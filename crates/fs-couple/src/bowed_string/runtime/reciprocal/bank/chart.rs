@@ -171,7 +171,7 @@ impl ReciprocalStringBank {
             body.modal_budget, body.listener_m, cavity.as_ref(), None, gate)?;
         if let Some(v) = &viscous { image.body_connections.extend(v.damping().connections(0)); }
         let mut bank = super::plate::finish_material_body_with_ports(cx, sources, &body.bridges,
-            string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), law, options, gate)?;
+            string_modes, gas, image, footprints.as_ref().map(|_| ports.as_slice()), None, law, options, gate)?;
         bank.source.material_chart = Some(body);
         bank.source.material_chart_viscosity = viscous;
         bank.source.material_chart_bridges = footprints;

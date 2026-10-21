@@ -3,6 +3,15 @@
 use super::*;
 
 impl PreparedMaterialNetwork<'_, '_> {
+    /// Original branch-to-cell heat routes from this admitted material network.
+    /// Coupled electrical consumers use these instead of an independently
+    /// authored destination list that could heat a different material. The
+    /// original circuit owner still checks complete active branch coverage.
+    #[must_use]
+    pub fn resistor_destinations(&self) -> Vec<ResistorCell> {
+        self.network.resistors.iter().map(|r| r.destination).collect()
+    }
+
     /// Bind a complete successor thermal network while retaining old source choices.
     ///
     /// Use after accepted births/contact events. Every old cell must remain, with

@@ -9,6 +9,9 @@ use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as VI
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 
 pub const MAX_BYTES: usize = 65_536;
+/// Shell (v3) and assembled (v4) profiles carry node and triangle rows, so they take a larger byte
+/// ceiling; flat plate profiles keep [`MAX_BYTES`].
+pub const MAX_SHELL_BYTES: usize = 1_048_576;
 const MAX_GRID: usize = 12;
 
 #[path = "body/shell.rs"]
@@ -29,7 +32,7 @@ enum BodyModel {
 }
 impl Profile {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > MAX_BYTES { return Err("body profile exceeds 64 KiB".into()); }
+        if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 1 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let version = text.lines().next().and_then(|s| s.split_ascii_whitespace().next())
             .ok_or("missing body profile version")?;
@@ -44,6 +47,8 @@ impl Profile {
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         match &self.model {
+            BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
+                "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),
             BodyModel::Plate(_) => Ok(()),
             BodyModel::Shell(shell) => shell.preflight(spec),
             BodyModel::Assembly(assembly) => assembly.preflight(spec),

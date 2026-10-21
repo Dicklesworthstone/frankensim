@@ -186,6 +186,23 @@ class PitchTests(unittest.TestCase):
             with self.assertRaisesRegex(dc.GraderRefusalError, "NOT_THE_NAMED_NOTE|PITCH_MISMATCH"):
                 note_of(x, 293.66 if f < 2000 else 392.0, max_cents=400.0)
 
+    def test_the_refusal_says_the_named_fundamental_and_the_graders_own_estimate_apart(self):
+        # P8 5066: "nothing at the fundamental near 208.5 Hz" for an F3 (174.6 Hz) read as the note's pitch; 208.5 Hz was the estimate
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        env = 0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1))
+        x = 0.2 * env * np.sin(2 * np.pi * 1200.0 * tt)  # a parasitic line, nothing near 174.6 or 208.5 Hz
+        with self.assertRaises(dc.GraderRefusalError) as named:
+            dc.check_fundamental(x, 208.5, "sustained", "ours", named_hz=174.6)
+        msg = str(named.exception)
+        self.assertIn("IRPDECOMP_NOT_THE_NAMED_NOTE", msg)
+        self.assertIn("named note's fundamental is 174.6 Hz", msg)
+        self.assertIn("pitch estimate for it is 208.5 Hz", msg)
+        self.assertIn("strongest spectral line is 1200 Hz", msg)
+        with self.assertRaises(dc.GraderRefusalError) as plain:  # the form without a name is unchanged
+            dc.check_fundamental(x, 208.5, "sustained", "ours")
+        self.assertIn("nothing at the fundamental near 208.5 Hz", str(plain.exception))
+
     def test_a_stretched_harmonic_note_passes_the_fundamental_check(self):
         n = int(2.6 * SR)
         tt = np.arange(n) / SR
@@ -200,6 +217,312 @@ class PitchTests(unittest.TestCase):
 
 # the keys the page generator reads from a references.json entry: id, licence (a CREDITS key) and the url of the recording
 REFERENCE_ENTRIES = {i: dict(id=i, licence="uiowa-mis", url=f"https://theremin.music.uiowa.edu/{i}.aiff") for i in ("syn-mf", "syn-ff")}
+
+
+def cwt_db_full_rate(y, per_oct=24, f_lo=60.0, f_hi=dc.F_HI, w0=20.0):
+    """The scalogram as first written: one full-length inverse FFT per scale (the reference the fast one must match)."""
+    import math
+    n = len(y)
+    nfft = 1 << int(math.ceil(math.log2(n + SR // 4)))
+    X = np.fft.rfft(y, nfft)
+    f = np.fft.rfftfreq(nfft, 1 / SR)
+    fc = f_lo * 2 ** (np.arange(int(per_oct * math.log2(f_hi / f_lo)) + 1) / per_oct)
+    frames = n // dc.HOP
+    out = np.empty((len(fc), frames), np.float32)
+    for i, c in enumerate(fc):
+        lo, hi = np.searchsorted(f, c * (1 - 6 / w0)), np.searchsorted(f, c * (1 + 6 / w0))
+        Y = np.zeros(nfft, complex)
+        Y[lo:hi] = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
+        z = np.fft.ifft(Y)[:n]
+        out[i] = ((z.real ** 2 + z.imag ** 2)[: frames * dc.HOP].reshape(frames, dc.HOP)).mean(1)
+    return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
+
+
+class ScalogramTests(unittest.TestCase):
+    def test_fast_scalogram_matches_the_full_rate_one_where_it_matters(self):
+        import time
+        x = tone(f0=196.0, dur=2.2, lead=0.1, attack=0.05, noise_db=-70)[: int(2.0 * SR)]
+        t = time.time()
+        ref, fc = cwt_db_full_rate(x)
+        t_ref = time.time() - t
+        t = time.time()
+        new, fc2 = dc.cwt_db(x)
+        t_new = time.time() - t
+        self.assertEqual(ref.shape, new.shape)
+        live = ref > ref.max() - 60.0  # cells within 60 dB of the peak: the ones every metric and figure uses
+        err = (new - ref)[live]
+        self.assertLess(float(np.sqrt(np.mean(err ** 2))), 0.6, "rms dB difference over live cells")
+        self.assertLess(float(np.abs(err).max()), 3.0)
+        self.assertLess(t_new, t_ref)
+
+
+class OnsetRuleTests(unittest.TestCase):
+    """The onset is where the envelope first reaches 20 dB under the signal's OWN steady level, for any signal."""
+
+    def step_then_growth(self, f0=233.08, noise_db=None, lead=2.0, seed=2):
+        # digital silence, a priming step 26 dB under the final level held 70 ms, then growth over 0.25 s to a steady note
+        n = int((lead + 3.0) * SR)
+        tt = np.arange(n) / SR
+        env = np.zeros(n)
+        t0 = lead
+        env[(tt >= t0) & (tt < t0 + 0.07)] = 0.05
+        g = (tt >= t0 + 0.07) & (tt < t0 + 0.32)
+        env[g] = 0.05 + 0.75 * ((tt[g] - t0 - 0.07) / 0.25) ** 2
+        env[tt >= t0 + 0.32] = 0.8
+        x = env * (np.sin(2 * np.pi * f0 * tt) + 0.4 * np.sin(2 * np.pi * 2 * f0 * tt))
+        if noise_db is not None:
+            x = x + np.random.default_rng(seed).standard_normal(n) * 10 ** (noise_db / 20)
+        return x, t0
+
+    def test_a_low_priming_step_does_not_count_as_the_onset(self):
+        f0 = 233.08
+        x, t0 = self.step_then_growth(f0)
+        y = dc.highpass(x, f0)
+        e, tms = dc.env_rms_db(y, win=dc.env_window(f0))
+        old_rule_onset = float(tms[np.flatnonzero(e > e.max() - 30.0)[0]])  # the previous rule: peak - 30 dB
+        self.assertLess(old_rule_onset, t0 + 0.07, "the old rule latches onto the priming step: the test discriminates")
+        cut, info = dc.align(x, f0, dc.render_floor(y, f0))  # raises if the 1.5 ms re-detection fails
+        self.assertGreater(info["onset_s"], t0 + 0.07)  # after the step, in the growth
+        self.assertLess(info["onset_s"], t0 + 0.30)
+        self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+
+    def test_a_recording_of_the_same_note_gets_the_same_onset_through_the_reference_path(self):
+        f0 = 233.08
+        render, t0 = self.step_then_growth(f0)
+        recording, _ = self.step_then_growth(f0, noise_db=-62.0)  # a room: noise floor 50+ dB under the steady level
+        _, ri = dc.align(render, f0, dc.render_floor(dc.highpass(render, f0), f0))
+        floor = dc.floor_of_file(recording, f0)
+        _, qi = dc.align(recording, f0, floor, anchor_s=t0 + 0.3, at_start=False)  # as the library gives it: an anchor inside the note
+        self.assertLess(abs(ri["onset_s"] - qi["onset_s"]), 0.003)  # the same instant, found by the same rule on both
+
+    def pluck_with_early_touch(self, f0=233.08, noise_db=None, lead=2.0, seed=3):
+        # a plucked note (a step to full level, then a 0.4 s decay) preceded by a 20 ms touch of the string 24 dB under it and a 20 ms gap:
+        # the envelope crosses steady - 20 dB at the touch, drops back under it, and crosses again at the pluck
+        n = int((lead + 3.0) * SR)
+        tt = np.arange(n) / SR
+        env = np.zeros(n)
+        env[(tt >= lead - 0.040) & (tt < lead - 0.020)] = 0.05
+        k = tt >= lead
+        env[k] = 0.8 * np.exp(-(tt[k] - lead) / 0.4)
+        x = env * np.sin(2 * np.pi * f0 * tt)
+        if noise_db is not None:
+            x = x + np.random.default_rng(seed).standard_normal(n) * 10 ** (noise_db / 20)
+        return x, lead
+
+    def test_an_early_touch_under_the_steady_level_does_not_make_a_reference_unalignable(self):
+        # the failure of the regrade: guitar Gb4/F5 and violin B5 references were refused (cut onset 1.4-2.7 ms against 10 ms) because the
+        # anchored detection took the last dip under the threshold before the note and the re-detection on the cut took the FIRST crossing
+        f0 = 233.08
+        recording, t0 = self.pluck_with_early_touch(f0, noise_db=-62.0)
+        y = dc.highpass(recording, f0)
+        e, tms = dc.env_rms_db(y, win=dc.env_window(f0))
+        thr = dc.steady_level_db(e[int((t0 - 0.1) * 1000): int((t0 + 3.0) * 1000)]) - dc.STEADY_DROP_DB
+        self.assertLess(float(tms[np.flatnonzero(e > thr)[0]]), t0 - 0.015, "the setup has an early crossing: the test discriminates")
+        _, qi = dc.align(recording, f0, dc.floor_of_file(recording, f0), anchor_s=t0 + 0.3, at_start=False)  # raised ONSET_MISALIGNED (4.28 ms)
+        self.assertAlmostEqual(qi["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+        # the pluck, not the touch: the touch ended 20 ms before the pluck and the envelope is back under the threshold from 15.7 ms before it;
+        # the zero-phase high-pass rings ahead of a step edge, so the final rise starts a few ms before t0 (12.7 ms in the noise-free signal)
+        self.assertGreater(qi["onset_s"], t0 - 0.0157)
+        self.assertLess(qi["onset_s"], t0 + 0.005)
+
+    def test_a_steep_onset_re_detects_after_the_cut_even_with_an_overshoot_and_noise(self):
+        # A guard for the class of failure that refused a UIowa clarinet note (a steep 40 dB rise, a wandering steady level, noise
+        # on the peak). This synthetic signal passes under the old rule too: the real recording (BbClar.mf.C4B4 @ Bb4, which is not
+        # in the repository) is what reproduced it, refused with a cut onset of 8.14 ms before and aligned after.
+        f0 = 466.16
+        n = int(5.0 * SR)
+        tt = np.arange(n) / SR
+        env = np.clip((tt - 2.0) / 0.05, 0, 1) ** 2 * (1.0 + 0.35 * np.exp(-(tt - 2.0) / 0.08)) * (1.0 + 0.2 * np.sin(2 * np.pi * 0.7 * tt))  # overshoot, steady, a slow +-1.6 dB wander
+        x = env * np.sin(2 * np.pi * f0 * tt)
+        x = x + np.random.default_rng(5).standard_normal(n) * 10 ** (-55 / 20)
+        floor = dc.floor_of_file(x, f0)
+        for shift in (0.0, 0.0007, 0.0013, 0.0021):  # the window slides by a few ms, which moved a max-based threshold
+            _, info = dc.align(x[int(shift * SR):], f0, floor, anchor_s=2.03 - shift, at_start=False)
+            self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+
+
+class FluxTests(unittest.TestCase):
+    def test_flux_curve_is_what_the_old_inline_formula_gave_a_note(self):
+        n = note_of(tone(noise_db=-55))  # noise puts live cells between the partials, where the flux lives
+        S = n.S[:, : n.frames].astype(np.float64)
+        m = (n.sf > dc.F_LO) & (n.sf < dc.F_HI)
+        live = np.maximum(S[m][:, 1:], S[m][:, :-1]) > S[m].max() - dc.SHOW_DB
+        pos = np.where(live, np.maximum(np.diff(S[m], axis=1), 0.0), 0.0)
+        old = np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+        np.testing.assert_array_equal(n.flux_db, old)
+        np.testing.assert_array_equal(dc.flux_curve(S, n.sf), old)
+        self.assertGreater(n.flux_db[n.sound].mean(), 0.5)  # not a vacuous equality of zeros
+
+
+class FloorTests(unittest.TestCase):
+    def test_block_wise_floor_matches_the_whole_file_floor_and_is_faster(self):
+        import time
+        rng = np.random.default_rng(3)
+        parts = []
+        for k in range(14):  # a range file: notes of 2.2 s with 0.6 s gaps of room noise
+            parts += [tone(f0=F0 * 2 ** (k / 12), dur=2.2, lead=0.0, attack=0.05, noise_db=-70, seed=k), 10 ** (-72 / 20) * rng.standard_normal(int(0.6 * SR))]
+        x = np.concatenate(parts)
+        t = time.time()
+        whole = dc.floor_of(dc.highpass(x, F0))
+        t_whole = time.time() - t
+        t = time.time()
+        blocks = dc.floor_of_file(x, F0, block=1 << 17)
+        t_blocks = time.time() - t
+        self.assertLess(abs(whole - blocks), 2.0, f"{whole} vs {blocks}")
+        self.assertLess(t_blocks, t_whole * 1.5)  # small files are not a speed test; the point is it never costs more
+
+
+class PartialGateTests(unittest.TestCase):
+    def test_noise_peaks_far_below_the_real_partials_do_not_make_inharmonicity_or_frequency_gaps(self):
+        def two_partials(junk):
+            n = int(2.6 * SR)
+            tt = np.arange(n) / SR
+            x = np.sin(2 * np.pi * 220 * tt) + 0.5 * np.sin(2 * np.pi * 440 * tt) + 0.3 * np.sin(2 * np.pi * 660 * tt)
+            if junk:  # spectral lines nowhere near the harmonic series, 70 dB down: what a render's numerical floor looks like
+                for f in (890.0, 1118.0, 1345.0, 1565.0, 1790.0, 2010.0):  # just off harmonics 4-9: inside the tracker's search windows
+                    x = x + 3e-4 * np.sin(2 * np.pi * f * tt)
+            x = 0.2 * x / np.abs(x).max() * (0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1)))
+            return x
+        clean, noisy = note_of(two_partials(False)), note_of(two_partials(True))
+        old_gate, dc.STRONG_DB = dc.STRONG_DB, 1000.0  # the gate switched off: every tracked peak counts
+        try:
+            ungated = dc.compare(note_of(two_partials(True)), note_of(two_partials(False)))
+            self.assertGreater(ungated["partial_freq_cents"][0], 8.0)  # the artifact is real without the gate
+        finally:
+            dc.STRONG_DB = old_gate
+        g = dc.compare(noisy, clean)
+        self.assertLess(g["partial_freq_cents"][0], 5.0)
+        self.assertLess(g["inharmonicity_B"][0], 2e-5)
+        self.assertLess(noisy.B, 2e-5)
+        self.assertEqual(int(noisy.strong.sum()), 3)  # exactly the three real partials count
+
+
+class GlideTests(unittest.TestCase):
+    def test_a_note_whose_partials_are_all_offset_together_has_no_stiffness(self):
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        # f0 estimated 0.6% below where every partial really is (an unsettled pitch): the series is still exactly harmonic
+        x = sum(a * np.sin(2 * np.pi * k * 221.3 * tt) for k, a in ((1, 1.0), (2, 0.6), (3, 0.3)))
+        x = 0.2 * x / np.abs(x).max() * (0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1)))
+        from unittest import mock
+        with mock.patch.object(dc, "fit_stiff_string_law", wraps=dc.fit_stiff_string_law) as fit:
+            note = note_of(x, 220.0)
+        # the B fit is the one Note makes itself, on strong partials, with f0 free (describe()'s own calls pass f0_fixed)
+        own = [c for c in fit.call_args_list if "f0_fixed" not in c.kwargs]
+        self.assertTrue(own, "Note fits B with f0 free")
+        self.assertLess(note.B, 1e-5)
+
+
+class ListeningOnlyTests(unittest.TestCase):
+    """The listening-only pair obeys every rule P8's generator enforces for a render with no reference."""
+
+    def make(self, root, **kw):
+        from instrgrade import write_wav
+        wav = Path(tempfile.mkdtemp()) / "r.wav"
+        write_wav(wav, 0.3 * tone(f0=523.25, dur=2.4, lead=0.2, noise_db=-80))
+        c = dict(family="pan-pipes", note="C5", dyn="mf", wav=str(wav), git_sha="abc", observer="receiver 1 m", recipe="r.sh",
+                 reason="No licensed recording of this instrument exists in the library.", listening_only=True)
+        c.update(kw)
+        dc._REFS = None
+        return dc._batch_job((c, root)), c
+
+    def test_the_pair_has_exactly_the_shape_p8_accepts(self):
+        import json
+        from instrgrade import load
+        root = Path(tempfile.mkdtemp())
+        res, c = self.make(root)
+        self.assertTrue(res["ok"], res)
+        d = root / "pan-pipes" / "C5"
+        pj = json.loads((d / "pair.json").read_text())
+        self.assertIsNone(pj["real"])
+        self.assertTrue(pj["no_reference"]["reason"].strip())
+        self.assertIsNone(pj["alignment"])
+        self.assertIsNone(pj["partials"])
+        self.assertEqual(pj["metrics"], [])
+        self.assertIsNone(pj["audio"]["real"])
+        self.assertEqual(pj["audio"]["ours"], "ours.wav")
+        for kind in ("spectrogram", "scalogram"):
+            f = pj["figures"][kind]
+            self.assertIsNone(f["real"])
+            self.assertIsNone(f["diff"])
+            self.assertTrue((d / f["ours"]).stat().st_size > 1000)
+            self.assertEqual((f["f_lo_hz"], f["f_hi_hz"], f["span_db"]), ((40.0 if kind == "spectrogram" else 60.0), dc.F_HI, 80.0))
+        x = load(d / "ours.wav")
+        self.assertAlmostEqual(len(x) / SR, pj["duration_s"], delta=0.05)
+        self.assertLess(float(np.abs(x).max()), 0.999)
+        self.assertGreater(float(np.abs(x).max()), 0.5)
+        self.assertEqual(pj["ours"]["git_sha"], "abc")
+        self.assertEqual(sorted(p.name for p in d.iterdir()), sorted(["pair.json", "ours.wav", "spectrogram-ours.webp", "scalogram-ours.webp"]))
+
+    def test_a_second_render_moves_the_first_aside_and_a_missing_reason_is_a_refusal_record(self):
+        import json
+        root = Path(tempfile.mkdtemp())
+        self.assertTrue(self.make(root)[0]["ok"])
+        self.assertTrue(self.make(root, git_sha="def")[0]["ok"])
+        d = root / "pan-pipes" / "C5"
+        self.assertEqual(len(list((d / "superseded").iterdir())), 1)
+        self.assertEqual(json.loads((d / "pair.json").read_text())["ours"]["git_sha"], "def")
+        res, _ = self.make(root, reason="  ", git_sha="ghi")
+        self.assertFalse(res["ok"])
+        self.assertIn("LISTEN_REASON", res["error"])
+        self.assertIn("LISTEN_REASON", json.loads((d / "pair.json").read_text())["refused"]["reason"])
+
+    def test_a_band_cap_is_stated_and_cuts_the_figures(self):
+        import json
+        root = Path(tempfile.mkdtemp())
+        res, _ = self.make(root, band_hz=3900.0)
+        self.assertTrue(res["ok"], res)
+        pj = json.loads((root / "pan-pipes" / "C5" / "pair.json").read_text())
+        self.assertEqual(pj["figures"]["spectrogram"]["f_hi_hz"], 3900.0)
+        self.assertIn("low-passed at 3900 Hz", pj["audio"]["level_match"])
+
+
+class StrictRulerTests(unittest.TestCase):
+    def rows(self, gap_spec, ruler):
+        real, ours = note_of(tone()), note_of(tone(cents=5))
+        gaps = {m: (1.0, None) for m in dc.METRICS}
+        gaps["spec_db"] = (gap_spec, None)
+        gaps["f0_cents"] = (gap_spec, None)
+        full = {c: [] for c in ("other_dynamic", "other_take", "neighbour", "other_articulation", "other_instrument")}
+        full.update(ruler)
+        return {m["id"]: m for m in dc.metric_rows(gaps, real, ours, full)}
+
+    def test_a_neighbouring_note_widens_only_the_loose_ruler(self):
+        ruler = dict(other_dynamic=[dict(label="ff", with_="x", gaps=dict(spec_db=2.0, f0_cents=2.0))],
+                     neighbour=[dict(label="next note", with_="y", gaps=dict(spec_db=10.0, f0_cents=10.0))])
+        r = self.rows(5.0, ruler)
+        s = r["spec_db"]
+        self.assertEqual([x["value"] for x in s["ruler"]], [2.0, 10.0])
+        self.assertEqual([x["value"] for x in s["ruler_strict"]], [2.0])
+        self.assertTrue(s["inside_loose"])  # 5 <= 10: flattering, because a neighbouring note is in the ruler
+        self.assertFalse(s["inside_strict"])  # 5 > 2: further from the recording than the same note's other dynamic is from it
+        f = r["f0_cents"]  # pitch-absolute measures never had neighbours in the ruler: strict equals loose
+        self.assertEqual(f["ruler"], f["ruler_strict"])
+        self.assertEqual(f["inside_loose"], f["inside_strict"])
+
+    def test_no_same_note_recording_means_no_strict_claim_not_a_failure(self):
+        ruler = dict(neighbour=[dict(label="next note", with_="y", gaps=dict(spec_db=10.0))])
+        s = self.rows(5.0, ruler)["spec_db"]
+        self.assertEqual(s["ruler_strict"], [])
+        self.assertTrue(s["inside_loose"])
+        self.assertIsNone(s["inside_strict"])
+
+    def test_a_reference_only_pair_has_the_strict_ruler_and_no_verdicts(self):
+        real = note_of(tone())
+        gaps = None
+        ruler = dict(other_dynamic=[dict(label="ff", with_="x", gaps={m: 1.0 for m in dc.METRICS})], neighbour=[])
+        full = {c: [] for c in ("other_dynamic", "other_take", "neighbour", "other_articulation", "other_instrument")}
+        full.update(ruler)
+        rows = dc.metric_rows(gaps, real, None, full)
+        self.assertTrue(all(m["inside_loose"] is None and m["inside_strict"] is None for m in rows))
+        self.assertTrue(any(m["ruler_strict"] for m in rows))
+
+    def test_verdict_counts_add_up(self):
+        ms = [dict(gap=1.0, inside_loose=True, inside_strict=True), dict(gap=2.0, inside_loose=True, inside_strict=False),
+              dict(gap=3.0, inside_loose=False, inside_strict=False), dict(gap=4.0, inside_loose=True, inside_strict=None),
+              dict(gap=None, inside_loose=None, inside_strict=None)]
+        v = dc.verdict_counts(ms)
+        self.assertEqual(v, {"measures": 4, "loose": {"inside": 3, "outside": 1, "no_ruler": 0}, "strict": {"inside": 1, "outside": 2, "no_ruler": 1}})
 
 
 class ContractTests(unittest.TestCase):
@@ -377,6 +700,159 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("NOT_THE_NAMED_NOTE", res["error"])
         self.assertIn("NOT_THE_NAMED_NOTE", json.loads((root / "syn" / "Bb3" / "pair.json").read_text())["refused"]["reason"])
+
+    def test_diff_reports_what_moved_between_two_gradings_of_a_note(self):
+        from instrgrade import write_wav
+        root = self.tmp / "diffroot"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="old1", observer="o", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        far = self.tmp / "far.wav"
+        write_wav(far, 0.3 * tone(f0=F0 * 2 ** (1 / 12), dur=2.4, lead=0.2, noise_db=-85, cents=60))
+        dc.run_pair(self.refs, dict(c, wav=str(far), git_sha="new2"), root)
+        d = root / "syn" / "Bb3"
+        old = __import__("json").loads(next((d / "superseded").glob("*/pair.json")).read_text())
+        new = __import__("json").loads((d / "pair.json").read_text())
+        rows, tot = dc.diff_pairs(old, new)
+        f0 = next(r for r in rows if r["id"] == "f0_cents")
+        self.assertAlmostEqual(f0["gap_old"], 8.0, delta=1.5)
+        self.assertAlmostEqual(f0["gap_new"], 60.0, delta=2.0)
+        self.assertGreater(f0["gap_new"], f0["gap_old"])
+        self.assertNotEqual(old["ours"]["git_sha"], new["ours"]["git_sha"])
+        import argparse, io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dc.cmd_diff(argparse.Namespace(out=str(root), family=None, against="old1"))
+        self.assertIn("old1 -> new2", buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            dc.cmd_diff(argparse.Namespace(out=str(root), family=None, against="nomatch"))
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(sum(tot["old"]), sum(tot["new"]))  # the same measures are judged both times
+
+    def test_a_band_limited_render_is_graded_only_inside_its_band(self):
+        import json
+        from instrgrade import write_wav
+        root = self.tmp / "band"
+        f0 = F0 * 2 ** (1 / 12)
+        full = 0.3 * tone(f0=f0, dur=2.4, lead=0.2, noise_db=-85)
+        limited = self.tmp / "limited.wav"
+        write_wav(limited, dc.lowpass(full, 3500.0))  # a render that models nothing above 3.5 kHz
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(limited), git_sha="b", observer="o", recipe="r.sh")
+        wide = dc.run_pair(self.refs, c, root / "wide")
+        narrow = dc.run_pair(self.refs, dict(c, band_hz=3900.0), root / "narrow")
+        gap = lambda pj, m: next(x["gap"] for x in pj["metrics"] if x["id"] == m)  # noqa: E731
+        self.assertLess(gap(narrow, "stft_lsd_db"), 0.6 * gap(wide, "stft_lsd_db"))
+        self.assertEqual(narrow["figures"]["spectrogram"]["f_hi_hz"], 3900.0)
+        self.assertEqual(narrow["figures"]["scalogram"]["f_hi_hz"], 3900.0)
+        self.assertEqual(narrow["alignment"]["band_hz"], 3900.0)
+        self.assertIn("low-passed at 3900 Hz", narrow["audio"]["level_match"])
+        self.assertIsNone(wide["alignment"]["band_hz"])
+
+    def test_a_failed_regrade_leaves_the_notes_earlier_pair_in_place(self):
+        import json
+        from unittest import mock
+        root = self.tmp / "atomic"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="first", observer="o", recipe="r.sh")
+        dc.run_pair(self.refs, c, root)
+        d = root / "syn" / "Bb3"
+        before = (d / "pair.json").read_bytes()
+        with mock.patch.object(self.refs, "ruler", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                dc.run_pair(self.refs, dict(c, git_sha="second"), root)
+        self.assertEqual((d / "pair.json").read_bytes(), before)  # the old grading is still there, untouched, mid-failure
+        aborted = list((d / "superseded").glob("aborted-*"))  # the failed attempt's partial files are kept aside, not deleted
+        self.assertEqual(len(aborted), 1)
+        self.assertTrue(any(aborted[0].iterdir()))
+        dc.run_pair(self.refs, dict(c, git_sha="third"), root)
+        self.assertEqual(json.loads((d / "pair.json").read_text())["ours"]["git_sha"], "third")
+        self.assertFalse([p for p in d.iterdir() if p.name.startswith(".staging")])  # nothing left staged
+
+    def test_an_io_error_in_a_reference_run_is_not_written_into_the_data_as_a_refusal(self):
+        from unittest import mock
+        root = self.tmp / "ioerr"
+        dc._REFS = self.refs
+        ref_e = self.refs.find("syn", 58, "mf")[0]
+        y, info = self.refs.aligned(ref_e)
+        dc.write_pair(root, "syn", "Bb3", ref_e, self.refs, y, info)
+        before = (root / "syn" / "Bb3" / "pair.json").read_bytes()
+        with mock.patch.object(dc, "run_pair", side_effect=OSError("disk went away")):
+            res = dc._ref_job((dict(family="syn", art="", dyn="mf", notes=["Bb3"], review=False), root))
+        self.assertFalse(res["ok"])
+        self.assertIn("I/O error", res["refused"][0]["reason"])
+        self.assertEqual((root / "syn" / "Bb3" / "pair.json").read_bytes(), before)  # the earlier pair is untouched
+
+    def test_pair_json_carries_both_verdicts_and_the_candidate_record(self):
+        import json
+        root = self.tmp / "strict"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="s", observer="o", recipe="r.sh", band_hz=None)
+        pj = dc.run_pair(self.refs, c, root)
+        self.validate(root, "syn", "Bb3")  # P8's validator still accepts it
+        for m in pj["metrics"]:
+            self.assertIn("ruler_strict", m)
+            self.assertIn(m["inside_strict"], (True, False, None))
+        v = pj["verdicts"]
+        self.assertEqual(v["measures"], sum(1 for m in pj["metrics"] if m["gap"] is not None))
+        for kind in ("loose", "strict"):
+            self.assertEqual(sum(v[kind].values()), v["measures"])
+        self.assertLessEqual(v["strict"]["inside"] + v["strict"]["outside"], v["loose"]["inside"] + v["loose"]["outside"])  # strict judges no more measures
+        cand = pj["decompose"]["candidate"]
+        self.assertEqual((cand["note"], cand["dyn"], cand["art"]), ("Bb3", "mf", ""))
+        self.assertEqual(cand["ref_contains"], "Syn.mf.A3B3")  # enough to rebuild the same candidate
+
+    def test_a_slot_gives_one_note_several_pairs(self):
+        import json
+        root = self.tmp / "slots"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="s", observer="o", recipe="r.sh")
+        a = dc.run_pair(self.refs, dict(c, slot="Bb3-a"), root)
+        b = dc.run_pair(self.refs, dict(c, slot="Bb3-e"), root)
+        self.assertEqual((a["note"], b["note"]), ("Bb3-a", "Bb3-e"))
+        self.assertEqual(json.loads((root / "syn" / "Bb3-e" / "pair.json").read_text())["note"], "Bb3-e")
+        self.assertTrue((root / "syn" / "Bb3-a" / "ours.wav").exists())
+
+    def test_an_io_error_in_a_render_job_is_not_recorded_as_a_refusal_and_leaves_the_pair(self):
+        import json
+        from unittest import mock
+        root = self.tmp / "ioerr2"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="ok", observer="o", recipe="r.sh")
+        dc._REFS = self.refs
+        self.assertTrue(dc._batch_job((c, root))["ok"])
+        before = (root / "syn" / "Bb3" / "pair.json").read_bytes()
+        with mock.patch.object(dc, "_write_pair_staged", side_effect=OSError("staging directory vanished")):
+            res = dc._batch_job((dict(c, git_sha="bad"), root))
+        self.assertFalse(res["ok"])
+        self.assertIn("not a refusal", res["error"])
+        d = root / "syn" / "Bb3"
+        self.assertEqual((d / "pair.json").read_bytes(), before)
+        self.assertIsNone(json.loads((d / "pair.json").read_text()).get("refused"))
+
+    def test_a_manifest_of_another_recording_set_must_carry_its_attribution(self):
+        import json
+        man = self.tmp / "vocalset.json"
+        entry = dict(path="VocalSet/x.wav", page="p", chain="c", id="vs-1", licence="vocalset-cc-by-4.0")
+        man.write_text(json.dumps({"files": [entry]}))
+        with self.assertRaisesRegex(ValueError, "SOURCE_MISSING"):
+            dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man)
+        man.write_text(json.dumps({"files": [entry], "external": {"name": "VocalSet", "url": "u", "licence": "CC BY 4.0"}}))
+        with self.assertRaisesRegex(ValueError, "credit"):  # CC BY needs the credit line
+            dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man)
+        man.write_text(json.dumps({"files": [entry], "external": {"name": "VocalSet", "url": "u", "licence": "CC BY 4.0",
+                                                                  "licence_url": "lu", "credit": "Wilkins et al."}}))
+        self.assertEqual(dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man).external["credit"], "Wilkins et al.")
+        man.write_text(json.dumps({"files": [dict(entry, licence="uiowa-mis")]}))  # the UIowa set needs none
+        self.assertIsNone(dc.Refs(self.tmp / "lib.json", self.tmp / "wav", man).external)
+
+    def test_refs_can_be_asked_for_exact_notes(self):
+        import argparse, io, contextlib, json
+        root = self.tmp / "exact"
+        args = argparse.Namespace(lib=str(self.tmp / "lib.json"), wav_dir=str(self.tmp / "wav"), refs_json=str(self.tmp / "refs.json"), out=str(root),
+                                  family=["syn"], all=False, notes="Bb3", jobs=1, review=False, since=None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as cm:
+            dc.cmd_refs(args)
+        self.assertEqual(cm.exception.code, 0)
+        rows = [json.loads(l) for l in buf.getvalue().splitlines()]
+        self.assertEqual([r["note"] for r in rows], ["Bb3"])  # exactly the note asked for
+        self.assertTrue((root / "syn" / "Bb3" / "pair.json").exists())
 
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json

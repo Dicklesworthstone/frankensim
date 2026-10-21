@@ -12,6 +12,8 @@ pub mod thermal;
 pub mod storage;
 /// Reciprocal electric/magnetic gap motion driven by the same field energy.
 pub mod motion;
+/// Self-consistent conductivity at solved electric field and current density.
+pub mod conductivity;
 /// Source-bound electrical contacts in series with original bulk branches.
 pub mod contacts;
 use contacts::{SeriesElectricalContact, ContactHeat};
@@ -57,8 +59,19 @@ pub enum MaterialCircuitError {
     Conductor(ConductorError),
     /// Source-derived electric/magnetic storage or field-energy refusal.
     Storage(fs_material::field_storage::FieldStorageError),
+    /// Original source-bound mechanical section or layer-strain refusal.
+    Material(fs_material::state_point::MaterialStatePointError),
     /// Independent branch heat or total electrical balance did not close.
     Balance(&'static str),
+    /// The material response did not agree with the solved branch fields.
+    ConductivityConvergence {
+        /// Actual native circuit trials performed.
+        iterations: usize,
+        /// Largest absolute applied/evaluated resistance difference [ohm].
+        resistance_defect_ohm: f64,
+        /// Largest absolute constitutive branch-power difference [W].
+        power_defect_w: f64,
+    },
     /// Cancellation before publication.
     Cancelled,
 }
@@ -70,6 +83,9 @@ impl From<ConductorError> for MaterialCircuitError {
 }
 impl From<fs_material::field_storage::FieldStorageError> for MaterialCircuitError {
     fn from(e: fs_material::field_storage::FieldStorageError) -> Self { Self::Storage(e) }
+}
+impl From<fs_material::state_point::MaterialStatePointError> for MaterialCircuitError {
+    fn from(e: fs_material::state_point::MaterialStatePointError) -> Self { Self::Material(e) }
 }
 impl core::fmt::Display for MaterialCircuitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	recorder-alto-bressan-brueggen-x-bouterse2010
+maker	Peter Bressan, London (alto recorder 'd', Frans Bruggen collection, Amsterdam; drawing No. X by Fred Morgan, Zen-On 1981); numbers as tabulated by Jan Bouterse
+model	baroque alto recorder in F, boxwood with ivory rings, in three joints (head, middle joint, foot), seven finger holes and a thumb hole
+serial	unstated
+year	about 1700 (Bressan worked in London from 1688); tables 2009 to 2010
+system	baroque recorder: curved windway, block, window and labium in the head; thumb hole and seven finger holes (holes 6 and 7 double on some altos)
+holder	Frans Bruggen collection, Amsterdam (the instrument is in fine condition and was played on a Handel sonatas recording)
+reference_state	assembled
+environment	pitch measurements made at 15 to 27 C in several rooms; the instrument was measured in its present, shrunken and slightly oval state
+source_ids	bouterse-2010-bressan-alto-fomrhi;terrien-2015-recorder-register-thresholds
+target_relation	one real alto recorder with published bore, hole and window geometry; the windway height is not published for it; no recording of it is in the library and no licensed reference exists yet (bead pexfp.219), so renders are listened to, not graded
+hole_index	hole-00 is the thumb hole (back of the middle joint); hole-01 to hole-06 are the front holes from the head down; hole-07 is on the foot; positions are measured from the upper shoulder of the middle joint along the bore, except where a feature says otherwise
+pitch_standard	plays at about a1 = 409 Hz (Bouterse: alto d- is about 40 cents below a1 = 415 Hz at 20 C)

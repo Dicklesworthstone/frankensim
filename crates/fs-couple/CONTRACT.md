@@ -30,6 +30,73 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Material-driven finite-body sliding
+
+`tribothermal::dynamics::SlidingPair` adds force-driven tangent inertia to the
+original material sliding contact and finite enthalpy network. Each complete
+uniform body's original thermal-cell mass also supplies its inertial mass.
+Centre-of-mass momentum and one Newton--Krylov relative-speed residual determine
+both velocities; every trial restarts the original contact/thermal candidate,
+including its actual endpoint temperature, pressure, speed and slip-history
+source queries. Separate impulse and whole-system energy gates precede joint
+publication of velocities, original slip/work history and finite temperatures.
+Original friction work is an internal transfer; external force work is measured
+on each body's endpoint displacement. Physical friction alone is partitioned
+as heat, while backward-Euler kinetic loss remains an explicit numerical account.
+The fixed patch/normal-load reduction passes released motion and inertial
+compliance `dt²(1/mA + 1/mB)` to the original tangential return map. That owner
+selects exact sticking or signed sliding; the source speed and accumulated
+distance converge to its solved slip. A stuck branch queries exact zero speed
+and leaves slip/work history unchanged. Bodies can accelerate together, stop
+and restart in the opposite direction, under the native endpoint static-first
+convention. It does not locate the physical stopping instant within a coarse
+interval: a backward-Euler stop may have numerical kinetic loss and zero endpoint
+friction heat. Refine time to resolve stopping heat; numerical loss is never
+thermalized. Zero-speed material support is required. No normal, rotational or
+contact-geometry evolution is added. Focused synthetic regressions cover static
+capacity, signed source feedback, stopping/restart, continuation and rollback;
+native execution remains required for qualification. The internal same-trial
+friction callback allows other energy owners to share this original solve;
+compliant consumers must gate queried motion against the native solved slip.
+
+The `SlidingPair::from_material_bodies` constructor also binds the original
+`fs_mbd_material::ResolvedBody` objects to their ordered interface materials
+and finite caloric cells. It requires uniform same-card bodies with matching
+mass and total reference volume. Motion and kinetic storage consume the
+retained canonical body inertias; accepted candidates share those immutable
+sources. A density change at fixed geometry therefore changes both inertial
+response and the matching finite heat inventory through data resolution.
+Mismatched identities, masses or geometry refuse before motion advances.
+
+### Material contact loads on a field actuator
+
+`tribothermal::field_motion` closes the existing dry-contact active-set/enthalpy
+owner with `MaterialFieldMotion`, including optional sourced axial support.
+Two displacement residuals identify actual field gap change, original solved
+contact slip, and the motion used to query interface material data. The native
+traction supplies the opposing field force. Field/circuit/body/support history
+and contact/thermal history publish together; inertia is not integrated twice.
+
+The same thermal trial resolves bulk electrical transport, pinned electrical
+contacts, and pinned mechanical friction. Original conductor/contact losses and
+the original friction heat partition enter explicit receivers exactly once.
+External thermal supply is independently evaluated before either internal loss.
+Field, kinetic, support elastic, interface and thermal storage plus exported
+friction work must close original electrical, mechanical and thermal supplies.
+A single descriptor budget includes all discarded outer and thermal trials.
+
+Surface A must match the single-region field body's source card, mass and
+reference volume; surface B is a stationary finite thermal guide. Normal force,
+area and tangent frame are fixed. Static reaction at rest uses an exact zero
+speed/history source query; uninterrupted sliding in either direction is
+supported. An unresolved stop/reversal refuses;
+there is no velocity clamp, impact impulse, moving thermal mesh, or new normal
+contact law. Focused `tribothermal::field_motion` regressions cover independent
+constant-charge trajectories, both static reaction directions, body/source
+inventory matching, authored/callback external heat, caloric/resistance/friction
+feedback including electrical contacts, cancellation and global-budget refusal.
+Syntax parsing and independent numeric checks passed; native execution is pending.
+
 ### Typed gesture consumer bindings
 
 `gesture_path::bind_paths` binds each description-validated parameter path to
@@ -3045,6 +3112,80 @@ duplicate bindings, unrepresentable energy and cancellation refuse atomically.
 C/L remain fixed within an ordinary circuit step. This linear lossless update
 does not supply continuous thermal/mechanical feedback or switching impulses.
 
+## Material conductivity at solved field and current
+
+`MaterialCircuit::conductivity_candidate` and its thermally refreshed-seed
+variant bind explicitly typed electric-field and current-density coordinates to
+the original bulk conductor cards. Each bounded constitutive iteration calls
+the existing Kirchhoff descriptor from the SAME accepted charge/flux history,
+obtains actual bulk branch voltage/current, and refreshes the complete original
+material bundle through `ResolvedMaterialStatePoint::at_query_point`. Geometry,
+source basis, selected claims, requirements and other physical coordinates
+remain explicit. Signed and magnitude axes are separate authored choices; a
+curve that requires an electrical operating axis cannot silently freeze it.
+
+Admission requires resistance consistency and an independent constitutive
+power gate. The original native circuit step remains the sole owner of charge,
+flux, source work and deposited Joule heat. The material evaluation at the
+solved operating point and its resistance/voltage/power residuals are retained
+separately; iteration discrepancy never becomes heat. Every reported iteration
+is one native circuit solve. Unsupported source states, changed source/geometry
+bindings, exhausted work and cancellation refuse without advancing history.
+This is isotropic, uniform, quasi-static bulk conduction with fixed C/L and
+geometry. It does not add switching, hysteresis, tensor/AC transport or contact
+laws; contact-bound circuits require their separate explicit contact owner.
+Five regression sources cover constant-law parity, analytic nonlinear RC
+discharge, current-density/polarity response, complete temperature refresh and
+atomic refusal. Native execution remains pending.
+
+## Joint nonlinear conduction and finite enthalpy
+
+`circuit_enthalpy::conductivity::step_candidate` places the same field/current
+material iteration inside the existing finite-enthalpy residual. Each thermal
+trial first refreshes the original source bundle at that proposed endpoint;
+the original circuit then resolves the electrical operating point from the
+same accepted charge/flux. Only its native per-branch Joule account reaches the
+existing receiving cells, conduction and authored boundary/source owners.
+There is no additional thermal integrator or duplicate heat calculation.
+
+The shared driver counts every inner native circuit solve, including discarded
+thermal stencils and fresh final admission. Source errors, operating-domain
+failures, nonconvergence, exhausted work and cancellation publish neither
+history. Authored conduction controls are admitted before the remaining outer
+budget narrows them. The report retains both actual circuit work and material
+evaluation at the joint temperature/field/current state. Thermal-only circuit
+members preserve their original query schema without dummy field coordinates.
+
+The existing first-order endpoint-thermal/midpoint-electrical discretization,
+fixed geometry/C/L, lumped bulk heating and explicit single-axis source-law
+limitations still apply. A two-resistor finite-capacitor fixture independently
+eliminates the coupled field and temperature laws and two-cell enthalpy
+equations; regressions cover data-only substitutions, energy balance, replay
+and atomic refusal. Equation checks do not substitute for native test execution.
+
+## Prepared material networks for nonlinear conductivity
+
+`MaterialNetwork::prepare_conductivity` binds explicit electrical property
+bases and typed field/current coordinates to the existing cell-resistor data.
+`PreparedMaterialNetwork::resolve_conductivity_seeds` initializes the original
+circuit from complete thermal/electrical material bundles.
+`PreparedMaterialNetwork::conductivity_candidate` then advances the original
+joint conduction/enthalpy owner without a caller-written material callback.
+Cards, geometry, destinations, caloric instances and selected source claims
+come from the same retained network; accepted continuation preserves those
+pins while re-evaluating the actual thermal and electrical state.
+
+The shared static-property admission admits extra physical axes only for the
+explicitly bound electrical property. Ordinary thermal-only resolution stays
+strict. Thermal conductivity curves depending on electrical field/current
+refuse: the present outer thermal network does not refresh link coefficients
+inside the inner electrical iteration. Missing, duplicate or incorrectly typed
+electrical axis plans also refuse rather than holding a curve at its seed.
+Regression sources cover data-only law substitution, independent coupled
+equations, complete-bundle initialization, continued discharge/heating,
+selection continuity and atomic source-domain/admission failures. Native
+execution remains pending.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound
@@ -3053,15 +3194,31 @@ The moving element's original quadratic term is replaced exactly once by
 q²d/(2 epsilon A) or lambda²d/(2 mu N²A), with lambda the winding flux linkage.
 All other C/L storage and original J/R/G topology are retained. The same descriptor
 solve advances charge, flux linkage, gap and momentum. Terminal effort and
-attractive force come from the same energy; mass comes only from `ResolvedBody`.
+attractive force come from the same energy; body mass comes only from `ResolvedBody`.
 Changing supported gap-medium or moving-body material data changes the coupled
 motion and electrical history without changing a physics law.
+
+`new_with_support` adds an optional layered axial return member to those SAME
+gap/momentum coordinates. `motion::support::AxialSupport` delegates force,
+elastic storage and per-layer strain admission to the original
+`ConcentricThermoelasticSection`; reference length and gap map displacement to
+axial strain. Canonical section density supplies consistent member inertia
+sum(rho A) L/3 for the declared linear displacement shape, added to body mass.
+Changing support layers changes return force, preload, motion and electrical
+back-reaction. Elastic storage participates in the native descriptor, ordinary
+enthalpy driver and thermoelectric-motion balance; it is never heat. Modulus and
+density require validity-wide constant claims. Temperatures/eigenstrains remain
+frozen; support damping, heating, live attachment, waves and buckling are outside
+this conservative reduction. `material_field_support` covers both field types
+against independent midpoint solutions, source substitutions through actual
+charge/Joule/finite-enthalpy evolution, and atomic source/strain/cancellation
+refusal. These regressions are added but native execution remains pending.
 
 Original electrical ports keep their order and an external force port appends.
 Bulk conductor and electrical contact losses reuse the existing native-effort
 accounting and remain separately sourced heat destinations. Explicit refreshed
 contacts must retain their IDs/branch assignments. Their losses are counted once.
-The combined field/kinetic storage, original source work, force times actual
+The combined field/kinetic/elastic storage, original source work, force times actual
 displacement, and heat must close before any joint candidate is returned.
 
 The endpoint retains exact proposed charge/flux and rechecks the original circuit
@@ -3122,6 +3279,32 @@ kinetic energy, strain, drag and force maps; rotations and material/gas swaps
 check the source binding. This is one bridge translation, not a six-DOF bridge,
 resolved winding slip, dynamic longitudinal inertia or measured instrument
 qualification.
+
+`ReciprocalStringBank::with_longitudinal_waves` selects the existing
+`fs_nlmodal::LongitudinalString` energy on the playable material bank. Original
+homogeneous/bonded material supplies EA and SOLID axial mass; retained
+transverse coordinates keep their own gas-loaded normalization. Explicit axial
+sine modes append after every original string/body/cavity/torsion/fluid state.
+Mapped modal storage couples them to both transverse planes in the same exact
+linear/friction/DG transaction. The full positive strain energy replaces each
+axial oscillator's linear stiffness once; the reported nonlinear correction can
+therefore be signed. Contiguous original bindings keep borrowed coordinate
+slices. Body states, connections, complete tensor losses, interface source and
+pressure weights are preserved rather than rebuilding an independent voice.
+
+`longitudinal-waves SLOPE STRAIN ITERATIONS MAX_FORCE ABS_TOL REL_TOL COUNT INDEX...`
+selects this path in the ordinary material-string file through scheduling and
+PCM. It replaces instantaneous geometric stretching. Requested indices, full
+mode budgets, material elasticity/density bands, clock, rotation-invariant slope
+bounds, strain, positive local tension and nonlinear closure remain explicit
+admission conditions. Axial modes are conservatively elastic; original bending,
+torsion, bridge, body and fluid losses remain active. Omitted axial channels are
+statically equilibrated. No axial viscosity is inferred, and no independent
+longitudinal end-force port, moving endpoint, helical slip, temperature evolution
+or nonlinear preload is added. Focused regressions cover exact axial linear
+limits, material frequency scaling, distinct fluid/solid mass, sympathetic motion,
+total work, source-band refusal and callback-identical PCM. They do not qualify
+measured violin/cello/bass fidelity or close the full string-unification program.
 
 `ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
 quartic channels to the existing `FrictionModalSystem`, preserving every original
@@ -3368,6 +3551,34 @@ supply combustion, jet thrust, moving-mesh conduction or a simultaneous nozzle
 residual. Regression sources cover material/mixture interventions, both flow
 directions, one withdrawal during repeated trials, full storage balance,
 closed-path parity and complete rollback; native execution remains unverified.
+
+### Molecular diffusion through the complete material assembly
+
+`MaterialExchangeState::diffusion_step_candidate` and `advance_with_diffusion`
+connect the original source-backed Maxwell–Stefan network to the same reacting
+gas, finite thermal cells, electrical circuit and moving pistons. Every face
+reads the original accepted composition/T/p, resolves explicit binary-pair
+diffusivity and transfers species plus their partial enthalpies once. All
+outgoing inventories are admitted jointly before incoming species can replenish
+them. Each chamber retains its existing caloric solver. Changed composition
+therefore enters actual chemistry, wall heat, charge/flux and momentum feedback.
+
+The whole-interval mass/energy balance starts before diffusion. A gross inlet or
+outlet makes the chamber's closed two-port audit unavailable even if net mass
+is zero; the enclosing account retains actual storage and external work/heat.
+All owners publish atomically after the original source, entropy, withdrawal,
+nonlinear and conservation checks. Chemical formation energy and carried
+enthalpy are never added again as heat.
+
+This is a first-order diffusion/reaction/coupled-heat-motion split over one
+interval, retaining the original ideal-gas, molar-average, approximately
+isothermal/isobaric face domain and explicit temperature/pressure limits.
+It supplies no thermal/pressure diffusion, membrane forces, resolved bulk flow
+or simultaneous nozzle/diffusion solve. Arrivals may react now but cannot cross
+a second diffusion face until the next interval. Focused regressions cover
+the binary limit, diffusivity-only physical response, post-mixing reaction,
+zero-net-mass stream accounting, closed faces and transactional refusal.
+Native execution and experimental qualification remain separate requirements.
 
 ### Curved material shell bodies in the reciprocal string network
 

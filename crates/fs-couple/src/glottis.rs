@@ -24,6 +24,18 @@
 //! named as such — the honesty ladder's permitted starting rung; a
 //! reduce-lab fold card slots into the same struct.
 //!
+//! Flow law: the kinetic (Bernoulli) drop `(rho/2)(U/a)^2` plus the
+//! Poiseuille viscous drop `12 mu d l^2 U / a^3` of each channel section,
+//! `a = l h`, in series with the tract load (Ishizaka and Flanagan, Bell
+//! Syst. Tech. J. 51(6), 1233-1268, 1972; the section drops are printed as
+//! P12 and P21 in Assaneo and Trevisan, arXiv:1312.2950, which also gives
+//! the upper-section thickness 0.05 cm beside the lower 0.25 cm). Without
+//! the viscous term the flow falls only linearly with the gap at closure,
+//! so it has a corner there and its derivative a step: harmonics fall at
+//! 6 dB/octave. With it the flow falls like `h^3` at small gaps. The forces
+//! on the masses keep the Steinecke-Herzel form (the viscous drop enters the
+//! flow, not the section pressures): a stated simplification.
+//!
 //! BOUNDARY: no formant filters, no vocoder, no glottal-waveform
 //! playback — the waveform must EMERGE from the valve + tract loop.
 
@@ -69,6 +81,9 @@ pub struct FoldCard {
     pub fold_length_m: f64,
     /// Lower-mass vertical thickness [m] (pressure face depth).
     pub thickness_m: f64,
+    /// Upper-mass vertical thickness [m] (the second viscous section;
+    /// Ishizaka-Flanagan 0.05 cm, arXiv:1312.2950).
+    pub thickness_upper_m: f64,
     /// Provenance marker.
     pub source: FoldCardSource,
 }
@@ -87,6 +102,7 @@ impl FoldCard {
             rest_gap_m: 3.57e-4, // S-H rest area 0.05 cm^2 / 1.4 cm
             fold_length_m: 1.4e-2,
             thickness_m: 0.25e-2,
+            thickness_upper_m: 0.05e-2,
             source: FoldCardSource::ReceiptedTwoMassPack,
         }
     }
@@ -100,6 +116,7 @@ impl FoldCard {
             (self.rest_gap_m, "rest gap"),
             (self.fold_length_m, "fold length"),
             (self.thickness_m, "thickness"),
+            (self.thickness_upper_m, "upper thickness"),
         ] {
             if !(v.is_finite() && v > 0.0) {
                 return Err(GlottisError::Invalid { what });
@@ -177,6 +194,8 @@ pub struct GlottalIsland {
     line: DelayedFilter,
     zc_flow: f64,
     rho: f64,
+    /// Dynamic viscosity of the glottal gas [Pa s].
+    viscosity_pa_s: f64,
     dt: f64,
     obstacle: Obstacle,
     p_minus: f64,
@@ -233,6 +252,39 @@ fn two_mass_phs(card: &FoldCard) -> Result<PortHamiltonian, GlottisError> {
         0.0, 1.0,
     ];
     PortHamiltonian::new(4, 2, j, r, g, storage).map_err(GlottisError::Phs)
+}
+
+/// Poiseuille series resistance [Pa s/m^3] of a slit channel of fold length
+/// `length`: the sum over `(thickness d, gap h)` sections of
+/// `12 mu d l^2 / a^3` with `a = l h` (Ishizaka and Flanagan 1972; P12 and P21
+/// of Assaneo and Trevisan, arXiv:1312.2950). A section with no gap is shut.
+fn viscous_series_resistance(mu: f64, length: f64, sections: &[(f64, f64)]) -> f64 {
+    sections
+        .iter()
+        .map(|&(d, h)| {
+            if h > 0.0 {
+                let a = length * h;
+                12.0 * mu * d * length * length / (a * a * a)
+            } else {
+                f64::INFINITY
+            }
+        })
+        .sum()
+}
+
+/// Signed volume flow through the junction: the drive `p_drive` falls over
+/// the series load `z_series` and the kinetic drop `U^2 / a_coef`
+/// (`a_coef = 2 (l h)^2 / rho`). `U^2 + a Z U - a P = 0` in the rationalized
+/// form `2 a P / (a Z + sqrt(a^2 Z^2 + 4 a P))`, which stays exact when the
+/// viscous resistance makes `a Z` huge and the textbook root cancels.
+fn junction_flow(a_coef: f64, z_series: f64, p_drive: f64) -> f64 {
+    let p = p_drive.abs();
+    let az = a_coef * z_series;
+    if !az.is_finite() {
+        return 0.0;
+    }
+    let mag = 2.0 * a_coef * p / (az + det::sqrt(az * az + 4.0 * a_coef * p));
+    if p_drive < 0.0 { -mag } else { mag }
 }
 
 impl GlottalIsland {
@@ -342,6 +394,7 @@ impl GlottalIsland {
             line,
             zc_flow,
             rho: gas.density,
+            viscosity_pa_s: gas.dynamic_viscosity,
             dt: 1.0 / f64::from(sample_rate_hz),
             obstacle,
             p_minus: 0.0,
@@ -380,6 +433,25 @@ impl GlottalIsland {
         }
     }
 
+    /// Poiseuille series resistance [Pa s/m^3] of the glottal channel at the
+    /// present gaps; `flow_gap` is the gap the flow sees (delayed for 1-DOF).
+    fn viscous_resistance(&self, flow_gap: f64) -> f64 {
+        let (d1, d2) = (self.card.thickness_m, self.card.thickness_upper_m);
+        let (mu, l) = (self.viscosity_pa_s, self.card.fold_length_m);
+        match &self.valve {
+            // One lumped mass: one channel of the whole thickness.
+            Valve::OneDof { .. } => viscous_series_resistance(mu, l, &[(d1 + d2, flow_gap)]),
+            Valve::TwoMass { x, .. } => viscous_series_resistance(
+                mu,
+                l,
+                &[
+                    (d1, self.card.rest_gap_m + x[0]),
+                    (d2, self.card.rest_gap_m + x[2]),
+                ],
+            ),
+        }
+    }
+
     /// Advance one audio sample under subglottal pressure `p_sub_pa`.
     ///
     /// # Errors
@@ -403,20 +475,19 @@ impl GlottalIsland {
         // acted as a negative resistance that rang the loop at ANY
         // blowing pressure). With P = p_sub - 2 p_minus and
         // U = w h sqrt(2 (P - Zc U)/rho), U solves the QUADRATIC
-        // U^2 + a Zc U - a P = 0, a = 2 (w h)^2 / rho - closed form,
-        // unconditionally dissipative at the junction.
+        // U^2 + a Z U - a P = 0, a = 2 (w h)^2 / rho, Z = Zc + R_v with
+        // R_v the Poiseuille resistance of the channel sections - closed
+        // form, unconditionally dissipative at the junction.
         let h_open = flow_gap.max(0.0);
         let p_drive = p_sub_pa - 2.0 * self.p_minus;
         let flow = if h_open > 0.0 && p_drive.abs() > 1.0e-12 {
             let wh = self.card.fold_length_m * h_open;
             let a_coef = 2.0 * wh * wh / self.rho;
-            let mag = f64::midpoint(
-                -a_coef * self.zc_flow,
-                det::sqrt(
-                    a_coef * a_coef * self.zc_flow * self.zc_flow + 4.0 * a_coef * p_drive.abs(),
-                ),
-            );
-            if p_drive < 0.0 { -mag } else { mag }
+            junction_flow(
+                a_coef,
+                self.zc_flow + self.viscous_resistance(flow_gap),
+                p_drive,
+            )
         } else {
             0.0
         };
@@ -708,7 +779,10 @@ mod glottis_tests {
 
     fn onset_pa(two_mass: bool, k_scale: f64) -> f64 {
         let mut p = 60.0f64;
-        while p < 6000.0 {
+        // The ladder ends above the old top rung (5821 Pa, the measured 1-DOF onset): the
+        // Poiseuille loss added to the flow law can only raise an onset, and a rung count
+        // is a ladder limit, not a claim.
+        while p < 9000.0 {
             let mut isl = island(two_mass, k_scale);
             if speaks(&mut isl, p, 0.4).0 {
                 return p;
@@ -962,5 +1036,140 @@ mod glottis_tests {
             Err(GlottisError::Invalid { .. })
         ));
         println!("{{\"suite\":\"fs-couple\",\"case\":\"gl-005-refusals\",\"verdict\":\"pass\"}}");
+    }
+
+    /// The viscous resistance is the cited Poiseuille sum, section by section
+    /// (`12 mu d l^2 / a^3`, `a = l h`; arXiv:1312.2950 P12 and P21).
+    #[test]
+    fn gl_006_viscous_resistance_is_the_cited_poiseuille_sum() {
+        let (mu, l): (f64, f64) = (1.9e-5, 1.4e-2);
+        let (d1, h1, d2, h2): (f64, f64, f64, f64) = (2.5e-3, 3.0e-4, 5.0e-4, 6.0e-4);
+        let by_hand =
+            12.0 * mu * d1 * l * l / (l * h1).powi(3) + 12.0 * mu * d2 * l * l / (l * h2).powi(3);
+        let got = viscous_series_resistance(mu, l, &[(d1, h1), (d2, h2)]);
+        assert!(
+            (got - by_hand).abs() <= 1.0e-12 * by_hand,
+            "{got} vs {by_hand}"
+        );
+        assert!(viscous_series_resistance(mu, l, &[(d1, h1), (d2, 0.0)]).is_infinite());
+        let r = |h: f64| viscous_series_resistance(mu, l, &[(d1, h)]);
+        assert!(
+            (r(0.5 * h1) / r(h1) - 8.0).abs() < 1.0e-12,
+            "cubic in the gap"
+        );
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"gl-006-poiseuille\",\"verdict\":\"pass\"}}");
+    }
+
+    /// The junction root: Bernoulli with no series load, the old closed form where
+    /// that was exact, odd in the drive, `p / Z` in the viscous limit, shut when
+    /// the load is not finite.
+    #[test]
+    fn gl_007_junction_flow_limits_and_symmetry() {
+        let (rho, l, p, h) = (1.14, 1.4e-2, 1000.0, 3.0e-4);
+        let a_coef = 2.0 * (l * h) * (l * h) / rho;
+        let bernoulli = l * h * det::sqrt(2.0 * p / rho);
+        assert!((junction_flow(a_coef, 0.0, p) - bernoulli).abs() <= 1.0e-12 * bernoulli);
+        let z = 2.0e6;
+        let old = 0.5 * (-a_coef * z + det::sqrt(a_coef * a_coef * z * z + 4.0 * a_coef * p));
+        assert!((junction_flow(a_coef, z, p) - old).abs() <= 1.0e-9 * old);
+        assert_eq!(junction_flow(a_coef, z, -p), -junction_flow(a_coef, z, p));
+        let z_big = 1.0e15;
+        let u = junction_flow(a_coef, z_big, p);
+        assert!(
+            (u - p / z_big).abs() <= 1.0e-6 * (p / z_big),
+            "viscous limit {u}"
+        );
+        assert!(
+            junction_flow(a_coef, z, p) < bernoulli,
+            "a series load only lowers the flow"
+        );
+        assert_eq!(junction_flow(a_coef, f64::INFINITY, p), 0.0);
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"gl-007-junction\",\"verdict\":\"pass\"}}");
+    }
+
+    /// With the viscous term the flow falls like the CUBE of the gap near closure
+    /// (Poiseuille), not linearly (Bernoulli): the corner that gave the harmonics
+    /// a 6 dB/octave tail. Local log-log slope at a small and a large gap, and the
+    /// flow stays below the Bernoulli flow and rises with the gap throughout.
+    #[test]
+    fn gl_008_flow_falls_as_the_cube_of_the_gap_near_closure() {
+        let gas = air();
+        let card = FoldCard::two_mass_standard();
+        let (l, rho, p) = (card.fold_length_m, gas.density, 1000.0);
+        let flow_at = |h: f64| {
+            let a_coef = 2.0 * (l * h) * (l * h) / rho;
+            let r_v = viscous_series_resistance(
+                gas.dynamic_viscosity,
+                l,
+                &[(card.thickness_m, h), (card.thickness_upper_m, h)],
+            );
+            junction_flow(a_coef, r_v, p)
+        };
+        let slope = |h: f64| {
+            let (lo, hi) = (0.99 * h, 1.01 * h);
+            (det::ln(flow_at(hi)) - det::ln(flow_at(lo))) / (det::ln(hi) - det::ln(lo))
+        };
+        assert!(
+            (slope(1.0e-6) - 3.0).abs() < 0.01,
+            "viscous slope {}",
+            slope(1.0e-6)
+        );
+        assert!(
+            (slope(2.0e-3) - 1.0).abs() < 0.02,
+            "kinetic slope {}",
+            slope(2.0e-3)
+        );
+        let mut previous = 0.0;
+        for k in 0..60 {
+            let h = 1.0e-6 * det::exp(0.15 * f64::from(k));
+            let u = flow_at(h);
+            assert!(u > previous, "flow must rise with the gap (h = {h})");
+            assert!(
+                u <= l * h * det::sqrt(2.0 * p / rho) * (1.0 + 1.0e-12),
+                "above Bernoulli at h = {h}"
+            );
+            previous = u;
+        }
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-008-closure-cube\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    /// Every step of a running two-mass island obeys the junction identity
+    /// `dp = sign(U) (rho/2) (U / (l h))^2 + R_v U` with its own viscous resistance.
+    #[test]
+    fn gl_009_every_step_obeys_the_kinetic_plus_viscous_drop() {
+        let mut isl = island(true, 1.0);
+        let l = FoldCard::two_mass_standard().fold_length_m;
+        let rho = air().density;
+        let (mut checked, mut worst) = (0_usize, 0.0_f64);
+        for k in 0..4800 {
+            let p_sub = 800.0 * (f64::from(k) / 1440.0).min(1.0);
+            // The flow sees the gap and the sections as they stand BEFORE the step
+            // (the frame reports the gap after the state update).
+            let gap_before = isl.gap_m();
+            let r_v = isl.viscous_resistance(gap_before);
+            let f = isl.step(p_sub).expect("step");
+            if f.flow_m3_s == 0.0 {
+                continue;
+            }
+            let a = l * gap_before;
+            let dp = p_sub - f.p_supra_pa;
+            let kinetic = 0.5 * rho * (f.flow_m3_s / a).powi(2) * f.flow_m3_s.signum();
+            let miss = (dp - kinetic - r_v * f.flow_m3_s).abs() / (dp.abs() + 1.0e-9);
+            worst = worst.max(miss);
+            checked += 1;
+        }
+        assert!(
+            checked > 1000,
+            "the island must be flowing for most of the run ({checked})"
+        );
+        assert!(
+            worst < 1.0e-8,
+            "junction identity violated: relative miss {worst:e}"
+        );
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-009-junction-identity\",\"checked\":{checked},\"worst_rel_miss\":{worst:e},\"verdict\":\"pass\"}}"
+        );
     }
 }

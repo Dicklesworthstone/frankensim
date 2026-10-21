@@ -4,7 +4,10 @@
 //! across caller-declared uniform half-cell distances.
 
 mod prepared;
+pub mod conductivity;
+pub use conductivity::CellConductionResponse;
 pub use prepared::{MaterialTransportObserver, PreparedMaterialNetwork};
+use conductivity::ElectricalAxes;
 
 use super::*;
 use crate::cavity_phs::piston::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
@@ -138,7 +141,7 @@ impl MaterialNetwork<'_> {
         -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
         if cancelled() {return Err(MaterialNetworkError::Thermal(DepositionError::Cancelled));}
         let bases=self.basis_plan(electrical_bases)?;
-        self.resolve_bound(thermal,&bases,None,cancelled)
+        self.resolve_bound(thermal,&bases,None,None,cancelled)
     }
 
     fn basis_plan(&self, electrical_bases:&[(usize,ElectricalPropertyBasis)])
@@ -157,7 +160,8 @@ impl MaterialNetwork<'_> {
 
     fn resolve_bound(&self, thermal:&DepositionSimulation<'_>,
         bases:&BTreeMap<usize,ElectricalPropertyBasis>,
-        pinned:Option<&BTreeMap<CellId,MaterialPropertySelection>>, mut cancelled:impl FnMut()->bool)
+        pinned:Option<&BTreeMap<CellId,MaterialPropertySelection>>,
+        electrical_axes:Option<&ElectricalAxes>, mut cancelled:impl FnMut()->bool)
         -> Result<CircuitThermalCoefficients<MaterialNetworkSample>,MaterialNetworkError> {
         let invalid=MaterialNetworkError::Invalid;
         let mut check=|| if cancelled() {Err(DepositionError::Cancelled)} else {Ok(())};
@@ -184,6 +188,13 @@ impl MaterialNetwork<'_> {
             let phase=binding.curve.state_at_specific_enthalpy(cell.specific_h_j_kg).map_err(MaterialNetworkError::Phase)?;
             let point=binding.point.at(phase).map_err(MaterialNetworkError::Material)?;
             let mut requested=Vec::new();
+            let mut electrical_property = None;
+            let operating_axes = resistor_cells
+                .get(&binding.cell)
+                .map(|resistor| {
+                    conductivity::admitted_axes(electrical_axes, resistor.destination.branch)
+                })
+                .unwrap_or_default();
             if let Some((key,selection))=&binding.conductivity {
                 let q=key.quantity();
                 if q!=QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
@@ -198,6 +209,7 @@ impl MaterialNetwork<'_> {
                 let basis=bases[&resistor.destination.branch];
                 let requirement=basis.requirement()
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
+                electrical_property = Some(requirement.name().to_owned());
                 requested.push((requirement,resistor.selection.clone()));
             }
             let conductivity=if requested.is_empty() {None} else {
@@ -218,7 +230,19 @@ impl MaterialNetwork<'_> {
                 let material=resolve_material_state_point(binding.point.material,&point,&requirements,selection)
                     .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
                 for property in material.properties() {
-                    binding.point.admit_static(property).map_err(MaterialNetworkError::Material)?;
+                    if electrical_property.as_deref() == Some(property.requirement().name()) {
+                        binding
+                            .point
+                            .admit_static_with_axes(property, &operating_axes)
+                            .map_err(MaterialNetworkError::Material)?;
+                    } else {
+                        // Heat conductances are resolved before the electrical
+                        // field iterator: k(E/J) must not freeze at seed fields.
+                        binding
+                            .point
+                            .admit_static(property)
+                            .map_err(MaterialNetworkError::Material)?;
+                    }
                 }
                 let conductivity=binding.conductivity.as_ref().map(|_|material.clone());
                 materials.insert(binding.cell,material);
@@ -235,7 +259,15 @@ impl MaterialNetwork<'_> {
             let body=MaterialOhmicBody {material:binding.point,selection:resistor.selection.clone(),
                 length_m:resistor.length_m,area_m2:resistor.area_m2};
             let material=materials.remove(&d.cell).ok_or(invalid("resistor material bundle is absent"))?;
-            let conductor=body.conductor_from_material(samples[&d.cell].phase,cell.geometry.volume_m3,material,bases[&d.branch])
+            let operating_axes = conductivity::admitted_axes(electrical_axes, d.branch);
+            let conductor = body
+                .conductor_from_material_with_axes(
+                    samples[&d.cell].phase,
+                    cell.geometry.volume_m3,
+                    material,
+                    bases[&d.branch],
+                    &operating_axes,
+                )
                 .map_err(MaterialNetworkError::Conductor)?;
             resistors.push(MaterialResistor {branch:d.branch,conductor});
         }

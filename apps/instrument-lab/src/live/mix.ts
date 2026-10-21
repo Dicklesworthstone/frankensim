@@ -161,6 +161,13 @@ class LaneWorker<R> {
 }
 
 // ------------------------------------------------------------------ kit piece lanes
+/** Original canonical gas sources, explicitly associated without name lookup. */
+export interface GasSourceOptions {
+  components: { speciesPack: Uint8Array; nasa9Pack: Uint8Array; transportPack: Uint8Array }[];
+  /** null explicitly selects no water identity; never inferred from spelling. */
+  waterSpecies: string | null;
+  phase: 'frozen' | 'liquid-water';
+}
 /** Canonical material-card pack inputs; physics resolution stays in Rust. */
 export interface KitMaterialOptions {
   surfacePack: Uint8Array;
@@ -200,7 +207,7 @@ export interface KitMaterialInfo {
 }
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];
-    gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number };
+    gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number; sourceSpecies?: number };
     materials?: KitMaterialInfo | null };
   /** Exact requested atmosphere, retained through every grid trial and rebuild. */
   gasRecord?: string;
@@ -269,10 +276,12 @@ export class KitLane {
    * `benchMs`: how much of one stroke each grid is timed over (default 112 ms; see kit/worker.js).
    * `gasRecord`: one canonical gas-state record retained through grid trials and rebuilding; an
    * explicit record requires an engine with material-atmosphere support.
+   * `gasSources`: canonical source triples for a thermochemical gas record;
+   * the same immutable source state reaches loading and microphone propagation.
    * `materials`: source-bound elastic surfaces and a spherical striker. Bulk material data changes
    * mass, stiffness and Hertz contact; preset T60/support/rim/wire laws remain separate declarations.
    */
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; materials?: KitMaterialOptions; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; gasSources?: GasSourceOptions; materials?: KitMaterialOptions; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.lane = new LaneWorker<KitReady>(`${LIVE_BASE_URL}/kit/worker.js`, `kit-${piece}`, `the ${piece} engine`, mix, piece, (m) => {
       if (m.type === "field") this.onField?.(m as unknown as KitField);

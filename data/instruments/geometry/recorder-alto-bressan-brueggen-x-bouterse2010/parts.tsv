@@ -1,0 +1,8 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+head-joint	boxwood with ivory rings (the first part of the windway runs through an ivory ring); no material card	assembled	middle-joint;window	beak, windway, block, window and labium; head bore narrowing slightly from the window
+middle-joint	boxwood; no material card	assembled	head-joint;foot;tone-holes	bore narrowing toward the foot; thumb hole and holes 1 to 6
+foot	boxwood	assembled	middle-joint;tone-holes	foot with the double hole 7 on some altos; length and bore vary much between the altos
+tone-holes	drilled in the wall; undercutting not stated for this instrument	assembled	middle-joint;foot	thumb hole at the back, six front holes, hole 7 on the foot
+window	boxwood; block of the original or a replacement is not stated for alto d-	assembled	head-joint	window, labium, step and block chamfer
+windway	boxwood and ivory; not measured on alto d- (only the windway length)	assembled	head-joint;window	estimate of the exit height from other altos

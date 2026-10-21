@@ -5,6 +5,7 @@
 use super::PowerSample;
 use super::super::layers::MaterialConductionLayers;
 use fs_matdb::PropertyKey;
+use fs_qty::QuantitySpec;
 use super::super::source::{ThermalMaterialError, ThermalMaterialPoint};
 use fs_material::conductor::{ConductorError, ElectricalPropertyBasis, OhmicDrive,
     ResolvedConductor, ResolvedConductorState};
@@ -107,24 +108,56 @@ impl MaterialOhmicBody<'_> {
     /// Lower an existing complete thermal/electrical bundle without querying a
     /// second material state. Its card, all coordinates and quantity descriptors
     /// must match this body's actual phase point. Extra properties stay intact.
-    pub(crate) fn conductor_from_material(&self, body: EquilibriumPhaseState, body_volume_m3: f64,
-        material: ResolvedMaterialStatePoint, basis: ElectricalPropertyBasis)
-        -> Result<ResolvedConductor, JouleHeatingError> {
-        let volume = self.length_m*self.area_m2;
-        if !volume.is_finite() || volume <= 0.0 || !body_volume_m3.is_finite() || body_volume_m3 <= 0.0
-            || (volume/body_volume_m3-1.0).abs() > 64.0*f64::EPSILON {
-            return Err(JouleHeatingError::Invalid("conductor geometry must represent the whole thermal body"));
+    pub(crate) fn conductor_from_material(
+        &self,
+        body: EquilibriumPhaseState,
+        body_volume_m3: f64,
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+    ) -> Result<ResolvedConductor, JouleHeatingError> {
+        self.conductor_from_material_with_axes(body, body_volume_m3, material, basis, &[])
+    }
+
+    /// The same whole-body/source lowering when an outer physical owner closes
+    /// explicitly typed operating coordinates. Only the electrical source uses
+    /// these axes; geometry and complete thermal-point checks are unchanged.
+    pub(crate) fn conductor_from_material_with_axes(
+        &self,
+        body: EquilibriumPhaseState,
+        body_volume_m3: f64,
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+        additional_axes: &[(&str, QuantitySpec)],
+    ) -> Result<ResolvedConductor, JouleHeatingError> {
+        let volume = self.length_m * self.area_m2;
+        if !volume.is_finite()
+            || volume <= 0.0
+            || !body_volume_m3.is_finite()
+            || body_volume_m3 <= 0.0
+            || (volume / body_volume_m3 - 1.0).abs() > 64.0 * f64::EPSILON
+        {
+            return Err(JouleHeatingError::Invalid(
+                "conductor geometry must represent the whole thermal body",
+            ));
         }
         let point = self.material.at(body)?;
         if material.card_identity() != self.material.material.content_hash()
             || material.axis_quantities() != point.axis_quantities()
             || material.query_point().len() != point.axes().len()
-            || material.query_point().iter().any(|(axis, value)|
-                point.axes().get(axis).is_none_or(|expected| expected.to_bits() != value.to_bits())) {
-            return Err(JouleHeatingError::Invalid("conductor bundle must retain the actual complete thermal material point"));
+            || material.query_point().iter().any(|(axis, value)| {
+                point
+                    .axes()
+                    .get(axis)
+                    .is_none_or(|expected| expected.to_bits() != value.to_bits())
+            })
+        {
+            return Err(JouleHeatingError::Invalid(
+                "conductor bundle must retain the actual complete thermal material point",
+            ));
         }
         let conductor = ResolvedConductorState::try_from_material_with_basis(material, basis)?;
-        self.material.admit_static(conductor.source_property())?;
+        self.material
+            .admit_static_with_axes(conductor.source_property(), additional_axes)?;
         Ok(conductor.into_uniform_conductor(self.length_m, self.area_m2)?)
     }
 }

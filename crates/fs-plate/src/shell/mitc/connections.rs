@@ -9,6 +9,17 @@ use super::MitcShellModel;
 use crate::PlateError;
 use fs_sparse::Coo;
 
+/// Largest number of physical modes one connection projection admits. It bounds the dense per-connection
+/// rows; the caller's `max_work` still governs cost. Callers that retain more modes than this must refuse
+/// before they reach it (fs-couple ties its own shell ceiling to this constant at compile time).
+pub const MAX_CONNECTION_MODES: usize = 256;
+
+/// Whether `n` supplied physical modes fit one projection: at least one, at most [`MAX_CONNECTION_MODES`].
+#[must_use]
+pub const fn connection_modes_admitted(n: usize) -> bool {
+    n >= 1 && n <= MAX_CONNECTION_MODES
+}
+
 /// One contribution to a work-conjugate displacement coordinate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellConnectionTerm {
@@ -157,7 +168,7 @@ impl MitcShellModel {
         poll(&mut cancelled)?;
         let nodes = self.frames.len();
         admit(connections, nodes, budget)?;
-        if physical_modes.is_empty() || physical_modes.len() > 64
+        if !connection_modes_admitted(physical_modes.len())
             || physical_modes.iter().any(|p| p.len() != 6 * nodes
                 || p.iter().any(|v| !v.is_finite())) {
             return Err(invalid("shell connection projection needs bounded full physical modes"));

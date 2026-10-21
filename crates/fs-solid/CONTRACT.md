@@ -525,6 +525,65 @@ trajectory against six independent material/damping finite-difference
 directions at two parameter points, and the fully prescribed zero-gradient,
 budget, cancellation and retry limits.
 
+`adjoint::support::reaction` supplies physical support-force observation
+pullbacks through `reaction_pullback`. The observed force is the force ON the
+solid, `R_c=(M*a+(eta*M+zeta*K)*v+K*q-fT-f_external)_c`, in fixed world
+Cartesian components. A caller supplies finite objective derivatives with
+respect to sorted unique fixed DOFs, typically from a recovered reaction
+residual. The result includes full motion seeds `(K' w,C' w,M' w)`, direct
+fixed-force rows `-w`, and direct material/Rayleigh terms `+w' dR` at fixed
+motion. The full canonical transpose and material contraction owners are
+reused; no global full matrix, new equilibrium solve or finite difference is
+introduced. `reaction_motion_pullback` on the prepared prescribed companion
+supplies the same motion seed without a primal-state tape.
+
+For a complete reaction objective, chain the motion seed through the existing
+initialization/step/trajectory reverse, then add the direct material and
+fixed-force terms. Fully prescribed motion has no implicit material derivative,
+but its physical reactions retain nonzero direct thermal, inertia and damping
+derivatives. The same `-w` applies independently to a full frozen thermal
+equivalent force. Stiffness-dependent thermal effects already present in the
+material term must not be counted again. The endpoint API supports stationary
+and driven restraints, keeps full consistent-mass and damping coupling, and
+checks independent full-DOF/element allowances before scratch allocation.
+Malformed rows, nonfinite arithmetic, refusal and cancellation publish no
+partial result and never change accepted motion. No moving-axis, shape,
+thermal-law, stress-observation, physical-work or acceptance-gate derivative
+is inferred.
+
+`tests/transient_reaction_adjoint3.rs` checks analytic direct and implicit
+initial reaction terms, the same observation seed on stationary and driven
+supports, three-step reaction-target finite differences in seven independent
+material/damping/support/free-force/fixed-force directions, fully prescribed
+nonzero direct material sensitivities, and malformed/budget/cancellation retry
+boundaries.
+
+`adjoint::support::stress` adds pointwise elastic stress objectives through
+`stress_pullback`. Rows contain sorted unique tetrahedron IDs and finite
+`dJ/dsigma` in mesh-frame Mandel `[xx,yy,zz,xy,yz,zx]`; the final three stress
+entries are `sqrt(2)` times physical tensor shears. The canonical P1 strain
+operator and admitted constitutive tensor supply `B' C' w`, including fixed
+DOFs, and the direct per-element stiffness-scale term `w' sigma`, where
+`sigma=C*(B*q-epsilon_free)`. Velocity, acceleration, direct density and direct
+Rayleigh terms are zero. No element-volume or time-quadrature factor is added;
+the objective owner includes any such weights. For complete design gradients,
+chain the full displacement seed through the matching accepted-state reverse
+and add its implicit material terms to the direct stiffness contribution.
+
+Geometry, material axes and free thermal strain remain fixed. Stationary,
+driven and fully prescribed endpoints use their actual full displacements.
+Full-DOF and element caps apply before scratch allocation; both total and
+elastic Mandel strains must obey the same finite positive ceiling as stress
+recovery, even for unobserved elements. Invalid rows, nonfinite arithmetic and
+cancellation yield no partial gradient and preserve accepted motion.
+`von_mises_limit` supplies the smooth dimensionless inequality
+`(sigma_vm/limit)^2-1 <= 0` and its Mandel stress seed, with a defined zero
+derivative at hydrostatic stress and a caller-supplied positive finite limit.
+It does not infer a yield law, failure probability or physical admission.
+`tests/transient_stress_adjoint3.rs` checks analytic thermal/shear terms without
+volume weighting, anisotropic nodal and material finite differences at two
+mesh scales, von-Mises derivatives, and refusal/cancellation/retry boundaries.
+
 `adjoint::support::trajectory` records complete prescribed-support simulations
 through `record_prescribed_controls`. For controls alone, its owning recorder
 retains only accepted interval times: the frozen linear motion Jacobian needs
@@ -563,10 +622,27 @@ frozen-material thermal-force cotangent. Parameter-dependent external loads and
 direct objective terms remain caller-owned chains. Refusal/cancellation returns
 no partial combined gradient and leaves the tape reusable.
 
+`reverse_design_with_stress` adds sparse element-stress observations at any
+recorded endpoint to those motion objectives. `ElementStressObservation3`
+contains objective/Pa seeds in mesh-frame Mandel `[xx,yy,zz,xy,yz,zx]`; duplicate
+element/state rows add in caller order, and callers include quadrature weights.
+The same reverse sweep accumulates full `B' C' w` displacement seeds, direct
+`w' sigma` stiffness terms, and implicit trajectory material/load/support terms,
+including initialization. No additional equilibrium solves or stress tape are
+needed. The combined motion/stress row cap and existing element/full-motion
+budgets apply. Every state with stress rows obeys the finite positive total and
+elastic strain ceiling, even when its seeds cancel to zero. Thermal strain,
+geometry, frames, restraint axes and accepted times remain fixed. The smooth
+`von_mises_limit` seed composes with this path for strength objectives; it does
+not add plasticity or infer material failure limits. The three regressions in
+`tests/transient_stress_trajectory3.rs` cover six material/damping/support/load
+directions for mixed stress/strength/motion objectives, fully prescribed
+intermediate-state controls, and observation-budget/strain/cancellation retries.
+
 Callers supply actual residual/quadrature weights for their motion objectives
 and chain returned world-component controls through authored waveforms. This
 does not infer derivatives of frame transforms, knot/step times, interpolation,
-geometry, direct control costs, reaction/work observations or acceptance.
+geometry, direct control costs, physical work reports or acceptance.
 `tests/transient_support_trajectory3.rs` supplies a multi-step least-squares
 objective checked against all twelve independent initial/force/support control
 directions, an analytical typed fully-prescribed ramp-amplitude chain rule,

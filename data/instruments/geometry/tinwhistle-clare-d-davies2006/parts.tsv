@@ -1,0 +1,5 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+bore	brass tube (paper Sec. 3); wall loss and material cards are not attached	played	mouthpiece;tone-holes	cylindrical brass tube of the measured bore; the paper's model also allows a slight taper but gives none
+mouthpiece	plastic (paper Sec. 3); no material card	played	bore	flue channel, window and wedge moulded in one piece; the bore is reduced locally by the chord of the flat wedge surface (not quantified)
+tone-holes	drilled in the brass tube wall (paper Sec. 3); holes were not quite round, sizes are averages	played	bore	six holes, wall thickness is the hole length; no pads: fingers are modelled as hard-closed holes

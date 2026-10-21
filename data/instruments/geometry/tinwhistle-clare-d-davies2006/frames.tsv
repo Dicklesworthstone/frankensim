@@ -1,0 +1,5 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+bore	centre of the rectangular window on the bore axis (paper: the generator centre; resonator length is counted from here)	+x along the bore axis toward the open end	unstated	unstated	hole centres are given from the open end and converted by the total resonator length 267.3 mm
+tone-holes	centre of the rectangular window on the bore axis	+x along the bore axis toward the open end	unstated	unstated	azimuth of the holes is not stated
+mouthpiece	centre of the rectangular window on the bore axis	+x along the bore axis toward the open end	unstated	unstated	flue channel and wedge are described by their own lengths, not positions

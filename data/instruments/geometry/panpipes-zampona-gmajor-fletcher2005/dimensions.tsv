@@ -1,0 +1,11 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+tubes	scaling	bore-power-law-coefficient-mm	1.32	1	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Eq. 1 and Fig. 2: pipe diameter d = 1.32 L^0.43 with d and L in millimetres, regression on measured Eastern European panpipes; a Peruvian instrument showed a very similar but much less regular scaling
+tubes	scaling	bore-power-law-exponent	0.43	1	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Eq. 1 (organ flue ranks scale as about 0.75)
+tubes	end	open-end-correction-over-radius	0.6133	1	unstated	published-measured	isvr-davies-2006-tin-whistle	Davies, Pinho and English 2006 Eq. 5 limit ka -> 0: end correction of a thin-walled open end 0.6133 radius
+jet	initial-half-width	low-note	0.001	m	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Sec. IV: initial jet half-width about 0.5 to 1 mm; the player reduces the lip height 2b0 for high notes (Sec. VI): 1 mm taken for the lowest tube
+jet	initial-half-width	high-note	0.0005	m	unstated	published-measured	fletcher-2005-panpipes-jasa	same source: 0.5 mm taken for the highest tube; tubes between are linear in log2(f)
+jet	length	low-note	0.01	m	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Sec. IV: jet length typically about 5 to 10 mm, shorter for high notes (Sec. VI): 10 mm for the lowest tube
+jet	length	high-note	0.005	m	unstated	published-measured	fletcher-2005-panpipes-jasa	same source: 5 mm for the highest tube
+jet	offset	over-half-width	0.5	1	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Eq. 6 with alpha about 2 and gamma about 0.4: in a STOPPED pipe the steady entrained flow is blocked, so the jet midplane is deflected outside the lip by about 0.5 of the jet half-width (typically 0.5 mm for a low note); depends on the player and note
+jet	spreading	half-angle	0.1	rad	unstated	published-measured	fletcher-2005-panpipes-jasa	Fletcher 2005 Eq. 9: epsilon about 0.1 (6 degrees); NOT modelled by the generic flue input, which keeps the initial half-width (u-jet-spreading)

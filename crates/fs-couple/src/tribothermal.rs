@@ -10,8 +10,9 @@
 //! trial starts from the same accepted slip history; only a balanced candidate
 //! can publish both histories. Heat exported elsewhere remains in the balance.
 //!
-//! This is a fixed-footprint, isotropic, prescribed-motion reduction. No normal
-//! contact solve, body dynamics, inferred interface temperature, flash estimate,
+//! This entry is a fixed-footprint, isotropic, prescribed-motion reduction;
+//! [`dynamics`] closes the same contact with finite-body tangent inertia.
+//! No normal contact solve, inferred interface temperature, flash estimate,
 //! wear geometry, lubricant, adhesion or friction entropy law is introduced.
 //! Dry contact refuses liquid material states. Source curves remain their
 //! original one-dimensional laws and validity domains; no multivariable law is
@@ -20,6 +21,10 @@
 //! accuracy, uniqueness or experimental-validation certificate.
 
 pub mod material;
+/// Force-driven finite-body motion using the same material/thermal contact.
+pub mod dynamics;
+/// Native electric/magnetic field motion with material guide friction and heat.
+pub mod field_motion;
 pub use material::{MaterialSlidingContact, SlidingInterface, SlidingMaterialSample};
 
 use fs_contact::interface_binding::InterfaceBindingError;
@@ -75,6 +80,7 @@ pub enum SlidingError<E = Infallible> {
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
     FrictionBudget,
+    MotionBudget,
     Cancelled,
 }
 impl<E> From<DepositionError> for SlidingError<E> {
@@ -147,7 +153,7 @@ pub struct SlidingReport<S> {
     pub nonlinear: NewtonReport,
     pub friction_trials: usize,
     pub maximum_cell_residual_j: f64,
-    /// Independently reconstructed effort dotted with prescribed relative motion.
+    /// Independently reconstructed effort dotted with actual solved relative motion.
     pub drive_work_j: f64,
     pub deposited_heat_j: f64,
     /// Authored/callback thermal supply, independently evaluated WITHOUT friction.
@@ -202,6 +208,31 @@ impl<'a> MaterialSlidingContact<'a> {
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<SlidingCandidate<'a, 't, S>, SlidingError<E>> {
+        self.step_candidate_with_motion(thermal, target_s, drive, 0.0,
+            drive.relative_increment_m, controls, guess_j, |state, _| resolve(state), cancelled)
+    }
+
+    /// Internal coupled proposal through the SAME friction and thermal owners.
+    /// `drive` supplies released motion; compliance belongs to the mechanical
+    /// owner. `material_increment_m` is its source-query iterate. Work, heat and
+    /// accepted history always use the ORIGINAL return map's solved slip.
+    /// A compliant caller MUST gate source-query versus solved motion before
+    /// publishing this internal candidate. The callback sees that same native
+    /// response and supplies only other heat/conduction and its own payload.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_candidate_with_motion<'t, S, E>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        drive: SlidingDrive,
+        compliance_m_per_n: f64,
+        material_increment_m: [f64; 2],
+        controls: SlidingSolve,
+        guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>, &TangentialStep<DryTangentialState>)
+            -> Result<StepCoefficients<S>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SlidingCandidate<'a, 't, S>, SlidingError<E>> {
         let cancel = RefCell::new(cancelled);
         let checkpoint = || {
             if (*cancel.borrow_mut())() {
@@ -218,6 +249,7 @@ impl<'a> MaterialSlidingContact<'a> {
             || guess_j.len() != thermal.cells().len()
             || controls.maximum_friction_trials == 0
             || controls.maximum_newton_iterations == 0
+            || !compliance_m_per_n.is_finite() || compliance_m_per_n < 0.0
             || [
                 controls.cell_energy_tolerance_j,
                 controls.thermal_energy_tolerance_j,
@@ -232,12 +264,12 @@ impl<'a> MaterialSlidingContact<'a> {
         }
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
-        for value in drive.relative_increment_m {
+        for value in drive.relative_increment_m.into_iter().chain(material_increment_m) {
             number::<E>(value)?;
         }
         let distance = number(det::hypot(
-            drive.relative_increment_m[0],
-            drive.relative_increment_m[1],
+            material_increment_m[0],
+            material_increment_m[1],
         ))?;
         let speed = number(distance / dt)?;
         let accumulated = number(self.distance_m + distance)?;
@@ -263,7 +295,7 @@ impl<'a> MaterialSlidingContact<'a> {
                             normal_n: drive.normal_load_n,
                             slip_increment_m: drive.relative_increment_m,
                             dt_s: dt,
-                            compliance_m_per_n: 0.0,
+                            compliance_m_per_n,
                             contact_temperature_k: self
                                 .data
                                 .point
@@ -274,16 +306,17 @@ impl<'a> MaterialSlidingContact<'a> {
                         },
                     )?;
                     let drive_work_j = number(
-                        number(friction.traction_n[0] * drive.relative_increment_m[0])?
-                            + number(friction.traction_n[1] * drive.relative_increment_m[1])?,
+                        number(friction.traction_n[0] * friction.slip_increment_m[0])?
+                            + number(friction.traction_n[1] * friction.slip_increment_m[1])?,
                     )?;
-                    if friction.slip_increment_m != drive.relative_increment_m
+                    if compliance_m_per_n == 0.0
+                        && friction.slip_increment_m != drive.relative_increment_m
                         || number(friction.stored_change_j + friction.dissipated_j - drive_work_j)?
                             .abs()
                             > controls.total_energy_tolerance_j
                     {
                         return Err(SlidingError::Invalid(
-                            "original friction work does not close prescribed drive work",
+                            "original friction work does not close actual interface motion",
                         ));
                     }
                     let partition = friction.dissipation_step(self.data.partition)?;
@@ -291,7 +324,7 @@ impl<'a> MaterialSlidingContact<'a> {
                         mut sources_w,
                         conductances_w_k,
                         payload,
-                    } = resolve(state).map_err(SlidingError::Source)?;
+                    } = resolve(state, &friction).map_err(SlidingError::Source)?;
                     // Independent external supply: do not reconstruct it by subtracting
                     // internal heat from the final thermal balance.
                     let external_heat_j = number(
@@ -403,7 +436,11 @@ impl<'a> MaterialSlidingContact<'a> {
         let mut contact = self.clone();
         contact.work.record(partition)?;
         contact.history = friction.state.clone();
-        contact.distance_m = accumulated;
+        let actual_distance = number(det::hypot(friction.slip_increment_m[0], friction.slip_increment_m[1]))?;
+        contact.distance_m = number(self.distance_m + actual_distance)?;
+        if actual_distance > 0.0 && contact.distance_m == self.distance_m {
+            return Err(SlidingError::Invalid("actual sliding history increment is unrepresentable"));
+        }
         contact.time_s = target_s;
         checkpoint()?;
         Ok(SlidingCandidate {

@@ -1,0 +1,102 @@
+# Voice performance: Story (2008) vowel [u] tract, fold card of the licensed two-mass pack, target note C3 (130.81 Hz).
+# Every number below is cited. UNKNOWN marks a quantity no cited source gives; none is fitted to a recording.
+#
+# TRACT: Story, B. H. (2008). Comparison of magnetic resonance imaging-based vocal tract area functions obtained from the same speaker in 1994 and 2002. J. Acoust. Soc. Am. 123(1):327-335, doi:10.1121/1.2805683; author manuscript PMC2377017.
+#   Table I column [u], sections 1-44 glottis to lips, in file order. Areas are the printed
+#   cm^2 digits scaled by e-4 (to m^2); the section length is the printed Delta (cm) scaled by e-2 (to m):
+#   Delta = 0.445 cm, VTL = 44 Delta = 19.59 cm. One male speaker, MRI of 2002, vowel sustained supine.
+#   LIMIT: a speech configuration, not a singing posture (larynx height, pharynx and lip shape differ in singing).
+#   Same-specimen oracle for the passive tract (Table II, same speaker, same vowel):
+#     measured  F1N 430±5  F2N 917±14  F3N 2087±14 Hz; Fo 155 Hz
+#     computed  F1C 314  F2C 702  F3C 2298 Hz (the paper's own model)
+#
+# FOLD: lower/upper mass 0.125 g / 0.025 g, k 80 / 8 N/m, coupling 25 N/m, fold length 1.4 cm, lower-mass
+#   thickness 0.25 cm: Ishizaka & Flanagan (1972) two-mass set in the Steinecke & Herzel (1995) form, as carried by
+#   the CC-BY model-card pack twomass-if72-standard-plos-pone0187486 (see crates/fs-couple/src/glottis.rs).
+#   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratio 0.1 is AUTHORED ESTIMATE
+#   (source would be tissue-loss measurements; Q1 sweeps it). Collision law and mucosal delay are fixed in glottis.rs.
+#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 0.470604. q was found by
+#   rendering and measuring the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, then
+#   re-measured on the full 3 s render) and iterating q until it was
+#   within 3 cents of the target note C3 = 130.81 Hz (equal temperament, A4 = 440 Hz). No recording enters. Trace on the
+#   sibling description:
+#     q 0.504353: f0 135.04 Hz (+55.1 c) -> q 0.473244: f0 131.15 Hz (+4.5 c) -> q 0.470604: f0 130.79 Hz (-0.3 c)
+#   The first rule tried (set the isolated in-phase mode f = sqrt((k1+k2)/(m1+m2))/2pi to the note) phonated 550-815 cents
+#   sharp: the pair oscillates nearer its second eigenmode (200.5 Hz at q = 1, pack values) than its in-phase mode (120.4 Hz).
+#   Eigenmodes from det(K - w^2 M) = 0 with the pack masses, stiffnesses and coupling; tract loading then moves f0 by a
+#   vowel-dependent amount, which is why q differs between vowels at the same note.
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q: the drive rule of the in-repo vowel gate,
+#   tests/vowel_gates.rs vw-002, which scales the drive with the stiffness. UNKNOWN for the recorded speaker: Story (2008) reports none; a measured source
+#   would be Holmberg, Hillman & Perkell (1988) subglottal pressures. Q1 sweeps it (voice_q1_subglottal_pressure_metamorphic).
+#   Ramp 0 -> P over 60 ms, hold, ramp to 0 over the last 150 ms.
+# GAS: saturated air at 310.15 K and 101325 Pa. UNKNOWN as a source: Story (2008) does not state the speed of sound
+#   its calculation used; the value is the declared physiological state of tract air, not fitted.
+# TERMINATION: flanged (the mouth modelled as a piston in an infinite baffle, matching the receiver below).
+# WALL: none (rigid). UNKNOWN as a measurement: the yielding-wall impedance of this tract; the cited setting is in the -flanagan files.
+#   The paper's calculation included yielding walls, so formant widths differ by this gap. A rigid wall also leaves the first formant
+#   with a bandwidth below the 50-90 Hz measured for humans (Birkholz et al. 2022), which makes /u/ at and above F1 irregular.
+#   This is the 48 kHz-clock workaround for a defect since fixed (2e629d5f3); the 96 kHz twin has no -r1 suffix.
+# MICROPHONE: 0.30 m from the mouth at 45 degrees off axis (x = z = 0.30 sin 45 deg), the geometry of the paper's
+#   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
+#   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).
+# LEVEL: full_scale_pa 4.0 Pa (106 dB SPL peak at the PCM ceiling) is a recording-level choice, the same for
+#   every description so vowel levels compare; the loudest render (a-D4) peaks near 3.2 Pa. Output is never normalized.
+# MECHANICS: 48 kHz physical clock (1 per output sample), read through the bandlimited differentiating receiver. The line
+#   cap of 65536 taps then spans 1.37 s of response instead of 0.68 s. A mechanics-rate rung: compare with the 96 kHz file.
+frankensim-voice-performance-v1
+audio 48000 144000 1
+full_scale_pa 4.0
+ambient moist_air 310.15 101325 1.0
+fold two_mass 0.000125 2.5e-05 37.6483 3.76483 11.7651 0.1 3.57e-4 1.4e-2 2.5e-3
+termination flanged
+tract_source story-2008-jasa-123-327-table-I-u
+tract_licence published measurements transcribed with citation (Story 2008 Table I); redistribution terms unconfirmed, owner to decide
+microphone 0.212132 0 0.212132 16 64 8000
+subglottal 0 0
+subglottal 0.06 423.544
+subglottal 2.85 423.544
+subglottal 3 0
+section 0.54e-4 0.445e-2
+section 0.61e-4 0.445e-2
+section 0.66e-4 0.445e-2
+section 0.75e-4 0.445e-2
+section 1.13e-4 0.445e-2
+section 1.99e-4 0.445e-2
+section 2.83e-4 0.445e-2
+section 2.90e-4 0.445e-2
+section 2.52e-4 0.445e-2
+section 2.40e-4 0.445e-2
+section 2.83e-4 0.445e-2
+section 3.56e-4 0.445e-2
+section 3.99e-4 0.445e-2
+section 3.89e-4 0.445e-2
+section 3.50e-4 0.445e-2
+section 3.04e-4 0.445e-2
+section 2.64e-4 0.445e-2
+section 2.44e-4 0.445e-2
+section 2.31e-4 0.445e-2
+section 2.07e-4 0.445e-2
+section 1.80e-4 0.445e-2
+section 1.52e-4 0.445e-2
+section 1.14e-4 0.445e-2
+section 0.74e-4 0.445e-2
+section 0.42e-4 0.445e-2
+section 0.22e-4 0.445e-2
+section 0.14e-4 0.445e-2
+section 0.20e-4 0.445e-2
+section 0.47e-4 0.445e-2
+section 0.89e-4 0.445e-2
+section 1.15e-4 0.445e-2
+section 1.42e-4 0.445e-2
+section 2.17e-4 0.445e-2
+section 3.04e-4 0.445e-2
+section 3.69e-4 0.445e-2
+section 4.70e-4 0.445e-2
+section 5.74e-4 0.445e-2
+section 5.41e-4 0.445e-2
+section 3.82e-4 0.445e-2
+section 2.34e-4 0.445e-2
+section 1.35e-4 0.445e-2
+section 0.65e-4 0.445e-2
+section 0.29e-4 0.445e-2
+section 0.16e-4 0.445e-2

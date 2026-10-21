@@ -31,11 +31,11 @@
 # GAS: saturated air at 310.15 K and 101325 Pa. UNKNOWN as a source: Story (2008) does not state the speed of sound
 #   its calculation used; the value is the declared physiological state of tract air, not fitted.
 # TERMINATION: flanged (the mouth modelled as a piston in an infinite baffle, matching the receiver below).
-# WALL: none (rigid). UNKNOWN: yielding-wall impedance of the tract; it would come from direct vocal-tract wall
-#   impedance measurements. The paper's calculation included yielding walls, so formant widths differ by this gap.
-#   REFUSES at the 96 kHz clock: the mouth-flow ladder reaches 65536 taps (0.68 s of response) at tail energy 1.08e-10
-#   against 1e-10, because the narrow lip opening leaves lightly damped resonances. The tolerance is not loosened;
-#   the -r1 variant (48 kHz clock, the same cap spans 1.37 s) is the /u/ that renders.
+# WALL: none (rigid). UNKNOWN as a measurement: the yielding-wall impedance of this tract; the cited setting is in the -flanagan files.
+#   The paper's calculation included yielding walls, so formant widths differ by this gap. A rigid wall also leaves the first formant
+#   with a bandwidth below the 50-90 Hz measured for humans (Birkholz et al. 2022), which makes /u/ at and above F1 irregular.
+#   Before the DC-bin fix 2e629d5f3 this REFUSED at the 96 kHz clock (mouth-flow ladder tail 1.08e-10 against 1e-10); the cause
+#   was that defect, and it renders with binary da31fbd67ee9. At C4 it is irregular (R(T)/R(0) 0.85, 48 to 192 kHz clocks).
 # MICROPHONE: 0.30 m from the mouth at 45 degrees off axis (x = z = 0.30 sin 45 deg), the geometry of the paper's
 #   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
 #   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).

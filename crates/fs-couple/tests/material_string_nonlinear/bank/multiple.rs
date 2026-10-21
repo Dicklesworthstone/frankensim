@@ -13,6 +13,7 @@ use fs_couple::render::schedule::force::coupled::contact::friction::multiple::ob
 };
 use fs_dcontact::Obstacle;
 
+#[path = "multiple/stations.rs"]
 mod stations;
 
 fn joint() -> MultiFrictionConfig {

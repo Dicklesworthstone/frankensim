@@ -491,10 +491,14 @@ impl CoupledModalSystem {
             return Err(invalid("external forces must be finite and match all component modes"));
         }
         if let Some(exact) = &self.exact {
-            let (record, x, _) = exact.advance(&self.models, external, self.dt)?;
+            // Sentinel: the first sample and every PREDICTION_SENTINEL_PERIOD-th keep the full trajectory energy-residual
+            // check of this free prediction; the samples between keep every finiteness check of the propagation only.
+            // The accepted trajectory is checked on every sample by `stage`'s own advance.
+            let verify = self.frame.sample % PREDICTION_SENTINEL_PERIOD == 0;
+            let (end, x) = exact.predict(&self.models, external, self.dt, verify)?;
             for k in 0..self.mode_count() {
                 self.old_q[k] = x[2 * k];
-                self.free_delta[k] = finite(record.x[2 * k] - x[2 * k])?;
+                self.free_delta[k] = finite(end[2 * k] - x[2 * k])?;
             }
         } else {
             let mut k = 0;
@@ -644,6 +648,8 @@ fn extension(models: &[ModalAcousticTimeModel], column: &[f64], rest: f64) -> Re
 fn dot(a: &[f64], b: &[f64]) -> Result<f64, ModalCouplingError> {
     a.iter().zip(b).try_fold(0.0, |s, (a,b)| finite(s+a*b))
 }
+/// The free prediction ahead of a friction sample runs its full energy-residual check on samples 0, 64, 128, ...
+const PREDICTION_SENTINEL_PERIOD: u64 = 64;
 fn finite(value: f64) -> Result<f64, ModalCouplingError> {
     if value.is_finite() { Ok(value) } else { Err(invalid("derived coupling value is not finite")) }
 }

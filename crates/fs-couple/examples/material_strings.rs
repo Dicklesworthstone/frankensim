@@ -24,6 +24,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
+use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::LongitudinalStringResolution;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
@@ -181,6 +182,10 @@ impl input::Spec {
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile(&self,sources,&mut catalog,&mut loader,settings.clone(),cx,gate)?
         } else {
+            if self.body.modes > input::MAX_PLATE_BODY_MODES {
+                return Err(format!("flat plate bodies admit 1..={} retained body modes",
+                    input::MAX_PLATE_BODY_MODES).into());
+            }
             let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
             let body=SharedMaterialPlateBody {
                 specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
@@ -201,9 +206,12 @@ impl input::Spec {
         };
         // Select the active prepared owner before either attachment can enlarge
         // its connected linear block. No record means the ordinary owner.
-        let bank = if let Some(budget) = self.prepared_linear {
-            bank.with_prepared_linear_propagation(budget, gate)?
-        } else { bank };
+        // A shell body bank is already built on this record (it cannot exist without it); binding it again refuses.
+        let bank = match self.prepared_linear {
+            Some(budget) if bank.source().prepared_linear_budget().is_none() =>
+                bank.with_prepared_linear_propagation(budget, gate)?,
+            _ => bank,
+        };
         let bank = if self.rotational_bridges.is_empty() { bank } else {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {
@@ -225,6 +233,9 @@ impl input::Spec {
         } else { bank };
         let bank = if let Some((slope, config)) = self.geometric_stretching {
             bank.with_geometric_stretching(slope, config, gate)?
+        } else { bank };
+        let bank = if let Some((resolution, config)) = &self.longitudinal_waves {
+            bank.with_longitudinal_waves(vec![resolution.clone(); self.strings.len()], *config, gate)?
         } else { bank };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };

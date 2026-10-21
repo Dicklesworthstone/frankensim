@@ -6,6 +6,8 @@
 use crate::kit::{self, CymbalSpec, DrumSpec, Piece, BRONZE, OUT_RATE};
 use crate::materials::KitMaterials;
 use crate::*;
+use fs_material::gas_species::input::{GasRecord, ThermochemicalPhase};
+use std::sync::Arc;
 
 /// Every piece the live kit knows, in the order a drummer names them.
 pub const PIECES: [&str; 9] = ["kick", "snare", "snare-off", "tom-12", "tom-14", "hihat-closed", "hihat-open", "crash", "ride"];
@@ -37,6 +39,9 @@ pub struct Live {
     /// Largest contact force of the last block [N].
     pub force: f64,
     pub strokes: u64,
+    // Complete immutable source authority for this trajectory, including
+    // canonical species/thermodynamic/transport receipts when supplied.
+    atmosphere_source: Option<Arc<GasRecord>>,
 }
 
 /// Stays awake this long after the motion has died away.
@@ -64,6 +69,44 @@ impl Live {
     /// instrument or erase its stored energy by changing coefficients in place.
     pub fn with_gas_record(piece: &str, scale: f64, record: &str) -> Result<Live, String> {
         Self::with_gas(piece, scale, gas_record(record)?)
+    }
+
+    /// A complete source record reaches every original gas-dependent operator
+    /// before settling. Copies retain the same immutable source authority.
+    pub fn with_resolved_atmosphere(piece: &str, scale: f64, record: GasRecord,
+        materials: Option<KitMaterials>) -> Result<Live, String> {
+        let mut live = Self::build(piece, scale, *record.state(), materials.as_ref())?;
+        live.atmosphere_source = Some(Arc::new(record));
+        Ok(live)
+    }
+
+    /// Shared canonical source-packet admission for native and browser callers.
+    /// Empty `water_species` explicitly means none; phase must be `frozen` or
+    /// `liquid-water`. No species, coefficients or phase policy are defaulted.
+    pub fn with_gas_source_packet(piece: &str, scale: f64, record: &str,
+        bytes: &[u8], lengths: &[u32], water_species: &str, phase: &str,
+        materials: Option<KitMaterials>) -> Result<Live, String> {
+        let phase = match phase {
+            "frozen" => ThermochemicalPhase::FrozenGas,
+            "liquid-water" => ThermochemicalPhase::LiquidWaterLimit,
+            _ => return Err("gas source phase must be frozen or liquid-water".into()),
+        };
+        let source = fs_material::gas_species::input::packs::read_source_packet(
+            record, bytes, lengths,
+            if water_species.is_empty() { None } else { Some(water_species) }, phase,
+        ).map_err(|error| error.to_string())?;
+        Self::with_resolved_atmosphere(piece, scale, source, materials)
+    }
+
+    /// Original thermodynamic models, transport claims and pack identities.
+    pub fn atmosphere_source(&self) -> Option<&GasRecord> { self.atmosphere_source.as_deref() }
+
+    /// Number of canonical species source triples retained by this trajectory.
+    pub fn gas_source_species(&self) -> usize {
+        match self.atmosphere_source() {
+            Some(GasRecord::Thermochemical(source)) => source.source_packs().len(),
+            _ => 0,
+        }
     }
 
     /// Material-card data and gas state reach the same live solver before
@@ -160,6 +203,7 @@ impl Live {
             oversample: p.oversample, decimator: StreamingDecimator::new(p.oversample),
             asleep: false, quiet_samples: 0, ke_peak: 0.0, kinetic: 0.0, force: 0.0, strokes: 0,
             sleep_frames: 0, sleep_peak: 0.0, sleep_force: 0.0,
+            atmosphere_source: None,
         })
     }
 

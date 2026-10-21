@@ -19,6 +19,12 @@ use super::{LayerThermalBinding, StripEnthalpyConfig, StripEnthalpyError, Therma
 use crate::circuit_enthalpy::material::{MaterialNetworkSample, PreparedMaterialNetwork};
 use super::transport::TransportError;
 
+/// Atomic spatial tip births after a coupled interval.
+pub mod growth;
+
+/// Shared finite electrical storage, Joule heat and spatial material mechanics.
+pub mod electrical;
+
 /// Mechanical tuple and its actual source-bound thermal destination.
 #[derive(Clone, Copy, Debug)]
 pub struct BridgeThermalBinding<'a> {
@@ -125,48 +131,7 @@ pub fn step_candidate<'t,'m,S,E>(
             .iter().any(|v|!v.is_finite() || *v<0.0) {
         return Err(invalid("complete bounded common-time states and finite energy controls required"));
     }
-    let mut axial=BTreeMap::new(); let mut expected=0usize;
-    for cell in bridge.cells() {
-        checkpoint()?;
-        expected=expected.checked_add(cell.section().layers().len())
-            .ok_or_else(||invalid("layer count overflow"))?;
-        axial.insert(cell.id(),cell);
-    }
-    if expected!=bindings.len() {return Err(invalid("one binding per born axial-cell/layer required"));}
-    let mut bound=BTreeMap::new(); let mut destinations=BTreeSet::new(); let mut masses=BTreeMap::new();
-    for binding in bindings {
-        checkpoint()?;
-        let b=binding.section;
-        let cell=axial.get(&binding.axial_cell).ok_or_else(||invalid("unknown axial cell"))?;
-        let layer=cell.section().layers().get(&b.layer).ok_or_else(||invalid("unknown section layer"))?;
-        let heat=thermal.cells().get(&b.cell).ok_or_else(||invalid("inactive thermal destination"))?;
-        if bound.insert((binding.axial_cell,b.layer),binding).is_some() || !destinations.insert(b.cell)
-            || !thermal.uses_material_law(heat.material_id,b.caloric.curve()) {
-            return Err(invalid("duplicate destination or incompatible caloric object"));
-        }
-        let density=b.material.reference_density_kg_m3(b.caloric)
-            .map_err(|e|BridgeEnthalpyError::Coupled(StripEnthalpyError::Binding(e)))?;
-        let volume=finite(layer.geometry.area_m2*cell.length_m())?;
-        if !same(volume,heat.geometry.volume_m3) || !same(finite(volume*density)?,heat.mass_kg) {
-            return Err(invalid("layer thermal mass/volume do not match the material reference"));
-        }
-        let mass=masses.entry(binding.axial_cell).or_insert(0.0);
-        *mass=finite(*mass+heat.mass_kg)?;
-        for point in layer.material_points() {
-            if !std::ptr::eq(point.law(),b.material.law()) {
-                return Err(invalid("layer does not retain its declared mechanical source"));
-            }
-            CaloricPoint::try_new(point.clone(),b.caloric.curve(),heat.specific_h_j_kg,
-                heat.mass_kg,volume,heat.geometry.surface_area_m2)
-                .map_err(|e|BridgeEnthalpyError::Coupled(StripEnthalpyError::CaloricAdmission(e)))?;
-        }
-    }
-    for cell in bridge.cells() {
-        checkpoint()?;
-        if !same(cell.mass_kg(),*masses.get(&cell.id()).ok_or_else(||invalid("unbound bridge mass"))?) {
-            return Err(invalid("gravity and heat storage must use the same reference mass"));
-        }
-    }
+    let bound=admit_bindings::<E>(thermal,bridge,bindings,checkpoint)?;
     let step=BackwardEulerStep::new(thermal,target_s,checkpoint)?;
     let dt=step.duration_s(); let trials=Cell::new(0usize);
     let mechanics=solid::Config {section:c.mechanics,maximum_deflection_m:config.maximum_deflection_m};
@@ -236,6 +201,63 @@ pub fn step_candidate<'t,'m,S,E>(
         mechanical,layer_energy_j,thermal:audit,source,nonlinear:result.report,
         structural_trials:trials.get(),maximum_cell_residual_j,deposited_heat_j,
         non_mechanical_heat_j,total_energy_residual_j:total}})
+}
+
+/// The same source, mass and history checks serve intervals and spatial births.
+fn admit_bindings<'b,'m,E>(
+    thermal:&DepositionSimulation<'_>, bridge:&solid::Bridge<'_>,
+    bindings:&'b [BridgeThermalBinding<'m>],
+    mut checkpoint:impl FnMut()->Result<(),DepositionError>,
+) -> Result<BTreeMap<(u64,u64),&'b BridgeThermalBinding<'m>>,BridgeEnthalpyError<E>> {
+    checkpoint()?;
+    if thermal.time_s()!=bridge.time_s() || bindings.is_empty()
+        || bindings.len()>thermal.cells().len() {
+        return Err(invalid("complete born bindings at one physical time required"));
+    }
+    let mut axial=BTreeMap::new(); let mut expected=0usize;
+    for cell in bridge.cells() {
+        checkpoint()?;
+        expected=expected.checked_add(cell.section().layers().len())
+            .ok_or_else(||invalid("layer count overflow"))?;
+        axial.insert(cell.id(),cell);
+    }
+    if expected!=bindings.len() {return Err(invalid("one binding per born axial-cell/layer required"));}
+    let mut bound=BTreeMap::new(); let mut destinations=BTreeSet::new(); let mut masses=BTreeMap::new();
+    for binding in bindings {
+        checkpoint()?;
+        let b=binding.section;
+        let cell=axial.get(&binding.axial_cell).ok_or_else(||invalid("unknown axial cell"))?;
+        let layer=cell.section().layers().get(&b.layer).ok_or_else(||invalid("unknown section layer"))?;
+        let heat=thermal.cells().get(&b.cell).ok_or_else(||invalid("inactive thermal destination"))?;
+        if bound.insert((binding.axial_cell,b.layer),binding).is_some() || !destinations.insert(b.cell)
+            || !thermal.uses_material_law(heat.material_id,b.caloric.curve()) {
+            return Err(invalid("duplicate destination or incompatible caloric object"));
+        }
+        let density=b.material.reference_density_kg_m3(b.caloric)
+            .map_err(|e|BridgeEnthalpyError::Coupled(StripEnthalpyError::Binding(e)))?;
+        let volume=finite(layer.geometry.area_m2*cell.length_m())?;
+        if !same(volume,heat.geometry.volume_m3) || !same(finite(volume*density)?,heat.mass_kg) {
+            return Err(invalid("layer thermal mass/volume do not match the material reference"));
+        }
+        let mass=masses.entry(binding.axial_cell).or_insert(0.0);
+        *mass=finite(*mass+heat.mass_kg)?;
+        for point in layer.material_points() {
+            if !std::ptr::eq(point.law(),b.material.law()) {
+                return Err(invalid("layer does not retain its declared mechanical source"));
+            }
+            CaloricPoint::try_new(point.clone(),b.caloric.curve(),heat.specific_h_j_kg,
+                heat.mass_kg,volume,heat.geometry.surface_area_m2)
+                .map_err(|e|BridgeEnthalpyError::Coupled(StripEnthalpyError::CaloricAdmission(e)))?;
+        }
+    }
+    for cell in bridge.cells() {
+        checkpoint()?;
+        if !same(cell.mass_kg(),*masses.get(&cell.id()).ok_or_else(||invalid("unbound bridge mass"))?) {
+            return Err(invalid("gravity and heat storage must use the same reference mass"));
+        }
+    }
+    checkpoint()?;
+    Ok(bound)
 }
 
 /// Same spatial solve with existing source-pinned material conductivities.

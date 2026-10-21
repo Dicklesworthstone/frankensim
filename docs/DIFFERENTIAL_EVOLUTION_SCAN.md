@@ -137,8 +137,8 @@ Finite callback results are cached before checking cancellation and are not
 recomputed on resume. Callbacks must keep their objective semantics fixed;
 their external side effects and panics cannot be rolled back.
 
-Execution is serial by default; the optional tile-backed parallel path is
-described below. There is no durable serialization, nonlinear-constraint
+Execution is serial by default; the optional tile-backed parallel path and
+file-backed recovery are described below. There is no nonlinear-constraint
 adapter, KKT certificate, global optimum,
 continuous-time thermal-error bound, or experimental calibration claim.
 
@@ -214,3 +214,77 @@ They have not been run in this delivery environment: Cargo/rustc, DSR and RCH
 are absent. Independent Python scheduling checks are not native concurrency
 verification. No wall-time speedup, cross-platform timing or total-memory claim
 is made.
+
+## Restarting a population search from disk
+
+`DifferentialEvolutionState::checkpoint_bytes` serializes the complete drained
+search, not just its best point. `from_checkpoint_bytes` restores exact floating
+point words, algorithm settings, spent callback attempts, parent populations,
+partial replacements and cached parallel results. Successful siblings of a
+failed or cancelled wave remain reusable after restart; unresolved candidates
+retain their original coordinates and incur a new attempt when retried.
+
+The caller supplies a 32-byte identity for the immutable objective/model and
+independent byte/dimension/population-entry limits. Restore checks the format and
+random-stream versions, checksum, counts, finite values, bounds and replayed
+pending candidate coordinates. No physical callback runs during restoration.
+An exhausted saved budget is still exhausted; extend it explicitly. This codec
+uses the existing `fs-blake3` implementation and adds no dependency.
+
+The executable supports the same recovery path in serial population mode and
+with parallel workers. For example, deliberately pause after 128 new search
+attempts, saving after each 32 attempts:
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example simplex_scan_fit -- \
+  --population --workers 4 --initial-enthalpy 80 --seed 17 \
+  --checkpoint-dir ./scan-checkpoints --checkpoint-every 32 --pause-after 128
+```
+
+A deliberate pause prints its saved `.fsde` path and exits successfully **without
+claiming target recovery or spending the final validation replay**. Resume with
+that exact printed path:
+
+```text
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example simplex_scan_fit -- \
+  --population --workers 8 --initial-enthalpy 80 --seed 17 \
+  --resume <printed-checkpoint-path.fsde> --checkpoint-dir ./scan-checkpoints
+```
+
+Recovery flags require `--population`; `--pause-after` and `--checkpoint-every`
+require an output directory. Saving defaults to every 128 new callback attempts
+when enabled. The cadence bounds callback starts, not elapsed time; an expensive
+in-flight wave must drain before it can be captured. On a returned physical or
+cancellation failure, the driver attempts a final save using a fresh context
+that performs no physics, then returns the original failure.
+
+The example binds files to a bounded, streamed identity of the exact executable,
+plus target fractions, initial enthalpy, maximum watts and seed. Changing those
+inputs or rebuilding the executable refuses old checkpoints. The worker count,
+checkpoint cadence and lifetime allowance are excluded so workers can change and
+the budget can increase. A smaller requested lifetime budget is rejected; use a
+per-invocation `--pause-after` limit instead. The generic library codec requires
+its caller to supply an equally appropriate model identity.
+
+Files are create-only, never truncating a previous checkpoint. Their contents
+are synced before a successful path is announced; the containing directory is
+also synced on Unix. A crash during a write may leave the newest file incomplete:
+restore rejects it and earlier snapshots remain available. There is no automatic
+"newest valid file" selection, filesystem-transaction or power-loss certificate.
+Saving or reading a checkpoint does not perform a physical solve. Final replay
+is still required before target recovery is reported and is separately charged.
+
+Checkpoint accounting includes search attempts only through its capture instant.
+Abrupt termination loses later work and its accounting, including a final replay
+performed after the snapshot. Reusing an older file does not create a global
+anti-rollback ledger. The checksum detects corruption, not malicious rewriting,
+and does not prove that cached objective values are physically correct. Exact
+continuation requires the same numerical build and compatible platform; no
+cross-ISA or cross-version equivalence is claimed.
+
+Native regressions cover early search prefixes, saved failed waves, cancelled
+callbacks, malformed/model-mismatched bytes, and a file-backed thermal pause
+followed by a new-context restart with a different worker count. They are authored
+but have not been executed in the editing environment (no Cargo/rustc or DSR/RCH).

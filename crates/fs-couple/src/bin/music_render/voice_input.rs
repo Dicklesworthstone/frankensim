@@ -68,6 +68,14 @@ pub(super) fn run_with_gas_sources(
     let mic = description.microphone.position_m;
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
+    // Rigid-end limit of this tract, mouth load and wall; see VoiceInfo::passive_formants_hz.
+    let passive = match &info.passive_formants_hz {
+        Ok(formants) => format!(
+            "[{}]",
+            formants.iter().map(|f| format!("{f:.1}")).collect::<Vec<_>>().join(",")
+        ),
+        Err(why) => format!("{{\"refused\":{}}}", json_string(why)),
+    };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"voice-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -79,6 +87,7 @@ pub(super) fn run_with_gas_sources(
          \"glottal_radius_m\":{:e},\"mouth_radius_m\":{:e},\"sound_speed_m_s\":{:e},\
          \"yielding_wall\":{},\"tract_source\":{},\"tract_licence\":{},\
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
+         \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
          \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}{gas_sources}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,

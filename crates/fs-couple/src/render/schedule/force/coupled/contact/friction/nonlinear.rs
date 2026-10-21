@@ -9,9 +9,12 @@
 //! nonlinear-solution claim, a trajectory certificate or a real-time guarantee.
 use super::*;
 use fs_phs::Storage;
+use std::borrow::Cow;
 
-/// Displacement-only additional energy, excluding the original linear stiffness
-/// and inertia. The constitutive owner admits its own physical validity envelope.
+/// Displacement-only positive constitutive energy. Contiguous bindings supply
+/// additional energy; mapped bindings may explicitly replace selected original
+/// diagonal stiffness. Inertia remains with the original linear owner. The
+/// constitutive owner admits its own physical validity envelope.
 pub trait ModalPotential: Storage + Send + Sync {
     /// Number of original mass-normalized displacement coordinates.
     fn coordinate_count(&self) -> usize;
@@ -26,6 +29,26 @@ pub struct ModalPotentialBinding {
     /// First coordinate within that component.
     pub coordinate_start: usize,
     /// Additional conservative storage in the unchanged normalized basis.
+    pub potential: Box<dyn ModalPotential>,
+}
+
+/// A coordinate in an existing component's mass-normalized basis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModalCoordinate {
+    pub component: usize,
+    pub mode: usize,
+}
+
+/// Conservative storage coupling coordinates of several original components.
+/// The coordinate list is the constitutive owner's order, not a new basis.
+pub struct MappedModalPotentialBinding {
+    pub coordinates: Vec<ModalCoordinate>,
+    /// Local indices whose original diagonal elastic energy is INCLUDED in
+    /// `potential`. That energy and its midpoint force are subtracted from the
+    /// nonlinear correction, since the exact linear propagator retains them.
+    /// This allows a positive full strain energy with a signed coupling
+    /// remainder, without counting linear stiffness twice.
+    pub replaces_linear: Vec<usize>,
     pub potential: Box<dyn ModalPotential>,
 }
 
@@ -69,7 +92,8 @@ pub struct NonlinearFrictionFrame {
     /// Network energy includes nonlinear storage; external work excludes the
     /// internal geometric reaction.
     pub friction: FrictionModalFrame,
-    /// Additional conservative storage [J], already counted in friction energy.
+    /// Conservative correction [J], already counted in friction energy. May be
+    /// signed when full strain storage replaces selected linear stiffness.
     pub nonlinear_energy_j: f64,
     /// Complete linear/friction trials required by this accepted sample.
     pub nonlinear_iterations: usize,
@@ -83,7 +107,7 @@ pub struct NonlinearFrictionFrame {
 /// The additional storage is already included in the accepted network energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonlinearFrictionDiagnostics {
-    /// Additional conservative storage [J].
+    /// Conservative correction [J]; may be signed for linear replacements.
     pub nonlinear_energy_j: f64,
     /// Complete network/friction trials required by this accepted sample.
     pub nonlinear_iterations: usize,
@@ -162,8 +186,18 @@ impl NonlinearTrial for SingleTrial<'_> {
     }
 }
 struct BoundPotential {
-    offset: usize,
+    coordinates: Vec<usize>,
+    contiguous: Option<std::ops::Range<usize>>,
+    replaced_stiffness: Vec<f64>,
     potential: Box<dyn ModalPotential>,
+}
+impl BoundPotential {
+    fn select<'a>(&self, q: &'a [f64]) -> Cow<'a, [f64]> {
+        match &self.contiguous {
+            Some(range) => Cow::Borrowed(&q[range.clone()]),
+            None => Cow::Owned(self.coordinates.iter().map(|&index| q[index]).collect()),
+        }
+    }
 }
 pub(super) struct NonlinearFrictionState {
     potentials: Vec<BoundPotential>,
@@ -175,8 +209,41 @@ impl FrictionModalSystem {
     /// motion is preserved. Rendering, gestures, interfaces and observation use
     /// this same owner; refused trials publish no accepted state or diagnostic.
     pub fn with_nonlinear_potentials(
-        mut self,
+        self,
         bindings: Vec<ModalPotentialBinding>,
+        config: NonlinearModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        let mut mapped = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            poll(Some(gate))?;
+            let count = binding.potential.coordinate_count();
+            let component = self.components().get(binding.component)
+                .ok_or_else(|| invalid("nonlinear potential names an unknown original component"))?;
+            let end = binding.coordinate_start.checked_add(count)
+                .ok_or_else(|| invalid("nonlinear component coordinate overflow"))?;
+            if count == 0 || end > component.modes().len() {
+                return Err(invalid("nonlinear potential must fit its unchanged component basis").into());
+            }
+            mapped.push(MappedModalPotentialBinding {
+                coordinates: (binding.coordinate_start..end).map(|mode| ModalCoordinate {
+                    component: binding.component, mode,
+                }).collect(),
+                replaces_linear: Vec::new(),
+                potential: binding.potential,
+            });
+        }
+        self.with_mapped_nonlinear_potentials(mapped, config, gate)
+    }
+
+    /// Bind a complete positive strain energy across existing components.
+    /// Referenced linear oscillators remain in the exact propagator. Only the
+    /// constitutive correction enters the joint friction/contact iteration.
+    /// Duplicate coordinates, overlapping bindings, invalid replacement indices
+    /// or nonlinear energy outside the complete network budget refuse.
+    pub fn with_mapped_nonlinear_potentials(
+        mut self,
+        bindings: Vec<MappedModalPotentialBinding>,
         config: NonlinearModalConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
@@ -193,28 +260,39 @@ impl FrictionModalSystem {
         let mut potentials = Vec::with_capacity(bindings.len());
         for binding in bindings {
             poll(Some(gate))?;
-            let component = self.components().get(binding.component).ok_or_else(|| {
-                invalid("nonlinear potential names an unknown original component")
-            })?;
             let count = binding.potential.coordinate_count();
-            let end = binding
-                .coordinate_start
-                .checked_add(count)
-                .ok_or_else(|| invalid("nonlinear component coordinate overflow"))?;
-            if count == 0 || end > component.modes().len() {
-                return Err(
-                    invalid("nonlinear potential must fit its unchanged component basis").into(),
-                );
+            if count == 0 || count != binding.coordinates.len() || count > self.mode_count() {
+                return Err(invalid("nonlinear coordinate map must match its full constitutive basis").into());
             }
-            let offset = self.network.offsets[binding.component] + binding.coordinate_start;
-            if occupied[offset..offset + count].iter().any(|v| *v) {
-                return Err(
-                    invalid("overlapping additive nonlinear bindings are not admitted").into(),
-                );
+            let mut coordinates = Vec::with_capacity(count);
+            let mut replaced_stiffness = vec![0.0; count];
+            let mut replaced = vec![false; count];
+            for &index in &binding.replaces_linear {
+                if index >= count || replaced[index] {
+                    return Err(invalid("linear replacement indices must be unique constitutive coordinates").into());
+                }
+                replaced[index] = true;
             }
-            occupied[offset..offset + count].fill(true);
+            for (local, coordinate) in binding.coordinates.iter().enumerate() {
+                let mode = self.components().get(coordinate.component)
+                    .and_then(|component| component.modes().get(coordinate.mode))
+                    .ok_or_else(|| invalid("nonlinear map names an unknown original modal coordinate"))?;
+                let global = self.network.offsets[coordinate.component] + coordinate.mode;
+                if occupied[global] {
+                    return Err(invalid("overlapping additive nonlinear bindings are not admitted").into());
+                }
+                occupied[global] = true;
+                coordinates.push(global);
+                if replaced[local] {
+                    replaced_stiffness[local] = finite(mode.angular_frequency_rad_s * mode.angular_frequency_rad_s)?;
+                }
+            }
+            let contiguous = coordinates.windows(2).all(|pair| pair[1] == pair[0] + 1)
+                .then(|| coordinates[0]..coordinates[0] + count);
             potentials.push(BoundPotential {
-                offset,
+                coordinates,
+                contiguous,
+                replaced_stiffness,
                 potential: binding.potential,
             });
         }
@@ -234,6 +312,51 @@ impl FrictionModalSystem {
         poll(Some(gate))?;
         Ok(self)
     }
+
+    /// Cold extension of the original full operator. Existing signed columns,
+    /// initial states, material interfaces and pressure weights are preserved.
+    /// Call before installing nonlinear storage; the new components then join
+    /// that same constitutive solve. No already-playing history can be reset.
+    pub(crate) fn with_internal_components(
+        self, additional: Vec<ModalAcousticTimeModel>, gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        poll(Some(gate))?;
+        if self.samples_rendered() != 0 || self.nonlinear.is_some() || additional.is_empty() {
+            return Err(invalid("internal coordinates require cold nonempty preparation before nonlinear binding").into());
+        }
+        let count = additional.iter().try_fold(self.mode_count(), |count, model| {
+            count.checked_add(model.modes().len()).ok_or_else(|| invalid("internal modal dimension overflow"))
+        })?;
+        if count > self.network.config.max_modes {
+            return Err(invalid("internal coordinates exceed the original complete-network mode budget").into());
+        }
+        let mut models = self.network.models.clone();
+        models.extend(additional);
+        let mut columns = Vec::with_capacity(self.network.columns.len());
+        for (column, law) in self.network.columns.iter().zip(&self.network.connections) {
+            poll(Some(gate))?;
+            let mut column = column.clone();
+            column.resize(count, 0.0);
+            columns.push(super::super::super::ModalColumnConnection {
+                column, stiffness_n_m: law.stiffness_n_m,
+                damping_n_s_m: law.damping_n_s_m, rest_extension_m: law.rest_extension_m,
+            });
+        }
+        let network = match self.network.prepared_budget() {
+            Some(budget) => CoupledModalSystem::new_with_columns_prepared(models, columns, self.network.config, budget, gate),
+            None => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
+        }?;
+        let mut next = Self::new(network, self.port, self.config, gate)?;
+        if let Some(mut weights) = self.acceleration_pressure {
+            weights.resize(count, 0.0);
+            next = next.with_acceleration_pressure(weights)?;
+        }
+        if let Some(interface) = self.interface {
+            next = next.with_interface(interface)?;
+        }
+        poll(Some(gate))?;
+        Ok(next)
+    }
     /// Whether an explicit constitutive participant is retained by this owner.
     pub fn has_nonlinear_potentials(&self) -> bool {
         self.nonlinear.is_some()
@@ -244,7 +367,8 @@ impl FrictionModalSystem {
             .as_ref()
             .and_then(|state| state.last.as_ref())
     }
-    /// Additional storage [J] at accepted coordinates, without advancing state.
+    /// Conservative correction [J] at accepted coordinates, without advancing
+    /// state. May be signed when a complete strain law replaces linear storage.
     pub fn nonlinear_energy_j(&self) -> Result<f64, ModalCouplingError> {
         match &self.nonlinear {
             Some(state) => state.potential_energy(&coordinates(self.components())),
@@ -256,15 +380,17 @@ impl NonlinearFrictionState {
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
         let mut energy = 0.0;
         for binding in &self.potentials {
-            let range = binding.offset..binding.offset + binding.potential.coordinate_count();
-            binding.potential.validate_coordinates(&q[range.clone()])?;
-            let value = finite(binding.potential.hamiltonian(&q[range]))?;
+            let selected = binding.select(q);
+            binding.potential.validate_coordinates(&selected)?;
+            let value = finite(binding.potential.hamiltonian(&selected))?;
             if value < 0.0 {
                 return Err(invalid(
                     "additive nonlinear storage must have a nonnegative energy reference",
                 ));
             }
-            energy = finite(energy + value)?;
+            let reference: f64 = binding.replaced_stiffness.iter().zip(selected.iter())
+                .map(|(stiffness, q)| 0.5 * stiffness * q * q).sum();
+            energy = finite(energy + finite(value - reference)?)?;
         }
         Ok(energy)
     }
@@ -437,17 +563,19 @@ impl NonlinearFrictionState {
         out.fill(0.0);
         for binding in &self.potentials {
             poll(gate)?;
-            let range = binding.offset..binding.offset + binding.potential.coordinate_count();
+            let before = binding.select(before);
+            let after = binding.select(after);
             let gradient = fs_phs::discrete_gradient(
                 binding.potential.as_ref(),
-                &before[range.clone()],
-                &after[range.clone()],
+                &before,
+                &after,
             );
-            for (force, value) in out[range].iter_mut().zip(gradient) {
-                *force = finite(-value)?;
+            for (local, (&index, value)) in binding.coordinates.iter().zip(gradient).enumerate() {
+                let reference = binding.replaced_stiffness[local] * f64::midpoint(before[local], after[local]);
+                out[index] = finite(if binding.replaced_stiffness[local] == 0.0 { -value } else { reference - value })?;
                 limit(
                     "nonlinear generalized reaction",
-                    force.abs(),
+                    out[index].abs(),
                     self.config.maximum_generalized_force,
                 )?;
             }

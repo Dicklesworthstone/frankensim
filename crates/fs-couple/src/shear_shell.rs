@@ -25,7 +25,10 @@ pub mod assembly;
 /// Independently owned exterior and cavity pressure boundaries.
 pub mod pressure;
 mod reduction;
-pub use reduction::{MaterialShellImage, ShellProjectionBudget, ShellReductionOptions};
+pub use reduction::{
+    MAX_SHELL_MODES, MaterialShellImage, ShellProjectionBudget, ShellReductionOptions,
+    shell_mode_budget_admits,
+};
 
 /// Explicit 13,23 and cross 13/23 shear viscosities [Pa s], in material axes.
 /// Missing values do not mean isotropy or zero.

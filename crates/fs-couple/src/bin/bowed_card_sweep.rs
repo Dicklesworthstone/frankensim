@@ -11,18 +11,23 @@
 //! a final row gives the playable band and Schelleng's maximum force
 //! `2 Z0 v / (beta (mu_s - mu_d))` for the card's own impedance and friction drop.
 //! The thresholds inside `classify` are the rig's declared tolerances, not
-//! literature constants, and the sweep says nothing about the onset transient.
+//! literature constants. By default the bow starts at full speed (a step onset);
+//! with `--accel A` the bow speed instead ramps from rest at `A` m/s^2 and then
+//! holds, refreshed on a 1 kHz control tick as the scheduled renderer does, so the
+//! sweep reaches the regime a render with that onset reaches. Neither mode maps
+//! hysteresis: every run starts from rest.
 //!
 //! ```text
 //! bowed_card_sweep CARD.performance --beta 0.0909 --speed 0.15 \
-//!     [--force-min 0.02] [--force-max 3] [--points 21] [--seconds 1.0]
+//!     [--force-min 0.02] [--force-max 3] [--points 21] [--seconds 1.0] [--accel 1.0]
 //! ```
 
 use std::process::ExitCode;
 
+use fs_couple::bowed_string::runtime::BowedStringState;
 use fs_couple::bowed_string::{
-    BowGesture, BowedRunConfig, BowedStringCard, FrictionIsland, Termination, classify,
-    gate_metrics, run_bowed,
+    BowGesture, BowedRunConfig, BowedRunLog, BowedStringCard, FrictionIsland, Termination,
+    classify, gate_metrics, run_bowed,
 };
 use fs_couple::stribeck_friction::StribeckFriction;
 
@@ -30,6 +35,8 @@ const SCHEMA: &str = "frankensim.bowed-card-sweep.v1";
 const MAX_CARD_BYTES: usize = 1024 * 1024;
 const MAX_POINTS: usize = 200;
 const MAX_STEPS: usize = 2_880_000;
+/// Control tick of the bow gesture [Hz], the rate the example schedules declare.
+const CONTROL_RATE_HZ: f64 = 1000.0;
 
 struct Args {
     card: String,
@@ -39,6 +46,8 @@ struct Args {
     force_max_n: f64,
     points: usize,
     seconds: f64,
+    /// Constant bow acceleration from rest [m/s^2]; zero is a step onset.
+    accel_m_s2: f64,
 }
 
 struct Card {
@@ -138,10 +147,12 @@ fn parse_args() -> Result<Args, String> {
     let mut force_max = 3.0;
     let mut points = 21_usize;
     let mut seconds = 1.0;
+    let mut accel = 0.0;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--beta" | "--speed" | "--force-min" | "--force-max" | "--points" | "--seconds" => {
+            "--beta" | "--speed" | "--force-min" | "--force-max" | "--points" | "--seconds"
+            | "--accel" => {
                 let raw = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
                 match arg.as_str() {
                     "--beta" => beta = Some(real(&raw, "--beta")?),
@@ -149,6 +160,7 @@ fn parse_args() -> Result<Args, String> {
                     "--force-min" => force_min = real(&raw, "--force-min")?,
                     "--force-max" => force_max = real(&raw, "--force-max")?,
                     "--seconds" => seconds = real(&raw, "--seconds")?,
+                    "--accel" => accel = real(&raw, "--accel")?,
                     _ => {
                         points = raw
                             .parse()
@@ -177,6 +189,9 @@ fn parse_args() -> Result<Args, String> {
     if !(seconds > 0.0) {
         return Err("--seconds must be positive".to_string());
     }
+    if !(accel >= 0.0) {
+        return Err("--accel must be zero (a step onset) or positive".to_string());
+    }
     Ok(Args {
         card: card.ok_or("a CARD.performance path is required")?,
         beta,
@@ -185,7 +200,54 @@ fn parse_args() -> Result<Args, String> {
         force_max_n: force_max,
         points,
         seconds,
+        accel_m_s2: accel,
     })
+}
+
+/// Bow speed at control tick `tick`: constant acceleration from rest, then held.
+fn ramp_speed_m_s(tick: usize, accel_m_s2: f64, speed_m_s: f64) -> f64 {
+    (accel_m_s2 * tick as f64 / CONTROL_RATE_HZ).min(speed_m_s)
+}
+
+/// The library's persistent runtime with the bow speed ramped at constant
+/// acceleration from rest and refreshed once per control tick, the way the
+/// scheduled renderer applies a gesture; force and position are constant.
+/// Only the string channels the detector reads are logged.
+fn run_ramped(
+    config: &BowedRunConfig,
+    speed_m_s: f64,
+    accel_m_s2: f64,
+) -> Result<BowedRunLog, String> {
+    let mut state = BowedStringState::new(config, 1).map_err(|error| format!("{error}"))?;
+    let samples_per_tick =
+        ((f64::from(config.card.sample_rate_hz) / CONTROL_RATE_HZ).round() as usize).max(1);
+    let force_n = config.gesture.normal_force_n;
+    let station = config.gesture.station_fraction;
+    let mut log = BowedRunLog {
+        bow_point_velocity_m_s: Vec::with_capacity(config.steps),
+        relative_velocity_m_s: Vec::with_capacity(config.steps),
+        bridge_force_n: Vec::with_capacity(config.steps),
+        body_volume_velocity_m3_s: Vec::new(),
+        radiated_pressure_pa: Vec::new(),
+        final_total_energy_j: 0.0,
+        peak_total_energy_j: 0.0,
+    };
+    for i in 0..config.steps {
+        if i % samples_per_tick == 0 {
+            let speed = ramp_speed_m_s(i / samples_per_tick, accel_m_s2, speed_m_s);
+            state
+                .set_bow(speed, force_n, station)
+                .map_err(|error| format!("{error}"))?;
+        }
+        let sample = state.step().map_err(|error| format!("{error}"))?;
+        log.bow_point_velocity_m_s
+            .push(sample.bow_point_velocity_m_s);
+        log.relative_velocity_m_s.push(sample.relative_velocity_m_s);
+        log.bridge_force_n.push(sample.bridge_force_n);
+    }
+    log.final_total_energy_j = state.total_modal_energy_j();
+    log.peak_total_energy_j = log.final_total_energy_j;
+    Ok(log)
 }
 
 /// JSON number; a non-finite value is `null`, as in the other sweep schema.
@@ -226,7 +288,13 @@ fn run() -> Result<(), String> {
             0.0
         };
         let force_n = args.force_min_n * (args.force_max_n / args.force_min_n).powf(t);
-        let gesture = BowGesture::admit(args.speed_m_s, force_n, args.beta)
+        // A ramped onset starts at rest; a step onset starts at the held speed.
+        let start_speed = if args.accel_m_s2 > 0.0 {
+            0.0
+        } else {
+            args.speed_m_s
+        };
+        let gesture = BowGesture::admit(start_speed, force_n, args.beta)
             .map_err(|error| format!("gesture refused at {force_n} N: {error:?}"))?;
         let config = BowedRunConfig {
             card: card.string.clone(),
@@ -237,19 +305,24 @@ fn run() -> Result<(), String> {
             termination: Termination::Rigid,
             listener_m: 1.0,
         };
-        let log =
-            run_bowed(&config).map_err(|error| format!("run refused at {force_n} N: {error}"))?;
+        let log = if args.accel_m_s2 > 0.0 {
+            run_ramped(&config, args.speed_m_s, args.accel_m_s2)
+                .map_err(|error| format!("run refused at {force_n} N: {error}"))?
+        } else {
+            run_bowed(&config).map_err(|error| format!("run refused at {force_n} N: {error}"))?
+        };
         let metrics = gate_metrics(&log, &config.card);
         let class = classify(&metrics);
         if class == "playable" {
             playable.push(force_n);
         }
         println!(
-            "{{\"schema\":\"{SCHEMA}\",\"card\":{:?},\"f1_hz\":{},\"beta\":{},\"speed_m_s\":{},\"force_n\":{},\"slip_fraction\":{},\"flybacks_per_period\":{},\"peak_hz\":{},\"peak_to_semitone\":{},\"class\":\"{class}\"}}",
+            "{{\"schema\":\"{SCHEMA}\",\"card\":{:?},\"f1_hz\":{},\"beta\":{},\"speed_m_s\":{},\"accel_m_s2\":{},\"force_n\":{},\"slip_fraction\":{},\"flybacks_per_period\":{},\"peak_hz\":{},\"peak_to_semitone\":{},\"class\":\"{class}\"}}",
             args.card,
             jnum(f1),
             jnum(args.beta),
             jnum(args.speed_m_s),
+            jnum(args.accel_m_s2),
             jnum(force_n),
             jnum(metrics.slip_frac),
             jnum(metrics.intervals_per_period),
@@ -258,10 +331,11 @@ fn run() -> Result<(), String> {
         );
     }
     println!(
-        "{{\"schema\":\"{SCHEMA}\",\"summary\":true,\"card\":{:?},\"beta\":{},\"speed_m_s\":{},\"steps\":{steps},\"playable_force_min_n\":{},\"playable_force_max_n\":{},\"schelleng_fmax_n\":{}}}",
+        "{{\"schema\":\"{SCHEMA}\",\"summary\":true,\"card\":{:?},\"beta\":{},\"speed_m_s\":{},\"accel_m_s2\":{},\"steps\":{steps},\"playable_force_min_n\":{},\"playable_force_max_n\":{},\"schelleng_fmax_n\":{}}}",
         args.card,
         jnum(args.beta),
         jnum(args.speed_m_s),
+        jnum(args.accel_m_s2),
         jnum(playable.first().copied().unwrap_or(f64::NAN)),
         jnum(playable.last().copied().unwrap_or(f64::NAN)),
         jnum(schelleng_fmax_n),
@@ -303,6 +377,15 @@ mod tests {
             read_card(&CARD.replace("damping 0.001 0.001 0.001", "damping 0.001 0.001")).is_err()
         );
         assert!(read_card(&CARD.replace("\nschedule\nrest", "")).is_err());
+    }
+
+    #[test]
+    fn the_onset_ramps_at_constant_acceleration_then_holds() {
+        // 1 m/s^2 on a 1 kHz tick reaches 0.15 m/s at tick 150 and holds.
+        assert_eq!(ramp_speed_m_s(0, 1.0, 0.15), 0.0);
+        assert!((ramp_speed_m_s(75, 1.0, 0.15) - 0.075).abs() < 1.0e-15);
+        assert!((ramp_speed_m_s(150, 1.0, 0.15) - 0.15).abs() < 1.0e-15);
+        assert_eq!(ramp_speed_m_s(10_000, 1.0, 0.15), 0.15);
     }
 
     #[test]

@@ -3,9 +3,13 @@
 Run with: uv run --with numpy --with pillow python -m unittest discover -s apps/instrument-lab/tools -p 'test_build_instruments.py' -v
 The pairs below are throwaway inputs to the generator, written to a temp directory; none of it reaches the page.
 """
+import contextlib
 import copy
+import io
 import json
 import math
+import shutil
+import subprocess
 import tempfile
 import unittest
 import wave
@@ -44,11 +48,25 @@ def track(n: int, frames: int = 4) -> dict:
     return {"n": n, "f_hz": [220.0 * n * (1 + 0.001 * k) for k in range(frames)], "level_db": [-20.0 - 6 * n] * frames}
 
 
-def metric(id_: str, gap, ruler) -> dict:
-    return {"id": id_, "label": id_, "unit": "dB", "real": None, "ours": None, "gap": gap, "ruler": [{"label": f"r{i}", "value": v} for i, v in enumerate(ruler)], "note": ""}
+def metric(id_: str, gap, ruler, strict=None) -> dict:
+    """strict None: the pair predates the strict ruler. Otherwise, like decompose.py: ruler_strict plus both inside_* verdicts."""
+    m = {"id": id_, "label": id_, "unit": "dB", "real": None, "ours": None, "gap": gap, "ruler": [{"label": f"r{i}", "value": v} for i, v in enumerate(ruler)], "note": ""}
+    if strict is not None:
+        m.update(ruler_strict=[{"label": f"s{i}", "value": v} for i, v in enumerate(strict)], inside_loose=B.inside(gap, ruler), inside_strict=B.inside(gap, strict))
+    return m
 
 
-def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5) -> dict:
+# A hand-made set of measures, one of each case the strict ruler exists to tell apart (gap, loose ruler, strict ruler):
+STRICT_CASES = [
+    metric("both_inside", 1.0, [2.0, 4.0], [1.5]),        # inside both spreads
+    metric("loose_only", 3.0, [2.0, 4.0], [1.0, 2.0]),    # inside the neighbouring-note spread, OUTSIDE the same-note one
+    metric("both_outside", 9.0, [2.0, 4.0], [1.5]),       # outside both
+    metric("no_same_note", 2.0, [3.0], []),               # no other recording of this note: no strict claim
+    metric("no_claim", 1.0, [], []),                      # no ruler of either kind
+]
+
+
+def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5, metrics: list | None = None) -> dict:
     d = root / "clarinet" / "D3"
     d.mkdir(parents=True)
     write_wav(d / "real.wav", 0.5)
@@ -65,13 +83,106 @@ def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5) -> dic
         "figures": {"spectrogram": fig(with_ours), "scalogram": fig(with_ours)},
         "partials": {"t_s": [0, 1, 2, 3], "f0_hz": {"real": 220.0, "ours": 220.5 if with_ours else None},
                      "real": [track(1), track(2)], "ours": [track(1), track(2)] if with_ours else None},
-        "metrics": [metric("a", 1.0, [2.0, 3.0]), metric("b", 5.0, [2.0, 3.0]), metric("c", 1.0, [])],
+        "metrics": metrics if metrics is not None else [metric("a", 1.0, [2.0, 3.0]), metric("b", 5.0, [2.0, 3.0]), metric("c", 1.0, [])],
     }
     if not with_ours:
         for m in pj["metrics"]:
             m["gap"] = None
     (d / "pair.json").write_text(json.dumps(pj))
     return pj
+
+
+class StrictRuler(unittest.TestCase):
+    """The two rulers, from a hand-made pair.json (STRICT_CASES): loose = this and neighbouring notes, strict = the same note only."""
+
+    def views(self) -> dict:
+        return {v["id"]: v for v in (B.metric_view(m, True) for m in STRICT_CASES)}
+
+    def test_each_measure_carries_both_verdicts_and_a_loose_only_measure_is_told_apart(self):
+        v = self.views()
+        self.assertEqual((v["both_inside"]["inside_loose"], v["both_inside"]["inside_strict"]), (True, True))
+        self.assertEqual((v["loose_only"]["inside_loose"], v["loose_only"]["inside_strict"]), (True, False))
+        self.assertEqual((v["loose_only"]["verdict"], v["loose_only"]["verdict_strict"], v["loose_only"]["ratio_strict"]), ("within", "outside", 1.5))
+        self.assertEqual((v["both_outside"]["verdict"], v["both_outside"]["verdict_strict"]), ("outside", "outside"))
+        self.assertEqual((v["no_same_note"]["inside_loose"], v["no_same_note"]["inside_strict"], v["no_same_note"]["verdict_strict"]), (True, None, "no-ruler"))
+        self.assertEqual((v["no_claim"]["inside_loose"], v["no_claim"]["inside_strict"]), (None, None))
+        self.assertEqual((v["loose_only"]["ruler_strict_max"], v["loose_only"]["ruler_strict_min"], v["loose_only"]["ruler_max"]), (2.0, 1.0, 4.0))
+
+    def test_a_pair_without_the_strict_fields_shows_the_loose_verdict_only(self):
+        v = B.metric_view(metric("old", 3.0, [2.0, 4.0]), True)
+        self.assertEqual((v["verdict"], v["ruler_strict"], v["verdict_strict"], v["inside_strict"]), ("within", None, None, None))
+
+    def test_the_pair_counts_both_verdicts(self):
+        want = {"measures": 5, "loose": {"inside": 3, "outside": 1, "no_ruler": 1}, "strict": {"inside": 1, "outside": 2, "no_ruler": 2}}
+        self.assertEqual(B.pair_verdicts(list(self.views().values())), want)
+        self.assertIsNone(B.pair_verdicts([B.metric_view(metric("old", 3.0, [2.0]), True)])["strict"])
+
+    def pair_dict(self, metrics: list, verdicts=None) -> dict:
+        return {"note": "D3", "real": {}, "ours": {"x": 1}, "metrics": [B.metric_view(m, True) for m in metrics], "verdicts": verdicts}
+
+    def test_the_badge_is_the_weaker_of_the_two_and_the_sentence_gives_both_counts(self):
+        # Loose says nothing is outside (close); strict has one measure outside (1 of 2 inside: mixed): the badge is mixed.
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [2.0]), metric("b", 2.5, [3.0], [2.0]), metric("c", 1.0, [3.0], [])])])
+        self.assertEqual(j["badge"], "mixed")
+        self.assertEqual((j["counts"]["within"], j["counts"]["outside"], j["counts"]["strict_within"], j["counts"]["strict_outside"], j["counts"]["strict_unruled"]), (3, 0, 1, 1, 1))
+        self.assertIn("inside the spread of real recordings of this and neighbouring notes, 3 of 3 measures", j["line"])
+        self.assertIn("Inside the spread of real recordings of the same note, 1 of 2 measures (1 has no same-note comparison)", j["line"])
+        self.assertIn("The badge is the weaker of the two.", j["line"])
+        self.assertIn("Largest gap against the same-note spread: b, 1.2× it (D3)", j["line"])
+        # Strict inside everywhere it can speak, loose too: close. Strict outside nearly everywhere: off, even though loose is mixed.
+        self.assertEqual(B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [2.0])])])["badge"], "close")
+        off = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [0.5]), metric("b", 5.0, [9.0], [0.5]), metric("c", 2.0, [3.0], [0.5]), metric("d", 9.5, [9.0], [0.5])])])
+        self.assertEqual((off["counts"]["within"], off["counts"]["outside"], off["badge"]), (3, 1, "off"))
+
+    def test_when_no_note_has_a_same_note_recording_the_badge_is_the_loose_one_and_says_so(self):
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], []), metric("b", 5.0, [3.0], [])])])
+        self.assertEqual((j["badge"], j["counts"]["strict_notes"]), ("mixed", 1))
+        self.assertIn("No same-note comparison could be made", j["line"])
+        self.assertNotIn("The badge is the weaker", j["line"])
+
+    def test_a_family_of_older_pairs_says_the_same_note_comparison_is_not_computed(self):
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0]), metric("b", 5.0, [3.0])])])
+        self.assertEqual((j["badge"], j["counts"]["strict_notes"]), ("mixed", 0))
+        self.assertIn("The same-note comparison has not been computed for these notes.", j["line"])
+
+    def test_a_pair_whose_own_verdicts_disagree_with_its_numbers_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root, metrics=[dict(m) for m in STRICT_CASES])
+            base = root / "clarinet" / "D3"
+            check = lambda p: B.validate_pair(p, "clarinet", "D3", base, {REF_ID: next(f for f in REFS["files"] if f["id"] == REF_ID)})  # noqa: E731
+            pj["verdicts"] = B.pair_verdicts([B.metric_view(m, True) for m in pj["metrics"]])
+            self.assertEqual(check(pj), [], "the pair decompose.py would write is accepted")
+            wrong = copy.deepcopy(pj)
+            wrong["metrics"][1]["inside_strict"] = True  # the loose-only measure claimed inside the same-note spread
+            self.assertTrue(any("inside_strict" in p and "loose_only" in p for p in check(wrong)), check(wrong))
+            wrong = copy.deepcopy(pj)
+            wrong["verdicts"]["strict"]["inside"] = 4
+            self.assertTrue(any("verdicts.strict" in p for p in check(wrong)), check(wrong))
+            wrong = copy.deepcopy(pj)
+            wrong["metrics"][0]["ruler_strict"] = [{"label": "s0", "value": -1.0}]
+            self.assertTrue(any("ruler_strict" in p for p in check(wrong)), check(wrong))
+            old = copy.deepcopy(pj)
+            for m in old["metrics"]:
+                for key in ("ruler_strict", "inside_loose", "inside_strict"):
+                    m.pop(key)
+            old["verdicts"] = None
+            self.assertEqual(check(old), [], "a pair that predates the strict ruler is still accepted")
+
+    def test_the_card_carries_both_rulers_and_the_pairs_verdicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            pj = make_pair(root, metrics=[dict(m) for m in STRICT_CASES])
+            pj["verdicts"] = B.pair_verdicts([B.metric_view(m, True) for m in pj["metrics"]])
+            (root / "clarinet" / "D3" / "pair.json").write_text(json.dumps(pj))
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out)]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            p = card["pairs"][0]
+            self.assertEqual(p["verdicts"], {"measures": 5, "loose": {"inside": 3, "outside": 1, "no_ruler": 1}, "strict": {"inside": 1, "outside": 2, "no_ruler": 2}})
+            self.assertEqual([m["inside_strict"] for m in p["metrics"]], [True, False, False, None, None])
+            self.assertEqual(card["status"]["badge"], "off", "strict: 1 of 3 inside, the weaker of the two")
+            self.assertEqual((card["status"]["counts"]["strict_within"], card["status"]["counts"]["strict_outside"], card["status"]["counts"]["strict_unruled"]), (1, 2, 2))
 
 
 class Verdicts(unittest.TestCase):
@@ -96,7 +207,7 @@ class Verdicts(unittest.TestCase):
 class Badges(unittest.TestCase):
     def pair(self, verdicts):
         ms = [B.metric_view(metric(f"m{i}", g, [2.0] if g is not None else []), True) for i, g in enumerate(verdicts)]
-        return {"note": "D3", "ours": {"x": 1}, "metrics": ms}
+        return {"note": "D3", "real": {}, "ours": {"x": 1}, "metrics": ms}
 
     def test_no_pairs_says_no_render_yet(self):
         j = B.judge(None, [])
@@ -107,7 +218,7 @@ class Badges(unittest.TestCase):
         self.assertEqual((j["badge"], j["line"]), ("blocked", "needs the tone-hole operator"))
 
     def test_reference_only_pairs_are_not_a_render(self):
-        ref_only = {"note": "D3", "ours": None, "metrics": []}
+        ref_only = {"note": "D3", "real": {}, "ours": None, "metrics": []}
         self.assertEqual(B.judge(None, [ref_only])["badge"], "none")
 
     def test_close_mixed_off(self):
@@ -280,6 +391,94 @@ class Credits(unittest.TestCase):
             self.assertIsNone(next(f for f in index["families"] if f["id"] == "voice")["reference"])
 
 
+def make_listening(root: Path, family: str = "pan-pipes", note: str = "C5") -> dict:
+    """A render with no reference recording, in the shape P2 and P8 agreed: real null, no_reference.reason, our audio and figures only."""
+    d = root / family / note
+    d.mkdir(parents=True)
+    write_wav(d / "ours.wav", 0.5)
+    for name in ("s_ours", "c_ours"):
+        write_png(d / f"{name}.png")
+    one = {"real": None, "ours": None, "diff": None, "f_lo_hz": 40, "f_hi_hz": 16000, "span_db": 90}
+    pj = {
+        "schema": B.PAIR_SCHEMA, "family": family, "note": note, "dynamic": "mf", "duration_s": 1.0,
+        "real": None, "no_reference": {"reason": "No licensed recording of this instrument is in the reference library."},
+        "ours": {"wav": "/x/ours.wav", "git_sha": "abc123", "observer": "baffled_outlet 0 0 0.5", "sample_rate": 48000, "recipe": "data/instruments/descriptions/pan-pipes/render.sh"},
+        "audio": {"real": None, "ours": "ours.wav", "level_match": "peak at -6 dBFS; there is no recording to match"},
+        "alignment": None,
+        "figures": {"spectrogram": dict(one, ours="s_ours.png"), "scalogram": dict(one, ours="c_ours.png")},
+        "partials": None, "metrics": [],
+    }
+    (d / "pair.json").write_text(json.dumps(pj))
+    return pj
+
+
+class Listening(unittest.TestCase):
+    def check(self, pj: dict, root: Path, family: str = "pan-pipes", note: str = "C5") -> list[str]:
+        return B.validate_pair(pj, family, note, root / family / note, {})
+
+    def test_a_render_with_no_reference_is_valid_and_has_nothing_to_grade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_listening(root)
+            self.assertEqual(self.check(pj, root), [])
+            self.assertEqual(B.check_audio(root / "pan-pipes" / "C5", pj), [])
+
+    def test_anything_that_needs_a_recording_is_refused_on_such_a_note(self):
+        cases = {
+            "audio.real must be null": lambda p: p["audio"].update(real="real.wav"),
+            "figures.spectrogram.real must be null": lambda p: p["figures"]["spectrogram"].update(real="s_ours.png"),
+            "figures.scalogram.diff must be null": lambda p: p["figures"]["scalogram"].update(diff="c_ours.png"),
+            "metrics must be []": lambda p: p.update(metrics=[metric("a", 1.0, [2.0])]),
+            "partials must be null": lambda p: p.update(partials={"t_s": [0, 1], "f0_hz": {}, "real": None, "ours": None}),
+            "alignment must be null": lambda p: p.update(alignment={"onset_real_s": 0.1, "onset_ours_s": 0.1, "highpass_hz": 50, "level_offset_db": 0}),
+            "no_reference must be {reason}": lambda p: p.update(no_reference={"reason": "  "}),
+            "needs a render": lambda p: p.update(ours=None),
+            "figures.spectrogram.ours names no file": lambda p: p["figures"]["spectrogram"].update(ours="missing.png"),
+        }
+        for expect, mutate in cases.items():
+            with self.subTest(expect), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                pj = make_listening(root)
+                mutate(pj)
+                self.assertTrue(any(expect in p for p in self.check(pj, root)), self.check(pj, root))
+
+    def test_real_null_without_no_reference_is_not_a_listening_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_listening(root)
+            del pj["no_reference"]
+            self.assertTrue(any("real is missing" in p for p in self.check(pj, root)))
+
+    def test_the_card_offers_our_audio_and_pictures_only_and_the_badge_says_there_is_nothing_to_grade_against(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            make_listening(root)
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none"), "--audio-ext", "mp4"]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "pan-pipes" / "card.json").read_text())
+            p = card["pairs"][0]
+            self.assertEqual((card["status"]["badge"], card["status"]["label"]), ("listening", "Rendered, no reference to grade against"))
+            self.assertEqual((p["real"], p["audio"]["real"], p["metrics"], p["partials"]), (None, None, [], None))
+            self.assertEqual(p["no_reference"], "No licensed recording of this instrument is in the reference library.")
+            self.assertEqual((card["status"]["counts"]["within"], card["status"]["counts"]["outside"], card["status"]["counts"]["notes_no_reference"]), (0, 0, 1))
+            self.assertEqual(sorted(f.name for f in (out / "pan-pipes" / "C5").iterdir()), ["ours.mp4", "scalogram-ours.webp", "spectrogram-ours.webp"])
+            self.assertEqual(p["figures"]["spectrogram"]["real"], None)
+            index = json.loads((out / "index.json").read_text())
+            self.assertEqual(next(f for f in index["families"] if f["id"] == "pan-pipes")["badge"], "listening")
+
+    def test_next_to_graded_notes_it_does_not_change_the_families_badge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            make_pair(root)
+            make_listening(root, "clarinet", "E3")
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none")]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            self.assertEqual(card["status"]["badge"], "mixed")
+            self.assertEqual([p["note"] for p in card["pairs"]], ["D3", "E3"])
+            self.assertEqual((card["status"]["counts"]["within"], card["status"]["counts"]["outside"]), (1, 1), "the graded note alone decides the counts")
+
+
 class GraderRefusals(unittest.TestCase):
     def run_main(self, root: Path, out: Path) -> int:
         with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none")]):
@@ -340,13 +539,79 @@ class EndToEnd(unittest.TestCase):
             index = json.loads((out / "index.json").read_text())
             self.assertEqual(len(index["families"]), len(B.FAMILIES) + len([p for p in B.DESCRIPTIONS.glob("*/status.json") if p.parent.name not in {f[0] for f in B.FAMILIES}]))
             by_id = {f["id"]: f for f in index["families"]}
-            self.assertEqual(by_id["oboe"]["badge"], "none")
+            # No oboe has been rendered here, so its badge is whatever its own status card says: blocked once a family lane
+            # writes a `blocked` reason, none while it has no status at all.
+            oboe = B.DESCRIPTIONS / "oboe" / "status.json"
+            blocked = oboe.is_file() and bool(json.loads(oboe.read_text()).get("blocked"))
+            self.assertEqual(by_id["oboe"]["badge"], "blocked" if blocked else "none")
             self.assertEqual(by_id["clarinet"]["badge"], "mixed")
             card = json.loads((out / "clarinet" / "card.json").read_text())
             p = card["pairs"][0]
             for path in (p["audio"]["real"], p["audio"]["ours"], p["figures"]["spectrogram"]["diff"], p["figures"]["scalogram"]["real"]):
                 self.assertTrue((out / path).is_file(), path)
             self.assertEqual(p["real"]["reference_id"], REF_ID)
+
+    def test_audio_ext_names_the_clips_and_the_card_agrees_with_the_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root)
+            for ext, argv in (("m4a", []), ("mp4", ["--audio-ext", "mp4"])):
+                out = Path(tmp) / f"out-{ext}"
+                with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), *argv]):
+                    self.assertEqual(B.main(), 0)
+                p = json.loads((out / "clarinet" / "card.json").read_text())["pairs"][0]
+                for side in ("real", "ours"):
+                    self.assertRegex(p["audio"][side], rf"/{side}\.{ext}$")
+                    self.assertTrue((out / p["audio"][side]).is_file())
+                    codec = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                                            str(out / p["audio"][side])], capture_output=True, text=True).stdout.strip()
+                    self.assertEqual(codec, "aac")
+                other = "mp4" if ext == "m4a" else "m4a"
+                self.assertEqual(list(out.rglob(f"*.{other}")), [], f"no .{other} clip beside the .{ext} ones")
+
+    def test_only_shows_the_named_notes_and_lists_the_rest_as_withheld_with_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root)
+            shutil.copytree(root / "clarinet" / "D3", root / "clarinet" / "E3")
+            e3 = root / "clarinet" / "E3" / "pair.json"
+            e3.write_text(json.dumps(dict(json.loads(e3.read_text()), note="E3")))
+            everything, some = Path(tmp) / "all", Path(tmp) / "some"
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(everything)]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((everything / "clarinet" / "card.json").read_text())
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3", "E3"], []))
+            err = io.StringIO()
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(some), "--only", "clarinet=D3", "--only", "clarinet=G9"]), contextlib.redirect_stderr(err):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((some / "clarinet" / "card.json").read_text())
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3"], ["E3"]))
+            self.assertFalse((some / "clarinet" / "E3").exists(), "a withheld note ships no files")
+            self.assertEqual(card["status"]["counts"]["notes_with_render"], 1, "the badge covers the notes shown")
+            self.assertIn("clarinet=G9", err.getvalue(), "a note named in --only that does not exist is reported")
+
+    def test_recording_only_notes_are_left_out_of_a_family_with_no_render_and_only_then(self):
+        def build(root: Path, out: Path, *flag: str) -> dict:
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), *flag]):
+                self.assertEqual(B.main(), 0)
+            return json.loads((out / "clarinet" / "card.json").read_text())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, with_ours=False)  # a recording-only note, and nothing rendered in the family
+            card = build(root, Path(tmp) / "all")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3"], []))
+            card = build(root, Path(tmp) / "lean", "--recordings-only-if-rendered")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), ([], ["D3"]))
+            self.assertFalse((Path(tmp) / "lean" / "clarinet" / "D3").exists(), "a withheld note ships no files")
+            # Once the family has a render, its recording-only notes are shown again.
+            e3 = root / "clarinet" / "E3"
+            shutil.copytree(root / "clarinet" / "D3", e3)
+            make_listening(root, "clarinet", "F3")
+            e3_pair = json.loads((e3 / "pair.json").read_text())
+            (e3 / "pair.json").write_text(json.dumps(dict(e3_pair, note="E3")))
+            card = build(root, Path(tmp) / "rendered", "--recordings-only-if-rendered")
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["F3", "D3", "E3"], []))
 
     def test_a_refused_pair_is_listed_and_the_exit_code_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:

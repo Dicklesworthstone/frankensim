@@ -204,26 +204,90 @@ fn advance<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
 // constitutive coordinate set. A rate-aware material is not a second solver.
 #[allow(clippy::too_many_arguments)]
 fn advance_with_sampler<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
-    slab: &mut MaterialSlab<S>, power: &[f64], forces: &[[f64; D]],
-    depth_m: f64, limits: HeatSourceLimits, gate: &CancelGate,
-    mut sample: impl FnMut(&MaterialSlab<S>, &S, usize, usize)
-        -> Result<Vec<TransportSample<F>>, MaterialTransportError>,
+    slab: &mut MaterialSlab<S>,
+    power: &[f64],
+    forces: &[[f64; D]],
+    depth_m: f64,
+    limits: HeatSourceLimits,
+    gate: &CancelGate,
+    sample: impl FnMut(
+        &MaterialSlab<S>,
+        &S,
+        usize,
+        usize,
+    ) -> Result<Vec<TransportSample<F>>, MaterialTransportError>,
 ) -> Result<MaterialTransportStep<F>, MaterialTransportError> {
+    advance_with_sampler_and_sources::<S, F, (), D, Q>(
+        slab,
+        power,
+        forces,
+        depth_m,
+        limits,
+        gate,
+        sample,
+        |_, input, _| Ok((input, ())),
+    )
+    .map(|(step, ())| step)
+}
+
+// A physical loss owner may add heat from the SAME already-resolved samples.
+// Source construction and its accounting must pass before the candidate is
+// stepped; source, endpoint and cancellation refusals all precede publication.
+#[allow(clippy::too_many_arguments)]
+fn advance_with_sampler_and_sources<
+    S: Slab<D, Q>,
+    F: FluidTransport,
+    A,
+    const D: usize,
+    const Q: usize,
+>(
+    slab: &mut MaterialSlab<S>,
+    power: &[f64],
+    forces: &[[f64; D]],
+    depth_m: f64,
+    limits: HeatSourceLimits,
+    gate: &CancelGate,
+    mut sample: impl FnMut(
+        &MaterialSlab<S>,
+        &S,
+        usize,
+        usize,
+    ) -> Result<Vec<TransportSample<F>>, MaterialTransportError>,
+    sources: impl FnOnce(
+        &MaterialSlab<S>,
+        super::Inputs<D>,
+        &[TransportSample<F>],
+    ) -> Result<(super::Inputs<D>, A), MaterialTransportError>,
+) -> Result<(MaterialTransportStep<F>, A), MaterialTransportError> {
     poll(gate)?;
     let (cells, plane) = slab.lattice.layout()?;
     let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
     if slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid() {
-        return Err(MaterialTransportError::Invalid("invalid material slab or independently changed normalized walls"));
+        return Err(MaterialTransportError::Invalid(
+            "invalid material slab or independently changed normalized walls",
+        ));
     }
-    if power[..plane].iter().chain(&power[cells-plane..]).any(|p| *p != 0.0) {
+    if power[..plane]
+        .iter()
+        .chain(&power[cells - plane..])
+        .any(|p| *p != 0.0)
+    {
         return Err(MaterialTransportError::Invalid("wall power must be zero"));
     }
     let applied = sample(slab, &slab.lattice, cells, plane)?;
+    let (input, audit) = sources(slab, input, &applied)?;
     let (trial, heat) = candidate_with_input::<S, F, D, Q>(slab, input, &applied, gate)?;
     let endpoint = sample(slab, &trial, cells, plane)?;
     poll(gate)?;
     slab.lattice = trial;
-    Ok(MaterialTransportStep { heat, applied, endpoint })
+    Ok((
+        MaterialTransportStep {
+            heat,
+            applied,
+            endpoint,
+        },
+        audit,
+    ))
 }
 
 // Shared by prescribed and electrical heat. The returned solver is tentative;

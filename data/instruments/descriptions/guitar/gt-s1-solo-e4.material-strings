@@ -7,8 +7,7 @@ strings 1
 string nylon-e4.fsmatpk 0.680 0.0003556 tension 77.437 12 0 0.955882 100000 0
 section homogeneous
 polarizations two 0.7071067811865476 0.7071067811865476 1 0
-cylinder-gas-loading 0.001 30 3
-prepared-linear 128 1073741824 4000000000000
+prepared-linear 64 67108864 200000000000
 cavity physical-neck 0.0115 0.043 0.0025 flanged flanged 1.0
 friction stribeck 0.8 0.4 0.1 0
 forces preload 1 1

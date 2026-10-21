@@ -14,9 +14,9 @@ mod extension;
 /// Caloric-law, card, coordinate, topology and geometry checks remain with the
 /// original network. Source-domain refusal never falls back to another claim.
 pub struct PreparedMaterialNetwork<'n, 'a> {
-    network: &'n MaterialNetwork<'a>,
-    bases: BTreeMap<usize, ElectricalPropertyBasis>,
-    pins: BTreeMap<CellId, MaterialPropertySelection>,
+    pub(super) network: &'n MaterialNetwork<'a>,
+    pub(super) bases: BTreeMap<usize, ElectricalPropertyBasis>,
+    pub(super) pins: BTreeMap<CellId, MaterialPropertySelection>,
 }
 
 impl PreparedMaterialNetwork<'_, '_> {
@@ -27,7 +27,13 @@ impl PreparedMaterialNetwork<'_, '_> {
     pub fn resolve(
         &self, thermal: &DepositionSimulation<'_>, cancelled: impl FnMut() -> bool,
     ) -> Result<CircuitThermalCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
-        self.network.resolve_bound(thermal, &self.bases, Some(&self.pins), cancelled)
+        self.network.resolve_bound(
+            thermal,
+            &self.bases,
+            Some(&self.pins),
+            None,
+            cancelled,
+        )
     }
 }
 
@@ -58,7 +64,19 @@ impl<'a> MaterialNetwork<'a> {
     ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
         let bases = self.basis_plan(electrical_bases)?;
-        let initial = self.resolve_bound(thermal, &bases, None, &mut cancelled)?;
+        self.prepare_bound(thermal, bases, None, cancelled)
+    }
+
+    // Share the original pin-selection owner with explicitly coupled electrical
+    // axes. Ordinary preparation/resolution still passes no additional axes.
+    pub(super) fn prepare_bound<'n>(
+        &'n self,
+        thermal: &DepositionSimulation<'_>,
+        bases: BTreeMap<usize, ElectricalPropertyBasis>,
+        electrical_axes: Option<&ElectricalAxes>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        let initial = self.resolve_bound(thermal, &bases, None, electrical_axes, &mut cancelled)?;
         let selection = |material: &ResolvedMaterialStatePoint| {
             MaterialPropertySelection::PinnedByProperty(material.properties().iter()
                 .map(|p| (p.requirement().name().to_owned(), p.answer().receipt.selected)).collect())

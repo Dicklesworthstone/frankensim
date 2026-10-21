@@ -7,6 +7,9 @@
 //! No gradient, stationary-point, constraint-feasibility or optimality claim is
 //! attached to the returned value. Only the fitting objective is evaluated.
 
+/// Sampled state and hot-spot responses on the same value-only trajectory.
+pub mod responses;
+
 use super::{ScanObservable, ScanObjectiveSampling, ScanSensitivityError,
     ScanStep, ScanningEnthalpyRun, EnthalpyStepConfig, finite, invalid, poll, zeros};
 use super::spatial::ScanObservationSpec;
@@ -48,9 +51,22 @@ pub struct ScanValueEvaluation {
 /// the sensor's supporting vertices. Physical failures and cancellation propagate.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_scan_values<O: ScanObservationSpec>(
+    cx: &Cx<'_>, run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
+    observations: &[O], sampling: ScanObjectiveSampling, step: EnthalpyStepConfig,
+    budget: ScanValueBudget,
+) -> Result<ScanValueEvaluation, ScanSensitivityError> {
+    evaluate_with_observer(cx, run, endpoints, observations, sampling, step, budget,
+        |_, _| Ok(()))
+}
+
+// Share the original primal and scoring loop. Response observers may inspect
+// accepted reports, never alter the trajectory or replace the physical solve.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_with_observer<O: ScanObservationSpec>(
     cx: &Cx<'_>, mut run: ScanningEnthalpyRun<'_, '_, '_>, endpoints: &[f64],
     observations: &[O], sampling: ScanObjectiveSampling, step: EnthalpyStepConfig,
     budget: ScanValueBudget,
+    mut observe: impl FnMut(usize, &ScanStep) -> Result<(), ScanSensitivityError>,
 ) -> Result<ScanValueEvaluation, ScanSensitivityError> {
     let at_endpoint = admit_values(cx, &run, endpoints, observations, budget)?;
     let mut predictions = zeros(observations.len())?;
@@ -78,6 +94,7 @@ pub fn evaluate_scan_values<O: ScanObservationSpec>(
             predictions[i] = prediction;
             residuals[i] = residual;
         }
+        observe(index, &report)?;
         if index + 1 == endpoints.len() { final_step = Some(report); }
     }
     poll(cx, endpoints.len())?;

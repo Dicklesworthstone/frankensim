@@ -22,9 +22,9 @@ use fs_material::phase::mushy::MushyPhaseLaw;
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
     ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, ViscousHeatControls, ViscousPower,
-    VoxelDomain, creeping_flow_with_darcy_heat, creeping_flow_with_viscous_heat,
-    simple_flow_with_material_resistance, simple_flow_with_viscosity,
-    simple_flow_with_viscosity_and_force,
+    VoxelDomain, creeping_flow_with_body_force_heat, creeping_flow_with_darcy_heat,
+    creeping_flow_with_viscous_heat, simple_flow_with_material_resistance,
+    simple_flow_with_viscosity, simple_flow_with_viscosity_and_force,
 };
 use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 
@@ -87,6 +87,9 @@ pub struct MaterialFlowEpoch<F> {
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
     /// None on the original fixed-density path; never an additional heat input.
     pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
+    /// Explicit externally powered force density at this epoch, separate from
+    /// buoyancy. Its signed work is in viscous_power, not added as heat again.
+    pub external_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.
     pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
@@ -120,8 +123,9 @@ pub struct MaterialFlowEpoch<F> {
 /// Refine the thermal step and establish rapid viscous equilibration relative
 /// to thermal evolution before using this approximation. There is no kinetic
 /// energy storage, pressure-work heat or free-surface motion. Explicit
-/// `Self::with_viscous_heating` admits wall-supplied molecular heat in a closed
-/// creeping-flow box; the ordinary entry adds no viscous heat.
+/// `Self::with_viscous_heating` admits wall-supplied molecular/Darcy heat in a
+/// closed creeping-flow box; `Self::with_body_force_heating` additionally admits
+/// explicit actuator work. The ordinary entry adds no viscous heat.
 #[derive(Clone)]
 pub struct MaterialFlowFeedback<'a, F, R, O> {
     domain: &'a VoxelDomain,
@@ -131,6 +135,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     resolve: R,
     reference: FluidTransportState,
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
+    external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
     viscous_heating: Option<ViscousHeating>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
@@ -190,6 +195,7 @@ where
             resolve,
             reference,
             buoyancy: None,
+            external_force_n_m3: None,
             mushy: None,
             viscous_heating: None,
             fluid_conduction: BTreeMap::new(),
@@ -347,13 +353,14 @@ where
     /// its heat and latent energy belong to that same fixed-reference-mass h.
     /// Separate phase temperatures/velocities and moving skeletons are excluded.
     /// Source viscosity and the actual returned velocity must satisfy the declared
-    /// global creeping-flow bound and independent wall-work power check.
+    /// global creeping-flow bound and independent actuator-work power check.
+    /// `Self::with_body_force_heating` also accounts for prescribed body work.
     ///
     /// The original registered h/T law, source receipts and cell masses remain
     /// the sole thermal owners. Each actual substep adds molecular plus Darcy heat
     /// once to the existing source map, alongside any wrapped source. The audit uses
     /// that step's accepted duration. Heat already appears in the original
-    /// thermal audit's external_heat_j; never add the wall supply a second time.
+    /// thermal audit's external_heat_j; never add actuator supply a second time.
     ///
     /// This is a fixed-volume, incompressible caloric approximation. There is no
     /// kinetic store or pressure-work thermalization. Wall drives are prescribed
@@ -366,11 +373,45 @@ where
     ) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
         if self.buoyancy.is_some() {
-            return Err(invalid("viscous heating excludes unaccounted body-force work").into());
+            return Err(invalid("viscous heating excludes unaccounted buoyancy work").into());
         }
         crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
         self.viscous_heating = Some(ViscousHeating::new(controls));
         Ok(self)
+    }
+
+    /// Drive this same Stokes/material/enthalpy loop by external body forces.
+    ///
+    /// One finite SI force density [N/m3] per voxel is frozen over the advance.
+    /// The original staggered momentum operator computes its work against the
+    /// actual returned flow; molecular and stationary Darcy dissipation alone
+    /// enter enthalpy. Material viscosity, phase fraction and permeability still
+    /// refresh at every actual thermal substep. Signed actuator supply and heat
+    /// are accepted together, including negative work by an opposing actuator.
+    ///
+    /// Closed all-fluid creeping-flow restrictions remain. Buoyancy is excluded:
+    /// no gravitational potential, finite electrical reservoir or kinetic store
+    /// is debited by this prescribed actuator. Change a force only between
+    /// accepted advances and account for its reported work in the enclosing
+    /// source owner. No acceleration-to-force conversion invents another density.
+    pub fn with_body_force_heating(
+        self,
+        force_density_n_m3: Vec<[f64; 3]>,
+        controls: ViscousHeatControls,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if force_density_n_m3.len() != self.domain.cell_count() {
+            return Err(invalid("body-force heating needs one explicit vector per voxel").into());
+        }
+        for force in &force_density_n_m3 {
+            check_gate(self.gate, &mut || Ok(()))?;
+            if force.iter().any(|v| !v.is_finite()) {
+                return Err(invalid("body-force heating requires finite force density").into());
+            }
+        }
+        let mut coupled = self.with_viscous_heating(controls)?;
+        coupled.external_force_n_m3 = Some(force_density_n_m3);
+        Ok(coupled)
     }
 
     /// Assign existing full voxel-face links to molecular fluid conduction.
@@ -611,7 +652,18 @@ where
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.viscous_heating {
-            let (flow, power) = if let Some(drag) = &mushy_drag_pa_s_m2 {
+            let (flow, power) = if let Some(force) = &self.external_force_n_m3 {
+                creeping_flow_with_body_force_heat(
+                    self.domain,
+                    &fluid,
+                    &viscosities,
+                    force,
+                    mushy_drag_pa_s_m2.as_deref(),
+                    self.config,
+                    owner.controls,
+                    self.gate,
+                )?
+            } else if let Some(drag) = &mushy_drag_pa_s_m2 {
                 creeping_flow_with_darcy_heat(
                     self.domain,
                     &fluid,
@@ -707,6 +759,7 @@ where
             samples,
             flow,
             buoyancy_force_n_m3,
+            external_force_n_m3: self.external_force_n_m3.clone(),
             mushy_drag_pa_s_m2,
             viscous_power,
         });

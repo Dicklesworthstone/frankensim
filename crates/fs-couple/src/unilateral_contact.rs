@@ -87,6 +87,35 @@ pub fn slit_lay(stiffness: f64, alpha: f64) -> Result<Obstacle, DContactError> {
     )
 }
 
+/// Reed lay that starts to touch the reed before the slit is closed: the same
+/// one-point power law as [`slit_lay`], but the penetration is `onset_m - q`, so
+/// contact begins at the positive opening `onset_m` (the curved lay of a real
+/// mouthpiece) and `onset_m = 0` is [`slit_lay`].
+///
+/// # Errors
+/// A negative or non-finite onset, or dcontact admission.
+pub fn slit_lay_with_onset(
+    stiffness: f64,
+    alpha: f64,
+    onset_m: f64,
+) -> Result<Obstacle, DContactError> {
+    if !onset_m.is_finite() || onset_m < 0.0 {
+        return Err(DContactError::Parameter {
+            what: "lay onset opening must be finite and nonnegative",
+        });
+    }
+    Obstacle::new(
+        vec![-1.0],
+        1,
+        1,
+        vec![-onset_m],
+        vec![1.0],
+        stiffness,
+        alpha,
+        "slit-lay".to_string(),
+    )
+}
+
 /// Contact force on a 1-DOF opening (`q` is the opening coordinate).
 ///
 /// # Errors
@@ -146,7 +175,10 @@ pub fn slit_contact_discrete_coefficients(
 /// Retain one contact storage across all trials of an implicit step.
 pub(crate) struct SlitContactStep {
     storage: ContactStorage,
+    /// Opening at the start of the step, measured from the lay's onset for a curved lay.
     opening_before_m: f64,
+    /// Opening at which a curved lay starts to touch the reed; zero for the original slit lay.
+    onset_m: f64,
     internal_loss: f64,
 }
 
@@ -158,9 +190,43 @@ impl SlitContactStep {
             });
         }
         slit_contact_coefficients(obstacle, opening_before_m)?;
+        // A lay that starts before the slit closes (negative gap) holds the reed in deep contact at its
+        // working point. Two things then break the momentum balance of the implicit reed step at the
+        // turning points of the reed (tiny steps dx, where the discrete gradient drops its correction
+        // below dx = 1e-14 |q|): the default endpoint-energy subtraction has force noise eps V / dx
+        // (1e-3 of the force at the cited stiffness), and a penetration formed as (onset - q) carries
+        // a rounding mismatch of one ulp of the onset against dx, which the remainder's affine term
+        // turns into 1e-2 of the force. Both are removed by evaluating the same power law about the
+        // onset (penetration = -(q - onset), a negation with no rounding, one shared increment) with an
+        // inner storage that states its zero remainder so fs-dcontact's cancellation-stable remainder
+        // is used. The zero-gap lay keeps its original arithmetic bit for bit.
+        let onset_m = match obstacle.gaps().first() {
+            Some(gap) if *gap < 0.0 => -*gap,
+            _ => 0.0,
+        };
+        if onset_m > 0.0 {
+            let shifted = Obstacle::new(
+                vec![-1.0],
+                1,
+                1,
+                vec![0.0],
+                obstacle.weights().to_vec(),
+                obstacle.stiffness(),
+                obstacle.alpha(),
+                "slit-lay-about-onset".to_string(),
+            )?
+            .with_internal_loss(obstacle.internal_loss())?;
+            return Ok(Self {
+                storage: ContactStorage::new(Box::new(CompleteZeroStorage), 1, vec![shifted])?,
+                opening_before_m: opening_before_m - onset_m,
+                onset_m,
+                internal_loss: obstacle.internal_loss(),
+            });
+        }
         Ok(Self {
             storage: ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])?,
             opening_before_m,
+            onset_m,
             internal_loss: obstacle.internal_loss(),
         })
     }
@@ -177,7 +243,7 @@ impl SlitContactStep {
         let gradient = fs_phs::discrete_gradient(
             &self.storage,
             &[self.opening_before_m, 0.0],
-            &[opening_after_m, 0.0],
+            &[opening_after_m - self.onset_m, 0.0],
         );
         let elastic = -gradient[0];
         let damping = elastic * self.internal_loss;
@@ -411,6 +477,24 @@ impl Storage for ZeroStorage {
     }
 }
 
+/// [`ZeroStorage`] that states its midpoint remainder: it stores no energy, so the remainder is
+/// exactly zero and every stored-energy contribution is the contact's own.
+struct CompleteZeroStorage;
+
+impl Storage for CompleteZeroStorage {
+    fn hamiltonian(&self, _x: &[f64]) -> f64 {
+        0.0
+    }
+
+    fn gradient(&self, _x: &[f64], out: &mut [f64]) {
+        out.fill(0.0);
+    }
+
+    fn midpoint_energy_remainder(&self, _a: &[f64], _b: &[f64], _midpoint: &[f64]) -> Option<f64> {
+        Some(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +529,59 @@ mod tests {
             friction_regularization_m_s: Some(1.0e-3),
             internal_loss: 0.0,
             provenance: "analytical string contact fixture".into(),
+        }
+    }
+
+    // A lay with an onset opening pushes back below that opening with the power
+    // law of the penetration `onset - q`, and not above it; zero onset is the
+    // original slit lay.
+    #[test]
+    fn slit_lay_onset_starts_contact_before_the_slit_closes() {
+        let (k, alpha, onset) = (7.9e6, 2.0, 2.0e-4);
+        let lay = slit_lay_with_onset(k, alpha, onset).unwrap();
+        let force = |q: f64| slit_contact_force(&lay, q).unwrap();
+        assert_eq!(force(onset), 0.0);
+        assert_eq!(force(1.5 * onset), 0.0);
+        for q in [1.5e-4, 1.0e-4, 0.0, -1.0e-4] {
+            let expect = k * (onset - q).powf(alpha);
+            assert!(
+                (force(q) - expect).abs() <= 1e-9 * expect,
+                "opening {q}: {} against {expect}",
+                force(q)
+            );
+        }
+        let plain = slit_lay(k, alpha).unwrap();
+        let zero = slit_lay_with_onset(k, alpha, 0.0).unwrap();
+        for q in [1.0e-4, 0.0, -1.0e-4, -3.0e-4] {
+            assert_eq!(
+                slit_contact_force(&plain, q).unwrap(),
+                slit_contact_force(&zero, q).unwrap()
+            );
+        }
+        assert!(slit_lay_with_onset(k, alpha, -1.0e-6).is_err());
+        assert!(slit_lay_with_onset(k, alpha, f64::NAN).is_err());
+    }
+
+    // The reed sits in deep contact (0.048 mm below an onset of 0.2 mm, K 7.9e6) when its velocity
+    // passes through zero. The secant must stay the force of the midpoint penetration to O(z^2) for
+    // every step, in particular across dx = 1e-14 |q| where the discrete gradient drops its correction;
+    // the endpoint-energy subtraction made a 1e-3 jump there and left the implicit reed step without a root.
+    #[test]
+    fn curved_lay_secant_has_no_jump_at_tiny_steps() {
+        let (k, alpha, onset, y) = (7.9e6, 2.0, 2.0e-4, 1.5194044950898812e-4);
+        let lay = slit_lay_with_onset(k, alpha, onset).unwrap();
+        let scale = k * (onset - y).powf(alpha);
+        for dx in [
+            1.0e-19, 1.4e-18, 1.5e-18, 1.52e-18, 1.54e-18, 1.6e-18, 1.0e-16, 1.0e-12, 1.0e-8,
+            -1.5e-18, -1.54e-18, -1.0e-12,
+        ] {
+            let (elastic, damping) = slit_contact_discrete_coefficients(&lay, y, y + dx).unwrap();
+            let midpoint = k * (onset - (y + 0.5 * dx)).powf(alpha);
+            assert!(
+                (elastic - midpoint).abs() <= 1e-8 * scale,
+                "dx {dx:e}: secant {elastic:e} against midpoint force {midpoint:e}"
+            );
+            assert_eq!(damping, 0.0, "an elastic lay has no loss term");
         }
     }
 

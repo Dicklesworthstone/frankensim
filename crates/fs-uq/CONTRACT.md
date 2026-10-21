@@ -27,8 +27,10 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   normal equations (ridge 1e−12) with an oversampling assertion
   (n ≥ 2·basis); mean/variance drop out of coefficients.
 - `product_pce::{PceConfig, PceExecution, PceReport, PceSummary}` — fixed
-  Gaussian Hermite regression from physical-model callbacks, with disjoint
-  held-out physical validation. Reuses the same basis and `PceModel`, with
+  Hermite/shifted-Legendre product regression from physical-model callbacks,
+  with disjoint held-out physical validation. `ProductPceModel` retains each
+  independent germ law alongside its coefficients, sharing Hermite and ANOVA
+  algebra with the unchanged standalone `PceModel`. Execution retains
   product admission and bounded, scaled `fs-la` QR least squares. Numerical
   rank/conditioning are screened before the first physical solve; no ridge
   changes the declared least-squares problem.
@@ -189,12 +191,14 @@ structured errors rather than panicking.
   finest-level expectation, independent reconstruction of correction statistics,
   one-level MC equivalence, correlated inputs, paired-call continuation,
   compliance, admission failures and terminal numerical/model refusals.
-- `product_pce::PceExecution` admits only finite Gaussian marginals under
-  explicit independence or an admitted joint Gaussian law, preserving unknown
-  dependence refusals. Its independent standard-normal germs use the existing
-  Philox seed/kernel/ordinal sampler. The callback receives the exact declared
-  affine physical transformation, also exposed by `physical_parameters`;
-  singular covariance and zero physical standard deviations require no inverse.
+- `product_pce::PceExecution` admits independent finite Gaussian/uniform
+  mixtures or an admitted joint Gaussian law, preserving unknown dependence
+  and non-Gaussian correlated-law refusals. Standard-normal and U(0,1) germs
+  use the existing Philox seed/kernel/ordinal sampler in declaration order.
+  The callback receives the declared physical transformation, also exposed by
+  `physical_parameters`; singular covariance and constant marginals require no
+  inverse. Uniform values use bounded convex endpoint interpolation, not a
+  potentially overflowing interval width. Germs outside [0,1] refuse.
   The envelope is 1..=16 declared parameters, degree 0..=8, <=128 total-degree
   terms, <=65,536 physical calls, and <=16,777,216 training row/term/term
   products. At least twice the basis count is reserved for training; at least
@@ -205,8 +209,8 @@ structured errors rather than panicking.
   Every paid finite observation survives chunks, cancellation and clone resume.
   Interrupted unfinished callbacks retry identical inputs without consuming an
   ordinal. Model/sampling/fit failures are terminal; no data is replaced.
-  Only the full allocation exposes the fitted `PceModel` and summary. Its mean,
-  variance and gradients belong to the Hermite surrogate; coefficient variance
+  Only the full allocation exposes the fitted `ProductPceModel` and summary.
+  Its mean, variance and gradients belong to the product surrogate; coefficient variance
   is response variance, not an estimator standard error or confidence interval.
   Unrepresentable variance is absent. Training and held-out RMS residuals and
   held-out mean error are descriptive checks against physics, not error bounds.
@@ -222,6 +226,12 @@ structured errors rather than panicking.
   moments, usable surrogate derivatives, joint/singular Gaussian MC sample
   identity, held-out separation, zero uncertainty, chunk/interruption/fit-boundary
   continuation, design admission and terminal physical/numerical refusals.
+  `tests/product_pce_model.rs` adds shifted-Legendre orthogonality, endpoint
+  derivatives, mixed-law coefficient sensitivity and Gaussian arithmetic
+  identity. `tests/product_pce_mixed.rs` adds uniform/mixed physical moments,
+  ordinary-MC draw identity, held-out separation and paid-work continuation.
+  `MIXED_PCE.md` documents use and the return-type/accessor migration. These
+  new tests require native execution; their presence is not a runtime pass.
 - Slice-1 scope. The bead's split lanes: seismic machinery
   (Kanai–Tajimi spectra via fs-scenario, response-spectrum CQC fast
   path, IDA fragility curves — needs fs-solid-advanced), e-process
@@ -244,6 +254,67 @@ structured errors rather than panicking.
   or optional-stopping guarantee. Only a complete predeclared design exposes
   estimates; finite-sample indices are not clipped, and zero sampled variance
   remains undefined rather than implying zero sensitivity.
+- `product_shapley::ShapleyExecution` attributes physical QoI variance to
+  1..=8 nonconstant Gaussian inputs under explicit Independent or JointGaussian
+  dependence. The original Monte Carlo plan budget must equal
+  `N*2*(2^d-1)`, with N>=2 and at most one million physical calls. Every proper
+  coalition S receives a permuted copy of the original law, admitted under the
+  existing numerical PSD and singular-pivot policy before physical work. The
+  conditioned coordinates come first in that factor; sharing their normal
+  prefix between two otherwise independent draws freezes the physical X_S
+  exactly. Callback inputs return to original parameter order and physical
+  units. No covariance inversion, physical-coordinate swap, jitter or hidden
+  independence assumption substitutes for conditional sampling. Constant
+  physical parameters remain in the caller's fixed model so conditioning on
+  them cannot reveal an unobserved latent variable.
+  Half the mean squared conditional-pair difference estimates
+  `c(S)=E[Var(Y|X_S)]`; the empty subset estimates output variance and the full
+  subset has zero conditional variance under the fixed deterministic-model
+  contract. Each physical effect sums `c(S)-c(S union {i})` with weights
+  `1/(d*choose(d-1,|S|))`, normalized by c(empty). These Shapley effects share
+  both dependence and interaction contributions; they are not causal effects
+  or independent-input Sobol indices. Conditional variance fractions and
+  finite-sample effects remain unclipped even when sample noise violates
+  monotonicity or [0,1]. The effect sum is an algebraic identity up to rounding,
+  not evidence of estimator accuracy. Zero/unrepresentable sampled variance
+  leaves effects unavailable after completion, never a false zero sensitivity.
+  Shared Sobol compensated reductions and scaled/centered normalization retain
+  small changes on large offsets and handle opposite finite extremes.
+  Paid calls, including one half of a pair, survive chunks, cancellation and
+  clone resumption. Unfinished callbacks retry identical inputs; model/sampling
+  failures are terminal and never skip a draw. Only the full allocation exposes
+  effects. Evidence stays Estimated with infinite dispersion; no confidence
+  interval, optional-stopping rule, durable checkpoint or adaptive subset search
+  is claimed. `tests/product_shapley.rs` checks analytical correlated and
+  interaction effects, physical conditioning and base-MC identity, independently
+  reconstructed variance costs, permutation/affine behavior, paid-call replay,
+  admission, undefined variance, unclipped effects and terminal failures.
+- `product_importance::ImportanceExecution` executes physical rare-event
+  failure probabilities under explicit Independent/JointGaussian Gaussian laws,
+  including singular covariance. A fixed, prechosen independent-germ shift mu
+  defines q(z)=epsilon*phi(z)+(1-epsilon)*phi(z-mu), with 0<epsilon<=1 and finite
+  reciprocal. The separate Philox component stream preserves original normal
+  addressing. Zero shift or epsilon=1 retains ordinary-MC input bits and unit
+  weights. Physical units, admitted factor and the fixed QoI ceiling are retained.
+  Failure means QoI>ceiling. Log-sum-exp yields target/proposal weights; invalid
+  configurations and unrepresentable draw weights refuse before model calls.
+  Ordinary weighted means are neither self-normalized nor clipped to [0,1].
+  Scaled reductions expose descriptive standard error, weighted-failure ESS and
+  mean likelihood weight; these diagnostics are not confidence guarantees.
+  `assess_failure_probability` sends epsilon*weight*failure in [0,1] to the
+  existing sigma=1/2 Gaussian-mixture confidence sequence and rescales by
+  epsilon; proposals equal to the target retain the ordinary unit-indicator CS.
+  This range-based anytime bound can be much broader than empirical
+  rare-event error. Clipping probability bounds never creates convergence.
+  Fix proposal/model/threshold/alpha independently of these outcomes; population
+  transfer, finite-grid/rounding and solver/model error are not covered. No
+  outward certificate, adaptive proposal fitting or durable checkpoint is minted.
+  Budgeted chunks, cancellation and cloning retain paid observations; unfinished
+  calls retry identical inputs/weights. Numerical/model failures are terminal
+  and cannot expose a selected-prefix estimate or confidence. Evidence remains
+  Estimated. `tests/product_importance.rs` covers analytic five-sigma events,
+  physical correlations/singularity, independently reconstructed likelihood
+  moments and CS, MC identity, paid-call resumption and terminal refusals.
 - `SobolExecution::checkpoint` / `restore` retain exact ordered observations,
   including partial rows, in bounded `FSSOB001` bytes. Identity binds every
   `UqPlan` field, original evaluation cap, Philox addressing, A/B/hybrid pairing

@@ -340,6 +340,65 @@ coarser, whose strokes already peak over 0.55, are not raised (up to 4.3 dB quie
 other wasm the table is ignored and the gain is used as given. The same applies wherever a kit Worker plays
 (Strandbar's gains are also measured on 5x).
 
+### Custom gas sources in the live kit
+
+Open **Atmosphere → Import gas material sources** to supply any gas supported by
+your canonical source data. Each component needs its original
+`NormalizedSpeciesPack`, NASA-9 `NormalizedModelPack`, and pure-species transport
+`NormalizedMaterialCardPack`. The three files explicitly associate transport
+with that species. The species identity and NASA-9 pack ID must agree; names do
+not select substitute coefficients. Transport claims must resolve unambiguously
+under `SingleClaimOnly` at the declared state.
+
+Enter the shared record with kelvin, pascals and dimensionless fractions:
+
+```text
+thermochemical 300 100000 mole 2 custom-alpha 0.7 custom-beta 0.3
+```
+
+The example IDs are placeholders for IDs in your packs, not bundled gases.
+Declare the water species ID or `none`, and choose frozen composition or the
+existing liquid-water saturation check. Mass fractions are also supported.
+The original source domains determine admitted temperatures and pressures;
+the five-species convenience model's range is not applied to imported sources.
+At most 128 source triples, 16 MiB per file, 64 MiB total and an 8 KiB record
+are accepted. Applying changes reconstructs every piece from rest.
+
+Programmatic lanes use the same optional `GasSourceOptions`:
+
+```ts
+import { KitLane, type GasSourceOptions } from './src/live/mix';
+
+const gasSources: GasSourceOptions = {
+  phase: 'frozen',
+  waterSpecies: null,
+  components: [{ speciesPack, nasa9Pack, transportPack }], // Uint8Array bytes
+};
+const lane = new KitLane(mix, 'tom-12', {
+  gain: 0.03,
+  gasRecord: 'thermochemical 300 100000 mole 1 custom-alpha 1',
+  gasSources,
+  // Optional `materials` also binds the surfaces, striker and bending loss.
+});
+```
+
+The original `fs-material` thermochemical evaluator supplies one coherent gas
+snapshot to cavity stiffness, added mass, radiation loading, ports and microphone
+propagation. `Live::with_resolved_atmosphere` retains the complete `GasRecord`,
+including source models, transport claims and canonical pack receipts; clones
+and timing retries retain it. `info.gas.sourceSpecies` reports the number of
+retained species source triples. The shared `gas_species::input::packs` adapter
+is file-independent and available to other native consumers too.
+
+The kit remains a fixed-composition, stationary-medium model with lumped
+adiabatic cavities and its existing loading/radiation approximations. This adds
+neither chemical reactions nor evolving gas temperature. Imported solid sources
+and gas sources compose, including sourced bending viscosity. Source-dependent
+playback keeps the declared pressure gain; the standard-material grid level
+table is not applied. Rebuild through `engine-kit/build-wasm.sh` to expose the
+new source constructors; an older bundle or refused source cannot fall back to
+ordinary air or discard a selected solid-material model.
+
 ## Strandbar
 
 The studio loop is three native renders that start 0.15 s before the first downbeat:

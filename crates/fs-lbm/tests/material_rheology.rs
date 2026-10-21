@@ -259,11 +259,32 @@ fn query(temperature: f64, shear_rate: f64) -> QueryPoint {
         .unwrap()
 }
 fn card(slope: f64) -> MaterialCard {
+    card_curve(
+        "shear_rate",
+        Frequency::DIMS,
+        vec![(0.0, 1.0), (100.0, 1.0 + 100.0 * slope)],
+        1.0,
+    )
+}
+fn card_curve(
+    axis: &str,
+    axis_dims: Dims,
+    knots: Vec<(f64, f64)>,
+    thermal_scale: f64,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         ("density", Dims([-3, 1, 0, 0, 0, 0]), 1000.0),
-        ("specific_heat_capacity", Dims([2, 0, -2, -1, 0, 0]), 1000.0),
-        ("thermal_conductivity", Dims([1, 1, -3, -1, 0, 0]), 1000.0),
+        (
+            "specific_heat_capacity",
+            Dims([2, 0, -2, -1, 0, 0]),
+            1000.0 * thermal_scale,
+        ),
+        (
+            "thermal_conductivity",
+            Dims([1, 1, -3, -1, 0, 0]),
+            1000.0 * thermal_scale,
+        ),
         ("dynamic_viscosity", Dims([-1, 1, -1, 0, 0, 0]), 1.0),
     ] {
         let viscosity = name == "dynamic_viscosity";
@@ -282,9 +303,9 @@ fn card(slope: f64) -> MaterialCard {
                 },
                 value: if viscosity {
                     PropertyValue::Curve {
-                        abscissa: "shear_rate".into(),
-                        abscissa_dims: Frequency::DIMS,
-                        knots: vec![(0.0, 1.0), (100.0, 1.0 + 100.0 * slope)],
+                        abscissa: axis.into(),
+                        abscissa_dims: axis_dims,
+                        knots: knots.clone(),
                         dims,
                     }
                 } else {
@@ -472,4 +493,440 @@ fn nonconvergence_source_refusal_and_cancelled_local_solve_are_atomic() {
     assert_eq!(slab.lattice.gpop, g);
     assert_eq!(slab.lattice.grid.tau, tau);
     assert_eq!(slab.lattice.grid.fext, loads);
+}
+
+#[test]
+fn g1_viscous_heat_matches_independent_shear_power_and_existing_heat_transport() {
+    let gamma = 0.02;
+    let expected_power = (gamma / DT) * (gamma / DT); // mu = 1 Pa s
+    let mut authored = [0.0; 16];
+    authored[8] = 17.0;
+    authored[10] = -5.0;
+    let mut prescribed = authored;
+    prescribed[6] += expected_power;
+    let force = [0.001, -0.0007, 0.0003];
+    let gate = CancelGate::new();
+
+    let mut hot = slab3();
+    let mut manual = slab3();
+    set_shear3(&mut hot, gamma, force);
+    set_shear3(&mut manual, gamma, force);
+    let heated = hot
+        .step_with_material_rheology_and_viscous_heating(
+            &authored,
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    let expected = manual
+        .step_with_material_rheology(
+            &prescribed,
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    let check = |heat: &fs_lbm::material::transport::rheology::heating::ViscousHeating,
+                 balance: &fs_lbm::thermal::sources::HeatBalance,
+                 reference: &fs_lbm::thermal::sources::HeatBalance,
+                 volume: f64| {
+        near(heat.power_w_m3[6], expected_power, 1e-11);
+        assert!(
+            heat.power_w_m3
+                .iter()
+                .enumerate()
+                .all(|(cell, &p)| p >= 0.0 && (cell == 6 || p < 1e-20))
+        );
+        near(heat.viscous_heat_j, expected_power * volume * DT, 1e-18);
+        near(heat.authored_heat_j, 12.0 * volume * DT, 1e-18);
+        near(heat.source_partition_defect_j, 0.0, 1e-18);
+        near(
+            balance.source_j,
+            (12.0 + expected_power) * volume * DT,
+            1e-18,
+        );
+        near(balance.source_j, reference.source_j, 1e-18);
+        near(balance.stored_change_j, reference.stored_change_j, 1e-12);
+        near(balance.bottom_wall_j, reference.bottom_wall_j, 1e-12);
+        near(balance.top_wall_j, reference.top_wall_j, 1e-12);
+    };
+    check(
+        &heated.viscous,
+        &heated.transport.heat,
+        &expected.heat,
+        DX * DX * DX,
+    );
+    assert_eq!(hot.lattice.grid.f, manual.lattice.grid.f);
+    for (a, b) in hot
+        .lattice
+        .gpop
+        .iter()
+        .flatten()
+        .zip(manual.lattice.gpop.iter().flatten())
+    {
+        near(*a, *b, 2e-15);
+    }
+
+    let mut hot = slab2();
+    let mut manual = slab2();
+    set_shear2(&mut hot, gamma, [force[0], force[1]]);
+    set_shear2(&mut manual, gamma, [force[0], force[1]]);
+    let depth = 2.0 * DX;
+    let heated = hot
+        .step_with_material_rheology_and_viscous_heating(
+            &authored,
+            &[[0.0; 2]; 16],
+            depth,
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    let expected = manual
+        .step_with_material_rheology(
+            &prescribed,
+            &[[0.0; 2]; 16],
+            depth,
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    check(
+        &heated.viscous,
+        &heated.transport.heat,
+        &expected.heat,
+        DX * DX * depth,
+    );
+    assert_eq!(hot.lattice.grid.f, manual.lattice.grid.f);
+    for (a, b) in hot
+        .lattice
+        .gpop
+        .iter()
+        .flatten()
+        .zip(manual.lattice.gpop.iter().flatten())
+    {
+        near(*a, *b, 2e-15);
+    }
+}
+
+#[test]
+fn zero_stress_adds_no_heat_and_preserves_both_existing_paths() {
+    // rho=9/8 makes every zero-velocity quadrature population exactly binary
+    // representable: this zero-stress oracle excludes equilibrium roundoff.
+    let gate = CancelGate::new();
+    let mut hot = slab3();
+    let mut cold = slab3();
+    for state in [&mut hot, &mut cold] {
+        state
+            .lattice
+            .grid
+            .f
+            .fill(fs_lbm::d3q19::equilibrium3(1.125, [0.0; 3]));
+    }
+    let heated = hot
+        .step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    let expected = cold
+        .step_with_material_rheology(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    assert!(heated.viscous.power_w_m3.iter().all(|&p| p == 0.0));
+    assert_eq!(heated.viscous.viscous_heat_j, 0.0);
+    assert_eq!(heated.transport, expected);
+    assert_eq!(hot.lattice.grid.f, cold.lattice.grid.f);
+    assert_eq!(hot.lattice.gpop, cold.lattice.gpop);
+
+    let mut hot = slab2();
+    let mut cold = slab2();
+    for state in [&mut hot, &mut cold] {
+        state
+            .lattice
+            .grid
+            .f
+            .fill(fs_lbm::equilibrium(1.125, 0.0, 0.0));
+    }
+    let heated = hot
+        .step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.0; 2]; 16],
+            DX,
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    let expected = cold
+        .step_with_material_rheology(
+            &[0.0; 16],
+            &[[0.0; 2]; 16],
+            DX,
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    assert!(heated.viscous.power_w_m3.iter().all(|&p| p == 0.0));
+    assert_eq!(heated.viscous.viscous_heat_j, 0.0);
+    assert_eq!(heated.transport, expected);
+    assert_eq!(hot.lattice.grid.f, cold.lattice.grid.f);
+    assert_eq!(hot.lattice.gpop, cold.lattice.gpop);
+}
+
+#[test]
+fn g3_source_temperature_curve_closes_viscous_heat_back_into_actual_flow() {
+    for slope in [0.0, 0.02] {
+        // Explicitly synthetic low caloric storage makes the feedback readily
+        // measurable; conductivity scales with Cp to keep the thermal stencil.
+        let source = card_curve(
+            "T",
+            Temperature::DIMS,
+            vec![(290.0, 1.0 - 10.0 * slope), (330.0, 1.0 + 30.0 * slope)],
+            0.001,
+        );
+        let reference = resolve_liquid_state(
+            &source,
+            &query(305.0, 0.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let make = || {
+            plan_scaling_from_material(&reference, DX, DT, 0.1)
+                .unwrap()
+                .thermal_slab3(MaterialThermalSlab3 {
+                    nx: 2,
+                    ny: 1,
+                    nz: 6,
+                    bottom_temperature_k: 310.0,
+                    top_temperature_k: 300.0,
+                    gravity_m_s2: 0.0,
+                    expansion_per_k: 0.0,
+                    max_cells: 16,
+                })
+                .unwrap()
+        };
+        let mut hot = make();
+        let mut cold = make();
+        set_shear3(&mut hot, 0.02, [0.0; 3]);
+        set_shear3(&mut cold, 0.02, [0.0; 3]);
+        let gate = CancelGate::new();
+        let heated = hot
+            .step_with_material_rheology_and_viscous_heating(
+                &[0.0; 16],
+                &[[0.0; 3]; 16],
+                limits(),
+                controls(),
+                &gate,
+                |point, _| resolve(&source, &reference, point),
+            )
+            .unwrap();
+        let unheated = cold
+            .step_with_material_rheology(
+                &[0.0; 16],
+                &[[0.0; 3]; 16],
+                limits(),
+                controls(),
+                &gate,
+                |point, _| resolve(&source, &reference, point),
+            )
+            .unwrap();
+        assert_eq!(
+            hot.lattice.grid.f, cold.lattice.grid.f,
+            "initial-state coefficients give the same first momentum step without buoyancy"
+        );
+        let warm = heated
+            .transport
+            .endpoint
+            .iter()
+            .find(|s| s.cell == 6)
+            .unwrap();
+        let cool = unheated.endpoint.iter().find(|s| s.cell == 6).unwrap();
+        assert!(warm.temperature_k > cool.temperature_k + 1e-6);
+        near(
+            warm.transport.dynamic_viscosity_pa_s() - cool.transport.dynamic_viscosity_pa_s(),
+            slope * (warm.temperature_k - cool.temperature_k),
+            1e-14,
+        );
+        for sample in heated
+            .transport
+            .applied
+            .iter()
+            .chain(&heated.transport.endpoint)
+        {
+            assert_eq!(
+                sample.material.source().material().card_identity(),
+                source.content_hash()
+            );
+            assert_eq!(
+                sample.material.source().material().query(),
+                query(
+                    sample.temperature_k,
+                    sample.material.point().shear_rate_per_s
+                )
+            );
+        }
+        hot.step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |point, _| resolve(&source, &reference, point),
+        )
+        .unwrap();
+        cold.step_with_material_rheology(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |point, _| resolve(&source, &reference, point),
+        )
+        .unwrap();
+        if slope == 0.0 {
+            assert_eq!(hot.lattice.grid.f, cold.lattice.grid.f);
+        } else {
+            assert_ne!(
+                hot.lattice.grid.f, cold.lattice.grid.f,
+                "the changed material temperature must change the next momentum step"
+            );
+        }
+    }
+}
+
+#[test]
+fn viscous_overheat_endpoint_refusal_and_cancellation_do_not_publish() {
+    let gate = CancelGate::new();
+    let mut slab = slab3();
+    set_shear3(&mut slab, 0.02, [0.0; 3]);
+    let wall = slab.lattice.gpop[0];
+    slab.lattice.gpop[2..14].fill(wall);
+    let (f, g, tau, forces) = (
+        slab.lattice.grid.f.clone(),
+        slab.lattice.gpop.clone(),
+        slab.lattice.grid.tau.clone(),
+        slab.lattice.grid.fext.clone(),
+    );
+    let result = slab.step_with_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        HeatSourceLimits {
+            temperature_range_k: [290.0, 310.0],
+            ..limits()
+        },
+        controls(),
+        &gate,
+        |_, _| Ok(fluid(1.0)),
+    );
+    assert!(matches!(
+        result,
+        Err(MaterialTransportError::Thermal(
+            fs_lbm::thermal::sources::ThermalSourceError::Temperature { .. }
+        ))
+    ));
+    let mut calls = 0;
+    let result = slab.step_with_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        &gate,
+        |_, _| {
+            calls += 1;
+            if calls == 13 {
+                Err(MaterialError::State {
+                    what: "heated endpoint outside source support".into(),
+                })
+            } else {
+                Ok(fluid(1.0))
+            }
+        },
+    );
+    assert!(matches!(result, Err(MaterialTransportError::State { .. })));
+    let result = slab.step_with_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        &gate,
+        |point, _| {
+            if point.cell == 6 {
+                gate.request();
+            }
+            Ok(fluid(1.0))
+        },
+    );
+    assert!(matches!(result, Err(MaterialTransportError::Cancelled)));
+    assert_eq!(slab.lattice.grid.f, f);
+    assert_eq!(slab.lattice.gpop, g);
+    assert_eq!(slab.lattice.grid.tau, tau);
+    assert_eq!(slab.lattice.grid.fext, forces);
+}
+
+#[test]
+fn unrepresentable_viscous_power_refuses_before_mutating_the_slab() {
+    // A representable lattice/thermal map can still have an unrepresentable
+    // dimensional stress power. This is a conversion boundary, not a material.
+    let dt = 1e-160;
+    let dx = (0.01_f64 * dt).sqrt();
+    let mut slab = plan_scaling_from_material(&fluid(1.0), dx, dt, 0.0)
+        .unwrap()
+        .thermal_slab3(MaterialThermalSlab3 {
+            nx: 2,
+            ny: 1,
+            nz: 6,
+            bottom_temperature_k: 310.0,
+            top_temperature_k: 300.0,
+            gravity_m_s2: 0.0,
+            expansion_per_k: 0.0,
+            max_cells: 16,
+        })
+        .unwrap();
+    set_shear3(&mut slab, 0.02, [0.0; 3]);
+    let (f, g, tau, forces) = (
+        slab.lattice.grid.f.clone(),
+        slab.lattice.gpop.clone(),
+        slab.lattice.grid.tau.clone(),
+        slab.lattice.grid.fext.clone(),
+    );
+    let result = slab.step_with_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        &CancelGate::new(),
+        |_, _| Ok(fluid(1.0)),
+    );
+    assert!(matches!(
+        result,
+        Err(MaterialTransportError::Invalid(
+            "physical viscous heating is unrepresentable"
+        ))
+    ));
+    assert_eq!(slab.lattice.grid.f, f);
+    assert_eq!(slab.lattice.gpop, g);
+    assert_eq!(slab.lattice.grid.tau, tau);
+    assert_eq!(slab.lattice.grid.fext, forces);
 }

@@ -6,6 +6,7 @@ use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::{
 };
 use fs_phs::Storage;
 
+#[path = "nonlinear/obstacles.rs"]
 mod obstacles;
 
 struct Quartic(f64);

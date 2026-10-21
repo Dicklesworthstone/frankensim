@@ -29,23 +29,21 @@ lip_response 204.5 7.0 0.063 0.012 0.00053 1.0e-4
 lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 Hz, QL1 7.0, 1/muL1 0.063 m2/kg, b 12 mm, H0 0.53 mm; artificial lips, outward-striking mode only; face area 1e-4 m2 is a normalization that cancels
 #
 # --- mouthpiece cup ---------------------------------------------------------------
-# Cullen (2000) p.41: the artificial-mouth mouthpiece 'when complete, has a total internal
-# volume of 12.7ml, a Helmholtz resonance frequency of 518Hz and a quality factor of
-# 7.1' (the mouthpiece the lip data above were measured with). Lumped here as the cup
-# compliance; the leadpipe and throat of the real instrument are in the bore below.
-# UNKNOWN: whether the printed volume overlaps the first bore element (see LIST).
-cup_volume_m3 1.27e-5
+# The cup and throat are GEOMETRY in the bore below (element 1, digitized from Braden's Fig 5.3: rim radius
+# 1.286 cm falling to a 0.39 cm throat within 3.8 cm, about 9.5 ml for the first 3.5 cm). A lumped cup
+# volume would count it twice, so the lumped volume is the smallest value the file format admits (1 mm^3,
+# under 0.01 percent of the cup); it is a format floor, not a measurement. The first native renders used
+# Cullen's rig mouthpiece volume (12.7 ml, thesis p.41) here AND a placeholder cylinder for element 1: that
+# double counted the cup, and moving the volume alone moved the emergent pitches by 12 to 50 cents.
+cup_volume_m3 1e-9
 termination flanged
 modes 3 1
-# Mouth-flow line ladder. The first native render (6f2e42ec7) was REFUSED by the owner's default
-# ladder (relative tail energy 1e-10): at the 65536-tap cap (3.4 s on this clock) the last quarter
-# of the mouth-flow impulse response still held 1.9e-8 of its energy, so the line never converged.
-# The cap is the owner's, and the tail's source is UNVERIFIED (a slow component of the long, narrow
-# bore's viscothermal memory is the suspect). Declared here instead of hidden: 1e-6 relative energy
-# is a wrap-around residual of about 1e-3 of the response amplitude (-60 dB), far below the tens of dB
-# the grading measures resolve. The realized rungs (taps, tail energy, tap change) are written to the
-# provenance sidecar; the default 1e-10 stays the default for every other file.
-mouth_flow_tail_tol 1e-6
+# Mouth-flow line ladder: the owner's DEFAULT (relative tail energy 1e-10), no declared tolerance. On the binary
+# before the DC-bin fix the placeholder-leadpipe bore was refused at the 65536-tap cap (tail 1.9e-8), its declared
+# 1e-6 rungs halved per doubling (4.4e-7, 2.4e-7, 1.4e-7 at 2048, 4096, 8192 taps: an algebraic 1/N tail, the
+# signature of the 20 Hz stand-in for the DC bin), and the digitized-leadpipe bore was refused again (1.25e-6 at
+# the cap). With P1's DC-bin fix (bin da31fbd67ee9) the digitized bore converges under the default: tail energy
+# 8.4e-4 (1024 taps), 3.2e-5, 5.7e-8, 8.0e-10 (8192), 1.4e-11, 1.4e-12, 4.9e-13 (65536), falling exponentially.
 #
 # --- bore -------------------------------------------------------------------------
 # A. C. P. Braden, "Bore Optimisation and Impedance Modelling of Brass Musical
@@ -56,16 +54,49 @@ mouth_flow_tail_tol 1e-6
 # reconstruct the 88H'). Template values, not raw calipers; the thesis states no
 # uncertainty. Radii and lengths are printed in cm, converted to m below. JUMP elements
 # (2, 4, 6, 9) are the radius steps between neighbouring records.
-# Specimen caveat: the UIowa tenor trombone model is 'NA' on MIStenortrombone.html, so
+# Element 1's interior is digitized from the thesis figure (see below). Specimen caveat: the UIowa tenor trombone model is 'NA' on MIStenortrombone.html, so
 # this is a population stand-in (QP verdict label: population-flagged), not the
 # recorded instrument. The F attachment is not represented (p.92 only gives '1 m').
 #
-# Element 1 LIST 'Mouthpiece & lead-pipe', length 26.145 cm, radius 1.286 -> 0.664 cm.
-# UNKNOWN: the interior of this list is not printed in the table (the point list is not
-# in the text; Fig 5.3 is a plot). Placeholder, NOT a measurement: a cylinder at the
-# printed END radius over the printed length (36 ml, close to a real cup+backbore+
-# leadpipe volume; a cone between the printed ends would be 81 ml).
-cylinder 0.00664 0.26145
+# Element 1 LIST 'Mouthpiece & lead-pipe', length 26.145 cm, radius 1.286 -> 0.664 cm (printed). The table
+# prints only the ends; the interior below is DIGITIZED FROM FIGURE 5.3 (thesis p.71), not a measured table:
+# see braden2006-fig5-3-leadpipe.tsv for the method, the axis calibration, the checks against printed values
+# and the estimated uncertainty (radius about +-0.015 cm, axial position about +-0.3 cm, cup volume about
+# +-1.5 ml). The first and last radii are the printed ones. A radius step at 7.8 cm (backbore 0.516 cm to
+# leadpipe 0.617 cm) is drawn by the thesis as a short ramp and is kept as a step. 33 segments.
+cone 0.012860 0.012561 0.006188
+cone 0.012561 0.012023 0.003868
+cone 0.012023 0.011485 0.002321
+cone 0.011485 0.010947 0.002321
+cone 0.010947 0.010409 0.001547
+cone 0.010409 0.008929 0.002321
+cone 0.008929 0.008391 0.001547
+cone 0.008391 0.007584 0.001547
+cone 0.007584 0.006508 0.001547
+cone 0.006508 0.005701 0.001547
+cone 0.005701 0.004894 0.001934
+cone 0.004894 0.004087 0.001934
+cone 0.004087 0.003885 0.009282
+cone 0.003885 0.004019 0.006188
+cone 0.004019 0.004288 0.006188
+cone 0.004288 0.004557 0.006188
+cone 0.004557 0.004759 0.006188
+cone 0.004759 0.004961 0.006188
+cone 0.004961 0.005163 0.009282
+cone 0.006171 0.006037 0.018564
+cone 0.006037 0.005970 0.012376
+cone 0.005970 0.006037 0.012376
+cone 0.006037 0.006104 0.012376
+cone 0.006104 0.006171 0.012376
+cone 0.006171 0.006306 0.012376
+cylinder 0.006306 0.012376
+cylinder 0.006306 0.012376
+cone 0.006306 0.006441 0.012376
+cylinder 0.006441 0.012376
+cylinder 0.006441 0.012376
+cylinder 0.006441 0.012376
+cone 0.006441 0.006575 0.012376
+cone 0.006575 0.006640 0.016244
 # Element 3 CYLR 'Main slide' 139.439 cm, r 0.695 cm
 cylinder 0.00695 1.39439
 # Element 5 CYLR 'Neck-pipe' 26.910 cm, r 0.725 cm
@@ -83,7 +114,7 @@ bessel 0.01105 0.01507 0.15042 1.260 16
 bessel 0.01507 0.02228 0.15042 0.894 16
 bessel 0.02228 0.04118 0.09685 0.494 16
 bessel 0.04118 0.10860 0.05593 1.110 16
-bore_source Braden (2006) PhD Edinburgh Table 5.1 p.72, 14-element template of the author's Conn 88H large-bore tenor (cm to m); LIST element interior UNKNOWN (cylinder at printed end radius is a placeholder); UIowa trombone model is NA so this is a population stand-in; no F attachment
+bore_source Braden (2006) PhD Edinburgh Table 5.1 p.72, 14-element template of the author's Conn 88H large-bore tenor (cm to m); element 1 (mouthpiece and leadpipe) interior DIGITIZED FROM FIG 5.3 p.71 with estimated uncertainty (braden2006-fig5-3-leadpipe.tsv), not a measured table; UIowa trombone model is NA so this is a population stand-in; no F attachment
 #
 # --- microphone -------------------------------------------------------------------
 # UIowa MIS pages: 'Distance 5 feet' = 1.524 m, anechoic chamber, Neumann KM 84

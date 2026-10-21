@@ -175,13 +175,7 @@ fn trimmed_with_poll<'s, 't>(
     budget: SurfaceDistanceBudget,
     cancel: &mut impl FnMut() -> bool,
 ) -> Result<TrimmedSurfaceDistanceRun<'s, 't>, NurbsError> {
-    let mut domain = TrimDomain {
-        source: trim,
-        classifications: 0,
-        outside_cells: 0,
-        unsupported_parameters: 0,
-        refusal: None,
-    };
+    let mut domain = TrimDomain::new(trim);
     let SearchRun::Complete(result) =
         search_with_poll(source, query, tolerance, budget, Some(&mut domain), cancel)?
     else {
@@ -224,7 +218,17 @@ pub(super) struct TrimDomain<'a> {
     pub(super) refusal: Option<NurbsError>,
 }
 
-impl TrimDomain<'_> {
+impl<'a> TrimDomain<'a> {
+    pub(super) fn new(source: AdmittedTrimmedPatch<'a>) -> Self {
+        Self {
+            source,
+            classifications: 0,
+            outside_cells: 0,
+            unsupported_parameters: 0,
+            refusal: None,
+        }
+    }
+
     pub(super) fn retained_payload(
         &self,
         meter: &mut Meter,

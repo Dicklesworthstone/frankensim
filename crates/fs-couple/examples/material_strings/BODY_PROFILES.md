@@ -325,13 +325,14 @@ an unconstrained translational component. The bridge count equals the actual
 string count, including unplayed strings. Source bytes, geometry, packs,
 physical eigenvectors and force maps remain attached to the performer.
 
-The file admits at most 128 nodes, 256 triangles, 16 regions, eight string
-attachments and 16 retained shell modes, within 64 KiB. `mass` explicitly selects
+The file admits at most 2048 nodes and 4096 triangles per component, 16 regions, eight string
+attachments and 128 retained shell modes, within 1 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
 `projection-work` declares a separate cold shell-projection budget, at most
-268,435,456 terms. It does not enlarge the existing complete-network limits.
+34,359,738,368 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
+force and pressure projections, about 2.6e10 for a cap-sized component). It does not enlarge the existing complete-network limits.
 These discretization choices require mesh, mode, stabilization and time-step
 refinement for the intended specimen.
 
@@ -597,8 +598,8 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles retain the 64 KiB limit and admit at most eight components, 512 total
-nodes, 1024 total triangles, 64 ties and 16 shared body modes. Per-component v3
+Profiles take the 1 MiB shell limit and admit at most eight components, 8192 total
+nodes, 16384 total triangles, 64 ties and 128 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select

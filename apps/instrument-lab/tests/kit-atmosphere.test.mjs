@@ -13,7 +13,8 @@ const source = (await readFile(url, 'utf8'))
 async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = false,
   missingWithGas = false, refuseGas = false, scales = [3, 5], materials,
   missingWithMaterials = false, refuseMaterials = false,
-  missingWithBendingLoss = false, refuseBendingLoss = false } = {}) {
+  missingWithBendingLoss = false, refuseBendingLoss = false, gasSources,
+  missingWithGasSources = false, refuseGasSources = false } = {}) {
   const calls = [], messages = [], kept = [];
   let id = 0, active = 0, clock = 0, attached = 0, correctionCalls = 0;
   function piece(name, scale, record, materials) {
@@ -50,19 +51,42 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
       if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
       return piece(name, scale, record, { importedPacks: 3, bendingLoss: { model: 'kelvin-voigt-plane-stress' } });
     }
+    static withGasSources(name, scale, record, ...inputs) {
+      calls.push(['source-gas', name, scale, record, ...inputs]);
+      if (refuseGasSources) throw new Error('canonical gas source domain refused');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record);
+    }
+    static withMaterialsAndGasSources(name, scale, record, ...inputs) {
+      calls.push(['source-materials', name, scale, record, ...inputs]);
+      if (refuseGasSources) throw new Error('canonical gas source domain refused');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3 });
+    }
+    static withMaterialBendingLossAndGasSources(name, scale, record, ...inputs) {
+      calls.push(['source-bending', name, scale, record, ...inputs]);
+      if (refuseGasSources) throw new Error('canonical gas source domain refused');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3, bendingLoss: { model: 'kelvin-voigt-plane-stress' } });
+    }
   }
   if (missingWithGas) KitPiece.withGas = undefined;
   if (missingWithMaterials) KitPiece.withMaterials = undefined;
   if (missingWithBendingLoss) KitPiece.withMaterialBendingLoss = undefined;
+  if (missingWithGasSources) {
+    KitPiece.withGasSources = undefined;
+    KitPiece.withMaterialsAndGasSources = undefined;
+    KitPiece.withMaterialBendingLossAndGasSources = undefined;
+  }
   const self = { postMessage(message) { messages.push(message); } };
   runInNewContext(source, { self, KitPiece, init: async () => {},
     createLane: () => { attached++; return { frame: 0 }; }, levelFix: () => { correctionCalls++; return 2; },
-    Float32Array, Uint8Array, URL,
+    Float32Array, Uint8Array, Uint32Array, URL,
     performance: { now() { clock += slowFirst && active === 1 ? 10 : 1; return clock; } },
     fetch: async () => ({ ok: true, clone() { return this; }, arrayBuffer: async () => new ArrayBuffer(0),
       json: async () => ({}) }),
   });
-  await self.onmessage({ data: { type: 'init', piece: 'snare', gasRecord, materials, port: {}, scales, minRealtime: 1.7 } });
+  await self.onmessage({ data: { type: 'init', piece: 'snare', gasRecord, gasSources, materials, port: {}, scales, minRealtime: 1.7 } });
   return { calls, messages, kept, attached, correctionCalls };
 }
 
@@ -70,6 +94,71 @@ const materialInput = Object.freeze({
   surfacePack: new Uint8Array([1, 2, 3]), secondaryPack: new Uint8Array([4, 5]),
   strikerPack: new Uint8Array([6, 7, 8]), temperatureAxis: 'T', temperatureK: 293.15,
   strikerVolumeM3: 9e-6, strikerTipRadiusM: 0.005, impactLossSM: 0.05,
+});
+
+const sourceRecord = 'thermochemical 300 100000 mole 2 custom-alpha 0.7 custom-beta 0.3';
+const sourceInput = () => ({ phase: 'frozen', waterSpecies: null, components: [
+  { speciesPack: new Uint8Array([99, 1, 2, 99]).subarray(1, 3), nasa9Pack: new Uint8Array([3]), transportPack: new Uint8Array([4, 5]) },
+  { speciesPack: new Uint8Array([6]), nasa9Pack: new Uint8Array([7, 8]), transportPack: new Uint8Array([9]) },
+] });
+
+test('canonical gas bytes compose with both solid routes through every grid, retry and copy fallback', async () => {
+  const bendingLoss = { model: 'kelvin-voigt-plane-stress', frequencyAxis: 'frequency',
+    frequencyHz: 1000, primaryAngleRad: 0.3, secondaryAngleRad: -0.7 };
+  for (const materials of [undefined, materialInput, { ...materialInput, bendingLoss }]) {
+    const expected = materials ? (materials.bendingLoss ? 'source-bending' : 'source-materials') : 'source-gas';
+    for (const options of [{}, { copies: false, slowFirst: true }, { refuseFine: true, scales: [2, 3] }]) {
+      const result = await run(sourceRecord, { ...options, materials, gasSources: sourceInput() });
+      assert.equal(result.messages.at(-1).type, 'ready');
+      assert.equal(result.messages.at(-1).gasRecord, sourceRecord);
+      assert.ok(result.calls.length >= 2);
+      for (const call of result.calls) {
+        assert.equal(call[0], expected);
+        assert.equal(call[3], sourceRecord);
+        assert.deepEqual([...call.at(-4)], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert.deepEqual([...call.at(-3)], [2, 1, 2, 1, 2, 1]);
+        assert.equal(call.at(-2), '');
+        assert.equal(call.at(-1), 'frozen');
+      }
+      assert.equal(result.correctionCalls, 0, 'source atmosphere retains physical pressure gain');
+      assert.equal(result.messages.at(-1).levels, 'none');
+      if (materials) assert.equal(result.messages.at(-1).info.materials.importedPacks, 3);
+      if (materials?.bendingLoss) assert.equal(result.messages.at(-1).info.materials.bendingLoss.model, bendingLoss.model);
+    }
+  }
+});
+
+test('source gas refusal or an older WASM cannot fall back to ordinary gas or discard solid selection', async () => {
+  for (const materials of [undefined, materialInput, { ...materialInput,
+    bendingLoss: { model: 'kelvin-voigt-plane-stress', frequencyAxis: 'f', frequencyHz: 1000,
+      primaryAngleRad: 0, secondaryAngleRad: 0 } }]) {
+    for (const options of [{ missingWithGasSources: true }, { refuseGasSources: true }]) {
+      const result = await run(sourceRecord, { ...options, materials, gasSources: sourceInput() });
+      assert.equal(result.messages.at(-1).type, 'error');
+      assert.equal(result.attached, 0);
+      assert.ok(result.calls.every(call => call[0].startsWith('source-')));
+    }
+  }
+});
+
+test('source associations and phase declarations are explicit and bounded before building grids', async () => {
+  const valid = sourceInput();
+  for (const gasSources of [null, {}, { ...valid, components: [] }, { ...valid, components: Array(129).fill(valid.components[0]) },
+    { ...valid, waterSpecies: undefined }, { ...valid, waterSpecies: '' }, { ...valid, phase: 'equilibrium' },
+    { ...valid, phase: 'liquid-water' }, { ...valid, components: [{ ...valid.components[0], nasa9Pack: new Uint8Array() }] },
+    { ...valid, components: [{ ...valid.components[0], speciesPack: [1, 2] }] }]) {
+    const result = await run(sourceRecord, { gasSources });
+    assert.equal(result.messages.at(-1).type, 'error');
+    assert.equal(result.calls.length, 0);
+  }
+  for (const record of [undefined, '300 100000 0', 'mixture 300 100000 mole 1 N2 1']) {
+    const result = await run(record, { gasSources: valid });
+    assert.equal(result.messages.at(-1).type, 'error');
+    assert.equal(result.calls.length, 0);
+  }
+  const wet = await run(sourceRecord, { gasSources: { ...valid, phase: 'liquid-water', waterSpecies: 'custom-water' } });
+  assert.equal(wet.messages.at(-1).type, 'ready');
+  assert.ok(wet.calls.every(call => call.at(-2) === 'custom-water' && call.at(-1) === 'liquid-water'));
 });
 
 test('source viscosity selection and orientations reach every actual constructor path', async () => {

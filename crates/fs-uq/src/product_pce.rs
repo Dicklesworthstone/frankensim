@@ -1,6 +1,6 @@
-//! Product Gaussian polynomial chaos with physical callbacks and held-out data.
+//! Product polynomial chaos with physical callbacks and held-out data.
 //!
-//! A fixed Philox design fits an orthonormal Hermite surrogate; disjoint later
+//! A fixed Philox design fits a Hermite/Legendre product surrogate; disjoint later
 //! ordinals measure its error against the physical model. Coefficient moments
 //! describe the surrogate, not a confidence interval or a certified model bound.
 //! Bead: `frankensim-extreal-program-f85xj.6.7`.
@@ -9,8 +9,9 @@ use core::fmt::Display;
 use fs_evidence::Color;
 use fs_la::factor::{Qr, lu, qr};
 
-use crate::pce::{PceModel, hermite_orthonormal, total_degree_basis_size, total_degree_indices};
+use crate::pce::{total_degree_basis_size, total_degree_indices};
 use crate::product_execution::sample_parameters;
+use crate::product_pce_model::{PceBasis, ProductPceModel};
 use crate::product_plan::admit_plan;
 use crate::product_qmc::summarize_replicates;
 use crate::{CorrelationModel, PropagationMethod, UncertaintyKind, UqPlan, UqStatus};
@@ -18,7 +19,7 @@ use crate::{CorrelationModel, PropagationMethod, UncertaintyKind, UqPlan, UqStat
 /// Fixed total-degree regression and a declared numerical conditioning limit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PceConfig {
-    /// Total Hermite degree, in 0..=8. All declared parameters supply germs.
+    /// Total polynomial degree, in 0..=8. All declared parameters supply germs.
     pub degree: usize,
     /// Prefix used for fitting, at least twice the total-degree basis size.
     /// Remaining calls in the original plan are held out; at least two remain.
@@ -43,7 +44,7 @@ impl PceConfig {
 /// Statistics available only after all fixed training and validation calls.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PceSummary {
-    /// Constant coefficient: expectation of the fitted Hermite polynomial.
+    /// Constant coefficient: expectation under the retained independent germ laws.
     pub surrogate_mean: f64,
     /// Sum of squared nonconstant coefficients, absent if not representable.
     /// This is response variance of the surrogate, not estimator variance.
@@ -72,7 +73,7 @@ pub struct PceReport {
     pub qoi_name: String,
     /// Immutable regression and conditioning choices.
     pub config: PceConfig,
-    /// Independent standard-normal germ dimension, in physical declaration order.
+    /// Independent germ dimension, in physical declaration order.
     pub germ_dimension: usize,
     /// Number of graded-lex total-degree basis terms.
     pub basis_terms: usize,
@@ -96,17 +97,19 @@ pub struct PceReport {
     pub rejection_reason: Option<String>,
 }
 
-/// Resumable physical-model execution for a Gaussian Hermite surrogate.
+/// Resumable physical-model execution for a law-aware product surrogate.
 ///
-/// Admission supports 1..=16 Gaussian parameters, degree <= 8, <= 128 basis
+/// Admission supports 1..=16 Gaussian/uniform parameters, degree <= 8, <= 128 basis
 /// terms and <= 65,536 total physical calls. Training work is capped at
-/// 16,777,216 row/term/term products. Independent or explicitly joint Gaussian
-/// laws, including singular laws and zero standard deviations, reuse product
-/// admission. Uniform marginals require a different basis and explicitly refuse.
+/// 16,777,216 row/term/term products. Independent mixtures and explicitly joint
+/// Gaussian laws reuse product admission, including singular laws and constant
+/// marginals. Unknown dependence and non-Gaussian correlated laws still refuse.
 ///
 /// The independent germs use the existing Philox seed/kernel/ordinal sampler.
-/// Physical inputs are `mean_i + sigma_i * (L * germ)_i`, with the admitted
-/// numerical correlation factor L (identity for independence). Germ sensitivity
+/// Gaussian germs use Hermite polynomials; uniform [0,1] germs use shifted
+/// Legendre polynomials. Physical Gaussian inputs are `mean_i + sigma_i *
+/// (L * germ)_i`; uniform inputs use the original convex endpoint interpolation.
+/// The admitted correlation factor L is identity for independence. Germ sensitivity
 /// of the returned model therefore need not describe physical-coordinate effects.
 /// The evaluator and its physical meaning must stay fixed through resumption.
 ///
@@ -119,6 +122,7 @@ pub struct PceExecution {
     plan: UqPlan,
     config: PceConfig,
     factor: Option<Vec<Vec<f64>>>,
+    basis: Vec<PceBasis>,
     germs: Vec<Vec<f64>>,
     indices: Vec<Vec<usize>>,
     design_scale: f64,
@@ -126,7 +130,7 @@ pub struct PceExecution {
     condition: f64,
     values: Vec<f64>,
     attempted: usize,
-    model: Option<PceModel>,
+    model: Option<ProductPceModel>,
     summary: Option<PceSummary>,
     status: UqStatus,
     failure: Option<String>,
@@ -145,15 +149,13 @@ impl PceExecution {
         let factor = admit_plan(&admitted)?;
         let dim = plan.parameters.len();
         if dim > 16 || config.degree > 8 || plan.budget_max_samples > 65_536 {
-            return Err("PCE supports 1..=16 Gaussian parameters, degree <=8 and <=65536 calls");
+            return Err("PCE supports 1..=16 Gaussian/uniform parameters, degree <=8 and <=65536 calls");
         }
-        if plan
-            .parameters
-            .iter()
-            .any(|p| !matches!(p.kind, UncertaintyKind::AleatoryGaussian { .. }))
-        {
-            return Err("Hermite product PCE requires Gaussian marginals; no law is substituted");
-        }
+        let basis: Vec<_> = plan.parameters.iter().map(|p| match p.kind {
+            UncertaintyKind::AleatoryGaussian { .. } => PceBasis::StandardNormal,
+            UncertaintyKind::AleatoryUniform { .. } => PceBasis::Uniform01,
+            _ => unreachable!("product admission requires Gaussian or uniform marginals"),
+        }).collect();
         if !config.max_condition_estimate.is_finite()
             || !(1.0..=1e8).contains(&config.max_condition_estimate)
         {
@@ -175,15 +177,17 @@ impl PceExecution {
         {
             return Err("PCE dense regression exceeds the bounded work envelope");
         }
-        // Use the existing physical sampler on a standard-normal independent
-        // plan to retain original seed/kernel/ordinal addressing without inverse
-        // transforms or division by a zero physical standard deviation.
+        // Preserve each distribution's draw order using the canonical sampler
+        // on standardized independent laws. No inverse transform or division
+        // by a zero standard deviation/interval width is needed.
         let mut germ_plan = admitted;
         germ_plan.correlation = CorrelationModel::Independent;
-        for parameter in &mut germ_plan.parameters {
-            parameter.kind = UncertaintyKind::AleatoryGaussian {
-                mean: 0.0,
-                std_dev: 1.0,
+        for (parameter, family) in germ_plan.parameters.iter_mut().zip(&basis) {
+            parameter.kind = match family {
+                PceBasis::StandardNormal => UncertaintyKind::AleatoryGaussian {
+                    mean: 0.0, std_dev: 1.0,
+                },
+                PceBasis::Uniform01 => UncertaintyKind::AleatoryUniform { lo: 0.0, hi: 1.0 },
             };
         }
         let mut germs = Vec::new();
@@ -203,7 +207,8 @@ impl PceExecution {
                 let value = index
                     .iter()
                     .zip(germ)
-                    .map(|(&degree, &x)| hermite_orthonormal(degree, x))
+                    .zip(&basis)
+                    .map(|((&degree, &x), &family)| family.value(degree, x))
                     .product::<f64>();
                 if !value.is_finite() {
                     return Err("PCE design basis overflowed");
@@ -247,6 +252,7 @@ impl PceExecution {
             plan: plan.clone(),
             config,
             factor,
+            basis,
             germs,
             indices,
             design_scale,
@@ -273,6 +279,12 @@ impl PceExecution {
         &self.germs
     }
 
+    /// Reference laws and polynomial families, available before any model call.
+    #[must_use]
+    pub fn basis(&self) -> &[PceBasis] {
+        &self.basis
+    }
+
     /// Accepted physical QoIs, in original ordinal order, including held-out data.
     #[must_use]
     pub fn observations(&self) -> &[f64] {
@@ -285,19 +297,20 @@ impl PceExecution {
         self.attempted
     }
 
-    /// Completed surrogate in independent standard-normal germ coordinates.
-    /// Existing `PceModel` evaluation, gradients and Sobol indices apply to this
-    /// surrogate; they are not certified derivatives or sensitivities of physics.
+    /// Completed surrogate bound to its independent germ laws. The returned
+    /// `ProductPceModel` supports evaluation, gradients and coefficient Sobol
+    /// indices; none is a certified derivative or sensitivity of physics.
     #[must_use]
-    pub fn model(&self) -> Option<&PceModel> {
+    pub fn model(&self) -> Option<&ProductPceModel> {
         (self.status == UqStatus::Complete)
             .then_some(self.model.as_ref())
             .flatten()
     }
 
-    /// Map a finite germ vector through the admitted physical Gaussian law.
+    /// Map a finite germ vector through the admitted physical probability law.
     /// This is the exact transformation used for every callback, also for
     /// singular joint laws; no inverse covariance or whitening is required.
+    /// Uniform coordinates must lie in [0,1], including for constant marginals.
     pub fn physical_parameters(&self, germ: &[f64]) -> Result<Vec<f64>, &'static str> {
         if germ.len() != self.plan.parameters.len() || germ.iter().any(|x| !x.is_finite()) {
             return Err("PCE germ must have the declared dimension and finite coordinates");
@@ -307,17 +320,20 @@ impl PceExecution {
             .iter()
             .enumerate()
             .map(|(i, parameter)| {
-                let UncertaintyKind::AleatoryGaussian { mean, std_dev } = parameter.kind else {
-                    unreachable!("admission requires Gaussian marginals")
-                };
-                let z = self
-                    .factor
-                    .as_ref()
-                    .map_or(germ[i], |l| (0..=i).map(|j| l[i][j] * germ[j]).sum());
-                let value = if std_dev == 0.0 {
-                    mean
-                } else {
-                    mean + std_dev * z
+                let value = match parameter.kind {
+                    UncertaintyKind::AleatoryGaussian { mean, std_dev } => {
+                        let z = self.factor.as_ref()
+                            .map_or(germ[i], |l| (0..=i).map(|j| l[i][j] * germ[j]).sum());
+                        if std_dev == 0.0 { mean } else { mean + std_dev * z }
+                    }
+                    UncertaintyKind::AleatoryUniform { lo, hi } => {
+                        let u = germ[i];
+                        if !(0.0..=1.0).contains(&u) {
+                            return Err("uniform PCE germs must lie in [0,1]");
+                        }
+                        if lo == hi { lo } else { (1.0 - u) * lo + u * hi }
+                    }
+                    _ => unreachable!("admission requires Gaussian or uniform marginals"),
                 };
                 if value.is_finite() {
                     Ok(value)
@@ -342,8 +358,10 @@ impl PceExecution {
             validation_samples_accepted: self.values.len().saturating_sub(self.config.training_samples),
             summary: if complete { self.summary.clone() } else { None },
             evidence_color: Color::Estimated {
-                estimator: if complete {
+                estimator: if complete && self.basis.iter().all(|&b| b == PceBasis::StandardNormal) {
                     "Gaussian Hermite surrogate with held-out physical diagnostics; no error or confidence bound"
+                } else if complete {
+                    "Hermite-Legendre product surrogate with held-out physical diagnostics; no error or confidence bound"
                 } else { "incomplete or refused PCE; no surrogate estimate" }.into(),
                 dispersion: f64::INFINITY,
             }, status: self.status, rejection_reason: self.failure.clone(),
@@ -458,15 +476,15 @@ impl PceExecution {
         if coefficients.iter().any(|c| !c.is_finite()) {
             return Err("PCE fitted coefficients are not representable");
         }
-        let model = PceModel {
-            indices: self.indices.clone(),
+        let model = ProductPceModel::new(
+            self.basis.clone(),
+            self.indices.clone(),
             coefficients,
-            dim: self.plan.parameters.len(),
-        };
+        )?;
         let (training_rmse, _) = residuals(&model, &self.germs[..n], &self.values[..n])?;
         let (validation_rmse, validation_mean_error) =
             residuals(&model, &self.germs[n..], &self.values[n..])?;
-        let surrogate_std_dev = scaled_norm(&model.coefficients[1..], 1.0);
+        let surrogate_std_dev = scaled_norm(&model.coefficients()[1..], 1.0);
         let surrogate_variance = surrogate_std_dev.and_then(|sd| {
             let variance = sd * sd;
             (variance.is_finite() && (variance > 0.0 || sd == 0.0)).then_some(variance)
@@ -494,13 +512,13 @@ impl PceExecution {
 }
 
 fn residuals(
-    model: &PceModel,
+    model: &ProductPceModel,
     germs: &[Vec<f64>],
     values: &[f64],
 ) -> Result<(f64, f64), &'static str> {
     let mut errors = Vec::with_capacity(values.len());
     for (germ, &value) in germs.iter().zip(values) {
-        let error = value - model.eval(germ);
+        let error = value - model.try_eval(germ)?;
         if !error.is_finite() {
             return Err("PCE prediction or physical residual is not representable");
         }

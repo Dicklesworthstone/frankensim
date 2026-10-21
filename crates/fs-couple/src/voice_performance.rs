@@ -27,6 +27,7 @@
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
 //! fold <two_mass|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
 //!      <k_couple_n_m> <damping_ratio> <rest_gap_m> <fold_length_m> <thickness_m>
+//!      [<thickness_upper_m>]      (the second viscous section; default 0.05 cm)
 //! tract_wall <surface_density_kg_m2> <stiffness_n_m3> <resistance_pa_s_m>   (optional)
 //! termination <flanged|unflanged|ideal_open>
 //! tract_source <identifier without spaces>
@@ -212,7 +213,11 @@ impl VoiceDescription {
                     once(&mut gas, record, key)?;
                 }
                 "fold" => {
-                    arity(&rest, 10, key)?;
+                    // Ten fields; an optional eleventh sets the upper-section thickness of the
+                    // viscous channel (default: Ishizaka-Flanagan's 0.05 cm, `FoldCard`).
+                    if rest.len() != 11 {
+                        arity(&rest, 10, key)?;
+                    }
                     let two_mass = match rest[0] {
                         "two_mass" => true,
                         "one_dof" => false,
@@ -228,6 +233,11 @@ impl VoiceDescription {
                         rest_gap_m: field(&rest, 7, "rest gap")?,
                         fold_length_m: field(&rest, 8, "fold length")?,
                         thickness_m: field(&rest, 9, "thickness")?,
+                        thickness_upper_m: if rest.len() == 11 {
+                            field(&rest, 10, "upper thickness")?
+                        } else {
+                            FoldCard::two_mass_standard().thickness_upper_m
+                        },
                         // Per-field provenance lives in the file's comments.
                         source: FoldCardSource::AuthoredEstimate,
                     };
@@ -394,6 +404,9 @@ impl VoiceDescription {
             self.microphone,
             medium,
         )?;
+        let passive_formants_hz = chart
+            .tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4)
+            .map_err(|e| format!("{e:?}"));
         let info = VoiceInfo {
             output_rate_hz: self.output_rate_hz,
             mechanics_rate_hz: mechanics_rate,
@@ -408,6 +421,7 @@ impl VoiceDescription {
             has_wall: self.wall.is_some(),
             mouth_flow_taps: receipt.n_fft,
             mouth_flow_rungs: receipt.rungs.len(),
+            passive_formants_hz,
         };
         Ok(VoicePerformance {
             island,
@@ -459,6 +473,13 @@ pub struct VoiceInfo {
     pub mouth_flow_taps: usize,
     /// Rungs the mouth-flow ladder traversed.
     pub mouth_flow_rungs: usize,
+    /// Passive resonances of exactly this tract, mouth load and wall: the
+    /// first four `|Z_in|` peaks seen from a closed glottis
+    /// ([`TractChart::tmm_formants_terminated`]), or why it refused. The
+    /// glottis opens and closes, so this is the rigid-end limit that the
+    /// formants of the radiated sound are compared with, not a prediction of
+    /// them.
+    pub passive_formants_hz: Result<Vec<f64>, String>,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -778,6 +799,39 @@ mod tests {
         let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
         let error = description.build().err().expect("licensing-first refusal");
         assert!(error.contains("tract chart refused"), "{error}");
+    }
+
+    #[test]
+    fn passive_formants_follow_the_declared_mouth_load() {
+        // Eight equal sections are a uniform tube of length L and radius a,
+        // closed at the glottis. Ideal-open mouth: F1 = c / (4 L). A flanged
+        // mouth lengthens the tube by its end correction, about 0.8216 a.
+        let gas = GasState::try_new_moist_air(310.15, 101_325.0, 1.0).expect("gas");
+        let area = 2.5e-4;
+        let sections = vec![TractSection { area_m2: area, length_m: 0.02 }; 8];
+        let chart = TractChart::try_new(sections, "uniform-test-fixture", "test fixture, not data")
+            .expect("chart");
+        let length = 0.16;
+        let radius = (area / core::f64::consts::PI).sqrt();
+        let ideal = chart
+            .tmm_formants_terminated(&gas, None, Termination::IdealOpen, 1)
+            .expect("ideal open")[0];
+        let flanged = chart
+            .tmm_formants_terminated(&gas, None, Termination::FlangedOpen, 1)
+            .expect("flanged")[0];
+        let ideal_expected = gas.sound_speed / (4.0 * length);
+        let flanged_expected = gas.sound_speed / (4.0 * (length + 0.8216 * radius));
+        assert!((ideal / ideal_expected - 1.0).abs() < 0.02, "ideal F1 {ideal} vs {ideal_expected}");
+        assert!(
+            (flanged / flanged_expected - 1.0).abs() < 0.02,
+            "flanged F1 {flanged} vs {flanged_expected}"
+        );
+        assert!(flanged < ideal, "an end correction must lower the resonance");
+        assert_eq!(
+            chart.tmm_formants(&gas, None, 1).expect("legacy entry point"),
+            vec![ideal],
+            "the original oracle is the ideal-open case, unchanged"
+        );
     }
 
     #[test]

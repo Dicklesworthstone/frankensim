@@ -11,10 +11,26 @@ use fs_exec::CancelGate;
 use fs_plate::shell::{modes_shell, mitc::{assemble_mitc3p, MitcBudget, NodalDirectors,
     ShellConstraint, ShellMass, viscosity::{project_viscosity, projection_terms}}};
 
+/// Largest retained mode count one shell body or shell assembly reduction admits. It bounds the
+/// stored mode vectors and the dense modal damping factor; the cold projection work still has to fit
+/// the caller's `max_projection_terms`, which is the cost governor, and the mesh must actually hold
+/// that many modes inside its eigenvalue window.
+pub const MAX_SHELL_MODES: usize = 256;
+// The shell connection projection inside fs-plate admits at most this many physical modes; a larger ceiling here
+// would pass the check below and fail deep inside the eigen reduction.
+const _: () = assert!(MAX_SHELL_MODES <= fs_plate::shell::mitc::connections::MAX_CONNECTION_MODES);
+
+/// Whether `n` retained modes fit a declared `max_modes` that is itself within
+/// `1..=`[`MAX_SHELL_MODES`]. Shared by the single-body and the assembly reductions.
+#[must_use]
+pub const fn shell_mode_budget_admits(n: usize, max_modes: usize) -> bool {
+    n >= 1 && n <= max_modes && max_modes >= 1 && max_modes <= MAX_SHELL_MODES
+}
+
 /// Explicit cold projection resources and passive-channel coordinate scaling.
 #[derive(Clone, Copy, Debug)]
 pub struct ShellProjectionBudget {
-    /// Complete requested mode count must fit (1..=64).
+    /// Complete requested mode count must fit (1..=[`MAX_SHELL_MODES`]).
     pub max_modes: usize,
     /// Condensation, all mode/force/volume projections and cubic factor work.
     pub max_projection_terms: usize,
@@ -110,7 +126,7 @@ impl ResolvedShearShell {
         let n=options.n_modes;
         let budget=options.projection_budget;
         let nodes=self.mesh.nodes.len(); let elements=self.mesh.tris.len();
-        if n==0 || n>budget.max_modes || !(1..=64).contains(&budget.max_modes)
+        if !shell_mode_budget_admits(n,budget.max_modes)
             || !budget.reference_resistance_n_s_m.is_finite() || budget.reference_resistance_n_s_m<=0.0
             || !options.eigenvalue_window.0.is_finite() || !options.eigenvalue_window.1.is_finite()
             || options.eigenvalue_window.0<0.0 || options.eigenvalue_window.1<=options.eigenvalue_window.0
@@ -195,5 +211,29 @@ impl ResolvedShearShell {
         poll(gate)?;
         Ok(MaterialShellImage { source:self.clone(),physical_modes,force_ports:projected,
             volume_shapes,cavity_volume_shapes,intervals,radiators,damping,interface_columns })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_budget_admits_exactly_up_to_the_ceiling() {
+        // The former 64-mode limit still passes; the new ceiling passes; one more does not.
+        assert!(shell_mode_budget_admits(1, 1));
+        assert!(shell_mode_budget_admits(64, 64));
+        assert!(shell_mode_budget_admits(65, 65));
+        assert!(shell_mode_budget_admits(MAX_SHELL_MODES, MAX_SHELL_MODES));
+        assert!(!shell_mode_budget_admits(MAX_SHELL_MODES + 1, MAX_SHELL_MODES + 1));
+    }
+
+    #[test]
+    fn mode_budget_refuses_an_empty_request_or_one_above_its_own_declaration() {
+        assert!(!shell_mode_budget_admits(0, MAX_SHELL_MODES));
+        assert!(!shell_mode_budget_admits(3, 2));
+        assert!(!shell_mode_budget_admits(1, 0));
+        // A declared budget above the ceiling is refused even for a small request.
+        assert!(!shell_mode_budget_admits(1, MAX_SHELL_MODES + 1));
     }
 }

@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	tinwhistle-clare-d-davies2006
+maker	Clare Whistle (Irish maker); measured by P. O. A. L. Davies, J. Pinho and E. J. English, ISVR, University of Southampton
+model	Clare D tin whistle: brass tube with a plastic mouthpiece carrying the flue, window and wedge, six finger holes, tuned to D5
+serial	unstated
+year	2006 (measurement paper)
+system	six-hole fipple whistle, cylindrical brass bore, rectangular tapered flue channel, rectangular window, flat wedge
+holder	none: published measurements of one whistle
+reference_state	played
+environment	anechoic room, air at 20 C, regulated metered air supply; humidity and pressure unstated
+source_ids	isvr-davies-2006-tin-whistle;dafx-timoney-2004-tin-whistle-fingering
+target_relation	one real whistle with published geometry and published flow rates per note; there is no recording of this whistle and no licensed reference recording exists yet (bead pexfp.219), so renders are listened to, not graded
+hole_index	hole-01 is nearest the open end and hole-06 nearest the mouth, as in the paper; axial positions are measured from the centre of the window (the generator) along the bore toward the open end, +x toward the open end
+pitch_standard	D5 sounds at 587 Hz with all holes covered at 6.2 l/min (paper Table 1); equal-tempered values of the D major scale are used

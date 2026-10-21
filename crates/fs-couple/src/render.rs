@@ -34,6 +34,7 @@ pub mod schedule;
 pub mod plate;
 /// Realized resolution and explicit solver-tolerance study seams.
 pub mod ladder;
+mod scattering;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
@@ -232,6 +233,23 @@ mod inlet_geometry_tests {
             "network voice differs from the duct voice by {error:.3e}"
         );
     }
+}
+
+/// A reed-lay contact that replaces the default slit lay of a massive reed:
+/// the power law `stiffness * p^alpha` [N] in the penetration `p = onset_m - y`
+/// of the opening `y`, with Hunt-Crossley loss `loss_s_per_m` [s/m]. A real
+/// mouthpiece lay is curved, so the reed meets it at the positive opening
+/// `onset_m` and the contact force is already carrying load when the slit shuts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReedLay {
+    /// Power-law stiffness [N/m^alpha].
+    pub(crate) stiffness: f64,
+    /// Power-law exponent, at least 1.
+    pub(crate) alpha: f64,
+    /// Opening [m] below which the reed touches the lay.
+    pub(crate) onset_m: f64,
+    /// Hunt-Crossley internal loss [s/m].
+    pub(crate) loss_s_per_m: f64,
 }
 
 /// One reed-on-a-characteristic-line voice: the `realize_reed_bore`
@@ -602,6 +620,32 @@ impl ReedBoreVoice {
         &mut self.plates
     }
 
+    /// Replace the default slit lay by a measured one ([`ReedLay`]). The voice
+    /// must not have advanced, the reed must be massive, and the lay must start
+    /// below the rest opening so the reed's initial state is out of contact.
+    ///
+    /// # Errors
+    /// A massless reed, an advanced voice, an onset at or above the rest
+    /// opening, or contact admission (negative stiffness or loss, exponent < 1).
+    pub(crate) fn set_lay(&mut self, lay: ReedLay) -> Result<(), AcousticRealizeError> {
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a measured lay needs a massive reed and a voice that has not advanced",
+            });
+        }
+        if lay.onset_m.is_nan() || lay.onset_m >= self.reed.rest_opening_m {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the lay onset must lie below the reed's rest opening",
+            });
+        }
+        let obstacle =
+            crate::unilateral_contact::slit_lay_with_onset(lay.stiffness, lay.alpha, lay.onset_m)
+                .and_then(|o| o.with_internal_loss(lay.loss_s_per_m))
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        self.lay = Some(obstacle);
+        Ok(())
+    }
+
     /// Replace the reed's held blowing pressure. Applied between blocks
     /// only (the render context enforces the boundary); the change is a
     /// pure input-parameter move — no stored state depends on it, so the
@@ -628,9 +672,9 @@ impl ReedBoreVoice {
 
     /// Advance exactly `out.len()` samples, writing observer pascals.
     ///
-    /// The per-sample sequence is byte-for-byte the one-shot realizer's
-    /// loop body; a block boundary performs no arithmetic, which is the
-    /// whole block-size-invariance contract.
+    /// Source pressure, flow and reflected wave use the same sample of the
+    /// original line, including instantaneous reflection. The one-shot path
+    /// shares this loop; a block boundary performs no arithmetic.
     ///
     /// # Errors
     /// Solver or finite-set refusals; on refusal the voice must be
@@ -639,23 +683,11 @@ impl ReedBoreVoice {
         for slot in out.iter_mut() {
             let t = self.sample_index as f64 * self.dt;
             let p_m = blowing_envelope(self.reed, t);
-            let p_minus = self.line.incoming();
+            let boundary = self.line.boundary_response().map_err(|_|
+                AcousticRealizeError::Reed { what: "characteristic boundary left the finite set" })?;
             let u_body = self.plates.volume_velocity();
             let p_plus = if self.reed.mass_kg > 0.0 {
-                let (pp, y, v) = crate::reed_bore::step_massive_reed(
-                    self.reed,
-                    self.rho,
-                    self.zc,
-                    p_minus,
-                    p_m,
-                    self.reed_y,
-                    self.reed_v,
-                    self.dt,
-                    u_body,
-                    self.lay.as_ref(),
-                    self.solver_mode,
-                    &mut self.fast_stats,
-                )?;
+                let (pp, y, v) = self.step_massive_scattering(boundary, p_m, u_body)?;
                 self.reed_y = y;
                 self.reed_v = v;
                 pp
@@ -665,8 +697,8 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        0.0,
-                        p_minus,
+                        boundary.direct,
+                        boundary.history,
                         p_m,
                         self.p_plus_prev,
                         u_body,
@@ -675,8 +707,8 @@ impl ReedBoreVoice {
                         self.reed,
                         self.rho,
                         self.zc,
-                        0.0,
-                        p_minus,
+                        boundary.direct,
+                        boundary.history,
                         p_m,
                         self.p_plus_prev,
                         u_body,
@@ -688,7 +720,7 @@ impl ReedBoreVoice {
             self.p_plus_prev = p_plus;
             if self.reed.mass_kg == 0.0 {
                 let residual = crate::reed_bore::reed_flow_mismatch(
-                    self.reed, self.rho, self.zc, 0.0, p_minus, p_m, p_plus, u_body,
+                    self.reed, self.rho, self.zc, boundary.direct, boundary.history, p_m, p_plus, u_body,
                 ).abs();
                 self.junction_residual_max = Some(self.junction_residual_max.unwrap_or(0.0).max(residual));
             }
@@ -720,15 +752,15 @@ impl ReedBoreVoice {
                 / (4.0 * core::f64::consts::PI * self.listener_m * self.sound_speed);
             *slot = p_obs;
             self.sample_index += 1;
-            // Same incoming characteristic used by the junction solve, before
-            // push changes the line history. This is the actual boundary work,
-            // not an inferred stored-energy or filter-dissipation account.
-            let volume = self.dt*(p_plus-p_minus)/self.zc;
+            // Current accepted incoming wave, matching the affine boundary used
+            // by the source up to convolution summation roundoff. This is port
+            // work, not an inferred line storage or filter-dissipation account.
+            let volume = self.dt*(p_plus-p_minus_now)/self.zc;
             self.ports.accept(crate::port_adoption::StepAccount {
                 tick:self.sample_index,duration_s:self.dt,storage_change_j:None,
                 loss_j:None,included_work_j:0.0,entropy_change_j_k:0.0,tolerance_j:None,
                 unavailable:Some("ReedBoreVoice/DelayedFilter has no physical line storage/loss owner or energy tolerance [J]"),
-            },[crate::port_adoption::PortTransfer::work((p_plus+p_minus)*volume,true)]);
+            },[crate::port_adoption::PortTransfer::work(p_bore*volume,true)]);
         }
         Ok(())
     }

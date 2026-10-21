@@ -10,6 +10,10 @@
 //! Magnetic geometry is a single uniform gap with a negligible-reluctance return
 //! path; it does not describe a solenoid changing the length of its entire coil.
 
+/// Source-bound layered axial support, on the same gap and momentum coordinates.
+pub mod support;
+use support::AxialSupport;
+
 use fs_matdb::EvaluationDecision;
 use fs_material::field_storage::{ELECTRIC_PERMITTIVITY_PROPERTY, MAGNETIC_PERMEABILITY_PROPERTY,
     ResolvedCapacitor, ResolvedInductor};
@@ -30,6 +34,7 @@ use super::{MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, Materia
 pub struct MaterialFieldMotion {
     circuit: MaterialCircuit,
     body: ResolvedBody,
+    support: Option<AxialSupport>,
     storage_slot: usize,
     coordinate_slot: usize,
     gap_limits_m: [f64; 2],
@@ -55,13 +60,16 @@ pub struct FieldMotionStep {
     pub native: StepRecord,
     /// Total capacitor/inductor energy before and after the coupled step [J].
     pub electrical_energy_j: [f64; 2],
-    /// Actual moving body's kinetic energy before and after the step [J].
+    /// Body plus optional axial member's consistent kinetic energy [J].
     pub kinetic_energy_j: [f64; 2],
+    /// Original layered support's elastic energy before and after the step [J].
+    /// Zero without a support; this reversible store is never deposited as heat.
+    pub elastic_energy_j: [f64; 2],
     /// Work supplied through original electrical ports [J].
     pub electrical_supply_j: f64,
     /// External mechanical work, force times actual gap change [J].
     pub mechanical_supply_j: f64,
-    /// Work transferred from electrical storage to the body [J]. This is internal
+    /// Work transferred from electrical storage to body/support motion [J]. This is internal
     /// exchange, already present in both storage changes; it is not extra heat.
     pub field_work_on_body_j: f64,
     /// Existing material conductor's branch-local heat at native terminal efforts.
@@ -147,6 +155,31 @@ impl MaterialFieldMotion {
     pub fn new(circuit: MaterialCircuit, branch: usize, body: ResolvedBody,
         velocity_m_s: f64, gap_limits_m: [f64; 2]) -> Result<Self, MaterialCircuitError>
     {
+        Self::build(circuit, branch, body, None, velocity_m_s, gap_limits_m)
+    }
+
+    /// Couple a layered return member to the SAME electrical/mechanical step.
+    /// Its original section owns elastic force and stored energy; the member's
+    /// consistent axial inertia is added to the canonical guided-body mass.
+    /// Source/geometry substitutions therefore change both dynamics and the
+    /// electrical back-reaction without a separate force or spring integrator.
+    ///
+    /// All original field restrictions apply. The member has a fixed far end and
+    /// a prescribed linear axial displacement shape. Its temperature/prestrain
+    /// stay frozen; no support damping, heat, buckling or elastic waves are added.
+    /// Construct the complete assembly before advancing history: attaching a
+    /// member to a live state would require an explicit energy/momentum transfer.
+    pub fn new_with_support(circuit: MaterialCircuit, branch: usize, body: ResolvedBody,
+        support: AxialSupport, velocity_m_s: f64, gap_limits_m: [f64; 2])
+        -> Result<Self, MaterialCircuitError>
+    {
+        Self::build(circuit, branch, body, Some(support), velocity_m_s, gap_limits_m)
+    }
+
+    fn build(circuit: MaterialCircuit, branch: usize, body: ResolvedBody,
+        support: Option<AxialSupport>, velocity_m_s: f64, gap_limits_m: [f64; 2])
+        -> Result<Self, MaterialCircuitError>
+    {
         let slot = circuit.storage.iter().position(|source| source.branch == branch)
             .ok_or_else(|| invalid("moving field requires an original material storage binding"))?;
         let element = &circuit.storage[slot].element;
@@ -162,7 +195,8 @@ impl MaterialFieldMotion {
         if gap_limits_m.iter().any(|gap| !positive(scale / gap) || !positive(gap / scale)) {
             return Err(invalid("field storage is unrepresentable within the declared gap domain"));
         }
-        let mass = body.inertia().mass();
+        if let Some(support) = &support { support.force_and_energy(gap)?; }
+        let mass = body.inertia().mass() + support.as_ref().map_or(0.0, AxialSupport::modal_mass_kg);
         let momentum = mass * velocity_m_s;
         if !positive(mass) || !positive(1.0 / mass) || !momentum.is_finite()
             || (velocity_m_s != 0.0 && momentum == 0.0) {
@@ -173,7 +207,7 @@ impl MaterialFieldMotion {
                 (MaterialStorageElement::Capacitor(_), Branch::Capacitor { .. })
                 | (MaterialStorageElement::Inductor(_), Branch::Inductor { .. }))
         }).count();
-        let result = Self { circuit, body, storage_slot: slot, coordinate_slot,
+        let result = Self { circuit, body, support, storage_slot: slot, coordinate_slot,
             gap_limits_m, momentum_kg_m_s: momentum };
         result.field_energy()?;
         result.kinetic_energy()?;
@@ -185,6 +219,19 @@ impl MaterialFieldMotion {
     pub const fn circuit(&self) -> &MaterialCircuit { &self.circuit }
     /// Canonical regional geometry, material receipts and spatial inertia.
     pub const fn body(&self) -> &ResolvedBody { &self.body }
+    /// Optional member, retaining every original section layer and source path.
+    pub const fn support(&self) -> Option<&AxialSupport> { self.support.as_ref() }
+    /// Body mass plus the member's consistent axial inertia [kg].
+    pub fn generalized_mass_kg(&self) -> f64 {
+        self.body.inertia().mass() + self.support.as_ref().map_or(0.0, AxialSupport::modal_mass_kg)
+    }
+    /// Stored elastic energy of the original support at the accepted gap [J].
+    pub fn elastic_energy_j(&self) -> Result<f64, MaterialCircuitError> {
+        match &self.support {
+            Some(support) => Ok(support.force_and_energy(self.gap_m())?.1),
+            None => Ok(0.0),
+        }
+    }
     /// Original material snapshot and CURRENT geometry of the moving element.
     pub fn element(&self) -> &MaterialStorageElement {
         &self.circuit.storage[self.storage_slot].element
@@ -210,10 +257,10 @@ impl MaterialFieldMotion {
             MaterialStorageElement::Inductor(inductor) => inductor.path_length_m(),
         }
     }
-    /// Canonical translational momentum [kg m/s].
+    /// Generalized momentum of body and optional axial member [kg m/s].
     pub const fn momentum_kg_m_s(&self) -> f64 { self.momentum_kg_m_s }
     /// Physical endpoint velocity [m/s], positive toward increasing separation.
-    pub fn velocity_m_s(&self) -> f64 { self.momentum_kg_m_s / self.body.inertia().mass() }
+    pub fn velocity_m_s(&self) -> f64 { self.momentum_kg_m_s / self.generalized_mass_kg() }
     /// Instantaneous fixed-charge/flux-linkage force `-dH/dd` [N].
     /// This is `-q^2/(2 epsilon A)` or `-lambda^2/(2 mu N^2 A)`.
     /// Its discrete-gradient counterpart, not this endpoint sample, drives a step.
@@ -253,8 +300,9 @@ impl MaterialFieldMotion {
     /// The moving element's quadratic term is REPLACED by its gap-dependent
     /// field energy: `q^2 d/(2 eps A)` or `lambda^2 d/(2 mu N^2 A)`.
     /// The original circuit's J/R/G stamps, transformer constraints and remaining
-    /// storage are retained. No force gain, separate circuit integrator, spring
-    /// constant or manually overridden inertial mass is introduced.
+    /// storage are retained. An optional layered support adds its original
+    /// material energy and consistent inertia. No force gain, separate circuit
+    /// integrator, authored spring constant or overridden mass is introduced.
     ///
     /// The endpoint must also admit its unchanged proposed charge/flux under the
     /// original algebraic constraints at the NEW geometry. Incompatible ideal
@@ -314,17 +362,18 @@ impl MaterialFieldMotion {
         }
         let electrical = [law.electrical_energy(&x0), law.electrical_energy(&record.x)];
         let kinetic = [law.kinetic_energy(&x0), law.kinetic_energy(&record.x)];
+        let elastic = [law.elastic_energy(&x0), law.elastic_energy(&record.x)];
         let nodes: Vec<_> = dae.node_potential_index.iter().map(|&i| map(i)).collect();
         let (heat, contact_heat, heat_j, residual) = account_step(&graph, &resistors, &contacts, &nodes, &x0, &record,
-            electrical[0]+kinetic[0], electrical[1]+kinetic[1], dt, controls, &mut cancelled)?;
+            electrical[0]+kinetic[0]+elastic[0], electrical[1]+kinetic[1]+elastic[1], dt, controls, &mut cancelled)?;
         let electrical_supply = dt * input.electrical_ports.iter().zip(&record.y)
             .map(|(&u, &y)| u*y).sum::<f64>();
         let mechanical_supply = input.external_force_n * (gap-self.gap_m());
         let native_mechanical_supply = dt * input.external_force_n * record.y[dae.ports];
-        let field_work = kinetic[1]-kinetic[0]-mechanical_supply;
+        let field_work = kinetic[1]-kinetic[0]+elastic[1]-elastic[0]-mechanical_supply;
         let electrical_work = electrical_supply-heat_j-(electrical[1]-electrical[0]);
         let total_residual = (electrical[1]-electrical[0])+(kinetic[1]-kinetic[0])
-            +heat_j-electrical_supply-mechanical_supply;
+            +(elastic[1]-elastic[0])+heat_j-electrical_supply-mechanical_supply;
         if [electrical_supply, mechanical_supply, native_mechanical_supply, field_work,
             electrical_work, total_residual].iter().any(|v| !v.is_finite())
             || (mechanical_supply-native_mechanical_supply).abs() > controls.energy_tolerance_j
@@ -346,15 +395,16 @@ impl MaterialFieldMotion {
             dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             dae.charge_index.iter().map(|&i| record.x[i]).collect(), input.electrical_ports)?;
         circuit.storage = storage;
-        let model = Self { circuit, body: self.body.clone(), storage_slot: self.storage_slot,
+        let model = Self { circuit, body: self.body.clone(), support: self.support.clone(), storage_slot: self.storage_slot,
             coordinate_slot: self.coordinate_slot, gap_limits_m: self.gap_limits_m,
             momentum_kg_m_s: record.x[nd+1] };
         model.field_energy()?;
         model.kinetic_energy()?;
         model.field_force_n()?;
+        model.elastic_energy_j()?;
         poll(&mut cancelled)?;
         Ok(FieldMotionCandidate { model, step: FieldMotionStep { native: record,
-            electrical_energy_j: electrical, kinetic_energy_j: kinetic,
+            electrical_energy_j: electrical, kinetic_energy_j: kinetic, elastic_energy_j: elastic,
             electrical_supply_j: electrical_supply, mechanical_supply_j: mechanical_supply,
             field_work_on_body_j: field_work, resistors: heat, contacts: contact_heat, heat_j,
             energy_residual_j: total_residual } })
@@ -394,8 +444,8 @@ impl MaterialFieldMotion {
         q[coordinate_index*nd+coordinate_index] = 0.0;
         let law = GapStorage { other: QuadraticStorage::new(q, nd).map_err(phs)?,
             coordinate_index, gap_index: old_d, momentum_index: old_d+1,
-            mass: self.body.inertia().mass(), scale: coupling_scale(self.element())?,
-            limits: self.gap_limits_m };
+            mass: self.generalized_mass_kg(), scale: coupling_scale(self.element())?,
+            limits: self.gap_limits_m, support: self.support.clone() };
         let (old_j, old_r, old_g) = dae.system.structure();
         let (mut j, mut r, mut g) = (vec![0.0; n*n], vec![0.0; n*n], vec![0.0; n*m]);
         let map = |i: usize| if i < old_d { i } else { i+2 };
@@ -424,6 +474,7 @@ struct GapStorage {
     mass: f64,
     scale: f64,
     limits: [f64; 2],
+    support: Option<AxialSupport>,
 }
 impl GapStorage {
     fn electrical_energy(&self, x: &[f64]) -> f64 {
@@ -433,11 +484,15 @@ impl GapStorage {
     fn kinetic_energy(&self, x: &[f64]) -> f64 {
         0.5*x[self.momentum_index]*(x[self.momentum_index]/self.mass)
     }
+    fn elastic_energy(&self, x: &[f64]) -> f64 {
+        self.support.as_ref().map_or(0.0, |support| support.force_and_energy(x[self.gap_index])
+            .map_or(f64::NAN, |(_, energy)| energy))
+    }
 }
 impl Storage for GapStorage {
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         if !within(x[self.gap_index], self.limits) { return f64::NAN; }
-        self.electrical_energy(x)+self.kinetic_energy(x)
+        self.electrical_energy(x)+self.kinetic_energy(x)+self.elastic_energy(x)
     }
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         if !within(x[self.gap_index], self.limits) { out.fill(f64::NAN); return; }
@@ -446,15 +501,25 @@ impl Storage for GapStorage {
         out[self.coordinate_index] += coordinate/(self.scale/x[self.gap_index]);
         out[self.gap_index] += 0.5*coordinate*(coordinate/self.scale);
         out[self.momentum_index] += x[self.momentum_index]/self.mass;
+        if let Some(support) = &self.support {
+            match support.force_and_energy(x[self.gap_index]) {
+                Ok((force, _)) => out[self.gap_index] -= force,
+                Err(_) => out.fill(f64::NAN),
+            }
+        }
     }
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], _: &[f64]) -> Option<f64> {
         if !within(a[self.gap_index], self.limits) || !within(b[self.gap_index], self.limits) {
             return Some(f64::NAN);
         }
+        if !self.elastic_energy(a).is_finite() || !self.elastic_energy(b).is_finite() {
+            return Some(f64::NAN);
+        }
         let dq = b[self.coordinate_index]-a[self.coordinate_index];
         let dd = b[self.gap_index]-a[self.gap_index];
         // Exact cubic midpoint remainder. The retained circuit and kinetic
-        // terms are quadratic and contribute zero; avoid subtracting large Hs.
+        // and frozen-prestrain support terms are quadratic and contribute zero;
+        // avoid subtracting large Hs.
         Some(0.125*dq*(dq/self.scale)*dd)
     }
 }

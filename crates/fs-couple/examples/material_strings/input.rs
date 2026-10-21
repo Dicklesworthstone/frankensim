@@ -9,6 +9,15 @@ pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
+/// Retained body modes a `body` record may request. Flat plate bodies keep [`MAX_PLATE_BODY_MODES`].
+pub const MAX_BODY_MODES: usize = 128;
+pub const MAX_PLATE_BODY_MODES: usize = 16;
+/// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The shared exact
+/// propagation holds at most 42 of them as one dense block; a larger network needs the explicit
+/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (512). The network
+/// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`].
+pub const MAX_TOTAL_MODES: usize = 512;
+const _: () = assert!(MAX_TOTAL_MODES <= fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES);
 pub const MAX_EVENTS: usize = 16_384;
 pub const MAX_CONTROLS: usize = 262_144;
 pub const MAX_WORK: u64 = 16_777_216;
@@ -18,6 +27,7 @@ pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
     /// With fixed extension, L0 is stress-free at this explicit reference T.
+    /// Bonded layers share that reference but retain their own expansion curves.
     /// None preserves the original same-temperature mechanical prescription.
     pub thermal_reference_kelvin: Option<f64>,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
@@ -56,6 +66,7 @@ pub struct Spec {
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
+    pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -96,7 +107,7 @@ impl Spec {
         let gas = *gas_record.state();
         let mut row = r.row("body")?;
         let body = Body { pack: row.path()?, length: row.positive()?, width: row.positive()?,
-            thickness: row.positive()?, modes: row.count(16)?, listener: row.positive()? };
+            thickness: row.positive()?, modes: row.count(MAX_BODY_MODES)?, listener: row.positive()? };
         row.end()?;
         let mut row = r.row("strings")?; let count = row.count(8)?; row.end()?;
         if count == 0 || body.modes == 0 { return Err("nonempty material strings and body modes required".into()); }
@@ -161,9 +172,8 @@ impl Spec {
                 let string = row.count(count - 1)?; let reference = row.positive()?; row.end()?;
                 let wire = &mut strings[string];
                 if wire.thermal_reference_kelvin.is_some()
-                    || !matches!(wire.prestress, StringPrestress::FixedExtension { .. })
-                    || !matches!(&wire.section, WireSection::Homogeneous) {
-                    return Err("thermal support requires one declaration per homogeneous fixed-extension string".into());
+                    || !matches!(wire.prestress, StringPrestress::FixedExtension { .. }) {
+                    return Err("thermal support requires one declaration per fixed-extension string".into());
                 }
                 wire.thermal_reference_kelvin = Some(reference);
             }
@@ -232,6 +242,27 @@ impl Spec {
                 axial_rigidity_n: 0.0, maximum_slope: slope,
             }.validate()?;
             Some((slope, config))
+        } else { None };
+        let longitudinal_waves = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-waves") {
+            let mut row = r.row("longitudinal-waves")?;
+            let maximum_slope = row.positive()?;
+            let maximum_strain = row.positive()?;
+            let config = NonlinearModalConfig {
+                max_iterations: row.count(128)?, maximum_generalized_force: row.positive()?,
+                force_absolute_tolerance: row.positive()?, force_relative_tolerance: row.positive()?,
+            };
+            let count = row.count(32)?;
+            let mut axial_modes = Vec::with_capacity(count);
+            for _ in 0..count { axial_modes.push(row.count(1024)?); }
+            row.end()?;
+            let resolution = LongitudinalStringResolution { axial_modes, maximum_slope, maximum_strain };
+            resolution.validate()?;
+            config.validate()?;
+            if geometric_stretching.is_some() {
+                return Err("longitudinal waves replace geometric stretching; select one strain law".into());
+            }
+            Some((resolution, config))
         } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
@@ -372,8 +403,8 @@ impl Spec {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(schedule.as_bytes())?;
-        if geometric_stretching.is_some() && initialization == ForceInitialization::StaticPreload {
-            return Err("geometric stretching requires retained initial state; nonlinear static preload is not implemented".into());
+        if (geometric_stretching.is_some() || longitudinal_waves.is_some()) && initialization == ForceInitialization::StaticPreload {
+            return Err("nonlinear string strain requires retained initial state; nonlinear static preload is not implemented".into());
         }
         if schedule.to_canonical_bytes() != text.split_once("\nschedule\n").unwrap().1.as_bytes()
             || schedule.control_rate_hz > rate || schedule.tracks().is_empty() || schedule.tracks().len() > 16 {
@@ -405,7 +436,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
+            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }
@@ -457,14 +488,23 @@ impl Spec {
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
         }
+        if let Some((resolution, config)) = &self.longitudinal_waves {
+            resolution.validate()?;
+            config.validate()?;
+            if self.geometric_stretching.is_some() {
+                return Err("longitudinal waves and geometric stretching cannot both supply strain energy".into());
+            }
+            modes = resolution.axial_modes.len().checked_mul(self.strings.len())
+                .and_then(|axial| modes.checked_add(axial)).ok_or("complete longitudinal mode count overflow")?;
+        }
         if let Some(budget) = self.prepared_linear {
             budget.validate()?;
             if modes > budget.max_modes {
                 return Err("complete instrument exceeds the explicit prepared mode budget".into());
             }
         }
-        if modes == 0 || modes > MAX_MODES {
-            return Err("complete instrument, including gas memory, exceeds 128 modes".into());
+        if modes == 0 || modes > MAX_TOTAL_MODES {
+            return Err(format!("complete instrument, including gas memory, exceeds {MAX_TOTAL_MODES} modes").into());
         }
         if links > MAX_MODAL_CONNECTIONS {
             return Err("complete instrument exceeds the shared modal connection ceiling".into());

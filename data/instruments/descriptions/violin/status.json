@@ -7,8 +7,9 @@
  "physics_present": [
   "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
   "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
-  "a point bow driven by a canonical gesture schedule: on the string at rest, constant acceleration to a bow speed, constant force, then lift",
-  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved"
+  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved",
+  "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); the bow force is chosen from the card's own bow-force sweep, in the middle of its longest run of Helmholtz motion, with no recording involved",
+  "bow-force sweeps of every card with a rigid bridge (bowed_card_sweep): one flyback per period with slip fraction near the bow-to-bridge ratio over a band of forces, interleaved with doubled-slip and raucous forces, so the playable map is multistable; receipts are in data/instruments/grades"
  ],
  "physics_missing": [
   "the whole body (a reduced stand-in is rendered): bridge, arched top and back with graduated thickness, ribs, bass bar, soundpost, f-holes, enclosed air and radiation back-loading; the physical route is the material_strings shell body with published plate geometry and wood data, finite-width bow ribbon",
@@ -16,7 +17,10 @@
   "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
   "a hyperbolic or thermal rosin law: the solver's Stribeck law is Gaussian and its regularisation speed is tied to the same file field",
   "stopped notes and finger damping; only open strings are described",
-  "mode-count, friction-substep and time-step convergence ladders"
+  "mode-count, friction-substep and time-step convergence ladders",
+  "player noise: the render is far too clean (harmonic-to-noise ratio and spectral flux of the violin and viola notes are far from the real recordings), because there is no hair ribbon, no rosin thermal third body and no bow speed or force fluctuation",
+  "hysteresis and onset classes: the sweeps start from rest at constant speed and force, so the up and down force ramps, the acceleration and force onset map and the pre-Helmholtz transient length are not measured",
+  "measured playable limits: the model's Helmholtz band has not been compared with the published measured limits on a card whose string matches the measured one; torsion, which lowers the upper limit, is absent"
  ],
  "blocked": null,
  "beads": [

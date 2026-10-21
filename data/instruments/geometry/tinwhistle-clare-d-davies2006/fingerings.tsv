@@ -1,0 +1,13 @@
+frankensim.specimen-fingerings.v1
+fingering	written	concert	register	open_holes	source_id	note
+d5	D5	D5	first	-	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+e5	E5	E5	first	1	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+fs5	F#5	F#5	first	1,2	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+g5	G5	G5	first	1,2,3	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+a5	A5	A5	first	1,2,3,4	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+b5	B5	B5	first	1,2,3,4,5	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+cs6	C#6	C#6	first	1,2,3,4,5,6	dafx-timoney-2004-tin-whistle-fingering	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1)
+d6	D6	D6	second	6	isvr-davies-2006-tin-whistle	standard fingering of the D major scale (hole 1 nearest the open end); blown at the air flow the paper measured for this note (Table 1) with only hole 6 open: the paper's cleaner D6 fingering, same flow rate
+d6c	D6	D6	second	-	dafx-timoney-2004-tin-whistle-fingering	all holes closed at the air flow the paper measured for the overblown D6 (Fig. 2, Table 1 last row): a test of whether the island overblows, whose answer is a result and not an input
+a6c	A6	A6	third	-	dafx-timoney-2004-tin-whistle-fingering	all holes closed at the air flow the paper measured for the overblown A6 (Fig. 2, Table 1 last row): a test of whether the island overblows, whose answer is a result and not an input
+d7c	D7	D7	fourth	-	dafx-timoney-2004-tin-whistle-fingering	all holes closed at the air flow the paper measured for the overblown D7 (Fig. 2, Table 1 last row): a test of whether the island overblows, whose answer is a result and not an input

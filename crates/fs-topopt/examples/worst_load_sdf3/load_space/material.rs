@@ -1,17 +1,28 @@
 //! Minimize dilated material under an authored simultaneous-load requirement.
+#[path = "material/binary.rs"]
+mod binary;
 use super::*;
 use fs_topopt::sdf3::robust::envelope::load_space::design::{LoadSpaceDesignPoint3,
     limits::{LoadSpaceCap3, LoadSpaceLimitedDesign3, LoadSpaceLimitedOptions3,
         start::{LoadSpaceStartOptions3, LoadSpaceStartStop3, controlled_load_space_feasible_start}}};
 
-pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if !(1..=3).contains(&args.len()) {
-        return Err("usage: worst_load_sdf3 --load-space --minimum-material CAP [UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into());
+pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> { run_mode(args, false) }
+pub fn run_binary(args: &[String]) -> Result<(), Box<dyn std::error::Error>> { run_mode(args, true) }
+fn run_mode(args: &[String], binary_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let maximum = if binary_mode { 4 } else { 3 };
+    if !(1..=maximum).contains(&args.len()) {
+        let mode = if binary_mode { "--binary-material" } else { "--minimum-material" };
+        return Err(format!("usage: worst_load_sdf3 --load-space {mode} CAP [UPDATES [TOTAL_KRYLOV_ITERATIONS{}]]",
+            if binary_mode { " [BINARY_DILATED_VOLUME_LIMIT]" } else { "" }).into());
     }
     // Authored physical requirement, never a baseline-derived normalization.
     let cap = LoadSpaceCap3::new(2, args[0].parse()?, 0.03)?;
     let updates = args.get(1).map_or(Ok(200), |s| s.parse::<usize>())?;
     let iterations = args.get(2).map_or(Ok(250_000), |s| s.parse::<usize>())?;
+    let binary_volume_limit = args.get(3).map_or(Ok(1.0), |s| s.parse::<f64>())?;
+    if !binary_volume_limit.is_finite() || !(0.0..=1.0).contains(&binary_volume_limit) {
+        return Err("binary dilated-volume limit must be finite and in [0,1]".into());
+    }
     let mut poll = |_| ControlFlow::Continue(());
     let mut geometry = QuadratureControl3::new(QuadratureOptions3::default(), &mut poll)?;
     let op = CutElasticity3::build(HexCell::try_new([0.0;3], [1.0;3])?, [3,2,2], &Slab,
@@ -58,9 +69,14 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let terminal = outcome?;
     let checked = session.recheck_best();
     eprintln!("fresh_full_load_set_check_passed={}; final_physical_work={:?}", matches!(&checked, Ok(Some(_))), session.work());
-    checked?.ok_or("no retained design available for combined-load recheck")?;
+    let checked = checked?.ok_or("no retained design available for combined-load recheck")?;
     if !matches!(terminal.stop, ProjectedAlStop::Converged | ProjectedAlStop::IterationLimit) {
         return Err("optimizer stopped before the requested allowance; exported result is the retained feasible prefix".into());
+    }
+    if binary_mode {
+        drop(session);
+        return binary::finish(&mut study, &basis, &checked.rho, &cap, options,
+            binary_volume_limit, &keys, &nodes, &mut control);
     }
     Ok(())
 }

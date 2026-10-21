@@ -28,10 +28,13 @@ use fs_qty::{Dims, QtyAny};
 use fs_scenario::scenario::Environment;
 use fs_scenario::signal::{TimeSignal, Interp};
 use fs_solver::NewtonKrylovConfig;
+#[path = "simplex_scan_fit/recovery.rs"]
+mod recovery;
+use recovery::Recovery;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-12;
-const USAGE: &str = "simplex_scan_fit [--population [--workers 1..128]] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]]";
+const USAGE: &str = "simplex_scan_fit [--population [--workers 1..128]] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]] [--checkpoint-dir DIR [--checkpoint-every N] [--pause-after N]] [--resume FILE]";
 
 #[derive(Clone, Copy)]
 struct Options {
@@ -126,7 +129,23 @@ impl Outcome {
     fn target_met(&self) -> bool { self.replay.physical.value <= TARGET }
 }
 
+enum FitResult {
+    Finished(Outcome),
+    Paused { search: SearchReport, checkpoint: std::path::PathBuf },
+}
+
+#[cfg(test)]
 fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
+    match fit_with_recovery(cx, input, pause, &mut Recovery::default())? {
+        FitResult::Finished(outcome) => Ok(outcome),
+        FitResult::Paused { .. } => Err("unexpected pause without a checkpoint policy".into()),
+    }
+}
+
+fn fit_with_recovery(cx: &Cx<'_>, input: Options, pause: bool, recovery: &mut Recovery) -> Result<FitResult> {
+    recovery.bind(cx, input)?;
+    let restored = recovery.restore(cx, input)?;
+    let prior_search_attempts = restored.as_ref().map_or(0, DifferentialEvolutionState::evaluations);
     let (complex,positions)=fs_conduction::fixtures::box_grid([1,1,1],[1.;3]);
     let mesh=ConductionMesh::new(complex,positions)?;
     let material=ConductivityModel::isotropic_declared(2.)?;
@@ -152,6 +171,7 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
                 spatial:EnthalpyBudget { max_vertices:8, max_elements:6 },max_steps:2 })?;
         Ok(ScanningEnthalpyRun::new(cx,run,sources,1,None)?)
     };
+    let pause = pause && !recovery.active();
     let initial_cap=if pause {8} else {input.evaluations-1};
     let template=source()?;
     // Only immutable specimen/readout data are shared. Each parallel callback
@@ -171,42 +191,51 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
                 max_retained_vertices:0,max_retained_source_vertices:0,
                 max_schedule_controls:16,max_retained_radiation_entries:0},source_reference_time_s:0.,
         },factory,allowance);
-    let mut study=build_study(cx,initial_cap+1)?;
+    let mut study=build_study(cx,initial_cap+1-prior_search_attempts)?;
     let parallel_calls=AtomicUsize::new(0);
     let search=if input.population {
-        let mut solver=DifferentialEvolutionState::new(cx,&[[0.,input.maximum_w];2],
+        let mut solver=if let Some(restored)=restored { restored } else { DifferentialEvolutionState::new(cx,&[[0.,input.maximum_w];2],
             Some(study.initial_coordinates()),DifferentialEvolutionConfig {
                 population_size:24,differential_weight:0.8,crossover_probability:0.9,seed:input.seed,
                 max_evaluations:initial_cap,max_population_entries:48,target:Some(TARGET),
-            })?;
-        let report=if let Some(workers)=input.workers {
-            let pool=TilePool::for_host(workers,input.seed);
-            let lease=OperationMemoryLease::bounded(64 << 20);
-            let evaluate=|worker_cx:&Cx<'_>,point:&[f64]| {
-                parallel_calls.fetch_add(1,Ordering::Relaxed);
-                let mut trial=build_study(worker_cx,1)?;
-                trial.evaluate_value(worker_cx,point).map(|value|value.physical.value)
+            })? };
+        let pool=input.workers.map(|workers|TilePool::for_host(workers,input.seed));
+        let lease=OperationMemoryLease::bounded(64 << 20);
+        let report=loop {
+            let newly_spent=solver.evaluations()-prior_search_attempts;
+            let allowance=recovery.quantum().min(recovery.pause_after
+                .map_or(usize::MAX,|n|n.saturating_sub(newly_spent)));
+            let attempted: Result<DifferentialEvolutionReport>=if let Some(pool)=&pool {
+                solver.advance_parallel(cx,pool,&lease,allowance,24,&|worker_cx:&Cx<'_>,point:&[f64]| {
+                    parallel_calls.fetch_add(1,Ordering::Relaxed);
+                    let mut trial=build_study(worker_cx,1)?;
+                    trial.evaluate_value(worker_cx,point).map(|value|value.physical.value)
+                }).map_err(Into::into)
+            } else {
+                solver.advance(cx,allowance,&mut |point|
+                    study.evaluate_value(cx,point).map(|value|value.physical.value)).map_err(Into::into)
             };
-            let mut report=solver.advance_parallel(cx,&pool,&lease,usize::MAX,24,&evaluate)?;
-            if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
+            let current=match attempted {
+                Ok(report)=>report,
+                Err(error)=>{ recovery.save_after_failure(&solver);return Err(error); },
+            };
+            recovery.save(cx,&solver)?;
+            if current.stop==DifferentialEvolutionStop::TargetReached { break current; }
+            if recovery.pause_after.is_some_and(|n|solver.evaluations()-prior_search_attempts>=n) {
+                return Ok(FitResult::Paused { search:SearchReport::Population(current),
+                    checkpoint:recovery.last_saved.clone().ok_or("a deliberate pause requires a saved checkpoint")? });
+            }
+            if pause && current.stop==DifferentialEvolutionStop::EvaluationLimit
+                && solver.evaluation_limit()<input.evaluations-1 {
+                if pool.is_none() { study.extend_evaluation_budget(input.evaluations)?; }
                 solver.extend_evaluation_budget(input.evaluations-1)?;
-                report=solver.advance_parallel(cx,&pool,&lease,usize::MAX,24,&evaluate)?;
+                continue;
             }
-            if parallel_calls.load(Ordering::Relaxed)!=solver.evaluations() {
-                return Err("parallel callback attempts disagree with the lifetime search allowance".into());
-            }
-            report
-        } else {
-            let mut report=solver.advance(cx,usize::MAX,&mut |point|
-                study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-            if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
-                study.extend_evaluation_budget(input.evaluations)?;
-                solver.extend_evaluation_budget(input.evaluations-1)?;
-                report=solver.advance(cx,usize::MAX,&mut |point|
-                    study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-            }
-            report
+            if current.stop==DifferentialEvolutionStop::EvaluationLimit { break current; }
         };
+        if prior_search_attempts+study.evaluations()+parallel_calls.load(Ordering::Relaxed)!=solver.evaluations() {
+            return Err("callback attempts disagree with retained plus new physical work".into());
+        }
         SearchReport::Population(report)
     } else {
         let mut solver=NelderMeadState::new(study.initial_coordinates(),
@@ -236,11 +265,11 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
     if replay.physical.value.to_bits()!=best_value.to_bits() {
         return Err("best-candidate replay changed the physical objective".into());
     }
-    let spent=study.evaluations()+parallel_calls.load(Ordering::Relaxed);
+    let spent=prior_search_attempts+study.evaluations()+parallel_calls.load(Ordering::Relaxed);
     if spent!=search.evaluations()+1 || spent>input.evaluations {
         return Err("callback and physical-evaluation budgets disagree".into());
     }
-    Ok(Outcome { search,replay,spent,sources })
+    Ok(FitResult::Finished(Outcome { search,replay,spent,sources }))
 }
 
 fn with_cx<T>(f: impl FnOnce(&CancelGate,&Cx<'_>) -> Result<T>) -> Result<T> {
@@ -251,8 +280,16 @@ fn with_cx<T>(f: impl FnOnce(&CancelGate,&Cx<'_>) -> Result<T>) -> Result<T> {
 }
 fn main() -> Result<()> {
     let args:Vec<_>=std::env::args().skip(1).collect();
+    let (args,mut recovery)=Recovery::parse(&args)?;
     let input=options(&args)?;
-    let outcome=with_cx(|_,cx|fit(cx,input,true))?;
+    let outcome=match with_cx(|_,cx|fit_with_recovery(cx,input,true,&mut recovery))? {
+        FitResult::Finished(outcome)=>outcome,
+        FitResult::Paused {search,checkpoint}=>{
+            println!("# paused; search_attempts={}; checkpoint={}; no target-recovery claim",
+                search.evaluations(),checkpoint.display());
+            return Ok(());
+        },
+    };
     println!("# synthetic specimen; search={}; no global-optimality guarantee; initial_h_j_kg={}; seed={}; requested_workers={}",
         outcome.search.method(),input.initial_h,input.seed,input.workers.unwrap_or(1));
     println!("# stop={}; objective={:.17e}; callback_attempts={}; total_physical_evaluations={}",

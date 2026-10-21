@@ -6,7 +6,9 @@ impl TetLinearElasticProblem<'_> {
     /// Columns are independent multiplicative stiffness/density scales at one;
     /// the final pair differentiates eta and zeta themselves. Thermal eigenstrain
     /// is fixed, so the stiffness derivative includes its equivalent-load term.
-    /// Only the accepted transient owner calls this with zero constrained seeds.
+    /// The accepted transient owner embeds free equilibrium multipliers here.
+    /// Reaction observations instead use negative constrained-row weights to
+    /// obtain their direct positive residual/material contraction.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn transient_material_contraction(
         &self, motion: &[Vec<[f64; 3]>; 3], lambda: &[[f64; 3]],

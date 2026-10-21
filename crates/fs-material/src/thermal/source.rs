@@ -78,21 +78,68 @@ impl ThermalMaterialPoint<'_> {
     /// This checks source form and frequency support, not the property's units,
     /// physical range, or continuous support between sampled states. Call `at`
     /// and the common state-point resolver before admitting the returned property.
-    pub fn admit_static(&self, property: &ResolvedScalarProperty) -> Result<(), ThermalMaterialError> {
+    pub fn admit_static(
+        &self,
+        property: &ResolvedScalarProperty,
+    ) -> Result<(), ThermalMaterialError> {
+        self.admit_static_with_axes(property, &[])
+    }
+
+    /// Admit the same instantaneous scalar law with explicitly coupled extra
+    /// coordinates. Every added axis must already have its exact quantity on
+    /// the original context; thermal axes cannot be replaced or retyped.
+    /// This does not solve those coordinates: the calling physical owner must
+    /// close them with its own state equation. Frequency support stays static.
+    pub fn admit_static_with_axes(
+        &self,
+        property: &ResolvedScalarProperty,
+        additional_axes: &[(&str, QuantitySpec)],
+    ) -> Result<(), ThermalMaterialError> {
         let invalid = ThermalMaterialError::Invalid;
-        let claim = self.material.claims().claim(property.answer().receipt.selected)
+        for (index, (axis, quantity)) in additional_axes.iter().enumerate() {
+            if *axis == self.temperature_axis
+                || Some(*axis) == self.liquid_fraction_axis
+                || !self.context.axes().contains_key(*axis)
+                || self.context.axis_quantities().get(*axis) != Some(quantity)
+                || additional_axes[..index]
+                    .iter()
+                    .any(|(other, _)| other == axis)
+            {
+                return Err(invalid(
+                    "additional static coordinates need unique existing typed nonthermal axes",
+                ));
+            }
+        }
+        let claim = self
+            .material
+            .claims()
+            .claim(property.answer().receipt.selected)
             .ok_or(invalid("selected thermal property claim is absent"))?;
         match &claim.value {
-            PropertyValue::Scalar { .. } => {},
-            PropertyValue::Curve { abscissa, abscissa_dims, .. }
-                if (abscissa == self.temperature_axis && *abscissa_dims == Temperature::DIMS)
-                    || (Some(abscissa.as_str()) == self.liquid_fraction_axis
-                        && *abscissa_dims == Dims([0;6])) => {},
-            _ => return Err(invalid("static property must be scalar or depend on a declared thermal coordinate")),
+            PropertyValue::Scalar { .. } => {}
+            PropertyValue::Curve {
+                abscissa,
+                abscissa_dims,
+                ..
+            } if (abscissa == self.temperature_axis && *abscissa_dims == Temperature::DIMS)
+                || (Some(abscissa.as_str()) == self.liquid_fraction_axis
+                    && *abscissa_dims == Dims([0; 6]))
+                || additional_axes.iter().any(|(axis, quantity)| {
+                    *axis == abscissa.as_str() && quantity.dims() == *abscissa_dims
+                }) => {}
+            _ => {
+                return Err(invalid(if additional_axes.is_empty() {
+                    "static property must be scalar or depend on a declared thermal coordinate"
+                } else {
+                    "static property must be scalar or depend on an explicitly coupled coordinate"
+                }));
+            }
         }
-        if property.angular_frequency_band_rad_s()
+        if property
+            .angular_frequency_band_rad_s()
             .map_err(|e| ThermalMaterialError::Coordinate(format!("{e:?}")))?
-            .is_some_and(|(low, _)| low > 0.0) {
+            .is_some_and(|(low, _)| low > 0.0)
+        {
             return Err(invalid("material source does not admit a static response"));
         }
         Ok(())

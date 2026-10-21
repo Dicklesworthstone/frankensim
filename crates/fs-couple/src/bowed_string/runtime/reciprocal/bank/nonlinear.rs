@@ -9,8 +9,10 @@
 //! instantaneously along the full fixed-end span. Both transverse planes of a
 //! polarized source contribute to one shared elongation and tension. Optional torsion
 //! remains a separate quadratic storage in that SAME joint mechanical solve.
-//! No axial wave inertia, evolving temperature, plasticity, winding slip,
-//! changing topology or automatic transfer from a running bow bank is implied.
+//! This impact route supplies no axial wave inertia, evolving temperature,
+//! plasticity, winding slip, changing topology or automatic transfer from a
+//! running bow bank. The `longitudinal` module separately retains dynamic
+//! material-derived axial coordinates in the playable friction bank.
 
 use super::{MaterialStringSource, BowedStringCard, ModalAcousticMode,
     ModalAcousticTimeBudget, ModalAcousticTimeModel, GasState, Cx, CancelGate};
@@ -21,6 +23,9 @@ use crate::render::plate::impact::string::StringStretching;
 
 /// Geometric stretching in the original playable material bank and scheduler.
 pub mod bank;
+
+/// Dynamic material-derived axial strain in the original playable bank.
+pub mod longitudinal;
 
 fn invalid(what: &'static str) -> ImpactError { ImpactError::Invalid(what) }
 fn poll(cx: &Cx<'_>, gate: &CancelGate) -> Result<(), ImpactError> {

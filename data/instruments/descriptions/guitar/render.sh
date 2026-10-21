@@ -24,11 +24,20 @@ for pack in nylon-g3 nylon-b3 nylon-e4 cedar-top; do
   cp "${D}/${pack}.tsv" "${D}/${pack}-manifest.tsv" .
   (cd "${SNAP}" && "${XTASK}" matdb-pack --manifest "${OUT}/${pack}-manifest.tsv" --out "${OUT}/${pack}.fsmatpk")
 done
-cp "${D}"/gt-s1-solo-*.material-strings "${D}"/gt-s1-solo-*.body .
-# The three notes are independent single-core renders (about 5 min each without the cavity).
-for note in g3 b3 e4; do
-  nice -n 10 "${BIN}/material_strings" "gt-s1-solo-${note}.material-strings" "${OUT}/gt-s1-solo-${note}.wav" \
-    --body-profile "gt-s1-solo-${note}.body" > "gt-s1-solo-${note}.log" 2>&1 &
+cp "${D}"/gt-s1-solo-*.material-strings "${D}"/gt-s1-solo-*.body "${D}"/gt-s1-fret-*.material-strings "${D}"/gt-s1-m24-*.material-strings .
+# Independent single-core renders (about 5 min each). Open strings: g3 b3 e4. Stopped notes on the B string
+# (gb4 = fret 7, f5 = fret 18) reuse the B-string pack, tension and body profile unchanged.
+# NOTES="gb4 f5" renders only some of them.
+# m24-<note> is the same note with 24 bending modes per polarization (convergence rung; 65 coordinates).
+for note in ${NOTES:-g3 b3 e4 gb4 f5}; do
+  case "${note}" in
+    gb4|f5) stem="gt-s1-fret-${note}"; body="gt-s1-solo-b3.body" ;;
+    m24-gb4|m24-f5) stem="gt-s1-${note}"; body="gt-s1-solo-b3.body" ;;
+    m24-*) stem="gt-s1-${note}"; body="gt-s1-solo-${note#m24-}.body" ;;
+    *) stem="gt-s1-solo-${note}"; body="gt-s1-solo-${note}.body" ;;
+  esac
+  nice -n 10 "${BIN}/material_strings" "${stem}.material-strings" "${OUT}/${stem}.wav" \
+    --body-profile "${body}" > "${stem}.log" 2>&1 &
 done
 wait
-tail -n 2 gt-s1-solo-*.log
+tail -n 2 gt-s1-*.log

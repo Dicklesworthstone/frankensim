@@ -577,6 +577,60 @@ impl LipDescription {
         &self.gas
     }
 
+    /// The passive bore (no lip, no cup shunt, no radiation observer) scanned at `frequencies_hz`: the multimodal and the
+    /// plane-wave input impedance and the mouth-to-input flow ratio, from the same duct, gas and termination the render uses.
+    ///
+    /// # Errors
+    /// The duct owner's refusal at any frequency (loss-model or radiation validity).
+    pub fn bore_scan(&self, frequencies_hz: &[f64]) -> Result<BoreScan, String> {
+        let gas = self.gas.state();
+        let radius = self
+            .duct
+            .segments
+            .first()
+            .map(Segment::inlet_radius)
+            .ok_or_else(|| "empty bore".to_string())?;
+        let [x, y, z] = self.microphone.position_m;
+        let mut rows = Vec::with_capacity(frequencies_hz.len());
+        for &frequency_hz in frequencies_hz {
+            let omega = core::f64::consts::TAU * frequency_hz;
+            let multimodal = fs_duct::modal::mm_input_impedance(
+                &self.duct,
+                gas,
+                omega,
+                LossModel::Bessel,
+                self.termination,
+                self.modes,
+                self.extra_slices,
+            )
+            .map_err(|e| format!("multimodal bore at {frequency_hz} Hz refused: {e}"))?;
+            let scalar = fs_duct::input_impedance(
+                &self.duct,
+                gas,
+                omega,
+                LossModel::Bessel,
+                self.termination,
+            )
+            .map_err(|e| format!("plane-wave bore at {frequency_hz} Hz refused: {e}"))?;
+            rows.push(BoreResponse {
+                frequency_hz,
+                impedance_multimodal: [
+                    multimodal.plane_impedance.re,
+                    multimodal.plane_impedance.im,
+                ],
+                impedance_scalar: [scalar.impedance.re, scalar.impedance.im],
+                mouth_over_input_flow: [scalar.u_mouth_over_u_in.re, scalar.u_mouth_over_u_in.im],
+            });
+        }
+        Ok(BoreScan {
+            input_characteristic_impedance: gas.density * gas.sound_speed
+                / (core::f64::consts::PI * radius * radius),
+            density_kg_m3: gas.density,
+            microphone_distance_m: x.hypot(y).hypot(z),
+            rows,
+        })
+    }
+
     /// Realize the bore line, the mouth-flow line and the microphone.
     ///
     /// # Errors
@@ -679,6 +733,9 @@ impl LipDescription {
             mouthpiece: vec![0.0; MAX_BLOCK],
             outgoing: vec![0.0; MAX_BLOCK],
             trace: [0.0],
+            window_len: u64::from(self.rate_hz / 10).max(1),
+            acc: Vec::new(),
+            tap: None,
         })
     }
 }
@@ -731,6 +788,85 @@ pub struct LipInfo {
     pub has_lip_tension_track: bool,
 }
 
+/// The passive bore's response at one frequency, at its input plane (the mouthpiece cup rim).
+#[derive(Debug, Clone, Copy)]
+pub struct BoreResponse {
+    /// Frequency [Hz].
+    pub frequency_hz: f64,
+    /// Multimodal plane-mode input impedance `[re, im]` [Pa s/m^3]: what the playing loop's reflectance is built from.
+    pub impedance_multimodal: [f64; 2],
+    /// Plane-wave (scalar transfer-matrix) input impedance `[re, im]` [Pa s/m^3]: what the radiation observer's mouth flow uses.
+    pub impedance_scalar: [f64; 2],
+    /// Mouth volume flow over input volume flow `[re, im]` (scalar chain).
+    pub mouth_over_input_flow: [f64; 2],
+}
+
+/// A scan of the passive bore with the quantities needed to read it.
+#[derive(Debug, Clone)]
+pub struct BoreScan {
+    /// Plane-wave characteristic impedance of the input plane `rho c / (pi r^2)` [Pa s/m^3].
+    pub input_characteristic_impedance: f64,
+    /// Gas density [kg/m^3].
+    pub density_kg_m3: f64,
+    /// Distance from the outlet plane to the microphone [m].
+    pub microphone_distance_m: f64,
+    /// One row per requested frequency.
+    pub rows: Vec<BoreResponse>,
+}
+
+/// Lip and bore statistics over one tenth of a second of a render: whether the lip closes and how large
+/// the pressure at the mouthpiece is. A diagnostic of the loop, not a graded quantity.
+#[derive(Debug, Clone, Copy)]
+pub struct LipWindow {
+    /// Start of the window [s].
+    pub start_s: f64,
+    /// Mean pressure at the mouthpiece (the mouth's DC operating point) [Pa].
+    pub bore_mean_pa: f64,
+    /// RMS of the alternating mouthpiece pressure [Pa].
+    pub bore_ac_rms_pa: f64,
+    /// Half the peak-to-peak mouthpiece pressure [Pa].
+    pub bore_ac_peak_pa: f64,
+    /// Smallest lip gap in the window [m] (0 = the lip closed).
+    pub gap_min_m: f64,
+    /// Mean lip gap [m] (mean of the per-chunk means).
+    pub gap_mean_m: f64,
+    /// Largest lip gap [m].
+    pub gap_max_m: f64,
+    /// Fraction of the control-tick chunks in which the lip closed at least once.
+    pub closed_chunk_fraction: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowAcc {
+    n: u64,
+    sum: f64,
+    sum_sq: f64,
+    p_min: f64,
+    p_max: f64,
+    chunks: u64,
+    closed_chunks: u64,
+    gap_min: f64,
+    gap_max: f64,
+    gap_mean_sum: f64,
+}
+
+impl WindowAcc {
+    const fn new() -> Self {
+        Self {
+            n: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            p_min: f64::INFINITY,
+            p_max: f64::NEG_INFINITY,
+            chunks: 0,
+            closed_chunks: 0,
+            gap_min: f64::INFINITY,
+            gap_max: 0.0,
+            gap_mean_sum: 0.0,
+        }
+    }
+}
+
 /// A realized performance: the lip, the bore and the microphone, advanced
 /// together on one physical clock.
 pub struct LipPerformance {
@@ -748,6 +884,9 @@ pub struct LipPerformance {
     mouthpiece: Vec<f64>,
     outgoing: Vec<f64>,
     trace: [f64; 1],
+    window_len: u64,
+    acc: Vec<WindowAcc>,
+    tap: Option<Vec<f64>>,
 }
 
 fn refusal(what: String) -> RenderError {
@@ -765,6 +904,43 @@ impl LipPerformance {
     #[must_use]
     pub fn diagnostics(&self) -> &[super::BrassBlockDiag] {
         self.voice.diagnostics()
+    }
+
+    /// Start recording the pressure at the mouthpiece (the internal pressure the
+    /// lip sees, DC included) for every sample rendered from now on.
+    pub fn record_mouthpiece(&mut self) {
+        self.tap.get_or_insert_with(Vec::new);
+    }
+
+    /// The recorded mouthpiece pressure [Pa] (empty unless [`Self::record_mouthpiece`] ran).
+    #[must_use]
+    pub fn mouthpiece_pressure(&self) -> &[f64] {
+        self.tap.as_deref().unwrap_or(&[])
+    }
+
+    /// Lip and bore statistics per tenth of a second rendered so far.
+    #[must_use]
+    pub fn windows(&self) -> Vec<LipWindow> {
+        let rate = f64::from(self.info.sample_rate_hz);
+        self.acc
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.n > 0 && a.chunks > 0)
+            .map(|(k, a)| {
+                let n = a.n as f64;
+                let mean = a.sum / n;
+                LipWindow {
+                    start_s: (k as u64 * self.window_len) as f64 / rate,
+                    bore_mean_pa: mean,
+                    bore_ac_rms_pa: (a.sum_sq / n - mean * mean).max(0.0).sqrt(),
+                    bore_ac_peak_pa: 0.5 * (a.p_max - a.p_min),
+                    gap_min_m: a.gap_min,
+                    gap_mean_m: a.gap_mean_sum / a.chunks as f64,
+                    gap_max_m: a.gap_max,
+                    closed_chunk_fraction: a.closed_chunks as f64 / a.chunks as f64,
+                }
+            })
+            .collect()
     }
 
     fn apply_controls(&mut self, tick: u64) -> Result<(), String> {
@@ -810,6 +986,29 @@ impl LipPerformance {
             self.voice
                 .step_block_outgoing(&mut self.mouthpiece[..chunk], &mut self.outgoing[..chunk])
                 .map_err(|e| format!("brass loop refused: {e}"))?;
+            let diag = self.voice.diagnostics().last().cloned();
+            let window = usize::try_from(n / self.window_len).unwrap_or(usize::MAX);
+            while self.acc.len() <= window {
+                self.acc.push(WindowAcc::new());
+            }
+            if let Some(tap) = self.tap.as_mut() {
+                tap.extend_from_slice(&self.mouthpiece[..chunk]);
+            }
+            let acc = &mut self.acc[window];
+            for &p in &self.mouthpiece[..chunk] {
+                acc.n += 1;
+                acc.sum += p;
+                acc.sum_sq += p * p;
+                acc.p_min = acc.p_min.min(p);
+                acc.p_max = acc.p_max.max(p);
+            }
+            if let Some(d) = diag {
+                acc.chunks += 1;
+                acc.closed_chunks += u64::from(d.gap_min_m <= 0.0);
+                acc.gap_min = acc.gap_min.min(d.gap_min_m);
+                acc.gap_max = acc.gap_max.max(d.gap_max_m);
+                acc.gap_mean_sum += d.gap_mean_m;
+            }
             for i in 0..chunk {
                 let flow = self
                     .mouth
@@ -1142,6 +1341,65 @@ mod tests {
         let noncanonical = fixture("").replace("1e-2", "0.01");
         assert!(LipDescription::from_bytes(noncanonical.as_bytes()).is_err());
         assert!(LipDescription::from_bytes(b"not a lip file\n").is_err());
+    }
+
+    #[test]
+    fn window_diagnostics_cover_the_render_and_describe_a_possible_lip() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        assert!(performance.windows().is_empty());
+        let mut block = vec![0.0; 600];
+        for _ in 0..4 {
+            performance.block(&mut block).expect("block");
+        }
+        let windows = performance.windows();
+        // 2400 samples at 24 kHz are exactly one tenth of a second.
+        assert_eq!(windows.len(), 1);
+        let w = windows[0];
+        assert_eq!(w.start_s, 0.0);
+        assert!(w.gap_min_m >= 0.0 && w.gap_min_m <= w.gap_mean_m && w.gap_mean_m <= w.gap_max_m);
+        assert!((0.0..=1.0).contains(&w.closed_chunk_fraction));
+        assert!(w.bore_ac_rms_pa.is_finite() && w.bore_ac_rms_pa <= w.bore_ac_peak_pa + 1e-9);
+        assert!(w.bore_mean_pa.is_finite());
+    }
+
+    #[test]
+    fn the_mouthpiece_tap_records_every_rendered_sample_only_when_asked() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        assert!(performance.mouthpiece_pressure().is_empty());
+        let mut block = vec![0.0; 600];
+        performance.block(&mut block).expect("block");
+        assert!(performance.mouthpiece_pressure().is_empty());
+        performance.record_mouthpiece();
+        for _ in 0..3 {
+            performance.block(&mut block).expect("block");
+        }
+        let tap = performance.mouthpiece_pressure();
+        assert_eq!(tap.len(), 1800);
+        assert!(tap.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn the_bore_scan_reads_the_passive_bore_without_building_the_loop() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let scan = description
+            .bore_scan(&[150.0, 300.0, 450.0])
+            .expect("scans");
+        assert_eq!(scan.rows.len(), 3);
+        assert!(scan.input_characteristic_impedance > 0.0 && scan.microphone_distance_m > 0.0);
+        for row in &scan.rows {
+            let z = row.impedance_multimodal[0].hypot(row.impedance_multimodal[1]);
+            assert!(z.is_finite() && z > 0.0);
+            // a passive load: the real part of both input impedances is not negative
+            assert!(row.impedance_multimodal[0] >= -1e-6 * z);
+            assert!(row.impedance_scalar[0] >= -1e-6 * z);
+            assert!(
+                row.mouth_over_input_flow[0]
+                    .hypot(row.mouth_over_input_flow[1])
+                    .is_finite()
+            );
+        }
     }
 
     #[test]

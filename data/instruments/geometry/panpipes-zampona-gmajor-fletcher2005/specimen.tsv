@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	panpipes-zampona-gmajor-fletcher2005
+maker	none: a design assembled from published rules (Fletcher 2005 for the pipe scaling and the jet; Sanchez Barrero and Ghezzi 2010 for the zampona note set)
+model	set of 13 stopped cylindrical tubes tuned to the G major scale D3 to B4 of a zampona (two rows: arca 7 tubes, ira 6 tubes)
+serial	unstated
+year	2005 and 2010 (papers)
+system	stopped pipes blown across the open top by the player's lip jet; one jet, one tube at a time
+holder	none: no accessible instrument; tube lengths are computed from the note set, not measured
+reference_state	played
+environment	unstated by both papers; the recipe uses dry air at 20 C
+source_ids	fletcher-2005-panpipes-jasa;sanchez-ghezzi-2010-zampona-notes;isvr-davies-2006-tin-whistle
+target_relation	no real instrument and no recording: the recipe is the published scaling rule applied to the published note set; no licensed reference recording exists yet (bead pexfp.219), so renders are listened to, not graded
+hole_index	none: pan pipes have no finger holes; each tube is one note and the performance picks the tube
+pitch_standard	equal-tempered frequencies of the theoretical table of Sanchez Barrero and Ghezzi 2010 (A at 440 Hz)

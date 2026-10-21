@@ -8,7 +8,11 @@
 //!
 //! This is an explicit generalized-Newtonian, fixed-storage BGK coupling.
 //! Local constitutive convergence is not implicit time integration, viscoelastic
-//! memory, viscous heating, a stability guarantee or experimental validation.
+//! memory, a stability guarantee or experimental validation. The base entry
+//! adds no viscous heat; [`heating`] explicitly thermalizes the same samples.
+
+/// Opt-in conversion of this constitutive stress power into sensible heat.
+pub mod heating;
 
 use super::{
     HeatSourceLimits, MaterialSlab, MaterialTransportError, MaterialTransportStep, ThermalLbm,

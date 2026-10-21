@@ -90,7 +90,7 @@ impl ReciprocalStringBank {
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
-        if self.source.geometric_stretching.is_some() || self.system.samples_rendered() != 0 {
+        if self.system.has_nonlinear_potentials() || self.system.samples_rendered() != 0 {
             return Err(invalid(
                 "geometric stretching requires one source-bound attachment before playback",
             ));

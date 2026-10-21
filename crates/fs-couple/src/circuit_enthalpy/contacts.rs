@@ -52,7 +52,7 @@ pub(crate) fn admit_routes<E>(thermal:&DepositionSimulation<'_>,circuit:&Materia
     Ok(result)
 }
 
-pub(super) fn deposit<E>(losses:&[ContactHeat],routes:&BTreeMap<u64,ContactHeatCells>,dt:f64,
+pub(crate) fn deposit<E>(losses:&[ContactHeat],routes:&BTreeMap<u64,ContactHeatCells>,dt:f64,
     powers:&mut BTreeMap<CellId,f64>,mut checkpoint:impl FnMut()->Result<(),DepositionError>)
     ->Result<(),CircuitEnthalpyError<E>> {
     if losses.len()!=routes.len() {return Err(CircuitEnthalpyError::Invalid("contact heat coverage changed during trial"));}

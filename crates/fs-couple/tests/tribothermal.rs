@@ -2,6 +2,10 @@
 //! measured friction calibration. Native execution is required for qualification.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "tribothermal/dynamics.rs"]
+mod dynamics;
+#[path = "tribothermal/field_motion.rs"]
+mod field_motion;
 
 use fs_couple::tribothermal::material::{KINETIC_FRICTION_PROPERTY, STATIC_FRICTION_PROPERTY};
 use fs_couple::tribothermal::*;
@@ -78,12 +82,22 @@ fn interface(
     knots: [(f64, f64); 2],
     maximum_temperature: f64,
 ) -> InterfaceSystemCard {
+    interface_with_static(cards, 2.0, axis, dims, knots, maximum_temperature)
+}
+fn interface_with_static(
+    cards: &[MaterialCard; 2],
+    static_mu: f64,
+    axis: &str,
+    dims: Dims,
+    knots: [(f64, f64); 2],
+    maximum_temperature: f64,
+) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     for (property, value, interpolation) in [
         (
             STATIC_FRICTION_PROPERTY,
             PropertyValue::Scalar {
-                value: 2.0,
+                value: static_mu,
                 dims: Dims::NONE,
             },
             InterpolationPolicy::ConstantWithinValidity,

@@ -15,8 +15,8 @@
 //! callback must retain its own solver/memory admission. No speedup is promised.
 
 use super::{DifferentialEvolutionError, DifferentialEvolutionReport,
-    DifferentialEvolutionState, DifferentialEvolutionStop, Pending, checkpoint,
-    finite, invalid, reserved};
+    RankedDifferentialEvolutionState, DifferentialEvolutionScore, DifferentialEvolutionStop, Pending, checkpoint,
+    invalid, reserved};
 use core::ops::ControlFlow;
 use fs_alloc::OperationMemoryLease;
 use fs_exec::{Cancelled, Cx, RunId, TileKernel, TilePlan, TilePool};
@@ -47,7 +47,7 @@ impl<E: fmt::Display> fmt::Display for DifferentialEvolutionParallelError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for DifferentialEvolutionParallelError<E> {}
 
-impl DifferentialEvolutionState {
+impl<S: DifferentialEvolutionScore> RankedDifferentialEvolutionState<S> {
     /// Evaluate bounded waves concurrently on a caller-owned production pool.
     ///
     /// `max_wave` limits simultaneous candidate slots, not the number of worker
@@ -71,8 +71,8 @@ impl DifferentialEvolutionState {
     pub fn advance_parallel<E: Send, F>(
         &mut self, cx: &Cx<'_>, pool: &TilePool, lease: &OperationMemoryLease,
         additional_evaluations: usize, max_wave: usize, evaluate: &F,
-    ) -> Result<DifferentialEvolutionReport, DifferentialEvolutionParallelError<E>>
-    where F: Fn(&Cx<'_>, &[f64]) -> Result<f64, E> + Sync,
+    ) -> Result<DifferentialEvolutionReport<S>, DifferentialEvolutionParallelError<E>>
+    where F: Fn(&Cx<'_>, &[f64]) -> Result<S, E> + Sync,
     {
         let mut poll = || cx.checkpoint().is_ok();
         checkpoint(&mut poll)?;
@@ -88,7 +88,7 @@ impl DifferentialEvolutionState {
                 self.consume(&mut poll)?;
             }
             let stop = if self.best.as_ref().is_some_and(|p|
-                self.config.target.is_some_and(|target| p.value <= target)) {
+                self.config.target.is_some_and(|target| p.value.reaches(target))) {
                 Some(DifferentialEvolutionStop::TargetReached)
             } else if self.evaluations >= self.config.max_evaluations {
                 Some(DifferentialEvolutionStop::EvaluationLimit)
@@ -137,7 +137,7 @@ impl DifferentialEvolutionState {
                     }
                 };
                 match outcome {
-                    Some(Ok(value)) => match finite(value) {
+                    Some(Ok(value)) => match value.checked() {
                         Ok(value) => {
                             let pending = if offset == 0 {
                                 self.pending.as_mut().expect("retained first DE member")
@@ -183,14 +183,14 @@ impl DifferentialEvolutionState {
     }
 }
 
-struct Wave<'a, F, E> {
+struct Wave<'a, F, E, S> {
     jobs: Vec<(usize, &'a [f64])>,
-    slots: Vec<(usize, Mutex<Option<Result<f64, E>>>)>,
+    slots: Vec<(usize, Mutex<Option<Result<S, E>>>)>,
     evaluate: &'a F,
     started: AtomicUsize,
 }
-impl<E: Send, F> TileKernel for Wave<'_, F, E>
-where F: Fn(&Cx<'_>, &[f64]) -> Result<f64, E> + Sync,
+impl<E: Send, F, S: DifferentialEvolutionScore> TileKernel for Wave<'_, F, E, S>
+where F: Fn(&Cx<'_>, &[f64]) -> Result<S, E> + Sync,
 {
     type Out = u64;
     fn tiles(&self) -> TilePlan {
@@ -211,5 +211,7 @@ where F: Fn(&Cx<'_>, &[f64]) -> Result<f64, E> + Sync,
     }
 }
 
+#[cfg(test)]
+use super::DifferentialEvolutionState;
 #[cfg(test)]
 mod tests;

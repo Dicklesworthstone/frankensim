@@ -13,7 +13,8 @@ and the output (all under public/data/instruments/, which is gitignored like the
 
      index.json                      every family with its badge and counts (the overview)
      <family>/card.json              one family's card
-     <family>/<note>/{real,ours}.m4a                       the A/B clips (AAC, like every other clip on the page)
+     <family>/<note>/{real,ours}.m4a                       the A/B clips (AAC, like every other clip on the page);
+                                     .mp4 with --audio-ext mp4 (same AAC, for a host that serves no .m4a)
      <family>/<note>/{spectrogram,scalogram}-{real,ours,diff}.webp
 
 The default analysis directory is ~/.local/share/wa-inst/analysis (a mirror of trj:/data/tmp/wa-inst/analysis);
@@ -58,12 +59,31 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
                   that metric. ruler: the same distance between REAL recordings (other dynamics, neighbouring
                   notes, other takes), value in gap_unit. An empty ruler means "no real-vs-real ruler for this
                   measure" and the page then makes no inside/outside claim for it.
+                  A second, STRICT ruler: ruler_strict: [{label, value}, ...] holds only real recordings of the SAME note
+                  (other dynamics, other takes); [] when there is none. inside_loose / inside_strict: true | false | null
+                  (gap <= the largest ruler value; null = no gap or no ruler, no claim). verdicts (per pair with a render):
+                  {measures, loose: {inside, outside, no_ruler}, strict: {...}}. The generator recomputes every one of
+                  these from the gap and the rulers and refuses a pair whose own values disagree. The page shows both
+                  counts; the badge is the weaker of the two. A pair without ruler_strict shows the loose verdict only.
 
 A note the grader cannot grade honestly (reference off its name, onset check failed) is not deleted: decompose.py
 overwrites its pair.json with {"refused": {"reason", "render_sha", "time"}, "ours": null} (family and note optional,
 checked when present) and moves the old figures and audio into <note>/superseded/<UTC>/. The card lists the note as
 "refused by the grader: <reason>", no badge counts it, and the build still exits 0 (the data is saying what is true).
 A family whose only renders were refused reads "Rendered, not graded".
+
+A render of an instrument with NO reference recording (pan pipes, tin whistle) is a listening-only note: "real": null and
+"no_reference": {"reason": one sentence on why there is no recording}. It has ours and audio.ours (plus audio.level_match),
+figures {spectrogram: F, scalogram: F} with F = {real: null, ours, diff: null, f_lo_hz, f_hi_hz, span_db}, and
+alignment null, partials null, metrics []. Anything else on such a pair is refused. The card shows our audio and our
+spectrogram and scalogram, no metrics and no recording credit, and a family with only such notes reads "Rendered, no
+reference to grade against". Next to graded notes they do not change the family's badge.
+
+--only FAMILY=NOTE,NOTE shows just those notes of a family (the review build's file limit). The others get no files, are
+listed on the card as card.withheld, and are in no badge: the badge covers exactly the notes the page shows.
+--recordings-only-if-rendered does the same for a family with no render at all: its recording-only notes (a real note
+and its pictures, no FrankenSim) get no files and are listed as withheld, so a file-limited build spends its files on
+what has been rendered.
 
 status.json (frankensim.instrument-status.v1), written by the family lane, prose only (no measured numbers):
   family, title, reference_instrument (a references.json files[].instrument, or null), summary,
@@ -136,6 +156,7 @@ BADGE_LABEL = {
     "none": "No render yet",
     "blocked": "Blocked",
     "ungraded": "Rendered, not graded",
+    "listening": "Rendered, no reference to grade against",
     "close": "Inside the real spread",
     "mixed": "Partly inside the real spread",
     "off": "Outside the real spread",
@@ -184,7 +205,7 @@ def encode(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
         return
-    tmp = dst.with_suffix(".tmp.m4a")
+    tmp = dst.with_suffix(f".tmp{dst.suffix}")  # ffmpeg picks the muxer from the extension, so it must match the final name
     for codec in (["-c:a", "aac_at", "-b:a", "256k"], ["-c:a", "aac", "-b:a", "256k"]):
         res = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", *codec, str(tmp)], capture_output=True)
         if res.returncode == 0:
@@ -234,6 +255,62 @@ def check_tracks(tracks, t_len: int, side: str, problems: list[str]) -> None:
                 return
 
 
+def is_listening(pj) -> bool:
+    """A render with no reference recording: real is null and no_reference says why."""
+    return isinstance(pj, dict) and pj.get("real") is None and pj.get("no_reference") is not None
+
+
+def validate_listening(pj: dict, base: Path) -> list[str]:
+    """The parts of a listening-only note: our render, our figures, and nothing that needs a recording."""
+    problems: list[str] = []
+    nr = pj["no_reference"]
+    if not isinstance(nr, dict) or not isinstance(nr.get("reason"), str) or not nr["reason"].strip():
+        problems.append("no_reference must be {reason} with a non-empty reason")
+    ours = pj.get("ours")
+    if not isinstance(ours, dict):
+        problems.append("a note with no reference needs a render: ours is missing")
+    else:
+        for key in ("wav", "git_sha", "observer", "recipe"):
+            if not isinstance(ours.get(key), str) or not ours[key]:
+                problems.append(f"ours.{key} is required")
+    audio = pj.get("audio")
+    if not isinstance(audio, dict):
+        problems.append("audio is missing")
+    else:
+        if audio.get("real") is not None:
+            problems.append("audio.real must be null for a note with no reference")
+        v = audio.get("ours")
+        if not (isinstance(v, str) and (base / v).is_file()):
+            problems.append(f"audio.ours names no file ({v!r})")
+        if not isinstance(audio.get("level_match"), str) or not audio["level_match"]:
+            problems.append("audio.level_match must say how loudness was set")
+    figs = pj.get("figures")
+    if not isinstance(figs, dict):
+        problems.append("figures is missing")
+    else:
+        for name in ("spectrogram", "scalogram"):
+            fig = figs.get(name)
+            if not isinstance(fig, dict):
+                problems.append(f"figures.{name} is missing")
+                continue
+            for key in ("f_lo_hz", "f_hi_hz", "span_db"):
+                if not finite(fig.get(key)) or fig[key] <= 0:
+                    problems.append(f"figures.{name}.{key} must be a positive number")
+            if finite(fig.get("f_lo_hz")) and finite(fig.get("f_hi_hz")) and fig["f_hi_hz"] <= fig["f_lo_hz"]:
+                problems.append(f"figures.{name}: f_hi_hz must exceed f_lo_hz")
+            if not (isinstance(fig.get("ours"), str) and (base / fig["ours"]).is_file()):
+                problems.append(f"figures.{name}.ours names no file ({fig.get('ours')!r})")
+            for side in ("real", "diff"):
+                if fig.get(side) is not None:
+                    problems.append(f"figures.{name}.{side} must be null for a note with no reference")
+    for key in ("alignment", "partials"):
+        if pj.get(key) is not None:
+            problems.append(f"{key} must be null for a note with no reference")
+    if pj.get("metrics") != []:
+        problems.append("metrics must be [] for a note with no reference: there is nothing to measure it against")
+    return problems
+
+
 def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict) -> list[str]:
     problems: list[str] = []
     if pj.get("schema") != PAIR_SCHEMA:
@@ -247,8 +324,10 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
     if not finite(pj.get("duration_s")) or pj["duration_s"] <= 0:
         problems.append("duration_s must be a positive number")
     real = pj.get("real")
+    if is_listening(pj):
+        return problems + validate_listening(pj, base)
     if not isinstance(real, dict):
-        problems.append("real is missing")
+        problems.append("real is missing (a render with no reference recording sets real null and no_reference.reason)")
     elif real.get("reference_id") in refs_by_id:
         entry = refs_by_id[real["reference_id"]]
         lic = entry.get("licence") if isinstance(entry, dict) else None
@@ -323,6 +402,25 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
                 problems.append(f"{where}: gap must be a non-negative number or null")
             if m.get("gap") is not None and not has_ours:
                 problems.append(f"{where}: a pair with no render has no gap")
+            rs = m.get("ruler_strict")
+            if "ruler_strict" in m and not (isinstance(rs, list) and all(isinstance(e, dict) and isinstance(e.get("label"), str) and finite(e.get("value")) and e["value"] >= 0 for e in rs)):
+                problems.append(f"{where}: ruler_strict must be a list of entries with a label and a non-negative value (empty when the note has no other recording of the same note)")
+            # decompose.py's own verdicts must be the ones the numbers give: two truths on one page are worse than a refused pair.
+            for key, rows in (("inside_loose", m.get("ruler")), ("inside_strict", rs)):
+                if key not in m or not isinstance(rows, list) or not all(isinstance(e, dict) and finite(e.get("value")) for e in rows) or not (m.get("gap") is None or finite(m["gap"])):
+                    continue
+                want = inside(m.get("gap"), [e["value"] for e in rows])
+                if m[key] is not want:
+                    problems.append(f"{where}: {key} is {m[key]!r} but gap {m.get('gap')!r} against its ruler gives {want!r}")
+        verdicts = pj.get("verdicts")
+        if verdicts is not None and not problems:
+            if not isinstance(verdicts, dict):
+                problems.append("verdicts must be an object or null")
+            else:
+                want = pair_verdicts([metric_view(m, has_ours) for m in metrics])
+                for key in ("measures", "loose", "strict"):
+                    if want[key] is not None and verdicts.get(key) != want[key]:
+                        problems.append(f"verdicts.{key} is {verdicts.get(key)!r} but the measures give {want[key]!r}")
     return problems
 
 
@@ -351,6 +449,15 @@ def grader_refusal(pj, family: str, note: str) -> dict | None:
     return {"note": note, "kind": "grader", "reason": rec["reason"].strip(), "render_sha": rec.get("render_sha"), "time": rec.get("time"), "problems": [rec["reason"].strip()]}
 
 
+def holds_a_render(pj_path: Path) -> bool:
+    """True when this pair.json carries a render (a graded pair or a listening-only note), not a grader refusal."""
+    try:
+        pj = json.loads(pj_path.read_text())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(pj, dict) and pj.get("ours") is not None and pj.get("refused") is None
+
+
 def check_audio(base: Path, pj: dict) -> list[str]:
     problems = []
     for side in ("real", "ours"):
@@ -369,19 +476,43 @@ def check_audio(base: Path, pj: dict) -> list[str]:
 
 
 # ------------------------------------------------------------------ card pieces
+def inside(gap, values) -> bool | None:
+    """True/False: the gap is no larger than the largest real-vs-real distance. None: no gap, or no ruler to judge it by (no claim)."""
+    if gap is None or not values:
+        return None
+    return bool(gap <= max(values))
+
+
 def metric_view(m: dict, has_ours: bool) -> dict:
+    """One measure. ruler is the loose real-vs-real ruler (this and neighbouring notes, other dynamics and takes); ruler_strict
+    the strict one (the same note only), None when the pair predates it. Both verdicts are recomputed here from the raw gap and
+    ruler values, the way decompose.py does, so the page never shows a verdict the numbers do not give."""
     gap = num_or_none(m.get("gap")) if has_ours else None
-    ruler = [{"label": e["label"], "value": sig(e["value"])} for e in m["ruler"]]
-    top = max((e["value"] for e in ruler), default=None)
+    loose = [e["value"] for e in m["ruler"]]
+    strict = None if m.get("ruler_strict") is None else [e["value"] for e in m["ruler_strict"]]
+    top = max(loose, default=None)
+    s_top = max(strict, default=None) if strict else None
     verdict = "no-gap" if gap is None else "no-ruler" if top is None else "within" if gap <= top else "outside"
-    ratio = None if gap is None or not top else gap / top
+    verdict_strict = None if strict is None else "no-gap" if gap is None else "no-ruler" if s_top is None else "within" if gap <= s_top else "outside"
     shown = lambda v: [num_or_none(x) for x in v] if isinstance(v, list) else num_or_none(v)  # noqa: E731
+    rows = lambda rs: [{"label": e["label"], "value": sig(e["value"])} for e in rs]  # noqa: E731
     return {
         "id": m["id"], "label": m["label"], "unit": m.get("unit", ""), "gap_unit": m.get("gap_unit", m.get("unit", "")),
         "real": shown(m.get("real")), "ours": shown(m.get("ours")) if has_ours else None,
-        "gap": sig(gap), "ruler": ruler, "ruler_max": sig(top), "ruler_min": sig(min((e["value"] for e in ruler), default=None)),
-        "verdict": verdict, "ratio": sig(ratio, 4), "note": m.get("note", ""),
+        "gap": sig(gap), "ruler": rows(m["ruler"]), "ruler_max": sig(top), "ruler_min": sig(min(loose, default=None)),
+        "verdict": verdict, "ratio": sig(None if gap is None or not top else gap / top, 4), "inside_loose": inside(gap, loose),
+        "ruler_strict": None if strict is None else rows(m["ruler_strict"]), "ruler_strict_max": sig(s_top), "ruler_strict_min": sig(min(strict, default=None)) if strict else None,
+        "verdict_strict": verdict_strict, "ratio_strict": sig(None if gap is None or not s_top else gap / s_top, 4), "inside_strict": None if strict is None else inside(gap, strict),
+        "note": m.get("note", ""),
     }
+
+
+def pair_verdicts(views: list[dict]) -> dict:
+    """The per-pair counts of both verdicts, in pair.json's own shape: the loose ruler and the strict one (None when a measure has
+    no strict ruler field). no_ruler: a measure that has a gap and nothing to judge it by."""
+    gapped = [v for v in views if v["gap"] is not None]
+    tally = lambda key: {"inside": sum(x[key] is True for x in gapped), "outside": sum(x[key] is False for x in gapped), "no_ruler": sum(x[key] is None for x in gapped)}  # noqa: E731
+    return {"measures": len(gapped), "loose": tally("inside_loose"), "strict": tally("inside_strict") if all(v["ruler_strict"] is not None for v in views) else None}
 
 
 def partials_view(parts: dict | None) -> dict | None:
@@ -418,23 +549,24 @@ def real_source(real: dict, ref: dict | None, licences: dict) -> dict:
     return {"id": s["id"].strip(), "name": s["name"].strip(), "credit": s["credit"].strip(), "licence": s["licence"].strip(), "licence_url": s.get("licence_url"), "url": s["url"].strip(), "external": True}
 
 
-def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict, licences: dict) -> dict:
+def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: dict, licences: dict, audio_ext: str = "m4a") -> dict:
     has_ours = pj.get("ours") is not None
     note = pj["note"]
     rel = f"{out_dir.parent.name}/{out_dir.name}"
-    ref = refs_by_id.get(pj["real"]["reference_id"])
-    source = real_source(pj["real"], ref, licences)
+    listening = is_listening(pj)
+    ref = None if listening else refs_by_id.get(pj["real"]["reference_id"])
+    source = None if listening else real_source(pj["real"], ref, licences)
     audio = {}
     for side in ("real", "ours"):
         if pj["audio"].get(side):
-            encode(base / pj["audio"][side], out_dir / f"{side}.m4a")
-            audio[side] = f"{rel}/{side}.m4a"
+            encode(base / pj["audio"][side], out_dir / f"{side}.{audio_ext}")
+            audio[side] = f"{rel}/{side}.{audio_ext}"
         else:
             audio[side] = None
     figures = {}
     for kind in ("spectrogram", "scalogram"):
         fig = pj["figures"][kind]
-        entry = {k: fig[k] for k in ("f_lo_hz", "f_hi_hz", "span_db", "diff_range_db")}
+        entry = {k: fig.get(k) for k in ("f_lo_hz", "f_hi_hz", "span_db", "diff_range_db")}  # a note with no reference has no diff_range_db
         for side in ("real", "ours", "diff"):
             if fig.get(side):
                 w, h = convert_image(base / fig[side], out_dir / f"{kind}-{side}.webp")
@@ -444,32 +576,41 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
                 entry[side] = None
         figures[kind] = entry
     chain = chains.get(ref.get("chain"), {}) if ref else {}
+    metrics = [metric_view(m, has_ours) for m in pj["metrics"]]
     return {
         "note": note, "dynamic": pj["dynamic"], "duration_s": r(pj["duration_s"], 3),
-        "real": {
+        "real": None if listening else {
             "reference_id": source["id"], "file": pj["real"].get("file") or (Path(ref.get("path") or "").name if ref else ""),
             "segment_s": pj["real"].get("segment_s"), "url": source["url"], "sha256": ref.get("sha256") if ref else None,
             "licence": ref.get("licence") if ref else source["licence"], "source": source,
             "mic": chain.get("mic"), "pattern": chain.get("pattern"), "distance_m": chain.get("distance_m"), "distance_status": chain.get("distance_status"),
             "room": chain.get("room"), "format": chain.get("format"),
         },
+        "no_reference": pj["no_reference"]["reason"].strip() if listening else None,
         "ours": pj.get("ours"),
         "audio": audio, "level_match": pj["audio"]["level_match"],
         "alignment": pj.get("alignment"),
         "figures": figures,
         "partials": partials_view(pj.get("partials")),
-        "metrics": [metric_view(m, has_ours) for m in pj["metrics"]],
+        "metrics": metrics, "verdicts": pair_verdicts(metrics) if has_ours and not listening else None,
         "source_sha256": None,  # filled by the caller
     }
 
 
 def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | None = None) -> dict:
     """The badge, and the sentence under it. Both are computed from the metrics; a note the grader refused counts in none."""
+    listening = [p for p in pairs if p["real"] is None]  # renders with no reference recording: nothing to grade them against
+    pairs = [p for p in pairs if p["real"] is not None]
     rendered = [p for p in pairs if p["ours"]]
     blocked = (status or {}).get("blocked")
     refused_renders = [x for x in (grader_refused or []) if x.get("render_sha")]
-    counts = {"notes_with_render": len(rendered), "notes_reference_only": len(pairs) - len(rendered), "notes_refused_by_grader": len(grader_refused or []), "within": 0, "outside": 0, "unruled": 0}
+    counts = {"notes_with_render": len(rendered) + len(listening), "notes_reference_only": len(pairs) - len(rendered), "notes_no_reference": len(listening),
+              "notes_refused_by_grader": len(grader_refused or []), "within": 0, "outside": 0, "unruled": 0}
     if not rendered:
+        if listening:
+            n = len(listening)
+            return {"badge": "listening", "label": BADGE_LABEL["listening"], "counts": counts,
+                    "line": f"{n} note{'s' if n != 1 else ''} rendered. There is no reference recording for this instrument, so nothing is compared or graded: this is audio to listen to, with its spectrogram and scalogram."}
         if refused_renders:
             why = "; ".join(f"{x['note']}: {x['reason']}" for x in refused_renders)
             return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "counts": counts,
@@ -478,26 +619,52 @@ def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | N
             return {"badge": "blocked", "label": BADGE_LABEL["blocked"], "line": blocked, "counts": counts}
         extra = f" The reference library has real recordings for {len(pairs)} note{'s' if len(pairs) != 1 else ''} below." if pairs else ""
         return {"badge": "none", "label": BADGE_LABEL["none"], "line": "No render has been made for this family yet." + extra, "counts": counts}
-    worst = None
+    counts.update(strict_within=0, strict_outside=0, strict_unruled=0, strict_notes=0)
+    worst = worst_strict = None
     for p in rendered:
+        if p["metrics"] and all(m["ruler_strict"] is not None for m in p["metrics"]):
+            counts["strict_notes"] += 1  # this note was graded against the same-note ruler too
         for m in p["metrics"]:
             if m["verdict"] == "within":
                 counts["within"] += 1
             elif m["verdict"] == "outside":
                 counts["outside"] += 1
-                if worst is None or m["ratio"] > worst[0]["ratio"]:
+                if worst is None or (m["ratio"] or 0) > (worst[0]["ratio"] or 0):
                     worst = (m, p["note"])
             elif m["verdict"] == "no-ruler":
                 counts["unruled"] += 1
+            if m["verdict_strict"] == "within":
+                counts["strict_within"] += 1
+            elif m["verdict_strict"] == "outside":
+                counts["strict_outside"] += 1
+                if worst_strict is None or (m["ratio_strict"] or 0) > (worst_strict[0]["ratio_strict"] or 0):
+                    worst_strict = (m, p["note"])
+            elif m["verdict_strict"] == "no-ruler":
+                counts["strict_unruled"] += 1
     ruled = counts["within"] + counts["outside"]
+    n = len(rendered)
+    notes = f"{n} note{'s' if n != 1 else ''}"
     if ruled == 0:
-        return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "line": f"{len(rendered)} note{'s' if len(rendered) != 1 else ''} rendered; none has a measure with a real-vs-real ruler yet.", "counts": counts}
-    frac = counts["within"] / ruled
-    badge = "close" if counts["outside"] == 0 else "mixed" if frac >= 0.5 else "off"
-    line = f"{counts['within']} of {ruled} graded measures, over {len(rendered)} note{'s' if len(rendered) != 1 else ''}, are no further from the real recording than real recordings are from each other."
-    if worst:
+        return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "line": f"{notes} rendered; none has a measure with a real-vs-real ruler yet.", "counts": counts}
+    s_ruled = counts["strict_within"] + counts["strict_outside"]
+    level = lambda inside_n, outside_n: "close" if outside_n == 0 else "mixed" if inside_n / (inside_n + outside_n) >= 0.5 else "off"  # noqa: E731
+    levels = [level(counts["within"], counts["outside"])] + ([level(counts["strict_within"], counts["strict_outside"])] if s_ruled else [])
+    badge = min(levels, key=("off", "mixed", "close").index)  # the weaker of the two verdicts
+    line = f"Over {notes}: inside the spread of real recordings of this and neighbouring notes, {counts['within']} of {ruled} measures. "
+    if s_ruled:
+        none = f" ({counts['strict_unruled']} {'has' if counts['strict_unruled'] == 1 else 'have'} no same-note comparison)" if counts["strict_unruled"] else ""
+        part = f"; computed for {counts['strict_notes']} of {n} notes" if counts["strict_notes"] < n else ""
+        line += f"Inside the spread of real recordings of the same note, {counts['strict_within']} of {s_ruled} measures{none}{part}. The badge is the weaker of the two."
+    elif counts["strict_notes"]:
+        line += "No same-note comparison could be made: there is no other recording of the same note to judge against."
+    else:
+        line += "The same-note comparison has not been computed for these notes."
+    if s_ruled and worst_strict:
+        m, note = worst_strict
+        line += f" Largest gap against the same-note spread: {m['label']}, {m['ratio_strict'] or 0:.1f}× it ({note})."
+    elif worst:
         m, note = worst
-        line += f" Largest gap against that spread: {m['label']}, {m['ratio']:.1f}× it ({note})."
+        line += f" Largest gap against the neighbouring-note spread: {m['label']}, {m['ratio'] or 0:.1f}× it ({note})."
     return {"badge": badge, "label": BADGE_LABEL[badge], "line": line, "counts": counts}
 
 
@@ -537,7 +704,16 @@ def main() -> int:
     ap.add_argument("--pull", action="store_true", help=f"rsync {TRJ_ANALYSIS} into --analysis first")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
+    ap.add_argument("--audio-ext", choices=("m4a", "mp4"), default="m4a", help="extension of the A/B clips; the codec is AAC either way (mp4 for a host that serves no .m4a)")
+    ap.add_argument("--only", action="append", default=[], metavar="FAMILY=NOTE,NOTE", help="show only these notes of a family; the rest are listed on its card as withheld and get no files")
+    ap.add_argument("--recordings-only-if-rendered", action="store_true", help="a family with no render shows none of its recording-only notes; they are listed as withheld and get no files")
     args = ap.parse_args()
+    only: dict[str, set[str]] = {}
+    for spec in args.only:
+        fam, sep, notes = spec.partition("=")
+        if not sep or not fam or not notes:
+            ap.error(f"--only wants FAMILY=NOTE,NOTE (got {spec!r})")
+        only.setdefault(fam, set()).update(notes.split(","))
 
     if args.pull:
         args.analysis.mkdir(parents=True, exist_ok=True)
@@ -558,9 +734,11 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     for fid, title, ref_instrument in families:
         status = load_status(fid, args.descriptions)
-        pairs, refused = [], []
+        pairs, refused, withheld = [], [], []
         fam_dir = args.analysis / fid
-        for pj_path in sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []:
+        pair_files = sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []
+        has_render = any(holds_a_render(p) for p in pair_files)
+        for pj_path in pair_files:
             note = pj_path.parent.name
             base = pj_path.parent
             try:
@@ -569,19 +747,25 @@ def main() -> int:
                 if refusal:
                     refused.append(refusal)
                     continue
+                if (fid in only and note not in only[fid]) or (args.recordings_only_if_rendered and pj.get("ours") is None and not has_render):
+                    withheld.append(note)
+                    continue
                 problems = validate_pair(pj, fid, note, base, refs_by_id)
                 if not problems:
                     problems = check_audio(base, pj)
                 if problems:
                     raise Refused(problems)
-                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains, licences)
+                pair = build_pair(pj, base, args.out / fid / note, refs_by_id, chains, licences, args.audio_ext)
                 pair["source_sha256"] = sha256(pj_path)
                 pairs.append(pair)
             except (Refused, json.JSONDecodeError) as e:
                 refused.append({"note": note, "kind": "site", "problems": e.problems if isinstance(e, Refused) else [f"pair.json is not JSON: {e}"]})
                 print(f"REFUSED {fid}/{note}: {'; '.join(refused[-1]['problems'])}", file=sys.stderr)
+        seen = {p["note"] for p in pairs} | set(withheld) | {x["note"] for x in refused}
+        for missing in sorted(only.get(fid, set()) - seen):
+            print(f"WARNING --only {fid}={missing}: no such note in the analysis", file=sys.stderr)
         refused_total += sum(1 for x in refused if x["kind"] == "site")
-        grader_refused = [x for x in refused if x["kind"] == "grader"]
+        grader_refused =[x for x in refused if x["kind"] == "grader"]
         pairs.sort(key=lambda p: (p["ours"] is None, p["dynamic"], p["note"]))
         verdict = judge(status, pairs, grader_refused)
         card = {
@@ -593,7 +777,7 @@ def main() -> int:
                 "physics_present": (status or {}).get("physics_present", []), "physics_missing": (status or {}).get("physics_missing", []),
                 "beads": (status or {}).get("beads", []), "described": status is not None,
             },
-            "pairs": pairs, "refused": refused,
+            "pairs": pairs, "refused": refused, "withheld": sorted(withheld),
         }
         (args.out / fid).mkdir(parents=True, exist_ok=True)
         (args.out / fid / "card.json").write_text(json.dumps(card, ensure_ascii=False, separators=(",", ":")))

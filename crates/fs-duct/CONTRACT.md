@@ -580,7 +580,18 @@ divergence-theorem closure/orientation pin on the lathe).
   Sheng 1989).
   - The previous fit-below / piston-above switch jumped by ~0.19 z0 at
     `ka = 1`, which no causal characteristic line can realize.
-  - Refused above `FLANGED_MAX_KA = 20`.
+  - Refused above `FLANGED_MAX_KA = 24`. This is the fixed-node
+    quadrature's design limit, not a validity edge of the model (the
+    multimodal load is exact for every `ka`). It was 20 until
+    `flanged_design_is_measured_across_and_beyond_the_cap` measured the
+    design: the quadrature `Z_00` against the closed-form piston is 3.5e-14
+    at `ka = 20`, at most 6.5e-14 through 26, 2.9e-13 at 28, and loses the
+    1e-12 gate at 30 (2.0e-11; 3.6e-8 at 34, 1.5e-5 at 38). The 16-mode
+    against 24-mode load differs by 1.1e-3 to 1.4e-3 over `ka` 20 to 28, flat
+    in `ka`, so mode truncation does not worsen with the lift. A mode exactly
+    at cutoff drops out of the Schur complement (`ζ = ∞`, the continuous
+    limit), so the new cutoff inside the band (`α_7 = 22.76`) is handled the
+    way `α_1` to `α_6` were. Values at `ka <= 20` are bit-identical to before.
   - The plane-mode TMM above a bore's first cross-mode cutoff stays the
     disclosed 1-D boundary.
   - A full exterior BEM of an unflanged pipe is still the recorded successor.

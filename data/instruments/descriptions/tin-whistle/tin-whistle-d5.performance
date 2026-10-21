@@ -1,0 +1,66 @@
+frankensim-flue-performance-v1
+clock 288000 48000
+output 120000 5 1000000
+gas 293.15 101325 0
+exterior same
+network 16 15
+duct_node inlet
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node reflection -1
+duct_section 0 1 0.0024000 0.0036737 1e-10
+duct_section 1 2 0.0106500 0.0061000 1e-10
+duct_section 1 3 0.1203000 0.0061000 1e-10
+duct_section 3 4 0.0015000 0.0024700 1e-10
+duct_section 3 5 0.0197000 0.0061000 1e-10
+duct_section 5 6 0.0015000 0.0030150 1e-10
+duct_section 5 7 0.0231000 0.0061000 1e-10
+duct_section 7 8 0.0015000 0.0027250 1e-10
+duct_section 7 9 0.0230000 0.0061000 1e-10
+duct_section 9 10 0.0015000 0.0024850 1e-10
+duct_section 9 11 0.0185000 0.0061000 1e-10
+duct_section 11 12 0.0015000 0.0033000 1e-10
+duct_section 11 13 0.0250000 0.0061000 1e-10
+duct_section 13 14 0.0015000 0.0033050 1e-10
+duct_section 13 15 0.0377000 0.0061000 1e-10
+radiation compact-baffled
+flue 0.00800 0.00148 0.00530 0 0 0.02
+windway slit 0.02455
+jet_card tonal-interim
+jet 90 1e-6 3 0
+jet_limits 0.2 0.3 65536
+wave_memory_bytes 67108864
+fractional 3000 0.01
+viscothermal sections 7
+loss_section 2 24 200 3000
+loss_section 4 4 200 3000
+loss_section 6 4 200 3000
+loss_section 8 4 200 3000
+loss_section 10 3 200 3000
+loss_section 12 5 200 3000
+loss_section 14 7 200 3000
+receiver -0.26730 0 1 4 16 2800
+outlets 15 0
+mouth_radiation -0.2673000 0 4 4
+controls 4096 100000
+gesture
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	5e-2	pressure-pa	6.715e1
+event	2.2e0	1.05e-2	pressure-pa	0e0

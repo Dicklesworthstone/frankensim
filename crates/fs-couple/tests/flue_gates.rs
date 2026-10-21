@@ -36,8 +36,70 @@ const GAIN: f64 = 90.0;
 /// seed three decades under the jet width and the loop free to grow.
 const SEED_REL: f64 = 1e-6;
 
+/// Lip-jet cut-up [m] of the overblowing and voicing fixtures. The island's
+/// band lags the loop by `16 theta / U` on top of the convective transit
+/// `W / (c_v U)`; the early tap that removes that lag needs the transit to
+/// be the longer of the two, i.e. `W > 16 theta c_v` (5.6 mm for the lip
+/// card below at a 1 mm flue). The interim fixture's 4 mm cut-up is under
+/// that limit for a lip jet.
+const LIP_CUT_UP: f64 = 0.007;
+/// Flue height [m] of `geometry` (kept in step with the literal there).
+const FLUE_H: f64 = 0.001;
+/// Convection velocity over jet centreline speed (Auvray et al. 2012;
+/// Terrien et al. 2014 cite 0.4; de la Cuadra 2008 cites 0.3 to 0.5).
+const LIP_CONVECTION: f64 = 0.4;
+/// theta / b of the island's band for a lip jet: the band peaks at
+/// `0.55 omega_c` with `omega_c = U / (4 theta)`; placing that peak at the
+/// Strouhal number of maximum jet amplification, `Str_h = f h / U = 0.025`
+/// (de la Cuadra 2008, Sec. 7), gives `theta = 0.875 h`, so `theta / b =
+/// 1.75` for `b = h / 2`. The interim card's 0.4 is the thickness of a 2-D
+/// lattice slot jet at Re 144 to 264.
+const LIP_THETA_OVER_B: f64 = 1.75;
+/// Published first-register window `Str_W = f1 W / U` (de la Cuadra 2008:
+/// the first register holds for 0.1 to 0.25; the octave jump sits near 0.1).
+const FIRST_REGISTER_WINDOW: (f64, f64) = (0.10, 0.25);
+
 fn air20() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
+}
+
+/// The lip-jet card: a published-parameter estimate (authority X-Est), the
+/// same one `flue_jet_phase.rs` pins its first register with. Its Reynolds
+/// band is de la Cuadra's 1000 to 2500, so the ladder rows between roughly
+/// 135 and 845 Pa are inside it; the card gate (fg_007) is unchanged and
+/// stays on the interim card.
+fn lip_card() -> JetCard {
+    // c_p / U = St (h / delta) / (stage + 1/4) with stage 1 and h / delta 10,
+    // so St = c_p / U / 8.
+    let st = LIP_CONVECTION / 8.0;
+    let json = format!(
+        "{{\"schema\":\"fs-aeroac.jet-card/v1\",\"claim_kind\":\"edge-tone-tonal\",\"claim\":{{\"stage\":1,\
+         \"locked_strouhal\":{st},\"ladder_band_lo\":0.7,\"ladder_band_hi\":1.4,\"multi_stable_strouhal\":[{st}],\
+         \"hysteresis_recorded\":true,\"saturated_force_rms\":null}},\"authority\":\"X-Est\",\
+         \"profile\":{{\"u_centerline\":0.08,\"slot_half\":1,\"momentum_thickness\":{LIP_THETA_OVER_B}}},\
+         \"band_db\":null,\"residual\":null,\"validity\":{{\"reynolds_lo\":1000,\"reynolds_hi\":2500,\
+         \"h_over_delta\":10,\"requires_receptivity_edge\":true,\"seeded_amplitude_claims_only\":true}},\
+         \"provenance\":{{\"rig_fingerprint\":0,\"receipts\":[\"de la Cuadra et al. 2008 Acta Acustica \
+         94(5) Sec. 7: maximum amplification at Str_h 0.025; Re 1000 to 2500 (Eq. 5)\"],\
+         \"classification\":\"published-parameter estimate for a lip jet, not a measured jet card\"}},\
+         \"scope\":\"{scope}\"}}",
+        scope = fs_aeroac::SCOPE_STATEMENT
+    );
+    JetCard::from_json(&json).expect("lip-jet card parses and validates")
+}
+
+/// The pair of whole-millimetre cut-ups that both lie inside the published
+/// first-register window at jet speed `u` (`Str_W = f1 W / U` in
+/// `FIRST_REGISTER_WINDOW`, `f1` the DESIGNED fundamental) and above the
+/// early-tap limit `16 theta c_v`. The ends of the usable window rounded
+/// inward: derived from the window, never from which pair happens to pass.
+fn window_cut_ups(f1_hz: f64, u: f64) -> (f64, f64) {
+    let theta = LIP_THETA_OVER_B * 0.5 * FLUE_H;
+    let tap_limit = 16.0 * theta * LIP_CONVECTION;
+    let lo = (FIRST_REGISTER_WINDOW.0 * u / f1_hz).max(tap_limit);
+    let hi = FIRST_REGISTER_WINDOW.1 * u / f1_hz;
+    let mm = 1e-3;
+    ((lo / mm).ceil() * mm, (hi / mm).floor() * mm)
 }
 
 /// A recorder-class open cylinder with one tone hole near the foot,
@@ -77,7 +139,7 @@ fn open_pipe(length_m: f64, radius_m: f64) -> FingeringTable {
 fn geometry(cut_up_m: f64, labium_offset_m: f64, jet_angle_rad: f64) -> FlueGeometry {
     FlueGeometry {
         flue_width_m: 0.010,
-        flue_height_m: 0.001,
+        flue_height_m: FLUE_H,
         cut_up_m,
         labium_offset_m,
         jet_angle_rad,
@@ -184,16 +246,30 @@ fn fg_002_energy_ledger_closes_to_roundoff_every_block() {
 /// the lock from the pipe's first mode to its second. Nothing in the
 /// sweep names a frequency; the reference modes are computed for the
 /// log only.
+///
+/// On the LIP-JET card (see `lip_card`): the interim slot-jet card is
+/// outside its own Reynolds band (144 to 264) at every row of this sweep.
+/// The sweep keeps its 1.5-ratio ladder and is continued past the old top
+/// (360 Pa) to the island's own incompressibility bound (jet Mach 0.2, about
+/// 2.8 kPa), where the old top-of-sweep bar (`>= 1.7 f1`) is asked of the
+/// physics instead of being lowered: a lip jet's first register holds to a
+/// much faster jet than the interim card's did.
 #[test]
 fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
-    let card = mint_tonal_interim_card().expect("card");
+    let card = lip_card();
     let gas = air20();
     let f1 = pipe_mode_hz(&gas, 0.30, BORE_R, 1.0);
     let f2 = pipe_mode_hz(&gas, 0.30, BORE_R, 2.0);
-    let mut v = voice(Some(&card), geometry(CUT_UP, 0.0, 0.0), 3, 0).expect("voice");
+    let mut v = voice(Some(&card), geometry(LIP_CUT_UP, 0.0, 0.0), 3, 0).expect("voice");
     let pressures = [
-        10.0, 15.0, 22.0, 33.0, 50.0, 75.0, 110.0, 160.0, 240.0, 360.0,
+        10.0, 15.0, 22.0, 33.0, 50.0, 75.0, 110.0, 160.0, 240.0, 360.0, 540.0, 810.0, 1200.0,
+        1800.0, 2700.0,
     ];
+    let mach_top = (2.0 * pressures[pressures.len() - 1] / gas.density).sqrt() / gas.sound_speed;
+    assert!(
+        mach_top < 0.2,
+        "the sweep stays incompressible: Mach {mach_top}"
+    );
     let mut map = Vec::new();
     println!(
         "REGIME MAP (blow_pa, U, Re, inside_card, transit_ms, lock_hz, lock/f1, p_rms, eta_rms/b, duty):"
@@ -228,8 +304,7 @@ fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
         "lowest oscillating pressure locks near the fundamental: {ratio_low}"
     );
     // The ladder: some higher pressure locks the octave, and the top of
-    // the sweep sits at or above it (a strong jet overblows further, to
-    // the twelfth — executed: 2.84 f1 at 360 Pa).
+    // the sweep sits at or above it (a strong jet overblows further).
     let octave = oscillating
         .iter()
         .find(|(p, lock, _)| *p > low.0 && (1.7..2.4).contains(&(lock / f1)))
@@ -252,7 +327,7 @@ fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
         Some(&card),
         GAIN,
         SEED_REL / 10.0,
-        geometry(CUT_UP, 0.0, 0.0),
+        geometry(LIP_CUT_UP, 0.0, 0.0),
         &open_pipe(0.30, BORE_R),
         &gas,
         Termination::UnflangedOpen,
@@ -281,9 +356,36 @@ fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
 /// VOICING: a larger cut-up lengthens the jet transit, so onset needs
 /// more pressure; a labium offset towards the pipe side shifts the duty
 /// of the cut jet. Both logged and asserted in direction only.
+///
+/// On the LIP-JET card (see `lip_card`). The cut-up pair is derived, not
+/// typed: both cut-ups must lie inside the published first-register window
+/// (`Str_W = f1 W / U` in 0.10 to 0.25, `f1` the designed fundamental)
+/// because "a longer cut-up locks the same or a lower mode" is a law of one
+/// edge-tone stage only (the stage ladder is a sawtooth: frequency falls with
+/// W inside a stage and jumps up at a stage boundary), and above the island's
+/// early-tap limit `16 theta c_v`. At `LAW_BLOW_PA` that window is 5.6 to 8.9
+/// mm, so the pair is 6 mm and 8 mm; 240 Pa is the first row of the fg_003
+/// ladder whose window holds two whole-millimetre cut-ups at least 2 mm apart
+/// (at 160 Pa it holds 6 and 7 mm only).
 #[test]
 fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
-    let card = mint_tonal_interim_card().expect("card");
+    const LAW_BLOW_PA: f64 = 240.0;
+    let card = lip_card();
+    let gas = air20();
+    let f1 = pipe_mode_hz(&gas, 0.30, BORE_R, 1.0);
+    let u_law = (2.0 * LAW_BLOW_PA / gas.density).sqrt();
+    let (cut_short, cut_long) = window_cut_ups(f1, u_law);
+    assert!(
+        cut_long - cut_short >= 2e-3 - 1e-12,
+        "the window holds two distinct cut-ups: {cut_short} {cut_long}"
+    );
+    for w in [cut_short, cut_long] {
+        let st_w = f1 * w / u_law;
+        assert!(
+            (FIRST_REGISTER_WINDOW.0..=FIRST_REGISTER_WINDOW.1).contains(&st_w),
+            "cut-up {w} m sits inside the first-register window: Str_W {st_w}"
+        );
+    }
     let onset = |cut_up: f64| -> Option<f64> {
         let mut v = voice(Some(&card), geometry(cut_up, 0.0, 0.0), 4, 0).expect("voice");
         for &p in &[
@@ -296,10 +398,10 @@ fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
         }
         None
     };
-    let short = onset(0.003);
-    let long = onset(0.005);
+    let short = onset(cut_short);
+    let long = onset(cut_long);
     println!(
-        "{{\"fixture\":\"fg-004\",\"onset_pa_cut_up_3mm\":{short:?},\"onset_pa_cut_up_5mm\":{long:?}}}"
+        "{{\"fixture\":\"fg-004\",\"cut_up_short_m\":{cut_short},\"cut_up_long_m\":{cut_long},\"onset_pa_short\":{short:?},\"onset_pa_long\":{long:?}}}"
     );
     assert!(
         short.is_some() && long.is_some(),
@@ -316,10 +418,12 @@ fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
         assert!(rms > 1.0, "cut-up {cut_up} must oscillate at {blow_pa} Pa");
         lock
     };
-    let lock_short = lock_at(0.003, 160.0);
-    let lock_long = lock_at(0.005, 160.0);
+    let lock_short = lock_at(cut_short, LAW_BLOW_PA);
+    let lock_long = lock_at(cut_long, LAW_BLOW_PA);
     println!(
-        "{{\"fixture\":\"fg-004\",\"lock_hz_cut_up_3mm\":{lock_short},\"lock_hz_cut_up_5mm\":{lock_long}}}"
+        "{{\"fixture\":\"fg-004\",\"blow_pa\":{LAW_BLOW_PA},\"lock_hz_short\":{lock_short},\"lock_hz_long\":{lock_long},\"lock_over_f1_short\":{},\"lock_over_f1_long\":{}}}",
+        lock_short / f1,
+        lock_long / f1
     );
     assert!(
         lock_long <= lock_short * 1.05,
@@ -327,7 +431,7 @@ fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
     );
 
     let duty = |offset: f64| -> f64 {
-        let mut v = voice(Some(&card), geometry(CUT_UP, offset, 0.0), 4, 1).expect("voice");
+        let mut v = voice(Some(&card), geometry(LIP_CUT_UP, offset, 0.0), 4, 1).expect("voice");
         let _ = settle(&mut v, 110.0, 40);
         v.diagnostics().last().expect("diag").duty_pipe_side
     };

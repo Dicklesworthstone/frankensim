@@ -7,6 +7,8 @@
 //! with circuit midpoint currents and ENDPOINT material coefficients: first-order
 //! coupled accuracy in general, not a second-order or unconditional-stability claim.
 
+/// Material field/current response coupled to the same finite enthalpy solve.
+pub mod conductivity;
 /// Data-only caloric/card, resistor and conductive-link bindings.
 pub mod material;
 /// Two-sided deposition of source-backed electrical contact heat.

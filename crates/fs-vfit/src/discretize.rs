@@ -19,6 +19,9 @@ use crate::model::{PoleTerm, RationalModel};
 use fs_math::c64::C64;
 use fs_math::det;
 
+#[path = "discretize_scattering.rs"]
+mod scattering;
+
 /// One second-order (or degenerate first-order) parallel section:
 /// `(b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)`.
 #[derive(Debug, Clone, Copy, PartialEq)]

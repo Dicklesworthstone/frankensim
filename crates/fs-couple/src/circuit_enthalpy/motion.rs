@@ -54,14 +54,17 @@ impl ThermalDriver for FieldMotionCandidate {
         DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
             heat_j: step.heat_j,
             stored_change_j: (step.electrical_energy_j[1]-step.electrical_energy_j[0])
-                +(step.kinetic_energy_j[1]-step.kinetic_energy_j[0]),
+                +(step.kinetic_energy_j[1]-step.kinetic_energy_j[0])
+                +(step.elastic_energy_j[1]-step.elastic_energy_j[0]),
             supplied_j: step.electrical_supply_j+step.mechanical_supply_j }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) { FieldMotionCandidate::into_parts(self) }
 }
 
 /// Close material resistance, Joule heating and reciprocal gap motion in one
-/// interval. Use a prepared material network's `resolve` to retain source pins.
+/// interval. Optional support elastic energy and consistent inertia stay in that
+/// same driver balance; its original frozen material state is not heated here.
+/// Use a prepared material network's `resolve` to retain source pins.
 /// Every thermal trial restarts from the SAME accepted flux/charge, gap and
 /// momentum, evaluates transport at its proposed enthalpy state, and advances
 /// the original field-motion descriptor for the common physical duration.

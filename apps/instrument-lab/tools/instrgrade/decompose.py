@@ -6,7 +6,9 @@ against how far REAL recordings differ from one another.
            each metric with its real-vs-real ruler (other dynamics, other takes, neighbouring notes)
   pair     one render against the library's recording of the same note: the same, plus ours and the difference
   batch    pair for each candidate in a CANDIDATES.json (list of the pair arguments)
+  listen   a render with no recording to compare it with: audio, maps and the reason, no gaps
   report   print every graded pair as a table, the worst gap against its real-vs-real ruler first
+  diff     for every re-graded note, what moved against the ruler since the grading kept in superseded/
 
 Output is P8's site contract: <out>/<family>/<note>/pair.json (frankensim.instrument-pair.v1) with the aligned,
 loudness-matched real.wav / ours.wav and bare spectrogram / scalogram maps. See tools/build_instruments.py.
@@ -27,7 +29,9 @@ import argparse
 import json
 import math
 import multiprocessing
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
@@ -36,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from descriptors import GraderRefusalError, track_partials  # noqa: E402
+from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
 DECOMPOSE_VERSION = "decompose-1"
@@ -47,6 +51,7 @@ HOP = SR // 100  # 10 ms: STFT hop and the grid of every curve
 F_LO, F_HI = 40.0, 16000.0
 SHOW_DB = 60.0  # cells within this many dB of the reference peak count in a spectrogram distance
 N_PARTIALS = 12
+STRONG_DB = 40.0  # a partial this far under the strongest is not a measurement of its own frequency
 
 
 class OnsetMisaligned(ValueError):
@@ -83,27 +88,59 @@ def floor_of(y):
     return float(max(-120.0, 10 * np.log10(np.percentile(ms, 5) + 1e-18)))
 
 
-def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
-    """(noise-floor crossing, peak-relative crossing) in seconds from the start of y; the onset is the later of the two.
+def floor_of_file(x, f0_hz, block=1 << 18):
+    """The noise floor of a long recording: floor_of() of its high-passed signal, high-passed in blocks.
 
-    A: the 2 ms envelope crosses floor + 12 dB.  B: it crosses peak - 30 dB.  Both are absolute levels, so cutting
-    the signal at the onset and detecting again finds the same crossing. A alone fires on dust in a digital-silence
-    render; B alone on the skirt of a slow bowed attack in a noisy recording.
+    One FFT high-pass over a 100 MB range file costs a minute and a gigabyte; the floor is a 5th percentile of
+    20 ms frame levels, which a block-wise high-pass (a ringing frame at a block edge is loud, never quiet) gives
+    to within a dB or so for a hundredth of the work.
+    """
+    if len(x) <= 2 * block:
+        return floor_of(highpass(x, f0_hz))
+    return floor_of(np.concatenate([highpass(x[i:i + block], f0_hz) for i in range(0, len(x), block)]))
 
-    With no anchor the first crossing is taken (a render, or a cut). With an anchor (a time inside the note, from
-    the library's segmentation) the crossing is the one that precedes it: walk back from the anchor to where the
-    level was last under the threshold. If B never was under it within the window, the note begins legato on the
-    previous one and has no level onset: refused, never guessed (align() hands a recording that begins at its own
-    onset zeros to start from, so a plucked string is not mistaken for that).
+
+STEADY_DROP_DB = 20.0  # the onset is where the envelope first reaches this far under the note's own steady level
+STEADY_FRAMES_DB = 40.0  # "sounding" frames for the steady level: within this of the loudest
+
+
+def steady_level_db(e):
+    """The note's own steady level [dB]: the MEDIAN of the sounding frames (those within STEADY_FRAMES_DB of the loudest).
+
+    A median, not a maximum: a maximum moves by a dB or two when the window slides by a few milliseconds (a noise peak,
+    an overshoot), and on a steep onset that is milliseconds of onset. An overshoot or a priming step lasting a small
+    part of the note does not move the median; a decaying note's median sits part-way down its decay, which only moves
+    the threshold lower on an onset that is steep anyway.
+    """
+    e = np.asarray(e)
+    top = float(e.max())
+    return float(np.median(e[e > top - STEADY_FRAMES_DB]))
+
+
+def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
+    """(noise-floor crossing, steady-relative crossing) in seconds from the start of y; the onset is the later of the two.
+
+    A: the envelope crosses floor + 12 dB.  B: it crosses (the signal's own steady level) - 20 dB, so a low priming
+    step, a click or the skirt of a slow attack does not count and the same rule applies to a render and to a
+    recording. Both are absolute levels, so cutting the signal at the onset and detecting again finds the same
+    crossing. A alone fires on dust in a digital-silence render; B alone on a recording whose steady level is
+    barely above its noise.
+
+    With no anchor the first crossing is taken (a render). With an anchor (a time inside the note, from
+    the library's segmentation, or the expected onset in a cut of such a recording) the crossing is the one that
+    precedes it: walk back from the anchor to where the level was last under the threshold. If B never was under it
+    within the window, the note begins legato on the previous one and has no level onset: refused, never guessed
+    (align() hands a recording that begins at its own onset zeros to start from, so a plucked string is not mistaken
+    for that).
     """
     e, t = env_rms_db(y, win=env_window(f0_hz))
     n = len(e)
     if not n:
         raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: empty signal")
     j0 = 0 if anchor_s is None else min(n - 1, int(anchor_s * 1000))
-    pk = float(e[j0: j0 + int((MAX_S + 1.0) * 1000)].max()) if peak_db is None else float(peak_db)
+    pk = steady_level_db(e[j0: j0 + int((MAX_S + 1.0) * 1000)]) if steady_db is None else float(steady_db)
     if pk < floor_db + 20:
-        raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: peak {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
+        raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: steady level {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
 
     def crossing(th, strict):
         above = e > th
@@ -124,10 +161,10 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, peak_db=None):
             return None
         return float(t[i])
 
-    tb = crossing(pk - 30.0, True)
+    tb = crossing(pk - STEADY_DROP_DB, True)
     ta = crossing(floor_db + 12.0, False)
     if tb is None:
-        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own peak window")
+        raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own steady window")
     return (tb if ta is None else ta), tb
 
 
@@ -144,7 +181,7 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
     `at_start`) is given silence to start from before detection, so that a plucked note's step edge is found by the
     same detector, with the same window, on the signal and on its cut. A window that starts in the middle of a
     file is not padded: a note that begins on the tail of the previous one is refused by onset_times.
-    The peak that B is measured from is the peak of the cut itself (found by iterating), so slow ramps stay
+    The steady level that B is measured from is that of the cut itself (found by iterating), so slow ramps stay
     idempotent; re-detecting on the cut at the lead-in is the alignment assertion. Times in `info` are in the
     time of `raw`.
     """
@@ -164,12 +201,23 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
         if a < 0:
             ypad, a = np.concatenate([np.zeros(-a), y]), 0
         cut = ypad[a:a + int(MAX_S * SR)]
-        pk_cut = float(env_rms_db(cut, win=win)[0].max())
+        pk_cut = steady_level_db(env_rms_db(cut, win=win)[0][: int((MAX_S + 1.0) * 1000)])
         if pk is not None and abs(pk_cut - pk) < 0.01:
             break
         pk = pk_cut
     ra, rb = onset_times(cut, floor_db, None, f0_hz)
     got = max(ra, rb)
+    if anchor_s is not None and abs(got - pre) * 1000 > ALIGN_TOL_MS:
+        # A recording's onset was found by walking back from the note to the last dip under the threshold. The first crossing of its cut
+        # can be earlier: a touch, a click or a fret noise that reached the threshold, dropped back under it and was followed by the note
+        # lies inside the lead-in (guitar Gb4/F5 and violin B5 were refused for it). Re-detect the way the onset was found, on the cut
+        # given silence to start from (as above), and accept it only if that lands on the lead-in to the same tolerance.
+        padc = int((pre + win / SR + 0.005) * SR)
+        try:
+            ra, rb = onset_times(np.concatenate([np.zeros(padc), cut]), floor_db, padc / SR + pre, f0_hz, pk_cut)
+            got = max(ra, rb) - padc / SR
+        except OnsetMisaligned:
+            pass  # no better: the first-crossing miss below stands
     if abs(got - pre) * 1000 > ALIGN_TOL_MS:
         raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
     off = pad / SR
@@ -191,20 +239,32 @@ def stft_db(y, n):
 
 def cwt_db(y, per_oct=24, f_lo=60.0, f_hi=F_HI, w0=20.0):
     """Analytic Morlet scalogram [dB, a full-scale sine reads -6 dB]: 24 scales per octave, Gaussian bandwidth f/20
-    (about a semitone, so the low partials of a pitched note stay resolved), 10 ms frames."""
+    (about a semitone, so the low partials of a pitched note stay resolved), 10 ms frames.
+
+    Each scale occupies a narrow band of the spectrum and only its envelope power per frame is wanted, so the
+    band is inverse-transformed on its own at a reduced sample rate (at least ~500 Hz, enough for 10 ms frames)
+    instead of at the full rate: a magnitude is unchanged by moving the band to baseband, and the 10 ms frame mean
+    is taken from the integral of that envelope power. About 30 times less work than one full-length inverse FFT
+    per scale, which cost 50 ms each on a loaded trj.
+    """
     n = len(y)
     nfft = 1 << int(math.ceil(math.log2(n + SR // 4)))
     X = np.fft.rfft(y, nfft)
     f = np.fft.rfftfreq(nfft, 1 / SR)
     fc = f_lo * 2 ** (np.arange(int(per_oct * math.log2(f_hi / f_lo)) + 1) / per_oct)
     frames = n // HOP
+    edges = np.arange(frames + 1) * HOP / SR
     out = np.empty((len(fc), frames), np.float32)
     for i, c in enumerate(fc):
         lo, hi = np.searchsorted(f, c * (1 - 6 / w0)), np.searchsorted(f, c * (1 + 6 / w0))
-        Y = np.zeros(nfft, complex)
-        Y[lo:hi] = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
-        z = np.fft.ifft(Y)[:n]
-        out[i] = ((z.real ** 2 + z.imag ** 2)[: frames * HOP].reshape(frames, HOP)).mean(1)
+        band = X[lo:hi] * np.exp(-0.5 * ((f[lo:hi] - c) / (c / w0)) ** 2)
+        m = max(4096, 1 << int(math.ceil(math.log2(max(hi - lo, 2)))))
+        w = np.fft.ifft(band, m)  # numpy normalises by 1/m; the full-rate envelope is (m / nfft) times this
+        p = (m / nfft) ** 2 * (w.real ** 2 + w.imag ** 2)
+        dt = nfft / (m * SR)  # seconds per decimated sample; sample l sits at l * dt
+        cum = np.concatenate([[0.0], np.cumsum(p)]) * dt
+        e = np.interp(edges, (np.arange(m + 1) - 0.5) * dt, cum)
+        out[i] = (e[1:] - e[:-1]) / (HOP / SR)
     return (10 * np.log10(out + 1e-20)).astype(np.float32), fc
 
 
@@ -242,8 +302,10 @@ def f0_comb(y, hint_hz, kind="sustained", max_cents=400.0, nh=8):
 FUNDAMENTAL_FLOOR_DB = -50.0
 
 
-def check_fundamental(y, f0, kind, label):
-    """Refuse a note that has no energy at its own measured fundamental.
+def check_fundamental(y, f0, kind, label, named_hz=None):
+    """Refuse a note that has no energy at its own measured fundamental. `f0` is the grader's pitch estimate for the signal; when
+    `named_hz` (the named note's fundamental) is given the refusal says both, since the estimate of a signal that has locked
+    onto a parasitic line is not the note's pitch and a reader takes "the fundamental near X Hz" for the note's.
 
     A pitched note carries its fundamental within 50 dB of its strongest spectral line (a bowed bass or a
     clarinet's even harmonics are weaker, not absent). A render that locks onto one high-order mode (the flute
@@ -263,8 +325,24 @@ def check_fundamental(y, f0, kind, label):
     lvl = 20 * math.log10(float(A[near].max()) / top + 1e-12)
     if lvl < FUNDAMENTAL_FLOOR_DB:
         f_top = float(fr[band][int(np.argmax(A[band]))])
-        raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the strongest spectral line is {f_top:.0f} Hz "
-                                 f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
+        if named_hz is None:
+            raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the strongest spectral line is {f_top:.0f} Hz "
+                                     f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
+        raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the named note's fundamental is {named_hz:.1f} Hz; the "
+                                 f"strongest spectral line is {f_top:.0f} Hz, the grader's pitch estimate for it is {f0:.1f} Hz, and there is "
+                                 f"nothing at that estimate ({lvl:.0f} dB re the strongest line)")
+
+
+def lowpass(x, cap_hz):
+    """Raised-cosine FFT low-pass: unity below 0.8 cap, zero above cap. Used when a render is valid only up to a band
+    (a receiver admitted to ka <= 20, say): the same filter goes on the render, the recording and every ruler note,
+    so the grade says nothing about what the render does not model."""
+    x = np.asarray(x, dtype=np.float64)
+    n = 1 << int(np.ceil(np.log2(len(x) + SR // 2)))
+    X = np.fft.rfft(x, n)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    g = np.clip((cap_hz - f) / (0.2 * cap_hz), 0.0, 1.0)
+    return np.fft.irfft(X * (0.5 - 0.5 * np.cos(np.pi * g)), n)[: len(x)]
 
 
 def cepstral_envelope(P_db, freqs, f0, grid):
@@ -297,6 +375,22 @@ def modal_partials(y, f0, P, f, n_modes=N_PARTIALS):
 
 
 # ------------------------------------------------------------------------------------------- one note
+def flux_cells(S, sf):
+    """The cells the spectral flux is made of, for an STFT map `S` [dB] with bin frequencies `sf`: (positive dB step between
+    consecutive frames, whether the step is live, the rows of `S` that are in F_LO..F_HI). A step is live when the louder of
+    its two cells is within SHOW_DB of the map's peak."""
+    m = (sf > F_LO) & (sf < F_HI)
+    X = S[m]
+    live = np.maximum(X[:, 1:], X[:, :-1]) > X.max() - SHOW_DB
+    return np.where(live, np.maximum(np.diff(X, axis=1), 0.0), 0.0), live, m
+
+
+def flux_curve(S, sf):
+    """Spectral flux [dB] per frame (0 for the first): the RMS over the live cells of the positive frame-to-frame dB step."""
+    pos, live, _ = flux_cells(S, sf)
+    return np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+
+
 class Note:
     """Everything the decomposition needs from one aligned signal, computed once."""
 
@@ -317,7 +411,7 @@ class Note:
         if abs(off_c) > max_cents:
             raise GraderRefusalError(f"IRPDECOMP_PITCH_MISMATCH: {label or 'signal'} measures {off_c:+.0f} cents from the named note")
         if not inharmonic:
-            check_fundamental(y, self.f0, kind, label)
+            check_fundamental(y, self.f0, kind, label, f0_hz)
         n = 8192 if self.f0 < 80 else 4096
         self.S, self.sf = stft_db(y, n)
         self.C, self.cf = cwt_db(y)
@@ -350,9 +444,11 @@ class Note:
             self.pdev = np.zeros(len(modes))
             self.pfreq_t = [np.full(self.frames, m) for m in modes]
             self.decay = np.array([_decay_db_s(self.t, p) for p in self.pl]) if self.kind == "decaying" else None
+            self.strong = np.ones(len(modes), bool)
+            self.B = float(d["inharmonicity_B"])
             return
         t0, t1 = d["windows"]["sustain"]
-        ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1))
+        ps = track_partials(self.y, self.f0, kmax=min(40, int(15000 // self.f0)), fit_inharmonicity=True, t_window=(t0, t1), f0_fixed=self.f0)
         self.pk = np.array([p.k for p in ps], int)
         self.pf = np.array([p.mean_f_hz for p in ps])
         self.pmean = np.array([p.mean_level_db for p in ps])
@@ -361,6 +457,18 @@ class Note:
         self.pdev = 1200 * np.log2(self.pf / (self.pk * self.f0)) if len(ps) else np.array([])
         self.pfreq_t = [np.interp(self.t, p.t_s, p.f_hz) for p in ps]
         self.decay = np.array([_decay_db_s(self.t, self.pl[i]) for i in range(len(ps))]) if self.kind == "decaying" else None
+        # A partial's frequency is a measurement only if the partial is there: within STRONG_DB of the strongest. Below
+        # that the tracker is reporting whichever noise peak lies in its search window (a render with two real
+        # partials has "partials" 4-12 at -60 to -90 dB), and a stiff-string fit or a frequency gap built on them is
+        # an artifact. B is fitted on the strong partials only, with f0 free: a note whose pitch has not settled has
+        # every partial offset together from the measured f0, and a fit that holds f0 would call that stiffness.
+        # It is 0 with fewer than three strong partials.
+        self.strong = self.pmean > self.pmean.max() - STRONG_DB if len(self.pmean) else np.zeros(0, bool)
+        if self.strong.sum() >= 3:
+            w = 10 ** ((self.pmean[self.strong] - self.pmean.max()) / 20.0)
+            self.B = float(fit_stiff_string_law(self.pk[self.strong].astype(float), self.pf[self.strong], w)[1])
+        else:
+            self.B = 0.0
 
     def _curves(self):
         S = self.S[:, : self.frames].astype(np.float64)
@@ -372,16 +480,11 @@ class Note:
         sound = self.rms_db > self.rms_db.max() - 40
         self.sound = sound
         self.centroid_hz = np.where(sound, (fb * P).sum(axis=0) / (tot + 1e-30), np.nan)
-        m = (self.sf > F_LO) & (self.sf < F_HI)
-        pk = S[m].max()
-        D = np.diff(S[m], axis=1)
-        live = np.maximum(S[m][:, 1:], S[m][:, :-1]) > pk - SHOW_DB
-        pos = np.where(live, np.maximum(D, 0.0), 0.0)
-        self.flux_db = np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
+        self.flux_db = flux_curve(S, self.sf)
 
     def scalars(self):
         d = self.desc
-        out = dict(f0_hz=self.f0, inharmonicity_B=d["inharmonicity_B"], odd_even_db=d["odd_even_db"], hnr_db=d["hnr_db"],
+        out = dict(f0_hz=self.f0, inharmonicity_B=self.B, odd_even_db=d["odd_even_db"], hnr_db=d["hnr_db"],
                    attack_ms=d["attack_ms"], centroid_rel=d["centroid_rel"], hi_share_db=d["hi_share_db"],
                    f0_sd_cents=d["f0_sd_cents"], level_db=self.level_db, duration_s=self.dur,
                    mean_centroid_hz=float(np.nanmean(self.centroid_hz)) if self.sound.any() else None,
@@ -499,12 +602,14 @@ def compare(a: Note, b: Note):
         if ia < 8 and live.sum() >= 5 and b.pmean[ib] > b.pmean.max() - 50:
             d = (la[live] - la[live].mean()) - (lb[live] - lb[live].mean())
             traj.append(float(np.sqrt(np.mean(d * d))))
-        cents.append(1200 * math.log2(a.ratios[ia] / b.ratios[ib]) if (a.inharmonic or b.inharmonic) else float(a.pdev[ia] - b.pdev[ib]))
+        if a.strong[ia] and b.strong[ib]:
+            cents.append(1200 * math.log2(a.ratios[ia] / b.ratios[ib]) if (a.inharmonic or b.inharmonic) else float(a.pdev[ia] - b.pdev[ib]))
     g["partial_traj_db"] = (float(np.median(traj)) if traj else None, None)
     g["partial_freq_cents"] = (float(np.sqrt(np.mean(np.square(cents)))) if cents else None, float(np.mean(cents)) if cents else None)
     sc = 1200 * math.log2(a.f0 / b.f0)
     g["f0_cents"] = (abs(sc), sc)
-    for k in ("inharmonicity_B", "odd_even_db", "hnr_db"):
+    g["inharmonicity_B"] = (abs(a.B - b.B), a.B - b.B)
+    for k in ("odd_even_db", "hnr_db"):
         g[k] = (abs(a.desc[k] - b.desc[k]), a.desc[k] - b.desc[k])
     r = math.log2(max(a.desc["attack_ms"], 0.02) / max(b.desc["attack_ms"], 0.02))
     g["attack_log2"] = (abs(r), r)
@@ -549,9 +654,16 @@ class Refs:
         if refs_json:
             manifest = json.loads(Path(refs_json).read_text())
             self.external = manifest.get("external")  # a recording set that is not in references.json (VocalSet)
+            foreign = sorted({e["licence"] for e in manifest["files"] if e.get("licence")} - {"uiowa-mis"})
+            if foreign:  # a set under another licence cannot be graded without the attribution its licence requires
+                missing = [k for k in ("name", "url", "licence", "licence_url", "credit") if not (self.external or {}).get(k)]
+                if missing:
+                    raise ValueError(f"IRPDECOMP_SOURCE_MISSING: {refs_json} lists recordings under {foreign} but its `external` block "
+                                     f"lacks {missing}: a pair would carry no attribution, and the page refuses it")
             for e in manifest["files"]:
                 self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
         self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()
+        self.band_hz = None  # set per pair by run_pair: every signal read through this Refs is low-passed there
 
     def info_of(self, e):
         return self.meta.get(Path(e["file"]).stem, {})
@@ -560,26 +672,29 @@ class Refs:
         return self.info_of(e).get("page")
 
     def raw(self, fname):
-        if fname not in self._raw:
-            self._raw[fname] = load(self.wav_dir / fname)
+        key = (fname, self.band_hz)
+        if key not in self._raw:
+            x = load(self.wav_dir / fname)
+            self._raw[key] = lowpass(x, self.band_hz) if self.band_hz else x
             while len(self._raw) > 8:
                 self._raw.popitem(last=False)
-        return self._raw[fname]
+        return self._raw[key]
 
     def aligned(self, e):
         """(aligned samples, alignment info) of library entry `e`, in the file's own time."""
         f0 = hz_of(e["note"])
         x = self.raw(e["file"])
-        if e["file"] not in self._floor:
-            self._floor[e["file"]] = floor_of(highpass(x, f0))
+        fkey = (e["file"], self.band_hz)
+        if fkey not in self._floor:
+            self._floor[fkey] = floor_of_file(x, f0)
         a = max(0, int((e["start"] - 2.0) * SR))
         b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
-        y, info = align(x[a:b], f0, self._floor[e["file"]], anchor_s=e["start"] - a / SR, at_start=(a == 0))
+        y, info = align(x[a:b], f0, self._floor[fkey], anchor_s=e["start"] - a / SR, at_start=(a == 0))
         info = dict(info, source_onset_s=a / SR + info["onset_s"], source_cut_start_s=a / SR + info["cut_start_s"])
         return y, info
 
     def note(self, e) -> Note:
-        key = (e["file"], e["start"])
+        key = (e["file"], e["start"], self.band_hz)
         if key not in self._notes:
             y, info = self.aligned(e)
             self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info)
@@ -799,18 +914,78 @@ def metric_rows(gaps, real: Note, ours: Note | None, ruler):
                       if r["gaps"].get(mid) is not None]
         context = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in ("other_articulation", "other_instrument") for r in ruler.get(c, [])
                    if r["gaps"].get(mid) is not None]
+        # the STRICT ruler: real recordings of the SAME note only (other dynamics, other takes); neighbouring notes excluded
+        strict_rows = [dict(label=r["label"], value=r["gaps"][mid] * k) for c in spec["cats"] if c in SAME_NOTE for r in ruler.get(c, [])
+                       if r["gaps"].get(mid) is not None]
         note = spec["note"]
         if mid == "inharmonicity_B" and ruler_rows and max(r["value"] for r in ruler_rows) < B_RESOLUTION:
             ruler_rows, note = [], note + " Real recordings of this note differ by less than the fit resolves, so no ruler is offered."
+        if mid == "inharmonicity_B" and strict_rows and max(r["value"] for r in strict_rows) < B_RESOLUTION:
+            strict_rows = []
+        gap = sc(gp) if ours else None
         rows.append(dict(id=mid, label=spec["label"], unit=spec["unit"], gap_unit=spec["gap_unit"], real=sc(rs.get(key)) if key else None,
-                         ours=sc(rv.get(key)) if key and ours else None, gap=sc(gp) if ours else None,
-                         signed_gap=sc(gaps[mid][1]) if gaps else None, ruler=ruler_rows,
+                         ours=sc(rv.get(key)) if key and ours else None, gap=gap,
+                         signed_gap=sc(gaps[mid][1]) if gaps else None, ruler=ruler_rows, ruler_strict=strict_rows,
+                         inside_loose=_inside(gap, ruler_rows), inside_strict=_inside(gap, strict_rows),
                          other_instruments_and_articulations=context, note=note))
     return rows
 
 
-def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False):
-    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract)."""
+def _inside(gap, rows):
+    """True/False: is the gap no larger than the largest ruler value? None: no gap (no render) or no ruler to judge by."""
+    if gap is None or not rows:
+        return None
+    return bool(gap <= max(r["value"] for r in rows))
+
+
+def verdict_counts(metrics):
+    """Per-pair counts of the two verdicts: against the loose ruler (this note, other dynamics and takes, neighbouring notes)
+    and the strict one (this note only). no_ruler = measures with a gap but nothing to judge it by."""
+    out = {"measures": sum(1 for m in metrics if m["gap"] is not None)}
+    for kind in ("loose", "strict"):
+        v = [m[f"inside_{kind}"] for m in metrics if m["gap"] is not None]
+        out[kind] = {"inside": sum(1 for x in v if x is True), "outside": sum(1 for x in v if x is False), "no_ruler": sum(1 for x in v if x is None)}
+    return out
+
+
+def staged(final, build):
+    """Run build(stage) with a fresh staging directory inside note directory `final`; when it returns, swap the staged
+    files in whole (the earlier files move to superseded/, nothing is deleted or overwritten). If it raises, the
+    partial files move to superseded/aborted-<UTC>-<pid>-<n>/ and the earlier grading stays in place."""
+    final.mkdir(parents=True, exist_ok=True)
+    stage = final / f".staging-{os.getpid()}-{time.time_ns()}"
+    stage.mkdir()
+    try:
+        result = build(stage)
+        supersede_existing(final)
+        for p in sorted(stage.iterdir()):
+            p.rename(final / p.name)
+        stage.rmdir()
+        return result
+    except BaseException:
+        if stage.exists():
+            if any(stage.iterdir()):
+                aside = final / "superseded" / f"aborted-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}-{time.time_ns() % 10**6}"
+                aside.parent.mkdir(parents=True, exist_ok=True)
+                stage.rename(aside)
+            else:
+                stage.rmdir()
+        raise
+
+
+def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False, cand_meta=None):
+    """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
+
+    Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
+    note never sits without its pair while the slow ruler is computed, and a failure leaves the earlier grading in
+    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted.
+    """
+    final = Path(root) / family / note_name
+    return staged(final, lambda stage: _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info,
+                                                          cand_y, cand_info, ours_meta, review, cand_meta))
+
+
+def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review, cand_meta=None):
     f0 = hz_of(ref_e["note"])
     inh = ref_e["inst"] in ("xylophone", "marimba")
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
@@ -823,9 +998,7 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
     nf = min(real.frames, ours.frames) if ours else real.frames
     dur = nf * HOP / SR
     off = real.level_db - ours.level_db if ours else 0.0
-    out = Path(root) / family / note_name
-    out.mkdir(parents=True, exist_ok=True)
-    supersede_existing(out)  # a regrade moves the earlier files aside; it never overwrites them
+    out = stage
     ns = int(round(dur * SR))
     yr, yo = ref_y[:ns], (cand_y[:ns] * 10 ** (off / 20) if ours else None)
     peak = max(np.abs(yr).max(), np.abs(yo).max() if yo is not None else 0.0)
@@ -835,9 +1008,10 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
         write_wav(out / "ours.wav", yo * g)
     gaps = compare(ours, real) if ours else None
     ruler = refs.ruler(ref_e)
-    lo, hi = (60.0, F_HI)
-    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, F_HI),
-                scalogram=map_images("scalogram", real, ours, off, out, lo, hi))
+    metrics = metric_rows(gaps, real, ours, ruler)
+    top_hz = float(refs.band_hz) if refs.band_hz else F_HI
+    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, top_hz),
+                scalogram=map_images("scalogram", real, ours, off, out, 60.0, top_hz))
     pm = _partial_match(ours, real) if ours else []
     parts = None
     if len(real.pk):
@@ -853,20 +1027,82 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
         ours=dict(wav=str(ours_meta["wav"]), git_sha=ours_meta["git_sha"], observer=ours_meta["observer"], sample_rate=ours_meta["sample_rate"],
                   recipe=ours_meta["recipe"]) if ours else None,
         audio=dict(real="real.wav", ours="ours.wav" if ours else None,
-                   level_match=(f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
+                   level_match=((f"Both clips are low-passed at {refs.band_hz:.0f} Hz (the render is valid only below it). " if refs.band_hz else "")
+                                + f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
                                 + (f"ours was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
                                    "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
-                       level_offset_db=off if ours else None, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
+                       level_offset_db=off if ours else None, band_hz=refs.band_hz, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
                        onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
-        figures=figs, partials=parts, metrics=metric_rows(gaps, real, ours, ruler),
+        figures=figs, partials=parts, metrics=metrics,
+        verdicts=verdict_counts(metrics) if ours else None,
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
-        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}'),
+        decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}',
+                       candidate=cand_meta),
     )
     (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
     if review and ours:
         fig_review(ours, real, off, out / "review.png")
     return pj
+
+
+def single_map_image(kind, M, f, nf, out, f_lo, f_hi, span_db=80.0):
+    """A bare spectrogram/scalogram of one signal, same axes, colours and span as map_images, normalised to its own peak."""
+    M = M[:, :nf].astype(np.float64)
+    pk = M[(f > f_lo) & (f < f_hi)].max()
+    stack = log_rows(M - pk, f, f_lo, f_hi)
+    v = np.clip((stack + span_db) / span_db, 0, 1)
+    name = f"{kind}-ours.webp"
+    save_map(_lut("magma")[(v * 255).astype(int)], out / name, nf * 4)
+    return dict(real=None, ours=name, diff=None, f_lo_hz=f_lo, f_hi_hz=f_hi, span_db=span_db)
+
+
+def write_listening(root, family, slot, y, info, meta, reason, dyn="mf", band_hz=None):
+    """A render with no recording to compare it with (an instrument with no licensed reference): audio, its two maps,
+    and the reason there is no reference, in the contract P8 accepts (real null, no_reference.reason, alignment null,
+    partials null, metrics []). No gap, no ruler, no claim."""
+    if not reason or not str(reason).strip():
+        raise ValueError("IRPDECOMP_LISTEN_REASON: a listening-only pair states why there is no reference")
+    final = Path(root) / family / slot
+
+    def build(stage):
+        n = 8192 if hz_of(midi_of(meta["note"])) < 80 else 4096
+        S, sf = stft_db(y, n)
+        C, cf = cwt_db(y)
+        nf = min(S.shape[1], C.shape[1], max(1, (len(y) - n // 2) // HOP))
+        top = float(band_hz) if band_hz else F_HI
+        figs = dict(spectrogram=single_map_image("spectrogram", S, sf, nf, stage, F_LO, top),
+                    scalogram=single_map_image("scalogram", C, cf, nf, stage, 60.0, top))
+        dur = nf * HOP / SR
+        yo = y[: int(round(dur * SR))]
+        g = 0.7 / max(float(np.abs(yo).max()), 1e-12)
+        write_wav(stage / "ours.wav", yo * g)
+        pj = dict(schema="frankensim.instrument-pair.v1", family=family, note=slot, dynamic=dyn, duration_s=round(dur, 4), real=None,
+                  no_reference=dict(reason=str(reason).strip()),
+                  ours=dict(wav=str(meta["wav"]), git_sha=meta["git_sha"], observer=meta["observer"], sample_rate=meta["sample_rate"], recipe=meta["recipe"]),
+                  audio=dict(real=None, ours="ours.wav",
+                             level_match=((f"The clip is low-passed at {band_hz:.0f} Hz (the render is valid only below it). " if band_hz else "")
+                                          + f"The peak is set to 0.70 of full scale ({20 * math.log10(g):+.1f} dB); there is no recording to match it to.")),
+                  alignment=None, figures=figs, partials=None, metrics=[],
+                  decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, mode="listening-only", onset_s=info["onset_s"]))
+        (stage / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
+        return pj
+
+    return staged(final, build)
+
+
+def run_listening(c, root):
+    """The listening-only twin of run_pair: no reference note is looked up and nothing is compared."""
+    f0 = hz_of(midi_of(c["note"]))  # only the high-pass corner and the analysis window length use the nominal pitch
+    try:
+        raw = load(Path(c["wav"]))
+    except OSError as e:
+        raise GraderRefusalError(f"IRPDECOMP_RENDER_UNREADABLE: {c['wav']}: {e}") from None
+    if c.get("band_hz"):
+        raw = lowpass(raw, c["band_hz"])
+    y, info = _labelled("render", align, raw, f0, render_floor(highpass(raw, f0), f0))
+    meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]), note=c["note"])
+    return write_listening(root, c["family"], c.get("slot") or c["note"], y, info, meta, c.get("reason"), c.get("dyn", "mf"), c.get("band_hz"))
 
 
 DEFAULTS = dict(lib="/data/tmp/wa-inst/p2-grade/grade/library-v6-light.json", wav_dir="/data/tmp/wa-inst/refs-wav48",
@@ -899,18 +1135,28 @@ def _labelled(signal, fn, *a, **k):
 
 
 def run_pair(refs, c, root):
+    refs.band_hz = c.get("band_hz")  # a render valid only up to a band is graded only up to it, signal and ruler alike
     ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"), c.get("ref_contains"))
     cand_y = cand_info = ours_meta = None
     if c.get("wav"):  # the render first: it is cheap, and a render that is not the note should be refused for that
         f0 = hz_of(ref_e["note"])
-        raw = load(Path(c["wav"]))
+        try:
+            raw = load(Path(c["wav"]))
+        except OSError as e:
+            raise GraderRefusalError(f"IRPDECOMP_RENDER_UNREADABLE: {c['wav']}: {e}") from None
+        if refs.band_hz:
+            raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
         if ref_e["inst"] not in ("xylophone", "marimba"):
-            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours")
+            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours", f0)
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
-    return write_pair(root, c["family"], c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
+    # `slot` names the pair's directory and note id when one musical note has several pairs (a vowel at C3: "C3-a")
+    cand_meta = dict(note=c["note"], slot=c.get("slot"), art=ref_e["art"], dyn=ref_e["dyn"], band_hz=c.get("band_hz"),
+                     ref_contains=Path(ref_e["file"]).stem) if c.get("wav") else None  # what a regrade needs to rebuild the same candidate
+    return write_pair(root, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False),
+                      cand_meta)
 
 
 _REFS = None
@@ -921,13 +1167,17 @@ def _init(lib, wav, refs_json):
     _REFS = Refs(lib, wav, refs_json)
 
 
-REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError, OSError)
+# What is a fact about a note. An OSError is not (a moved directory, a full disk): it is the run's trouble and is never
+# written into the data as a refusal. A render file that cannot be read IS a fact about the candidate: run_pair turns
+# that one OSError into IRPDECOMP_RENDER_UNREADABLE.
+REFUSALS = (OnsetMisaligned, GraderRefusalError, SystemExit, ValueError, IndexError, KeyError)
+NOTE_REFUSALS = REFUSALS
 
 
 def supersede_existing(d):
     """Move everything in note directory `d` (bar a superseded/ folder) into superseded/<UTC>/; nothing is deleted or
     overwritten. Returns the folder it moved into, or None if there was nothing to move."""
-    old = [p for p in Path(d).iterdir() if p.name != "superseded"] if Path(d).is_dir() else []
+    old = [p for p in Path(d).iterdir() if p.name != "superseded" and not p.name.startswith(".staging")] if Path(d).is_dir() else []
     if not old:
         return None
     stamp, k = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), 1
@@ -991,10 +1241,12 @@ def _ref_job(args):
         try:
             pj = run_pair(_REFS, dict(c, note=name), root)
             return dict(family=c["family"], art=c["art"], note=name, ok=True, metrics=len(pj["metrics"]), refused=refused)
-        except REFUSALS as e:
+        except NOTE_REFUSALS as e:
             refused.append(dict(note=name, reason=str(e)))
             if (Path(root) / c["family"] / name / "pair.json").exists():  # an older pair of this note is stale: supersede it
                 refuse_pair(root, c["family"], name, e, dyn=c.get("dyn"))
+        except OSError as e:  # the run's own trouble (disk, a moved directory): reported, never written into the data as a refusal
+            refused.append(dict(note=name, reason=f"I/O error, not a refusal: {e}"))
     return dict(family=c["family"], art=c["art"], ok=False, refused=refused)
 
 
@@ -1010,8 +1262,12 @@ def cmd_refs(a):
         es = [e for e in refs.lib if e["inst"] == inst and e["dyn"] == "mf"]
         art = canon_art({e["art"] for e in es})
         notes = sorted({e["note"] for e in es if e["art"] == art})
-        centres = list(range(len(notes))) if a.all else sorted({min(len(notes) - 1, int(q * len(notes))) for q in (0.1, 0.35, 0.6, 0.85)})
-        reach = 0 if a.all else min(4, max(1, len(notes) // 8))
+        if a.notes:  # exactly these notes (names, comma-separated), no fallback to a neighbour
+            want = {midi_of(n) for n in a.notes.split(",")}
+            centres = [k for k, m in enumerate(notes) if m in want]
+        else:
+            centres = list(range(len(notes))) if a.all else sorted({min(len(notes) - 1, int(q * len(notes))) for q in (0.1, 0.35, 0.6, 0.85)})
+        reach = 0 if (a.all or a.notes) else min(4, max(1, len(notes) // 8))
         for ci in centres:
             order = [ci] + [ci + d * s_ for d in range(1, reach + 1) for s_ in (1, -1)]
             order = [k for k in order if 0 <= k < len(notes)]
@@ -1031,7 +1287,7 @@ def cmd_refs(a):
 
 def cmd_pair(a):
     refs = Refs(a.lib, a.wav_dir, a.refs_json)
-    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
+    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
     try:
@@ -1048,11 +1304,24 @@ def cmd_pair(a):
 def _batch_job(args):
     c, root = args
     try:
-        pj = run_pair(_REFS, c, root)
-        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
+        pj = run_listening(c, root) if c.get("listening_only") else run_pair(_REFS, c, root)
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=True, metrics=len(pj["metrics"]))
     except REFUSALS as e:
-        refuse_pair(root, c["family"], c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
-        return dict(family=c["family"], note=c["note"], wav=c["wav"], ok=False, error=str(e))
+        refuse_pair(root, c["family"], c.get("slot") or c["note"], e, c.get("git_sha"), c.get("wav"), c.get("dyn"))
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=str(e))
+    except OSError as e:  # the run's own trouble: reported here, never recorded as a refusal, the note's pair untouched
+        return dict(family=c["family"], note=c.get("slot") or c["note"], wav=c["wav"], ok=False, error=f"I/O error, not a refusal: {e}")
+
+
+def cmd_listen(a):
+    c = dict(family=a.family, note=a.note, slot=a.slot, dyn=a.dyn, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe,
+             reason=a.reason, band_hz=a.band_hz)
+    try:
+        pj = run_listening({k: v for k, v in c.items() if v is not None}, a.out)
+    except REFUSALS as e:
+        refuse_pair(a.out, a.family, a.slot or a.note, e, a.git_sha, a.render, a.dyn)
+        raise SystemExit(f"{e}\n(recorded as a refusal in {a.out}/{a.family}/{a.slot or a.note}/pair.json)")
+    print(f'listening-only pair written: {a.family}/{pj["note"]}  {pj["duration_s"]} s  ({pj["no_reference"]["reason"]})')
 
 
 def cmd_batch(a):
@@ -1089,6 +1358,53 @@ def pair_report(pj):
     return "\n".join(out)
 
 
+def pair_view(pj):
+    """{metric id: (gap, largest real-vs-real distance | None)} of a pair with a render."""
+    return {m["id"]: (m["gap"], max((r["value"] for r in m["ruler"]), default=None)) for m in pj["metrics"] if m["gap"] is not None}
+
+
+def diff_pairs(old, new):
+    """What moved between two gradings of the same note: per metric the old and new gap, the old and new gap / ruler
+    ratio (None where there is no ruler) and whether the verdict flipped, plus the inside/outside totals of each."""
+    vo, vn = pair_view(old), pair_view(new)
+    rows, tot = [], {"old": [0, 0], "new": [0, 0]}
+    for mid in vn:
+        if mid not in vo:
+            continue
+        (go, to), (gn, tn) = vo[mid], vn[mid]
+        ro = None if not to else go / to
+        rn = None if not tn else gn / tn
+        for key, g, t in (("old", go, to), ("new", gn, tn)):
+            if t is not None:
+                tot[key][0 if g <= t else 1] += 1
+        rows.append(dict(id=mid, label=next(m["label"] for m in new["metrics"] if m["id"] == mid), unit=next(m["gap_unit"] for m in new["metrics"] if m["id"] == mid),
+                         gap_old=go, gap_new=gn, ratio_old=ro, ratio_new=rn,
+                         flipped=(ro is not None and rn is not None and (ro <= 1.0) != (rn <= 1.0))))
+    return rows, tot
+
+
+def cmd_diff(a):
+    """For every graded note that has an earlier grading in superseded/, print what moved against the real-vs-real ruler."""
+    root = Path(a.out)
+    for p in sorted(root.glob("*/*/pair.json")):
+        pj = json.loads(p.read_text())
+        if not pj.get("ours") or (a.family and pj["family"] not in a.family):
+            continue
+        prev = sorted((p.parent / "superseded").glob("*/pair.json")) if (p.parent / "superseded").is_dir() else []
+        prev = [q for q in prev if (json.loads(q.read_text()).get("ours") or {}).get("git_sha") != pj["ours"]["git_sha"] and json.loads(q.read_text()).get("ours")]
+        if a.against:  # compare with the newest earlier grading of a named render sha, not merely the latest different one
+            prev = [q for q in prev if json.loads(q.read_text())["ours"]["git_sha"].startswith(a.against)]
+        if not prev:
+            continue
+        old = json.loads(prev[-1].read_text())
+        rows, tot = diff_pairs(old, pj)
+        print(f'{pj["family"]} {pj["note"]}: {old["ours"]["git_sha"][:9]} -> {pj["ours"]["git_sha"][:9]}   inside {tot["old"][0]} -> {tot["new"][0]}, outside {tot["old"][1]} -> {tot["new"][1]}')
+        for r in sorted(rows, key=lambda r: -abs((r["ratio_new"] or 0) - (r["ratio_old"] or 0))):
+            if r["flipped"] or (r["ratio_old"] is not None and r["ratio_new"] is not None and abs(r["ratio_new"] - r["ratio_old"]) >= 0.5):
+                arrow = "  FLIPPED" if r["flipped"] else ""
+                print(f'    {r["label"]} [{r["unit"]}]: gap {r["gap_old"]:.4g} -> {r["gap_new"]:.4g}   x{r["ratio_old"]:.2f} -> x{r["ratio_new"]:.2f}{arrow}')
+
+
 def cmd_report(a):
     root = Path(a.out)
     for p in sorted(root.glob("*/*/pair.json")):
@@ -1115,10 +1431,24 @@ def main():
     p.add_argument("--dyn", default="mf")
     p.add_argument("--art")
     p.add_argument("--ref-contains", help="substring of the library file name, to pick the string/session of the reference")
+    p.add_argument("--band-hz", type=float, help="grade only up to this frequency: low-pass render, recording and ruler there (a render valid only below it)")
     p.add_argument("--git-sha")
     p.add_argument("--observer")
     p.add_argument("--recipe")
     p.set_defaults(fn=cmd_pair)
+    p = sub.add_parser("listen", help="a render with no recording to compare it with: audio, maps and the reason, no gaps")
+    p.add_argument("--render", required=True)
+    p.add_argument("--family", required=True)
+    p.add_argument("--note", required=True, help="nominal note name (sets the high-pass corner only); nothing is compared with it")
+    p.add_argument("--slot", help="directory and note id of the pair when it differs from --note")
+    p.add_argument("--dyn", default="mf")
+    p.add_argument("--git-sha", required=True)
+    p.add_argument("--observer", required=True)
+    p.add_argument("--recipe", required=True)
+    p.add_argument("--reason", required=True, help="one sentence: why there is no recording to compare with")
+    p.add_argument("--band-hz", type=float)
+    p.add_argument("--out", default=DEFAULTS["out"])
+    p.set_defaults(fn=cmd_listen)
     p = sub.add_parser("batch")
     common(p)
     p.add_argument("candidates")
@@ -1128,9 +1458,15 @@ def main():
     common(p)
     p.add_argument("--family", action="append")
     p.add_argument("--all", action="store_true", help="every mf note, not four spread ones")
+    p.add_argument("--notes", help="only these notes, e.g. G5,C4 (with --family); no fallback to a neighbouring note")
     p.add_argument("--since", type=float, help="epoch seconds: skip notes whose reference-only pair.json is at least this new (resume a run)")
     p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_refs)
+    p = sub.add_parser("diff", help="for every re-graded note, what moved against the real-vs-real ruler since the grading in superseded/")
+    p.add_argument("--out", default=DEFAULTS["out"])
+    p.add_argument("--family", action="append")
+    p.add_argument("--against", help="sha (prefix) of the earlier grading to compare with")
+    p.set_defaults(fn=cmd_diff)
     p = sub.add_parser("report", help="print each graded pair as a table, worst gap against its ruler first")
     p.add_argument("--out", default=DEFAULTS["out"])
     p.add_argument("--family", action="append")

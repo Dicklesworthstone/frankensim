@@ -9,14 +9,17 @@
 //! tape is needed for this linear map at fixed steps, geometry and material.
 //!
 //! These are derivatives of the admitted discrete equations, not derivatives
-//! of PCG, acceptance gates or rounding. Stress, reactions, work/energy report
-//! objectives, frame motion and event times require their own additional
-//! pullbacks. `TetTransientRun3::material_scale_pullback` adds the full nodal
-//! material and damping contractions. Displacement impulses are not supported.
+//! of PCG, acceptance gates or rounding. Work/energy report objectives, frame
+//! motion and event times require their own additional pullbacks. `reaction`
+//! supplies support-force observations, `stress` supplies element stresses, and
+//! `TetTransientRun3::material_scale_pullback` adds full nodal material and
+//! damping contractions. Displacement impulses are not supported.
 
 use super::*;
 
 mod material;
+pub mod reaction;
+pub mod stress;
 pub mod trajectory;
 
 /// Full node-major objective cotangents, including constrained components.

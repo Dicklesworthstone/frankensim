@@ -163,3 +163,6 @@ mod response;
 
 // Material-scale derivatives reuse the canonical P1 tiles.
 mod material_gradient;
+
+// Stress observations transpose the same P1 B and constitutive tensors.
+mod stress_gradient;
