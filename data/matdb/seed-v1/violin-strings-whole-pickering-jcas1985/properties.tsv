@@ -1,0 +1,1602 @@
+frankensim.matdb-source.v1
+observation	pick85-s01	Dominant E string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s01	pick85-s01	diameter_max_s01	0.000315	m	constant
+uncertainty	diameter-max-s01	unstated	-	-	-	-
+validity	diameter-max-s01	temperature_known	0	0	1
+scalar	diameter-min-s01	pick85-s01	diameter_min_s01	0.000307	m	constant
+uncertainty	diameter-min-s01	unstated	-	-	-	-
+validity	diameter-min-s01	temperature_known	0	0	1
+scalar	length-relaxed-s01	pick85-s01	length_relaxed_s01	0.565	m	constant
+uncertainty	length-relaxed-s01	unstated	-	-	-	-
+validity	length-relaxed-s01	temperature_known	0	0	1
+scalar	tension-s01	pick85-s01	tension_s01	72.56	N	constant
+uncertainty	tension-s01	unstated	-	-	-	-
+validity	tension-s01	temperature_known	0	0	1
+scalar	wave-impedance-s01	pick85-s01	wave_impedance_s01	0.1666	kg/s	constant
+uncertainty	wave-impedance-s01	unstated	-	-	-	-
+validity	wave-impedance-s01	temperature_known	0	0	1
+scalar	linear-density-s01	pick85-s01	linear_density_s01	0.000383	kg/m	constant
+uncertainty	linear-density-s01	unstated	-	-	-	-
+validity	linear-density-s01	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s01	pick85-s01	torsion_stiffness_printed_g_cm_per_rad_s01	15.57	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s01	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s01	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s01	pick85-s01	damping_coefficient_printed_x100_s01	0.69	1	constant
+uncertainty	damping-coefficient-printed-x100-s01	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s01	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s01	pick85-s01	partial_2_deviation_cents_s01	0	1	constant
+uncertainty	partial-2-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s01	pick85-s01	partial_3_deviation_cents_s01	-1	1	constant
+uncertainty	partial-3-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s01	pick85-s01	partial_4_deviation_cents_s01	0	1	constant
+uncertainty	partial-4-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s01	pick85-s01	partial_5_deviation_cents_s01	2	1	constant
+uncertainty	partial-5-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s01	pick85-s01	partial_6_deviation_cents_s01	1	1	constant
+uncertainty	partial-6-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s01	pick85-s01	partial_7_deviation_cents_s01	1	1	constant
+uncertainty	partial-7-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s01	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s01	pick85-s01	partial_8_deviation_cents_s01	6	1	constant
+uncertainty	partial-8-deviation-cents-s01	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s01	temperature_known	0	0	1
+observation	pick85-s02	Super Sensitive E string, solid steel (the table's note 2); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s02	pick85-s02	diameter_max_s02	0.000264	m	constant
+uncertainty	diameter-max-s02	unstated	-	-	-	-
+validity	diameter-max-s02	temperature_known	0	0	1
+scalar	diameter-min-s02	pick85-s02	diameter_min_s02	0.000264	m	constant
+uncertainty	diameter-min-s02	unstated	-	-	-	-
+validity	diameter-min-s02	temperature_known	0	0	1
+scalar	length-relaxed-s02	pick85-s02	length_relaxed_s02	0.552	m	constant
+uncertainty	length-relaxed-s02	unstated	-	-	-	-
+validity	length-relaxed-s02	temperature_known	0	0	1
+scalar	tension-s02	pick85-s02	tension_s02	84.01	N	constant
+uncertainty	tension-s02	unstated	-	-	-	-
+validity	tension-s02	temperature_known	0	0	1
+scalar	wave-impedance-s02	pick85-s02	wave_impedance_s02	0.1929	kg/s	constant
+uncertainty	wave-impedance-s02	unstated	-	-	-	-
+validity	wave-impedance-s02	temperature_known	0	0	1
+scalar	linear-density-s02	pick85-s02	linear_density_s02	0.000443	kg/m	constant
+uncertainty	linear-density-s02	unstated	-	-	-	-
+validity	linear-density-s02	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s02	pick85-s02	torsion_stiffness_printed_g_cm_per_rad_s02	24.67	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s02	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s02	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s02	pick85-s02	damping_coefficient_printed_x100_s02	0.38	1	constant
+uncertainty	damping-coefficient-printed-x100-s02	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s02	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s02	pick85-s02	partial_2_deviation_cents_s02	2	1	constant
+uncertainty	partial-2-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s02	pick85-s02	partial_3_deviation_cents_s02	1	1	constant
+uncertainty	partial-3-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s02	pick85-s02	partial_4_deviation_cents_s02	2	1	constant
+uncertainty	partial-4-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s02	pick85-s02	partial_5_deviation_cents_s02	2	1	constant
+uncertainty	partial-5-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s02	pick85-s02	partial_6_deviation_cents_s02	4	1	constant
+uncertainty	partial-6-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s02	pick85-s02	partial_7_deviation_cents_s02	6	1	constant
+uncertainty	partial-7-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s02	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s02	pick85-s02	partial_8_deviation_cents_s02	6	1	constant
+uncertainty	partial-8-deviation-cents-s02	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s02	temperature_known	0	0	1
+observation	pick85-s03	Super Sensitive E string, solid steel (the table's note 2); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s03	pick85-s03	diameter_max_s03	0.000249	m	constant
+uncertainty	diameter-max-s03	unstated	-	-	-	-
+validity	diameter-max-s03	temperature_known	0	0	1
+scalar	diameter-min-s03	pick85-s03	diameter_min_s03	0.000249	m	constant
+uncertainty	diameter-min-s03	unstated	-	-	-	-
+validity	diameter-min-s03	temperature_known	0	0	1
+scalar	length-relaxed-s03	pick85-s03	length_relaxed_s03	0.551	m	constant
+uncertainty	length-relaxed-s03	unstated	-	-	-	-
+validity	length-relaxed-s03	temperature_known	0	0	1
+scalar	tension-s03	pick85-s03	tension_s03	73.76	N	constant
+uncertainty	tension-s03	unstated	-	-	-	-
+validity	tension-s03	temperature_known	0	0	1
+scalar	wave-impedance-s03	pick85-s03	wave_impedance_s03	0.1694	kg/s	constant
+uncertainty	wave-impedance-s03	unstated	-	-	-	-
+validity	wave-impedance-s03	temperature_known	0	0	1
+scalar	linear-density-s03	pick85-s03	linear_density_s03	0.000389	kg/m	constant
+uncertainty	linear-density-s03	unstated	-	-	-	-
+validity	linear-density-s03	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s03	pick85-s03	torsion_stiffness_printed_g_cm_per_rad_s03	17.36	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s03	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s03	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s03	pick85-s03	damping_coefficient_printed_x100_s03	0.21	1	constant
+uncertainty	damping-coefficient-printed-x100-s03	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s03	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s03	pick85-s03	partial_2_deviation_cents_s03	0	1	constant
+uncertainty	partial-2-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s03	pick85-s03	partial_3_deviation_cents_s03	-1	1	constant
+uncertainty	partial-3-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s03	pick85-s03	partial_4_deviation_cents_s03	0	1	constant
+uncertainty	partial-4-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s03	pick85-s03	partial_5_deviation_cents_s03	2	1	constant
+uncertainty	partial-5-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s03	pick85-s03	partial_6_deviation_cents_s03	1	1	constant
+uncertainty	partial-6-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s03	pick85-s03	partial_7_deviation_cents_s03	4	1	constant
+uncertainty	partial-7-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s03	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s03	pick85-s03	partial_8_deviation_cents_s03	4	1	constant
+uncertainty	partial-8-deviation-cents-s03	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s03	temperature_known	0	0	1
+observation	pick85-s04	Jargar E string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s04	pick85-s04	diameter_max_s04	0.000259	m	constant
+uncertainty	diameter-max-s04	unstated	-	-	-	-
+validity	diameter-max-s04	temperature_known	0	0	1
+scalar	diameter-min-s04	pick85-s04	diameter_min_s04	0.000254	m	constant
+uncertainty	diameter-min-s04	unstated	-	-	-	-
+validity	diameter-min-s04	temperature_known	0	0	1
+scalar	length-relaxed-s04	pick85-s04	length_relaxed_s04	0.553	m	constant
+uncertainty	length-relaxed-s04	unstated	-	-	-	-
+validity	length-relaxed-s04	temperature_known	0	0	1
+scalar	tension-s04	pick85-s04	tension_s04	77.77	N	constant
+uncertainty	tension-s04	unstated	-	-	-	-
+validity	tension-s04	temperature_known	0	0	1
+scalar	wave-impedance-s04	pick85-s04	wave_impedance_s04	0.1786	kg/s	constant
+uncertainty	wave-impedance-s04	unstated	-	-	-	-
+validity	wave-impedance-s04	temperature_known	0	0	1
+scalar	linear-density-s04	pick85-s04	linear_density_s04	0.000411	kg/m	constant
+uncertainty	linear-density-s04	unstated	-	-	-	-
+validity	linear-density-s04	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s04	pick85-s04	torsion_stiffness_printed_g_cm_per_rad_s04	22.81	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s04	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s04	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s04	pick85-s04	damping_coefficient_printed_x100_s04	0.25	1	constant
+uncertainty	damping-coefficient-printed-x100-s04	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s04	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s04	pick85-s04	partial_2_deviation_cents_s04	1	1	constant
+uncertainty	partial-2-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s04	pick85-s04	partial_3_deviation_cents_s04	0	1	constant
+uncertainty	partial-3-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s04	pick85-s04	partial_4_deviation_cents_s04	0	1	constant
+uncertainty	partial-4-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s04	pick85-s04	partial_5_deviation_cents_s04	1	1	constant
+uncertainty	partial-5-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s04	pick85-s04	partial_6_deviation_cents_s04	2	1	constant
+uncertainty	partial-6-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s04	pick85-s04	partial_7_deviation_cents_s04	3	1	constant
+uncertainty	partial-7-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s04	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s04	pick85-s04	partial_8_deviation_cents_s04	4	1	constant
+uncertainty	partial-8-deviation-cents-s04	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s04	temperature_known	0	0	1
+observation	pick85-s05	Corelli E string, solid steel (the table's note 2); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s05	pick85-s05	diameter_max_s05	0.000259	m	constant
+uncertainty	diameter-max-s05	unstated	-	-	-	-
+validity	diameter-max-s05	temperature_known	0	0	1
+scalar	diameter-min-s05	pick85-s05	diameter_min_s05	0.000259	m	constant
+uncertainty	diameter-min-s05	unstated	-	-	-	-
+validity	diameter-min-s05	temperature_known	0	0	1
+scalar	length-relaxed-s05	pick85-s05	length_relaxed_s05	0.545	m	constant
+uncertainty	length-relaxed-s05	unstated	-	-	-	-
+validity	length-relaxed-s05	temperature_known	0	0	1
+scalar	tension-s05	pick85-s05	tension_s05	72.25	N	constant
+uncertainty	tension-s05	unstated	-	-	-	-
+validity	tension-s05	temperature_known	0	0	1
+scalar	wave-impedance-s05	pick85-s05	wave_impedance_s05	0.1659	kg/s	constant
+uncertainty	wave-impedance-s05	unstated	-	-	-	-
+validity	wave-impedance-s05	temperature_known	0	0	1
+scalar	linear-density-s05	pick85-s05	linear_density_s05	0.000381	kg/m	constant
+uncertainty	linear-density-s05	unstated	-	-	-	-
+validity	linear-density-s05	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s05	pick85-s05	torsion_stiffness_printed_g_cm_per_rad_s05	18.48	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s05	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s05	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s05	pick85-s05	damping_coefficient_printed_x100_s05	0.32	1	constant
+uncertainty	damping-coefficient-printed-x100-s05	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s05	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s05	pick85-s05	partial_2_deviation_cents_s05	0	1	constant
+uncertainty	partial-2-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s05	pick85-s05	partial_3_deviation_cents_s05	1	1	constant
+uncertainty	partial-3-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s05	pick85-s05	partial_4_deviation_cents_s05	2	1	constant
+uncertainty	partial-4-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s05	pick85-s05	partial_5_deviation_cents_s05	2	1	constant
+uncertainty	partial-5-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s05	pick85-s05	partial_6_deviation_cents_s05	3	1	constant
+uncertainty	partial-6-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s05	pick85-s05	partial_7_deviation_cents_s05	4	1	constant
+uncertainty	partial-7-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s05	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s05	pick85-s05	partial_8_deviation_cents_s05	5	1	constant
+uncertainty	partial-8-deviation-cents-s05	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s05	temperature_known	0	0	1
+observation	pick85-s06	Kaplan A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s06	pick85-s06	diameter_max_s06	0.000681	m	constant
+uncertainty	diameter-max-s06	unstated	-	-	-	-
+validity	diameter-max-s06	temperature_known	0	0	1
+scalar	diameter-min-s06	pick85-s06	diameter_min_s06	0.000668	m	constant
+uncertainty	diameter-min-s06	unstated	-	-	-	-
+validity	diameter-min-s06	temperature_known	0	0	1
+scalar	length-relaxed-s06	pick85-s06	length_relaxed_s06	0.55	m	constant
+uncertainty	length-relaxed-s06	unstated	-	-	-	-
+validity	length-relaxed-s06	temperature_known	0	0	1
+scalar	tension-s06	pick85-s06	tension_s06	49.96	N	constant
+uncertainty	tension-s06	unstated	-	-	-	-
+validity	tension-s06	temperature_known	0	0	1
+scalar	wave-impedance-s06	pick85-s06	wave_impedance_s06	0.1719	kg/s	constant
+uncertainty	wave-impedance-s06	unstated	-	-	-	-
+validity	wave-impedance-s06	temperature_known	0	0	1
+scalar	linear-density-s06	pick85-s06	linear_density_s06	0.000592	kg/m	constant
+uncertainty	linear-density-s06	unstated	-	-	-	-
+validity	linear-density-s06	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s06	pick85-s06	torsion_stiffness_printed_g_cm_per_rad_s06	9.79	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s06	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s06	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s06	pick85-s06	damping_coefficient_printed_x100_s06	2.23	1	constant
+uncertainty	damping-coefficient-printed-x100-s06	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s06	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s06	pick85-s06	partial_2_deviation_cents_s06	1	1	constant
+uncertainty	partial-2-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s06	pick85-s06	partial_3_deviation_cents_s06	1	1	constant
+uncertainty	partial-3-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s06	pick85-s06	partial_4_deviation_cents_s06	2	1	constant
+uncertainty	partial-4-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s06	pick85-s06	partial_5_deviation_cents_s06	2	1	constant
+uncertainty	partial-5-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s06	pick85-s06	partial_6_deviation_cents_s06	3	1	constant
+uncertainty	partial-6-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s06	pick85-s06	partial_7_deviation_cents_s06	5	1	constant
+uncertainty	partial-7-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s06	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s06	pick85-s06	partial_8_deviation_cents_s06	6	1	constant
+uncertainty	partial-8-deviation-cents-s06	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s06	temperature_known	0	0	1
+observation	pick85-s07	Kaplan A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s07	pick85-s07	diameter_max_s07	0.000691	m	constant
+uncertainty	diameter-max-s07	unstated	-	-	-	-
+validity	diameter-max-s07	temperature_known	0	0	1
+scalar	diameter-min-s07	pick85-s07	diameter_min_s07	0.000681	m	constant
+uncertainty	diameter-min-s07	unstated	-	-	-	-
+validity	diameter-min-s07	temperature_known	0	0	1
+scalar	length-relaxed-s07	pick85-s07	length_relaxed_s07	0.557	m	constant
+uncertainty	length-relaxed-s07	unstated	-	-	-	-
+validity	length-relaxed-s07	temperature_known	0	0	1
+scalar	tension-s07	pick85-s07	tension_s07	50.59	N	constant
+uncertainty	tension-s07	unstated	-	-	-	-
+validity	tension-s07	temperature_known	0	0	1
+scalar	wave-impedance-s07	pick85-s07	wave_impedance_s07	0.1741	kg/s	constant
+uncertainty	wave-impedance-s07	unstated	-	-	-	-
+validity	wave-impedance-s07	temperature_known	0	0	1
+scalar	linear-density-s07	pick85-s07	linear_density_s07	0.000599	kg/m	constant
+uncertainty	linear-density-s07	unstated	-	-	-	-
+validity	linear-density-s07	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s07	pick85-s07	torsion_stiffness_printed_g_cm_per_rad_s07	18.4	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s07	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s07	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s07	pick85-s07	damping_coefficient_printed_x100_s07	2.74	1	constant
+uncertainty	damping-coefficient-printed-x100-s07	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s07	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s07	pick85-s07	partial_2_deviation_cents_s07	2	1	constant
+uncertainty	partial-2-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s07	pick85-s07	partial_3_deviation_cents_s07	3	1	constant
+uncertainty	partial-3-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s07	pick85-s07	partial_4_deviation_cents_s07	3	1	constant
+uncertainty	partial-4-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s07	pick85-s07	partial_5_deviation_cents_s07	2	1	constant
+uncertainty	partial-5-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s07	pick85-s07	partial_6_deviation_cents_s07	3	1	constant
+uncertainty	partial-6-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s07	pick85-s07	partial_7_deviation_cents_s07	3	1	constant
+uncertainty	partial-7-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s07	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s07	pick85-s07	partial_8_deviation_cents_s07	5	1	constant
+uncertainty	partial-8-deviation-cents-s07	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s07	temperature_known	0	0	1
+observation	pick85-s08	Kaplan A string, wound on a synthetic core (the table's note 5); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s08	pick85-s08	diameter_max_s08	0.000683	m	constant
+uncertainty	diameter-max-s08	unstated	-	-	-	-
+validity	diameter-max-s08	temperature_known	0	0	1
+scalar	diameter-min-s08	pick85-s08	diameter_min_s08	0.000666	m	constant
+uncertainty	diameter-min-s08	unstated	-	-	-	-
+validity	diameter-min-s08	temperature_known	0	0	1
+scalar	length-relaxed-s08	pick85-s08	length_relaxed_s08	0.57	m	constant
+uncertainty	length-relaxed-s08	unstated	-	-	-	-
+validity	length-relaxed-s08	temperature_known	0	0	1
+scalar	tension-s08	pick85-s08	tension_s08	54.15	N	constant
+uncertainty	tension-s08	unstated	-	-	-	-
+validity	tension-s08	temperature_known	0	0	1
+scalar	wave-impedance-s08	pick85-s08	wave_impedance_s08	0.1864	kg/s	constant
+uncertainty	wave-impedance-s08	unstated	-	-	-	-
+validity	wave-impedance-s08	temperature_known	0	0	1
+scalar	linear-density-s08	pick85-s08	linear_density_s08	0.000641	kg/m	constant
+uncertainty	linear-density-s08	unstated	-	-	-	-
+validity	linear-density-s08	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s08	pick85-s08	torsion_stiffness_printed_g_cm_per_rad_s08	12.35	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s08	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s08	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s08	pick85-s08	damping_coefficient_printed_x100_s08	10.36	1	constant
+uncertainty	damping-coefficient-printed-x100-s08	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s08	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s08	pick85-s08	partial_2_deviation_cents_s08	0	1	constant
+uncertainty	partial-2-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s08	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s08	pick85-s08	partial_3_deviation_cents_s08	-3	1	constant
+uncertainty	partial-3-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s08	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s08	pick85-s08	partial_4_deviation_cents_s08	-4	1	constant
+uncertainty	partial-4-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s08	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s08	pick85-s08	partial_5_deviation_cents_s08	1	1	constant
+uncertainty	partial-5-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s08	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s08	pick85-s08	partial_6_deviation_cents_s08	-2	1	constant
+uncertainty	partial-6-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s08	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s08	pick85-s08	partial_7_deviation_cents_s08	1	1	constant
+uncertainty	partial-7-deviation-cents-s08	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s08	temperature_known	0	0	1
+observation	pick85-s09	Gold Label A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s09	pick85-s09	diameter_max_s09	0.000686	m	constant
+uncertainty	diameter-max-s09	unstated	-	-	-	-
+validity	diameter-max-s09	temperature_known	0	0	1
+scalar	diameter-min-s09	pick85-s09	diameter_min_s09	0.000678	m	constant
+uncertainty	diameter-min-s09	unstated	-	-	-	-
+validity	diameter-min-s09	temperature_known	0	0	1
+scalar	length-relaxed-s09	pick85-s09	length_relaxed_s09	0.57	m	constant
+uncertainty	length-relaxed-s09	unstated	-	-	-	-
+validity	length-relaxed-s09	temperature_known	0	0	1
+scalar	tension-s09	pick85-s09	tension_s09	54.15	N	constant
+uncertainty	tension-s09	unstated	-	-	-	-
+validity	tension-s09	temperature_known	0	0	1
+scalar	wave-impedance-s09	pick85-s09	wave_impedance_s09	0.1864	kg/s	constant
+uncertainty	wave-impedance-s09	unstated	-	-	-	-
+validity	wave-impedance-s09	temperature_known	0	0	1
+scalar	linear-density-s09	pick85-s09	linear_density_s09	0.000641	kg/m	constant
+uncertainty	linear-density-s09	unstated	-	-	-	-
+validity	linear-density-s09	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s09	pick85-s09	torsion_stiffness_printed_g_cm_per_rad_s09	11.64	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s09	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s09	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s09	pick85-s09	damping_coefficient_printed_x100_s09	2.09	1	constant
+uncertainty	damping-coefficient-printed-x100-s09	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s09	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s09	pick85-s09	partial_2_deviation_cents_s09	0	1	constant
+uncertainty	partial-2-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s09	pick85-s09	partial_3_deviation_cents_s09	0	1	constant
+uncertainty	partial-3-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s09	pick85-s09	partial_4_deviation_cents_s09	0	1	constant
+uncertainty	partial-4-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s09	pick85-s09	partial_5_deviation_cents_s09	2	1	constant
+uncertainty	partial-5-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s09	pick85-s09	partial_6_deviation_cents_s09	2	1	constant
+uncertainty	partial-6-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s09	pick85-s09	partial_7_deviation_cents_s09	5	1	constant
+uncertainty	partial-7-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s09	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s09	pick85-s09	partial_8_deviation_cents_s09	5	1	constant
+uncertainty	partial-8-deviation-cents-s09	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s09	temperature_known	0	0	1
+observation	pick85-s10	Gold Label A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s10	pick85-s10	diameter_max_s10	0.000691	m	constant
+uncertainty	diameter-max-s10	unstated	-	-	-	-
+validity	diameter-max-s10	temperature_known	0	0	1
+scalar	diameter-min-s10	pick85-s10	diameter_min_s10	0.000681	m	constant
+uncertainty	diameter-min-s10	unstated	-	-	-	-
+validity	diameter-min-s10	temperature_known	0	0	1
+scalar	length-relaxed-s10	pick85-s10	length_relaxed_s10	0.566	m	constant
+uncertainty	length-relaxed-s10	unstated	-	-	-	-
+validity	length-relaxed-s10	temperature_known	0	0	1
+scalar	tension-s10	pick85-s10	tension_s10	51.48	N	constant
+uncertainty	tension-s10	unstated	-	-	-	-
+validity	tension-s10	temperature_known	0	0	1
+scalar	wave-impedance-s10	pick85-s10	wave_impedance_s10	0.1772	kg/s	constant
+uncertainty	wave-impedance-s10	unstated	-	-	-	-
+validity	wave-impedance-s10	temperature_known	0	0	1
+scalar	linear-density-s10	pick85-s10	linear_density_s10	0.00061	kg/m	constant
+uncertainty	linear-density-s10	unstated	-	-	-	-
+validity	linear-density-s10	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s10	pick85-s10	torsion_stiffness_printed_g_cm_per_rad_s10	13.46	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s10	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s10	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s10	pick85-s10	damping_coefficient_printed_x100_s10	2.27	1	constant
+uncertainty	damping-coefficient-printed-x100-s10	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s10	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s10	pick85-s10	partial_2_deviation_cents_s10	1	1	constant
+uncertainty	partial-2-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s10	pick85-s10	partial_3_deviation_cents_s10	-1	1	constant
+uncertainty	partial-3-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s10	pick85-s10	partial_4_deviation_cents_s10	-1	1	constant
+uncertainty	partial-4-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s10	pick85-s10	partial_5_deviation_cents_s10	-4	1	constant
+uncertainty	partial-5-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s10	pick85-s10	partial_6_deviation_cents_s10	3	1	constant
+uncertainty	partial-6-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s10	pick85-s10	partial_7_deviation_cents_s10	2	1	constant
+uncertainty	partial-7-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s10	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s10	pick85-s10	partial_8_deviation_cents_s10	1	1	constant
+uncertainty	partial-8-deviation-cents-s10	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s10	temperature_known	0	0	1
+observation	pick85-s11	Eudoxa A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s11	pick85-s11	diameter_max_s11	0.000671	m	constant
+uncertainty	diameter-max-s11	unstated	-	-	-	-
+validity	diameter-max-s11	temperature_known	0	0	1
+scalar	diameter-min-s11	pick85-s11	diameter_min_s11	0.000663	m	constant
+uncertainty	diameter-min-s11	unstated	-	-	-	-
+validity	diameter-min-s11	temperature_known	0	0	1
+scalar	length-relaxed-s11	pick85-s11	length_relaxed_s11	0.57	m	constant
+uncertainty	length-relaxed-s11	unstated	-	-	-	-
+validity	length-relaxed-s11	temperature_known	0	0	1
+scalar	tension-s11	pick85-s11	tension_s11	48.89	N	constant
+uncertainty	tension-s11	unstated	-	-	-	-
+validity	tension-s11	temperature_known	0	0	1
+scalar	wave-impedance-s11	pick85-s11	wave_impedance_s11	0.1683	kg/s	constant
+uncertainty	wave-impedance-s11	unstated	-	-	-	-
+validity	wave-impedance-s11	temperature_known	0	0	1
+scalar	linear-density-s11	pick85-s11	linear_density_s11	0.000579	kg/m	constant
+uncertainty	linear-density-s11	unstated	-	-	-	-
+validity	linear-density-s11	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s11	pick85-s11	torsion_stiffness_printed_g_cm_per_rad_s11	11.93	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s11	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s11	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s11	pick85-s11	damping_coefficient_printed_x100_s11	2.19	1	constant
+uncertainty	damping-coefficient-printed-x100-s11	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s11	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s11	pick85-s11	partial_2_deviation_cents_s11	0	1	constant
+uncertainty	partial-2-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s11	pick85-s11	partial_3_deviation_cents_s11	-1	1	constant
+uncertainty	partial-3-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s11	pick85-s11	partial_4_deviation_cents_s11	0	1	constant
+uncertainty	partial-4-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s11	pick85-s11	partial_5_deviation_cents_s11	1	1	constant
+uncertainty	partial-5-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s11	pick85-s11	partial_6_deviation_cents_s11	1	1	constant
+uncertainty	partial-6-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s11	pick85-s11	partial_7_deviation_cents_s11	4	1	constant
+uncertainty	partial-7-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s11	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s11	pick85-s11	partial_8_deviation_cents_s11	4	1	constant
+uncertainty	partial-8-deviation-cents-s11	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s11	temperature_known	0	0	1
+observation	pick85-s12	Dominant A string, wound on a Perlon core (the table's note 3); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s12	pick85-s12	diameter_max_s12	0.000686	m	constant
+uncertainty	diameter-max-s12	unstated	-	-	-	-
+validity	diameter-max-s12	temperature_known	0	0	1
+scalar	diameter-min-s12	pick85-s12	diameter_min_s12	0.000676	m	constant
+uncertainty	diameter-min-s12	unstated	-	-	-	-
+validity	diameter-min-s12	temperature_known	0	0	1
+scalar	length-relaxed-s12	pick85-s12	length_relaxed_s12	0.59	m	constant
+uncertainty	length-relaxed-s12	unstated	-	-	-	-
+validity	length-relaxed-s12	temperature_known	0	0	1
+scalar	tension-s12	pick85-s12	tension_s12	56.25	N	constant
+uncertainty	tension-s12	unstated	-	-	-	-
+validity	tension-s12	temperature_known	0	0	1
+scalar	wave-impedance-s12	pick85-s12	wave_impedance_s12	0.1936	kg/s	constant
+uncertainty	wave-impedance-s12	unstated	-	-	-	-
+validity	wave-impedance-s12	temperature_known	0	0	1
+scalar	linear-density-s12	pick85-s12	linear_density_s12	0.000666	kg/m	constant
+uncertainty	linear-density-s12	unstated	-	-	-	-
+validity	linear-density-s12	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s12	pick85-s12	torsion_stiffness_printed_g_cm_per_rad_s12	24.85	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s12	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s12	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s12	pick85-s12	damping_coefficient_printed_x100_s12	10.33	1	constant
+uncertainty	damping-coefficient-printed-x100-s12	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s12	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s12	pick85-s12	partial_2_deviation_cents_s12	1	1	constant
+uncertainty	partial-2-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s12	pick85-s12	partial_3_deviation_cents_s12	3	1	constant
+uncertainty	partial-3-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s12	pick85-s12	partial_4_deviation_cents_s12	5	1	constant
+uncertainty	partial-4-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s12	pick85-s12	partial_5_deviation_cents_s12	6	1	constant
+uncertainty	partial-5-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s12	pick85-s12	partial_6_deviation_cents_s12	5	1	constant
+uncertainty	partial-6-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s12	pick85-s12	partial_7_deviation_cents_s12	10	1	constant
+uncertainty	partial-7-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s12	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s12	pick85-s12	partial_8_deviation_cents_s12	10	1	constant
+uncertainty	partial-8-deviation-cents-s12	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s12	temperature_known	0	0	1
+observation	pick85-s13	Jargar A string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s13	pick85-s13	diameter_max_s13	0.000508	m	constant
+uncertainty	diameter-max-s13	unstated	-	-	-	-
+validity	diameter-max-s13	temperature_known	0	0	1
+scalar	diameter-min-s13	pick85-s13	diameter_min_s13	0.000491	m	constant
+uncertainty	diameter-min-s13	unstated	-	-	-	-
+validity	diameter-min-s13	temperature_known	0	0	1
+scalar	length-relaxed-s13	pick85-s13	length_relaxed_s13	0.58	m	constant
+uncertainty	length-relaxed-s13	unstated	-	-	-	-
+validity	length-relaxed-s13	temperature_known	0	0	1
+scalar	tension-s13	pick85-s13	tension_s13	56.07	N	constant
+uncertainty	tension-s13	unstated	-	-	-	-
+validity	tension-s13	temperature_known	0	0	1
+scalar	wave-impedance-s13	pick85-s13	wave_impedance_s13	0.1931	kg/s	constant
+uncertainty	wave-impedance-s13	unstated	-	-	-	-
+validity	wave-impedance-s13	temperature_known	0	0	1
+scalar	linear-density-s13	pick85-s13	linear_density_s13	0.000664	kg/m	constant
+uncertainty	linear-density-s13	unstated	-	-	-	-
+validity	linear-density-s13	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s13	pick85-s13	torsion_stiffness_printed_g_cm_per_rad_s13	25.69	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s13	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s13	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s13	pick85-s13	damping_coefficient_printed_x100_s13	10.67	1	constant
+uncertainty	damping-coefficient-printed-x100-s13	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s13	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s13	pick85-s13	partial_2_deviation_cents_s13	9	1	constant
+uncertainty	partial-2-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s13	pick85-s13	partial_3_deviation_cents_s13	6	1	constant
+uncertainty	partial-3-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s13	pick85-s13	partial_4_deviation_cents_s13	7	1	constant
+uncertainty	partial-4-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s13	pick85-s13	partial_5_deviation_cents_s13	9	1	constant
+uncertainty	partial-5-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s13	pick85-s13	partial_6_deviation_cents_s13	10	1	constant
+uncertainty	partial-6-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s13	pick85-s13	partial_7_deviation_cents_s13	12	1	constant
+uncertainty	partial-7-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s13	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s13	pick85-s13	partial_8_deviation_cents_s13	13	1	constant
+uncertainty	partial-8-deviation-cents-s13	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s13	temperature_known	0	0	1
+observation	pick85-s14	Super Sensitive A string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s14	pick85-s14	diameter_max_s14	0.000465	m	constant
+uncertainty	diameter-max-s14	unstated	-	-	-	-
+validity	diameter-max-s14	temperature_known	0	0	1
+scalar	diameter-min-s14	pick85-s14	diameter_min_s14	0.000452	m	constant
+uncertainty	diameter-min-s14	unstated	-	-	-	-
+validity	diameter-min-s14	temperature_known	0	0	1
+scalar	length-relaxed-s14	pick85-s14	length_relaxed_s14	0.6	m	constant
+uncertainty	length-relaxed-s14	unstated	-	-	-	-
+validity	length-relaxed-s14	temperature_known	0	0	1
+scalar	tension-s14	pick85-s14	tension_s14	63.51	N	constant
+uncertainty	tension-s14	unstated	-	-	-	-
+validity	tension-s14	temperature_known	0	0	1
+scalar	wave-impedance-s14	pick85-s14	wave_impedance_s14	0.2186	kg/s	constant
+uncertainty	wave-impedance-s14	unstated	-	-	-	-
+validity	wave-impedance-s14	temperature_known	0	0	1
+scalar	linear-density-s14	pick85-s14	linear_density_s14	0.000752	kg/m	constant
+uncertainty	linear-density-s14	unstated	-	-	-	-
+validity	linear-density-s14	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s14	pick85-s14	torsion_stiffness_printed_g_cm_per_rad_s14	22.97	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s14	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s14	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s14	pick85-s14	damping_coefficient_printed_x100_s14	1.54	1	constant
+uncertainty	damping-coefficient-printed-x100-s14	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s14	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s14	pick85-s14	partial_2_deviation_cents_s14	-4	1	constant
+uncertainty	partial-2-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s14	pick85-s14	partial_3_deviation_cents_s14	-1	1	constant
+uncertainty	partial-3-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s14	pick85-s14	partial_4_deviation_cents_s14	-2	1	constant
+uncertainty	partial-4-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s14	pick85-s14	partial_5_deviation_cents_s14	0	1	constant
+uncertainty	partial-5-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s14	pick85-s14	partial_6_deviation_cents_s14	1	1	constant
+uncertainty	partial-6-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s14	pick85-s14	partial_7_deviation_cents_s14	2	1	constant
+uncertainty	partial-7-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s14	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s14	pick85-s14	partial_8_deviation_cents_s14	3	1	constant
+uncertainty	partial-8-deviation-cents-s14	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s14	temperature_known	0	0	1
+observation	pick85-s15	Corelli A string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s15	pick85-s15	diameter_max_s15	0.000701	m	constant
+uncertainty	diameter-max-s15	unstated	-	-	-	-
+validity	diameter-max-s15	temperature_known	0	0	1
+scalar	diameter-min-s15	pick85-s15	diameter_min_s15	0.000688	m	constant
+uncertainty	diameter-min-s15	unstated	-	-	-	-
+validity	diameter-min-s15	temperature_known	0	0	1
+scalar	length-relaxed-s15	pick85-s15	length_relaxed_s15	0.57	m	constant
+uncertainty	length-relaxed-s15	unstated	-	-	-	-
+validity	length-relaxed-s15	temperature_known	0	0	1
+scalar	tension-s15	pick85-s15	tension_s15	51.03	N	constant
+uncertainty	tension-s15	unstated	-	-	-	-
+validity	tension-s15	temperature_known	0	0	1
+scalar	wave-impedance-s15	pick85-s15	wave_impedance_s15	0.1756	kg/s	constant
+uncertainty	wave-impedance-s15	unstated	-	-	-	-
+validity	wave-impedance-s15	temperature_known	0	0	1
+scalar	linear-density-s15	pick85-s15	linear_density_s15	0.000604	kg/m	constant
+uncertainty	linear-density-s15	unstated	-	-	-	-
+validity	linear-density-s15	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s15	pick85-s15	torsion_stiffness_printed_g_cm_per_rad_s15	12.58	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s15	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s15	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s15	pick85-s15	damping_coefficient_printed_x100_s15	2.4	1	constant
+uncertainty	damping-coefficient-printed-x100-s15	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s15	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s15	pick85-s15	partial_2_deviation_cents_s15	1	1	constant
+uncertainty	partial-2-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s15	pick85-s15	partial_3_deviation_cents_s15	1	1	constant
+uncertainty	partial-3-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s15	pick85-s15	partial_4_deviation_cents_s15	2	1	constant
+uncertainty	partial-4-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s15	pick85-s15	partial_5_deviation_cents_s15	2	1	constant
+uncertainty	partial-5-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s15	pick85-s15	partial_6_deviation_cents_s15	3	1	constant
+uncertainty	partial-6-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s15	pick85-s15	partial_7_deviation_cents_s15	4	1	constant
+uncertainty	partial-7-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s15	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s15	pick85-s15	partial_8_deviation_cents_s15	3	1	constant
+uncertainty	partial-8-deviation-cents-s15	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s15	temperature_known	0	0	1
+observation	pick85-s16	Kaplan D string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s16	pick85-s16	diameter_max_s16	0.000914	m	constant
+uncertainty	diameter-max-s16	unstated	-	-	-	-
+validity	diameter-max-s16	temperature_known	0	0	1
+scalar	diameter-min-s16	pick85-s16	diameter_min_s16	0.000881	m	constant
+uncertainty	diameter-min-s16	unstated	-	-	-	-
+validity	diameter-min-s16	temperature_known	0	0	1
+scalar	length-relaxed-s16	pick85-s16	length_relaxed_s16	0.543	m	constant
+uncertainty	length-relaxed-s16	unstated	-	-	-	-
+validity	length-relaxed-s16	temperature_known	0	0	1
+scalar	tension-s16	pick85-s16	tension_s16	39.22	N	constant
+uncertainty	tension-s16	unstated	-	-	-	-
+validity	tension-s16	temperature_known	0	0	1
+scalar	wave-impedance-s16	pick85-s16	wave_impedance_s16	0.2022	kg/s	constant
+uncertainty	wave-impedance-s16	unstated	-	-	-	-
+validity	wave-impedance-s16	temperature_known	0	0	1
+scalar	linear-density-s16	pick85-s16	linear_density_s16	0.001043	kg/m	constant
+uncertainty	linear-density-s16	unstated	-	-	-	-
+validity	linear-density-s16	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s16	pick85-s16	torsion_stiffness_printed_g_cm_per_rad_s16	17.74	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s16	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s16	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s16	pick85-s16	damping_coefficient_printed_x100_s16	3.51	1	constant
+uncertainty	damping-coefficient-printed-x100-s16	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s16	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s16	pick85-s16	partial_2_deviation_cents_s16	-1	1	constant
+uncertainty	partial-2-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s16	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s16	pick85-s16	partial_3_deviation_cents_s16	-1	1	constant
+uncertainty	partial-3-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s16	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s16	pick85-s16	partial_4_deviation_cents_s16	0	1	constant
+uncertainty	partial-4-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s16	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s16	pick85-s16	partial_5_deviation_cents_s16	1	1	constant
+uncertainty	partial-5-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s16	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s16	pick85-s16	partial_6_deviation_cents_s16	2	1	constant
+uncertainty	partial-6-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s16	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s16	pick85-s16	partial_7_deviation_cents_s16	1	1	constant
+uncertainty	partial-7-deviation-cents-s16	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s16	temperature_known	0	0	1
+observation	pick85-s17	Kaplan D string, silver wound (the table's note 4); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s17	pick85-s17	diameter_max_s17	0.000691	m	constant
+uncertainty	diameter-max-s17	unstated	-	-	-	-
+validity	diameter-max-s17	temperature_known	0	0	1
+scalar	diameter-min-s17	pick85-s17	diameter_min_s17	0.000681	m	constant
+uncertainty	diameter-min-s17	unstated	-	-	-	-
+validity	diameter-min-s17	temperature_known	0	0	1
+scalar	length-relaxed-s17	pick85-s17	length_relaxed_s17	0.557	m	constant
+uncertainty	length-relaxed-s17	unstated	-	-	-	-
+validity	length-relaxed-s17	temperature_known	0	0	1
+scalar	tension-s17	pick85-s17	tension_s17	58.38	N	constant
+uncertainty	tension-s17	unstated	-	-	-	-
+validity	tension-s17	temperature_known	0	0	1
+scalar	wave-impedance-s17	pick85-s17	wave_impedance_s17	0.3011	kg/s	constant
+uncertainty	wave-impedance-s17	unstated	-	-	-	-
+validity	wave-impedance-s17	temperature_known	0	0	1
+scalar	linear-density-s17	pick85-s17	linear_density_s17	0.001552	kg/m	constant
+uncertainty	linear-density-s17	unstated	-	-	-	-
+validity	linear-density-s17	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s17	pick85-s17	torsion_stiffness_printed_g_cm_per_rad_s17	8.68	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s17	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s17	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s17	pick85-s17	damping_coefficient_printed_x100_s17	1.13	1	constant
+uncertainty	damping-coefficient-printed-x100-s17	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s17	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s17	pick85-s17	partial_2_deviation_cents_s17	0	1	constant
+uncertainty	partial-2-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s17	pick85-s17	partial_3_deviation_cents_s17	0	1	constant
+uncertainty	partial-3-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s17	pick85-s17	partial_4_deviation_cents_s17	-1	1	constant
+uncertainty	partial-4-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s17	pick85-s17	partial_5_deviation_cents_s17	-1	1	constant
+uncertainty	partial-5-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s17	pick85-s17	partial_6_deviation_cents_s17	-3	1	constant
+uncertainty	partial-6-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s17	pick85-s17	partial_7_deviation_cents_s17	2	1	constant
+uncertainty	partial-7-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s17	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s17	pick85-s17	partial_8_deviation_cents_s17	3	1	constant
+uncertainty	partial-8-deviation-cents-s17	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s17	temperature_known	0	0	1
+observation	pick85-s18	Kaplan D string, wound on a synthetic core (the table's note 5); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s18	pick85-s18	diameter_max_s18	0.000686	m	constant
+uncertainty	diameter-max-s18	unstated	-	-	-	-
+validity	diameter-max-s18	temperature_known	0	0	1
+scalar	diameter-min-s18	pick85-s18	diameter_min_s18	0.000671	m	constant
+uncertainty	diameter-min-s18	unstated	-	-	-	-
+validity	diameter-min-s18	temperature_known	0	0	1
+scalar	length-relaxed-s18	pick85-s18	length_relaxed_s18	0.575	m	constant
+uncertainty	length-relaxed-s18	unstated	-	-	-	-
+validity	length-relaxed-s18	temperature_known	0	0	1
+scalar	tension-s18	pick85-s18	tension_s18	39	N	constant
+uncertainty	tension-s18	unstated	-	-	-	-
+validity	tension-s18	temperature_known	0	0	1
+scalar	wave-impedance-s18	pick85-s18	wave_impedance_s18	0.2011	kg/s	constant
+uncertainty	wave-impedance-s18	unstated	-	-	-	-
+validity	wave-impedance-s18	temperature_known	0	0	1
+scalar	linear-density-s18	pick85-s18	linear_density_s18	0.001037	kg/m	constant
+uncertainty	linear-density-s18	unstated	-	-	-	-
+validity	linear-density-s18	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s18	pick85-s18	torsion_stiffness_printed_g_cm_per_rad_s18	22.67	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s18	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s18	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s18	pick85-s18	damping_coefficient_printed_x100_s18	20.23	1	constant
+uncertainty	damping-coefficient-printed-x100-s18	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s18	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s18	pick85-s18	partial_2_deviation_cents_s18	1	1	constant
+uncertainty	partial-2-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s18	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s18	pick85-s18	partial_3_deviation_cents_s18	3	1	constant
+uncertainty	partial-3-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s18	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s18	pick85-s18	partial_4_deviation_cents_s18	6	1	constant
+uncertainty	partial-4-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s18	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s18	pick85-s18	partial_5_deviation_cents_s18	10	1	constant
+uncertainty	partial-5-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s18	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s18	pick85-s18	partial_6_deviation_cents_s18	15	1	constant
+uncertainty	partial-6-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s18	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s18	pick85-s18	partial_7_deviation_cents_s18	23	1	constant
+uncertainty	partial-7-deviation-cents-s18	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s18	temperature_known	0	0	1
+observation	pick85-s19	Gold Label D string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s19	pick85-s19	diameter_max_s19	0.000859	m	constant
+uncertainty	diameter-max-s19	unstated	-	-	-	-
+validity	diameter-max-s19	temperature_known	0	0	1
+scalar	diameter-min-s19	pick85-s19	diameter_min_s19	0.000851	m	constant
+uncertainty	diameter-min-s19	unstated	-	-	-	-
+validity	diameter-min-s19	temperature_known	0	0	1
+scalar	length-relaxed-s19	pick85-s19	length_relaxed_s19	0.551	m	constant
+uncertainty	length-relaxed-s19	unstated	-	-	-	-
+validity	length-relaxed-s19	temperature_known	0	0	1
+scalar	tension-s19	pick85-s19	tension_s19	40.11	N	constant
+uncertainty	tension-s19	unstated	-	-	-	-
+validity	tension-s19	temperature_known	0	0	1
+scalar	wave-impedance-s19	pick85-s19	wave_impedance_s19	0.2068	kg/s	constant
+uncertainty	wave-impedance-s19	unstated	-	-	-	-
+validity	wave-impedance-s19	temperature_known	0	0	1
+scalar	linear-density-s19	pick85-s19	linear_density_s19	0.001066	kg/m	constant
+uncertainty	linear-density-s19	unstated	-	-	-	-
+validity	linear-density-s19	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s19	pick85-s19	torsion_stiffness_printed_g_cm_per_rad_s19	20.18	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s19	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s19	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s19	pick85-s19	damping_coefficient_printed_x100_s19	3.63	1	constant
+uncertainty	damping-coefficient-printed-x100-s19	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s19	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s19	pick85-s19	partial_2_deviation_cents_s19	2	1	constant
+uncertainty	partial-2-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s19	pick85-s19	partial_3_deviation_cents_s19	4	1	constant
+uncertainty	partial-3-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s19	pick85-s19	partial_4_deviation_cents_s19	6	1	constant
+uncertainty	partial-4-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s19	pick85-s19	partial_5_deviation_cents_s19	7	1	constant
+uncertainty	partial-5-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s19	pick85-s19	partial_6_deviation_cents_s19	6	1	constant
+uncertainty	partial-6-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s19	pick85-s19	partial_7_deviation_cents_s19	7	1	constant
+uncertainty	partial-7-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s19	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s19	pick85-s19	partial_8_deviation_cents_s19	11	1	constant
+uncertainty	partial-8-deviation-cents-s19	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s19	temperature_known	0	0	1
+observation	pick85-s20	Gold Label D string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s20	pick85-s20	diameter_max_s20	0.000869	m	constant
+uncertainty	diameter-max-s20	unstated	-	-	-	-
+validity	diameter-max-s20	temperature_known	0	0	1
+scalar	diameter-min-s20	pick85-s20	diameter_min_s20	0.000861	m	constant
+uncertainty	diameter-min-s20	unstated	-	-	-	-
+validity	diameter-min-s20	temperature_known	0	0	1
+scalar	length-relaxed-s20	pick85-s20	length_relaxed_s20	0.551	m	constant
+uncertainty	length-relaxed-s20	unstated	-	-	-	-
+validity	length-relaxed-s20	temperature_known	0	0	1
+scalar	tension-s20	pick85-s20	tension_s20	38.24	N	constant
+uncertainty	tension-s20	unstated	-	-	-	-
+validity	tension-s20	temperature_known	0	0	1
+scalar	wave-impedance-s20	pick85-s20	wave_impedance_s20	0.1972	kg/s	constant
+uncertainty	wave-impedance-s20	unstated	-	-	-	-
+validity	wave-impedance-s20	temperature_known	0	0	1
+scalar	linear-density-s20	pick85-s20	linear_density_s20	0.001017	kg/m	constant
+uncertainty	linear-density-s20	unstated	-	-	-	-
+validity	linear-density-s20	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s20	pick85-s20	torsion_stiffness_printed_g_cm_per_rad_s20	17.09	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s20	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s20	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s20	pick85-s20	damping_coefficient_printed_x100_s20	2.28	1	constant
+uncertainty	damping-coefficient-printed-x100-s20	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s20	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s20	pick85-s20	partial_2_deviation_cents_s20	-1	1	constant
+uncertainty	partial-2-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s20	pick85-s20	partial_3_deviation_cents_s20	-2	1	constant
+uncertainty	partial-3-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s20	pick85-s20	partial_4_deviation_cents_s20	-4	1	constant
+uncertainty	partial-4-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s20	pick85-s20	partial_5_deviation_cents_s20	-5	1	constant
+uncertainty	partial-5-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s20	pick85-s20	partial_6_deviation_cents_s20	-3	1	constant
+uncertainty	partial-6-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s20	pick85-s20	partial_7_deviation_cents_s20	-5	1	constant
+uncertainty	partial-7-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s20	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s20	pick85-s20	partial_8_deviation_cents_s20	-3	1	constant
+uncertainty	partial-8-deviation-cents-s20	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s20	temperature_known	0	0	1
+observation	pick85-s21	Eudoxa D string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s21	pick85-s21	diameter_max_s21	0.000886	m	constant
+uncertainty	diameter-max-s21	unstated	-	-	-	-
+validity	diameter-max-s21	temperature_known	0	0	1
+scalar	diameter-min-s21	pick85-s21	diameter_min_s21	0.000874	m	constant
+uncertainty	diameter-min-s21	unstated	-	-	-	-
+validity	diameter-min-s21	temperature_known	0	0	1
+scalar	length-relaxed-s21	pick85-s21	length_relaxed_s21	0.545	m	constant
+uncertainty	length-relaxed-s21	unstated	-	-	-	-
+validity	length-relaxed-s21	temperature_known	0	0	1
+scalar	tension-s21	pick85-s21	tension_s21	41.01	N	constant
+uncertainty	tension-s21	unstated	-	-	-	-
+validity	tension-s21	temperature_known	0	0	1
+scalar	wave-impedance-s21	pick85-s21	wave_impedance_s21	0.2114	kg/s	constant
+uncertainty	wave-impedance-s21	unstated	-	-	-	-
+validity	wave-impedance-s21	temperature_known	0	0	1
+scalar	linear-density-s21	pick85-s21	linear_density_s21	0.001091	kg/m	constant
+uncertainty	linear-density-s21	unstated	-	-	-	-
+validity	linear-density-s21	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s21	pick85-s21	torsion_stiffness_printed_g_cm_per_rad_s21	24.13	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s21	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s21	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s21	pick85-s21	damping_coefficient_printed_x100_s21	4.86	1	constant
+uncertainty	damping-coefficient-printed-x100-s21	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s21	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s21	pick85-s21	partial_2_deviation_cents_s21	2	1	constant
+uncertainty	partial-2-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s21	pick85-s21	partial_3_deviation_cents_s21	3	1	constant
+uncertainty	partial-3-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s21	pick85-s21	partial_4_deviation_cents_s21	4	1	constant
+uncertainty	partial-4-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s21	pick85-s21	partial_5_deviation_cents_s21	6	1	constant
+uncertainty	partial-5-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s21	pick85-s21	partial_6_deviation_cents_s21	7	1	constant
+uncertainty	partial-6-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s21	pick85-s21	partial_7_deviation_cents_s21	11	1	constant
+uncertainty	partial-7-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s21	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s21	pick85-s21	partial_8_deviation_cents_s21	14	1	constant
+uncertainty	partial-8-deviation-cents-s21	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s21	temperature_known	0	0	1
+observation	pick85-s22	Dominant D string, wound on a Perlon core (the table's note 3); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s22	pick85-s22	diameter_max_s22	0.000801	m	constant
+uncertainty	diameter-max-s22	unstated	-	-	-	-
+validity	diameter-max-s22	temperature_known	0	0	1
+scalar	diameter-min-s22	pick85-s22	diameter_min_s22	0.000795	m	constant
+uncertainty	diameter-min-s22	unstated	-	-	-	-
+validity	diameter-min-s22	temperature_known	0	0	1
+scalar	length-relaxed-s22	pick85-s22	length_relaxed_s22	0.565	m	constant
+uncertainty	length-relaxed-s22	unstated	-	-	-	-
+validity	length-relaxed-s22	temperature_known	0	0	1
+scalar	tension-s22	pick85-s22	tension_s22	43.72	N	constant
+uncertainty	tension-s22	unstated	-	-	-	-
+validity	tension-s22	temperature_known	0	0	1
+scalar	wave-impedance-s22	pick85-s22	wave_impedance_s22	0.2254	kg/s	constant
+uncertainty	wave-impedance-s22	unstated	-	-	-	-
+validity	wave-impedance-s22	temperature_known	0	0	1
+scalar	linear-density-s22	pick85-s22	linear_density_s22	0.001162	kg/m	constant
+uncertainty	linear-density-s22	unstated	-	-	-	-
+validity	linear-density-s22	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s22	pick85-s22	torsion_stiffness_printed_g_cm_per_rad_s22	42.58	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s22	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s22	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s22	pick85-s22	damping_coefficient_printed_x100_s22	6.75	1	constant
+uncertainty	damping-coefficient-printed-x100-s22	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s22	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s22	pick85-s22	partial_2_deviation_cents_s22	-2	1	constant
+uncertainty	partial-2-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s22	pick85-s22	partial_3_deviation_cents_s22	1	1	constant
+uncertainty	partial-3-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s22	pick85-s22	partial_4_deviation_cents_s22	-2	1	constant
+uncertainty	partial-4-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s22	pick85-s22	partial_5_deviation_cents_s22	3	1	constant
+uncertainty	partial-5-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s22	pick85-s22	partial_6_deviation_cents_s22	0	1	constant
+uncertainty	partial-6-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s22	pick85-s22	partial_7_deviation_cents_s22	2	1	constant
+uncertainty	partial-7-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s22	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s22	pick85-s22	partial_8_deviation_cents_s22	3	1	constant
+uncertainty	partial-8-deviation-cents-s22	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s22	temperature_known	0	0	1
+observation	pick85-s23	Jargar D string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s23	pick85-s23	diameter_max_s23	0.000739	m	constant
+uncertainty	diameter-max-s23	unstated	-	-	-	-
+validity	diameter-max-s23	temperature_known	0	0	1
+scalar	diameter-min-s23	pick85-s23	diameter_min_s23	0.000734	m	constant
+uncertainty	diameter-min-s23	unstated	-	-	-	-
+validity	diameter-min-s23	temperature_known	0	0	1
+scalar	length-relaxed-s23	pick85-s23	length_relaxed_s23	0.564	m	constant
+uncertainty	length-relaxed-s23	unstated	-	-	-	-
+validity	length-relaxed-s23	temperature_known	0	0	1
+scalar	tension-s23	pick85-s23	tension_s23	61.73	N	constant
+uncertainty	tension-s23	unstated	-	-	-	-
+validity	tension-s23	temperature_known	0	0	1
+scalar	wave-impedance-s23	pick85-s23	wave_impedance_s23	0.3183	kg/s	constant
+uncertainty	wave-impedance-s23	unstated	-	-	-	-
+validity	wave-impedance-s23	temperature_known	0	0	1
+scalar	linear-density-s23	pick85-s23	linear_density_s23	0.001641	kg/m	constant
+uncertainty	linear-density-s23	unstated	-	-	-	-
+validity	linear-density-s23	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s23	pick85-s23	torsion_stiffness_printed_g_cm_per_rad_s23	100.77	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s23	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s23	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s23	pick85-s23	damping_coefficient_printed_x100_s23	82.66	1	constant
+uncertainty	damping-coefficient-printed-x100-s23	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s23	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s23	pick85-s23	partial_2_deviation_cents_s23	5	1	constant
+uncertainty	partial-2-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s23	pick85-s23	partial_3_deviation_cents_s23	8	1	constant
+uncertainty	partial-3-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s23	pick85-s23	partial_4_deviation_cents_s23	8	1	constant
+uncertainty	partial-4-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s23	pick85-s23	partial_5_deviation_cents_s23	11	1	constant
+uncertainty	partial-5-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s23	pick85-s23	partial_6_deviation_cents_s23	11	1	constant
+uncertainty	partial-6-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s23	pick85-s23	partial_7_deviation_cents_s23	15	1	constant
+uncertainty	partial-7-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s23	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s23	pick85-s23	partial_8_deviation_cents_s23	24	1	constant
+uncertainty	partial-8-deviation-cents-s23	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s23	temperature_known	0	0	1
+observation	pick85-s24	Super Sensitive D string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s24	pick85-s24	diameter_max_s24	0.000752	m	constant
+uncertainty	diameter-max-s24	unstated	-	-	-	-
+validity	diameter-max-s24	temperature_known	0	0	1
+scalar	diameter-min-s24	pick85-s24	diameter_min_s24	0.000739	m	constant
+uncertainty	diameter-min-s24	unstated	-	-	-	-
+validity	diameter-min-s24	temperature_known	0	0	1
+scalar	length-relaxed-s24	pick85-s24	length_relaxed_s24	0.523	m	constant
+uncertainty	length-relaxed-s24	unstated	-	-	-	-
+validity	length-relaxed-s24	temperature_known	0	0	1
+scalar	tension-s24	pick85-s24	tension_s24	57.14	N	constant
+uncertainty	tension-s24	unstated	-	-	-	-
+validity	tension-s24	temperature_known	0	0	1
+scalar	wave-impedance-s24	pick85-s24	wave_impedance_s24	0.2946	kg/s	constant
+uncertainty	wave-impedance-s24	unstated	-	-	-	-
+validity	wave-impedance-s24	temperature_known	0	0	1
+scalar	linear-density-s24	pick85-s24	linear_density_s24	0.001519	kg/m	constant
+uncertainty	linear-density-s24	unstated	-	-	-	-
+validity	linear-density-s24	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s24	pick85-s24	torsion_stiffness_printed_g_cm_per_rad_s24	60.86	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s24	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s24	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s24	pick85-s24	damping_coefficient_printed_x100_s24	23.62	1	constant
+uncertainty	damping-coefficient-printed-x100-s24	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s24	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s24	pick85-s24	partial_2_deviation_cents_s24	1	1	constant
+uncertainty	partial-2-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s24	pick85-s24	partial_3_deviation_cents_s24	3	1	constant
+uncertainty	partial-3-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s24	pick85-s24	partial_4_deviation_cents_s24	3	1	constant
+uncertainty	partial-4-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s24	pick85-s24	partial_5_deviation_cents_s24	6	1	constant
+uncertainty	partial-5-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s24	pick85-s24	partial_6_deviation_cents_s24	10	1	constant
+uncertainty	partial-6-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s24	pick85-s24	partial_7_deviation_cents_s24	11	1	constant
+uncertainty	partial-7-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s24	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s24	pick85-s24	partial_8_deviation_cents_s24	17	1	constant
+uncertainty	partial-8-deviation-cents-s24	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s24	temperature_known	0	0	1
+observation	pick85-s25	Corelli D string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s25	pick85-s25	diameter_max_s25	0.000843	m	constant
+uncertainty	diameter-max-s25	unstated	-	-	-	-
+validity	diameter-max-s25	temperature_known	0	0	1
+scalar	diameter-min-s25	pick85-s25	diameter_min_s25	0.000833	m	constant
+uncertainty	diameter-min-s25	unstated	-	-	-	-
+validity	diameter-min-s25	temperature_known	0	0	1
+scalar	length-relaxed-s25	pick85-s25	length_relaxed_s25	0.558	m	constant
+uncertainty	length-relaxed-s25	unstated	-	-	-	-
+validity	length-relaxed-s25	temperature_known	0	0	1
+scalar	tension-s25	pick85-s25	tension_s25	34.76	N	constant
+uncertainty	tension-s25	unstated	-	-	-	-
+validity	tension-s25	temperature_known	0	0	1
+scalar	wave-impedance-s25	pick85-s25	wave_impedance_s25	0.1792	kg/s	constant
+uncertainty	wave-impedance-s25	unstated	-	-	-	-
+validity	wave-impedance-s25	temperature_known	0	0	1
+scalar	linear-density-s25	pick85-s25	linear_density_s25	0.000924	kg/m	constant
+uncertainty	linear-density-s25	unstated	-	-	-	-
+validity	linear-density-s25	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s25	pick85-s25	torsion_stiffness_printed_g_cm_per_rad_s25	9.54	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s25	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s25	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s25	pick85-s25	damping_coefficient_printed_x100_s25	1.37	1	constant
+uncertainty	damping-coefficient-printed-x100-s25	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s25	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s25	pick85-s25	partial_2_deviation_cents_s25	2	1	constant
+uncertainty	partial-2-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s25	pick85-s25	partial_3_deviation_cents_s25	4	1	constant
+uncertainty	partial-3-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s25	pick85-s25	partial_4_deviation_cents_s25	5	1	constant
+uncertainty	partial-4-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s25	pick85-s25	partial_5_deviation_cents_s25	7	1	constant
+uncertainty	partial-5-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s25	pick85-s25	partial_6_deviation_cents_s25	7	1	constant
+uncertainty	partial-6-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s25	pick85-s25	partial_7_deviation_cents_s25	10	1	constant
+uncertainty	partial-7-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s25	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s25	pick85-s25	partial_8_deviation_cents_s25	13	1	constant
+uncertainty	partial-8-deviation-cents-s25	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s25	temperature_known	0	0	1
+observation	pick85-s26	Kaplan G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s26	pick85-s26	diameter_max_s26	0.00082	m	constant
+uncertainty	diameter-max-s26	unstated	-	-	-	-
+validity	diameter-max-s26	temperature_known	0	0	1
+scalar	diameter-min-s26	pick85-s26	diameter_min_s26	0.000815	m	constant
+uncertainty	diameter-min-s26	unstated	-	-	-	-
+validity	diameter-min-s26	temperature_known	0	0	1
+scalar	length-relaxed-s26	pick85-s26	length_relaxed_s26	0.546	m	constant
+uncertainty	length-relaxed-s26	unstated	-	-	-	-
+validity	length-relaxed-s26	temperature_known	0	0	1
+scalar	tension-s26	pick85-s26	tension_s26	43.68	N	constant
+uncertainty	tension-s26	unstated	-	-	-	-
+validity	tension-s26	temperature_known	0	0	1
+scalar	wave-impedance-s26	pick85-s26	wave_impedance_s26	0.3375	kg/s	constant
+uncertainty	wave-impedance-s26	unstated	-	-	-	-
+validity	wave-impedance-s26	temperature_known	0	0	1
+scalar	linear-density-s26	pick85-s26	linear_density_s26	0.002607	kg/m	constant
+uncertainty	linear-density-s26	unstated	-	-	-	-
+validity	linear-density-s26	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s26	pick85-s26	torsion_stiffness_printed_g_cm_per_rad_s26	25.83	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s26	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s26	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s26	pick85-s26	damping_coefficient_printed_x100_s26	5.12	1	constant
+uncertainty	damping-coefficient-printed-x100-s26	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s26	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s26	pick85-s26	partial_2_deviation_cents_s26	1	1	constant
+uncertainty	partial-2-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s26	pick85-s26	partial_3_deviation_cents_s26	-1	1	constant
+uncertainty	partial-3-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s26	pick85-s26	partial_4_deviation_cents_s26	1	1	constant
+uncertainty	partial-4-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s26	pick85-s26	partial_5_deviation_cents_s26	4	1	constant
+uncertainty	partial-5-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s26	pick85-s26	partial_6_deviation_cents_s26	2	1	constant
+uncertainty	partial-6-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s26	pick85-s26	partial_7_deviation_cents_s26	7	1	constant
+uncertainty	partial-7-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s26	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s26	pick85-s26	partial_8_deviation_cents_s26	9	1	constant
+uncertainty	partial-8-deviation-cents-s26	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s26	temperature_known	0	0	1
+observation	pick85-s27	Kaplan G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s27	pick85-s27	diameter_max_s27	0.000811	m	constant
+uncertainty	diameter-max-s27	unstated	-	-	-	-
+validity	diameter-max-s27	temperature_known	0	0	1
+scalar	diameter-min-s27	pick85-s27	diameter_min_s27	0.000801	m	constant
+uncertainty	diameter-min-s27	unstated	-	-	-	-
+validity	diameter-min-s27	temperature_known	0	0	1
+scalar	length-relaxed-s27	pick85-s27	length_relaxed_s27	0.554	m	constant
+uncertainty	length-relaxed-s27	unstated	-	-	-	-
+validity	length-relaxed-s27	temperature_known	0	0	1
+scalar	tension-s27	pick85-s27	tension_s27	40.91	N	constant
+uncertainty	tension-s27	unstated	-	-	-	-
+validity	tension-s27	temperature_known	0	0	1
+scalar	wave-impedance-s27	pick85-s27	wave_impedance_s27	0.3161	kg/s	constant
+uncertainty	wave-impedance-s27	unstated	-	-	-	-
+validity	wave-impedance-s27	temperature_known	0	0	1
+scalar	linear-density-s27	pick85-s27	linear_density_s27	0.002442	kg/m	constant
+uncertainty	linear-density-s27	unstated	-	-	-	-
+validity	linear-density-s27	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s27	pick85-s27	torsion_stiffness_printed_g_cm_per_rad_s27	15.35	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s27	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s27	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s27	pick85-s27	damping_coefficient_printed_x100_s27	4.79	1	constant
+uncertainty	damping-coefficient-printed-x100-s27	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s27	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s27	pick85-s27	partial_2_deviation_cents_s27	1	1	constant
+uncertainty	partial-2-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s27	pick85-s27	partial_3_deviation_cents_s27	2	1	constant
+uncertainty	partial-3-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s27	pick85-s27	partial_4_deviation_cents_s27	5	1	constant
+uncertainty	partial-4-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s27	pick85-s27	partial_5_deviation_cents_s27	6	1	constant
+uncertainty	partial-5-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s27	pick85-s27	partial_6_deviation_cents_s27	7	1	constant
+uncertainty	partial-6-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s27	pick85-s27	partial_7_deviation_cents_s27	10	1	constant
+uncertainty	partial-7-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s27	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s27	pick85-s27	partial_8_deviation_cents_s27	13	1	constant
+uncertainty	partial-8-deviation-cents-s27	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s27	temperature_known	0	0	1
+observation	pick85-s28	Kaplan G string, wound on a synthetic core (the table's note 5); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s28	pick85-s28	diameter_max_s28	0.00081	m	constant
+uncertainty	diameter-max-s28	unstated	-	-	-	-
+validity	diameter-max-s28	temperature_known	0	0	1
+scalar	diameter-min-s28	pick85-s28	diameter_min_s28	0.00079	m	constant
+uncertainty	diameter-min-s28	unstated	-	-	-	-
+validity	diameter-min-s28	temperature_known	0	0	1
+scalar	length-relaxed-s28	pick85-s28	length_relaxed_s28	0.572	m	constant
+uncertainty	length-relaxed-s28	unstated	-	-	-	-
+validity	length-relaxed-s28	temperature_known	0	0	1
+scalar	tension-s28	pick85-s28	tension_s28	46.44	N	constant
+uncertainty	tension-s28	unstated	-	-	-	-
+validity	tension-s28	temperature_known	0	0	1
+scalar	wave-impedance-s28	pick85-s28	wave_impedance_s28	0.3588	kg/s	constant
+uncertainty	wave-impedance-s28	unstated	-	-	-	-
+validity	wave-impedance-s28	temperature_known	0	0	1
+scalar	linear-density-s28	pick85-s28	linear_density_s28	0.002772	kg/m	constant
+uncertainty	linear-density-s28	unstated	-	-	-	-
+validity	linear-density-s28	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s28	pick85-s28	torsion_stiffness_printed_g_cm_per_rad_s28	10.24	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s28	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s28	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s28	pick85-s28	damping_coefficient_printed_x100_s28	7.2	1	constant
+uncertainty	damping-coefficient-printed-x100-s28	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s28	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s28	pick85-s28	partial_2_deviation_cents_s28	-2	1	constant
+uncertainty	partial-2-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s28	pick85-s28	partial_3_deviation_cents_s28	-1	1	constant
+uncertainty	partial-3-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s28	pick85-s28	partial_4_deviation_cents_s28	-4	1	constant
+uncertainty	partial-4-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s28	pick85-s28	partial_5_deviation_cents_s28	-3	1	constant
+uncertainty	partial-5-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s28	pick85-s28	partial_6_deviation_cents_s28	-5	1	constant
+uncertainty	partial-6-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s28	pick85-s28	partial_7_deviation_cents_s28	-2	1	constant
+uncertainty	partial-7-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s28	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s28	pick85-s28	partial_8_deviation_cents_s28	-1	1	constant
+uncertainty	partial-8-deviation-cents-s28	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s28	temperature_known	0	0	1
+observation	pick85-s29	Gold Label G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s29	pick85-s29	diameter_max_s29	0.000813	m	constant
+uncertainty	diameter-max-s29	unstated	-	-	-	-
+validity	diameter-max-s29	temperature_known	0	0	1
+scalar	diameter-min-s29	pick85-s29	diameter_min_s29	0.000808	m	constant
+uncertainty	diameter-min-s29	unstated	-	-	-	-
+validity	diameter-min-s29	temperature_known	0	0	1
+scalar	length-relaxed-s29	pick85-s29	length_relaxed_s29	0.523	m	constant
+uncertainty	length-relaxed-s29	unstated	-	-	-	-
+validity	length-relaxed-s29	temperature_known	0	0	1
+scalar	tension-s29	pick85-s29	tension_s29	40.78	N	constant
+uncertainty	tension-s29	unstated	-	-	-	-
+validity	tension-s29	temperature_known	0	0	1
+scalar	wave-impedance-s29	pick85-s29	wave_impedance_s29	0.3151	kg/s	constant
+uncertainty	wave-impedance-s29	unstated	-	-	-	-
+validity	wave-impedance-s29	temperature_known	0	0	1
+scalar	linear-density-s29	pick85-s29	linear_density_s29	0.002434	kg/m	constant
+uncertainty	linear-density-s29	unstated	-	-	-	-
+validity	linear-density-s29	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s29	pick85-s29	torsion_stiffness_printed_g_cm_per_rad_s29	18.79	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s29	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s29	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s29	pick85-s29	damping_coefficient_printed_x100_s29	3.67	1	constant
+uncertainty	damping-coefficient-printed-x100-s29	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s29	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s29	pick85-s29	partial_2_deviation_cents_s29	0	1	constant
+uncertainty	partial-2-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s29	pick85-s29	partial_3_deviation_cents_s29	1	1	constant
+uncertainty	partial-3-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s29	pick85-s29	partial_4_deviation_cents_s29	1	1	constant
+uncertainty	partial-4-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s29	pick85-s29	partial_5_deviation_cents_s29	2	1	constant
+uncertainty	partial-5-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s29	pick85-s29	partial_6_deviation_cents_s29	1	1	constant
+uncertainty	partial-6-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s29	pick85-s29	partial_7_deviation_cents_s29	3	1	constant
+uncertainty	partial-7-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s29	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s29	pick85-s29	partial_8_deviation_cents_s29	5	1	constant
+uncertainty	partial-8-deviation-cents-s29	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s29	temperature_known	0	0	1
+observation	pick85-s30	Gold Label G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s30	pick85-s30	diameter_max_s30	0.000826	m	constant
+uncertainty	diameter-max-s30	unstated	-	-	-	-
+validity	diameter-max-s30	temperature_known	0	0	1
+scalar	diameter-min-s30	pick85-s30	diameter_min_s30	0.000815	m	constant
+uncertainty	diameter-min-s30	unstated	-	-	-	-
+validity	diameter-min-s30	temperature_known	0	0	1
+scalar	length-relaxed-s30	pick85-s30	length_relaxed_s30	0.535	m	constant
+uncertainty	length-relaxed-s30	unstated	-	-	-	-
+validity	length-relaxed-s30	temperature_known	0	0	1
+scalar	tension-s30	pick85-s30	tension_s30	38.33	N	constant
+uncertainty	tension-s30	unstated	-	-	-	-
+validity	tension-s30	temperature_known	0	0	1
+scalar	wave-impedance-s30	pick85-s30	wave_impedance_s30	0.2968	kg/s	constant
+uncertainty	wave-impedance-s30	unstated	-	-	-	-
+validity	wave-impedance-s30	temperature_known	0	0	1
+scalar	linear-density-s30	pick85-s30	linear_density_s30	0.002288	kg/m	constant
+uncertainty	linear-density-s30	unstated	-	-	-	-
+validity	linear-density-s30	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s30	pick85-s30	torsion_stiffness_printed_g_cm_per_rad_s30	19.07	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s30	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s30	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s30	pick85-s30	damping_coefficient_printed_x100_s30	3.43	1	constant
+uncertainty	damping-coefficient-printed-x100-s30	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s30	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s30	pick85-s30	partial_2_deviation_cents_s30	1	1	constant
+uncertainty	partial-2-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s30	pick85-s30	partial_3_deviation_cents_s30	-1	1	constant
+uncertainty	partial-3-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s30	pick85-s30	partial_4_deviation_cents_s30	2	1	constant
+uncertainty	partial-4-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s30	pick85-s30	partial_5_deviation_cents_s30	1	1	constant
+uncertainty	partial-5-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s30	pick85-s30	partial_6_deviation_cents_s30	3	1	constant
+uncertainty	partial-6-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s30	pick85-s30	partial_7_deviation_cents_s30	5	1	constant
+uncertainty	partial-7-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s30	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s30	pick85-s30	partial_8_deviation_cents_s30	5	1	constant
+uncertainty	partial-8-deviation-cents-s30	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s30	temperature_known	0	0	1
+observation	pick85-s31	Eudoxa G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s31	pick85-s31	diameter_max_s31	0.000803	m	constant
+uncertainty	diameter-max-s31	unstated	-	-	-	-
+validity	diameter-max-s31	temperature_known	0	0	1
+scalar	diameter-min-s31	pick85-s31	diameter_min_s31	0.000801	m	constant
+uncertainty	diameter-min-s31	unstated	-	-	-	-
+validity	diameter-min-s31	temperature_known	0	0	1
+scalar	length-relaxed-s31	pick85-s31	length_relaxed_s31	0.511	m	constant
+uncertainty	length-relaxed-s31	unstated	-	-	-	-
+validity	length-relaxed-s31	temperature_known	0	0	1
+scalar	tension-s31	pick85-s31	tension_s31	39.18	N	constant
+uncertainty	tension-s31	unstated	-	-	-	-
+validity	tension-s31	temperature_known	0	0	1
+scalar	wave-impedance-s31	pick85-s31	wave_impedance_s31	0.3027	kg/s	constant
+uncertainty	wave-impedance-s31	unstated	-	-	-	-
+validity	wave-impedance-s31	temperature_known	0	0	1
+scalar	linear-density-s31	pick85-s31	linear_density_s31	0.002338	kg/m	constant
+uncertainty	linear-density-s31	unstated	-	-	-	-
+validity	linear-density-s31	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s31	pick85-s31	torsion_stiffness_printed_g_cm_per_rad_s31	20.02	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s31	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s31	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s31	pick85-s31	damping_coefficient_printed_x100_s31	3.03	1	constant
+uncertainty	damping-coefficient-printed-x100-s31	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s31	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s31	pick85-s31	partial_2_deviation_cents_s31	1	1	constant
+uncertainty	partial-2-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s31	pick85-s31	partial_3_deviation_cents_s31	4	1	constant
+uncertainty	partial-3-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s31	pick85-s31	partial_4_deviation_cents_s31	3	1	constant
+uncertainty	partial-4-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s31	pick85-s31	partial_5_deviation_cents_s31	4	1	constant
+uncertainty	partial-5-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s31	pick85-s31	partial_6_deviation_cents_s31	6	1	constant
+uncertainty	partial-6-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s31	pick85-s31	partial_7_deviation_cents_s31	11	1	constant
+uncertainty	partial-7-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s31	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s31	pick85-s31	partial_8_deviation_cents_s31	14	1	constant
+uncertainty	partial-8-deviation-cents-s31	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s31	temperature_known	0	0	1
+observation	pick85-s32	Dominant G string, wound on a Perlon core (the table's note 3); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s32	pick85-s32	diameter_max_s32	0.000808	m	constant
+uncertainty	diameter-max-s32	unstated	-	-	-	-
+validity	diameter-max-s32	temperature_known	0	0	1
+scalar	diameter-min-s32	pick85-s32	diameter_min_s32	0.000803	m	constant
+uncertainty	diameter-min-s32	unstated	-	-	-	-
+validity	diameter-min-s32	temperature_known	0	0	1
+scalar	length-relaxed-s32	pick85-s32	length_relaxed_s32	0.567	m	constant
+uncertainty	length-relaxed-s32	unstated	-	-	-	-
+validity	length-relaxed-s32	temperature_known	0	0	1
+scalar	tension-s32	pick85-s32	tension_s32	44.57	N	constant
+uncertainty	tension-s32	unstated	-	-	-	-
+validity	tension-s32	temperature_known	0	0	1
+scalar	wave-impedance-s32	pick85-s32	wave_impedance_s32	0.3443	kg/s	constant
+uncertainty	wave-impedance-s32	unstated	-	-	-	-
+validity	wave-impedance-s32	temperature_known	0	0	1
+scalar	linear-density-s32	pick85-s32	linear_density_s32	0.002661	kg/m	constant
+uncertainty	linear-density-s32	unstated	-	-	-	-
+validity	linear-density-s32	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s32	pick85-s32	torsion_stiffness_printed_g_cm_per_rad_s32	28.36	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s32	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s32	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s32	pick85-s32	damping_coefficient_printed_x100_s32	18.37	1	constant
+uncertainty	damping-coefficient-printed-x100-s32	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s32	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s32	pick85-s32	partial_2_deviation_cents_s32	1	1	constant
+uncertainty	partial-2-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s32	pick85-s32	partial_3_deviation_cents_s32	0	1	constant
+uncertainty	partial-3-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s32	pick85-s32	partial_4_deviation_cents_s32	1	1	constant
+uncertainty	partial-4-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s32	pick85-s32	partial_5_deviation_cents_s32	3	1	constant
+uncertainty	partial-5-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s32	pick85-s32	partial_6_deviation_cents_s32	1	1	constant
+uncertainty	partial-6-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s32	pick85-s32	partial_7_deviation_cents_s32	4	1	constant
+uncertainty	partial-7-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s32	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s32	pick85-s32	partial_8_deviation_cents_s32	4	1	constant
+uncertainty	partial-8-deviation-cents-s32	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s32	temperature_known	0	0	1
+observation	pick85-s33	Jargar G string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s33	pick85-s33	diameter_max_s33	0.000821	m	constant
+uncertainty	diameter-max-s33	unstated	-	-	-	-
+validity	diameter-max-s33	temperature_known	0	0	1
+scalar	diameter-min-s33	pick85-s33	diameter_min_s33	0.000801	m	constant
+uncertainty	diameter-min-s33	unstated	-	-	-	-
+validity	diameter-min-s33	temperature_known	0	0	1
+scalar	length-relaxed-s33	pick85-s33	length_relaxed_s33	0.535	m	constant
+uncertainty	length-relaxed-s33	unstated	-	-	-	-
+validity	length-relaxed-s33	temperature_known	0	0	1
+scalar	tension-s33	pick85-s33	tension_s33	46.13	N	constant
+uncertainty	tension-s33	unstated	-	-	-	-
+validity	tension-s33	temperature_known	0	0	1
+scalar	wave-impedance-s33	pick85-s33	wave_impedance_s33	0.3564	kg/s	constant
+uncertainty	wave-impedance-s33	unstated	-	-	-	-
+validity	wave-impedance-s33	temperature_known	0	0	1
+scalar	linear-density-s33	pick85-s33	linear_density_s33	0.002753	kg/m	constant
+uncertainty	linear-density-s33	unstated	-	-	-	-
+validity	linear-density-s33	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s33	pick85-s33	torsion_stiffness_printed_g_cm_per_rad_s33	177.29	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s33	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s33	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s33	pick85-s33	damping_coefficient_printed_x100_s33	55.11	1	constant
+uncertainty	damping-coefficient-printed-x100-s33	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s33	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s33	pick85-s33	partial_2_deviation_cents_s33	4	1	constant
+uncertainty	partial-2-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s33	pick85-s33	partial_3_deviation_cents_s33	6	1	constant
+uncertainty	partial-3-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s33	pick85-s33	partial_4_deviation_cents_s33	8	1	constant
+uncertainty	partial-4-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s33	pick85-s33	partial_5_deviation_cents_s33	12	1	constant
+uncertainty	partial-5-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s33	pick85-s33	partial_6_deviation_cents_s33	20	1	constant
+uncertainty	partial-6-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s33	pick85-s33	partial_7_deviation_cents_s33	30	1	constant
+uncertainty	partial-7-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s33	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s33	pick85-s33	partial_8_deviation_cents_s33	40	1	constant
+uncertainty	partial-8-deviation-cents-s33	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s33	temperature_known	0	0	1
+observation	pick85-s34	Super Sensitive G string, wound steel (the table's note 1); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s34	pick85-s34	diameter_max_s34	0.000833	m	constant
+uncertainty	diameter-max-s34	unstated	-	-	-	-
+validity	diameter-max-s34	temperature_known	0	0	1
+scalar	diameter-min-s34	pick85-s34	diameter_min_s34	0.000821	m	constant
+uncertainty	diameter-min-s34	unstated	-	-	-	-
+validity	diameter-min-s34	temperature_known	0	0	1
+scalar	length-relaxed-s34	pick85-s34	length_relaxed_s34	0.525	m	constant
+uncertainty	length-relaxed-s34	unstated	-	-	-	-
+validity	length-relaxed-s34	temperature_known	0	0	1
+scalar	tension-s34	pick85-s34	tension_s34	49.92	N	constant
+uncertainty	tension-s34	unstated	-	-	-	-
+validity	tension-s34	temperature_known	0	0	1
+scalar	wave-impedance-s34	pick85-s34	wave_impedance_s34	0.3856	kg/s	constant
+uncertainty	wave-impedance-s34	unstated	-	-	-	-
+validity	wave-impedance-s34	temperature_known	0	0	1
+scalar	linear-density-s34	pick85-s34	linear_density_s34	0.002979	kg/m	constant
+uncertainty	linear-density-s34	unstated	-	-	-	-
+validity	linear-density-s34	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s34	pick85-s34	torsion_stiffness_printed_g_cm_per_rad_s34	64.96	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s34	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s34	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s34	pick85-s34	damping_coefficient_printed_x100_s34	15.75	1	constant
+uncertainty	damping-coefficient-printed-x100-s34	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s34	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s34	pick85-s34	partial_2_deviation_cents_s34	1	1	constant
+uncertainty	partial-2-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s34	pick85-s34	partial_3_deviation_cents_s34	7	1	constant
+uncertainty	partial-3-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s34	pick85-s34	partial_4_deviation_cents_s34	5	1	constant
+uncertainty	partial-4-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s34	pick85-s34	partial_5_deviation_cents_s34	5	1	constant
+uncertainty	partial-5-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s34	pick85-s34	partial_6_deviation_cents_s34	6	1	constant
+uncertainty	partial-6-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s34	pick85-s34	partial_7_deviation_cents_s34	9	1	constant
+uncertainty	partial-7-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s34	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s34	pick85-s34	partial_8_deviation_cents_s34	13	1	constant
+uncertainty	partial-8-deviation-cents-s34	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s34	temperature_known	0	0	1
+observation	pick85-s35	Corelli G string, wound on a gut core (the table's default: all the rest are wound on gut); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Test bed of a rigid aluminium bar with two massive bridges 329 mm apart, tension from an accurate force gauge, amplitude by a light shadow on a photodetector, drive by a magnetic force on the string; diameter and length of the RELAXED string; tension at the exact open-string frequency (196.0, 293.7, 440.0, 659.3 Hz for G, D, A, E) after the string settled (gut up to 48 h); a small torsion pendulum clamped at the centre of the stretched string for the torsional stiffness and the logarithmic-decrement damping coefficient; overtone tuning in cents from integer ratios with a Seiko tuning indicator	Relative humidity and temperature are not stated; diameters in the table are max and min along the string; wave impedance is sqrt(tension x linear mass); the units of the torsional stiffness (g-cm per rad) and of the damping coefficient (times 100) are the table's own and are kept as printed numbers
+scalar	diameter-max-s35	pick85-s35	diameter_max_s35	0.000818	m	constant
+uncertainty	diameter-max-s35	unstated	-	-	-	-
+validity	diameter-max-s35	temperature_known	0	0	1
+scalar	diameter-min-s35	pick85-s35	diameter_min_s35	0.00081	m	constant
+uncertainty	diameter-min-s35	unstated	-	-	-	-
+validity	diameter-min-s35	temperature_known	0	0	1
+scalar	length-relaxed-s35	pick85-s35	length_relaxed_s35	0.577	m	constant
+uncertainty	length-relaxed-s35	unstated	-	-	-	-
+validity	length-relaxed-s35	temperature_known	0	0	1
+scalar	tension-s35	pick85-s35	tension_s35	35.43	N	constant
+uncertainty	tension-s35	unstated	-	-	-	-
+validity	tension-s35	temperature_known	0	0	1
+scalar	wave-impedance-s35	pick85-s35	wave_impedance_s35	0.2737	kg/s	constant
+uncertainty	wave-impedance-s35	unstated	-	-	-	-
+validity	wave-impedance-s35	temperature_known	0	0	1
+scalar	linear-density-s35	pick85-s35	linear_density_s35	0.002115	kg/m	constant
+uncertainty	linear-density-s35	unstated	-	-	-	-
+validity	linear-density-s35	temperature_known	0	0	1
+scalar	torsion-stiffness-printed-g-cm-per-rad-s35	pick85-s35	torsion_stiffness_printed_g_cm_per_rad_s35	15.07	1	constant
+uncertainty	torsion-stiffness-printed-g-cm-per-rad-s35	unstated	-	-	-	-
+validity	torsion-stiffness-printed-g-cm-per-rad-s35	temperature_known	0	0	1
+scalar	damping-coefficient-printed-x100-s35	pick85-s35	damping_coefficient_printed_x100_s35	1.85	1	constant
+uncertainty	damping-coefficient-printed-x100-s35	unstated	-	-	-	-
+validity	damping-coefficient-printed-x100-s35	temperature_known	0	0	1
+scalar	partial-2-deviation-cents-s35	pick85-s35	partial_2_deviation_cents_s35	-1	1	constant
+uncertainty	partial-2-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-2-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-3-deviation-cents-s35	pick85-s35	partial_3_deviation_cents_s35	-1	1	constant
+uncertainty	partial-3-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-3-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-4-deviation-cents-s35	pick85-s35	partial_4_deviation_cents_s35	-2	1	constant
+uncertainty	partial-4-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-4-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-5-deviation-cents-s35	pick85-s35	partial_5_deviation_cents_s35	3	1	constant
+uncertainty	partial-5-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-5-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-6-deviation-cents-s35	pick85-s35	partial_6_deviation_cents_s35	3	1	constant
+uncertainty	partial-6-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-6-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-7-deviation-cents-s35	pick85-s35	partial_7_deviation_cents_s35	6	1	constant
+uncertainty	partial-7-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-7-deviation-cents-s35	temperature_known	0	0	1
+scalar	partial-8-deviation-cents-s35	pick85-s35	partial_8_deviation_cents_s35	7	1	constant
+uncertainty	partial-8-deviation-cents-s35	unstated	-	-	-	-
+validity	partial-8-deviation-cents-s35	temperature_known	0	0	1

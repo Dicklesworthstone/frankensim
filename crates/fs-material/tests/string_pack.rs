@@ -28,7 +28,10 @@ fn load_pack(dir: &str) -> Pack {
         std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/manifest.tsv")))
             .expect("manifest");
     assert!(manifest.starts_with("frankensim.matdb-manifest.v1"));
-    assert!(manifest.contains("CC-BY-4.0"), "{dir}: licensing-first CC BY");
+    assert!(
+        manifest.contains("CC-BY-4.0"),
+        "{dir}: licensing-first CC BY"
+    );
     assert!(
         manifest.contains("https://doi.org/10.3813/AAA.919333"),
         "{dir}: DOI required"
@@ -97,7 +100,10 @@ fn string_packs_pass_physicality_gates() {
         gut.scalars["density"],
     );
     assert!(rf > rg && rf > rn, "fluorocarbon must be the densest");
-    assert!(rf / rg.max(rn) > 1.3, "and by a wide margin: {rf} vs {rg}, {rn}");
+    assert!(
+        rf / rg.max(rn) > 1.3,
+        "and by a wide margin: {rf} vs {rg}, {rn}"
+    );
 
     // Gut: E' and E'' fixed, and the quoted eta_E = 0.04 must be their ratio within the table's rounding.
     let eta_gut = gut.scalars["young_modulus_loss"] / gut.scalars["young_modulus_storage"];
@@ -119,8 +125,14 @@ fn string_packs_pass_physicality_gates() {
     // Nylon: eta_E falls from 0.04 to 0.02 "as stress increases over the range tested"; the fit must reach 0.02 above the 0.04 stress
     // and below a typical nylon breaking stress (0.5 GPa), and E' must rise with stress.
     let s_lo = stress_gpa_at_loss_factor(&nylon, nylon.scalars["loss_factor_at_low_stress"]);
-    let s_hi = stress_gpa_at_loss_factor(&nylon, nylon.scalars["loss_factor_at_highest_tested_stress"]);
-    assert!(s_hi > s_lo && s_hi < 0.5, "nylon stress span {s_lo}..{s_hi} GPa");
+    let s_hi = stress_gpa_at_loss_factor(
+        &nylon,
+        nylon.scalars["loss_factor_at_highest_tested_stress"],
+    );
+    assert!(
+        s_hi > s_lo && s_hi < 0.5,
+        "nylon stress span {s_lo}..{s_hi} GPa"
+    );
     assert!(nylon.scalars["young_modulus_storage_per_gpa_stress"] > 0.0);
 
     // The kHz storage modulus of all three lies in the polymer band 3-20 GPa at a harp-string stress of 0.1 GPa (gut has none).
@@ -133,6 +145,9 @@ fn string_packs_pass_physicality_gates() {
         ("fluorocarbon", at(&fluoro, 0.1)),
         ("gut", gut.scalars["young_modulus_storage"]),
     ] {
-        assert!((3e9..20e9).contains(&e), "{name}: E' {e} Pa outside the polymer band");
+        assert!(
+            (3e9..20e9).contains(&e),
+            "{name}: E' {e} Pa outside the polymer band"
+        );
     }
 }

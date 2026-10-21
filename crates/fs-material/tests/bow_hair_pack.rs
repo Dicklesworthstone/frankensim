@@ -35,7 +35,11 @@ fn load_pack(dir: &str) -> BTreeMap<String, f64> {
         match cols[0] {
             "scalar" => {
                 let value: f64 = cols[4].parse().expect("scalar value");
-                assert!(value.is_finite() && value > 0.0, "{dir}: {} must be positive", cols[3]);
+                assert!(
+                    value.is_finite() && value > 0.0,
+                    "{dir}: {} must be positive",
+                    cols[3]
+                );
                 scalars.insert(cols[3].to_string(), value);
                 ids.push(cols[1].to_string());
             }
@@ -46,7 +50,10 @@ fn load_pack(dir: &str) -> BTreeMap<String, f64> {
         }
     }
     for id in &ids {
-        assert!(unc.contains(id), "{dir}: scalar {id} lacks an uncertainty row");
+        assert!(
+            unc.contains(id),
+            "{dir}: scalar {id} lacks an uncertainty row"
+        );
         assert!(val.contains(id), "{dir}: scalar {id} lacks a validity row");
     }
     scalars
@@ -72,7 +79,10 @@ fn bow_hair_pack_passes_physicality_gates() {
             <= e_static + p["young_modulus_static_printed_half_width"]
     );
     assert!(p["loss_factor_printed_range_low"] < p["loss_factor_printed_range_high"]);
-    assert!(p["exponential_decay_rate_printed_range_low"] < p["exponential_decay_rate_printed_range_high"]);
+    assert!(
+        p["exponential_decay_rate_printed_range_low"]
+            < p["exponential_decay_rate_printed_range_high"]
+    );
     assert!(p["hair_diameter_printed_range_low"] < p["hair_diameter_printed_range_high"]);
     assert!(p["hairs_in_contact_with_string_at_most"] <= p["violin_bow_hair_count_estimate"]);
 
@@ -84,7 +94,10 @@ fn bow_hair_pack_passes_physicality_gates() {
         let count = get(n, "hair_count_estimate");
         let mass = get(n, "hair_ribbon_mass");
         let width = get(n, "ribbon_width");
-        assert!(count > prev.0 && mass > prev.1 && width >= prev.2, "{n}: ordering");
+        assert!(
+            count > prev.0 && mass > prev.1 && width >= prev.2,
+            "{n}: ordering"
+        );
         prev = (count, mass, width);
     }
 

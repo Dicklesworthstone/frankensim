@@ -24,7 +24,10 @@ fn load_pack(dir: &str, license: &str) -> BTreeMap<String, f64> {
         std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/manifest.tsv")))
             .expect("manifest");
     assert!(manifest.starts_with("frankensim.matdb-manifest.v1"));
-    assert!(manifest.contains(&format!("\nlicense\t{license}\n")), "{dir}: license {license}");
+    assert!(
+        manifest.contains(&format!("\nlicense\t{license}\n")),
+        "{dir}: license {license}"
+    );
     let text =
         std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/properties.tsv")))
             .expect("properties");
@@ -36,7 +39,11 @@ fn load_pack(dir: &str, license: &str) -> BTreeMap<String, f64> {
         match cols[0] {
             "scalar" => {
                 let value: f64 = cols[4].parse().expect("scalar value");
-                assert!(value.is_finite() && value > 0.0, "{dir}: {} must be positive", cols[3]);
+                assert!(
+                    value.is_finite() && value > 0.0,
+                    "{dir}: {} must be positive",
+                    cols[3]
+                );
                 scalars.insert(cols[3].to_string(), value);
                 ids.push(cols[1].to_string());
             }
@@ -47,7 +54,10 @@ fn load_pack(dir: &str, license: &str) -> BTreeMap<String, f64> {
         }
     }
     for id in &ids {
-        assert!(unc.contains(id), "{dir}: scalar {id} lacks an uncertainty row");
+        assert!(
+            unc.contains(id),
+            "{dir}: scalar {id} lacks an uncertainty row"
+        );
         assert!(val.contains(id), "{dir}: scalar {id} lacks a validity row");
     }
     scalars
@@ -65,33 +75,55 @@ fn viscosity(p: &BTreeMap<String, f64>, kelvin: f64) -> f64 {
 
 #[test]
 fn rosin_packs_pass_physicality_gates() {
-    let sw = load_pack("rosin-smith-woodhouse-jmps2000", "Published-Scientific-Facts-Attribution-Retained");
-    let wg = load_pack("rosin-violin-glass-transition-woodhouse-galluzzo-2025", "CC-BY-4.0");
+    let sw = load_pack(
+        "rosin-smith-woodhouse-jmps2000",
+        "Published-Scientific-Facts-Attribution-Retained",
+    );
+    let wg = load_pack(
+        "rosin-violin-glass-transition-woodhouse-galluzzo-2025",
+        "CC-BY-4.0",
+    );
     let eu = load_pack(
         "rosin-glass-transition-woodhouse-euphonics-9-6",
         "Published-Scientific-Facts-Attribution-Retained",
     );
 
     // Bulk density of a resin acid solid: close to water, a little above.
-    assert!((1000.0..1100.0).contains(&sw["density"]), "density {}", sw["density"]);
+    assert!(
+        (1000.0..1100.0).contains(&sw["density"]),
+        "density {}",
+        sw["density"]
+    );
 
     // The printed law gives the printed "approximately four orders of magnitude" between 45 and 85 C, and its stated anchors.
     let (t45, t85) = (318.15, 358.15);
     let decades = (viscosity(&sw, t45) / viscosity(&sw, t85)).log10();
-    assert!((decades - sw["viscosity_decades_lost_over_45_to_85_c_printed"]).abs() < 0.25, "{decades} decades");
+    assert!(
+        (decades - sw["viscosity_decades_lost_over_45_to_85_c_printed"]).abs() < 0.25,
+        "{decades} decades"
+    );
     let at70 = viscosity(&sw, 343.15);
     assert!((at70 - 3000.0).abs() < 1.0, "eta(70 C) = {at70}");
 
     // Softening statements are ordered and lie inside the fitted range.
-    let (indent, sticky) = (sw["knife_indent_temperature_about"], sw["thick_sticky_liquid_temperature_about"]);
+    let (indent, sticky) = (
+        sw["knife_indent_temperature_about"],
+        sw["thick_sticky_liquid_temperature_about"],
+    );
     assert!(indent < sticky);
     assert!(t45 <= indent && sticky <= t85, "{indent} {sticky}");
 
     // Two sources on the violin rosin's transition agree to a few kelvin; the bass rosin's lies below room temperature.
-    let (tg_wg, tg_eu) = (wg["glass_transition_temperature_about"], eu["violin_rosin_glass_transition_temperature"]);
+    let (tg_wg, tg_eu) = (
+        wg["glass_transition_temperature_about"],
+        eu["violin_rosin_glass_transition_temperature"],
+    );
     assert!((tg_wg - tg_eu).abs() < 3.0, "{tg_wg} against {tg_eu}");
     let (room, tg_bass) = (293.15, eu["double_bass_rosin_glass_transition_temperature"]);
-    assert!(tg_bass < room && room < tg_eu, "bass {tg_bass}, room {room}, violin {tg_eu}");
+    assert!(
+        tg_bass < room && room < tg_eu,
+        "bass {tg_bass}, room {room}, violin {tg_eu}"
+    );
     // The viscosity law's fitted range straddles the violin transition (Woodhouse and Galluzzo: properties vary rapidly across it).
     assert!(t45 < tg_eu && tg_eu < t85);
 }

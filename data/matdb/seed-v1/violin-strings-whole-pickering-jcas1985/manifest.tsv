@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	violin-strings-whole-pickering-jcas1985
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Pickering N.C. (1985), Physical Properties of Violin Strings, Journal of the Catgut Acoustical Society 44:6-8 (November 1985), the table "Physical Constants of Violin Strings" on p. 7 and the method text on pp. 6 and 8, read twice on 320 dpi page images from the copy at https://knutsacoustics.com/files/pickering-violin-string-properties.pdf
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
