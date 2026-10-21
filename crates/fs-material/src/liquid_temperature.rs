@@ -10,13 +10,9 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
 use crate::liquid::{
-    DYNAMIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_PROPERTY, ResolvedLiquidState,
-    resolve_liquid_state, resolve_liquid_state_from_kinematic,
+    ResolvedLiquidState, resolve_liquid_state, resolve_liquid_state_from_kinematic,
 };
-use crate::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
-    SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY,
-};
+use crate::state_point::{MaterialPropertySelection, MaterialStatePointError};
 
 /// Which viscosity quantity the source actually reports. No implicit fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,10 +33,11 @@ impl LiquidViscosityBasis {
         }
     }
 
+    #[cfg(test)]
     fn property(self) -> &'static str {
         match self {
-            Self::Dynamic => DYNAMIC_VISCOSITY_PROPERTY,
-            Self::Kinematic => KINEMATIC_VISCOSITY_PROPERTY,
+            Self::Dynamic => crate::liquid::DYNAMIC_VISCOSITY_PROPERTY,
+            Self::Kinematic => crate::liquid::KINEMATIC_VISCOSITY_PROPERTY,
         }
     }
 }
@@ -57,7 +54,6 @@ pub struct LiquidTemperatureLaw<'a> {
     reference_state: ResolvedLiquidState,
     temperature_axis: String,
     viscosity_basis: LiquidViscosityBasis,
-    selection: MaterialPropertySelection,
 }
 
 impl<'a> LiquidTemperatureLaw<'a> {
@@ -84,18 +80,9 @@ impl<'a> LiquidTemperatureLaw<'a> {
             return Err(invalid("liquid temperature law needs an explicit positive absolute-temperature coordinate"));
         }
         let reference_state = viscosity_basis.resolve(card, point, selection)?;
-        let mut pins = Vec::with_capacity(4);
-        for name in [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY,
-            THERMAL_CONDUCTIVITY_PROPERTY, viscosity_basis.property()]
-        {
-            let property = reference_state.material().property(name)
-                .ok_or_else(|| invalid("liquid law is missing a required source property"))?;
-            pins.push((name.to_owned(), property.answer().receipt.selected));
-        }
         Ok(Self {
             card, reference_point: point.clone(), reference_state,
             temperature_axis: temperature_axis.to_owned(), viscosity_basis,
-            selection: MaterialPropertySelection::PinnedByProperty(pins),
         })
     }
 
@@ -113,7 +100,7 @@ impl<'a> LiquidTemperatureLaw<'a> {
         }
         let point = self.reference_point.clone().with(&self.temperature_axis, temperature.value())
             .map_err(|_| invalid("liquid temperature violates its retained quantity convention"))?;
-        self.viscosity_basis.resolve(self.card, &point, self.selection.clone())
+        self.reference_state.at_query_point(self.card, &point)
     }
 
     /// The immutable card owning every evaluated state.
@@ -140,11 +127,17 @@ fn invalid(quantity: &'static str) -> MaterialStatePointError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_evidence::ValidityDomain;
-    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim,
-        PropertyKey, PropertyValue, Provenance, UncertaintyModel};
-    use fs_qty::Dims;
     use crate::fluid_transport::FluidTransport;
+    use crate::liquid::{DYNAMIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_PROPERTY};
+    use crate::state_point::{
+        DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_PROPERTY,
+    };
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
+        Provenance, UncertaintyModel,
+    };
+    use fs_qty::Dims;
 
     fn card(basis: LiquidViscosityBasis, split_viscosity: bool) -> MaterialCard {
         let mut claims = ClaimSet::new();
@@ -200,6 +193,19 @@ mod tests {
         let law = LiquidTemperatureLaw::try_new(&card, &point(), "T", LiquidViscosityBasis::Dynamic,
             MaterialPropertySelection::SingleClaimOnly).unwrap();
         let hot = law.at_temperature(Temperature::new(400.0)).unwrap();
+        assert_eq!(
+            hot,
+            law.reference_state()
+                .at_query_point(
+                    &card,
+                    &law.reference_state()
+                        .material()
+                        .query()
+                        .with("T", 400.0)
+                        .unwrap()
+                )
+                .unwrap()
+        );
         assert_eq!(hot.density_kg_m3(), 800.0);
         assert_eq!(hot.specific_heat_j_kg_k(), 4000.0);
         assert_eq!(hot.dynamic_viscosity_pa_s(), 0.001);

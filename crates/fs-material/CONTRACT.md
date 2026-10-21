@@ -71,6 +71,20 @@ homogenization, the P2 milestone.
   Absent source bounds remain unconstrained. This nominal unit conversion does
   not modify receipts, extend source support or freeze a sampled frequency curve.
   G0 tests cover conversions, source preservation, ambiguity and invalid bounds.
+- `ResolvedMaterialStatePoint::query` reconstructs its complete physical query;
+  `at_query_point` refreshes every retained property from the exact original
+  card and selected claims. Temperature, pressure, moisture, shear rate and
+  other declared coordinate values can change together. All coordinate names
+  and quantity conventions, complete property keys (including same-name tensor
+  and test contexts), and consumer admissibility remain fixed. A dependent
+  property leaving source support refuses the whole candidate instead of
+  switching sources or leaving a stale value. `ResolvedLiquidState` uses this
+  same refresh and recalculates all derived transport coefficients with its
+  original dynamic/kinematic viscosity basis; section and liquid temperature
+  laws delegate to it. Focused G0 regressions cover simultaneous multiaxis
+  updates, complete-key preservation, typed-coordinate refusals, source pins
+  and atomic failure. These are endpoint evaluations, not history integration,
+  support along an intervening path, or measured multiaxis validation.
 - `conductor::resolve_uniform_conductor` binds exactly one sourced
   `electrical_resistivity` claim in ohm-metre dimensions to caller-owned
   positive uniform length and cross-sectional area, retaining the resolved

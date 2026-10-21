@@ -36,6 +36,7 @@ pub const KINEMATIC_VISCOSITY_DIMS: Dims = Dims([2, 0, -1, 0, 0, 0]);
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLiquidState {
     material: ResolvedMaterialStatePoint,
+    viscosity_is_kinematic: bool,
     density_kg_m3: f64,
     specific_heat_j_kg_k: f64,
     thermal_conductivity_w_m_k: f64,
@@ -46,6 +47,28 @@ pub struct ResolvedLiquidState {
 }
 
 impl ResolvedLiquidState {
+    /// Refresh every transport property at a new complete physical query while
+    /// retaining the original material card, source claims and viscosity basis.
+    /// Temperature, pressure, shear rate and composition coordinates may evolve
+    /// together, provided their names/conventions and source support are retained.
+    /// In particular, a kinematic-viscosity source is converted with the NEW
+    /// density. No derived transport coefficient remains at the reference state.
+    ///
+    /// # Errors
+    /// Refuses any source-bundle refresh or derived-transport failure atomically.
+    /// This evaluates a constitutive state; it does not supply a fluid solver,
+    /// phase stability, or a path-dependent rheological history.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        liquid_from_resolved_material(
+            self.material.at_query_point(card, point)?,
+            self.viscosity_is_kinematic,
+        )
+    }
+
     /// The complete evidence-bearing source bundle and its four receipts.
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
@@ -180,6 +203,20 @@ fn resolve_liquid_state_with_viscosity(
         )?,
     ];
     let material = resolve_material_state_point(card, point, &requirements, selection)?;
+    liquid_from_resolved_material(material, viscosity_is_kinematic)
+}
+
+// Only initial liquid resolution and exact-source refresh enter here, so all
+// four required complete keys have already passed the same consumer checks.
+fn liquid_from_resolved_material(
+    material: ResolvedMaterialStatePoint,
+    viscosity_is_kinematic: bool,
+) -> Result<ResolvedLiquidState, MaterialStatePointError> {
+    let viscosity_property = if viscosity_is_kinematic {
+        KINEMATIC_VISCOSITY_PROPERTY
+    } else {
+        DYNAMIC_VISCOSITY_PROPERTY
+    };
     let value = |name| {
         material
             .property(name)
@@ -203,6 +240,7 @@ fn resolve_liquid_state_with_viscosity(
     )?;
     Ok(ResolvedLiquidState {
         material,
+        viscosity_is_kinematic,
         density_kg_m3,
         specific_heat_j_kg_k,
         thermal_conductivity_w_m_k,

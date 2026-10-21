@@ -574,6 +574,82 @@ impl ResolvedMaterialStatePoint {
         &self.properties[0].answer.receipt.axis_quantities
     }
 
+    /// Reconstruct the complete physical query, retaining every axis convention.
+    /// Callers may change coordinate values with `QueryPoint::with` and pass the
+    /// result to [`Self::at_query_point`] without rebuilding property requirements.
+    #[must_use]
+    pub fn query(&self) -> QueryPoint {
+        let mut point = QueryPoint::new();
+        for (axis, value) in &self.query_point {
+            point = match self.axis_quantities().get(axis) {
+                Some(&quantity) => point.with_quantity(axis, quantity, *value),
+                None => point.with(axis, *value),
+            }
+            .expect("resolved material coordinates have already been admitted");
+        }
+        point
+    }
+
+    /// Re-evaluate this entire bundle at a new physical state using the SAME
+    /// immutable material card, complete property keys and exact source claims.
+    ///
+    /// All coordinate values may change together: temperature, pressure,
+    /// moisture, strain rate or any other declared source axis. Axis names and
+    /// quantity conventions must remain identical; this operation neither
+    /// converts units nor infers omitted conditions. Source validity and the
+    /// original consumer admissibility apply to EVERY property at the new point.
+    ///
+    /// The selected claims remain pinned even if another claim becomes usable.
+    /// This evaluates an endpoint, not a constitutive-history update, phase
+    /// change, source switch, or guarantee of support along the intervening path.
+    ///
+    /// # Errors
+    /// Refuses a different card, changed coordinate schema, or any property
+    /// query/admissibility failure. No partially refreshed state is returned and
+    /// the original bundle, source receipts and physical state remain unchanged.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        if card.content_hash() != self.card_identity {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "material refresh requires the original immutable card",
+            });
+        }
+        if point.axis_quantities() != self.axis_quantities()
+            || !point
+                .axes()
+                .keys()
+                .eq(self.query_point.iter().map(|(axis, _)| axis))
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "material refresh must retain every coordinate name and quantity convention",
+            });
+        }
+        let requirements: Vec<_> = self
+            .properties
+            .iter()
+            .map(|property| property.requirement.clone())
+            .collect();
+        let pins = self
+            .properties
+            .iter()
+            .map(|property| {
+                (
+                    property.requirement.name.clone(),
+                    property.answer.receipt.selected,
+                )
+            })
+            .collect();
+        resolve_material_state_point(
+            card,
+            point,
+            &requirements,
+            MaterialPropertySelection::PinnedByProperty(pins),
+        )
+    }
+
     /// Canonically ordered resolved properties.
     #[must_use]
     pub fn properties(&self) -> &[ResolvedScalarProperty] {
@@ -2599,6 +2675,226 @@ mod tests {
         }
     }
 
+    // Synthetic independent curves exercise source plumbing, not a measured
+    // material model or a claim about joint physical validity.
+    fn multiaxis_refresh_fixture() -> (MaterialCard, ResolvedMaterialStatePoint) {
+        let axes = [
+            (
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+                400.0,
+            ),
+            (
+                "pressure",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                100_000.0,
+                200_000.0,
+            ),
+            ("moisture", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0),
+            (
+                "shear_rate",
+                QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0])),
+                0.0,
+                100.0,
+            ),
+        ];
+        let mut validity = ValidityDomain::unconstrained();
+        let mut point = QueryPoint::new();
+        for (axis, quantity, low, high) in axes {
+            validity = validity.with_quantity(axis, quantity, low, high);
+            point = point.with_quantity(axis, quantity, low).unwrap();
+        }
+        let conductivity = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        ));
+        let mut claims = ClaimSet::new();
+        let mut requirements = Vec::new();
+        for (name, quantity, axis_index, values) in [
+            (
+                DENSITY_PROPERTY,
+                QuantitySpec::dimensional(Density::DIMS),
+                1,
+                [1000.0, 1100.0],
+            ),
+            (
+                YOUNG_MODULUS_PROPERTY,
+                QuantitySpec::dimensional(Pressure::DIMS),
+                0,
+                [2e9, 1e9],
+            ),
+            (THERMAL_CONDUCTIVITY_PROPERTY, conductivity, 0, [0.5, 1.0]),
+            (
+                crate::conductor::ELECTRICAL_RESISTIVITY_PROPERTY,
+                QuantitySpec::dimensional(crate::conductor::ELECTRICAL_RESISTIVITY_DIMS),
+                2,
+                [2e-7, 4e-7],
+            ),
+            (
+                crate::liquid::DYNAMIC_VISCOSITY_PROPERTY,
+                QuantitySpec::dimensional(crate::liquid::DYNAMIC_VISCOSITY_DIMS),
+                3,
+                [0.02, 0.01],
+            ),
+        ] {
+            let (axis, axis_quantity, low, high) = axes[axis_index];
+            let mut property = claim(name, quantity.dims(), vec![], 400.0);
+            property.key = PropertyKey::with_quantity(name, quantity);
+            property.validity = validity.clone();
+            property.value = PropertyValue::Curve {
+                abscissa: axis.into(),
+                abscissa_dims: axis_quantity.dims(),
+                knots: vec![(low, values[0]), (high, values[1])],
+                dims: quantity.dims(),
+            };
+            claims.insert_claim(property).unwrap();
+            requirements.push(
+                ScalarPropertyRequirement::try_with_quantity(
+                    name,
+                    quantity,
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap(),
+            );
+        }
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic multiaxis refresh fixture".into(),
+                phase: "test".into(),
+                process: "test".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap();
+        let state = resolve_material_state_point(
+            &card,
+            &point,
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        (card, state)
+    }
+
+    #[test]
+    fn g0_refresh_updates_the_complete_multiphysics_bundle_at_one_new_query() {
+        let (card, initial) = multiaxis_refresh_fixture();
+        let retained = initial.clone();
+        let point = initial
+            .query()
+            .with("T", 400.0)
+            .unwrap()
+            .with("pressure", 200_000.0)
+            .unwrap()
+            .with("moisture", 1.0)
+            .unwrap()
+            .with("shear_rate", 100.0)
+            .unwrap();
+        let refreshed = initial.at_query_point(&card, &point).unwrap();
+        for (name, expected) in [
+            (DENSITY_PROPERTY, 1100.0),
+            (YOUNG_MODULUS_PROPERTY, 1e9),
+            (THERMAL_CONDUCTIVITY_PROPERTY, 1.0),
+            (crate::conductor::ELECTRICAL_RESISTIVITY_PROPERTY, 4e-7),
+            (crate::liquid::DYNAMIC_VISCOSITY_PROPERTY, 0.01),
+        ] {
+            let before = initial.property(name).unwrap();
+            let after = refreshed.property(name).unwrap();
+            assert_eq!(after.value_si(), expected);
+            assert_ne!(after.value_si(), before.value_si());
+            assert_eq!(after.requirement(), before.requirement());
+            assert_eq!(
+                after.answer().receipt.selected,
+                before.answer().receipt.selected
+            );
+            assert_eq!(
+                after.answer().receipt.axis_quantities,
+                *point.axis_quantities()
+            );
+            assert_eq!(
+                after.answer().receipt.query_point.as_slice(),
+                refreshed.query_point()
+            );
+            card.claims()
+                .verify_receipt(&after.answer().receipt)
+                .unwrap();
+        }
+        assert_eq!(refreshed.query(), point);
+        assert_ne!(refreshed.identity(), initial.identity());
+        assert_eq!(refreshed, initial.at_query_point(&card, &point).unwrap());
+        assert_eq!(initial, retained);
+    }
+
+    #[test]
+    fn g0_refresh_refuses_foreign_sources_schema_changes_and_partial_states() {
+        let (card, initial) = multiaxis_refresh_fixture();
+        let retained = initial.clone();
+        let foreign = MaterialCard::assemble(
+            MaterialStateId {
+                revision: 1,
+                ..card.id().clone()
+            },
+            card.claims().clone(),
+            vec![],
+        )
+        .unwrap();
+        assert!(initial.at_query_point(&foreign, &initial.query()).is_err());
+        let altered_temperature = initial
+            .query()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::TemperatureDifference,
+                    ValueForm::Static,
+                )),
+                300.0,
+            )
+            .unwrap();
+        for point in [
+            altered_temperature,
+            initial.query().with("unmodeled_axis", 1.0).unwrap(),
+            QueryPoint::new().with("T", 300.0).unwrap(),
+            initial.query().with("shear_rate", 101.0).unwrap(),
+        ] {
+            assert!(initial.at_query_point(&card, &point).is_err());
+            assert_eq!(initial, retained);
+        }
+        // Source support is sufficient, but a retained operator domain can be
+        // narrower. Refresh cannot replace it with generic positivity.
+        let mut requirements: Vec<_> = initial
+            .properties()
+            .iter()
+            .map(|p| p.requirement().clone())
+            .collect();
+        requirements
+            .iter_mut()
+            .find(|r| r.name() == YOUNG_MODULUS_PROPERTY)
+            .unwrap()
+            .admissibility = ScalarAdmissibility::OpenInterval {
+            lower: 1.5e9,
+            upper: 2.5e9,
+        };
+        let bounded = resolve_material_state_point(
+            &card,
+            &initial.query(),
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(
+            matches!(bounded.at_query_point(&card, &bounded.query().with("T", 400.0).unwrap()),
+            Err(MaterialStatePointError::OutsideConsumerDomain { property, .. })
+                if property == YOUNG_MODULUS_PROPERTY)
+        );
+        assert_eq!(initial, retained);
+    }
+
     #[test]
     fn g0_frequency_applicability_converts_semantics_and_preserves_sources() {
         use fs_qty::semantic::FrequencyConvention::{Angular, Cyclic};
@@ -3189,10 +3485,14 @@ mod tests {
             .unwrap();
             assert!(bulk.property("hardness").is_none());
             assert!(surface.property("hardness").is_none());
+            let refreshed = bulk.at_query_point(&material, &bulk.query().with("T", 500.0).unwrap())
+                .unwrap();
+            assert!(refreshed.property("hardness").is_none());
             for (required_key, expected) in [(&key, 210.0), (&other_key, 310.0)] {
                 for value in [
                     bulk.property_by_key(required_key).unwrap(),
                     surface.property_by_key(required_key).unwrap(),
+                    refreshed.property_by_key(required_key).unwrap(),
                 ] {
                     assert_eq!(value.value_si(), expected);
                     material

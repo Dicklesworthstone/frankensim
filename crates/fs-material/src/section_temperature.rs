@@ -17,18 +17,13 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
 use crate::section::{ConcentricElasticSection, ConcentricMaterialLayer};
-use crate::state_point::{
-    MaterialPropertySelection, MaterialStatePointError, ScalarPropertyRequirement,
-    resolve_material_state_point,
-};
+use crate::state_point::MaterialStatePointError;
 
 #[derive(Clone, Debug)]
 struct LayerBinding<'a> {
     card: &'a MaterialCard,
     point: QueryPoint,
     axis: String,
-    requirements: Vec<ScalarPropertyRequirement>,
-    selection: MaterialPropertySelection,
 }
 
 /// A reusable data-only temperature law for the existing layered section.
@@ -77,20 +72,8 @@ impl<'a> ConcentricSectionTemperatureLaw<'a> {
             {
                 return Err(invalid("section temperature law requires positive absolute-temperature coordinates"));
             }
-            let mut point = QueryPoint::new();
-            for (name, value) in layer.material.query_point() {
-                point = match layer.material.axis_quantities().get(name) {
-                    Some(&quantity) => point.with_quantity(name, quantity, *value),
-                    None => point.with(name, *value),
-                }.map_err(|_| invalid("section temperature query cannot retain its coordinate convention"))?;
-            }
-            let requirements = layer.material.properties().iter()
-                .map(|p| p.requirement().clone()).collect();
-            let pins = layer.material.properties().iter()
-                .map(|p| (p.requirement().name().to_owned(), p.answer().receipt.selected)).collect();
             bindings.push(LayerBinding {
-                card, point, axis: axis.to_owned(), requirements,
-                selection: MaterialPropertySelection::PinnedByProperty(pins),
+                card, point: layer.material.query(), axis: axis.to_owned(),
             });
         }
         Ok(Self { reference, bindings })
@@ -106,7 +89,8 @@ impl<'a> ConcentricSectionTemperatureLaw<'a> {
     /// Source support is checked at each requested state; this is not an
     /// assertion of continuous thermal-path or phase-stability support.
     pub fn at_temperatures_k(
-        &self, temperatures_k: &[f64],
+        &self,
+        temperatures_k: &[f64],
     ) -> Result<ConcentricElasticSection, MaterialStatePointError> {
         if temperatures_k.len() != self.bindings.len()
             || temperatures_k.iter().any(|t| !t.is_finite() || *t <= 0.0)
@@ -119,9 +103,7 @@ impl<'a> ConcentricSectionTemperatureLaw<'a> {
         {
             let point = binding.point.clone().with(&binding.axis, temperature)
                 .map_err(|_| invalid("section temperature violates its retained convention"))?;
-            let material = resolve_material_state_point(
-                binding.card, &point, &binding.requirements, binding.selection.clone(),
-            )?;
+            let material = geometry.material.at_query_point(binding.card, &point)?;
             layers.push(ConcentricMaterialLayer { outer_radius_m: geometry.outer_radius_m, material });
         }
         ConcentricElasticSection::try_new(self.reference.inner_radius_m(), layers)
@@ -135,14 +117,21 @@ fn invalid(quantity: &'static str) -> MaterialStatePointError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conductor::{
+        ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY, OhmicDrive,
+    };
+    use crate::state_point::{
+        DENSITY_PROPERTY, MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS,
+        SPECIFIC_HEAT_CAPACITY_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement,
+        THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, YOUNG_MODULUS_PROPERTY,
+        resolve_material_state_point,
+    };
     use fs_evidence::ValidityDomain;
-    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim,
-        PropertyKey, PropertyValue, Provenance, UncertaintyModel};
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue,
+        Provenance, UncertaintyModel,
+    };
     use fs_qty::{Density, Dims, Pressure};
-    use crate::conductor::{ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY, OhmicDrive};
-    use crate::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, ScalarAdmissibility,
-        SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
-        THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY};
 
     pub(super) fn card(scale: f64) -> (MaterialCard, Vec<ScalarPropertyRequirement>) {
         let mut claims = ClaimSet::new();
