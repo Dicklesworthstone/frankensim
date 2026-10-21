@@ -22,6 +22,9 @@ use super::transport::TransportError;
 /// Atomic spatial tip births after a coupled interval.
 pub mod growth;
 
+/// Shared finite electrical storage, Joule heat and spatial material mechanics.
+pub mod electrical;
+
 /// Mechanical tuple and its actual source-bound thermal destination.
 #[derive(Clone, Copy, Debug)]
 pub struct BridgeThermalBinding<'a> {
