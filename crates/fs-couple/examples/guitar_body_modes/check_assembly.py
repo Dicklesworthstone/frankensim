@@ -6,7 +6,7 @@ import sys
 import numpy as np
 
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-assert lines[0] == "frankensim.guitar-shell-assembly.v1"
+assert lines[0] in ("frankensim.guitar-shell-assembly.v1", "frankensim.shell-assembly.v1"), lines[0]
 comps = {}
 order = []
 ties = []
@@ -31,6 +31,8 @@ while i < len(lines):
         assert len(mn) == nm and len(sn) == ns, (m, s)
         ties.append((m, s, side, mn, sn))
         i += 3
+    elif f[0] == "drive":
+        i += 1
     elif f[0] == "cavity":
         cavity = list(map(float, f[1:]))
         i += 1

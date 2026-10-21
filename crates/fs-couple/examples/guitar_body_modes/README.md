@@ -1,5 +1,14 @@
 # Closed guitar body modes from a shell assembly
 
+**Superseded by the shared module** `crates/fs-couple/examples/shell_body_modes.rs` (table format
+`frankensim.shell-assembly.v1`, with `drive` records). `gen_shell_assembly.py` now writes that format by default
+(`format=guitar` writes the first format this example reads); on the same 24 mm Esteso geometry the shared example and
+this one print identical frequencies, net volumes, Q columns and effective masses (largest relative difference 0 over
+every compared column). Use the shared module; this file stays until its removal is approved. The generator also takes
+`wall_layers_min=N` (at least N element layers through every deep brace and bar; 5 is converged to 0.3 percent, 1 locks).
+`audit_boundaries.py` (with the owner-side `shell_body_modes/audit_welds.py`) checks a table for unwelded seams and cracked
+components.
+
 `guitar_body_modes` reads a `frankensim.guitar-shell-assembly.v1` table, builds one
 `fs_couple::shear_shell::assembly::MaterialShellAssembly` from its components (top, brace
 walls, back, ladder bars, rib strips), ties them with the rigid work-conjugate mortar, runs

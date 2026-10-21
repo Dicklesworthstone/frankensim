@@ -20,6 +20,11 @@ BACK_ARCH = opts.get("back_arch", "parabola")  # parabola through the three prin
 BRACE_H_SCALE = float(opts.get("brace_h_scale", "1.0"))  # sensitivity only; 1.0 = printed heights
 BACK_BAR_H_SCALE = float(opts.get("back_bar_h_scale", "1.0"))
 TOP_T_SCALE = float(opts.get("top_t_scale", "1.0"))
+# Constant-strain triangles lock badly in the in-plane bending of a deep wall: a brace or bar needs several element layers through its
+# height whatever the plate mesh size is (wall_layers_min, default 1 = the first table's behaviour).
+WALL_K_MIN = int(opts.get("wall_layers_min", "1"))
+# table format: "shared" = frankensim.shell-assembly.v1 of the shell_body_modes example (with drive records); "guitar" = the first format
+FORMAT = opts.get("format", "shared")
 TOP_MAT = opts.get("top_pack", "spruce")
 BACK_MAT = opts.get("back_pack", "rosewood")
 BRACE_MAT = opts.get("brace_pack", "spruce")
@@ -215,13 +220,16 @@ for feat, rs in by_feature.items():
 
 BRIDGE = opts.get("bridge", "0") == "1"
 BRIDGE_MAT = opts.get("bridge_pack", "rosewood")
+# Saddle station: the plan prints no bridge position; the centre of the gap between the two axis strips is INFERRED. It places the bridge
+# wall when bridge=1 and the three drive points (outer strings and the G string) of the table in every case.
+_neck_strip = [l for l in top_lines if l["name"] == "axis-strip-neck-side"][0]
+_tail_strip = [l for l in top_lines if l["name"] == "axis-strip-tail-side"][0]
+XB_SADDLE = float(opts.get("bridge_x", 0.5 * (max(_neck_strip["a"][0], _neck_strip["b"][0]) + min(_tail_strip["a"][0], _tail_strip["b"][0]))))
 if BRIDGE:
     _bd = {(r[1], r[2]): float(r[3]) * 1000.0 for r in rows_with_header("dimensions.tsv")[1] if r[0] == "bridge"}
     b_len, b_w, b_h = _bd[("outline", "length")], _bd[("outline", "width")], _bd[("outline", "height")]
     b_mid, b_scoop = _bd[("central-section", "length")], _bd[("end-scoop", "depth")]
-    _neck_strip = [l for l in top_lines if l["name"] == "axis-strip-neck-side"][0]
-    _tail_strip = [l for l in top_lines if l["name"] == "axis-strip-tail-side"][0]
-    xb = float(opts.get("bridge_x", 0.5 * (max(_neck_strip["a"][0], _neck_strip["b"][0]) + min(_tail_strip["a"][0], _tail_strip["b"][0]))))
+    xb = XB_SADDLE
 
     def bridge_h(y, b_len=b_len, b_mid=b_mid, b_h=b_h, b_scoop=b_scoop):
         ay = abs(y)
@@ -431,8 +439,9 @@ for ln, chain in top_lines_mesh:
     w_mm = ln["w"]
     hfun = ln.get("hfun")
     spacing = np.hypot(*(pts[1:] - pts[:-1]).T).mean()
-    K = max(1, int(math.ceil(h_mm / (0.8 * spacing))))
-    wall = Comp(("top-brace-" + ln["name"]) if side == -1 else ln["name"], ln.get("pack", BRACE_MAT), w_mm, False, False)
+    K = max(WALL_K_MIN if h_mm >= 6.0 else 1, int(math.ceil(h_mm / (0.8 * spacing))))
+    # walls are not in group "top" (a component's group is its name up to the first '-'): the plate means of the shared body module use the plates only
+    wall = Comp(("brace-" + ln["name"]) if side == -1 else ln["name"], ln.get("pack", BRACE_MAT), w_mm, False, False)
     wall.regions = [(u[0], u[1], 0.0)]
     idx = []
     for k in range(K + 1):
@@ -467,7 +476,7 @@ bar_x = [x1, x1 + sp12, x1 + sp12 + sp23, x1 + sp12 + sp23 + sp34]
 meta("back_bar_positions_mm", "%s (bar 1 at the printed 91 mm from the neck end, then the mean of the printed treble-side and bass-side spacings 106/107.5, 88/85.5, 85/83; the bars are drawn slightly slanted, modelled straight and transverse; the back view is a mirror of the front view whose handedness is UNKNOWN)" % ",".join("%.2f" % x for x in bar_x))
 back_lines = []
 for k, x in enumerate(bar_x):
-    back_lines.append(dict(name="back-bar-%d" % (k + 1), a=np.array([x, -250.0]), b=np.array([x, 250.0]),
+    back_lines.append(dict(name="bar-%d" % (k + 1), a=np.array([x, -250.0]), b=np.array([x, 250.0]),
                            w=dd[("back-braces", "brace-%d" % (k + 1), "width")], h=dd[("back-braces", "brace-%d" % (k + 1), "annotated-height")] * BACK_BAR_H_SCALE))
 back = Comp("back", BACK_MAT, t_back, True, True)
 Vb, Tb, lvb = plate_mesh(ring, None, back_lines, H, "back")
@@ -489,7 +498,7 @@ for ln, chain in lvb:
     u = d / np.hypot(*d)
     h_mm, w_mm = ln["h"], ln["w"]
     spacing = np.hypot(*(pts[1:] - pts[:-1]).T).mean()
-    K = max(1, int(math.ceil(h_mm / (0.8 * spacing))))
+    K = max(WALL_K_MIN if h_mm >= 6.0 else 1, int(math.ceil(h_mm / (0.8 * spacing))))
     wall = Comp(ln["name"], BACKBAR_MAT, w_mm, False, False)
     wall.regions = [(u[0], u[1], 0.0)]
     idx = []
@@ -605,8 +614,11 @@ meta("neck", "radius %.4f mm (fit to the vector circle), length = top thickness 
 total_nodes = sum(len(c.nodes) for c in components)
 total_tris = sum(len(c.tris) for c in components)
 meta("totals", "%d components, %d nodes, %d triangles" % (len(components), total_nodes, total_tris))
+OMITTED = "bridge%s, neck and heel, tail and heel blocks, linings, rosette, fingerboard, strings, the central back strip and the back patches, glue compliance, finish" % (" (modelled: wall on the outer skin)" if BRIDGE else "")
+if FORMAT == "shared":
+    meta("omitted", OMITTED)
 with open(OUT, "w", encoding="utf-8") as f:
-    f.write("frankensim.guitar-shell-assembly.v1\n")
+    f.write(("frankensim.shell-assembly.v1" if FORMAT == "shared" else "frankensim.guitar-shell-assembly.v1") + chr(10))
     for k, v in META:
         f.write("meta\t%s\t%s\n" % (k, v))
     for c in components:
@@ -623,6 +635,11 @@ with open(OUT, "w", encoding="utf-8") as f:
         f.write("tie\t%s\t%s\t%d\t%d\t%d\n" % (m, s, side, len(mn), len(sn)))
         f.write("master\t%s\n" % " ".join(map(str, mn)))
         f.write("slave\t%s\n" % " ".join(map(str, sn)))
+    if FORMAT == "shared":
+        # three saddle drive points on the top: the two outer string positions and the G string (string-hole span 58.5 mm, holes 11.7 mm apart;
+        # which outer string is on which side is UNKNOWN), unit force along +z, at the inferred saddle station
+        for label, y_mm in (("outer string, -y side", -29.25), ("G string position", 5.85), ("outer string, +y side", 29.25)):
+            f.write("drive\t%s\ttop\t%.6f\t%.6f\t0.000000\t0\t0\t1\n" % (label, XB_SADDLE / 1000.0, y_mm / 1000.0))
     f.write("cavity\t%.9f\t%.9f\t%.9f\n" % (vol_inner_mm3 / 1e9, R_hole / 1000.0, t_top / 1000.0))
 for k, v in META:
     print(k, "=", v)
