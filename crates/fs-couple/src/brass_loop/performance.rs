@@ -679,6 +679,8 @@ impl LipDescription {
             mouthpiece: vec![0.0; MAX_BLOCK],
             outgoing: vec![0.0; MAX_BLOCK],
             trace: [0.0],
+            window_len: u64::from(self.rate_hz / 10).max(1),
+            acc: Vec::new(),
         })
     }
 }
@@ -731,6 +733,59 @@ pub struct LipInfo {
     pub has_lip_tension_track: bool,
 }
 
+/// Lip and bore statistics over one tenth of a second of a render: whether the lip closes and how large
+/// the pressure at the mouthpiece is. A diagnostic of the loop, not a graded quantity.
+#[derive(Debug, Clone, Copy)]
+pub struct LipWindow {
+    /// Start of the window [s].
+    pub start_s: f64,
+    /// Mean pressure at the mouthpiece (the mouth's DC operating point) [Pa].
+    pub bore_mean_pa: f64,
+    /// RMS of the alternating mouthpiece pressure [Pa].
+    pub bore_ac_rms_pa: f64,
+    /// Half the peak-to-peak mouthpiece pressure [Pa].
+    pub bore_ac_peak_pa: f64,
+    /// Smallest lip gap in the window [m] (0 = the lip closed).
+    pub gap_min_m: f64,
+    /// Mean lip gap [m] (mean of the per-chunk means).
+    pub gap_mean_m: f64,
+    /// Largest lip gap [m].
+    pub gap_max_m: f64,
+    /// Fraction of the control-tick chunks in which the lip closed at least once.
+    pub closed_chunk_fraction: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowAcc {
+    n: u64,
+    sum: f64,
+    sum_sq: f64,
+    p_min: f64,
+    p_max: f64,
+    chunks: u64,
+    closed_chunks: u64,
+    gap_min: f64,
+    gap_max: f64,
+    gap_mean_sum: f64,
+}
+
+impl WindowAcc {
+    const fn new() -> Self {
+        Self {
+            n: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+            p_min: f64::INFINITY,
+            p_max: f64::NEG_INFINITY,
+            chunks: 0,
+            closed_chunks: 0,
+            gap_min: f64::INFINITY,
+            gap_max: 0.0,
+            gap_mean_sum: 0.0,
+        }
+    }
+}
+
 /// A realized performance: the lip, the bore and the microphone, advanced
 /// together on one physical clock.
 pub struct LipPerformance {
@@ -748,6 +803,8 @@ pub struct LipPerformance {
     mouthpiece: Vec<f64>,
     outgoing: Vec<f64>,
     trace: [f64; 1],
+    window_len: u64,
+    acc: Vec<WindowAcc>,
 }
 
 fn refusal(what: String) -> RenderError {
@@ -765,6 +822,31 @@ impl LipPerformance {
     #[must_use]
     pub fn diagnostics(&self) -> &[super::BrassBlockDiag] {
         self.voice.diagnostics()
+    }
+
+    /// Lip and bore statistics per tenth of a second rendered so far.
+    #[must_use]
+    pub fn windows(&self) -> Vec<LipWindow> {
+        let rate = f64::from(self.info.sample_rate_hz);
+        self.acc
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.n > 0 && a.chunks > 0)
+            .map(|(k, a)| {
+                let n = a.n as f64;
+                let mean = a.sum / n;
+                LipWindow {
+                    start_s: (k as u64 * self.window_len) as f64 / rate,
+                    bore_mean_pa: mean,
+                    bore_ac_rms_pa: (a.sum_sq / n - mean * mean).max(0.0).sqrt(),
+                    bore_ac_peak_pa: 0.5 * (a.p_max - a.p_min),
+                    gap_min_m: a.gap_min,
+                    gap_mean_m: a.gap_mean_sum / a.chunks as f64,
+                    gap_max_m: a.gap_max,
+                    closed_chunk_fraction: a.closed_chunks as f64 / a.chunks as f64,
+                }
+            })
+            .collect()
     }
 
     fn apply_controls(&mut self, tick: u64) -> Result<(), String> {
@@ -810,6 +892,26 @@ impl LipPerformance {
             self.voice
                 .step_block_outgoing(&mut self.mouthpiece[..chunk], &mut self.outgoing[..chunk])
                 .map_err(|e| format!("brass loop refused: {e}"))?;
+            let diag = self.voice.diagnostics().last().cloned();
+            let window = usize::try_from(n / self.window_len).unwrap_or(usize::MAX);
+            while self.acc.len() <= window {
+                self.acc.push(WindowAcc::new());
+            }
+            let acc = &mut self.acc[window];
+            for &p in &self.mouthpiece[..chunk] {
+                acc.n += 1;
+                acc.sum += p;
+                acc.sum_sq += p * p;
+                acc.p_min = acc.p_min.min(p);
+                acc.p_max = acc.p_max.max(p);
+            }
+            if let Some(d) = diag {
+                acc.chunks += 1;
+                acc.closed_chunks += u64::from(d.gap_min_m <= 0.0);
+                acc.gap_min = acc.gap_min.min(d.gap_min_m);
+                acc.gap_max = acc.gap_max.max(d.gap_max_m);
+                acc.gap_mean_sum += d.gap_mean_m;
+            }
             for i in 0..chunk {
                 let flow = self
                     .mouth
@@ -1142,6 +1244,26 @@ mod tests {
         let noncanonical = fixture("").replace("1e-2", "0.01");
         assert!(LipDescription::from_bytes(noncanonical.as_bytes()).is_err());
         assert!(LipDescription::from_bytes(b"not a lip file\n").is_err());
+    }
+
+    #[test]
+    fn window_diagnostics_cover_the_render_and_describe_a_possible_lip() {
+        let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        assert!(performance.windows().is_empty());
+        let mut block = vec![0.0; 600];
+        for _ in 0..4 {
+            performance.block(&mut block).expect("block");
+        }
+        let windows = performance.windows();
+        // 2400 samples at 24 kHz are exactly one tenth of a second.
+        assert_eq!(windows.len(), 1);
+        let w = windows[0];
+        assert_eq!(w.start_s, 0.0);
+        assert!(w.gap_min_m >= 0.0 && w.gap_min_m <= w.gap_mean_m && w.gap_mean_m <= w.gap_max_m);
+        assert!((0.0..=1.0).contains(&w.closed_chunk_fraction));
+        assert!(w.bore_ac_rms_pa.is_finite() && w.bore_ac_rms_pa <= w.bore_ac_peak_pa + 1e-9);
+        assert!(w.bore_mean_pa.is_finite());
     }
 
     #[test]

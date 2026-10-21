@@ -227,6 +227,24 @@ pub(super) fn run_with_gas_sources(
         info.full_scale_pa,
     )?;
     let wav_hash = rendered.hash.to_hex();
+    let windows_json = performance
+        .windows()
+        .iter()
+        .map(|w| {
+            format!(
+                "{{\"start_s\":{},\"bore_mean_pa\":{},\"bore_ac_rms_pa\":{},\"bore_ac_peak_pa\":{},\"gap_min_m\":{},\"gap_mean_m\":{},\"gap_max_m\":{},\"closed_chunk_fraction\":{}}}",
+                number(w.start_s),
+                number(w.bore_mean_pa),
+                number(w.bore_ac_rms_pa),
+                number(w.bore_ac_peak_pa),
+                number(w.gap_min_m),
+                number(w.gap_mean_m),
+                number(w.gap_max_m),
+                number(w.closed_chunk_fraction)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     let provenance = format!(
@@ -235,6 +253,7 @@ pub(super) fn run_with_gas_sources(
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
+         \"lip_windows_0p1s\":[{}],\
          \"observation\":{{\"mechanics_sample_rate_hz\":{},\"output_sample_rate_hz\":{},\"ratio\":1,\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
          \"resampled\":false,\"declared_band_hz\":{}}}{gas_sources}}}",
@@ -244,6 +263,7 @@ pub(super) fn run_with_gas_sources(
         rendered.peak_pa,
         rendered.rms_pa,
         input_json(&info),
+        windows_json,
         info.sample_rate_hz,
         info.sample_rate_hz,
         number(info.microphone.maximum_frequency_hz),
