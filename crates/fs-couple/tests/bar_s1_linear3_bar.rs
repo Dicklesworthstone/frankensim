@@ -2132,3 +2132,171 @@ fn bar_s1_boxwood_mallet_surrogate_renders_speed_and_sensitivity_sweeps() {
         }
     }
 }
+
+/// TET10 rung of the cheap contact check: [48, 4, 2] cells, no BEM.
+const CHECK_RUNG: usize = 2;
+/// Substeps per output sample of the contact check (a 0.16 ms contact spans
+/// about 490 steps).
+const CHECK_SUBSTEPS: u32 = 64;
+
+/// Per-mode energy right after separation, contact time and peak force of one
+/// stroke on lossless modes with zero transfers: excitation only, no sound.
+fn strike_energies(
+    frequencies: &[f64],
+    phi: &[f64],
+    free: usize,
+    stroke: &Stroke<'_>,
+) -> (f64, f64, Vec<f64>) {
+    let mut modes: Vec<_> = frequencies
+        .iter()
+        .map(|&f| ModalAcousticMode {
+            angular_frequency_rad_s: TAU * f,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        })
+        .collect();
+    modes.extend((0..free).map(|_| ModalAcousticMode {
+        angular_frequency_rad_s: 0.0,
+        damping_ratio: 0.0,
+        pressure_per_modal_velocity: C64::ZERO,
+    }));
+    let mut body = ModalAcousticTimeModel::try_new_with_free_coordinates(
+        RATE * CHECK_SUBSTEPS,
+        modes,
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    let mut workspace = ModalAcousticWorkspace::new(&body);
+    let mut forces = vec![0.0; phi.len()];
+    let h = 1.0 / f64::from(RATE * CHECK_SUBSTEPS);
+    let (mut position, mut speed) = (0.0, stroke.speed);
+    let mut peak: f64 = 0.0;
+    // Work cap: 20 ms of contact, far above either head.
+    for step in 0..(RATE * CHECK_SUBSTEPS / 50) {
+        let displacement: f64 = body
+            .states()
+            .iter()
+            .zip(phi)
+            .map(|(s, p)| s.displacement_m_sqrt_kg * p)
+            .sum();
+        let overlap = position - displacement;
+        if step > 0 && overlap < 0.0 && speed < 0.0 {
+            let energies: Vec<f64> = body.states()[..frequencies.len()]
+                .iter()
+                .zip(frequencies)
+                .map(|(s, &f)| {
+                    let w = TAU * f;
+                    0.5 * (s.velocity_m_sqrt_kg_per_s.powi(2)
+                        + (w * s.displacement_m_sqrt_kg).powi(2))
+                })
+                .collect();
+            return (f64::from(step) * h, peak, energies);
+        }
+        let load = (stroke.force)(overlap);
+        peak = peak.max(load);
+        for (f, p) in forces.iter_mut().zip(phi) {
+            *f = p * load;
+        }
+        body.step_into(&forces, &mut workspace)
+            .expect("contact check on 3-D modes");
+        speed -= h * load / stroke.mass;
+        position += h * speed;
+    }
+    panic!("stroke failed to separate within its declared work cap");
+}
+
+/// WhiteAnchor 5292: before any long render, check the measured boxwood head
+/// on one coarse rung of the designed bar (cached design, no radiation). At
+/// the measured 2.1 m/s it prints the contact time and peak force beside
+/// Doutaut and Chaigne's measured 0.16 ms and their Eq. 3 for the reduced mass
+/// of head and bar (the bar's rigid-body mass at the strike point), and the
+/// per-mode excitation change against the silicone head, at its own 0.10 m/s
+/// and at the same 2.1 m/s. Numbers only; no grade, no audio.
+#[test]
+fn boxwood_contact_on_coarse_rung_against_measured_duration_and_silicone_levels() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let started = Instant::now();
+    let design = tune_design();
+    let card = fs_matdb::ContactLawCard::parse(BOXWOOD_CONTACT_PACK, BOXWOOD_CONTACT)
+        .expect("boxwood contact card");
+    let mass = scalar(BOXWOOD_MALLET, "mallet_equivalent_mass");
+    let measured = scalar(BOXWOOD_MALLET, "measured_contact_duration");
+    let speed = scalar(BOXWOOD_MALLET, "initial_mallet_velocity");
+    let k = card.k_n_per_m_alpha;
+    with_cx(|cx| {
+        let mat = material(HONDURAS);
+        let mesh = mesh([24 * CHECK_RUNG, 2 * CHECK_RUNG, CHECK_RUNG], design);
+        let (nodes, _, a) = tet10_assemble(&mesh, design, &mat, cx);
+        let mut report = slice(&a, 20.0, FMAX / design.scale);
+        canonical_phase(&mut report.modes);
+        let selected = classify(&mesh, &report.modes);
+        let rigid = rigid_projectors(&mesh, &nodes, &a);
+        let node = strike_node(&mesh);
+        let frequencies: Vec<f64> = selected.iter().map(|&m| hz(&report.modes[m])).collect();
+        let mut phi: Vec<f64> = selected
+            .iter()
+            .map(|&m| -report.modes[m].phi[3 * node + 2])
+            .collect();
+        // Free-body mobility at the strike point: 1/M = sum of squared rigid projections.
+        let bar_mass = 1.0 / rigid.iter().map(|p| p * p).sum::<f64>();
+        phi.extend_from_slice(&rigid);
+        let silicone_law = hertz_law(HEAD_E, HEAD_NU);
+        let interface = hertz_interface();
+        let silicone = |overlap: f64| force(silicone_law, &interface, overlap);
+        let boxwood = |overlap: f64| {
+            if overlap > 0.0 {
+                k * det::pow(overlap, card.alpha)
+            } else {
+                0.0
+            }
+        };
+        let strike = |m: f64, v: f64, law: &dyn Fn(f64) -> f64| {
+            strike_energies(
+                &frequencies,
+                &phi,
+                rigid.len(),
+                &Stroke {
+                    mass: m,
+                    speed: v,
+                    force: law,
+                },
+            )
+        };
+        let (t_box, f_box, e_box) = strike(mass, speed, &boxwood);
+        let (t_sil, f_sil, e_sil) = strike(HEAD_MASS, STROKE, &silicone);
+        let (t_sil_fast, f_sil_fast, e_sil_fast) = strike(HEAD_MASS, speed, &silicone);
+        card.lookup(f_box, speed)
+            .expect("measured stroke inside the boxwood card");
+        let mu = mass * bar_mass / (mass + bar_mass);
+        let eq3 = |m: f64| 3.21 * det::pow(m * m / (k * k * speed), 0.2);
+        let hertz_peak = |m: f64| det::pow(k, 0.4) * det::pow(1.25 * m * speed * speed, 0.6);
+        let db = |a: &[f64], b: &[f64]| -> Vec<f64> {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| 10.0 * det::ln(x / y) / det::ln(10.0))
+                .collect()
+        };
+        row(
+            "boxwood-contact-coarse-rung",
+            "contact",
+            "pass",
+            &format!(
+                "{{\"rung\":{CHECK_RUNG},\"n_tets\":{},\"substeps\":{CHECK_SUBSTEPS},\"f_modes_hz\":{frequencies:?},\"kinds\":{KINDS:?},\"bar_rigid_mass_at_strike_kg\":{bar_mass},\"head_mass_kg\":{mass},\"reduced_mass_kg\":{mu},\"speed_m_s\":{speed},\"measured_contact_s\":{measured},\"eq3_contact_reduced_mass_s\":{},\"eq3_contact_rigid_target_s\":{},\"simulated_contact_s\":{t_box},\"simulated_peak_force_n\":{f_box},\"hertz_peak_force_reduced_mass_n\":{},\"silicone_contact_s_at_0_10\":{t_sil},\"silicone_peak_force_n_at_0_10\":{f_sil},\"silicone_contact_s_at_2_1\":{t_sil_fast},\"silicone_peak_force_n_at_2_1\":{f_sil_fast},\"mode_energy_change_db_vs_silicone_render\":{:?},\"mode_energy_change_db_vs_silicone_same_speed\":{:?},\"acceptance\":false}}",
+                mesh.tets.len(),
+                eq3(mu),
+                eq3(mass),
+                hertz_peak(mu),
+                db(&e_box, &e_sil),
+                db(&e_box, &e_sil_fast)
+            ),
+            started,
+        );
+        assert!(t_box > 0.0 && t_box < 1e-3 && t_sil > t_box);
+        assert!(
+            e_box
+                .iter()
+                .chain(&e_sil)
+                .all(|e| e.is_finite() && *e > 0.0)
+        );
+    });
+}
