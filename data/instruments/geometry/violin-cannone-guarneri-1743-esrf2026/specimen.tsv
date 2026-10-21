@@ -1,0 +1,21 @@
+frankensim.specimen.v1
+key	value
+specimen_id	violin-cannone-guarneri-1743-esrf2026
+maker	Bartolomeo Giuseppe Guarneri 'del Gesu', Cremona (the producer field of the ESRF record)
+model	'il Cannone', the violin of Niccolo Paganini (ESRF record title)
+serial	unstated
+year	1743 (ESRF record)
+system	four-string violin scanned with its strings tensioned (the dataset the ESRF names accorded); repairs and later additions are present, see unknowns.tsv
+holder	Palazzo Doria-Tursi, Genoa city hall (the repository institution of the ESRF record); not accessible to FrankenSim
+reference_state	strung
+environment	unstated; scanned at the ESRF beamline BM18, session 2024-03-09 to 2024-03-11, proposal HG-236
+source_ids	esrf-il-cannone-ct-2026
+target_relation	ONE REAL violin from a published CT study for pexfp.199 (mail 5226). A 1743 del Gesu, NOT the UIowa violin of the recordings, whose own dimensions stay UNKNOWN (u-not-iowa-violin); population-grade stand-in only
+doi	10.15151/ESRF-DC-2413577471
+licence	CC-BY-4.0 (ESRF DataCite record, issued 2026); attribution: ESRF; data authors Paul Tafforeau, Luigi Paolasini and Alessandro Mirone, segmentation by Paul Tafforeau (the scan metadata file); the record states no licence of the instrument's owner beyond the ESRF's
+scan	propagation phase-contrast synchrotron tomography, helical, 12000 projections, 35.66 um voxel, volume 5947 x 3165 x 16933 voxels (the scan metadata file of dataset 2416550332)
+mesh_resolution	measured on the fetched meshes with tools/geometry/violin-cannone-esrf/mesh_resolution.py: the part meshes are decimated copies of the CT surface, not voxel-sized: median edge 0.19 mm for the top plate (5.4 voxels, 90th percentile 0.46 mm), 0.16 mm for the back plate, 0.17 mm for the ribs; the whole-violin STL named 200K holds 3508724 triangles and the one named 10M holds 10027320, so the names are not triangle counts; their volumes differ by 0.06 percent (694157 and 694565 mm3), their areas by 0.4 percent and their sections at z = -100 and -190 mm, y = 5 mm and x = 30 mm by at most 0.09 percent; every part mesh checked is closed (each edge used twice, a few exceptions in the tailpiece) and the STL header states Unit:Millimeter
+source_files	files of dataset 2416550332 under surface_models/ (and the STL of the whole violin, used only for the frame): name=first 16 hex of the SHA-256 of the file as fetched: 2416550404_Cannone_FS2-accorded_surface_200K.stl=456effacda5860e2;2416550405_table_all.glb=bddb2d9dcbc44e8d;2416550410_corde_sol.glb=ace0379893e43985;2416550411_talon_bloc_principal.glb=9b30684d5ef54d8c;2416550416_manche_all.glb=36d6467079a506ee;2416550418_ame.glb=4907a821fa862d5d;2416550419_eclisses_all.glb=468852e9aeb75c15;2416550421_cordier.glb=9b00dbca85b30249;2416550427_dos_all.glb=7a375d29810bae15;2416550428_contre_elisses.glb=bcd0d7fdd8cf9bd0;2416550432_corde_mi.glb=a5088f3eff567c11;2416550436_chevalet.glb=cd2e1f9762fdc66e;2416550443_barre_harmonie.glb=7ed77b44468a9439;2416550444_touche.glb=dc44970edb97517e;2416550448_corde_re.glb=af9a8dd21ff922ab;2416550453_corde_la.glb=4aa0599e4f68aa78
+units_and_frame	every length in the data tables is in millimetres in the frame of the source files (frames.tsv); dimensions.tsv is in SI
+extraction	this lane's numpy-only scripts (tools/geometry/violin-cannone-esrf/): plate outlines, holes and thickness from a 0.5 mm raster of the surface samples of each closed plate mesh (3 mm blocks in the map tables); sections of bar, post, bridge, neck, fingerboard, tail block and strings by planes; rib and lining sections by half-planes through the vertical axis every 2 degrees
+cross_checks	the 4 string meshes give equivalent diameters 1.095, 1.094, 0.826 and 0.266 mm and the soundpost 6.35 mm (1/4 inch); the string bridge contacts agree to 0.2 mm in z and the nut contacts of three strings to 0.2 mm; the STL header states Unit:Millimeter

@@ -1,0 +1,10 @@
+frankensim.specimen-string-contacts.v1
+string	contact	z_mm	x_mm	y_mm	slope_dy_dz_before	slope_dy_dz_after
+g	bridge	-106.0	-17.34	-51.64	-0.2355	0.1258
+g	nut	214.0	-3.93	-9.35	0.1324	0.3954
+d	bridge	-106.1	-5.57	-54.21	-0.2381	0.1368
+d	nut	221.9	1.95	-8.64	0.1454	0.6780
+a	bridge	-105.9	6.29	-53.29	-0.2226	0.1347
+a	nut	222.1	7.59	-8.05	0.1398	0.6603
+e	bridge	-106.1	17.28	-48.87	-0.2008	0.1233
+e	nut	221.9	12.54	-6.85	0.1351	0.6176

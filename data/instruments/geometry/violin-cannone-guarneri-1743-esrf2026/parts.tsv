@@ -1,0 +1,17 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+top-plate	unstated in the ESRF record (spruce is usual for the type but not stated)	assembled	ribs;bass-bar;bridge;soundpost;linings	file table_all.glb; closed shell of 7190594 triangles holding the outer and inner surfaces, the f-holes and the purfling channel; whether varnish is inside it is not established (u-varnish-and-purfling)
+back-plate	unstated in the ESRF record (maple is usual for the type but not stated)	assembled	ribs;soundpost;linings;neck;tail-block	file dos_all.glb; closed shell of 10389200 triangles including the neck button; one piece in this scan's maps (the record does not say whether the back is one or two pieces)
+ribs	unstated in the ESRF record	assembled	top-plate;back-plate;linings;tail-block	file eclisses_all.glb; the six rib strips are one mesh
+linings	unstated in the ESRF record	assembled	ribs;top-plate;back-plate	file contre_elisses.glb (the French name for the counter-ribs); top and bottom linings merged with the corner blocks (u-body-corner-blocks)
+bass-bar	unstated in the ESRF record	assembled	top-plate	file barre_harmonie.glb; a single closed mesh; whether it is the original bar is not stated (u-repairs-and-modifications)
+soundpost	unstated in the ESRF record	assembled	top-plate;back-plate	file ame.glb; a single closed mesh
+bridge	unstated in the ESRF record	assembled	strings;top-plate	file chevalet.glb; a single closed mesh
+tailpiece	unstated in the ESRF record	assembled	strings	file cordier.glb; closed mesh with 4 non-manifold edges out of 1.5 million
+neck	unstated in the ESRF record	assembled	fingerboard;back-plate;tail-block	file manche_all.glb: the neck with its foot, pegbox and scroll; separate meshes of later neck additions exist in the dataset and are not extracted (u-repairs-and-modifications)
+fingerboard	unstated in the ESRF record	assembled	neck;strings	file touche.glb
+tail-block	unstated in the ESRF record	assembled	ribs;top-plate;back-plate	file talon_bloc_principal.glb: located at the tail end (z -261.57..-250.52 mm) and as tall as the ribs, so read here as the tail (end) block; the file's own label is talon
+string-g	unstated in the ESRF record	strung	bridge;neck	file corde_sol.glb
+string-d	unstated in the ESRF record	strung	bridge;neck	file corde_re.glb
+string-a	unstated in the ESRF record	strung	bridge;neck	file corde_la.glb
+string-e	unstated in the ESRF record	strung	bridge;neck	file corde_mi.glb

@@ -1,0 +1,117 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+top-plate	footprint	length-z	0.356	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent in z of the outline rows (1 mm rows), including the end features of the plate
+top-plate	footprint	width-max	0.207	m	0.0005	published-measured	esrf-il-cannone-ct-2026	widest outline row (right edge minus left edge of the occupied cells); row at z = -193.75 mm
+top-plate	outline	lower-bout-width-max	0.207	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+top-plate	outline	lower-bout-z-position	-0.19375	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+top-plate	outline	waist-width-min	0.113	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+top-plate	outline	waist-z-position	-0.07075	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+top-plate	outline	upper-bout-width-max	0.1695	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+top-plate	outline	upper-bout-z-position	0.01625	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+top-plate	footprint	midline-x-mean	0.0005948529	m	0.0005	published-measured	esrf-il-cannone-ct-2026	mean of the outline midpoints over rows wider than 100 mm: offset of the plate's mid line from the x origin of the scan frame
+top-plate	thickness	normal-median-interior	0.00314	m	0.0001	published-measured	esrf-il-cannone-ct-2026	median of the 3 mm block values farther than 8 mm from the outline; thickness measured normal to the outer surface
+top-plate	thickness	normal-p05-interior	0.00275	m	0.0001	published-measured	esrf-il-cannone-ct-2026	5th percentile of the same cells
+top-plate	thickness	normal-p95-interior	0.00349	m	0.0001	published-measured	esrf-il-cannone-ct-2026	95th percentile of the same cells
+top-plate	thickness	normal-max-interior	0.0038	m	0.0001	published-measured	esrf-il-cannone-ct-2026	largest block value of the same cells, at x = -1.5 mm, z = -243.5 mm
+top-plate	arching	outer-crown-height-above-edge-plane	0.01174	m	0.0005	published-measured	esrf-il-cannone-ct-2026	outer surface at the crown (x = 4.5 mm, z = -69.5 mm) against the median outer surface of the 1 to 3 mm band inside the outline; the plate thickness is NOT added; other authors may define arch height differently
+top-plate	arching	edge-plane-y	-0.01108	m	0.0005	published-measured	esrf-il-cannone-ct-2026	median outer-surface y of the 1 to 3 mm band inside the outline (scan frame)
+back-plate	footprint	length-z	0.366	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent in z of the outline rows (1 mm rows), including the end features of the plate
+back-plate	footprint	width-max	0.2075	m	0.0005	published-measured	esrf-il-cannone-ct-2026	widest outline row (right edge minus left edge of the occupied cells); row at z = -191.75 mm
+back-plate	outline	lower-bout-width-max	0.2075	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+back-plate	outline	lower-bout-z-position	-0.19175	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+back-plate	outline	waist-width-min	0.111	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+back-plate	outline	waist-z-position	-0.06975	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+back-plate	outline	upper-bout-width-max	0.1685	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extreme of the outline width within the tail-end, middle or neck-end third of the plate
+back-plate	outline	upper-bout-z-position	0.01425	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z of the row of the preceding width
+back-plate	footprint	midline-x-mean	0.0009210914	m	0.0005	published-measured	esrf-il-cannone-ct-2026	mean of the outline midpoints over rows wider than 100 mm: offset of the plate's mid line from the x origin of the scan frame
+back-plate	thickness	normal-median-interior	0.00388	m	0.0001	published-measured	esrf-il-cannone-ct-2026	median of the 3 mm block values farther than 8 mm from the outline; thickness measured normal to the outer surface
+back-plate	thickness	normal-p05-interior	0.00282	m	0.0001	published-measured	esrf-il-cannone-ct-2026	5th percentile of the same cells
+back-plate	thickness	normal-p95-interior	0.00603	m	0.0001	published-measured	esrf-il-cannone-ct-2026	95th percentile of the same cells
+back-plate	thickness	normal-max-interior	0.00642	m	0.0001	published-measured	esrf-il-cannone-ct-2026	largest block value of the same cells, at x = -9.5 mm, z = -119.5 mm
+back-plate	arching	outer-crown-height-above-edge-plane	0.01056	m	0.0005	published-measured	esrf-il-cannone-ct-2026	outer surface at the crown (x = 5.5 mm, z = -101.5 mm) against the median outer surface of the 1 to 3 mm band inside the outline; the plate thickness is NOT added; other authors may define arch height differently
+back-plate	arching	edge-plane-y	0.02821	m	0.0005	published-measured	esrf-il-cannone-ct-2026	median outer-surface y of the 1 to 3 mm band inside the outline (scan frame)
+top-plate	f-hole-1	area	0.000409	m2	5e-06	published-measured	esrf-il-cannone-ct-2026	area of the unoccupied cells inside the outline (0.5 mm raster); hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
+top-plate	f-hole-1	centroid-x	-0.0424566	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-1	centroid-z	-0.1094065	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-1	z-extent	0.073	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.00 to -67.00 mm
+top-plate	f-hole-1	x-extent	0.035	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from -63.50 to -28.50 mm
+top-plate	f-hole-1	length-along-principal-axis	0.07771164	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
+top-plate	f-hole-1	principal-axis-angle-from-z	0.3547532	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
+top-plate	f-hole-2	area	0.00031275	m2	5e-06	published-measured	esrf-il-cannone-ct-2026	area of the unoccupied cells inside the outline (0.5 mm raster); hole 1 lies at negative x (the bass-bar side), hole 2 at positive x
+top-plate	f-hole-2	centroid-x	0.03990907	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-2	centroid-z	-0.1051781	m	0.0005	published-measured	esrf-il-cannone-ct-2026	area centroid of the raster
+top-plate	f-hole-2	z-extent	0.0725	m	0.0005	published-measured	esrf-il-cannone-ct-2026	z from -140.00 to -67.50 mm
+top-plate	f-hole-2	x-extent	0.022	m	0.0005	published-measured	esrf-il-cannone-ct-2026	x from 31.50 to 53.50 mm
+top-plate	f-hole-2	length-along-principal-axis	0.07446431	m	0.0005	published-measured	esrf-il-cannone-ct-2026	extent along the principal axis of the raster
+top-plate	f-hole-2	principal-axis-angle-from-z	-0.148656	rad	0.0175	published-measured	esrf-il-cannone-ct-2026	angle of the principal axis from +z toward +x
+bass-bar	extent	length-z	0.26185	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh
+bass-bar	section	area-max	3.844e-05	m2	1e-06	published-measured	esrf-il-cannone-ct-2026	largest section area (planes every 5 mm), at z = -90.05 mm
+bass-bar	section	width-x-at-area-max	0.00585	m	0.0002	published-measured	esrf-il-cannone-ct-2026	x extent of that section
+bass-bar	section	height-y-at-area-max	0.00806	m	0.0002	published-measured	esrf-il-cannone-ct-2026	y extent of that section
+bass-bar	position	centroid-x-at-area-max	-0.01516	m	0.0002	published-measured	esrf-il-cannone-ct-2026	section centroid, scan frame
+bass-bar	position	centroid-x-at-bridge-z	-0.0158837	m	0.0003	published-measured	esrf-il-cannone-ct-2026	section centroid interpolated at the string-bridge contact z (-106.0 mm)
+soundpost	extent	length-y	0.05196	m	0.0001	published-measured	esrf-il-cannone-ct-2026	y extent of the mesh
+soundpost	section	equivalent-diameter-mean	0.006350772	m	0.0001	published-measured	esrf-il-cannone-ct-2026	2 sqrt(mean section area / pi); mean area 31.68 mm2
+soundpost	axis	tilt-x-per-y	0.03399829	1	0.002	published-measured	esrf-il-cannone-ct-2026	dx/dy of the section centroids (dimensionless)
+soundpost	axis	tilt-z-per-y	0.007620513	1	0.002	published-measured	esrf-il-cannone-ct-2026	dz/dy of the section centroids (dimensionless)
+soundpost	position	centroid-x-at-mid-length	0.016605	m	0.0002	published-measured	esrf-il-cannone-ct-2026	scan frame
+soundpost	position	centroid-z-at-mid-length	-0.114295	m	0.0002	published-measured	esrf-il-cannone-ct-2026	scan frame
+bridge	extent	height-y	0.03453	m	0.0001	published-measured	esrf-il-cannone-ct-2026	y extent of the mesh
+bridge	extent	width-x-max	0.04347	m	0.0003	published-measured	esrf-il-cannone-ct-2026	largest x extent of any section (planes every 1 mm)
+bridge	extent	thickness-z-max	0.00474	m	0.0002	published-measured	esrf-il-cannone-ct-2026	largest z extent of any section
+bridge	extent	thickness-z-min-above-y-minus-52	0.0018	m	0.0002	published-measured	esrf-il-cannone-ct-2026	smallest z extent among the sections above y = -52 mm
+bridge	position	z-mid-plane-mean	-0.106272	m	0.0002	published-measured	esrf-il-cannone-ct-2026	mean of the mid z over sections of area above 50 mm2
+ribs	section	height-y-median	0.032035	m	0.0003	published-measured	esrf-il-cannone-ct-2026	median over the 180 half-plane sections of y_max - y_min
+ribs	section	radial-mean-width-p10	0.001499	m	0.0002	published-measured	esrf-il-cannone-ct-2026	10th percentile of section area / height; a RADIAL section overstates the wall thickness where the wall is oblique to the radial direction
+ribs	section	radial-mean-width-median	0.00173	m	0.0002	published-measured	esrf-il-cannone-ct-2026	median of the same quantity
+ribs	extent	x-extent	0.2039	m	0.0001	published-measured	esrf-il-cannone-ct-2026	x extent of the mesh
+ribs	extent	z-extent	0.35146	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh
+ribs	extent	y-extent	0.03535	m	0.0001	published-measured	esrf-il-cannone-ct-2026	y extent of the mesh
+linings	top-lining	height-y-median	0.00785	m	0.0003	published-measured	esrf-il-cannone-ct-2026	median over the sections that are not corner blocks (top area < 20 mm2 and bottom area < 25 mm2)
+linings	top-lining	radial-mean-width-median	0.00142	m	0.0002	published-measured	esrf-il-cannone-ct-2026	section area / height, radial section
+linings	bottom-lining	height-y-median	0.0076	m	0.0003	published-measured	esrf-il-cannone-ct-2026	same selection
+linings	bottom-lining	radial-mean-width-median	0.00162	m	0.0002	published-measured	esrf-il-cannone-ct-2026	section area / height, radial section
+linings	corner-blocks	sections-merged-into-the-mesh	29	1	0	published-measured	esrf-il-cannone-ct-2026	number of the 2-degree half-plane sections whose top or bottom area is that of a block (top >= 20 mm2 or bottom >= 25 mm2): corner and end blocks are merged into this mesh
+string-g	section	equivalent-diameter-median	0.001101254	m	2e-05	published-measured	esrf-il-cannone-ct-2026	2 sqrt(median section area / pi) over the stations along the string (planes every 20 mm); envelope of the segmented cross-section, windings included where present
+string-g	bridge-contact	z	-0.106	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the bridge (1 mm sections, 12-station slope fits)
+string-g	bridge-contact	x	-0.01734	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x of the centre line at that z
+string-g	bridge-contact	y	-0.05164	m	0.0003	published-measured	esrf-il-cannone-ct-2026	y of the centre line at that z
+string-g	nut-contact	z	0.214	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the nut (the G detection differs by 8 mm from the other three and is not used for the vibrating length)
+string-d	section	equivalent-diameter-median	0.001096329	m	2e-05	published-measured	esrf-il-cannone-ct-2026	2 sqrt(median section area / pi) over the stations along the string (planes every 20 mm); envelope of the segmented cross-section, windings included where present
+string-d	bridge-contact	z	-0.1061	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the bridge (1 mm sections, 12-station slope fits)
+string-d	bridge-contact	x	-0.00557	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x of the centre line at that z
+string-d	bridge-contact	y	-0.05421	m	0.0003	published-measured	esrf-il-cannone-ct-2026	y of the centre line at that z
+string-d	nut-contact	z	0.2219	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the nut
+string-a	section	equivalent-diameter-median	0.0008261092	m	2e-05	published-measured	esrf-il-cannone-ct-2026	2 sqrt(median section area / pi) over the stations along the string (planes every 20 mm); envelope of the segmented cross-section, windings included where present
+string-a	bridge-contact	z	-0.1059	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the bridge (1 mm sections, 12-station slope fits)
+string-a	bridge-contact	x	0.00629	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x of the centre line at that z
+string-a	bridge-contact	y	-0.05329	m	0.0003	published-measured	esrf-il-cannone-ct-2026	y of the centre line at that z
+string-a	nut-contact	z	0.2221	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the nut
+string-e	section	equivalent-diameter-median	0.0002646284	m	2e-05	published-measured	esrf-il-cannone-ct-2026	2 sqrt(median section area / pi) over the stations along the string (planes every 20 mm); envelope of the segmented cross-section, windings included where present
+string-e	bridge-contact	z	-0.1061	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the bridge (1 mm sections, 12-station slope fits)
+string-e	bridge-contact	x	0.01728	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x of the centre line at that z
+string-e	bridge-contact	y	-0.04887	m	0.0003	published-measured	esrf-il-cannone-ct-2026	y of the centre line at that z
+string-e	nut-contact	z	0.2219	m	0.001	published-measured	esrf-il-cannone-ct-2026	z of the largest bend of the centre line near the nut
+fingerboard	nut-to-bridge	string-vibrating-length	0.3279917	m	0.0015	published-measured	esrf-il-cannone-ct-2026	mean nut contact z of the D, A and E strings (222.0 mm) minus the mean bridge contact z of the four strings (-106.0 mm); the fingerboard mesh ends at z = 222.84 mm
+fingerboard	extent	length-z	0.27308	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh
+fingerboard	section	width-x-first-station	0.04268	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x extent at the station nearest the body (z = -45.24 mm)
+fingerboard	section	width-x-last-station	0.0245	m	0.0003	published-measured	esrf-il-cannone-ct-2026	x extent at the station nearest the nut (z = 214.76 mm)
+neck	extent	z-extent	0.2338	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh (it includes the neck foot, pegbox and scroll)
+tailpiece	extent	z-extent	0.12078	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh
+tail-block	extent	z-extent	0.01105	m	0.0001	published-measured	esrf-il-cannone-ct-2026	z extent of the mesh (file talon_bloc_principal)
+tail-block	extent	x-extent	0.04964	m	0.0001	published-measured	esrf-il-cannone-ct-2026	x extent of the mesh
+top-plate	mesh	enclosed-volume	0.0001678063	m3	1.68e-06	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+back-plate	mesh	enclosed-volume	0.0002208236	m3	2.21e-06	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+ribs	mesh	enclosed-volume	5.00013e-05	m3	5e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+linings	mesh	enclosed-volume	2.90333e-05	m3	2.9e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+bass-bar	mesh	enclosed-volume	6.1537e-06	m3	6.15e-08	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+soundpost	mesh	enclosed-volume	1.6318e-06	m3	1.63e-08	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+bridge	mesh	enclosed-volume	3.1703e-06	m3	3.17e-08	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+tailpiece	mesh	enclosed-volume	1.37065e-05	m3	1.37e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+neck	mesh	enclosed-volume	9.70845e-05	m3	9.71e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+fingerboard	mesh	enclosed-volume	6.16992e-05	m3	6.17e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+tail-block	mesh	enclosed-volume	1.08096e-05	m3	1.08e-07	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+string-g	mesh	enclosed-volume	4.739e-07	m3	4.74e-09	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+string-d	mesh	enclosed-volume	5.915e-07	m3	5.92e-09	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+string-a	mesh	enclosed-volume	3.463e-07	m3	3.46e-09	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
+string-e	mesh	enclosed-volume	5.75e-08	m3	5.75e-10	published-measured	esrf-il-cannone-ct-2026	signed volume of the closed part mesh (a few non-manifold edges in the tailpiece); 1 percent is a stated allowance, not a measured bound
