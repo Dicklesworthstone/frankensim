@@ -1042,8 +1042,8 @@ mod glottis_tests {
     /// (`12 mu d l^2 / a^3`, `a = l h`; arXiv:1312.2950 P12 and P21).
     #[test]
     fn gl_006_viscous_resistance_is_the_cited_poiseuille_sum() {
-        let (mu, l) = (1.9e-5, 1.4e-2);
-        let (d1, h1, d2, h2) = (2.5e-3, 3.0e-4, 5.0e-4, 6.0e-4);
+        let (mu, l): (f64, f64) = (1.9e-5, 1.4e-2);
+        let (d1, h1, d2, h2): (f64, f64, f64, f64) = (2.5e-3, 3.0e-4, 5.0e-4, 6.0e-4);
         let by_hand =
             12.0 * mu * d1 * l * l / (l * h1).powi(3) + 12.0 * mu * d2 * l * l / (l * h2).powi(3);
         let got = viscous_series_resistance(mu, l, &[(d1, h1), (d2, h2)]);
