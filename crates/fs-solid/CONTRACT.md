@@ -558,6 +558,32 @@ material/damping/support/free-force/fixed-force directions, fully prescribed
 nonzero direct material sensitivities, and malformed/budget/cancellation retry
 boundaries.
 
+`adjoint::support::stress` adds pointwise elastic stress objectives through
+`stress_pullback`. Rows contain sorted unique tetrahedron IDs and finite
+`dJ/dsigma` in mesh-frame Mandel `[xx,yy,zz,xy,yz,zx]`; the final three stress
+entries are `sqrt(2)` times physical tensor shears. The canonical P1 strain
+operator and admitted constitutive tensor supply `B' C' w`, including fixed
+DOFs, and the direct per-element stiffness-scale term `w' sigma`, where
+`sigma=C*(B*q-epsilon_free)`. Velocity, acceleration, direct density and direct
+Rayleigh terms are zero. No element-volume or time-quadrature factor is added;
+the objective owner includes any such weights. For complete design gradients,
+chain the full displacement seed through the matching accepted-state reverse
+and add its implicit material terms to the direct stiffness contribution.
+
+Geometry, material axes and free thermal strain remain fixed. Stationary,
+driven and fully prescribed endpoints use their actual full displacements.
+Full-DOF and element caps apply before scratch allocation; both total and
+elastic Mandel strains must obey the same finite positive ceiling as stress
+recovery, even for unobserved elements. Invalid rows, nonfinite arithmetic and
+cancellation yield no partial gradient and preserve accepted motion.
+`von_mises_limit` supplies the smooth dimensionless inequality
+`(sigma_vm/limit)^2-1 <= 0` and its Mandel stress seed, with a defined zero
+derivative at hydrostatic stress and a caller-supplied positive finite limit.
+It does not infer a yield law, failure probability or physical admission.
+`tests/transient_stress_adjoint3.rs` checks analytic thermal/shear terms without
+volume weighting, anisotropic nodal and material finite differences at two
+mesh scales, von-Mises derivatives, and refusal/cancellation/retry boundaries.
+
 `adjoint::support::trajectory` records complete prescribed-support simulations
 through `record_prescribed_controls`. For controls alone, its owning recorder
 retains only accepted interval times: the frozen linear motion Jacobian needs
