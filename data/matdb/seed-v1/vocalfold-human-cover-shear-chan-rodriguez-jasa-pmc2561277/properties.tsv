@@ -1,0 +1,70 @@
+frankensim.matdb-source.v1
+observation	cover-seven-subjects	Human vocal fold cover (epithelium and superficial layer of the lamina propria) separated from the ligament by blunt dissection, from seven subjects, all nonsmokers with normal true folds, kept in PBS (pH 7.4) at room temperature before testing; subject 1: female, 53 y, African American, 3 h after total laryngectomy; subject 2: female, 58 y, Hispanic, 4 h after total laryngectomy; subject 3: male, 60 y, Caucasian, 9 h postmortem; subject 4: male, 64 y, Caucasian, 15 h postmortem; subject 5: male, 69 y, Caucasian, 20 h postmortem; subject 6: male, 79 y, Caucasian, 11 h postmortem; subject 7: male, 88 y, Caucasian, 10 h postmortem. The source's footnote: postmortem time is the time from death to rheometry, except subjects 1 and 2 who were total laryngectomy patients	Controlled-strain linear SIMPLE-SHEAR rheometer: the specimen between two rigid parallel acrylic plates (nominal gap 1.0 mm), sinusoidal displacement of the upper plate by a linear motor (0.01 mm amplitude = 1.0 percent shear strain), force on the lower plate by a piezoelectric transducer, displacement by an LVDT, at least 20 cycles per frequency, frequency sweep 1-250 Hz (the range the authors validated against a standard polyurethane, ANSI S2.21), environmental chamber with ambient air about 37 C and relative humidity near 100 percent; strain sweep at 100 Hz: G' constant up to a strain amplitude of about 3-7 percent	Power laws are fitted to the MEAN of the seven specimens (not per specimen) over 1-250 Hz and must not be extrapolated. The source defines the damping ratio as the ratio of the viscous to the elastic modulus (loss factor G''/G'), not c/(2 sqrt(km)). Below about 50 Hz G'' exceeds G' (liquid-like terminal region), unlike earlier torsional studies; above it G' exceeds G''. The units printed for the coefficient p are Pa.s (G', G'') and Pa.s2 (eta'): p is the value at f = 1 Hz in Pa (Pa.s for eta') with f in Hz, so it is stored dimensionless with the unit in the property name. The exponent of eta' is negative in the source (shear thinning); its magnitude is stored. Cadaveric and laryngectomy tissue of 53-88 y subjects; n = 7. Standard deviations are printed only in a figure and are not recorded
+scalar	storage-p	cover-seven-subjects	shear_storage_modulus_power_law_p_pa_at_1hz	17.246	1	constant
+uncertainty	storage-p	unstated	-	-	-	-
+validity	storage-p	loading_frequency	1	250	Hz
+validity	storage-p	shear_strain_amplitude	0.01	0.01	1
+validity	storage-p	chamber_air_temperature	310.15	310.15	K
+scalar	storage-q	cover-seven-subjects	shear_storage_modulus_power_law_exponent_q	0.632	1	constant
+uncertainty	storage-q	unstated	-	-	-	-
+validity	storage-q	loading_frequency	1	250	Hz
+validity	storage-q	shear_strain_amplitude	0.01	0.01	1
+validity	storage-q	chamber_air_temperature	310.15	310.15	K
+scalar	storage-r2	cover-seven-subjects	shear_storage_modulus_power_law_fit_r2	0.9493	1	constant
+uncertainty	storage-r2	unstated	-	-	-	-
+validity	storage-r2	loading_frequency	1	250	Hz
+validity	storage-r2	shear_strain_amplitude	0.01	0.01	1
+validity	storage-r2	chamber_air_temperature	310.15	310.15	K
+scalar	loss-p	cover-seven-subjects	shear_loss_modulus_power_law_p_pa_at_1hz	58.448	1	constant
+uncertainty	loss-p	unstated	-	-	-	-
+validity	loss-p	loading_frequency	1	250	Hz
+validity	loss-p	shear_strain_amplitude	0.01	0.01	1
+validity	loss-p	chamber_air_temperature	310.15	310.15	K
+scalar	loss-q	cover-seven-subjects	shear_loss_modulus_power_law_exponent_q	0.3243	1	constant
+uncertainty	loss-q	unstated	-	-	-	-
+validity	loss-q	loading_frequency	1	250	Hz
+validity	loss-q	shear_strain_amplitude	0.01	0.01	1
+validity	loss-q	chamber_air_temperature	310.15	310.15	K
+scalar	loss-r2	cover-seven-subjects	shear_loss_modulus_power_law_fit_r2	0.8363	1	constant
+uncertainty	loss-r2	unstated	-	-	-	-
+validity	loss-r2	loading_frequency	1	250	Hz
+validity	loss-r2	shear_strain_amplitude	0.01	0.01	1
+validity	loss-r2	chamber_air_temperature	310.15	310.15	K
+scalar	viscosity-p	cover-seven-subjects	dynamic_viscosity_power_law_p_pa_s_at_1hz	10.509	1	constant
+uncertainty	viscosity-p	unstated	-	-	-	-
+validity	viscosity-p	loading_frequency	1	250	Hz
+validity	viscosity-p	shear_strain_amplitude	0.01	0.01	1
+validity	viscosity-p	chamber_air_temperature	310.15	310.15	K
+scalar	viscosity-q	cover-seven-subjects	dynamic_viscosity_power_law_exponent_magnitude_decreasing_with_frequency	0.7391	1	constant
+uncertainty	viscosity-q	unstated	-	-	-	-
+validity	viscosity-q	loading_frequency	1	250	Hz
+validity	viscosity-q	shear_strain_amplitude	0.01	0.01	1
+validity	viscosity-q	chamber_air_temperature	310.15	310.15	K
+scalar	viscosity-r2	cover-seven-subjects	dynamic_viscosity_power_law_fit_r2	0.9934	1	constant
+uncertainty	viscosity-r2	unstated	-	-	-	-
+validity	viscosity-r2	loading_frequency	1	250	Hz
+validity	viscosity-r2	shear_strain_amplitude	0.01	0.01	1
+validity	viscosity-r2	chamber_air_temperature	310.15	310.15	K
+scalar	damping-ratio-100-250	cover-seven-subjects	damping_ratio_loss_factor_mean_100_250hz	0.7383	1	constant
+uncertainty	damping-ratio-100-250	absolute	0.1211	1	0.68	1
+validity	damping-ratio-100-250	loading_frequency	100	250	Hz
+validity	damping-ratio-100-250	shear_strain_amplitude	0.01	0.01	1
+validity	damping-ratio-100-250	chamber_air_temperature	310.15	310.15	K
+scalar	crossover-frequency	cover-seven-subjects	storage_equals_loss_crossover_frequency_about	50	Hz	constant
+uncertainty	crossover-frequency	unstated	-	-	-	-
+validity	crossover-frequency	loading_frequency	1	250	Hz
+validity	crossover-frequency	shear_strain_amplitude	0.01	0.01	1
+validity	crossover-frequency	chamber_air_temperature	310.15	310.15	K
+observation	derived-evaluations	The printed power laws evaluated at two phonatory frequencies (COMPUTED here from the printed p and q, not printed in the source)	G'(f) = p f^q and G''(f) = p f^q with the printed coefficients, f in Hz, result in Pa	Derived values, valid only inside 1-250 Hz; they inherit every caveat of the fit to the seven-specimen mean
+scalar	derived-gprime-100	derived-evaluations	derived_shear_storage_modulus_at_100hz_pa	316.729	Pa	constant
+uncertainty	derived-gprime-100	unstated	-	-	-	-
+validity	derived-gprime-100	loading_frequency	100	100	Hz
+scalar	derived-gprime-250	derived-evaluations	derived_shear_storage_modulus_at_250hz_pa	565.18	Pa	constant
+uncertainty	derived-gprime-250	unstated	-	-	-	-
+validity	derived-gprime-250	loading_frequency	250	250	Hz
+scalar	derived-gdoubleprime-100	derived-evaluations	derived_shear_loss_modulus_at_100hz_pa	260.237	Pa	constant
+uncertainty	derived-gdoubleprime-100	unstated	-	-	-	-
+validity	derived-gdoubleprime-100	loading_frequency	100	100	Hz
+scalar	derived-gdoubleprime-250	derived-evaluations	derived_shear_loss_modulus_at_250hz_pa	350.285	Pa	constant
+uncertainty	derived-gdoubleprime-250	unstated	-	-	-	-
+validity	derived-gdoubleprime-250	loading_frequency	250	250	Hz

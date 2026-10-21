@@ -1203,3 +1203,110 @@ fn g2_lower_lip_aspiration_and_perioral_stiffness_pin_the_printed_values() {
         luboz.value("lower-lip")
     );
 }
+
+#[test]
+fn g2_human_cover_shear_pack_pins_the_fits_and_reproduces_the_crossover() {
+    let pack = load_human_pack("vocalfold-human-cover-shear-chan-rodriguez-jasa-pmc2561277");
+
+    // Table 2 of Chan and Rodriguez 2008, as printed: p, q and R2 of the power laws fitted to the mean of seven covers.
+    for (id, value) in [
+        ("storage-p", 17.246),
+        ("storage-q", 0.6320),
+        ("storage-r2", 0.9493),
+        ("loss-p", 58.448),
+        ("loss-q", 0.3243),
+        ("loss-r2", 0.8363),
+        ("viscosity-p", 10.509),
+        ("viscosity-q", 0.7391),
+        ("viscosity-r2", 0.9934),
+        ("damping-ratio-100-250", 0.7383),
+        ("crossover-frequency", 50.0),
+    ] {
+        assert!(near(pack.value(id), value), "{id}");
+        assert_eq!(
+            pack.uncertainty[id].0,
+            if id == "damping-ratio-100-250" {
+                "absolute"
+            } else {
+                "unstated"
+            }
+        );
+    }
+    assert_eq!(pack.uncertainty["damping-ratio-100-250"].1, Some(0.1211));
+    let state = &pack.observation["cover-seven-subjects"];
+    for needle in [
+        "seven subjects",
+        "SIMPLE-SHEAR",
+        "1.0 percent shear strain",
+        "MEAN of the seven",
+        "total laryngectomy",
+        "must not be extrapolated",
+    ] {
+        assert!(
+            state.contains(needle),
+            "the observation must carry: {needle}"
+        );
+    }
+
+    let (pg, qg) = (pack.value("storage-p"), pack.value("storage-q"));
+    let (pl, ql) = (pack.value("loss-p"), pack.value("loss-q"));
+    let (pe, qe) = (pack.value("viscosity-p"), pack.value("viscosity-q"));
+    let g_storage = |f: f64| pg * f.powf(qg);
+    let g_loss = |f: f64| pl * f.powf(ql);
+
+    // The crossover the authors report ("around 50 Hz") follows from the two printed power laws, and G'' is above G'
+    // below it and under it above it.
+    let crossover = (pl / pg).powf(1.0 / (qg - ql));
+    assert!(
+        (40.0..65.0).contains(&crossover),
+        "crossover {crossover} Hz against the printed about 50 Hz"
+    );
+    assert!(g_loss(10.0) > g_storage(10.0) && g_loss(200.0) < g_storage(200.0));
+
+    // The derived evaluations equal the printed laws at the phonatory frequencies (stored rounded to 1e-3 Pa).
+    for (id, f, value) in [
+        ("derived-gprime-100", 100.0, g_storage(100.0)),
+        ("derived-gprime-250", 250.0, g_storage(250.0)),
+        ("derived-gdoubleprime-100", 100.0, g_loss(100.0)),
+        ("derived-gdoubleprime-250", 250.0, g_loss(250.0)),
+    ] {
+        assert!(
+            (pack.value(id) - value).abs() <= 1e-3 * 0.5 + 1e-9 * value,
+            "{id} at {f} Hz: {} against {value}",
+            pack.value(id)
+        );
+        assert_eq!(pack.scalar[id].1, "Pa");
+        assert!(pack.observation["derived-evaluations"].contains("COMPUTED"));
+    }
+
+    // Consistency between the three printed fits: eta' = G''/(2 pi f) within 30 percent at 100 Hz, and the printed
+    // mean loss factor over 100-250 Hz within 10 percent of the mean of G''/G' from the fits.
+    let eta_100 = pe * 100.0_f64.powf(-qe);
+    let eta_from_loss = g_loss(100.0) / (2.0 * core::f64::consts::PI * 100.0);
+    assert!(
+        (eta_100 / eta_from_loss - 1.0).abs() < 0.3,
+        "eta' {eta_100} against G''/omega {eta_from_loss}"
+    );
+    let samples = 1501_u32;
+    let mean_loss_factor = (0..samples)
+        .map(|i| {
+            let f = 100.0 + 150.0 * f64::from(i) / f64::from(samples - 1);
+            g_loss(f) / g_storage(f)
+        })
+        .sum::<f64>()
+        / f64::from(samples);
+    let printed = pack.value("damping-ratio-100-250");
+    assert!(
+        (mean_loss_factor / printed - 1.0).abs() < 0.1,
+        "mean G''/G' {mean_loss_factor} against printed {printed}"
+    );
+
+    // Contrast with the felid register: the human cover's phonatory-range loss factor lies far above the large-felid
+    // lamina propria tan delta of the older pack, and the source itself says it exceeds the 0.1-0.2 of fold models.
+    let felid = load_pack("vocalfold-felid-rheometry-plos-pone0027029");
+    assert!(printed > 2.0 * felid.scalars["loss_tangent_tiger"]);
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-human-cover-shear\",\"verdict\":\"pass\",\
+         \"crossover_hz\":{crossover},\"mean_loss_factor_100_250\":{mean_loss_factor}}}"
+    );
+}
