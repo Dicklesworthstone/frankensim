@@ -268,6 +268,18 @@ def check_fundamental(y, f0, kind, label):
                                  f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
 
 
+def lowpass(x, cap_hz):
+    """Raised-cosine FFT low-pass: unity below 0.8 cap, zero above cap. Used when a render is valid only up to a band
+    (a receiver admitted to ka <= 20, say): the same filter goes on the render, the recording and every ruler note,
+    so the grade says nothing about what the render does not model."""
+    x = np.asarray(x, dtype=np.float64)
+    n = 1 << int(np.ceil(np.log2(len(x) + SR // 2)))
+    X = np.fft.rfft(x, n)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    g = np.clip((cap_hz - f) / (0.2 * cap_hz), 0.0, 1.0)
+    return np.fft.irfft(X * (0.5 - 0.5 * np.cos(np.pi * g)), n)[: len(x)]
+
+
 def cepstral_envelope(P_db, freqs, f0, grid):
     """Smooth spectral envelope [dB] of the mean sounding spectrum, liftered below 0.6/f0, read on `grid` [Hz]."""
     n = (len(freqs) - 1) * 2
@@ -553,6 +565,7 @@ class Refs:
             for e in manifest["files"]:
                 self.meta[Path(e["path"]).stem.replace(" ", "")] = dict(page=e["page"], chain=e["chain"], id=e["id"], name=Path(e["path"]).name)
         self._raw, self._floor, self._notes = OrderedDict(), {}, OrderedDict()
+        self.band_hz = None  # set per pair by run_pair: every signal read through this Refs is low-passed there
 
     def info_of(self, e):
         return self.meta.get(Path(e["file"]).stem, {})
@@ -561,26 +574,29 @@ class Refs:
         return self.info_of(e).get("page")
 
     def raw(self, fname):
-        if fname not in self._raw:
-            self._raw[fname] = load(self.wav_dir / fname)
+        key = (fname, self.band_hz)
+        if key not in self._raw:
+            x = load(self.wav_dir / fname)
+            self._raw[key] = lowpass(x, self.band_hz) if self.band_hz else x
             while len(self._raw) > 8:
                 self._raw.popitem(last=False)
-        return self._raw[fname]
+        return self._raw[key]
 
     def aligned(self, e):
         """(aligned samples, alignment info) of library entry `e`, in the file's own time."""
         f0 = hz_of(e["note"])
         x = self.raw(e["file"])
-        if e["file"] not in self._floor:
-            self._floor[e["file"]] = floor_of(highpass(x, f0))
+        fkey = (e["file"], self.band_hz)
+        if fkey not in self._floor:
+            self._floor[fkey] = floor_of(highpass(x, f0))
         a = max(0, int((e["start"] - 2.0) * SR))
         b = min(len(x), int(e["end"] * SR) + int(0.1 * SR))
-        y, info = align(x[a:b], f0, self._floor[e["file"]], anchor_s=e["start"] - a / SR, at_start=(a == 0))
+        y, info = align(x[a:b], f0, self._floor[fkey], anchor_s=e["start"] - a / SR, at_start=(a == 0))
         info = dict(info, source_onset_s=a / SR + info["onset_s"], source_cut_start_s=a / SR + info["cut_start_s"])
         return y, info
 
     def note(self, e) -> Note:
-        key = (e["file"], e["start"])
+        key = (e["file"], e["start"], self.band_hz)
         if key not in self._notes:
             y, info = self.aligned(e)
             self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info)
@@ -836,9 +852,9 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
         write_wav(out / "ours.wav", yo * g)
     gaps = compare(ours, real) if ours else None
     ruler = refs.ruler(ref_e)
-    lo, hi = (60.0, F_HI)
-    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, F_HI),
-                scalogram=map_images("scalogram", real, ours, off, out, lo, hi))
+    top_hz = float(refs.band_hz) if refs.band_hz else F_HI
+    figs = dict(spectrogram=map_images("spectrogram", real, ours, off, out, F_LO, top_hz),
+                scalogram=map_images("scalogram", real, ours, off, out, 60.0, top_hz))
     pm = _partial_match(ours, real) if ours else []
     parts = None
     if len(real.pk):
@@ -854,11 +870,12 @@ def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand
         ours=dict(wav=str(ours_meta["wav"]), git_sha=ours_meta["git_sha"], observer=ours_meta["observer"], sample_rate=ours_meta["sample_rate"],
                   recipe=ours_meta["recipe"]) if ours else None,
         audio=dict(real="real.wav", ours="ours.wav" if ours else None,
-                   level_match=(f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
+                   level_match=((f"Both clips are low-passed at {refs.band_hz:.0f} Hz (the render is valid only below it). " if refs.band_hz else "")
+                                + f"One shared gain of {20 * math.log10(g):+.1f} dB puts the louder clip at 0.70 of full scale; "
                                 + (f"ours was set {off:+.1f} dB beforehand so its RMS over {real.match_window[0]:.1f}-{real.match_window[1]:.1f} s "
                                    "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
-                       level_offset_db=off if ours else None, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
+                       level_offset_db=off if ours else None, band_hz=refs.band_hz, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
                        onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
         figures=figs, partials=parts, metrics=metric_rows(gaps, real, ours, ruler),
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
@@ -900,11 +917,14 @@ def _labelled(signal, fn, *a, **k):
 
 
 def run_pair(refs, c, root):
+    refs.band_hz = c.get("band_hz")  # a render valid only up to a band is graded only up to it, signal and ruler alike
     ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"), c.get("ref_contains"))
     cand_y = cand_info = ours_meta = None
     if c.get("wav"):  # the render first: it is cheap, and a render that is not the note should be refused for that
         f0 = hz_of(ref_e["note"])
         raw = load(Path(c["wav"]))
+        if refs.band_hz:
+            raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
         if ref_e["inst"] not in ("xylophone", "marimba"):
             check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours")
@@ -1032,7 +1052,7 @@ def cmd_refs(a):
 
 def cmd_pair(a):
     refs = Refs(a.lib, a.wav_dir, a.refs_json)
-    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
+    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
     try:
@@ -1161,6 +1181,7 @@ def main():
     p.add_argument("--dyn", default="mf")
     p.add_argument("--art")
     p.add_argument("--ref-contains", help="substring of the library file name, to pick the string/session of the reference")
+    p.add_argument("--band-hz", type=float, help="grade only up to this frequency: low-pass render, recording and ruler there (a render valid only below it)")
     p.add_argument("--git-sha")
     p.add_argument("--observer")
     p.add_argument("--recipe")

@@ -397,6 +397,25 @@ class ContractTests(unittest.TestCase):
         self.assertNotEqual(old["ours"]["git_sha"], new["ours"]["git_sha"])
         self.assertEqual(sum(tot["old"]), sum(tot["new"]))  # the same measures are judged both times
 
+    def test_a_band_limited_render_is_graded_only_inside_its_band(self):
+        import json
+        from instrgrade import write_wav
+        root = self.tmp / "band"
+        f0 = F0 * 2 ** (1 / 12)
+        full = 0.3 * tone(f0=f0, dur=2.4, lead=0.2, noise_db=-85)
+        limited = self.tmp / "limited.wav"
+        write_wav(limited, dc.lowpass(full, 3500.0))  # a render that models nothing above 3.5 kHz
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(limited), git_sha="b", observer="o", recipe="r.sh")
+        wide = dc.run_pair(self.refs, c, root / "wide")
+        narrow = dc.run_pair(self.refs, dict(c, band_hz=3900.0), root / "narrow")
+        gap = lambda pj, m: next(x["gap"] for x in pj["metrics"] if x["id"] == m)  # noqa: E731
+        self.assertLess(gap(narrow, "stft_lsd_db"), 0.6 * gap(wide, "stft_lsd_db"))
+        self.assertEqual(narrow["figures"]["spectrogram"]["f_hi_hz"], 3900.0)
+        self.assertEqual(narrow["figures"]["scalogram"]["f_hi_hz"], 3900.0)
+        self.assertEqual(narrow["alignment"]["band_hz"], 3900.0)
+        self.assertIn("low-passed at 3900 Hz", narrow["audio"]["level_match"])
+        self.assertIsNone(wide["alignment"]["band_hz"])
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"
