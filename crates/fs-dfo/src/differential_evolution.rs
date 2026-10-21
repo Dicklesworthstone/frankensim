@@ -21,6 +21,8 @@
 
 /// Parallel objective waves on the existing cancellation-aware tile executor.
 pub mod parallel;
+/// Portable byte transport for quiescent search states, including cached waves.
+pub mod snapshot;
 
 use fs_exec::Cx;
 use fs_rand::{Stream, StreamKey};
@@ -114,7 +116,8 @@ pub struct DifferentialEvolutionReport {
 #[derive(Debug)]
 struct Pending { coordinates: Vec<f64>, value: Option<f64> }
 
-/// No public clone/rewind can refund spent work. Reports are not search state.
+/// Reports are not search state. Snapshots retain the work spent at capture;
+/// replaying an older snapshot cannot account for work done after that capture.
 #[derive(Debug)]
 pub struct DifferentialEvolutionState {
     bounds: Vec<[f64; 2]>,
@@ -338,6 +341,7 @@ impl CandidateRandom {
             if i % 8 == 0 { checkpoint(poll)?; }
             let product = u128::from(self.bits()?) * u128::from(n);
             if product as u64 >= threshold { return Ok((product >> 64) as usize); }
+            // rejected: next bounded draw retains the original candidate identity
         }
         Err(DifferentialEvolutionError::RandomBudget)
     }
