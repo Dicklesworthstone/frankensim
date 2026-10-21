@@ -24,6 +24,9 @@
 # 25 kPa (the highest blowing pressure measured in a professional trumpeter, Fletcher and Tarnopolsky
 # p.875) and measure the threshold of THIS model directly; holds are placed above the measured threshold.
 #
+# Needs a music_render with the DC-bin fix of the mouth-flow line (bin da31fbd67ee9 or later): without it the
+# default mouth-flow ladder cannot converge on this bore (see the head).
+#
 # Clock: 32 kHz mechanics = output, not 48 kHz. The fs-duct flanged radiation load is admitted only to
 # ka = 20, and the 0.061 m bell reaches ka = 20 at 17.9 kHz, so Nyquist 16 kHz (ka 17.9) is admitted and
 # 48 kHz (Nyquist 24 kHz, ka 26.8) would be refused. The radiation receiver's resolved band is 6.9 kHz

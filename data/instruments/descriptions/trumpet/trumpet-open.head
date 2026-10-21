@@ -29,16 +29,13 @@ lip_source Cullen (2000) PhD Edinburgh Table A.2 p.253 embouchure 7: fL1 204.5 H
 cup_volume_m3 1e-9
 termination flanged
 modes 3 1
-# Mouth-flow line ladder. The first native render of this bore was REFUSED by the owner's default ladder
-# (relative tail energy 1e-10): at the 65536-tap cap (2.0 s on this 32 kHz clock) the last quarter of the
-# mouth-flow impulse response still held 6.8e-7 of its energy. With this tolerance declared the ladder
-# stops at 8192 taps and the sidecar records every rung: tail energy 9.8e-6 (4096 taps), 4.9e-6 (8192).
-# As for the trombone bore (see its head), the tail halves per doubling: an algebraic 1/N decay, the
-# signature of an endpoint discontinuity of the sampled response (the 20 Hz stand-in for the DC bin or the
-# real Nyquist bin), not of a long physical ring-down. UNVERIFIED. Declared instead of hidden: 1e-5
-# relative energy is about -50 dB of wrap-around amplitude, above the measured tail and far below the
-# tens of dB the grading measures resolve.
-mouth_flow_tail_tol 1e-5
+# Mouth-flow line ladder: the owner's DEFAULT (relative tail energy 1e-10), no declared tolerance. On the
+# binary before the DC-bin fix this bore was refused at the 65536-tap cap (tail 6.8e-7) and only rendered with a
+# declared 1e-5, whose rungs halved per doubling (9.8e-6, 4.9e-6 at 4096 and 8192 taps): an algebraic 1/N tail.
+# That was the signature of the 20 Hz stand-in for the DC bin, and P1's DC-bin fix (bin da31fbd67ee9) confirms
+# it: the same file with the tolerance record removed converges under the default, tail energy 1.1e-6 (4096
+# taps), 3.1e-10 (8192), 1.8e-11, 2.5e-12, 4.9e-13 (65536), falling exponentially. The two renders differ by
+# 0.08 percent in rms and 0.02 percent in peak, so the declared-tolerance renders were accurate.
 #
 # --- bore -------------------------------------------------------------------------------------
 # 34 stations (position x, radius r) in metres, copied digit for digit from the data file
