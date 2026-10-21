@@ -176,6 +176,52 @@ fn thickness_point_maps_are_well_formed_and_inside_their_bodies() {
 }
 
 #[test]
+fn vector_reads_agree_with_the_printed_numbers() {
+    let dims = load().dimensions;
+    let header = "path\tindex\tx_mm\ty_mm";
+    let outline = points("top-outline-vector.tsv", header, 4);
+    let of = |name: &str| -> Vec<(f64, f64)> {
+        outline
+            .iter()
+            .filter(|r| r[0] == name)
+            .map(|r| (r[2].parse().expect("x"), r[3].parse().expect("y")))
+            .collect()
+    };
+    let extent = |pts: &[(f64, f64)], axis: usize| {
+        let v = |p: &(f64, f64)| if axis == 0 { p.0 } else { p.1 };
+        let max = pts.iter().map(v).fold(f64::NEG_INFINITY, f64::max);
+        let min = pts.iter().map(v).fold(f64::INFINITY, f64::min);
+        max - min
+    };
+    // The plot is 1:1: the vector outline height equals the printed lower-bout width.
+    let top = of("outline");
+    assert_eq!(top.len(), 486);
+    let printed = 1000.0 * value(&dims, "top", "outline", "lower-bout-width");
+    assert!(
+        (extent(&top, 1) - printed).abs() < 0.05,
+        "{}",
+        extent(&top, 1)
+    );
+    // The sound hole circle read from the vectors has the printed radius.
+    let hole = of("soundhole-circle");
+    let radius = 1000.0 * value(&dims, "top", "soundhole", "radius");
+    assert!((extent(&hole, 0) / 2.0 - radius).abs() < 0.1);
+    assert!((extent(&hole, 1) / 2.0 - radius).abs() < 0.1);
+    // Fret lines: the nut line and ten fret lines coincide with equal temperament for 650 mm to 0.1 mm;
+    // other lines (a short sixth line, a string tick line, a body-edge line) are 5 mm or more away.
+    let frets = points(
+        "fret-lines-vector.tsv",
+        "line\tx_pt\tmm_from_nut_line\twidth_mm\tet_mm_for_650_scale\tdifference_mm",
+        6,
+    );
+    let diff: Vec<f64> = frets.iter().map(|r| r[5].parse().expect("diff")).collect();
+    assert_eq!(diff.iter().filter(|d| d.abs() < 0.1).count(), 11);
+    assert!(diff.iter().any(|d| d.abs() > 5.0));
+    let back = points("back-outline-vector.tsv", header, 4);
+    assert_eq!(back.len(), 570);
+}
+
+#[test]
 fn signature_modes_and_annotations_are_well_formed() {
     let modes = points(
         "signature-modes.tsv",
