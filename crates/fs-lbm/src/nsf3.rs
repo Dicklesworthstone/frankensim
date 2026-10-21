@@ -340,7 +340,8 @@ fn stress<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> [
 /// pure function of read-only inputs, so the bits do not depend on the worker count.
 fn par_fill<T: Send>(out: &mut [T], workers: usize, f: &(impl Fn(usize) -> T + Sync)) {
     let n = out.len();
-    if workers <= 1 || n < 2 {
+    // wasm32 cannot spawn threads: the serial path gives the same bits (the pass is order-independent)
+    if workers <= 1 || n < 2 || cfg!(target_arch = "wasm32") {
         for (i, o) in out.iter_mut().enumerate() {
             *o = f(i);
         }
