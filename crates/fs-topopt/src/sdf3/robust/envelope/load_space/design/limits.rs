@@ -4,6 +4,7 @@ pub mod start;
 pub mod binary;
 pub mod refinement;
 pub mod refit;
+pub mod campaign;
 use super::*;
 pub use crate::sdf3::robust::envelope::limits::ComplianceLimitedOptions3 as LoadSpaceLimitedOptions3;
 
