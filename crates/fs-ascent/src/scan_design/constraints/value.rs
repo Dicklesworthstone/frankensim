@@ -13,6 +13,9 @@ use super::super::value::{ScanPowerValueEvaluation, ScanValueResponseBudget,
     ScanValueBatch, ScanResponseValue, ScanPeakValue};
 use fs_exec::Cx;
 
+/// Shared authored designs evaluated under multiple physical operating cases.
+pub mod scenarios;
+
 /// Explicit retained scalar/selection limits, with no irrelevant KKT allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanValueConstraintBudget {
