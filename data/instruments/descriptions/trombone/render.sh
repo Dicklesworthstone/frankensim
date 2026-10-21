@@ -68,14 +68,27 @@ cd "$SNAP"
 if [ "$PIECES" != 16 ]; then
   OUT="$OUT/pieces-$PIECES"
 fi
+if [ -n "${CUP_VOLUME_M3:-}" ]; then
+  OUT="$OUT/cup-$CUP_VOLUME_M3"
+fi
 mkdir -p "$OUT"
+
+# head_text: the description head with the Bessel piece count (PIECES) and, when CUP_VOLUME_M3 is set, the
+# lumped cup volume replaced. The head's own 12.7 ml is Cullen's rig mouthpiece; Braden's mouthpiece-and-leadpipe
+# element starts at a 1.286 cm radius (a cup rim), so the cup may be counted twice (once lumped, once inside
+# that element, whose interior is UNKNOWN). CUP_VOLUME_M3=1e-9 removes the lumped cup: a sensitivity bracket
+# over an unknown, not a choice.
+head_text() {
+  sed -E "s/^(bessel .* )16\$/\1$PIECES/" "$DIR/tenor-trombone.head" |
+    if [ -n "${CUP_VOLUME_M3:-}" ]; then sed -E "s/^cup_volume_m3 .*/cup_volume_m3 $CUP_VOLUME_M3/"; else cat; fi
+}
 
 # compose <file> <seconds> <mouth-pressure-pa> <initial-pre-stress> [<final-pre-stress>]
 compose() {
   local file=$1 seconds=$2 pressure=$3 initial=$4 final=${5:-}
   {
     printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * seconds))
-    sed -E "s/^(bessel .* )16\$/\1$PIECES/" "$DIR/tenor-trombone.head"
+    head_text
     printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
     printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t1\n'
     printf 'event\t0e0\t5e-2\tpressure-pa\t%s\n' "$pressure"
@@ -96,7 +109,7 @@ compose_pressure_ramp() {
   local file=$1 up=$2 peak=$3 tension=$4
   {
     printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * up * 2))
-    sed -E "s/^(bessel .* )16\$/\1$PIECES/" "$DIR/tenor-trombone.head"
+    head_text
     printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
     printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n'
     printf 'event\t0e0\t%se0\tpressure-pa\t%s\n' "$up" "$peak"
@@ -110,7 +123,7 @@ compose_attack() {
   local file=$1 seconds=$2 tension=$3
   {
     printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * seconds))
-    sed -E "s/^(bessel .* )16\$/\1$PIECES/" "$DIR/tenor-trombone.head"
+    head_text
     printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
     printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n'
     printf 'event\t0e0\t5e-2\tpressure-pa\t%s\n' "$ATTACK_PRESSURE"
