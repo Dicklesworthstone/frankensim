@@ -11,6 +11,7 @@ use fs_blake3::DomainHasher;
 use fs_couple::brass_loop::performance::{LipDescription, LipInfo, MAX_LIP_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::pcm_wav::stream::{MAX_PCM16_WAV_SAMPLES, Pcm16WavStream};
+use fs_material::gas_species::input::ThermochemicalSources;
 
 use super::{WAV_HASH_DOMAIN, create_outputs, json_string};
 
@@ -196,7 +197,10 @@ fn input_json(i: &LipInfo) -> String {
     )
 }
 
-pub(super) fn run(args: &[String]) -> Result<(), String> {
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let (input, output, block) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
@@ -208,7 +212,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     file.take((MAX_LIP_PERFORMANCE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("lip input read failed: {e}"))?;
-    let description = LipDescription::from_bytes(&bytes)?;
+    let description = LipDescription::from_bytes_with_gas_sources(&bytes, sources)?;
     let mut performance = description.build()?;
     let info = performance.info().clone();
     let samples =
@@ -223,6 +227,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         info.full_scale_pa,
     )?;
     let wav_hash = rendered.hash.to_hex();
+    let gas_sources =
+        super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"lip-input\",\
          \"sample_rate_hz\":{},\"samples\":{samples},\"block\":{block},\
@@ -231,7 +237,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
          \"observation\":{{\"mechanics_sample_rate_hz\":{},\"output_sample_rate_hz\":{},\"ratio\":1,\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
-         \"resampled\":false,\"declared_band_hz\":{}}}}}",
+         \"resampled\":false,\"declared_band_hz\":{}}}{gas_sources}}}",
         info.sample_rate_hz,
         info.full_scale_pa,
         rendered.clipped,

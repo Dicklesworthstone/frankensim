@@ -9,6 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../src/render/schedule/reed/field_input/tests/support.rs"]
+mod thermochemical_support;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_music_render")
 }
@@ -29,6 +32,94 @@ fn run(args: &[&str]) -> (bool, String) {
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     )
+}
+
+#[test]
+fn lip_and_voice_commands_resolve_the_shared_gas_registry_and_preserve_source_receipts() {
+    // Synthetic geometry/materials exercise source routing, not instrument fidelity.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lip-voice-gases-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let packs = thermochemical_support::packs("specimen-gas", 0.028, 3.5, 200.0);
+    let species = dir.join("species.pack");
+    let nasa9 = dir.join("nasa9.pack");
+    let transport = dir.join("transport.pack");
+    std::fs::write(&species, packs.species.to_bytes()).unwrap();
+    std::fs::write(&nasa9, packs.nasa9.to_bytes()).unwrap();
+    std::fs::write(&transport, packs.transport.claims_pack().to_bytes()).unwrap();
+
+    let lip = format!(
+        "frankensim-lip-performance-v1\n\
+        audio 24000 2400\nfull_scale_pa 1\n\
+        ambient thermochemical 293.15 101325 mole 1 specimen-gas 1\n\
+        lip_response 200 7 0.1 0.012 0.0005 0.0001\n\
+        lip_source test fixture, not a measurement\n\
+        bore_source test fixture, not a measurement\n\
+        cup_volume_m3 1.5e-6\ntermination flanged\nmodes 3 1\n\
+        cylinder 0.006 0.30\ncone 0.006 0.012 0.25\ncone 0.012 0.035 0.12\n\
+        microphone 0 0 1 32 128 3000\nschedule\n{}",
+        String::from_utf8(pressure_performance().to_canonical_bytes()).unwrap()
+    );
+    let voice = "frankensim-voice-performance-v1\n\
+        audio 48000 2400 2\nfull_scale_pa 2\n\
+        ambient thermochemical 310.15 101325 mole 1 specimen-gas 1\n\
+        fold two_mass 1.25e-4 2.5e-5 128 12.8 40 0.1 3.57e-4 1.4e-2 2.5e-3\n\
+        termination flanged\ntract_source test-fixture\ntract_licence test fixture, not data\n\
+        microphone 0 0 0.3 4 16 4000\nsubglottal 0 0\nsubglottal 0.02 900\n\
+        section 5e-5 0.02\nsection 6e-5 0.02\nsection 1.5e-4 0.02\nsection 2.5e-4 0.02\n\
+        section 3e-4 0.02\nsection 3e-4 0.02\nsection 2.5e-4 0.02\nsection 2e-4 0.02\n";
+    for (kind, text, rate) in [("lip", lip.as_str(), 24000_u32), ("voice", voice, 48000)] {
+        let input = dir.join(format!("{kind}.performance"));
+        let output = dir.join(format!("{kind}.wav"));
+        std::fs::write(&input, text).unwrap();
+        let base = [kind, input.to_str().unwrap(), output.to_str().unwrap()];
+        let (ok, diagnostic) = run(&base);
+        assert!(!ok, "a NASA-9 record needs original source packs");
+        assert!(
+            diagnostic.contains("explicit source registry"),
+            "{diagnostic}"
+        );
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+
+        let mut args = base.to_vec();
+        args.extend_from_slice(&[
+            "--gas-component",
+            species.to_str().unwrap(),
+            nasa9.to_str().unwrap(),
+            transport.to_str().unwrap(),
+            "--gas-water",
+            "none",
+            "--gas-phase",
+            "frozen",
+            "--block",
+            "37",
+        ]);
+        let (ok, diagnostic) = run(&args);
+        assert!(ok, "{kind}: {diagnostic}");
+        let wav = std::fs::read(&output).unwrap();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), rate);
+        assert_eq!(wav.len(), 44 + 2 * 2400);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in [
+            "\"thermochemical_gases\":[",
+            "\"species\":\"specimen-gas\"",
+            "\"law\":\"NASA-9 frozen ideal gas; Wilke/WMS transport\"",
+            "\"transport_pack\":",
+        ] {
+            assert!(
+                metadata.contains(token),
+                "{kind}: missing {token}: {metadata}"
+            );
+        }
+        assert!(metadata.contains(&packs.species.content_hash().to_hex()));
+        assert!(metadata.contains(&packs.nasa9.content_hash().to_hex()));
+    }
 }
 
 #[test]

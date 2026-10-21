@@ -47,6 +47,14 @@
 //! baffled microphone. The file owns every physical input; see
 //! `fs_couple::voice_performance` for the format and its stated limits.
 //!
+//! Both `lip` and `voice` accept shared `ambient mixture T P mole|mass COUNT
+//! SPECIES FRACTION...` records. `ambient thermochemical T P mole|mass COUNT
+//! ID FRACTION...` uses explicit source packs supplied by repeating
+//! `--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack`, with
+//! `--gas-water none|ID` and `--gas-phase frozen|liquid-water`. The same resolved
+//! state drives internal flow, duct loss and exterior radiation; original pack
+//! identities are written to the sidecar. Gas records remain in the source file.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. A new command interrupts
@@ -362,13 +370,13 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|arg| arg == "voice") {
-        if gas_registry.is_some() || gas_options.record.is_some() { fail("voice input declares its own ambient gas"); }
-        voice_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("voice gas records belong in the performance file"); }
+        voice_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "lip") {
-        if gas_registry.is_some() || gas_options.record.is_some() { fail("lip input declares its own ambient gas"); }
-        lip_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("lip gas records belong in the performance file"); }
+        lip_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     let mut positional = Vec::new();
