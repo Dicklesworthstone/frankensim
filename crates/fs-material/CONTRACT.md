@@ -51,9 +51,9 @@ homogenization, the P2 milestone.
   name; `property_by_key` requires the complete quantity/test/tensor context.
   The elastic resolver uses that exact lookup for all 36 matrix coefficients.
   `ResolvedScalarProperty::is_constant_at_fixed_temperature` retains the exact
-  selected claim's curve axis and admits either validity-wide scalar constants
+  selected claim's independent axes and admits either validity-wide scalar constants
   or T-only curves evaluated at positive absolute temperature. Frequency curves,
-  other state axes and temperature-difference coordinates refuse. Legacy T
+  multiaxis surfaces, other state axes and temperature-difference coordinates refuse. Legacy T
   remains kelvin; typed coordinates must be dimensional temperature or static
   absolute temperature. The original interpolation decision, evidence and
   identities remain unchanged. This classifies a declared source model;
@@ -85,6 +85,13 @@ homogenization, the P2 milestone.
   updates, complete-key preservation, typed-coordinate refusals, source pins
   and atomic failure. These are endpoint evaluations, not history integration,
   support along an intervening path, or measured multiaxis validation.
+  The shared `Surface2D` payload evaluates both source coordinates together
+  through the original matdb evaluator. `ResolvedScalarProperty::source_axes`
+  retains every declared dependence even at an exact vertex; a surface cannot
+  masquerade as a constant or temperature-only coefficient. Sparse source holes
+  remain refusals during complete-bundle refresh. Existing exact thermal-
+  expansion and Seebeck path integrators explicitly refuse surface payloads;
+  endpoint support alone cannot authorize integration across cells or holes.
 - `conductor::resolve_uniform_conductor` binds exactly one sourced
   `electrical_resistivity` claim in ohm-metre dimensions to caller-owned
   positive uniform length and cross-sectional area, retaining the resolved

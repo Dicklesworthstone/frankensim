@@ -29,10 +29,12 @@ fn fixture_with_basis(scale: Option<f64>, axis: &str, basis:ElectricalPropertyBa
     let k = PropertyKey::with_quantity("thermal_conductivity", quantity(QuantityKind::ThermalConductivity));
     let mut claims = ClaimSet::new();
     let mut insert = |key: PropertyKey, value: PropertyValue| {
-        // A scalar claim is a plateau; only a curve has knots to interpolate.
+        // A scalar claim is a plateau; sampled responses declare interpolation.
         let interpolation = match &value {
             PropertyValue::Scalar { .. } => InterpolationPolicy::ConstantWithinValidity,
-            PropertyValue::Curve { .. } => InterpolationPolicy::LinearInside,
+            PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+                InterpolationPolicy::LinearInside
+            }
         };
         claims.insert_claim(PropertyClaim { key, value,
             validity: ValidityDomain::unconstrained().with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 200.0, 800.0)

@@ -8,7 +8,6 @@ use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_material::thermal::source::ThermalMaterialError;
 use fs_material::state_point::{MaterialPropertySelection,MaterialStatePointError};
 use fs_material::electrical_interface::resolve_electrical_interface_state;
-use fs_matdb::PropertyValue;
 
 /// One electrical contact using an existing thermal link's A/B order and area.
 pub struct MaterialElectricalContact<'a> {
@@ -85,9 +84,14 @@ impl ElectricalContactNetwork<'_> {
     }
 
     // Both fresh-policy and prepared callers use this same interface evaluator.
-    fn resolve_contacts(&self,thermal:&DepositionSimulation<'_>,bulk:CircuitThermalCoefficients<MaterialNetworkSample>,
-        pins:Option<&BTreeMap<u64,MaterialPropertySelection>>,mut cancelled:impl FnMut()->bool)
-        ->Result<ContactThermalCoefficients<MaterialNetworkSample>,ElectricalContactNetworkError> {
+    fn resolve_contacts(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        bulk: CircuitThermalCoefficients<MaterialNetworkSample>,
+        pins: Option<&BTreeMap<u64, MaterialPropertySelection>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactThermalCoefficients<MaterialNetworkSample>, ElectricalContactNetworkError>
+    {
         use ElectricalContactNetworkError as Error;
         if cancelled() {return Err(Error::Thermal(DepositionError::Cancelled));}
         self.routes(thermal)?;
@@ -111,10 +115,14 @@ impl ElectricalContactNetwork<'_> {
                 .ok_or(Error::Invalid("contact source property absent"))?;
             let claim=binding.point.interface.claims().claim(property.answer().receipt.selected)
                 .ok_or(Error::Invalid("contact source claim absent"))?;
-            match &claim.value {
-                PropertyValue::Scalar {..}=>{},
-                PropertyValue::Curve {abscissa,abscissa_dims,..} if binding.point.is_thermal_axis(abscissa,*abscissa_dims)=>{},
-                _=>return Err(Error::Invalid("contact law must be static or use declared thermal/phase coordinates")),
+            if !claim
+                .value
+                .axes()
+                .all(|(axis, dims)| binding.point.is_thermal_axis(axis, dims))
+            {
+                return Err(Error::Invalid(
+                    "contact law must be static or use declared thermal/phase coordinates",
+                ));
             }
             if property.angular_frequency_band_rad_s().map_err(|e|Error::State(ThermalMaterialError::Coordinate(format!("{e:?}"))))?
                 .is_some_and(|(lower,_)|lower>0.0) {

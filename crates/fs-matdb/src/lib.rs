@@ -18,7 +18,7 @@
 //! (PR-2), InterfaceSystemCard (PR-3), the query/receipt path (PR-4) and
 //! the receipt mutation battery (PR-5) follow.
 //!
-//! Layer: L1. Deps: fs-qty, fs-evidence, fs-blake3 ONLY. This crate owns
+//! Layer: L1. Deps: fs-qty, fs-evidence, fs-blake3, fs-ivl. This crate owns
 //! NO executable closures and NO per-run state; those belong to L3
 //! adapters. It never imports L2 transforms, L3 state types, or L6
 //! persistence.
@@ -41,7 +41,10 @@ mod pack;
 mod pcb;
 mod query;
 mod species_pack;
+mod surface;
 mod tensor;
+
+pub use surface::{MAX_SURFACE_SAMPLES, MAX_SURFACE_TRIANGLES};
 
 pub use tensor::{
     ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
@@ -74,9 +77,10 @@ pub use pack::{
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
     MATDB_PACK_TARGET_BASIS, MATDB_STRAIN_PACK_SCHEMA_VERSION, MATDB_STRESS_PACK_SCHEMA_VERSION,
-    MATDB_TENSOR_PACK_SCHEMA_VERSION, MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION,
-    MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt, NormalizationTarget, NormalizedPack,
-    PackError, StatisticComponent, StatisticMember, ValidityBoundSide,
+    MATDB_SURFACE_PACK_SCHEMA_VERSION, MATDB_TENSOR_PACK_SCHEMA_VERSION,
+    MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
+    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
+    ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -92,7 +96,9 @@ pub use query::{
     PINNED_CLAIM_POLICY_TAG, PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,
     PROPERTY_USAGE_RECEIPT_IDENTITY_SCHEMA_DECLARATION, PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
     PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION, PropertySample, PropertySupportError,
-    PropertyUsageReceipt, PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
+    PropertyUsageReceipt, PropertyUsageReceiptError, QueryPoint, SURFACE_MATDB_EVALUATOR_VERSION,
+    SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,
+    SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION, SelectionPolicy,
     TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,
     TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
 };
@@ -212,6 +218,11 @@ pub enum MatDbError {
         /// What is wrong.
         reason: &'static str,
     },
+    /// A sampled two-coordinate law has invalid coordinates or source cells.
+    MalformedSurface {
+        /// Repair required before admitting the source payload.
+        reason: &'static str,
+    },
     /// A referenced observation id is not present in the claim set's
     /// observation registry.
     UnknownObservation {
@@ -317,6 +328,13 @@ pub enum MatDbError {
         lo: f64,
         /// Last knot.
         hi: f64,
+    },
+    /// No declared sample or interpolation triangle covers this state.
+    OutsideSurfaceSupport {
+        /// Ordered source coordinates.
+        axes: [String; 2],
+        /// Requested coordinates, in the same order.
+        requested: [f64; 2],
     },
     /// The claim's payload/policy combination cannot answer this query.
     UnsupportedEvaluation {
@@ -431,6 +449,9 @@ impl fmt::Display for MatDbError {
                 write!(f, "uncertainty model invalid: {reason}")
             }
             MatDbError::MalformedCurve { reason } => write!(f, "curve payload invalid: {reason}"),
+            MatDbError::MalformedSurface { reason } => {
+                write!(f, "surface payload invalid: {reason}")
+            }
             MatDbError::UnknownObservation { observation } => write!(
                 f,
                 "claim references unknown observation dataset {observation:?}"
@@ -512,6 +533,11 @@ impl fmt::Display for MatDbError {
                 f,
                 "abscissa '{axis}' = {requested} is outside the knot span [{lo}, {hi}]; \
                  extrapolation beyond data refuses"
+            ),
+            MatDbError::OutsideSurfaceSupport { axes, requested } => write!(
+                f,
+                "state ({}, {}) = ({}, {}) is outside the declared sampled surface support",
+                axes[0], axes[1], requested[0], requested[1]
             ),
             MatDbError::UnsupportedEvaluation { reason } => {
                 write!(f, "unsupported evaluation: {reason}")
@@ -782,11 +808,9 @@ impl ObservationDataset {
     }
 }
 
-/// The value payload of a property claim. PR-1 carries the scalar and
-/// curve forms (enough for the density/moduli/conductivity class of the
-/// initial vocabulary); tensor, distribution, and model-parameter
-/// payloads land with the constitutive card work (PR-2) so their frames
-/// and state schemas arrive together.
+/// The scalar response payload of a property claim. A response may depend on
+/// zero, one, or two named state coordinates. Tensor component keys reuse these
+/// same response forms without introducing a second evaluator.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PropertyValue {
     /// A single SI value with its dimensions.
@@ -809,6 +833,21 @@ pub enum PropertyValue {
         /// The ordinate's dimensions.
         dims: Dims,
     },
+    /// A scalar law of two simultaneous state coordinates. Only source-declared
+    /// triangles provide interpolation support; samples outside cells remain
+    /// usable at their exact coordinate pairs.
+    Surface2D {
+        /// Ordered source axis names, matching their validity coordinates.
+        axes: [String; 2],
+        /// Dimensions of the two source axes, in the same order.
+        axis_dims: [Dims; 2],
+        /// Finite `([axis_0, axis_1], ordinate)` source samples.
+        samples: Vec<([f64; 2], f64)>,
+        /// Explicit interpolation cells, each indexing three source samples.
+        triangles: Vec<[u32; 3]>,
+        /// The ordinate's dimensions.
+        dims: Dims,
+    },
 }
 
 impl PropertyValue {
@@ -817,12 +856,40 @@ impl PropertyValue {
     #[must_use]
     pub fn dims(&self) -> Dims {
         match self {
-            PropertyValue::Scalar { dims, .. } | PropertyValue::Curve { dims, .. } => *dims,
+            PropertyValue::Scalar { dims, .. }
+            | PropertyValue::Curve { dims, .. }
+            | PropertyValue::Surface2D { dims, .. } => *dims,
         }
+    }
+
+    /// Named source coordinates, preserving the source's declared order.
+    pub fn axes(&self) -> impl Iterator<Item = (&str, Dims)> {
+        match self {
+            Self::Scalar { .. } => [None, None],
+            Self::Curve {
+                abscissa,
+                abscissa_dims,
+                ..
+            } => [Some((abscissa.as_str(), *abscissa_dims)), None],
+            Self::Surface2D {
+                axes, axis_dims, ..
+            } => [
+                Some((axes[0].as_str(), axis_dims[0])),
+                Some((axes[1].as_str(), axis_dims[1])),
+            ],
+        }
+        .into_iter()
+        .flatten()
     }
 
     fn validate(&self) -> Result<(), MatDbError> {
         match self {
+            PropertyValue::Surface2D {
+                axes,
+                samples,
+                triangles,
+                ..
+            } => surface::validate(axes, samples, triangles),
             PropertyValue::Scalar { value, .. } => {
                 if !value.is_finite() {
                     return Err(MatDbError::NonFinite {
@@ -1000,6 +1067,32 @@ impl PropertyClaim {
                 }
                 push(&dims_bytes(*dims));
             }
+            PropertyValue::Surface2D {
+                axes,
+                axis_dims,
+                samples,
+                triangles,
+                dims,
+            } => {
+                push(b"surface-2d");
+                for (axis, dims) in axes.iter().zip(axis_dims) {
+                    push(axis.as_bytes());
+                    push(&dims_bytes(*dims));
+                }
+                push(&(samples.len() as u64).to_le_bytes());
+                for (point, value) in samples {
+                    push(&point[0].to_bits().to_le_bytes());
+                    push(&point[1].to_bits().to_le_bytes());
+                    push(&value.to_bits().to_le_bytes());
+                }
+                push(&(triangles.len() as u64).to_le_bytes());
+                for triangle in triangles {
+                    for index in triangle {
+                        push(&index.to_le_bytes());
+                    }
+                }
+                push(&dims_bytes(*dims));
+            }
         }
         for (axis, &(lo, hi)) in self.validity.bounds() {
             push(axis.as_bytes());
@@ -1141,20 +1234,36 @@ impl ClaimSet {
                 axis: "typed validity domain".into(),
             });
         }
-        if let PropertyValue::Curve {
-            abscissa,
-            abscissa_dims,
-            ..
-        } = &claim.value
-            && let Some(quantity) = claim.validity.axis_quantities().get(abscissa)
-            && quantity.dims() != *abscissa_dims
-        {
-            return Err(MatDbError::AxisQuantityMismatch {
-                property: claim.key.name().to_owned(),
-                axis: abscissa.clone(),
-                expected: Some(*quantity),
-                found: Some(QuantitySpec::dimensional(*abscissa_dims)),
-            });
+        for (axis, dims) in claim.value.axes() {
+            if let Some(quantity) = claim.validity.axis_quantities().get(axis)
+                && quantity.dims() != dims
+            {
+                return Err(MatDbError::AxisQuantityMismatch {
+                    property: claim.key.name().to_owned(),
+                    axis: axis.to_owned(),
+                    expected: Some(*quantity),
+                    found: Some(QuantitySpec::dimensional(dims)),
+                });
+            }
+        }
+        if let PropertyValue::Surface2D { axes, samples, .. } = &claim.value {
+            for (index, axis) in axes.iter().enumerate() {
+                let Some(&(lo, hi)) = claim.validity.bounds().get(axis) else {
+                    return Err(MatDbError::MalformedSurface {
+                        reason: "both surface axes require explicit validity bounds",
+                    });
+                };
+                if !lo.is_finite()
+                    || !hi.is_finite()
+                    || samples
+                        .iter()
+                        .any(|(point, _)| point[index] < lo || point[index] > hi)
+                {
+                    return Err(MatDbError::MalformedSurface {
+                        reason: "finite surface validity bounds must enclose every source sample",
+                    });
+                }
+            }
         }
         let found = claim.value.dims();
         if found != claim.key.dims() {
@@ -1178,6 +1287,11 @@ impl ClaimSet {
                 PropertyValue::Curve { knots, .. } => {
                     for &(_, value) in knots {
                         validate(value)?;
+                    }
+                }
+                PropertyValue::Surface2D { samples, .. } => {
+                    for (_, value) in samples {
+                        validate(*value)?;
                     }
                 }
             }

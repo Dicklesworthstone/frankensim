@@ -30,6 +30,8 @@ pub const MATDB_TENSOR_PACK_SCHEMA_VERSION: u32 = 5;
 pub const MATDB_STRAIN_PACK_SCHEMA_VERSION: u32 = 6;
 /// Preserves symmetric Cauchy stress coordinates separately from stiffness.
 pub const MATDB_STRESS_PACK_SCHEMA_VERSION: u32 = 7;
+/// Explicit two-coordinate scalar responses and source sample components.
+pub const MATDB_SURFACE_PACK_SCHEMA_VERSION: u32 = 8;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
@@ -69,6 +71,18 @@ pub enum StatisticComponent {
         /// Zero-based knot index.
         knot: u32,
     },
+    /// One source sample's coordinate on a two-coordinate response.
+    SurfaceCoordinate {
+        /// Zero-based sample index.
+        sample: u32,
+        /// Source coordinate index, zero or one.
+        axis: u8,
+    },
+    /// One two-coordinate source sample's ordinate.
+    SurfaceOrdinate {
+        /// Zero-based sample index.
+        sample: u32,
+    },
 }
 
 /// Exact scalar/curve component named by a covariance matrix row or column.
@@ -103,6 +117,24 @@ impl StatisticMember {
         Self {
             claim,
             component: StatisticComponent::CurveOrdinate { knot },
+        }
+    }
+
+    /// One two-coordinate sample's source coordinate.
+    #[must_use]
+    pub const fn surface_coordinate(claim: ClaimId, sample: u32, axis: u8) -> Self {
+        Self {
+            claim,
+            component: StatisticComponent::SurfaceCoordinate { sample, axis },
+        }
+    }
+
+    /// One two-coordinate sample's ordinate.
+    #[must_use]
+    pub const fn surface_ordinate(claim: ClaimId, sample: u32) -> Self {
+        Self {
+            claim,
+            component: StatisticComponent::SurfaceOrdinate { sample },
         }
     }
 
@@ -547,6 +579,13 @@ impl NormalizedPack {
         if self
             .claims
             .claims_ordered()
+            .any(|(_, claim)| matches!(claim.value, PropertyValue::Surface2D { .. }))
+        {
+            return MATDB_SURFACE_PACK_SCHEMA_VERSION;
+        }
+        if self
+            .claims
+            .claims_ordered()
             .any(|(_, claim)| claim.key.stress_component().is_some())
         {
             return MATDB_STRESS_PACK_SCHEMA_VERSION;
@@ -704,9 +743,9 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_STRESS_PACK_SCHEMA_VERSION).contains(&version) {
+        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_SURFACE_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected 1, 2, 3 (typed axes), 4 (hardness test), or 5 (elastic tensor context)"
+                "unsupported schema version {version}; expected schema 1..=8"
             )));
         }
         let pack_id = reader.string()?;
@@ -761,7 +800,7 @@ impl NormalizedPack {
             )?;
             let mut members = Vec::with_capacity(member_count);
             for _ in 0..member_count {
-                members.push(decode_statistic_member(&mut reader)?);
+                members.push(decode_statistic_member(&mut reader, version)?);
             }
             let triangle = triangle_len(member_count)?;
             let covariance = reader.fixed_f64s(triangle)?;
@@ -790,7 +829,7 @@ impl NormalizedPack {
         let mut normalizations = Vec::with_capacity(normalization_count);
         for _ in 0..normalization_count {
             normalizations.push(NormalizationReceipt::new(
-                decode_normalization_target(&mut reader)?,
+                decode_normalization_target(&mut reader, version)?,
                 reader.hash()?,
                 reader.dims()?,
                 reader.f64()?,
@@ -822,7 +861,9 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_STRESS_PACK_SCHEMA_VERSION {
+    if version == MATDB_SURFACE_PACK_SCHEMA_VERSION {
+        "org.frankensim.fs-matdb.normalized-pack.v8"
+    } else if version == MATDB_STRESS_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v7"
     } else if version == MATDB_STRAIN_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v6"
@@ -949,6 +990,16 @@ fn validate_claim_set(claims: &ClaimSet) -> Result<(), PackError> {
         require_text("claim.key.name", claim.key.name())?;
         match &claim.value {
             PropertyValue::Scalar { value, .. } => portable(*value, "claim.scalar")?,
+            PropertyValue::Surface2D { axes, samples, .. } => {
+                for axis in axes {
+                    require_text("claim.surface.axis", axis)?;
+                }
+                for (point, value) in samples {
+                    portable(point[0], "claim.surface.coordinate")?;
+                    portable(point[1], "claim.surface.coordinate")?;
+                    portable(*value, "claim.surface.ordinate")?;
+                }
+            }
             PropertyValue::Curve {
                 abscissa, knots, ..
             } => {
@@ -1157,13 +1208,28 @@ fn statistic_member_dims_at(
             validate_knot_index(knot, knots.len(), field)?;
             Ok(*dims)
         }
-        (PropertyValue::Scalar { .. }, component) => Err(invalid(
+        (
+            PropertyValue::Surface2D {
+                samples, axis_dims, ..
+            },
+            StatisticComponent::SurfaceCoordinate { sample, axis },
+        ) => {
+            validate_knot_index(sample, samples.len(), field)?;
+            axis_dims
+                .get(usize::from(axis))
+                .copied()
+                .ok_or_else(|| invalid(field, "surface coordinate index must be zero or one"))
+        }
+        (
+            PropertyValue::Surface2D { samples, dims, .. },
+            StatisticComponent::SurfaceOrdinate { sample },
+        ) => {
+            validate_knot_index(sample, samples.len(), field)?;
+            Ok(*dims)
+        }
+        (_, component) => Err(invalid(
             field,
-            format!("scalar claim cannot supply component {component:?}"),
-        )),
-        (PropertyValue::Curve { .. }, StatisticComponent::Scalar) => Err(invalid(
-            field,
-            "curve claim requires an explicit abscissa/ordinate knot component",
+            format!("claim payload cannot supply component {component:?}"),
         )),
     }
 }
@@ -1998,15 +2064,33 @@ fn encode_statistic_member(writer: &mut Writer, member: StatisticMember) {
             writer.u8(2);
             writer.u32(knot);
         }
+        StatisticComponent::SurfaceCoordinate { sample, axis } => {
+            writer.u8(3);
+            writer.u32(sample);
+            writer.u8(axis);
+        }
+        StatisticComponent::SurfaceOrdinate { sample } => {
+            writer.u8(4);
+            writer.u32(sample);
+        }
     }
 }
 
-fn decode_statistic_member(reader: &mut Reader<'_>) -> Result<StatisticMember, PackError> {
+fn decode_statistic_member(
+    reader: &mut Reader<'_>,
+    version: u32,
+) -> Result<StatisticMember, PackError> {
     let claim = ClaimId(reader.hash()?);
     match reader.u8()? {
         0 => Ok(StatisticMember::scalar(claim)),
         1 => Ok(StatisticMember::curve_abscissa(claim, reader.u32()?)),
         2 => Ok(StatisticMember::curve_ordinate(claim, reader.u32()?)),
+        3 if version >= MATDB_SURFACE_PACK_SCHEMA_VERSION => Ok(
+            StatisticMember::surface_coordinate(claim, reader.u32()?, reader.u8()?),
+        ),
+        4 if version >= MATDB_SURFACE_PACK_SCHEMA_VERSION => {
+            Ok(StatisticMember::surface_ordinate(claim, reader.u32()?))
+        }
         tag => Err(reader.malformed(format!("unknown statistic-component tag {tag}"))),
     }
 }
@@ -2045,10 +2129,13 @@ fn encode_normalization_target(writer: &mut Writer, target: &NormalizationTarget
     }
 }
 
-fn decode_normalization_target(reader: &mut Reader<'_>) -> Result<NormalizationTarget, PackError> {
+fn decode_normalization_target(
+    reader: &mut Reader<'_>,
+    version: u32,
+) -> Result<NormalizationTarget, PackError> {
     match reader.u8()? {
         0 => Ok(NormalizationTarget::ClaimValue(decode_statistic_member(
-            reader,
+            reader, version,
         )?)),
         1 => Ok(NormalizationTarget::ClaimUncertainty {
             claim: ClaimId(reader.hash()?),
@@ -2197,6 +2284,32 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
             }
             writer.dims(*dims);
         }
+        PropertyValue::Surface2D {
+            axes,
+            axis_dims,
+            samples,
+            triangles,
+            dims,
+        } => {
+            writer.u8(2);
+            for (axis, dims) in axes.iter().zip(axis_dims) {
+                writer.string(axis);
+                writer.dims(*dims);
+            }
+            writer.count(samples.len());
+            for (point, value) in samples {
+                writer.f64(point[0]);
+                writer.f64(point[1]);
+                writer.f64(*value);
+            }
+            writer.count(triangles.len());
+            for triangle in triangles {
+                for index in triangle {
+                    writer.u32(*index);
+                }
+            }
+            writer.dims(*dims);
+        }
     }
     writer.count(claim.validity.bounds().len());
     for (axis, &(lo, hi)) in claim.validity.bounds() {
@@ -2326,7 +2439,10 @@ fn decode_claim_key(reader: &mut Reader<'_>, version: u32) -> Result<PropertyKey
     Ok(key)
 }
 
-fn decode_property_value(reader: &mut Reader<'_>) -> Result<PropertyValue, PackError> {
+fn decode_property_value(
+    reader: &mut Reader<'_>,
+    version: u32,
+) -> Result<PropertyValue, PackError> {
     Ok(match reader.u8()? {
         0 => PropertyValue::Scalar {
             value: reader.f64()?,
@@ -2351,13 +2467,39 @@ fn decode_property_value(reader: &mut Reader<'_>) -> Result<PropertyValue, PackE
                 dims: reader.dims()?,
             }
         }
+        2 if version >= MATDB_SURFACE_PACK_SCHEMA_VERSION => {
+            let axes_and_dims = [
+                (reader.string()?, reader.dims()?),
+                (reader.string()?, reader.dims()?),
+            ];
+            let [(first, first_dims), (second, second_dims)] = axes_and_dims;
+            let sample_count = reader.count("surface_samples", crate::MAX_SURFACE_SAMPLES)?;
+            reader.require_items(sample_count, 24, "surface samples")?;
+            let mut samples = Vec::with_capacity(sample_count);
+            for _ in 0..sample_count {
+                samples.push(([reader.f64()?, reader.f64()?], reader.f64()?));
+            }
+            let triangle_count = reader.count("surface_triangles", crate::MAX_SURFACE_TRIANGLES)?;
+            reader.require_items(triangle_count, 12, "surface triangles")?;
+            let mut triangles = Vec::with_capacity(triangle_count);
+            for _ in 0..triangle_count {
+                triangles.push([reader.u32()?, reader.u32()?, reader.u32()?]);
+            }
+            PropertyValue::Surface2D {
+                axes: [first, second],
+                axis_dims: [first_dims, second_dims],
+                samples,
+                triangles,
+                dims: reader.dims()?,
+            }
+        }
         tag => return Err(reader.malformed(format!("unknown property-value tag {tag}"))),
     })
 }
 
 fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, PackError> {
     let key = decode_claim_key(reader, version)?;
-    let value = decode_property_value(reader)?;
+    let value = decode_property_value(reader, version)?;
     let validity_count = reader.count("validity_axes", MAX_VALIDITY_AXES)?;
     let mut validity = ValidityDomain::unconstrained();
     let mut previous_axis: Option<String> = None;

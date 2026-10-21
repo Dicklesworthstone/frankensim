@@ -611,6 +611,76 @@ fn dynamic_wetting_card(
     .expect("dynamic wetting fixture assembles")
 }
 
+#[test]
+fn dynamic_wetting_surface_retains_temperature_speed_response_and_speed_dimensions() {
+    for speed_dims in [DYNAMIC_WETTING_SPEED_DIMS, Dims::NONE] {
+        let mut receding = dynamic_angle_claim(
+            RECEDING_CONTACT_ANGLE_PROPERTY,
+            (60.0, 70.0),
+            Dims::NONE,
+            "manufactured simultaneous temperature and contact-line-speed response",
+        );
+        receding.value = PropertyValue::Surface2D {
+            axes: ["T".into(), DYNAMIC_WETTING_SPEED_AXIS.into()],
+            axis_dims: [Dims([0, 0, 0, 1, 0, 0]), speed_dims],
+            samples: [[280.0, 0.0], [320.0, 0.0], [280.0, 1.0], [320.0, 1.0]]
+                .into_iter()
+                .map(|at| {
+                    let degrees: f64 = 60.0 + 0.1 * (at[0] - 280.0) + 10.0 * at[1];
+                    (at, degrees.to_radians())
+                })
+                .collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: Dims::NONE,
+        };
+        let card = dynamic_wetting_card(
+            vec![
+                receding,
+                dynamic_angle_claim(
+                    ADVANCING_CONTACT_ANGLE_PROPERTY,
+                    (90.0, 110.0),
+                    Dims::NONE,
+                    "manufactured advancing speed response",
+                ),
+            ],
+            false,
+            "virgin",
+        );
+        for temperature in [290.0, 310.0] {
+            for speed in [0.25, 0.75] {
+                let query = QueryPoint::new().with("T", temperature).unwrap();
+                let answer = query_dynamic_wetting2(
+                    &card,
+                    &query,
+                    -speed,
+                    0.01,
+                    SelectionPolicy::SingleClaimOnly,
+                );
+                if speed_dims == Dims::NONE {
+                    assert!(matches!(
+                        answer,
+                        Err(DynamicWettingError2::ContactLineSpeedDimsMismatch {
+                            property: RECEDING_CONTACT_ANGLE_PROPERTY,
+                            dims: Dims::NONE,
+                        })
+                    ));
+                } else {
+                    let answer = answer.unwrap();
+                    let expected: f64 = 60.0 + 0.1 * (temperature - 280.0) + 10.0 * speed;
+                    assert!(
+                        (answer.receding.evidence.value.value - expected.to_radians()).abs()
+                            < 1e-14
+                    );
+                    card.claims()
+                        .verify_receipt(&answer.receding.receipt)
+                        .unwrap();
+                    assert_eq!(answer.receding.receipt.schema_version, 4);
+                }
+            }
+        }
+    }
+}
+
 fn room_temperature_query() -> QueryPoint {
     QueryPoint::new()
         .with("T", 300.0)

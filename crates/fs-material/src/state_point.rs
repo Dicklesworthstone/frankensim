@@ -328,8 +328,8 @@ pub struct ResolvedScalarProperty {
     requirement: ScalarPropertyRequirement,
     answer: MaterialAnswer,
     // Derived only from the exact selected claim, already bound by the receipt
-    // and card identities. A sampled value alone cannot establish this axis.
-    source_curve_axis: Option<(String, Dims)>,
+    // and card identities. A sampled value alone cannot establish these axes.
+    source_axes: Vec<(String, Dims)>,
 }
 
 impl ResolvedScalarProperty {
@@ -351,12 +351,20 @@ impl ResolvedScalarProperty {
         &self.answer
     }
 
+    /// Independent coordinates of the selected source model, in source order.
+    /// Applicability coordinates without a declared value dependence are not
+    /// included. An evaluated surface remains a two-axis law, even at a vertex.
+    #[must_use]
+    pub fn source_axes(&self) -> &[(String, Dims)] {
+        &self.source_axes
+    }
+
     /// Whether this source supplies a constant coefficient when temperature is
     /// held at the resolved state. Accepts validity-wide scalar constants or
     /// positive absolute-temperature curves. A semantic AbsoluteTemperature/Static
     /// descriptor identifies a temperature axis under any source name; legacy
     /// untyped or purely dimensional temperature coordinates require the name T.
-    /// Other curves, including frequency under any axis name, are not frozen.
+    /// Other curves and multiaxis surfaces are not frozen.
     ///
     /// This classifies the declared source model, not its physical accuracy.
     /// The consumer must still intersect all coefficient applicability domains
@@ -365,8 +373,11 @@ impl ResolvedScalarProperty {
     #[must_use]
     pub fn is_constant_at_fixed_temperature(&self) -> bool {
         use fs_matdb::EvaluationDecision;
-        let Some((axis, dims)) = &self.source_curve_axis else {
+        if self.source_axes.is_empty() {
             return self.answer.receipt.decision == EvaluationDecision::ConstantWithinValidity;
+        }
+        let [(axis, dims)] = self.source_axes.as_slice() else {
+            return false;
         };
         if *dims != fs_qty::Temperature::DIMS
             || !matches!(
@@ -821,22 +832,17 @@ fn resolve_scalar_property_set(
                 property: requirement.name.clone(),
                 source,
             })?;
-        let source_curve_axis = match &claims
+        let source_axes = claims
             .claim(answer.receipt.selected)
             .expect("successful query selected a claim from this immutable set")
             .value
-        {
-            fs_matdb::PropertyValue::Scalar { .. } => None,
-            fs_matdb::PropertyValue::Curve {
-                abscissa,
-                abscissa_dims,
-                ..
-            } => Some((abscissa.clone(), *abscissa_dims)),
-        };
+            .axes()
+            .map(|(axis, dims)| (axis.to_owned(), dims))
+            .collect();
         properties.push(ResolvedScalarProperty {
             requirement,
             answer,
-            source_curve_axis,
+            source_axes,
         });
     }
     properties.sort_by(|left, right| {
@@ -1417,6 +1423,11 @@ pub fn integrate_isotropic_thermal_expansion(
         fs_matdb::PropertyValue::Curve { .. } => {
             return Err(MaterialStatePointError::InvalidDerived {
                 quantity: "thermal-expansion curve abscissa must be T",
+            });
+        }
+        fs_matdb::PropertyValue::Surface2D { .. } => {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "thermal-expansion surface requires supported path integration",
             });
         }
     };

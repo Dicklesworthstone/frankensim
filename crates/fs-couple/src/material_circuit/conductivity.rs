@@ -5,7 +5,7 @@
 //! restarts from the same accepted charge/flux. Only the original electrical
 //! solver advances time and accounts for source work and Joule heat.
 
-use fs_matdb::{MaterialCard, PropertyValue};
+use fs_matdb::MaterialCard;
 use fs_material::conductor::{ConductorError, ResolvedConductor, ResolvedConductorState};
 use fs_qty::{Dims, QuantitySpec};
 
@@ -254,31 +254,23 @@ fn admit<'a, 'b>(
             }
         }
         // A legacy untyped query must not hide the independent field variable
-        // recorded by its original constitutive curve.
+        // recorded by its original constitutive response.
         for property in material.properties() {
             let claim = binding
                 .card
                 .claims()
                 .claim(property.answer().receipt.selected)
                 .ok_or_else(|| invalid("conductivity bundle lost its selected claim"))?;
-            if let PropertyValue::Curve {
-                abscissa,
-                abscissa_dims,
-                ..
-            } = &claim.value
-            {
+            for (name, dims) in claim.value.axes() {
                 if [
                     ConductionCoordinate::ElectricField.dimensions(),
                     ConductionCoordinate::CurrentDensity.dimensions(),
                 ]
-                .contains(abscissa_dims)
-                    && !binding
-                        .axes
-                        .iter()
-                        .any(|axis| axis.name == abscissa.as_str())
+                .contains(&dims)
+                    && !binding.axes.iter().any(|axis| axis.name == name)
                 {
                     return Err(invalid(
-                        "a source curve's electrical coordinate cannot remain frozen",
+                        "a source law's electrical coordinate cannot remain frozen",
                     ));
                 }
             }

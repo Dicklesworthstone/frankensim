@@ -107,3 +107,46 @@ fn malformed_joint_bands_and_temperature_coordinates_refuse() {
         assert!(query_point(&dry(), "T", t, StatePoint::Nominal).is_err());
     }
 }
+
+#[test]
+fn surface_point_support_preserves_both_legacy_coordinate_dimensions() {
+    let state = InterfaceState::DryContact {
+        pressure: QtyAny::new(1.0e6, dims::PRESSURE),
+        pressure_half_width: QtyAny::new(0.0, dims::PRESSURE),
+        finish: "machined".into(),
+    };
+    for (axis_dims, accepted) in [
+        ([dims::TEMPERATURE, dims::PRESSURE], true),
+        ([dims::PRESSURE, dims::PRESSURE], false),
+        ([dims::TEMPERATURE, dims::TEMPERATURE], false),
+    ] {
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(crate::CONTACT_RESISTANCE_PROPERTY, crate::CONTACT_RESISTANCE_DIMS),
+            value: PropertyValue::Surface2D {
+                axes: ["T".into(), "normal_pressure".into()],
+                axis_dims,
+                samples: vec![([300.0, 1.0e6], 0.1)],
+                triangles: vec![],
+                dims: crate::CONTACT_RESISTANCE_DIMS,
+            },
+            validity: fs_evidence::ValidityDomain::unconstrained()
+                .with("T", 300.0, 300.0)
+                .with("normal_pressure", 1.0e6, 1.0e6),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::TabulatedOnly,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured exact interface state".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        }).unwrap();
+        let result = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &state,
+            "T", 300.0, 300.0, SINGLE);
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            assert!(matches!(result, Err(PropertySupportError::InvalidEnvelope { .. })));
+        }
+    }
+}

@@ -1,7 +1,7 @@
 //! Ordered material data and original caloric/history ownership for dry sliding.
 use super::*;
 use fs_contact::interface_binding::{BoundDryInterfaceSystem, bind_dry_interface_system_card};
-use fs_matdb::{PropertyValue, QueryPoint};
+use fs_matdb::QueryPoint;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_material::state_point::{
     MaterialPropertySelection, ResolvedInterfaceStatePoint, ScalarAdmissibility,
@@ -270,22 +270,15 @@ fn sample<E>(
             .ok_or(SlidingError::Invalid(
                 "selected friction claim is absent from its original interface",
             ))?;
-        match &claim.value {
-            PropertyValue::Scalar { .. } => {}
-            PropertyValue::Curve {
-                abscissa,
-                abscissa_dims,
-                ..
-            } if data.point.is_thermal_axis(abscissa, *abscissa_dims)
-                || abscissa == data.pressure_axis && *abscissa_dims == Pressure::DIMS
-                || abscissa == data.speed_axis && *abscissa_dims == SPEED_DIMS
-                || Some(abscissa.as_str()) == data.accumulated_distance_axis
-                    && *abscissa_dims == LENGTH_DIMS => {}
-            _ => {
-                return Err(SlidingError::Invalid(
-                    "friction curve must follow a declared physical state coordinate",
-                ));
-            }
+        if !claim.value.axes().all(|(axis, dims)| {
+            data.point.is_thermal_axis(axis, dims)
+                || axis == data.pressure_axis && dims == Pressure::DIMS
+                || axis == data.speed_axis && dims == SPEED_DIMS
+                || Some(axis) == data.accumulated_distance_axis && dims == LENGTH_DIMS
+        }) {
+            return Err(SlidingError::Invalid(
+                "friction source must follow declared physical state coordinates",
+            ));
         }
         if property
             .angular_frequency_band_rad_s()?

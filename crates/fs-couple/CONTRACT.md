@@ -3109,7 +3109,7 @@ obtains actual bulk branch voltage/current, and refreshes the complete original
 material bundle through `ResolvedMaterialStatePoint::at_query_point`. Geometry,
 source basis, selected claims, requirements and other physical coordinates
 remain explicit. Signed and magnitude axes are separate authored choices; a
-curve that requires an electrical operating axis cannot silently freeze it.
+source law that requires an electrical operating axis cannot silently freeze it.
 
 Admission requires resistance consistency and an independent constitutive
 power gate. The original native circuit step remains the sole owner of charge,
@@ -3144,8 +3144,10 @@ evaluation at the joint temperature/field/current state. Thermal-only circuit
 members preserve their original query schema without dummy field coordinates.
 
 The existing first-order endpoint-thermal/midpoint-electrical discretization,
-fixed geometry/C/L, lumped bulk heating and explicit single-axis source-law
-limitations still apply. A two-resistor finite-capacitor fixture independently
+fixed geometry/C/L and lumped bulk heating limitations still apply. Scalar
+response surfaces may depend simultaneously on temperature and an explicitly
+owned field or current coordinate, using the canonical material evaluator and
+only its source-declared interpolation cells. A two-resistor finite-capacitor fixture independently
 eliminates the coupled field and temperature laws and two-cell enthalpy
 equations; regressions cover data-only substitutions, energy balance, replay
 and atomic refusal. Equation checks do not substitute for native test execution.
@@ -3180,7 +3182,19 @@ owners. Focused regressions cover k(E) and k(J) substitutions, independently
 eliminated coupled equations over two accepted intervals, exact source-sample
 equality, series conductance, native Joule accounting and solved-field source
 refusal. These synthetic numerical cases do not establish measured material
-accuracy or extend the fixed-geometry, scalar conduction model.
+accuracy or extend the fixed-geometry, scalar conduction model. A two-coordinate
+regression additionally changes both resistivity and thermal conductivity with
+the same actual temperature and field, retaining exact thermal/electrical
+source-sample equality through two accepted intervals.
+
+The same `PropertyValue::axes()` metadata admission applies to the existing
+tribothermal, electrical-contact and plastic-contact material owners. Every
+source coordinate must still have an explicitly owned, correctly dimensioned
+physical state. A temperature/sliding-speed friction surface therefore feeds
+the original coupled momentum/finite-enthalpy residual; it does not create a
+second friction law or convert numerical loss into heat. The force-driven
+surface regression independently checks the resulting velocity, heating and
+momentum under data-only speed-slope changes.
 
 ## Reciprocal material electric and magnetic gap motion
 

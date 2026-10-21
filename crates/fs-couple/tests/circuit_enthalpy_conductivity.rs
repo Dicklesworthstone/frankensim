@@ -1,5 +1,5 @@
 //! G1/G3: source-backed nonlinear conduction and finite heat on the real owners.
-//! The two authored one-axis laws below are synthetic numerical fixtures.
+//! The authored curves and surfaces below are synthetic numerical fixtures.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 
@@ -855,6 +855,191 @@ fn g3_solved_field_and_current_heat_transport_close_data_only_feedback_and_conti
         assert!(endpoints[1].1 > endpoints[0].1);
         assert!(endpoints[1].2 < endpoints[0].2);
     }
+}
+
+fn thermo_field_material(beta: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    let (base, _) = common::material(1.0, 1.0, 0.0);
+    let mut claims = ClaimSet::new();
+    for (_, original) in base.claims().claims_ordered() {
+        let mut claim = original.clone();
+        let slopes = match claim.key.name() {
+            ELECTRICAL_RESISTIVITY_PROPERTY => Some((0.004, beta)),
+            "thermal_conductivity" => Some((0.002, 0.3)),
+            _ => None,
+        };
+        if let Some((temperature_slope, field_slope)) = slopes {
+            claim.value = PropertyValue::Surface2D {
+                axes: ["T".into(), "E".into()],
+                axis_dims: [Temperature::DIMS, FIELD],
+                samples: [[200.0, 0.0], [500.0, 0.0], [500.0, 20.0], [200.0, 20.0]]
+                    .into_iter()
+                    .map(|[t, e]| {
+                        (
+                            [t, e],
+                            1.0 + temperature_slope * (t - 300.0) + field_slope * e,
+                        )
+                    })
+                    .collect(),
+                triangles: vec![[0, 1, 2], [0, 2, 3]],
+                dims: claim.key.quantity().dims(),
+            };
+            claim.validity = claim
+                .validity
+                .with_quantity(
+                    "T",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    200.0,
+                    500.0,
+                )
+                .with_quantity("E", QuantitySpec::dimensional(FIELD), 0.0, 20.0);
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+    let curve = field_caloric(&card);
+    (card, curve)
+}
+
+#[test]
+fn g3_two_coordinate_material_surfaces_close_electrical_and_thermal_feedback() {
+    let mut endpoints = Vec::new();
+    for beta in [0.02, 0.08] {
+        let (a, ca) = thermo_field_material(beta);
+        let (b, cb) = common::material(3.0, 2.0, 0.005);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let thermal = initial(&curves, 1.0, None);
+        let context = [query(300.0), point(300.0)];
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let cells = network_cells(&cards, &curves, &context, &key);
+        let resistors = network_resistors();
+        let network = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &NETWORK_LINKS,
+        };
+        let responses = network_responses();
+        let prepared = network
+            .prepare_conductivity(&thermal, &responses, || false)
+            .unwrap();
+        let seeds = prepared
+            .resolve_conductivity_seeds(&thermal, &responses, || false)
+            .unwrap();
+        let electrical = circuit_from_complete_seeds(seeds.resistors);
+        let mut old_thermal = thermal.clone();
+        let mut old_circuit = electrical.clone();
+        for interval in 1..=2 {
+            let result = prepared
+                .conductivity_candidate(
+                    &old_thermal,
+                    f64::from(interval) * 0.2,
+                    &old_circuit,
+                    &[],
+                    &responses,
+                    config(),
+                    conductivity_controls(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            let ta = result
+                .thermal()
+                .temperature_k(DESTINATIONS[0].cell)
+                .unwrap();
+            let tb = result
+                .thermal()
+                .temperature_k(DESTINATIONS[1].cell)
+                .unwrap();
+            let q = result.circuit().charges_c()[0];
+            let q0 = old_circuit.charges_c()[0];
+            let current = (q0 - q) / 0.2;
+            // Independent elimination of E=I*rho for the manufactured law,
+            // with rho0=L=A=1. Both T and E must affect the actual resistance.
+            let ra = (1.0 + 0.004 * (ta - 300.0)) / (1.0 - beta * current);
+            let rb = 3.0 * (1.0 + 0.005 * (tb - 300.0));
+            let field = current * ra;
+            let k = 1.0 + 0.002 * (ta - 300.0) + 0.3 * field;
+            let g = 1.0 / (0.5 / k + 0.5);
+            let delta_a = ta - old_thermal.temperature_k(DESTINATIONS[0].cell).unwrap();
+            let delta_b = tb - old_thermal.temperature_k(DESTINATIONS[1].cell).unwrap();
+            near(current * (ra + rb), 0.5 * (q0 + q));
+            near(delta_a, 0.2 * (current * current * ra + g * (tb - ta)));
+            near(
+                2.0 * delta_b,
+                0.2 * (current * current * rb + g * (ta - tb)),
+            );
+            near(0.5 * (q * q - q0 * q0) + delta_a + 2.0 * delta_b, 0.0);
+
+            let report = result.report();
+            let evaluated = &report.electrical.evaluated[0];
+            let bundle = evaluated.conductor.material();
+            near(evaluated.point.current_a, current);
+            near(evaluated.point.electric_field_v_m.abs(), field);
+            near(bundle.state_coordinate("T").unwrap(), ta);
+            near(bundle.state_coordinate("E").unwrap(), field);
+            assert_eq!(
+                bundle.axis_quantities().get("T"),
+                Some(&QuantitySpec::dimensional(Temperature::DIMS))
+            );
+            assert_eq!(
+                bundle.axis_quantities().get("E"),
+                Some(&QuantitySpec::dimensional(FIELD))
+            );
+            near(
+                bundle
+                    .property(ELECTRICAL_RESISTIVITY_PROPERTY)
+                    .unwrap()
+                    .value_si(),
+                ra,
+            );
+            near(
+                bundle.property("thermal_conductivity").unwrap().value_si(),
+                k,
+            );
+            for property in bundle.properties() {
+                assert_eq!(
+                    property.source_axes(),
+                    &[("T".into(), Temperature::DIMS), ("E".into(), FIELD)]
+                );
+                let pinned = electrical.resistors()[0]
+                    .conductor
+                    .material()
+                    .property(property.requirement().name())
+                    .unwrap();
+                assert_eq!(
+                    property.answer().receipt.selected,
+                    pinned.answer().receipt.selected
+                );
+            }
+            let sample = report
+                .source
+                .cells
+                .iter()
+                .find(|sample| sample.cell == DESTINATIONS[0].cell)
+                .unwrap();
+            assert_eq!(sample.conductivity.as_ref().unwrap(), bundle);
+            near(report.source.links[0].conductivity_w_m_k[0], k);
+            near(report.source.links[0].conductance_w_k, g);
+            let native = &report.electrical.electrical;
+            near(native.resistors[0].material.conductor.resistance_ohm(), ra);
+            near(native.resistors[0].heat_j, 0.2 * current * current * ra);
+            near(native.resistors[1].heat_j, 0.2 * current * current * rb);
+            near(native.heat_j, 0.5 * (q0 * q0 - q * q));
+            near(report.deposited_joule_j, native.heat_j);
+            near(report.total_energy_residual_j, 0.0);
+            if interval == 1 {
+                endpoints.push((q, ta, tb));
+            }
+            let (warm, charged, _) = result.into_parts();
+            old_thermal = warm;
+            old_circuit = charged;
+        }
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(electrical.charges_c(), &[10.0]);
+    }
+    assert!(endpoints[1].0 > endpoints[0].0 + 1e-3);
+    assert!((endpoints[1].1 - endpoints[0].1).abs() > 1e-3);
+    assert!((endpoints[1].2 - endpoints[0].2).abs() > 1e-3);
 }
 
 #[test]

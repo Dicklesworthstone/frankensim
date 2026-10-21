@@ -31,7 +31,7 @@ deprecation horizon.
 | `euler.protocol` | `fs-euler-disc-e2e` | `EULER_PROTOCOL_SCHEMA_VERSION` | 1 |
 | `scenario.ir` | `fs-scenario` | `SCENARIO_IR_VERSION` | 2 |
 | `scenario.assembly` | `fs-scenario` | `ASSEMBLY_DESCRIPTION_SCHEMA_VERSION` | 1 |
-| `matdb.pack` | `fs-matdb` | `MATDB_STRESS_PACK_SCHEMA_VERSION` | 7 |
+| `matdb.pack` | `fs-matdb` | `MATDB_SURFACE_PACK_SCHEMA_VERSION` | 8 |
 | `ledger.schema` | `fs-ledger` | `SCHEMA_VERSION` | 20 |
 | `sbom.source_manifest` | `xtask` | `SCHEMA` | `frankensim-source-manifest-v1` |
 | `maturity.registry` | `xtask` | `REGISTRY_SCHEMA` | `frankensim-capability-maturity-v1` |
@@ -61,7 +61,7 @@ commit. The registry records every current binding:
 | `package.format` | `CHECKER_SUPPORTED_PACKAGE_FORMAT=9`, `CHECKER_DECISION_IDENTITY_VERSION=9`, `SUPPORTED_PACKAGE_FORMAT=9` |
 | `euler.scientific-contract` | `VV_SCHEMA_VERSION=3`, `VV_ARTIFACT_FAMILY="org.frankensim.fs-evidence.vv-artifact.v3"`, `AUTHORITY_ALGEBRA_VERSION=2`, `EXPERIMENT_CAMPAIGN_SCHEMA_VERSION_V1=1` |
 | `scenario.ir` | `LEGACY_SCENARIO_IR_VERSION=1` |
-| `matdb.pack` | `MATDB_PACK_SCHEMA_VERSION=1`, `MATDB_TYPED_PACK_SCHEMA_VERSION=2`, `MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION=3`, `MATDB_HARDNESS_PACK_SCHEMA_VERSION=4`, `MATDB_TENSOR_PACK_SCHEMA_VERSION=5`, `MATDB_STRAIN_PACK_SCHEMA_VERSION=6`, `SPECIES_PACK_SCHEMA_VERSION=1`, `INTERFACE_PACK_SCHEMA_VERSION=1`, `MODEL_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION=2` |
+| `matdb.pack` | `MATDB_PACK_SCHEMA_VERSION=1`, `MATDB_TYPED_PACK_SCHEMA_VERSION=2`, `MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION=3`, `MATDB_HARDNESS_PACK_SCHEMA_VERSION=4`, `MATDB_TENSOR_PACK_SCHEMA_VERSION=5`, `MATDB_STRAIN_PACK_SCHEMA_VERSION=6`, `MATDB_STRESS_PACK_SCHEMA_VERSION=7`, `SPECIES_PACK_SCHEMA_VERSION=1`, `INTERFACE_PACK_SCHEMA_VERSION=1`, `MODEL_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_PACK_SCHEMA_VERSION=1`, `MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION=2` |
 | `sbom.source_manifest` | `SPDX_VERSION="SPDX-2.3"` |
 
 Lockstep values are verified against their declared source locations in the

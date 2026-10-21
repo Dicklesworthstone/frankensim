@@ -130,6 +130,142 @@ fn heat_capacity_data_changes_actual_slowing_through_endpoint_material_friction(
 }
 
 #[test]
+fn two_coordinate_friction_surface_drives_actual_motion_and_finite_heat() {
+    let (a, ca) = common::material(1.0, 0.5, 0.0);
+    let (b, cb) = common::material(1.0, 3.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let point = context();
+    let thermal = common::initial(&curves, 0.0, None);
+    let template = interface_with_static(
+        &cards,
+        0.4,
+        "speed",
+        SPEED,
+        [(0.0, 0.2), (2.0, 0.2)],
+        2000.0,
+    );
+    let mut endpoints = Vec::new();
+    for beta in [0.0, 0.15] {
+        let mut claims = ClaimSet::new();
+        for (_, original) in template.claims().claims_ordered() {
+            let mut claim = original.clone();
+            if claim.key.name() == KINETIC_FRICTION_PROPERTY {
+                claim.value = PropertyValue::Surface2D {
+                    axes: ["Ta".into(), "speed".into()],
+                    axis_dims: [Temperature::DIMS, SPEED],
+                    samples: [[299.0, 0.0], [310.0, 0.0], [310.0, 2.0], [299.0, 2.0]]
+                        .into_iter()
+                        .map(|[t, s]| ([t, s], 0.2 + 0.1 * (t - 300.0) + beta * s))
+                        .collect(),
+                    triangles: vec![[0, 1, 2], [0, 2, 3]],
+                    dims: Dims::NONE,
+                };
+                claim.validity = claim.validity.with_quantity(
+                    "Ta",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    299.0,
+                    310.0,
+                );
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        let card = InterfaceSystemCard::assemble(
+            template.surface_a().clone(),
+            template.surface_b().clone(),
+            template.context().clone(),
+            claims,
+            vec![],
+        )
+        .unwrap();
+        let contact = MaterialSlidingContact::new(
+            &thermal,
+            binding(
+                &cards,
+                &curves,
+                &card,
+                &point,
+                HeatPartition::new(0.5, 0.5, 0.0).unwrap(),
+            ),
+            10.0,
+            1.0,
+            InputAuthority::SyntheticFixture,
+        )
+        .unwrap();
+        let pair = SlidingPair::new(&thermal, contact, [1.0, 0.0]).unwrap();
+        let next = pair
+            .step_candidate(
+                &thermal,
+                0.1,
+                MotionDrive {
+                    normal_load_n: 10.0,
+                    body_forces_n: [0.0; 2],
+                },
+                motion_controls(),
+                0.5,
+                &[0.0; 2],
+                other,
+                || false,
+            )
+            .unwrap();
+        // mA=mB=1, N=10, dt=.1 imply s=1-2*mu and heat=mu*s.
+        // Ca=.5 and half the heat to A give Ta-300=mu*s. Thus
+        // .1*s^2-(1.1+2*beta)*s+.6=0; take its positive small root.
+        let b = 1.1_f64 + 2.0 * beta;
+        let speed = 1.2 / (b + (b * b - 0.24).sqrt());
+        let mu = 0.5 * (1.0 - speed);
+        let heat = mu * speed;
+        let ta = 300.0 + heat;
+        let tb = 300.0 + heat / 6.0;
+        let velocities = next.pair().velocities_mps();
+        close(velocities[0], 1.0 - mu);
+        close(velocities[1], mu);
+        close(next.thermal().temperature_k(CELLS[0]).unwrap(), ta);
+        close(next.thermal().temperature_k(CELLS[1]).unwrap(), tb);
+        let report = next.report();
+        let material = &report.sliding.material.resolved;
+        let property = material.property(KINETIC_FRICTION_PROPERTY).unwrap();
+        close(property.value_si(), 0.2 + 0.1 * (ta - 300.0) + beta * speed);
+        close(property.value_si(), mu);
+        close(material.state_coordinate("Ta").unwrap(), ta);
+        close(
+            material.state_coordinate("speed").unwrap(),
+            velocities[0] - velocities[1],
+        );
+        assert_eq!(
+            property.source_axes(),
+            &[("Ta".into(), Temperature::DIMS), ("speed".into(), SPEED)]
+        );
+        assert_eq!(
+            property.answer().receipt.selected,
+            card.claims_for(KINETIC_FRICTION_PROPERTY)[0].0
+        );
+        assert_eq!(
+            pair.contact().binding().selection,
+            next.pair().contact().binding().selection
+        );
+        close(report.sliding.friction.traction_n[0], 10.0 * mu);
+        close(report.sliding.deposited_heat_j, heat);
+        close(report.sliding.thermal.stored_energy_change_j, heat);
+        close(report.numerical_dissipation_j, mu * mu);
+        close(report.total_energy_residual_j, 0.0);
+        assert!(
+            report
+                .body_momentum_residual_n_s
+                .iter()
+                .all(|r| r.abs() < 1e-8)
+        );
+        close(next.pair().contact().accumulated_distance_m(), 0.1 * speed);
+        assert_eq!(pair.velocities_mps(), [1.0, 0.0]);
+        assert_eq!(pair.contact().work().dissipated_work_j(), 0.0);
+        endpoints.push((velocities[0] - velocities[1], ta));
+    }
+    assert!(endpoints[0].0 - endpoints[1].0 > 0.1);
+    assert!((endpoints[0].1 - endpoints[1].1).abs() > 1e-4);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
 fn late_failures_and_budget_refuse_before_any_motion_or_heat_is_published() {
     let (a, ca) = common::material(1.0, 2.0, 0.0);
     let (b, cb) = common::material(1.0, 3.0, 0.0);

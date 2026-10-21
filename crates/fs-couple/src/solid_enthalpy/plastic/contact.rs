@@ -12,7 +12,7 @@
 use super::*;
 use fs_conduction::ConductionError;
 use fs_conduction::interface::{InterfaceResistance, SeriesThermalResistance};
-use fs_matdb::{ClaimId, PropertyValue};
+use fs_matdb::ClaimId;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_material::thermal::source::ThermalMaterialError;
@@ -353,19 +353,13 @@ impl<'m> ThermoplasticSolid<'m> {
                     }
                 }
             }
-            match &claim.value {
-                PropertyValue::Scalar { .. } => {}
-                PropertyValue::Curve {
-                    abscissa,
-                    abscissa_dims,
-                    ..
-                } if (abscissa == axis && *abscissa_dims == Pressure::DIMS)
-                    || binding.point.is_thermal_axis(abscissa, *abscissa_dims) => {}
-                _ => {
-                    return Err(ContactError::Invalid(
-                        "contact resistance must follow declared static pressure/thermal coordinates",
-                    ));
-                }
+            if !claim.value.axes().all(|(name, dims)| {
+                (name == axis && dims == Pressure::DIMS)
+                    || binding.point.is_thermal_axis(name, dims)
+            }) {
+                return Err(ContactError::Invalid(
+                    "contact resistance must follow declared static pressure/thermal coordinates",
+                ));
             }
             // Admission uses actual accepted stress/temperatures, never a stale
             // pressure copied from the card context. Trials retain the same pin.

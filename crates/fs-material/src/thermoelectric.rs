@@ -138,6 +138,9 @@ impl ResolvedSeebeckSpan {
                         }
                         mean
                     }
+                    PropertyValue::Surface2D { .. } => {
+                        return Err(invalid("Seebeck surface requires supported path integration"));
+                    }
                 }
             };
             if !value.is_finite() || value != 0.0 && start != end && value * (end - start) == 0.0 {

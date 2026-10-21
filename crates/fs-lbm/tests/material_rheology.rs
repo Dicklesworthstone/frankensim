@@ -272,6 +272,17 @@ fn card_curve(
     knots: Vec<(f64, f64)>,
     thermal_scale: f64,
 ) -> MaterialCard {
+    card_value(
+        PropertyValue::Curve {
+            abscissa: axis.into(),
+            abscissa_dims: axis_dims,
+            knots,
+            dims: Dims([-1, 1, -1, 0, 0, 0]),
+        },
+        thermal_scale,
+    )
+}
+fn card_value(viscosity_value: PropertyValue, thermal_scale: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         ("density", Dims([-3, 1, 0, 0, 0, 0]), 1000.0),
@@ -302,12 +313,7 @@ fn card_curve(
                     PropertyKey::new(name, dims)
                 },
                 value: if viscosity {
-                    PropertyValue::Curve {
-                        abscissa: axis.into(),
-                        abscissa_dims: axis_dims,
-                        knots: knots.clone(),
-                        dims,
-                    }
+                    viscosity_value.clone()
                 } else {
                     PropertyValue::Scalar { value, dims }
                 },
@@ -361,6 +367,205 @@ fn resolve(
         .map_err(|error| MaterialError::State {
             what: error.to_string(),
         })
+}
+
+fn card_surface(temperature_slope: f64, shear_slope: f64, thermal_scale: f64) -> MaterialCard {
+    card_value(
+        PropertyValue::Surface2D {
+            axes: ["T".into(), "shear_rate".into()],
+            axis_dims: [Temperature::DIMS, Frequency::DIMS],
+            samples: [[290.0, 0.0], [330.0, 0.0], [290.0, 100.0], [330.0, 100.0]]
+                .into_iter()
+                .map(|point| {
+                    (
+                        point,
+                        1.0 + temperature_slope * (point[0] - 300.0) + shear_slope * point[1],
+                    )
+                })
+                .collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: Dims([-1, 1, -1, 0, 0, 0]),
+        },
+        thermal_scale,
+    )
+}
+
+#[test]
+fn g1_g3_two_axis_source_changes_actual_flow_at_the_constitutive_root() {
+    let gamma = 0.02;
+    let mut populations = Vec::new();
+    for (temperature_slope, shear_slope) in [(0.0, 0.0), (0.02, 0.0), (0.02, 0.2)] {
+        let source = card_surface(temperature_slope, shear_slope, 1.0);
+        let reference = resolve_liquid_state(
+            &source,
+            &query(305.0, 0.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let mut slab = slab3();
+        set_shear3(&mut slab, gamma, [0.0; 3]);
+        slab.lattice.grid.tau[6] = 1.7;
+        let step = slab
+            .step_with_material_rheology(
+                &[0.0; 16],
+                &[[0.0; 3]; 16],
+                limits(),
+                controls(),
+                &CancelGate::new(),
+                |point, _| resolve(&source, &reference, point),
+            )
+            .unwrap();
+        let sample = step.applied.iter().find(|s| s.cell == 6).unwrap();
+        // Independent moment law: rate=C/(tau*dt), C=0.8*gamma. For the
+        // manufactured mu=1+a(T-300)+b*rate, tau solves tau²-A*tau-B=0.
+        let a = 0.5 + 0.3 * (1.0 + temperature_slope * (sample.temperature_k - 300.0));
+        let b = 0.3 * shear_slope * 0.8 * gamma / DT;
+        let expected_tau = 0.5 * (a + (a * a + 4.0 * b).sqrt());
+        near(sample.momentum_relaxation, expected_tau, 2e-12);
+        near(
+            sample.material.point().shear_rate_per_s,
+            0.8 * gamma / (DT * expected_tau),
+            2e-11,
+        );
+        for sample in step.applied.iter().chain(&step.endpoint) {
+            let material = sample.material.source().material();
+            assert_eq!(material.card_identity(), source.content_hash());
+            assert_eq!(material.properties().len(), 4);
+            assert_eq!(
+                material.query(),
+                query(
+                    sample.temperature_k,
+                    sample.material.point().shear_rate_per_s
+                )
+            );
+            let viscosity = material.property("dynamic_viscosity").unwrap();
+            assert_eq!(viscosity.source_axes().len(), 2);
+            assert!(!viscosity.is_constant_at_fixed_temperature());
+            assert_eq!(
+                viscosity.answer().receipt.selected,
+                reference
+                    .material()
+                    .property("dynamic_viscosity")
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+            near(
+                sample.transport.dynamic_viscosity_pa_s(),
+                1.0 + temperature_slope * (sample.temperature_k - 300.0)
+                    + shear_slope * sample.material.point().shear_rate_per_s,
+                2e-12,
+            );
+        }
+        populations.push(slab.lattice.grid.f);
+    }
+    assert_ne!(
+        populations[0], populations[1],
+        "temperature law must change momentum"
+    );
+    assert_ne!(
+        populations[1], populations[2],
+        "shear law must change momentum"
+    );
+}
+
+#[test]
+fn g3_two_axis_viscosity_and_viscous_heat_share_the_same_evolving_material_state() {
+    let source = card_surface(0.02, 0.2, 0.001);
+    let reference = resolve_liquid_state(
+        &source,
+        &query(305.0, 0.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let make = || {
+        plan_scaling_from_material(&reference, DX, DT, 0.1)
+            .unwrap()
+            .thermal_slab3(MaterialThermalSlab3 {
+                nx: 2,
+                ny: 1,
+                nz: 6,
+                bottom_temperature_k: 310.0,
+                top_temperature_k: 300.0,
+                gravity_m_s2: 0.0,
+                expansion_per_k: 0.0,
+                max_cells: 16,
+            })
+            .unwrap()
+    };
+    let mut hot = make();
+    let mut cold = make();
+    set_shear3(&mut hot, 0.02, [0.0; 3]);
+    set_shear3(&mut cold, 0.02, [0.0; 3]);
+    let gate = CancelGate::new();
+    let heated = hot
+        .step_with_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |point, _| resolve(&source, &reference, point),
+        )
+        .unwrap();
+    let unheated = cold
+        .step_with_material_rheology(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |point, _| resolve(&source, &reference, point),
+        )
+        .unwrap();
+    assert_eq!(hot.lattice.grid.f, cold.lattice.grid.f);
+    let warm = heated
+        .transport
+        .endpoint
+        .iter()
+        .find(|s| s.cell == 6)
+        .unwrap();
+    let cool = unheated.endpoint.iter().find(|s| s.cell == 6).unwrap();
+    assert!(warm.temperature_k > cool.temperature_k);
+    near(
+        warm.transport.dynamic_viscosity_pa_s() - cool.transport.dynamic_viscosity_pa_s(),
+        0.02 * (warm.temperature_k - cool.temperature_k)
+            + 0.2
+                * (warm.material.point().shear_rate_per_s - cool.material.point().shear_rate_per_s),
+        2e-12,
+    );
+    let applied = heated
+        .transport
+        .applied
+        .iter()
+        .find(|s| s.cell == 6)
+        .unwrap();
+    near(
+        heated.viscous.power_w_m3[6],
+        applied.transport.dynamic_viscosity_pa_s()
+            * applied.material.point().shear_rate_per_s.powi(2),
+        2e-12,
+    );
+    hot.step_with_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        &gate,
+        |point, _| resolve(&source, &reference, point),
+    )
+    .unwrap();
+    cold.step_with_material_rheology(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        &gate,
+        |point, _| resolve(&source, &reference, point),
+    )
+    .unwrap();
+    assert_ne!(hot.lattice.grid.f, cold.lattice.grid.f);
 }
 
 #[test]

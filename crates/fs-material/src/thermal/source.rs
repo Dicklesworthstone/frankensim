@@ -3,9 +3,9 @@
 
 use crate::phase::EquilibriumPhaseState;
 use crate::state_point::{MaterialStatePointError, ResolvedScalarProperty};
-use fs_matdb::{MaterialCard, PropertyValue, QueryPoint};
-use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec, Temperature};
 
 /// Original material and externally specified conditions of a finite thermal body.
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +74,7 @@ impl ThermalMaterialPoint<'_> {
     }
 
     /// Admit a scalar static property already resolved from this binding's card.
-    /// Curves may use the declared temperature or liquid-mass-fraction axis.
+    /// Every source axis must be a declared temperature or liquid-mass-fraction axis.
     /// This checks source form and frequency support, not the property's units,
     /// physical range, or continuous support between sampled states. Call `at`
     /// and the common state-point resolver before admitting the returned property.
@@ -115,25 +115,18 @@ impl ThermalMaterialPoint<'_> {
             .claims()
             .claim(property.answer().receipt.selected)
             .ok_or(invalid("selected thermal property claim is absent"))?;
-        match &claim.value {
-            PropertyValue::Scalar { .. } => {}
-            PropertyValue::Curve {
-                abscissa,
-                abscissa_dims,
-                ..
-            } if (abscissa == self.temperature_axis && *abscissa_dims == Temperature::DIMS)
-                || (Some(abscissa.as_str()) == self.liquid_fraction_axis
-                    && *abscissa_dims == Dims([0; 6]))
-                || additional_axes.iter().any(|(axis, quantity)| {
-                    *axis == abscissa.as_str() && quantity.dims() == *abscissa_dims
-                }) => {}
-            _ => {
-                return Err(invalid(if additional_axes.is_empty() {
-                    "static property must be scalar or depend on a declared thermal coordinate"
-                } else {
-                    "static property must be scalar or depend on an explicitly coupled coordinate"
-                }));
-            }
+        if !claim.value.axes().all(|(axis, dims)| {
+            (axis == self.temperature_axis && dims == Temperature::DIMS)
+                || (Some(axis) == self.liquid_fraction_axis && dims == Dims([0; 6]))
+                || additional_axes.iter().any(|(declared_axis, quantity)| {
+                    *declared_axis == axis && quantity.dims() == dims
+                })
+        }) {
+            return Err(invalid(if additional_axes.is_empty() {
+                "static property must depend only on declared thermal coordinates"
+            } else {
+                "static property must depend only on explicitly coupled coordinates"
+            }));
         }
         if property
             .angular_frequency_band_rad_s()

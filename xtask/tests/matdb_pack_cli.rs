@@ -3326,6 +3326,21 @@ mod common_material_acquisition {
                     .map(|&(x, y)| (point(claim, &[(abscissa, x)]), y))
                     .collect::<Vec<_>>(),
                 PropertyValue::Scalar { value, .. } => vec![(point(claim, &[]), *value)],
+                PropertyValue::Surface2D { axes, samples, .. } => samples
+                    .iter()
+                    .map(|(coordinates, value)| {
+                        (
+                            point(
+                                claim,
+                                &[
+                                    (axes[0].as_str(), coordinates[0]),
+                                    (axes[1].as_str(), coordinates[1]),
+                                ],
+                            ),
+                            *value,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
             };
             for (at, expected) in samples {
                 let answer = pack
@@ -5160,6 +5175,19 @@ mod common_material_acquisition {
                 },
                 PropertyValue::Scalar { value, .. } => PropertyValue::Scalar {
                     value: *value,
+                    dims: Dims::NONE,
+                },
+                PropertyValue::Surface2D {
+                    axes,
+                    axis_dims,
+                    samples,
+                    triangles,
+                    ..
+                } => PropertyValue::Surface2D {
+                    axes: axes.clone(),
+                    axis_dims: *axis_dims,
+                    samples: samples.clone(),
+                    triangles: triangles.clone(),
                     dims: Dims::NONE,
                 },
             };
@@ -8794,7 +8822,9 @@ fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
                 assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
                 *value
             }
-            PropertyValue::Curve { .. } => panic!("N0602-001 slope was not scalar"),
+            PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+                panic!("N0602-001 slope was not scalar")
+            }
         })
         .collect::<Vec<_>>();
     slopes.sort_by(f64::total_cmp);
@@ -9620,7 +9650,9 @@ fn g3_cli_compiles_committed_ngyc_n42_sintered_magnet_seed() {
                 assert_eq!(*dims, Dims([-1, 1, -2, 0, 0, 0]));
                 *value
             }
-            PropertyValue::Curve { .. } => panic!("NGYC N42 energy product was not scalar"),
+            PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+                panic!("NGYC N42 energy product was not scalar")
+            }
         })
         .collect::<Vec<_>>();
     energy_values.sort_by(f64::total_cmp);
@@ -10674,7 +10706,9 @@ fn g3_cli_compiles_committed_face_g_cdtrf_g_2023_v1_surrogate_seed() {
                 assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
                 *value
             }
-            PropertyValue::Curve { .. } => panic!("CDTRF-G RON was not scalar"),
+            PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+                panic!("CDTRF-G RON was not scalar")
+            }
         })
         .collect::<Vec<_>>();
     ron_values.sort_by(f64::total_cmp);
@@ -14116,7 +14150,9 @@ fn tonewood_scalar(pack: &NormalizedPack, property: &str) -> Option<f64> {
     );
     match &claims[0].1.value {
         PropertyValue::Scalar { value, .. } => Some(*value),
-        PropertyValue::Curve { .. } => panic!("{property} must be a scalar claim"),
+        PropertyValue::Curve { .. } | PropertyValue::Surface2D { .. } => {
+            panic!("{property} must be a scalar claim")
+        }
     }
 }
 

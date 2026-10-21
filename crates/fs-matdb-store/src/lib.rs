@@ -646,9 +646,9 @@ pub struct PropertyRow {
     pub pack_kind: PackKind,
     /// Property name.
     pub property: String,
-    /// Scalar value (SI) for scalar claims; `None` for curves.
+    /// Scalar value (SI) for scalar claims; `None` for curves and surfaces.
     pub scalar_value: Option<f64>,
-    /// `"scalar"` or `"curve"`.
+    /// `"scalar"`, `"curve"`, or `"surface2d"`.
     pub kind: String,
     /// Whether the claim carries at least one observation.
     pub observation_backed: bool,
@@ -665,7 +665,7 @@ pub struct ValidityRow {
     pub hi: f64,
 }
 
-/// Search the admitted scalar/one-dimensional model, using the authoritative
+/// Search the admitted scalar/curve/surface model, using the authoritative
 /// pinned evaluator for values and typed support checks. A curve segment is
 /// continuous only when its source explicitly admits linear interpolation.
 fn claim_attains_range(
@@ -745,6 +745,44 @@ fn claim_attains_range(
                 }
                 InterpolationPolicy::ConstantWithinValidity => false,
             }
+        }
+        PropertyValue::Surface2D {
+            axes,
+            samples,
+            triangles,
+            ..
+        } => {
+            // Admission puts every sample inside both source validity bounds.
+            // Each declared triangle attains the interval between its vertex
+            // extrema. Separate patches do not fill gaps in attained values.
+            let values: Vec<_> = samples
+                .iter()
+                .map(|(coordinates, _)| {
+                    point
+                        .clone()
+                        .with(&axes[0], coordinates[0])
+                        .and_then(|p| p.with(&axes[1], coordinates[1]))
+                        .ok()
+                        .and_then(|p| evaluate(&p))
+                })
+                .collect();
+            if values
+                .iter()
+                .flatten()
+                .any(|&value| lo <= value && value <= hi)
+            {
+                return true;
+            }
+            if claim.interpolation != InterpolationPolicy::LinearInside {
+                return false;
+            }
+            triangles.iter().any(|triangle| {
+                let [Some(a), Some(b), Some(c)] = triangle.map(|index| values[index as usize])
+                else {
+                    return false;
+                };
+                a.min(b).min(c) <= hi && lo <= a.max(b).max(c)
+            })
         }
     }
 }
@@ -1091,6 +1129,7 @@ impl MaterialStore {
             let (kind, scalar_value) = match &claim.value {
                 fs_matdb::PropertyValue::Scalar { value, .. } => ("scalar", Some(*value)),
                 fs_matdb::PropertyValue::Curve { .. } => ("curve", None),
+                fs_matdb::PropertyValue::Surface2D { .. } => ("surface2d", None),
             };
             self.conn
                 .execute_with_params_sync(
@@ -1268,6 +1307,7 @@ impl MaterialStore {
                         let (scalar_value, kind) = match &claim.value {
                             PropertyValue::Scalar { value, .. } => (Some(*value), "scalar"),
                             PropertyValue::Curve { .. } => (None, "curve"),
+                            PropertyValue::Surface2D { .. } => (None, "surface2d"),
                         };
                         matches.push(PropertyRow {
                             pack_id: pack_id.clone(),
@@ -1714,6 +1754,7 @@ impl MaterialStore {
                         ("scalar".to_string(), Some(*value))
                     }
                     fs_matdb::PropertyValue::Curve { .. } => ("curve".to_string(), None),
+                    fs_matdb::PropertyValue::Surface2D { .. } => ("surface2d".to_string(), None),
                 };
                 (
                     claim.key.name().to_string(),

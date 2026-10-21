@@ -13,9 +13,7 @@
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, E, OPP, Q, equilibrium};
-use fs_matdb::{
-    InterfaceSystemCard, MatDbError, MaterialAnswer, PropertyValue, QueryPoint, SelectionPolicy,
-};
+use fs_matdb::{InterfaceSystemCard, MatDbError, MaterialAnswer, QueryPoint, SelectionPolicy};
 use fs_qty::{Dims, QtyAny};
 
 /// MatDB property name consumed for the lower wetting-hysteresis endpoint.
@@ -279,18 +277,10 @@ fn checked_contact_angle(
             .ok_or(DynamicWettingError2::MatDb(MatDbError::ReceiptMismatch {
                 field: "selected",
             }))?;
-    if let PropertyValue::Curve {
-        abscissa,
-        abscissa_dims,
-        ..
-    } = &selected_claim.value
-        && abscissa == DYNAMIC_WETTING_SPEED_AXIS
-        && *abscissa_dims != DYNAMIC_WETTING_SPEED_DIMS
-    {
-        return Err(DynamicWettingError2::ContactLineSpeedDimsMismatch {
-            property,
-            dims: *abscissa_dims,
-        });
+    for (axis, dims) in selected_claim.value.axes() {
+        if axis == DYNAMIC_WETTING_SPEED_AXIS && dims != DYNAMIC_WETTING_SPEED_DIMS {
+            return Err(DynamicWettingError2::ContactLineSpeedDimsMismatch { property, dims });
+        }
     }
     let sample = &answer.evidence.value;
     if sample.dims != Dims::NONE {

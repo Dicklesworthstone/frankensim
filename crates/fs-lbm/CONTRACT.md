@@ -157,6 +157,14 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
   with forcing, both-dimensional constant-material equivalence, a source-card
   viscosity curve against its analytic constitutive root, actual material-swap
   momentum response, and transactional refusals.
+  Source-authored `Surface2D` laws additionally carry simultaneous temperature
+  and shear-rate dependence through the same complete material bundle. The
+  focused manufactured affine law checks the independent constitutive quadratic,
+  source pins and actual momentum changes under data-only substitutions. With
+  viscous heating enabled, the identical evaluated viscosity supplies both
+  momentum and physical heat, and the heated endpoint changes the next flow
+  step. These fixtures establish plumbing and numerical identities, not
+  measured non-Newtonian material accuracy.
 - `MaterialSlab::step_with_material_rheology_and_viscous_heating` (2-D and
   3-D) explicitly adds `mu * rate^2 = 2 mu D:D` from those same cached
   initial material/shear samples to the existing source/transport step.

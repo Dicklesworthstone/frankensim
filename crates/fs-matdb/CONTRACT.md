@@ -27,7 +27,7 @@ labels. fs-matdb is the L1 data layer every physics claim inherits its
 weakest load-bearing material datum through: typed (dims-checked at
 insertion), immutable (append-only; conflicting claims coexist),
 provenance-complete (source + license + content hashes are load-bearing
-fields). Layer: L1. Runtime deps: fs-qty, fs-evidence, fs-blake3 ONLY.
+fields). Layer: L1. Runtime deps: fs-qty, fs-evidence, fs-blake3, fs-ivl.
 This crate owns no executable closures and no per-run state (L3
 adapters do); it never imports L2 transforms, L3 state types, or L6
 persistence.
@@ -47,10 +47,11 @@ persistence.
   Observations are what claims point at: a citation-only claim (no
   observations) is admitted but can never be Validated-class downstream —
   specimen/process match requires observations.
-- `PropertyValue` — `Scalar { value, dims }` or `Curve { abscissa,
+- `PropertyValue` — `Scalar { value, dims }`, `Curve { abscissa,
   abscissa_dims, knots, dims }` (strictly increasing finite abscissae,
-  ≥ 2 knots). Tensor/distribution/model-parameter payloads arrive with
-  PR-2 so frames and state schemas land together.
+  ≥ 2 knots), or `Surface2D { axes, axis_dims, samples, triangles, dims }`.
+  `axes()` exposes every source coordinate without assuming a scalar or curve.
+  Tensor component keys reuse these same response payloads and evaluator.
 - `UncertaintyModel` — `Unstated` (admitted AND marked; PR-4 never lets
   it launder into a certified band), absolute `HalfWidth`, or
   `RelativeHalfWidth`, each with confidence strictly in (0, 1).
@@ -261,6 +262,45 @@ persistence.
   (`org.frankensim.fs-matdb.interface-system-card.v1`) over both
   ordered surfaces, the full context, and the transitive
   claim/observation/model identities.
+
+### Simultaneous state dependence and sampled support
+
+`Surface2D` evaluates a scalar property against two simultaneous state
+coordinates: for example viscosity(T, shear rate), conductivity(T, pressure),
+or an elastic coefficient(T, moisture). It uses the canonical `ClaimSet`
+evaluator, with actual state coordinates supplied by the physics consumer.
+Both axes require finite explicit validity bounds enclosing every source
+sample. Typed quantity descriptors remain in `ValidityDomain` and `QueryPoint`.
+
+`LinearInside` performs barycentric interpolation only inside source-declared
+triangles. A validity rectangle or convex hull does not invent interpolation
+coverage; holes, disconnected patches, and isolated exact samples are retained.
+`TabulatedOnly` requires a bit-exact coordinate pair. A surface with
+`ConstantWithinValidity` refuses evaluation. Either triangle winding is
+accepted. Admission rejects degenerate or repeated cells, edge crossings,
+overlap, and partial junctions. Every source sample lying inside or on a cell
+must be one of its declared vertices, preventing a discontinuous exact-sample
+override of the cell's affine law.
+
+Membership and topology use `fs_ivl::orient2d`. Source and query coordinates
+must be zero or have magnitude in `[2^-200, 2^200]`, within that owner's
+finite, no-underflow predicate domain. One response admits at most 4096
+samples and 1024 triangles; admission checks are explicitly bounded.
+
+Pack schema v8 preserves source order, both coordinate dimensions, ordinates,
+cells, and source-component covariance/normalization targets. Existing v1–v7
+packs retain their bytes. Surface usage receipts use identity/wire v4 and
+evaluator v3; scalar and curve receipts retain v2/v3 and evaluator v2.
+The receipt identifies the exact sample or source cell used.
+
+Affine interpolation is the source's declared model, not an additional
+measurement, numerical enclosure, or inferred covariance. Stated uncertainty
+is retained. Sample covariance is transported, but propagation to an
+interpolated query is not claimed. Derivatives and line integrals remain
+unsupported. Envelope requests varying either surface coordinate refuse:
+corner evaluations cannot prove continuous coverage across cells or holes.
+G0/G1/G3 tests in `tests/surface.rs` exercise a manufactured simultaneous
+temperature/shear law, explicit support, and portable replay.
 
 ## Invariants
 

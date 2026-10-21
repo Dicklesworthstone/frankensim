@@ -60,6 +60,11 @@ plus a canonical-bytes vault.
   sample gaps or extending beyond validity/knot support. Range endpoints must
   be finite and ordered (`InvalidValueRange`). This asks whether some supported
   state matches; it does not admit a complete state envelope or select a claim.
+  `surface2d` rows retain canonical sample/cell payloads in the same packs.
+  Range discovery checks exact samples and each declared triangle's affine
+  vertex interval separately. Disconnected patches do not fill each other's
+  value gaps. Local evaluation and receipt replay use the original evaluator;
+  surface envelopes with varying source coordinates conservatively refuse.
 - `evaluate(pack_id, property, &QueryPoint, policy)` — decodes the
   stored bytes via the family's hash-verified decoder and delegates
   to `ClaimSet::query` + `verify_receipt`: the SAME evaluator,
@@ -227,8 +232,9 @@ an explicitly empty registry and retain their assertions.
   association described above. Model discovery uses only actual associated
   cards and the caller's executable registry; interface v1 still has no model
   association payload. Exact whole-artifact identities resolve through `load_by_hash`.
-- Value-range and compound discovery cover the existing scalar and
-  one-dimensional curve payloads. Compound envelopes prove declared data
+- Value-range and local compound discovery cover scalar, curve and two-axis
+  surface payloads. Surface box coverage is not inferred from corners or a
+  bounding rectangle. Admitted compound envelopes prove declared data
   support and stable source selection, not a physical trajectory, numeric
   admissibility at every future solver state, or physical validity. Model results
   prove only the stated registry admission and declared card/node box support;

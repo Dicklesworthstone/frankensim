@@ -31,6 +31,9 @@
 //! Manifest v5 permits source v2 `sample` rows: a scalar observation plus two
 //! or more complete coordinates. Each row lowers to an existing tabulated
 //! scalar claim with exact point validity; sparse rows never imply a grid.
+//! Manifest v9/source v3 additionally admit `surface2d` rows with two explicit
+//! coordinate units and source-declared triangles. The `surface` module owns
+//! that bounded grammar; fs-matdb owns its support and interpolation semantics.
 //! A kinetics-v1 source declares exactly one explicitly first-order reaction
 //! plus `pre_exponential` and `activation_temperature`, representing only the
 //! immutable coefficient schema `k(T) = A exp(-T_a / T)` with `A` in `s^-1`
@@ -68,6 +71,9 @@ use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueFor
 use fs_qty::{Dims, QuantitySpec};
 
 mod constitutive;
+mod surface;
+#[cfg(test)]
+mod surface_tests;
 
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
@@ -86,6 +92,8 @@ const STRAIN_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v7";
 const STRAIN_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v7";
 const STRESS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v8";
 const STRESS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v8";
+const SURFACE_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v9";
+const SURFACE_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v9";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -94,7 +102,7 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 12;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 13;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
@@ -103,8 +111,10 @@ const SAMPLE_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v5";
 const TENSOR_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v6";
 const STRAIN_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v7";
 const STRESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v8";
+const SURFACE_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v9";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const SAMPLE_SOURCE_HEADER: &str = "frankensim.matdb-source.v2";
+const SURFACE_SOURCE_HEADER: &str = "frankensim.matdb-source.v3";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
 const SPECIES_SOURCE_HEADER: &str = "frankensim.species-source.v1";
@@ -477,6 +487,7 @@ enum RawClaimValue {
         ordinate_unit: String,
         points: Vec<(String, String)>,
     },
+    Surface2D(surface::RawSurface2D),
 }
 
 #[derive(Debug)]
@@ -672,6 +683,8 @@ enum LocalComponent {
     Scalar,
     CurveAbscissa(u32),
     CurveOrdinate(u32),
+    SurfaceCoordinate(u32, u8),
+    SurfaceOrdinate(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -983,12 +996,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         Some(TENSOR_MANIFEST_HEADER) => 6,
         Some(STRAIN_MANIFEST_HEADER) => 7,
         Some(STRESS_MANIFEST_HEADER) => 8,
+        Some(SURFACE_MANIFEST_HEADER) => 9,
         _ => {
             return Err(CompileError::new(
                 "unsupported_manifest_schema",
                 "manifest",
                 format!(
-                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, {SAMPLE_MANIFEST_HEADER:?}, {TENSOR_MANIFEST_HEADER:?}, {STRAIN_MANIFEST_HEADER:?}, or {STRESS_MANIFEST_HEADER:?}"
+                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, {SAMPLE_MANIFEST_HEADER:?}, {TENSOR_MANIFEST_HEADER:?}, {STRAIN_MANIFEST_HEADER:?}, {STRESS_MANIFEST_HEADER:?}, or {SURFACE_MANIFEST_HEADER:?}"
                 ),
             ));
         }
@@ -1771,12 +1785,16 @@ fn parse_source(
     }
     let mut lines = source.text.lines();
     let header = lines.next();
-    let sample_source = header == Some(SAMPLE_SOURCE_HEADER) && manifest.version >= 5;
+    let surface_source = header == Some(SURFACE_SOURCE_HEADER) && manifest.version >= 9;
+    let sample_source =
+        header == Some(SAMPLE_SOURCE_HEADER) && manifest.version >= 5 || surface_source;
     if header != Some(SOURCE_HEADER) && !sample_source {
         return Err(CompileError::new(
             "unsupported_source_schema",
             format!("source:{}", source.spec.id),
-            format!("expected {SOURCE_HEADER:?}; {SAMPLE_SOURCE_HEADER:?} requires manifest v5"),
+            format!(
+                "expected {SOURCE_HEADER:?}; {SAMPLE_SOURCE_HEADER:?} requires manifest v5; {SURFACE_SOURCE_HEADER:?} requires manifest v9"
+            ),
         ));
     }
     for (offset, line) in lines.enumerate() {
@@ -1988,6 +2006,25 @@ fn parse_source(
                         "sample coordinates replace no existing validity declaration",
                     ));
                 }
+            }
+            Some("surface2d") if surface_source => {
+                require_field_count(&fields, 12, &source.spec.id, line_number)?;
+                let id = require_identifier(fields[1], "claim id", &subject)?;
+                let claim = RawClaim {
+                    id: id.clone(),
+                    observations: parse_identifier_list(
+                        fields[2],
+                        "observation references",
+                        &subject,
+                    )?,
+                    property: require_identifier(fields[3], "property", &subject)?,
+                    value: RawClaimValue::Surface2D(surface::parse(&fields, &subject)?),
+                    interpolation: parse_interpolation(fields[11], &subject)?,
+                    source_id: source.spec.id.clone(),
+                    source_hash: source.hash,
+                    record_hash,
+                };
+                insert_claim(raw, id, claim)?;
             }
             Some("curve") => {
                 require_field_count(&fields, 9, &source.spec.id, line_number)?;
@@ -4132,6 +4169,8 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let compiler_id = match (manifest.version, profile) {
+        (9, SourceProfile::Material) => SURFACE_COMPILER_ID,
+        (9, SourceProfile::Interface) => SURFACE_INTERFACE_COMPILER_ID,
         (8, SourceProfile::Material) => STRESS_COMPILER_ID,
         (8, SourceProfile::Interface) => STRESS_INTERFACE_COMPILER_ID,
         (7, SourceProfile::Material) => STRAIN_COMPILER_ID,
@@ -4284,6 +4323,18 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             }
             if let PropertyValue::Curve { abscissa, .. } = &mut value {
                 *abscissa = manifest.axis(abscissa).to_owned();
+            }
+            if let PropertyValue::Surface2D {
+                axes, axis_dims, ..
+            } = &mut value
+            {
+                surface::bind_axes(
+                    axes,
+                    *axis_dims,
+                    raw.validities.get(local_id),
+                    &manifest,
+                    local_id,
+                )?;
             }
             let raw_uncertainty = raw.uncertainties.get(local_id).ok_or_else(|| {
                 CompileError::new(
@@ -4489,7 +4540,11 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             decisions.push(Decision::admit(
                 format!("claim:{local_id}"),
                 "claim_normalized",
-                "inserted one immutable dims-checked scalar/curve claim",
+                if matches!(&raw_claim.value, RawClaimValue::Surface2D(_)) {
+                    "inserted one immutable dims-checked source-triangulated surface claim"
+                } else {
+                    "inserted one immutable dims-checked scalar/curve claim"
+                },
                 Some(raw_claim.record_hash),
             ));
             if let Some(frame) = frame {
@@ -4767,7 +4822,9 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
             }
         }
         hash_domain(
-            if manifest.version >= 8 {
+            if manifest.version >= 9 {
+                "org.frankensim.xtask.matdb-pack.source-envelope.v9"
+            } else if manifest.version >= 8 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v8"
             } else if manifest.version >= 7 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v7"
@@ -5057,6 +5114,7 @@ fn preflight_normalization_budget(raw: &RawDatabase) -> Result<(), CompileError>
                     )
                 })?
             }
+            RawClaimValue::Surface2D(surface) => surface.points.len() * 3,
         };
         add(value_receipts, &format!("claim:{claim_id}"))?;
         if raw
@@ -5210,6 +5268,9 @@ fn compile_value(
                 components,
             ))
         }
+        RawClaimValue::Surface2D(surface) => {
+            surface::compile(surface, claim.interpolation, kind, manifest, &subject)
+        }
     }
 }
 
@@ -5344,6 +5405,10 @@ fn statistic_member(claim: ClaimId, component: LocalComponent) -> StatisticMembe
         LocalComponent::Scalar => StatisticMember::scalar(claim),
         LocalComponent::CurveAbscissa(knot) => StatisticMember::curve_abscissa(claim, knot),
         LocalComponent::CurveOrdinate(knot) => StatisticMember::curve_ordinate(claim, knot),
+        LocalComponent::SurfaceCoordinate(sample, axis) => {
+            StatisticMember::surface_coordinate(claim, sample, axis)
+        }
+        LocalComponent::SurfaceOrdinate(sample) => StatisticMember::surface_ordinate(claim, sample),
     }
 }
 
@@ -5373,6 +5438,12 @@ fn normalization_subject(claim: &str, component: LocalComponent) -> String {
         }
         LocalComponent::CurveOrdinate(knot) => {
             format!("normalization:{claim}:curve:y:{knot}")
+        }
+        LocalComponent::SurfaceCoordinate(sample, axis) => {
+            format!("normalization:{claim}:surface:axis:{axis}:{sample}")
+        }
+        LocalComponent::SurfaceOrdinate(sample) => {
+            format!("normalization:{claim}:surface:value:{sample}")
         }
     }
 }
@@ -5600,10 +5671,24 @@ fn parse_member_reference(
             };
             Ok((claim, component))
         }
+        [
+            claim,
+            component @ ("surface-x" | "surface-y" | "surface-value"),
+            sample,
+        ] => {
+            let claim = require_identifier(claim, "joint claim id", subject)?;
+            let sample = parse_canonical_u32(sample, "surface member sample", subject)?;
+            let component = match *component {
+                "surface-x" => LocalComponent::SurfaceCoordinate(sample, 0),
+                "surface-y" => LocalComponent::SurfaceCoordinate(sample, 1),
+                _ => LocalComponent::SurfaceOrdinate(sample),
+            };
+            Ok((claim, component))
+        }
         _ => Err(CompileError::new(
             "invalid_joint_member",
             subject,
-            "member must be claim:scalar, claim:x:knot, or claim:y:knot",
+            "member must be claim:scalar, claim:x:knot, claim:y:knot, or claim:surface-{x|y|value}:sample",
         )),
     }
 }

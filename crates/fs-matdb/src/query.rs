@@ -51,9 +51,15 @@ pub const TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION: u32 = 3;
 /// Typed-axis receipt domain; the legacy v2 domain remains frozen above.
 pub const TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-matdb.property-usage-receipt.v3";
+/// Receipt identity schema retaining explicit two-coordinate source support.
+pub const SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION: u32 = 4;
+/// Surface receipt domain; scalar and curve identities remain frozen.
+pub const SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-matdb.property-usage-receipt.v4";
 
 const PROPERTY_USAGE_RECEIPT_MAGIC: &[u8; 8] = b"FSMATUR\0";
 const TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC: &[u8; 8] = b"FSMATU3\0";
+const SURFACE_PROPERTY_USAGE_RECEIPT_MAGIC: &[u8; 8] = b"FSMATU4\0";
 const FIELD_PROPERTY: u8 = 1;
 const FIELD_QUERY_POINT: u8 = 2;
 const FIELD_CONSIDERED: u8 = 3;
@@ -70,6 +76,8 @@ const DECISION_CONSTANT_WITHIN_VALIDITY: u8 = 1;
 const DECISION_EXACT_SCALAR: u8 = 2;
 const DECISION_EXACT_TABULATED: u8 = 3;
 const DECISION_LINEAR_INSIDE: u8 = 4;
+const DECISION_EXACT_SURFACE_SAMPLE: u8 = 5;
+const DECISION_LINEAR_INSIDE_TRIANGLE: u8 = 6;
 
 /// Maximum canonical bytes accepted for one portable property-usage receipt.
 pub const MAX_PROPERTY_USAGE_RECEIPT_BYTES: usize = 1024 * 1024;
@@ -90,6 +98,8 @@ pub const MAX_PROPERTY_USAGE_SOURCE_HASHES: usize = 8_192;
 /// bumped when selection or evaluation semantics change).
 /// Version 2 refuses interval support for exact-only scalar claims.
 pub const MATDB_EVALUATOR_VERSION: u32 = 2;
+/// Evaluator semantics for explicit sampled two-coordinate support.
+pub const SURFACE_MATDB_EVALUATOR_VERSION: u32 = 3;
 
 /// A fail-closed refusal at the portable property-usage receipt boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,9 +395,34 @@ pub enum EvaluationDecision {
         /// Right bracketing knot abscissa.
         x_hi: f64,
     },
+    /// An exact bitwise hit on a declared two-coordinate sample.
+    ExactSurfaceSample {
+        /// Index in the source sample sequence.
+        sample: u32,
+    },
+    /// Barycentric interpolation inside one explicit source cell.
+    LinearInsideTriangle {
+        /// Index in the source triangle sequence.
+        triangle: u32,
+    },
 }
 
 impl EvaluationDecision {
+    fn is_surface(&self) -> bool {
+        matches!(
+            self,
+            Self::ExactSurfaceSample { .. } | Self::LinearInsideTriangle { .. }
+        )
+    }
+
+    fn evaluator_version(&self) -> u32 {
+        if self.is_surface() {
+            SURFACE_MATDB_EVALUATOR_VERSION
+        } else {
+            MATDB_EVALUATOR_VERSION
+        }
+    }
+
     fn encode(&self, encoder: &mut ReceiptEncoder) {
         match self {
             EvaluationDecision::ConstantWithinValidity => {
@@ -405,6 +440,14 @@ impl EvaluationDecision {
                 encoder.f64(*x_lo);
                 encoder.f64(*x_hi);
             }
+            EvaluationDecision::ExactSurfaceSample { sample } => {
+                encoder.u8(DECISION_EXACT_SURFACE_SAMPLE);
+                encoder.u32(*sample);
+            }
+            EvaluationDecision::LinearInsideTriangle { triangle } => {
+                encoder.u8(DECISION_LINEAR_INSIDE_TRIANGLE);
+                encoder.u32(*triangle);
+            }
         }
     }
 
@@ -417,6 +460,12 @@ impl EvaluationDecision {
             DECISION_LINEAR_INSIDE => Ok(Self::LinearInside {
                 x_lo: reader.f64()?,
                 x_hi: reader.f64()?,
+            }),
+            DECISION_EXACT_SURFACE_SAMPLE => Ok(Self::ExactSurfaceSample {
+                sample: reader.u32()?,
+            }),
+            DECISION_LINEAR_INSIDE_TRIANGLE => Ok(Self::LinearInsideTriangle {
+                triangle: reader.u32()?,
             }),
             tag => Err(PropertyUsageReceiptError::UnknownDecisionTag {
                 tag,
@@ -519,13 +568,13 @@ fn classify_property_usage_receipt_identity_fields(source: &PropertyUsageReceipt
 pub const PROPERTY_USAGE_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-matdb:property-usage-receipt",
-    "version_const=TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
-    "version=3",
-    "domain=org.frankensim.fs-matdb.property-usage-receipt.v3",
-    "domain_const=TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN",
+    "version_const=SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
+    "version=4",
+    "domain=org.frankensim.fs-matdb.property-usage-receipt.v4",
+    "domain_const=SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN",
     "encoder=PropertyUsageReceipt::try_content_hash",
-    "encoder_helpers=PropertyUsageReceipt::content_hash,PropertyUsageReceipt::identity_preimage,property_usage_receipt_hash,EvaluationDecision::encode,ReceiptEncoder::new,ReceiptEncoder::bytes,ReceiptEncoder::u8,ReceiptEncoder::u32,ReceiptEncoder::u64,ReceiptEncoder::count,ReceiptEncoder::string,ReceiptEncoder::hash,ReceiptEncoder::f64,ReceiptEncoder::boolean,ReceiptEncoder::finish",
-    "schema_constants=PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION,PROPERTY_USAGE_RECEIPT_MAGIC,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC,FIELD_AXIS_QUANTITIES,FIELD_PROPERTY,FIELD_QUERY_POINT,FIELD_CONSIDERED,FIELD_IN_DOMAIN,FIELD_SELECTED,FIELD_POLICY,FIELD_DECISION,FIELD_OBSERVATION_BACKED,FIELD_EVALUATOR_VERSION,FIELD_SOURCE_HASHES,DECISION_CONSTANT_WITHIN_VALIDITY,DECISION_EXACT_SCALAR,DECISION_EXACT_TABULATED,DECISION_LINEAR_INSIDE,MATDB_EVALUATOR_VERSION,MAX_PROPERTY_USAGE_RECEIPT_BYTES,MAX_PROPERTY_USAGE_PROPERTY_BYTES,MAX_PROPERTY_USAGE_QUERY_AXES,MAX_PROPERTY_USAGE_AXIS_BYTES,MAX_PROPERTY_USAGE_CLAIM_IDS,MAX_PROPERTY_USAGE_POLICY_BYTES,MAX_PROPERTY_USAGE_SOURCE_HASHES",
+    "encoder_helpers=PropertyUsageReceipt::content_hash,PropertyUsageReceipt::identity_preimage,property_usage_receipt_hash,EvaluationDecision::encode,EvaluationDecision::is_surface,ReceiptEncoder::new,ReceiptEncoder::bytes,ReceiptEncoder::u8,ReceiptEncoder::u32,ReceiptEncoder::u64,ReceiptEncoder::count,ReceiptEncoder::string,ReceiptEncoder::hash,ReceiptEncoder::f64,ReceiptEncoder::boolean,ReceiptEncoder::finish",
+    "schema_constants=SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,SURFACE_PROPERTY_USAGE_RECEIPT_MAGIC,SURFACE_MATDB_EVALUATOR_VERSION,DECISION_EXACT_SURFACE_SAMPLE,DECISION_LINEAR_INSIDE_TRIANGLE,PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION,PROPERTY_USAGE_RECEIPT_MAGIC,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC,FIELD_AXIS_QUANTITIES,FIELD_PROPERTY,FIELD_QUERY_POINT,FIELD_CONSIDERED,FIELD_IN_DOMAIN,FIELD_SELECTED,FIELD_POLICY,FIELD_DECISION,FIELD_OBSERVATION_BACKED,FIELD_EVALUATOR_VERSION,FIELD_SOURCE_HASHES,DECISION_CONSTANT_WITHIN_VALIDITY,DECISION_EXACT_SCALAR,DECISION_EXACT_TABULATED,DECISION_LINEAR_INSIDE,MATDB_EVALUATOR_VERSION,MAX_PROPERTY_USAGE_RECEIPT_BYTES,MAX_PROPERTY_USAGE_PROPERTY_BYTES,MAX_PROPERTY_USAGE_QUERY_AXES,MAX_PROPERTY_USAGE_AXIS_BYTES,MAX_PROPERTY_USAGE_CLAIM_IDS,MAX_PROPERTY_USAGE_POLICY_BYTES,MAX_PROPERTY_USAGE_SOURCE_HASHES",
     "schema_functions=PropertyUsageReceipt::validate_portable,PropertyUsageReceipt::to_bytes,PropertyUsageReceipt::from_bytes,PropertyUsageReceipt::from_bytes_verified,EvaluationDecision::decode,SelectionPolicy::tag,SelectionPolicy::from_tag,admitted_policy_tag,ClaimSelection::tag,query_point_exact_eq,evaluation_decision_exact_eq,ReceiptReader::new,ReceiptReader::take,ReceiptReader::require_remaining_items,ReceiptReader::expect,ReceiptReader::expect_tag,ReceiptReader::u8,ReceiptReader::u32,ReceiptReader::u64,ReceiptReader::count,ReceiptReader::string,ReceiptReader::hash,ReceiptReader::f64,ReceiptReader::boolean,ReceiptReader::finish,invalid_field,resource_limit,check_bytes,check_count,crates/fs-blake3/src/lib.rs#hash_domain",
     "schema_types=crates/fs-matdb/src/lib.rs#ClaimSet,crates/fs-matdb/src/lib.rs#InterpolationPolicy,crates/fs-matdb/src/lib.rs#MatDbError,crates/fs-matdb/src/lib.rs#PropertyClaim,crates/fs-matdb/src/lib.rs#PropertyValue,crates/fs-matdb/src/lib.rs#UncertaintyModel,crates/fs-matdb/src/query.rs#ClaimSelection",
     "schema_dependencies=none",
@@ -533,16 +582,16 @@ pub const PROPERTY_USAGE_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoding=canonical-transport-exact-bits",
     "sources=PropertyUsageReceipt",
     "source_fields=PropertyUsageReceipt.schema_version:semantic,PropertyUsageReceipt.property:semantic,PropertyUsageReceipt.query_point:semantic,PropertyUsageReceipt.axis_quantities:semantic,PropertyUsageReceipt.considered:semantic,PropertyUsageReceipt.in_domain:semantic,PropertyUsageReceipt.selected:semantic,PropertyUsageReceipt.policy:semantic,PropertyUsageReceipt.decision:semantic,PropertyUsageReceipt.observation_backed:semantic,PropertyUsageReceipt.evaluator_version:semantic,PropertyUsageReceipt.source_hashes:semantic",
-    "source_bindings=PropertyUsageReceipt.schema_version>wire-schema-version,PropertyUsageReceipt.property>property-byte-count+property-utf8,PropertyUsageReceipt.query_point>query-point-count+query-point-order+query-axis-byte-count+query-axis-utf8+query-coordinate-f64-exact-bits,PropertyUsageReceipt.axis_quantities>axis-quantities,PropertyUsageReceipt.considered>considered-count+considered-order+considered-claim-id,PropertyUsageReceipt.in_domain>in-domain-count+in-domain-order+in-domain-claim-id,PropertyUsageReceipt.selected>selected-claim-id,PropertyUsageReceipt.policy>policy-byte-count+policy-utf8,PropertyUsageReceipt.decision>decision-tag+decision-at-f64-exact-bits+decision-x-lo-f64-exact-bits+decision-x-hi-f64-exact-bits,PropertyUsageReceipt.observation_backed>observation-backed-flag,PropertyUsageReceipt.evaluator_version>evaluator-version,PropertyUsageReceipt.source_hashes>source-hash-count+source-hash-order+source-hash",
+    "source_bindings=PropertyUsageReceipt.schema_version>wire-schema-version,PropertyUsageReceipt.property>property-byte-count+property-utf8,PropertyUsageReceipt.query_point>query-point-count+query-point-order+query-axis-byte-count+query-axis-utf8+query-coordinate-f64-exact-bits,PropertyUsageReceipt.axis_quantities>axis-quantities,PropertyUsageReceipt.considered>considered-count+considered-order+considered-claim-id,PropertyUsageReceipt.in_domain>in-domain-count+in-domain-order+in-domain-claim-id,PropertyUsageReceipt.selected>selected-claim-id,PropertyUsageReceipt.policy>policy-byte-count+policy-utf8,PropertyUsageReceipt.decision>decision-tag+decision-at-f64-exact-bits+decision-x-lo-f64-exact-bits+decision-x-hi-f64-exact-bits+decision-sample-index-u32+decision-triangle-index-u32,PropertyUsageReceipt.observation_backed>observation-backed-flag,PropertyUsageReceipt.evaluator_version>evaluator-version,PropertyUsageReceipt.source_hashes>source-hash-count+source-hash-order+source-hash",
     "external_semantic_fields=identity-domain,identity-version,wire-magic,canonical-field-order,field-tag-u8,length-count-u64-le,fixed-numeric-little-endian,in-band-identity",
-    "semantic_fields=identity-domain,identity-version,wire-magic,canonical-field-order,field-tag-u8,length-count-u64-le,fixed-numeric-little-endian,in-band-identity,wire-schema-version,property-byte-count,property-utf8,query-point-count,query-point-order,query-axis-byte-count,query-axis-utf8,query-coordinate-f64-exact-bits,axis-quantities,considered-count,considered-order,considered-claim-id,in-domain-count,in-domain-order,in-domain-claim-id,selected-claim-id,policy-byte-count,policy-utf8,decision-tag,decision-at-f64-exact-bits,decision-x-lo-f64-exact-bits,decision-x-hi-f64-exact-bits,observation-backed-flag,evaluator-version,source-hash-count,source-hash-order,source-hash",
+    "semantic_fields=identity-domain,identity-version,wire-magic,canonical-field-order,field-tag-u8,length-count-u64-le,fixed-numeric-little-endian,in-band-identity,wire-schema-version,property-byte-count,property-utf8,query-point-count,query-point-order,query-axis-byte-count,query-axis-utf8,query-coordinate-f64-exact-bits,axis-quantities,considered-count,considered-order,considered-claim-id,in-domain-count,in-domain-order,in-domain-claim-id,selected-claim-id,policy-byte-count,policy-utf8,decision-tag,decision-at-f64-exact-bits,decision-x-lo-f64-exact-bits,decision-x-hi-f64-exact-bits,decision-sample-index-u32,decision-triangle-index-u32,observation-backed-flag,evaluator-version,source-hash-count,source-hash-order,source-hash",
     "excluded_fields=none",
     "consumers=PropertyUsageReceipt::try_content_hash,PropertyUsageReceipt::content_hash,PropertyUsageReceipt::to_bytes,PropertyUsageReceipt::from_bytes,PropertyUsageReceipt::from_bytes_verified,ClaimSet::query,ClaimSet::query_pinned,ClaimSet::verify_receipt,MaterialAnswer",
-    "mutations=identity-domain:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,identity-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,wire-magic:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,canonical-field-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,field-tag-u8:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,length-count-u64-le:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,fixed-numeric-little-endian:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,in-band-identity:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,wire-schema-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,axis-quantities:crates/fs-matdb/tests/query.rs#g0_typed_axis_queries_and_receipts_preserve_equal_dimension_conventions,property-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,property-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-point-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-point-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-axis-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-axis-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-coordinate-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,considered-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,considered-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,considered-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,in-domain-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,in-domain-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,in-domain-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,selected-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,policy-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,policy-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-tag:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-at-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-x-lo-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-x-hi-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,observation-backed-flag:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,evaluator-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently",
+    "mutations=identity-domain:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,identity-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,wire-magic:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,canonical-field-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,field-tag-u8:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,length-count-u64-le:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,fixed-numeric-little-endian:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_round_trips_and_replays_exactly,in-band-identity:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_decoder_fails_closed,wire-schema-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,axis-quantities:crates/fs-matdb/tests/query.rs#g0_typed_axis_queries_and_receipts_preserve_equal_dimension_conventions,property-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,property-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-point-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-point-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-axis-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-axis-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,query-coordinate-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,considered-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,considered-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,considered-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,in-domain-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_v2_binds_collection_boundaries,in-domain-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,in-domain-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,selected-claim-id:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,policy-byte-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,policy-utf8:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-tag:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-at-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-x-lo-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-x-hi-f64-exact-bits:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,decision-sample-index-u32:crates/fs-matdb/tests/surface.rs#g0_surface_receipts_bind_source_cell_and_preserve_legacy_versions,decision-triangle-index-u32:crates/fs-matdb/tests/surface.rs#g0_surface_receipts_bind_source_cell_and_preserve_legacy_versions,observation-backed-flag:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,evaluator-version:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash-count:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash-order:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently,source-hash:crates/fs-matdb/tests/query.rs#property_usage_receipt_identity_fields_move_independently",
     "nonsemantic_mutations=none",
     "field_guard=classify_property_usage_receipt_identity_fields",
     "transport_guard=PropertyUsageReceipt::from_bytes_verified",
-    "version_guard=crates/fs-matdb/tests/query.rs#g0_typed_axis_queries_and_receipts_preserve_equal_dimension_conventions",
+    "version_guard=crates/fs-matdb/tests/surface.rs#g0_surface_receipts_bind_source_cell_and_preserve_legacy_versions",
     "coupling_surface=fs-matdb:property-usage-receipt",
 ];
 
@@ -553,6 +602,13 @@ impl PropertyUsageReceipt {
     /// semantic check.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
+        if self.schema_version == 4 || self.decision.is_surface() {
+            return property_usage_receipt_hash(
+                SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
+                SURFACE_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,
+                &self.identity_preimage(),
+            );
+        }
         if self.schema_version == 3 || !self.axis_quantities.is_empty() {
             return property_usage_receipt_hash(
                 TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
@@ -606,13 +662,17 @@ impl PropertyUsageReceipt {
             ));
         }
         let mut reader = ReceiptReader::new(bytes);
-        let supported = if bytes.starts_with(TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC) {
+        let supported = if bytes.starts_with(SURFACE_PROPERTY_USAGE_RECEIPT_MAGIC) {
+            4
+        } else if bytes.starts_with(TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC) {
             3
         } else {
             PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION
         };
         reader.expect(
-            if supported == 3 {
+            if supported == 4 {
+                SURFACE_PROPERTY_USAGE_RECEIPT_MAGIC
+            } else if supported == 3 {
                 TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC
             } else {
                 PROPERTY_USAGE_RECEIPT_MAGIC
@@ -666,7 +726,7 @@ impl PropertyUsageReceipt {
         }
 
         let mut axis_quantities = BTreeMap::new();
-        if schema_version == 3 {
+        if schema_version >= 3 {
             reader.expect_tag(FIELD_AXIS_QUANTITIES, "axis-quantities")?;
             axis_quantities = reader.axis_quantities()?;
         }
@@ -721,13 +781,13 @@ impl PropertyUsageReceipt {
 
     fn identity_preimage(&self) -> Vec<u8> {
         let mut encoder = ReceiptEncoder::new();
-        encoder.bytes(
-            if self.schema_version == 3 || !self.axis_quantities.is_empty() {
-                TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC
-            } else {
-                PROPERTY_USAGE_RECEIPT_MAGIC
-            },
-        );
+        encoder.bytes(if self.schema_version == 4 || self.decision.is_surface() {
+            SURFACE_PROPERTY_USAGE_RECEIPT_MAGIC
+        } else if self.schema_version == 3 || !self.axis_quantities.is_empty() {
+            TYPED_AXIS_PROPERTY_USAGE_RECEIPT_MAGIC
+        } else {
+            PROPERTY_USAGE_RECEIPT_MAGIC
+        });
         encoder.u32(self.schema_version);
 
         encoder.u8(FIELD_PROPERTY);
@@ -772,7 +832,10 @@ impl PropertyUsageReceipt {
         for hash in &self.source_hashes {
             encoder.hash(*hash);
         }
-        if self.schema_version == 3 || !self.axis_quantities.is_empty() {
+        if self.schema_version >= 3
+            || !self.axis_quantities.is_empty()
+            || self.decision.is_surface()
+        {
             encoder.u8(FIELD_AXIS_QUANTITIES);
             encoder.count(self.axis_quantities.len());
             for (axis, quantity) in &self.axis_quantities {
@@ -785,17 +848,26 @@ impl PropertyUsageReceipt {
 
     #[allow(clippy::too_many_lines)] // the closed portable profile IS this one straight-line check sequence
     fn validate_portable(&self) -> Result<(), PropertyUsageReceiptError> {
-        if self.schema_version != PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION && self.schema_version != 3
+        if self.schema_version != PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION
+            && self.schema_version != 3
+            && self.schema_version != 4
         {
             return Err(PropertyUsageReceiptError::UnsupportedSchemaVersion {
                 found: self.schema_version,
-                supported: 3,
+                supported: 4,
             });
         }
-        if (self.schema_version == 3) == self.axis_quantities.is_empty() {
+        if self.schema_version != 4 && (self.schema_version == 3) == self.axis_quantities.is_empty()
+        {
             return Err(invalid_field(
                 "axis-quantities",
                 "typed axes require v3; legacy receipts require an empty descriptor map",
+            ));
+        }
+        if (self.schema_version == 4) != self.decision.is_surface() {
+            return Err(invalid_field(
+                "decision.surface",
+                "surface decisions require v4; scalar and curve decisions retain v2/v3",
             ));
         }
         check_count(
@@ -920,6 +992,22 @@ impl PropertyUsageReceipt {
                 return Err(invalid_field(
                     "decision.linear-inside",
                     "bounds must be finite and strictly increasing",
+                ));
+            }
+            EvaluationDecision::ExactSurfaceSample { sample }
+                if *sample as usize >= crate::MAX_SURFACE_SAMPLES =>
+            {
+                return Err(invalid_field(
+                    "decision.surface-sample",
+                    "source sample index exceeds the surface budget",
+                ));
+            }
+            EvaluationDecision::LinearInsideTriangle { triangle }
+                if *triangle as usize >= crate::MAX_SURFACE_TRIANGLES =>
+            {
+                return Err(invalid_field(
+                    "decision.surface-triangle",
+                    "source triangle index exceeds the surface budget",
                 ));
             }
             _ => {}
@@ -1503,6 +1591,16 @@ impl ClaimSet {
         let high = check_selection(upper)?;
         for (id, claim) in self.claims_for(property) {
             if id == selected {
+                if let PropertyValue::Surface2D { axes, .. } = &claim.value
+                    && axes.iter().any(|axis| lower.axes[axis] < upper.axes[axis])
+                {
+                    return Err(PropertySupportError::Evaluation {
+                        point: lower.clone(),
+                        error: Box::new(MatDbError::UnsupportedEvaluation {
+                            reason: "surface corner queries do not prove continuous box coverage across source cells or holes",
+                        }),
+                    });
+                }
                 // Scalar policy and linear knot-span coverage were checked by
                 // both corner queries. Exact-only curves cover only knots.
                 if let PropertyValue::Curve { abscissa, .. } = &claim.value
@@ -1728,8 +1826,11 @@ impl ClaimSet {
         for observation in &claim.observations {
             source_hashes.push(observation.0);
         }
+        let evaluator_version = decision.evaluator_version();
         let receipt = PropertyUsageReceipt {
-            schema_version: if point.axis_quantities().is_empty() {
+            schema_version: if decision.is_surface() {
+                4
+            } else if point.axis_quantities().is_empty() {
                 PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION
             } else {
                 3
@@ -1747,7 +1848,7 @@ impl ClaimSet {
             policy: selection.tag(),
             decision,
             observation_backed: !claim.observations.is_empty(),
-            evaluator_version: MATDB_EVALUATOR_VERSION,
+            evaluator_version,
             source_hashes,
         };
 
@@ -1867,7 +1968,9 @@ impl ClaimSet {
     /// [`MatDbError::ReceiptMismatch`] naming the field that failed to
     /// reproduce.
     pub fn verify_receipt(&self, receipt: &PropertyUsageReceipt) -> Result<(), MatDbError> {
-        let current = if receipt.axis_quantities.is_empty() {
+        let current = if receipt.decision.is_surface() {
+            4
+        } else if receipt.axis_quantities.is_empty() {
             PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION
         } else {
             3
@@ -1878,10 +1981,10 @@ impl ClaimSet {
                 current,
             });
         }
-        if receipt.evaluator_version != MATDB_EVALUATOR_VERSION {
+        if receipt.evaluator_version != receipt.decision.evaluator_version() {
             return Err(MatDbError::EvaluatorVersionDrift {
                 receipt: receipt.evaluator_version,
-                current: MATDB_EVALUATOR_VERSION,
+                current: receipt.decision.evaluator_version(),
             });
         }
         receipt.validate_portable().map_err(|error| match error {
@@ -1949,14 +2052,10 @@ fn claim_axis_mismatch<'a>(claim: &'a crate::PropertyClaim, point: &QueryPoint) 
         .validity
         .axis_quantity_mismatch(point.axis_quantities())
         .or_else(|| {
-            if let PropertyValue::Curve { abscissa, .. } = &claim.value
-                && claim.validity.axis_quantities().get(abscissa)
-                    != point.axis_quantities().get(abscissa)
-            {
-                Some(abscissa.as_str())
-            } else {
-                None
-            }
+            claim.value.axes().find_map(|(axis, _)| {
+                (claim.validity.axis_quantities().get(axis) != point.axis_quantities().get(axis))
+                    .then_some(axis)
+            })
         })
 }
 
@@ -1991,6 +2090,14 @@ fn evaluation_decision_exact_eq(left: &EvaluationDecision, right: &EvaluationDec
                 x_hi: right_hi,
             },
         ) => left_lo.to_bits() == right_lo.to_bits() && left_hi.to_bits() == right_hi.to_bits(),
+        (
+            EvaluationDecision::ExactSurfaceSample { sample: left },
+            EvaluationDecision::ExactSurfaceSample { sample: right },
+        ) => left == right,
+        (
+            EvaluationDecision::LinearInsideTriangle { triangle: left },
+            EvaluationDecision::LinearInsideTriangle { triangle: right },
+        ) => left == right,
         _ => false,
     }
 }
@@ -2001,6 +2108,24 @@ fn evaluate(
     point: &QueryPoint,
 ) -> Result<(f64, EvaluationDecision), MatDbError> {
     match (&claim.value, claim.interpolation) {
+        (
+            PropertyValue::Surface2D {
+                axes,
+                samples,
+                triangles,
+                ..
+            },
+            policy,
+        ) => {
+            let mut coordinates = [0.0; 2];
+            for (index, axis) in axes.iter().enumerate() {
+                coordinates[index] = *point
+                    .axes()
+                    .get(axis)
+                    .ok_or_else(|| MatDbError::MissingQueryAxis { axis: axis.clone() })?;
+            }
+            crate::surface::evaluate(axes, samples, triangles, coordinates, policy)
+        }
         (PropertyValue::Scalar { value, .. }, InterpolationPolicy::ConstantWithinValidity) => {
             Ok((*value, EvaluationDecision::ConstantWithinValidity))
         }

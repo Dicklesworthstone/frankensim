@@ -407,9 +407,9 @@
       "title": "The FSMATPK material pack family",
       "owner": "fs-matdb",
       "version_kind": "integer-const",
-      "version_constant": "MATDB_STRESS_PACK_SCHEMA_VERSION",
+      "version_constant": "MATDB_SURFACE_PACK_SCHEMA_VERSION",
       "version_location": "crates/fs-matdb/src/pack.rs",
-      "current_version": "7",
+      "current_version": "8",
       "lockstep": [
         {
           "constant": "MATDB_PACK_SCHEMA_VERSION",
@@ -440,6 +440,11 @@
           "constant": "MATDB_STRAIN_PACK_SCHEMA_VERSION",
           "location": "crates/fs-matdb/src/pack.rs",
           "value": "6"
+        },
+        {
+          "constant": "MATDB_STRESS_PACK_SCHEMA_VERSION",
+          "location": "crates/fs-matdb/src/pack.rs",
+          "value": "7"
         },
         {
           "constant": "SPECIES_PACK_SCHEMA_VERSION",
@@ -514,7 +519,7 @@
           "location": "crates/fs-matdb/tests/material_pack.rs"
         }
       ],
-      "deprecation_horizon": "prior pack schema versions (v1..v6 material packs and v1 model-free material-card packs) remain frozen and decode byte-identically alongside the current version; version-tag substitution without matching payload structure is refused"
+      "deprecation_horizon": "prior pack schema versions (v1..v7 material packs and v1 model-free material-card packs) remain frozen and decode byte-identically alongside the current version; version-tag substitution without matching payload structure is refused"
     },
     {
       "id": "ledger.schema",
