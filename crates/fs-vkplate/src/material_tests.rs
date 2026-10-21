@@ -7,7 +7,7 @@ use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+    ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
 };
 use fs_qty::{
     Density, Dims, DynViscosity, Frequency, Pressure, QuantitySpec,
@@ -30,6 +30,25 @@ fn pack_with_viscosity(
         ValueForm::Static,
     ));
     let mut claims = ClaimSet::new();
+    // Retain the actual manufactured inputs, including the frequency-curve
+    // prescription. These are numerical fixtures, not measured material data.
+    let raw = format!(
+        "{name}\ndensity={rho:?}\nyoung_modulus={young:?}\npoisson_ratio={poisson:?}\nviscosity={viscosity:?}\n"
+    );
+    let artifact = hash_domain("frankensim.kit.material-test", raw.as_bytes());
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: name.into(),
+            method: "manufactured SI coefficients supplied by this test".into(),
+            artifact,
+            caveats: raw,
+            provenance: Provenance {
+                source: format!("manufactured kit test {name}"),
+                license: "CC0-1.0".into(),
+                artifact: Some(artifact),
+            },
+        })
+        .unwrap();
     for (key, value, dims) in [
         ("density", Some(rho), Density::DIMS),
         ("young_modulus", Some(young), Pressure::DIMS),
@@ -48,11 +67,11 @@ fn pack_with_viscosity(
                     ),
                     uncertainty: UncertaintyModel::Unstated,
                     interpolation: InterpolationPolicy::ConstantWithinValidity,
-                    observations: vec![],
+                    observations: vec![observation],
                     provenance: Provenance {
                         source: format!("manufactured kit test {name}/{key}"),
                         license: "CC0-1.0".into(),
-                        artifact: None,
+                        artifact: Some(artifact),
                     },
                 })
                 .unwrap();
@@ -95,11 +114,11 @@ fn pack_with_viscosity(
                     } else {
                         InterpolationPolicy::ConstantWithinValidity
                     },
-                    observations: vec![],
+                    observations: vec![observation],
                     provenance: Provenance {
                         source: format!("manufactured {name}/{key}"),
                         license: "CC0-1.0".into(),
-                        artifact: None,
+                        artifact: Some(artifact),
                     },
                 })
                 .unwrap();
@@ -108,7 +127,7 @@ fn pack_with_viscosity(
     let claims = NormalizedPack::new(
         name,
         "manufactured-kit-g1-g3",
-        hash_domain("frankensim.kit.material-test", name.as_bytes()),
+        artifact,
         "CC0-1.0 synthetic test data",
         claims,
         vec![],
