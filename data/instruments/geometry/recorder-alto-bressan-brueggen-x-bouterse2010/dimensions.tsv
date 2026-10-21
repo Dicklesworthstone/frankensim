@@ -1,0 +1,136 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+head-joint	joint	length-total	0.1925	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1, alto d-
+head-joint	joint	sounding-length	0.131	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1: SL = length from the lower end to the block line
+head-joint	windway	length	0.0615	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1 row 'L windway' (= total length minus sounding length)
+head-joint	bore-station-01	distance-from-block-line	0	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter at the block line
+head-joint	bore-station-01	diameter	0.0198	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+head-joint	bore-station-02	distance-from-upper-end	0.08	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter (the minimum is 0.2 to 0.4 mm smaller: oval cross sections)
+head-joint	bore-station-02	diameter	0.01965	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+head-joint	bore-station-03	distance-from-upper-end	0.1	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter (the minimum is 0.2 to 0.4 mm smaller: oval cross sections)
+head-joint	bore-station-03	diameter	0.0196	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+head-joint	bore-station-04	distance-from-upper-end	0.12	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter (the minimum is 0.2 to 0.4 mm smaller: oval cross sections)
+head-joint	bore-station-04	diameter	0.01965	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+head-joint	bore-station-05	distance-from-upper-end	0.14	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter (the minimum is 0.2 to 0.4 mm smaller: oval cross sections)
+head-joint	bore-station-05	diameter	0.0196	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+head-joint	bore-station-06	distance-from-upper-end	0.16	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2: head bore, maximum diameter (the minimum is 0.2 to 0.4 mm smaller: oval cross sections)
+head-joint	bore-station-06	diameter	0.01955	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 2 (alto d-)
+middle-joint	joint	length-total	0.2519	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1
+middle-joint	joint	upper-tenon-length	0.0267	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1
+middle-joint	joint	sounding-length	0.2092	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1: length between the tenons
+middle-joint	joint	lower-tenon-length	0.016	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1
+middle-joint	bore-station-01	distance-from-upper-end	0	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-01	diameter	0.0194	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-02	distance-from-upper-end	0.01	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-02	diameter	0.0193	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-03	distance-from-upper-end	0.02	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-03	diameter	0.0192	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-04	distance-from-upper-end	0.03	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-04	diameter	0.019	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-05	distance-from-upper-end	0.04	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-05	diameter	0.019	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-06	distance-from-upper-end	0.05	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-06	diameter	0.0188	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-07	distance-from-upper-end	0.06	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-07	diameter	0.0185	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-08	distance-from-upper-end	0.07	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-08	diameter	0.0181	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-09	distance-from-upper-end	0.08	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-09	diameter	0.018	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-10	distance-from-upper-end	0.09	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-10	diameter	0.0178	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-11	distance-from-upper-end	0.1	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-11	diameter	0.0176	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-12	distance-from-upper-end	0.11	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-12	diameter	0.0176	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-13	distance-from-upper-end	0.12	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-13	diameter	0.0176	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-14	distance-from-upper-end	0.13	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-14	diameter	0.0175	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-15	distance-from-upper-end	0.14	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-15	diameter	0.0175	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-16	distance-from-upper-end	0.15	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-16	diameter	0.0173	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-17	distance-from-upper-end	0.16	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-17	diameter	0.017	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-18	distance-from-upper-end	0.17	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-18	diameter	0.0169	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-19	distance-from-upper-end	0.18	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-19	diameter	0.0165	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-20	distance-from-upper-end	0.19	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-20	diameter	0.0162	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-21	distance-from-upper-end	0.2	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-21	diameter	0.0161	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-22	distance-from-upper-end	0.21	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-22	diameter	0.0158	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-23	distance-from-upper-end	0.22	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-23	diameter	0.0154	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-24	distance-from-upper-end	0.23	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-24	diameter	0.015	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-25	distance-from-upper-end	0.24	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-25	diameter	0.0146	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-26	distance-from-upper-end	0.25	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-26	diameter	0.0143	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+middle-joint	bore-station-27	distance-from-upper-end	0.2519	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (bore of the middle joint at 10 mm steps; all data extrapolated and rounded from other tables and graphs, +-0.1 mm possible)
+middle-joint	bore-station-27	diameter	0.0142	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	joint	length-sounding	0.1103	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 1 (Table 5 gives 111 mm)
+foot	bore-station-01	distance-from-upper-end	0.016	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-01	diameter	0.0142	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-02	distance-from-upper-end	0.025	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-02	diameter	0.014	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-03	distance-from-upper-end	0.035	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-03	diameter	0.0135	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-04	distance-from-upper-end	0.045	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-04	diameter	0.013	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-05	distance-from-upper-end	0.055	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-05	diameter	0.0127	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-06	distance-from-upper-end	0.065	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-06	diameter	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-07	distance-from-upper-end	0.075	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-07	diameter	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-08	distance-from-upper-end	0.085	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-08	diameter	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-09	distance-from-upper-end	0.095	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-09	diameter	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-10	distance-from-upper-end	0.1	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-10	diameter	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+foot	bore-station-11	distance-from-upper-end	0.1103	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5 (foot bore; the last row is the open end)
+foot	bore-station-11	diameter	0.0125	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5, alto d- column
+tone-holes	hole-00	axial-position-from-upper-shoulder	0.0212	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint (thumb hole)
+tone-holes	hole-00	diameter	0.0064	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 6.4 and maximum 6.4 mm (thumb hole, 'c. 6.4')
+tone-holes	hole-00	outer-diameter-at-hole	0.0282	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-01	axial-position-from-upper-shoulder	0.036	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-01	diameter	0.006	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 5.9 and maximum 6.1 mm
+tone-holes	hole-01	outer-diameter-at-hole	0.0279	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-02	axial-position-from-upper-shoulder	0.0642	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-02	diameter	0.0063	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 6.2 and maximum 6.4 mm
+tone-holes	hole-02	outer-diameter-at-hole	0.0273	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-03	axial-position-from-upper-shoulder	0.0994	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-03	diameter	0.0062	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 6.1 and maximum 6.3 mm
+tone-holes	hole-03	outer-diameter-at-hole	0.0265	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-04	axial-position-from-upper-shoulder	0.1385	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-04	diameter	0.0058	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 5.7 and maximum 5.9 mm
+tone-holes	hole-04	outer-diameter-at-hole	0.026	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-05	axial-position-from-upper-shoulder	0.1703	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-05	diameter	0.0064	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 6.4 and maximum 6.4 mm
+tone-holes	hole-05	outer-diameter-at-hole	0.0255	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-06	axial-position-from-upper-shoulder	0.1996	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 3: distance from the centre of the hole to the upper shoulder of the middle joint
+tone-holes	hole-06	diameter	0.00535	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: mean of the minimum 5.2 and maximum 5.5 mm
+tone-holes	hole-06	outer-diameter-at-hole	0.025	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 4: outer diameter of the wood at the hole (the chimney height follows as half of this minus the local bore diameter)
+tone-holes	hole-07	diameter	0.00525	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5: hole 7 minimum 5.0, maximum 5.5 mm; the position along the foot is NOT published (u-hole-7-position)
+tone-holes	hole-07	outer-diameter-at-hole	0.032	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1929 Table 5: outer diameter of the foot at hole 7
+window	opening	width	0.012	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table, alto d-: window 12.0 wide
+window	opening	length	0.0046	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table: 4.6 long (Morgan measured the maximum; 4.2 near the sides); the cut-up of the flue model
+window	opening	length-at-sides	0.0042	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table footnote: 4.2 mm close to the sides
+window	opening	upper-width-at-block-line	0.0124	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table, column b
+window	labium	side-wall-length	0.0226	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table, column c (including the window)
+window	labium	total-length	0.0265	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table, column d
+window	labium	maximum-width	0.014	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 window table, column e
+window	labium	step-height	0.0008	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 step table, alto d-: difference in height between the windway roof and the lower side of the labium edge
+window	labium	edge-thickness	0.00025	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898 labium table, alto d-: 0.25 mm, irregular and in places paper thin
+window	block	chamfer-length	0.0008	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898: block chamfer of alto d-, hypotenuse 0.8 mm
+window	opening	external-diameter-others-mean	0.03295	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	DERIVED, not stated for alto d-: mean of the external diameters at the window of altos a, b, c and e (33.2, 32.9, 33.0, 32.7 mm); the window depth follows from it and the head bore
+windway	opening	height-centre-alto-e	0.0018	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898: windway opening of the Berlin Bressan alto e-, 1.8 mm high in the centre and 0.9 mm at the side (crescent shaped, Beaudin drawing); alto d- is not given
+windway	opening-to-exit	area-ratio	1.7	1	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	Comm 1898: opening to exit area ratio about 1.7 to 1 of Bouterse's Bressan copy, similar on a Terton alto
+windway	exit	height-estimate	0.001058823529	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	DERIVED, not measured on alto d-: 1.8 mm divided by 1.7, an estimate from two sources with the bounds in u-windway-height
+windway	exit	width-estimate	0.012	m	unstated	published-measured	bouterse-2010-bressan-alto-fomrhi	DERIVED: the windway exit as wide as the window (Wijne soprano: windway width 10.8 to 8.6 mm for an 8.9 mm window, Comm 2115)

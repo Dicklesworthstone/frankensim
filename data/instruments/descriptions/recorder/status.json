@@ -1,0 +1,32 @@
+{
+  "schema": "frankensim.instrument-status.v1",
+  "family": "recorder",
+  "title": "Recorder",
+  "reference_instrument": null,
+  "summary": "An alto recorder built only from the published measurements of one real baroque alto (a Bressan recorder of the Frans Brueggen collection, as tabulated by Jan Bouterse): the bore of its three joints, the thumb hole and six finger holes, the window, the labium and step, and the windway length. The windway height is not published for this instrument and is estimated from other altos. Four fingerings of the first register are rendered as held notes at a pressure read from published register-jump thresholds, and as slow crescendos that choose no pressure at all. Speaks; not graded (no licensed reference). It speaks, but it does not sound like a recorder yet: it stays in the first register only at the lowest blowing pressures and then sounds high partials of the pipe. Listening only: there is no licensed reference recording of a recorder in the library, so no spectrogram comparison is made and nothing here claims to match a real recorder.",
+  "physics_present": [
+    "fs-couple flue_loop: a jet driven by a blowing pressure through the viscous windway law with the published windway length, the published window length as the jet length and the window width as the flue width, acting on a connected duct network (one jet drives the whole graph)",
+    "the published bore of the head, middle joint and foot as equal-volume cylinders, the thumb hole and six finger holes as chimney sections on ideal junctions (chimney height from the published outer diameter and the local bore), open or closed per the published fingerings, and the bore closed by the block behind the window",
+    "fractional-delay propagation and gas-derived viscothermal loss on the long bore sections",
+    "radiation reaction and observation from the apertures themselves, so the sound is radiated pressure at a physical receiver rather than internal pressure: a compact baffled-piston load on every open hole and the open end, plus the window",
+    "deterministic oscillation: every held note sounds the same pitch and level for another jet seed, so it is a limit cycle and not a filtered seed",
+    "the start of every crescendo: each fingering begins in the first register of its pipe, at the lowest pressures, at two mechanics clocks"
+  ],
+  "physics_missing": [
+    "any reference: no licensed recording of a recorder exists in the library yet (bead pexfp.219), so these renders are listened to, not graded, and no claim of resemblance is made",
+    "register control: the loop leaves the first register at a pressure below the published first-register ceiling of a real Bressan alto (measured on an artificial mouth) and sounds several high partials of the pipe, not the octave the real instrument jumps to. The held notes are blown at the published ceilings, so they already sound those high partials and are not recorder notes. The same blowing, with the same island, reproduced a measured register ladder on the tin whistle, so the cause is in what is unknown for this windway (its height, shape and taper), not shown to be in the island",
+    "the windway: its height is not published for this alto (only its length) and is estimated from two other instruments; its curved, crescent-shaped opening, the direction of its roof, the chamfers and the taper of its section are unknown, and the recipe has a straight rectangular slit. The pressure-to-jet-speed map and every register claim depend on the height, and a sweep of the published bounds has not been made",
+    "labium offset and jet angle: the step and the edge thickness are published but the jet position follows from the unknown windway height, so both are zero (UNKNOWN)",
+    "the second and third registers: the thumb hole is a fully open or closed hole; the half-closed thumb hole that raises the register is not modelled, so only first-register fingerings are rendered",
+    "pitch: the first-register pitch at the start of a crescendo is sharp of the instrument's documented pitch. Hole 7 (its position is unpublished) is omitted, the finger holes have no undercutting and no hole inertance corrections, and the measured bore is the tabulated maximum of a shrunken, slightly oval boxwood joint",
+    "the jet: the card is the repository's interim slot-jet card of a lattice rig, outside its Reynolds band; the displacement gain is the demonstrator value, not a measured amplification",
+    "a spectrum and attack like a real recorder: the held notes are not first-register notes, and no breath noise, chiff or edge-tone noise is modelled",
+    "breath temperature, humidity and the room: the published pitch measurements were made at several room temperatures, the recipe uses dry air at a fixed temperature",
+    "native verification beyond one fingering at two mechanics clocks and two jet seeds on a few files"
+  ],
+  "blocked": null,
+  "beads": [
+    "pexfp.315",
+    "pexfp.219"
+  ]
+}

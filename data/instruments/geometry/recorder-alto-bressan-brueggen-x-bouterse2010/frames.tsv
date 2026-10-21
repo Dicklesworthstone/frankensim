@@ -1,0 +1,8 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+head-joint	upper end of the head (beak) on the bore axis for bore stations; the block line (upper edge of the window) for the sounding length	+x along the bore axis toward the foot	unstated	unstated	bore stations are distances from the upper end of the head; the block line is 61.5 mm from it
+middle-joint	upper end of the middle joint (tenon top) for bore stations; its upper shoulder for hole positions	+x along the bore axis toward the foot	unstated	unstated	the 26.7 mm upper tenon lies inside the head socket
+foot	upper end (socket rim) of the foot on the bore axis	+x along the bore axis toward the open end	unstated	unstated	the 16.0 mm lower tenon of the middle joint lies inside the first 16 mm of the foot
+tone-holes	upper shoulder of the middle joint on the bore axis	+x along the bore axis toward the foot	unstated	unstated	azimuth is not stated except that hole 0 is the thumb hole at the back
+window	block line (north face of the window) on the bore axis	+x along the bore axis toward the foot (south)	unstated	unstated	window, labium, step and windway length
+windway	windway opening at the beak (north end)	+x along the windway toward the window (south)	unstated	unstated	heights are measured between the windway roof and the block surface
