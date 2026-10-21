@@ -17,16 +17,18 @@
 #  * hold-tNNN-pNNN: the same lip held at a fixed pre-stress and mouth pressure for 3 s. The embouchure
 #    setting is the free player input; which setting yields which note is READ FROM THE RENDER afterwards.
 #
-# Mouth pressure: threshold p0 = K f with K of 4 to 8 Pa/Hz for three trumpeters (Fletcher and
-# Tarnopolsky 1999, JASA 105:874, p.877), and 4 to 13 kPa pp to ff on high notes (Bouhuys, as quoted
-# there); per-note mf tables are UNKNOWN. The ramps go up to 25 kPa (the highest blowing pressure measured
-# in a professional trumpeter, Fletcher and Tarnopolsky p.875) and measure the threshold of THIS model
-# directly; holds are placed above the measured threshold. The lip is Cullen (2000) embouchure 19 (see the
-# head for why, and for the disclosure that playability entered the choice): the first renders used
-# embouchure 7, whose upper open notes started only at 19 to 27.5 kPa and sat on the extinction edge at
-# 21 kPa (the D5 hold fell silent). The 14 kPa below is still at the top of Bouhuys's 4 to 13 kPa pp to ff
-# for high notes, and the internal mouthpiece level it gives is 6 to 12 dB over the 166.9 to 167.2 dB
-# (rms, shank, forte) of Resch et al. (arXiv 1611.01025); see the status card.
+# Mouth pressure is a CITED player input. Fletcher and Tarnopolsky (1999, JASA 105:874) measured the threshold
+# blowing pressure of trumpet players as p0 = K f (their Eq. 1 and Fig 4, p.877: K = 7 Pa/Hz for the professional
+# GC, 8 and 4 for two amateurs) and found loud playing at 3.3 to 3.9 times threshold (their Fig 6: C4 2.0 / 3.9 /
+# 6.6 kPa, C5 3.3 / 6.3 / 13.0, C6 6.7 / 11.0 / 24.0 kPa). The held notes use 3.5 x 7 Pa/Hz x f: Bb3 (233.08 Hz)
+# 5.71 kPa, F4 (349.23 Hz) 8.56, Bb4 (466.16 Hz) 11.42, D5 (587.33 Hz) 14.39 kPa. The 25 kPa ramp peak is the
+# highest blowing pressure they measured (Fig 1, p.875); the ramps measure the threshold of THIS lip directly.
+# Earlier revisions held all four notes at 14 kPa, which gave radiated levels near the measured ones but a
+# shank fundamental 11 dB too strong; at the cited pressures this model's notes are 10 to 21 dB(A) quieter
+# and duller than F&T measured (the status card has both results), and that is the setting kept here. The
+# lip is Cullen (2000) embouchure 19 (see the head for why, and for the disclosure that playability entered
+# the choice): the first renders used embouchure 7, whose upper open notes started only at 19 to 27.5 kPa and
+# sat on the extinction edge at 21 kPa (the D5 hold fell silent).
 #
 # Needs a music_render with the DC-bin fix of the mouth-flow line (bin da31fbd67ee9 or later): without it the
 # default mouth-flow ladder cannot converge on this bore (see the head).
@@ -53,10 +55,13 @@ RAMP_PEAK=${RAMP_PEAK:-2.5e4}
 # Held notes use an attack: mouth pressure rises to an ATTACK pressure in 50 ms (above the onset the pressure
 # ramps measured at that pre-stress), stays there for ATTACK_SECONDS, then relaxes over 0.5 s to a SUSTAIN
 # pressure (inside the hysteresis band: above the extinction pressure, below the onset). Each hold is
-# "pre-stress:attack-Pa:sustain-Pa". With embouchure 19 the four holds are a CONSTANT 14 kPa (attack equal to
-# sustain): the model's own threshold map for this lip (a diagnostic 45 kPa ramp at lip frequency 511 Hz:
-# onset 8.4 kPa, extinction 5.6 kPa) puts 14 kPa above the onset of every open note, not from a recording and
-# not from a published mf pressure. The pre-stress of each hold was set from the emergent pitch of a first
+# "pre-stress:attack-Pa:sustain-Pa". The SUSTAIN is the cited Fletcher and Tarnopolsky pressure above. This lip
+# needs more than its sustain pressure to start: a slow 0 -> 16 -> 0 kPa ramp at the landed pre-stress starts
+# Bb3, F4, Bb4 and D5 at 5.7, 11.7, 9.7 and 13.0 kPa and stops them at 2.3, 3.0, 3.7 and 7.0 kPa (a diagnostic;
+# their players start a note with an attack and settle at the pressure they hold, which the hysteresis
+# reproduces), so each note starts with a 14 kPa attack for ATTACK_SECONDS (a player's tongued attack, a gesture
+# and not a measured value) and relaxes over 0.5 s to its sustain; D5's sustain is already the attack. The
+# pre-stress of each hold was set from the emergent pitch of a first
 # render against equal temperament (a player tuning an embouchure; pitch is never an input): first guesses
 # 0.9, 1.38, 1.86, 2.38 gave Bb3 33 cents flat, F4 26, Bb4 21, D5 21 cents flat; 0.95, 1.42, 1.9, 2.42 gave
 # Bb3 +20, F4 +5, Bb4 +2, D5 -1 cents; Bb3 at 0.92 gave -16 and at 0.93 -5 cents (steady-state, 2 to 4 s).
@@ -64,7 +69,7 @@ RAMP_PEAK=${RAMP_PEAK:-2.5e4}
 # 62 cents flat of the equal-tempered open series for partials 3 to 6, which the lip pulls toward the note.
 ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
 HOLD_SECONDS=${HOLD_SECONDS:-4}
-HOLDS=${HOLDS-"9.3e-1:1.4e4:1.4e4 1.42e0:1.4e4:1.4e4 1.9e0:1.4e4:1.4e4 2.42e0:1.4e4:1.4e4"}
+HOLDS=${HOLDS-"9.3e-1:1.4e4:5.71e3 1.42e0:1.4e4:8.56e3 1.9e0:1.4e4:1.142e4 2.42e0:1.439e4:1.439e4"}
 SWEEP_PRESSURE=${SWEEP_PRESSURE:-1.4e4}
 
 cd "$SNAP"
