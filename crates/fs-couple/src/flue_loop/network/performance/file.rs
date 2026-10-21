@@ -19,6 +19,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::{
 use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
+use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::openings::duct::{
@@ -145,6 +146,10 @@ impl FlueFilePerformance {
     /// after the windway row binds the existing separated-flow law to the actual
     /// mouth window and inlet gas. Omission or `mouth_loss none` retains the
     /// original linear mouth. The closure's source and Mach limit stay explicit.
+    /// Optional `jet_transfer nolle-price-2015 long-channel|short-channel CHAMFER_DEPTH_M` after the
+    /// `jet` row replaces the island's receptivity chain by the published Nolle/Price jet transfer
+    /// (`flue_loop::nolle_jet`), with the measured phase velocity of the channel class. Omission keeps
+    /// the island's own chain and every default result bit-identical.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
     /// The gesture suffix may also contain one typed `jet-angle` track in radians:
     /// it changes the existing geometric jet split at fixed cut-up and mouth area.
@@ -394,6 +399,24 @@ impl FlueFilePerformance {
         let voice_seed = row.number()?;
         let voice_index = row.number()?;
         row.end()?;
+        // Optional, by name: the published Nolle/Price jet transfer replaces the island's own
+        // receptivity chain (the `jet` gain above is then unused). The channel class picks the
+        // measured phase velocity (de la Cuadra 2005): `long-channel` 0.3 U0, `short-channel` 0.5 U0.
+        let jet_transfer = if rows.next_is("jet_transfer") {
+            let mut row = rows.row("jet_transfer")?;
+            if row.fields.next() != Some("nolle-price-2015") {
+                return Err(bad(rows.line, "jet_transfer requires nolle-price-2015 CHANNEL CHAMFER_DEPTH_M"));
+            }
+            let channel = match row.fields.next() {
+                Some("long-channel") => ChannelClass::Long,
+                Some("short-channel") => ChannelClass::Short,
+                _ => return Err(bad(rows.line, "jet_transfer channel must be long-channel or short-channel")),
+            };
+            let chamfer_depth_m = row.scalar()?;
+            row.end()?;
+            Some(NolleSpec::price_2015(channel, chamfer_depth_m)
+                .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?)
+        } else { None };
         let mut row = rows.row("jet_limits")?;
         let minimum_jet_speed_m_s = row.scalar()?;
         let maximum_jet_mach = row.scalar()?;
@@ -493,6 +516,10 @@ impl FlueFilePerformance {
             WindwayInput::Unsteady { length_m, transverse_cells, convection_cells } =>
                 voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
                     .map_err(FlueInputError::Physics)?,
+        };
+        let voice = match jet_transfer {
+            Some(spec) => voice.with_nolle_jet(spec).map_err(FlueInputError::Physics)?,
+            None => voice,
         };
         let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
             .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;

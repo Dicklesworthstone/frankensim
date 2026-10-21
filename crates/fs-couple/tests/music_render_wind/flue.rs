@@ -105,5 +105,25 @@ fn declared_windway_reaches_the_source_and_cli_pressure_without_a_second_model()
     assert!(sidecar.contains("\"windway_dynamic_viscosity_pa_s\":"));
 }
 
+#[test]
+fn published_jet_transfer_is_opt_in_by_name_and_refuses_malformed_rows() {
+    // G2: the Nolle/Price transfer replaces the island's receptivity chain only when named; the
+    // closed-form and time-domain checks of the transfer itself live in `flue_loop::nolle_jet`.
+    let source = short();
+    let reference = physical(&source);
+    let row = "jet 90 1e-6 3 0\n";
+    assert!(source.contains(row));
+    let named = source.replace(row, &format!("{row}jet_transfer nolle-price-2015 long-channel 0\n"));
+    let (pressure, _) = physical(&named);
+    let energy: f64 = reference.0.iter().map(|p| p*p).sum();
+    let difference: f64 = pressure.iter().zip(&reference.0).map(|(a, b)| (a-b).powi(2)).sum();
+    assert!(difference > 1e-10*energy, "naming the transfer must change the jet response");
+    for refused in ["jet_transfer nolle-price-2015 medium-channel 0", "jet_transfer made-up long-channel 0",
+        "jet_transfer nolle-price-2015 long-channel -1e-3", "jet_transfer nolle-price-2015 long-channel 0 extra"] {
+        let text = source.replace(row, &format!("{row}{refused}\n"));
+        assert!(FlueFilePerformance::from_bytes(text.as_bytes(), 37, &CancelGate::new_clock_free()).is_err(), "{refused}");
+    }
+}
+
 #[path = "flue/material.rs"]
 mod material;

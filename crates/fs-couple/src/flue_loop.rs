@@ -93,6 +93,9 @@ pub mod mouth_loss;
 /// Refinable unsteady no-slip source channel and spatial jet feedback transport.
 pub mod windway;
 
+/// Opt-in published jet transfer of Nolle/Price (2015) in place of the island's band chain.
+pub mod nolle_jet;
+
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
@@ -221,6 +224,9 @@ struct JetStepCoefficients {
     band_alpha: f64,
     hp_alpha: f64,
     leak_rate: f64,
+    // The opt-in Nolle/Price transfer supplies the labium displacement directly; None keeps the
+    // island's own receptivity chain and every default golden bit-identical.
+    eta_override: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -548,6 +554,10 @@ pub struct FlueVoice {
     // integral's 1/omega cancels the drive derivative's omega and the
     // pipe's resonance alone selects the mode).
     displacement_state: f64,
+    // Opt-in published jet transfer (see `nolle_jet`) and the previous fluctuating jet flow it
+    // feeds back through alpha_j. None = the island's own chain.
+    nolle: Option<nolle_jet::NolleJet>,
+    nolle_jet_flow_prev: f64,
     // Mouth loop coefficients.
     inertance: f64,
     resistance: f64,
@@ -661,6 +671,8 @@ impl FlueVoice {
             band_hp: [0.0; 2],
             momentum_thickness_m,
             displacement_state: 0.0,
+            nolle: None,
+            nolle_jet_flow_prev: 0.0,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
@@ -826,6 +838,46 @@ impl FlueVoice {
         Ok(self)
     }
 
+    /// Replace the island's receptivity chain by the published Nolle/Price jet transfer
+    /// ([`nolle_jet`]) before any accepted sample. The mouth loop, labium cut, windway and wind line
+    /// are unchanged; the drive source becomes `M_d dQ_j/dt` with Price's `M_d = 0.88 rho / H`, and
+    /// the labium displacement comes from the transfer's own history. A slit windway implies a
+    /// Poiseuille profile (centre speed 1.5 x bulk); no windway keeps the Bernoulli central speed.
+    /// The unsteady windway is refused: its evolving profile has no published centre-speed law here.
+    /// The authored displacement gain of the card is unused while this transfer is attached.
+    ///
+    /// # Errors
+    /// Late or repeated attachment, a poisoned voice, an unsteady windway, or the transfer's own
+    /// geometry/realisation refusal.
+    pub fn with_nolle_jet(mut self, spec: nolle_jet::NolleSpec) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.nolle.is_some()
+            || self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid {
+                what: "nolle jet requires one cold attachment and no unsteady windway",
+            });
+        }
+        let centre_over_bulk = if self.viscous_windway.is_some() {
+            nolle_jet::POISEUILLE_CENTRE_OVER_BULK
+        } else {
+            1.0
+        };
+        // Slowest bulk jet the retained convection history admits (the voice refuses slower ones).
+        let history_s = (self.history.len() - 2) as f64 * self.dt;
+        let min_bulk = self.geometry.cut_up_m / (self.island.convection_ratio * history_s);
+        let jet = nolle_jet::NolleJet::new(spec, centre_over_bulk, self.geometry.flue_height_m,
+            self.geometry.cut_up_m, self.dt, centre_over_bulk * min_bulk)
+            .map_err(|what| FlueError::Invalid { what })?;
+        self.source_coeff = spec.drive_inertance_coeff * self.rho / self.geometry.flue_width_m;
+        self.nolle = Some(jet);
+        Ok(self)
+    }
+
+    /// The attached published jet transfer, if any.
+    #[must_use]
+    pub const fn nolle_jet(&self) -> Option<&nolle_jet::NolleJet> {
+        self.nolle.as_ref()
+    }
+
     /// Actual source field, material state, energy and both supplied resolutions.
     #[must_use]
     pub const fn unsteady_windway(&self) -> Option<&windway::UnsteadyWindway> {
@@ -861,6 +913,9 @@ impl FlueVoice {
     /// Jet transit delay `W / c_p` [s] (infinite at zero blowing).
     #[must_use]
     pub fn transit_s(&self) -> f64 {
+        if let Some(jet) = &self.nolle {
+            return jet.transit_s(jet.centre_over_bulk() * self.jet_speed_m_s());
+        }
         self.geometry.cut_up_m / (self.island.convection_ratio * self.jet_speed_m_s())
     }
 
@@ -876,7 +931,10 @@ impl FlueVoice {
         let hp_out = c.hp_alpha*(self.band_hp[1]+hp_in-self.band_hp[0]);
         let displacement_m = self.displacement_state
             + self.dt*(hp_out+seed-c.leak_rate*self.displacement_state);
-        let eta_m = self.island.displacement_gain*displacement_m;
+        let eta_m = match c.eta_override {
+            Some(eta) => eta,
+            None => self.island.displacement_gain*displacement_m,
+        };
         let flow_m3_s = if c.q_max > 0.0 {
             0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
         } else { 0.0 };
@@ -1100,20 +1158,41 @@ impl FlueVoice {
             // The unsteady channel keeps its original spatial transport. The
             // quasi-steady history is sampled at THIS time minus the physical
             // transit, including a current-mouth term when transit < dt.
-            let delayed = match convected {
-                Some(velocity) => RetardedVelocity { past_m_s: velocity, current_weight: 0.0 },
-                None => retarded_velocity(&self.history, self.head, delay_samples)?,
+            let delayed = if self.nolle.is_some() {
+                // The published transfer owns the jet response; the island chain idles at zero.
+                RetardedVelocity { past_m_s: 0.0, current_weight: 0.0 }
+            } else {
+                match convected {
+                    Some(velocity) => RetardedVelocity { past_m_s: velocity, current_weight: 0.0 },
+                    None => retarded_velocity(&self.history, self.head, delay_samples)?,
+                }
             };
             let seed = if seed_scale > 0.0 {
                 seed_scale * (2.0 * self.seed.next_f64() - 1.0)
             } else {
                 0.0
             };
+            // Disjoint field borrows: the transfer is advanced with last sample's mouth flow and jet
+            // flow (forward Euler), the seed entering as transverse velocity like the island's.
+            let (chain_seed, eta_override) = match &mut self.nolle {
+                Some(jet) => {
+                    let eta = jet
+                        .step(jet.centre_over_bulk() * u, self.q_prev, self.nolle_jet_flow_prev,
+                            self.geometry.flue_width_m, seed)
+                        .map_err(|what| FlueError::Invalid { what })?;
+                    (0.0, Some(eta))
+                }
+                None => (seed, None),
+            };
             let coefficients = JetStepCoefficients { q_max, half_width_m: b,
-                offset_m: y0, band_alpha, hp_alpha, leak_rate };
+                offset_m: y0, band_alpha, hp_alpha, leak_rate, eta_override };
             let boundary = self.line.mouth_boundary()?;
-            let (mouth, trial, separation_power) = self.solve_jet_mouth(boundary, delayed, seed, coefficients)?;
+            let (mouth, trial, separation_power) = self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients)?;
             let (eta, flow, p_source) = (trial.eta_m, trial.flow_m3_s, trial.source_pa);
+            if self.nolle.is_some() {
+                // Fluctuating part of the cut jet flow about the undeflected cut (Price's q_j).
+                self.nolle_jet_flow_prev = flow - 0.5 * q_max * (1.0 + (-y0 / b).tanh());
+            }
             eta_sq += eta * eta;
             if eta > y0 {
                 pipe_side += 1;
