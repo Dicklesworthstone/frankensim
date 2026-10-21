@@ -209,6 +209,23 @@ impl TractChart {
         wall: Option<&WallPin>,
         count: usize,
     ) -> Result<Vec<f64>, TractError> {
+        self.tmm_formants_terminated(gas, wall, Termination::IdealOpen, count)
+    }
+
+    /// [`TractChart::tmm_formants`] under any mouth load, so the passive
+    /// resonances can be read for the exact termination a render uses
+    /// (for example the flanged-piston load, which lengthens the tract by its
+    /// end correction).
+    ///
+    /// # Errors
+    /// TMM refusals.
+    pub fn tmm_formants_terminated(
+        &self,
+        gas: &GasState,
+        wall: Option<&WallPin>,
+        termination: Termination,
+        count: usize,
+    ) -> Result<Vec<f64>, TractError> {
         let duct = self.to_duct();
         let mut formants = Vec::new();
         let mut prev2 = 0.0f64;
@@ -221,7 +238,7 @@ impl TractChart {
                 gas,
                 omega,
                 fs_duct::LossModel::Bessel,
-                Termination::IdealOpen,
+                termination,
                 wall,
             )?
             .impedance;
