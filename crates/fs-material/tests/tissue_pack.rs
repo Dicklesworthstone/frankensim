@@ -195,3 +195,318 @@ fn g2_tissue_packs_pass_physicality_and_register_gates() {
         lip.scalars["young_modulus_effective_upper_lip"]
     );
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// HUMAN layered vocal-fold packs of music bead `frankensim-irp-v5-instrument-realism-pexfp.194` (M8-W2d): the layered
+// human lamina propria of Kelleher et al. 2013 and the human elastic set of Alipour and Vigmostad 2012. Both are
+// publisher-copyright papers, so the packs hold numeric facts with attribution (licence token
+// `Published-Scientific-Facts-Attribution-Retained`), never a table layout, and the loader below does not require
+// CC-BY. The gates encode what the sources themselves state: every typed value equals the printed one; the
+// per-specimen ratios recomputed from the typed rows reproduce the means the source prints; the layer ordering the
+// authors report; E_L > E_T > G_L in every specimen; every observation binds the specimen state (age, sex, hours
+// postmortem, storage) to its values; and the two independent human sources agree on the longitudinal low-strain
+// scale within a factor 2. The older packs above stay untouched; their statement that no pack holds a measured
+// density is superseded for measured use by `tf-rho` / `ff-rho` of the Alipour pack (a facts-only row).
+// ---------------------------------------------------------------------------------------------------------------
+
+struct HumanPack {
+    manifest: String,
+    /// claim id -> (value, unit, observation id)
+    scalar: BTreeMap<String, (f64, String, String)>,
+    /// claim id -> uncertainty kind and, for absolute kinds, the spread
+    uncertainty: BTreeMap<String, (String, Option<f64>)>,
+    /// claim id -> number of validity rows
+    validity: BTreeMap<String, usize>,
+    /// observation id -> specimen, method and caveats joined
+    observation: BTreeMap<String, String>,
+}
+
+impl HumanPack {
+    fn value(&self, claim: &str) -> f64 {
+        self.scalar
+            .get(claim)
+            .unwrap_or_else(|| panic!("claim {claim} missing"))
+            .0
+    }
+}
+
+fn load_human_pack(dir: &str) -> HumanPack {
+    let root = repo_root();
+    let manifest =
+        std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/manifest.tsv")))
+            .expect("manifest");
+    assert!(manifest.starts_with("frankensim.matdb-manifest.v1"));
+    assert!(
+        manifest.contains("Published-Scientific-Facts-Attribution-Retained"),
+        "{dir}: facts-only licence token"
+    );
+    assert!(manifest.contains("https://doi.org/"), "{dir}: DOI required");
+    let text =
+        std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/properties.tsv")))
+            .expect("properties");
+    assert!(text.starts_with("frankensim.matdb-source.v1"));
+    let mut pack = HumanPack {
+        manifest,
+        scalar: BTreeMap::new(),
+        uncertainty: BTreeMap::new(),
+        validity: BTreeMap::new(),
+        observation: BTreeMap::new(),
+    };
+    for line in text.lines().skip(1) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        match cols[0] {
+            "scalar" => {
+                assert_eq!(cols.len(), 7, "{dir}: scalar arity");
+                let value: f64 = cols[4].parse().expect("scalar value");
+                assert!(
+                    value.is_finite() && value > 0.0,
+                    "{dir}: {} positive",
+                    cols[1]
+                );
+                let previous = pack.scalar.insert(
+                    cols[1].to_string(),
+                    (value, cols[5].to_string(), cols[2].to_string()),
+                );
+                assert!(previous.is_none(), "{dir}: duplicate claim {}", cols[1]);
+            }
+            "uncertainty" => {
+                assert_eq!(cols.len(), 7, "{dir}: uncertainty arity");
+                let spread = match cols[2] {
+                    "unstated" => None,
+                    "absolute" => Some(cols[3].parse::<f64>().expect("spread")),
+                    other => panic!("{dir}: unexpected uncertainty kind {other}"),
+                };
+                pack.uncertainty
+                    .insert(cols[1].to_string(), (cols[2].to_string(), spread));
+            }
+            "validity" => {
+                assert_eq!(cols.len(), 6, "{dir}: validity arity");
+                *pack.validity.entry(cols[1].to_string()).or_insert(0) += 1;
+            }
+            "observation" => {
+                assert_eq!(cols.len(), 5, "{dir}: observation arity");
+                pack.observation.insert(
+                    cols[1].to_string(),
+                    format!("{} {} {}", cols[2], cols[3], cols[4]),
+                );
+            }
+            other => panic!("unknown row kind {other}"),
+        }
+    }
+    for (id, (_, _, obs)) in &pack.scalar {
+        assert!(
+            pack.uncertainty.contains_key(id),
+            "{dir}: {id} lacks an uncertainty row"
+        );
+        assert!(
+            pack.validity.contains_key(id),
+            "{dir}: {id} lacks a validity row"
+        );
+        assert!(
+            pack.observation.contains_key(obs),
+            "{dir}: {id} names missing observation {obs}"
+        );
+    }
+    pack
+}
+
+/// Kelleher et al. 2013 Table 2: (subject, layer, E_L, E_T, G_L [kPa], R2 of the contact fit).
+const TABLE_2: [(&str, &str, f64, f64, f64, f64); 12] = [
+    ("a", "ligament", 28.20, 2.53, 0.91, 1.000),
+    ("a", "cover", 196.40, 5.18, 4.18, 0.997),
+    ("b", "ligament", 29.95, 1.18, 0.89, 0.997),
+    ("b", "cover", 579.20, 7.17, 6.01, 0.978),
+    ("c", "ligament", 24.32, 1.48, 0.77, 0.997),
+    ("c", "cover", 268.20, 8.25, 7.50, 0.976),
+    ("d", "ligament", 25.82, 1.51, 0.78, 0.996),
+    ("d", "cover", 302.25, 14.35, 6.42, 0.999),
+    ("e", "ligament", 38.56, 5.06, 1.59, 0.999),
+    ("e", "cover", 199.80, 4.80, 3.24, 0.976),
+    ("f", "ligament", 14.11, 3.08, 1.03, 0.999),
+    ("f", "cover", 253.85, 11.93, 7.62, 0.988),
+];
+
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * b.abs().max(1.0)
+}
+
+#[test]
+fn g2_human_layer_pack_pins_the_printed_table_and_the_printed_means() {
+    let pack = load_human_pack("vocalfold-human-layers-kelleher-bmmb-pmc3745772");
+
+    // Every typed value equals the printed one, with the specimen state bound to it.
+    for (subject, layer, el, et, gl, r2) in TABLE_2 {
+        let id = format!("{subject}-{layer}");
+        assert!(near(pack.value(&format!("{id}-el")), el), "{id} E_L");
+        assert!(near(pack.value(&format!("{id}-et")), et), "{id} E_T");
+        assert!(near(pack.value(&format!("{id}-gl")), gl), "{id} G_L");
+        assert!(near(pack.value(&format!("{id}-r2")), r2), "{id} R2");
+        assert_eq!(pack.scalar[&format!("{id}-el")].1, "kPa");
+        let state = &pack.observation[&id];
+        assert!(
+            state.contains("h postmortem") && state.contains("PBS") && state.contains(" y, "),
+            "{id}: the observation must carry age, postmortem hours and storage"
+        );
+        assert!(
+            state.contains("1 Hz") && state.contains("coupled"),
+            "{id}: loading rate and the E_T/G_L coupling caveat must be carried"
+        );
+        // Per-value uncertainty is not printed by the source: it must say so.
+        for part in ["el", "et", "gl", "r2"] {
+            assert_eq!(pack.uncertainty[&format!("{id}-{part}")].0, "unstated");
+        }
+    }
+
+    // The per-specimen ratios recomputed from the typed rows reproduce the means the source prints
+    // (14 and 39 for E_L/E_T, 28 and 54 for E_L/G_L, rounded to integers in the text).
+    fn mean_ratio(layer: &str, f: fn(f64, f64, f64) -> f64) -> f64 {
+        let rows: Vec<f64> = TABLE_2
+            .iter()
+            .filter(|r| r.1 == layer)
+            .map(|r| f(r.2, r.3, r.4))
+            .collect();
+        assert_eq!(rows.len(), 6);
+        rows.iter().sum::<f64>() / 6.0
+    }
+    fn el_over_et(el: f64, et: f64, _gl: f64) -> f64 {
+        el / et
+    }
+    fn el_over_gl(el: f64, _et: f64, gl: f64) -> f64 {
+        el / gl
+    }
+    let cases: [(&str, &str, f64, f64, fn(f64, f64, f64) -> f64); 4] = [
+        ("ligament", "e-l-over-e-t", 14.0, 8.0, el_over_et),
+        ("cover", "e-l-over-e-t", 39.0, 22.0, el_over_et),
+        ("ligament", "e-l-over-g-l", 28.0, 8.0, el_over_gl),
+        ("cover", "e-l-over-g-l", 54.0, 23.0, el_over_gl),
+    ];
+    for (layer, what, printed, spread, f) in cases {
+        let id = format!("ratio-{what}-{layer}");
+        assert!(near(pack.value(&id), printed), "{id} typed mean");
+        assert_eq!(pack.uncertainty[&id].1, Some(spread), "{id} typed spread");
+        let recomputed = mean_ratio(layer, f);
+        assert!(
+            (recomputed - printed).abs() < 0.5,
+            "{id}: recomputed mean {recomputed} against printed {printed}"
+        );
+    }
+
+    // The layer ordering the authors report.
+    let mut stiffer_ratio = Vec::new();
+    for subject in ["a", "b", "c", "d", "e", "f"] {
+        let lig = |part: &str| pack.value(&format!("{subject}-ligament-{part}"));
+        let cov = |part: &str| pack.value(&format!("{subject}-cover-{part}"));
+        let ratio = cov("el") / lig("el");
+        assert!(
+            (3.0..30.0).contains(&ratio),
+            "{subject}: cover/ligament E_L {ratio}"
+        );
+        stiffer_ratio.push(ratio);
+        for layer in ["ligament", "cover"] {
+            let (el, et, gl) = (
+                pack.value(&format!("{subject}-{layer}-el")),
+                pack.value(&format!("{subject}-{layer}-et")),
+                pack.value(&format!("{subject}-{layer}-gl")),
+            );
+            assert!(el > et && et > gl, "{subject} {layer}: E_L > E_T > G_L");
+        }
+        // Cover E_T and G_L exceed the ligament's in every subject except E, whose cover E_T is lower
+        // (G_L of subject E is still higher): the exception the source names.
+        assert!(cov("gl") > lig("gl"), "{subject}: cover G_L above ligament");
+        if subject == "e" {
+            assert!(cov("et") < lig("et"), "subject E: the named exception");
+        } else {
+            assert!(cov("et") > lig("et"), "{subject}: cover E_T above ligament");
+        }
+    }
+    let geometric = (stiffer_ratio.iter().map(|r| r.ln()).sum::<f64>() / 6.0).exp();
+    assert!(
+        (5.0..20.0).contains(&geometric),
+        "cover is stiffer than ligament in tension by roughly a factor 10 (geometric mean {geometric})"
+    );
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-human-layers\",\"verdict\":\"pass\",\
+         \"cover_over_ligament_el_geometric_mean\":{geometric},\"packs\":1}}"
+    );
+}
+
+#[test]
+fn g2_human_elastic_set_pins_the_table_and_agrees_with_the_layered_pack() {
+    let set = load_human_pack("vocalfold-human-elastic-set-alipour-jvoice-pmc3508138");
+    let layers = load_human_pack("vocalfold-human-layers-kelleher-bmmb-pmc3745772");
+
+    // Table 1: mean and spread, in kPa, kg/m3 (g/mL x 1000) and dimensionless.
+    for (id, mean, spread, unit) in [
+        ("tf-el", 30.0, 13.4, "kPa"),
+        ("tf-et", 1.0, 0.5, "kPa"),
+        ("ff-el", 13.9, 7.6, "kPa"),
+        ("tf-gl", 0.67, 0.31, "kPa"),
+        ("tf-nu", 0.57, 0.17, "1"),
+        ("tf-rho", 1029.9, 5.1, "kg/m3"),
+        ("ff-rho", 1019.3, 4.6, "kg/m3"),
+    ] {
+        assert!(near(set.value(id), mean), "{id} mean");
+        assert_eq!(set.uncertainty[id].1, Some(spread), "{id} spread");
+        assert_eq!(set.scalar[id].1, unit, "{id} unit");
+    }
+
+    // A measured density of human true and false fold tissue; true above false (the source's paired t-test
+    // finding), both in the soft-tissue class.
+    let (rho_t, rho_f) = (set.value("tf-rho"), set.value("ff-rho"));
+    assert!(
+        rho_t > rho_f && (1000.0..1100.0).contains(&rho_f) && (1000.0..1100.0).contains(&rho_t)
+    );
+    assert!(set.observation["tissue-density"].contains("MEASURED"));
+    assert!(set.observation["tissue-density"].contains("Archimedes"));
+
+    // Transverse stiffness far below longitudinal (the source: about 30 times), Poisson ratio near 0.5.
+    let anisotropy = set.value("tf-el") / set.value("tf-et");
+    assert!((20.0..40.0).contains(&anisotropy), "E_L/E_T {anisotropy}");
+    assert!((0.4..0.7).contains(&set.value("tf-nu")));
+    // The nonlinearity statement is a printed range, and the typical sample sits inside it.
+    assert!(set.value("stiffening-low") < set.value("stiffening-high"));
+    let typical = set.value("typical-high") / set.value("typical-low");
+    assert!(
+        (set.value("stiffening-low")..=set.value("stiffening-high")).contains(&typical),
+        "typical sample slope ratio {typical} inside the printed 10-15"
+    );
+
+    // State is bound to the values: donors, storage, rate, and the register of the modulus.
+    for id in [
+        "tf-longitudinal",
+        "tf-transverse",
+        "ff-longitudinal",
+        "tf-shear",
+        "tf-poisson",
+    ] {
+        let state = &set.observation[id];
+        assert!(
+            state.contains("Geriatric") && state.contains("1 Hz") && state.contains("nonlinear"),
+            "{id}: donors, rate and nonlinearity must be carried"
+        );
+    }
+
+    // Two independent human sources, two methods (ergometer on lamina propria strips; tension with optical strain
+    // on separated ligament): the longitudinal low-strain scale agrees within a factor 2.
+    let ligament: Vec<f64> = TABLE_2
+        .iter()
+        .filter(|r| r.1 == "ligament")
+        .map(|r| r.2)
+        .collect();
+    let ligament_mean = ligament.iter().sum::<f64>() / 6.0;
+    let ratio = set.value("tf-el") / ligament_mean;
+    assert!(
+        (0.5..2.0).contains(&ratio),
+        "Alipour {} vs ligament mean {ligament_mean}",
+        set.value("tf-el")
+    );
+    assert!(near(layers.value("a-ligament-el"), 28.2));
+
+    // The measured density sits within 2 percent of the stated 1040 kg/m3 constant of the older register pack.
+    assert!((rho_t - 1040.0).abs() / 1040.0 < 0.02);
+    assert!(set.manifest.contains("Alipour"));
+    println!(
+        "{{\"suite\":\"fs-material\",\"case\":\"g2-human-elastic-set\",\"verdict\":\"pass\",\
+         \"rho_true_fold\":{rho_t},\"rho_false_fold\":{rho_f},\"el_over_et\":{anisotropy}}}"
+    );
+}

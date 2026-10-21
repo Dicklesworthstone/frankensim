@@ -414,6 +414,54 @@ fn figure_digitization_requires_error_for_acceptance_but_records_fixtures() {
 }
 
 #[test]
+fn figure_digitization_under_facts_only_requires_a_stated_or_bounded_reading_error() {
+    let start = Instant::now();
+    let refused = LedgerErrorKind::Inconsistent(
+        "figure digitization requires permitted redistribution, or facts-only with a stated or bounded reading error",
+    );
+    let mut fields = fixture_fields();
+    fields[9] = "figure-digitized".to_owned();
+    fields[10] = Decision::AdmitFactsOnly.tag().to_owned();
+    fields[7] = Redistribution::FactsOnly.tag().to_owned();
+    // OD17: facts-only figure readings are retained when the error is stated or bounded.
+    for uncertainty in [UncertaintyStatement::Stated, UncertaintyStatement::Bounded] {
+        fields[8] = uncertainty.tag().to_owned();
+        let ledger = parse_fields(&fields).unwrap();
+        assert_eq!(ledger.rows()[0].redistribution, Redistribution::FactsOnly);
+        assert_eq!(ledger.rows()[0].uncertainty, uncertainty);
+    }
+    let mut refusals = 0;
+    // An unstated reading error is refused under facts-only, whatever the decision.
+    fields[8] = UncertaintyStatement::Unstated.tag().to_owned();
+    for decision in [Decision::AdmitFactsOnly, Decision::FixtureOnly] {
+        fields[10] = decision.tag().to_owned();
+        fields[13] = "GRAPH-READ; reading error unstated".to_owned();
+        assert_eq!(parse_fields(&fields).unwrap_err().kind, refused);
+        refusals += 1;
+    }
+    // Redistribution that is neither permitted nor facts-only stays refused even with a stated error.
+    fields[8] = UncertaintyStatement::Stated.tag().to_owned();
+    fields[10] = Decision::FixtureOnly.tag().to_owned();
+    for redistribution in [Redistribution::PermissionRequired, Redistribution::Refused] {
+        fields[7] = redistribution.tag().to_owned();
+        assert!(parse_fields(&fields).is_err());
+        refusals += 1;
+    }
+    // Permitted redistribution is unchanged: an unstated-error figure reading is still recordable as a fixture.
+    fields[7] = Redistribution::Permitted.tag().to_owned();
+    fields[8] = UncertaintyStatement::Unstated.tag().to_owned();
+    assert_eq!(
+        parse_fields(&fields).unwrap().rows()[0].decision,
+        Decision::FixtureOnly
+    );
+    schema_event(
+        "figure_digitization_under_facts_only_requires_a_stated_or_bounded_reading_error",
+        refusals,
+        start,
+    );
+}
+
+#[test]
 fn committed_graph_read_packs_are_fixture_only() {
     let start = Instant::now();
     let text = committed_text();

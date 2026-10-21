@@ -443,11 +443,16 @@ fn parse_row(fields: &[&str]) -> Result<LedgerRow, LedgerErrorKind> {
             "retained artifacts require permitted or facts-only redistribution",
         ));
     }
+    // Owner decision OD17 (2026-10-21): numbers read off a published figure are
+    // facts, so facts-only redistribution may retain them, but only when the row
+    // states or bounds the reading error. Other redistribution stays refused.
     if row.digitization == Digitization::FigureDigitized
-        && row.redistribution != Redistribution::Permitted
+        && !(row.redistribution == Redistribution::Permitted
+            || (row.redistribution == Redistribution::FactsOnly
+                && row.uncertainty != UncertaintyStatement::Unstated))
     {
         return Err(LedgerErrorKind::Inconsistent(
-            "figure digitization requires permitted redistribution",
+            "figure digitization requires permitted redistribution, or facts-only with a stated or bounded reading error",
         ));
     }
     // M8-W1 disposition (Agent Mail 2493): preserve unbounded historical

@@ -47,7 +47,7 @@ pub(super) fn reduce(
     additional: &[Vec<f64>],
     max_projection_terms: usize,
 ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>), AcousticRealizeError> {
-    reduce_with_tensor(specimen, options, additional, max_projection_terms, None)
+    reduce_with_tensor(specimen, options, additional, max_projection_terms, None, None)
         .map(|(radiators, ports, _)| (radiators, ports))
 }
 
@@ -74,9 +74,31 @@ impl ResolvedPlateChart {
         -> Result<(ViscousPlateImage, Vec<Vec<f64>>), AcousticRealizeError>
     {
         let (radiators, ports, damping) = reduce_with_tensor(self, options,
-            additional_force_weights, max_force_projection_terms, Some((viscosity, limits, gate)))?;
+            additional_force_weights, max_force_projection_terms, Some((viscosity, limits, gate)), None)?;
         Ok((ViscousPlateImage { source: viscosity.clone(), radiators,
             damping: damping.expect("selected tensor projection returns its full matrix") }, ports))
+    }
+
+    /// Retain original rotations and mass normalization for subsequent regional
+    /// constitutive projection. There is still exactly one plate eigensolve.
+    pub(crate) fn material_radiators_with_basis_and_force_ports(
+        &self, options: &PlateChartRadiation, additional: &[Vec<f64>],
+        max_projection_terms: usize,
+        tensor: Option<(&PlateViscosity, PlateViscosityLimits, &CancelGate)>,
+        gate: &CancelGate,
+    ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>, Option<ModalPlateViscosity>, RetainedPlateBasis), AcousticRealizeError> {
+        if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+        let terms = self.chart().mesh.nodes.len().checked_mul(3)
+            .and_then(|n| n.checked_mul(options.n_modes))
+            .ok_or_else(|| refuse("retained material basis size overflows"))?;
+        if terms > max_projection_terms {
+            return Err(refuse("retained material basis exceeds its projection budget"));
+        }
+        let mut basis = None;
+        let (radiators, ports, damping) = reduce_with_tensor(self, options, additional,
+            max_projection_terms, tensor, Some(&mut basis))?;
+        if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+        Ok((radiators, ports, damping, basis.expect("selected original basis is retained")))
     }
 }
 
@@ -84,6 +106,7 @@ fn reduce_with_tensor(
     specimen: &ResolvedPlateChart, options: &PlateChartRadiation,
     additional: &[Vec<f64>], max_projection_terms: usize,
     tensor: Option<(&PlateViscosity, PlateViscosityLimits, &CancelGate)>,
+    retain: Option<&mut Option<RetainedPlateBasis>>,
 ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>, Option<ModalPlateViscosity>), AcousticRealizeError> {
     if let Some((law, limits, gate)) = tensor {
         law.preflight(specimen, options.n_modes, limits, gate)?;
@@ -131,6 +154,8 @@ fn reduce_with_tensor(
         let root_mass = fs_math::det::sqrt(radiator.mass_kg);
         if let Some((_, _, gate)) = tensor {
             if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
+        }
+        if tensor.is_some() || retain.is_some() {
             normalized.push(pair.phi.iter().map(|p| p / root_mass).collect::<Vec<_>>());
         }
         for (projection, port) in projections.iter().zip(&mut ports) {
@@ -164,6 +189,12 @@ fn reduce_with_tensor(
         let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
         law.project(specimen, &model, &normalized, &omega, limits, gate)
     }).transpose()?;
+    if let Some(basis) = retain {
+        *basis = Some(RetainedPlateBasis {
+            source_identity: specimen.specimen_identity(),
+            dof_map: model.dof_map.clone(), mass_normalized_modes: normalized,
+        });
+    }
     Ok((radiators, ports, damping))
 }
 
@@ -171,6 +202,7 @@ fn reduce_with_tensor(
 mod tests;
 
 mod pressure;
+mod bending;
 
 #[cfg(test)]
 mod tensor_tests;

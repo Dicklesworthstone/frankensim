@@ -40,7 +40,7 @@ impl ModalValveMaterialRecord {
 pub(super) enum LossSelection {
     Elastic,
     Tensor { properties: [String; 6], limits: PlateViscosityLimits },
-    Maxwell { properties: Vec<(String, String)>, initial: InitialModalMemory },
+    Maxwell { properties: Vec<(String, String)>, initial: InitialModalMemory, regional: bool },
 }
 impl LossSelection {
     pub fn read(rows: &mut Reader<'_>) -> Result<Self, PlateValveInputError> {
@@ -60,7 +60,8 @@ impl LossSelection {
                     max_modes: 32, max_projection_terms, reference_resistance_n_s_m,
                 } }
             }
-            "proportional-maxwell" => {
+            selection @ ("proportional-maxwell" | "regional-maxwell") => {
+                let regional = selection == "regional-maxwell";
                 let initial = match row.word()? {
                     "relaxed" => InitialModalMemory::Relaxed,
                     "unrelaxed" => InitialModalMemory::Unrelaxed,
@@ -77,9 +78,9 @@ impl LossSelection {
                     }
                     properties.push((modulus, time));
                 }
-                Self::Maxwell { properties, initial }
+                Self::Maxwell { properties, initial, regional }
             }
-            _ => return Err(bad(row.line, "loss requires elastic, tensor properties/limits, or proportional-maxwell INITIAL COUNT MODULUS TIME ...")),
+            _ => return Err(bad(row.line, "loss requires elastic, tensor properties/limits, or proportional-maxwell/regional-maxwell INITIAL COUNT MODULUS TIME ...")),
         };
         row.finish()?;
         Ok(selected)

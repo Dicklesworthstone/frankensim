@@ -39,7 +39,8 @@ pub struct StringObservation {
     /// Continuous-span bound sum_n ||Q_n||*n*pi/L, not a sampled maximum.
     /// Q_n is a scalar for one plane or the two-component transverse amplitude.
     pub slope_bound: f64,
-    /// Averaged geometric extension / reference length (dimensionless).
+    /// Mean additional axial strain (dimensionless). Moving axial endpoints
+    /// contribute their actual extension when longitudinal motion is retained.
     pub additional_strain: f64,
     /// Initial tension plus E*A times additional_strain [N].
     pub tension_n: f64,

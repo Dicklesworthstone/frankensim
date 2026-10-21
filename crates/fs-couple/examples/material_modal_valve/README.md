@@ -431,6 +431,31 @@ branches also require `dt/tau <= 2`. Neither exact free propagation nor the
 source law establishes convergence of nonlinear contact or acoustic coupling.
 These are fixed-temperature manufactured inputs, not wet-cane measurements.
 
+`loss regional-maxwell relaxed|unrelaxed COUNT MODULUS TIME ...` allows each
+original material region to have different modulus ratios and relaxation times.
+For example:
+
+```text
+loss regional-maxwell relaxed 1 maxwell_modulus maxwell_time
+```
+
+Keep the original geometry and reference different normalized material packs
+in the `section` records. The properties are read separately from each region's
+original material state. The complete regional bending tensors are projected
+using the same retained DKT displacement and rotation eigenvectors as the
+pressure, gap and force ports. All cross-mode material forces remain in the
+same exact structural solve, so changing one region's data reaches the duct
+pressure and rendered PCM. No independent replacement reed is synthesized.
+
+This selector requires `propagator exact-zoh`; it permits equilibrium
+pretension, which is not included in the relaxing bending branches. The local
+plane-stress tensor is scaled by each region's own modulus ratios. This is not
+arbitrary three-dimensional tensor Prony condensation. The complete exact loss
+block must satisfy `2*(3*modes+channels) <= 256`, in addition to the original
+projection, angular-step, material-frequency and `dt/tau <= 2` limits. Singular
+nonzero regional forms refuse instead of receiving artificial stiffness or a
+rank cutoff. The proportional selector keeps its existing diagonal path.
+
 The shared limit is 32 total modes across one or two blades, with at most 512
 nodes and 2048 triangles per blade. Each normalized pack is capped at 8 MiB and
 the complete distinct-source set at 64 MiB. Mechanical/output ratio is an integer
@@ -458,7 +483,10 @@ execution remain required; committed tests are not evidence of a passed run.
 Hereditary regressions separately check modal memory storage and work, positive
 material loss, unchanged accepted histories after a refused step, the exact
 elastic limit, data-only spectral changes at the microphone, callback identity,
-and refusal of nonproportional or unresolved source laws.
+and refusal of unresolved source laws. The regional selector additionally has
+cross-mode storage/work tests, agreement with a uniform proportional spectrum,
+and data-only regional changes through the actual CLI PCM path. These tests are
+authored; native compilation and execution remain required.
 Native MIMO regressions additionally retain source byte hashes and declared
 bake identities separately, preserve all material/gas/loss/supply owners,
 exercise off-diagonal feedback and PCM partition parity, reject stale

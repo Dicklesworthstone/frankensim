@@ -321,11 +321,13 @@ impl MaterialModalValvePerformance {
                     viscous, rest_opening, inlet, impedance, dt, mechanical_samples,
                     limits, states, contact, propagator, gate)
             }
-            LossSelection::Maxwell { properties, initial } => {
+            LossSelection::Maxwell { properties, initial, regional } => {
                 ModalAperture::from_material_plates_with_propagator(
                     plates, rest_opening, inlet, impedance, dt, mechanical_samples,
                     limits, states, contact, propagator, gate)
-                    .and_then(|valve| valve.with_material_relaxation(&properties, initial, gate))
+                    .and_then(|valve| if regional {
+                        valve.with_regional_material_relaxation(&properties, initial, gate)
+                    } else { valve.with_material_relaxation(&properties, initial, gate) })
             }
         }.map_err(PlateValveInputError::Physics)?;
         if let Some(length) = slit {

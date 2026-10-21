@@ -3265,6 +3265,29 @@ independent force work, momentum, positive loss, trial rollback, data-only
 substitution and PCM callback identity; they do not establish measured cane
 behavior or complete clarinet/oboe fidelity.
 
+`ModalAperture::with_regional_material_relaxation` removes the blade-wide
+proportional-spectrum restriction while retaining each region's original
+plane-stress constitutive approximation. Every region supplies its own modulus
+ratios and times; its full rotated bending form is projected using the original
+DKT displacement and rotation eigenvectors, retained by the same eigensolve
+that supplied pressure, gap and force ports. Positive factors retain all
+cross-mode reactions and explicit internal strains in the existing exact modal
+owner. Equilibrium and geometric-prestress stiffness remain unrelaxed. Loss and
+mean material force are independently integrated, and rejected pressure/contact
+trials publish no memory. `loss regional-maxwell relaxed|unrelaxed COUNT
+MODULUS TIME ...` reaches the existing wind file, CLI, metadata and PCM.
+
+The complete exact loss block must satisfy `2*(3*modes+channels) <= 256` before
+allocation. Original projection budgets, instantaneous frequency/source bands,
+angular caps and `dt/tau <= 2` apply. Exact-zero strain rows carry no memory;
+singular nonzero regional forms refuse without regularization or rank removal.
+The old proportional selector retains its original diagonal propagation.
+This is regional proportional-to-local-tensor bending memory, not arbitrary
+three-dimensional Prony plane-stress condensation, nonlinear wet-cane physics
+or measured instrument qualification. Physical-coordinate propagation/power
+oracles and material-to-microphone/PCM regressions are authored; native source
+compilation and execution remain required.
+
 ### Material two-plane nonlinear string composition
 
 `MaterialStringSource::into_nonlinear` admits both transverse planes to one existing fs-nlmodal Kirchhoff–Carrier stress channel, with one source-derived EA, elongation, live tension and cross-plane stretching work. Original EI, prestress, mass, material/gas loss, torsion and directional centreline/surface/torque maps retain their ordering. `NonlinearMaterialString::prepare` retains that source while composing explicitly supplied receiver/contact/felt/volume participants in the original `PreparedImpactSystem`; `MaterialStringRun` implements the existing `ImpactSource` for the existing causal pressure renderer. The continuous vector-slope bound is invariant to transverse basis rotation. This is a frozen, moderate-slope reference model. Full rod/longitudinal dynamics, transfer from a nonlinear bow-friction bank, acoustic reaction, full instrument validation and exact-linear/SAV bandwidth work remain open for this impact route.
@@ -3279,6 +3302,26 @@ kinetic energy, strain, drag and force maps; rotations and material/gas swaps
 check the source binding. This is one bridge translation, not a six-DOF bridge,
 resolved winding slip, dynamic longitudinal inertia or measured instrument
 qualification.
+
+`SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
+that same support owner with material-solid axial inertia and selected
+longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame
+and support direction determine every axial and transverse projection. The
+exact triangular kinetic transform retains each directional affine-lift mass
+once. `fs_nlmodal::LongitudinalString` supplies positive strain storage and its
+derivatives, including actual moving-end extension; transposed forces drive
+the same support and neighboring spans. Original transverse material/gas loss,
+torsion and source states remain. The reference is already strung and
+equilibrated, so initial static tension reactions are not reapplied. Axial
+modes are conservative; axial viscosity and gas drag are not inferred.
+
+This extension still has one translating support, without a full 6-DOF bridge,
+moving torsional endpoints, winding slip or an exact linear propagation
+upgrade. Existing `ImpactSystem` owns admission, stepping and work balance.
+Independent spatial mass/strain/gas quadrature, gradient/Hessian,
+support/neighbor work and material/gas/torsion regressions are authored. Syntax
+and whitespace checks pass; native compilation and execution remain required.
+No measured instrument realism is claimed.
 
 `ReciprocalStringBank::with_longitudinal_waves` selects the existing
 `fs_nlmodal::LongitudinalString` energy on the playable material bank. Original
