@@ -282,6 +282,22 @@ class PartialGateTests(unittest.TestCase):
         self.assertEqual(int(noisy.strong.sum()), 3)  # exactly the three real partials count
 
 
+class GlideTests(unittest.TestCase):
+    def test_a_note_whose_partials_are_all_offset_together_has_no_stiffness(self):
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        # f0 estimated 0.6% below where every partial really is (an unsettled pitch): the series is still exactly harmonic
+        x = sum(a * np.sin(2 * np.pi * k * 221.3 * tt) for k, a in ((1, 1.0), (2, 0.6), (3, 0.3)))
+        x = 0.2 * x / np.abs(x).max() * (0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1)))
+        from unittest import mock
+        with mock.patch.object(dc, "fit_stiff_string_law", wraps=dc.fit_stiff_string_law) as fit:
+            note = note_of(x, 220.0)
+        # the B fit is the one Note makes itself, on strong partials, with f0 free (describe()'s own calls pass f0_fixed)
+        own = [c for c in fit.call_args_list if "f0_fixed" not in c.kwargs]
+        self.assertTrue(own, "Note fits B with f0 free")
+        self.assertLess(note.B, 1e-5)
+
+
 class ContractTests(unittest.TestCase):
     """write_pair against P8's validator (tools/build_instruments.py) on a synthetic library."""
 

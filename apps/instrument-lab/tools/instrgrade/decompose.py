@@ -406,11 +406,13 @@ class Note:
         # A partial's frequency is a measurement only if the partial is there: within STRONG_DB of the strongest. Below
         # that the tracker is reporting whichever noise peak lies in its search window (a render with two real
         # partials has "partials" 4-12 at -60 to -90 dB), and a stiff-string fit or a frequency gap built on them is
-        # an artifact. B is fitted on the strong partials only (f0 held), and is 0 with fewer than three of them.
+        # an artifact. B is fitted on the strong partials only, with f0 free: a note whose pitch has not settled has
+        # every partial offset together from the measured f0, and a fit that holds f0 would call that stiffness.
+        # It is 0 with fewer than three strong partials.
         self.strong = self.pmean > self.pmean.max() - STRONG_DB if len(self.pmean) else np.zeros(0, bool)
         if self.strong.sum() >= 3:
             w = 10 ** ((self.pmean[self.strong] - self.pmean.max()) / 20.0)
-            self.B = float(fit_stiff_string_law(self.pk[self.strong].astype(float), self.pf[self.strong], w, f0_fixed=self.f0)[1])
+            self.B = float(fit_stiff_string_law(self.pk[self.strong].astype(float), self.pf[self.strong], w)[1])
         else:
             self.B = 0.0
 
