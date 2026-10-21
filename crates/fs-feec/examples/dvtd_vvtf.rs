@@ -17,6 +17,7 @@ use fs_io::gmsh::{GmshElementType, parse_gmsh};
 use fs_modal::SliceOptions;
 use fs_rep_mesh::TetComplex;
 use fs_sparse::direct::DirectOrdering;
+use fs_sparse::ordering_nd::NdOptions;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -71,7 +72,10 @@ fn main() {
     let lips = &faces[&3];
     let opts = SliceOptions {
         ordering: if nested {
-            DirectOrdering::NestedDissection
+            DirectOrdering::NestedDissection(NdOptions {
+                leaf_size: 256,
+                refinement_passes: 2,
+            })
         } else {
             DirectOrdering::Amd
         },
