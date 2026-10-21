@@ -1,5 +1,6 @@
 //! Check an entire simultaneous-load requirement on an enriched physical grid.
 //! Both grids solve the same authored load laws and inherited eroded material.
+pub mod binary;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{adaptive::{AdaptiveElasticity3, enrichment::AdaptiveTransfer3}, surface::ReferenceLoad3};
 use super::LoadSpaceCap3;
@@ -49,12 +50,17 @@ impl LoadSpaceCapRefinement3 {
     /// or the difference between two maxima. No dilated-volume error is tested.
     #[must_use]
     pub fn stable_and_feasible(&self, smooth_tolerance: f64, change_tolerance: f64) -> bool {
-        change_tolerance.is_finite() && change_tolerance >= 0.0
-            && self.normalized_gram_change.is_finite() && self.normalized_gram_change >= 0.0
-            && self.normalized_gram_change <= change_tolerance
-            && [&self.coarse, &self.fine].iter().all(|grid| self.cap.admits_spectrum(
-                self.cap.policy(), &grid.spectrum, grid.worst_compliance, smooth_tolerance))
+        pair_admits(&self.cap, &self.coarse, &self.fine, self.normalized_gram_change,
+            smooth_tolerance, change_tolerance)
     }
+}
+
+fn pair_admits(cap: &LoadSpaceCap3, coarse: &LoadSpaceGridCheck3, fine: &LoadSpaceGridCheck3,
+    change: f64, smooth_tolerance: f64, change_tolerance: f64) -> bool {
+    change_tolerance.is_finite() && change_tolerance >= 0.0
+        && change.is_finite() && change >= 0.0 && change <= change_tolerance
+        && [coarse, fine].iter().all(|grid| cap.admits_spectrum(
+            cap.policy(), &grid.spectrum, grid.worst_compliance, smooth_tolerance))
 }
 
 fn poll(control: &mut SolveControl<'_>, stage: &'static str) -> ControlFlow<()> {
@@ -118,7 +124,47 @@ fn grid_check(forces: &[Vec<f64>], states: &[Vec<f64>], fixed: &[bool],
         worst_compliance, witness_relative_defect })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn admit_enrichment<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, enriched: &AdaptiveElasticity3,
+    laws: &[ReferenceLoad3<'_>], rho: &[f64], params: SimpParams, robustness: RobustOptions3,
+    cap: &LoadSpaceCap3, options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+    -> Result<(), GoalRefinementError3> {
+    robustness.assert_valid(params);
+    if laws.len() != cap.policy().dimension() || laws.len() > options.max_load_cases
+        || options.max_transfer_terms == 0
+        || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance]
+            .iter().all(|x| x.is_finite() && *x > 0.0 && *x < 1.0)
+        || rho.len() != study.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) {
+        return Err(invalid("invalid load-space refinement model, basis or resource policy"));
+    }
+    control.checkpoint("sdf3-load-space-grid-start")?;
+    let transfer = AdaptiveTransfer3::new(study.operator().adaptive(), enriched,
+        options.max_transfer_terms, || poll(control, "sdf3-load-space-grid-transfer"))?;
+    if !enriched.leaves().iter().zip(transfer.parents()).any(|(leaf, &parent)|
+        leaf.level() > study.operator().adaptive().leaves()[parent].level()) {
+        return Err(invalid("load-space assessment requires actual active-space enrichment"));
+    }
+    drop(transfer);
+    Ok(())
+}
+
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
+    #[allow(clippy::too_many_arguments)]
+    fn assess_load_space_grids(&self, enriched: AdaptiveElasticity3, laws: &[ReferenceLoad3<'_>],
+        forces: &[Vec<f64>], states: &[Vec<f64>], cap: &LoadSpaceCap3,
+        options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+        -> Result<(LoadSpaceGridCheck3, LoadSpaceGridCheck3, f64, ComplianceRefinement3), GoalRefinementError3> {
+        let coarse = grid_check(forces, states, self.operator().fixed(), cap, control)?;
+        let loads: Vec<_> = laws.iter().map(|&load| GoalReferenceLoad3 {
+            load, weight: 1.0/laws.len() as f64 }).collect();
+        let fine_fixed = enriched.fixed().to_vec();
+        let (basis_assessment, fields) = self.estimate_reference_compliance_with_fields(
+            enriched, &loads, states, options, control)?;
+        let fine = grid_check(&fields.forces, &fields.displacements, &fine_fixed, cap, control)?;
+        let change = gram_change(&fine.spectrum.gram, &coarse.spectrum.gram)?;
+        Ok((coarse, fine, change, basis_assessment))
+    }
+
     /// Re-solve the authored basis on both grids and check the full combined-load
     /// cap. The finer grid inherits the COARSE ERODED PHYSICAL stiffness; it does
     /// not inherit/refilter raw controls or replace the current design.
@@ -139,23 +185,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         laws: &[ReferenceLoad3<'_>], rho: &[f64], params: SimpParams, robustness: RobustOptions3,
         cap: &LoadSpaceCap3, options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<LoadSpaceCapRefinement3, GoalRefinementError3> {
-        robustness.assert_valid(params);
-        if laws.len() != cap.policy().dimension() || laws.len() > options.max_load_cases
-            || options.max_transfer_terms == 0
-            || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance]
-                .iter().all(|x| x.is_finite() && *x > 0.0 && *x < 1.0)
-            || rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) {
-            return Err(invalid("invalid load-space refinement model, basis or resource policy"));
-        }
-        control.checkpoint("sdf3-load-space-grid-start")?;
-        let transfer = AdaptiveTransfer3::new(self.operator().adaptive(), &enriched,
-            options.max_transfer_terms, || poll(control, "sdf3-load-space-grid-transfer"))?;
-        if !enriched.leaves().iter().zip(transfer.parents()).any(|(leaf, &parent)|
-            leaf.level() > self.operator().adaptive().leaves()[parent].level()) {
-            return Err(invalid("load-space assessment requires actual active-space enrichment"));
-        }
-        drop(transfer);
-        let fine_fixed = enriched.fixed().to_vec();
+        admit_enrichment(self, &enriched, laws, rho, params, robustness, cap, options, control)?;
         let incoming_params = self.params;
         let incoming_scales = self.operator().scales().to_vec();
         let result = (|| {
@@ -164,8 +194,6 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 forces.push(self.operator().adaptive().reference_load(law,
                     || poll(control, "sdf3-load-space-grid-load"))?);
             }
-            let loads: Vec<_> = laws.iter().map(|&load| GoalReferenceLoad3 {
-                load, weight: 1.0/laws.len() as f64 }).collect();
             let nodal: Vec<_> = forces.iter().map(|force| LoadCase {
                 force, weight: 1.0/laws.len() as f64 }).collect();
             self.params = params;
@@ -173,12 +201,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             // Existing evaluator installs this same eroded design for the DWR
             // owner to inherit, including protected regions and actual cut mass.
             let eroded = self.evaluate(rho, &nodal, control)?;
-            let coarse = grid_check(&forces, &eroded.objective.displacements,
-                self.operator().fixed(), cap, control)?;
-            let (basis_assessment, fields) = self.estimate_reference_compliance_with_fields(
-                enriched, &loads, &eroded.objective.displacements, options, control)?;
-            let fine = grid_check(&fields.forces, &fields.displacements, &fine_fixed, cap, control)?;
-            let normalized_gram_change = gram_change(&fine.spectrum.gram, &coarse.spectrum.gram)?;
+            let (coarse, fine, normalized_gram_change, basis_assessment) =
+                self.assess_load_space_grids(enriched, laws, &forces,
+                    &eroded.objective.displacements, cap, options, control)?;
             control.checkpoint("sdf3-load-space-grid-publish")?;
             Ok(LoadSpaceCapRefinement3 { cap: cap.clone(), params, robustness, rho: rho.to_vec(),
                 eroded, coarse, fine, normalized_gram_change, basis_assessment, work: control.work() })

@@ -19,26 +19,26 @@ impl CutSdf3 for Slab {
         let d=if a==HeightAxis::Z {1.0} else {0.0}; Interval::new(d,d)
     }
 }
-fn build(tree: &Octree3) -> AdaptiveElasticity3 {
+pub(super) fn build(tree: &Octree3) -> AdaptiveElasticity3 {
     let mut poll = |_| ControlFlow::Continue(());
     let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
     AdaptiveElasticity3::build(HexCell::try_new([0.0;3],[1.0;3]).unwrap(), tree, &Slab,
         &IsotropicElastic::new(1.0,0.3,1.0).unwrap(), &|p| p[0]==0.0,
         ElasticityOptions3::default(), &mut q).unwrap()
 }
-fn params() -> SimpParams { SimpParams { penal: 2.0, beta: 2.0, e_min: 1e-3, ..Default::default() } }
+pub(super) fn params() -> SimpParams { SimpParams { penal: 2.0, beta: 2.0, e_min: 1e-3, ..Default::default() } }
 fn y(p: [f64;3]) -> [f64;3] { [0.0,-1.0-p[1],0.0] }
 fn yz(p: [f64;3]) -> [f64;3] { [0.0,-0.4*(1.0+p[1]),-1.0-p[0]] }
-fn laws() -> [ReferenceLoad3<'static>;2] { [ReferenceLoad3::body(&y), ReferenceLoad3::body(&yz)] }
-fn options() -> GoalRefinementOptions3 {
+pub(super) fn laws() -> [ReferenceLoad3<'static>;2] { [ReferenceLoad3::body(&y), ReferenceLoad3::body(&yz)] }
+pub(super) fn options() -> GoalRefinementOptions3 {
     GoalRefinementOptions3 { preconditioner: GoalPreconditioner3::Jacobi { max_contributions: 100_000_000 }, ..Default::default() }
 }
-fn trees() -> (Octree3, Octree3) {
+pub(super) fn trees() -> (Octree3, Octree3) {
     let tree=Octree3::uniform(1,4,4096).unwrap();
     let fine=tree.refined(&tree.leaves().iter().copied().collect::<Vec<_>>(), || ControlFlow::Continue(())).unwrap();
     (tree,fine)
 }
-fn close(a: f64, b: f64) { assert!((a-b).abs() <= 1e-8*a.abs().max(b.abs()).max(1e-12), "{a} != {b}"); }
+pub(super) fn close(a: f64, b: f64) { assert!((a-b).abs() <= 1e-8*a.abs().max(b.abs()).max(1e-12), "{a} != {b}"); }
 
 #[test]
 fn fine_worst_combination_replays_inherited_eroded_material_without_raw_refiltering() {
