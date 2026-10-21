@@ -79,5 +79,51 @@ energy/free thermal strain and a single solid phase; conductivity and relaxation
 may vary within source support. No inertia, melting, yielding, buckling, adhesion
 or automatic mesh/time-error estimate is supplied. Split at scheduled events and
 load changes: endpoint events remain pending until both histories are accepted.
-Existing bridge growth may provide the next accepted specimen, but this module
-does not itself perform atomic spatial birth/contact synchronization.
+The base interval leaves target-time events pending. The `growth` composition
+below accepts those events together with the solved interval.
+
+## Growing spatial material on one accepted history
+
+`bridge::growth::GrowingBridge` binds an already born single-layer clamped seed,
+its complete `BridgeThermalBinding` list, a selected thermal body ID and bounded
+future `TipBirth` descriptors. Each future descriptor supplies its source binding
+and unstrained projected length; the actual scheduled thermal cell supplies mass
+and enthalpy. The shared admission checks require density, reference volume,
+caloric object, original mechanical law and current temperatures to agree.
+
+`step_candidate` and `step_transport_candidate` first use the original spatial
+coupled interval. The thermal timeline then applies its target-time events in
+the authored order, with zero thermal substeps. The existing bridge append owner
+initializes each new section stress-free along the accepted tip tangent. Old
+positions, branch histories and sources are preserved. Appends poll cancellation
+inside their original per-cell checks; none run inside Newton/Jacobian trials.
+
+The result contains interval accounts and a separate `BirthAudit`, including the
+original thermal incoming mass/enthalpy and ordered mechanical tip reports. A
+final combined storage/work gate includes incoming enthalpy once. Failure in the
+last birth rejects the entire interval and all earlier births. Other thermal
+bodies may arrive without acquiring invented beam sections, but a registered tip
+cannot change physical body. A missing selected-body binding is an error.
+
+Callers still split at events and load changes. Loads and energy guesses describe
+the old topology. After acceptance, use `PreparedMaterialNetwork::extend_thermal`
+with the complete new cell/contact description to retain existing source pins.
+The thermal contacts remain explicitly authored fixed-reference geometry, not
+contacts detected from the deflected beam. Birth is not an instantaneous impact
+or equilibrium solve: `birth_equilibrium_pending` remains true until a subsequent
+positive-time coupled advance. Multi-layer tip extension, drawing tension,
+inertia, phase change and a moving nozzle constraint remain outside this model.
+
+Six additional Rust regressions cover manual-owner equivalence followed by
+source-preserving conduction and sag, schedule-order growth, final invalid-birth
+rollback, cancellation/replay, current-time initialization with passive enthalpy,
+and bounded complete registration. Run with:
+
+```
+rch exec -- cargo test -p fs-couple --test bridge_enthalpy --test bridge_enthalpy_growth
+```
+
+These Rust tests remain unexecuted here because DSR/RCH/Cargo are unavailable.
+Independent Python/SciPy equations checked 27 one-to-two-cell growth histories;
+maximum energy discrepancy was 4.41e-16 J. These checks confirm the reference
+equations and tip-tangent continuity, not execution of the Rust event composition.
