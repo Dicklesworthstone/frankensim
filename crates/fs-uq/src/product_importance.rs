@@ -5,6 +5,8 @@
 //! a failure indicator by epsilon times that ratio gives a [0,1] observation
 //! for the existing bounded-mean confidence-sequence owner.
 //! Bead: `frankensim-ext-uq-reliability-upgrades-pwui`.
+pub mod proposal;
+
 use core::fmt::Display;
 use fs_eproc::GaussianMixtureCs;
 use fs_evidence::Color;
@@ -78,7 +80,8 @@ pub struct ImportanceReport {
 /// including singular covariance. Weights live in independent germ space, so
 /// no physical covariance inverse or determinant is needed. The evaluator and
 /// threshold must remain fixed. Choose the proposal independently of this
-/// run's observations; adaptive fitting/pilot reuse is not implemented.
+/// run's observations. `proposal` can learn a shift from a completed pilot for
+/// a SEPARATE execution; it never retroactively reweights this run.
 ///
 /// Clone retains paid calls. Cancellation is checked between calls; expensive
 /// solvers own their internal cancellation. The original one-million-call cap
@@ -375,20 +378,10 @@ impl ImportanceExecution {
                 1.0,
             ));
         }
-        let mut selector = fs_rand::StreamKey {
-            seed: self.plan.seed,
-            kernel: 0x4953_4d58,
-            tile: ordinal as u32,
-        }
-        .stream();
-        let shifted = selector.next_f64() >= epsilon;
-        let mut germs = sample_parameters(&self.germ_plan, None, ordinal)?;
+        let germs = self.draw_germs(ordinal)?;
         let mut product = Sum::default();
-        for (z, &shift) in germs.iter_mut().zip(&self.config.germ_shift) {
-            if shifted {
-                *z += shift;
-            }
-            let term = *z * shift;
+        for (&z, &shift) in germs.iter().zip(&self.config.germ_shift) {
+            let term = z * shift;
             if !z.is_finite() || !term.is_finite() {
                 return Err("importance germ or log-density product overflowed");
             }
@@ -431,6 +424,28 @@ impl ImportanceExecution {
             physical.push(value);
         }
         Ok((physical, scaled, weight))
+    }
+
+    // Single owner for the actual mixture germs, including pilot replay.
+    // No inversion of a possibly singular physical Cholesky map is involved.
+    fn draw_germs(&self, ordinal: usize) -> Result<Vec<f64>, &'static str> {
+        let mut selector = fs_rand::StreamKey {
+            seed: self.plan.seed,
+            kernel: 0x4953_4d58,
+            tile: ordinal as u32,
+        }.stream();
+        let shifted = !self.unchanged
+            && selector.next_f64() >= self.config.defensive_fraction;
+        let mut germs = sample_parameters(&self.germ_plan, None, ordinal)?;
+        if shifted {
+            for (z, &shift) in germs.iter_mut().zip(&self.config.germ_shift) {
+                *z += shift;
+                if !z.is_finite() {
+                    return Err("importance germ or log-density product overflowed");
+                }
+            }
+        }
+        Ok(germs)
     }
 }
 
