@@ -138,6 +138,25 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.
+- `MaterialSlab::step_with_material_rheology` (2-D and 3-D) resolves shared
+  material transport at actual temperature and local physical shear rate.
+  The existing non-equilibrium stress estimators include the Guo half-force
+  second-moment correction; a bounded damped local solve closes
+  `tau=1/2+3*nu(T,rate)*dt/dx^2` with `rate=numerator/(tau*dt)`. The retained
+  background relaxation field is only an initial iterate, never an assumed
+  viscosity for the evolving material. Both initial and candidate endpoint
+  source evaluations must converge before the existing thermal/flow step is
+  published. Original source payloads, physical queries, iteration counts and
+  residuals remain on `transport::rheology::RheologyMaterial`. Source failures,
+  exhausted iteration and observed cancellation preserve all accepted state.
+  No viscosity floor/cap or material-name law is substituted. This is a
+  fixed-density/Cp, low-Mach generalized-Newtonian BGK path with explicit
+  initial-state transport, not a viscoelastic model, implicit thermal coupling,
+  viscous-heating account or arbitrary-law convergence guarantee.
+  `tests/material_rheology.rs` checks independent prescribed stress moments
+  with forcing, both-dimensional constant-material equivalence, a source-card
+  viscosity curve against its analytic constitutive root, actual material-swap
+  momentum response, and transactional refusals.
 - `MaterialSlab::step_with_boussinesq_material_transport` (2-D and 3-D) —
   evaluates actual local material density for `(rho(T)-rho0)*gravity`, and
   the same evaluation's dynamic viscosity and conductivity for

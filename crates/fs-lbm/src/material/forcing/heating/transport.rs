@@ -6,6 +6,8 @@
 
 /// Density-resolved buoyancy with explicit, fixed reference storage.
 pub mod boussinesq;
+/// Source-resolved shear-dependent viscosity on the same thermal/flow path.
+pub mod rheology;
 
 use super::{HeatBalance, HeatSourceLimits, MaterialSlab, ThermalLbm, ThermalLbm3, ThermalSourceError};
 use crate::material::{MaterialLbmError, plan_scaling_from_material};
@@ -58,6 +60,15 @@ pub enum MaterialTransportError {
         /// Original material/conversion error.
         source: MaterialLbmError,
     },
+    /// Local shear rate and material viscosity did not become self-consistent.
+    RheologyConvergence {
+        /// Original linear fluid-cell index.
+        cell: usize,
+        /// Material evaluations attempted at this cell and time level.
+        iterations: usize,
+        /// Final absolute relaxation-time fixed-point residual.
+        relaxation_defect: f64,
+    },
     /// Existing source, physical-unit or heat-balance admission failed.
     Thermal(ThermalSourceError),
     /// Cancellation observed before publication.
@@ -68,6 +79,8 @@ impl core::fmt::Display for MaterialTransportError {
         match self {
             Self::Invalid(s) => write!(f, "material transport: {s}"),
             Self::State { cell, temperature_k, source } => write!(f, "material transport at cell {cell}, {temperature_k} K: {source}"),
+            Self::RheologyConvergence { cell, iterations, relaxation_defect } => write!(f,
+                "material rheology at cell {cell} did not converge in {iterations} iterations (relaxation defect {relaxation_defect})"),
             Self::Thermal(e) => write!(f, "material transport: {e}"),
             Self::Cancelled => write!(f, "material transport cancelled"),
         }
@@ -87,9 +100,16 @@ pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, con
     range: [f64; 2], gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
 ) -> Result<Vec<TransportSample<F>>, MaterialTransportError> {
+    let temperatures = temperatures::<S, D, Q>(mapping, state, range, gate)?;
+    sample_temperatures::<S, F, D, Q>(mapping, &temperatures, cells, plane, range, gate, resolve)
+}
+
+fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
+    mapping: &MaterialSlab<S>, state: &S, range: [f64; 2], gate: &CancelGate,
+) -> Result<Vec<f64>, MaterialTransportError> {
     // Admit the whole field before calling a material owner; no late bad
     // temperature causes an otherwise avoidable partially evaluated field.
-    let mut temperatures = Vec::with_capacity(cells);
+    let mut temperatures = Vec::with_capacity(state.populations().len());
     for (cell, pop) in state.populations().iter().enumerate() {
         if cell % 256 == 0 { poll(gate)?; }
         if !pop.iter().all(|x| x.is_finite()) {
@@ -101,7 +121,7 @@ pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, con
         }
         temperatures.push(t);
     }
-    sample_temperatures::<S, F, D, Q>(mapping, &temperatures, cells, plane, range, gate, resolve)
+    Ok(temperatures)
 }
 
 // The same sampler accepts physical midpoint coordinates without fabricating
@@ -113,6 +133,19 @@ pub(in crate::material::forcing) fn sample_temperatures<
     mapping: &MaterialSlab<S>, temperatures: &[f64], cells: usize, plane: usize,
     range: [f64; 2], gate: &CancelGate,
     resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+) -> Result<Vec<TransportSample<F>>, MaterialTransportError> {
+    sample_temperatures_with::<S, F, D, Q>(mapping, temperatures, cells, plane, range, gate,
+        &mut |cell, temperature_k, retained| resolve(cell, temperature_k, retained)
+            .map_err(|source| MaterialTransportError::State {
+                cell, temperature_k, source: source.into(),
+            }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_temperatures_with<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
+    mapping: &MaterialSlab<S>, temperatures: &[f64], cells: usize, plane: usize,
+    range: [f64; 2], gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialTransportError>,
 ) -> Result<Vec<TransportSample<F>>, MaterialTransportError> {
     poll(gate)?;
     if temperatures.len() != cells || plane == 0 || plane > cells / 2
@@ -132,8 +165,7 @@ pub(in crate::material::forcing) fn sample_temperatures<
         poll(gate)?;
         let temperature_k = temperatures[cell];
         let error = |source| MaterialTransportError::State { cell, temperature_k, source };
-        let material = resolve(cell, temperature_k, &units.transport)
-            .map_err(|e| error(MaterialLbmError::from(e)))?;
+        let material = resolve(cell, temperature_k, &units.transport)?;
         let transport = material.transport_state().map_err(|e| error(e.into()))?;
         if transport.density_kg_m3().to_bits() != units.transport.density_kg_m3().to_bits()
             || transport.specific_heat_j_kg_k().to_bits() != units.transport.specific_heat_j_kg_k().to_bits()
@@ -163,6 +195,20 @@ fn advance<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
     depth_m: f64, limits: HeatSourceLimits, gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
 ) -> Result<MaterialTransportStep<F>, MaterialTransportError> {
+    advance_with_sampler::<S, F, D, Q>(slab, power, forces, depth_m, limits, gate,
+        |mapping, state, cells, plane| sample::<S, F, D, Q>(mapping, state, cells, plane,
+            limits.temperature_range_k, gate, &mut resolve))
+}
+
+// One preflight, numerical step, endpoint admission and commit for every
+// constitutive coordinate set. A rate-aware material is not a second solver.
+#[allow(clippy::too_many_arguments)]
+fn advance_with_sampler<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
+    slab: &mut MaterialSlab<S>, power: &[f64], forces: &[[f64; D]],
+    depth_m: f64, limits: HeatSourceLimits, gate: &CancelGate,
+    mut sample: impl FnMut(&MaterialSlab<S>, &S, usize, usize)
+        -> Result<Vec<TransportSample<F>>, MaterialTransportError>,
+) -> Result<MaterialTransportStep<F>, MaterialTransportError> {
     poll(gate)?;
     let (cells, plane) = slab.lattice.layout()?;
     let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
@@ -172,11 +218,9 @@ fn advance<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
     if power[..plane].iter().chain(&power[cells-plane..]).any(|p| *p != 0.0) {
         return Err(MaterialTransportError::Invalid("wall power must be zero"));
     }
-    let applied = sample::<S, F, D, Q>(slab, &slab.lattice, cells, plane,
-        limits.temperature_range_k, gate, &mut resolve)?;
+    let applied = sample(slab, &slab.lattice, cells, plane)?;
     let (trial, heat) = candidate_with_input::<S, F, D, Q>(slab, input, &applied, gate)?;
-    let endpoint = sample::<S, F, D, Q>(slab, &trial, cells, plane,
-        limits.temperature_range_k, gate, &mut resolve)?;
+    let endpoint = sample(slab, &trial, cells, plane)?;
     poll(gate)?;
     slab.lattice = trial;
     Ok(MaterialTransportStep { heat, applied, endpoint })
