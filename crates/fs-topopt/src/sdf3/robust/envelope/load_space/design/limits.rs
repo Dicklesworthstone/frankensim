@@ -1,6 +1,7 @@
 //! Minimum dilated material under one authored cap for ALL f=Fq, ||q||<=1.
 //! This is not a list of independent per-column compliance requirements.
 pub mod start;
+pub mod binary;
 use super::*;
 pub use crate::sdf3::robust::envelope::limits::ComplianceLimitedOptions3 as LoadSpaceLimitedOptions3;
 
@@ -27,13 +28,20 @@ impl LoadSpaceCap3 {
     /// diagonals. This remains numerical evidence, not a rigorous enclosure.
     #[must_use]
     pub fn admits(&self, e: &LoadSpaceEvaluation3, smooth_tolerance: f64) -> bool {
-        e.policy == self.policy && smooth_tolerance.is_finite()
+        self.admits_spectrum(&e.policy, &e.spectrum, e.worst_compliance, smooth_tolerance)
+    }
+
+    // Both gray and binary evaluations use the same physical requirement.
+    // This is numerical result admission, not a certificate for caller-edited data.
+    fn admits_spectrum(&self, policy: &LoadSpace3, spectrum: &LoadSpaceSpectrum3,
+        worst_compliance: f64, smooth_tolerance: f64) -> bool {
+        policy == &self.policy && smooth_tolerance.is_finite()
             && (0.0..1.0).contains(&smooth_tolerance)
-            && e.worst_compliance.is_finite() && e.worst_compliance >= 0.0
-            && e.worst_compliance <= self.cap()
-            && e.spectrum.maximum.is_finite() && (0.0..=1.0).contains(&e.spectrum.maximum)
-            && e.spectrum.smooth_maximum.is_finite()
-            && e.spectrum.smooth_maximum - 1.0 <= smooth_tolerance
+            && worst_compliance.is_finite() && worst_compliance >= 0.0
+            && worst_compliance <= self.cap()
+            && spectrum.maximum.is_finite() && (0.0..=1.0).contains(&spectrum.maximum)
+            && spectrum.smooth_maximum.is_finite()
+            && spectrum.smooth_maximum - 1.0 <= smooth_tolerance
     }
 }
 

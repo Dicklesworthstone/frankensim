@@ -56,3 +56,23 @@ cargo test --release -p fs-topopt --features cutfem-marquee \
 cargo test --release -p fs-topopt --features cutfem-marquee \
   --example worst_load_sdf3 load_space::material::tests
 ```
+
+## Binary endpoint assessment of the same load set
+
+`CutDensityStudy3::evaluate_binary_load_space_cap` checks a declared solid/void
+threshold and positive void stiffness against the SAME `LoadSpaceCap3`. It
+reuses the binary material evaluator, freshly solves every basis column, then
+recomputes the complete cross-compliance spectrum and maximizing force.
+Neither the gray design's direction nor separately passing basis cases is a
+substitute for this check. The finite-case envelope in `physical` is only a
+diagnostic; use `BinaryLoadSpaceEvaluation3::feasible` for the combined set.
+
+The result retains all three masks, basis displacements, worst coefficients,
+worst force/displacement and its physical compliance. It checks consistency
+between direct force work and the numerical eigenvalue before publication.
+Gray and binary evaluations share the same physical-cap admission rule.
+No gradient is claimed for thresholding, and this API does not impose an
+additional material-volume cap or search over thresholds. It is a library
+assessment, not an automatic extra phase of the command above. Loads and
+supports remain present in the declared positive-stiffness void material;
+passing is not a zero-void, CAD, continuum or manufacturing certificate.
