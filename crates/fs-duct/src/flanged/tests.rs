@@ -13,7 +13,12 @@ fn air() -> GasState {
 }
 
 fn omega_of(gas: &GasState, ka: f64) -> f64 {
-    ka * gas.sound_speed / RADIUS
+    let mut omega = ka * gas.sound_speed / RADIUS;
+    // The load recomputes `ka = omega / c * a`; a request at the cap must not round-trip an ulp above it.
+    while omega / gas.sound_speed * RADIUS > ka {
+        omega = f64::from_bits(omega.to_bits() - 1);
+    }
+    omega
 }
 
 /// Dimensionless load `Z_L/z0` at `ka`.
@@ -178,6 +183,15 @@ fn flanged_refusals_fire_by_name() {
         flanged_pipe_impedance(&gas, RADIUS, at_cap * (1.0 + 1.0e-12), FLANGED_MODES),
         Err(DuctError::RadiationKaTooLarge { .. })
     ));
+    // One whole unit of ka past the cap, at the production and the largest mode count.
+    for modes in [FLANGED_MODES, FLANGED_MAX_MODES] {
+        let past =
+            flanged_pipe_impedance(&gas, RADIUS, omega_of(&gas, FLANGED_MAX_KA + 1.0), modes);
+        assert!(
+            matches!(past, Err(DuctError::RadiationKaTooLarge { ka }) if (ka - (FLANGED_MAX_KA + 1.0)).abs() < 1.0e-9),
+            "cap + 1 must refuse and name its ka: {past:?}"
+        );
+    }
     assert!(flanged_pipe_impedance(&gas, RADIUS, omega_of(&gas, 0.5), FLANGED_MAX_MODES).is_ok());
     for modes in [0, FLANGED_MAX_MODES + 1] {
         assert!(matches!(
@@ -221,16 +235,21 @@ fn flanged_load_bitwise_repeat() {
 
 /// Measurement behind the cap (bead `frankensim-irp-v5-instrument-realism-pexfp.324`). The cap is a
 /// quadrature-design limit, not an edge of the model, so what matters is where the design stops
-/// resolving. This calls the cap-free seams above `FLANGED_MAX_KA`: the quadrature `Z_00` against the
-/// closed-form piston, the 16-mode load against the 24-mode load, and passivity. It records each
-/// `ka` (an error is recorded, not unwrapped) and asserts only that the cap itself is inside what
-/// it measures. Receipts: `IRPDUCT_FLANGED_ABOVE_CAP`.
+/// resolving. This calls the cap-free seams across and above `FLANGED_MAX_KA`: the quadrature
+/// `Z_00` against the closed-form piston, the 16-mode load against the 24-mode load, and
+/// passivity. It records each `ka` (an error is recorded, not unwrapped) and asserts that every
+/// measured point at or below the cap holds the 1e-12 gate, that the cap itself is measured, and
+/// that the first point above the cap still holds the gate, so the cap is never the edge itself.
+/// Measured natively (qtest f67a93ae9): 3.5e-14 at 20, 6.5e-14 at 24, 6.0e-14 at 26, 2.9e-13 at
+/// 28, 2.0e-11 at 30. Moving the cap past 28 fails the last assertion. Receipts:
+/// `IRPDUCT_FLANGED_ABOVE_CAP`.
 #[test]
-fn flanged_design_is_measured_above_the_cap() {
+fn flanged_design_is_measured_across_and_beyond_the_cap() {
     let gas = air();
     let z0 = gas.density * gas.sound_speed / (PI * RADIUS * RADIUS);
     let mut at_cap = None;
-    for ka in [FLANGED_MAX_KA, 20.5, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 34.0, 38.0] {
+    let mut first_above = None;
+    for ka in [20.0, 20.5, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 34.0, 38.0] {
         let omega = omega_of(&gas, ka);
         let (r, x) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, RADIUS, omega)
             .expect("piston");
@@ -254,13 +273,94 @@ fn flanged_design_is_measured_above_the_cap() {
                     a.re / z0
                 )
             }
-            (a, b) => format!("REFUSED 16: {:?} 24: {:?}", a.as_ref().err(), b.as_ref().err()),
+            (a, b) => format!(
+                "REFUSED 16: {:?} 24: {:?}",
+                a.as_ref().err(),
+                b.as_ref().err()
+            ),
         };
         eprintln!("IRPDUCT_FLANGED_ABOVE_CAP ka={ka} piston_rel={piston_rel:e} {line}");
         if ka == FLANGED_MAX_KA {
             at_cap = Some(piston_rel);
         }
-        assert!(piston_rel.is_finite(), "quadrature Z_00 not finite at ka={ka}");
+        if ka > FLANGED_MAX_KA && first_above.is_none() {
+            first_above = Some((ka, piston_rel));
+        }
+        assert!(
+            piston_rel.is_finite(),
+            "quadrature Z_00 not finite at ka={ka}"
+        );
+        if ka <= FLANGED_MAX_KA {
+            assert!(
+                piston_rel < 1.0e-12,
+                "admitted ka={ka} loses the 1e-12 gate: {piston_rel:e}"
+            );
+        }
     }
-    assert!(at_cap.expect("the cap is measured") < 1.0e-12, "the cap itself must hold the 1e-12 gate");
+    assert!(at_cap.expect("the cap is one of the measured points") < 1.0e-12);
+    let (ka_above, rel_above) = first_above.expect("a measured point lies above the cap");
+    assert!(
+        rel_above < 1.0e-12,
+        "the cap must sit inside the plateau: ka={ka_above} just above it already loses the gate ({rel_above:e})"
+    );
+}
+
+/// The band the lift admitted, `ka` from 20 to the cap, held to the module's own gates on a dense
+/// linear grid that straddles the one cutoff inside it (`α_7 = 22.76`): the quadrature `Z_00`
+/// against the closed-form piston at 1e-12, and a finite, passive load at the production mode
+/// count. A mode exactly at cutoff drops out of the Schur complement, so the grid also lands the
+/// cutoff to within a few ulp.
+#[test]
+fn flanged_lifted_band_holds_the_gates_across_a_cutoff() {
+    let gas = air();
+    let z0 = gas.density * gas.sound_speed / (PI * RADIUS * RADIUS);
+    let alpha7 = RULES.as_ref().expect("rules").roots[6].0;
+    assert!(
+        (20.0..FLANGED_MAX_KA).contains(&alpha7),
+        "the cutoff this test straddles must lie inside the lifted band: {alpha7}"
+    );
+    let steps = ((FLANGED_MAX_KA - 20.0) / 0.05).round() as usize;
+    let mut grid: Vec<f64> = (0..=steps).map(|i| 20.0 + 0.05 * i as f64).collect();
+    grid.extend([
+        alpha7 * (1.0 - 1.0e-6),
+        alpha7 * (1.0 - 1.0e-9),
+        alpha7,
+        alpha7 * (1.0 + 1.0e-9),
+        alpha7 * (1.0 + 1.0e-6),
+    ]);
+    grid.retain(|&ka| ka < FLANGED_MAX_KA);
+    let (mut worst_piston, mut worst_piston_ka, mut worst_r, mut worst_r_ka) =
+        (0.0_f64, 0.0, 0.0_f64, 0.0);
+    for &ka in &grid {
+        let omega = omega_of(&gas, ka);
+        let (r, x) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, RADIUS, omega)
+            .expect("piston");
+        let closed = C64::new(r / z0, x / z0);
+        let piston_rel =
+            (radiation_matrix(ka, 1).expect("matrix")[0] - closed).abs() / closed.abs();
+        let z = flanged_pipe_impedance(&gas, RADIUS, omega, FLANGED_MODES).expect("admitted load");
+        let refl = (C64::new(z.re - z0, z.im) / C64::new(z.re + z0, z.im)).abs();
+        assert!(
+            z.re.is_finite() && z.im.is_finite(),
+            "load not finite at ka={ka}"
+        );
+        assert!(refl <= 1.0, "load not passive at ka={ka}: |R|={refl}");
+        if piston_rel > worst_piston {
+            (worst_piston, worst_piston_ka) = (piston_rel, ka);
+        }
+        if refl > worst_r {
+            (worst_r, worst_r_ka) = (refl, ka);
+        }
+    }
+    assert!(
+        worst_piston < 1.0e-12,
+        "piston gate lost at ka={worst_piston_ka}: {worst_piston:e}"
+    );
+    eprintln!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"flanged_lifted_band_holds_the_gates_across_a_cutoff\",\
+         \"inputs\":\"{} points, ka 20..{FLANGED_MAX_KA} step 0.05 plus alpha_7={alpha7:.6} +-1e-6,1e-9,0\",\
+         \"observed\":{{\"worst_piston_rel\":{worst_piston:e},\"at_ka\":{worst_piston_ka},\
+         \"max_abs_r\":{worst_r:.12},\"at_ka_r\":{worst_r_ka}}},\"verdict\":\"pass\"}}",
+        grid.len()
+    );
 }

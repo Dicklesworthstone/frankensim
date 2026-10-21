@@ -46,9 +46,14 @@ use std::sync::LazyLock;
 pub const FLANGED_MODES: usize = 16;
 /// Largest admitted mode count (the tail split must clear `α_{N−1}`).
 pub const FLANGED_MAX_MODES: usize = 24;
-/// Largest admitted `ka`. The fixed node design resolves the integrands
-/// up to here; above it the load refuses by name.
-pub const FLANGED_MAX_KA: f64 = 20.0;
+/// Largest admitted `ka`. A limit of the fixed node design, not of the
+/// model: Zorumski's multimodal load is exact for every `ka`. Measured by
+/// `flanged_design_is_measured_across_and_beyond_the_cap`, the quadrature
+/// `Z_00` against the closed-form piston is 3.5e-14 at `ka = 20`, at most
+/// 6.5e-14 through 26, then 2.9e-13 at 28, 2.0e-11 at 30 (past the 1e-12
+/// gate), 3.6e-8 at 34 and 1.5e-5 at 38. The cap sits well inside the
+/// plateau, not on its edge; above it the load refuses by name.
+pub const FLANGED_MAX_KA: f64 = 24.0;
 
 /// Reactive split, above `α_23 ≈ 72.9` with room for the rotated tail.
 const TAIL_X: f64 = 86.0;
