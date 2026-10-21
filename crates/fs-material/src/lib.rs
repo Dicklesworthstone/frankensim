@@ -65,6 +65,8 @@ pub mod thermochemical_gas;
 /// Bounded temperature-dependent Maxwell history, thermal strain and work balance.
 pub mod thermovisco;
 pub mod visco;
+/// Finite-strain Maxwell branches on a hyperelastic equilibrium (multiplicative split, incremental potential).
+pub mod visco_hyper;
 /// Passive full-tensor Prony memory with work-conjugate stress and heat.
 pub mod visco_tensor;
 
