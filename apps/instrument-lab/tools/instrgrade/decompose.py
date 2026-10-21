@@ -302,8 +302,10 @@ def f0_comb(y, hint_hz, kind="sustained", max_cents=400.0, nh=8):
 FUNDAMENTAL_FLOOR_DB = -50.0
 
 
-def check_fundamental(y, f0, kind, label):
-    """Refuse a note that has no energy at its own measured fundamental.
+def check_fundamental(y, f0, kind, label, named_hz=None):
+    """Refuse a note that has no energy at its own measured fundamental. `f0` is the grader's pitch estimate for the signal; when
+    `named_hz` (the named note's fundamental) is given the refusal says both, since the estimate of a signal that has locked
+    onto a parasitic line is not the note's pitch and a reader takes "the fundamental near X Hz" for the note's.
 
     A pitched note carries its fundamental within 50 dB of its strongest spectral line (a bowed bass or a
     clarinet's even harmonics are weaker, not absent). A render that locks onto one high-order mode (the flute
@@ -323,8 +325,12 @@ def check_fundamental(y, f0, kind, label):
     lvl = 20 * math.log10(float(A[near].max()) / top + 1e-12)
     if lvl < FUNDAMENTAL_FLOOR_DB:
         f_top = float(fr[band][int(np.argmax(A[band]))])
-        raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the strongest spectral line is {f_top:.0f} Hz "
-                                 f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
+        if named_hz is None:
+            raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the strongest spectral line is {f_top:.0f} Hz "
+                                     f"and there is nothing at the fundamental near {f0:.1f} Hz ({lvl:.0f} dB re that line)")
+        raise GraderRefusalError(f"IRPDECOMP_NOT_THE_NAMED_NOTE: {label or 'signal'}: the named note's fundamental is {named_hz:.1f} Hz; the "
+                                 f"strongest spectral line is {f_top:.0f} Hz, the grader's pitch estimate for it is {f0:.1f} Hz, and there is "
+                                 f"nothing at that estimate ({lvl:.0f} dB re the strongest line)")
 
 
 def lowpass(x, cap_hz):
@@ -405,7 +411,7 @@ class Note:
         if abs(off_c) > max_cents:
             raise GraderRefusalError(f"IRPDECOMP_PITCH_MISMATCH: {label or 'signal'} measures {off_c:+.0f} cents from the named note")
         if not inharmonic:
-            check_fundamental(y, self.f0, kind, label)
+            check_fundamental(y, self.f0, kind, label, f0_hz)
         n = 8192 if self.f0 < 80 else 4096
         self.S, self.sf = stft_db(y, n)
         self.C, self.cf = cwt_db(y)
@@ -1142,7 +1148,7 @@ def run_pair(refs, c, root):
             raw = lowpass(raw, refs.band_hz)
         hp = highpass(raw, f0)
         if ref_e["inst"] not in ("xylophone", "marimba"):
-            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours")
+            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours", f0)
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)

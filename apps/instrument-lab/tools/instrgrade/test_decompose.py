@@ -186,6 +186,23 @@ class PitchTests(unittest.TestCase):
             with self.assertRaisesRegex(dc.GraderRefusalError, "NOT_THE_NAMED_NOTE|PITCH_MISMATCH"):
                 note_of(x, 293.66 if f < 2000 else 392.0, max_cents=400.0)
 
+    def test_the_refusal_says_the_named_fundamental_and_the_graders_own_estimate_apart(self):
+        # P8 5066: "nothing at the fundamental near 208.5 Hz" for an F3 (174.6 Hz) read as the note's pitch; 208.5 Hz was the estimate
+        n = int(2.6 * SR)
+        tt = np.arange(n) / SR
+        env = 0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 0.3) / 0.05, 0, 1))
+        x = 0.2 * env * np.sin(2 * np.pi * 1200.0 * tt)  # a parasitic line, nothing near 174.6 or 208.5 Hz
+        with self.assertRaises(dc.GraderRefusalError) as named:
+            dc.check_fundamental(x, 208.5, "sustained", "ours", named_hz=174.6)
+        msg = str(named.exception)
+        self.assertIn("IRPDECOMP_NOT_THE_NAMED_NOTE", msg)
+        self.assertIn("named note's fundamental is 174.6 Hz", msg)
+        self.assertIn("pitch estimate for it is 208.5 Hz", msg)
+        self.assertIn("strongest spectral line is 1200 Hz", msg)
+        with self.assertRaises(dc.GraderRefusalError) as plain:  # the form without a name is unchanged
+            dc.check_fundamental(x, 208.5, "sustained", "ours")
+        self.assertIn("nothing at the fundamental near 208.5 Hz", str(plain.exception))
+
     def test_a_stretched_harmonic_note_passes_the_fundamental_check(self):
         n = int(2.6 * SR)
         tt = np.arange(n) / SR
