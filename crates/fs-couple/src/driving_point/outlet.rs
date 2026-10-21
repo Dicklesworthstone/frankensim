@@ -25,10 +25,31 @@ use fs_math::c64::C64;
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
 
-/// Frequency whose response stands in for the DC bin. Mean flow radiates no
-/// pressure (the receiver differentiates), so only a finite, bin-independent
-/// value is required; 20 Hz stays inside the viscothermal model's domain.
-const DC_BIN_HZ: f64 = 20.0;
+/// Angular frequencies [rad/s] probed for the DC bin, lowest first. The bin must
+/// be the true limit `T(0+)`: a value taken from a higher frequency steps
+/// against bin 1 and puts a constant `J/N` into every tap, a tail that falls
+/// only as `1/N` and that no ladder can converge. (The first version took
+/// 20 Hz, where the tube's inertance has already moved the real part by
+/// ~0.4%, and missed the production tolerance at 65536 taps.) The reflectance
+/// line probes 1e-3 rad/s the same way; a refused probe is answered from the
+/// next decade up instead of a made-up value.
+const DC_PROBE_RAD_S: [f64; 5] = [1.0e-3, 1.0e-2, 1.0e-1, 1.0, 10.0];
+
+fn dc_limit(
+    response: &impl Fn(f64) -> Result<C64, DrivingPointError>,
+    probes: &[f64],
+) -> Result<f64, DrivingPointError> {
+    let mut refusal = None;
+    for &omega in probes {
+        match response(omega) {
+            Ok(value) => return Ok(value.re),
+            Err(error) => refusal = Some(error),
+        }
+    }
+    Err(refusal.unwrap_or(DrivingPointError::Invalid {
+        what: "the DC probe list is empty",
+    }))
+}
 
 /// One rung of the mouth-flow ladder.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +108,24 @@ pub fn realize_mouth_flow_ir(
     wall: Option<&WallPin>,
     ladder: &LineLadder,
 ) -> Result<(Vec<f64>, MouthFlowRealization), DrivingPointError> {
+    realize_with_dc_probes(
+        physics, gas, termination, sample_rate_hz, zc, wall, ladder, &DC_PROBE_RAD_S,
+    )
+}
+
+// The DC probe list is a parameter only so a test can rebuild the stepped-DC
+// variant beside the true-limit one and measure what the step costs.
+#[allow(clippy::too_many_arguments)]
+fn realize_with_dc_probes(
+    physics: &Duct,
+    gas: &GasState,
+    termination: Termination,
+    sample_rate_hz: u32,
+    zc: f64,
+    wall: Option<&WallPin>,
+    ladder: &LineLadder,
+    dc_probes: &[f64],
+) -> Result<(Vec<f64>, MouthFlowRealization), DrivingPointError> {
     let length = duct_axial_length(physics);
     if !(length > 0.0 && length.is_finite()) {
         return Err(DrivingPointError::Invalid {
@@ -119,7 +158,7 @@ pub fn realize_mouth_flow_ir(
     let response = |omega: f64| {
         mouth_flow_per_incident_pressure(physics, gas, omega, termination, wall, zc)
     };
-    let dc = response(core::f64::consts::TAU * DC_BIN_HZ)?;
+    let dc = dc_limit(&response, dc_probes)?;
     let mut t_pos: Vec<C64> = Vec::new();
     let mut previous: Vec<f64> = Vec::new();
     let mut rungs: Vec<MouthFlowRung> = Vec::new();
@@ -139,7 +178,7 @@ pub fn realize_mouth_flow_ir(
                 next[k] = response(core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))?;
             }
         }
-        next[0] = C64::new(dc.re, 0.0);
+        next[0] = C64::new(dc, 0.0);
         t_pos = next;
         let ir = realize_reflectance_ir_from_positive_spectrum(&t_pos, n_fft, transit, true);
         let total: f64 = ir.iter().map(|h| h * h).sum();
@@ -221,8 +260,11 @@ mod tests {
     #[test]
     fn realized_fir_reproduces_the_sampled_mouth_flow_response_between_bins() {
         // The IR is built from samples on a DFT grid; at frequencies that are
-        // NOT grid bins its transform must still equal the direct TMM
-        // response, because the converged tail leaves nothing to alias.
+        // NOT grid bins its transform must still equal the direct TMM response,
+        // because the converged tail leaves nothing to alias. 1 and 7 Hz sit
+        // below the first bins and would expose a DC bin that is not the true
+        // T(0+): the first version took T(20 Hz), which missed the production
+        // tail tolerance at 65536 taps (2.87e-10 against 1e-10).
         let (duct, zc) = tube();
         let gas = air();
         let (ir, receipt) = realize_mouth_flow_ir(
@@ -231,7 +273,7 @@ mod tests {
         .expect("ladder converges");
         assert!(receipt.rungs.len() >= 2, "a ladder needs at least two rungs");
         let dt = 1.0 / f64::from(RATE);
-        let frequencies = [310.0, 1013.0, 2207.0, 3119.0];
+        let frequencies = [1.0, 7.0, 310.0, 1013.0, 2207.0, 3119.0];
         let mut worst = 0.0_f64;
         let mut scale = 0.0_f64;
         for f in frequencies {
@@ -250,10 +292,127 @@ mod tests {
             worst = worst.max(error);
             scale = scale.max(direct.abs());
         }
+        println!(
+            "IRPVOICE_FIR_ERROR taps={} worst={worst:e} scale={scale:e} ratio={:e}",
+            receipt.n_fft,
+            worst / scale
+        );
         assert!(
             worst < 1.0e-3 * scale,
             "FIR departs from the TMM mouth-flow response by {worst:e} of scale {scale:e}"
         );
+    }
+
+    // Measurement, not a gate on a number. An unreachable tail tolerance makes
+    // each ladder run to its cap and report the tail energy it reached there,
+    // so the tail can be read against tap count: exponential ringing falls by
+    // orders of magnitude per doubling, an algebraic (boundary-layer) tail by
+    // a fixed factor. Output lines are tagged IRPVOICE_TAIL.
+    fn never_converges(cap: usize) -> LineLadder {
+        LineLadder { tail_tol: 1.0e-300, peak_tol_cents: 0.05, max_taps: cap }
+    }
+
+    fn tail_of<T>(result: Result<T, DrivingPointError>) -> f64 {
+        match result {
+            Err(DrivingPointError::LadderUnconverged { tail_energy, .. }) => tail_energy,
+            Err(other) => panic!("unexpected refusal: {other}"),
+            Ok(_) => panic!("a ladder with an unreachable tolerance cannot converge"),
+        }
+    }
+
+    fn tails(
+        name: &str, duct: &Duct, gas: &GasState, rate: u32, zc: f64, wall: Option<&WallPin>,
+    ) -> Vec<(f64, f64)> {
+        let mut series = Vec::new();
+        for cap in [4096_usize, 16384, 65536] {
+            let ladder = never_converges(cap);
+            let reflectance = tail_of(crate::driving_point::realize_line(
+                duct, gas, Termination::FlangedOpen, rate, zc, wall, &ladder,
+            ));
+            let mouth_flow = tail_of(realize_mouth_flow_ir(
+                duct, gas, Termination::FlangedOpen, rate, zc, wall, &ladder,
+            ));
+            println!(
+                "IRPVOICE_TAIL case={name} rate_hz={rate} taps={cap} \
+                 reflectance_tail={reflectance:e} mouth_flow_tail={mouth_flow:e}"
+            );
+            series.push((reflectance, mouth_flow));
+        }
+        series
+    }
+
+    fn description_case(file: &str) -> (Duct, GasState, u32, f64, Option<WallPin>) {
+        let path = format!(
+            "{}/../../data/instruments/descriptions/voice/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let description = crate::voice_performance::VoiceDescription::from_bytes(&bytes)
+            .expect("description parses");
+        let chart = crate::tract::TractChart::try_new(
+            description.sections.clone(),
+            &description.tract_source,
+            &description.tract_licence,
+        )
+        .expect("chart admitted");
+        let rate = description.output_rate_hz * description.mechanics_per_output;
+        let zc = description.gas.density * description.gas.sound_speed
+            / description.sections[0].area_m2;
+        (chart.to_duct(), description.gas, rate, zc, description.wall)
+    }
+
+    #[test]
+    fn a_dc_bin_taken_from_20_hz_leaves_a_tail_the_true_limit_does_not() {
+        // Controlled A/B on the same tube at the same cap: the only difference
+        // is where the DC bin is read. A jump J between bin 0 and bin 1 adds a
+        // constant J/N to every tap, so its tail energy falls only as 1/N.
+        let (duct, zc) = tube();
+        let gas = air();
+        let ladder = never_converges(65536);
+        let tail = |probes: &[f64]| {
+            tail_of(realize_with_dc_probes(
+                &duct, &gas, Termination::FlangedOpen, RATE, zc, None, &ladder, probes,
+            ))
+        };
+        let stepped = tail(&[core::f64::consts::TAU * 20.0]);
+        let limit = tail(&DC_PROBE_RAD_S);
+        println!("IRPVOICE_DC_AB taps=65536 stepped_dc_tail={stepped:e} true_limit_tail={limit:e} ratio={:e}", stepped / limit);
+        assert!(stepped.is_finite() && limit.is_finite());
+        assert!(
+            limit <= stepped,
+            "reading the DC bin at its true limit must not leave a longer tail: {limit:e} vs {stepped:e}"
+        );
+    }
+
+    #[test]
+    fn tail_energy_against_tap_count_for_both_lines() {
+        let (tube_duct, tube_zc) = tube();
+        let mut cases = vec![(
+            "uniform-tube".to_string(),
+            tails("uniform-tube", &tube_duct, &air(), RATE, tube_zc, None),
+        )];
+        for file in [
+            "story2008-a-Ds3.performance",
+            "story2008-u-Ds3.performance",
+            "story2008-u-Ds3-r1.performance",
+        ] {
+            let (duct, gas, rate, zc, wall) = description_case(file);
+            cases.push((file.to_string(), tails(file, &duct, &gas, rate, zc, wall.as_ref())));
+        }
+        for (name, series) in &cases {
+            for (reflectance, mouth_flow) in series {
+                assert!(
+                    reflectance.is_finite() && mouth_flow.is_finite()
+                        && *reflectance >= 0.0 && *mouth_flow >= 0.0,
+                    "{name}: tail energies must be finite and non-negative"
+                );
+            }
+            let (first, last) = (series[0], series[series.len() - 1]);
+            assert!(
+                last.0 < first.0 && last.1 < first.1,
+                "{name}: tail energy must fall with tap count, got {first:?} then {last:?}"
+            );
+        }
     }
 
     #[test]
