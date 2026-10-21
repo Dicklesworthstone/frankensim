@@ -235,6 +235,23 @@ mod inlet_geometry_tests {
     }
 }
 
+/// A reed-lay contact that replaces the default slit lay of a massive reed:
+/// the power law `stiffness * p^alpha` [N] in the penetration `p = onset_m - y`
+/// of the opening `y`, with Hunt-Crossley loss `loss_s_per_m` [s/m]. A real
+/// mouthpiece lay is curved, so the reed meets it at the positive opening
+/// `onset_m` and the contact force is already carrying load when the slit shuts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReedLay {
+    /// Power-law stiffness [N/m^alpha].
+    pub(crate) stiffness: f64,
+    /// Power-law exponent, at least 1.
+    pub(crate) alpha: f64,
+    /// Opening [m] below which the reed touches the lay.
+    pub(crate) onset_m: f64,
+    /// Hunt-Crossley internal loss [s/m].
+    pub(crate) loss_s_per_m: f64,
+}
+
 /// One reed-on-a-characteristic-line voice: the `realize_reed_bore`
 /// physics, restructured so a caller can advance it block by block. The
 /// one-shot realizer is now a thin wrapper over this type, so the two
@@ -601,6 +618,32 @@ impl ReedBoreVoice {
     /// stay byte-identical to the pre-render-API code).
     pub const fn plate_bank_mut(&mut self) -> &mut PlateBank {
         &mut self.plates
+    }
+
+    /// Replace the default slit lay by a measured one ([`ReedLay`]). The voice
+    /// must not have advanced, the reed must be massive, and the lay must start
+    /// below the rest opening so the reed's initial state is out of contact.
+    ///
+    /// # Errors
+    /// A massless reed, an advanced voice, an onset at or above the rest
+    /// opening, or contact admission (negative stiffness or loss, exponent < 1).
+    pub(crate) fn set_lay(&mut self, lay: ReedLay) -> Result<(), AcousticRealizeError> {
+        if self.reed.mass_kg <= 0.0 || self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "a measured lay needs a massive reed and a voice that has not advanced",
+            });
+        }
+        if lay.onset_m.is_nan() || lay.onset_m >= self.reed.rest_opening_m {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "the lay onset must lie below the reed's rest opening",
+            });
+        }
+        let obstacle =
+            crate::unilateral_contact::slit_lay_with_onset(lay.stiffness, lay.alpha, lay.onset_m)
+                .and_then(|o| o.with_internal_loss(lay.loss_s_per_m))
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        self.lay = Some(obstacle);
+        Ok(())
     }
 
     /// Replace the reed's held blowing pressure. Applied between blocks

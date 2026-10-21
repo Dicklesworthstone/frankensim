@@ -87,6 +87,35 @@ pub fn slit_lay(stiffness: f64, alpha: f64) -> Result<Obstacle, DContactError> {
     )
 }
 
+/// Reed lay that starts to touch the reed before the slit is closed: the same
+/// one-point power law as [`slit_lay`], but the penetration is `onset_m - q`, so
+/// contact begins at the positive opening `onset_m` (the curved lay of a real
+/// mouthpiece) and `onset_m = 0` is [`slit_lay`].
+///
+/// # Errors
+/// A negative or non-finite onset, or dcontact admission.
+pub fn slit_lay_with_onset(
+    stiffness: f64,
+    alpha: f64,
+    onset_m: f64,
+) -> Result<Obstacle, DContactError> {
+    if !onset_m.is_finite() || onset_m < 0.0 {
+        return Err(DContactError::Parameter {
+            what: "lay onset opening must be finite and nonnegative",
+        });
+    }
+    Obstacle::new(
+        vec![-1.0],
+        1,
+        1,
+        vec![-onset_m],
+        vec![1.0],
+        stiffness,
+        alpha,
+        "slit-lay".to_string(),
+    )
+}
+
 /// Contact force on a 1-DOF opening (`q` is the opening coordinate).
 ///
 /// # Errors
@@ -446,6 +475,36 @@ mod tests {
             internal_loss: 0.0,
             provenance: "analytical string contact fixture".into(),
         }
+    }
+
+    // A lay with an onset opening pushes back below that opening with the power
+    // law of the penetration `onset - q`, and not above it; zero onset is the
+    // original slit lay.
+    #[test]
+    fn slit_lay_onset_starts_contact_before_the_slit_closes() {
+        let (k, alpha, onset) = (7.9e6, 2.0, 2.0e-4);
+        let lay = slit_lay_with_onset(k, alpha, onset).unwrap();
+        let force = |q: f64| slit_contact_force(&lay, q).unwrap();
+        assert_eq!(force(onset), 0.0);
+        assert_eq!(force(1.5 * onset), 0.0);
+        for q in [1.5e-4, 1.0e-4, 0.0, -1.0e-4] {
+            let expect = k * (onset - q).powf(alpha);
+            assert!(
+                (force(q) - expect).abs() <= 1e-9 * expect,
+                "opening {q}: {} against {expect}",
+                force(q)
+            );
+        }
+        let plain = slit_lay(k, alpha).unwrap();
+        let zero = slit_lay_with_onset(k, alpha, 0.0).unwrap();
+        for q in [1.0e-4, 0.0, -1.0e-4, -3.0e-4] {
+            assert_eq!(
+                slit_contact_force(&plain, q).unwrap(),
+                slit_contact_force(&zero, q).unwrap()
+            );
+        }
+        assert!(slit_lay_with_onset(k, alpha, -1.0e-6).is_err());
+        assert!(slit_lay_with_onset(k, alpha, f64::NAN).is_err());
     }
 
     #[test]

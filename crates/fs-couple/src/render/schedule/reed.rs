@@ -29,7 +29,7 @@ use super::{
     GestureCompileError, PressureGestureBinding, ScheduledRenderer, compile_pressure_gestures,
 };
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
-use crate::render::{ReedBoreVoice, RenderContext, RenderError, RenderVoice};
+use crate::render::{ReedBoreVoice, ReedLay, RenderContext, RenderError, RenderVoice};
 use crate::thin_plate::PlateBank;
 pub use field_input::steady::SteadyGasPerformance;
 
@@ -165,7 +165,10 @@ impl ReedPerformance {
     /// The schedule owns the entire pressure history, so the fixture's extra
     /// attack envelope is disabled. The six reed fields are opening, width,
     /// closing pressure, mass, stiffness and damping ratio. Zero mass/stiffness
-    /// retain the owner's quasistatic/derived-stiffness limits. Static tone-hole
+    /// retain the owner's quasistatic/derived-stiffness limits. Four optional
+    /// trailing fields give a measured lay of a massive reed: stiffness
+    /// [N/m^alpha], exponent, onset opening [m] and Hunt-Crossley loss [s/m]; a
+    /// six-field row keeps the default slit lay byte for byte. Static tone-hole
     /// openings are explicit fractions; they are never silently clamped here.
     ///
     /// # Errors
@@ -314,12 +317,41 @@ impl ReedPerformance {
             blowing_pressure_pa: 0.0,
             attack_s: 0.0,
         };
+        // Optional measured lay: stiffness [N/m^alpha], exponent, onset opening [m]
+        // and Hunt-Crossley loss [s/m]; absent, the default slit lay applies.
+        let lay = if row.more() {
+            Some(ReedLay {
+                stiffness: row.positive()?,
+                alpha: row.scalar()?,
+                onset_m: row.scalar()?,
+                loss_s_per_m: row.scalar()?,
+            })
+        } else {
+            None
+        };
         row.finish()?;
         if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(bad(
                 r.line,
                 "reed mass, stiffness and damping must be finite and nonnegative",
             ));
+        }
+        if let Some(lay) = lay {
+            if reed.mass_kg <= 0.0 {
+                return Err(bad(r.line, "a measured lay needs a massive reed"));
+            }
+            if lay.alpha < 1.0 || lay.loss_s_per_m < 0.0 {
+                return Err(bad(
+                    r.line,
+                    "lay exponent must be at least 1 and its loss nonnegative",
+                ));
+            }
+            if lay.onset_m < 0.0 || lay.onset_m >= reed.rest_opening_m {
+                return Err(bad(
+                    r.line,
+                    "lay onset must lie between zero and the reed's rest opening",
+                ));
+            }
         }
         let observation =
             outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
@@ -564,6 +596,10 @@ impl ReedPerformance {
                 samples as usize,
             )?
         };
+        let mut voice = voice;
+        if let Some(lay) = lay {
+            voice.set_lay(lay).map_err(ReedPerformanceError::Model)?;
+        }
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls)
             .map_err(ReedPerformanceError::Render)?;
@@ -766,6 +802,9 @@ impl<'a> Row<'a> {
         records.push(record);
         Ok(gas)
     }
+    fn more(&self) -> bool {
+        self.words.clone().next().is_some()
+    }
     fn word(&mut self) -> Result<&'a str, ReedPerformanceError> {
         self.words
             .next()
@@ -816,3 +855,6 @@ mod field_tests;
 
 #[cfg(test)]
 mod segment_cap_tests;
+
+#[cfg(test)]
+mod lay_tests;
