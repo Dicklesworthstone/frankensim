@@ -9,9 +9,9 @@
 # bore file is straightened, so only the open harmonics are valid. There is no pitch, note or frequency
 # anywhere in an input: the note is the lock the loop finds between the lip and the bore.
 #
-#  * sweep-p4000: lip pre-stress ramps 0.7 -> 3.5 at a held 4 kPa. A diagnostic, not a note: it records
+#  * sweep-pNNN: lip pre-stress ramps 0.7 -> 3.5 at a held mouth pressure (default 8 kPa). A diagnostic, not a note: it records
 #    which regime the bore + lip speaks as the lip tightens.
-#  * pramp-tNNN: mouth pressure ramps 0 -> 6 kPa -> 0 at a fixed lip pre-stress. The pressure at which
+#  * pramp-tNNN: mouth pressure ramps 0 -> 12 kPa -> 0 at a fixed lip pre-stress. The pressure at which
 #    the note starts on the way up and stops on the way down is the oscillation threshold and the
 #    extinction pressure; their gap is the hysteresis.
 #  * hold-tNNN-pNNN: the same lip held at a fixed pre-stress and mouth pressure for 3 s. The embouchure
@@ -19,8 +19,9 @@
 #
 # Mouth pressure: threshold p0 = K f with K of 4 to 8 Pa/Hz for three trumpeters (Fletcher and
 # Tarnopolsky 1999, JASA 105:874, p.877), and 4 to 13 kPa pp to ff on high notes (Bouhuys, as quoted
-# there); per-note mf tables are UNKNOWN, so holds use 3 kPa and the pressure ramps measure the
-# threshold of this model directly.
+# there); per-note mf tables are UNKNOWN. The first trombone renders with this same lip never started at
+# 1.5 kPa (nor to 4 kPa), so the ramps go to 12 kPa and measure the threshold of THIS model directly;
+# holds are placed above the measured threshold.
 #
 # Clock: 32 kHz mechanics = output, not 48 kHz. The fs-duct flanged radiation load is admitted only to
 # ka = 20, and the 0.061 m bell reaches ka = 20 at 17.9 kHz, so Nyquist 16 kHz (ka 17.9) is admitted and
@@ -42,6 +43,8 @@ RATE=32000
 HOLD_TENSIONS=${HOLD_TENSIONS:-"1e0 1.5e0 2.2e0 2.9e0"}
 HOLD_PRESSURE=${HOLD_PRESSURE:-3e3}
 RAMP_TENSIONS=${RAMP_TENSIONS:-"1e0 1.5e0 2.2e0 2.9e0"}
+RAMP_PEAK=${RAMP_PEAK:-1.2e4}
+SWEEP_PRESSURE=${SWEEP_PRESSURE:-8e3}
 
 cd "$SNAP"
 mkdir -p "$OUT"
@@ -87,10 +90,10 @@ render() {
       && echo "rendered $name" || echo "FAILED $name (see $OUT/$name.log)"; } &
 }
 
-compose "$OUT/sweep-p4000.performance" 10 4e3 7e-1 3.5e0
-render sweep-p4000
+compose "$OUT/sweep-p$SWEEP_PRESSURE.performance" 10 "$SWEEP_PRESSURE" 7e-1 3.5e0
+render "sweep-p$SWEEP_PRESSURE"
 for tension in $RAMP_TENSIONS; do
-  compose_pressure_ramp "$OUT/pramp-t$tension.performance" 8 6e3 "$tension"
+  compose_pressure_ramp "$OUT/pramp-t$tension.performance" 8 "$RAMP_PEAK" "$tension"
   render "pramp-t$tension"
 done
 for tension in $HOLD_TENSIONS; do

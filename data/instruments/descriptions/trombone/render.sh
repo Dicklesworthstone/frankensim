@@ -42,6 +42,12 @@ PRESSURE=${PRESSURE:-1.5e3}
 DIR=data/instruments/descriptions/trombone
 RATE=19200
 HOLD_TENSIONS=${HOLD_TENSIONS:-"6e-1 8e-1 1e0 1.2e0 1.4e0 1.6e0 1.8e0"}
+# The first native renders (1.5 kPa holds at pre-stress 0.6 to 1.8, and a ramp to 4 kPa at 1.0) never
+# started the lip: the mouth flow stayed steady and the receiver, which differentiates flow, radiated
+# exactly zero. These ramps find where THIS model's lip first speaks.
+RAMP_TENSIONS=${RAMP_TENSIONS:-"7e-1 1e0 1.3e0 1.6e0 2e0 2.5e0"}
+RAMP_PEAK=${RAMP_PEAK:-1.2e4}
+SWEEP_PRESSURE=${SWEEP_PRESSURE:-8e3}
 
 cd "$SNAP"
 if [ "$PIECES" != 16 ]; then
@@ -93,11 +99,13 @@ render() {
       && echo "rendered $name" || echo "FAILED $name (see $OUT/$name.log)"; } &
 }
 
-compose "$OUT/sweep-p1500.performance" 8 "$PRESSURE" 5e-1 2e0
-render sweep-p1500
-# Threshold and extinction pressure at the mid pre-stress (up to 4 kPa, 8 s each way).
-compose_pressure_ramp "$OUT/pramp-t1e0.performance" 8 4e3 1e0
-render pramp-t1e0
+compose "$OUT/sweep-p$SWEEP_PRESSURE.performance" 8 "$SWEEP_PRESSURE" 5e-1 2e0
+render "sweep-p$SWEEP_PRESSURE"
+# Threshold and extinction pressure at each pre-stress (8 s up, 8 s down).
+for tension in $RAMP_TENSIONS; do
+  compose_pressure_ramp "$OUT/pramp-t$tension.performance" 8 "$RAMP_PEAK" "$tension"
+  render "pramp-t$tension"
+done
 for tension in $HOLD_TENSIONS; do
   name="hold-t${tension}-p1500"
   compose "$OUT/$name.performance" 3 "$PRESSURE" "$tension"
