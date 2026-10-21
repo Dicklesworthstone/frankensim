@@ -139,10 +139,12 @@ function creditLine(p: Pair): HTMLElement {
 
 function sourceLines(p: Pair): HTMLElement {
   const r = p.real;
+  const level = p.level_match.trim().replace(/\.$/, ""); // a sentence from the data may or may not end in a full stop
+  const levelSentence = `${level.charAt(0).toUpperCase()}${level.slice(1)}.`;
   if (!r) {
     return el("div", { class: "small muted ir-source" },
       p.ours ? el("p", {}, `Render: commit ${p.ours.git_sha.slice(0, 12)}, observed at ${p.ours.observer}, ${fmt(p.ours.sample_rate / 1000)} kHz; recipe ${p.ours.recipe}.`) : null,
-      el("p", {}, `${p.level_match.charAt(0).toUpperCase()}${p.level_match.slice(1)}.`));
+      el("p", {}, levelSentence));
   }
   const mic = [r.mic, r.pattern === "unstated" ? null : r.pattern, r.distance_m !== null ? `at ${num(r.distance_m, "m")}` : r.distance_status === "absent-on-page" ? "distance not stated on the source page" : null, r.room].filter(Boolean).join(", ");
   const seg = r.segment_s ? `, ${num(r.segment_s[0], "")}–${num(r.segment_s[1], "s")} of the file` : "";
@@ -150,7 +152,7 @@ function sourceLines(p: Pair): HTMLElement {
   return el("div", { class: "small muted ir-source" },
     el("p", {}, "Recording: ", r.url ? el("a", { href: r.url, rel: "noopener" }, r.file) : r.file, `${seg}. ${mic}${r.format ? `; ${r.format}` : ""}.`),
     p.ours ? el("p", {}, `Render: commit ${p.ours.git_sha.slice(0, 12)}, observed at ${p.ours.observer}, ${fmt(p.ours.sample_rate / 1000)} kHz; recipe ${p.ours.recipe}.`) : el("p", {}, "Render: none for this note."),
-    el("p", {}, `${p.level_match.charAt(0).toUpperCase()}${p.level_match.slice(1)}.${a ? ` ${p.ours ? "Both signals are" : "The recording is"} high-passed at ${num(a.highpass_hz, "Hz")}; onsets ${num(a.onset_real_s, "s")} (recording)${a.onset_ours_s !== null ? ` and ${num(a.onset_ours_s, "s")} (render)` : ""} aligned.` : ""}`));
+    el("p", {}, `${levelSentence}${a ?` ${p.ours ? "Both signals are" : "The recording is"} high-passed at ${num(a.highpass_hz, "Hz")}; onsets ${num(a.onset_real_s, "s")} (recording)${a.onset_ours_s !== null ? ` and ${num(a.onset_ours_s, "s")} (render)` : ""} aligned.` : ""}`));
 }
 
 function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
