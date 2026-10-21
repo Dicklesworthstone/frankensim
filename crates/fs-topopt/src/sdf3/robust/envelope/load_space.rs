@@ -6,6 +6,7 @@
 //! amplitudes and correlations are authored through the columns of F; these
 //! columns are NOT probabilities or independent mutually exclusive scenarios.
 pub mod design;
+mod audit;
 use super::{RobustEvaluation3, RobustOptions3};
 use crate::gradient_check::{audit_design_map, GradientCheckOptions, GradientSample, MultiLoadGradientCheck};
 use crate::pipeline::LoadCase;
@@ -215,11 +216,19 @@ pub fn controlled_load_space_gradient_check<O: Sdf3Elasticity>(
 ) -> Result<LoadSpaceGradientCheck3, EvaluationStop> {
     options.assert_valid();
     robustness.assert_valid(study.params());
-    let numerical = audit_design_map(study.params(), rho, options, control, |point, _, control| {
+    let mut baseline_compliance = 0.0;
+    // Remove only the DESIGN-INDEPENDENT temperature*ln(dimension) offset
+    // before differencing. Adding it first can erase small but nonzero load
+    // sensitivities under loose caps. The analytic gradient and gate stay exact.
+    let mut numerical = audit_design_map(study.params(), rho, options, control, |point, baseline, control| {
         let e = study.evaluate_robust_load_space(point, basis, robustness, policy, control)?;
-        Ok(GradientSample { compliance: e.spectrum.smooth_maximum, compliance_gradient: e.gradient,
+        if baseline { baseline_compliance = e.spectrum.smooth_maximum; }
+        Ok(GradientSample { compliance: audit::centered_maximum(&e.spectrum, policy)?, compliance_gradient: e.gradient,
             volume: e.physical.dilated_volume_fraction, volume_gradient: e.physical.dilated_volume_gradient })
     })?;
+    // Keep the public baseline in the original objective's units and convention.
+    // All directional differences are invariant to the constant removed above.
+    numerical.baseline_compliance = baseline_compliance;
     Ok(LoadSpaceGradientCheck3 { policy: policy.clone(), robustness, numerical })
 }
 
