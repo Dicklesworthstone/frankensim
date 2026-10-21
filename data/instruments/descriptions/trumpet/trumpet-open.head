@@ -31,12 +31,13 @@ termination flanged
 modes 3 1
 # Mouth-flow line ladder. The first native render of this bore was REFUSED by the owner's default ladder
 # (relative tail energy 1e-10): at the 65536-tap cap (2.0 s on this 32 kHz clock) the last quarter of the
-# mouth-flow impulse response still held 6.8e-7 of its energy. The cap and the default are the owner's, and
-# the source of the tail is UNVERIFIED (the viscothermal memory of the 1.8 mm throat and the long narrow
-# bore is the suspect: the same refusal hit the 2.7 m trombone bore at 1.9e-8). Declared instead of hidden:
-# 1e-5 relative energy is a wrap-around residual of about 3e-3 of the response amplitude (-50 dB), well
-# above the measured 6.8e-7 and far below the tens of dB the grading measures resolve. The realized rungs
-# (taps, tail energy, tap change) are written to the provenance sidecar.
+# mouth-flow impulse response still held 6.8e-7 of its energy. With this tolerance declared the ladder
+# stops at 8192 taps and the sidecar records every rung: tail energy 9.8e-6 (4096 taps), 4.9e-6 (8192).
+# As for the trombone bore (see its head), the tail halves per doubling: an algebraic 1/N decay, the
+# signature of an endpoint discontinuity of the sampled response (the 20 Hz stand-in for the DC bin or the
+# real Nyquist bin), not of a long physical ring-down. UNVERIFIED. Declared instead of hidden: 1e-5
+# relative energy is about -50 dB of wrap-around amplitude, above the measured tail and far below the
+# tens of dB the grading measures resolve.
 mouth_flow_tail_tol 1e-5
 #
 # --- bore -------------------------------------------------------------------------------------
