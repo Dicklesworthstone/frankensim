@@ -5,6 +5,9 @@ use crate::sdf3::response::limits::strength::ResponseStressError3;
 use crate::sdf3::stress::{von_mises, StressError3};
 use std::ops::ControlFlow;
 
+mod scan;
+pub use scan::{BinaryStressCandidate3, BinaryStressScan3, BinaryStressScanOptions3};
+
 /// Fixed-grid endpoint requirements, independent of the gray design's stress
 /// relaxation. Physical stress is tested in BOTH solid and positive-ersatz cells.
 #[derive(Debug, Clone, Copy)]

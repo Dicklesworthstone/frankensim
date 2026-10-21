@@ -10,6 +10,8 @@ use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use crate::{SimpParams, SolveBudget, SolveProgress};
 
+mod scan;
+
 type Study = CutDensityStudy3<AdaptiveSolveSpace3>;
 struct Slab;
 impl CutSdf3 for Slab {

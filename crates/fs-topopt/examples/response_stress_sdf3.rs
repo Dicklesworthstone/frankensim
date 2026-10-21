@@ -3,6 +3,8 @@
 //!   --example response_stress_sdf3 -- 80 500000 0.0012 0.008 0.1
 //! Arguments: accepted updates, total Krylov allowance, min/max axial reaction,
 //! stress cap. All units are dimensionless reference units (E=1, nu=0).
+//! Append --binary T1,T2,... VOID_STIFFNESS to re-solve actual two-phase
+//! candidates and retain only endpoints meeting response AND physical-stress caps.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::elastic3::{adaptive::AdaptiveElasticity3,ElasticityOptions3};
@@ -16,6 +18,8 @@ use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::limits::*;
 use fs_topopt::sdf3::response::limits::strength::ResponseStressOptions3;
 use fs_topopt::sdf3::response::limits::strength::design::{ResponseStressDesignOptions3,ResponseStressDesignStudy3};
+#[path = "response_stress_sdf3/binary.rs"]
+mod binary;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64 {(p[0]-0.17)*(p[0]-0.83)}
@@ -31,8 +35,9 @@ fn motion(p:[f64;3],_:[f64;3])->[f64;3] {[0.02*(p[0]-0.17),0.0,0.0]}
 fn opposite(p:[f64;3],n:[f64;3])->[f64;3] {motion(p,n).map(|v|-v)}
 fn right(_:[f64;3],n:[f64;3])->[f64;3] {if n[0]>0.0 {[1.0,0.0,0.0]}else{[0.0;3]}}
 fn main()->Result<(),Box<dyn std::error::Error>> {
-    let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()>5 {return Err("usage: response_stress_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION [STRESS_CAP]]]]]".into());}
+    let mut args:Vec<_>=std::env::args().skip(1).collect();
+    let binary=binary::parse(&mut args)?;
+    if args.len()>5 {return Err("usage: response_stress_sdf3 [UPDATES [KRYLOV [MIN_REACTION [MAX_REACTION [STRESS_CAP]]]]] [--binary T1,T2,... VOID_STIFFNESS]".into());}
     let steps=args.first().map_or(Ok(80),|s|s.parse::<usize>())?;
     let budget=args.get(1).map_or(Ok(500000),|s|s.parse::<usize>())?;
     let lo=args.get(2).map_or(Ok(0.0012),|s|s.parse::<f64>())?;
@@ -79,6 +84,9 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     eprintln!("initial_volume={initial:.17e}; retained_volume={:.17e}; joint_constraint={:.17e}; worst_original_residual={:.17e}; selected_latest={}; feasible={}; work={:?}; continuum_certified=false; actuator_energy_claimed=false",
         e.response.volume_fraction,e.constraint,e.worst_residual,e.response.rho==session.point(),e.feasible(options.optimizer.tolerance),session.work());
     let report=outcome?;eprintln!("latest_al_stop={:?}; latest_al_kkt={:?}; selected_stationarity_not_claimed=true",report.stop,report.kkt);
-    let _retained=session.into_best_feasible()?;
+    let retained=session.into_best_feasible()?;
+    if let Some(config)=binary {
+        binary::run(&mut study,&retained.response.rho,&cases,options,config,&mut control)?;
+    }
     Ok(())
 }
