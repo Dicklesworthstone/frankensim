@@ -4,10 +4,12 @@
 // 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gasRecord?, materials?, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
+//   {type:'init', piece, port, gasRecord?, gasSources?, materials?, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
 //       gasRecord    shared material record: `T_K P_Pa RH`, or
 //                    `mixture T_K P_Pa mole|mass COUNT SPECIES FRACTION ...`
 //                    Held for every grid trial, clone and fallback construction.
+//       gasSources   explicit species/NASA-9/transport card-pack triples for a
+//                    thermochemical record, plus water identity and phase policy
 //       materials    canonical primary/secondary/striker card-pack bytes and
 //                    declared temperature + spherical-impactor geometry/loss
 //                    (KitMaterialOptions in mix.ts); no browser material laws.
@@ -113,7 +115,7 @@ function copyOf(p) {
 
 // The material owner admits the record; the browser never substitutes another
 // gas after a refused constructor or when a deployed WASM predates withGas.
-function makePiece(name, scale, gasRecord, materials) {
+function makePiece(name, scale, gasRecord, materials, gasSources) {
   if (gasRecord !== undefined && (typeof gasRecord !== 'string' || !gasRecord.trim())) {
     throw new Error('A nonempty atmosphere record is required.');
   }
@@ -140,22 +142,62 @@ function makePiece(name, scale, gasRecord, materials) {
           || ![loss.frequencyHz, loss.primaryAngleRad, loss.secondaryAngleRad].every(Number.isFinite)) {
         throw new Error('Declare the source bending-loss model, frequency coordinate and both material orientations.');
       }
-      if (typeof KitPiece.withMaterialBendingLoss !== 'function') {
+      const constructor = gasSources ? 'withMaterialBendingLossAndGasSources' : 'withMaterialBendingLoss';
+      if (typeof KitPiece[constructor] !== 'function') {
         throw new Error('This kit engine needs rebuilding with source bending-loss support; the selected viscosity was not applied.');
       }
-      return KitPiece.withMaterialBendingLoss(...inputs, loss.frequencyAxis, loss.frequencyHz,
-        loss.primaryAngleRad, loss.secondaryAngleRad);
+      return KitPiece[constructor](...inputs, loss.frequencyAxis, loss.frequencyHz,
+        loss.primaryAngleRad, loss.secondaryAngleRad, ...(gasSources ?? []));
     }
-    if (typeof KitPiece.withMaterials !== 'function') {
+    const constructor = gasSources ? 'withMaterialsAndGasSources' : 'withMaterials';
+    if (typeof KitPiece[constructor] !== 'function') {
       throw new Error('This kit engine needs rebuilding with material-card support; the selected materials were not applied.');
     }
-    return KitPiece.withMaterials(...inputs);
+    return KitPiece[constructor](...inputs, ...(gasSources ?? []));
+  }
+  if (gasSources) {
+    if (typeof KitPiece.withGasSources !== 'function') {
+      throw new Error('This kit engine needs rebuilding with gas-source support; the source atmosphere was not applied.');
+    }
+    return KitPiece.withGasSources(name, scale, gasRecord, ...gasSources);
   }
   if (gasRecord === undefined) return new KitPiece(name, scale);
   if (typeof KitPiece.withGas !== 'function') {
     throw new Error('This kit engine needs rebuilding with atmosphere support; the selected gas was not applied.');
   }
   return KitPiece.withGas(name, scale, gasRecord);
+}
+
+// Only frame unchanged canonical bytes. Species matching, thermodynamics,
+// transport mixing and source validity all remain in the Rust material owner.
+function gasSourcePacket(record, sources) {
+  if (sources === undefined) return undefined;
+  if (typeof record !== 'string' || !/^\s*thermochemical\s/.test(record)
+      || !sources || !Array.isArray(sources.components)
+      || sources.components.length < 1 || sources.components.length > 128
+      || !['frozen', 'liquid-water'].includes(sources.phase)
+      || !(sources.waterSpecies === null || (typeof sources.waterSpecies === 'string'
+        && sources.waterSpecies.trim() === sources.waterSpecies && sources.waterSpecies.length > 0))
+      || (sources.phase === 'liquid-water' && sources.waterSpecies === null)) {
+    throw new Error('Declare a thermochemical gas record, 1..128 source triples, explicit water identity (or null), and phase policy.');
+  }
+  const parts = [], lengths = [], limit = 16 * 1024 * 1024;
+  let total = 0;
+  for (const component of sources.components) {
+    for (const name of ['speciesPack', 'nasa9Pack', 'transportPack']) {
+      const bytes = component?.[name];
+      if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length > limit) {
+        throw new Error('Each gas source triple needs three nonempty canonical packs, at most 16 MiB each.');
+      }
+      total += bytes.length;
+      if (total > 4 * limit) throw new Error('Gas source packs exceed the aggregate 64 MiB budget.');
+      parts.push(bytes); lengths.push(bytes.length);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.length; }
+  return [bytes, new Uint32Array(lengths), sources.waterSpecies ?? '', sources.phase];
 }
 
 // The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
@@ -171,15 +213,15 @@ function makePiece(name, scale, gasRecord, materials) {
 // The first timing in a Worker runs while V8 is still optimizing the engine code, and can read slow. A
 // shortfall there is timed once more, on a new build, before it ends the search.
 let timed = 0;
-function choose(name, scales, minRealtime, benchMs, gasRecord, materials) {
+function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSources) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
     let kept = null, rt;
     try {
-      const built = makePiece(name, scales[i], gasRecord, materials);
+      const built = makePiece(name, scales[i], gasRecord, materials, gasSources);
       kept = copyOf(built);
       rt = bench(built, benchMs, minRealtime);
-      if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord, materials), benchMs, minRealtime);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord, materials, gasSources), benchMs, minRealtime);
     } catch {
       kept?.free();
       continue; // refused (the grid needs oversampling at 48 kHz) or failed: skip it, as a finest-first search would
@@ -193,7 +235,7 @@ function choose(name, scales, minRealtime, benchMs, gasRecord, materials) {
     pick = { scale: scales[i], realtime: rt, piece: kept };
   }
   if (pick) return pick;
-  const built = makePiece(name, 5, gasRecord, materials);
+  const built = makePiece(name, 5, gasRecord, materials, gasSources);
   const kept = copyOf(built);
   try {
     return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
@@ -217,12 +259,13 @@ self.onmessage = async (event) => {
       if (m.bursts === false) bursts = false;
       const gasRecord = m.gasRecord;
       const materials = m.materials;
-      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials);
-      piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord, materials);
+      const gasSources = gasSourcePacket(gasRecord, m.gasSources);
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials, gasSources);
+      piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord, materials, gasSources);
       // The grid correction table describes the original material presets.
       // A source-bound swap keeps the declared pressure gain; it is never
       // normalized back to a bronze/Mylar stroke's level.
-      fix = materials === undefined ? levelFix(table, m.piece, pick.scale, pageGain) : 1;
+      fix = materials === undefined && gasSources === undefined ? levelFix(table, m.piece, pick.scale, pageGain) : 1;
       gain = pageGain * fix;
       const engine = {
         idle: () => piece.asleep(),
@@ -281,7 +324,7 @@ self.onmessage = async (event) => {
       };
       lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024, chunk: m.chunk });
       const xy = piece.surfaceXY();
-      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && materials === undefined ? 'ok' : 'none' }, [xy.buffer]);
+      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && materials === undefined && gasSources === undefined ? 'ok' : 'none' }, [xy.buffer]);
     } else if (!piece || !lane) {
       return;
     } else if (m.type === 'strike') {

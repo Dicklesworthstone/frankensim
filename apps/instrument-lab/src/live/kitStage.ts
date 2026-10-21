@@ -5,7 +5,7 @@
 import { claimPlayback, registerPlayer } from "../audio";
 import { el } from "../util";
 import { createLiveAudioContext } from "./liveAudio";
-import { createLiveMix, KitLane, type KitBurst, type KitField, type KitMaterialOptions, type KitReady, type LiveMix } from "./mix";
+import { createLiveMix, KitLane, type GasSourceOptions, type KitBurst, type KitField, type KitMaterialOptions, type KitReady, type LiveMix } from "./mix";
 
 /** Slow-motion factor for the replay of each stroke's first milliseconds. */
 const SLOW = 60;
@@ -144,7 +144,8 @@ export function mountLiveKit(root: HTMLElement): void {
   const pressure = numberInput(101.325, 10, 200);
   const humidity = numberInput(0, 0, 100);
   const medium = el("select", {}, el("option", { value: "air" }, "Air"),
-    el("option", { value: "mixture" }, "Custom gas mixture"));
+    el("option", { value: "mixture" }, "Custom gas mixture"),
+    el("option", { value: "sources" }, "Import gas material sources"));
   const basis = el("select", {}, el("option", { value: "mole" }, "Mole percentages"),
     el("option", { value: "mass" }, "Mass percentages"));
   const components = ([
@@ -154,27 +155,83 @@ export function mountLiveKit(root: HTMLElement): void {
   const labelled = (name: string, input: HTMLElement): HTMLElement => el("label", {}, el("span", {}, name), input);
   const mixtureFields = el("div", { class: "kit-atmosphere-grid", hidden: "" },
     labelled("Composition basis", basis), ...components.map(c => labelled(`${c.name} · %`, c.input)));
+  const sourceRecord = el("textarea", { rows: "3", placeholder: "thermochemical 300 100000 mole 1 species-id 1" });
+  const sourceWater = el("input", { type: "text", placeholder: "Canonical water species ID, or none" });
+  const sourcePhase = el("select", {}, el("option", { value: "" }, "Choose phase assumption"),
+    el("option", { value: "frozen" }, "Frozen gas composition"),
+    el("option", { value: "liquid-water" }, "Require unsaturated water vapor"));
+  const gasRows: { species: HTMLInputElement; nasa9: HTMLInputElement; transport: HTMLInputElement }[] = [];
+  const gasRowsElement = el("div", {});
+  const addGas = el("button", { type: "button", class: "btn sm" }, "Add another gas source");
+  const addGasRow = (): void => {
+    if (gasRows.length >= 128) return;
+    const row = { species: el("input", { type: "file" }), nasa9: el("input", { type: "file" }),
+      transport: el("input", { type: "file" }) };
+    gasRows.push(row);
+    gasRowsElement.append(el("fieldset", {}, el("legend", {}, `Gas source ${gasRows.length}`),
+      el("div", { class: "kit-atmosphere-grid" }, labelled("Species identity and molar mass", row.species),
+        labelled("NASA-9 thermodynamic model", row.nasa9), labelled("Transport material card", row.transport))));
+    addGas.disabled = gasRows.length >= 128;
+  };
+  addGas.addEventListener("click", addGasRow);
+  addGasRow();
+  const sourceFields = el("div", { hidden: "" },
+    labelled("Temperature (K), pressure (Pa) and composition record", sourceRecord),
+    el("div", { class: "kit-atmosphere-grid" }, labelled("Water identity", sourceWater), labelled("Phase assumption", sourcePhase)),
+    gasRowsElement, addGas,
+    el("p", { class: "small muted" }, "Pair each species with its thermodynamic model and transport card. The record selects species by their exact source IDs. Data determines the admitted temperature and pressure range. Sources change the cavity, air loading and microphone together; composition stays fixed during playback."));
   const atmosphereStatus = el("p", { class: "small muted", role: "status" },
     "One atmosphere supplies every piece's cavity, air loading and microphone. Applying changes restarts the kit from rest.");
   const applyAtmosphere = el("button", { class: "btn sm", type: "submit" }, "Apply atmosphere");
   const atmosphereForm = el("form", {},
     el("div", { class: "kit-atmosphere-grid" }, labelled("Gas", medium), labelled("Temperature · °C", temperature),
       labelled("Pressure · kPa", pressure), labelled("Relative humidity in air · %", humidity)),
-    mixtureFields, el("p", { class: "small muted" }, "Mixture percentages must total 100. Water vapor is a mixture component; relative humidity applies to air."),
+    mixtureFields, sourceFields, el("p", { class: "small muted" }, "Mixture percentages must total 100. Water vapor is a mixture component; relative humidity applies to air."),
     applyAtmosphere, atmosphereStatus);
   const atmosphere = el("details", { class: "kit-atmosphere" }, el("summary", {}, "Atmosphere"), atmosphereForm);
   const updateMedium = (): void => {
     const isMixture = medium.value === "mixture";
-    humidity.disabled = isMixture;
+    const isSources = medium.value === "sources";
+    humidity.disabled = medium.value !== "air";
+    temperature.disabled = isSources;
+    pressure.disabled = isSources;
     mixtureFields.hidden = !isMixture;
+    sourceFields.hidden = !isSources;
     basis.disabled = !isMixture;
     for (const component of components) component.input.disabled = !isMixture;
   };
   medium.addEventListener("change", updateMedium);
   updateMedium();
 
-  function readAtmosphere(): { record: string; label: string } {
+  function readAtmosphere(): { record: string; label: string; load?: () => Promise<GasSourceOptions> } {
     if (!atmosphereForm.reportValidity()) throw new Error("Enter temperature, pressure and composition within the shown ranges.");
+    if (medium.value === "sources") {
+      const record = sourceRecord.value.trim();
+      const water = sourceWater.value.trim(), phase = sourcePhase.value;
+      if (!/^thermochemical\s/.test(record) || new TextEncoder().encode(record).length > 8192
+          || !water || (phase !== "frozen" && phase !== "liquid-water")
+          || (phase === "liquid-water" && water === "none")) {
+        throw new Error("Declare a thermochemical record, water ID (or none), and a compatible phase assumption.");
+      }
+      const selected = gasRows.map(row => [row.species.files?.[0], row.nasa9.files?.[0], row.transport.files?.[0]])
+        .filter(row => row.some(Boolean));
+      let total = 0;
+      if (!selected.length) throw new Error("Select at least one complete gas source triple.");
+      const files = selected.map(row => row.map(file => {
+        if (!file || !file.size || file.size > 16 * 1024 * 1024) {
+          throw new Error("Each gas needs species, thermodynamic and transport files of 1 byte to 16 MiB.");
+        }
+        total += file.size;
+        if (total > 64 * 1024 * 1024) throw new Error("Gas source files exceed 64 MiB in total.");
+        return file;
+      }));
+      return { record, label: `Imported atmosphere · ${files.length} gas source${files.length === 1 ? "" : "s"}`,
+        load: async () => ({ phase, waterSpecies: water === "none" ? null : water,
+          components: await Promise.all(files.map(async row => {
+            const bytes = await Promise.all(row.map(async file => new Uint8Array(await file.arrayBuffer())));
+            return { speciesPack: bytes[0]!, nasa9Pack: bytes[1]!, transportPack: bytes[2]! };
+          })) }) };
+    }
     const t = temperature.valueAsNumber + 273.15, p = pressure.valueAsNumber * 1000;
     if (!Number.isFinite(t) || !Number.isFinite(p)) throw new Error("Temperature and pressure must be finite.");
     if (medium.value === "air") {
@@ -516,7 +573,7 @@ export function mountLiveKit(root: HTMLElement): void {
 
   async function begin(): Promise<void> {
     if (running || start.disabled) return;
-    let environment: { record: string; label: string };
+    let environment: ReturnType<typeof readAtmosphere>;
     let selectedMaterials: ReturnType<typeof captureMaterials>;
     try { environment = readAtmosphere(); selectedMaterials = captureMaterials(); }
     catch (e) { hud.textContent = (e as Error).message; return; }
@@ -533,6 +590,7 @@ export function mountLiveKit(root: HTMLElement): void {
       await ctx.resume();
       if (my !== session) return;
       const materials = await selectedMaterials.load();
+      const gasSources = await environment.load?.();
       if (my !== session) return;
       const m = await createLiveMix(ctx, ctx.destination);
       if (my !== session) { m.dispose(); return; }
@@ -540,7 +598,7 @@ export function mountLiveKit(root: HTMLElement): void {
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
-        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, materials, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
+        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, gasSources, materials, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;
@@ -563,6 +621,9 @@ export function mountLiveKit(root: HTMLElement): void {
         const r = await lane.ready;
         if (my !== session) { lane.dispose(); return; }
         if (r.gasRecord !== environment.record) throw new Error("The kit engine did not retain the requested atmosphere. Reload after rebuilding the live kit.");
+        if (gasSources && !(r.info.gas?.sourceSpecies && r.info.gas.sourceSpecies > 0)) {
+          throw new Error("The kit engine did not retain the imported gas sources. Rebuild the live kit before applying them.");
+        }
         if (materials && !r.info.materials) throw new Error("The kit engine did not retain the imported materials. Rebuild the live kit before applying them.");
         if (materials?.bendingLoss && r.info.materials?.bendingLoss?.model !== materials.bendingLoss.model) {
           throw new Error("The kit engine did not retain the selected material bending loss. Rebuild the live kit before applying it.");

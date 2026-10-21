@@ -1,6 +1,9 @@
 //! Bounded textual gas admission shared by file-driven physics consumers.
 //! This is a source adapter, not a constitutive law or an instrument schema.
 
+/// Canonical source bytes for browser and other file-independent callers.
+pub mod packs;
+
 use super::{GasSpecies, resolve_gas_mixture};
 use crate::MaterialError;
 use crate::gas::GasState;

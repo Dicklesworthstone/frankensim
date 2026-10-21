@@ -137,6 +137,30 @@ fn live_composition_changes_motion_and_pcm_and_survives_clone_and_blocks() {
 }
 
 #[test]
+fn owned_gas_record_reaches_the_original_live_mechanics_and_survives_cloning() {
+    let record = fs_material::gas_species::input::read_gas_record(
+        &mut "mixture 300 100000 mole 2 N2 0.6 CO2 0.4".split_ascii_whitespace(), None, None).unwrap();
+    let mut retained = live::Live::with_resolved_atmosphere("tom-12", 8.0, record.clone(), None).unwrap();
+    let mut original = live::Live::with_gas("tom-12", 8.0, *record.state()).unwrap();
+    assert_eq!(retained.atmosphere_source(), Some(&record));
+    assert_eq!(retained.ins.gas(), record.state());
+    for piece in [&mut retained, &mut original] { piece.strike(0.25 * piece.radius, 0.0, 2.0); }
+    let mut cloned = retained.clone();
+    let (mut actual, mut expected, mut split) = ([0.0; 1024], [0.0; 1024], [0.0; 1024]);
+    retained.render(&mut actual, 1.0);
+    original.render(&mut expected, 1.0);
+    cloned.render(&mut split[..319], 1.0);
+    cloned.render(&mut split[319..], 1.0);
+    assert_eq!(actual, expected);
+    assert_eq!(actual, split);
+    assert!(actual.iter().any(|v| *v != 0.0));
+    assert_eq!(cloned.atmosphere_source(), Some(&record));
+    assert_eq!(retained.ins.bodies[retained.target].w, original.ins.bodies[original.target].w);
+    assert!(live::Live::with_gas_source_packet("tom-12", 8.0,
+        "thermochemical 300 100000 mole 1 custom 1", &[1, 2, 3], &[1, 1, 1], "", "unspecified", None).is_err());
+}
+
+#[test]
 fn incoherent_and_incomplete_gas_declarations_refuse_before_construction() {
     let mut broken = standard_gas();
     broken.density *= 2.0;

@@ -31,6 +31,16 @@ mod wasm {
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
+        /// Canonical species, NASA-9 and transport material packs. The packet
+        /// is shared by all native physics consumers; no browser gas law.
+        #[wasm_bindgen(js_name = withGasSources)]
+        pub fn with_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            bytes: &[u8], lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, bytes, lengths,
+                water_species, phase, None)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
         /// Canonical material-card packs for both surfaces and a spherical
         /// impactor. Mass, elasticity and Hertz stiffness follow the resolved
         /// data; preset T60/support/rim/wire laws remain independent estimates.
@@ -59,6 +69,39 @@ mod wasm {
                 frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
                 .map_err(|e| JsError::new(&e))?;
             Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// Independently sourced solids and atmosphere in the same trajectory.
+        #[wasm_bindgen(js_name = withMaterialsAndGasSources)]
+        pub fn with_materials_and_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64,
+            gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_at_temperature(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, gas_bytes, gas_lengths,
+                water_species, phase, Some(materials))
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// Source viscosity and source atmosphere compose without restoring
+        /// preset structural damping or replacing either material selection.
+        #[wasm_bindgen(js_name = withMaterialBendingLossAndGasSources)]
+        pub fn with_material_bending_loss_and_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64, frequency_axis: &str,
+            frequency_hz: f64, primary_angle_rad: f64, secondary_angle_rad: f64,
+            gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_with_bending_loss(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, gas_bytes, gas_lengths,
+                water_species, phase, Some(materials))
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
@@ -115,10 +158,11 @@ mod wasm {
         pub fn info(&self) -> String {
             let b: Vec<String> = self.live.ins.bodies.iter().map(|b| format!("{{\"name\":\"{}\",\"nodes\":{}}}", b.name, b.n)).collect();
             format!(
-                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{}}},\"materials\":{},\"bodies\":[{}]}}",
+                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{},\"sourceSpecies\":{}}},\"materials\":{},\"bodies\":[{}]}}",
                 self.live.name, self.scale, self.live.radius, self.live.surface_xy().len() / 2, self.live.surface_h(), self.live.ins.rate,
                 self.live.ins.gas().temperature, self.live.ins.gas().pressure,
                 self.live.ins.gas().density, self.live.ins.gas().sound_speed,
+                self.live.gas_source_species(),
                 self.live.ins.materials().map_or_else(|| "null".into(), KitMaterials::info_json), b.join(",")
             )
         }
