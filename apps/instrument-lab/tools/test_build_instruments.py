@@ -48,11 +48,25 @@ def track(n: int, frames: int = 4) -> dict:
     return {"n": n, "f_hz": [220.0 * n * (1 + 0.001 * k) for k in range(frames)], "level_db": [-20.0 - 6 * n] * frames}
 
 
-def metric(id_: str, gap, ruler) -> dict:
-    return {"id": id_, "label": id_, "unit": "dB", "real": None, "ours": None, "gap": gap, "ruler": [{"label": f"r{i}", "value": v} for i, v in enumerate(ruler)], "note": ""}
+def metric(id_: str, gap, ruler, strict=None) -> dict:
+    """strict None: the pair predates the strict ruler. Otherwise, like decompose.py: ruler_strict plus both inside_* verdicts."""
+    m = {"id": id_, "label": id_, "unit": "dB", "real": None, "ours": None, "gap": gap, "ruler": [{"label": f"r{i}", "value": v} for i, v in enumerate(ruler)], "note": ""}
+    if strict is not None:
+        m.update(ruler_strict=[{"label": f"s{i}", "value": v} for i, v in enumerate(strict)], inside_loose=B.inside(gap, ruler), inside_strict=B.inside(gap, strict))
+    return m
 
 
-def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5) -> dict:
+# A hand-made set of measures, one of each case the strict ruler exists to tell apart (gap, loose ruler, strict ruler):
+STRICT_CASES = [
+    metric("both_inside", 1.0, [2.0, 4.0], [1.5]),        # inside both spreads
+    metric("loose_only", 3.0, [2.0, 4.0], [1.0, 2.0]),    # inside the neighbouring-note spread, OUTSIDE the same-note one
+    metric("both_outside", 9.0, [2.0, 4.0], [1.5]),       # outside both
+    metric("no_same_note", 2.0, [3.0], []),               # no other recording of this note: no strict claim
+    metric("no_claim", 1.0, [], []),                      # no ruler of either kind
+]
+
+
+def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5, metrics: list | None = None) -> dict:
     d = root / "clarinet" / "D3"
     d.mkdir(parents=True)
     write_wav(d / "real.wav", 0.5)
@@ -69,13 +83,106 @@ def make_pair(root: Path, with_ours: bool = True, ours_peak: float = 0.5) -> dic
         "figures": {"spectrogram": fig(with_ours), "scalogram": fig(with_ours)},
         "partials": {"t_s": [0, 1, 2, 3], "f0_hz": {"real": 220.0, "ours": 220.5 if with_ours else None},
                      "real": [track(1), track(2)], "ours": [track(1), track(2)] if with_ours else None},
-        "metrics": [metric("a", 1.0, [2.0, 3.0]), metric("b", 5.0, [2.0, 3.0]), metric("c", 1.0, [])],
+        "metrics": metrics if metrics is not None else [metric("a", 1.0, [2.0, 3.0]), metric("b", 5.0, [2.0, 3.0]), metric("c", 1.0, [])],
     }
     if not with_ours:
         for m in pj["metrics"]:
             m["gap"] = None
     (d / "pair.json").write_text(json.dumps(pj))
     return pj
+
+
+class StrictRuler(unittest.TestCase):
+    """The two rulers, from a hand-made pair.json (STRICT_CASES): loose = this and neighbouring notes, strict = the same note only."""
+
+    def views(self) -> dict:
+        return {v["id"]: v for v in (B.metric_view(m, True) for m in STRICT_CASES)}
+
+    def test_each_measure_carries_both_verdicts_and_a_loose_only_measure_is_told_apart(self):
+        v = self.views()
+        self.assertEqual((v["both_inside"]["inside_loose"], v["both_inside"]["inside_strict"]), (True, True))
+        self.assertEqual((v["loose_only"]["inside_loose"], v["loose_only"]["inside_strict"]), (True, False))
+        self.assertEqual((v["loose_only"]["verdict"], v["loose_only"]["verdict_strict"], v["loose_only"]["ratio_strict"]), ("within", "outside", 1.5))
+        self.assertEqual((v["both_outside"]["verdict"], v["both_outside"]["verdict_strict"]), ("outside", "outside"))
+        self.assertEqual((v["no_same_note"]["inside_loose"], v["no_same_note"]["inside_strict"], v["no_same_note"]["verdict_strict"]), (True, None, "no-ruler"))
+        self.assertEqual((v["no_claim"]["inside_loose"], v["no_claim"]["inside_strict"]), (None, None))
+        self.assertEqual((v["loose_only"]["ruler_strict_max"], v["loose_only"]["ruler_strict_min"], v["loose_only"]["ruler_max"]), (2.0, 1.0, 4.0))
+
+    def test_a_pair_without_the_strict_fields_shows_the_loose_verdict_only(self):
+        v = B.metric_view(metric("old", 3.0, [2.0, 4.0]), True)
+        self.assertEqual((v["verdict"], v["ruler_strict"], v["verdict_strict"], v["inside_strict"]), ("within", None, None, None))
+
+    def test_the_pair_counts_both_verdicts(self):
+        want = {"measures": 5, "loose": {"inside": 3, "outside": 1, "no_ruler": 1}, "strict": {"inside": 1, "outside": 2, "no_ruler": 2}}
+        self.assertEqual(B.pair_verdicts(list(self.views().values())), want)
+        self.assertIsNone(B.pair_verdicts([B.metric_view(metric("old", 3.0, [2.0]), True)])["strict"])
+
+    def pair_dict(self, metrics: list, verdicts=None) -> dict:
+        return {"note": "D3", "real": {}, "ours": {"x": 1}, "metrics": [B.metric_view(m, True) for m in metrics], "verdicts": verdicts}
+
+    def test_the_badge_is_the_weaker_of_the_two_and_the_sentence_gives_both_counts(self):
+        # Loose says nothing is outside (close); strict has one measure outside (1 of 2 inside: mixed): the badge is mixed.
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [2.0]), metric("b", 2.5, [3.0], [2.0]), metric("c", 1.0, [3.0], [])])])
+        self.assertEqual(j["badge"], "mixed")
+        self.assertEqual((j["counts"]["within"], j["counts"]["outside"], j["counts"]["strict_within"], j["counts"]["strict_outside"], j["counts"]["strict_unruled"]), (3, 0, 1, 1, 1))
+        self.assertIn("inside the spread of real recordings of this and neighbouring notes, 3 of 3 measures", j["line"])
+        self.assertIn("Inside the spread of real recordings of the same note, 1 of 2 measures (1 has no same-note comparison)", j["line"])
+        self.assertIn("The badge is the weaker of the two.", j["line"])
+        self.assertIn("Largest gap against the same-note spread: b, 1.2× it (D3)", j["line"])
+        # Strict inside everywhere it can speak, loose too: close. Strict outside nearly everywhere: off, even though loose is mixed.
+        self.assertEqual(B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [2.0])])])["badge"], "close")
+        off = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], [0.5]), metric("b", 5.0, [9.0], [0.5]), metric("c", 2.0, [3.0], [0.5]), metric("d", 9.5, [9.0], [0.5])])])
+        self.assertEqual((off["counts"]["within"], off["counts"]["outside"], off["badge"]), (3, 1, "off"))
+
+    def test_when_no_note_has_a_same_note_recording_the_badge_is_the_loose_one_and_says_so(self):
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0], []), metric("b", 5.0, [3.0], [])])])
+        self.assertEqual((j["badge"], j["counts"]["strict_notes"]), ("mixed", 1))
+        self.assertIn("No same-note comparison could be made", j["line"])
+        self.assertNotIn("The badge is the weaker", j["line"])
+
+    def test_a_family_of_older_pairs_says_the_same_note_comparison_is_not_computed(self):
+        j = B.judge(None, [self.pair_dict([metric("a", 1.0, [3.0]), metric("b", 5.0, [3.0])])])
+        self.assertEqual((j["badge"], j["counts"]["strict_notes"]), ("mixed", 0))
+        self.assertIn("The same-note comparison has not been computed for these notes.", j["line"])
+
+    def test_a_pair_whose_own_verdicts_disagree_with_its_numbers_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pj = make_pair(root, metrics=[dict(m) for m in STRICT_CASES])
+            base = root / "clarinet" / "D3"
+            check = lambda p: B.validate_pair(p, "clarinet", "D3", base, {REF_ID: next(f for f in REFS["files"] if f["id"] == REF_ID)})  # noqa: E731
+            pj["verdicts"] = B.pair_verdicts([B.metric_view(m, True) for m in pj["metrics"]])
+            self.assertEqual(check(pj), [], "the pair decompose.py would write is accepted")
+            wrong = copy.deepcopy(pj)
+            wrong["metrics"][1]["inside_strict"] = True  # the loose-only measure claimed inside the same-note spread
+            self.assertTrue(any("inside_strict" in p and "loose_only" in p for p in check(wrong)), check(wrong))
+            wrong = copy.deepcopy(pj)
+            wrong["verdicts"]["strict"]["inside"] = 4
+            self.assertTrue(any("verdicts.strict" in p for p in check(wrong)), check(wrong))
+            wrong = copy.deepcopy(pj)
+            wrong["metrics"][0]["ruler_strict"] = [{"label": "s0", "value": -1.0}]
+            self.assertTrue(any("ruler_strict" in p for p in check(wrong)), check(wrong))
+            old = copy.deepcopy(pj)
+            for m in old["metrics"]:
+                for key in ("ruler_strict", "inside_loose", "inside_strict"):
+                    m.pop(key)
+            old["verdicts"] = None
+            self.assertEqual(check(old), [], "a pair that predates the strict ruler is still accepted")
+
+    def test_the_card_carries_both_rulers_and_the_pairs_verdicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            pj = make_pair(root, metrics=[dict(m) for m in STRICT_CASES])
+            pj["verdicts"] = B.pair_verdicts([B.metric_view(m, True) for m in pj["metrics"]])
+            (root / "clarinet" / "D3" / "pair.json").write_text(json.dumps(pj))
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out)]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            p = card["pairs"][0]
+            self.assertEqual(p["verdicts"], {"measures": 5, "loose": {"inside": 3, "outside": 1, "no_ruler": 1}, "strict": {"inside": 1, "outside": 2, "no_ruler": 2}})
+            self.assertEqual([m["inside_strict"] for m in p["metrics"]], [True, False, False, None, None])
+            self.assertEqual(card["status"]["badge"], "off", "strict: 1 of 3 inside, the weaker of the two")
+            self.assertEqual((card["status"]["counts"]["strict_within"], card["status"]["counts"]["strict_outside"], card["status"]["counts"]["strict_unruled"]), (1, 2, 2))
 
 
 class Verdicts(unittest.TestCase):

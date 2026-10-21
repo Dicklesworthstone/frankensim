@@ -64,6 +64,18 @@
 .ir-ruler .ir-mark { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1px; border-radius: 2px; background: var(--brass); }
 .ir-ruler .ir-mark.within { background: var(--ivory); }
 .ir-ruler .ir-mark.outside { background: var(--ember); }
+/* Two rulers: the pale band is this and neighbouring notes, the darker one the same note only. A mark inside the pale band but
+   outside the dark one (loose-only) is brass and striped, so it never reads as "inside" or as "outside". */
+.ir-ruler .ir-band.strict { background: rgba(143, 185, 214, 0.55); border-right: 1px solid rgba(143, 185, 214, 0.95); }
+.ir-ruler .ir-mark.loose-only { width: 6px; margin-left: -2px; background: repeating-linear-gradient(135deg, var(--brass) 0 2px, #14161c 2px 4px); outline: 1px solid var(--brass); }
+.ir-verdict.within { color: var(--ivory-2); }
+.ir-verdict.loose-only { color: var(--brass); }
+.ir-row.loose-only > td:first-child { box-shadow: inset 3px 0 0 var(--brass); }
+.ir-row.outside > td:first-child { box-shadow: inset 3px 0 0 var(--ember); }
+.ir-two { display: grid; gap: 2px; }
+.ir-two b { font-weight: 600; color: var(--ivory-2); }
+.ir-counts { margin: 0 0 10px; }
+.ir-counts p { margin: 4px 0; }
 
 .ir-phys h4 { font: 600 13.5px/1.4 var(--font-body); color: var(--ivory); margin-bottom: 8px; }
 .ir-phys ul { display: grid; gap: 8px; }

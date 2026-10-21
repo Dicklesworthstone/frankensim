@@ -59,6 +59,12 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
                   that metric. ruler: the same distance between REAL recordings (other dynamics, neighbouring
                   notes, other takes), value in gap_unit. An empty ruler means "no real-vs-real ruler for this
                   measure" and the page then makes no inside/outside claim for it.
+                  A second, STRICT ruler: ruler_strict: [{label, value}, ...] holds only real recordings of the SAME note
+                  (other dynamics, other takes); [] when there is none. inside_loose / inside_strict: true | false | null
+                  (gap <= the largest ruler value; null = no gap or no ruler, no claim). verdicts (per pair with a render):
+                  {measures, loose: {inside, outside, no_ruler}, strict: {...}}. The generator recomputes every one of
+                  these from the gap and the rulers and refuses a pair whose own values disagree. The page shows both
+                  counts; the badge is the weaker of the two. A pair without ruler_strict shows the loose verdict only.
 
 A note the grader cannot grade honestly (reference off its name, onset check failed) is not deleted: decompose.py
 overwrites its pair.json with {"refused": {"reason", "render_sha", "time"}, "ours": null} (family and note optional,
@@ -396,6 +402,25 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
                 problems.append(f"{where}: gap must be a non-negative number or null")
             if m.get("gap") is not None and not has_ours:
                 problems.append(f"{where}: a pair with no render has no gap")
+            rs = m.get("ruler_strict")
+            if "ruler_strict" in m and not (isinstance(rs, list) and all(isinstance(e, dict) and isinstance(e.get("label"), str) and finite(e.get("value")) and e["value"] >= 0 for e in rs)):
+                problems.append(f"{where}: ruler_strict must be a list of entries with a label and a non-negative value (empty when the note has no other recording of the same note)")
+            # decompose.py's own verdicts must be the ones the numbers give: two truths on one page are worse than a refused pair.
+            for key, rows in (("inside_loose", m.get("ruler")), ("inside_strict", rs)):
+                if key not in m or not isinstance(rows, list) or not all(isinstance(e, dict) and finite(e.get("value")) for e in rows) or not (m.get("gap") is None or finite(m["gap"])):
+                    continue
+                want = inside(m.get("gap"), [e["value"] for e in rows])
+                if m[key] is not want:
+                    problems.append(f"{where}: {key} is {m[key]!r} but gap {m.get('gap')!r} against its ruler gives {want!r}")
+        verdicts = pj.get("verdicts")
+        if verdicts is not None and not problems:
+            if not isinstance(verdicts, dict):
+                problems.append("verdicts must be an object or null")
+            else:
+                want = pair_verdicts([metric_view(m, has_ours) for m in metrics])
+                for key in ("measures", "loose", "strict"):
+                    if want[key] is not None and verdicts.get(key) != want[key]:
+                        problems.append(f"verdicts.{key} is {verdicts.get(key)!r} but the measures give {want[key]!r}")
     return problems
 
 
@@ -451,19 +476,43 @@ def check_audio(base: Path, pj: dict) -> list[str]:
 
 
 # ------------------------------------------------------------------ card pieces
+def inside(gap, values) -> bool | None:
+    """True/False: the gap is no larger than the largest real-vs-real distance. None: no gap, or no ruler to judge it by (no claim)."""
+    if gap is None or not values:
+        return None
+    return bool(gap <= max(values))
+
+
 def metric_view(m: dict, has_ours: bool) -> dict:
+    """One measure. ruler is the loose real-vs-real ruler (this and neighbouring notes, other dynamics and takes); ruler_strict
+    the strict one (the same note only), None when the pair predates it. Both verdicts are recomputed here from the raw gap and
+    ruler values, the way decompose.py does, so the page never shows a verdict the numbers do not give."""
     gap = num_or_none(m.get("gap")) if has_ours else None
-    ruler = [{"label": e["label"], "value": sig(e["value"])} for e in m["ruler"]]
-    top = max((e["value"] for e in ruler), default=None)
+    loose = [e["value"] for e in m["ruler"]]
+    strict = None if m.get("ruler_strict") is None else [e["value"] for e in m["ruler_strict"]]
+    top = max(loose, default=None)
+    s_top = max(strict, default=None) if strict else None
     verdict = "no-gap" if gap is None else "no-ruler" if top is None else "within" if gap <= top else "outside"
-    ratio = None if gap is None or not top else gap / top
+    verdict_strict = None if strict is None else "no-gap" if gap is None else "no-ruler" if s_top is None else "within" if gap <= s_top else "outside"
     shown = lambda v: [num_or_none(x) for x in v] if isinstance(v, list) else num_or_none(v)  # noqa: E731
+    rows = lambda rs: [{"label": e["label"], "value": sig(e["value"])} for e in rs]  # noqa: E731
     return {
         "id": m["id"], "label": m["label"], "unit": m.get("unit", ""), "gap_unit": m.get("gap_unit", m.get("unit", "")),
         "real": shown(m.get("real")), "ours": shown(m.get("ours")) if has_ours else None,
-        "gap": sig(gap), "ruler": ruler, "ruler_max": sig(top), "ruler_min": sig(min((e["value"] for e in ruler), default=None)),
-        "verdict": verdict, "ratio": sig(ratio, 4), "note": m.get("note", ""),
+        "gap": sig(gap), "ruler": rows(m["ruler"]), "ruler_max": sig(top), "ruler_min": sig(min(loose, default=None)),
+        "verdict": verdict, "ratio": sig(None if gap is None or not top else gap / top, 4), "inside_loose": inside(gap, loose),
+        "ruler_strict": None if strict is None else rows(m["ruler_strict"]), "ruler_strict_max": sig(s_top), "ruler_strict_min": sig(min(strict, default=None)) if strict else None,
+        "verdict_strict": verdict_strict, "ratio_strict": sig(None if gap is None or not s_top else gap / s_top, 4), "inside_strict": None if strict is None else inside(gap, strict),
+        "note": m.get("note", ""),
     }
+
+
+def pair_verdicts(views: list[dict]) -> dict:
+    """The per-pair counts of both verdicts, in pair.json's own shape: the loose ruler and the strict one (None when a measure has
+    no strict ruler field). no_ruler: a measure that has a gap and nothing to judge it by."""
+    gapped = [v for v in views if v["gap"] is not None]
+    tally = lambda key: {"inside": sum(x[key] is True for x in gapped), "outside": sum(x[key] is False for x in gapped), "no_ruler": sum(x[key] is None for x in gapped)}  # noqa: E731
+    return {"measures": len(gapped), "loose": tally("inside_loose"), "strict": tally("inside_strict") if all(v["ruler_strict"] is not None for v in views) else None}
 
 
 def partials_view(parts: dict | None) -> dict | None:
@@ -527,6 +576,7 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
                 entry[side] = None
         figures[kind] = entry
     chain = chains.get(ref.get("chain"), {}) if ref else {}
+    metrics = [metric_view(m, has_ours) for m in pj["metrics"]]
     return {
         "note": note, "dynamic": pj["dynamic"], "duration_s": r(pj["duration_s"], 3),
         "real": None if listening else {
@@ -542,7 +592,7 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
         "alignment": pj.get("alignment"),
         "figures": figures,
         "partials": partials_view(pj.get("partials")),
-        "metrics": [metric_view(m, has_ours) for m in pj["metrics"]],
+        "metrics": metrics, "verdicts": pair_verdicts(metrics) if has_ours and not listening else None,
         "source_sha256": None,  # filled by the caller
     }
 
@@ -569,26 +619,52 @@ def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | N
             return {"badge": "blocked", "label": BADGE_LABEL["blocked"], "line": blocked, "counts": counts}
         extra = f" The reference library has real recordings for {len(pairs)} note{'s' if len(pairs) != 1 else ''} below." if pairs else ""
         return {"badge": "none", "label": BADGE_LABEL["none"], "line": "No render has been made for this family yet." + extra, "counts": counts}
-    worst = None
+    counts.update(strict_within=0, strict_outside=0, strict_unruled=0, strict_notes=0)
+    worst = worst_strict = None
     for p in rendered:
+        if p["metrics"] and all(m["ruler_strict"] is not None for m in p["metrics"]):
+            counts["strict_notes"] += 1  # this note was graded against the same-note ruler too
         for m in p["metrics"]:
             if m["verdict"] == "within":
                 counts["within"] += 1
             elif m["verdict"] == "outside":
                 counts["outside"] += 1
-                if worst is None or m["ratio"] > worst[0]["ratio"]:
+                if worst is None or (m["ratio"] or 0) > (worst[0]["ratio"] or 0):
                     worst = (m, p["note"])
             elif m["verdict"] == "no-ruler":
                 counts["unruled"] += 1
+            if m["verdict_strict"] == "within":
+                counts["strict_within"] += 1
+            elif m["verdict_strict"] == "outside":
+                counts["strict_outside"] += 1
+                if worst_strict is None or (m["ratio_strict"] or 0) > (worst_strict[0]["ratio_strict"] or 0):
+                    worst_strict = (m, p["note"])
+            elif m["verdict_strict"] == "no-ruler":
+                counts["strict_unruled"] += 1
     ruled = counts["within"] + counts["outside"]
+    n = len(rendered)
+    notes = f"{n} note{'s' if n != 1 else ''}"
     if ruled == 0:
-        return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "line": f"{len(rendered)} note{'s' if len(rendered) != 1 else ''} rendered; none has a measure with a real-vs-real ruler yet.", "counts": counts}
-    frac = counts["within"] / ruled
-    badge = "close" if counts["outside"] == 0 else "mixed" if frac >= 0.5 else "off"
-    line = f"{counts['within']} of {ruled} graded measures, over {len(rendered)} note{'s' if len(rendered) != 1 else ''}, are no further from the real recording than real recordings are from each other."
-    if worst:
+        return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "line": f"{notes} rendered; none has a measure with a real-vs-real ruler yet.", "counts": counts}
+    s_ruled = counts["strict_within"] + counts["strict_outside"]
+    level = lambda inside_n, outside_n: "close" if outside_n == 0 else "mixed" if inside_n / (inside_n + outside_n) >= 0.5 else "off"  # noqa: E731
+    levels = [level(counts["within"], counts["outside"])] + ([level(counts["strict_within"], counts["strict_outside"])] if s_ruled else [])
+    badge = min(levels, key=("off", "mixed", "close").index)  # the weaker of the two verdicts
+    line = f"Over {notes}: inside the spread of real recordings of this and neighbouring notes, {counts['within']} of {ruled} measures. "
+    if s_ruled:
+        none = f" ({counts['strict_unruled']} {'has' if counts['strict_unruled'] == 1 else 'have'} no same-note comparison)" if counts["strict_unruled"] else ""
+        part = f"; computed for {counts['strict_notes']} of {n} notes" if counts["strict_notes"] < n else ""
+        line += f"Inside the spread of real recordings of the same note, {counts['strict_within']} of {s_ruled} measures{none}{part}. The badge is the weaker of the two."
+    elif counts["strict_notes"]:
+        line += "No same-note comparison could be made: there is no other recording of the same note to judge against."
+    else:
+        line += "The same-note comparison has not been computed for these notes."
+    if s_ruled and worst_strict:
+        m, note = worst_strict
+        line += f" Largest gap against the same-note spread: {m['label']}, {m['ratio_strict'] or 0:.1f}× it ({note})."
+    elif worst:
         m, note = worst
-        line += f" Largest gap against that spread: {m['label']}, {m['ratio']:.1f}× it ({note})."
+        line += f" Largest gap against the neighbouring-note spread: {m['label']}, {m['ratio'] or 0:.1f}× it ({note})."
     return {"badge": badge, "label": BADGE_LABEL[badge], "line": line, "counts": counts}
 
 

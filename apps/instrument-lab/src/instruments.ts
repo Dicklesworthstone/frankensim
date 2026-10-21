@@ -12,7 +12,13 @@ interface Metric {
   real: Value; ours: Value; gap: number | null;
   ruler: { label: string; value: number }[]; ruler_max: number | null; ruler_min: number | null;
   verdict: "within" | "outside" | "no-ruler" | "no-gap"; ratio: number | null; note: string;
+  // The strict ruler: real recordings of the SAME note only. null when the pair predates it ("not computed").
+  ruler_strict: { label: string; value: number }[] | null; ruler_strict_max: number | null; ruler_strict_min: number | null;
+  verdict_strict: "within" | "outside" | "no-ruler" | "no-gap" | null; ratio_strict: number | null;
+  inside_loose: boolean | null; inside_strict: boolean | null;
 }
+interface Tally { inside: number; outside: number; no_ruler: number }
+type RowVerdict = Metric["verdict"] | "loose-only";
 interface FigureSet { real: string | null; ours: string | null; diff: string | null; f_lo_hz: number; f_hi_hz: number; span_db: number; diff_range_db: number | null; size?: [number, number] }
 interface Side { level_db: (number | null)[]; cents: (number | null)[] }
 interface Track { n: number; ref_hz: number | null; real: Side | null; ours: Side | null }
@@ -26,6 +32,7 @@ interface Pair {
   figures: { spectrogram: FigureSet; scalogram: FigureSet };
   partials: { t_s: number[]; f0_hz: Record<string, number | null>; tracks: Track[] } | null;
   metrics: Metric[];
+  verdicts: { measures: number; loose: Tally; strict: Tally | null } | null; // null: no render, or a listening-only note
 }
 interface Card {
   family: string; title: string; built_utc: string;
@@ -75,36 +82,65 @@ function figure(label: string, src: string | null, fig: FigureSet, duration: num
   return el("figure", { class: "ir-fig" }, el("figcaption", {}, label), el("div", { class: "ir-img-box", style: `aspect-ratio: ${w} / ${h}` }, img, axes(fig, duration)));
 }
 
-/** A measure's gap against the spread between real recordings: shaded band = real-vs-real, mark = this render. */
+/** One verdict for a row, from both rulers: a measure inside the neighbouring-note spread but outside the same-note one is its own case. */
+const rowVerdict = (m: Metric): RowVerdict => (m.verdict === "within" && m.verdict_strict === "outside" ? "loose-only" : m.verdict);
+
+/** The headline of a row, plainly: which spreads the gap is inside and which it is outside. */
+function headline(m: Metric): string {
+  const s = m.verdict_strict;
+  if (m.verdict === "within") return s === "within" ? "inside both spreads" : s === "outside" ? "inside the neighbouring-note spread, OUTSIDE the same-note spread" : "inside the neighbouring-note spread";
+  if (m.verdict === "outside") return s === "outside" ? "outside both spreads" : "outside the neighbouring-note spread";
+  return "";
+}
+
+/** A measure's gap against the spread between real recordings: pale band = this and neighbouring notes, dark band = the same note only, mark = this render. */
 function rulerBar(m: Metric): HTMLElement {
   const top = Math.max(m.gap ?? 0, m.ruler_max ?? 0) * 1.15 || 1;
   const pct = (v: number): string => `${Math.min(100, (v / top) * 100).toFixed(2)}%`;
-  const bar = el("div", { class: "ir-ruler", role: "img", "aria-label": m.gap === null ? "No render to measure" : `${num(m.gap, m.gap_unit)} from the recording; ${m.verdict}` });
-  if (m.ruler_max !== null && m.ruler_min !== null) {
-    const band = el("span", { class: "ir-band", style: `left: ${pct(m.ruler_min)}; width: max(3px, calc(${pct(m.ruler_max)} - ${pct(m.ruler_min)}))` });
-    bar.append(el("span", { class: "ir-zero" }), band);
-  }
-  if (m.gap !== null) bar.append(el("span", { class: `ir-mark ${m.verdict}`, style: `left: ${pct(m.gap)}` }));
+  const bar = el("div", { class: "ir-ruler", role: "img", "aria-label": m.gap === null ? "No render to measure" : `${num(m.gap, m.gap_unit)} from the recording; ${headline(m) || m.verdict}` });
+  const band = (lo: number, hi: number, cls: string): HTMLElement => el("span", { class: cls, style: `left: ${pct(lo)}; width: max(3px, calc(${pct(hi)} - ${pct(lo)}))` });
+  if (m.ruler_max !== null && m.ruler_min !== null) bar.append(el("span", { class: "ir-zero" }), band(m.ruler_min, m.ruler_max, "ir-band"));
+  if (m.ruler_strict_max !== null && m.ruler_strict_min !== null) bar.append(band(m.ruler_strict_min, m.ruler_strict_max, "ir-band strict"));
+  if (m.gap !== null) bar.append(el("span", { class: `ir-mark ${rowVerdict(m)}`, style: `left: ${pct(m.gap)}` }));
   return bar;
 }
 
+const distances = (n: number): string => `${n} real-vs-real distance${n === 1 ? "" : "s"}`;
+
 function metricsTable(p: Pair): HTMLElement {
   const rows = p.metrics.map((m) => {
-    const spread = m.ruler_max === null ? "no real-vs-real ruler for this measure" : `real recordings differ by ${num(m.ruler_min, "", 3)}–${num(m.ruler_max, m.gap_unit, 3)}`;
-    const verdict = m.verdict === "within" ? "inside the real spread" : m.verdict === "outside" ? `outside it (${num(m.ratio, "", 2)}× the largest real-vs-real distance)` : "";
-    const ruler = m.ruler.length ? m.ruler.map((r) => `${r.label} ${num(r.value, "", 3)}`).join(" · ") : "";
-    return el("tr", { class: `ir-row ${m.verdict}` },
+    const list = (rs: { label: string; value: number }[]): string => rs.map((r) => `${r.label} ${num(r.value, "", 3)}`).join(" · ");
+    const range = (lo: number | null, hi: number | null): string => (lo === hi ? num(hi, m.gap_unit, 3) : `${num(lo, "", 3)}–${num(hi, m.gap_unit, 3)}`);
+    const wide = m.ruler_max === null ? "no ruler for this measure" : m.verdict === "outside" ? `outside: ${num(m.ratio, "", 3)}× the largest such distance (${num(m.ruler_max, m.gap_unit, 3)})` : `${m.verdict === "within" ? "inside: " : ""}real recordings of these notes differ by ${range(m.ruler_min, m.ruler_max)}`;
+    const strict = m.verdict_strict === null ? "not computed for this note"
+      : m.verdict_strict === "no-ruler" ? "no comparison: there is no other recording of this note"
+      : m.verdict_strict === "outside" ? `outside: ${num(m.ratio_strict, "", 3)}× the largest such distance (${num(m.ruler_strict_max, m.gap_unit, 3)})`
+      : `${m.verdict_strict === "within" ? "inside: " : ""}real recordings of this note differ by ${range(m.ruler_strict_min, m.ruler_strict_max)}`;
+    return el("tr", { class: `ir-row ${rowVerdict(m)}` },
       el("td", { class: "vs-measure" }, el("div", {}, m.label), m.note ? el("div", { class: "small muted" }, m.note) : null,
-        ruler ? el("details", { class: "small muted ir-rulers" }, el("summary", {}, `ruler: ${m.ruler.length} real-vs-real distance${m.ruler.length === 1 ? "" : "s"}`), el("div", {}, ruler)) : null),
+        m.ruler.length ? el("details", { class: "small muted ir-rulers" }, el("summary", {}, `neighbouring-note ruler: ${distances(m.ruler.length)}`), el("div", {}, list(m.ruler))) : null,
+        m.ruler_strict?.length ? el("details", { class: "small muted ir-rulers strict" }, el("summary", {}, `same-note ruler: ${distances(m.ruler_strict.length)}`), el("div", {}, list(m.ruler_strict))) : null),
       el("td", { class: "num", "data-label": "Real" }, show(m.real, m.unit)),
       el("td", { class: "num", "data-label": "FrankenSim" }, p.ours ? show(m.ours, m.unit) : "—"),
       el("td", { class: "ir-gap", "data-label": "Gap" },
-        m.gap === null ? null : el("div", { class: "num" }, num(m.gap, m.gap_unit, 3), el("span", { class: `ir-verdict ${m.verdict}` }, ` ${verdict}`)),
+        m.gap === null ? null : el("div", { class: "num" }, num(m.gap, m.gap_unit, 3), el("span", { class: `ir-verdict ${rowVerdict(m)}` }, ` ${headline(m)}`)),
         rulerBar(m),
-        el("div", { class: "small muted" }, spread)));
+        m.gap === null ? null : el("div", { class: "small muted ir-two" }, el("div", {}, el("b", {}, "Neighbouring notes included: "), wide), el("div", {}, el("b", {}, "Same note only: "), strict))));
   });
-  return el("div", { class: "table-scroll", tabindex: "0", "aria-label": "Measures against the real-vs-real ruler" },
-    el("table", { class: "vs-table ir-table" }, el("thead", {}, el("tr", {}, ...["Measure", "Real", "FrankenSim", "Gap vs real-vs-real spread"].map((h) => el("th", {}, h)))), el("tbody", {}, ...rows)));
+  return el("div", { class: "table-scroll", tabindex: "0", "aria-label": "Measures against the two real-vs-real rulers" },
+    el("table", { class: "vs-table ir-table" }, el("thead", {}, el("tr", {}, ...["Measure", "Real", "FrankenSim", "Gap against how much real recordings differ"].map((h) => el("th", {}, h)))), el("tbody", {}, ...rows)));
+}
+
+/** The note's own counts, both rulers, in plain words. */
+function verdictLine(p: Pair): HTMLElement | null {
+  const v = p.verdicts;
+  if (!v) return null;
+  const s = v.strict;
+  const wide = `Against real recordings of this and neighbouring notes: ${v.loose.inside} of ${v.loose.inside + v.loose.outside} measures inside${v.loose.no_ruler ? ` (${v.loose.no_ruler} with no ruler)` : ""}.`;
+  const same = s ? `Against real recordings of the same note only: ${s.inside} of ${s.inside + s.outside} inside${s.no_ruler ? ` (${s.no_ruler} ${s.no_ruler === 1 ? "has" : "have"} no same-note comparison)` : ""}.` : "Against real recordings of the same note only: not computed for this note.";
+  return el("div", { class: "ir-counts" },
+    el("p", {}, el("b", {}, `This note, ${v.measures} measures. `), wide, " ", same),
+    el("p", { class: "small muted" }, "How to read a row: the pale band is how far real recordings of this and neighbouring notes (other dynamics and takes too) differ from each other, the darker band is the same note only, and the mark is how far this render is from the recording. A row marked ‘OUTSIDE the same-note spread’ is inside the pale band but outside the dark one."));
 }
 
 function physicsLists(c: Card): HTMLElement {
@@ -343,7 +379,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
     measuredHead.textContent = listening() ? "How this render was made" : "Measured against how much real recordings differ";
     drawFigures();
     drawPartials();
-    tableBox.replaceChildren(...(listening() ? [] : [metricsTable(pair)]));
+    tableBox.replaceChildren(...(listening() ? [] : [verdictLine(pair), metricsTable(pair)].filter((x): x is HTMLElement => x !== null)));
     source.replaceChildren(sourceLines(pair));
     feedback.value = notes[key()] ?? "";
     labelButtons();
