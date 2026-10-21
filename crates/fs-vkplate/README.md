@@ -246,9 +246,15 @@ The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a pl
 half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
 shell's lower face slip by (t_b/2) grad w_b + (t_t/2) grad w_t, slopes from the grid's finite
 differences. Each step, after the contacts, every rim contact's friction is the force that would stop
-that slip (stick) unless it exceeds 0.5 times the contact's normal force (slide at that force); it
-acts through the same per-node compliances as the contacts, so it is implicit and only removes
-energy. The following grades used the earlier geometry, gap and clock, and do not qualify the
+that slip (stick) unless it exceeds 0.5 times the contact's normal force. Sliding solves
+`(C + lambda I) f = -d`, with `|f| = mu N`, so the force opposes the final slip even when
+the tangent compliance is anisotropic; radially clipping the sticking force does not do this.
+It acts through the same per-node compliances as normal contact and reduces free-mass
+kinetic energy. This backward-slip discretization does not establish passivity of the
+complete coupled oscillator. Hunt-Crossley damping reads the actual current node positions,
+because subsequent contacts can invalidate an earlier contact's cached compression.
+Neither correction alone qualifies the timbre. The following grades used the earlier
+geometry, gap and clock, and do not qualify the
 corrected implementation. Graded against the Salamander closed hat, friction brought its octave-band decay inside
 the real-vs-real ruler (0.32 octaves from the real stroke, two real strokes 0.47, 0.95 before) at
 1.4 dB more octave-balance error (10.4 -> 11.8 dB: it is still far too dark, centroid 1.7 kHz against 11 kHz);
@@ -265,8 +271,9 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 - the four-lane contact solves match solving one contact at a time, force, penetration and every
   update bit for bit, with node-sharing and other-law contacts in the list;
 - an empty matrix adds nothing, and a NaN penetration exerts no force, alone or queued;
-- rim friction stops the slip exactly inside its cone, slides at mu N outside it, and never reverses
-  or grows the slip it acts on;
+- rim friction stops the slip exactly inside its cone, slides opposite final slip at mu N outside
+  it, and contracts backward slip; prescribed cone solutions cover rotated anisotropic compliance;
+- contact damping uses actual current compression after shared-node updates, in queued and scalar solves;
 - every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
   silent; a clone, taken settled or mid-ring, renders bit for bit what the original would (`live`).
 

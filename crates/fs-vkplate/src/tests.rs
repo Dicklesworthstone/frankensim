@@ -482,16 +482,18 @@ fn queued_contact_solves_match_solving_one_at_a_time() {
     // the reference: every active contact in list order, each seeing the earlier ones' updates
     fn one_at_a_time(bodies: &mut [Body], contacts: &mut [Contact], k: f64) {
         for c in contacts.iter_mut().filter(|c| c.active) {
-            let (mut d_pred, mut comp) = (-c.gap, 0.0);
+            let (mut d_pred, mut d_now, mut comp) = (-c.gap, -c.gap, 0.0);
             for &(b, i, w) in &c.a {
                 d_pred += w * bodies[b].wn[i];
+                d_now += w * bodies[b].w[i];
                 comp += w * w * bodies[b].compliance(i, k);
             }
             for &(b, i, w) in &c.b {
                 d_pred -= w * bodies[b].wn[i];
+                d_now -= w * bodies[b].w[i];
                 comp += w * w * bodies[b].compliance(i, k);
             }
-            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
+            let f = contact_force(d_pred, comp, c.force, d_now, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
         }
     }
@@ -576,7 +578,112 @@ fn empty_matrix_and_nan_penetration_do_nothing() {
 }
 
 #[test]
-fn rim_friction_sticks_inside_its_cone_slides_on_it_and_only_removes_energy() {
+fn endpoint_contact_loss_uses_current_shared_node_positions() {
+    // G0: another contact can move a shared node after this contact stores
+    // d_now. Its next damping force must use the actual current positions.
+    for alpha in [1.5, 2.0] { // queued and scalar paths
+        for stale in [-1e-3, 1e-3] {
+            let mut bodies = vec![Body::point("upper", 0.01), Body::point("lower", 0.02)];
+            bodies[0].w[0] = 2e-5;
+            bodies[0].wn[0] = 2e-5;
+            let law = Law::Power { k: 3e7, alpha, mu: 0.35 };
+            let mut contact = Contact::new(vec![(0, 0, 1.0)], vec![(1, 0, 1.0)], 5e-6, law);
+            contact.d_now = stale;
+            let current = bodies[0].w[0] - bodies[1].w[0] - contact.gap;
+            let dt = 1e-5;
+            let mut contacts = vec![contact];
+            solve_contacts(&mut bodies, &mut contacts, &mut ContactQueue::default(), dt);
+            let compression = bodies[0].wn[0] - bodies[1].wn[0] - contacts[0].gap;
+            // Evaluate the constitutive equation directly, independently of
+            // the scalar Newton implementation used by both solver paths.
+            let expected = 3e7 * compression.max(0.0).powf(alpha)
+                * (1.0 + 0.35 * (compression - current) / dt).max(0.0);
+            let force = contacts[0].force;
+            assert!(expected > 0.0 && force > 0.0);
+            assert!((force / expected - 1.0).abs() < 1e-11,
+                "alpha {alpha}, stale {stale}: force {force} does not satisfy current-state law {expected}");
+            assert!((0.01 * (bodies[0].wn[0] - 2e-5) + 0.02 * bodies[1].wn[0]).abs() < 1e-20);
+        }
+    }
+}
+
+#[test]
+fn endpoint_sliding_friction_opposes_final_slip_for_anisotropic_compliance() {
+    // G0: unequal masses and a skew tangent basis give non-scalar compliance.
+    // Recover applied force from momentum changes, not the solver's output.
+    for skew in [0.0, 0.5, -0.5] {
+        let mut bodies = vec![Body::point("x", 1.0), Body::point("y", 0.25)];
+        bodies[0].wn[0] = 1.0;
+        bodies[1].wn[0] = 1.0;
+        let mut contact = Contact::new(vec![], vec![], 0.0, Law::Power { k: 1.0, alpha: 1.0, mu: 0.0 });
+        contact.force = 1.0;
+        let mut frictions = vec![Friction {
+            contact: 0, sx: vec![(0, 0, 1.0)], sy: vec![(0, 0, skew), (1, 0, 1.0)],
+            mu: 0.5, force: 0.0, stuck: false,
+        }];
+        solve_frictions(&mut bodies, &[contact], &mut frictions, 1.0);
+        let (x, y) = (bodies[0].wn[0], bodies[1].wn[0]);
+        let fy = 0.25 * (y - 1.0);
+        let fx = x - 1.0 - skew * fy;
+        let (sx, sy) = (x, skew * x + y);
+        assert!(!frictions[0].stuck);
+        assert!(((fx * fx + fy * fy).sqrt() - 0.5).abs() < 1e-12);
+        assert!((fx * sy - fy * sx).abs() < 1e-12, "force is not opposite slip: skew={skew}");
+        assert!(fx * sx + fy * sy < 0.0);
+        assert!(0.5 * x * x + 0.125 * y * y < 0.625, "kinetic energy increased");
+    }
+}
+
+#[test]
+fn endpoint_friction_recovers_prescribed_cone_solutions() {
+    // G0/G3: prescribe f and lambda, then construct d = -(C + lambda I) f.
+    // This checks the constitutive law across units and rotated anisotropy
+    // without using another iterative solver as the oracle.
+    for unit in [1e-12, 1e-6, 1e2] {
+        for ratio in [1.0, 4.0, 100.0] {
+            for angle in [0.0f64, 0.21, 0.77] {
+                let (s, c) = angle.sin_cos();
+                let cxx = unit * (c*c + ratio*s*s);
+                let cyy = unit * (s*s + ratio*c*c);
+                let cxy = unit * (1.0-ratio)*s*c;
+                for cap in [1e-4, 1.0, 1e3] {
+                    for multiplier in [0.25, 1.0] {
+                        for lambda in [0.0, 1e-8*unit, unit, 1e6*unit] {
+                            if multiplier < 1.0 && lambda != 0.0 { continue; }
+                            let expected = [-0.6*cap*multiplier, 0.8*cap*multiplier];
+                            let dx = -(cxx+lambda)*expected[0] - cxy*expected[1];
+                            let dy = -cxy*expected[0] - (cyy+lambda)*expected[1];
+                            let (fx, fy, stuck) = friction_force(dx, dy, cxx, cyy, cxy, cap);
+                            assert!((fx-expected[0]).hypot(fy-expected[1]) <= 5e-10*cap,
+                                "unit {unit}, ratio {ratio}, angle {angle}, cap {cap}, lambda {lambda}: ({fx}, {fy}) != {expected:?}");
+                            assert!(fx.hypot(fy) <= cap*(1.0+2e-12));
+                            if multiplier < 1.0 { assert!(stuck); }
+                            let slip = [dx+cxx*fx+cxy*fy, dy+cxy*fx+cyy*fy];
+                            let budget = 1e-9*cap*cap*(unit*ratio+lambda);
+                            assert!((fx*slip[1]-fy*slip[0]).abs() <= budget);
+                            assert!(fx*slip[0]+fy*slip[1] <= budget);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(friction_force(0.0, 0.0, 1.0, 4.0, 0.5, 1.0), (0.0, 0.0, true));
+    assert_eq!(friction_force(1.0, -2.0, 1.0, 4.0, 0.5, 0.0), (0.0, 0.0, false));
+    // A finite prescribed sliding force remains finite when squaring the
+    // unconstrained sticking force overflows its norm.
+    let (cxx, cyy, cxy) = (1e-100, 4e-100, 0.3e-100);
+    for lambda in [1e80, 1e100] {
+        let (dx, dy) = (0.6*(cxx+lambda)-0.8*cxy, 0.6*cxy-0.8*(cyy+lambda));
+        let (fx, fy, stuck) = friction_force(dx, dy, cxx, cyy, cxy, 1.0);
+        assert!(!stuck && fx.is_finite() && fy.is_finite());
+        assert!((fx+0.6).hypot(fy-0.8) < 5e-10);
+        assert!(fx.hypot(fy) <= 1.0+2e-12);
+    }
+}
+
+#[test]
+fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
     // the closed hat's rim frictions on a coarse grid, each solved alone on a random step
     let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 };
     let mut ins = kit::hihat_grid_mu(0.0, 80.0, &[], rim, 0.8, 6.0, 0.4).unwrap().instrument;
@@ -619,8 +726,8 @@ fn rim_friction_sticks_inside_its_cone_slides_on_it_and_only_removes_energy() {
             } else {
                 assert!(!f.stuck, "friction {j} stuck under {normal} N");
                 assert!((f.force - 0.4 * normal).abs() <= 1e-12 * normal, "sliding force {} != mu N", f.force);
-                // the slip it leaves points the same way as before (it is only slowed), so the friction
-                // force, which opposes the slip, does no positive work on it
+                // Anisotropic compliance can rotate the remaining slip; its
+                // projection on the incoming slip stays nonnegative.
                 assert!(ax * bx + ay * by >= 0.0 && (ax * ax + ay * ay).sqrt() <= before, "friction {j} reversed or grew the slip");
                 slid += 1;
             }

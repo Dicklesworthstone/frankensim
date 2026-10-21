@@ -280,14 +280,26 @@ __device__ void airy_rows(const P& p, ll gwarp, ll nwarps) {
 }
 
 // Contact j of simulation s: its force from the predicted gap (implicit, one scalar Newton solve), applied.
-__device__ __forceinline__ void solve_contact(const P& p, ll s, int j, double* Wn, double k) {
+__device__ __forceinline__ void solve_contact(const P& p, ll s, int j, const double* W, double* Wn, double k) {
   const ll o = s * p.NT, oj = s * p.NCON + j;
   if (!p.ct_active[oj]) return;
   double d_pred = -__ldg(&p.ct_gap[j]);
-  for (int e = __ldg(&p.ct_a0[j]); e < __ldg(&p.ct_b0[j]); e++) d_pred = d_pred + __ldg(&p.ct_w[e]) * Wn[o + __ldg(&p.ct_node[e])];
-  for (int e = __ldg(&p.ct_b0[j]); e < __ldg(&p.ct_end[j]); e++) d_pred = d_pred - __ldg(&p.ct_w[e]) * Wn[o + __ldg(&p.ct_node[e])];
+  double d_now = d_pred;
+  for (int e = __ldg(&p.ct_a0[j]); e < __ldg(&p.ct_b0[j]); e++) {
+    const int nd = __ldg(&p.ct_node[e]);
+    const double w = __ldg(&p.ct_w[e]);
+    d_pred = d_pred + w * Wn[o + nd];
+    d_now = d_now + w * W[o + nd];
+  }
+  for (int e = __ldg(&p.ct_b0[j]); e < __ldg(&p.ct_end[j]); e++) {
+    const int nd = __ldg(&p.ct_node[e]);
+    const double w = __ldg(&p.ct_w[e]);
+    d_pred = d_pred - w * Wn[o + nd];
+    d_now = d_now - w * W[o + nd];
+  }
   const double comp = __ldg(&p.ct_comp[j]);
-  const double f = contact_force(d_pred, comp, p.ct_force[oj], p.ct_dnow[oj], __ldg(&p.ct_kk[j]), __ldg(&p.ct_alpha[j]),
+  // Match the CPU: later shared-node forces can invalidate cached compression.
+  const double f = contact_force(d_pred, comp, p.ct_force[oj], d_now, __ldg(&p.ct_kk[j]), __ldg(&p.ct_alpha[j]),
                                  __ldg(&p.ct_mu[j]), __ldg(&p.ct_fx[j]), k);
   if (f > 0.0) {
     for (int e = __ldg(&p.ct_a0[j]); e < __ldg(&p.ct_b0[j]); e++) {
@@ -304,7 +316,7 @@ __device__ __forceinline__ void solve_contact(const P& p, ll s, int j, double* W
   p.ct_dnow[oj] = d_pred - comp * f;
 }
 
-// Friction r of simulation s: the force that stops this step's slip, limited to the friction cone.
+// Friction r of simulation s: constrained quadratic solve, as in fs-vkplate.
 __device__ __forceinline__ void solve_friction(const P& p, ll s, int r, const double* W, double* Wn) {
   const ll o = s * p.NT;
   const int c = __ldg(&p.fr_contact[r]);
@@ -318,7 +330,25 @@ __device__ __forceinline__ void solve_friction(const P& p, ll s, int r, const do
   if (!(det > 0.0)) return;
   double fx = -(cyy * dx - cxy * dy) / det, fy = -(cxx * dy - cxy * dx) / det;
   const double mag = sqrt(fx * fx + fy * fy), cap = __ldg(&p.fr_mu[r]) * nf;
-  if (!(mag <= cap)) { fx = fx * (cap / mag); fy = fy * (cap / mag); }
+  if (cap == 0.0) return;
+  if (!(mag <= cap)) {
+    // (C + lambda I) f = -d and |f| = cap. Unlike radial clipping,
+    // this opposes final slip even when the compliance is anisotropic.
+    double lo = 0.0, hi = sqrt(dx * dx + dy * dy) / cap;
+    double lambda = isfinite(mag) ? hi * ((mag - cap) / mag) : 0.5 * hi;
+    for (int it = 0; it < 64; it++) {
+      const double a = cxx + lambda, b = cyy + lambda;
+      const double determinant = a * b - cxy * cxy;
+      fx = -(b * dx - cxy * dy) / determinant;
+      fy = -(a * dy - cxy * dx) / determinant;
+      const double norm = sqrt(fx * fx + fy * fy), residual = norm - cap;
+      if (fabs(residual) <= 1e-12 * cap) break;
+      if (residual > 0.0) lo = lambda; else hi = lambda;
+      const double derivative = -(b * fx * fx - 2.0 * cxy * fx * fy + a * fy * fy) / (determinant * norm);
+      const double next = lambda - residual / derivative;
+      lambda = next > lo && next < hi ? next : 0.5 * (lo + hi);
+    }
+  }
   for (int e = __ldg(&p.fr_x0[r]); e < __ldg(&p.fr_y0[r]); e++) {
     const int nd = __ldg(&p.fr_node[e]);
     Wn[o + nd] = Wn[o + nd] + __ldg(&p.ia[nd]) * __ldg(&p.fr_w[e]) * fx;
@@ -633,12 +663,12 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           for (ll e = (ll)tid * nbk + blockIdx.x; e < B * size; e += (ll)nbk * TPB) {
             const ll s = e / size;
             const int q = q0 + (int)(e % size);
-            if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), Wn, k);
+            if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), W, Wn, k);
           }
         } else {
           for (ll s = nbk - 1 - blockIdx.x; s < B; s += nbk)
             for (int q = q0 + tid; q < q1; q += TPB) {
-              if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), Wn, k);
+              if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), W, Wn, k);
             }
           __syncthreads();
         }

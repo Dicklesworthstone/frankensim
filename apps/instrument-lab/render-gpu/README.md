@@ -8,6 +8,11 @@ The GPU path is an optional accelerator, not a second solver:
 - It is checked against the CPU step (`--check`).
 - The CPU step stays the reference.
 
+Normal-contact damping reads current node positions rather than a cached intermediate
+compression. Sliding friction solves the same anisotropic Coulomb disk problem as the
+CPU, so its force opposes final slip. These changes require a fresh CPU/GPU comparison;
+the historical measurements below do not qualify the corrected equations or their timbre.
+
 The tool is its own cargo workspace. Nothing in the main workspace builds it or links its GPU bindings (the engine-kit pattern).
 
 ## Build and run
@@ -71,8 +76,10 @@ That is five barriers per step for a drum and six for a cymbal. A large contact 
 - **Determinism.** Sums use fixed trees, so a run repeats bit for bit.
 - **Difference from the CPU.** It rounds differently from the CPU's sequential sums; the measured differences are below.
 - **Frictions.** By default they are solved as a coloured Gauss-Seidel sweep: 6 groups on a closed hi-hat, where the CPU's list order needs 603.
-  - Each friction projection only removes energy, given the state it sees, so either order is a valid step.
-  - The sweeps differ in the waveform, not in the spectrum.
+  - Each projection reduces free-mass kinetic energy for the state it sees; this is not a
+    passivity certificate for the complete coupled oscillator discretization.
+  - The sweeps can differ in waveform and spectrum; the comparisons below describe only
+    the measured historical inputs and implementation.
 
 **Chunks** follow the method validated for the Strandbar studio hi-hat (stitched within 0.06–0.3 dB per octave of a continuous render):
 

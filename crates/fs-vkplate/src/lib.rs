@@ -1640,15 +1640,21 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         }
         let c = &mut contacts[jc];
         let mut d_pred = -c.gap;
+        let mut d_now = -c.gap;
         let mut comp = 0.0;
         for &(b, i, w) in &c.a {
             d_pred += w * bodies[b].wn[i];
+            d_now += w * bodies[b].w[i];
             comp += w * w * bodies[b].compliance(i, k);
         }
         for &(b, i, w) in &c.b {
             d_pred -= w * bodies[b].wn[i];
+            d_now -= w * bodies[b].w[i];
             comp += w * w * bodies[b].compliance(i, k);
         }
+        // A later contact or friction solve can move a shared node after
+        // apply_force records d_now. Damping needs the final current pose.
+        c.d_now = d_now;
         if !queued || d_pred.is_nan() || d_pred <= 0.0 {
             // solved now: the queue is empty, or this contact moves nothing
             let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
@@ -1677,9 +1683,9 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
 /// (Kirchhoff: u = -z grad w), so the two faces of a contact slip against each other by
 /// s = (t_a / 2) grad w_a + (t_b / 2) grad w_b, the face below a plate moving opposite to the face
 /// above it. `sx` and `sy` hold the two slip components as weighted sums of node displacements. The
-/// friction force acts against the slip with at most `mu` times the contact's normal force, and it
-/// is solved the way the contacts are, after them in each step: the force that would stop the slip
-/// over this step (stick), limited to the cone mu N (slip). It only removes energy.
+/// friction force acts against the final slip with at most `mu` times the normal force. It is
+/// solved after normal contact using backward slip. This reduces free-mass kinetic energy;
+/// it does not certify passivity of the complete coupled oscillator discretization.
 #[derive(Clone)]
 pub struct Friction {
     pub contact: usize,
@@ -1705,6 +1711,37 @@ impl Friction {
         let sy = side(ay, a, ta).chain(side(by, b, tb)).collect();
         Friction { contact, sx, sy, mu, force: 0.0, stuck: false }
     }
+}
+
+/// Minimize d'f + f'Cf/2 over the Coulomb disk |f| <= cap, for SPD C.
+/// Sliding satisfies (C + lambda I) f = -d, so f opposes the final slip
+/// d + C f = -lambda f. Radially clipping C^-1 d fails for anisotropic C.
+fn friction_force(dx: f64, dy: f64, cxx: f64, cyy: f64, cxy: f64, cap: f64) -> (f64, f64, bool) {
+    if cap == 0.0 { return (0.0, 0.0, false); }
+    let det = cxx * cyy - cxy * cxy;
+    let (mut fx, mut fy) = (-(cyy * dx - cxy * dy) / det, -(cxx * dy - cxy * dx) / det);
+    let mag = (fx * fx + fy * fy).sqrt();
+    let stuck = mag <= cap;
+    if !stuck {
+        let (mut lo, mut hi) = (0.0, (dx * dx + dy * dy).sqrt() / cap);
+        // Exact for isotropic C, and near zero at the stick/slide boundary.
+        // An overflowed unconstrained norm must not seed lambda with NaN.
+        let mut lambda = if mag.is_finite() { hi * ((mag - cap) / mag) } else { 0.5 * hi };
+        for _ in 0..64 {
+            let (a, b) = (cxx + lambda, cyy + lambda);
+            let det = a * b - cxy * cxy;
+            fx = -(b * dx - cxy * dy) / det;
+            fy = -(a * dy - cxy * dx) / det;
+            let mag = (fx * fx + fy * fy).sqrt();
+            let residual = mag - cap;
+            if residual.abs() <= 1e-12 * cap { break; }
+            if residual > 0.0 { lo = lambda; } else { hi = lambda; }
+            let derivative = -(b * fx * fx - 2.0 * cxy * fx * fy + a * fy * fy) / (det * mag);
+            let next = lambda - residual / derivative;
+            lambda = if next > lo && next < hi { next } else { 0.5 * (lo + hi) };
+        }
+    }
+    (fx, fy, stuck)
 }
 
 fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [Friction], k: f64) {
@@ -1738,14 +1775,8 @@ fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [F
             fr.stuck = false;
             continue;
         }
-        // stick: C f = -(dx, dy); outside the friction cone it slides at mu N in the same direction
-        let (mut fx, mut fy) = (-(cyy * dx - cxy * dy) / det, -(cxx * dy - cxy * dx) / det);
-        let (mag, cap) = ((fx * fx + fy * fy).sqrt(), fr.mu * n);
-        fr.stuck = mag <= cap;
-        if !fr.stuck {
-            fx *= cap / mag;
-            fy *= cap / mag;
-        }
+        let (fx, fy, stuck) = friction_force(dx, dy, cxx, cyy, cxy, fr.mu * n);
+        fr.stuck = stuck;
         for &(b, i, w) in &fr.sx {
             let cm = bodies[b].compliance(i, k);
             bodies[b].wn[i] += cm * w * fx;
