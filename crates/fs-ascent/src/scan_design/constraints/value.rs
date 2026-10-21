@@ -89,6 +89,10 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
         Ok(Self { study, limits })
     }
 
+    /// Exact immutable inequality count, including automatic domain rows.
+    /// Available before running physics for bounded population admission.
+    pub fn constraint_count(&self) -> usize { self.limits.rows }
+
     pub fn initial_coordinates(&self) -> &[f64] { self.study.initial_coordinates() }
     pub fn evaluations(&self) -> usize { self.study.evaluations() }
     pub fn evaluation_limit(&self) -> usize { self.study.evaluation_limit() }

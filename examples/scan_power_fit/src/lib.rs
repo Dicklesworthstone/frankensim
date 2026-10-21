@@ -1,0 +1,3 @@
+//! Reusable drivers for the executable physical scan-design examples.
+//! Numerical models and optimization kernels remain in the original fs crates.
+pub mod population;
