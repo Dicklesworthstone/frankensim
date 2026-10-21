@@ -14,6 +14,7 @@
 /// Versioned data-driven flue construction through this same pressure renderer.
 pub mod file;
 mod controls;
+pub mod aperture_flows;
 
 use super::{FlueError, FlueResonator, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -135,6 +136,7 @@ pub struct FlueOutletPerformance {
     next: usize,
     launched: Vec<f64>,
     mouth: Option<MouthPressure>,
+    flow_tap: Option<aperture_flows::ApertureFlowTap>,
     poisoned: bool,
 }
 
@@ -280,7 +282,7 @@ impl FlueOutletPerformance {
             .map_err(|_| invalid("flue callback scratch exceeds available allocation"))?;
         launched.resize(scratch_samples, 0.0);
         Ok(Self { voice, receiver, config, radiation, outlet_nodes, mechanics_rate_hz,
-            mechanics_per_output, schedule, controls, next: 0, launched, mouth: None, poisoned: false })
+            mechanics_per_output, schedule, controls, next: 0, launched, mouth: None, flow_tap: None, poisoned: false })
     }
 
     /// Include actual mouth volume flow in the same external microphone signal.
@@ -426,10 +428,12 @@ impl FlueOutletPerformance {
             let count = (until - now) as usize;
             let receiver = &mut self.receiver;
             let mouth = &mut self.mouth;
+            let flow_tap = &mut self.flow_tap;
             let ceiling = self.config.maximum_abs_pressure_pa;
             let mut destinations = output[written..].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
                 let FlueResonator::Network(network) = line else { unreachable!("owned physical graph") };
+                if let Some(tap) = flow_tap.as_mut() { tap.record(network)?; }
                 let pressure = receiver.push_frame(|_, node| network.node_frame(node)
                     .map(|frame| frame.net_flow_into_node_m3_s))
                     .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?;

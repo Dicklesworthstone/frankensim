@@ -16,8 +16,9 @@ use fs_exec::CancelGate;
 use fs_material::gas_species::input::ThermochemicalSources;
 use super::{RATE, create_outputs, json_string, stream_output};
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy), String> {
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>), String> {
     let mut paths = Vec::new();
+    let mut flows = None;
     let mut block = None;
     let mut decimate = false;
     let mut policy = ObservationPolicy::Diagnostic;
@@ -27,6 +28,11 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
             "--acceptance" => {
                 if policy == ObservationPolicy::Acceptance { return Err("--acceptance may only be supplied once".into()); }
                 policy = ObservationPolicy::Acceptance;
+            }
+            "--aperture-flows" => {
+                if flows.is_some() { return Err("--aperture-flows may only be supplied once".into()); }
+                flows = Some(iter.next().map(String::as_str).filter(|v| !v.starts_with('-'))
+                    .ok_or_else(|| "--aperture-flows needs an output path".to_string())?);
             }
             "--decimate" => {
                 if decimate { return Err("--decimate may only be supplied once".into()); }
@@ -45,9 +51,9 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate, policy))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -270,7 +276,7 @@ fn load_with_sources(
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<Loaded, String> {
     load_with_all_sources(bytes, block, policy, sources, load_material,
-        |_| Err("MIMO radiation artifacts require an explicit source loader".into()))
+        |_| Err("MIMO radiation artifacts require an explicit source loader".into()), None)
 }
 fn load_with_all_sources(
     bytes: &[u8],
@@ -279,7 +285,11 @@ fn load_with_all_sources(
     sources: Option<&ThermochemicalSources<'_>>,
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    flow_tap: Option<Box<dyn Write + Send>>,
 ) -> Result<Loaded, String> {
+    if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
+        return Err("--aperture-flows observes flue files only".into());
+    }
     if bytes.starts_with(b"frankensim-material-modal-valve-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal files retain flat DKT walls and an effective uniform slit; matched baffled observation is not a measured instrument qualification".into());
@@ -511,7 +521,11 @@ fn load_with_all_sources(
         let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{mechanical_samples},\"output_sample_rate_hz\":{RATE},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{},\"propagation_fir_support_output_samples\":[{},{}],\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
             i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),propagation.0,
             propagation.1,ratio-1);
-        Ok(Loaded { source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
+        let renderer = match flow_tap {
+            Some(sink) => p.into_renderer().with_aperture_flow_tap(sink).map_err(|e| e.to_string())?,
+            None => p.into_renderer(),
+        };
+        Ok(Loaded { source:Box::new(renderer),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"flue-input",source_json,
             observation_json:Some(observation_json) })
     } else if bytes.starts_with(b"frankensim-plate-valve-performance-v1\n") {
@@ -568,12 +582,20 @@ pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block, decimate, policy) = options(args)?;
+    let (input, output, block, decimate, policy, flows) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
         return Err("output/sidecar paths must be distinct and must not already exist".into());
     }
+    let flow_tap: Option<Box<dyn Write + Send>> = match flows.map(Path::new) {
+        Some(path) if path == output || path == sidecar.as_path() => {
+            return Err("--aperture-flows must name a file distinct from the WAV and its sidecar".into());
+        }
+        Some(path) => Some(Box::new(std::io::BufWriter::new(std::fs::File::create_new(path)
+            .map_err(|e| format!("aperture flow file {} create failed: {e}", path.display()))?))),
+        None => None,
+    };
     let file = std::fs::File::open(input).map_err(|e| format!("wind input open failed: {e}"))?;
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
@@ -600,7 +622,7 @@ pub(super) fn run_with_gas_sources(
             return Err("MIMO radiation artifact exceeds 8 MiB".into());
         }
         Ok(bytes)
-    })?;
+    }, flow_tap)?;
     if decimate && loaded.observation_json.is_some() {
         return Err("this source already declares mechanical and output clocks; omit --decimate to avoid a second observer".into());
     }

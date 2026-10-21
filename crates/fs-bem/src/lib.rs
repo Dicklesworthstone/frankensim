@@ -218,6 +218,8 @@ impl From<FmmError> for BemError {
 }
 
 pub mod helmholtz;
+/// Closed lathed bodies with named aperture patches, for exterior observation of solved flows.
+pub mod lathed_apertures;
 /// Complete structural-mode loading through the existing BEM and Rayleigh owners.
 pub mod modal_loading;
 /// Geometry-admitted, adaptively integrated finite receivers near closed surfaces.
