@@ -562,7 +562,7 @@ class Refs:
     def raw(self, fname):
         if fname not in self._raw:
             self._raw[fname] = load(self.wav_dir / fname)
-            while len(self._raw) > 3:
+            while len(self._raw) > 8:
                 self._raw.popitem(last=False)
         return self._raw[fname]
 
@@ -583,7 +583,7 @@ class Refs:
         if key not in self._notes:
             y, info = self.aligned(e)
             self._notes[key] = Note(y, hz_of(e["note"]), e["kind"], e["inst"] in ("xylophone", "marimba"), f'{e["file"]}@{e["name"]}.{e["dyn"]}', info)
-            while len(self._notes) > 48:
+            while len(self._notes) > 160:
                 self._notes.popitem(last=False)
         return self._notes[key]
 
@@ -960,6 +960,15 @@ def refuse_pair(root, family, note, reason, render_sha=None, render_wav=None, dy
     return rec
 
 
+def _written_since(root, family, note, epoch):
+    """True if the note's pair.json is a reference-only pair written at or after `epoch` (seconds): a restarted run skips it."""
+    p = Path(root) / family / note / "pair.json"
+    try:
+        return p.stat().st_mtime >= float(epoch) and json.loads(p.read_text()).get("ours") is None and not json.loads(p.read_text()).get("refused")
+    except (OSError, ValueError):
+        return False
+
+
 def has_render(root, family, note):
     """True if <root>/<family>/<note>/pair.json already speaks for a render: ours filled in, or a refusal record that
     names the render it refused. A reference-only run leaves both alone."""
@@ -975,6 +984,8 @@ def _ref_job(args):
     c, root = args
     refused = []
     for name in c["notes"]:
+        if c.get("since") and _written_since(root, c["family"], name, c["since"]):
+            return dict(family=c["family"], art=c["art"], note=name, ok=True, kept="already regenerated since --since", refused=refused)
         if has_render(root, c["family"], name):
             return dict(family=c["family"], art=c["art"], note=name, ok=True, kept="a graded or refused render pair is left untouched", refused=refused)
         try:
@@ -1004,11 +1015,12 @@ def cmd_refs(a):
         for ci in centres:
             order = [ci] + [ci + d * s_ for d in range(1, reach + 1) for s_ in (1, -1)]
             order = [k for k in order if 0 <= k < len(notes)]
-            jobs.append((dict(family=fam, art=art, dyn="mf", notes=[name_of(notes[k]) for k in order], review=a.review), a.out))
+            jobs.append((dict(family=fam, art=art, dyn="mf", notes=[name_of(notes[k]) for k in order], review=a.review, since=a.since), a.out))
     if a.jobs > 1:
         with ProcessPoolExecutor(min(a.jobs, 16), mp_context=multiprocessing.get_context("fork"), initializer=_init,
                                  initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
-            res = list(pool.map(_ref_job, jobs, chunksize=1))
+            # one instrument's notes go to one worker in turn: they share its range files and its analysed ruler notes
+            res = list(pool.map(_ref_job, jobs, chunksize=4))
     else:
         _init(a.lib, a.wav_dir, a.refs_json)
         res = [_ref_job(j) for j in jobs]
@@ -1116,6 +1128,7 @@ def main():
     common(p)
     p.add_argument("--family", action="append")
     p.add_argument("--all", action="store_true", help="every mf note, not four spread ones")
+    p.add_argument("--since", type=float, help="epoch seconds: skip notes whose reference-only pair.json is at least this new (resume a run)")
     p.add_argument("--jobs", type=int, default=1)
     p.set_defaults(fn=cmd_refs)
     p = sub.add_parser("report", help="print each graded pair as a table, worst gap against its ruler first")

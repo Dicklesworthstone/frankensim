@@ -295,6 +295,19 @@ class ContractTests(unittest.TestCase):
         dc.refuse_pair(root, "syn", "A3", "stale pair superseded")  # no render_sha: it names no render
         self.assertFalse(dc.has_render(root, "syn", "A3"))
 
+    def test_a_restarted_reference_run_skips_what_it_already_regenerated(self):
+        import time
+        root = self.tmp / "resume"
+        dc._REFS = self.refs
+        ref_e = self.refs.find("syn", 58, "mf")[0]
+        y, info = self.refs.aligned(ref_e)
+        dc.write_pair(root, "syn", "Bb3", ref_e, self.refs, y, info)
+        job = dict(family="syn", art="", dyn="mf", notes=["Bb3"], review=False)
+        self.assertEqual(dc._ref_job((dict(job, since=time.time() - 60), root))["kept"], "already regenerated since --since")
+        res = dc._ref_job((dict(job, since=time.time() + 60), root))  # an older pair than --since is regenerated
+        self.assertNotIn("kept", res)
+        self.assertEqual(len(list((root / "syn" / "Bb3" / "superseded").iterdir())), 1)
+
     def test_reference_only_run_falls_back_to_the_next_verifying_note(self):
         root = self.tmp / "fallback"
         dc._REFS = self.refs
