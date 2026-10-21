@@ -16,6 +16,20 @@
   </header>
 
   <main id="main">
+    <!-- Reference candidates for the owner to confirm: only in a build whose data holds them (tools/build_candidates.py); hidden otherwise. -->
+    <section id="candidates">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Your call</span> <span class="tag plain">Real recordings</span></p>
+          <h2>Reference candidates: are these the real thing?</h2>
+          <p class="lede">For every instrument family the project renders or plans to render, these are real recordings that were found and cut to an excerpt: the clip, where it came from, its licence, and what could be measured on it. Mark each one VALID or INVALID. Nothing here is used to grade a render until you have confirmed it. Whoever found them could not listen: a pitch tracker and a level meter measured what is shown, and the rest is yours to judge.</p>
+          <p class="small muted" style="margin-top: 14px">Your marks stay in this browser, in the same notes as everything else on this page; “Copy all my notes” puts them on the clipboard so you can send them back.</p>
+        </header>
+        <div id="candidates-root" class="ir-root" style="min-height: 240px"></div>
+      </div>
+    </section>
+
     <!-- The same section as index.html, alone. Built by vite.instruments.config.ts; tools/build-review.sh stages its data. -->
     <section id="instruments">
       <div class="wrap">

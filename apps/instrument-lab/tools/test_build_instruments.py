@@ -3,6 +3,7 @@
 Run with: uv run --with numpy --with pillow python -m unittest discover -s apps/instrument-lab/tools -p 'test_build_instruments.py' -v
 The pairs below are throwaway inputs to the generator, written to a temp directory; none of it reaches the page.
 """
+import collections
 import contextlib
 import copy
 import io
@@ -623,6 +624,240 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(card["pairs"], [])
             self.assertEqual(card["refused"][0]["note"], "D3")
             self.assertEqual(card["status"]["badge"], "none")
+
+
+def tally(t: tuple) -> dict:
+    return {"inside": t[0], "outside": t[1], "no_ruler": t[2]}
+
+
+def rec(slot: str, note: str, measures: int, loose: tuple, strict: tuple, out_loose: list, out_strict: list, retuned: bool = False) -> dict:
+    """A row of P2's recording_list: one real recording graded like a render."""
+    return {"slot": slot, "note": note, "recording": slot, "reference_file": "ref.aiff", "retuned_by_authors": retuned, "measures": measures,
+            "loose": tally(loose), "strict": tally(strict), "outside_loose": out_loose, "outside_strict": out_strict}
+
+
+def fraction(t: dict) -> dict:
+    n = t["inside"] + t["outside"]
+    return {**t, "inside_fraction": None if n == 0 else round(t["inside"] / n, 4)}
+
+
+# Two graded real recordings of D3 (loose 5+6 inside, 3+2 outside; strict 4+6 inside, 3+1 outside), the way P2's file lists them.
+ROWS_D3 = [rec("D3-s1", "D3", 10, (5, 3, 2), (4, 3, 3), ["both_outside", "loose_only", "no_claim"], ["both_outside", "loose_only", "both_inside"]),
+           rec("D3-s2", "D3", 8, (6, 2, 0), (6, 1, 1), ["both_outside", "loose_only"], ["both_outside"], retuned=True)]
+
+
+def p2_family(rows=None, refused=(), live=None, **over) -> dict:
+    """A family entry of cross-library-baseline.json that agrees with itself, built the way P2's counting script builds it, so a test
+    breaks exactly one thing at a time."""
+    rows = copy.deepcopy(ROWS_D3 if rows is None else rows)
+    live = CrossLibraryBaseline.LIVE if live is None else live
+    add = lambda ts: {k: sum(t[k] for t in ts) for k in ("inside", "outside", "no_ruler")}  # noqa: E731
+    nothing = lambda r, kind: r[kind]["outside"] == 0 and r[kind]["inside"] > 0  # noqa: E731  (a recording nothing of which was judged is not "nothing outside")
+    real = {kind: add([r[kind] for r in rows]) for kind in ("loose", "strict")}
+    have = [r for r in rows if r["note"] in live]
+    ours = {kind: add([live[r["note"]][kind] for r in have]) for kind in ("loose", "strict")} if have else {}
+    out = {kind: collections.Counter(m for r in rows for m in r[f"outside_{kind}"]) for kind in ("loose", "strict")}
+    fam = {
+        "source": {"name": "TEST LIBRARY, v1", "url": "https://example.org/record/0", "licence": "CC BY 4.0", "licence_url": "https://creativecommons.org/licenses/by/4.0/", "credit": "TEST CREDIT: A, B and C"},
+        "independence": "other_library", "compared_with": "TEST reference (a different room, microphone and player)", "grader": ["decompose-1/instrgrade-2"],
+        "recordings": len(rows), "refused": [dict(x) for x in refused], "retuned_by_authors": sum(r["retuned_by_authors"] for r in rows),
+        "real_recordings": {kind: fraction(real[kind]) for kind in real},
+        "recordings_with_nothing_outside": {"loose": sum(nothing(r, "loose") for r in rows), "strict": sum(nothing(r, "strict") for r in rows), "both": sum(nothing(r, "loose") and nothing(r, "strict") for r in rows)},
+        "our_renders_same_notes": {**{kind: fraction(ours[kind]) for kind in ours}, "render_pairs": len(have)},
+        "ruler_rows_per_measure": {"loose": {"median": 5, "min": 0, "max": 6}, "strict": {"median": 2, "min": 0, "max": 3}},
+        "by_measure": {mid: {kind: {"outside": out[kind].get(mid, 0), "ruled": len(rows)} for kind in out} for mid in ("both_inside", "both_outside", "loose_only", "no_claim")},
+        "recording_list": rows,
+    }
+    fam.update(over)
+    return fam
+
+
+class CrossLibraryBaseline(unittest.TestCase):
+    """What a real recording from another library earns against our rulers, beside the render's own share (P2's file)."""
+    LIVE = {"D3": {"measures": 5, "loose": {"inside": 3, "outside": 1, "no_ruler": 1}, "strict": {"inside": 1, "outside": 2, "no_ruler": 2}}}
+    LABELS = {"both_outside": "Both outside", "loose_only": "Loose only"}
+
+    def entry(self, family=None, live=None):
+        return B.baseline_entry("clarinet", p2_family() if family is None else family, self.LIVE if live is None else live, self.LABELS)
+
+    def refusal(self, family, live=None) -> str:
+        with self.assertRaises(B.Refused) as cm:
+            self.entry(family, live)
+        return "; ".join(cm.exception.problems)
+
+    def test_the_real_side_is_summed_from_the_recordings_and_the_render_side_comes_from_the_live_pairs(self):
+        e, disagreements = self.entry(p2_family(refused=[{"slot": "D3-s3", "reason": "IRPDECOMP_ONSET_MISALIGNED: cut onset 17.5 ms"}]))
+        self.assertEqual(disagreements, [])
+        self.assertEqual(e["real"]["loose"], {"inside": 11, "outside": 5, "no_ruler": 2, "pct": 69})
+        self.assertEqual(e["real"]["strict"], {"inside": 10, "outside": 4, "no_ruler": 4, "pct": 71})
+        # one render pair per recording, repeats counted: the render's D3 verdicts twice
+        self.assertEqual(e["render"]["loose"], {"inside": 6, "outside": 2, "no_ruler": 2, "pct": 75})
+        self.assertEqual(e["render"]["strict"], {"inside": 2, "outside": 4, "no_ruler": 4, "pct": 33})
+        self.assertEqual((e["render"]["recordings"], e["render"]["missing_notes"]), (2, []))
+        self.assertEqual(e["recordings"], {"graded": 2, "refused": [{"slot": "D3-s3", "reason": "IRPDECOMP_ONSET_MISALIGNED: cut onset 17.5 ms"}], "retuned": 1, "notes": ["D3"], "nothing_outside": {"loose": 0, "strict": 0, "both": 0}})
+        self.assertEqual((e["source"]["name"], e["source"]["licence"], e["independence"], e["grader"]), ("TEST LIBRARY, v1", "CC BY 4.0", "other_library", ["decompose-1/instrgrade-2"]))
+        self.assertEqual(e["ruler_rows"]["loose"]["median"], 5)
+
+    def test_a_recording_none_of_whose_measures_had_a_ruler_was_not_judged_and_is_not_nothing_outside(self):
+        rows = ROWS_D3 + [rec("D3-s9", "D3", 6, (0, 0, 6), (0, 0, 6), [], [])]  # like the voice take that had no ruler left
+        e, _ = self.entry(p2_family(rows))
+        self.assertEqual(e["recordings"]["nothing_outside"], {"loose": 0, "strict": 0, "both": 0})
+        self.assertEqual(e["real"]["loose"]["no_ruler"], 8)
+        self.assertIn("recordings_with_nothing_outside says", self.refusal(p2_family(rows, recordings_with_nothing_outside={"loose": 1, "strict": 1, "both": 1})))
+
+    def test_the_measures_are_listed_worst_first_with_the_pages_own_labels(self):
+        e, _ = self.entry()
+        self.assertEqual([(m["id"], m["label"], m["loose"]["outside"], m["loose"]["ruled"]) for m in e["by_measure"]],
+                         [("both_outside", "Both outside", 2, 2), ("loose_only", "Loose only", 2, 2), ("no_claim", "no_claim", 1, 2), ("both_inside", "both_inside", 0, 2)])
+        self.assertEqual(e["by_measure"][2]["strict"]["outside"], 0)
+
+    def test_the_percent_is_of_the_measures_that_had_a_ruler_and_rounds_half_up(self):
+        self.assertEqual(B.share({"inside": 1, "outside": 1, "no_ruler": 9})["pct"], 50)
+        self.assertEqual(B.share({"inside": 1, "outside": 7, "no_ruler": 0})["pct"], 13)  # 12.5
+        self.assertEqual(B.share({"inside": 125, "outside": 6, "no_ruler": 0})["pct"], 95)
+        self.assertIsNone(B.share({"inside": 0, "outside": 0, "no_ruler": 3})["pct"])  # nothing had a ruler: no percent, never 0%
+        self.assertIsNone(B.share(None))
+
+    def test_a_recording_whose_note_has_no_graded_render_is_listed_and_not_counted_on_the_render_side(self):
+        rows = ROWS_D3 + [rec("E3-s1", "E3", 4, (4, 0, 0), (4, 0, 0), [], [])]
+        e, disagreements = self.entry(p2_family(rows))
+        self.assertEqual(disagreements, [])
+        self.assertEqual((e["render"]["recordings"], e["render"]["missing_notes"]), (2, ["E3"]))
+        self.assertEqual(e["real"]["loose"]["inside"], 15)  # the real side still counts every graded recording
+        self.assertEqual((e["recordings"]["notes"], e["recordings"]["nothing_outside"]), (["D3", "E3"], {"loose": 1, "strict": 1, "both": 1}))
+        e, _ = self.entry(p2_family(rows, live={}), live={})
+        self.assertEqual((e["render"]["loose"], e["render"]["strict"], e["render"]["missing_notes"]), (None, None, ["D3", "E3"]))
+
+    def test_a_strict_share_is_not_computed_when_a_live_pair_lacks_the_strict_verdicts(self):
+        old = dict(self.LIVE["D3"], strict=None)
+        e, _ = self.entry(live={"D3": old})
+        self.assertIsNone(e["render"]["strict"])
+        self.assertEqual(e["render"]["loose"]["pct"], 75)
+
+    def test_a_file_that_disagrees_with_itself_is_refused(self):
+        def broken(mutate):
+            fam = p2_family()
+            mutate(fam)
+            return self.refusal(fam)
+
+        self.assertIn("real_recordings.loose says", broken(lambda f: f["real_recordings"]["loose"].update(inside=125, outside=6, no_ruler=4)))
+        self.assertIn("real_recordings.strict says", broken(lambda f: f["real_recordings"]["strict"].update(outside=5)))
+        self.assertIn("inside_fraction", broken(lambda f: f["real_recordings"]["loose"].update(inside_fraction=0.95)))
+        self.assertIn("recordings says 9", broken(lambda f: f.update(recordings=9)))
+        self.assertIn("retuned_by_authors says 5", broken(lambda f: f.update(retuned_by_authors=5)))
+        self.assertIn("recordings_with_nothing_outside says", broken(lambda f: f["recordings_with_nothing_outside"].update(loose=2)))
+        self.assertIn("by_measure.both_outside.loose.outside is 1 but the rows list it outside 2 times", broken(lambda f: f["by_measure"]["both_outside"]["loose"].update(outside=1)))
+        self.assertIn("needs outside <= ruled", broken(lambda f: f["by_measure"]["both_outside"]["strict"].update(ruled=0)))
+        self.assertIn("by_measure.loose_only.loose needs outside <= ruled", broken(lambda f: f["by_measure"].pop("loose_only")))  # a measure the rows list as missed, absent from the table
+
+    def test_a_recording_row_whose_numbers_do_not_add_up_is_refused(self):
+        def one(mutate):
+            row = copy.deepcopy(ROWS_D3[0])
+            mutate(row)
+            return self.refusal(p2_family([row, ROWS_D3[1]]))
+
+        self.assertIn("is not its 10 measures", one(lambda r: r["loose"].update(no_ruler=1)))
+        self.assertIn("strict: inside 4 + outside 3 + no_ruler 4 is not its 10 measures", one(lambda r: r["strict"].update(no_ruler=4)))
+        self.assertIn("outside_loose lists 3 measures but loose.outside is 2", one(lambda r: r["loose"].update(inside=6, outside=2)))
+        self.assertIn("whole number", one(lambda r: r.update(measures=10.5)))
+        self.assertIn("whole numbers", one(lambda r: r["loose"].update(inside=True)))
+        self.assertIn("appears twice", self.refusal(p2_family([ROWS_D3[0], ROWS_D3[0]])))
+        self.assertIn("needs a slot and a note", one(lambda r: r.update(slot="")))
+
+    def test_the_source_the_independence_and_the_rulers_must_be_stated(self):
+        self.assertIn("source needs a name", self.refusal(p2_family(source={"name": "x", "url": "https://x", "licence": "CC BY 4.0", "credit": " "})))
+        self.assertIn("independence must be one of", self.refusal(p2_family(independence="independent")))
+        self.assertIn("compared_with", self.refusal(p2_family(compared_with="")))
+        self.assertIn("recording_list must be a non-empty list", self.refusal(p2_family([], recordings=0)))
+        self.assertIn("ruler_rows_per_measure.strict", self.refusal(p2_family(ruler_rows_per_measure={"loose": {"median": 5, "min": 0, "max": 6}})))
+        self.assertIn("refused must list", self.refusal(p2_family(refused=[{"slot": "x"}])))
+
+    def test_a_render_figure_the_file_states_wrongly_is_reported_and_the_recomputed_one_is_shown(self):
+        fam = p2_family()
+        fam["our_renders_same_notes"]["loose"] = fraction(tally((60, 2, 2)))
+        e, disagreements = self.entry(fam)
+        self.assertEqual(e["render"]["loose"]["pct"], 75)  # the live pairs' own figure
+        self.assertEqual(len(disagreements), 1)
+        self.assertIn("clarinet loose: the file says the renders were (60, 2, 2)", disagreements[0])
+        fam = p2_family()
+        fam["our_renders_same_notes"]["render_pairs"] = 3
+        self.assertIn("3 render pairs", self.entry(fam)[1][0])
+
+    def test_the_render_side_is_recomputed_from_the_raw_pair_never_trusted(self):
+        pj = {"ours": {"wav": "x"}, "real": {"reference_id": REF_ID}, "metrics": STRICT_CASES}
+        self.assertEqual(B.live_verdicts(pj), self.LIVE["D3"])
+        self.assertIsNone(B.live_verdicts(dict(pj, ours=None)))                     # a recording-only note
+        self.assertIsNone(B.live_verdicts(dict(pj, refused={"reason": "x"})))       # a grader refusal
+        self.assertIsNone(B.live_verdicts(dict(pj, metrics=[])))
+        self.assertIsNone(B.live_verdicts(dict(pj, metrics=[{"id": "broken"}])))    # a pair this generator cannot read makes no claim
+
+    def build(self, root: Path, out: Path, *flag: str, families=None, raw=None, **top):
+        doc = {"schema": B.BASELINE_SCHEMA, "generated_utc": "2026-10-21T00:00:00Z", "method": ["Graded like a render."], "caveats": ["A small sample."], "families": families, **top}
+        if families is not None:
+            (root / B.BASELINE_FILE).write_text(json.dumps(doc))
+        if raw is not None:
+            (root / B.BASELINE_FILE).write_text(raw)
+        err = io.StringIO()
+        with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), *flag]), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = B.main()
+        return code, err.getvalue(), lambda fam: json.loads((out / fam / "card.json").read_text())
+
+    def test_the_card_carries_the_baseline_and_a_family_with_no_entry_carries_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, metrics=STRICT_CASES)
+            code, err, card = self.build(root, Path(tmp) / "out", families={"clarinet": p2_family()})
+            self.assertEqual(code, 0, err)
+            b = card("clarinet")["baseline"]
+            self.assertTrue(b["shown"])
+            self.assertEqual((b["real"]["loose"]["pct"], b["render"]["loose"]["pct"], b["render"]["strict"]["pct"]), (69, 75, 33))
+            self.assertEqual((b["method"], b["caveats"], b["generated_utc"]), (["Graded like a render."], ["A small sample."], "2026-10-21T00:00:00Z"))
+            self.assertEqual(b["by_measure"][0]["label"], "both_outside")  # the label of a measure the family's pairs know
+            self.assertIsNone(card("flute")["baseline"])
+            self.assertIsNone(card("oboe")["baseline"])
+
+    def test_a_note_the_build_withholds_still_counts_on_the_render_side_of_the_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, metrics=STRICT_CASES)
+            code, err, card = self.build(root, Path(tmp) / "out", "--only", "clarinet=Z9", families={"clarinet": p2_family()})
+            self.assertEqual(card("clarinet")["withheld"], ["D3"])
+            self.assertEqual(card("clarinet")["baseline"]["render"]["loose"]["pct"], 75)
+
+    def test_a_refused_family_baseline_says_why_and_the_exit_code_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, metrics=STRICT_CASES)
+            bad = p2_family(recordings=9)
+            code, err, card = self.build(root, Path(tmp) / "out", families={"clarinet": bad, "ghost": p2_family()})
+            self.assertEqual(code, 2)
+            self.assertFalse(card("clarinet")["baseline"]["shown"])
+            self.assertIn("recordings says 9", card("clarinet")["baseline"]["why"])
+            self.assertIn("REFUSED baseline for clarinet", err)
+            self.assertIn("'ghost', which is not on the page", err)
+
+    def test_a_stale_render_figure_still_builds_with_the_live_figure_and_a_warning_and_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, metrics=STRICT_CASES)
+            fam = p2_family()
+            fam["our_renders_same_notes"]["strict"] = fraction(tally((9, 9, 0)))
+            code, err, card = self.build(root, Path(tmp) / "out", families={"clarinet": fam})
+            self.assertEqual(code, 2)
+            self.assertIn("WARNING baseline out of date", err)
+            self.assertEqual(card("clarinet")["baseline"]["render"]["strict"]["pct"], 33)
+
+    def test_no_baseline_file_means_no_baseline_and_an_unreadable_one_stops_the_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root, metrics=STRICT_CASES)
+            code, err, card = self.build(root, Path(tmp) / "out")
+            self.assertEqual(code, 0)
+            self.assertIsNone(card("clarinet")["baseline"])
+            for n, raw in enumerate(('{"schema": "frankensim.instrument-cross-library-baseline.v1", "fam', json.dumps({"schema": "wrong", "families": {}, "method": ["x"], "caveats": ["y"]}),
+                                     json.dumps({"schema": B.BASELINE_SCHEMA, "families": {}, "caveats": ["y"]}), json.dumps({"schema": B.BASELINE_SCHEMA, "families": {}, "method": ["x"], "caveats": []}))):
+                with self.assertRaises(SystemExit):
+                    self.build(root, Path(tmp) / f"out-{n}", raw=raw)
 
 
 if __name__ == "__main__":

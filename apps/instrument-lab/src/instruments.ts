@@ -4,6 +4,7 @@ import "./instruments.css";
 import { GroupPlayer } from "./audio";
 import { blindLine, blindOrder, type Order } from "./blind";
 import { LineChart, type Series } from "./chart";
+import { notes as sharedNotes, saveNotes } from "./notes";
 import { asset, el, fmt, json, onVisible } from "./util";
 
 type Badge = "none" | "blocked" | "ungraded" | "listening" | "close" | "mixed" | "off";
@@ -35,8 +36,20 @@ interface Pair {
   metrics: Metric[];
   verdicts: { measures: number; loose: Tally; strict: Tally | null } | null; // null: no render, or a listening-only note
 }
+// What real recordings from another library earn against the same rulers (P2's cross-library-baseline.json, summed and checked by the generator).
+interface Share { inside: number; outside: number; no_ruler: number; pct: number | null }
+interface Spread { median: number; min: number; max: number }
+type Baseline = { shown: false; why: string } | {
+  shown: true; source: { name: string; url: string; licence: string; licence_url: string | null; credit: string }; independence: "other_library" | "other_singer_same_library";
+  compared_with: string; grader: string[]; method: string[]; caveats: string[]; generated_utc: string | null;
+  recordings: { graded: number; refused: { slot: string; reason: string }[]; retuned: number; notes: string[]; nothing_outside: { loose: number; strict: number; both: number } };
+  real: { loose: Share; strict: Share };
+  render: { loose: Share | null; strict: Share | null; recordings: number; missing_notes: string[] };
+  ruler_rows: { loose: Spread; strict: Spread };
+  by_measure: { id: string; label: string; loose: { outside: number; ruled: number }; strict: { outside: number; ruled: number } }[];
+};
 interface Card {
-  family: string; title: string; built_utc: string;
+  family: string; title: string; built_utc: string; baseline?: Baseline | null;
   reference: { instrument: string; files: number; by_dynamic: Record<string, number>; chains: string[]; licence: string; licence_url: string | null; credit: string | null } | null;
   status: { badge: Badge; label: string; line: string; summary: string; blocked: string | null; physics_present: string[]; physics_missing: string[]; beads: string[]; described: boolean };
   pairs: Pair[]; refused: { note: string; kind?: "grader" | "site"; problems: string[]; reason?: string; render_sha?: string | null; time?: string | null }[];
@@ -48,14 +61,7 @@ interface Index { built_utc: string; families: IndexFamily[] }
 const data = (path: string): string => asset(`data/instruments/${path}`);
 const MARK: Record<Badge, string> = { close: "✓", mixed: "◐", off: "✕", ungraded: "◌", listening: "♪", blocked: "■", none: "○" };
 const PARTIAL_COLOURS = ["#d9a94f", "#63d2c0", "#8fb9d6", "#e86a3c", "#c79ad8", "#a6d46f", "#f1eadb", "#e0708f"];
-const NOTES_KEY = "struck:instruments:notes";
-
-function load(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(NOTES_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
-}
-function save(notes: Record<string, string>): void {
-  try { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); } catch { /* storage unavailable: notes stay on the page only */ }
-}
+const save = (_notes: Record<string, string>): void => saveNotes(); // the one shared store (notes.ts), written whole
 
 const num = (v: number | null | undefined, unit = "", digits = 3): string => (v === null || v === undefined || !Number.isFinite(v) ? "—" : `${fmt(v, digits)}${unit ? ` ${unit}` : ""}`);
 // Four significant digits: a real 146.8 Hz and a render at 147.2 Hz must not both read "147".
@@ -144,6 +150,43 @@ function verdictLine(p: Pair): HTMLElement | null {
     el("p", { class: "small muted" }, "How to read a row: the pale band is how far real recordings of this and neighbouring notes (other dynamics and takes too) differ from each other, the darker band is the same note only, and the mark is how far this render is from the recording. A row marked ‘OUTSIDE the same-note spread’ is inside the pale band but outside the dark one."));
 }
 
+/** A share as the owner reads it: the whole-number percent of the measures that had a ruler, or why there is none. */
+const pctText = (s: Share | null): string => (s === null ? "not computed" : s.pct === null ? "no measure had a ruler" : `${s.pct}%`);
+const ofText = (s: Share | null): string => (s === null ? "not computed" : `${s.inside} of ${s.inside + s.outside}`);
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/** Beside the badge: what a real instrument from another library earns against the same rulers, next to this render's own share.
+ *  A family with a graded badge and no baseline says so; the badge rule is not changed by any of this. */
+function baselineBlock(c: Card): HTMLElement | null {
+  const b = c.baseline ?? null;
+  if (b === null) {
+    if (!["close", "mixed", "off"].includes(c.status.badge)) return null;
+    return el("div", { class: "ir-baseline none" }, el("p", {}, el("b", {}, "No cross-library baseline yet. "), "Real recordings of this instrument from another library have not been graded against these rulers, so there is no figure for what a real instrument earns here."));
+  }
+  if (!b.shown) return el("div", { class: "ir-baseline refused", role: "status" }, el("p", {}, el("b", {}, "Cross-library baseline not shown: "), b.why));
+  const number = (s: Share | null): HTMLElement => el("b", {}, pctText(s));
+  // Another singer from the same recording set is NOT another library: same room, same microphone. The data says which, the page says it plainly.
+  const lead = b.independence === "other_library" ? "Real recordings from another library" : "Another singer from the same recording set (the same library, room and microphone: not another library, so a weaker check)";
+  const render = b.render.loose === null ? el("span", {}, "no graded render of these notes") : el("span", {}, number(b.render.loose), " / ", number(b.render.strict));
+  const covered = b.render.recordings < b.recordings.graded ? `, ${plural(b.render.recordings, "recording")} of ${b.recordings.graded} have a graded render (none for ${b.render.missing_notes.join(", ")})` : "";
+  const r = b.recordings;
+  const rows = b.ruler_rows;
+  const worst = b.by_measure.filter((m) => m.loose.outside > 0).slice(0, 6);
+  return el("div", { class: "ir-baseline" },
+    el("p", { class: "ir-bl-head" }, `${lead}: `, number(b.real.loose), " of measures inside (loose) / ", number(b.real.strict), " (strict). This render: ", render, "."),
+    el("p", { class: "small muted" }, "A real instrument does not land inside every ruler either, so a measure outside one is not by itself a sign that a render is wrong. Loose: against real recordings of this and neighbouring notes. Strict: the same note only."),
+    el("p", { class: "small muted" }, `Real: ${ofText(b.real.loose)} measures loose, ${ofText(b.real.strict)} strict, over ${plural(r.graded, "recording")} of ${plural(r.notes.length, "note")} (${r.notes.join(", ")}). This render, the same notes: ${ofText(b.render.loose)} loose, ${ofText(b.render.strict)} strict${covered}. Source: ${b.source.name}, ${b.source.licence}, ${b.source.credit} (`, el("a", { href: b.source.url, rel: "noopener" }, b.source.url), ")."),
+    el("details", { class: "small muted ir-bl-more" }, el("summary", {}, "How this was measured, and its limits"),
+      ...b.method.map((t) => el("p", {}, t)),
+      el("p", {}, `Compared with: ${b.compared_with}. ${r.nothing_outside.both} of ${r.graded} recordings had no measure outside either ruler${r.nothing_outside.both === 0 ? ": by the badge rule none of these real recordings would earn ‘Inside the real spread’" : ""}.`),
+      r.refused.length ? el("p", {}, `Not counted, refused by the grader: ${r.refused.map((x) => `${x.slot} (${x.reason})`).join("; ")}.`) : null,
+      r.retuned ? el("p", {}, `${plural(r.retuned, "recording")} of ${r.graded} ${r.retuned === 1 ? "was" : "were"} digitally retuned by the library's authors.`) : null,
+      el("p", {}, `The rulers are built from a median of ${rows.loose.median} real-vs-real distances per measure (loose; ${rows.loose.min}–${rows.loose.max}) and ${rows.strict.median} (strict; ${rows.strict.min}–${rows.strict.max}); a measure is inside when its gap is no larger than the largest.`),
+      worst.length ? el("p", {}, `Measures real recordings land outside (loose, strict): ${worst.map((m) => `${m.label} ${m.loose.outside}/${m.loose.ruled}, ${m.strict.outside}/${m.strict.ruled}`).join("; ")}.`) : null,
+      el("ul", {}, ...b.caveats.map((t) => el("li", {}, t))),
+      el("p", {}, `Graded with ${b.grader.join(", ") || "an unstated tool"}${b.generated_utc ? `; file written ${b.generated_utc.replace("T", " ").replace("Z", " UTC")}` : ""}.`)));
+}
+
 function physicsLists(c: Card): HTMLElement {
   if (!c.status.described) {
     return el("p", { class: "small muted" }, `No description data has been written for this family yet (data/instruments/descriptions/${c.family}/status.json is missing), so the physics that runs and the physics that is missing are not listed.`);
@@ -197,6 +240,7 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   const status = el("div", { class: `vs-verdict ir-status ir-${c.status.badge}` },
     el("div", { class: "vs-verdict-head" }, el("span", { class: "vs-mark", "aria-hidden": "true" }, MARK[c.status.badge]), el("span", { class: "vs-word" }, c.status.label), el("h4", {}, "Status")),
     el("p", {}, c.status.line),
+    baselineBlock(c),
     c.status.summary ? el("p", { class: "small muted" }, c.status.summary) : null);
   root.append(
     el("div", { class: "panel-head" }, el("h3", {}, c.title), el("div", { class: "tags" }, pill(c.status.badge, c.status.label), c.status.beads.length ? el("span", { class: "tag plain" }, c.status.beads.join(" · ")) : null)),
@@ -448,7 +492,7 @@ export async function mountInstruments(root: HTMLElement): Promise<void> {
   const stat = (k: string, v: string): HTMLElement => el("div", { class: "stat" }, el("dt", {}, k), el("dd", {}, v));
   const tiles = el("div", { class: "ir-tiles", role: "group", "aria-label": "Choose an instrument family" });
   const host = el("div", { class: "ir-cards" });
-  const notes = load();
+  const notes = sharedNotes;
   const cards = new Map<string, HTMLElement>();
   const pending = new Map<string, Promise<HTMLElement>>();
   let current = "";

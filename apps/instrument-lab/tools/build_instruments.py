@@ -85,6 +85,17 @@ listed on the card as card.withheld, and are in no badge: the badge covers exact
 and its pictures, no FrankenSim) get no files and are listed as withheld, so a file-limited build spends its files on
 what has been rendered.
 
+cross-library-baseline.json (frankensim.instrument-cross-library-baseline.v1), written by P2 next to the family folders:
+how far REAL recordings from another library land inside our rulers, so the owner reads every badge beside what a real
+instrument earns. {schema, generated_utc, method: [str], caveats: [str], families: {<family>: {source, independence,
+compared_with, recordings, refused, retuned_by_authors, real_recordings, recordings_with_nothing_outside,
+our_renders_same_notes, ruler_rows_per_measure, by_measure, recording_list: [{slot, note, measures, loose, strict,
+outside_loose, outside_strict}]}}}. The generator sums recording_list itself and only COMPARES every total the file states
+(a family whose file disagrees with itself is refused); the render's share over the same notes is recomputed from the live
+graded pairs, one render pair per recording, and a stated figure that differs is reported (the file is out of date) with the
+recomputed one shown. card.baseline is null for a family with no entry ("no cross-library baseline yet"), {shown: false,
+why} for a refused one.
+
 status.json (frankensim.instrument-status.v1), written by the family lane, prose only (no measured numbers):
   family, title, reference_instrument (a references.json files[].instrument, or null), summary,
   physics_present: [str], physics_missing: [str], blocked: null | str, beads: [str]
@@ -95,6 +106,7 @@ real-vs-real distance in its ruler, "outside" otherwise.
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import math
@@ -124,6 +136,8 @@ LIBRARY_NAME = {"uiowa-mis": "University of Iowa Musical Instrument Samples"}
 
 PAIR_SCHEMA = "frankensim.instrument-pair.v1"
 STATUS_SCHEMA = "frankensim.instrument-status.v1"
+BASELINE_SCHEMA = "frankensim.instrument-cross-library-baseline.v1"
+BASELINE_FILE = "cross-library-baseline.json"
 
 # id, title, references.json instrument (None: the library has no recording of this instrument)
 FAMILIES: list[tuple[str, str, str | None]] = [
@@ -668,6 +682,176 @@ def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | N
     return {"badge": badge, "label": BADGE_LABEL[badge], "line": line, "counts": counts}
 
 
+# ------------------------------------------------------------------ the real-vs-real baseline
+def live_verdicts(pj: dict) -> dict | None:
+    """The both-rulers counts of a graded pair, recomputed from its raw gaps and rulers (the way the card's own pairs are), or None
+    when this is not a graded pair: a grader refusal, a reference-only note, a listening-only note, or one with no usable metrics."""
+    try:
+        if pj.get("refused") is not None or pj.get("ours") is None or is_listening(pj) or not pj.get("metrics"):
+            return None
+        return pair_verdicts([metric_view(m, True) for m in pj["metrics"]])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def share(t: dict | None) -> dict | None:
+    """A tally with the whole-number percent inside among the measures that had a ruler (None when none did)."""
+    if t is None:
+        return None
+    n = t["inside"] + t["outside"]
+    return {"inside": t["inside"], "outside": t["outside"], "no_ruler": t["no_ruler"], "pct": None if n == 0 else int(100 * t["inside"] / n + 0.5)}
+
+
+def add_tallies(tallies: list[dict]) -> dict:
+    return {k: sum(t[k] for t in tallies) for k in ("inside", "outside", "no_ruler")}
+
+
+def check_tally(t, measures: int, where: str, problems: list[str]) -> None:
+    ok = isinstance(t, dict) and all(isinstance(t.get(k), int) and not isinstance(t.get(k), bool) and t[k] >= 0 for k in ("inside", "outside", "no_ruler"))
+    if not ok:
+        problems.append(f"{where} must hold non-negative whole numbers inside, outside and no_ruler")
+    elif t["inside"] + t["outside"] + t["no_ruler"] != measures:
+        problems.append(f"{where}: inside {t['inside']} + outside {t['outside']} + no_ruler {t['no_ruler']} is not its {measures} measures")
+
+
+INDEPENDENCE = ("other_library", "other_singer_same_library")
+TALLY = ("inside", "outside", "no_ruler")
+
+
+def is_count(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def counts_of(t) -> tuple:
+    return tuple(t.get(k) for k in TALLY) if isinstance(t, dict) else (None,) * len(TALLY)
+
+
+def baseline_entry(fid: str, raw, live: dict[str, dict], labels: dict[str, str]) -> tuple[dict, list[str]]:
+    """One family's baseline for its card: how many of the measures real recordings from another library land inside the same
+    rulers, loose and strict, beside the render's own share over the same notes. Returns (the card's entry, disagreements).
+    The real side is SUMMED here from the per-recording rows of P2's file, and every total P2 states (real_recordings with its
+    inside_fraction, recordings, retuned_by_authors, recordings_with_nothing_outside, by_measure outside counts) is only compared:
+    Refused when the file does not agree with itself, since a wrong percent beside a badge is worse than none. The render side
+    is recomputed from the live graded pairs (live: note -> verdicts), one render pair per recording, so it follows a regrade;
+    where P2's stated figure for it differs (a regrade since the file was written) that is a disagreement, reported to the
+    caller, and the recomputed figure is the one shown."""
+    problems: list[str] = []
+    if not isinstance(raw, dict):
+        raise Refused([f"{fid}: the baseline entry must be an object"])
+    src = raw.get("source")
+    if not isinstance(src, dict) or not all(isinstance(src.get(k), str) and src[k].strip() for k in ("name", "url", "licence", "credit")) or not isinstance(src.get("licence_url", ""), str):
+        problems.append("source needs a name, url, licence and credit")
+    if raw.get("independence") not in INDEPENDENCE:
+        problems.append(f"independence must be one of {', '.join(INDEPENDENCE)}")
+    if not isinstance(raw.get("compared_with"), str) or not raw["compared_with"].strip():
+        problems.append("compared_with must say what the recordings were compared with")
+    recs = raw.get("recording_list")
+    if not isinstance(recs, list) or not recs:
+        raise Refused(problems + ["recording_list must be a non-empty list, one row per graded real recording"])
+    rows, seen = [], set()
+    for i, rec in enumerate(recs):
+        ok = isinstance(rec, dict) and all(isinstance(rec.get(k), str) and rec[k] for k in ("slot", "note"))
+        where = f"recording {rec['slot']}" if ok else f"recording_list[{i}]"
+        if not ok:
+            problems.append(f"{where} needs a slot and a note")
+            continue
+        if rec["slot"] in seen:
+            problems.append(f"{where} appears twice")
+        seen.add(rec["slot"])
+        if not is_count(rec.get("measures")):
+            problems.append(f"{where}: measures must be a whole number")
+            continue
+        for kind in ("loose", "strict"):
+            check_tally(rec.get(kind), rec["measures"], f"{where} {kind}", problems)
+            names = rec.get(f"outside_{kind}")
+            if not isinstance(names, list) or not all(isinstance(x, str) for x in names):
+                problems.append(f"{where}: outside_{kind} must list the measures outside")
+            elif isinstance(rec.get(kind), dict) and len(names) != rec[kind].get("outside"):
+                problems.append(f"{where}: outside_{kind} lists {len(names)} measures but {kind}.outside is {rec[kind].get('outside')}")
+        rows.append(rec)
+    refused = raw.get("refused", [])
+    if not isinstance(refused, list) or not all(isinstance(x, dict) and isinstance(x.get("slot"), str) and isinstance(x.get("reason"), str) for x in refused):
+        problems.append("refused must list {slot, reason}")
+    for key in ("loose", "strict"):
+        rows_rule = (raw.get("ruler_rows_per_measure") or {}).get(key)
+        if not isinstance(rows_rule, dict) or not all(isinstance(rows_rule.get(k), (int, float)) and not isinstance(rows_rule.get(k), bool) for k in ("median", "min", "max")):
+            problems.append(f"ruler_rows_per_measure.{key} needs a median, min and max")
+    if problems:
+        raise Refused(problems)
+
+    # P2's own totals against the sums of its rows
+    real = {kind: add_tallies([r[kind] for r in rows]) for kind in ("loose", "strict")}
+    for kind in ("loose", "strict"):
+        stated = (raw.get("real_recordings") or {}).get(kind)
+        if counts_of(stated) != counts_of(real[kind]):
+            problems.append(f"real_recordings.{kind} says {counts_of(stated)} (inside, outside, no_ruler) but its recording_list adds up to {counts_of(real[kind])}")
+        elif real[kind]["inside"] + real[kind]["outside"] and not (isinstance(stated.get("inside_fraction"), (int, float)) and abs(stated["inside_fraction"] - real[kind]["inside"] / (real[kind]["inside"] + real[kind]["outside"])) <= 1e-3):
+            problems.append(f"real_recordings.{kind}.inside_fraction {stated.get('inside_fraction')} is not inside/(inside+outside) of its counts")
+    if raw.get("recordings") != len(rows):
+        problems.append(f"recordings says {raw.get('recordings')} but recording_list has {len(rows)} rows")
+    retuned = sum(r.get("retuned_by_authors") is True for r in rows)
+    if raw.get("retuned_by_authors") != retuned:
+        problems.append(f"retuned_by_authors says {raw.get('retuned_by_authors')} but recording_list marks {retuned}")
+    # "nothing outside" needs at least one measure that was judged: a recording whose every measure lacked a ruler was not judged at all
+    nothing = lambda r, kind: r[kind]["outside"] == 0 and r[kind]["inside"] > 0  # noqa: E731
+    clean = {"loose": sum(nothing(r, "loose") for r in rows), "strict": sum(nothing(r, "strict") for r in rows), "both": sum(nothing(r, "loose") and nothing(r, "strict") for r in rows)}
+    if raw.get("recordings_with_nothing_outside") != clean:
+        problems.append(f"recordings_with_nothing_outside says {raw.get('recordings_with_nothing_outside')} but the rows give {clean}")
+    by_measure = raw.get("by_measure")
+    if not isinstance(by_measure, dict):
+        problems.append("by_measure must map each measure to its outside and ruled counts")
+    else:
+        for kind in ("loose", "strict"):
+            out = collections.Counter(m for r in rows for m in r[f"outside_{kind}"])
+            for mid in sorted(set(by_measure) | set(out)):
+                v = (by_measure.get(mid) or {}).get(kind)
+                if not isinstance(v, dict) or not is_count(v.get("outside")) or not is_count(v.get("ruled")) or v["outside"] > v["ruled"]:
+                    problems.append(f"by_measure.{mid}.{kind} needs outside <= ruled, both whole numbers")
+                elif v["outside"] != out.get(mid, 0):
+                    problems.append(f"by_measure.{mid}.{kind}.outside is {v['outside']} but the rows list it outside {out.get(mid, 0)} times")
+    if problems:
+        raise Refused(problems)
+
+    notes = sorted({r["note"] for r in rows})
+    have = [r for r in rows if r["note"] in live]
+    missing = sorted({r["note"] for r in rows if r["note"] not in live})
+    render = {"loose": add_tallies([live[r["note"]]["loose"] for r in have]) if have else None,
+              "strict": add_tallies([live[r["note"]]["strict"] for r in have]) if have and all(live[r["note"]].get("strict") is not None for r in have) else None}
+    disagreements = []
+    said = raw.get("our_renders_same_notes") or {}
+    for kind in ("loose", "strict"):
+        if render[kind] is not None and counts_of(said.get(kind)) != counts_of(render[kind]):
+            disagreements.append(f"{fid} {kind}: the file says the renders were {counts_of(said.get(kind))} (inside, outside, no_ruler), the live pairs now give {counts_of(render[kind])}")
+    if said.get("render_pairs") != len(have):
+        disagreements.append(f"{fid}: the file says {said.get('render_pairs')} render pairs, the live tree has {len(have)}")
+    spread = sorted(({"id": mid, "label": labels.get(mid, mid), "loose": v["loose"], "strict": v["strict"]} for mid, v in by_measure.items()),
+                    key=lambda m: (-(m["loose"]["outside"] / m["loose"]["ruled"] if m["loose"]["ruled"] else 0), m["id"]))
+    return {
+        "shown": True, "why": None, "source": {k: src.get(k) for k in ("name", "url", "licence", "licence_url", "credit")}, "independence": raw["independence"],
+        "compared_with": raw["compared_with"].strip(), "grader": [g for g in raw.get("grader", []) if isinstance(g, str)],
+        "recordings": {"graded": len(rows), "refused": [{"slot": x["slot"], "reason": x["reason"].strip()} for x in refused], "retuned": retuned, "notes": notes, "nothing_outside": clean},
+        "real": {"loose": share(real["loose"]), "strict": share(real["strict"])},
+        "render": {"loose": share(render["loose"]), "strict": share(render["strict"]), "recordings": len(have), "missing_notes": missing},
+        "ruler_rows": raw["ruler_rows_per_measure"], "by_measure": spread,
+    }, disagreements
+
+
+def load_baseline(path: Path) -> dict | None:
+    """P2's cross-library baseline, analysis/cross-library-baseline.json. None when there is no such file (every card then says
+    there is no cross-library baseline yet). A file that is there but unreadable stops the build: a half-copied file must not turn
+    into a page that says no baseline exists."""
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{path} is not JSON ({e}); not building with a half-written baseline")
+    texts = lambda v: isinstance(v, list) and bool(v) and all(isinstance(x, str) and x.strip() for x in v)  # noqa: E731
+    if not isinstance(raw, dict) or raw.get("schema") != BASELINE_SCHEMA or not isinstance(raw.get("families"), dict) or not texts(raw.get("method")) or not texts(raw.get("caveats")):
+        raise SystemExit(f"{path}: schema must be {BASELINE_SCHEMA!r}, with a families object and lists of method and caveats sentences")
+    return raw
+
+
 def load_status(family: str, root: Path = DESCRIPTIONS) -> dict | None:
     path = root / family / "status.json"
     if not path.is_file():
@@ -704,6 +888,7 @@ def main() -> int:
     ap.add_argument("--pull", action="store_true", help=f"rsync {TRJ_ANALYSIS} into --analysis first")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
+    ap.add_argument("--baseline", type=Path, default=None, help=f"P2's cross-library baseline file (default <analysis>/{BASELINE_FILE}); no file means every card says there is no cross-library baseline yet")
     ap.add_argument("--audio-ext", choices=("m4a", "mp4"), default="m4a", help="extension of the A/B clips; the codec is AAC either way (mp4 for a host that serves no .m4a)")
     ap.add_argument("--only", action="append", default=[], metavar="FAMILY=NOTE,NOTE", help="show only these notes of a family; the rest are listed on its card as withheld and get no files")
     ap.add_argument("--recordings-only-if-rendered", action="store_true", help="a family with no render shows none of its recording-only notes; they are listed as withheld and get no files")
@@ -728,7 +913,13 @@ def main() -> int:
     extra = sorted(p.parent.name for p in args.descriptions.glob("*/status.json") if p.parent.name not in known) if args.descriptions.is_dir() else []
     families = list(FAMILIES) + [(fid, (load_status(fid, args.descriptions) or {}).get("title", fid), (load_status(fid, args.descriptions) or {}).get("reference_instrument")) for fid in extra]
 
+    baseline = load_baseline(args.baseline or args.analysis / BASELINE_FILE)
+    if baseline is not None:
+        for fid in sorted(set(baseline["families"]) - {f[0] for f in families}):
+            print(f"WARNING {BASELINE_FILE} names the family {fid!r}, which is not on the page", file=sys.stderr)
     refused_total = 0
+    baseline_refused = 0
+    baseline_disagreed = 0
     total_grader_refused = 0
     index = []
     args.out.mkdir(parents=True, exist_ok=True)
@@ -768,6 +959,28 @@ def main() -> int:
         grader_refused =[x for x in refused if x["kind"] == "grader"]
         pairs.sort(key=lambda p: (p["ours"] is None, p["dynamic"], p["note"]))
         verdict = judge(status, pairs, grader_refused)
+        family_baseline = None
+        if baseline is not None and fid in baseline["families"]:
+            live, labels = {}, {}
+            for pj_path in pair_files:  # every graded note counts, also one this build withholds from the page
+                try:
+                    pj = json.loads(pj_path.read_text())
+                except json.JSONDecodeError:
+                    continue
+                v = live_verdicts(pj)
+                if v is not None:
+                    live[pj_path.parent.name] = v
+                    labels.update({m["id"]: m["label"] for m in pj["metrics"] if isinstance(m.get("label"), str)})
+            try:
+                family_baseline, disagreements = baseline_entry(fid, baseline["families"][fid], live, labels)
+                family_baseline.update(method=baseline["method"], caveats=baseline["caveats"], generated_utc=baseline.get("generated_utc"))
+                for d in disagreements:
+                    baseline_disagreed += 1
+                    print(f"WARNING baseline out of date, showing the live pairs' figure: {d}", file=sys.stderr)
+            except Refused as e:
+                baseline_refused += 1
+                family_baseline = {"shown": False, "why": "; ".join(e.problems)}
+                print(f"REFUSED baseline for {fid}: {family_baseline['why']}", file=sys.stderr)
         card = {
             "schema": "frankensim.instrument-card.v1", "family": fid, "title": (status or {}).get("title", title),
             "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -777,7 +990,7 @@ def main() -> int:
                 "physics_present": (status or {}).get("physics_present", []), "physics_missing": (status or {}).get("physics_missing", []),
                 "beads": (status or {}).get("beads", []), "described": status is not None,
             },
-            "pairs": pairs, "refused": refused, "withheld": sorted(withheld),
+            "pairs": pairs, "refused": refused, "withheld": sorted(withheld), "baseline": family_baseline,
         }
         (args.out / fid).mkdir(parents=True, exist_ok=True)
         (args.out / fid / "card.json").write_text(json.dumps(card, ensure_ascii=False, separators=(",", ":")))
@@ -790,7 +1003,10 @@ def main() -> int:
     (args.out / "index.json").write_text(json.dumps({"schema": "frankensim.instrument-index.v1", "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "families": index}, ensure_ascii=False, separators=(",", ":")))
     graded = sum(1 for f in index if f["badge"] in ("close", "mixed", "off"))
     print(f"{len(index)} families, {sum(len(f['notes']) for f in index)} notes shown, {graded} graded, {total_grader_refused} notes refused by the grader, {refused_total} pairs refused by this generator -> {args.out}")
-    return 2 if refused_total else 0
+    if baseline is not None:
+        shown = sum(1 for f in index if (json.loads((args.out / f["id"] / "card.json").read_text()).get("baseline") or {}).get("shown"))
+        print(f"cross-library baseline shown for {shown} families, refused for {baseline_refused}, out of date for {baseline_disagreed} figures")
+    return 2 if refused_total or baseline_refused or baseline_disagreed else 0
 
 
 if __name__ == "__main__":

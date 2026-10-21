@@ -29,6 +29,37 @@
 
 .ir-status { margin-top: 4px; }
 .ir-status .vs-mark, .ir-status .vs-word { color: var(--vc); }
+/* What a real instrument from another library earns against the same rulers, beside the badge. Neutral on purpose: it is a
+   calibration, not a verdict, so it takes no badge colour. */
+.ir-baseline { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line); border-left: 3px solid var(--air); border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.025); }
+.ir-baseline p { margin: 4px 0; }
+.ir-baseline .ir-bl-head { color: var(--ivory); }
+.ir-baseline .ir-bl-head b { font-weight: 700; white-space: nowrap; }
+.ir-baseline.none { border-left-style: dashed; }
+.ir-baseline.refused { border-left-color: var(--ember); color: #f0b9a3; }
+.ir-bl-more summary { cursor: pointer; }
+.ir-bl-more[open] summary { margin-bottom: 4px; }
+.ir-bl-more ul { display: grid; gap: 4px; margin: 6px 0 4px 18px; list-style: disc; }
+/* Reference candidates: one card per recording, the facts as a definition list, VALID / INVALID as a pair of toggles. */
+.ir-cands { display: grid; gap: 14px; }
+.ir-cand-summary { margin: 14px 0 8px; font: 500 14px/1.5 var(--font-mono); color: var(--ivory); }
+.ir-cand .panel-head h4 { font: 600 16px/1.35 var(--font-display); color: var(--ivory); overflow-wrap: anywhere; }
+.ir-facts { display: grid; gap: 6px; margin: 12px 0; }
+.ir-fact { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 4px 12px; }
+.ir-fact dt { color: var(--ivory-3); font: 500 11px/1.5 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.ir-fact dd { overflow-wrap: anywhere; color: var(--ivory-2); }
+.ir-cc { color: var(--verdigris); font-weight: 600; }
+.ir-std { color: var(--brass); font-weight: 600; }
+.ir-notes-found ul { display: grid; gap: 3px; margin: 6px 0 2px 18px; list-style: disc; }
+.ir-looked { display: grid; gap: 4px; margin: 6px 0 0 18px; list-style: disc; }
+.ir-valid[aria-pressed="true"] { background: var(--verdigris); border-color: var(--verdigris); color: #06130f; }
+.ir-invalid[aria-pressed="true"] { background: var(--ember); border-color: var(--ember); color: #1a0903; }
+.ir-valid[aria-pressed="true"]:hover { background: var(--verdigris); color: #06130f; }
+.ir-invalid[aria-pressed="true"]:hover { background: var(--ember); color: #1a0903; }
+.ir-cand[data-verdict="VALID"] { border-left: 3px solid var(--verdigris); }
+.ir-cand[data-verdict="INVALID"] { border-left: 3px solid var(--ember); }
+.ir-verdict-state { margin-left: 4px; }
+@media (max-width: 640px) { .ir-fact { grid-template-columns: 1fr; } }
 .ir-h { margin: 26px 0 10px; font: 600 12px/1.4 var(--font-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ivory-3); }
 .ir-card > .seg, .ir-card > .btn-row, .ir-card > p { margin-top: 10px; }
 .ir-empty { margin-top: 18px; padding: 18px 20px; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); }

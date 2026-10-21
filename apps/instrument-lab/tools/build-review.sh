@@ -33,12 +33,21 @@ status=0
 uv run --with numpy --with pillow python tools/build_instruments.py --analysis "$ANALYSIS" --out "$STAGE/data/instruments" --audio-ext mp4 --recordings-only-if-rendered ${only_args[@]+"${only_args[@]}"} || status=$?
 # 2 = the generator itself rejected a pair; the card lists it, the review still builds. Anything else is a real failure.
 [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || { echo "build_instruments.py failed ($status)" >&2; exit "$status"; }
+# The reference-candidates section, when a candidates tree is named (REVIEW_CANDIDATES=<mirror of trj:/data/tmp/wa-inst/refs-candidates>).
+# A record that fails a check is listed on its family's page and the build goes on (exit 2), as for a pair.
+if [ -n "${REVIEW_CANDIDATES:-}" ]; then
+  [ -d "$REVIEW_CANDIDATES" ] || { echo "no candidates directory $REVIEW_CANDIDATES" >&2; exit 64; }
+  cstatus=0
+  uv run --with numpy python tools/build_candidates.py --candidates "$REVIEW_CANDIDATES" --out "$STAGE/data/candidates" || cstatus=$?
+  [ "$cstatus" -eq 0 ] || [ "$cstatus" -eq 2 ] || { echo "build_candidates.py failed ($cstatus)" >&2; exit "$cstatus"; }
+  [ "$status" -ne 0 ] || status="$cstatus"
+fi
 
 ./node_modules/.bin/tsc --noEmit
 REVIEW_PUBLIC="$STAGE" REVIEW_OUT="$OUT" VITE_REVIEW_SHA="$SHA" ./node_modules/.bin/vite build --config vite.instruments.config.ts
 
 # What shipped: only the page, its bundle and its own data.
-stray="$(cd "$OUT" && find . -type f ! -name instruments.html ! -name index.html ! -path './assets/*' ! -path './data/instruments/*' | head -5)"
+stray="$(cd "$OUT" && find . -type f ! -name instruments.html ! -name index.html ! -path './assets/*' ! -path './data/instruments/*' ! -path './data/candidates/*' | head -5)"
 [ -z "$stray" ] || { echo "unexpected files in the review build:" >&2; echo "$stray" >&2; exit 1; }
 m4a="$(cd "$OUT" && find . -type f -name '*.m4a' | head -3)"
 [ -z "$m4a" ] || { echo "the host serves no .m4a, but the review build holds:" >&2; echo "$m4a" >&2; exit 1; }
