@@ -44,11 +44,27 @@ if [ -n "${REVIEW_CANDIDATES:-}" ]; then
   [ "$status" -ne 0 ] || status="$cstatus"
 fi
 
+# The blind A/B section, when pairs are named (REVIEW_BLIND_AB=<a folder of <pair-id>/pair.json folders>, the format is in the docstring of
+# tools/build_blind_ab.py) and/or a placeholder is asked for (REVIEW_BLIND_AB_PLACEHOLDER=1: two existing renders of the analysis tree, so the
+# page can be tried before the first real pair arrives). A pair that fails a check is listed on the page and the build goes on (exit 2).
+if [ -n "${REVIEW_BLIND_AB:-}" ] || [ "${REVIEW_BLIND_AB_PLACEHOLDER:-0}" = 1 ]; then
+  ab_args=(--out "$STAGE/data/blind-ab")
+  if [ -n "${REVIEW_BLIND_AB:-}" ]; then
+    [ -d "$REVIEW_BLIND_AB" ] || { echo "no blind A/B directory $REVIEW_BLIND_AB" >&2; exit 64; }
+    ab_args+=(--pairs "$REVIEW_BLIND_AB")
+  fi
+  [ "${REVIEW_BLIND_AB_PLACEHOLDER:-0}" != 1 ] || ab_args+=(--placeholder-from "$ANALYSIS")
+  abstatus=0
+  uv run --with numpy python tools/build_blind_ab.py "${ab_args[@]}" || abstatus=$?
+  [ "$abstatus" -eq 0 ] || [ "$abstatus" -eq 2 ] || { echo "build_blind_ab.py failed ($abstatus)" >&2; exit "$abstatus"; }
+  [ "$status" -ne 0 ] || status="$abstatus"
+fi
+
 ./node_modules/.bin/tsc --noEmit
 REVIEW_PUBLIC="$STAGE" REVIEW_OUT="$OUT" VITE_REVIEW_SHA="$SHA" ./node_modules/.bin/vite build --config vite.instruments.config.ts
 
 # What shipped: only the page, its bundle and its own data.
-stray="$(cd "$OUT" && find . -type f ! -name instruments.html ! -name index.html ! -path './assets/*' ! -path './data/instruments/*' ! -path './data/candidates/*' | head -5)"
+stray="$(cd "$OUT" && find . -type f ! -name instruments.html ! -name index.html ! -path './assets/*' ! -path './data/instruments/*' ! -path './data/candidates/*' ! -path './data/blind-ab/*' | head -5)"
 [ -z "$stray" ] || { echo "unexpected files in the review build:" >&2; echo "$stray" >&2; exit 1; }
 m4a="$(cd "$OUT" && find . -type f -name '*.m4a' | head -3)"
 [ -z "$m4a" ] || { echo "the host serves no .m4a, but the review build holds:" >&2; echo "$m4a" >&2; exit 1; }

@@ -8,7 +8,7 @@
 .ir-blocked { --vc: var(--ember); }
 .ir-none { --vc: var(--ivory-3); }
 
-.ir-card [hidden] { display: none !important; }
+.ir-card [hidden], .ir-cand [hidden], .ir-ab [hidden] { display: none !important; }
 .ir-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 8px; margin: 18px 0 22px; }
 .ir-tile {
   display: grid; gap: 4px; align-content: start; text-align: left; cursor: pointer;
@@ -124,6 +124,17 @@
   border: 1px solid var(--line-strong); background: var(--ink-1); color: var(--ivory); font: 400 14.5px/1.5 var(--font-body);
 }
 .ir-feedback:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
+/* The blind A/B section: a pair of renders judged as X and Y. */
+.ir-ab { margin-top: 18px; }
+.ir-ab[data-state="answered"] { border-left: 3px solid var(--brass); }
+.ir-ab .ir-ab-ask { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; }
+.ir-ab .ir-ab-ask legend { padding: 0; margin-bottom: 6px; font: 600 14.5px/1.4 var(--font-body); color: var(--ivory); }
+.ir-ab .ir-ab-choices { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.ir-ab .ir-feedback { margin-top: 16px; }
+.ir-ab .ir-ab-placeholder { margin: 10px 0; padding: 4px 0 4px 14px; border-left: 2px solid var(--ember); color: #f0b9a3; }
+.ir-ab .ir-ab-reveal { margin-top: 14px; padding: 4px 0 4px 14px; border-left: 2px solid var(--verdigris); }
+.ir-ab .ir-ab-reveal p { margin: 6px 0; }
 
 @media (max-width: 640px) {
   .ir-notes { display: flex; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; padding-bottom: 4px; }

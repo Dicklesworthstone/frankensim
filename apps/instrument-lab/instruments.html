@@ -16,6 +16,20 @@
   </header>
 
   <main id="main">
+    <!-- Blind A/B pairs for the owner's one-change-at-a-time tests: only in a build whose data holds them (tools/build_blind_ab.py); hidden otherwise. -->
+    <section id="blind-ab">
+      <div class="wrap">
+        <header>
+          <div class="rule"></div>
+          <p class="eyebrow"><span class="tag offline">Your call</span> <span class="tag plain">Blind test</span></p>
+          <h2>Blind A/B: which is closer to the real instrument?</h2>
+          <p class="lede">Each pair is two renders that differ in one thing and are played here as X and Y, in an order drawn at random in your browser. Listen to both and to the real recording, then say which is closer and whether either sounds like the real instrument. Only after you record your answer does the page say which was which and what differed. An answer scores nothing; it tells us which physics matters.</p>
+          <p class="small muted" style="margin-top: 14px">Your answers stay in this browser, in the same notes as everything else on this page; “Copy all my notes” puts them on the clipboard so you can send them back.</p>
+        </header>
+        <div id="blind-ab-root" class="ir-root" style="min-height: 240px"></div>
+      </div>
+    </section>
+
     <!-- Reference candidates for the owner to confirm: only in a build whose data holds them (tools/build_candidates.py); hidden otherwise. -->
     <section id="candidates">
       <div class="wrap">
