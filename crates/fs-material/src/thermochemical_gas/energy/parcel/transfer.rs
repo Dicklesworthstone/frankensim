@@ -16,6 +16,8 @@
 pub mod nozzle;
 /// Shared-snapshot multi-inlet/outlet transfer with one reconstruction per volume.
 pub mod snapshot;
+/// Selective counterflow with individual species enthalpy and inventory conservation.
+pub mod species;
 
 use std::collections::BTreeMap;
 use super::ClosedGasParcel;
