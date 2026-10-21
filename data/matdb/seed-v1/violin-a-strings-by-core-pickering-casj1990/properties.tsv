@@ -1,0 +1,79 @@
+frankensim.matdb-source.v1
+observation	pick90-steel-nickel	Violin A string, Steel core, nickel winding; the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-steel-nickel	pick90-steel-nickel	diameter_steel_nickel	0.000488	m	constant
+uncertainty	diameter-steel-nickel	unstated	-	-	-	-
+validity	diameter-steel-nickel	temperature_known	0	0	1
+scalar	diameter-printed-inch-steel-nickel	pick90-steel-nickel	diameter_printed_in_inches_steel_nickel	0.0192	1	constant
+uncertainty	diameter-printed-inch-steel-nickel	unstated	-	-	-	-
+validity	diameter-printed-inch-steel-nickel	temperature_known	0	0	1
+scalar	tension-steel-nickel	pick90-steel-nickel	tension_steel_nickel	77.8	N	constant
+uncertainty	tension-steel-nickel	unstated	-	-	-	-
+validity	tension-steel-nickel	temperature_known	0	0	1
+scalar	tension-printed-pounds-steel-nickel	pick90-steel-nickel	tension_printed_in_pounds_force_steel_nickel	17.5	1	constant
+uncertainty	tension-printed-pounds-steel-nickel	unstated	-	-	-	-
+validity	tension-printed-pounds-steel-nickel	temperature_known	0	0	1
+observation	pick90-steel-aluminum	Violin A string, Steel core, aluminium winding; the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-steel-aluminum	pick90-steel-aluminum	diameter_steel_aluminum	0.000485	m	constant
+uncertainty	diameter-steel-aluminum	unstated	-	-	-	-
+validity	diameter-steel-aluminum	temperature_known	0	0	1
+scalar	diameter-printed-inch-steel-aluminum	pick90-steel-aluminum	diameter_printed_in_inches_steel_aluminum	0.0191	1	constant
+uncertainty	diameter-printed-inch-steel-aluminum	unstated	-	-	-	-
+validity	diameter-printed-inch-steel-aluminum	temperature_known	0	0	1
+scalar	tension-steel-aluminum	pick90-steel-aluminum	tension_steel_aluminum	58.3	N	constant
+uncertainty	tension-steel-aluminum	unstated	-	-	-	-
+validity	tension-steel-aluminum	temperature_known	0	0	1
+scalar	tension-printed-pounds-steel-aluminum	pick90-steel-aluminum	tension_printed_in_pounds_force_steel_aluminum	13.1	1	constant
+uncertainty	tension-printed-pounds-steel-aluminum	unstated	-	-	-	-
+validity	tension-printed-pounds-steel-aluminum	temperature_known	0	0	1
+observation	pick90-perlon-aluminum-heavy	Violin A string, Perlon core, aluminium winding (the Tables III and IV headings call the 12.7 lb string a Pro-Arte Perlon/aluminum violin A string); the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-perlon-aluminum-heavy	pick90-perlon-aluminum-heavy	diameter_perlon_aluminum_heavy	0.000683	m	constant
+uncertainty	diameter-perlon-aluminum-heavy	unstated	-	-	-	-
+validity	diameter-perlon-aluminum-heavy	temperature_known	0	0	1
+scalar	diameter-printed-inch-perlon-aluminum-heavy	pick90-perlon-aluminum-heavy	diameter_printed_in_inches_perlon_aluminum_heavy	0.0269	1	constant
+uncertainty	diameter-printed-inch-perlon-aluminum-heavy	unstated	-	-	-	-
+validity	diameter-printed-inch-perlon-aluminum-heavy	temperature_known	0	0	1
+scalar	tension-perlon-aluminum-heavy	pick90-perlon-aluminum-heavy	tension_perlon_aluminum_heavy	56.5	N	constant
+uncertainty	tension-perlon-aluminum-heavy	unstated	-	-	-	-
+validity	tension-perlon-aluminum-heavy	temperature_known	0	0	1
+scalar	tension-printed-pounds-perlon-aluminum-heavy	pick90-perlon-aluminum-heavy	tension_printed_in_pounds_force_perlon_aluminum_heavy	12.7	1	constant
+uncertainty	tension-printed-pounds-perlon-aluminum-heavy	unstated	-	-	-	-
+validity	tension-printed-pounds-perlon-aluminum-heavy	temperature_known	0	0	1
+observation	pick90-perlon-aluminum-light	Violin A string, Perlon core, aluminium winding (heading: Pro-Arte Perlon/aluminum violin A string, 9.1 lb); the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-perlon-aluminum-light	pick90-perlon-aluminum-light	diameter_perlon_aluminum_light	0.000615	m	constant
+uncertainty	diameter-perlon-aluminum-light	unstated	-	-	-	-
+validity	diameter-perlon-aluminum-light	temperature_known	0	0	1
+scalar	diameter-printed-inch-perlon-aluminum-light	pick90-perlon-aluminum-light	diameter_printed_in_inches_perlon_aluminum_light	0.0242	1	constant
+uncertainty	diameter-printed-inch-perlon-aluminum-light	unstated	-	-	-	-
+validity	diameter-printed-inch-perlon-aluminum-light	temperature_known	0	0	1
+scalar	tension-perlon-aluminum-light	pick90-perlon-aluminum-light	tension_perlon_aluminum_light	40.5	N	constant
+uncertainty	tension-perlon-aluminum-light	unstated	-	-	-	-
+validity	tension-perlon-aluminum-light	temperature_known	0	0	1
+scalar	tension-printed-pounds-perlon-aluminum-light	pick90-perlon-aluminum-light	tension_printed_in_pounds_force_perlon_aluminum_light	9.1	1	constant
+uncertainty	tension-printed-pounds-perlon-aluminum-light	unstated	-	-	-	-
+validity	tension-printed-pounds-perlon-aluminum-light	temperature_known	0	0	1
+observation	pick90-gut-aluminum-heavy	Violin A string, Gut core, aluminium winding; the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-gut-aluminum-heavy	pick90-gut-aluminum-heavy	diameter_gut_aluminum_heavy	0.000724	m	constant
+uncertainty	diameter-gut-aluminum-heavy	unstated	-	-	-	-
+validity	diameter-gut-aluminum-heavy	temperature_known	0	0	1
+scalar	diameter-printed-inch-gut-aluminum-heavy	pick90-gut-aluminum-heavy	diameter_printed_in_inches_gut_aluminum_heavy	0.0285	1	constant
+uncertainty	diameter-printed-inch-gut-aluminum-heavy	unstated	-	-	-	-
+validity	diameter-printed-inch-gut-aluminum-heavy	temperature_known	0	0	1
+scalar	tension-gut-aluminum-heavy	pick90-gut-aluminum-heavy	tension_gut_aluminum_heavy	61.8	N	constant
+uncertainty	tension-gut-aluminum-heavy	unstated	-	-	-	-
+validity	tension-gut-aluminum-heavy	temperature_known	0	0	1
+scalar	tension-printed-pounds-gut-aluminum-heavy	pick90-gut-aluminum-heavy	tension_printed_in_pounds_force_gut_aluminum_heavy	13.9	1	constant
+uncertainty	tension-printed-pounds-gut-aluminum-heavy	unstated	-	-	-	-
+validity	tension-printed-pounds-gut-aluminum-heavy	temperature_known	0	0	1
+observation	pick90-gut-aluminum-light	Violin A string, Gut core, aluminium winding; the six strings of the study, two tensions ('gauges', heavy and light) for the Perlon and gut cores	Bowed by a computer-controlled machine at two combinations of bow velocity and pressure on a rigid bar with two stationary bridges 328 mm apart; amplitude by an optical sensor at 1/41 of the active length; the diameter, tension in pounds and in newtons are as the table prints them	The table prints the tension at which each string was tuned (A 440 Hz); brand, humidity and temperature are not stated for the steel and gut strings; the partial-level spectra against bow pressure of Tables I-IV (relative dB levels of 20 partials) are measurements of the bowed strings and are not transcribed here
+scalar	diameter-gut-aluminum-light	pick90-gut-aluminum-light	diameter_gut_aluminum_light	0.000635	m	constant
+uncertainty	diameter-gut-aluminum-light	unstated	-	-	-	-
+validity	diameter-gut-aluminum-light	temperature_known	0	0	1
+scalar	diameter-printed-inch-gut-aluminum-light	pick90-gut-aluminum-light	diameter_printed_in_inches_gut_aluminum_light	0.025	1	constant
+uncertainty	diameter-printed-inch-gut-aluminum-light	unstated	-	-	-	-
+validity	diameter-printed-inch-gut-aluminum-light	temperature_known	0	0	1
+scalar	tension-gut-aluminum-light	pick90-gut-aluminum-light	tension_gut_aluminum_light	43.1	N	constant
+uncertainty	tension-gut-aluminum-light	unstated	-	-	-	-
+validity	tension-gut-aluminum-light	temperature_known	0	0	1
+scalar	tension-printed-pounds-gut-aluminum-light	pick90-gut-aluminum-light	tension_printed_in_pounds_force_gut_aluminum_light	9.7	1	constant
+uncertainty	tension-printed-pounds-gut-aluminum-light	unstated	-	-	-	-
+validity	tension-printed-pounds-gut-aluminum-light	temperature_known	0	0	1
