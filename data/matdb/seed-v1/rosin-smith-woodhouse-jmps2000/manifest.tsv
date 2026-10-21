@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	rosin-smith-woodhouse-jmps2000
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Smith J.H., Woodhouse J. (2000), The tribology of rosin, Journal of the Mechanics and Physics of Solids 48:1633-1681; Table 1, Section 4.1 and Eq. (3) (pp. 1649-1651) read on the publisher's PDF as hosted by the author's group
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

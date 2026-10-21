@@ -1,0 +1,103 @@
+frankensim.matdb-source.v1
+observation	pw98-static	Single bow-hair (horse hair) samples of the authors; hair origin, humidity and temperature are not stated	Static tensile tests: the stress-strain relation was linear over a large range in stress, well beyond actual bowing; breaking strain 0.2, about 30 % elastic and 70 % plastic deformation	The page prints E_H = 7 +- 0.5 GPa; the confidence of the +- is not stated, so the half-width is kept as its own scalar and the claim uncertainty is unstated
+observation	pw98-dynamic	Bow-hair of length 0.03 to 0.6 m with attached masses of 11 to 62 g, hung vertically and impulsively excited (accelerometer on the mass); "fresh" and "old" parts of a hair and entire hairs; humidity and temperature not stated	Vibrating-mass tests over roughly 10 to 100 Hz: the eigenfrequency gives the real part and the decay rate the imaginary part of the Young's modulus; exponential time decay was verified; aerodynamic damping is negligible; the values rise at lower frequency; old growth is less elastic than fresh	The page prints E_H = 9 +- 1.5 GPa and states the hair diameter (+-5 %) and eigenfrequency (+-2.5 %) errors can change these results by +-15 %; the loss factor is "of the order of" 0.02 to 0.05 and rises with frequency, especially for the longer samples; the decay rate ran 1 to 14 per second
+observation	pw98-density-speed	Bow-hair density by submerging an accurately weighed bundle of hair in a volumetric flask filled with water and weighing the flask (air bubbles removed with ultrasound); longitudinal wave speed from Schumacher (the page cites [18], not a measurement of this paper)	Water displacement for the density; for the speed, time of flight of impulses and normal modes up to 10 kHz on single hairs (Schumacher)	The page prints rho_H of about 1100 kg/m^3 and c_H = 2500 m/s +- 3 % (Schumacher), and E_H = c_H^2 rho_H of about 7 GPa
+observation	pw98-ribbon	Commercial ready-made bow-hair hanks; the ribbon of a violin bow has roughly 200 hairs of which no more than 50 touch the string at once; an individual hair is 0.16 to 0.25 mm in diameter; a ribbon is roughly four layers thick	Table I (p. 549): the ribbon mass M_H comes from commercial hanks and takes account that the original hank is longer than the bow-hair length l_H; the violin hair count n0 = 200 is an estimate from the hank mass, the bow-hair density and diameter; the viola, cello and bass counts are derived by comparison with the violin M_H and l_H	Counts are estimates; the +- of the hair diameter and the percentage ranges are as printed
+scalar	young-modulus-static	pw98-static	young_modulus_static	7000000000	Pa	constant
+uncertainty	young-modulus-static	unstated	-	-	-	-
+validity	young-modulus-static	frequency	0	0	Hz
+validity	young-modulus-static	relative_humidity_known	0	0	1
+scalar	young-modulus-static-printed-half-width	pw98-static	young_modulus_static_printed_half_width	500000000	Pa	constant
+uncertainty	young-modulus-static-printed-half-width	unstated	-	-	-	-
+validity	young-modulus-static-printed-half-width	frequency	0	0	Hz
+scalar	breaking-strain	pw98-static	breaking_strain	0.2	1	constant
+uncertainty	breaking-strain	unstated	-	-	-	-
+validity	breaking-strain	frequency	0	0	Hz
+scalar	young-modulus-dynamic	pw98-dynamic	young_modulus_dynamic	9000000000	Pa	constant
+uncertainty	young-modulus-dynamic	unstated	-	-	-	-
+validity	young-modulus-dynamic	frequency	10	100	Hz
+validity	young-modulus-dynamic	relative_humidity_known	0	0	1
+scalar	young-modulus-dynamic-printed-half-width	pw98-dynamic	young_modulus_dynamic_printed_half_width	1500000000	Pa	constant
+uncertainty	young-modulus-dynamic-printed-half-width	unstated	-	-	-	-
+validity	young-modulus-dynamic-printed-half-width	frequency	10	100	Hz
+scalar	young-modulus-dynamic-stated-relative-error	pw98-dynamic	young_modulus_dynamic_stated_relative_error	0.15	1	constant
+uncertainty	young-modulus-dynamic-stated-relative-error	unstated	-	-	-	-
+validity	young-modulus-dynamic-stated-relative-error	frequency	10	100	Hz
+scalar	loss-factor-printed-range-low	pw98-dynamic	loss_factor_printed_range_low	0.02	1	constant
+uncertainty	loss-factor-printed-range-low	unstated	-	-	-	-
+validity	loss-factor-printed-range-low	frequency	10	100	Hz
+scalar	loss-factor-printed-range-high	pw98-dynamic	loss_factor_printed_range_high	0.05	1	constant
+uncertainty	loss-factor-printed-range-high	unstated	-	-	-	-
+validity	loss-factor-printed-range-high	frequency	10	100	Hz
+scalar	decay-rate-printed-range-low	pw98-dynamic	exponential_decay_rate_printed_range_low	1	s^-1	constant
+uncertainty	decay-rate-printed-range-low	unstated	-	-	-	-
+validity	decay-rate-printed-range-low	frequency	10	100	Hz
+scalar	decay-rate-printed-range-high	pw98-dynamic	exponential_decay_rate_printed_range_high	14	s^-1	constant
+uncertainty	decay-rate-printed-range-high	unstated	-	-	-	-
+validity	decay-rate-printed-range-high	frequency	10	100	Hz
+scalar	density	pw98-density-speed	density	1100	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	relative_humidity_known	0	0	1
+scalar	longitudinal-wave-speed-schumacher	pw98-density-speed	longitudinal_wave_speed_quoted_from_schumacher	2500	m/s	constant
+uncertainty	longitudinal-wave-speed-schumacher	unstated	-	-	-	-
+validity	longitudinal-wave-speed-schumacher	frequency	0	10000	Hz
+scalar	longitudinal-wave-speed-schumacher-printed-relative-error	pw98-density-speed	longitudinal_wave_speed_quoted_relative_error	0.03	1	constant
+uncertainty	longitudinal-wave-speed-schumacher-printed-relative-error	unstated	-	-	-	-
+validity	longitudinal-wave-speed-schumacher-printed-relative-error	frequency	0	10000	Hz
+scalar	hair-diameter-printed-range-low	pw98-ribbon	hair_diameter_printed_range_low	0.00016	m	constant
+uncertainty	hair-diameter-printed-range-low	unstated	-	-	-	-
+validity	hair-diameter-printed-range-low	relative_humidity_known	0	0	1
+scalar	hair-diameter-printed-range-high	pw98-ribbon	hair_diameter_printed_range_high	0.00025	m	constant
+uncertainty	hair-diameter-printed-range-high	unstated	-	-	-	-
+validity	hair-diameter-printed-range-high	relative_humidity_known	0	0	1
+scalar	hairs-in-contact-at-most	pw98-ribbon	hairs_in_contact_with_string_at_most	50	1	constant
+uncertainty	hairs-in-contact-at-most	unstated	-	-	-	-
+validity	hairs-in-contact-at-most	relative_humidity_known	0	0	1
+scalar	violin-hair-count	pw98-ribbon	violin_bow_hair_count_estimate	200	1	constant
+uncertainty	violin-hair-count	unstated	-	-	-	-
+validity	violin-hair-count	relative_humidity_known	0	0	1
+scalar	viola-hair-count	pw98-ribbon	viola_bow_hair_count_estimate	230	1	constant
+uncertainty	viola-hair-count	unstated	-	-	-	-
+validity	viola-hair-count	relative_humidity_known	0	0	1
+scalar	cello-hair-count	pw98-ribbon	cello_bow_hair_count_estimate	290	1	constant
+uncertainty	cello-hair-count	unstated	-	-	-	-
+validity	cello-hair-count	relative_humidity_known	0	0	1
+scalar	bass-hair-count	pw98-ribbon	double_bass_bow_hair_count_estimate	400	1	constant
+uncertainty	bass-hair-count	unstated	-	-	-	-
+validity	bass-hair-count	relative_humidity_known	0	0	1
+scalar	violin-ribbon-mass	pw98-ribbon	violin_bow_hair_ribbon_mass	0.0045	kg	constant
+uncertainty	violin-ribbon-mass	unstated	-	-	-	-
+validity	violin-ribbon-mass	relative_humidity_known	0	0	1
+scalar	viola-ribbon-mass	pw98-ribbon	viola_bow_hair_ribbon_mass	0.0052	kg	constant
+uncertainty	viola-ribbon-mass	unstated	-	-	-	-
+validity	viola-ribbon-mass	relative_humidity_known	0	0	1
+scalar	cello-ribbon-mass	pw98-ribbon	cello_bow_hair_ribbon_mass	0.0062	kg	constant
+uncertainty	cello-ribbon-mass	unstated	-	-	-	-
+validity	cello-ribbon-mass	relative_humidity_known	0	0	1
+scalar	bass-ribbon-mass	pw98-ribbon	double_bass_bow_hair_ribbon_mass	0.0075	kg	constant
+uncertainty	bass-ribbon-mass	unstated	-	-	-	-
+validity	bass-ribbon-mass	relative_humidity_known	0	0	1
+scalar	violin-hair-length	pw98-ribbon	violin_bow_hair_length_frog_to_tip	0.65	m	constant
+uncertainty	violin-hair-length	unstated	-	-	-	-
+validity	violin-hair-length	relative_humidity_known	0	0	1
+scalar	viola-hair-length	pw98-ribbon	viola_bow_hair_length_frog_to_tip	0.65	m	constant
+uncertainty	viola-hair-length	unstated	-	-	-	-
+validity	viola-hair-length	relative_humidity_known	0	0	1
+scalar	cello-hair-length	pw98-ribbon	cello_bow_hair_length_frog_to_tip	0.61	m	constant
+uncertainty	cello-hair-length	unstated	-	-	-	-
+validity	cello-hair-length	relative_humidity_known	0	0	1
+scalar	bass-hair-length	pw98-ribbon	double_bass_bow_hair_length_frog_to_tip	0.53	m	constant
+uncertainty	bass-hair-length	unstated	-	-	-	-
+validity	bass-hair-length	relative_humidity_known	0	0	1
+scalar	violin-ribbon-width	pw98-ribbon	violin_bow_ribbon_width	0.010	m	constant
+uncertainty	violin-ribbon-width	unstated	-	-	-	-
+validity	violin-ribbon-width	relative_humidity_known	0	0	1
+scalar	viola-ribbon-width	pw98-ribbon	viola_bow_ribbon_width	0.010	m	constant
+uncertainty	viola-ribbon-width	unstated	-	-	-	-
+validity	viola-ribbon-width	relative_humidity_known	0	0	1
+scalar	cello-ribbon-width	pw98-ribbon	cello_bow_ribbon_width	0.013	m	constant
+uncertainty	cello-ribbon-width	unstated	-	-	-	-
+validity	cello-ribbon-width	relative_humidity_known	0	0	1
+scalar	bass-ribbon-width	pw98-ribbon	double_bass_bow_ribbon_width	0.016	m	constant
+uncertainty	bass-ribbon-width	unstated	-	-	-	-
+validity	bass-ribbon-width	relative_humidity_known	0	0	1

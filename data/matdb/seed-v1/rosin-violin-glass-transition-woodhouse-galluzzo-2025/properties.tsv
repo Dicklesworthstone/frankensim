@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	wg2025-violin-rosin-tg	The violin rosin on which the paper concentrates (brand and formulation not stated; the paper says different commercial formulations give different transition temperatures)	Calorimetry measurements "suggest a transition temperature around 50 C"; heating rate and calorimeter not stated in the sentence read	The paper's own rounded statement ("around"), a glass transition; the mechanical properties of rosin are expected to vary rapidly with temperature in a range straddling it; no uncertainty is stated
+scalar	glass-transition-temperature	wg2025-violin-rosin-tg	glass_transition_temperature_about	323.15	K	constant
+uncertainty	glass-transition-temperature	unstated	-	-	-	-
+validity	glass-transition-temperature	temperature_known	0	0	1

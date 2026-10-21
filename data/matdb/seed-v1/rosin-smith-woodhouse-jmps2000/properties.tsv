@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	sw2000-table-1	A sample of rosin (brand and grade not stated; the paper says various grades exist, from opaque black to transparent colourless, and that its chief constituent is abietic acid); Table 1 is headed "Material properties used in simulations"	Density: source not stated in the paper. Thermal conductivity and specific heat capacity: "taken from the measurements of Cobbold and Jackson (1992)"	Temperature not stated for Table 1 (a simulation input at ambient). The authors themselves say Cobbold and Jackson did not attribute very great accuracy to the diffusivity and so to the specific heat, that 250 J/kg/K "seems unexpectedly low", and that comparable materials such as paraffin wax are an order of magnitude higher; the pack keeps the printed value and this warning
+observation	sw2000-viscosity	Rosin layer 1.5 mm thick cast hot between two aluminium discs of 25 mm diameter in a Rheometrics RDS II rheometer; the rosin stayed firmly stuck to the discs so bulk properties were measured	Oscillatory shear at two frequencies, 1 rad/s and 100 rad/s, over 45 to 85 C: predominantly viscous (phase angle above 70 degrees), independent of strain amplitude when small enough not to heat the sample; viscosity fell by approximately four orders of magnitude over 45 to 85 C; 1 rad/s values are consistently higher than 100 rad/s values; the printed exponential law fits the 100 rad/s data	Eq. (3): eta = 3000 x 10^((50 - T)/10) Pa s with T the temperature in kelvin ABOVE AMBIENT (ambient taken as 20 C), for 319 to 353 K absolute; the fit is to the higher of the two testing frequencies; the 1 rad/s data are shown only as symbols in the paper's figure and are not in this pack; no uncertainty is stated
+observation	sw2000-softening	A small amount of rosin heated slowly (qualitative)	By about 60 C it is possible to make a visible indent with the point of a knife; the rosin softens progressively rather than melting at a defined temperature and is a thick and sticky liquid by about 75 C	The temperatures are the paper's own rounded statements ("about"), not measurements with an instrument; no glass transition temperature is printed in this paper
+scalar	density	sw2000-table-1	density	1010	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature_known	0	0	1
+scalar	thermal-conductivity	sw2000-table-1	thermal_conductivity	0.113	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature_known	0	0	1
+scalar	specific-heat-capacity	sw2000-table-1	specific_heat_capacity	250	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	temperature_known	0	0	1
+scalar	viscosity-law-prefactor	sw2000-viscosity	viscosity_law_prefactor	3000	Pa*s	constant
+uncertainty	viscosity-law-prefactor	unstated	-	-	-	-
+validity	viscosity-law-prefactor	T	318.15	358.15	K
+validity	viscosity-law-prefactor	omega	100	100	rad/s
+scalar	viscosity-law-reference-excess-temperature	sw2000-viscosity	viscosity_law_reference_excess_temperature	50	K	constant
+uncertainty	viscosity-law-reference-excess-temperature	unstated	-	-	-	-
+validity	viscosity-law-reference-excess-temperature	T	318.15	358.15	K
+validity	viscosity-law-reference-excess-temperature	omega	100	100	rad/s
+scalar	viscosity-law-decade-interval	sw2000-viscosity	viscosity_law_decade_temperature_interval	10	K	constant
+uncertainty	viscosity-law-decade-interval	unstated	-	-	-	-
+validity	viscosity-law-decade-interval	T	318.15	358.15	K
+validity	viscosity-law-decade-interval	omega	100	100	rad/s
+scalar	viscosity-law-ambient-temperature	sw2000-viscosity	viscosity_law_ambient_temperature	293.15	K	constant
+uncertainty	viscosity-law-ambient-temperature	unstated	-	-	-	-
+validity	viscosity-law-ambient-temperature	T	318.15	358.15	K
+validity	viscosity-law-ambient-temperature	omega	100	100	rad/s
+scalar	viscosity-decades-lost-45-to-85-c	sw2000-viscosity	viscosity_decades_lost_over_45_to_85_c_printed	4	1	constant
+uncertainty	viscosity-decades-lost-45-to-85-c	unstated	-	-	-	-
+validity	viscosity-decades-lost-45-to-85-c	T	318.15	358.15	K
+scalar	knife-indent-temperature	sw2000-softening	knife_indent_temperature_about	333.15	K	constant
+uncertainty	knife-indent-temperature	unstated	-	-	-	-
+validity	knife-indent-temperature	temperature_known	0	0	1
+scalar	thick-sticky-liquid-temperature	sw2000-softening	thick_sticky_liquid_temperature_about	348.15	K	constant
+uncertainty	thick-sticky-liquid-temperature	unstated	-	-	-	-
+validity	thick-sticky-liquid-temperature	temperature_known	0	0	1

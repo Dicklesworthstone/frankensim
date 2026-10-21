@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	euph96-tg	Two types of commercial rosin (brands not stated): a violin rosin and a type of double-bass rosin	Glass transition temperature measured with a differential scanning calorimeter (heating rate not stated); shear viscosity versus temperature with a rheometer; the two viscosity curves have very similar shapes separated along the temperature axis by approximately the difference of the two transition temperatures	The web page states 49 C for the violin rosin and 16 C for the bass rosin and notes that the bass rosin is already above its glass transition temperature at normal room temperature; no uncertainty is stated
+scalar	violin-rosin-glass-transition	euph96-tg	violin_rosin_glass_transition_temperature	322.15	K	constant
+uncertainty	violin-rosin-glass-transition	unstated	-	-	-	-
+validity	violin-rosin-glass-transition	temperature_known	0	0	1
+scalar	bass-rosin-glass-transition	euph96-tg	double_bass_rosin_glass_transition_temperature	289.15	K	constant
+uncertainty	bass-rosin-glass-transition	unstated	-	-	-	-
+validity	bass-rosin-glass-transition	temperature_known	0	0	1
