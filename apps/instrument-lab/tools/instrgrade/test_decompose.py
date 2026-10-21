@@ -344,6 +344,20 @@ class ContractTests(unittest.TestCase):
         base = root / "voice" / "Bb3"
         self.assertEqual(bi.validate_pair(json.loads((base / "pair.json").read_text()), "voice", "Bb3", base, {}), [])
 
+    def test_a_render_that_locks_onto_another_tone_is_refused_for_that_not_for_its_onset(self):
+        import json
+        root = self.tmp / "lock"
+        n = int(2.4 * SR)
+        tt = np.arange(n) / SR
+        x = 0.2 * np.sin(2 * np.pi * 1915.8 * tt) * np.clip(tt / 0.01, 0, 1)  # sounds at once, on the wrong tone
+        from instrgrade import write_wav
+        wav = self.tmp / "lock.wav"
+        write_wav(wav, x)
+        res = dc._batch_job((dict(family="syn", note="Bb3", dyn="mf", wav=str(wav), git_sha="q", observer="o", recipe="r.sh"), root))
+        self.assertFalse(res["ok"])
+        self.assertIn("NOT_THE_NAMED_NOTE", res["error"])
+        self.assertIn("NOT_THE_NAMED_NOTE", json.loads((root / "syn" / "Bb3" / "pair.json").read_text())["refused"]["reason"])
+
     def test_a_refused_render_batch_job_writes_the_record(self):
         import json
         root = self.tmp / "refbatch"

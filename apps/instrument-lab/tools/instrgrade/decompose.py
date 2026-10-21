@@ -890,15 +890,26 @@ def pick_entry(refs, family, note, dyn, art, contains=None):
     return sorted(cands, key=lambda e: e["file"])[0]
 
 
+def _labelled(signal, fn, *a, **k):
+    """Run an alignment and say WHICH signal it was when the onset check refuses."""
+    try:
+        return fn(*a, **k)
+    except OnsetMisaligned as e:
+        raise OnsetMisaligned(f"{e} [{signal}]") from None
+
+
 def run_pair(refs, c, root):
     ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"), c.get("ref_contains"))
-    ref_y, ref_info = refs.aligned(ref_e)
     cand_y = cand_info = ours_meta = None
-    if c.get("wav"):
+    if c.get("wav"):  # the render first: it is cheap, and a render that is not the note should be refused for that
         f0 = hz_of(ref_e["note"])
         raw = load(Path(c["wav"]))
-        cand_y, cand_info = align(raw, f0, render_floor(highpass(raw, f0), f0))
+        hp = highpass(raw, f0)
+        if ref_e["inst"] not in ("xylophone", "marimba"):
+            check_fundamental(hp, f0_comb(hp, f0, ref_e["kind"], 400.0), ref_e["kind"], "ours")
+        cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
+    ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
     return write_pair(root, c["family"], c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False))
 
 
