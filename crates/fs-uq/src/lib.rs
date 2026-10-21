@@ -28,6 +28,7 @@ pub mod product_execution;
 pub mod product_importance;
 pub mod product_lhs;
 pub mod product_mlmc;
+pub mod product_mlmc_allocation;
 pub mod product_pce;
 pub mod product_plan;
 pub mod product_qmc;
@@ -48,6 +49,9 @@ pub use product_importance::{
 };
 pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
 pub use product_mlmc::{MlmcEstimate, MlmcExecution, MlmcExecutionReport, MlmcLevelReport};
+pub use product_mlmc_allocation::{
+    allocate_mlmc, MlmcAllocation, MlmcAllocationError, MlmcAllocationPolicy,
+};
 pub use product_pce::{PceConfig, PceExecution, PceReport, PceSummary};
 pub use product_sensitivity::{SobolEffect, SobolEstimate, SobolExecution, SobolReport};
 pub use product_shapley::{ShapleyEffect, ShapleyEstimate, ShapleyExecution, ShapleyReport};
