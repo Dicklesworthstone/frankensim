@@ -23,8 +23,10 @@
 //! only on smooth branches. The existing symmetric single-coordinate image
 //! remains available and unchanged. Optional independent regional Maxwell laws
 //! use the same fs-material/fs-plate/fs-phs projection and update as the scalar
-//! plate valve. Material history participates in this same midpoint solve and
-//! publishes only with both blades and the connected acoustic network.
+//! plate valve. Material history participates in the selected linear block and
+//! publishes only with both blades and the connected acoustic network. The exact
+//! block integrates each blade's own Maxwell force, storage and dissipation; the
+//! pressure/contact forces are still held over a step and require time refinement.
 
 /// Spatial slit/contact coupled to the original independent blade mechanics.
 mod spatial;
@@ -73,8 +75,8 @@ pub enum BladePropagator {
     /// Exact zero-order-hold exponential of the mass/damping/stiffness block,
     /// with the step's contact, pressure and external forces held over the
     /// step. No frequency warping at any omega*dt; the nonlinear contact/
-    /// Bernoulli junction solve is unchanged. DynamicAperture carries Maxwell
-    /// arms inside this block; PairedAperture blade memory still refuses.
+    /// Bernoulli junction solve is unchanged. Each original blade's optional
+    /// Maxwell arms evolve inside its own block, without a split memory update.
     ExactZoh,
 }
 
@@ -92,13 +94,15 @@ pub(crate) struct ExactArm {
 /// `[omega x, v, F/(m omega), w_1..w_n, omega int v, omega^2 int x]` with
 /// `w_j = omega z_j / c_j` keeps every generator entry at omega*dt, c*dt/m,
 /// dt/tau or (k_j/k) omega*dt. The `int v` row gives the displacement
-/// increment directly, without subtracting nearly equal values.
+/// increment directly, without subtracting nearly equal values. With arms, one
+/// extra row integrates their restoring force divided by mass, avoiding an
+/// endpoint subtraction when reporting the step-mean material force.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExactBlade {
     omega: f64,
     mass: f64,
     arms: Vec<ExactArm>,
-    // Square exponential map, side 5 + arms.
+    // Square map, side 5 + arms plus one material-force integral when nonempty.
     map: Vec<f64>,
     // Exact c*int v^2 and arm int (c x - z)^2/tau over the step, as quadratic
     // forms on the leading 3 + arms (state and held force) coordinates.
@@ -130,7 +134,8 @@ impl ExactBlade {
         let omega = fs_math::det::sqrt(stiffness_n_m / mass);
         let (w, g) = (omega * dt, damping_n_s_m / mass * dt);
         let a = arms.len();
-        let (core, n) = (3 + a, 5 + a);
+        // Preserve the original no-memory matrix and its arithmetic exactly.
+        let (core, n) = (3 + a, 5 + a + usize::from(a != 0));
         let mut generator = vec![0.0; n * n];
         generator[1] = w;
         generator[n] = -w;
@@ -143,6 +148,10 @@ impl ExactBlade {
             generator[n + 3 + j] = beta;
             generator[(3 + j) * n] = rate;
             generator[(3 + j) * n + 3 + j] = -rate;
+            // dI/dt = sum(c*(c*x-z))/m. The stored scaled coordinates are
+            // omega*x and omega*z/c, so beta is the same momentum coefficient.
+            generator[(5 + a) * n] += beta;
+            generator[(5 + a) * n + 3 + j] = -beta;
         }
         generator[(3 + a) * n + 1] = w;
         generator[(4 + a) * n] = w;
@@ -188,7 +197,7 @@ impl ExactBlade {
         }
         Ok(Self { omega, mass, arms: arms.to_vec(), map, viscous, arm_loss })
     }
-    fn side(&self) -> usize { 5 + self.arms.len() }
+    fn side(&self) -> usize { 5 + self.arms.len() + usize::from(!self.arms.is_empty()) }
     // Leading state: scaled displacement, velocity, held force and arm memories.
     fn scaled(&self, state: BladeState, force_n: f64, memory: &[f64]) -> Vec<f64> {
         assert_eq!(memory.len(), self.arms.len(), "exact blade memory must name every arm");
@@ -227,6 +236,13 @@ impl ExactBlade {
     pub(crate) fn end_memory(&self, state: BladeState, held_n: f64, memory: &[f64]) -> Vec<f64> {
         let z = self.scaled(state, held_n, memory);
         self.arms.iter().enumerate().map(|(j, arm)| arm.coupling * self.row(3 + j, &z) / self.omega).collect()
+    }
+    /// Step-mean Maxwell restoring force [N], integrated in the same block.
+    /// This is not the endpoint or midpoint force and does not subtract nearly
+    /// equal end memories. Empty spectra preserve the no-memory arithmetic.
+    fn mean_memory_force_n(&self, state: BladeState, held_n: f64, dt: f64, memory: &[f64]) -> f64 {
+        if self.arms.is_empty() { return 0.0; }
+        self.mass / dt * self.row(5 + self.arms.len(), &self.scaled(state, held_n, memory))
     }
     /// Exact arm dissipation over the step [J].
     pub(crate) fn arm_loss_j(&self, state: BladeState, held_n: f64, memory: &[f64]) -> f64 {
@@ -389,6 +405,20 @@ impl PairedAperture {
         limits: PairedApertureLimits, states: [BladeState; 2], contact: Obstacle)
         -> Result<Self, AcousticRealizeError>
     {
+        Self::from_plates_with_propagator(plates, gas, impedance_pa_s_m3, time_step_s,
+            max_steps, limits, states, contact, BladePropagator::Midpoint)
+    }
+
+    /// Retain both source plates with an explicitly chosen structural propagator.
+    /// Exact propagation carries each attached material spectrum inside its own
+    /// block; it does not remove the source band, time-resolution, geometry or
+    /// nonlinear junction limits. No plate reduction or material law is replaced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_plates_with_propagator(plates: [PlateApertureReduction; 2], gas: GasState,
+        impedance_pa_s_m3: f64, time_step_s: f64, max_steps: u64,
+        limits: PairedApertureLimits, states: [BladeState; 2], contact: Obstacle,
+        propagator: BladePropagator) -> Result<Self, AcousticRealizeError>
+    {
         gas.validate_coherence().map_err(|_| invalid("paired aperture requires one coherent source gas"))?;
         let h = plates[0].options().rest_opening_m;
         let width = plates[0].width_m();
@@ -406,7 +436,7 @@ impl PairedAperture {
         let spec = PairedApertureSpec { rest_opening_m: h, width_m: width,
             blades: [blade(&plates[0]), blade(&plates[1])], density_kg_m3: gas.density,
             impedance_pa_s_m3, time_step_s, max_steps, limits };
-        let mut model = Self::new(spec, states, contact)?;
+        let mut model = Self::new_with_propagator(spec, states, contact, propagator)?;
         model.plates = Some(Box::new(plates));
         model.gas = Some(gas);
         model.validate_state(states)?;
@@ -473,13 +503,15 @@ impl PairedAperture {
             || self.spec.blades[blade].damping_n_s_m!=0.0 {
             return Err(invalid("blade relaxation requires a valid cold blade, one attachment and zero separate damping"));
         }
-        if self.exact.is_some() {
-            return Err(invalid("material memory is not part of the exact blade block; it requires the Midpoint propagator"));
-        }
         let plate=self.plates.as_ref().ok_or_else(||invalid("blade relaxation requires its original physical plate"))?;
         let memory=ApertureRelaxation::from_plate(&plate[blade],self.spec.time_step_s,
             self.blades[blade].displacement_m,spec,initial)?;
         self.validate_energy(self.stored_energy_j()+memory.stored_energy_j())?;
+        if let Some(exact) = &mut self.exact {
+            let b = self.spec.blades[blade];
+            exact[blade] = ExactBlade::with_arms(b.mass_kg, b.damping_n_s_m,
+                b.stiffness_n_m, &memory.exact_arms()?, self.spec.time_step_s)?;
+        }
         self.relaxation[blade]=Some(memory);
         Ok(self)
     }
@@ -611,11 +643,13 @@ impl PairedAperture {
         let contact = ApertureContactStep::new(&self.contact, gap).map_err(nonlinear)?;
         let mut free = [0.0; 2];
         let mut mobility = [0.0; 2];
+        let arm_memory: [&[f64]; 2] = std::array::from_fn(|i|
+            self.relaxation[i].as_ref().map_or(&[][..], ApertureRelaxation::memory_sqrt_j));
         for i in 0..2 {
             if let Some(exact) = &self.exact {
                 // Exact held-force map: the mean velocity dx/dt stays affine in the
                 // step's force, so the junction solve below is unchanged.
-                (free[i], mobility[i]) = exact[i].free_and_mobility(old[i], forces[i], dt, &[]);
+                (free[i], mobility[i]) = exact[i].free_and_mobility(old[i], forces[i], dt, arm_memory[i]);
                 if !free[i].is_finite() || !mobility[i].is_finite() || mobility[i] <= 0.0 {
                     return Err(invalid("paired blade exact response is not representable"));
                 }
@@ -716,7 +750,7 @@ impl PairedAperture {
         let next: [BladeState; 2] = std::array::from_fn(|i| BladeState {
             displacement_m: after[i],
             velocity_m_s: match &self.exact {
-                Some(exact) => exact[i].end_velocity(old[i], held[i], &[]),
+                Some(exact) => exact[i].end_velocity(old[i], held[i], arm_memory[i]),
                 None => 2.0*trial.velocity[i]-old[i].velocity_m_s,
             },
         });
@@ -747,7 +781,13 @@ impl PairedAperture {
         let (mut memory_energy, mut memory_loss) = (0.0, 0.0);
         for i in 0..2 {
             if let Some(material) = &self.relaxation[i] {
-                let result = material.preview(old[i].displacement_m, next[i].displacement_m, dt)?;
+                let result = match &self.exact {
+                    Some(exact) => material.exact_trial(
+                        exact[i].end_memory(old[i], held[i], arm_memory[i]),
+                        next[i].displacement_m,
+                        exact[i].arm_loss_j(old[i], held[i], arm_memory[i]))?,
+                    None => material.preview(old[i].displacement_m, next[i].displacement_m, dt)?,
+                };
                 memory_energy += result.energy;
                 memory_loss += result.loss;
                 memory[i] = Some(result);
@@ -765,7 +805,8 @@ impl PairedAperture {
             dissipated_energy_j: match &self.exact {
                 // The exact blocks integrate c*v^2 along their own trajectories.
                 Some(exact) => dt*(trial.dp*jet+contact_loss)+memory_loss
-                    + exact[0].viscous_loss_j(old[0], held[0], &[]) + exact[1].viscous_loss_j(old[1], held[1], &[]),
+                    + exact[0].viscous_loss_j(old[0], held[0], arm_memory[0])
+                    + exact[1].viscous_loss_j(old[1], held[1], arm_memory[1]),
                 None => dt*(trial.dp*jet+viscous+contact_loss)+memory_loss,
             },
             pressure_work_j: dt*trial.dp*(wave-drive.body_flow_m3_s), mechanical_work_j: mechanical,
@@ -775,14 +816,17 @@ impl PairedAperture {
         for i in 0..2 {
             // Step-mean displacement: exact time average, or the midpoint value.
             let mean_x = match &self.exact {
-                Some(exact) => exact[i].mean_displacement(old[i], held[i], dt, &[]),
+                Some(exact) => exact[i].mean_displacement(old[i], held[i], dt, arm_memory[i]),
                 None => f64::midpoint(old[i].displacement_m,next[i].displacement_m),
             };
             momentum[i] = b[i].mass_kg*(next[i].velocity_m_s-old[i].velocity_m_s)/dt
                 + b[i].stiffness_n_m*mean_x
                 + b[i].damping_n_s_m*trial.velocity[i]+b[i].pressure_area_m2*trial.dp-contact_forces[i]-forces[i];
             if let Some(material) = &self.relaxation[i] {
-                momentum[i] += material.restoring_force(old[i].displacement_m, next[i].displacement_m, dt)?;
+                momentum[i] += match &self.exact {
+                    Some(exact) => exact[i].mean_memory_force_n(old[i], held[i], dt, arm_memory[i]),
+                    None => material.restoring_force(old[i].displacement_m, next[i].displacement_m, dt)?,
+                };
             }
         }
         let flow_scale = jet.abs()+swept.abs()+drive.body_flow_m3_s.abs()+wave.abs();
@@ -833,3 +877,6 @@ mod relaxation_tests;
 
 #[cfg(test)]
 mod spatial_tests;
+
+#[cfg(test)]
+mod exact_memory_tests;
