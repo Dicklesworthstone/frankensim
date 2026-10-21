@@ -1,0 +1,36 @@
+frankensim.matdb-source.v1
+observation	spycher-a	Sycamore maple (Acer pseudoplatanus) heartwood, resonance wood sample A (graded 'good', strongly curled, from Bosnia)	Flexural resonance of free bars (Timoshenko/Goens solution) with an ASSUMED shear modulus (1000 MPa parallel, 10 percent of that perpendicular; the paper states a 20 percent change in G moves E by less than 0.5 percent); axial bars 3 T x 25 R x 150 L mm, radial bars 3 T x 25 L x 100 R mm, 20 of each per sample; conditioned at 23 C and 50 % RH, moisture content 10.5 +/- 0.5 %	Table 3 prints absolute values +/- SD (entered as one standard deviation at 0.68 by the pack author); the density column is printed once per sample; no E_T, G or Poisson ratio is measured; specimen provenance per Table 5
+scalar	density-a	spycher-a	density	579	kg/m3	constant
+uncertainty	density-a	absolute	17	kg/m3	0.68	1
+validity	density-a	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-longitudinal-a	spycher-a	dynamic_young_modulus_longitudinal	7315	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal-a	absolute	1363	MPa	0.68	1
+validity	dynamic-young-modulus-longitudinal-a	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-radial-a	spycher-a	dynamic_young_modulus_radial	1050	MPa	constant
+uncertainty	dynamic-young-modulus-radial-a	absolute	51	MPa	0.68	1
+validity	dynamic-young-modulus-radial-a	moisture_content	10.5	10.5	%
+observation	spycher-b	Sycamore maple (Acer pseudoplatanus) heartwood, resonance wood sample B (graded 'very good', slightly curled, Mittenwald, Germany)	Flexural resonance of free bars (Timoshenko/Goens solution) with an ASSUMED shear modulus (1000 MPa parallel, 10 percent of that perpendicular; the paper states a 20 percent change in G moves E by less than 0.5 percent); axial bars 3 T x 25 R x 150 L mm, radial bars 3 T x 25 L x 100 R mm, 20 of each per sample; conditioned at 23 C and 50 % RH, moisture content 10.5 +/- 0.5 %	Table 3 prints absolute values +/- SD (entered as one standard deviation at 0.68 by the pack author); the density column is printed once per sample; no E_T, G or Poisson ratio is measured; specimen provenance per Table 5
+scalar	density-b	spycher-b	density	625	kg/m3	constant
+uncertainty	density-b	absolute	22	kg/m3	0.68	1
+validity	density-b	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-longitudinal-b	spycher-b	dynamic_young_modulus_longitudinal	9707	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal-b	absolute	1345	MPa	0.68	1
+validity	dynamic-young-modulus-longitudinal-b	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-radial-b	spycher-b	dynamic_young_modulus_radial	1703	MPa	constant
+uncertainty	dynamic-young-modulus-radial-b	absolute	236	MPa	0.68	1
+validity	dynamic-young-modulus-radial-b	moisture_content	10.5	10.5	%
+observation	spycher-control	Sycamore maple (Acer pseudoplatanus) heartwood, control (normal) wood of unknown provenance, no curly figure	Flexural resonance of free bars (Timoshenko/Goens solution) with an ASSUMED shear modulus (1000 MPa parallel, 10 percent of that perpendicular; the paper states a 20 percent change in G moves E by less than 0.5 percent); axial bars 3 T x 25 R x 150 L mm, radial bars 3 T x 25 L x 100 R mm, 20 of each per sample; conditioned at 23 C and 50 % RH, moisture content 10.5 +/- 0.5 %	Table 3 prints absolute values +/- SD (entered as one standard deviation at 0.68 by the pack author); the density column is printed once per sample; no E_T, G or Poisson ratio is measured; specimen provenance per Table 5
+scalar	density-control	spycher-control	density	569	kg/m3	constant
+uncertainty	density-control	absolute	15	kg/m3	0.68	1
+validity	density-control	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-longitudinal-control	spycher-control	dynamic_young_modulus_longitudinal	9974	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal-control	absolute	769	MPa	0.68	1
+validity	dynamic-young-modulus-longitudinal-control	moisture_content	10.5	10.5	%
+scalar	dynamic-young-modulus-radial-control	spycher-control	dynamic_young_modulus_radial	1645	MPa	constant
+uncertainty	dynamic-young-modulus-radial-control	absolute	66	MPa	0.68	1
+validity	dynamic-young-modulus-radial-control	moisture_content	10.5	10.5	%
+observation	spycher-damping	Sycamore maple axial bars of the same study (which samples are averaged is not stated)	Damping factor d = pi * delta f / f_r from the half-power bandwidth (Eq. 4, p. 332); value printed in the text p. 335	Loss factor = d / pi = 0.043 / pi, derived by the pack author; frequency 540 Hz as printed; no dispersion printed
+scalar	loss-factor-longitudinal	spycher-damping	loss_factor_longitudinal	0.013687	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	frequency	540	540	Hz
+validity	loss-factor-longitudinal	moisture_content	10.5	10.5	%

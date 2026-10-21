@@ -1,0 +1,41 @@
+frankensim.matdb-source.v1
+observation	barros-sample-1	Dalbergia nigra sample 1, 50 x 5 x 5 mm with the fibres along the length	DMA 242 (Netzsch) three-point bending, storage modulus along the grain and tan delta; values taken at 0.025 Hz after 55 min and at 50 Hz after 60 min of test (Tables 1 and 2)	Density printed 1.12(3) g/cm3 (last digit uncertain, no confidence stated). Moisture was NOT controlled: the authors report the modulus rising and tan delta falling during the tests, possibly by water loss, and call comparison with other work inaccurate. These densities are far above every other D. nigra report found (0.81-0.86); test temperature for the timed columns is not printed
+scalar	density-1	barros-sample-1	density	1120	kg/m3	constant
+uncertainty	density-1	unstated	-	-	-	-
+validity	density-1	moisture_content_known	0	0	1
+scalar	storage-modulus-longitudinal-0p025hz-1	barros-sample-1	storage_young_modulus_longitudinal	16004.9	MPa	constant
+uncertainty	storage-modulus-longitudinal-0p025hz-1	unstated	-	-	-	-
+validity	storage-modulus-longitudinal-0p025hz-1	frequency	0.025	0.025	Hz
+validity	storage-modulus-longitudinal-0p025hz-1	moisture_content_known	0	0	1
+scalar	tan-delta-longitudinal-0p025hz-1	barros-sample-1	loss_factor_longitudinal	0.05445	1	constant
+uncertainty	tan-delta-longitudinal-0p025hz-1	unstated	-	-	-	-
+validity	tan-delta-longitudinal-0p025hz-1	frequency	0.025	0.025	Hz
+validity	tan-delta-longitudinal-0p025hz-1	moisture_content_known	0	0	1
+scalar	storage-modulus-longitudinal-50hz-1	barros-sample-1	storage_young_modulus_longitudinal	17551.0	MPa	constant
+uncertainty	storage-modulus-longitudinal-50hz-1	unstated	-	-	-	-
+validity	storage-modulus-longitudinal-50hz-1	frequency	50	50	Hz
+validity	storage-modulus-longitudinal-50hz-1	moisture_content_known	0	0	1
+scalar	tan-delta-longitudinal-50hz-1	barros-sample-1	loss_factor_longitudinal	0.02022	1	constant
+uncertainty	tan-delta-longitudinal-50hz-1	unstated	-	-	-	-
+validity	tan-delta-longitudinal-50hz-1	frequency	50	50	Hz
+validity	tan-delta-longitudinal-50hz-1	moisture_content_known	0	0	1
+observation	barros-sample-2	Dalbergia nigra sample 2, 50 x 5 x 5 mm with the fibres along the length	DMA 242 (Netzsch) three-point bending, storage modulus along the grain and tan delta; values taken at 0.025 Hz after 55 min and at 50 Hz after 60 min of test (Tables 1 and 2)	Density printed 1.16(3) g/cm3 (last digit uncertain, no confidence stated). Moisture was NOT controlled: the authors report the modulus rising and tan delta falling during the tests, possibly by water loss, and call comparison with other work inaccurate. These densities are far above every other D. nigra report found (0.81-0.86); test temperature for the timed columns is not printed
+scalar	density-2	barros-sample-2	density	1160	kg/m3	constant
+uncertainty	density-2	unstated	-	-	-	-
+validity	density-2	moisture_content_known	0	0	1
+scalar	storage-modulus-longitudinal-0p025hz-2	barros-sample-2	storage_young_modulus_longitudinal	16585.7	MPa	constant
+uncertainty	storage-modulus-longitudinal-0p025hz-2	unstated	-	-	-	-
+validity	storage-modulus-longitudinal-0p025hz-2	frequency	0.025	0.025	Hz
+validity	storage-modulus-longitudinal-0p025hz-2	moisture_content_known	0	0	1
+scalar	tan-delta-longitudinal-0p025hz-2	barros-sample-2	loss_factor_longitudinal	0.05676	1	constant
+uncertainty	tan-delta-longitudinal-0p025hz-2	unstated	-	-	-	-
+validity	tan-delta-longitudinal-0p025hz-2	frequency	0.025	0.025	Hz
+validity	tan-delta-longitudinal-0p025hz-2	moisture_content_known	0	0	1
+scalar	storage-modulus-longitudinal-50hz-2	barros-sample-2	storage_young_modulus_longitudinal	18094.1	MPa	constant
+uncertainty	storage-modulus-longitudinal-50hz-2	unstated	-	-	-	-
+validity	storage-modulus-longitudinal-50hz-2	frequency	50	50	Hz
+validity	storage-modulus-longitudinal-50hz-2	moisture_content_known	0	0	1
+scalar	tan-delta-longitudinal-50hz-2	barros-sample-2	loss_factor_longitudinal	0.01882	1	constant
+uncertainty	tan-delta-longitudinal-50hz-2	unstated	-	-	-	-
+validity	tan-delta-longitudinal-50hz-2	frequency	50	50	Hz
+validity	tan-delta-longitudinal-50hz-2	moisture_content_known	0	0	1

@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	bremaud2012-table3	Sycamore maple, Acer pseudoplatanus L., normal heartwood	Free-free first bending mode of 150 L x 12 R x 2 T mm beams (l/h = 75) in non-contact forced-released vibration; E'/gamma by Euler-Bernoulli (Eq. 1), tan delta by half-power bandwidth or logarithmic decrement; conditioned >= 3 weeks at 20 +/- 1 C and 60-65 % RH, equilibrium moisture content 6 to 12 % depending on species (per-species value not printed)	ONE specimen from one stock (Table 3 N = 1), so no CV is printed. Method uncertainty stated in Section 2.5.1: E'/gamma theoretical 5.9 % (thickness machining), repeatability < 1 %; tan delta average experimental error 3 % (bandwidth) or 2-5 % (decrement); no confidence level, so runtime uncertainty stays Unstated. dynamic_young_modulus_longitudinal = printed E'/gamma (GPa) x printed gamma, multiplied by the pack author. Same specimens as the author's 2006 thesis Tableau 10, which prints E'/rho 2 to 8 % lower; the papers do not explain the per-species difference. Longitudinal only
+scalar	specific-gravity	bremaud2012-table3	specific_gravity	0.64	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	6	12	%
+scalar	specific-dynamic-modulus-longitudinal	bremaud2012-table3	specific_dynamic_modulus_longitudinal_gpa	10.6	1	constant
+uncertainty	specific-dynamic-modulus-longitudinal	unstated	-	-	-	-
+validity	specific-dynamic-modulus-longitudinal	moisture_content	6	12	%
+scalar	dynamic-young-modulus-longitudinal	bremaud2012-table3	dynamic_young_modulus_longitudinal	6784.0	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal	unstated	-	-	-	-
+validity	dynamic-young-modulus-longitudinal	moisture_content	6	12	%
+scalar	loss-factor-longitudinal	bremaud2012-table3	loss_factor_longitudinal	0.0161	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	6	12	%

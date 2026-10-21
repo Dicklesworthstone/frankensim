@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	maple-sycamore-spycher2008
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Spycher M., Schwarze F.W.M.R., Steiger R. (2008), Assessment of resonance wood quality by comparing its physical and histological properties, Wood Science and Technology 42:325-342, doi:10.1007/s00226-007-0170-5; Table 3 (p. 328), Eq. 4 (p. 332) and the damping text p. 335, read on the publisher PDF as hosted by Empa DORA (https://www.dora.lib4ri.ch/empa/dload/empa:2081/PDF/view)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

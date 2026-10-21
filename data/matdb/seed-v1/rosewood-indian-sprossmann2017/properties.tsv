@@ -1,0 +1,17 @@
+frankensim.matdb-source.v1
+observation	spr-indian-rosewood	Indian rosewood (Dalbergia latifolia Roxb.) heartwood supplied by a classical-guitar manufacturer; 20 specimens 190 L x 28 R x 6.5 T mm	Conditioned and tested at 20 C / 65 % RH; experimental modal analysis of free-free bars: dynamic E' from the first bending mode (Timoshenko, Hearmon approximation, Eq. 1), dynamic G'_LR from the first torsion mode (Eq. 4), internal friction Q^-1 = delta f / f_R (half-power bandwidth, Eq. 5); static E by DIN 52186 three-point bending, span 150 mm; EMC against oven-dry mass at 80 C	Table 2 prints mean and CV (standard deviation / mean); absolute uncertainty = CV x mean, one specimen standard deviation entered at 0.68 by the pack author. The torsion G of an L-R plate-shaped bar is reported by the authors as the LR-plane modulus. No E_R, E_T, G_LT, G_RT or Poisson ratio is measured. Static E includes shear deflection (span/depth about 23)
+scalar	density	spr-indian-rosewood	density	793	kg/m3	constant
+uncertainty	density	absolute	47.58	kg/m3	0.68	1
+validity	density	moisture_content	7.7	7.7	%
+scalar	young-modulus-longitudinal-static-bending	spr-indian-rosewood	young_modulus_longitudinal_bending	13300	MPa	constant
+uncertainty	young-modulus-longitudinal-static-bending	absolute	2926	MPa	0.68	1
+validity	young-modulus-longitudinal-static-bending	moisture_content	7.7	7.7	%
+scalar	dynamic-young-modulus-longitudinal	spr-indian-rosewood	dynamic_young_modulus_longitudinal	13000	MPa	constant
+uncertainty	dynamic-young-modulus-longitudinal	absolute	2990	MPa	0.68	1
+validity	dynamic-young-modulus-longitudinal	moisture_content	7.7	7.7	%
+scalar	dynamic-shear-modulus-lr	spr-indian-rosewood	dynamic_shear_modulus_lr	1640	MPa	constant
+uncertainty	dynamic-shear-modulus-lr	absolute	196.8	MPa	0.68	1
+validity	dynamic-shear-modulus-lr	moisture_content	7.7	7.7	%
+scalar	loss-factor-longitudinal	spr-indian-rosewood	loss_factor_longitudinal	0.0096	1	constant
+uncertainty	loss-factor-longitudinal	absolute	0.001056	1	0.68	1
+validity	loss-factor-longitudinal	moisture_content	7.7	7.7	%

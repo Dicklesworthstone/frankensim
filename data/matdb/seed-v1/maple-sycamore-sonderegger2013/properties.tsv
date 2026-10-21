@@ -1,0 +1,107 @@
+frankensim.matdb-source.v1
+observation	sond-density	Sycamore maple (Acer pseudoplatanus L.), clear wood cut from logs of ONE tree of Eastern Switzerland; tested at the normal climate 20 C / 65 % RH (mean normal density 626 kg/m3 at a moisture content of about 12 %)	Gravimetric density at the normal climate and oven-dry (text p. 93, Section 2.1)	Specimen-set means printed without dispersion; the test groups of Table 3 print their own densities 590 to 690 kg/m3
+observation	sond-static	Sycamore maple (Acer pseudoplatanus L.), clear wood cut from logs of ONE tree of Eastern Switzerland; tested at the normal climate 20 C / 65 % RH (mean normal density 626 kg/m3 at a moisture content of about 12 %)	Static tension (tensile parallel per DIN 52187, perpendicular on 95 mm dog-bone specimens), compression (DIN 52185/52192, reduced 15 x 15 x 45 mm specimens) and bending (DIN 52186, 20 x 20 x 400 mm) on a Zwick Z010/Z100; strains by 2D video image correlation (Vic 2D); Table 3 p. 95, 15 to 19 specimens per row, group densities 630 (tension/bending) and 660 (compression) kg/m3	Printed V is the coefficient of variation of the specimens; the absolute uncertainty rows are V x mean (one specimen standard deviation, entered at 0.68 by the pack author), NOT an uncertainty of the mean. The authors attribute the high compression E_L to bimodularity. Static moduli are quasi-static: no frequency band is claimed. Axis convention per instrument-axis-convention.tsv
+observation	sond-ultrasonic	Same tree; 10 mm cubes, 36 to 42 specimens per climate; density of the cubes not printed	Ultrasound transit time with an Olympus Epoch XT: longitudinal waves 2.27 MHz (A133S transducer), E = rho c^2; transverse waves 1 MHz (Staveley S-0104), G = rho c^2 with G_ij and G_ji averaged (Eqs. 3 and 5); Table 4 p. 96, normal climate 20/65	NOT AUDIO-BAND: these are 2.27 MHz (E) and 1 MHz (G) ultrasonic moduli. The paper's text gives the shear ratio as LT:LR:RT = 4.5:2.9:1 while Table 4 prints G_LR 1680 > G_LT 1070 (4.6 and 2.9 times G_RT): the text and the table disagree on the LR/LT labels; the pack keeps Table 4. Ultrasonic E exceeds the static E by up to 2.5 times (the paper attributes this to specimen size, test frequency and neglect of lateral contraction); these are the ONLY shear moduli in the paper, so a consumer combining them with static E or Poisson ratios is mixing methods and must say so. Table 4 also prints a linear moisture law MOE (or G) = A + B x (x = MC in %): E_L A 19100 B -160, E_R 3610 -58.1, E_T 2030 -24.2, G_LR 1720 -10.9 (R2 0.43), G_LT 1150 -7.69, G_RT 414 -4.68, all in MPa and MPa per %, over the 20/35 to 20/95 climates; the MC range of those climates is shown only in figures. Absolute uncertainty = printed V x mean (specimen scatter)
+observation	sond-poisson	Same tree; the tension and compression specimens of Table 3	Poisson ratios from transverse and longitudinal strains by video image correlation; Table 5 p. 97 at 20/65 for tension and compression, plus a mean of tension and compression over all climates	SUBSCRIPT ORDER CONVERTED: the paper defines mu_ij = eps_i / eps_j with i the transverse and j the loaded direction (Eq. 4), the reverse of FPL-GTR-282 Table 5-2. Printed RL -> nu_lr, TL -> nu_lt, TR -> nu_rt, LR -> nu_rl, RT -> nu_tr, LT -> nu_tl. Check: with the Table 3 tension moduli, nu_rt/E_R = 0.65/1210 = 5.37e-4 and nu_tr/E_T = 0.38/690 = 5.51e-4 agree to 3 percent, and nu_lr/E_L = 4.26e-5 against nu_rl/E_R = 4.88e-5, which only the converted order satisfies. Tension nu_lt was not measured (printed as a dash). Absolute uncertainty = printed V x mean (specimen scatter); the all-climate means print no V
+scalar	density-normal-climate	sond-density	density	626	kg/m3	constant
+uncertainty	density-normal-climate	unstated	-	-	-	-
+validity	density-normal-climate	moisture_content	12	12	%
+scalar	density-ovendry	sond-density	density	563	kg/m3	constant
+uncertainty	density-ovendry	unstated	-	-	-	-
+validity	density-ovendry	moisture_content	0	0	%
+scalar	young-modulus-longitudinal-tension	sond-static	young_modulus_longitudinal_tension	11500	MPa	constant
+uncertainty	young-modulus-longitudinal-tension	absolute	2760	MPa	0.68	1
+validity	young-modulus-longitudinal-tension	moisture_content	12	12	%
+scalar	young-modulus-radial-tension	sond-static	young_modulus_radial_tension	1210	MPa	constant
+uncertainty	young-modulus-radial-tension	absolute	121	MPa	0.68	1
+validity	young-modulus-radial-tension	moisture_content	12	12	%
+scalar	young-modulus-tangential-tension	sond-static	young_modulus_tangential_tension	690	MPa	constant
+uncertainty	young-modulus-tangential-tension	absolute	26.22	MPa	0.68	1
+validity	young-modulus-tangential-tension	moisture_content	12	12	%
+scalar	young-modulus-longitudinal-compression	sond-static	young_modulus_longitudinal_compression	14500	MPa	constant
+uncertainty	young-modulus-longitudinal-compression	absolute	3190	MPa	0.68	1
+validity	young-modulus-longitudinal-compression	moisture_content	12	12	%
+scalar	young-modulus-radial-compression	sond-static	young_modulus_radial_compression	1140	MPa	constant
+uncertainty	young-modulus-radial-compression	absolute	171	MPa	0.68	1
+validity	young-modulus-radial-compression	moisture_content	12	12	%
+scalar	young-modulus-tangential-compression	sond-static	young_modulus_tangential_compression	790	MPa	constant
+uncertainty	young-modulus-tangential-compression	absolute	30.81	MPa	0.68	1
+validity	young-modulus-tangential-compression	moisture_content	12	12	%
+scalar	young-modulus-longitudinal-bending	sond-static	young_modulus_longitudinal_bending	10900	MPa	constant
+uncertainty	young-modulus-longitudinal-bending	absolute	1744	MPa	0.68	1
+validity	young-modulus-longitudinal-bending	moisture_content	12	12	%
+scalar	young-modulus-longitudinal-ultrasonic	sond-ultrasonic	young_modulus_longitudinal_ultrasonic	17100	MPa	constant
+uncertainty	young-modulus-longitudinal-ultrasonic	absolute	632.7	MPa	0.68	1
+validity	young-modulus-longitudinal-ultrasonic	moisture_content	12	12	%
+validity	young-modulus-longitudinal-ultrasonic	frequency	2270000	2270000	Hz
+scalar	young-modulus-radial-ultrasonic	sond-ultrasonic	young_modulus_radial_ultrasonic	2910	MPa	constant
+uncertainty	young-modulus-radial-ultrasonic	absolute	221.16	MPa	0.68	1
+validity	young-modulus-radial-ultrasonic	moisture_content	12	12	%
+validity	young-modulus-radial-ultrasonic	frequency	2270000	2270000	Hz
+scalar	young-modulus-tangential-ultrasonic	sond-ultrasonic	young_modulus_tangential_ultrasonic	1740	MPa	constant
+uncertainty	young-modulus-tangential-ultrasonic	absolute	180.96	MPa	0.68	1
+validity	young-modulus-tangential-ultrasonic	moisture_content	12	12	%
+validity	young-modulus-tangential-ultrasonic	frequency	2270000	2270000	Hz
+scalar	shear-modulus-lr-ultrasonic	sond-ultrasonic	shear_modulus_lr_ultrasonic	1680	MPa	constant
+uncertainty	shear-modulus-lr-ultrasonic	absolute	245.28	MPa	0.68	1
+validity	shear-modulus-lr-ultrasonic	moisture_content	12	12	%
+validity	shear-modulus-lr-ultrasonic	frequency	1000000	1000000	Hz
+scalar	shear-modulus-lt-ultrasonic	sond-ultrasonic	shear_modulus_lt_ultrasonic	1070	MPa	constant
+uncertainty	shear-modulus-lt-ultrasonic	absolute	128.4	MPa	0.68	1
+validity	shear-modulus-lt-ultrasonic	moisture_content	12	12	%
+validity	shear-modulus-lt-ultrasonic	frequency	1000000	1000000	Hz
+scalar	shear-modulus-rt-ultrasonic	sond-ultrasonic	shear_modulus_rt_ultrasonic	366	MPa	constant
+uncertainty	shear-modulus-rt-ultrasonic	absolute	35.868	MPa	0.68	1
+validity	shear-modulus-rt-ultrasonic	moisture_content	12	12	%
+validity	shear-modulus-rt-ultrasonic	frequency	1000000	1000000	Hz
+scalar	nu-lr-tension	sond-poisson	nu_lr_tension	0.49	1	constant
+uncertainty	nu-lr-tension	absolute	0.0735	1	0.68	1
+validity	nu-lr-tension	moisture_content	12	12	%
+scalar	nu-rt-tension	sond-poisson	nu_rt_tension	0.65	1	constant
+uncertainty	nu-rt-tension	absolute	0.02795	1	0.68	1
+validity	nu-rt-tension	moisture_content	12	12	%
+scalar	nu-rl-tension	sond-poisson	nu_rl_tension	0.059	1	constant
+uncertainty	nu-rl-tension	absolute	0.02124	1	0.68	1
+validity	nu-rl-tension	moisture_content	12	12	%
+scalar	nu-tr-tension	sond-poisson	nu_tr_tension	0.38	1	constant
+uncertainty	nu-tr-tension	absolute	0.03686	1	0.68	1
+validity	nu-tr-tension	moisture_content	12	12	%
+scalar	nu-tl-tension	sond-poisson	nu_tl_tension	0.043	1	constant
+uncertainty	nu-tl-tension	absolute	0.0129	1	0.68	1
+validity	nu-tl-tension	moisture_content	12	12	%
+scalar	nu-lr-compression	sond-poisson	nu_lr_compression	0.34	1	constant
+uncertainty	nu-lr-compression	absolute	0.1496	1	0.68	1
+validity	nu-lr-compression	moisture_content	12	12	%
+scalar	nu-lt-compression	sond-poisson	nu_lt_compression	0.42	1	constant
+uncertainty	nu-lt-compression	absolute	0.1302	1	0.68	1
+validity	nu-lt-compression	moisture_content	12	12	%
+scalar	nu-rt-compression	sond-poisson	nu_rt_compression	0.68	1	constant
+uncertainty	nu-rt-compression	absolute	0.0748	1	0.68	1
+validity	nu-rt-compression	moisture_content	12	12	%
+scalar	nu-rl-compression	sond-poisson	nu_rl_compression	0.16	1	constant
+uncertainty	nu-rl-compression	absolute	0.0512	1	0.68	1
+validity	nu-rl-compression	moisture_content	12	12	%
+scalar	nu-tr-compression	sond-poisson	nu_tr_compression	0.4	1	constant
+uncertainty	nu-tr-compression	absolute	0.0276	1	0.68	1
+validity	nu-tr-compression	moisture_content	12	12	%
+scalar	nu-tl-compression	sond-poisson	nu_tl_compression	0.049	1	constant
+uncertainty	nu-tl-compression	absolute	0.02597	1	0.68	1
+validity	nu-tl-compression	moisture_content	12	12	%
+scalar	nu-lr-mean	sond-poisson	nu_lr	0.42	1	constant
+uncertainty	nu-lr-mean	unstated	-	-	-	-
+validity	nu-lr-mean	relative_humidity	35	95	%
+scalar	nu-lt-mean	sond-poisson	nu_lt	0.44	1	constant
+uncertainty	nu-lt-mean	unstated	-	-	-	-
+validity	nu-lt-mean	relative_humidity	35	95	%
+scalar	nu-rt-mean	sond-poisson	nu_rt	0.69	1	constant
+uncertainty	nu-rt-mean	unstated	-	-	-	-
+validity	nu-rt-mean	relative_humidity	35	95	%
+scalar	nu-rl-mean	sond-poisson	nu_rl	0.091	1	constant
+uncertainty	nu-rl-mean	unstated	-	-	-	-
+validity	nu-rl-mean	relative_humidity	35	95	%
+scalar	nu-tr-mean	sond-poisson	nu_tr	0.39	1	constant
+uncertainty	nu-tr-mean	unstated	-	-	-	-
+validity	nu-tr-mean	relative_humidity	35	95	%
+scalar	nu-tl-mean	sond-poisson	nu_tl	0.061	1	constant
+uncertainty	nu-tl-mean	unstated	-	-	-	-
+validity	nu-tl-mean	relative_humidity	35	95	%
