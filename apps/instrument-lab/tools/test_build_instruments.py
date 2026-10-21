@@ -3,9 +3,12 @@
 Run with: uv run --with numpy --with pillow python -m unittest discover -s apps/instrument-lab/tools -p 'test_build_instruments.py' -v
 The pairs below are throwaway inputs to the generator, written to a temp directory; none of it reaches the page.
 """
+import contextlib
 import copy
+import io
 import json
 import math
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -370,6 +373,27 @@ class EndToEnd(unittest.TestCase):
                     self.assertEqual(codec, "aac")
                 other = "mp4" if ext == "m4a" else "m4a"
                 self.assertEqual(list(out.rglob(f"*.{other}")), [], f"no .{other} clip beside the .{ext} ones")
+
+    def test_only_shows_the_named_notes_and_lists_the_rest_as_withheld_with_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "analysis"
+            make_pair(root)
+            shutil.copytree(root / "clarinet" / "D3", root / "clarinet" / "E3")
+            e3 = root / "clarinet" / "E3" / "pair.json"
+            e3.write_text(json.dumps(dict(json.loads(e3.read_text()), note="E3")))
+            everything, some = Path(tmp) / "all", Path(tmp) / "some"
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(everything)]):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((everything / "clarinet" / "card.json").read_text())
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3", "E3"], []))
+            err = io.StringIO()
+            with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(some), "--only", "clarinet=D3", "--only", "clarinet=G9"]), contextlib.redirect_stderr(err):
+                self.assertEqual(B.main(), 0)
+            card = json.loads((some / "clarinet" / "card.json").read_text())
+            self.assertEqual(([p["note"] for p in card["pairs"]], card["withheld"]), (["D3"], ["E3"]))
+            self.assertFalse((some / "clarinet" / "E3").exists(), "a withheld note ships no files")
+            self.assertEqual(card["status"]["counts"]["notes_with_render"], 1, "the badge covers the notes shown")
+            self.assertIn("clarinet=G9", err.getvalue(), "a note named in --only that does not exist is reported")
 
     def test_a_refused_pair_is_listed_and_the_exit_code_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:

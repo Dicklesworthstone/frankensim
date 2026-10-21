@@ -15,6 +15,12 @@ OUT="${2:?usage: build-review.sh <analysis-dir> <out-dir> <commit>}"
 SHA="${3:?usage: build-review.sh <analysis-dir> <out-dir> <commit>}"
 MAX_FILES="${REVIEW_MAX_FILES:-500}"   # the host's cap is 511
 MAX_MB="${REVIEW_MAX_MB:-60}"
+# Voice has 13 graded notes at 8 files each, more than the host's file limit leaves room for: show one per vowel at C3
+# (a rendered note, C3 before C4). The card says how many notes it left out. REVIEW_ONLY="family=note,note family=note"
+# changes the choice and REVIEW_ONLY="" shows every note.
+ONLY="${REVIEW_ONLY-voice=C3-a,C3-e,C3-i,C3-o,C3-u}"
+only_args=()
+for spec in $ONLY; do only_args+=(--only "$spec"); done
 
 [ ! -e "$OUT" ] || { echo "refusing: $OUT already exists (a review build is never overwritten; give it a new name)" >&2; exit 64; }
 [ -d "$ANALYSIS" ] || { echo "no analysis directory $ANALYSIS" >&2; exit 64; }
@@ -22,7 +28,7 @@ MAX_MB="${REVIEW_MAX_MB:-60}"
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/review-public.XXXXXX")"
 echo "staging the data in $STAGE"
 status=0
-uv run --with numpy --with pillow python tools/build_instruments.py --analysis "$ANALYSIS" --out "$STAGE/data/instruments" --audio-ext mp4 || status=$?
+uv run --with numpy --with pillow python tools/build_instruments.py --analysis "$ANALYSIS" --out "$STAGE/data/instruments" --audio-ext mp4 ${only_args[@]+"${only_args[@]}"} || status=$?
 # 2 = the generator itself rejected a pair; the card lists it, the review still builds. Anything else is a real failure.
 [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || { echo "build_instruments.py failed ($status)" >&2; exit "$status"; }
 

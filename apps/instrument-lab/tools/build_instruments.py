@@ -66,6 +66,9 @@ checked when present) and moves the old figures and audio into <note>/superseded
 "refused by the grader: <reason>", no badge counts it, and the build still exits 0 (the data is saying what is true).
 A family whose only renders were refused reads "Rendered, not graded".
 
+--only FAMILY=NOTE,NOTE shows just those notes of a family (the review build's file limit). The others get no files, are
+listed on the card as card.withheld, and are in no badge: the badge covers exactly the notes the page shows.
+
 status.json (frankensim.instrument-status.v1), written by the family lane, prose only (no measured numbers):
   family, title, reference_instrument (a references.json files[].instrument, or null), summary,
   physics_present: [str], physics_missing: [str], blocked: null | str, beads: [str]
@@ -539,7 +542,14 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--descriptions", type=Path, default=DESCRIPTIONS, help="where <family>/status.json live")
     ap.add_argument("--audio-ext", choices=("m4a", "mp4"), default="m4a", help="extension of the A/B clips; the codec is AAC either way (mp4 for a host that serves no .m4a)")
+    ap.add_argument("--only", action="append", default=[], metavar="FAMILY=NOTE,NOTE", help="show only these notes of a family; the rest are listed on its card as withheld and get no files")
     args = ap.parse_args()
+    only: dict[str, set[str]] = {}
+    for spec in args.only:
+        fam, sep, notes = spec.partition("=")
+        if not sep or not fam or not notes:
+            ap.error(f"--only wants FAMILY=NOTE,NOTE (got {spec!r})")
+        only.setdefault(fam, set()).update(notes.split(","))
 
     if args.pull:
         args.analysis.mkdir(parents=True, exist_ok=True)
@@ -560,7 +570,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     for fid, title, ref_instrument in families:
         status = load_status(fid, args.descriptions)
-        pairs, refused = [], []
+        pairs, refused, withheld = [], [], []
         fam_dir = args.analysis / fid
         for pj_path in sorted(fam_dir.glob("*/pair.json")) if fam_dir.is_dir() else []:
             note = pj_path.parent.name
@@ -570,6 +580,9 @@ def main() -> int:
                 refusal = grader_refusal(pj, fid, note)
                 if refusal:
                     refused.append(refusal)
+                    continue
+                if fid in only and note not in only[fid]:
+                    withheld.append(note)
                     continue
                 problems = validate_pair(pj, fid, note, base, refs_by_id)
                 if not problems:
@@ -582,8 +595,11 @@ def main() -> int:
             except (Refused, json.JSONDecodeError) as e:
                 refused.append({"note": note, "kind": "site", "problems": e.problems if isinstance(e, Refused) else [f"pair.json is not JSON: {e}"]})
                 print(f"REFUSED {fid}/{note}: {'; '.join(refused[-1]['problems'])}", file=sys.stderr)
+        seen = {p["note"] for p in pairs} | set(withheld) | {x["note"] for x in refused}
+        for missing in sorted(only.get(fid, set()) - seen):
+            print(f"WARNING --only {fid}={missing}: no such note in the analysis", file=sys.stderr)
         refused_total += sum(1 for x in refused if x["kind"] == "site")
-        grader_refused = [x for x in refused if x["kind"] == "grader"]
+        grader_refused =[x for x in refused if x["kind"] == "grader"]
         pairs.sort(key=lambda p: (p["ours"] is None, p["dynamic"], p["note"]))
         verdict = judge(status, pairs, grader_refused)
         card = {
@@ -595,7 +611,7 @@ def main() -> int:
                 "physics_present": (status or {}).get("physics_present", []), "physics_missing": (status or {}).get("physics_missing", []),
                 "beads": (status or {}).get("beads", []), "described": status is not None,
             },
-            "pairs": pairs, "refused": refused,
+            "pairs": pairs, "refused": refused, "withheld": sorted(withheld),
         }
         (args.out / fid).mkdir(parents=True, exist_ok=True)
         (args.out / fid / "card.json").write_text(json.dumps(card, ensure_ascii=False, separators=(",", ":")))

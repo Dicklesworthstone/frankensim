@@ -31,6 +31,7 @@ interface Card {
   reference: { instrument: string; files: number; by_dynamic: Record<string, number>; chains: string[]; licence: string; licence_url: string | null; credit: string | null } | null;
   status: { badge: Badge; label: string; line: string; summary: string; blocked: string | null; physics_present: string[]; physics_missing: string[]; beads: string[]; described: boolean };
   pairs: Pair[]; refused: { note: string; kind?: "grader" | "site"; problems: string[]; reason?: string; render_sha?: string | null; time?: string | null }[];
+  withheld?: string[];
 }
 interface IndexFamily { id: string; title: string; reference: string | null; badge: Badge; label: string; line: string; counts: { notes_with_render: number; notes_reference_only: number; notes_refused_by_grader: number; within: number; outside: number; unruled: number }; refused: number }
 interface Index { built_utc: string; families: IndexFamily[] }
@@ -163,6 +164,10 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
   if (bySite.length) {
     root.append(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `${bySite.length} analysis pair${bySite.length === 1 ? "" : "s"} refused, not shown: `),
       ...bySite.map((r) => el("div", {}, `${r.note}: ${r.problems.join("; ")}`))));
+  }
+  if (c.withheld?.length) {
+    root.append(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `Showing ${c.pairs.length} of ${c.pairs.length + c.withheld.length} notes: `),
+      `this review build leaves out ${c.withheld.join(", ")} to fit the page host's file limit. They are not shown here and are in no badge.`));
   }
   if (c.pairs.length === 0) {
     const kind = c.status.badge === "blocked" ? "blocked" : c.status.badge === "ungraded" ? "ungraded" : "none";
