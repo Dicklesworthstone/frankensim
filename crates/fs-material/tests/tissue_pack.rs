@@ -777,7 +777,7 @@ fn g2_human_indentation_pack_pins_the_rows_and_records_the_source_inconsistency(
     for lx in ["m49", "f19", "m30"] {
         let state = &pack.observation[&format!("apparatus-larynx-{lx}")];
         assert!(
-            state.contains("postmortem") && state.contains("AN EFFECTIVE INDENTATION MODULUS"),
+            state.contains("postmortem") && state.contains("AN APPARATUS RESPONSE"),
             "{lx}: the apparatus-response register and the specimen state must be carried"
         );
     }
