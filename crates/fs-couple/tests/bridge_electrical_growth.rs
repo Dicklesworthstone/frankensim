@@ -5,6 +5,8 @@ mod common;
 mod contact_source;
 #[path = "bridge_electrical_growth/contacts.rs"]
 mod contact_growth;
+#[path = "bridge_electrical_growth/sources.rs"]
+mod sources;
 use common::*;
 use std::collections::BTreeMap;
 use fs_couple::strip_enthalpy::{LayerThermalBinding, StripEnthalpyError};
@@ -98,8 +100,8 @@ fn electrical_interval_and_real_birth_match_original_owners_then_continue_with_f
     let expanded=cells(&m,&context,&key,&[(90,0),(99,1)]);
     let links=[ConductionLink {link:5,distance_a_m:0.05,distance_b_m:0.01}];
     let successor=MaterialNetwork {cells:&expanded,resistors:&resistors,links:&links};
-    // Explicit new selection epoch; retain the returned circuit, never rebuild its charge.
-    let next_p=successor.prepare(born.thermal(),||false).unwrap();
+    // Keep the selected electrical/thermal data as well as the accepted charge.
+    let next_p=p.extend_fixed_circuit(&successor,born.thermal(),||false).unwrap();
     let (after,final_circuit,r2)=born.step_electrical_candidate(&next_circuit,&next_p,&[],0.4,1.0,&[0.02;2],
         controls(),&[0.0;2],||false).unwrap();
     assert!(final_circuit.charges_c()[0]<next_circuit.charges_c()[0]);

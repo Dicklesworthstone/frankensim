@@ -35,6 +35,57 @@ impl PreparedMaterialNetwork<'_, '_> {
         if !self.network.resistors.is_empty() || !network.resistors.is_empty() {
             return Err(invalid("thermal extension cannot discard or introduce circuit branches"));
         }
+        self.extend_fixed_circuit(network, thermal, cancelled)
+    }
+
+    /// Retain material sources while thermal cells/contacts grow around an
+    /// UNCHANGED circuit. Existing branch indices, receiving cells, current-path
+    /// lengths/areas and electrical bases must remain identical. This transfers
+    /// only source selections: the caller retains the accepted MaterialCircuit,
+    /// including its charges, fluxes, C/L, ports and graph. No branch is inferred.
+    ///
+    /// Every old cell keeps its card, caloric law, fixed context and already
+    /// requested properties. Newly requested conductivity and new thermal cells
+    /// use the successor's explicit policy. Even electrical-only old cells keep
+    /// their electrical claim when acquiring a first conductive contact. An
+    /// expired selected claim refuses rather than falling back to a hot fit.
+    /// Interface-contact source migration and evolving E/J coordinates are not
+    /// provided by this thermal-state extension. No physical state is advanced.
+    pub fn extend_fixed_circuit<'n, 'a>(
+        &self, network: &'n MaterialNetwork<'a>, thermal: &DepositionSimulation<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedMaterialNetwork<'n, 'a>, MaterialNetworkError> {
+        let invalid = MaterialNetworkError::Invalid;
+        if cancelled() { return Err(DepositionError::Cancelled.into()); }
+        if network.resistors.len() != self.network.resistors.len() {
+            return Err(invalid("extension cannot add or remove electrical branches"));
+        }
+        let mut remaining_resistors = BTreeMap::new();
+        for old in self.network.resistors {
+            if cancelled() { return Err(DepositionError::Cancelled.into()); }
+            remaining_resistors.insert(old.destination.branch, old);
+        }
+        let mut resistors = Vec::with_capacity(network.resistors.len());
+        for resistor in network.resistors {
+            if cancelled() { return Err(DepositionError::Cancelled.into()); }
+            let old = remaining_resistors.remove(&resistor.destination.branch)
+                .ok_or(invalid("duplicate or changed electrical branch"))?;
+            if resistor.destination != old.destination
+                || resistor.length_m.to_bits() != old.length_m.to_bits()
+                || resistor.area_m2.to_bits() != old.area_m2.to_bits() {
+                return Err(invalid("extension must retain electrical heat routes and current-path geometry"));
+            }
+            let basis = self.bases.get(&resistor.destination.branch)
+                .ok_or(invalid("retained electrical basis is absent"))?;
+            let requirement = basis.requirement()
+                .map_err(|e|MaterialNetworkError::Material(ThermalMaterialError::Material(e)))?;
+            resistors.push(CellResistor { destination: resistor.destination,
+                selection: self.retained_property(resistor.destination.cell, requirement.name())?,
+                length_m: resistor.length_m, area_m2: resistor.area_m2 });
+        }
+        if !remaining_resistors.is_empty() {
+            return Err(invalid("existing electrical branch is absent from the successor"));
+        }
         if network.cells.len() != thermal.cells().len() || network.links.len() != thermal.links().len()
             || self.network.cells.len() > network.cells.len() {
             return Err(invalid("extension needs complete successor cells/links and every old cell"));
@@ -73,8 +124,7 @@ impl PreparedMaterialNetwork<'_, '_> {
                     if key.name() != next_key.name() || key.quantity() != next_key.quantity() {
                         return Err(invalid("existing conductivity role cannot change during extension"));
                     }
-                    conductivity = Some((*next_key, self.pins.get(&cell.cell)
-                        .ok_or(invalid("existing conductivity source selection is absent"))?.clone()));
+                    conductivity = Some((*next_key, self.retained_property(cell.cell, key.name())?));
                 }
             }
             staged.push(MaterialCell { cell: cell.cell, material_id: cell.material_id,
@@ -85,12 +135,26 @@ impl PreparedMaterialNetwork<'_, '_> {
         }
         // The original resolver admits the combined old pins/new policies and
         // computes a fresh complete state. No substitute conductivity evaluator.
-        let stage = MaterialNetwork { cells: &staged, resistors: &[], links: network.links };
-        let prepared = stage.prepare(thermal, &mut cancelled)?;
+        let stage = MaterialNetwork { cells: &staged, resistors: &resistors, links: network.links };
+        let electrical_bases = self.bases.iter().map(|(&branch, &basis)| (branch, basis)).collect::<Vec<_>>();
+        let prepared = stage.prepare_with_bases(thermal, &electrical_bases, &mut cancelled)?;
         let pins = prepared.pins;
         let bases = prepared.bases;
         if cancelled() { return Err(DepositionError::Cancelled.into()); }
         // Keep only owned claim choices, never a borrow of the temporary stage.
         Ok(PreparedMaterialNetwork { network, bases, pins })
+    }
+
+    // A complete old bundle can contain both electrical and thermal properties.
+    // Feed only the relevant original pin to each requirement-selection call;
+    // the canonical resolver then assembles the complete new bundle itself.
+    fn retained_property(&self, cell: CellId, name: &str)
+        -> Result<MaterialPropertySelection, MaterialNetworkError> {
+        let Some(MaterialPropertySelection::PinnedByProperty(pins)) = self.pins.get(&cell) else {
+            return Err(MaterialNetworkError::Invalid("existing material source selections are absent"));
+        };
+        let pin = pins.iter().find(|(property, _)| property == name)
+            .ok_or(MaterialNetworkError::Invalid("existing requested material property has no source pin"))?;
+        Ok(MaterialPropertySelection::PinnedByProperty(vec![pin.clone()]))
     }
 }

@@ -37,10 +37,18 @@ new tip material has not equilibrated under the enlarged mechanical load yet.
 Circuit topology, charges and fluxes do not change during zero-duration births.
 New material is not automatically a resistor. The next interval requires a
 complete material-network binding for the expanded thermal topology and the
-returned circuit, not a reconstructed initial capacitor. Ordinary preparation
-is an explicit source-selection epoch; carry explicit property pins when source
-continuity is required. `extend_thermal` is not an electrical topology migration
-API. Existing bulk-only electrical/contact restrictions remain unchanged.
+returned circuit, not a reconstructed initial capacitor. For an unchanged circuit,
+call `prepared.extend_fixed_circuit(&successor, born.thermal(), cancelled)`.
+This retains the old thermal and electrical source claims and electrical bases;
+new thermal cells or newly requested conductivity use explicit successor policies.
+An old electrical-only cell can acquire its first conductive link without silently
+selecting a different hot resistivity fit. Expired old claims still refuse.
+
+Branch indices, resistor receiving cells and current-path geometry must remain
+identical. This extends material bindings, not electrical topology or charge/flux.
+Ordinary `prepare` remains an intentional new selection epoch; `extend_thermal`
+still rejects electrical branches. Contact-source migration requires its own
+interface owner and is not supplied by this bulk-network extension.
 
 Four regressions compare original-owner replay followed by another coupled
 interval, a final invalid birth after a valid append, final cancellation/replay,
@@ -94,3 +102,14 @@ Three further Rust regressions exercise original-owner replay, a late invalid
 birth after a valid append, and final cancellation/replay with real contact heat
 in a passive receiving body. They are authored but not executed in this session;
 Cargo, rustc and RCH are unavailable. Patch checks are not native validation.
+
+## Source continuity across electrical growth
+
+Four further native regressions cover a competing electrical fit becoming eligible
+when an electrical-only cell acquires its first thermal contact, further coupled
+charge/heat/sag evolution, expired-source refusal, fixed branch/geometry/context
+admission, and cancellation with reordered-cell replay. The original test of
+continued finite-supply evolution now uses `extend_fixed_circuit` rather than
+reselecting all sources. These tests are authored but have not been run natively
+in the editing environment. No physical equations or solvers change in this
+source-binding extension.

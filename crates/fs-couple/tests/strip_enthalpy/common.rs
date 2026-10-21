@@ -44,6 +44,13 @@ pub fn material_with_conductivity_alternative(cp: f64, branch_pa: f64, hot_shift
 pub fn material_with_transport(cp: f64, branch_pa: f64, hot_shift: f64,
     free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>,
     resistivity: Vec<(f64,f64)>) -> Material {
+    material_with_transport_alternatives(cp, branch_pa, hot_shift, free_at_320,
+        conductivity, alternative, (resistivity, None))
+}
+pub fn material_with_transport_alternatives(cp: f64, branch_pa: f64, hot_shift: f64,
+    free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>,
+    electrical: (Vec<(f64,f64)>, Option<Vec<(f64,f64)>>)) -> Material {
+    let (resistivity, electrical_alternative) = electrical;
     let mut claims = ClaimSet::new();
     for (name, dims, knots) in [
         ("equilibrium", Pressure::DIMS, vec![(280.0,1e8),(320.0,1e8)]),
@@ -57,7 +64,9 @@ pub fn material_with_transport(cp: f64, branch_pa: f64, hot_shift: f64,
         ("conductivity", THERMAL_CONDUCTIVITY_DIMS, conductivity),
         ("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS, resistivity),
     ].into_iter().chain(alternative.into_iter().map(|knots|
-        ("conductivity", THERMAL_CONDUCTIVITY_DIMS, knots))) {
+        ("conductivity", THERMAL_CONDUCTIVITY_DIMS, knots)))
+        .chain(electrical_alternative.into_iter().map(|knots|
+            ("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS, knots))) {
         let low = knots[0].0;
         let high = knots[knots.len()-1].0;
         claims.insert_claim(PropertyClaim { key:PropertyKey::new(name,dims),
