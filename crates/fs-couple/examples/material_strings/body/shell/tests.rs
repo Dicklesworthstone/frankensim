@@ -276,25 +276,39 @@ fn clamped_plate_body(nx: usize, ny: usize, window: &str, work: usize) -> String
     text
 }
 
+/// Rendered samples of the end-to-end ceiling test. A COST choice, not a limit: nothing caps the sample count. Measured on trj
+/// (release, shared host, 98-coordinate prepared network): construction takes 116 s and rendering about 0.86 s per sample (518
+/// samples in 444 s), so the fixture's own 4096 samples would take about an hour. 96 is the length the curved-body tests in this
+/// file already render. Every dimension the ceilings bound (nodes, triangles, modes, gas memory, projection work) is at full value.
+const CEILING_SAMPLES: u64 = 96;
+
+/// The ceiling fixture: the clamped 15 x 11 plate with `modes` retained modes under the cylinder-flow performance (its 12 gas-memory
+/// intervals) for `samples` samples, with the prepared-linear record that any network above 42 modal coordinates needs.
+fn ceiling_inputs(modes: usize, samples: u64) -> (Profile, input::Spec) {
+    let text = clamped_plate_body(15, 11, "window 1 400000000", 2_000_000_000);
+    let profile = Profile::parse(text.as_bytes()).unwrap();
+    // 70 body modes, the cavity, two string planes, twist and the gas memory (2 planes x 12 intervals) make 98: declare room for 128.
+    let performance = include_str!("../../cylinder-flow.material-strings")
+        .replace("48000 4096 0.01 128", &format!("48000 {samples} 0.01 128"))
+        .replace("cylinder-gas-loading 0.001 30 12",
+            "cylinder-gas-loading 0.001 30 12\nprepared-linear 128 1073741824 10000000000000");
+    let mut spec = input::Spec::parse(performance.as_bytes()).unwrap();
+    spec.body.modes = modes;
+    (profile, spec)
+}
+
 #[test]
 fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipeline() {
     // 15 x 11 = 165 nodes (former ceiling 128), 280 triangles (256), 70 retained modes (16), and a projection
     // allowance of 2e9 terms (268,435,456). The window holds well over 70 bending modes of the fixture plate.
     let (nx, ny) = (15, 11);
-    let text = clamped_plate_body(nx, ny, "window 1 400000000", 2_000_000_000);
-    let profile = Profile::parse(text.as_bytes()).unwrap();
-    // The fixture's own dimensions: 4096 samples and 12 gas-memory intervals, nothing shrunk. A connected network above
-    // 42 modal coordinates needs the explicit prepared-linear record: 70 body modes, the cavity, two string planes,
-    // twist and the gas memory (2 planes x 12 intervals) make 98, so declare room for 128.
-    let performance = include_str!("../../cylinder-flow.material-strings")
-        .replace("cylinder-gas-loading 0.001 30 12",
-            "cylinder-gas-loading 0.001 30 12\nprepared-linear 128 1073741824 10000000000000");
-    let mut spec = input::Spec::parse(performance.as_bytes()).unwrap();
-    spec.body.modes = 70;
+    let (profile, spec) = ceiling_inputs(70, CEILING_SAMPLES);
     scoped(|cx, gate| {
         let constructing = std::time::Instant::now();
         let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
             pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+        // Timing lines go to stderr (visible with --nocapture): this test is slow by the cost measured above.
+        eprintln!("ceiling e2e: constructed in {:.1?}", constructing.elapsed());
         let source = r.performance.bank().source().bank();
         let image = source.material_shell_image().unwrap();
         assert_eq!(source.material_shell().unwrap().specimen.mesh().nodes.len(), nx * ny);
@@ -302,17 +316,30 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
         assert_eq!(image.physical_modes().len(), 70);
         assert!(image.physical_modes().iter().all(|v| v.len() == 6 * nx * ny));
         assert_eq!(image.damping().mode_count(), 70);
-        // Progress lines (stderr, visible with --nocapture): a 98-coordinate dense network is the costly part of this
-        // test, so report construction and every 512 samples instead of leaving a long render silent.
-        eprintln!("ceiling e2e: constructed in {:.1?}", constructing.elapsed());
-        let mut samples = vec![0.0; r.spec.samples as usize];
-        let total = samples.len();
         let rendering = std::time::Instant::now();
-        for (i, block) in samples.chunks_mut(7).enumerate() {
-            r.performance.block(block).unwrap();
-            if (7 * i) % 511 < 7 { eprintln!("ceiling e2e: {} of {total} samples after {:.1?}", 7 * i + block.len(), rendering.elapsed()); }
-        }
+        let samples = pressure(&mut r, 7);
+        eprintln!("ceiling e2e: {} samples in {:.1?}", samples.len(), rendering.elapsed());
         assert!(samples.iter().all(|p| p.is_finite()));
         assert!(samples.iter().any(|p| p.abs() > 1e-14), "the body radiated nothing");
     });
+}
+
+/// Cost probe, not a correctness check (`-- --ignored --nocapture`): prints how the prepared route's construction time and time
+/// per sample grow with the retained body modes of the same plate, so the growth is measured rather than assumed.
+#[test]
+#[ignore = "timing probe: run with --ignored --nocapture"]
+fn prepared_body_cost_against_retained_modes() {
+    for modes in [10, 20, 40, 70] {
+        let (profile, spec) = ceiling_inputs(modes, 28);
+        scoped(|cx, gate| {
+            let constructing = std::time::Instant::now();
+            let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
+                pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+            let built = constructing.elapsed();
+            let rendering = std::time::Instant::now();
+            let samples = pressure(&mut r, 7);
+            eprintln!("cost probe: {modes} body modes: constructed in {built:.1?}, {:.1?} per sample",
+                rendering.elapsed() / samples.len() as u32);
+        });
+    }
 }
