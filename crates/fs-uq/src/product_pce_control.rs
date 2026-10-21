@@ -6,6 +6,9 @@
 //! errors are not bounded here. No confidence sequence or accuracy certificate.
 //! Bead: `frankensim-extreal-program-f85xj.6.7`; plan sections 8.8 and 9.7.
 
+mod execution;
+pub use execution::{PceMeanConfig, PceMeanExecution, PceMeanReport, PceMeanStage};
+
 use crate::product_execution::sample_parameters;
 use crate::product_qmc::summarize_replicates;
 use crate::{CorrelationModel, PceBasis, PceExecution, ProductPceModel, UqExecution, UqPlan, UqStatus, UncertaintyKind};
@@ -109,11 +112,7 @@ impl PceMeanControl {
         }
         if plan.seed == fit.plan().seed { return Err(PceControlError::ReusedSeed); }
         if !weight.is_finite() { return Err(PceControlError::InvalidWeight); }
-        if plan.budget_max_samples.checked_mul(model.indices().len())
-            .and_then(|n| n.checked_mul(model.dimension())).is_none_or(|n| n > 67_108_864)
-        {
-            return Err(PceControlError::Budget);
-        }
+        admit_replay(plan.budget_max_samples, model.indices().len(), model.dimension())?;
         // Strip the constant COEFFICIENT, not two large evaluated values. This
         // keeps small nonconstant controls next to a large physical offset.
         let mut coefficients = model.coefficients().to_vec();
@@ -192,4 +191,9 @@ impl PceMeanControl {
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PceControlError> {
     if cancelled() { Err(PceControlError::Cancelled) } else { Ok(()) }
+}
+fn admit_replay(samples: usize, terms: usize, dimension: usize) -> Result<(), PceControlError> {
+    if samples.checked_mul(terms).and_then(|n| n.checked_mul(dimension))
+        .is_none_or(|n| n > 67_108_864)
+    { Err(PceControlError::Budget) } else { Ok(()) }
 }
