@@ -20,7 +20,9 @@ use fs_conduction::{ConductionMesh, ConductivityModel, ScalarField, ThermalBc,
 use fs_dfo::neldermead::state::{NelderMeadConfig, NelderMeadReport, NelderMeadState, NelderMeadStop};
 use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionReport,
     DifferentialEvolutionState, DifferentialEvolutionStop};
-use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey};
+use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey, TilePool};
+use fs_alloc::OperationMemoryLease;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EnthalpyPhaseKnot};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::scenario::Environment;
@@ -29,17 +31,18 @@ use fs_solver::NewtonKrylovConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-12;
-const USAGE: &str = "simplex_scan_fit [--population] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]]";
+const USAGE: &str = "simplex_scan_fit [--population [--workers 1..128]] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]]";
 
 #[derive(Clone, Copy)]
 struct Options {
     targets: [f64;2], maximum_w: f64, evaluations: usize,
-    population: bool, initial_h: f64, seed: u64,
+    population: bool, initial_h: f64, seed: u64, workers: Option<usize>,
 }
 fn options(args: &[String]) -> Result<Options> {
     let mut values=Vec::new();
     let (mut population,mut initial_h,mut seed)=(false,100.0_f64,17_u64);
-    let mut seen=[false;3];
+    let mut workers=None;
+    let mut seen=[false;4];
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
@@ -50,12 +53,17 @@ fn options(args: &[String]) -> Result<Options> {
             "--seed" if !seen[2] => {
                 i+=1;seed=args.get(i).ok_or(USAGE)?.parse()?;seen[2]=true;
             },
+            "--workers" if !seen[3] => {
+                i+=1;workers=Some(args.get(i).ok_or(USAGE)?.parse::<usize>()?);seen[3]=true;
+            },
             value if !value.starts_with("--") => values.push(value),
             _ => return Err(USAGE.into()),
         }
         i+=1;
     }
-    if !matches!(values.len(),0|2|4) || (seen[2] && !population) { return Err(USAGE.into()); }
+    if !matches!(values.len(),0|2|4) || ((seen[2] || seen[3]) && !population)
+        || workers.is_some_and(|n| !(1..=128).contains(&n))
+    { return Err(USAGE.into()); }
     let targets: [f64;2]=if values.is_empty() {[0.1,0.3]} else {[values[0].parse()?,values[1].parse()?]};
     let (maximum_w,evaluations): (f64,usize)=if values.len()==4 {
         (values[2].parse()?,values[3].parse()?)
@@ -65,7 +73,7 @@ fn options(args: &[String]) -> Result<Options> {
         || !(10..=10_000).contains(&evaluations)
         || !initial_h.is_finite() || !(-100.0..=200.0).contains(&initial_h)
     { return Err("fractions in [0,1], watts in (0,100], evaluations in [10,10000], initial enthalpy in [-100,200] J/kg required".into()); }
-    Ok(Options { targets,maximum_w,evaluations,population,initial_h,seed })
+    Ok(Options { targets,maximum_w,evaluations,population,initial_h,seed,workers })
 }
 
 fn source() -> Result<MovingHeatSource> {
@@ -145,11 +153,14 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
         Ok(ScanningEnthalpyRun::new(cx,run,sources,1,None)?)
     };
     let initial_cap=if pause {8} else {input.evaluations-1};
-    let mut study=ScanPowerStudy::new_joint_with_power_coordinates(cx,vec![source()?],
+    let template=source()?;
+    // Only immutable specimen/readout data are shared. Each parallel callback
+    // constructs an independent trial study using its own worker Cx and arena.
+    let build_study=|cx:&Cx<'_>, allowance| ScanPowerStudy::new_joint_with_power_coordinates(cx,vec![template.clone()],
         vec![ScanPowerControl {source:0,value:0,reference_w:1.},
              ScanPowerControl {source:0,value:1,reference_w:1.}],vec![],
         ScanPowerCoordinates::NonnegativeLinear,ScanPowerObjective {
-            endpoints_s:vec![1.,2.],observations,sampling:ScanObjectiveSampling::EventLeft,
+            endpoints_s:vec![1.,2.],observations:observations.clone(),sampling:ScanObjectiveSampling::EventLeft,
             step:EnthalpyStepConfig { newton:NewtonKrylovConfig { absolute_tolerance:1e-11,
                 relative_tolerance:1e-12,linear_restart:8,max_linear_cycles:16,
                 forcing_minimum:1e-12,forcing_maximum:1e-3,..Default::default() },
@@ -159,21 +170,43 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
             budget:ScanObjectiveBudget {max_steps:2,max_observations:2,
                 max_retained_vertices:0,max_retained_source_vertices:0,
                 max_schedule_controls:16,max_retained_radiation_entries:0},source_reference_time_s:0.,
-        },factory,initial_cap+1)?;
+        },factory,allowance);
+    let mut study=build_study(cx,initial_cap+1)?;
+    let parallel_calls=AtomicUsize::new(0);
     let search=if input.population {
         let mut solver=DifferentialEvolutionState::new(cx,&[[0.,input.maximum_w];2],
             Some(study.initial_coordinates()),DifferentialEvolutionConfig {
                 population_size:24,differential_weight:0.8,crossover_probability:0.9,seed:input.seed,
                 max_evaluations:initial_cap,max_population_entries:48,target:Some(TARGET),
             })?;
-        let mut report=solver.advance(cx,usize::MAX,&mut |point|
-            study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-        if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
-            study.extend_evaluation_budget(input.evaluations)?;
-            solver.extend_evaluation_budget(input.evaluations-1)?;
-            report=solver.advance(cx,usize::MAX,&mut |point|
+        let report=if let Some(workers)=input.workers {
+            let pool=TilePool::for_host(workers,input.seed);
+            let lease=OperationMemoryLease::bounded(64 << 20);
+            let evaluate=|worker_cx:&Cx<'_>,point:&[f64]| {
+                parallel_calls.fetch_add(1,Ordering::Relaxed);
+                let mut trial=build_study(worker_cx,1)?;
+                trial.evaluate_value(worker_cx,point).map(|value|value.physical.value)
+            };
+            let mut report=solver.advance_parallel(cx,&pool,&lease,usize::MAX,24,&evaluate)?;
+            if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
+                solver.extend_evaluation_budget(input.evaluations-1)?;
+                report=solver.advance_parallel(cx,&pool,&lease,usize::MAX,24,&evaluate)?;
+            }
+            if parallel_calls.load(Ordering::Relaxed)!=solver.evaluations() {
+                return Err("parallel callback attempts disagree with the lifetime search allowance".into());
+            }
+            report
+        } else {
+            let mut report=solver.advance(cx,usize::MAX,&mut |point|
                 study.evaluate_value(cx,point).map(|value|value.physical.value))?;
-        }
+            if pause && report.stop==DifferentialEvolutionStop::EvaluationLimit {
+                study.extend_evaluation_budget(input.evaluations)?;
+                solver.extend_evaluation_budget(input.evaluations-1)?;
+                report=solver.advance(cx,usize::MAX,&mut |point|
+                    study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+            }
+            report
+        };
         SearchReport::Population(report)
     } else {
         let mut solver=NelderMeadState::new(study.initial_coordinates(),
@@ -203,10 +236,11 @@ fn fit(cx: &Cx<'_>, input: Options, pause: bool) -> Result<Outcome> {
     if replay.physical.value.to_bits()!=best_value.to_bits() {
         return Err("best-candidate replay changed the physical objective".into());
     }
-    if study.evaluations()!=search.evaluations()+1 || study.evaluations()>input.evaluations {
+    let spent=study.evaluations()+parallel_calls.load(Ordering::Relaxed);
+    if spent!=search.evaluations()+1 || spent>input.evaluations {
         return Err("callback and physical-evaluation budgets disagree".into());
     }
-    Ok(Outcome { search,replay,spent:study.evaluations(),sources })
+    Ok(Outcome { search,replay,spent,sources })
 }
 
 fn with_cx<T>(f: impl FnOnce(&CancelGate,&Cx<'_>) -> Result<T>) -> Result<T> {
@@ -219,8 +253,8 @@ fn main() -> Result<()> {
     let args:Vec<_>=std::env::args().skip(1).collect();
     let input=options(&args)?;
     let outcome=with_cx(|_,cx|fit(cx,input,true))?;
-    println!("# synthetic specimen; search={}; no global-optimality guarantee; initial_h_j_kg={}; seed={}",
-        outcome.search.method(),input.initial_h,input.seed);
+    println!("# synthetic specimen; search={}; no global-optimality guarantee; initial_h_j_kg={}; seed={}; requested_workers={}",
+        outcome.search.method(),input.initial_h,input.seed,input.workers.unwrap_or(1));
     println!("# stop={}; objective={:.17e}; callback_attempts={}; total_physical_evaluations={}",
         outcome.search.stop(),outcome.replay.physical.value,outcome.search.evaluations(),outcome.spent);
     println!("start_s,end_s,absorbed_power_w,mean_fraction_at_end,target_fraction_at_end");
@@ -238,6 +272,43 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn g5_parallel_physical_trials_preserve_worker_and_budget_partition_results() {
+        let input=options(&["--population","--workers","1","--initial-enthalpy","80",
+            "0.1","0.3","50","65"].map(str::to_string)).unwrap();
+        with_cx(|_,cx| {
+            let one=fit(cx,input,false)?;
+            let many=fit(cx,Options {workers:Some(4),..input},false)?;
+            let resumed=fit(cx,Options {workers:Some(4),..input},true)?;
+            assert_eq!(one.search,many.search);
+            assert_eq!(many.search,resumed.search);
+            assert_eq!(one.sources,many.sources);
+            assert_eq!(many.sources,resumed.sources);
+            assert_eq!(one.replay.physical.predictions,many.replay.physical.predictions);
+            assert_eq!(many.replay.physical.predictions,resumed.replay.physical.predictions);
+            assert_eq!(one.spent,one.search.evaluations()+1);
+            assert!(one.spent<=65);
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
+    fn g1_parallel_cold_start_fits_original_physics_and_rejects_bad_worker_options() {
+        let input=options(&["--population","--workers","4","--initial-enthalpy","80"]
+            .map(str::to_string)).unwrap();
+        let result=with_cx(|_,cx|fit(cx,input,true)).unwrap();
+        assert!(result.target_met());
+        for (&actual,expected) in result.replay.powers_w.iter().zip([30.,20.]) {
+            assert!((actual-expected).abs()<1e-3);
+        }
+        assert_eq!(result.spent,result.search.evaluations()+1);
+        assert!(result.spent<=input.evaluations);
+        for args in [vec!["--workers","4"],vec!["--population","--workers","0"],
+            vec!["--population","--workers","129"],vec!["--population","--workers"],
+            vec!["--population","--workers","2","--workers","4"]] {
+            assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
+        }
+        with_cx(|gate,cx| {gate.request();assert!(fit(cx,input,true).is_err());Ok(())}).unwrap();
+    }
     #[test]
     fn g1_simplex_fits_melting_from_zero_at_the_original_nondifferentiable_solidus() {
         let input=options(&[]).unwrap();

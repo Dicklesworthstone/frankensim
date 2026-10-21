@@ -123,8 +123,8 @@ record keeps the earliest exact equal score.
 Mutation is computed in unit-box coordinates to avoid overflow from scaled
 physical differences. Finite endpoints with a nonfinite interval width refuse.
 The declared population-entry cap bounds one population's shape. Two
-populations, optional initial point, best point, and candidate buffers add
-storage; it is not a total byte or allocator-peak certificate.
+populations, an optional retained parallel wave, initial point, best point,
+and candidate buffers add storage; it is not a total byte or allocator-peak certificate.
 
 Philox draws are keyed by the explicit seed, member ID and generation.
 Integer draws have a 64-attempt rejection allowance, and counter segments
@@ -137,8 +137,9 @@ Finite callback results are cached before checking cancellation and are not
 recomputed on resume. Callbacks must keep their objective semantics fixed;
 their external side effects and panics cannot be rolled back.
 
-Execution is serial. There is no parallel population evaluator, durable
-serialization, nonlinear-constraint adapter, KKT certificate, global optimum,
+Execution is serial by default; the optional tile-backed parallel path is
+described below. There is no durable serialization, nonlinear-constraint
+adapter, KKT certificate, global optimum,
 continuous-time thermal-error bound, or experimental calibration claim.
 
 ## Verification scope
@@ -158,3 +159,58 @@ Native compilation and these Rust tests were not executed in the authoring
 environment: the required runner/toolchain commands could not start.
 Independent Python/NumPy/SciPy checks are supplementary reference calculations,
 not evidence that this Rust build or executable passed.
+
+## Parallel physical evaluations
+
+Select an existing `fs-exec::TilePool` explicitly with `--workers`:
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example simplex_scan_fit -- \
+  --population --workers 8 --initial-enthalpy 80 --seed 17
+```
+
+`--workers` requires `--population` and accepts 1 through 128 requested workers.
+Without it the existing serial behavior is unchanged. The example evaluates
+waves of at most 24 candidates, never crossing a generation boundary, under a
+64 MiB executor lease. That lease is not a total RAM cap on the physical models.
+Each candidate builds an isolated trial study using its worker's own `Cx` and
+arena. Only immutable specimen, phase-chart and measurement data are shared;
+there is no mutex around the physical solver. Each trial is limited to one
+physical evaluation, while the original DE state counts the complete search's
+actual callback starts. One further serial physical replay is reserved.
+
+The library entry point is:
+
+```rust
+let report = state.advance_parallel(
+    cx, &pool, &lease, additional_evaluations, max_wave,
+    &|worker_cx, point| evaluate_physics(worker_cx, point),
+)?;
+```
+
+The same Philox candidate keys and ordered greedy selection are used by serial
+and parallel execution. Worker completion order does not change a complete
+generation. With deterministic callbacks and no target stop, changing wave
+width or worker count at the same evaluation prefix gives the same population.
+A target is checked **between waves**, so parallel execution may score additional
+already-launched candidates after a serial run would first reach its target.
+Those evaluations are counted, never refunded. This can change the reported
+best candidate and evaluation count without changing DE's generation rule.
+
+Cancellation propagates through the existing executor bridge and all workers
+drain before control returns. Successful finite scores are cached before any
+cancellation, callback error or executor refusal escapes. Failed or unlaunched
+members retain their original coordinates; resumption retries only those gaps.
+The serial `advance` API can also resume a previously parallel search. Failed
+attempts stay spent. Several callback errors return the lowest failed member's
+error; remaining error values are dropped, not interpreted as fitness. No parent
+generation is partially replaced because a worker happened to finish early.
+
+The new native regression targets cover serial/parallel populations, hard-budget
+boundaries, cancellation with cached successful work, typed failures, serial
+continuation, source export/replay and the actual cold-start thermal objective.
+They have not been run in this delivery environment: Cargo/rustc, DSR and RCH
+are absent. Independent Python scheduling checks are not native concurrency
+verification. No wall-time speedup, cross-platform timing or total-memory claim
+is made.
