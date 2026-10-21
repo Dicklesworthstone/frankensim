@@ -3123,6 +3123,32 @@ check the source binding. This is one bridge translation, not a six-DOF bridge,
 resolved winding slip, dynamic longitudinal inertia or measured instrument
 qualification.
 
+`ReciprocalStringBank::with_longitudinal_waves` selects the existing
+`fs_nlmodal::LongitudinalString` energy on the playable material bank. Original
+homogeneous/bonded material supplies EA and SOLID axial mass; retained
+transverse coordinates keep their own gas-loaded normalization. Explicit axial
+sine modes append after every original string/body/cavity/torsion/fluid state.
+Mapped modal storage couples them to both transverse planes in the same exact
+linear/friction/DG transaction. The full positive strain energy replaces each
+axial oscillator's linear stiffness once; the reported nonlinear correction can
+therefore be signed. Contiguous original bindings keep borrowed coordinate
+slices. Body states, connections, complete tensor losses, interface source and
+pressure weights are preserved rather than rebuilding an independent voice.
+
+`longitudinal-waves SLOPE STRAIN ITERATIONS MAX_FORCE ABS_TOL REL_TOL COUNT INDEX...`
+selects this path in the ordinary material-string file through scheduling and
+PCM. It replaces instantaneous geometric stretching. Requested indices, full
+mode budgets, material elasticity/density bands, clock, rotation-invariant slope
+bounds, strain, positive local tension and nonlinear closure remain explicit
+admission conditions. Axial modes are conservatively elastic; original bending,
+torsion, bridge, body and fluid losses remain active. Omitted axial channels are
+statically equilibrated. No axial viscosity is inferred, and no independent
+longitudinal end-force port, moving endpoint, helical slip, temperature evolution
+or nonlinear preload is added. Focused regressions cover exact axial linear
+limits, material frequency scaling, distinct fluid/solid mass, sympathetic motion,
+total work, source-band refusal and callback-identical PCM. They do not qualify
+measured violin/cello/bass fidelity or close the full string-unification program.
+
 `ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
 quartic channels to the existing `FrictionModalSystem`, preserving every original
 string/body/bridge/cavity coordinate, optional torsion, complete tensor damping,

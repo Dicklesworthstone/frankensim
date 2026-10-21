@@ -158,6 +158,7 @@ mod contact_loaded_bow;
 
 #[path = "tests/nonlinear.rs"]
 mod nonlinear;
+mod longitudinal;
 
 #[path = "tests/bow_interfaces.rs"]
 mod bow_interfaces;

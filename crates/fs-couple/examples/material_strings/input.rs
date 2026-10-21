@@ -56,6 +56,7 @@ pub struct Spec {
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
+    pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -233,6 +234,27 @@ impl Spec {
             }.validate()?;
             Some((slope, config))
         } else { None };
+        let longitudinal_waves = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-waves") {
+            let mut row = r.row("longitudinal-waves")?;
+            let maximum_slope = row.positive()?;
+            let maximum_strain = row.positive()?;
+            let config = NonlinearModalConfig {
+                max_iterations: row.count(128)?, maximum_generalized_force: row.positive()?,
+                force_absolute_tolerance: row.positive()?, force_relative_tolerance: row.positive()?,
+            };
+            let count = row.count(32)?;
+            let mut axial_modes = Vec::with_capacity(count);
+            for _ in 0..count { axial_modes.push(row.count(1024)?); }
+            row.end()?;
+            let resolution = LongitudinalStringResolution { axial_modes, maximum_slope, maximum_strain };
+            resolution.validate()?;
+            config.validate()?;
+            if geometric_stretching.is_some() {
+                return Err("longitudinal waves replace geometric stretching; select one strain law".into());
+            }
+            Some((resolution, config))
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -372,8 +394,8 @@ impl Spec {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(schedule.as_bytes())?;
-        if geometric_stretching.is_some() && initialization == ForceInitialization::StaticPreload {
-            return Err("geometric stretching requires retained initial state; nonlinear static preload is not implemented".into());
+        if (geometric_stretching.is_some() || longitudinal_waves.is_some()) && initialization == ForceInitialization::StaticPreload {
+            return Err("nonlinear string strain requires retained initial state; nonlinear static preload is not implemented".into());
         }
         if schedule.to_canonical_bytes() != text.split_once("\nschedule\n").unwrap().1.as_bytes()
             || schedule.control_rate_hz > rate || schedule.tracks().is_empty() || schedule.tracks().len() > 16 {
@@ -405,7 +427,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, cavity, friction, bow_ribbon, forces, schedule };
+            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }
@@ -456,6 +478,15 @@ impl Spec {
                 .ok_or("fluid memory dimension overflow")?;
             modes = modes.checked_add(memory).ok_or("complete fluid mode count overflow")?;
             links = links.checked_add(memory).ok_or("complete fluid connection count overflow")?;
+        }
+        if let Some((resolution, config)) = &self.longitudinal_waves {
+            resolution.validate()?;
+            config.validate()?;
+            if self.geometric_stretching.is_some() {
+                return Err("longitudinal waves and geometric stretching cannot both supply strain energy".into());
+            }
+            modes = resolution.axial_modes.len().checked_mul(self.strings.len())
+                .and_then(|axial| modes.checked_add(axial)).ok_or("complete longitudinal mode count overflow")?;
         }
         if let Some(budget) = self.prepared_linear {
             budget.validate()?;

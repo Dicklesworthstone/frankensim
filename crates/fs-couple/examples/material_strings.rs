@@ -24,6 +24,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
+use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::LongitudinalStringResolution;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{StringForceCoupling,StringForcePort,StringForceProgram};
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
@@ -225,6 +226,9 @@ impl input::Spec {
         } else { bank };
         let bank = if let Some((slope, config)) = self.geometric_stretching {
             bank.with_geometric_stretching(slope, config, gate)?
+        } else { bank };
+        let bank = if let Some((resolution, config)) = &self.longitudinal_waves {
+            bank.with_longitudinal_waves(vec![resolution.clone(); self.strings.len()], *config, gate)?
         } else { bank };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };

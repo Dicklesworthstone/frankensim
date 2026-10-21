@@ -10,8 +10,8 @@
 //! stations are interior points, not fictitious moving ports on pinned ends.
 //! Sources remain frozen-state linear bending models; concentric layers mean
 //! perfect bonding, not helical winding/slip. Optional sourced torsion shares
-//! the surface friction solve. Source-derived geometric stretching can join
-//! that same network through with_geometric_stretching; broadband radiation
+//! the surface friction solve. Source-derived geometric stretching or retained
+//! longitudinal waves can join that same network through the nonlinear module; broadband radiation
 //! back-loading is absent. Explicit interior rotational connections can also
 //! transfer material-string torque to the shared body. Multiple fixed bow contacts
 //! use the existing simultaneous-friction owner through `multiple`.
@@ -120,6 +120,7 @@ pub struct MaterialStringBankSource {
     rotational_body_connections: Vec<torsion::StringBodyRotationConnection>,
     fluid_loading: Option<fluid::StringBankFluidLoading>,
     geometric_stretching: Option<nonlinear::bank::StringBankStretching>,
+    longitudinal_waves: Option<nonlinear::longitudinal::StringBankLongitudinal>,
     prepared_linear: Option<PreparedModalBudget>,
     material_plate: Option<plate::SharedMaterialPlateBody>,
     material_chart: Option<chart::SharedMaterialPlateChartBody>,
@@ -194,7 +195,8 @@ impl MaterialStringBankSource {
 }
 
 /// All string/body vibration persists in ONE mechanical/friction state.
-/// Components are strings, supplied physical bodies, then optional fluid memory.
+/// Components are strings, supplied physical bodies, optional fluid memory,
+/// then explicitly selected longitudinal coordinates.
 pub struct ReciprocalStringBank {
     source: MaterialStringBankSource,
     cards: Vec<BowedStringCard>,
@@ -248,7 +250,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: None, material_plate: None, material_chart: None, material_chart_viscosity: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding

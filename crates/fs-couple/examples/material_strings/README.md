@@ -580,6 +580,58 @@ material or bonded section supplies axial rigidity EA; there is no independent
 nonlinear stiffness or pitch parameter. Omitting the record retains the
 original linear route.
 
+For retained longitudinal inertia, select `longitudinal-waves` in that same
+position instead of `geometric-stretching`:
+
+```text
+longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2
+```
+
+The fields are maximum transverse slope, maximum absolute dynamic axial strain,
+the four constitutive iteration/force tolerances used above, then a count and
+strictly increasing one-based axial sine indices. This record selects the same
+indices for each original string; the Rust API accepts a separate selection per
+string. Both transverse planes contribute to the same material strain
+`u_x + (y_x² + z_x²)/2`. The existing `fs-nlmodal::LongitudinalString` supplies
+the strain energy and gradient; no separate instrument solver is introduced.
+
+Solid material density and EA determine the longitudinal frequencies
+`omega_j = j*pi/L*sqrt(EA/mu_solid)`. Transverse motion retains its actual
+gas-loaded mass normalization. Swapping a homogeneous material or a bonded
+layer changes these coefficients automatically; changing the gas does not
+assign transverse added fluid mass to axial motion. Every requested axial mode
+must fit the original material elasticity/density applicability, clock and
+complete-network budget. Unknown/out-of-band physics refuses without retuning
+or silently deleting modes.
+
+The axial oscillators join the original exact linear network. Their complete
+positive strain energy replaces their linear elastic storage once, through the
+same bounded discrete-gradient/friction solve. All original body/cavity,
+torsion, bridge, gas-memory and pressure coordinates remain present. Both
+reaction convergence and the complete work/energy balance must close. The
+reported nonlinear correction can be signed because the exact linear owner
+already includes axial stiffness; the complete physical energy remains positive.
+
+`longitudinal-cylinder-bow.material-strings` is a runnable bonded-string example
+with two transverse planes, torsion, gas memory, body, cavity and retained axial
+modes. Build the existing wire/body/sleeve packs and render:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/longitudinal-cylinder-bow.material-strings" "$demo/longitudinal-cylinder-bow.wav"
+```
+
+The axial extension is explicitly elastic and lossless. Original bending,
+torsional, bridge, body and gas losses remain active; bending viscosity is not
+reused as an unsupported axial loss law. Unretained axial channels equilibrate
+statically, so a two-mode selection is not a fully resolved longitudinal wave
+field. Fixed endpoints, moderate slopes, small constitutive strain and positive
+local tension remain required. There is no winding slip, temperature evolution,
+nonlinear static preload or independent longitudinal end-force port into the
+body. Axial strain reaches the receiver through its reciprocal effect on
+transverse motion and the original bridge connections. This is not a claim of
+measured violin/cello/bass equivalence.
+
 `nonlinear-cylinder-bow.material-strings` combines a bonded string's two
 transverse planes and material torsion with causal cylinder-gas memory, the
 shared material plate, its cavity and an actual bow gesture. With the existing

@@ -27,6 +27,7 @@ use fs_scenario::{
 use fs_tribo::FrictionLaw;
 
 mod multiple;
+mod longitudinal;
 
 fn nonlinear_config() -> NonlinearModalConfig {
     NonlinearModalConfig {
