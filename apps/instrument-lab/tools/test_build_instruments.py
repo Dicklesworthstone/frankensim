@@ -181,6 +181,62 @@ class Partials(unittest.TestCase):
         self.assertEqual([t["n"] for t in v["tracks"]], list(range(1, 9)))
 
 
+def write_refusal(root: Path, family: str, note: str, **extra) -> None:
+    d = root / family / note
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "pair.json").write_text(json.dumps({"schema": B.PAIR_SCHEMA, "ours": None, "refused": {"reason": "reference measures -113 cents from the named note", "render_sha": "99f76b610", "time": "2026-10-20T23:40:00Z"}, **extra}))
+
+
+class GraderRefusals(unittest.TestCase):
+    def run_main(self, root: Path, out: Path) -> int:
+        with mock.patch("sys.argv", ["build_instruments.py", "--analysis", str(root), "--out", str(out), "--descriptions", str(root / "none")]):
+            return B.main()
+
+    def test_a_refusal_record_is_listed_with_its_reason_and_counts_in_no_badge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            make_pair(root)
+            write_refusal(root, "clarinet", "E5")
+            self.assertEqual(self.run_main(root, out), 0, "a refusal by the grader is data, not a build failure")
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            self.assertEqual([p["note"] for p in card["pairs"]], ["D3"])
+            (r,) = card["refused"]
+            self.assertEqual((r["note"], r["kind"], r["render_sha"]), ("E5", "grader", "99f76b610"))
+            self.assertIn("-113 cents", r["reason"])
+            self.assertEqual(card["status"]["counts"]["notes_refused_by_grader"], 1)
+            with tempfile.TemporaryDirectory() as tmp2:
+                root2, out2 = Path(tmp2) / "analysis", Path(tmp2) / "out"
+                make_pair(root2)
+                self.run_main(root2, out2)
+                without = json.loads((out2 / "clarinet" / "card.json").read_text())["status"]
+            keep = lambda s: {k: s[k] for k in ("badge", "label", "line")} | {k: s["counts"][k] for k in ("within", "outside", "unruled", "notes_with_render")}  # noqa: E731
+            self.assertEqual(keep(card["status"]), keep(without), "the refused note must not move the badge, the sentence or any count")
+
+    def test_a_family_whose_only_render_was_refused_reads_rendered_not_graded(self):
+        j = B.judge(None, [], [{"note": "A1", "reason": "reference is +54 cents off", "render_sha": "945988669d92"}])
+        self.assertEqual(j["badge"], "ungraded")
+        self.assertIn("reference is +54 cents off", j["line"])
+        self.assertIn("nothing is graded", j["line"])
+
+    def test_a_refused_note_without_a_render_does_not_claim_one(self):
+        j = B.judge(None, [], [{"note": "A1", "reason": "no signal", "render_sha": None}])
+        self.assertEqual(j["badge"], "none")
+
+    def test_a_malformed_refusal_is_a_site_refusal_and_fails_the_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / "analysis", Path(tmp) / "out"
+            d = root / "clarinet" / "E5"
+            d.mkdir(parents=True)
+            (d / "pair.json").write_text(json.dumps({"refused": {"reason": ""}, "ours": None}))
+            self.assertEqual(self.run_main(root, out), 2)
+            card = json.loads((out / "clarinet" / "card.json").read_text())
+            self.assertEqual(card["refused"][0]["kind"], "site")
+
+    def test_a_refusal_in_the_wrong_directory_is_refused(self):
+        with self.assertRaises(B.Refused):
+            B.grader_refusal({"family": "oboe", "refused": {"reason": "x"}}, "clarinet", "E5")
+
+
 class EndToEnd(unittest.TestCase):
     def test_main_writes_cards_for_every_family_and_a_graded_clarinet(self):
         with tempfile.TemporaryDirectory() as tmp:

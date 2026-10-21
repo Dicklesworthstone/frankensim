@@ -54,6 +54,12 @@ A reference-only pair (no render yet) has "ours": null and no ours/diff files.
                   notes, other takes), value in gap_unit. An empty ruler means "no real-vs-real ruler for this
                   measure" and the page then makes no inside/outside claim for it.
 
+A note the grader cannot grade honestly (reference off its name, onset check failed) is not deleted: decompose.py
+overwrites its pair.json with {"refused": {"reason", "render_sha", "time"}, "ours": null} (family and note optional,
+checked when present) and moves the old figures and audio into <note>/superseded/<UTC>/. The card lists the note as
+"refused by the grader: <reason>", no badge counts it, and the build still exits 0 (the data is saying what is true).
+A family whose only renders were refused reads "Rendered, not graded".
+
 status.json (frankensim.instrument-status.v1), written by the family lane, prose only (no measured numbers):
   family, title, reference_instrument (a references.json files[].instrument, or null), summary,
   physics_present: [str], physics_missing: [str], blocked: null | str, beads: [str]
@@ -293,6 +299,31 @@ def validate_pair(pj: dict, family: str, note: str, base: Path, refs_by_id: dict
     return problems
 
 
+def grader_refusal(pj, family: str, note: str) -> dict | None:
+    """The grader's own refusal of a note, or None when pj is an ordinary pair.
+
+    decompose.py refuses a note it cannot grade honestly by overwriting that note's pair.json with
+    {"refused": {"reason", "render_sha", "time"}} (ours null) and moving the old figures and audio into superseded/.
+    The note is listed on the card with its reason and counts toward no badge.
+    """
+    if not isinstance(pj, dict) or pj.get("refused") is None:
+        return None
+    rec, problems = pj["refused"], []
+    if not isinstance(rec, dict) or not isinstance(rec.get("reason"), str) or not rec["reason"].strip():
+        problems.append("refused must be {reason, render_sha, time} with a non-empty reason")
+    for key in ("render_sha", "time"):
+        if isinstance(rec, dict) and rec.get(key) is not None and not isinstance(rec[key], str):
+            problems.append(f"refused.{key} must be a string")
+    for key, want in (("family", family), ("note", note)):
+        if pj.get(key) is not None and pj[key] != want:
+            problems.append(f"{key} {pj[key]!r} is not its directory {want!r}")
+    if pj.get("ours") is not None:
+        problems.append("a refused note must have ours null")
+    if problems:
+        raise Refused(problems)
+    return {"note": note, "kind": "grader", "reason": rec["reason"].strip(), "render_sha": rec.get("render_sha"), "time": rec.get("time"), "problems": [rec["reason"].strip()]}
+
+
 def check_audio(base: Path, pj: dict) -> list[str]:
     problems = []
     for side in ("real", "ours"):
@@ -392,12 +423,17 @@ def build_pair(pj: dict, base: Path, out_dir: Path, refs_by_id: dict, chains: di
     }
 
 
-def judge(status: dict | None, pairs: list[dict]) -> dict:
-    """The badge, and the sentence under it. Both are computed from the metrics."""
+def judge(status: dict | None, pairs: list[dict], grader_refused: list[dict] | None = None) -> dict:
+    """The badge, and the sentence under it. Both are computed from the metrics; a note the grader refused counts in none."""
     rendered = [p for p in pairs if p["ours"]]
     blocked = (status or {}).get("blocked")
-    counts = {"notes_with_render": len(rendered), "notes_reference_only": len(pairs) - len(rendered), "within": 0, "outside": 0, "unruled": 0}
+    refused_renders = [x for x in (grader_refused or []) if x.get("render_sha")]
+    counts = {"notes_with_render": len(rendered), "notes_reference_only": len(pairs) - len(rendered), "notes_refused_by_grader": len(grader_refused or []), "within": 0, "outside": 0, "unruled": 0}
     if not rendered:
+        if refused_renders:
+            why = "; ".join(f"{x['note']}: {x['reason']}" for x in refused_renders)
+            return {"badge": "ungraded", "label": BADGE_LABEL["ungraded"], "counts": counts,
+                    "line": f"{len(refused_renders)} note{'s' if len(refused_renders) != 1 else ''} rendered, but the grader refused to compare {'them' if len(refused_renders) != 1 else 'it'} with the recording, so nothing is graded. {why}"}
         if blocked:
             return {"badge": "blocked", "label": BADGE_LABEL["blocked"], "line": blocked, "counts": counts}
         extra = f" The reference library has real recordings for {len(pairs)} note{'s' if len(pairs) != 1 else ''} below." if pairs else ""
@@ -474,6 +510,7 @@ def main() -> int:
     families = list(FAMILIES) + [(fid, (load_status(fid, args.descriptions) or {}).get("title", fid), (load_status(fid, args.descriptions) or {}).get("reference_instrument")) for fid in extra]
 
     refused_total = 0
+    total_grader_refused = 0
     index = []
     args.out.mkdir(parents=True, exist_ok=True)
     for fid, title, ref_instrument in families:
@@ -485,6 +522,10 @@ def main() -> int:
             base = pj_path.parent
             try:
                 pj = json.loads(pj_path.read_text())
+                refusal = grader_refusal(pj, fid, note)
+                if refusal:
+                    refused.append(refusal)
+                    continue
                 problems = validate_pair(pj, fid, note, base, refs_by_id)
                 if not problems:
                     problems = check_audio(base, pj)
@@ -494,11 +535,12 @@ def main() -> int:
                 pair["source_sha256"] = sha256(pj_path)
                 pairs.append(pair)
             except (Refused, json.JSONDecodeError) as e:
-                refused.append({"note": note, "problems": e.problems if isinstance(e, Refused) else [f"pair.json is not JSON: {e}"]})
+                refused.append({"note": note, "kind": "site", "problems": e.problems if isinstance(e, Refused) else [f"pair.json is not JSON: {e}"]})
                 print(f"REFUSED {fid}/{note}: {'; '.join(refused[-1]['problems'])}", file=sys.stderr)
-        refused_total += len(refused)
+        refused_total += sum(1 for x in refused if x["kind"] == "site")
+        grader_refused = [x for x in refused if x["kind"] == "grader"]
         pairs.sort(key=lambda p: (p["ours"] is None, p["dynamic"], p["note"]))
-        verdict = judge(status, pairs)
+        verdict = judge(status, pairs, grader_refused)
         card = {
             "schema": "frankensim.instrument-card.v1", "family": fid, "title": (status or {}).get("title", title),
             "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -517,9 +559,10 @@ def main() -> int:
             "line": verdict["line"], "counts": verdict["counts"], "notes": [{"note": p["note"], "dynamic": p["dynamic"], "render": p["ours"] is not None} for p in pairs],
             "refused": len(refused),
         })
+        total_grader_refused += len(grader_refused)
     (args.out / "index.json").write_text(json.dumps({"schema": "frankensim.instrument-index.v1", "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "families": index}, ensure_ascii=False, separators=(",", ":")))
     graded = sum(1 for f in index if f["badge"] in ("close", "mixed", "off"))
-    print(f"{len(index)} families, {sum(len(f['notes']) for f in index)} notes shown, {graded} graded, {refused_total} pairs refused -> {args.out}")
+    print(f"{len(index)} families, {sum(len(f['notes']) for f in index)} notes shown, {graded} graded, {total_grader_refused} notes refused by the grader, {refused_total} pairs refused by this generator -> {args.out}")
     return 2 if refused_total else 0
 
 

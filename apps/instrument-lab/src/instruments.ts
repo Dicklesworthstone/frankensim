@@ -30,9 +30,9 @@ interface Card {
   family: string; title: string; built_utc: string;
   reference: { instrument: string; files: number; by_dynamic: Record<string, number>; chains: string[]; licence: string } | null;
   status: { badge: Badge; label: string; line: string; summary: string; blocked: string | null; physics_present: string[]; physics_missing: string[]; beads: string[]; described: boolean };
-  pairs: Pair[]; refused: { note: string; problems: string[] }[];
+  pairs: Pair[]; refused: { note: string; kind?: "grader" | "site"; problems: string[]; reason?: string; render_sha?: string | null; time?: string | null }[];
 }
-interface IndexFamily { id: string; title: string; reference: string | null; badge: Badge; label: string; line: string; counts: { notes_with_render: number; notes_reference_only: number; within: number; outside: number; unruled: number }; refused: number }
+interface IndexFamily { id: string; title: string; reference: string | null; badge: Badge; label: string; line: string; counts: { notes_with_render: number; notes_reference_only: number; notes_refused_by_grader: number; within: number; outside: number; unruled: number }; refused: number }
 interface Index { built_utc: string; families: IndexFamily[] }
 
 const data = (path: string): string => asset(`data/instruments/${path}`);
@@ -143,13 +143,20 @@ function buildCard(c: Card, notes: Record<string, string>): HTMLElement {
     el("div", { class: "panel-head" }, el("h3", {}, c.title), el("div", { class: "tags" }, pill(c.status.badge, c.status.label), c.status.beads.length ? el("span", { class: "tag plain" }, c.status.beads.join(" · ")) : null)),
     status,
     el("p", { class: "small muted", style: "margin: 12px 0 0" }, referenceLine(c)));
-  if (c.refused.length) {
-    root.append(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `${c.refused.length} analysis pair${c.refused.length === 1 ? "" : "s"} refused, not shown: `),
-      ...c.refused.map((r) => el("div", {}, `${r.note}: ${r.problems.join("; ")}`))));
+  const byGrader = c.refused.filter((r) => r.kind === "grader");
+  const bySite = c.refused.filter((r) => r.kind !== "grader");
+  if (byGrader.length) {
+    root.append(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `${byGrader.length} note${byGrader.length === 1 ? "" : "s"} refused by the grader, in no badge: `),
+      ...byGrader.map((r) => el("div", {}, `${r.note}: refused: ${r.reason ?? r.problems.join("; ")}${r.render_sha ? ` (render ${r.render_sha.slice(0, 12)}${r.time ? `, ${r.time}` : ""})` : ""}`))));
+  }
+  if (bySite.length) {
+    root.append(el("div", { class: "ir-refused small", role: "status" }, el("b", {}, `${bySite.length} analysis pair${bySite.length === 1 ? "" : "s"} refused, not shown: `),
+      ...bySite.map((r) => el("div", {}, `${r.note}: ${r.problems.join("; ")}`))));
   }
   if (c.pairs.length === 0) {
-    root.append(el("div", { class: "ir-empty" }, el("h4", {}, c.status.badge === "blocked" ? "Blocked" : "No render yet"),
-      el("p", {}, c.status.badge === "blocked" ? c.status.blocked ?? "" : "Nothing has been rendered for this family, so there is nothing to hear or measure. The comparison with a real recording appears here when there is."),
+    const kind = c.status.badge === "blocked" ? "blocked" : c.status.badge === "ungraded" ? "ungraded" : "none";
+    root.append(el("div", { class: "ir-empty" }, el("h4", {}, kind === "blocked" ? "Blocked" : kind === "ungraded" ? "Rendered, nothing to compare" : "No render yet"),
+      el("p", {}, kind === "blocked" ? c.status.blocked ?? "" : kind === "ungraded" ? c.status.line : "Nothing has been rendered for this family, so there is nothing to hear or measure. The comparison with a real recording appears here when there is."),
       c.reference ? el("p", { class: "small muted" }, "The real recordings are in the reference library; their spectrograms, scalograms and the real-vs-real ruler appear here once they have been analysed.") : null),
       el("h4", { class: "ir-h" }, "What the description says"), physicsLists(c));
     return root;
@@ -376,7 +383,7 @@ export async function mountInstruments(root: HTMLElement): Promise<void> {
     }
   };
   for (const f of families) {
-    const sub = f.counts.notes_with_render ? `${f.counts.notes_with_render} note${f.counts.notes_with_render === 1 ? "" : "s"} rendered` : f.counts.notes_reference_only ? "recordings analysed" : f.reference ? "recordings only in library" : "no recordings in library";
+    const sub = f.counts.notes_with_render ? `${f.counts.notes_with_render} note${f.counts.notes_with_render === 1 ? "" : "s"} rendered` : f.counts.notes_refused_by_grader ? `${f.counts.notes_refused_by_grader} refused by the grader` : f.counts.notes_reference_only ? "recordings analysed" : f.reference ? "recordings only in library" : "no recordings in library";
     const b = el("button", { type: "button", class: `ir-tile ir-${f.badge}`, "data-family": f.id, "aria-pressed": "false" }, el("b", {}, f.title), el("span", { class: "ir-tile-badge" }, el("span", { "aria-hidden": "true" }, MARK[f.badge]), f.label), el("small", {}, sub));
     b.addEventListener("click", () => void select(f.id));
     tiles.append(b);
