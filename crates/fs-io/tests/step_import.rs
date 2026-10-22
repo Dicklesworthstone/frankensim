@@ -661,6 +661,12 @@ fn g1_step_tessellation_reaches_volume_mesh() {
         HOLED_BLOCK_STEP.len(),
         holed_block_receipt("step.bytes").parse::<usize>().unwrap()
     );
+    // Stock OpenCASCADE 7.8 output, header not normalized (FILE_NAME first).
+    assert_eq!(
+        holed_block_receipt("step.header_order"),
+        "FILE_NAME,FILE_DESCRIPTION,FILE_SCHEMA"
+    );
+    assert!(HOLED_BLOCK_STEP.starts_with(b"ISO-10303-21;\nHEADER;\nFILE_NAME("));
     let parsed = parse_step(HOLED_BLOCK_STEP).expect("the OpenCASCADE STEP file parses");
     let soup = holed_block_soup();
     assert_eq!(

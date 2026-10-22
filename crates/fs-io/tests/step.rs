@@ -404,3 +404,40 @@ fn step_009_file_schema_shape_and_value_grammar_refuse() {
         );
     }
 }
+
+/// The three header records in any order parse to the same header; a
+/// duplicate or a missing record still refuses (IRP M1.3-W4: stock
+/// OpenCASCADE 7.8 writes FILE_NAME first).
+#[test]
+fn step_header_records_in_any_order_each_exactly_once() {
+    let records = [
+        "FILE_DESCRIPTION(('bounded syntax fixture'),'2;1');\n",
+        "FILE_NAME('fixture.step','2026-07-16T00:00:00',('fs-io'),('FrankenSim'),\
+         'fs-io','FrankenSim','');\n",
+        "FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));\n",
+    ];
+    let with_header = |header: &str| {
+        format!(
+            "ISO-10303-21;\nHEADER;\n{header}ENDSEC;\nDATA;\n#1=ORIGIN($,*);\nENDSEC;\nEND-ISO-10303-21;\n"
+        )
+    };
+    let canonical = parse_step(with_header(&records.concat()).as_bytes()).expect("ISO order");
+    for order in [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let header: String = order.iter().map(|&i| records[i]).collect();
+        let parsed = parse_step(with_header(&header).as_bytes()).expect("any order parses");
+        assert_eq!(parsed.document().header, canonical.document().header);
+        assert_eq!(
+            write_step(parsed.document()).expect("writes"),
+            write_step(canonical.document()).expect("writes"),
+            "the writer emits the ISO order"
+        );
+    }
+    let duplicate = format!("{}{}{}", records[0], records[1], records[1]);
+    let missing = format!("{}{}", records[1], records[2]);
+    for header in [duplicate, missing] {
+        assert!(matches!(
+            parse_step(with_header(&header).as_bytes()),
+            Err(IoError::Malformed { .. })
+        ));
+    }
+}

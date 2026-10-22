@@ -1515,9 +1515,41 @@ impl<'a> Parser<'a> {
         self.expect_identifier("HEADER")?;
         self.expect_kind(TokenKind::Semicolon, "';' after HEADER")?;
 
-        let file_description = self.parse_required_header("FILE_DESCRIPTION")?;
-        let file_name = self.parse_required_header("FILE_NAME")?;
-        let file_schema = self.parse_required_header("FILE_SCHEMA")?;
+        // ISO 10303-21 lists the three header entities in one order, but
+        // stock writers differ (OpenCASCADE 7.8 puts FILE_NAME first). The
+        // names are unique, so any order is read; each must appear exactly
+        // once and none may be missing.
+        let mut file_description = None;
+        let mut file_name = None;
+        let mut file_schema = None;
+        for _ in 0..3 {
+            let token = self.peek()?.clone();
+            let slot = match &token.kind {
+                TokenKind::Identifier(name) if name == "FILE_DESCRIPTION" => &mut file_description,
+                TokenKind::Identifier(name) if name == "FILE_NAME" => &mut file_name,
+                TokenKind::Identifier(name) if name == "FILE_SCHEMA" => &mut file_schema,
+                _ => {
+                    return Err(malformed(
+                        token.at,
+                        "expected FILE_DESCRIPTION, FILE_NAME or FILE_SCHEMA",
+                    ));
+                }
+            };
+            let TokenKind::Identifier(name) = token.kind else {
+                unreachable!("matched an identifier above");
+            };
+            if slot.is_some() {
+                return Err(malformed(
+                    token.at,
+                    format!("duplicate {name} header record"),
+                ));
+            }
+            *slot = Some(self.parse_required_header(&name)?);
+        }
+        let missing = |what: &str| malformed(0, format!("missing {what} header record"));
+        let file_description = file_description.ok_or_else(|| missing("FILE_DESCRIPTION"))?;
+        let file_name = file_name.ok_or_else(|| missing("FILE_NAME"))?;
+        let file_schema = file_schema.ok_or_else(|| missing("FILE_SCHEMA"))?;
         self.expect_identifier("ENDSEC")?;
         self.expect_kind(TokenKind::Semicolon, "';' after HEADER ENDSEC")?;
         self.expect_identifier("DATA")?;

@@ -870,6 +870,13 @@ No-claim boundaries:
 
 ## Second-order Gmsh solids (`gmsh` module, IRP M1.3-W4)
 
+- ASCII MSH 2.x and 4.1 (gmsh's default) bodies are both read. A 4.1 element
+  gets the 2.2 tag pair `[first physical tag of its entity, entity tag]`, so
+  both files of one mesh parse to the same elements (pinned on a real gmsh
+  4.1 fixture). Binary files and other versions refuse with
+  `IoError::Unsupported`. Block counts that do not add up, and a file cut
+  short, are `IoError::Malformed`. Before this, a 4.1 file parsed to an empty
+  mesh without refusing.
 - MSH 2.2 element ids 11 (TET10), 17 (HEX20) and 12 (HEX27) parse with their
   node counts; every other unlisted id refuses with `IoError::Unsupported`, and
   a record with too few nodes is `IoError::Malformed`.
@@ -897,9 +904,10 @@ No-claim boundaries:
   through-hole made offline by `make_holed_block.py` (gmsh 4.15.2 Python
   wheel, OpenCASCADE 7.8): a TET10 `.msh`, the STEP solid, its triangle
   tessellation and a key=value receipt (tool, version, settings
-  fingerprints, sizes, volumes). The adapter puts the STEP header entities in
-  the ISO 10303-21 order, because OCC 7.8 writes FILE_NAME first and
-  `parse_step` refuses that; the raw order and hash are in the receipt.
+  fingerprints, sizes, volumes). The STEP file is stock OCC 7.8 output with
+  its header unchanged (FILE_NAME first, recorded in the receipt).
+  `parse_step` reads the three header entities in any order, each exactly
+  once (`tests/step.rs::step_header_records_in_any_order_each_exactly_once`).
   Adapter output has Estimate authority and is never a build dependency.
   `g1_imported_mesh_promotes_and_assembles` checks two things. First, TET10
   assembly reproduces the adapter's curved volumes (gmsh's own Jacobians on

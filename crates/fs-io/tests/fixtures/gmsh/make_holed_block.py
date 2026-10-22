@@ -8,6 +8,7 @@ Writes, in millimetres (Gmsh files carry no unit; the importer declares it):
 - holed_block_tet10.msh     second-order (Gmsh type 11) volume mesh, MSH 2.2 ASCII
 - holed_block.step          the OpenCASCADE solid
 - holed_block_surface.msh   a 3-node triangle tessellation of that STEP, MSH 2.2 ASCII
+- holed_block_surface41.msh the same tessellation as gmsh's default MSH 4.1 ASCII
 - holed_block.receipt.txt   key=value receipt: tool identity, settings, census, volumes
 
 Everything here is Estimate authority. The geometry is a declared synthetic
@@ -87,34 +88,23 @@ def min_dihedral_deg(p):
     return best
 
 
-def normalize_step_header(path):
-    """Put the Part-21 header entities in the order ISO 10303-21 requires
-    (FILE_DESCRIPTION, FILE_NAME, FILE_SCHEMA). OpenCASCADE 7.8 writes
-    FILE_NAME first, which a conforming reader refuses. Nothing else moves."""
+def step_header_order(path):
+    """The header entity names in the order the writer emitted them. Nothing
+    is rewritten: fs-io reads the three entities in any order."""
     with open(path) as f:
         text = f.read()
     start = text.index("HEADER;") + len("HEADER;")
     end = text.index("ENDSEC;", start)
-    # Split at semicolons outside Part-21 strings ('' escapes a quote).
-    statements, current, quoted = [], "", False
+    names, current, quoted = [], "", False
     for ch in text[start:end]:
         if ch == "'":
             quoted = not quoted
         if ch == ";" and not quoted:
-            statements.append(current.strip())
+            names.append(current.strip().split("(", 1)[0].strip())
             current = ""
         else:
             current += ch
-    assert not quoted and not current.strip(), current
-    statements = [s for s in statements if s]
-    order = ["FILE_DESCRIPTION", "FILE_NAME", "FILE_SCHEMA"]
-    by_name = {s.split("(", 1)[0].strip(): s for s in statements}
-    assert sorted(by_name) == sorted(order), by_name.keys()
-    original = [s.split("(", 1)[0].strip() for s in statements]
-    header = "".join(f"\n{by_name[name]};" for name in order) + "\n"
-    with open(path, "w") as f:
-        f.write(text[:start] + header + text[end:])
-    return ",".join(original)
+    return ",".join(n for n in names if n)
 
 
 def duffy_rule():
@@ -159,10 +149,8 @@ def main(out):
     )
     step = f"{out}/holed_block.step"
     gmsh.write(step)
-    receipt["step.raw_sha256"] = sha256(step)
-    receipt["step.raw_header_order"] = normalize_step_header(step)
-    receipt["step.header_order"] = "FILE_DESCRIPTION,FILE_NAME,FILE_SCHEMA"
     receipt["step.sha256"] = sha256(step)
+    receipt["step.header_order"] = step_header_order(step)
     receipt["step.bytes"] = str(os.path.getsize(step))
 
     # Second-order volume mesh: only the volume is a physical group, so the
@@ -174,6 +162,7 @@ def main(out):
     gmsh.write(msh)
     receipt["tet10.sha256"] = sha256(msh)
     receipt["tet10.bytes"] = str(os.path.getsize(msh))
+    receipt["tet10.msh_format"] = "2.2"
     receipt["tet10.settings_fingerprint"] = f"{settings_fingerprint(VOLUME_SETTINGS):016x}"
     types, tags, nodes = gmsh.model.mesh.getElements(3, volume_tag)
     assert list(types) == [11], types
@@ -218,6 +207,13 @@ def main(out):
     gmsh.write(surface)
     receipt["tessellation.sha256"] = sha256(surface)
     receipt["tessellation.bytes"] = str(os.path.getsize(surface))
+    receipt["tessellation.msh_format"] = "2.2"
+    gmsh.option.setNumber("Mesh.MshFileVersion", 4.1)
+    surface41 = f"{out}/holed_block_surface41.msh"
+    gmsh.write(surface41)
+    receipt["tessellation41.sha256"] = sha256(surface41)
+    receipt["tessellation41.bytes"] = str(os.path.getsize(surface41))
+    receipt["tessellation41.msh_format"] = "4.1"
     receipt["tessellation.settings_fingerprint"] = (
         f"{settings_fingerprint(SURFACE_SETTINGS):016x}"
     )

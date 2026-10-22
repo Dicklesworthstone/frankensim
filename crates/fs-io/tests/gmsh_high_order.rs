@@ -641,3 +641,119 @@ fn g0_promotion_refuses_undeclared_and_unsupported() {
         Err(GmshPromotionRefusal::DuplicateNodeId { id: 1 })
     ));
 }
+
+// ---- MSH 4.1 (gmsh's default format) is read, never dropped to empty.
+
+const SURFACE_MSH22: &str = include_str!("fixtures/gmsh/holed_block_surface.msh");
+const SURFACE_MSH41: &str = include_str!("fixtures/gmsh/holed_block_surface41.msh");
+
+fn sorted_mesh(mesh: &GmshMesh) -> (Vec<(u64, [u64; 3])>, Vec<GmshElement>) {
+    let mut nodes = coordinate_bits(mesh);
+    nodes.sort_unstable();
+    let mut elements = mesh.elements.clone();
+    elements.sort_by_key(|e| e.id);
+    (nodes, elements)
+}
+
+#[test]
+fn g0_msh41_reads_the_same_mesh_as_msh22() {
+    let receipt = adapter_receipt();
+    assert_eq!(receipt["tessellation41.msh_format"], "4.1");
+    assert_eq!(
+        SURFACE_MSH41.len(),
+        receipt["tessellation41.bytes"].parse::<usize>().unwrap()
+    );
+    let (q22, r22) = parse_gmsh(SURFACE_MSH22).expect("MSH 2.2 parses");
+    let (q41, r41) = parse_gmsh(SURFACE_MSH41).expect("MSH 4.1 parses");
+    let (m22, m41) = (q22.into_inner(), q41.into_inner());
+    assert_eq!(m41.version, "4.1");
+    let nodes: usize = receipt["tessellation.nodes"].parse().unwrap();
+    let triangles: usize = receipt["tessellation.triangles"].parse().unwrap();
+    assert_eq!((r41.node_count, r41.element_count), (nodes, triangles));
+    assert!(r41.node_count > 0 && r41.element_count > 0, "never empty");
+    assert_eq!(r41.element_census, r22.element_census);
+    assert_eq!(m41.physical_names, m22.physical_names);
+    // Same node tags and coordinate bits; same elements with the 2.2 tag pair
+    // (physical group, elementary entity).
+    assert_eq!(sorted_mesh(&m41), sorted_mesh(&m22));
+}
+
+/// The first TET10 of `high_order_mesh`, hand-written as MSH 4.1 ASCII: one
+/// volume entity (tag 1, physical 7), one node block, one element block.
+fn tet10_msh41(file_type: &str, version: &str) -> String {
+    let mesh = high_order_mesh();
+    let mut text = format!(
+        "$MeshFormat\n{version} {file_type} 8\n$EndMeshFormat\n$PhysicalNames\n1\n3 7 \"solid\"\n\
+         $EndPhysicalNames\n$Entities\n0 0 0 1\n1 -1 -1 -1 1 1 1 1 7 0\n$EndEntities\n$Nodes\n1 10 1 10\n3 1 0 10\n"
+    );
+    for node in &mesh.nodes[..10] {
+        text.push_str(&format!("{}\n", node.id));
+    }
+    for node in &mesh.nodes[..10] {
+        let [x, y, z] = node.coords;
+        text.push_str(&format!("{x:e} {y:e} {z:e}\n"));
+    }
+    text.push_str("$EndNodes\n$Elements\n1 1 1 1\n3 1 11 1\n1");
+    for id in &mesh.elements[0].node_ids {
+        text.push_str(&format!(" {id}"));
+    }
+    text.push_str("\n$EndElements\n");
+    text
+}
+
+#[test]
+fn g0_msh41_tet10_refusals_and_caps() {
+    let (q, receipt) = parse_gmsh(&tet10_msh41("0", "4.1")).expect("4.1 TET10 parses");
+    let mesh = q.into_inner();
+    let reference = high_order_mesh();
+    assert_eq!(receipt.element_census.get(&11), Some(&1));
+    assert_eq!(mesh.elements[0].node_ids, reference.elements[0].node_ids);
+    assert_eq!(mesh.elements[0].tags, vec![7, 1], "physical from $Entities");
+    assert_eq!(
+        coordinate_bits(&mesh),
+        coordinate_bits(&reference)[..10].to_vec()
+    );
+
+    for (file_type, version) in [("1", "4.1"), ("0", "4.0"), ("0", "3.0"), ("0", "1.0")] {
+        let result = parse_gmsh(&tet10_msh41(file_type, version));
+        assert!(
+            matches!(result, Err(IoError::Unsupported { .. })),
+            "MSH {version} file-type {file_type} must refuse, got {result:?}"
+        );
+    }
+    // Block counts that do not add up, and a file cut short, are malformed.
+    let text = tet10_msh41("0", "4.1");
+    for broken in [
+        text.replacen("$Nodes\n1 10 1 10", "$Nodes\n1 11 1 11", 1),
+        text.replacen("$Elements\n1 1 1 1", "$Elements\n1 2 1 2", 1),
+        text[..text.find("$EndNodes").unwrap() - 30].to_string(),
+    ] {
+        let result = parse_gmsh(&broken);
+        assert!(
+            matches!(result, Err(IoError::Malformed { .. })),
+            "got {result:?}"
+        );
+    }
+    // Caps at cap and cap + 1.
+    let at_cap = GmshLimits {
+        max_nodes: 10,
+        max_elements: 1,
+        max_bytes: text.len(),
+    };
+    assert!(parse_gmsh_with_limits(&text, &at_cap).is_ok());
+    for limits in [
+        GmshLimits {
+            max_nodes: 9,
+            ..at_cap.clone()
+        },
+        GmshLimits {
+            max_elements: 0,
+            ..at_cap.clone()
+        },
+    ] {
+        assert!(matches!(
+            parse_gmsh_with_limits(&text, &limits),
+            Err(IoError::ResourceBound { .. })
+        ));
+    }
+}

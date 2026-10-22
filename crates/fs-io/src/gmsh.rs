@@ -12,6 +12,11 @@
 //! edges (0,1),(1,2),(0,2),(0,3),(1,3),(2,3)) and M1.3-W1b (HEX20/HEX27:
 //! corners, bottom and top perimeter edges, vertical edges, face centres
 //! z-,z+,y-,x+,y+,x-, body centre). Every other Gmsh type refuses.
+//!
+//! ASCII MSH 2.x and 4.1 bodies are both read. A 4.1 element takes the tags
+//! `[first physical tag of its entity (0 if none), entity tag]`, the pair MSH
+//! 2.2 writes, so either file of one mesh parses to the same elements. Binary
+//! files and other versions refuse; nothing parses to an empty mesh silently.
 
 use crate::quarantine::Quarantined;
 use crate::representation::{LengthUnit, ReferenceState};
@@ -303,6 +308,188 @@ pub struct GmshReceipt {
     pub content_hash: ContentHash,
 }
 
+fn malformed(at: usize, what: impl Into<String>) -> IoError {
+    IoError::Malformed {
+        at,
+        what: what.into(),
+    }
+}
+
+/// The next record of a section, split on whitespace.
+fn next_record<'a>(
+    lines: &mut impl Iterator<Item = (usize, &'a str)>,
+    section: &str,
+) -> Result<(usize, Vec<&'a str>), IoError> {
+    let (at, line) = lines
+        .next()
+        .ok_or_else(|| malformed(0, format!("file ends inside {section}")))?;
+    Ok((at, line.split_whitespace().collect()))
+}
+
+fn field<T: core::str::FromStr>(
+    parts: &[&str],
+    index: usize,
+    at: usize,
+    what: &str,
+) -> Result<T, IoError> {
+    parts
+        .get(index)
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| malformed(at, format!("invalid {what}")))
+}
+
+/// MSH 4.1 `$Entities`: physical tags of every (dimension, entity tag).
+fn parse_entities_v41<'a>(
+    lines: &mut impl Iterator<Item = (usize, &'a str)>,
+    physical: &mut BTreeMap<(u32, i32), Vec<i32>>,
+) -> Result<(), IoError> {
+    let (at, header) = next_record(lines, "$Entities")?;
+    let counts: [usize; 4] = [
+        field(&header, 0, at, "point entity count")?,
+        field(&header, 1, at, "curve entity count")?,
+        field(&header, 2, at, "surface entity count")?,
+        field(&header, 3, at, "volume entity count")?,
+    ];
+    for (dim, &count) in (0u32..).zip(counts.iter()) {
+        for _ in 0..count {
+            let (at, parts) = next_record(lines, "$Entities")?;
+            let tag: i32 = field(&parts, 0, at, "entity tag")?;
+            // A point lists x y z; higher entities list a 6-value box.
+            let first = if dim == 0 { 4 } else { 7 };
+            let n: usize = field(&parts, first, at, "physical tag count")?;
+            let mut tags = Vec::with_capacity(n.min(parts.len()));
+            for k in 0..n {
+                tags.push(field(&parts, first + 1 + k, at, "physical tag")?);
+            }
+            physical.insert((dim, tag), tags);
+        }
+    }
+    Ok(())
+}
+
+/// MSH 4.1 `$Nodes`: entity blocks of node tags, then their coordinates.
+fn parse_nodes_v41<'a>(
+    lines: &mut impl Iterator<Item = (usize, &'a str)>,
+    limits: &GmshLimits,
+    mesh: &mut GmshMesh,
+) -> Result<(), IoError> {
+    let (at, header) = next_record(lines, "$Nodes")?;
+    let blocks: usize = field(&header, 0, at, "node entity block count")?;
+    let total: usize = field(&header, 1, at, "node count")?;
+    if total > limits.max_nodes {
+        return Err(IoError::ResourceBound {
+            what: format!("node count {total} exceeds limit {}", limits.max_nodes),
+        });
+    }
+    mesh.nodes.reserve(total);
+    let mut seen = 0usize;
+    for _ in 0..blocks {
+        let (at, block) = next_record(lines, "$Nodes")?;
+        let parametric: u8 = field(&block, 2, at, "parametric flag")?;
+        let count: usize = field(&block, 3, at, "block node count")?;
+        if parametric > 1 {
+            return Err(malformed(at, "parametric flag must be 0 or 1"));
+        }
+        seen = seen
+            .checked_add(count)
+            .filter(|&n| n <= total)
+            .ok_or_else(|| malformed(at, "node blocks exceed the declared node count"))?;
+        let mut ids = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (at, parts) = next_record(lines, "$Nodes")?;
+            ids.push(field::<u64>(&parts, 0, at, "node tag")?);
+        }
+        for id in ids {
+            let (at, parts) = next_record(lines, "$Nodes")?;
+            let coords: [f64; 3] = [
+                field(&parts, 0, at, "node x")?,
+                field(&parts, 1, at, "node y")?,
+                field(&parts, 2, at, "node z")?,
+            ];
+            if coords.iter().any(|c| !c.is_finite()) {
+                return Err(malformed(at, "non-finite node coordinates"));
+            }
+            mesh.nodes.push(GmshNode { id, coords });
+        }
+    }
+    if seen != total {
+        return Err(malformed(
+            at,
+            "node blocks do not sum to the declared node count",
+        ));
+    }
+    Ok(())
+}
+
+/// MSH 4.1 `$Elements`: entity blocks of one element type each.
+fn parse_elements_v41<'a>(
+    lines: &mut impl Iterator<Item = (usize, &'a str)>,
+    limits: &GmshLimits,
+    physical: &BTreeMap<(u32, i32), Vec<i32>>,
+    mesh: &mut GmshMesh,
+) -> Result<(), IoError> {
+    let (at, header) = next_record(lines, "$Elements")?;
+    let blocks: usize = field(&header, 0, at, "element entity block count")?;
+    let total: usize = field(&header, 1, at, "element count")?;
+    if total > limits.max_elements {
+        return Err(IoError::ResourceBound {
+            what: format!(
+                "element count {total} exceeds limit {}",
+                limits.max_elements
+            ),
+        });
+    }
+    mesh.elements.reserve(total);
+    let mut seen = 0usize;
+    for _ in 0..blocks {
+        let (at, block) = next_record(lines, "$Elements")?;
+        let dim: u32 = field(&block, 0, at, "entity dimension")?;
+        let entity: i32 = field(&block, 1, at, "entity tag")?;
+        let type_id: u32 = field(&block, 2, at, "element type id")?;
+        let count: usize = field(&block, 3, at, "block element count")?;
+        let element_type =
+            GmshElementType::from_id(type_id).ok_or_else(|| IoError::Unsupported {
+                what: format!("unsupported Gmsh element type {type_id}"),
+            })?;
+        seen = seen
+            .checked_add(count)
+            .filter(|&n| n <= total)
+            .ok_or_else(|| malformed(at, "element blocks exceed the declared element count"))?;
+        let physical_tag = physical
+            .get(&(dim, entity))
+            .and_then(|tags| tags.first())
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..count {
+            let (at, parts) = next_record(lines, "$Elements")?;
+            if parts.len() < 1 + element_type.node_count() {
+                return Err(malformed(
+                    at,
+                    "element record has insufficient node references",
+                ));
+            }
+            let id: u64 = field(&parts, 0, at, "element id")?;
+            let mut node_ids = Vec::with_capacity(element_type.node_count());
+            for n in 0..element_type.node_count() {
+                node_ids.push(field(&parts, 1 + n, at, "node id in element connectivity")?);
+            }
+            mesh.elements.push(GmshElement {
+                id,
+                element_type,
+                tags: vec![physical_tag, entity],
+                node_ids,
+            });
+        }
+    }
+    if seen != total {
+        return Err(malformed(
+            at,
+            "element blocks do not sum to the declared element count",
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a Gmsh ASCII mesh string using default resource limits.
 pub fn parse_gmsh(input: &str) -> Result<(Quarantined<GmshMesh>, GmshReceipt), IoError> {
     parse_gmsh_with_limits(input, &GmshLimits::default())
@@ -327,6 +514,7 @@ pub fn parse_gmsh_with_limits(
     let mut mesh = GmshMesh::new("2.2");
     let mut lines = input.lines().enumerate();
     let mut version = "2.2".to_string();
+    let mut entity_physical: BTreeMap<(u32, i32), Vec<i32>> = BTreeMap::new();
 
     while let Some((line_idx, line)) = lines.next() {
         let trimmed = line.trim();
@@ -340,11 +528,30 @@ pub fn parse_gmsh_with_limits(
                     });
                 }
                 version = parts[0].to_string();
+                if !(version.starts_with('2') || version == "4.1") {
+                    return Err(IoError::Unsupported {
+                        what: format!("MSH version {version} (ASCII 2.x and 4.1 are read)"),
+                    });
+                }
+                if parts.get(1).is_some_and(|file_type| *file_type != "0") {
+                    return Err(IoError::Unsupported {
+                        what: "binary MSH files are not read".to_string(),
+                    });
+                }
                 mesh.version = version.clone();
             }
             // Consume until $EndMeshFormat
             for (_, end_line) in lines.by_ref() {
                 if end_line.trim() == "$EndMeshFormat" {
+                    break;
+                }
+            }
+        } else if trimmed == "$Entities" {
+            if version == "4.1" {
+                parse_entities_v41(&mut lines, &mut entity_physical)?;
+            }
+            for (_, end_line) in lines.by_ref() {
+                if end_line.trim() == "$EndEntities" {
                     break;
                 }
             }
@@ -427,21 +634,7 @@ pub fn parse_gmsh_with_limits(
                     }
                 }
             } else {
-                // MSH 4.x nodes format
-                if let Some((_, header_line)) = lines.next() {
-                    let parts: Vec<&str> = header_line.split_whitespace().collect();
-                    if parts.len() >= 4 {
-                        let num_nodes: usize = parts[1].parse().unwrap_or(0);
-                        if num_nodes > limits.max_nodes {
-                            return Err(IoError::ResourceBound {
-                                what: format!(
-                                    "node count {num_nodes} exceeds limit {}",
-                                    limits.max_nodes
-                                ),
-                            });
-                        }
-                    }
-                }
+                parse_nodes_v41(&mut lines, limits, &mut mesh)?;
             }
             for (_, end_line) in lines.by_ref() {
                 if end_line.trim() == "$EndNodes" {
@@ -528,6 +721,8 @@ pub fn parse_gmsh_with_limits(
                         }
                     }
                 }
+            } else {
+                parse_elements_v41(&mut lines, limits, &entity_physical, &mut mesh)?;
             }
             for (_, end_line) in lines.by_ref() {
                 if end_line.trim() == "$EndElements" {
