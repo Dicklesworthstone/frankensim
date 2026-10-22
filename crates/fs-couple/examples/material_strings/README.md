@@ -864,6 +864,56 @@ contact footprint and refine spatial modes and time before treating a resulting
 pitch or timbre as converged; four retained modes per plane are an example
 configuration, not an accuracy claim.
 
+## Computed exterior reaction on the shared body
+
+The optional record immediately before `cavity` selects a geometry- and
+gas-derived load on a regional flat-plate body:
+
+```text
+body-radiation rayleigh SIDES MIN_HZ MAX_HZ FREQUENCIES MAX_CELLS MAX_SWEEP_TERMS MAX_POLES
+```
+
+`rayleigh-pluck.material-strings` and `orthotropic.body` provide a small runnable
+example. After the initial copy and wire-pack commands above:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/directional-body-manifest.tsv" --out "$demo/directional-body.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/rayleigh-pluck.material-strings" "$demo/rayleigh-pluck.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/orthotropic.body
+```
+
+The original retained, mass-normalized DKT displacement fields supply three
+area points per triangle. Every signed body mode enters the full Rayleigh
+impedance matrix, including modes whose integrated displacement is zero.
+The shared positive-real fitter preserves mutual modal reactions; its acoustic
+storage and loss join the same exact string/body/cavity/bow solve. Radiation
+therefore alters actual string and body motion before the pressure observer.
+Material, grain, thickness, gas pressure and gas-composition changes rebuild
+this load from their physical data. No damping ratio or output gain substitutes
+for the air reaction. The native report retains the original specimen, gas,
+complete mode/cell/pole counts and sampled complex/resistance fit errors.
+
+`SIDES` is one or two independent infinite-baffle half-spaces; a body with a
+modeled interior cavity requires one exterior side. Supply an odd 33–257
+frequency count. The band must cover all retained free-body frequencies, and
+the fitter's highest 8x off-band storage poles must resolve on the mechanical
+clock. All declared cells, fitted poles and existing material histories count
+against the original work and exact-state limits; none are silently dropped.
+The complete fit keeps the shared 5% peak/2% RMS complex and 10% peak/5% RMS
+resistance gates. Those sampled estimates do not bound mesh or out-of-band
+error. Finer source meshes and wider bands can require fewer retained modes
+or a higher physical clock to fit the explicit resource envelope.
+
+This first computed route requires a v1/v2 regional plate profile and the
+ordinary exact owner. Curved shells and `prepared-linear` are refused. The
+receiver remains the existing compact, zero-retardation pressure observation
+of the **loaded** acceleration; it is not a matched broadband microphone or a
+validated violin exterior. The example retains one body mode to keep the
+complete passive acoustic image small; it is an integration fixture, not a
+claim of converged instrument timbre.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly
@@ -889,7 +939,8 @@ span **including afterlength**, plus explicitly selected scalar rotational
 spring/dashpot joints. It does not model carved wood shells, a full 3D unilateral
 bridge-contact law, f-hole geometry, distributed cavity
 modes, helical winding/slip, solved finger disengagement,
-bow-hair normal-load distribution, or exterior radiation back-loading. The body
+bow-hair normal-load distribution, or unbaffled exterior radiation. The optional
+computed planar back-loading is described above. The body
 and neck observations retain the existing compact baffled, zero-retardation
 approximation. Source-state validity is not measured instrument-fidelity evidence.
 

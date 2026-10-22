@@ -4169,3 +4169,16 @@ approximations: a coarse interface is not invariant to swapping blade order,
 and source/interface refinement must be assessed separately. Curved or
 noncoincident blades, moving contact footprints and measured reed fidelity
 remain outside this connection.
+
+### Material-surface feedback in hereditary vibration
+
+The existing `thermovisco_dynamics::Oscillator` consumes source-backed Maxwell
+laws built from complete fixed-context temperature lines, including sampled
+temperature/pressure surfaces. Changing the pressure query on an identical
+material card changes the actual hereditary motion and physical dashpot heat;
+the same heat reaches the original lumped enthalpy-feedback owner. Focused
+regressions check the thermal endpoint and independent combined energy balance.
+Source continuity, role pins and shared material identity remain enforced.
+Non-temperature coordinates stay fixed external conditions; this adds no
+evolving pressure/composition work, phase transition, variable reference mass
+or alternate caloric model. Numerical dissipation is not converted to heat.

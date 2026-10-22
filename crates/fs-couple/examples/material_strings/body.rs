@@ -34,6 +34,8 @@ enum BodyModel {
     Assembly(shell::assembly::Spec),
 }
 impl Profile {
+    pub fn has_planar_material_basis(&self) -> bool { matches!(self.model, BodyModel::Plate(_)) }
+
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 1 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;

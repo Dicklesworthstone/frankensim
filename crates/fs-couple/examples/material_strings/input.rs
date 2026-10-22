@@ -5,6 +5,7 @@ use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -100,6 +101,7 @@ pub struct Spec {
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub bending_memory: Option<bending_memory::Input>,
+    pub body_radiation: Option<PlateRayleighOptions>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -367,6 +369,22 @@ impl Spec {
             }
             Some(bending_memory::Input::new(max_states,selections,&strings)?)
         } else { None };
+        let body_radiation = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("body-radiation") {
+            let mut row = r.row("body-radiation")?;
+            if row.word()? != "rayleigh" { return Err("body-radiation requires the computed rayleigh model".into()); }
+            let options = PlateRayleighOptions {
+                sides: row.parse()?, minimum_hz: row.positive()?, maximum_hz: row.positive()?,
+                frequency_samples: row.count(257)?, maximum_surface_cells: row.count(4096)?,
+                maximum_sweep_terms: row.parse()?, maximum_poles: row.count(256)?,
+            };
+            row.end()?;
+            options.validate(rate)?;
+            if prepared_linear.is_some() {
+                return Err("body radiation requires the exact owner; prepared-linear has no acoustic storage".into());
+            }
+            Some(options)
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -546,7 +564,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, bending_memory, cavity, friction, bow_ribbon, forces, schedule };
+            longitudinal_loss, bending_memory, body_radiation, cavity, friction, bow_ribbon, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }

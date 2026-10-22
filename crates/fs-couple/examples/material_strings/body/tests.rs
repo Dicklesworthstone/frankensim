@@ -1,6 +1,8 @@
 //! Actual pack -> material tensor -> shared instrument -> pressure/PCM tests.
 //! All coefficients below are synthetic; they are not measured wood or metal.
 use super::*;
+#[path = "rayleigh_tests.rs"]
+mod rayleigh_tests;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,ObservationDataset,PropertyClaim,PropertyKey,PropertyValue,
     Provenance,InterpolationPolicy,UncertaintyModel};

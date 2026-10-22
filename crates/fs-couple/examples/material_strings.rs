@@ -25,6 +25,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{LongitudinalStringResolution,LongitudinalMaterialLoss};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
@@ -144,7 +145,7 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
 }
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
-    stop_profile: Option<stops::Profile> }
+    stop_profile: Option<stops::Profile>, body_radiation: Option<PlateRayleighReport> }
 impl input::Spec {
     fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
@@ -166,6 +167,14 @@ impl input::Spec {
         }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
+        if let Some(radiation) = self.body_radiation {
+            radiation.validate(self.rate)?;
+            if !profile.as_ref().is_some_and(body::Profile::has_planar_material_basis)
+                || self.prepared_linear.is_some()
+                || (radiation.sides == 2 && self.cavity.is_some()) {
+                return Err("computed body radiation needs a regional flat-plate profile, exact propagation, and one exterior side when a cavity is modeled".into());
+            }
+        }
         // Count every fluid inertia and physical connection before pack I/O.
         // The exact owner still applies its stricter connected-island bound.
         let additional_body_connections = profile.as_ref()
@@ -187,10 +196,12 @@ impl input::Spec {
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
             .ok_or("complete material memory extent overflow")?;
-        if memory != 0 {
+        let internal_states = self.body_radiation.map_or(0, |r| 2*r.maximum_poles)
+            .checked_add(memory).ok_or("complete constitutive/acoustic state extent overflow")?;
+        if internal_states != 0 {
             let core = settings.network.max_modes.checked_mul(2).ok_or("material setup dimension overflow")?;
-            let terms = core.checked_add(memory).and_then(|d| d.checked_mul(d))
-                .and_then(|d| core.checked_mul(memory).and_then(|m| d.checked_add(m)))
+            let terms = core.checked_add(internal_states).and_then(|d| d.checked_mul(d))
+                .and_then(|d| core.checked_mul(internal_states).and_then(|m| d.checked_add(m)))
                 .and_then(|d| settings.network.max_setup_terms.checked_add(d))
                 .ok_or("complete material setup work overflow")?;
             if memory > 256 || terms > input::MAX_WORK as usize {
@@ -292,6 +303,15 @@ impl input::Spec {
             Some(memory) => memory.bind(bank, gate)?,
             None => bank,
         };
+        // The original body basis survives fluid, torsion and material-history
+        // binding. Compute its air reaction once, before bows or preload run.
+        let (bank, body_radiation) = match self.body_radiation {
+            Some(options) => {
+                let (bank, report) = bank.with_material_plate_rayleigh(options, gate)?;
+                (bank, Some(report))
+            },
+            None => (bank, None),
+        };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };
         let mut bank=if let Some((width,cells))=self.bow_ribbon {
@@ -329,7 +349,7 @@ impl input::Spec {
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
-        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile })
+        Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
     }
 }
 impl Ready {
@@ -405,6 +425,7 @@ fn main()->Result<()> {
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
+    if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report:?}"); }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
