@@ -302,6 +302,16 @@ pub trait BoundaryProjection {
     fn project(&self, p: [f64; 3]) -> Result<[f64; 3], TetElasticError>;
 }
 
+/// A generated part's exact-surface midside table (IRP M1.3-W4). A point that
+/// is not a boundary-edge midpoint of the tabulated mesh refuses.
+impl BoundaryProjection for fs_mesh::solid_parts::MidsideProjection {
+    fn project(&self, p: [f64; 3]) -> Result<[f64; 3], TetElasticError> {
+        self.get(p).ok_or(TetElasticError::InvalidGeometryUpdate {
+            what: "boundary midpoint is not tabulated by the exact-surface projection",
+        })
+    }
+}
+
 fn sorted_edge(a: usize, b: usize) -> [usize; 2] {
     [a.min(b), a.max(b)]
 }

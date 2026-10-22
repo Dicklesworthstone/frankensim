@@ -14,6 +14,7 @@
 //! z-,z+,y-,x+,y+,x-, body centre). Every other Gmsh type refuses.
 
 use crate::quarantine::Quarantined;
+use crate::representation::{LengthUnit, ReferenceState};
 use crate::{IoError, MAX_ELEMENTS};
 use core::fmt::Write as _;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -610,4 +611,238 @@ pub fn write_gmsh_msh2(mesh: &GmshMesh) -> String {
     out.push_str("$EndElements\n");
 
     out
+}
+
+/// Declared facts a Gmsh volume mesh needs before it leaves quarantine. Gmsh
+/// files carry neither a length unit nor a mechanical state; neither is ever
+/// guessed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GmshSolidDeclaration {
+    /// Source length unit; `None` refuses.
+    pub unit: Option<LengthUnit>,
+    /// Mechanical state the geometry describes; `None` refuses.
+    pub reference_state: Option<ReferenceState>,
+}
+
+/// A promoted volume mesh of one canonical solid family, in metres.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GmshSolid {
+    /// The single volume element type.
+    pub element_type: GmshElementType,
+    /// Referenced nodes [m], in source node order.
+    pub nodes_m: Vec<[f64; 3]>,
+    /// Node indices into `nodes_m`, in the canonical local order of
+    /// [`GmshElementType::canonical_permutation`].
+    pub elements: Vec<Vec<usize>>,
+    /// First Gmsh tag (the physical group; 0 when untagged) of each element.
+    pub physical_tags: Vec<i32>,
+    /// Names of the volume physical groups, by tag.
+    pub region_names: BTreeMap<i32, String>,
+    /// Declared reference state.
+    pub reference_state: ReferenceState,
+}
+
+/// What [`promote_gmsh_solid`] admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GmshSolidReceipt {
+    /// Source hash from the quarantine receipt.
+    pub source_hash: u64,
+    /// Declared unit label.
+    pub unit: String,
+    /// Metres per source unit, applied once.
+    pub metres_per_unit: f64,
+    /// Declared reference state.
+    pub reference_state: ReferenceState,
+    /// Gmsh id of the volume element type.
+    pub element_type: u32,
+    /// Volume elements.
+    pub elements: usize,
+    /// Nodes referenced by them.
+    pub nodes: usize,
+    /// Listed nodes no volume element references (not carried over).
+    pub unreferenced_nodes: usize,
+    /// Point, line and surface elements (boundary tags; not carried over).
+    pub lower_dimensional_elements: usize,
+}
+
+/// Refusals of [`promote_gmsh_solid`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum GmshPromotionRefusal {
+    /// No (valid) unit was declared.
+    UnitMissing,
+    /// No reference state was declared.
+    ReferenceStateMissing,
+    /// The mesh holds no volume element.
+    NoVolumeElements,
+    /// Two volume element types appear.
+    MixedVolumeTypes {
+        /// First type id.
+        first: u32,
+        /// Conflicting type id.
+        second: u32,
+    },
+    /// A volume element type without a canonical node order (prism, pyramid).
+    NoCanonicalOrder {
+        /// Element id.
+        element: u64,
+        /// Gmsh type id.
+        type_id: u32,
+    },
+    /// A node id is listed twice.
+    DuplicateNodeId {
+        /// Node id.
+        id: u64,
+    },
+    /// An element references a node that is not listed.
+    UnknownNode {
+        /// Element id.
+        element: u64,
+        /// Node id.
+        node: u64,
+    },
+    /// An element lists one node twice.
+    RepeatedNode {
+        /// Element id.
+        element: u64,
+    },
+    /// The node list does not match the element type.
+    NodeCount {
+        /// Element id.
+        element: u64,
+    },
+}
+
+/// Promote a quarantined Gmsh volume mesh: declared unit and reference state,
+/// one canonical solid family, canonical local node order, referenced nodes
+/// only. Lower-dimensional elements are counted in the receipt and not
+/// carried over. Geometric validity (positive Jacobians, conformity of shared
+/// midside nodes) is the assembling element's admission, not checked here.
+///
+/// # Errors
+/// [`GmshPromotionRefusal`]; nothing is published on any refusal.
+pub fn promote_gmsh_solid(
+    q: Quarantined<GmshMesh>,
+    d: &GmshSolidDeclaration,
+) -> Result<(GmshSolid, GmshSolidReceipt), GmshPromotionRefusal> {
+    let unit = match &d.unit {
+        Some(unit)
+            if !unit.label.trim().is_empty()
+                && unit.metres_per_unit.is_finite()
+                && unit.metres_per_unit > 0.0 =>
+        {
+            unit
+        }
+        _ => return Err(GmshPromotionRefusal::UnitMissing),
+    };
+    let reference_state = d
+        .reference_state
+        .ok_or(GmshPromotionRefusal::ReferenceStateMissing)?;
+    let source_hash = q.source_receipt.source_hash;
+    let mesh = q.into_inner();
+    let mut index_of: BTreeMap<u64, usize> = BTreeMap::new();
+    for (i, node) in mesh.nodes.iter().enumerate() {
+        if index_of.insert(node.id, i).is_some() {
+            return Err(GmshPromotionRefusal::DuplicateNodeId { id: node.id });
+        }
+    }
+    let mut element_type = None;
+    let mut lower_dimensional_elements = 0;
+    let mut volume = Vec::new();
+    for element in &mesh.elements {
+        match element.element_type {
+            GmshElementType::Point
+            | GmshElementType::Line
+            | GmshElementType::Triangle
+            | GmshElementType::Quad => lower_dimensional_elements += 1,
+            GmshElementType::Prism | GmshElementType::Pyramid => {
+                return Err(GmshPromotionRefusal::NoCanonicalOrder {
+                    element: element.id,
+                    type_id: element.element_type.type_id(),
+                });
+            }
+            t => {
+                match element_type {
+                    None => element_type = Some(t),
+                    Some(first) if first != t => {
+                        return Err(GmshPromotionRefusal::MixedVolumeTypes {
+                            first: first.type_id(),
+                            second: t.type_id(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                volume.push(element);
+            }
+        }
+    }
+    let element_type = element_type.ok_or(GmshPromotionRefusal::NoVolumeElements)?;
+    // Compact to referenced nodes, keeping the source node order.
+    let mut referenced = vec![false; mesh.nodes.len()];
+    let mut canonical = Vec::with_capacity(volume.len());
+    for element in &volume {
+        let ids = element
+            .canonical_node_ids()
+            .map_err(|_| GmshPromotionRefusal::NodeCount {
+                element: element.id,
+            })?;
+        let mut local = Vec::with_capacity(ids.len());
+        for id in ids {
+            let i = *index_of.get(&id).ok_or(GmshPromotionRefusal::UnknownNode {
+                element: element.id,
+                node: id,
+            })?;
+            if local.contains(&i) {
+                return Err(GmshPromotionRefusal::RepeatedNode {
+                    element: element.id,
+                });
+            }
+            referenced[i] = true;
+            local.push(i);
+        }
+        canonical.push(local);
+    }
+    let mut new_index = vec![usize::MAX; mesh.nodes.len()];
+    let mut nodes_m = Vec::new();
+    for (i, node) in mesh.nodes.iter().enumerate() {
+        if referenced[i] {
+            new_index[i] = nodes_m.len();
+            nodes_m.push(node.coords.map(|c| c * unit.metres_per_unit));
+        }
+    }
+    let elements: Vec<Vec<usize>> = canonical
+        .into_iter()
+        .map(|local| local.into_iter().map(|i| new_index[i]).collect())
+        .collect();
+    let physical_tags: Vec<i32> = volume
+        .iter()
+        .map(|e| e.tags.first().copied().unwrap_or(0))
+        .collect();
+    let region_names = mesh
+        .physical_names
+        .iter()
+        .filter(|((dim, tag), _)| *dim == 3 && physical_tags.contains(tag))
+        .map(|((_, tag), name)| (*tag, name.clone()))
+        .collect();
+    let receipt = GmshSolidReceipt {
+        source_hash,
+        unit: unit.label.clone(),
+        metres_per_unit: unit.metres_per_unit,
+        reference_state,
+        element_type: element_type.type_id(),
+        elements: elements.len(),
+        nodes: nodes_m.len(),
+        unreferenced_nodes: mesh.nodes.len() - nodes_m.len(),
+        lower_dimensional_elements,
+    };
+    Ok((
+        GmshSolid {
+            element_type,
+            nodes_m,
+            elements,
+            physical_tags,
+            region_names,
+            reference_state,
+        },
+        receipt,
+    ))
 }

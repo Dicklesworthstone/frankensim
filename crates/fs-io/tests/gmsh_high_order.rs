@@ -1,18 +1,20 @@
 //! IRP M1.3-W4: second-order Gmsh solids (ids 11, 17, 12) and their node
 //! orders. The Gmsh reference coordinates below are transcribed from the Gmsh
 //! manual's node-ordering figures (https://gmsh.info/doc/texinfo/#Node-ordering),
-//! independently of the permutation tables they pin.
+//! independently of the permutation tables they pin. The imported-mesh test
+//! reads a committed fixture made offline by an out-of-process gmsh adapter.
 
-use fs_io::IoError;
 use fs_io::gmsh::{
     GMSH_HEX20_TO_CANONICAL, GMSH_HEX27_TO_CANONICAL, GMSH_TET10_TO_CANONICAL, GmshElement,
-    GmshElementType, GmshLimits, GmshMesh, GmshNode, parse_gmsh, parse_gmsh_with_limits,
-    write_gmsh_msh2,
+    GmshElementType, GmshLimits, GmshMesh, GmshNode, GmshPromotionRefusal, GmshSolidDeclaration,
+    parse_gmsh, parse_gmsh_with_limits, promote_gmsh_solid, write_gmsh_msh2,
 };
+use fs_io::{IoError, LengthUnit, ReferenceState};
 use fs_solid::linear3::hex::{
     GMSH20_TO_CANONICAL, GMSH27_TO_CANONICAL, HEX_EDGES, HEX27_REFERENCE_NODES,
 };
-use fs_solid::linear3::tet10::TET10_EDGES;
+use fs_solid::linear3::tet10::{QuadraticTetProblem, TET10_EDGES, TetQuadrature};
+use fs_solid::linear3::{TetAssemblyBudget, TetElasticMaterial, TetMaterialField};
 
 /// Gmsh order: vertices, then edges (0,1),(1,2),(2,0),(3,0),(3,2),(3,1).
 const GMSH_TET10_REFERENCE: [[f64; 3]; 10] = [
@@ -354,4 +356,288 @@ fn g0_element_cap_and_cap_plus_one() {
             "cap + 1 must refuse under {limits:?}"
         );
     }
+}
+
+// ---- The committed gmsh/OpenCASCADE fixture (crates/fs-io/tests/fixtures/gmsh,
+// produced offline by make_holed_block.py; the receipt names tool and version).
+
+const HOLED_BLOCK_TET10: &str = include_str!("fixtures/gmsh/holed_block_tet10.msh");
+const ADAPTER_RECEIPT: &str = include_str!("fixtures/gmsh/holed_block.receipt.txt");
+
+fn adapter_receipt() -> std::collections::BTreeMap<&'static str, &'static str> {
+    ADAPTER_RECEIPT
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect()
+}
+
+fn receipt_number(key: &str) -> f64 {
+    adapter_receipt()[key]
+        .parse()
+        .unwrap_or_else(|_| panic!("receipt {key} is a number"))
+}
+
+fn millimetres() -> GmshSolidDeclaration {
+    GmshSolidDeclaration {
+        unit: Some(LengthUnit {
+            label: "mm".to_string(),
+            metres_per_unit: 1e-3,
+        }),
+        reference_state: Some(ReferenceState::Unloaded),
+    }
+}
+
+fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 0x63,
+                kernel_id: 63,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn tet_min_dihedral_deg(p: [[f64; 3]; 4]) -> f64 {
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let faces = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+    let normals: Vec<[f64; 3]> = faces
+        .iter()
+        .enumerate()
+        .map(|(k, f)| {
+            let n = cross(sub(p[f[1]], p[f[0]]), sub(p[f[2]], p[f[0]]));
+            if dot(n, sub(p[k], p[f[0]])) > 0.0 {
+                n.map(|v| -v)
+            } else {
+                n
+            }
+        })
+        .collect();
+    let mut best = 180.0f64;
+    for k in 0..4 {
+        for l in k + 1..4 {
+            let c = dot(normals[k], normals[l])
+                / (dot(normals[k], normals[k]) * dot(normals[l], normals[l])).sqrt();
+            best = best.min(180.0 - c.clamp(-1.0, 1.0).acos().to_degrees());
+        }
+    }
+    best
+}
+
+#[test]
+fn g1_imported_mesh_promotes_and_assembles() {
+    let receipt = adapter_receipt();
+    assert_eq!(receipt["adapter.tool"], "gmsh");
+    assert_eq!(receipt["adapter.kernel"], "OpenCASCADE");
+    assert!(!receipt["adapter.version"].is_empty());
+    assert!(receipt["authority"].starts_with("Estimate"));
+    assert_eq!(receipt["unit"], "mm");
+    assert_eq!(
+        HOLED_BLOCK_TET10.len(),
+        receipt["tet10.bytes"].parse::<usize>().unwrap()
+    );
+    let elements: usize = receipt["tet10.elements"].parse().unwrap();
+    let nodes: usize = receipt["tet10.nodes"].parse().unwrap();
+
+    // Quarantined at parse: the census is the receipt's.
+    let (quarantined, census) = parse_gmsh(HOLED_BLOCK_TET10).expect("adapter mesh parses");
+    assert_eq!(
+        census.element_census.iter().collect::<Vec<_>>(),
+        vec![(&11u8, &elements)]
+    );
+    let (solid, promoted) = promote_gmsh_solid(quarantined, &millimetres()).expect("promotes");
+    assert_eq!(promoted.element_type, 11);
+    assert_eq!((promoted.elements, promoted.nodes), (elements, nodes));
+    assert_eq!(promoted.reference_state, ReferenceState::Unloaded);
+    assert_eq!(
+        solid.region_names.get(&1).map(String::as_str),
+        Some("block")
+    );
+
+    // Assembled by TET10: the element volumes are gmsh's curved volumes
+    // (its own Jacobians on an exact rule), and the mass is rho V.
+    let tet10: Vec<[usize; 10]> = solid
+        .elements
+        .iter()
+        .map(|e| e.as_slice().try_into().expect("ten nodes"))
+        .collect();
+    let density = 1000.0;
+    let material = TetElasticMaterial::try_new(density, 2.0e9, 0.3, [0x63; 32]).unwrap();
+    let assembly = with_cx(|cx| {
+        QuadraticTetProblem {
+            nodes_m: &solid.nodes_m,
+            elements: &tet10,
+            materials: TetMaterialField::Uniform(&material),
+            fixed_dofs: &[],
+            budget: TetAssemblyBudget::standard(),
+            quadrature: TetQuadrature {
+                stiffness_points_per_dir: 3,
+                mass_points_per_dir: 4,
+            },
+        }
+        .assemble(cx)
+    })
+    .expect("TET10 assembles the imported mesh");
+    let mm3 = 1e-9;
+    let rel = |a: f64, b: f64| ((a - b) / b).abs();
+    let volume: f64 = assembly.element_volumes_m3.iter().sum();
+    assert!(rel(volume, receipt_number("tet10.volume_mm3") * mm3) <= 1e-12);
+    let smallest = assembly
+        .element_volumes_m3
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let largest = assembly
+        .element_volumes_m3
+        .iter()
+        .copied()
+        .fold(0.0, f64::max);
+    assert!(
+        rel(
+            smallest,
+            receipt_number("tet10.element_volume_min_mm3") * mm3
+        ) <= 1e-12
+    );
+    assert!(
+        rel(
+            largest,
+            receipt_number("tet10.element_volume_max_mm3") * mm3
+        ) <= 1e-12
+    );
+    assert!(rel(assembly.total_mass_kg, density * volume) <= 1e-12);
+    assert!(assembly.minimum_scaled_jacobian > 0.0);
+    // The curved volume is closer to the CAD solid than the straight one.
+    let cad = receipt_number("cad.volume_mm3") * mm3;
+    let straight = receipt_number("tet10.straight_sided_volume_mm3") * mm3;
+    assert!((volume - cad).abs() < 0.01 * (straight - cad).abs());
+    // Quality census: corner-tet dihedrals in metres match the adapter's.
+    let dihedral = tet10
+        .iter()
+        .map(|e| tet_min_dihedral_deg(core::array::from_fn(|k| solid.nodes_m[e[k]])))
+        .fold(180.0, f64::min);
+    assert!((dihedral - receipt_number("tet10.min_corner_dihedral_deg")).abs() <= 1e-9);
+    eprintln!(
+        "{{\"suite\":\"irp-s1\",\"bead\":\"M1.3-W4\",\"test\":\"g1_imported_mesh_promotes_and_assembles\",\
+         \"inputs\":{{\"source\":\"gmsh-adapter\",\"adapter\":{{\"tool\":\"{}\",\"version\":\"{}\"}},\
+         \"fixture\":\"crates/fs-io/tests/fixtures/gmsh/holed_block_tet10.msh\"}},\
+         \"observed\":{{\"elements\":{elements},\"nodes\":{nodes},\"volume_m3\":{volume:e},\
+         \"receipt_volume_m3\":{:e},\"cad_volume_m3\":{cad:e},\"min_corner_dihedral_deg\":{dihedral},\
+         \"min_scaled_jacobian\":{:e}}},\"tolerance\":1e-12,\"verdict\":\"pass\"}}",
+        receipt["adapter.tool"],
+        receipt["adapter.version"],
+        receipt_number("tet10.volume_mm3") * mm3,
+        assembly.minimum_scaled_jacobian
+    );
+}
+
+#[test]
+fn g0_promotion_refuses_undeclared_and_unsupported() {
+    let promote = |text: &str, d: &GmshSolidDeclaration| {
+        let (q, _) = parse_gmsh(text).expect("parses");
+        promote_gmsh_solid(q, d).map(|_| ())
+    };
+    let mut no_unit = millimetres();
+    no_unit.unit = None;
+    assert_eq!(
+        promote(HOLED_BLOCK_TET10, &no_unit),
+        Err(GmshPromotionRefusal::UnitMissing)
+    );
+    let mut zero_unit = millimetres();
+    zero_unit.unit = Some(LengthUnit {
+        label: "mm".to_string(),
+        metres_per_unit: 0.0,
+    });
+    assert_eq!(
+        promote(HOLED_BLOCK_TET10, &zero_unit),
+        Err(GmshPromotionRefusal::UnitMissing)
+    );
+    let mut no_state = millimetres();
+    no_state.reference_state = None;
+    assert_eq!(
+        promote(HOLED_BLOCK_TET10, &no_state),
+        Err(GmshPromotionRefusal::ReferenceStateMissing)
+    );
+
+    let mesh = high_order_mesh();
+    // Three volume families in one file.
+    assert!(matches!(
+        promote(&write_gmsh_msh2(&mesh), &millimetres()),
+        Err(GmshPromotionRefusal::MixedVolumeTypes {
+            first: 11,
+            second: 17
+        })
+    ));
+    let mut tet_only = mesh.clone();
+    tet_only.elements.truncate(1);
+    tet_only.nodes.truncate(10);
+    let (q, _) = parse_gmsh(&write_gmsh_msh2(&tet_only)).unwrap();
+    let (solid, receipt) = promote_gmsh_solid(q, &millimetres()).expect("one TET10");
+    assert_eq!(receipt.unreferenced_nodes, 0);
+    // Canonical order and unit applied: the midside of canonical edge (1,3)
+    // is node 8, in metres.
+    let x = |i: usize| solid.nodes_m[solid.elements[0][i]];
+    for k in 0..3 {
+        assert!((x(8)[k] - (x(1)[k] + x(3)[k]) / 2.0).abs() <= 1e-15);
+        assert!((x(0)[k] - affine(GMSH_TET10_REFERENCE[0])[k] * 1e-3).abs() <= 1e-18);
+    }
+    let mut prism = tet_only.clone();
+    prism.elements.push(GmshElement {
+        id: 9,
+        element_type: GmshElementType::Prism,
+        tags: vec![7, 1],
+        node_ids: vec![1, 2, 3, 4, 5, 6],
+    });
+    assert!(matches!(
+        promote(&write_gmsh_msh2(&prism), &millimetres()),
+        Err(GmshPromotionRefusal::NoCanonicalOrder {
+            element: 9,
+            type_id: 6
+        })
+    ));
+    let mut surface_only = tet_only.clone();
+    surface_only.elements = vec![GmshElement {
+        id: 1,
+        element_type: GmshElementType::Triangle,
+        tags: vec![7, 1],
+        node_ids: vec![1, 2, 3],
+    }];
+    assert_eq!(
+        promote(&write_gmsh_msh2(&surface_only), &millimetres()),
+        Err(GmshPromotionRefusal::NoVolumeElements)
+    );
+    let mut dangling = tet_only.clone();
+    dangling.elements[0].node_ids[9] = 99;
+    assert!(matches!(
+        promote(&write_gmsh_msh2(&dangling), &millimetres()),
+        Err(GmshPromotionRefusal::UnknownNode { node: 99, .. })
+    ));
+    let mut repeated = tet_only.clone();
+    repeated.elements[0].node_ids[9] = 1;
+    assert!(matches!(
+        promote(&write_gmsh_msh2(&repeated), &millimetres()),
+        Err(GmshPromotionRefusal::RepeatedNode { .. })
+    ));
+    let mut duplicate = tet_only.clone();
+    duplicate.nodes[1].id = 1;
+    assert!(matches!(
+        promote(&write_gmsh_msh2(&duplicate), &millimetres()),
+        Err(GmshPromotionRefusal::DuplicateNodeId { id: 1 })
+    ));
 }

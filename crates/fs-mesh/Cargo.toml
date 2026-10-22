@@ -19,6 +19,10 @@ fs-obs = { path = "../fs-obs" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 [dev-dependencies]
+# TET10 promotion and Duffy quadrature for the solid-part ladders (dev-deps are
+# layer-exempt; fs-solid itself depends on fs-mesh).
+fs-feec = { path = "../fs-feec" }
+fs-solid = { path = "../fs-solid" }
 fs-mms = { path = "../fs-mms" }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }

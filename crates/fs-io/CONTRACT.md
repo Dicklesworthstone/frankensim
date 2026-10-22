@@ -885,3 +885,28 @@ No-claim boundaries:
   nodes at their affine reference positions within 1e-12 (with a negative
   control on the raw Gmsh order), refusals, and node/element/byte caps at cap
   and cap+1.
+- `promote_gmsh_solid` takes a quarantined Gmsh mesh out of quarantine. The
+  declaration must supply a length unit (Gmsh files carry none) and a
+  `ReferenceState`; a missing one refuses. The mesh must hold one canonical
+  solid family. The output is in canonical local order, in metres, holding
+  only referenced nodes. A prism or pyramid, a second volume family, an
+  unknown or repeated node and a duplicate node id refuse. Lower-dimensional
+  elements are counted in the receipt and not carried over. Jacobian
+  admission belongs to the assembling element.
+- Adapter route (ADPT-2026-07). `tests/fixtures/gmsh` holds a block with a
+  through-hole made offline by `make_holed_block.py` (gmsh 4.15.2 Python
+  wheel, OpenCASCADE 7.8): a TET10 `.msh`, the STEP solid, its triangle
+  tessellation and a key=value receipt (tool, version, settings
+  fingerprints, sizes, volumes). The adapter puts the STEP header entities in
+  the ISO 10303-21 order, because OCC 7.8 writes FILE_NAME first and
+  `parse_step` refuses that; the raw order and hash are in the receipt.
+  Adapter output has Estimate authority and is never a build dependency.
+  `g1_imported_mesh_promotes_and_assembles` checks two things. First, TET10
+  assembly reproduces the adapter's curved volumes (gmsh's own Jacobians on
+  an exact rule) within 1e-12. Second, its corner dihedral census matches
+  within 1e-9 deg. `step_import.rs::g1_step_tessellation_reaches_volume_mesh`
+  takes the identified tessellation through `import_step_tessellation`,
+  `admit_representation` (closed solid, millimetres, reference state) and
+  `fs_mesh::solid_parts::imported_solid` to an audited volume mesh, within
+  1e-12 of the tessellation volume. A leak and a non-manifold fin refuse at
+  import and as a PLC.

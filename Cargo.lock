@@ -1815,6 +1815,7 @@ dependencies = [
  "fs-exec",
  "fs-geom",
  "fs-math",
+ "fs-mesh",
  "fs-obs",
  "fs-rep-mesh",
  "fs-rep-sdf",
@@ -2032,6 +2033,7 @@ dependencies = [
  "asupersync 0.5.0",
  "fs-alloc",
  "fs-exec",
+ "fs-feec",
  "fs-geom",
  "fs-ivl",
  "fs-math",
@@ -2039,6 +2041,7 @@ dependencies = [
  "fs-obs",
  "fs-rep-frep",
  "fs-rep-mesh",
+ "fs-solid",
 ]
 
 [[package]]

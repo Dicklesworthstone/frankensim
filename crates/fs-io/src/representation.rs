@@ -107,29 +107,9 @@ impl Frame {
     };
 }
 
-/// The mechanical state the geometry describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferenceState {
-    /// No preload (stress-free).
-    Unloaded,
-    /// Under string load.
-    Strung,
-    /// Assembled, without string load.
-    Assembled,
-    /// As played.
-    Played,
-}
-
-impl ReferenceState {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Unloaded => "unloaded",
-            Self::Strung => "strung",
-            Self::Assembled => "assembled",
-            Self::Played => "played",
-        }
-    }
-}
+/// The mechanical state the geometry describes; owned by fs-geom so imports
+/// and generated parts declare the same type.
+pub use fs_geom::ReferenceState;
 
 /// A part's material binding.
 #[derive(Debug, Clone, PartialEq)]

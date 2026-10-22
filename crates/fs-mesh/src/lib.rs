@@ -41,8 +41,12 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+/// Parametric bars and extruded outlines as closed PLCs with exact surfaces.
+pub mod solid_parts;
 /// Deterministic quadratic boxes and variable-depth mapped profile extrusions.
 pub mod structured_hex;
+/// Boundary-frozen tet quality improvement (smoothing and 2-3/3-2 flips).
+pub mod tet_improve;
 mod tet_refinement;
 mod uniform;
 mod volumetric;

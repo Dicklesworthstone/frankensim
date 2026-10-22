@@ -25,6 +25,8 @@ fs-alloc = { path = "../fs-alloc" }
 # Canonical TET10/HEX orders and TET10 assembly for the second-order Gmsh
 # tests (dev-deps are layer-exempt).
 fs-solid = { path = "../fs-solid" }
+# volumetricize and imported_solid for the STEP-tessellation test.
+fs-mesh = { path = "../fs-mesh" }
 
 [lints]
 workspace = true

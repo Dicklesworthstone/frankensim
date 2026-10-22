@@ -41,6 +41,29 @@ readonly -a ARCHING_TESTS=(
   g1_plate_with_hole_modes_converge
   g1_annular_tensioned_film_matches_bessel_roots
 )
+# M1.3-W4: generated and imported solid parts reach audited, curved TET10 meshes.
+readonly -a SOLID_PARTS_TESTS=(
+  g1_undercut_bar_with_nodal_holes_from_parameters
+  g1_bridge_outline_with_holes_extruded
+  g0_profile_generator_is_deterministic_and_closed
+  g0_refuses_self_intersecting_outline_and_missing_reference_state
+  g0_policy_cap_and_cap_plus_one
+)
+readonly -a TET_IMPROVE_TESTS=(
+  g0_flip23_valid_and_nonconvex_refused
+  g0_flip32_removes_a_degree_three_edge
+  g0_inverted_interior_vertex_is_untangled_and_boundary_frozen
+  g0_refusals
+)
+readonly -a GMSH_TESTS=(
+  g0_tet10_hex20_hex27_round_trip
+  g0_midside_nodes_at_midpoints_pin_ordering
+  g0_unknown_type_refuses
+  g0_element_cap_and_cap_plus_one
+  g1_imported_mesh_promotes_and_assembles
+  g0_promotion_refuses_undeclared_and_unsupported
+)
+readonly STEP_TEST='g1_step_tessellation_reaches_volume_mesh'
 readonly -a SHELL_TESTS=(
   g2_scordelis_lo_roof
   g2_pinched_cylinder_with_diaphragms
@@ -58,6 +81,10 @@ list() {
   for test in "${HEX_TESTS[@]}"; do printf 'fs-solid:hex::%s\n' "$test"; done
   for test in "${SHELL_TESTS[@]}"; do printf 'fs-plate:shell_obstacle_course::%s\n' "$test"; done
   for test in "${OUTLINE_TESTS[@]}"; do printf 'fs-mesh:planar_outline::%s\n' "$test"; done
+  for test in "${SOLID_PARTS_TESTS[@]}"; do printf 'fs-mesh:solid_parts::%s\n' "$test"; done
+  for test in "${TET_IMPROVE_TESTS[@]}"; do printf 'fs-mesh:tet_improve::%s\n' "$test"; done
+  for test in "${GMSH_TESTS[@]}"; do printf 'fs-io:gmsh_high_order::%s\n' "$test"; done
+  printf 'fs-io:step_import::%s\n' "$STEP_TEST"
   for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
   for test in "${ND_TESTS[@]}" g1_nd_fill_beats_amd_on_3d_grids; do printf 'fs-sparse:nested_dissection::%s\n' "$test"; done
   for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do printf 'fs-modal:parallel_windows::%s\n' "$test"; done
@@ -96,12 +123,22 @@ check() {
   for test in "${ARCHING_TESTS[@]}"; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-plate/tests/arched_outline_shell.rs" || return 1
   done
+  for test in "${SOLID_PARTS_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-mesh/tests/solid_parts.rs" || { printf 'missing test: %s\n' "$test" >&2; return 1; }
+  done
+  for test in "${TET_IMPROVE_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-mesh/tests/tet_improve.rs" || { printf 'missing test: %s\n' "$test" >&2; return 1; }
+  done
+  for test in "${GMSH_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-io/tests/gmsh_high_order.rs" || { printf 'missing test: %s\n' "$test" >&2; return 1; }
+  done
+  grep -Fq "fn ${STEP_TEST}(" "${REPO_ROOT}/crates/fs-io/tests/step_import.rs" || { printf 'missing test: %s\n' "$STEP_TEST" >&2; return 1; }
   grep -Fq "fn ${MODAL_TIME_TEST}(" "${REPO_ROOT}/crates/fs-modal/src/time.rs" || { printf 'missing test: %s\n' "$MODAL_TIME_TEST" >&2; return 1; }
   grep -Fq 'fn string_bakeoff_receipt_is_reproduced_and_golden_pinned(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_string.rs" || return 1
   grep -Fq 'fn committed_dispersion_receipt_decides_and_modal_rows_are_untouched(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_dispersion.rs" || return 1
   grep -Fq 'fn a_copy_renders_what_the_original_would(' "${REPO_ROOT}/apps/instrument-lab/engine-piano/tests/clone.rs" || return 1
   grep -Fq 'fn factor_one_retains_the_original_pressure_and_float_bits(' "${REPO_ROOT}/apps/instrument-lab/engine-piano/tests/audio_rate.rs" || return 1
-  printf 'IRP S1: solid, shell, outline and arching cases present\n'
+  printf 'IRP S1: solid, shell, outline, arching and solid-part cases present\n'
 }
 
 run() {
@@ -153,6 +190,8 @@ run() {
     printf '%q ' "${hex_command[@]}"; printf '\n'
     printf '%q ' cargo test --locked -j 12 -p fs-sparse --test nested_dissection -- --exact --test-threads=1 --show-output "${ND_TESTS[@]}"; printf '\n'
     printf '%q ' cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}"; printf '\n'
+    printf '%q ' cargo test --release --locked -j 12 -p fs-mesh --test solid_parts --test tet_improve -- --exact --test-threads=1 --show-output "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}"; printf '\n'
+    printf '%q ' cargo test --locked -j 12 -p fs-io --test gmsh_high_order --test step_import -- --exact --test-threads=1 --show-output "${GMSH_TESTS[@]}" "$STEP_TEST"; printf '\n'
   } >"${output_dir}/command.txt"
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
@@ -183,8 +222,15 @@ run() {
   (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  # The undercut-bar ladder reaches 1.7 M tets on its third rung: release only.
+  (cd "$REPO_ROOT" && cargo test --release --locked -j 12 -p fs-mesh --test solid_parts --test tet_improve -- --exact --test-threads=1 --show-output "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-io --test gmsh_high_order --test step_import -- --exact --test-threads=1 --show-output "${GMSH_TESTS[@]}" "$STEP_TEST") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
-  for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}"; do
+  for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}" "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}" "${GMSH_TESTS[@]}" "$STEP_TEST"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then missing=1; fi
   done
   for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do

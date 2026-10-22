@@ -1763,3 +1763,12 @@ claim those stronger G4/G5 results.
   conflicts from the same realistic swarm-concurrency trials; that quarterly
   trial and any fallback to ownership partitioning are governance decisions
   (xpck.6).
+
+## Reference state (`reference_state` module, IRP M1.3-W4)
+
+`ReferenceState { Unloaded, Strung, Assembled, Played }` names the mechanical
+state a geometry describes (plan section 1.4). fs-geom owns the type so
+imported geometry (`fs_io::admit_representation`, which re-exports it) and
+generated parts (`fs_mesh::solid_parts`) declare the same type. It has no
+default: every consumer takes `Option<ReferenceState>` and refuses `None`.
+`name()` is the stable receipt label. The move added no dependency edge.

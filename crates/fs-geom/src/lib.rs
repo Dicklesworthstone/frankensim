@@ -46,6 +46,8 @@ pub mod diff;
 pub mod exit_path;
 pub mod fixtures;
 pub mod ident;
+/// The mechanical state a geometry describes (shared declaration).
+pub mod reference_state;
 mod region;
 pub mod router;
 pub mod sheaf;
@@ -56,6 +58,7 @@ pub mod sheaf_repair;
 
 pub use convert::{Convert, ConvertDiag, ErrBudget, SagittaEnclosure, SampledSdf};
 pub use ident::{EntityId, IdTransform, IdentityMap};
+pub use reference_state::ReferenceState;
 pub use region::{
     AgreementConfig, AgreementReport, AgreementScope, AgreementStatus, AgreementUnknown,
     AgreementUnknownReason, Disagreement, Region, RegionChart,

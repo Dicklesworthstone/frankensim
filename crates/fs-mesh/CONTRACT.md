@@ -833,3 +833,52 @@ Constitutive-history transport, momentum reconstruction, kinetic projection
 accounting and native-fluid initialization remain higher-layer responsibilities.
 The analytic tests cover simplex and clipped moments, cell partitions, translated
 geometry, orientation reversal, invalid input and cancellation.
+
+## Solid parts and boundary-frozen tet quality (IRP M1.3-W4)
+
+`solid_parts` turns descriptions and identified tessellations into closed PLCs
+for `volumetricize`, each with the exact surface it approximates:
+
+- `profile_bar`: length, width, a C1 piecewise-cubic Hermite depth profile
+  `h(x)` and circular through-holes across the width. `outline_solid`: a
+  polygon with polygonal holes, extruded by a uniform or affine thickness.
+  Both mesh one planar section with `planar::mesh_outline` and extrude it.
+  Curves are sampled to the declared chord tolerance. Section coordinates are
+  rounded to a declared power-of-two grid so boundary midpoints stay exactly
+  collinear, and the receipt records the largest rounding (zero for on-grid
+  input).
+- `imported_solid`: an identified tessellation (for example an admitted STEP
+  tessellation) becomes a PLC. The tessellation is the surface of record. A
+  leak, a non-manifold edge or an orientation conflict refuses; nothing is
+  repaired.
+- Every part declares `fs_geom::ReferenceState` (the type fs-io's
+  representation admission re-exports). `None` refuses.
+- Curved patches are re-bound through the parent-facet index of
+  `source_faces`, never by vertex keys. `SolidPart::snap` and
+  `SolidPart::refine_snapped` (the `refine_uniform` split) move boundary
+  vertices onto their exact patch. A vertex on two curved patches refuses.
+  `midside_projection` tabulates the exact-surface midside node of every
+  boundary edge for `fs_solid`'s TET10 `BoundaryProjection`.
+- An optional quality pass follows each snap. It first peels boundary slivers
+  whose two boundary faces lie on one patch; every boundary vertex stays on
+  the exact surface. Then `tet_improve::improve_tets` runs: it smooths free
+  vertices (untangling inverted stars first) and makes 2-3/3-2 flips across
+  interior faces and edges. Frozen vertices never move. Flip candidates are
+  built with the parent tets' orientation, so a positive sign is the validity
+  test. The pass refuses if a tet stays inverted or if the oriented volume
+  sum moves by more than 1e-10 relative. It aims at a target dihedral and
+  reports what it reached; it certifies nothing.
+
+Measured (ts1, `tests/solid_parts.rs`, release). Undercut bar, 3 rungs (26 262
+/ 210 096 / 1 680 768 tets): straight-sided volume order 1.986 then 1.997;
+exact-surface TET10 order 3.99 then 4.00 (relative error 2.8e-9 at rung 2);
+minimum dihedral 5.004 deg on every rung against a declared 5 deg floor;
+genus 2 and solid Euler characteristic -1 on every rung. Bridge outline with
+three holes: volume equals shoelace area x thickness within 7e-15.
+
+No-claim: generated holes run across the width only. `outline_solid` takes
+polygons (no curved outlines) and a uniform or affine thickness. The quality
+pass has no vertex insertion or multi-face removal, so a configuration it
+cannot improve is reported below target, not hidden. The floor is met by
+improvement after each snap, not by `volumetricize` itself (its census still
+shows about 1 deg).
