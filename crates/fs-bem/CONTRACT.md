@@ -266,7 +266,7 @@ system through complex fs-fmm double/mixed matvecs and fs-solver `GmresState`.
 The stacked real representation applies the complex operator once per matvec.
 This path retains the surface cap of 81,920 panels and the resolution check,
 without the dense LU cap of 8,192. Dense arithmetic and panel-bit goldens are
-unchanged. Plain CBIE is explicitly refused by this owner.
+unchanged. Plain CBIE has its own operator on this owner; see below.
 
 The actual dense Burton-Miller arm uses centroid off-diagonal kernels and
 equivalent-disc self terms, not the triangle quadrature used by Plain CBIE.
@@ -277,6 +277,57 @@ traversal with the dynamic operator; directional zero-k closures select W5a's
 low-frequency partition. The static constant-density identities close under
 the computed zero-k operator. Static-sum and cross-route FMM approximation
 remain part of the operator error, independently tested against dense LU.
+
+Plain CBIE (`Formulation::PlainCbie`, IRP .105) keeps the dense owner's
+triangle quadrature; it is not replaced by centroid kernels.
+- The far field is a far-field-only W5a double layer (single layer for the
+  RHS) over a cloud of Radon's seven-point degree-5 rule on every triangle.
+  Its first node is the centroid, so the collocation points are cloud points.
+  `leaf_capacity` counts panels; the cloud capacity is seven times it.
+- For every target, the near table stores the dense owner's `(S, D)` entry
+  (`assemble_dense_with_static`'s own dispatch: Duffy self term, 8x8 near and
+  4x4 far rules on the analytic static layers) for every panel with a node in
+  the target leaf's direct-interaction leaves, minus the exact point sums of
+  that panel's nodes the far pass covers. Entry plus far pass is the dense
+  entry to FMM accuracy. A panel with every node separated enters through its
+  seven-point sum alone.
+- `CBIE_MIN_LEAF_RADII` (4) refuses leaves narrower than four panel radii,
+  where the seven-point sum would stand in for the dense rule at more than
+  1.1e-6 of the single layer (7.5e-8 at 6 radii, 1.3e-8 at 8).
+- `NearFieldBlockJacobi` factors same-leaf blocks of the stored table, which
+  are exact dense entries there. `max_near_entries` also charges the table,
+  two complex entries per stored pair; `m2l_cache_bytes` goes to the one
+  far-field double layer. Workers and the cache change no bit.
+- Retained triangles are required. The directional route and Robin
+  boundaries refuse: plain CBIE rows lie below the interior Dirichlet bound,
+  where root kD is within W5a.
+
+The near table is this owner's one sparse near-field mechanism, keyed by
+`NearOperator` (S, D, N; D' always stays centroid). A crate-internal
+`NearRows` rule plugs into Burton-Miller through `prepare_with_near`.
+- Its rows correct the centroid operator, P2P near field included: A gains
+  `D + alpha N`, B gains `S`, and the rule's `(dA_ii, dB_ii)` join both
+  diagonals and the block-Jacobi blocks.
+- Row lengths are known before allocation, and `max_near_entries` charges
+  pairs times operators. Rows must be finite, strictly ascending and
+  worker-independent, or the build refuses.
+- `prepare` is `prepare_with_near(None)`, bitwise, and plain CBIE refuses a
+  rule.
+- `burton_miller_near_rows_enter_as_declared` plants a three-operator rule
+  and checks both sides against the declared sums within 1e-14, a converged
+  preconditioned solve, the inclusive budget, and the CBIE refusal.
+
+`helmholtz::iterative::cbie_tests` checks every pair of a 1280-panel
+icosphere at k = 1.3 against the assembled dense matrix: 354080 pairs with no
+separated node are bitwise the dense entries; 48192 corrected pairs rebuild it
+within 3.5e-16; 1236128 separated pairs' seven-point sums are within 4.2e-8
+(single) and 3.6e-8 (double, times the panel radius) of the single layer (ts1,
+6a478871b). `tests/iterative_cbie.rs` solves 5120-panel bodies at fmm order 7
+and GMRES 1e-10 against dense plain CBIE: sphere 6.5e-7 (k = 0.05, depth 2),
+8.3e-7 (k = 1) and 9.0e-7 (k = 2, depth 3), ellipsoid 1, 0.7, 0.5 m 7.6e-7
+(k = 1), all within 1e-5, in 9 to 11 iterations. Its order ladder gives
+1.8e-3, 4.4e-5 and 8.3e-7 at p = 3, 5 and 7. Workers 1, 5 and 16 and the row
+cache are bitwise (ts1, 88e7dd212).
 
 `IterativeOptions` explicitly declares GMRES tolerance, restart (1..256),
 iteration cap, FMM order/leaf capacity, and near-field storage budget.
@@ -452,6 +503,27 @@ checks loaded frequency-response force/power balance; it does not satisfy the
 bar's 0.1-cent frequency/2% decay requirement. Full M2.5-W4a remains open for
 these numerical and composition gates. No piano example or panel-bits golden
 was changed.
+
+`modal_radiation_loading_routed` is the M2.5-W5 route past the dense cap.
+- At or below `MAX_DENSE_PANELS` it is the dense bake, bitwise, declaration
+  identity included.
+- Above it, a closed body's rows go to `IterativeRadiation` with the declared
+  options, each in its own formulation (the route's or `GeometryPolicy`'s).
+  Every field must converge to the GMRES tolerance or the bake refuses with
+  `Iterative`. The declaration identity binds the numerical options, not
+  workers or caches. Closure and orientation are admitted by
+  `near_field::components`, the owner `near_field::Geometry` uses below the
+  cap; that receiver admission itself stops at the dense cap.
+  `GeometryPolicy::new` admits surfaces up to `MAX_SURFACE_PANELS`, since its
+  box bound holds at any size; its `solve_batch` keeps the dense owner's cap.
+- The reciprocity and passivity gates are unchanged. `NonReciprocal` and
+  `NonPassive` carry the refused matrix as a diagnostic, never as a row.
+  FMM and GMRES errors are not reciprocal, so a routed matrix's defect sits at
+  their level, far above 1e-12.
+- `routed_modal_loading_is_the_dense_bake_below_the_cap` checks the bitwise
+  dense equality for a plain-CBIE and a Burton-Miller row, the unrouted W5c
+  refusal, a live closure refusal and a worker-bitwise, option-bound
+  declaration at 20480 panels.
 
 1. G0 Gauss identity: the assembled Neumann operator applied to ones
    gives −1 at every centroid within discretization tolerance

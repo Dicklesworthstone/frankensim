@@ -43,12 +43,15 @@ impl<'a> GeometryPolicy<'a> {
     /// The exact-coordinate closure/orientation owner is shared with receiver
     /// admission; no tolerance weld, geometry inflation, or missing-face fill.
     /// Bounds are rounded down and box widths up at every positive operation.
+    /// Selection holds at any size up to the surface cap, so routed solves
+    /// past the dense cap select by it too; [`Self::solve_batch`] keeps the
+    /// dense owner's own cap.
     /// # Errors
     /// Missing retained triangles, open/inward/degenerate or unbounded geometry,
     /// exceeded panel cap, or an unrepresentable positive spectral bound.
     pub fn new(surface: &'a SpherePanels) -> Result<Self, HelmholtzError> {
         let triangles = surface.triangles().ok_or_else(|| bad("geometric radiation policy requires retained triangles"))?;
-        if triangles.is_empty() || triangles.len() > helmholtz::MAX_DENSE_PANELS
+        if triangles.is_empty() || triangles.len() > crate::panel3d::MAX_SURFACE_PANELS
             || triangles.iter().flatten().flatten().any(|v| !v.is_finite() || v.abs() > 1e9) {
             return Err(bad("invalid bounded triangle surface for radiation policy"));
         }

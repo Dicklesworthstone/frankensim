@@ -7,7 +7,7 @@ use fs_math::{c64::C64, det};
 
 use crate::{
     CellKey, Fmm, FmmError, Laplace3d, MAX_COEFFICIENT_SLOTS, MAX_DIRECT_POINTS,
-    MAX_INTERPOLATION_ORDER, MAX_TRANSLATION_WORK, MIN_INTERPOLATION_ORDER,
+    MAX_INTERPOLATION_ORDER, MAX_TRANSLATION_WORK, MIN_INTERPOLATION_ORDER, point_leaves,
 };
 
 /// Registered capsule: the M2L dot body recompiled with AVX2 on x86-64 CPUs
@@ -163,6 +163,9 @@ pub struct FmmC64<'k> {
     /// Optional per-group M2L kernel rows in `potentials` layout; see
     /// [`Self::cache_m2l_rows`].
     m2l_rows: Option<Vec<Vec<C64>>>,
+    /// Built without near-field admission; only [`Self::far_potentials`]
+    /// evaluates. See [`Self::new_far_field_within`].
+    far_field_only: bool,
 }
 
 impl<'k> FmmC64<'k> {
@@ -286,6 +289,50 @@ impl<'k> FmmC64<'k> {
         )
     }
 
+    /// Scalar engine for a consumer that supplies its own near field, such as
+    /// panel quadrature. Only [`Self::far_potentials`] evaluates: it omits
+    /// the adjacent-leaf direct sum, whose pairs
+    /// [`Self::near_field_neighbor_leaves`] names. That pair work is never
+    /// run, so it is not charged, and [`Self::potentials`] refuses.
+    pub fn new_far_field_within(
+        kernel: &'k dyn ComplexKernel,
+        points: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build_with(
+            Operator::Scalar(kernel),
+            points,
+            None,
+            order,
+            leaf_cap,
+            budget,
+            true,
+        )
+    }
+
+    /// Source-normal double layer on the far-field route of
+    /// [`Self::new_far_field_within`].
+    pub fn new_double_far_field_within(
+        kernel: HelmholtzDouble,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build_with(
+            Operator::Double(kernel),
+            points,
+            Some(normals),
+            order,
+            leaf_cap,
+            budget,
+            true,
+        )
+    }
+
     /// Validate a peak complex coefficient count before allocation. The bound
     /// includes both passes and transient cell buffers, in C64 units.
     pub fn validate_coefficient_slots(slots: usize) -> Result<(), FmmError> {
@@ -305,7 +352,6 @@ impl<'k> FmmC64<'k> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // one construction admission audit
     fn build(
         operator: Operator<'k>,
         points: Vec<[f64; 3]>,
@@ -313,6 +359,19 @@ impl<'k> FmmC64<'k> {
         order: usize,
         leaf_cap: usize,
         budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build_with(operator, points, normals, order, leaf_cap, budget, false)
+    }
+
+    #[allow(clippy::too_many_lines)] // one construction admission audit
+    fn build_with(
+        operator: Operator<'k>,
+        points: Vec<[f64; 3]>,
+        normals: Option<Vec<[f64; 3]>>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+        far_field_only: bool,
     ) -> Result<Self, FmmError> {
         if budget.max_translation_work == 0 {
             return Err(FmmError::ComplexRequest {
@@ -348,7 +407,11 @@ impl<'k> FmmC64<'k> {
         // allocates no coefficients. Actual complex storage and M2L work are
         // validated below before any complex pass. The real implementation's
         // conservative p^6 estimate remains untouched for existing consumers.
-        let mut geometry = Fmm::new(&Laplace3d, points, MIN_INTERPOLATION_ORDER, leaf_cap)?;
+        let mut geometry = if far_field_only {
+            far_field_tree(points, leaf_cap)?
+        } else {
+            Fmm::new(&Laplace3d, points, MIN_INTERPOLATION_ORDER, leaf_cap)?
+        };
         geometry.order = order;
         if let Some(k) = operator.wavenumber() {
             let kd = k * geometry.side;
@@ -439,6 +502,7 @@ impl<'k> FmmC64<'k> {
             directional: None,
             workers: 1,
             m2l_rows: None,
+            far_field_only,
         })
     }
 
@@ -538,14 +602,44 @@ impl<'k> FmmC64<'k> {
 
     /// P2M/M2M, M2L, L2L/L2P and the adjacent-leaf direct sum. Never invokes
     /// the quadratic oracle. Traversal and accumulation orders are fixed.
-    #[allow(clippy::too_many_lines)] // the four standard passes share one channel layout
+    ///
+    /// # Errors
+    /// Besides charge, kernel and output refusals, `ComplexRequest` on a
+    /// far-field-only engine, whose near field was never admitted.
     pub fn potentials(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
+        if self.far_field_only {
+            return Err(FmmError::ComplexRequest {
+                reason: "a far-field-only engine has no admitted near field; use far_potentials",
+            });
+        }
+        self.evaluate(charges, true)
+    }
+
+    /// [`Self::potentials`] without the adjacent-leaf direct sum: every pair
+    /// of points in leaves [`Self::near_field_neighbor_leaves`] relates is
+    /// omitted, each point's pair with itself included. The remaining passes,
+    /// their order and their bits are those of [`Self::potentials`].
+    ///
+    /// # Errors
+    /// `ComplexRequest` on the directional route, which owns a different
+    /// pair partition; otherwise as [`Self::potentials`].
+    pub fn far_potentials(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
+        if self.directional.is_some() {
+            return Err(FmmError::ComplexRequest {
+                reason: "far-field potentials apply only to the non-directional route",
+            });
+        }
+        self.evaluate(charges, false)
+    }
+
+    #[allow(clippy::too_many_lines)] // the four standard passes share one channel layout
+    fn evaluate(&self, charges: &[C64], near: bool) -> Result<Vec<C64>, FmmError> {
         self.validate_charges(charges)?;
         if let Some(plan) = &self.directional {
             return plan.potentials(self, charges);
         }
         if self.workers > 1 {
-            return self.potentials_on_workers(charges);
+            return self.potentials_on_workers(charges, near);
         }
         let (ns, nt) = self.operator.dimensions();
         let np = self.nodes.len().pow(3);
@@ -656,6 +750,9 @@ impl<'k> FmmC64<'k> {
                     }
                 }
             }
+            if !near {
+                continue;
+            }
             for source in self.neighbors(key) {
                 for &t in &cell.points {
                     for &s in &source.points {
@@ -703,10 +800,10 @@ impl<'k> FmmC64<'k> {
         Ok(())
     }
 
-    /// [`Self::potentials`] on the declared workers. Every coefficient and
+    /// [`Self::evaluate`] on the declared workers. Every coefficient and
     /// output receives the serial path's operations in the serial order.
     #[allow(clippy::too_many_lines)] // the four passes share one channel layout
-    fn potentials_on_workers(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
+    fn potentials_on_workers(&self, charges: &[C64], near: bool) -> Result<Vec<C64>, FmmError> {
         let (ns, nt) = self.operator.dimensions();
         let np = self.nodes.len().pow(3);
         let workers = self.workers;
@@ -914,7 +1011,7 @@ impl<'k> FmmC64<'k> {
                     }
                 }
             }
-            for source in self.neighbors(key) {
+            for source in self.neighbors(key).filter(|_| near) {
                 for (p, &t) in cell.points.iter().enumerate() {
                     for &s in &source.points {
                         if t != s {
@@ -1041,9 +1138,9 @@ impl<'k> FmmC64<'k> {
     /// cannot be reserved; the engine then stays uncached. `ComplexRequest`
     /// on the directional route, which owns a different near partition.
     pub fn cache_near_field(&mut self, max_bytes: usize) -> Result<usize, FmmError> {
-        if self.directional.is_some() {
+        if self.directional.is_some() || self.far_field_only {
             return Err(FmmError::ComplexRequest {
-                reason: "the near-field cache applies only to the non-directional route",
+                reason: "the near-field cache applies only to the non-directional route with a near field",
             });
         }
         let mut count = 0usize;
@@ -1128,6 +1225,13 @@ impl<'k> FmmC64<'k> {
         self.geometry.side
     }
 
+    /// Side of the leaf cells in coordinate units. A point pair closer than
+    /// this always falls in the adjacent-leaf direct sum.
+    #[must_use]
+    pub fn leaf_box_size(&self) -> f64 {
+        self.geometry.side / f64::from(1u32 << self.geometry.max_level)
+    }
+
     /// Nonempty direct-interaction leaf groups, in the matvec's fixed tree order.
     /// Every point occurs exactly once. A consumer may subdivide these groups
     /// for a bounded block-Jacobi preconditioner without rebuilding the tree.
@@ -1137,6 +1241,46 @@ impl<'k> FmmC64<'k> {
             .values()
             .filter(|cell| cell.leaf)
             .map(|cell| cell.points.as_slice())
+    }
+
+    /// For each leaf of [`Self::near_field_blocks`], in that order, the
+    /// ascending indices (in that same order) of the leaves its points pair
+    /// with in the adjacent-leaf direct sum, itself included. These are
+    /// exactly the pairs [`Self::far_potentials`] omits. The directional
+    /// route owns a different partition and returns none.
+    #[must_use]
+    pub fn near_field_neighbor_leaves(&self) -> Vec<Vec<usize>> {
+        if self.directional.is_some() {
+            return Vec::new();
+        }
+        let leaves: BTreeMap<CellKey, usize> = self
+            .geometry
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.leaf)
+            .enumerate()
+            .map(|(i, (&key, _))| (key, i))
+            .collect();
+        leaves
+            .keys()
+            .map(|&key| {
+                (0..27i64)
+                    .filter_map(|o| {
+                        let n = [
+                            i64::from(key.1) + o / 9 - 1,
+                            i64::from(key.2) + (o / 3) % 3 - 1,
+                            i64::from(key.3) + o % 3 - 1,
+                        ];
+                        if n.iter().any(|&v| v < 0) {
+                            return None;
+                        }
+                        leaves
+                            .get(&(key.0, n[0] as u32, n[1] as u32, n[2] as u32))
+                            .copied()
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// JSON tree/work statistics; coefficient slots are counted in C64 units.
@@ -1159,6 +1303,50 @@ impl<'k> FmmC64<'k> {
             })
         )
     }
+}
+
+/// The uniform tree [`Fmm::new`] builds, without its direct-sum pair
+/// admission, which a far-field-only engine never runs. Every other admission
+/// is [`Fmm::validate_request`]'s, and leaves use the shared `point_leaves`
+/// rule, so the partition is `Fmm::new`'s (the real engine stays untouched).
+fn far_field_tree(points: Vec<[f64; 3]>, leaf_cap: usize) -> Result<Fmm<'static>, FmmError> {
+    Fmm::validate_request(&points, MIN_INTERPOLATION_ORDER, leaf_cap)?;
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in &points {
+        for c in 0..3 {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
+    }
+    let side = (hi[0] - lo[0])
+        .max(hi[1] - lo[1])
+        .max(hi[2] - lo[2])
+        .max(1e-12)
+        * (1.0 + 1e-9);
+    let depth = ((points.len() as f64 / leaf_cap as f64).max(1.0).ln() / (8.0f64).ln()).ceil();
+    let max_level = (depth as u32).clamp(1, 6);
+    let n_side = 1u32 << max_level;
+    let mut cells = point_leaves(&points, lo, side / f64::from(n_side), max_level, n_side);
+    let leaves: Vec<CellKey> = cells.keys().copied().collect();
+    for mut key in leaves {
+        while key.0 > 0 {
+            key = (key.0 - 1, key.1 >> 1, key.2 >> 1, key.3 >> 1);
+            cells.entry(key).or_insert_with(|| crate::Cell {
+                points: Vec::new(),
+                leaf: false,
+            });
+        }
+    }
+    Ok(Fmm {
+        kernel: &Laplace3d,
+        points,
+        order: MIN_INTERPOLATION_ORDER,
+        max_level,
+        cells,
+        lo,
+        side,
+    })
 }
 
 /// Run `f(offset + i, &mut slots[i])` for every slot, in contiguous chunks

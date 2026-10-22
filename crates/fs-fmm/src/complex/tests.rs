@@ -522,6 +522,146 @@ fn declared_workers_leave_potentials_bitwise_g0() {
 }
 
 #[test]
+fn far_field_route_omits_exactly_the_named_near_pairs_g0() {
+    // Several levels (leaf cap 2), both far-field shapes, on the untouched
+    // serial and worker passes.
+    let points: Vec<[f64; 3]> = (0..240)
+        .map(|i| {
+            let j = 0.07 * det::cos(i as f64);
+            [
+                (i % 8) as f64 + j,
+                ((i / 8) % 6) as f64 - j,
+                (i / 48) as f64 + 0.5 * j,
+            ]
+        })
+        .collect();
+    let normals: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| {
+            let v = [p[0] + 1.0, p[1] + 2.0, p[2] + 3.0];
+            let n = det::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            [v[0] / n, v[1] / n, v[2] / n]
+        })
+        .collect();
+    let q: Vec<C64> = (0..240)
+        .map(|i| C64::new(det::sin(i as f64), 0.2 - i as f64 / 240.0))
+        .collect();
+    let bits = |p: Vec<C64>| -> Vec<(u64, u64)> {
+        p.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
+    };
+    let single = HelmholtzSingle { k: 0.6 };
+    let double = HelmholtzDouble { k: 0.6 };
+    for shape in 0..2 {
+        let (p, n) = (points.clone(), normals.clone());
+        let (full, far) = if shape == 0 {
+            (
+                FmmC64::new(&single, p.clone(), 3, 2).unwrap(),
+                FmmC64::new_far_field_within(&single, p, 3, 2, ComplexBudget::V1).unwrap(),
+            )
+        } else {
+            (
+                FmmC64::new_double(double, p.clone(), n.clone(), 3, 2).unwrap(),
+                FmmC64::new_double_far_field_within(double, p, n, 3, 2, ComplexBudget::V1).unwrap(),
+            )
+        };
+        let depth = far.geometry.cells.keys().map(|k| k.0).max().unwrap();
+        assert!(depth >= 3);
+        assert_eq!(
+            far.leaf_box_size(),
+            far.root_box_size() / f64::from(1u32 << depth)
+        );
+        // The far-field engine runs the full engine's far passes, bit for bit.
+        let far_bits = bits(far.far_potentials(&q).unwrap());
+        assert_eq!(bits(full.far_potentials(&q).unwrap()), far_bits);
+        // The named neighbour leaves hold exactly the omitted pairs.
+        let leaves: Vec<&[usize]> = far.near_field_blocks().collect();
+        let neighbours = far.near_field_neighbor_leaves();
+        assert_eq!(neighbours.len(), leaves.len());
+        let mut near = vec![C64::ZERO; q.len()];
+        let mut pairs = 0usize;
+        for (leaf, around) in leaves.iter().zip(&neighbours) {
+            assert!(around.windows(2).all(|w| w[0] < w[1]));
+            for &t in *leaf {
+                for &l in around {
+                    for &s in leaves[l] {
+                        if t != s {
+                            near[t] = near[t] + far.pair(t, s) * q[s];
+                            pairs += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut cached = FmmC64::new(&single, points.clone(), 3, 2).unwrap();
+        let cache = cached.cache_near_field(usize::MAX).unwrap();
+        assert_eq!(pairs * core::mem::size_of::<C64>(), cache);
+        let total = full.potentials(&q).unwrap();
+        for ((&f, &n), &t) in far
+            .far_potentials(&q)
+            .unwrap()
+            .iter()
+            .zip(&near)
+            .zip(&total)
+        {
+            close(f + n, t, 1.0e-13);
+        }
+        let mut workers = far;
+        for count in [2, 5, 300] {
+            workers.set_workers(count).unwrap();
+            assert_eq!(bits(workers.far_potentials(&q).unwrap()), far_bits);
+        }
+        // Its near field was never admitted, so it neither evaluates nor caches one.
+        assert!(matches!(
+            workers.potentials(&q),
+            Err(FmmError::ComplexRequest { .. })
+        ));
+        assert!(matches!(
+            workers.cache_near_field(usize::MAX),
+            Err(FmmError::ComplexRequest { .. })
+        ));
+    }
+}
+
+#[test]
+fn far_field_route_is_not_charged_the_direct_sum_it_never_runs_g0() {
+    // 20000 points in one level-1 octant group: every leaf is adjacent, so
+    // the direct sum would pair 4e8 > MAX_NEAR_FIELD_PAIR_WORK points.
+    let points: Vec<[f64; 3]> = (0..20_000)
+        .map(|i| {
+            let t = i as f64;
+            [det::sin(t), det::cos(1.3 * t), det::sin(0.7 * t + 1.0)]
+        })
+        .collect();
+    let single = HelmholtzSingle { k: 0.6 };
+    assert!(matches!(
+        FmmC64::new_within(&single, points.clone(), 3, 20_000, ComplexBudget::V1),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "near-field pair",
+            ..
+        })
+    ));
+    let far = FmmC64::new_far_field_within(&single, points.clone(), 3, 20_000, ComplexBudget::V1)
+        .unwrap();
+    // No separated pair exists at level 1, so the far field is exactly zero.
+    let q = vec![C64::ONE; points.len()];
+    assert!(
+        far.far_potentials(&q)
+            .unwrap()
+            .iter()
+            .all(|&z| z == C64::ZERO)
+    );
+    assert!(matches!(
+        far.potentials(&q),
+        Err(FmmError::ComplexRequest { .. })
+    ));
+    // Every other admission is unchanged.
+    assert!(matches!(
+        FmmC64::new_far_field_within(&single, points, 1, 20_000, ComplexBudget::V1),
+        Err(FmmError::InvalidOrder { .. })
+    ));
+}
+
+#[test]
 fn avx2_dot_capsule_is_bitwise_the_portable_body() {
     // On an x86-64 AVX2 host the dispatcher takes the capsule; this compares
     // it with the portable codegen of the same body. Elsewhere it re-checks

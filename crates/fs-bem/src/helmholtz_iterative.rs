@@ -6,11 +6,19 @@
 //! directional route's zero-k owner uses the low-frequency partition.
 //! FMM approximation error is distinct from the recomputed GMRES residual;
 //! callers must qualify the explicit order against dense/refinement oracles.
+//!
+//! Plain CBIE keeps the dense owner's triangle quadrature. Its far field is a
+//! far-field-only W5a pass over a seven-point quadrature cloud of every panel.
+//! Each target row stores the dense owner's exact `(S, D)` entries for every
+//! panel with a node in the FMM's direct-interaction leaves, minus the point
+//! sums of those of its nodes the far pass already covers. A panel with all
+//! nodes in separated leaves enters through its seven-point sum alone.
 
 use super::{
-    Formulation, HelmholtzError, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, Medium,
+    Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, Medium,
     RadiationSolution, alpha_for, characteristic_panel_size, evaluate_radiated_power, kernels,
-    self_terms, surface_fingerprint,
+    self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
+    triangle_weak_influence, triangle_weak_influence_with_rule,
 };
 use crate::{BemError, panel3d::SpherePanels};
 use fs_exec::CancelGate;
@@ -52,7 +60,9 @@ pub struct IterativeOptions {
     /// When present, its order and leaf capacity are the effective FMM values.
     pub directional: Option<DirectionalOptions>,
     pub precond: Preconditioner,
-    /// Maximum stored complex entries across all inverse-preconditioner blocks.
+    /// Maximum stored complex entries across all inverse-preconditioner
+    /// blocks. Plain CBIE also charges its exact near table here, two complex
+    /// entries (S and D) per stored target-panel pair.
     pub max_near_entries: usize,
     /// Byte budget for caching the double and mixed operators' adjacent-leaf
     /// pair values (half each), which are otherwise re-evaluated every matvec.
@@ -69,8 +79,9 @@ pub struct IterativeOptions {
     pub workers: usize,
     /// Byte budget for caching the double and mixed operators' M2L kernel
     /// rows (half each), which are otherwise re-evaluated by every pass and
-    /// by every declared worker. The cache changes no bits. An operator whose
-    /// cache exceeds its half, and the directional route, stay uncached.
+    /// by every declared worker. Plain CBIE's one far-field double layer may
+    /// use all of it. The cache changes no bits. An operator whose cache
+    /// exceeds its share, and the directional route, stay uncached.
     /// Zero (the default) disables it.
     pub m2l_cache_bytes: usize,
 }
@@ -265,9 +276,271 @@ struct NearBlock {
     inverse: LuComplex,
 }
 
+/// Radon's seven-point degree-5 triangle rule (barycentric node, weight over
+/// area). Its first node is the centroid, so the far-field cloud holds every
+/// collocation point exactly.
+const RADON_A: f64 = 0.101_286_507_323_456_34; // (6 - sqrt 15) / 21
+const RADON_B: f64 = 0.797_426_985_353_087_3; // 1 - 2 RADON_A
+const RADON_C: f64 = 0.470_142_064_105_115_1; // (6 + sqrt 15) / 21
+const RADON_D: f64 = 0.059_715_871_789_769_82; // 1 - 2 RADON_C
+const RADON_WA: f64 = 0.125_939_180_544_827_14; // (155 - sqrt 15) / 1200
+const RADON_WC: f64 = 0.132_394_152_788_506_2; // (155 + sqrt 15) / 1200
+const RADON7: [([f64; 3], f64); 7] = [
+    ([1.0 / 3.0; 3], 0.225),
+    ([RADON_A, RADON_A, RADON_B], RADON_WA),
+    ([RADON_A, RADON_B, RADON_A], RADON_WA),
+    ([RADON_B, RADON_A, RADON_A], RADON_WA),
+    ([RADON_C, RADON_C, RADON_D], RADON_WC),
+    ([RADON_C, RADON_D, RADON_C], RADON_WC),
+    ([RADON_D, RADON_C, RADON_C], RADON_WC),
+];
+
+/// Smallest W5a leaf side, in panel radii (largest centroid-vertex distance),
+/// at which a fully separated panel's seven-point sum stands in for the dense
+/// owner's static-exact rule. Against a converged integral of 1/r and its
+/// normal derivative over an equilateral triangle, the seven-point error
+/// relative to the single layer is 1.1e-6 at a centroid distance of 4 radii,
+/// 7.5e-8 at 6 and 1.3e-8 at 8; the dense 4x4 rule's is 2.9e-8 at 4.
+pub const CBIE_MIN_LEAF_RADII: f64 = 4.0;
+
+/// One boundary operator a near table carries. The adjoint double layer D'
+/// always stays on its centroid rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NearOperator {
+    /// Single layer S.
+    Single,
+    /// Double layer D, with the source normal.
+    Double,
+    /// Hypersingular N, with both normals.
+    Hypersingular,
+}
+
+/// A pluggable near-field rule for [`IterativeRadiation::prepare_with_near`]:
+/// the sparse rows a Burton-Miller operator gains on top of its centroid
+/// operator (P2P near field included), and its diagonal terms. Rows must be
+/// finite, strictly ascending in column, and independent of the worker count.
+pub(crate) trait NearRows: Sync {
+    /// Operators per stored pair, in value order.
+    fn operators(&self) -> &[NearOperator];
+    /// Stored pairs of target row `i`, known before any allocation.
+    fn row_len(&self, i: usize) -> usize;
+    /// Ascending columns and pair-major values, `values[p * ops + o]`.
+    fn fill_row(&self, i: usize, cols: &mut [u32], values: &mut [C64]);
+    /// `(dA_ii, dB_ii)` at coupling `alpha`.
+    fn diagonal(&self, i: usize, alpha: C64) -> (C64, C64);
+    /// Rule declaration word for the checkpoint stamp.
+    fn stamp(&self) -> u64;
+}
+
+/// This owner's one sparse near-field mechanism: target rows, ascending
+/// columns, one value per declared operator per stored pair, applied
+/// matrix-free beside the FMM passes. Plain CBIE stores its exact dense
+/// triangle entries over a far-field-only pass; a Burton-Miller [`NearRows`]
+/// rule stores corrections over the centroid operator.
+struct NearTable {
+    operators: Vec<NearOperator>,
+    row_start: Vec<usize>,
+    cols: Vec<u32>,
+    values: Vec<C64>,
+}
+
+impl NearTable {
+    /// Row offsets and the complex values the table would store, before the
+    /// table is allocated.
+    fn plan(
+        n: usize,
+        operators: usize,
+        row_len: impl Fn(usize) -> usize,
+    ) -> Result<(Vec<usize>, usize), IterativeError> {
+        let overflow = IterativeError::Invalid {
+            what: "near-field extent overflow",
+        };
+        if n > u32::MAX as usize || operators == 0 {
+            return Err(overflow);
+        }
+        let mut row_start = Vec::with_capacity(n + 1);
+        row_start.push(0usize);
+        for i in 0..n {
+            let end = row_start[i]
+                .checked_add(row_len(i))
+                .ok_or(overflow.clone())?;
+            row_start.push(end);
+        }
+        let values = row_start[n].checked_mul(operators).ok_or(overflow)?;
+        Ok((row_start, values))
+    }
+
+    /// Fill every row on the declared workers. Each row writes only its own
+    /// range from shared data, so any worker count gives the same bits.
+    fn build(
+        operators: &[NearOperator],
+        row_start: Vec<usize>,
+        workers: usize,
+        gate: &CancelGate,
+        fill: &(dyn Fn(usize, &mut [u32], &mut [C64]) + Sync),
+    ) -> Result<Self, IterativeError> {
+        let n = row_start.len() - 1;
+        let ops = operators.len();
+        let pairs = row_start[n];
+        let refused = IterativeError::Invalid {
+            what: "near-field table allocation",
+        };
+        let mut cols = Vec::new();
+        cols.try_reserve_exact(pairs).map_err(|_| refused.clone())?;
+        cols.resize(pairs, 0u32);
+        let mut values = Vec::new();
+        values.try_reserve_exact(pairs * ops).map_err(|_| refused)?;
+        values.resize(pairs * ops, C64::ZERO);
+        let workers = workers.clamp(1, n.max(1));
+        let cancelled = core::sync::atomic::AtomicBool::new(false);
+        {
+            let (mut c_rest, mut v_rest) = (&mut cols[..], &mut values[..]);
+            std::thread::scope(|scope| {
+                for w in 0..workers {
+                    let (start, end) = (w * n / workers, (w + 1) * n / workers);
+                    let entries = row_start[end] - row_start[start];
+                    let (c_head, c_tail) = core::mem::take(&mut c_rest).split_at_mut(entries);
+                    let (v_head, v_tail) = core::mem::take(&mut v_rest).split_at_mut(entries * ops);
+                    (c_rest, v_rest) = (c_tail, v_tail);
+                    let (row_start, cancelled) = (&row_start, &cancelled);
+                    scope.spawn(move || {
+                        let base = row_start[start];
+                        for i in start..end {
+                            if (i - start) % 256 == 0 && gate.is_requested() {
+                                cancelled.store(true, core::sync::atomic::Ordering::Relaxed);
+                                return;
+                            }
+                            let range = row_start[i] - base..row_start[i + 1] - base;
+                            fill(
+                                i,
+                                &mut c_head[range.clone()],
+                                &mut v_head[range.start * ops..range.end * ops],
+                            );
+                        }
+                    });
+                }
+            });
+        }
+        if cancelled.into_inner() {
+            return Err(IterativeError::Cancelled { matvecs: 0 });
+        }
+        for i in 0..n {
+            let row = &cols[row_start[i]..row_start[i + 1]];
+            if row.windows(2).any(|w| w[0] >= w[1]) || row.iter().any(|&j| j as usize >= n) {
+                return Err(IterativeError::Invalid {
+                    what: "near-field rows need strictly ascending in-range columns",
+                });
+            }
+        }
+        if values.iter().any(|v| !finite(*v)) {
+            return Err(IterativeError::Invalid {
+                what: "nonfinite near-field entry",
+            });
+        }
+        Ok(Self {
+            operators: operators.to_vec(),
+            row_start,
+            cols,
+            values,
+        })
+    }
+
+    /// `y_i = sum_j (sum over operators c_o T_o,ij) x_j`, rows on the declared
+    /// workers. An undeclared operator contributes nothing.
+    fn apply(&self, coefficients: &[(NearOperator, C64)], x: &[C64], workers: usize) -> Vec<C64> {
+        let ops = self.operators.len();
+        let terms: Vec<(usize, C64)> = self
+            .operators
+            .iter()
+            .enumerate()
+            .filter_map(|(o, op)| {
+                coefficients
+                    .iter()
+                    .find(|(c, _)| c == op)
+                    .map(|&(_, weight)| (o, weight))
+            })
+            .collect();
+        let row = |i: usize| -> C64 {
+            let mut sum = C64::ZERO;
+            for p in self.row_start[i]..self.row_start[i + 1] {
+                let entry = match terms.as_slice() {
+                    [(o, weight)] if *weight == C64::ONE => self.values[p * ops + o],
+                    _ => terms.iter().fold(C64::ZERO, |s, &(o, weight)| {
+                        s + weight * self.values[p * ops + o]
+                    }),
+                };
+                sum = sum + entry * x[self.cols[p] as usize];
+            }
+            sum
+        };
+        let n = self.row_start.len() - 1;
+        let mut out = vec![C64::ZERO; n];
+        let workers = workers.clamp(1, n.max(1));
+        let mut rest = &mut out[..];
+        std::thread::scope(|scope| {
+            for w in 0..workers {
+                let (start, end) = (w * n / workers, (w + 1) * n / workers);
+                let (head, tail) = core::mem::take(&mut rest).split_at_mut(end - start);
+                rest = tail;
+                let row = &row;
+                scope.spawn(move || {
+                    for (slot, i) in head.iter_mut().zip(start..end) {
+                        *slot = row(i);
+                    }
+                });
+            }
+        });
+        out
+    }
+
+    /// The stored value of `op` at `(i, j)`, if the pair and operator exist.
+    fn get(&self, i: usize, j: usize, op: NearOperator) -> Option<C64> {
+        let o = self.operators.iter().position(|&d| d == op)?;
+        let row = &self.cols[self.row_start[i]..self.row_start[i + 1]];
+        let p = row.binary_search(&u32::try_from(j).ok()?).ok()?;
+        Some(self.values[(self.row_start[i] + p) * self.operators.len() + o])
+    }
+
+    fn pairs(&self) -> usize {
+        self.cols.len()
+    }
+
+    fn bytes(&self) -> usize {
+        self.values.len() * core::mem::size_of::<C64>()
+            + self.cols.len() * core::mem::size_of::<u32>()
+            + self.row_start.len() * core::mem::size_of::<usize>()
+    }
+}
+
+/// Plain CBIE's far-field FMM over the quadrature cloud, and its exact near
+/// table (operators S and D). Cloud point j < N is panel j's centroid; node
+/// m >= 1 of panel j is point N + 6j + m - 1.
+struct CbieLayers {
+    points: Vec<[f64; 3]>,
+    /// Rule weight times panel area, per cloud point.
+    weights: Vec<f64>,
+    cloud_capacity: usize,
+    double: FmmC64<'static>,
+    table: NearTable,
+}
+
+/// The prepared layers: the original Burton-Miller FMM pair, with an optional
+/// [`NearRows`] correction table, or plain CBIE.
+enum Layers {
+    BurtonMiller {
+        double: FmmC64<'static>,
+        mixed: FmmC64<'static>,
+        diagonal_a: Vec<C64>,
+        diagonal_b: Vec<C64>,
+        near: Option<NearTable>,
+    },
+    PlainCbie(Box<CbieLayers>),
+}
+
 /// Prepared immutable geometry/operator, reusable across boundary velocities.
-/// Only Burton-Miller and its explicit sign-mutation arm are supported. The
-/// triangle PlainCbie quadrature is NOT replaced with centroid FMM kernels.
+/// Burton-Miller and its explicit sign-mutation arm use centroid point
+/// kernels. Plain CBIE keeps the dense owner's triangle quadrature in its near
+/// table and needs retained triangles; it is not a centroid-kernel operator.
 pub struct IterativeRadiation<'a> {
     surface: &'a SpherePanels,
     admittance: Option<super::bc::Admittance<'a>>,
@@ -276,10 +549,7 @@ pub struct IterativeRadiation<'a> {
     alpha: C64,
     options: IterativeOptions,
     ppw: f64,
-    double: FmmC64<'static>,
-    mixed: FmmC64<'static>,
-    diagonal_a: Vec<C64>,
-    diagonal_b: Vec<C64>,
+    layers: Layers,
     blocks: Vec<NearBlock>,
     near_entries: usize,
     near_cache_bytes: usize,
@@ -336,6 +606,11 @@ impl<'a> IterativeRadiation<'a> {
         gate: &CancelGate,
     ) -> Result<Self, IterativeError> {
         poll(gate)?;
+        if formulation == Formulation::PlainCbie {
+            return Err(IterativeError::Invalid {
+                what: "Robin boundaries keep the Burton-Miller iterative owner",
+            });
+        }
         admittance.validate(surface.areas().len())?;
         super::bc::validate_closed(surface)?;
         let mut out = Self::prepare(surface, k, medium, formulation, options, gate)?;
@@ -355,6 +630,25 @@ impl<'a> IterativeRadiation<'a> {
         options: &IterativeOptions,
         gate: &CancelGate,
     ) -> Result<Self, IterativeError> {
+        Self::prepare_with_near(surface, k, medium, formulation, options, None, gate)
+    }
+
+    /// [`Self::prepare`] with an optional Burton-Miller near-field rule. Its
+    /// rows are corrections on top of the centroid operator: A gains
+    /// `D + alpha N`, B gains `S`, the rule's diagonal terms join both
+    /// diagonals, and the block-Jacobi blocks include all of them.
+    /// `max_near_entries` charges the rule's stored values with the blocks.
+    /// `None` is [`Self::prepare`], bitwise. Plain CBIE refuses a rule: its
+    /// own table already holds the dense owner's triangle entries.
+    pub(crate) fn prepare_with_near(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        near: Option<&dyn NearRows>,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeError> {
         let started = Instant::now();
         poll(gate)?;
         surface.validate().map_err(IterativeError::Geometry)?;
@@ -367,11 +661,6 @@ impl<'a> IterativeRadiation<'a> {
         {
             return Err(IterativeError::Invalid {
                 what: "positive finite k, density and sound speed required",
-            });
-        }
-        if formulation == Formulation::PlainCbie {
-            return Err(IterativeError::Invalid {
-                what: "iterative owner requires Burton-Miller; triangle CBIE keeps its dense quadrature",
             });
         }
         if !options.tol.is_finite()
@@ -397,6 +686,52 @@ impl<'a> IterativeRadiation<'a> {
                 panels_per_wavelength: ppw,
             }
             .into());
+        }
+        if formulation == Formulation::PlainCbie {
+            if near.is_some() {
+                return Err(IterativeError::Invalid {
+                    what: "plain CBIE already stores the dense triangle near entries",
+                });
+            }
+            let (cbie, blocks, near_entries) = CbieLayers::prepare(surface, k, options, gate)?;
+            let mut stamp = surface_fingerprint(surface);
+            let preconditioner_key = match options.precond {
+                Preconditioner::None => 0,
+                Preconditioner::NearFieldBlockJacobi { max_block_panels } => {
+                    max_block_panels as u64
+                }
+            };
+            // 0xCB1E marks the formulation; Burton-Miller stamps are unchanged.
+            for word in [
+                0xCB1E,
+                k.to_bits(),
+                medium.density.to_bits(),
+                medium.sound_speed.to_bits(),
+                options.tol.to_bits(),
+                options.restart as u64,
+                options.max_iters as u64,
+                options.fmm_order as u64,
+                options.leaf_capacity as u64,
+                near_entries as u64,
+                preconditioner_key,
+            ] {
+                stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            return Ok(Self {
+                surface,
+                admittance: None,
+                k,
+                medium,
+                alpha: C64::ZERO,
+                options: options.clone(),
+                ppw,
+                layers: Layers::PlainCbie(Box::new(cbie)),
+                blocks,
+                near_entries,
+                near_cache_bytes: 0,
+                setup_s: started.elapsed().as_secs_f64(),
+                stamp,
+            });
         }
         let points = || surface.centroids().to_vec();
         let normals = || surface.normals().to_vec();
@@ -447,6 +782,14 @@ impl<'a> IterativeRadiation<'a> {
             diagonal_a.push(d_self - C64::from_re(0.5) + alpha * (n_reg - n0[i]));
             diagonal_b.push(s + alpha * (d_self + C64::from_re(0.5)));
         }
+        let planned = match near {
+            Some(rows) => Some(NearTable::plan(
+                weights.len(),
+                rows.operators().len(),
+                |i| rows.row_len(i),
+            )?),
+            None => None,
+        };
         let groups: Vec<Vec<usize>> = match options.precond {
             Preconditioner::None => Vec::new(),
             Preconditioner::NearFieldBlockJacobi { max_block_panels } => double
@@ -456,7 +799,7 @@ impl<'a> IterativeRadiation<'a> {
         };
         let near_entries = groups
             .iter()
-            .try_fold(0usize, |count, block| {
+            .try_fold(planned.as_ref().map_or(0, |p| p.1), |count, block| {
                 block
                     .len()
                     .checked_mul(block.len())
@@ -471,6 +814,37 @@ impl<'a> IterativeRadiation<'a> {
                 maximum_entries: options.max_near_entries,
             });
         }
+        let near_table = match (near, planned) {
+            (Some(rows), Some((row_start, _))) => {
+                poll(gate)?;
+                let table = NearTable::build(
+                    rows.operators(),
+                    row_start,
+                    options.workers,
+                    gate,
+                    &|i, cols, values| rows.fill_row(i, cols, values),
+                )?;
+                for i in 0..weights.len() {
+                    let (da, db) = rows.diagonal(i, alpha);
+                    if !finite(da) || !finite(db) {
+                        return Err(IterativeError::Invalid {
+                            what: "nonfinite near-field diagonal",
+                        });
+                    }
+                    diagonal_a[i] = diagonal_a[i] + da;
+                    diagonal_b[i] = diagonal_b[i] + db;
+                }
+                Some(table)
+            }
+            _ => None,
+        };
+        let correction = |i: usize, j: usize| -> Option<C64> {
+            let table = near_table.as_ref()?;
+            let d = table.get(i, j, NearOperator::Double);
+            let h = table.get(i, j, NearOperator::Hypersingular);
+            (d.is_some() || h.is_some())
+                .then(|| d.unwrap_or(C64::ZERO) + alpha * h.unwrap_or(C64::ZERO))
+        };
         let mut blocks = Vec::with_capacity(groups.len());
         for indices in groups {
             poll(gate)?;
@@ -492,6 +866,10 @@ impl<'a> IterativeRadiation<'a> {
                         );
                         (d + alpha * h).scale(surface.areas()[j])
                     };
+                    // A near rule's stored pair enters the block as in apply.
+                    if let Some(extra) = correction(i, j) {
+                        matrix[a * m + b] = matrix[a * m + b] + extra;
+                    }
                 }
             }
             let inverse =
@@ -536,6 +914,11 @@ impl<'a> IterativeRadiation<'a> {
                 stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
+        if let (Some(rows), Some(table)) = (near, &near_table) {
+            for word in [2, rows.stamp(), table.pairs() as u64] {
+                stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
         Ok(Self {
             surface,
             admittance: None,
@@ -544,10 +927,13 @@ impl<'a> IterativeRadiation<'a> {
             alpha,
             options: options.clone(),
             ppw,
-            double,
-            mixed,
-            diagonal_a,
-            diagonal_b,
+            layers: Layers::BurtonMiller {
+                double,
+                mixed,
+                diagonal_a,
+                diagonal_b,
+                near: near_table,
+            },
             blocks,
             near_entries,
             near_cache_bytes,
@@ -572,6 +958,20 @@ impl<'a> IterativeRadiation<'a> {
             .iter()
             .map(|&v| v * C64::new(0.0, self.k * self.medium.sound_speed * self.medium.density))
             .collect();
+        let (diagonal_b, near) = match &self.layers {
+            Layers::BurtonMiller {
+                diagonal_b, near, ..
+            } => (diagonal_b, near),
+            Layers::PlainCbie(cbie) => {
+                let rhs = cbie.single_layer(self.k, &self.options, &q, gate)?;
+                if rhs.iter().any(|v| !finite(*v)) {
+                    return Err(IterativeError::Invalid {
+                        what: "nonfinite radiation right-hand side",
+                    });
+                }
+                return Ok(rhs);
+            }
+        };
         let weighted: Vec<_> = q
             .iter()
             .zip(self.surface.areas())
@@ -605,9 +1005,19 @@ impl<'a> IterativeRadiation<'a> {
             )?
             .potentials(&weighted)?;
         poll(gate)?;
-        let rhs_complex: Vec<_> = (0..q.len())
-            .map(|i| single[i] + self.alpha * adjoint[i] + self.diagonal_b[i] * q[i])
+        let mut rhs_complex: Vec<_> = (0..q.len())
+            .map(|i| single[i] + self.alpha * adjoint[i] + diagonal_b[i] * q[i])
             .collect();
+        if let Some(table) = near {
+            let extra = table.apply(
+                &[(NearOperator::Single, C64::ONE)],
+                &q,
+                self.options.workers,
+            );
+            for (value, extra) in rhs_complex.iter_mut().zip(extra) {
+                *value = *value + extra;
+            }
+        }
         if rhs_complex.iter().any(|v| !finite(*v)) {
             return Err(IterativeError::Invalid {
                 what: "nonfinite radiation right-hand side",
@@ -661,18 +1071,55 @@ impl<'a> IterativeRadiation<'a> {
                 what: "pressure/operator dimension mismatch",
             });
         }
-        let weighted: Vec<_> = pressure
-            .iter()
-            .zip(self.surface.areas())
-            .map(|(&p, &a)| p.scale(a))
-            .collect();
-        let d = self.double.potentials(&weighted)?;
-        poll(gate)?;
-        let h = self.mixed.potentials(&weighted)?;
-        poll(gate)?;
-        let mut out: Vec<_> = (0..pressure.len())
-            .map(|i| d[i] + self.alpha * h[i] + self.diagonal_a[i] * pressure[i])
-            .collect();
+        let mut out = match &self.layers {
+            Layers::BurtonMiller {
+                double,
+                mixed,
+                diagonal_a,
+                near,
+                ..
+            } => {
+                let weighted: Vec<_> = pressure
+                    .iter()
+                    .zip(self.surface.areas())
+                    .map(|(&p, &a)| p.scale(a))
+                    .collect();
+                let d = double.potentials(&weighted)?;
+                poll(gate)?;
+                let h = mixed.potentials(&weighted)?;
+                poll(gate)?;
+                let mut out: Vec<_> = (0..pressure.len())
+                    .map(|i| d[i] + self.alpha * h[i] + diagonal_a[i] * pressure[i])
+                    .collect();
+                if let Some(table) = near {
+                    let extra = table.apply(
+                        &[
+                            (NearOperator::Double, C64::ONE),
+                            (NearOperator::Hypersingular, self.alpha),
+                        ],
+                        pressure,
+                        self.options.workers,
+                    );
+                    for (value, extra) in out.iter_mut().zip(extra) {
+                        *value = *value + extra;
+                    }
+                }
+                out
+            }
+            Layers::PlainCbie(cbie) => {
+                let far = cbie.double.far_potentials(&cbie.charges(pressure))?;
+                poll(gate)?;
+                let mut out = cbie.table.apply(
+                    &[(NearOperator::Double, C64::ONE)],
+                    pressure,
+                    self.options.workers,
+                );
+                for (i, value) in out.iter_mut().enumerate() {
+                    *value = *value + far[i] - pressure[i].scale(0.5);
+                }
+                out
+            }
+        };
         if let Some(admittance) = self.admittance {
             let velocity: Vec<_> = admittance
                 .image(pressure)?
@@ -686,7 +1133,7 @@ impl<'a> IterativeRadiation<'a> {
         }
         if out.iter().any(|v| !finite(*v)) {
             return Err(IterativeError::Invalid {
-                what: "nonfinite Burton-Miller application",
+                what: "nonfinite boundary-integral application",
             });
         }
         Ok(out)
@@ -822,6 +1269,13 @@ impl<'a> IterativeRadiation<'a> {
         ))
     }
 
+    fn near_table(&self) -> Option<&NearTable> {
+        match &self.layers {
+            Layers::BurtonMiller { near, .. } => near.as_ref(),
+            Layers::PlainCbie(cbie) => Some(&cbie.table),
+        }
+    }
+
     #[must_use]
     pub fn receipt(&self, state: &IterativeState) -> ResourceReceipt {
         ResourceReceipt {
@@ -831,15 +1285,282 @@ impl<'a> IterativeRadiation<'a> {
             matvecs: state.matvecs,
             iterations: state.gmres.iters,
             fmm_order: self.options.effective_order(),
-            near_field_bytes: self.near_entries * core::mem::size_of::<C64>()
-                + self
-                    .blocks
-                    .iter()
-                    .map(|b| b.indices.len() * core::mem::size_of::<usize>() * 2)
-                    .sum::<usize>(),
+            near_field_bytes: match self.near_table() {
+                None => self.near_entries * core::mem::size_of::<C64>(),
+                Some(table) => {
+                    (self.near_entries - table.values.len()) * core::mem::size_of::<C64>()
+                        + table.bytes()
+                }
+            } + self
+                .blocks
+                .iter()
+                .map(|b| b.indices.len() * core::mem::size_of::<usize>() * 2)
+                .sum::<usize>(),
             near_cache_bytes: self.near_cache_bytes,
-            fmm_stats: [self.double.stats(), self.mixed.stats()],
+            fmm_stats: match &self.layers {
+                Layers::BurtonMiller { double, mixed, .. } => [double.stats(), mixed.stats()],
+                Layers::PlainCbie(cbie) => [
+                    cbie.double.stats(),
+                    format!(
+                        "{{\"cbie_cloud_points\":{},\"cbie_near_pairs\":{}}}",
+                        cbie.points.len(),
+                        cbie.table.pairs()
+                    ),
+                ],
+            },
         }
+    }
+}
+
+/// One plain-CBIE dense entry `(S_ij, D_ij)`, by the dense owner's own
+/// triangle dispatch (assemble_dense_with_static without a static table).
+/// The A row's -1/2 jump is applied by the caller.
+fn cbie_entry(
+    k: f64,
+    surface: &SpherePanels,
+    triangles: &[[[f64; 3]; 3]],
+    i: usize,
+    j: usize,
+) -> (C64, C64) {
+    let x = surface.centroids()[i];
+    if i == j {
+        (triangle_self_terms(k, x, triangles[i]).0, C64::ZERO)
+    } else if triangle_is_near(x, surface.centroids()[j], triangles[j]) {
+        triangle_weak_influence(k, x, triangles[j], surface.normals()[j])
+    } else {
+        triangle_weak_influence_with_rule(k, x, triangles[j], surface.normals()[j], &GL4_X, &GL4_W)
+    }
+}
+
+impl CbieLayers {
+    /// Build the cloud, its far-field double layer, the exact near table and
+    /// the leaf-block preconditioner. Returns the stored complex entries.
+    #[allow(clippy::too_many_lines)] // one admission and assembly audit
+    fn prepare(
+        surface: &SpherePanels,
+        k: f64,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<(Self, Vec<NearBlock>, usize), IterativeError> {
+        let triangles = surface.triangles().ok_or(IterativeError::Invalid {
+            what: "iterative plain CBIE requires retained triangles",
+        })?;
+        if options.directional.is_some() {
+            return Err(IterativeError::Invalid {
+                what: "iterative plain CBIE is W5a only; directional rows are Burton-Miller",
+            });
+        }
+        let n = triangles.len();
+        let cloud_capacity =
+            options
+                .leaf_capacity
+                .checked_mul(RADON7.len())
+                .ok_or(IterativeError::Invalid {
+                    what: "leaf capacity overflow",
+                })?;
+        let mut points = vec![[0.0; 3]; n * RADON7.len()];
+        let mut normals = vec![[0.0; 3]; points.len()];
+        let mut weights = vec![0.0; points.len()];
+        let mut radius = 0.0_f64;
+        for (j, triangle) in triangles.iter().enumerate() {
+            let centroid = surface.centroids()[j];
+            for vertex in triangle {
+                let d = [
+                    vertex[0] - centroid[0],
+                    vertex[1] - centroid[1],
+                    vertex[2] - centroid[2],
+                ];
+                radius = radius.max((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+            }
+            for (m, &(barycentric, weight)) in RADON7.iter().enumerate() {
+                let index = if m == 0 { j } else { n + 6 * j + m - 1 };
+                points[index] = if m == 0 {
+                    centroid
+                } else {
+                    core::array::from_fn(|axis| {
+                        barycentric[0] * triangle[0][axis]
+                            + barycentric[1] * triangle[1][axis]
+                            + barycentric[2] * triangle[2][axis]
+                    })
+                };
+                normals[index] = surface.normals()[j];
+                weights[index] = weight * surface.areas()[j];
+            }
+        }
+        poll(gate)?;
+        let mut double = FmmC64::new_double_far_field_within(
+            HelmholtzDouble { k },
+            points.clone(),
+            normals.clone(),
+            options.fmm_order,
+            cloud_capacity,
+            options.budget(),
+        )?;
+        double.set_workers(options.workers)?;
+        if double.leaf_box_size() < CBIE_MIN_LEAF_RADII * radius {
+            return Err(IterativeError::Invalid {
+                what: "iterative plain CBIE leaves must span CBIE_MIN_LEAF_RADII panel radii; raise leaf_capacity",
+            });
+        }
+        let leaves: Vec<&[usize]> = double.near_field_blocks().collect();
+        let neighbours = double.near_field_neighbor_leaves();
+        let mut point_leaf = vec![0usize; points.len()];
+        for (l, leaf) in leaves.iter().enumerate() {
+            for &p in *leaf {
+                point_leaf[p] = l;
+            }
+        }
+        let panel_of = |p: usize| if p < n { p } else { (p - n) / 6 };
+        let leaf_panels: Vec<Vec<usize>> = neighbours
+            .iter()
+            .map(|around| {
+                let mut panels: Vec<usize> = around
+                    .iter()
+                    .flat_map(|&l| leaves[l].iter().map(|&p| panel_of(p)))
+                    .collect();
+                panels.sort_unstable();
+                panels.dedup();
+                panels
+            })
+            .collect();
+        let target_leaf: Vec<usize> = point_leaf[..n].to_vec();
+        let operators = [NearOperator::Single, NearOperator::Double];
+        let (row_start, table_values) =
+            NearTable::plan(n, operators.len(), |i| leaf_panels[target_leaf[i]].len())?;
+        let groups: Vec<Vec<usize>> = match options.precond {
+            Preconditioner::None => Vec::new(),
+            Preconditioner::NearFieldBlockJacobi { max_block_panels } => leaves
+                .iter()
+                .flat_map(|leaf| {
+                    let targets: Vec<usize> = leaf.iter().copied().filter(|&p| p < n).collect();
+                    targets
+                        .chunks(max_block_panels)
+                        .map(<[usize]>::to_vec)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|block| !block.is_empty())
+                .collect(),
+        };
+        let near_entries = groups
+            .iter()
+            .try_fold(table_values, |count, block| {
+                block
+                    .len()
+                    .checked_mul(block.len())
+                    .and_then(|entries| count.checked_add(entries))
+            })
+            .ok_or(IterativeError::Invalid {
+                what: "near-field extent overflow",
+            })?;
+        if near_entries > options.max_near_entries {
+            return Err(IterativeError::NearFieldBudget {
+                required_entries: near_entries,
+                maximum_entries: options.max_near_entries,
+            });
+        }
+        poll(gate)?;
+        let fill = |i: usize, cols: &mut [u32], values: &mut [C64]| {
+            let leaf = target_leaf[i];
+            let around = &neighbours[leaf];
+            let (x, nx) = (surface.centroids()[i], surface.normals()[i]);
+            for (slot, &j) in leaf_panels[leaf].iter().enumerate() {
+                let (mut single, mut double) = cbie_entry(k, surface, triangles, i, j);
+                // Remove the nodes the far pass already sums; the stored
+                // entry plus that pass is the dense entry to FMM accuracy.
+                for m in 0..RADON7.len() {
+                    let p = if m == 0 { j } else { n + 6 * j + m - 1 };
+                    if around.binary_search(&point_leaf[p]).is_err() {
+                        let (g, dgdny, _, _) = kernels(k, x, nx, points[p], normals[p]);
+                        single = single - g.scale(weights[p]);
+                        double = double - dgdny.scale(weights[p]);
+                    }
+                }
+                cols[slot] = j as u32;
+                values[2 * slot] = single;
+                values[2 * slot + 1] = double;
+            }
+        };
+        let table = NearTable::build(&operators, row_start, options.workers, gate, &fill)?;
+        poll(gate)?;
+        let mut blocks = Vec::with_capacity(groups.len());
+        for indices in groups {
+            poll(gate)?;
+            let m = indices.len();
+            let mut matrix = vec![C64::ZERO; m * m];
+            for (a, &i) in indices.iter().enumerate() {
+                for (b, &j) in indices.iter().enumerate() {
+                    // j's centroid shares i's leaf, so every node of j is in
+                    // a direct-interaction leaf and this is the dense entry.
+                    let d =
+                        table
+                            .get(i, j, NearOperator::Double)
+                            .ok_or(IterativeError::Invalid {
+                                what: "near table lacks a same-leaf panel",
+                            })?;
+                    matrix[a * m + b] = d - if a == b { C64::from_re(0.5) } else { C64::ZERO };
+                }
+            }
+            let inverse =
+                lu_complex(&matrix, m).map_err(|_| IterativeError::SingularNearBlock {
+                    block: blocks.len(),
+                })?;
+            blocks.push(NearBlock { indices, inverse });
+        }
+        if options.m2l_cache_bytes > 0 {
+            poll(gate)?;
+            match double.cache_m2l_rows(options.m2l_cache_bytes) {
+                Ok(_) | Err(FmmError::WorkEnvelopeExceeded { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok((
+            Self {
+                points,
+                weights,
+                cloud_capacity,
+                double,
+                table,
+            },
+            blocks,
+            near_entries,
+        ))
+    }
+
+    /// Panel densities spread to their cloud nodes, with node weights.
+    fn charges(&self, density: &[C64]) -> Vec<C64> {
+        let n = density.len();
+        (0..self.points.len())
+            .map(|p| density[if p < n { p } else { (p - n) / 6 }].scale(self.weights[p]))
+            .collect()
+    }
+
+    /// The dense owner's S q: the near rows plus a far-field single layer on
+    /// the same cloud and leaf capacity, hence the same tree and partition.
+    fn single_layer(
+        &self,
+        k: f64,
+        options: &IterativeOptions,
+        q: &[C64],
+        gate: &CancelGate,
+    ) -> Result<Vec<C64>, IterativeError> {
+        let kernel = HelmholtzSingle { k };
+        let mut single = FmmC64::new_far_field_within(
+            &kernel,
+            self.points.clone(),
+            options.fmm_order,
+            self.cloud_capacity,
+            options.budget(),
+        )?;
+        single.set_workers(options.workers)?;
+        let far = single.far_potentials(&self.charges(q))?;
+        poll(gate)?;
+        let mut out = self
+            .table
+            .apply(&[(NearOperator::Single, C64::ONE)], q, options.workers);
+        for (value, &f) in out.iter_mut().zip(&far) {
+            *value = *value + f;
+        }
+        Ok(out)
     }
 }
 
@@ -952,4 +1673,285 @@ pub fn solve_radiation_iterative(
     let mut state = operator.start(velocity, gate)?;
     operator.advance(&mut state, options.max_iters.saturating_add(1), gate)?;
     operator.finish(&state)
+}
+
+#[cfg(test)]
+mod cbie_tests {
+    use super::*;
+
+    /// G1: every dense plain-CBIE entry is a stored near entry plus the exact
+    /// point sum of its far nodes, or, for a fully separated panel, its
+    /// seven-point sum within the CBIE_MIN_LEAF_RADII error table.
+    #[test]
+    fn cbie_near_table_and_far_nodes_rebuild_the_dense_owner_entries() {
+        let surface = SpherePanels::icosphere(1.0, 3).unwrap();
+        let triangles = surface.triangles().unwrap();
+        let n = triangles.len();
+        let k = 1.3;
+        let options = IterativeOptions {
+            leaf_capacity: 32,
+            workers: 3,
+            ..IterativeOptions::default()
+        };
+        let gate = CancelGate::new_clock_free();
+        let (cbie, blocks, entries) = CbieLayers::prepare(&surface, k, &options, &gate).unwrap();
+        assert!(entries > cbie.table.values.len() && !blocks.is_empty());
+        let (amat, bmat) = super::super::assemble_dense(&surface, k, C64::ZERO);
+        let neighbours = cbie.double.near_field_neighbor_leaves();
+        let mut point_leaf = vec![0; cbie.points.len()];
+        for (l, leaf) in cbie.double.near_field_blocks().enumerate() {
+            for &p in leaf {
+                point_leaf[p] = l;
+            }
+        }
+        let (mut exact, mut corrected, mut separated) = (0, 0, 0);
+        let mut worst = [0.0_f64; 3];
+        for i in 0..n {
+            let leaf = point_leaf[i];
+            let (x, nx) = (surface.centroids()[i], surface.normals()[i]);
+            for j in 0..n {
+                let (mut single, mut double) = (C64::ZERO, C64::ZERO);
+                let mut far_nodes = 0;
+                for m in 0..RADON7.len() {
+                    let p = if m == 0 { j } else { n + 6 * j + m - 1 };
+                    if neighbours[leaf].binary_search(&point_leaf[p]).is_err() {
+                        let (g, dgdny, _, _) =
+                            kernels(k, x, nx, cbie.points[p], surface.normals()[j]);
+                        single = single + g.scale(cbie.weights[p]);
+                        double = double + dgdny.scale(cbie.weights[p]);
+                        far_nodes += 1;
+                    }
+                }
+                let dense_d = amat[i * n + j] + if i == j { C64::from_re(0.5) } else { C64::ZERO };
+                let dense_s = bmat[i * n + j];
+                let stored = (
+                    cbie.table.get(i, j, NearOperator::Single),
+                    cbie.table.get(i, j, NearOperator::Double),
+                );
+                assert_eq!(stored.0.is_some(), stored.1.is_some());
+                if let (Some(s), Some(d)) = stored {
+                    if far_nodes == 0 {
+                        exact += 1;
+                        assert_eq!(
+                            (s.re.to_bits(), s.im.to_bits()),
+                            (dense_s.re.to_bits(), dense_s.im.to_bits())
+                        );
+                        assert_eq!(
+                            (d.re.to_bits(), d.im.to_bits()),
+                            (dense_d.re.to_bits(), dense_d.im.to_bits())
+                        );
+                    } else {
+                        corrected += 1;
+                        worst[0] = worst[0].max((s + single - dense_s).abs() / dense_s.abs());
+                        worst[0] = worst[0].max((d + double - dense_d).abs() / dense_s.abs());
+                    }
+                } else {
+                    assert_eq!(far_nodes, RADON7.len());
+                    separated += 1;
+                    let radius = triangles[j]
+                        .iter()
+                        .map(|v| {
+                            let c = surface.centroids()[j];
+                            ((v[0] - c[0]).powi(2) + (v[1] - c[1]).powi(2) + (v[2] - c[2]).powi(2))
+                                .sqrt()
+                        })
+                        .fold(0.0, f64::max);
+                    worst[1] = worst[1].max((single - dense_s).abs() / dense_s.abs());
+                    worst[2] = worst[2].max((double - dense_d).abs() * radius / dense_s.abs());
+                }
+            }
+        }
+        println!(
+            "{{\"case\":\"cbie-near-far-split\",\"panels\":{n},\"exact\":{exact},\"corrected\":{corrected},\"separated\":{separated},\"corrected_rel\":{},\"separated_single_rel\":{},\"separated_double_rel\":{}}}",
+            worst[0], worst[1], worst[2]
+        );
+        assert!(exact > 0 && corrected > 0 && separated > 0);
+        assert!(worst[0] <= 1e-12, "{worst:?}");
+        assert!(worst[1] <= 2e-6 && worst[2] <= 2e-6, "{worst:?}");
+    }
+
+    /// G0: leaves narrower than CBIE_MIN_LEAF_RADII panel radii, centroid-only
+    /// surfaces, the directional route and Robin boundaries refuse.
+    #[test]
+    fn cbie_route_refusals() {
+        let gate = CancelGate::new_clock_free();
+        let surface = SpherePanels::icosphere(1.0, 3).unwrap();
+        let deep = IterativeOptions {
+            leaf_capacity: 2,
+            ..IterativeOptions::default()
+        };
+        assert!(matches!(
+            CbieLayers::prepare(&surface, 1.0, &deep, &gate),
+            Err(IterativeError::Invalid { what }) if what.contains("CBIE_MIN_LEAF_RADII")
+        ));
+        let centroids_only = SpherePanels::new(
+            surface.centroids().to_vec(),
+            surface.normals().to_vec(),
+            surface.areas().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            CbieLayers::prepare(&centroids_only, 1.0, &IterativeOptions::default(), &gate),
+            Err(IterativeError::Invalid { what }) if what.contains("retained triangles")
+        ));
+        let directional = IterativeOptions {
+            directional: Some(fs_fmm::DirectionalOptions::for_tolerance(1e-3).unwrap()),
+            ..IterativeOptions::default()
+        };
+        assert!(matches!(
+            CbieLayers::prepare(&surface, 1.0, &directional, &gate),
+            Err(IterativeError::Invalid { what }) if what.contains("W5a only")
+        ));
+        let budget = IterativeOptions {
+            max_near_entries: 1,
+            ..IterativeOptions::default()
+        };
+        assert!(matches!(
+            CbieLayers::prepare(&surface, 1.0, &budget, &gate),
+            Err(IterativeError::NearFieldBudget {
+                maximum_entries: 1,
+                ..
+            })
+        ));
+        let beta = vec![C64::ZERO; surface.areas().len()];
+        assert!(matches!(
+            IterativeRadiation::prepare_bc(
+                &surface,
+                1.0,
+                Medium::air(),
+                Formulation::PlainCbie,
+                &IterativeOptions::default(),
+                super::super::bc::Admittance::Local {
+                    beta: &beta,
+                    declared_active: false,
+                },
+                &gate,
+            ),
+            Err(IterativeError::Invalid { what }) if what.contains("Robin")
+        ));
+    }
+
+    /// A planted correction rule: rows at columns i and i + 1 (mod n).
+    struct Planted(usize);
+    impl NearRows for Planted {
+        fn operators(&self) -> &[NearOperator] {
+            &[
+                NearOperator::Single,
+                NearOperator::Double,
+                NearOperator::Hypersingular,
+            ]
+        }
+        fn row_len(&self, _: usize) -> usize {
+            2
+        }
+        fn fill_row(&self, i: usize, cols: &mut [u32], values: &mut [C64]) {
+            let mut columns = [i, (i + 1) % self.0];
+            columns.sort_unstable();
+            for (p, &j) in columns.iter().enumerate() {
+                cols[p] = j as u32;
+                for o in 0..3 {
+                    values[3 * p + o] = C64::new(1e-3 * (o + 1) as f64, 1e-4 * (j % 7) as f64);
+                }
+            }
+        }
+        fn diagonal(&self, i: usize, alpha: C64) -> (C64, C64) {
+            (alpha.scale(1e-3 * (i % 3) as f64), C64::new(2e-3, -1e-3))
+        }
+        fn stamp(&self) -> u64 {
+            0x5EED
+        }
+    }
+
+    /// G1/G0: a [`NearRows`] rule enters the Burton-Miller operator exactly
+    /// as declared: A gains D + alpha N and dA_ii, B gains S and dB_ii.
+    /// `None` is prepare; plain CBIE and an over-budget rule refuse.
+    #[test]
+    fn burton_miller_near_rows_enter_as_declared() {
+        let surface = SpherePanels::icosphere(1.0, 2).unwrap();
+        let n = surface.areas().len();
+        let (k, medium) = (1.0, Medium::air());
+        let gate = CancelGate::new_clock_free();
+        let options = IterativeOptions {
+            workers: 3,
+            ..IterativeOptions::default()
+        };
+        let rule = Planted(n);
+        let bm = Formulation::BurtonMiller;
+        let prepare = |o: &IterativeOptions, near: Option<&dyn NearRows>| {
+            IterativeRadiation::prepare_with_near(&surface, k, medium, bm, o, near, &gate)
+        };
+        let plain = IterativeRadiation::prepare(&surface, k, medium, bm, &options, &gate).unwrap();
+        assert_eq!(prepare(&options, None).unwrap().stamp, plain.stamp);
+        let ruled = prepare(&options, Some(&rule)).unwrap();
+        assert_ne!(ruled.stamp, plain.stamp);
+        let x: Vec<C64> = (0..n)
+            .map(|i| C64::new(1.0 + 0.01 * i as f64, 0.5 - 0.003 * i as f64))
+            .collect();
+        let q: Vec<C64> = x
+            .iter()
+            .map(|&v| v * C64::new(0.0, k * medium.sound_speed * medium.density))
+            .collect();
+        let alpha = plain.alpha;
+        let pairs = [
+            (
+                plain.apply(&x, &gate).unwrap(),
+                ruled.apply(&x, &gate).unwrap(),
+            ),
+            (
+                plain.boundary_rhs(&x, &gate).unwrap(),
+                ruled.boundary_rhs(&x, &gate).unwrap(),
+            ),
+        ];
+        for (side, (base, with)) in pairs.iter().enumerate() {
+            let scale = base.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let mut worst = 0.0_f64;
+            for i in 0..n {
+                let (mut cols, mut values) = ([0u32; 2], [C64::ZERO; 6]);
+                rule.fill_row(i, &mut cols, &mut values);
+                let (da, db) = rule.diagonal(i, alpha);
+                let mut extra = if side == 0 { da * x[i] } else { db * q[i] };
+                for p in 0..2 {
+                    let j = cols[p] as usize;
+                    extra = extra
+                        + if side == 0 {
+                            (values[3 * p + 1] + alpha * values[3 * p + 2]) * x[j]
+                        } else {
+                            values[3 * p] * q[j]
+                        };
+                }
+                worst = worst.max((with[i] - base[i] - extra).abs() / scale);
+            }
+            assert!(worst <= 1e-14, "side {side}: {worst}");
+        }
+        // The corrected operator solves through its own preconditioner.
+        let mut state = ruled.start(&x, &gate).unwrap();
+        ruled.advance(&mut state, 100, &gate).unwrap();
+        assert!(ruled.finish(&state).is_ok());
+        // Its values join the near-entry budget; the cap is inclusive.
+        let exact = IterativeOptions {
+            max_near_entries: plain.near_entries + 6 * n,
+            ..options.clone()
+        };
+        assert!(prepare(&exact, Some(&rule)).is_ok());
+        let short = IterativeOptions {
+            max_near_entries: plain.near_entries + 6 * n - 1,
+            ..options.clone()
+        };
+        assert!(matches!(
+            prepare(&short, Some(&rule)),
+            Err(IterativeError::NearFieldBudget { .. })
+        ));
+        assert!(matches!(
+            IterativeRadiation::prepare_with_near(
+                &surface,
+                k,
+                medium,
+                Formulation::PlainCbie,
+                &options,
+                Some(&rule),
+                &gate
+            ),
+            Err(IterativeError::Invalid { what }) if what.contains("already stores")
+        ));
+    }
 }

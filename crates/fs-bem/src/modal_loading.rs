@@ -6,10 +6,13 @@
 //! discarded. A nonreciprocal or active sampled result refuses; this adapter
 //! does not repair collocation data or claim a positive-real time realization.
 use crate::helmholtz::rayleigh_modal::{self, AreaSample, PreparedSurface};
-use crate::helmholtz::{self, Formulation, HelmholtzError, Medium};
+use crate::helmholtz::{
+    self, Formulation, HelmholtzError, IterativeError, IterativeOptions, IterativeRadiation, Medium,
+};
 use crate::panel3d::SpherePanels;
 use crate::radiation_policy::GeometryPolicy;
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use std::ops::Range;
 
@@ -44,7 +47,8 @@ pub enum LoadingRoute {
     PlanarBaffledRayleigh,
 }
 
-/// Source or loading-admission refusal. No partial bake is returned.
+/// Source or loading-admission refusal. No partial bake is returned. A refused
+/// sampled matrix travels as a diagnostic only; it is never a bake row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModalLoadingError {
     /// Original numerical owner's refusal.
@@ -53,13 +57,22 @@ pub enum ModalLoadingError {
     Invalid(&'static str),
     /// Dense geometry must be handled by the named larger-solver work item.
     SolverRoute { panels: usize, route: &'static str },
+    /// The routed iterative owner refused a row or did not converge a field.
+    Iterative(String),
     /// Original data fail reciprocity, measured relative to the Frobenius norm.
-    NonReciprocal { omega: f64, relative_defect: f64 },
+    NonReciprocal {
+        omega: f64,
+        relative_defect: f64,
+        /// The refused row-major matrix, unchanged.
+        impedance: Vec<C64>,
+    },
     /// Symmetric resistance has a resolved negative eigenvalue.
     NonPassive {
         omega: f64,
         minimum_eigenvalue: f64,
         norm: f64,
+        /// The refused row-major matrix, unchanged.
+        impedance: Vec<C64>,
     },
 }
 impl From<HelmholtzError> for ModalLoadingError {
@@ -73,9 +86,11 @@ impl core::fmt::Display for ModalLoadingError {
             Self::Helmholtz(e) => core::fmt::Display::fmt(e, f),
             Self::Invalid(s) => write!(f, "modal radiation loading: {s}"),
             Self::SolverRoute { panels, route } => write!(f, "{panels} panels require {route}"),
+            Self::Iterative(e) => write!(f, "routed modal loading: {e}"),
             Self::NonReciprocal {
                 omega,
                 relative_defect,
+                ..
             } => write!(
                 f,
                 "nonreciprocal loading at {omega} rad/s: {relative_defect}"
@@ -84,6 +99,7 @@ impl core::fmt::Display for ModalLoadingError {
                 omega,
                 minimum_eigenvalue,
                 norm,
+                ..
             } => write!(
                 f,
                 "active loading at {omega} rad/s: min(Re Z)={minimum_eigenvalue}, norm={norm}"
@@ -103,12 +119,33 @@ pub fn admit_loading_work(
     route: LoadingRoute,
     maximum_matrix_entries: usize,
 ) -> Result<usize, ModalLoadingError> {
+    admit(
+        sites,
+        modes,
+        frequencies,
+        route,
+        maximum_matrix_entries,
+        false,
+    )
+}
+
+/// `routed` lifts only the dense cap, and only for closed bodies.
+fn admit(
+    sites: usize,
+    modes: usize,
+    frequencies: usize,
+    route: LoadingRoute,
+    maximum_matrix_entries: usize,
+    routed: bool,
+) -> Result<usize, ModalLoadingError> {
     if sites == 0 || modes == 0 || frequencies == 0 {
         return Err(ModalLoadingError::Invalid(
             "nonempty surface, basis and frequency grid required",
         ));
     }
-    if sites > helmholtz::MAX_DENSE_PANELS {
+    if sites > helmholtz::MAX_DENSE_PANELS
+        && !(routed && route != LoadingRoute::PlanarBaffledRayleigh)
+    {
         return Err(ModalLoadingError::SolverRoute {
             panels: sites,
             route: "M2.5-W5c",
@@ -258,6 +295,7 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
         return Err(ModalLoadingError::NonReciprocal {
             omega,
             relative_defect: defect / norm,
+            impedance: z,
         });
     }
     if norm == 0.0 {
@@ -304,6 +342,7 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
             omega,
             minimum_eigenvalue: minimum * norm,
             norm,
+            impedance: z,
         });
     }
     Ok(ModalLoadingRow {
@@ -326,6 +365,70 @@ pub fn modal_radiation_loading(
     medium: Medium,
     provenance: ContentHash,
     maximum_matrix_entries: usize,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ModalLoadingBake, ModalLoadingError> {
+    load(
+        traces,
+        route,
+        omegas,
+        medium,
+        provenance,
+        maximum_matrix_entries,
+        None,
+        cancelled,
+    )
+}
+
+/// [`modal_radiation_loading`] on the M2.5-W5 route past the dense cap.
+/// - At or below [`helmholtz::MAX_DENSE_PANELS`] it is the dense bake,
+///   bitwise, declaration identity included; `iterative` is unused.
+/// - Above it, a closed body's rows go to [`IterativeRadiation`] with
+///   `iterative`, each in its own formulation: plain CBIE on the dense
+///   owner's triangle quadrature, Burton-Miller on centroid kernels. Every
+///   field must converge to the declared GMRES tolerance, or the bake
+///   refuses. The declaration identity then binds the numerical options
+///   (not workers or caches, which change no bits).
+///
+/// Cancellation is also polled between fields; one GMRES solve is not
+/// interrupted by `cancelled`.
+pub fn modal_radiation_loading_routed(
+    traces: SurfaceModeTraces<'_>,
+    route: LoadingRoute,
+    omegas: &[f64],
+    medium: Medium,
+    provenance: ContentHash,
+    maximum_matrix_entries: usize,
+    iterative: Option<&IterativeOptions>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ModalLoadingBake, ModalLoadingError> {
+    load(
+        traces,
+        route,
+        omegas,
+        medium,
+        provenance,
+        maximum_matrix_entries,
+        iterative,
+        cancelled,
+    )
+}
+
+fn iterative_error(e: IterativeError) -> ModalLoadingError {
+    match e {
+        IterativeError::Helmholtz(e) => ModalLoadingError::Helmholtz(e),
+        other => ModalLoadingError::Iterative(other.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one admission audit
+fn load(
+    traces: SurfaceModeTraces<'_>,
+    route: LoadingRoute,
+    omegas: &[f64],
+    medium: Medium,
+    provenance: ContentHash,
+    maximum_matrix_entries: usize,
+    iterative: Option<&IterativeOptions>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ModalLoadingBake, ModalLoadingError> {
     poll(&mut cancelled)?;
@@ -347,7 +450,15 @@ pub fn modal_radiation_loading(
             samples.first().map_or(0, |s| s.mode_shape.len()),
         ),
     };
-    admit_loading_work(sites, modes, omegas.len(), route, maximum_matrix_entries)?;
+    admit(
+        sites,
+        modes,
+        omegas.len(),
+        route,
+        maximum_matrix_entries,
+        iterative.is_some(),
+    )?;
+    let iterative = iterative.filter(|_| sites > helmholtz::MAX_DENSE_PANELS);
     let mut hash = DomainHasher::new("fs-bem/complete-modal-loading/v1");
     hash.update(provenance.as_bytes());
     for v in [
@@ -382,22 +493,67 @@ pub fn modal_radiation_loading(
                 LoadingRoute::ClosedBodyGeometryPolicy => 4,
                 _ => 2,
             }]);
+            if let Some(o) = iterative {
+                hash.update(&[5]);
+                let precond = match o.precond {
+                    helmholtz::Preconditioner::None => 0,
+                    helmholtz::Preconditioner::NearFieldBlockJacobi { max_block_panels } => {
+                        max_block_panels as u64
+                    }
+                };
+                for v in [
+                    o.tol.to_bits(),
+                    o.restart as u64,
+                    o.max_iters as u64,
+                    o.fmm_order as u64,
+                    o.leaf_capacity as u64,
+                    precond,
+                    o.max_translation_work as u64,
+                    u64::from(o.directional.is_some()),
+                ] {
+                    hash.update(&v.to_le_bytes());
+                }
+                if let Some(d) = &o.directional {
+                    for v in [
+                        d.tolerance.to_bits(),
+                        d.order as u64,
+                        d.leaf_capacity as u64,
+                        d.low_freq_threshold.to_bits(),
+                        d.cone_resolution as u64,
+                        d.max_cones_per_level as u64,
+                        d.compression_tolerance.to_bits(),
+                        d.max_rank as u64,
+                    ] {
+                        hash.update(&v.to_le_bytes());
+                    }
+                }
+            }
             // Reuse the original exact closure/orientation admission. The
             // exterior probe is geometry only, never an acoustic observation.
             let triangles = surface.triangles().ok_or(ModalLoadingError::Invalid(
                 "closed-body loading requires retained triangles",
             ))?;
-            let mut low = [f64::INFINITY; 3];
-            let mut high = [f64::NEG_INFINITY; 3];
-            for p in triangles.iter().flatten() {
-                for i in 0..3 {
-                    low[i] = low[i].min(p[i]);
-                    high[i] = high[i].max(p[i]);
+            if sites > helmholtz::MAX_DENSE_PANELS {
+                // Routed past the dense cap, which near_field's receiver
+                // admission shares: the same closed outward-component owner.
+                helmholtz::bc::validate_closed(surface)?;
+            } else {
+                let mut low = [f64::INFINITY; 3];
+                let mut high = [f64::NEG_INFINITY; 3];
+                for p in triangles.iter().flatten() {
+                    for i in 0..3 {
+                        low[i] = low[i].min(p[i]);
+                        high[i] = high[i].max(p[i]);
+                    }
                 }
+                let length = (0..3).map(|i| high[i] - low[i]).fold(0.0_f64, f64::max);
+                let outside = [high[0] + 2.0 * length, high[1], high[2]];
+                crate::near_field::Geometry::new(
+                    surface,
+                    &[outside],
+                    64.0 * f64::EPSILON * length,
+                )?;
             }
-            let length = (0..3).map(|i| high[i] - low[i]).fold(0.0_f64, f64::max);
-            let outside = [high[0] + 2.0 * length, high[1], high[2]];
-            crate::near_field::Geometry::new(surface, &[outside], 64.0 * f64::EPSILON * length)?;
             for v in triangles
                 .iter()
                 .flatten()
@@ -447,29 +603,54 @@ pub fn modal_radiation_loading(
                 };
                 let mut z = reserved(modes * modes)?;
                 z.resize(modes * modes, C64::ZERO);
-                for range in source_batches(modes) {
-                    poll(&mut cancelled)?;
-                    let fields: Vec<Vec<C64>> = shapes[range.clone()]
-                        .iter()
-                        .map(|r| r.iter().map(|v| C64::from_re(*v)).collect())
-                        .collect();
-                    let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
-                    let solved = helmholtz::solve_radiation_batch(
+                let mut project = |column: usize, pressure: &[C64]| {
+                    for (row, shape) in shapes.iter().enumerate() {
+                        let mut force = C64::ZERO;
+                        for ((&phi, &p), &area) in shape.iter().zip(pressure).zip(surface.areas()) {
+                            force = force + p.scale(phi * area);
+                        }
+                        z[row * modes + column] = force;
+                    }
+                };
+                let k = omega / medium.sound_speed;
+                if let Some(options) = iterative {
+                    let gate = CancelGate::new_clock_free();
+                    let operator = IterativeRadiation::prepare(
                         surface,
-                        omega / medium.sound_speed,
+                        k,
                         medium,
-                        &refs,
                         formulation,
-                    )?;
-                    for (column, solution) in range.zip(solved) {
-                        for (row, shape) in shapes.iter().enumerate() {
-                            let mut force = C64::ZERO;
-                            for ((&phi, &p), &area) in
-                                shape.iter().zip(&solution.pressure).zip(surface.areas())
-                            {
-                                force = force + p.scale(phi * area);
-                            }
-                            z[row * modes + column] = force;
+                        options,
+                        &gate,
+                    )
+                    .map_err(iterative_error)?;
+                    for (column, shape) in shapes.iter().enumerate() {
+                        poll(&mut cancelled)?;
+                        let field: Vec<C64> = shape.iter().map(|&v| C64::from_re(v)).collect();
+                        let mut state = operator.start(&field, &gate).map_err(iterative_error)?;
+                        operator
+                            .advance(&mut state, options.max_iters.saturating_add(1), &gate)
+                            .map_err(iterative_error)?;
+                        let (solution, _, _) = operator.finish(&state).map_err(iterative_error)?;
+                        project(column, &solution.pressure);
+                    }
+                } else {
+                    for range in source_batches(modes) {
+                        poll(&mut cancelled)?;
+                        let fields: Vec<Vec<C64>> = shapes[range.clone()]
+                            .iter()
+                            .map(|r| r.iter().map(|v| C64::from_re(*v)).collect())
+                            .collect();
+                        let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
+                        let solved = helmholtz::solve_radiation_batch(
+                            surface,
+                            k,
+                            medium,
+                            &refs,
+                            formulation,
+                        )?;
+                        for (column, solution) in range.zip(solved) {
+                            project(column, &solution.pressure);
                         }
                     }
                 }

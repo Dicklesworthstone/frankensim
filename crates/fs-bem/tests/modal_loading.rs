@@ -1,7 +1,7 @@
 //! M2.5-W4a: complete modal loading. Strict sphere tolerances are qualification
 //! gates, not a claim that the existing collocation owner already meets them.
 use fs_bem::helmholtz::rayleigh_modal::{self, AreaSample, PreparedSurface};
-use fs_bem::helmholtz::{self, Formulation, Medium};
+use fs_bem::helmholtz::{self, Formulation, IterativeOptions, Medium};
 use fs_bem::modal_loading::*;
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::hash_domain;
@@ -465,17 +465,55 @@ fn resolved_sphere(latitude: usize) -> SpherePanels {
     SpherePanels::from_triangles(triangles).unwrap()
 }
 
+/// The M2.5-W5 options a routed sphere row declares. Workers and the M2L row
+/// cache are scheduling budgets only: every solve is bit-identical at any
+/// count. Leaf capacity 32 keeps plain CBIE's leaves at 5.3 to 7.6 panel
+/// radii on the 16128-81224 rungs, above CBIE_MIN_LEAF_RADII. Root kD
+/// exceeds W5a's 10 only at ka = 10, which takes the directional route.
+fn routed_options(ka: f64) -> IterativeOptions {
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    let directional = (ka > 5.0).then(|| {
+        let mut d = fs_fmm::DirectionalOptions::for_tolerance(1e-3).unwrap();
+        d.order = 7;
+        d.low_freq_threshold = 0.5;
+        d.leaf_capacity = 128;
+        d.max_coefficient_slots = 1 << 28;
+        d
+    });
+    IterativeOptions {
+        tol: 1e-9,
+        fmm_order: 6,
+        max_iters: 900,
+        leaf_capacity: 32,
+        directional,
+        max_near_entries: 1 << 29,
+        near_field_cache_bytes: 1 << 31,
+        max_translation_work: 40_000_000_000,
+        workers,
+        m2l_cache_bytes: 1 << 33,
+        ..IterativeOptions::default()
+    }
+}
+
 /// G2, sphere radius 1 m. Derivation: p_l=A*h_l^(1)(kr)*P_l and
 /// v_l=k*p_l'/(i*w*rho) give z_l=i*rho*c*h_l/h_l'. For l=0 this
 /// reduces to (-i*x)/(1-i*x). For translation, integral cos²(theta)dS=S/3;
 /// h_1=-exp(ix)*(x+i)/x² gives S*rho*c/3 * [x^4-i*(2*x+x³)]/(4+x^4).
 /// Verified source: Sutherland WR68-12, NASA 19690015869, Appendix B,
 /// equations B-9 (printed p43), B-18 (p45), and Fig.8 (p26).
+///
+/// On the M2.5-W5 route. The dense rungs alone (latitudes 24/32/40, up to
+/// 6240 panels) end at the flat-panel floor: finest errors 2.11e-3, 2.03e-3,
+/// 1.85e-3 and 2.63e-3 at ka 0.05, pi, 5 and 10 (ts1, 8476279df). The ladder
+/// now runs latitudes 40, 64, 100 and 143 (6240 dense, then 16128, 39600 and
+/// 81224 iterative). Each row keeps its geometry-policy formulation on every
+/// rung: plain CBIE below 0.8 of the Dirichlet bound, Burton-Miller above.
 #[test]
 fn sphere_modal_loading_closed_forms() {
     let started = Instant::now();
     let medium = air();
     let area = 4.0 * PI;
+    let latitudes = [40, 64, 100, 143];
     // Every ka is measured before the gate, so one run reports the band.
     let mut unmet = Vec::new();
     for ka in [0.05_f64, 0.5, 1.0, PI, 5.0, 10.0] {
@@ -486,60 +524,95 @@ fn sphere_modal_loading_closed_forms() {
             C64::new(x4, -ka * (2.0 + x2))
                 .scale(area * medium.density * medium.sound_speed / (3.0 * (4.0 + x4))),
         ];
+        let options = routed_options(ka);
         let mut finest = None;
         let mut admitted = 0;
-        for (rung, latitude) in [24, 32, 40].into_iter().enumerate() {
+        let mut ladder: Vec<(usize, [f64; 2])> = Vec::new();
+        for (rung, latitude) in latitudes.into_iter().enumerate() {
             let surface = resolved_sphere(latitude);
+            let panels = surface.areas().len();
             let shapes = vec![
-                vec![1.0; surface.areas().len()],
+                vec![1.0; panels],
                 surface.normals().iter().map(|n| n[2]).collect(),
             ];
-            let result = modal_radiation_loading(
-                SurfaceModeTraces::ClosedBody {
-                    surface: &surface,
-                    shapes: &shapes,
-                },
-                LoadingRoute::ClosedBodyGeometryPolicy,
-                &[ka * medium.sound_speed],
-                medium,
-                source(),
-                4,
-                || false,
-            );
-            match result {
-                Ok(bake) => {
-                    admitted += 1;
-                    let row = &bake.rows()[0];
-                    let z = row.impedance();
-                    let mut worst = 0.0_f64;
-                    for mode in 0..2 {
-                        let error = (z[mode * 2 + mode] - oracle[mode]).abs() / oracle[mode].abs();
-                        worst = worst.max(error);
-                        println!(
-                            "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m; NASA WR68-12 B-9/B-18\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{},\"mode\":{mode},\"observed\":[{},{}],\"oracle\":[{},{}],\"err\":{error},\"min_eig_re\":{},\"tol\":1e-3,\"verdict\":\"{}\",\"elapsed_s\":{}}}",
-                            surface.areas().len(),
-                            z[mode * 2 + mode].re,
-                            z[mode * 2 + mode].im,
-                            oracle[mode].re,
-                            oracle[mode].im,
-                            row.minimum_resistance_eigenvalue(),
-                            if error <= 1e-3 { "pass" } else { "fail" },
-                            started.elapsed().as_secs_f64()
-                        );
-                    }
-                    if rung == 2 {
-                        finest = Some(worst);
-                    }
-                }
-                Err(error) => println!(
-                    "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{},\"err\":\"{}\",\"tol\":1e-3,\"verdict\":\"refused\",\"elapsed_s\":{}}}",
-                    surface.areas().len(),
-                    error,
-                    started.elapsed().as_secs_f64()
+            let solve_started = Instant::now();
+            let result = helmholtz::with_dense_workers(options.workers, || {
+                modal_radiation_loading_routed(
+                    SurfaceModeTraces::ClosedBody {
+                        surface: &surface,
+                        shapes: &shapes,
+                    },
+                    LoadingRoute::ClosedBodyGeometryPolicy,
+                    &[ka * medium.sound_speed],
+                    medium,
+                    source(),
+                    4,
+                    Some(&options),
+                    || false,
+                )
+            });
+            let route = if panels > helmholtz::MAX_DENSE_PANELS {
+                "iterative"
+            } else {
+                "dense"
+            };
+            // A refused row's matrix is measured and logged, never admitted.
+            let (z, min_eig, refusal) = match &result {
+                Ok(bake) => (
+                    bake.rows()[0].impedance().to_vec(),
+                    bake.rows()[0].minimum_resistance_eigenvalue(),
+                    None,
                 ),
+                Err(
+                    ModalLoadingError::NonReciprocal { impedance, .. }
+                    | ModalLoadingError::NonPassive { impedance, .. },
+                ) => (
+                    impedance.clone(),
+                    f64::NAN,
+                    result.as_ref().err().map(ToString::to_string),
+                ),
+                Err(error) => {
+                    println!(
+                        "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{panels},\"route\":\"{route}\",\"err\":\"{}\",\"tol\":1e-3,\"verdict\":\"refused\",\"elapsed_s\":{}}}",
+                        error,
+                        started.elapsed().as_secs_f64()
+                    );
+                    continue;
+                }
+            };
+            if refusal.is_none() {
+                admitted += 1;
+            }
+            let mut errors = [0.0_f64; 2];
+            for mode in 0..2 {
+                let error = (z[mode * 2 + mode] - oracle[mode]).abs() / oracle[mode].abs();
+                errors[mode] = error;
+                // Panel size scales as panels^-1/2.
+                let order = ladder.last().map_or(f64::NAN, |&(n, e)| {
+                    (e[mode] / error).ln() / (panels as f64 / n as f64).sqrt().ln()
+                });
+                let verdict = match (&refusal, error <= 1e-3) {
+                    (Some(_), _) => "refused",
+                    (None, true) => "pass",
+                    (None, false) => "fail",
+                };
+                println!(
+                    "{{\"suite\":\"fs-bem\",\"case\":\"modal-loading-sphere\",\"inputs\":\"analytic sphere a=1m; NASA WR68-12 B-9/B-18\",\"axis\":\"panels\",\"rung\":{rung},\"ka\":{ka},\"panels\":{panels},\"route\":\"{route}\",\"mode\":{mode},\"observed\":[{},{}],\"oracle\":[{},{}],\"err\":{error},\"order\":{order},\"min_eig_re\":{min_eig},\"tol\":1e-3,\"verdict\":\"{verdict}\",\"refusal\":\"{}\",\"solve_s\":{},\"elapsed_s\":{}}}",
+                    z[mode * 2 + mode].re,
+                    z[mode * 2 + mode].im,
+                    oracle[mode].re,
+                    oracle[mode].im,
+                    refusal.as_deref().unwrap_or(""),
+                    solve_started.elapsed().as_secs_f64(),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            ladder.push((panels, errors));
+            if rung == latitudes.len() - 1 && refusal.is_none() {
+                finest = Some(errors[0].max(errors[1]));
             }
         }
-        if !(admitted == 3 && finest.is_some_and(|e| e <= 1e-3)) {
+        if !(admitted == latitudes.len() && finest.is_some_and(|e| e <= 1e-3)) {
             unmet.push((ka, finest));
         }
     }
@@ -547,6 +620,120 @@ fn sphere_modal_loading_closed_forms() {
         unmet.is_empty(),
         "strict sphere qualification unmet at (ka, finest): {unmet:?}; refine the numerical owner, never relax 1e-3"
     );
+}
+
+/// G5/G0: a routed bake at or below the dense cap is the dense bake, bitwise,
+/// declaration identity included, in both policy formulations. Above the cap
+/// the unrouted owner names M2.5-W5c, while the routed one solves.
+/// - A one-mode (pulsating) bake is reciprocal by construction: it is
+///   admitted, worker-bitwise, and binds its numerical options (not its
+///   workers) into the declaration.
+/// - The two-mode bake keeps the unchanged 1e-12 reciprocity gate. The FMM
+///   and GMRES errors are not reciprocal, so it refuses NonReciprocal, at a
+///   defect of their size, carrying the refused matrix. Its pulsating entry is
+///   the one-mode bake's, bitwise.
+#[test]
+fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
+    let medium = air();
+    let below = SpherePanels::icosphere(1.0, 2).unwrap();
+    let shapes_of = |surface: &SpherePanels| {
+        vec![
+            vec![1.0; surface.areas().len()],
+            surface.normals().iter().map(|n| n[2]).collect::<Vec<f64>>(),
+        ]
+    };
+    let bake_modes =
+        |surface: &SpherePanels, modes: usize, ka: f64, options: Option<&IterativeOptions>| {
+            let mut shapes = shapes_of(surface);
+            shapes.truncate(modes);
+            modal_radiation_loading_routed(
+                SurfaceModeTraces::ClosedBody {
+                    surface,
+                    shapes: &shapes,
+                },
+                LoadingRoute::ClosedBodyGeometryPolicy,
+                &[ka * medium.sound_speed],
+                medium,
+                source(),
+                4,
+                options,
+                || false,
+            )
+        };
+    let bake = |surface: &SpherePanels, ka: f64, options: Option<&IterativeOptions>| {
+        bake_modes(surface, 2, ka, options)
+    };
+    let bits = |b: &ModalLoadingBake| -> Vec<(u64, u64)> {
+        b.rows()[0]
+            .impedance()
+            .iter()
+            .map(|z| (z.re.to_bits(), z.im.to_bits()))
+            .collect()
+    };
+    let options = routed_options(0.05);
+    // ka 0.05 is plain CBIE and ka 3 Burton-Miller under the policy.
+    for ka in [0.05, 3.0] {
+        let dense = bake(&below, ka, None).unwrap();
+        let routed = bake(&below, ka, Some(&options)).unwrap();
+        assert_eq!(bits(&routed), bits(&dense));
+        assert_eq!(routed.declaration_hash(), dense.declaration_hash());
+    }
+    let above = SpherePanels::icosphere(1.0, 5).unwrap();
+    assert!(above.areas().len() > helmholtz::MAX_DENSE_PANELS);
+    assert!(matches!(
+        bake(&above, 0.05, None),
+        Err(ModalLoadingError::SolverRoute {
+            route: "M2.5-W5c",
+            ..
+        })
+    ));
+    // Past the cap the closed outward-surface admission is still live.
+    let mut open = above.triangles().unwrap().to_vec();
+    open.pop();
+    let open = SpherePanels::from_triangles(open).unwrap();
+    assert!(matches!(
+        bake(&open, 0.05, Some(&options)),
+        Err(ModalLoadingError::Helmholtz(_))
+    ));
+    let routed = bake_modes(&above, 1, 0.05, Some(&options)).unwrap();
+    let serial = IterativeOptions {
+        workers: 3,
+        m2l_cache_bytes: 0,
+        ..options.clone()
+    };
+    let repeat = bake_modes(&above, 1, 0.05, Some(&serial)).unwrap();
+    assert_eq!(bits(&repeat), bits(&routed));
+    assert_eq!(repeat.declaration_hash(), routed.declaration_hash());
+    let looser = IterativeOptions {
+        tol: 1e-7,
+        ..options.clone()
+    };
+    assert_ne!(
+        bake_modes(&above, 1, 0.05, Some(&looser))
+            .unwrap()
+            .declaration_hash(),
+        routed.declaration_hash()
+    );
+    match bake(&above, 0.05, Some(&options)) {
+        Err(ModalLoadingError::NonReciprocal {
+            relative_defect,
+            impedance,
+            ..
+        }) => {
+            println!(
+                "{{\"suite\":\"fs-bem\",\"case\":\"routed-modal-loading-reciprocity\",\"inputs\":\"analytic icosphere-5, ka 0.05, plain CBIE\",\"panels\":{},\"observed\":{relative_defect},\"tol\":1e-12,\"verdict\":\"refused\"}}",
+                above.areas().len()
+            );
+            assert!(relative_defect > 1e-12 && relative_defect < 1e-6);
+            let z00 = impedance[0];
+            let single = routed.rows()[0].impedance()[0];
+            assert_eq!(
+                (z00.re.to_bits(), z00.im.to_bits()),
+                (single.re.to_bits(), single.im.to_bits())
+            );
+        }
+        other => panic!("expected the unchanged reciprocity refusal: {other:?}"),
+    }
 }
 
 /// G1: the low-ka translation (dipole) mode, which motivated the

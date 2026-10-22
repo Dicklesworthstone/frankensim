@@ -247,6 +247,27 @@ kernel rows once, on the declared workers, and both passes reuse them.
 - On every refusal the engine stays uncached.
 - `stats()` reports `m2l_cache_bytes`.
 
+`FmmC64::far_potentials` runs the same upward, M2L and downward passes as
+`potentials`, with their order and bits, and omits the adjacent-leaf direct
+sum. `near_field_neighbor_leaves` names, for each leaf of `near_field_blocks`
+and in that order, the ascending leaves its points pair with in that sum,
+itself included; `leaf_box_size` is their side. These are exactly the omitted
+pairs, so a consumer can supply its own near field, such as panel quadrature,
+consistently with the far pass.
+- `new_far_field_within` (scalar) and `new_double_far_field_within` build an
+  engine whose consumer supplies that near field. The direct sum is never run,
+  so its pair work is not charged against `MAX_NEAR_FIELD_PAIR_WORK`; every
+  other admission is unchanged. Such an engine's `potentials` and
+  `cache_near_field` refuse with `ComplexRequest`.
+- The directional route refuses `far_potentials` and names no leaves: it owns a
+  different pair partition.
+- `far_field_route_omits_exactly_the_named_near_pairs_g0` checks, for the
+  scalar and double layers on a four-level tree: far-field engine bits equal
+  the full engine's far pass; far plus the named pairs equals `potentials`
+  within 1e-13; the named pairs count equals the near-field cache; workers
+  1, 2, 5 and 300 are bitwise. `far_field_route_is_not_charged_the_direct_sum_it_never_runs_g0`
+  builds a 20000-point cloud whose direct sum the full constructor refuses.
+
 `tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
 It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/
 mixed checks, `1e-12` translation, high-kD refusal (including an unguarded
