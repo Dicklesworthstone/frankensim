@@ -1,5 +1,7 @@
 //! Learned rare-event proposals evaluated by the original cooling product.
 //! Pilots select a proposal; only independent, fixed production estimates risk.
+mod recovery;
+
 use super::*;
 use fs_uq::{
     ImportanceConfig, ImportanceFitConfig, PilotImportanceConfig,
@@ -71,7 +73,12 @@ impl Settings {
     }
 }
 
-pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<ExecutionOutput> {
+pub(super) fn execute(
+    base_text: &str, base: &J, config: &Config, options: &Options, settings: Settings,
+) -> Result<ExecutionOutput> {
+    if options.checkpoint.is_some() || options.resume.is_some() {
+        return recovery::execute(base_text, base, config, options, settings);
+    }
     // Setup, every pilot, production, fitting and publication share ONE allowance.
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
     let plan = config.plan();
@@ -89,7 +96,7 @@ pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<E
     }
     if report.status != UqStatus::Complete || Instant::now() >= deadline {
         return Err(budget(format!(
-            "importance study stopped after {} of {} physical evaluations and {} completed pilots; no partial or pilot-pooled probability published; this mode has no durable checkpoint",
+            "importance study stopped after {} of {} physical evaluations and {} completed pilots; no partial or pilot-pooled probability published; use --checkpoint to retain completed physics and learned proposals",
             report.model_calls_evaluated, report.model_calls_planned, report.completed_pilots.len(),
         )));
     }
@@ -168,14 +175,13 @@ mod tests {
     }
 
     #[test]
-    fn pilot_mode_cannot_silently_override_another_method_or_recovery() {
+    fn pilot_mode_cannot_silently_override_another_method() {
         assert!(Options::parse(&args(&["--importance-pilot", VALID])).unwrap().importance.is_some());
         for other in [
             vec!["--importance-pilot", VALID], vec!["--importance", "0.2,0"], vec!["--pce", "0,2"],
             vec!["--pce-mean", "0,2,4"], vec!["--qmc-replicates", "2"],
             vec!["--sensitivity", "sobol"], vec!["--sensitivity", "shapley"],
-            vec!["--mean-control", "adjoint"], vec!["--checkpoint", "never.bin"],
-            vec!["--resume", "never.bin"], vec!["--max-new-samples", "0"],
+            vec!["--mean-control", "adjoint"], vec!["--max-new-samples", "0"],
             vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"],
         ] {
             let own = args(&["--importance-pilot", VALID]);

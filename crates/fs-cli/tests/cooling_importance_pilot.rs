@@ -1,6 +1,8 @@
 //! Exercise the actual cooling binary, its child solver and pilot/production split.
 #[path = "../src/json_read.rs"]
 mod json;
+#[path = "cooling_importance_pilot/recovery.rs"]
+mod recovery;
 use json::JsonValue as J;
 use fs_uq::{
     CorrelationModel, ImportanceConfig, ImportanceFitConfig, ParameterUncertainty,
@@ -157,7 +159,7 @@ fn incompatible_flags_refuse_before_input_reads_or_checkpoint_reservation() {
         assert!(result.stdout.is_empty());
     }
     let destination = dir.join("must-not-exist.bin");
-    let result = command(&missing, &missing, LAYOUT).arg("--checkpoint").arg(&destination).output().unwrap();
+    let result = command(&missing, &missing, LAYOUT).args(["--qmc-replicates", "2"]).arg("--checkpoint").arg(&destination).output().unwrap();
     assert_eq!(result.status.code(), Some(i32::from(fs_cli::exit::USAGE)));
     assert!(!destination.exists());
     let help = Command::new(env!("CARGO_BIN_EXE_frankensim"))

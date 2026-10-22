@@ -46,11 +46,6 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
     {
         return Err(bad("importance requires a fixed experiment without other sampling modes, mean controls or decision flags"));
     }
-    if matches!(options.importance.as_ref(), Some(Settings::Pilot(_)))
-        && (options.checkpoint.is_some() || options.resume.is_some() || options.max_new_samples.is_some())
-    {
-        return Err(bad("pilot importance has no durable combined checkpoint; recovery requires a fixed --importance proposal"));
-    }
     Ok(())
 }
 
@@ -59,7 +54,7 @@ pub(super) fn execute(
 ) -> Result<ExecutionOutput> {
     let proposal = match settings {
         Settings::Fixed(proposal) => proposal,
-        Settings::Pilot(settings) => return pilot::execute(base, config, *settings),
+        Settings::Pilot(settings) => return pilot::execute(base_text, base, config, options, *settings),
     };
     if options.checkpoint.is_some() || options.resume.is_some() {
         return recovery::execute(base_text, base, config, options, proposal);
@@ -151,14 +146,14 @@ mod tests {
     }
 
     #[test]
-    fn fixed_recovery_is_admitted_but_pilot_history_cannot_use_its_codec() {
+    fn fixed_and_pilot_recovery_select_their_own_codecs() {
         for extra in [vec!["--checkpoint", "new.bin", "--max-new-samples", "0"],
             vec!["--resume", "old.bin"], vec!["--resume", "old.bin", "--checkpoint", "new.bin"]]
         {
             let mut fixed = args(&["--importance", "0.2,3"]); fixed.extend(args(&extra));
             assert!(Options::parse(&fixed).is_ok());
             let mut pilot = args(&["--importance-pilot", "1,2,0.2,0.5,1,8"]); pilot.extend(args(&extra));
-            assert!(Options::parse(&pilot).is_err());
+            assert!(Options::parse(&pilot).is_ok());
         }
     }
 
