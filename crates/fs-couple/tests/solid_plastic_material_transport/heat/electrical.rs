@@ -14,7 +14,7 @@ use fs_solid::plastic3::{SmallStrainTetProblem, SmallStrainLawField};
 
 const CAPACITANCE: f64 = 0.01;
 const CHARGE: f64 = 0.01;
-const ELECTRICAL_AREA: f64 = L * L;
+const ELECTRICAL_AREA: f64 = VOLUME / L;
 const EMISSIVITY: f64 = 0.7;
 const THERMAL_CONTACT: f64 = 0.1;
 

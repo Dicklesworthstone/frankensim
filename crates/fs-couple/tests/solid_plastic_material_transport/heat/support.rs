@@ -1,4 +1,5 @@
 //! G0/G1/G3: solved support pressure and bulk heat transport retain their owners.
+mod electrical;
 use super::*;
 use fs_couple::solid_enthalpy::plastic::contact::{ContactError, ContactSolve, ThermalSupportContact};
 use fs_solver::NewtonKrylovConfig;

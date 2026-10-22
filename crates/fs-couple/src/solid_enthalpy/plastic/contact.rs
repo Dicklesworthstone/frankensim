@@ -87,7 +87,7 @@ impl<E> From<ThermoplasticError> for ContactError<E> {
         }
     }
 }
-impl<E: std::fmt::Debug> std::fmt::Display for ContactError<E> {
+impl<E: std::fmt::Debug> core::fmt::Display for ContactError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "thermoplastic contact: {self:?}")
     }
@@ -157,7 +157,7 @@ fn number<E>(value: f64) -> Result<f64, ContactError<E>> {
 }
 
 impl ThermalSupportContact<'_> {
-    fn sample<E>(
+    pub(super) fn sample<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
         stress: &[f64; 6],
@@ -337,6 +337,23 @@ impl<'m> ThermoplasticSolid<'m> {
             ));
         }
         self.enthalpies::<Infallible>(thermal, true, cx)?;
+        let routes = self.support_contact_routes::<E>(thermal, contacts, prescribed_m, cx)?;
+        self.solve_contacts_candidate(thermal, contacts, target_s, prescribed_m,
+            nodal_forces_n, settings, controls, guess_j, resolve, series_bulk, &routes, cx)
+    }
+
+    // Both powered and unpowered solids use these exact face/source checks.
+    // Returned normals and indices belong to the native reference mesh, never
+    // to a second caller-authored pressure map.
+    pub(super) fn support_contact_routes<E>(
+        &self, thermal: &DepositionSimulation<'_>, contacts: &[ThermalSupportContact<'_>],
+        prescribed_m: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, [f64; 3])>, ContactError<E>> {
+        let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
+        checkpoint()?;
+        if contacts.len() > 64 {
+            return Err(ContactError::Invalid("bounded support contact count required"));
+        }
         let mut links = BTreeSet::new();
         let mut faces = BTreeSet::new();
         let mut routes = Vec::with_capacity(contacts.len());
@@ -439,6 +456,18 @@ impl<'m> ThermoplasticSolid<'m> {
             )?;
             routes.push((element, face.outward_normal));
         }
+        Ok(routes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_contacts_candidate<'t, S, E>(
+        &self, thermal: &DepositionSimulation<'t>, contacts: &[ThermalSupportContact<'_>],
+        target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ContactSolve, guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        series_bulk: bool, routes: &[(usize, [f64; 3])], cx: &Cx<'_>,
+    ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
+        let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         let mechanical_config = ThermoplasticConfig {
             maximum_iterations: 1,
             temperature_tolerance_k: f64::EPSILON,
@@ -469,7 +498,7 @@ impl<'m> ThermoplasticSolid<'m> {
                     )?;
                     let mut coefficients = resolve(endpoint).map_err(ContactError::Source)?;
                     let mut samples = Vec::with_capacity(contacts.len());
-                    for (binding, &(element, normal)) in contacts.iter().zip(&routes) {
+                    for (binding, &(element, normal)) in contacts.iter().zip(routes) {
                         checkpoint()?;
                         let mut sample = binding.sample(
                             endpoint,

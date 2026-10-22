@@ -3,6 +3,7 @@
 //! Only physical plastic/Joule heat and admitted reversible exchange enter heat;
 //! hardening storage and backward-Euler loss retain their original accounts.
 use super::*;
+use super::contact::{ContactError, ContactSample, ThermalSupportContact};
 use std::cell::Cell;
 use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpyInput,
     CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients};
@@ -26,6 +27,7 @@ pub struct ElectricalSolidSolve {
 pub enum ElectricalSolidSourceError {
     Heat(HeatNetworkError),
     Mechanical(ThermoplasticError),
+    Support(ContactError<Infallible>),
     Thermal(DepositionError),
     Invalid(&'static str),
     MechanicalBudget,
@@ -44,6 +46,7 @@ impl std::error::Error for ElectricalSolidSourceError {}
 pub enum ElectricalSolidError {
     Binding(SolidHeatError<Infallible>),
     Mechanical(ThermoplasticError),
+    Support(ContactError<Infallible>),
     Heat(HeatNetworkError),
     Coupled(CircuitEnthalpyError<ElectricalSolidSourceError>),
     Invalid(&'static str),
@@ -61,6 +64,9 @@ pub struct ElectricalSolidReport {
     /// This subsystem report treats mechanical heat and radiative net roundoff
     /// as callback supply. The CLOSED account below removes those internal terms.
     pub circuit_thermal: CircuitEnthalpyReport<ContactThermalSample<HeatNetworkSample>>,
+    /// Solved-pressure thermal interfaces, including their original bulk
+    /// conductance and actual series heat. Not added again as source power.
+    pub support_contacts: Vec<ContactSample>,
     /// Original native J2 energy increments, in tetrahedron connectivity order.
     pub element_energy: Vec<EnergyIncrement>,
     pub mechanical_trials: usize,
@@ -103,6 +109,7 @@ impl<'m, 't> ElectricalSolidCandidate<'m, 't> {
 struct Trial {
     mechanical: MechanicalProposal,
     material: HeatNetworkSample,
+    support_contacts: Vec<ContactSample>,
     applied_heat_j: f64,
     external_heat_j: f64,
     radiation_net_j: f64,
@@ -141,6 +148,35 @@ impl<'m> ThermoplasticSolid<'m> {
         settings: IncrementSettings, controls: ElectricalSolidSolve,
         guess_j: &[f64], cx: &Cx<'_>,
     ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
+        self.advance_electrical_with_supports_candidate(thermal, circuit, prepared, &[],
+            ports, target_s, prescribed_m, nodal_forces_n, settings, controls, guess_j, cx)
+    }
+
+    /// Solve finite electrical heating AND load-dependent support heat transfer.
+    ///
+    /// Each support's pressure is -n.sigma.n from the SAME native mechanical
+    /// endpoint, not an independently supplied context value. Its pinned
+    /// interface resistance is placed in series with the prepared network's
+    /// fresh bulk conductivity. The existing circuit/enthalpy residual then
+    /// couples that flux back to resistivity, yield and deformation.
+    ///
+    /// A support link must not also have a fixed thermal-contact correction or
+    /// electrical contact in the prepared network. The latter would freeze an
+    /// interface state while its pressure changes; this method does not infer
+    /// a pressure-dependent electrical contact law. Other links may retain
+    /// their authored electrical/thermal interfaces and radiation.
+    ///
+    /// Fixed whole-face prescribed supports and compressive traction only.
+    /// Geometry, reference mass and electrical topology remain fixed. Empty
+    /// support bindings use the original powered calculation unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_electrical_with_supports_candidate<'t>(
+        &self, thermal: &DepositionSimulation<'t>, circuit: &MaterialCircuit,
+        prepared: &PreparedHeatNetwork<'_, '_>, support_contacts: &[ThermalSupportContact<'_>],
+        ports: &[f64], target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ElectricalSolidSolve,
+        guess_j: &[f64], cx: &Cx<'_>,
+    ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
         let dt = target_s - self.time_s;
@@ -153,6 +189,11 @@ impl<'m> ThermoplasticSolid<'m> {
         self.admit_heat_network::<Infallible>(thermal, prepared, cx)
             .map_err(ElectricalSolidError::Binding)?;
         self.enthalpies::<Infallible>(thermal, true, cx).map_err(ElectricalSolidError::Mechanical)?;
+        let support_routes = self.support_contact_routes::<Infallible>(
+            thermal, support_contacts, prescribed_m, cx).map_err(|e| match e {
+                ContactError::Cancelled => ElectricalSolidError::Cancelled,
+                other => ElectricalSolidError::Support(other),
+            })?;
         let destinations = prepared.resistor_destinations();
         let contacts = prepared.heat_destinations(thermal).map_err(ElectricalSolidError::Heat)?;
         let routes: BTreeMap<_, _> = destinations.iter().map(|d| (d.branch, d.cell)).collect();
@@ -160,6 +201,13 @@ impl<'m> ThermoplasticSolid<'m> {
         // these exact claims, and still re-evaluates their support and values at
         // every endpoint; do not repeat the structural source queries per stencil.
         let initial = prepared.resolve(cx, thermal).map_err(ElectricalSolidError::Heat)?;
+        for support in support_contacts {
+            if initial.bulk.source.thermal_contacts.iter().any(|c| c.link == support.link)
+                || contacts.iter().any(|c| c.id == support.link) {
+                return Err(ElectricalSolidError::Invalid(
+                    "a solved-pressure support cannot also have a fixed thermal or electrical interface"));
+            }
+        }
         self.admit_electrical_transport(thermal, &initial.bulk.source,
             &initial.bulk.resistors, &routes, cx).map_err(|error|
                 ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(error)))?;
@@ -186,6 +234,18 @@ impl<'m> ThermoplasticSolid<'m> {
                 let mechanical = self.mechanics::<Infallible>(&h, prescribed_m,
                     nodal_forces_n, settings, mechanics, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
+                let mut support_samples = Vec::with_capacity(support_contacts.len());
+                for (binding, &(element, normal)) in support_contacts.iter().zip(&support_routes) {
+                    checkpoint()?;
+                    let bulk = *coefficients.conductances_w_k.get(&binding.link)
+                        .ok_or(ElectricalSolidSourceError::Invalid("support lacks original bulk conductance"))?;
+                    let sample = binding.sample::<Infallible>(endpoint,
+                        &mechanical.solution.element_stress[element], normal, dt)
+                        .and_then(|s| s.with_bulk(bulk, dt))
+                        .map_err(ElectricalSolidSourceError::Support)?;
+                    coefficients.conductances_w_k.insert(binding.link, sample.conductance_w_k);
+                    support_samples.push(sample);
+                }
                 let radiation_net_j = number(dt * coefficients.source.radiation_net_power_w())?;
                 let external_heat_j = number(number(dt * endpoint.external_step_power_w(
                     &coefficients.sources_w, &coefficients.conductances_w_k, checkpoint)?)? - radiation_net_j)?;
@@ -209,7 +269,8 @@ impl<'m> ThermoplasticSolid<'m> {
                 Ok(ContactThermalCoefficients { contacts, bulk: CircuitThermalCoefficients {
                     resistors: coefficients.resistors, sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
-                    source: Trial { mechanical, material: coefficients.source, applied_heat_j,
+                    source: Trial { mechanical, material: coefficients.source,
+                        support_contacts: support_samples, applied_heat_j,
                         external_heat_j, radiation_net_j },
                 } })
             }, || cx.checkpoint().is_err());
@@ -239,6 +300,7 @@ impl<'m> ThermoplasticSolid<'m> {
         solid.solution = mechanical.solution;
         for cell in &mut solid.cells { cell.accepted = thermal.cells()[&cell.accepted.id].clone(); }
         let report = ElectricalSolidReport {
+            support_contacts: trial.support_contacts,
             circuit_thermal: CircuitEnthalpyReport {
                 electrical: r.electrical, thermal: r.thermal,
                 source: ContactThermalSample { material: trial.material, destinations: r.source.destinations },
