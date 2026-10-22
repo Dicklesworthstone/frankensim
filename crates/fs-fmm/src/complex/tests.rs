@@ -520,3 +520,34 @@ fn declared_workers_leave_potentials_bitwise_g0() {
     assert_eq!(broken.cache_m2l_rows(usize::MAX).unwrap_err(), serial);
     assert!(broken.m2l_rows.is_none());
 }
+
+#[test]
+fn avx2_dot_capsule_is_bitwise_the_portable_body() {
+    // On an x86-64 AVX2 host the dispatcher takes the capsule; this compares
+    // it with the portable codegen of the same body. Elsewhere it re-checks
+    // the portable body against itself.
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(
+        avx2::accelerated(),
+        std::arch::is_x86_feature_detected!("avx2")
+    );
+    let mut s = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = || {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (s >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    };
+    for len in [0, 1, 2, 3, 4, 5, 6, 7, 8, 31, 375, 1000] {
+        let a: Vec<C64> = (0..len)
+            .map(|_| C64::new(next(), next() * 1.0e-7))
+            .collect();
+        let b: Vec<C64> = (0..len).map(|_| C64::new(next() * 1.0e5, next())).collect();
+        let (x, y) = (dot(&a, &b), dot_body(&a, &b));
+        assert_eq!(
+            (x.re.to_bits(), x.im.to_bits()),
+            (y.re.to_bits(), y.im.to_bits()),
+            "len {len}"
+        );
+    }
+}

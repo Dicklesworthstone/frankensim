@@ -10,6 +10,9 @@ use crate::{
     MAX_INTERPOLATION_ORDER, MAX_TRANSLATION_WORK, MIN_INTERPOLATION_ORDER,
 };
 
+/// Registered capsule: the M2L dot body recompiled with AVX2 on x86-64 CPUs
+/// that have it.
+mod avx2;
 pub mod directional;
 mod kernels;
 pub use kernels::{
@@ -1193,12 +1196,20 @@ fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
 
+/// The M2L dot product, run with AVX2 codegen where the CPU has it
+/// ([`avx2`]); bit-identical to [`dot_body`] on every CPU.
+fn dot(a: &[C64], b: &[C64]) -> C64 {
+    avx2::dot(a, b)
+}
+
 /// Complex dot product in four fixed interleaved partial sums with unfused
 /// IEEE products. The order is fixed, so the result is bit-identical on every
 /// ISA. The fused `C64` product calls libm `fma` per term when the target
 /// lacks FMA, and that call dominated the M2L pass. The interpolation error
 /// dwarfs the rounding difference.
-fn dot(a: &[C64], b: &[C64]) -> C64 {
+#[inline(always)]
+#[allow(clippy::inline_always)] // must inline INTO the avx2 capsule's target_feature fn
+fn dot_body(a: &[C64], b: &[C64]) -> C64 {
     let (mut re, mut im) = ([0.0f64; 4], [0.0f64; 4]);
     let (a4, b4) = (a.chunks_exact(4), b.chunks_exact(4));
     let (ar, br) = (a4.remainder(), b4.remainder());

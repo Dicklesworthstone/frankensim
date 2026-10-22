@@ -195,6 +195,10 @@ translation-invariant; a custom scalar kernel qualifies only through
 - The application is a contiguous complex dot product: unfused IEEE products,
   summed in four fixed partial sums. It is bit-identical across ISAs and avoids
   one libm `fma` call per term on targets without FMA.
+- On x86-64 CPUs with AVX2, a registered capsule (`complex/avx2`) runs the same
+  body four lanes wide instead of two. AVX2 enables no FMA, and no multiply is
+  fused, so the bits are unchanged. `avx2_dot_capsule_is_bitwise_the_portable_body`
+  pins this.
 - Work admission still counts every multiply-add.
 - `stats()` reports `m2l_kernel_blocks` beside `m2l_pairs`.
 
