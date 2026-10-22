@@ -6,8 +6,8 @@
 //! layer, thermal equilibration or live replacement of an acoustic state.
 
 use super::{DuctError, DuctResponse, GasState, HoleState, LossModel, Region,
-    RegionalDuct, Segment, Termination, WallPin, input_impedance_load,
-    input_impedance_wall, invalid};
+    RegionalDuct, Segment, Termination, WallModel, input_impedance_load_with_wall,
+    input_impedance_with_wall, invalid};
 
 impl RegionalDuct {
     /// Bind the homogeneous exterior independently of the internal terminal gas.
@@ -60,12 +60,12 @@ impl RegionalDuct {
     }
 
     pub(super) fn terminal_response(&self, terminal: &Region, omega: f64,
-        loss: LossModel, termination: Termination, wall: Option<&WallPin>)
+        loss: LossModel, termination: Termination, wall: WallModel<'_>)
         -> Result<DuctResponse, DuctError> {
         let exterior = self.exterior_gas();
         if *exterior == terminal.gas
             || matches!(termination, Termination::Closed | Termination::IdealOpen) {
-            return input_impedance_wall(&terminal.duct, &terminal.gas,
+            return input_impedance_with_wall(&terminal.duct, &terminal.gas,
                 omega, loss, termination, wall);
         }
         let radius = terminal.duct.segments.last().expect("admitted axial outlet").outlet_radius();
@@ -73,7 +73,7 @@ impl RegionalDuct {
         // low-ka refusal and flanged-piston continuation. Internal propagation
         // receives that load through the same port as a measured/baked load.
         let load = fs_duct::compact_radiation_impedance(termination, exterior, radius, omega)?;
-        let mut response = input_impedance_load(&terminal.duct, &terminal.gas,
+        let mut response = input_impedance_load_with_wall(&terminal.duct, &terminal.gas,
             omega, loss, load, wall)?;
         response.mouth_ka = omega / exterior.sound_speed * radius;
         Ok(response)

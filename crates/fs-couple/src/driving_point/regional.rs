@@ -14,6 +14,8 @@ pub mod outlet;
 pub mod exterior;
 /// Primitive gas-field sampling through the existing regional propagation law.
 pub mod field;
+/// Source-bound membrane walls on the same regional/continuous propagation.
+pub mod material_wall;
 
 use super::{
     DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
@@ -21,7 +23,7 @@ use super::{
     sealed_volume_compliance_gain,
 };
 use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
-    input_impedance_load, input_impedance_wall};
+    WallModel, input_impedance_load_with_wall, input_impedance_with_wall};
 use fs_material::gas::GasState;
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
@@ -158,17 +160,23 @@ impl RegionalDuct {
     /// or an intermediate port is nonfinite (for example an exact lossless pole).
     pub fn response(&self, omega: f64, loss: LossModel, termination: Termination,
         wall: Option<&WallPin>) -> Result<DuctResponse, DuctError> {
+        self.response_with_wall(omega, loss, termination, WallModel::from_pin(wall))
+    }
+
+    /// Complete local wall response with the same gas, geometry and terminal load.
+    pub fn response_with_wall(&self, omega: f64, loss: LossModel, termination: Termination,
+        wall: WallModel<'_>) -> Result<DuctResponse, DuctError> {
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
         if let Some(field) = &self.continuous {
-            return field.response_wall(omega, loss, termination, Some(self.exterior_gas()), wall);
+            return field.response_with_wall(omega, loss, termination, Some(self.exterior_gas()), wall);
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
         let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
         for region in runs {
-            let upstream = input_impedance_load(&region.duct, &region.gas, omega,
+            let upstream = input_impedance_load_with_wall(&region.duct, &region.gas, omega,
                 loss, response.impedance, wall)?;
             // A downstream one-port receives the upstream run's output flow.
             // Keep the REAL mouth's ka and load; this interface is not another
@@ -180,6 +188,25 @@ impl RegionalDuct {
             response.min_shear_number = response.min_shear_number.min(upstream.min_shear_number);
         }
         Ok(response)
+    }
+
+    /// Reflection at the original inlet port, with the complete local wall.
+    /// Continuous fields and uniform regions use their stable reflection owner.
+    pub fn reflection_with_wall(&self, omega: f64, loss: LossModel,
+        termination: Termination, wall: WallModel<'_>) -> Result<fs_math::c64::C64, DuctError> {
+        let zc = self.inlet_impedance();
+        if let Some(field) = &self.continuous {
+            return field.reflection_with_wall(omega, loss, termination,
+                Some(self.exterior_gas()), wall)?.referenced_to(zc);
+        }
+        if self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
+            || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
+            let region = &self.regions[0];
+            return fs_duct::compose::input_reflection_with_wall(&region.duct, &region.gas,
+                omega, loss, termination, wall)?.referenced_to(zc);
+        }
+        self.response_with_wall(omega, loss, termination, wall)
+            .map(|response| impedance_reflectance(&response, zc))
     }
 
     /// Realize the regional driving-point reflectance using the SAME FIR owner.
@@ -204,16 +231,33 @@ impl RegionalDuct {
     pub fn characteristic_line_realized(&self, termination: Termination, sample_rate_hz: u32,
         n: usize, wall: Option<&WallPin>, n_fft_override: Option<usize>)
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
-        // Delegate the uniform case verbatim, including the order of travel-time
-        // arithmetic at the FFT-size thresholds.
-        if self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
+        self.characteristic_line_with_wall_realized(termination, sample_rate_hz, n,
+            WallModel::from_pin(wall), n_fft_override)
+    }
+
+    /// Original FIR owner with one complete source-owned wall binding.
+    pub fn characteristic_line_with_wall(&self, termination: Termination, sample_rate_hz: u32,
+        n: usize, wall: WallModel<'_>, n_fft_override: Option<usize>)
+        -> Result<DelayedFilter, DrivingPointError> {
+        self.characteristic_line_with_wall_realized(termination, sample_rate_hz, n,
+            wall, n_fft_override).map(|(line, _)| line)
+    }
+
+    /// Complete wall-frequency response and the original line-realization receipt.
+    pub fn characteristic_line_with_wall_realized(&self, termination: Termination, sample_rate_hz: u32,
+        n: usize, wall: WallModel<'_>, n_fft_override: Option<usize>)
+        -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+        // Delegate constant pins verbatim, including travel-time arithmetic.
+        if let WallModel::Rigid | WallModel::Pin(_) = wall
+            && self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
             || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
+            let pin = match wall { WallModel::Pin(pin) => Some(pin), _ => None };
             let r = &self.regions[0];
             let length = super::duct_axial_length(&r.duct);
             let dt = 1.0 / f64::from(sample_rate_hz);
             let geo_delay = 2.0 * length / r.gas.sound_speed / dt;
             let mut pole_states: Vec<PoleState> = Vec::new();
-            if let Some(gain) = sealed_volume_compliance_gain(&r.duct, &r.gas, termination, wall) {
+            if let Some(gain) = sealed_volume_compliance_gain(&r.duct, &r.gas, termination, pin) {
                 pole_states.push(PoleState::Compliance { gain });
             }
             pole_states.push(bulk_delay_pole_state(geo_delay));
@@ -228,7 +272,7 @@ impl RegionalDuct {
                 pole_states,
                 |omega| {
                     let loss = LossModel::Bessel;
-                    duct_reflectance(&r.duct, &r.gas, omega, loss, termination, wall, zc)
+                    duct_reflectance(&r.duct, &r.gas, omega, loss, termination, pin, zc)
                 },
             );
         }
@@ -247,12 +291,7 @@ impl RegionalDuct {
             n_fft_override,
             pole_states,
             |omega| {
-                if let Some(field) = &self.continuous {
-                    return field.reflection_wall(omega, LossModel::Bessel, termination,
-                        Some(self.exterior_gas()), wall)?.referenced_to(zc);
-                }
-                self.response(omega, LossModel::Bessel, termination, wall)
-                    .map(|response| impedance_reflectance(&response, zc))
+                self.reflection_with_wall(omega, LossModel::Bessel, termination, wall)
             },
         )
     }

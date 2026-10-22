@@ -12,6 +12,7 @@ use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
+use crate::WallModel;
 
 pub const MAX_COMPOSITION_BLOCKS: usize = 131_072;
 pub const MAX_COMPOSITION_MODES: usize = 32;
@@ -466,8 +467,16 @@ pub fn input_reflection_wall(
     termination: Termination,
     wall: Option<&WallPin>,
 ) -> Result<InputReflection, DuctError> {
+    input_reflection_with_wall(duct, state, omega, loss, termination, WallModel::from_pin(wall))
+}
+
+/// Direct stable reflection with the complete local material-wall response.
+pub fn input_reflection_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    termination: Termination, wall: WallModel<'_>,
+) -> Result<InputReflection, DuctError> {
     let options = ComposeOptions::default();
-    let chain = duct_chain(duct, state, omega, loss, wall, options, true, || false)?;
+    let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
     let radius = duct
         .segments
         .last()
@@ -780,6 +789,17 @@ pub fn duct_chain(
     wall: Option<&WallPin>,
     options: ComposeOptions,
     compact_corrections: bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedChain, DuctError> {
+    duct_chain_with_wall(duct, state, omega, loss, WallModel::from_pin(wall),
+        options, compact_corrections, cancelled)
+}
+
+/// The same stable cascade, evaluating a local wall law at every gas/geometry sample.
+#[allow(clippy::too_many_arguments)]
+pub fn duct_chain_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    wall: WallModel<'_>, options: ComposeOptions, compact_corrections: bool,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedChain, DuctError> {
     options.validate()?;
@@ -867,7 +887,7 @@ pub fn duct_chain(
                         }
                         hole_index += 1;
                     }
-                    crate::tone_hole_t_junction(
+                    crate::tone_hole_t_junction_with_wall(
                         state,
                         hole_radius,
                         chimney_height,
@@ -885,7 +905,7 @@ pub fn duct_chain(
                         loss
                     };
                     let impedance = |termination| {
-                        crate::chimney_line_impedance(
+                        crate::chimney_line_impedance_with_wall(
                             state,
                             hole_radius,
                             chimney_height,
@@ -915,7 +935,7 @@ pub fn duct_chain(
                 inlet_radius,
                 outlet_radius,
                 length,
-            } if wall.is_some() || loss != LossModel::Lossless => {
+            } if !wall.is_rigid() || loss != LossModel::Lossless => {
                 let count = crate::cone_loss_slices(inlet_radius, outlet_radius)?;
                 if count > options.maximum_blocks - blocks.len() {
                     return Err(bad("composition block work cap exceeded"));
@@ -928,15 +948,10 @@ pub fn duct_chain(
                     let ra = inlet_radius + (outlet_radius - inlet_radius) * t0;
                     let rb = inlet_radius + (outlet_radius - inlet_radius) * t1;
                     let mut wave = crate::cone_midpoint_wave(state, ra, rb, omega, loss)?;
-                    if let Some(w) = wall {
+                    if !wall.is_rigid() {
                         let slope = (rb - ra) / dx;
-                        wave = crate::apply_wall_to_wave(
-                            wave,
-                            f64::midpoint(ra, rb),
-                            omega,
-                            w,
-                            (1.0 + slope * slope).sqrt(),
-                        )?;
+                        wave = wall.apply(wave, f64::midpoint(ra, rb), omega,
+                            (1.0 + slope * slope).sqrt())?;
                     }
                     min_shear = min_shear.min(wave.shear_number);
                     push_block(
@@ -956,9 +971,7 @@ pub fn duct_chain(
             }
             _ => {
                 let mut wave = crate::segment_wave(state, s.mean_radius(), omega, loss)?;
-                if let Some(w) = wall {
-                    wave = crate::apply_wall_to_wave(wave, s.mean_radius(), omega, w, 1.0)?;
-                }
+                wave = wall.apply(wave, s.mean_radius(), omega, 1.0)?;
                 min_shear = min_shear.min(wave.shear_number);
                 push_block(
                     &mut blocks,
@@ -983,8 +996,15 @@ pub(crate) fn evaluate(
     load: LoadSpec,
     wall: Option<&WallPin>,
 ) -> Result<DuctResponse, DuctError> {
+    evaluate_with_wall(duct, state, omega, loss, load, WallModel::from_pin(wall))
+}
+
+pub(crate) fn evaluate_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    load: LoadSpec, wall: WallModel<'_>,
+) -> Result<DuctResponse, DuctError> {
     let options = ComposeOptions::default();
-    let chain = duct_chain(duct, state, omega, loss, wall, options, true, || false)?;
+    let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
     let radius = duct
         .segments
         .last()
@@ -995,13 +1015,14 @@ pub(crate) fn evaluate(
         LoadSpec::Fixed(z) => (Some(z), omega * radius / state.sound_speed),
     };
     let solved = compose_chain(&chain.blocks, z_load, options)?;
-    if options.preserve_well_conditioned_bits
+    if let Some(pin) = wall.legacy_pin()
+        && options.preserve_well_conditioned_bits
         && solved.condition_estimate <= LEGACY_MAX_TRANSFER_CONDITION
         && solved
             .transfer_condition_estimate
             .is_some_and(|v| v <= LEGACY_MAX_TRANSFER_CONDITION)
     {
-        if let Ok(mut old) = crate::input_impedance_legacy(duct, state, omega, loss, load, wall) {
+        if let Ok(mut old) = crate::input_impedance_legacy(duct, state, omega, loss, load, pin) {
             if [old.impedance, old.u_mouth_over_u_in, old.p_mouth_over_u_in]
                 .iter()
                 .all(|&v| finite(v))

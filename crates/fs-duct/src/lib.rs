@@ -74,6 +74,9 @@ pub mod compose;
 /// Smooth plane-wave profiles and declared integration/slice axes.
 pub mod profile;
 pub use profile::{ConeSlices, RadiusProfile, RiccatiSteps};
+/// Source-owned local wall response shared by constant and varying gas paths.
+pub mod wall;
+pub use wall::{WallLaw, WallModel};
 /// Generic frequency-domain duct graphs, loops and labelled N-port impedances.
 pub mod network;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
@@ -480,6 +483,16 @@ fn apply_wall_to_wave(
         wall_admittance_per_metre(wall, radius, omega).map_err(|_| DuctError::BadParameter {
             what: "wall pin surface density, stiffness, and resistance",
         })?;
+    apply_wall_admittance_to_wave(wave, radius, y_phs, slant)
+}
+
+// One constitutive-to-wave map for constant pins and source-owned wall laws.
+fn apply_wall_admittance_to_wave(
+    wave: SegmentWave, radius: f64, y_phs: C64, slant: f64,
+) -> Result<SegmentWave, DuctError> {
+    if !slant.is_finite() || slant <= 0.0 || !y_phs.re.is_finite() || !y_phs.im.is_finite() {
+        return Err(DuctError::BadParameter { what: "wall admittance and surface slope must be finite" });
+    }
     // Cylinder `Y' = 2πa/Z'` is per axial metre. A taper's surface
     // element is `ds = slant dx`.
     let y_w = C64::new(y_phs.re, -y_phs.im).scale(slant);
@@ -786,9 +799,18 @@ pub fn tone_hole_shunt_wall(
     bore_radius: f64,
     wall: Option<&WallPin>,
 ) -> Result<C64, DuctError> {
+    tone_hole_shunt_with_wall(state, hole_radius, chimney_height, hole_state,
+        omega, loss, bore_radius, WallModel::from_pin(wall))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tone_hole_shunt_with_wall(
+    state: &GasState, hole_radius: f64, chimney_height: f64, hole_state: HoleState,
+    omega: f64, loss: LossModel, bore_radius: f64, wall: WallModel<'_>,
+) -> Result<C64, DuctError> {
     let sigma = hole_sigma(hole_state);
     if sigma > 0.0 && sigma < 1.0 {
-        let z_o = tone_hole_shunt_wall(
+        let z_o = tone_hole_shunt_with_wall(
             state,
             hole_radius,
             chimney_height,
@@ -798,7 +820,7 @@ pub fn tone_hole_shunt_wall(
             bore_radius,
             wall,
         )?;
-        let z_c = tone_hole_shunt_wall(
+        let z_c = tone_hole_shunt_with_wall(
             state,
             hole_radius,
             chimney_height,
@@ -811,7 +833,7 @@ pub fn tone_hole_shunt_wall(
         return Ok((z_o.recip().scale(sigma) + z_c.recip().scale(1.0 - sigma)).recip());
     }
     if sigma <= 0.0 {
-        return chimney_line_impedance(
+        return chimney_line_impedance_with_wall(
             state,
             hole_radius,
             chimney_height,
@@ -822,7 +844,7 @@ pub fn tone_hole_shunt_wall(
         );
     }
     let inner = side_hole_inner_length(hole_radius, bore_radius);
-    chimney_line_impedance(
+    chimney_line_impedance_with_wall(
         state,
         hole_radius,
         chimney_height + inner,
@@ -836,14 +858,14 @@ pub fn tone_hole_shunt_wall(
 /// Input impedance of a one-segment chimney. WideTube is
 /// Bessel so a compact neck never trips the bore floor or
 /// a narrow/wide model jump.
-fn chimney_line_impedance(
+fn chimney_line_impedance_with_wall(
     state: &GasState,
     radius: f64,
     length: f64,
     omega: f64,
     loss: LossModel,
     termination: Termination,
-    wall: Option<&WallPin>,
+    wall: WallModel<'_>,
 ) -> Result<C64, DuctError> {
     if !(radius > 0.0 && length > 0.0 && radius.is_finite() && length.is_finite()) {
         return Err(DuctError::BadParameter {
@@ -857,7 +879,7 @@ fn chimney_line_impedance(
     let duct = Duct {
         segments: vec![Segment::Cylinder { radius, length }],
     };
-    Ok(input_impedance_wall(&duct, state, omega, chimney_loss, termination, wall)?.impedance)
+    Ok(input_impedance_with_wall(&duct, state, omega, chimney_loss, termination, wall)?.impedance)
 }
 
 fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
@@ -886,15 +908,17 @@ fn tone_hole_t_junction(
     extra_series_m: f64,
     wall: Option<&WallPin>,
 ) -> Result<[C64; 4], DuctError> {
-    let zh = tone_hole_shunt_wall(
-        state,
-        hole_radius,
-        chimney_height,
-        hole_state,
-        omega,
-        loss,
-        bore_radius,
-        wall,
+    tone_hole_t_junction_with_wall(state, hole_radius, chimney_height, hole_state,
+        omega, loss, bore_radius, extra_series_m, WallModel::from_pin(wall))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tone_hole_t_junction_with_wall(
+    state: &GasState, hole_radius: f64, chimney_height: f64, hole_state: HoleState,
+    omega: f64, loss: LossModel, bore_radius: f64, extra_series_m: f64, wall: WallModel<'_>,
+) -> Result<[C64; 4], DuctError> {
+    let zh = tone_hole_shunt_with_wall(
+        state, hole_radius, chimney_height, hole_state, omega, loss, bore_radius, wall,
     )?;
     let shunt = [C64::ONE, C64::ZERO, zh.recip(), C64::ONE];
     let sigma = hole_sigma(hole_state);
@@ -1189,6 +1213,19 @@ pub fn input_impedance_wall(
     )
 }
 
+/// Evaluate the same duct with a complete source-owned local wall response.
+/// Every cylinder, cone slice, profile quadrature point and chimney uses the
+/// actual radius. Constant pins retain the original arithmetic and API.
+///
+/// # Errors
+/// Existing geometry/gas/load refusals and the wall law's applicability refusal.
+pub fn input_impedance_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    termination: Termination, wall: WallModel<'_>,
+) -> Result<DuctResponse, DuctError> {
+    compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Analytic(termination), wall)
+}
+
 /// How the mouth load is supplied to the chain.
 #[derive(Clone,Copy)]
 enum LoadSpec {
@@ -1222,6 +1259,20 @@ pub fn input_impedance_load(
         });
     }
     input_impedance_core(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
+}
+
+/// Explicit terminal load with the same complete local wall law.
+///
+/// # Errors
+/// As `input_impedance_load`, including material-wall support refusals.
+pub fn input_impedance_load_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    z_load: C64, wall: WallModel<'_>,
+) -> Result<DuctResponse, DuctError> {
+    if !z_load.re.is_finite() || !z_load.im.is_finite() {
+        return Err(DuctError::BadParameter { what: "tabulated load must be finite" });
+    }
+    compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
 }
 
 #[allow(clippy::too_many_lines)] // one coherent physics stage

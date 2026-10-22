@@ -7,6 +7,7 @@ use crate::{DuctError, LossModel, mul2, segment_wave};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
+use crate::WallModel;
 
 /// Continuous primitive gas fields on the same plane-wave propagation owner.
 pub mod gas_field;
@@ -342,13 +343,10 @@ fn local_generator(
     omega: f64,
     loss: LossModel,
     zref: f64,
-    wall: Option<&WallPin>,
+    wall: WallModel<'_>,
     slant: f64,
 ) -> Result<((C64, C64), f64), DuctError> {
-    let mut wave = segment_wave(state, radius, omega, loss)?;
-    if let Some(wall) = wall {
-        wave = crate::apply_wall_to_wave(wave, radius, omega, wall, slant)?;
-    }
+    let wave = wall.apply(segment_wave(state, radius, omega, loss)?, radius, omega, slant)?;
     let ik = C64::new(0.0, 1.0) * wave.wavenumber;
     Ok((
         (
@@ -418,6 +416,23 @@ pub fn profile_matrix_wall_controlled<F: FnMut() -> bool>(
     wall: Option<&WallPin>,
     cancel: &mut F,
 ) -> Result<ProfileTransfer, DuctError> {
+    profile_matrix_with_wall_controlled(profile, state, omega, loss, steps,
+        WallModel::from_pin(wall), cancel)
+}
+
+/// Smooth geometry and a source-owned wall law at the same quadrature radii.
+pub fn profile_matrix_with_wall(
+    profile: &RadiusProfile, state: &GasState, omega: f64, loss: LossModel,
+    steps: RiccatiSteps, wall: WallModel<'_>,
+) -> Result<ProfileTransfer, DuctError> {
+    profile_matrix_with_wall_controlled(profile, state, omega, loss, steps, wall, &mut || false)
+}
+
+/// Complete wall response with the existing cancellation/publication contract.
+pub fn profile_matrix_with_wall_controlled<F: FnMut() -> bool>(
+    profile: &RadiusProfile, state: &GasState, omega: f64, loss: LossModel,
+    steps: RiccatiSteps, wall: WallModel<'_>, cancel: &mut F,
+) -> Result<ProfileTransfer, DuctError> {
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let (min_shear, zref) =
         for_each_profile_step(profile, state, omega, loss, steps, wall, cancel, |e, _| {
@@ -448,7 +463,7 @@ pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
     omega: f64,
     loss: LossModel,
     steps: RiccatiSteps,
-    wall: Option<&WallPin>,
+    wall: WallModel<'_>,
     cancel: &mut F,
 ) -> Result<(Vec<[C64; 4]>, f64), DuctError> {
     steps.validate()?;
@@ -474,7 +489,7 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     omega: f64,
     loss: LossModel,
     steps: RiccatiSteps,
-    wall: Option<&WallPin>,
+    wall: WallModel<'_>,
     cancel: &mut F,
     mut visit: impl FnMut([C64; 4], f64) -> Result<(), DuctError>,
 ) -> Result<(f64, f64), DuctError> {
@@ -492,7 +507,7 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
     let mut min_shear = f64::INFINITY;
     let mut local = |x: f64| -> Result<(C64, C64), DuctError> {
-        let slant = if wall.is_some() {
+        let slant = if !wall.is_rigid() {
             let slope = profile.slope(x)?;
             det::sqrt(1.0 + slope * slope)
         } else { 1.0 };

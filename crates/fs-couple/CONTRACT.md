@@ -4236,3 +4236,32 @@ torsion of bonded circular sections; it does not add axial Prony loss, winding
 slip, heating or measured-alloy accuracy. Focused source and runtime regressions
 cover layer subdivision, independent complex shear response, body/pressure
 coupling, history preservation and explicit zero-arm reduction.
+
+### Shared material walls on regional duct paths
+
+`RegionalDuct::with_material_wall` binds one `LocalMaterialWall` to input
+impedance, stable reflection, characteristic feedback and physical baffled-outlet
+pressure. The local owner retains the resolved material identity, thickness,
+axial restraint and full elastic, Kelvin–Voigt or Maxwell law. The existing graph
+material-wall reduction uses this same owner. A source-resolved relaxation law
+must match the exact material snapshot; matching equilibrium modulus alone
+cannot admit a foreign source. Explicitly authored spectra retain their declared
+unbound semantics.
+
+Every actual cone, profile and continuous-gas quadrature radius and admitted
+chimney is reduced through the original thin isotropic membrane map. Maxwell
+frequency response calls the existing `GeneralizedMaxwell::modulus`, retaining
+positive-arm geometry admission and the graph RC image. Every sampled frequency
+must lie inside material support; unsupported data never becomes a rigid wall
+or a constant-loss substitute. Existing constant-pin wrappers retain their
+original arithmetic and compatibility path.
+
+This remains a frozen-state, local thin-membrane image with thickness/radius
+at most 0.05. It adds no axial shell coupling, wall thermal evolution, pressure
+prestress or exterior wall radiation. FIR sampling and history admission remain
+with the existing characteristic/outlet realizers; graph midpoint-state
+timestep limits are not reinterpreted as frequency-domain physics. Synthetic
+source-card regressions compare graph/continuum impedance, the independent
+elastic-cylinder limit, joint gas/geometry/material refinement, source identity,
+and material-only relaxation changes in feedback and microphone impulse pressure.
+They do not establish measured-material or experimental-wall validation.

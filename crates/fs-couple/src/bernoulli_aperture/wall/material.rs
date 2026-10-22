@@ -16,17 +16,16 @@
 pub mod relaxation;
 pub use relaxation::WallRelaxation;
 pub(crate) mod source;
+mod local;
+pub use local::LocalMaterialWall;
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
-use super::{WallPatch, WallPin, invalid};
+use super::{WallPatch, invalid};
 use super::super::network::{NetworkNode, TubeNetworkSpec};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
-use fs_material::state_point::{
-    DENSITY_PROPERTY, POISSON_RATIO_PROPERTY, YOUNG_MODULUS_PROPERTY,
-    ResolvedMaterialStatePoint,
-};
-use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
+use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_qty::{Dims, QuantitySpec};
 
 /// Uniaxial solid Young viscosity [Pa s], NOT fluid or bending viscosity.
 /// Its isotropic Kelvin--Voigt law uses the elastic Poisson ratio unchanged.
@@ -133,40 +132,10 @@ fn property(material: &ResolvedMaterialStatePoint, name: &str, dims: Dims,
 fn reduce(source: MaterialWallAssignment, radius: f64, length: f64, band: [f64; 2])
     -> Result<BoundMaterialWall, AcousticRealizeError>
 {
-    let h = source.thickness_m;
-    // A supported-model boundary, NOT a proved approximation-error bound.
-    if ![radius, length, h].iter().all(|x| x.is_finite() && *x > 0.0) || h / radius > 0.05 {
-        return Err(invalid("local membrane wall requires positive geometry and thickness/radius <= 0.05"));
-    }
-    let rho = property(&source.material, DENSITY_PROPERTY, Density::DIMS, band)?;
-    let young = property(&source.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS, band)?;
-    let nu = property(&source.material, POISSON_RATIO_PROPERTY, Dims([0; 6]), band)?;
-    if rho <= 0.0 || young <= 0.0 || nu <= -1.0 || nu >= 0.5 {
-        return Err(invalid("isotropic wall needs rho,E>0 and -1<nu<0.5"));
-    }
-    let viscosity = match &source.loss {
-        WallMaterialLoss::Elastic | WallMaterialLoss::Maxwell(_) => 0.0,
-        WallMaterialLoss::KelvinVoigt => property(&source.material, YOUNG_VISCOSITY_PROPERTY,
-            DynViscosity::DIMS, band)?,
-    };
-    if viscosity < 0.0 { return Err(invalid("wall Young viscosity must be nonnegative")); }
-    let axial = match source.axial {
-        AxialConstraint::StressFree => 1.0,
-        AxialConstraint::StrainFixed => 1.0 / (1.0 - nu * nu),
-    };
-    let factor = (h / radius) / radius * axial;
-    let patch = WallPatch { area_m2: core::f64::consts::TAU * radius * length,
-        wall: WallPin { surface_density: rho * h, stiffness_per_area: young * factor,
-            resistance: viscosity * factor } };
-    patch.impedance()?;
-    if viscosity > 0.0 && patch.wall.resistance == 0.0 {
-        return Err(invalid("wall material reduction lost its nonzero viscosity"));
-    }
-    let load = match &source.loss {
-        WallMaterialLoss::Maxwell(spectrum) => spectrum.load(patch, young, band)?,
-        _ => RelaxationImpedanceSpec::new(patch.impedance()?, &[])
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?,
-    };
+    let law = LocalMaterialWall::new(source.material.clone(), source.thickness_m,
+        source.axial, source.loss.clone(), band)?;
+    let patch = law.base_patch(radius, length)?;
+    let load = law.load(patch)?;
     Ok(BoundMaterialWall { source, radius_m: radius, length_m: length, band_hz: band, patch, load })
 }
 

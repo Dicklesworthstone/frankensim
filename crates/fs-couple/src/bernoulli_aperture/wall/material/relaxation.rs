@@ -4,6 +4,7 @@
 //! Each last term is the shared parallel-RC impedance, NOT gas RL diffusion.
 use super::{BoundMaterialWall, WallMaterialLoss, WallPatch, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
+use fs_blake3::ContentHash;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_qty::{Dims, Pressure};
@@ -16,6 +17,7 @@ use fs_vfit::waveguide::network::{NetworkNode, WaveguideNetwork};
 pub struct WallRelaxation {
     material: GeneralizedMaxwell,
     provenance: String,
+    source_identity: Option<ContentHash>,
     band_hz: [f64; 2],
     max_dt_over_tau: f64,
     max_angular_step: f64,
@@ -23,7 +25,8 @@ pub struct WallRelaxation {
 impl PartialEq for WallRelaxation {
     fn eq(&self, other: &Self) -> bool {
         self.material.e_inf == other.material.e_inf && self.material.terms == other.material.terms
-            && self.provenance == other.provenance && self.band_hz == other.band_hz
+            && self.provenance == other.provenance && self.source_identity == other.source_identity
+            && self.band_hz == other.band_hz
             && self.max_dt_over_tau == other.max_dt_over_tau && self.max_angular_step == other.max_angular_step
     }
 }
@@ -56,8 +59,11 @@ impl WallRelaxation {
         }
         let law = GeneralizedMaxwell::new(equilibrium, terms)
             .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-        Self::new(law, format!("material-state:{}; branches:{properties:?}", material.identity()),
-            band_hz, max_dt_over_tau, max_angular_step)
+        let mut spectrum = Self::new(law,
+            format!("material-state:{}; branches:{properties:?}", material.identity()),
+            band_hz, max_dt_over_tau, max_angular_step)?;
+        spectrum.source_identity = Some(material.identity());
+        Ok(spectrum)
     }
 
     /// Admit an existing `GeneralizedMaxwell` law and retain its source/conditions.
@@ -87,7 +93,7 @@ impl WallRelaxation {
         }
         let material = GeneralizedMaxwell::new(material.e_inf, material.terms)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        Ok(Self { material, provenance, band_hz, max_dt_over_tau, max_angular_step })
+        Ok(Self { material, provenance, source_identity: None, band_hz, max_dt_over_tau, max_angular_step })
     }
     /// Exact original material law; zero arms remain in the source record.
     #[must_use]
@@ -95,17 +101,34 @@ impl WallRelaxation {
     /// Source and conditions, or the explicit label of an authored model.
     #[must_use]
     pub fn provenance(&self) -> &str { &self.provenance }
+    /// Exact source snapshot for a resolved spectrum; None for an authored law.
+    #[must_use]
+    pub const fn source_identity(&self) -> Option<ContentHash> { self.source_identity }
     /// Original material applicability [Hz].
     #[must_use]
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
 
-    pub(super) fn load(&self, patch: WallPatch, young: f64, band: [f64; 2])
-        -> Result<RelaxationImpedanceSpec, AcousticRealizeError>
-    {
+    pub(super) fn validate_source(&self, material: &ResolvedMaterialStatePoint)
+        -> Result<(), AcousticRealizeError> {
+        if self.source_identity.is_some_and(|identity| identity != material.identity()) {
+            return Err(invalid("wall relaxation and inertia must use the same original material snapshot"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_material(&self, young: f64, band: [f64; 2])
+        -> Result<(), AcousticRealizeError> {
         if self.material.e_inf.to_bits() != young.to_bits()
             || band[0] < self.band_hz[0] || band[1] > self.band_hz[1] {
             return Err(invalid("wall spectrum must match the original equilibrium modulus and cover the entire requested band"));
         }
+        Ok(())
+    }
+
+    pub(super) fn load(&self, patch: WallPatch, young: f64, band: [f64; 2])
+        -> Result<RelaxationImpedanceSpec, AcousticRealizeError>
+    {
+        self.validate_material(young, band)?;
         let mut terms = [ComplianceRelaxationTerm::default(); MAX_RELAXATION_BRANCHES];
         let mut count = 0;
         for &(modulus, tau) in &self.material.terms {

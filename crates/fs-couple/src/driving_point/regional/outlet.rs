@@ -10,7 +10,7 @@
 use super::RegionalDuct;
 use crate::driving_point::DrivingPointError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
-use fs_duct::{DuctError, DuctResponse, LossModel, Termination};
+use fs_duct::{DuctError, DuctResponse, LossModel, Termination, WallModel};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
@@ -124,6 +124,13 @@ impl RegionalDuct {
     pub fn baffled_outlet(&self, sample_rate_hz: u32, fft_samples: usize,
         receiver: CircularOutletReceiver, wall: Option<&WallPin>)
         -> Result<OutletPressure, OutletError> {
+        self.baffled_outlet_with_wall(sample_rate_hz, fft_samples, receiver, WallModel::from_pin(wall))
+    }
+
+    /// The same physical outlet transfer with a complete local material wall.
+    pub fn baffled_outlet_with_wall(&self, sample_rate_hz: u32, fft_samples: usize,
+        receiver: CircularOutletReceiver, wall: WallModel<'_>)
+        -> Result<OutletPressure, OutletError> {
         let terminal = self.regions.last().expect("admitted nonempty regional duct");
         let radius_m = terminal.duct.segments.last().expect("admitted axial terminal").outlet_radius();
         let gas = *self.exterior_gas();
@@ -134,7 +141,7 @@ impl RegionalDuct {
         let exterior_delay_samples = mic.delay_samples;
         let (kernel, axial_delay_samples) = acceleration_kernel(sample_rate_hz, fft_samples,
             self.one_way_time_s(), self.inlet_impedance(), |omega| {
-                self.response(omega, LossModel::Bessel, Termination::FlangedOpen, wall)
+                self.response_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, wall)
             })?;
         let dt = 1.0 / f64::from(sample_rate_hz);
         let acceleration = DelayedFilter::from_impulse_response(dt, kernel)

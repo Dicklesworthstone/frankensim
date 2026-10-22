@@ -9,7 +9,7 @@
 use super::{MAX_RICCATI_STEPS, RiccatiSteps, bad, local_generator, magnus_step, positive};
 use crate::compose::{
     ComposeOptions, CompositionMode, InputReflection, PreparedChain, TwoPort, compose_chain,
-    compose_chain_reflection, duct_chain,
+    compose_chain_reflection, duct_chain_with_wall,
 };
 use crate::{Duct, DuctError, DuctResponse, LossModel, Segment, Termination};
 use fs_material::MaterialError;
@@ -17,6 +17,7 @@ use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
+use crate::WallModel;
 
 /// Original source or propagation refusal, without a fallback material law.
 #[derive(Debug)]
@@ -304,8 +305,16 @@ impl GasFieldDuct {
         wall: Option<&WallPin>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
+        self.chain_with_wall_controlled(omega, loss, WallModel::from_pin(wall), cancelled)
+    }
+
+    /// Complete wall-frequency law at every retained material/geometry sample.
+    pub fn chain_with_wall_controlled(
+        &self, omega: f64, loss: LossModel, wall: WallModel<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedChain, DuctError> {
         if self.field.uniform_state().is_some() {
-            return duct_chain(
+            return duct_chain_with_wall(
                 &self.duct,
                 &self.inlet,
                 omega,
@@ -387,6 +396,14 @@ impl GasFieldDuct {
         exterior: Option<&GasState>,
         wall: Option<&WallPin>,
     ) -> Result<DuctResponse, DuctError> {
+        self.response_with_wall(omega, loss, termination, exterior, WallModel::from_pin(wall))
+    }
+
+    /// Input and outlet response with the complete source-owned wall law.
+    pub fn response_with_wall(
+        &self, omega: f64, loss: LossModel, termination: Termination,
+        exterior: Option<&GasState>, wall: WallModel<'_>,
+    ) -> Result<DuctResponse, DuctError> {
         let exterior = self.exterior(exterior)?;
         let radius = self
             .duct
@@ -398,15 +415,15 @@ impl GasFieldDuct {
             if *exterior == self.inlet
                 || matches!(termination, Termination::Closed | Termination::IdealOpen)
             {
-                return crate::input_impedance_wall(&self.duct, &self.inlet, omega, loss, termination, wall);
+                return crate::input_impedance_with_wall(&self.duct, &self.inlet, omega, loss, termination, wall);
             }
             let load = crate::compact_radiation_impedance(termination, exterior, radius, omega)?;
             let mut response =
-                crate::input_impedance_load(&self.duct, &self.inlet, omega, loss, load, wall)?;
+                crate::input_impedance_load_with_wall(&self.duct, &self.inlet, omega, loss, load, wall)?;
             response.mouth_ka = omega / exterior.sound_speed * radius;
             return Ok(response);
         }
-        let chain = self.chain_wall_controlled(omega, loss, wall, &mut || false)?;
+        let chain = self.chain_with_wall_controlled(omega, loss, wall, &mut || false)?;
         let (load, mouth_ka) = crate::termination_impedance(termination, exterior, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
         Ok(DuctResponse {
@@ -447,8 +464,16 @@ impl GasFieldDuct {
         exterior: Option<&GasState>,
         wall: Option<&WallPin>,
     ) -> Result<InputReflection, DuctError> {
+        self.reflection_with_wall(omega, loss, termination, exterior, WallModel::from_pin(wall))
+    }
+
+    /// Direct reflection with the same complete material wall as the response.
+    pub fn reflection_with_wall(
+        &self, omega: f64, loss: LossModel, termination: Termination,
+        exterior: Option<&GasState>, wall: WallModel<'_>,
+    ) -> Result<InputReflection, DuctError> {
         let exterior = self.exterior(exterior)?;
-        let chain = self.chain_wall_controlled(omega, loss, wall, &mut || false)?;
+        let chain = self.chain_with_wall_controlled(omega, loss, wall, &mut || false)?;
         let radius = self
             .duct
             .segments

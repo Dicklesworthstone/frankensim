@@ -50,6 +50,18 @@ apply the existing locally reacting `WallPin` at both quadrature points, with
 the actual local radius and `sqrt(1+(dr/dx)^2)` surface-area factor. Per-area
 mass/stiffness/resistance are explicitly supplied and constant over this wall
 image; no material or shell parameters are inferred from the gas or profile.
+`WallLaw` is the shared local specific-impedance seam for source-owned material
+walls. `WallModel::{Rigid,Pin,Law}` keeps the existing constant-pin API and
+arithmetic while `input_impedance_with_wall`, stable composition and smooth/
+continuous-field methods pass a complete frequency law through every actual
+cylinder, cone slice, profile quadrature point and admitted chimney radius.
+Geometry supplies the same circumference and slant factor; gas and wall
+admittance still enter the one original telegraph-to-wave conversion. The law
+must return a passive, finite, nonzero impedance under exp(-i omega t) and
+refuse unsupported material, frequency or geometry. General laws stay on the
+stable cascade, never a constant-pin legacy reconstruction. The source-bound
+thin-membrane/Maxwell adapter and original material receipts live in fs-couple;
+fs-duct does not duplicate that constitutive law or infer shell physics.
 The multimodal profile image remains separate: this module converges to
 Webster's plane-wave equation, not to 3-D.
 
