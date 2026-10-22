@@ -105,7 +105,7 @@ class Chain:
         """The chain of session `page` (an MIS page in references.json): its chain record, its ambient file(s), and the gaps of its
         graded files located with the library's note spans (decompose's library: file stem.wav, start, end in seconds)."""
         m = json.loads(Path(manifest).read_text())
-        prec = next((p for p in m["pages"] if p["page"] == page), None)
+        prec = next((p for p in m.get("pages", []) if p["page"] == page), None)
         if prec is None or not prec.get("chain"):
             raise ChainError(f"IRPCHAIN_UNKNOWN_SESSION: {page} has no chain record in {manifest}")
         rec = next(c for c in m["chains"] if c["id"] == prec["chain"])

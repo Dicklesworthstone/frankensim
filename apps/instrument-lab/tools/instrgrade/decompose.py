@@ -398,6 +398,14 @@ def flux_curve(S, sf):
     return np.concatenate([[0.0], np.sqrt(np.sum(pos ** 2, axis=0) / np.maximum(live.sum(axis=0), 1))])
 
 
+def match_level_db(y, kind):
+    """The level a pair matches loudness on [dB re full scale]: mean power over the kind's window of an aligned signal
+    (0-0.3 s of a decaying note, 0.1-0.8 s of a sustained one)."""
+    w0, w1 = (0.0, 0.3) if kind == "decaying" else (0.1, 0.8)
+    seg = y[int(w0 * SR):int(w1 * SR)]
+    return float(10 * np.log10(np.mean(seg * seg) + 1e-18)) if len(seg) else float("nan")
+
+
 class Note:
     """Everything the decomposition needs from one aligned signal, computed once."""
 
@@ -406,9 +414,8 @@ class Note:
         self.f0_hint = f0_hz
         self.dur = len(y) / SR
         w0, w1 = (0.0, 0.3) if kind == "decaying" else (0.1, 0.8)
-        seg = y[int(w0 * SR):int(w1 * SR)]
         self.match_window = [w0, min(w1, self.dur)]
-        self.level_db = float(10 * np.log10(np.mean(seg * seg) + 1e-18)) if len(seg) else float("nan")
+        self.level_db = match_level_db(y, kind)
         f0_m = None if inharmonic else f0_comb(y, f0_hz, kind, 400.0)
         self.desc = describe(y, kind, f0_hz, inharmonic=inharmonic, _skip_q3_heavy=True, f0_override=f0_m)
         if self.desc is None:
@@ -657,6 +664,7 @@ class Refs:
     def __init__(self, lib_path, wav_dir, refs_json=None):
         self.lib = json.loads(Path(lib_path).read_text())
         self.wav_dir = Path(wav_dir)
+        self.refs_json = refs_json  # the manifest: also where a recording chain finds its session (session_chain)
         self.meta, self.external = {}, None
         if refs_json:
             manifest = json.loads(Path(refs_json).read_text())
@@ -980,19 +988,22 @@ def staged(final, build):
         raise
 
 
-def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False, cand_meta=None):
+def write_pair(root, family, note_name, ref_e, refs: Refs, ref_y, ref_info, cand_y=None, cand_info=None, ours_meta=None, review=False, cand_meta=None,
+               chain=None):
     """Write <root>/<family>/<note>/pair.json and the files it names (the P8 site contract).
 
     Everything is built in a staging directory inside the note's directory and swapped in only when complete, so a
     note never sits without its pair while the slow ruler is computed, and a failure leaves the earlier grading in
-    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted.
+    place. A failed attempt's partial files are moved to superseded/aborted-<UTC>-<pid>/, never deleted. `chain` is the
+    receipt of the recording chain the render went through (chain id, floor source, ambient and gap hashes, flags), if any.
     """
     final = Path(root) / family / note_name
     return staged(final, lambda stage: _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info,
-                                                          cand_y, cand_info, ours_meta, review, cand_meta))
+                                                          cand_y, cand_info, ours_meta, review, cand_meta, chain))
 
 
-def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review, cand_meta=None):
+def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, review, cand_meta=None,
+                       chain=None):
     f0 = hz_of(ref_e["note"])
     inh = ref_e["inst"] in ("xylophone", "marimba")
     n = len(ref_y) if cand_y is None else min(len(ref_y), len(cand_y))
@@ -1046,6 +1057,7 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},
         decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, library_note=f'{ref_e["file"]}@{ref_e["name"]}.{ref_e["dyn"]}',
                        candidate=cand_meta),
+        **({"chain": chain} if chain else {}),
     )
     (out / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
     if review and ours:
@@ -1141,6 +1153,26 @@ def _labelled(signal, fn, *a, **k):
         raise OnsetMisaligned(f"{e} [{signal}]") from None
 
 
+_CHAINS = {}
+
+
+def session_chain(refs, ref_e, refdir):
+    """The recording chain (chain.py) of the session reference entry `ref_e` was recorded in, built once per process and session
+    from the manifest this Refs was given and the fetched files in `refdir`. A session that has no chain record, or whose floor
+    cannot be built, is a ChainError: the pair is refused, never graded without the chain it asked for."""
+    import chain as chn
+
+    if not refs.refs_json:
+        raise chn.ChainError("IRPCHAIN_UNKNOWN_SESSION: a chain needs --refs-json, the manifest that records the sessions")
+    stem = Path(ref_e["file"]).stem
+    f = next((f for f in json.loads(Path(refs.refs_json).read_text()).get("files", []) if Path(f["path"]).stem.replace(" ", "") == stem), None)
+    if f is None:
+        raise chn.ChainError(f"IRPCHAIN_UNKNOWN_SESSION: {refs.refs_json} has no session record for {stem}")
+    if f["page"] not in _CHAINS:
+        _CHAINS[f["page"]] = chn.Chain.from_references(Path(refs.refs_json), f["page"], Path(refdir), refs.lib)
+    return _CHAINS[f["page"]]
+
+
 def run_pair(refs, c, root):
     refs.band_hz = c.get("band_hz")  # a render valid only up to a band is graded only up to it, signal and ruler alike
     ref_e = c.get("ref_entry") or pick_entry(refs, c["family"], c["note"], c.get("dyn", "mf"), c.get("art"), c.get("ref_contains"))
@@ -1159,11 +1191,21 @@ def run_pair(refs, c, root):
         cand_y, cand_info = _labelled("render", align, raw, f0, render_floor(hp, f0))
         ours_meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]))
     ref_y, ref_info = _labelled(f"reference {ref_e['file']}@{ref_e['name']}", refs.aligned, ref_e)
+    receipt = None
+    if c.get("wav") and (c.get("chain") is not None or c.get("chain_refdir")):
+        # the render as its reference's session would have recorded it: level-matched to the reference as the pair matches it,
+        # then the session's measured floor and its files' grid (chain.py); no chain is ever applied by default
+        ch = c["chain"] if c.get("chain") is not None else session_chain(refs, ref_e, c["chain_refdir"])
+        gain_db = match_level_db(ref_y, ref_e["kind"]) - match_level_db(cand_y, ref_e["kind"])
+        y, receipt = ch.apply(raw * 10 ** (gain_db / 20), f'{c["family"]} {c.get("slot") or c["note"]} {c["git_sha"]}')
+        receipt = dict({k: v for k, v in receipt.items() if k != "blocks"}, level_match_db=gain_db, blocks=receipt["blocks"])
+        raw = lowpass(y, refs.band_hz) if refs.band_hz else y
+        cand_y, cand_info = _labelled("render through its session's chain", align, raw, f0, render_floor(highpass(raw, f0), f0))
     # `slot` names the pair's directory and note id when one musical note has several pairs (a vowel at C3: "C3-a")
     cand_meta = dict(note=c["note"], slot=c.get("slot"), art=ref_e["art"], dyn=ref_e["dyn"], band_hz=c.get("band_hz"),
                      ref_contains=Path(ref_e["file"]).stem) if c.get("wav") else None  # what a regrade needs to rebuild the same candidate
     return write_pair(root, c["family"], c.get("slot") or c["note"], ref_e, refs, ref_y, ref_info, cand_y, cand_info, ours_meta, c.get("review", False),
-                      cand_meta)
+                      cand_meta, receipt)
 
 
 _REFS = None
@@ -1294,7 +1336,8 @@ def cmd_refs(a):
 
 def cmd_pair(a):
     refs = Refs(a.lib, a.wav_dir, a.refs_json)
-    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review)
+    c = dict(family=a.family, note=a.note, dyn=a.dyn, art=a.art, ref_contains=a.ref_contains, band_hz=a.band_hz, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe, review=a.review,
+             chain_refdir=a.chain_refdir)
     if not all((a.render, a.git_sha, a.observer, a.recipe)):
         raise SystemExit("IRPDECOMP_USAGE: a render needs --git-sha, --observer and --recipe (the page shows them)")
     try:
@@ -1333,7 +1376,8 @@ def cmd_listen(a):
 
 def cmd_batch(a):
     """Pair for every candidate in a JSON list of {family, note, wav, git_sha, observer, recipe, [dyn, art, ref_contains]}."""
-    jobs = [(dict(c, dyn=c.get("dyn", "mf")), a.out) for c in json.loads(Path(a.candidates).read_text())]
+    jobs = [(dict(c, dyn=c.get("dyn", "mf"), **({"chain_refdir": a.chain_refdir} if a.chain_refdir else {})), a.out)
+            for c in json.loads(Path(a.candidates).read_text())]
     if a.jobs > 1:
         with ProcessPoolExecutor(min(a.jobs, 16), mp_context=multiprocessing.get_context("fork"), initializer=_init,
                                  initargs=(a.lib, a.wav_dir, a.refs_json)) as pool:
@@ -1442,6 +1486,8 @@ def main():
     p.add_argument("--git-sha")
     p.add_argument("--observer")
     p.add_argument("--recipe")
+    p.add_argument("--chain-refdir", help="put the render through its reference session's recording chain (chain.py), reading the session's "
+                                           "fetched files here (FRANKENSIM_REFERENCE_DIR); there is no default chain")
     p.set_defaults(fn=cmd_pair)
     p = sub.add_parser("listen", help="a render with no recording to compare it with: audio, maps and the reason, no gaps")
     p.add_argument("--render", required=True)
@@ -1460,6 +1506,8 @@ def main():
     common(p)
     p.add_argument("candidates")
     p.add_argument("--jobs", type=int, default=1)
+    p.add_argument("--chain-refdir", help="put the render through its reference session's recording chain (chain.py), reading the session's "
+                                           "fetched files here (FRANKENSIM_REFERENCE_DIR); there is no default chain")
     p.set_defaults(fn=cmd_batch)
     p = sub.add_parser("refs")
     common(p)

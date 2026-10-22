@@ -629,6 +629,35 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("neighbour", " ".join(r["label"] for r in by["f0_cents"]["ruler"]))  # pitch-absolute: same note only
         self.assertTrue(any("neighbouring" in r["label"] for r in by["attack_log2"]["ruler"]))
 
+    def test_a_render_through_its_sessions_chain_says_so_in_the_pair(self):
+        """With a chain (chain.py) the render is graded as the session would have recorded it, and pair.json records which
+        chain, from which floor (and the hashes of its files), with which flags, at which level match. P8 still accepts it."""
+        import chain as chn
+        floor = np.random.default_rng(9).standard_normal(20 * chn.FS_REC) * 10 ** (-60 / 20)
+        ch = chn.Chain(id="syn-chain@p.html", page="p.html", record={}, stretches=[chn.Stretch("amb", "a" * 64, 0, len(floor), "ambient")],
+                       flags=[dict(flag="capsule_not_applied")], bits=16, sources=[dict(path="amb", sha256="a" * 64, role="ambient")],
+                       _audio={"amb": floor})
+        root = self.tmp / "chained"
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="abc", observer="test", recipe="r.sh", chain=ch)
+        pj = dc.run_pair(self.refs, c, root)
+        self.validate(root, "syn", "Bb3")
+        rc = pj["chain"]
+        print(f"\n  chain {rc['chain_id']}: floor {rc['floor_source']}, ambient {rc['ambient_sha256']}, {rc['bits']} bit at {rc['fs_hz']} Hz, "
+              f"level match {rc['level_match_db']:+.2f} dB, flags {[f['flag'] for f in rc['flags']]}")
+        self.assertEqual((rc["chain_id"], rc["floor_source"], rc["ambient_sha256"]), ("syn-chain@p.html", "ambient", ["a" * 64]))
+        self.assertAlmostEqual(rc["level_match_db"], 20 * math.log10(1 / 0.3), delta=1.0)  # the render was 0.3 of the library's level
+        plain = dc.run_pair(self.refs, dict(c, chain=None), self.tmp / "plain")
+        self.assertNotIn("chain", plain)  # no chain unless one is asked for
+
+    def test_a_chain_for_a_session_with_no_record_refuses_the_pair(self):
+        c = dict(family="syn", note="Bb3", dyn="mf", wav=str(self.render), git_sha="abc", observer="test", recipe="r.sh",
+                 chain_refdir=str(self.tmp))
+        with self.assertRaises(ValueError) as e:
+            dc.run_pair(self.refs, c, self.tmp / "nochain")
+        print(f"\n  {e.exception}")
+        self.assertIn("IRPCHAIN_UNKNOWN_SESSION", str(e.exception))
+        self.assertIsInstance(e.exception, dc.REFUSALS)  # recorded as a refusal of the pair, never graded without its chain
+
     def test_render_pair_refuses_misaligned_onsets(self):
         ref_e = self.refs.find("syn", 58, "mf")[0]
         y, info = self.refs.aligned(ref_e)
