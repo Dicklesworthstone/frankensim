@@ -5,6 +5,7 @@ use fs_lbm::material::{MaterialSlab, MaterialSlab3, MaterialThermalSlab, Materia
 use fs_lbm::material::electrothermal::{ElectricHeatInput, ElectricHeatLimits};
 use fs_lbm::material::electrothermal::magnetic::transport::{ElectricalTransport, MaterialMagneticError};
 use fs_lbm::material::transport::MaterialTransportError;
+use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 use fs_lbm::thermal::sources::HeatSourceLimits;
 use fs_material::{MaterialError, fluid_transport::{FluidTransport, FluidTransportState}};
 use std::{cell::Cell, rc::Rc};
@@ -177,4 +178,195 @@ fn endpoint_refusal_cancellation_and_storage_changes_do_not_publish() {
     let out=a.step_magnetothermal_with_material_transport(input(&electric),&[[0.0,2.0,0.0];N],&[[0.0;3];N],&CancelGate::new(),|_,t,_| law(t)).unwrap();
     let check=fresh.step_magnetothermal_with_material_transport(input(&electric),&[[0.0,2.0,0.0];N],&[[0.0;3];N],&CancelGate::new(),|_,t,_| law(t)).unwrap();
     assert_eq!(out.step.heat,check.step.heat); assert_eq!(a.lattice.grid.f,fresh.lattice.grid.f);
+}
+
+fn buoyant_fluid(t: f64) -> FluidTransportState {
+    FluidTransportState::try_new(
+        1000.0 - 0.2 * (t - 300.0), 1000.0 + 0.2 * (t - 300.0),
+        50.0 + 8.0 * (t - 290.0), 0.5 + 0.03 * (t - 290.0),
+    ).unwrap()
+}
+fn buoyancy<const D: usize>(gravity_m_s2: [f64; D]) -> BoussinesqConfig<D> {
+    BoussinesqConfig { gravity_m_s2, max_relative_density_departure: 0.01,
+        max_relative_specific_heat_departure: 0.01 }
+}
+fn buoyant_law(t: f64) -> Result<ElectricalTransport<FluidTransportState>, MaterialError> {
+    ElectricalTransport::try_new(buoyant_fluid(t), Some(1.0 + 0.01 * (t - 300.0)))
+}
+
+#[test]
+fn material_buoyancy_and_lorentz_force_share_the_existing_heat_and_flow_owners() {
+    let electric = setup(2, 20.0); let gate = CancelGate::new();
+    let mut coupled = slab3(); let mut source_owner = slab3(); let mut reference = slab3();
+    // A legacy expansion coefficient must not contribute a second buoyancy.
+    coupled.lattice.gbeta = 1e-3; reference.lattice.gbeta = 1e-3;
+    let external = [[1.0, 2.0, 0.0]; N]; let field = [[0.0, 2.0, 0.0]; N];
+    let config = buoyancy([0.0, 0.0, -9.81]);
+    let source = source_owner.step_magnetothermal(input(&electric), &field, &external, &gate,
+        |_, t, _| Ok(Some(1.0 + 0.01 * (t - 300.0)))).unwrap();
+    let power: Vec<_> = source.motion.electric.joule_w.iter().map(|w| w / DX.powi(3)).collect();
+    let forces: Vec<_> = source.motion.lorentz_force_density_n_m3.iter().zip(external)
+        .map(|(a, b)| [a[0] + b[0], a[1] + b[1], a[2] + b[2]]).collect();
+    let separate = reference.step_with_boussinesq_material_transport(
+        &power, &forces, input(&electric).limits.thermal, config, &gate,
+        |_, t, _| Ok(buoyant_fluid(t)),
+    ).unwrap();
+    let out = coupled.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &field, &external, config, &gate, |_, t, _| buoyant_law(t),
+    ).unwrap();
+    assert_eq!(coupled.lattice.grid.f, reference.lattice.grid.f);
+    assert_eq!(coupled.lattice.gpop, reference.lattice.gpop);
+    assert_eq!(out.step.heat, separate.heat);
+    assert_eq!(out.step.motion.electric.joule_w, source.motion.electric.joule_w);
+    assert_eq!(coupled.lattice.gbeta, 1e-3);
+    near(out.step.heat.source_j, out.step.joule_energy_j);
+    let base = initial();
+    let scale = plan_scaling_from_material(&base, DX, 0.01, 0.1).unwrap();
+    for sample in &out.applied {
+        let raw = sample.material.material().resolved_transport();
+        assert_eq!(*raw, buoyant_fluid(sample.temperature_k));
+        assert_eq!(sample.transport.density_kg_m3(), base.density_kg_m3());
+        assert_eq!(sample.transport.specific_heat_j_kg_k(), base.specific_heat_j_kg_k());
+        let density_force = (raw.density_kg_m3() - base.density_kg_m3()) * -9.81;
+        near(coupled.lattice.grid.fext[sample.cell][2], scale.force_density_lattice(
+            forces[sample.cell][2] + density_force,
+        ).unwrap());
+    }
+}
+
+#[test]
+fn buoyant_zero_field_recovers_original_transport_in_both_dimensions() {
+    let electric = ElectricSetup::default(); let gate = CancelGate::new();
+    let mut a = slab2(); let mut b = slab2();
+    let config2 = buoyancy([1.0, -9.81]);
+    let out = a.step_magnetothermal_isolated_with_boussinesq_material_transport(
+        input(&electric), &[[0.0; 3]; N], &[[1.0, 0.0]; N], DX, 1e-10, config2, &gate,
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    b.step_with_boussinesq_material_transport(&[0.0; N], &[[1.0, 0.0]; N], DX,
+        input(&electric).limits.thermal, config2, &gate, |_, t, _| Ok(buoyant_fluid(t))).unwrap();
+    assert_eq!(a.lattice.grid.f, b.lattice.grid.f);
+    assert_eq!(a.lattice.gpop, b.lattice.gpop);
+    assert_eq!(out.step.joule_energy_j, 0.0);
+    let mut a = slab3(); let mut b = slab3();
+    let config3 = buoyancy([1.0, 0.0, -9.81]);
+    a.step_magnetothermal_isolated_with_boussinesq_material_transport(
+        input(&electric), &[[0.0; 3]; N], &[[1.0, 0.0, 0.0]; N], 1e-10, config3, &gate,
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    b.step_with_boussinesq_material_transport(&[0.0; N], &[[1.0, 0.0, 0.0]; N],
+        input(&electric).limits.thermal, config3, &gate, |_, t, _| Ok(buoyant_fluid(t))).unwrap();
+    assert_eq!(a.lattice.grid.f, b.lattice.grid.f);
+    assert_eq!(a.lattice.gpop, b.lattice.gpop);
+}
+
+#[test]
+fn two_dimensional_buoyant_current_preserves_physical_depth_scaling() {
+    let electric = setup(1, 20.0); let gate = CancelGate::new();
+    let config = buoyancy([0.0, -9.81]);
+    let mut a = slab2(); let mut b = slab2();
+    let r = a.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 0.0, 2.0]; N], &[[0.0; 2]; N], DX, config, &gate,
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    let s = b.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 0.0, 2.0]; N], &[[0.0; 2]; N], 2.0 * DX, config, &gate,
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    near(s.step.joule_energy_j, 2.0 * r.step.joule_energy_j);
+    near(s.step.heat.stored_change_j, 2.0 * r.step.heat.stored_change_j);
+    for (x, y) in a.lattice.grid.f.iter().flatten().zip(b.lattice.grid.f.iter().flatten()) { near(*x, *y); }
+    for (x, y) in a.lattice.gpop.iter().flatten().zip(b.lattice.gpop.iter().flatten()) { near(*x, *y); }
+}
+
+#[test]
+fn raw_buoyant_sources_and_electrical_coefficients_are_sampled_once_per_epoch() {
+    let electric = setup(2, 20.0); let mut slab = slab3(); let gate = CancelGate::new();
+    let reads = Rc::new(Cell::new(0)); let mut calls = 0;
+    let out = slab.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N],
+        buoyancy([0.0, 0.0, -9.81]), &gate,
+        |_, t, reference| {
+            assert_eq!(*reference, initial());
+            let id = calls; calls += 1;
+            ElectricalTransport::try_new(Receipt { id, state: buoyant_fluid(t), reads: reads.clone() },
+                Some(1.0 + 0.01 * (t - 300.0)))
+        },
+    ).unwrap();
+    assert_eq!(calls, 24); assert_eq!(reads.get(), 24);
+    for (i, sample) in out.applied.iter().enumerate() {
+        assert_eq!(sample.material.material().material().id, i);
+        assert_eq!(out.endpoint[i].material.material().material().id, 12 + i);
+        near(sample.material.resistivity_ohm_m().unwrap(), 1.0 + 0.01 * (sample.temperature_k - 300.0));
+        near(out.endpoint[i].temperature_k,
+            slab.temperature_si(slab.lattice.gpop[sample.cell].iter().sum()).unwrap());
+    }
+}
+
+#[test]
+fn data_only_material_change_alters_electrical_thermal_and_buoyant_response() {
+    let electric = setup(2, 20.0); let gate = CancelGate::new();
+    let mut runs = Vec::new();
+    // Two synthetic material datasets; geometry, solver and boundary data stay fixed.
+    for (density_slope, conductivity, viscosity, resistivity) in [
+        (0.2, 100.0, 1.0, 1.0), (0.4, 200.0, 1.5, 2.0),
+    ] {
+        let mut slab = slab3();
+        let out = slab.step_magnetothermal_with_boussinesq_material_transport(
+            input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N],
+            buoyancy([0.0, 0.0, -9.81]), &gate,
+            |_, t, _| ElectricalTransport::try_new(FluidTransportState::try_new(
+                1000.0 - density_slope * (t - 300.0), 1000.0, conductivity, viscosity,
+            )?, Some(resistivity)),
+        ).unwrap();
+        runs.push((slab, out));
+    }
+    let (a, x) = &runs[0]; let (b, y) = &runs[1];
+    near(x.step.joule_energy_j, 2.0 * y.step.joule_energy_j);
+    near(b.lattice.grid.fext[6][2], 2.0 * a.lattice.grid.fext[6][2]);
+    assert_ne!(x.applied[0].momentum_relaxation, y.applied[0].momentum_relaxation);
+    assert_ne!(x.applied[0].thermal_relaxation, y.applied[0].thermal_relaxation);
+    assert_ne!(a.lattice.grid.f, b.lattice.grid.f);
+    assert_ne!(a.lattice.gpop, b.lattice.gpop);
+}
+
+#[test]
+fn buoyant_endpoint_support_and_cancellation_refuse_atomically() {
+    let electric = setup(2, 20.0); let mut slab = slab3(); slab.lattice.gbeta = 1e-3;
+    let initial_f = slab.lattice.grid.f.clone(); let initial_g = slab.lattice.gpop.clone();
+    let initial_loads = slab.lattice.grid.fext.clone(); let initial_tau = slab.lattice.grid.tau.clone();
+    let config = buoyancy([0.0, 0.0, -9.81]);
+    for change_capacity in [false, true] {
+        let mut calls = 0;
+        let result = slab.step_magnetothermal_with_boussinesq_material_transport(
+            input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N], config, &CancelGate::new(),
+            |_, t, _| {
+                calls += 1;
+                if calls <= 12 { return buoyant_law(t); }
+                let (rho, cp) = if change_capacity { (1000.0, 1100.0) } else { (900.0, 1000.0) };
+                ElectricalTransport::try_new(FluidTransportState::try_new(rho, cp, 100.0, 1.0)?, Some(1.0))
+            },
+        );
+        assert!(result.is_err()); assert_eq!(calls, 13);
+    }
+    let gate = CancelGate::new(); let mut calls = 0;
+    let result = slab.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N], config, &gate,
+        |_, t, _| { calls += 1; if calls == 13 { gate.request(); } buoyant_law(t) },
+    );
+    assert!(matches!(result, Err(MaterialMagneticError::Material(MaterialTransportError::Cancelled))));
+    assert_eq!(slab.lattice.grid.f, initial_f); assert_eq!(slab.lattice.gpop, initial_g);
+    assert_eq!(slab.lattice.grid.fext, initial_loads); assert_eq!(slab.lattice.grid.tau, initial_tau);
+    assert_eq!(slab.lattice.gbeta, 1e-3);
+    let mut fresh = slab3(); fresh.lattice.gbeta = 1e-3;
+    slab.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N], config, &CancelGate::new(),
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    fresh.step_magnetothermal_with_boussinesq_material_transport(
+        input(&electric), &[[0.0, 2.0, 0.0]; N], &[[0.0; 3]; N], config, &CancelGate::new(),
+        |_, t, _| buoyant_law(t),
+    ).unwrap();
+    assert_eq!(slab.lattice.grid.f, fresh.lattice.grid.f);
+    assert_eq!(slab.lattice.gpop, fresh.lattice.gpop);
 }

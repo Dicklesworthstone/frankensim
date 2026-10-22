@@ -140,7 +140,7 @@ fn resolve_bounded<F: FluidTransport, const D: usize>(
     })
 }
 
-trait BackgroundBuoyancy {
+pub(in crate::material::forcing) trait BackgroundBuoyancy {
     fn coefficient(&self) -> f64;
     fn set_coefficient(&mut self, value: f64);
 }
@@ -180,7 +180,7 @@ fn advance<
     poll(gate)?;
     config.validate()?;
     let (cells, plane) = slab.lattice.layout()?;
-    let mut input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
+    let input = slab.heat_inputs(power, forces, cells, depth_m, limits)?;
     if slab.lattice.walls() != (1.0, 0.0) || !slab.lattice.flow_valid() {
         return Err(MaterialTransportError::Invalid(
             "invalid material slab or independently changed normalized walls",
@@ -205,32 +205,9 @@ fn advance<
         gate,
         &mut bounded,
     )?;
-    let units = slab.force_units;
-    for value in &applied {
-        poll(gate)?;
-        let density_difference =
-            value.material.resolved.density_kg_m3() - units.transport.density_kg_m3();
-        for axis in 0..D {
-            let force = forces[value.cell][axis] + density_difference * config.gravity_m_s2[axis];
-            input.force[value.cell][axis] =
-                units
-                    .component(force)
-                    .map_err(|source| MaterialTransportError::State {
-                        cell: value.cell,
-                        temperature_k: value.temperature_k,
-                        source,
-                    })?;
-        }
-    }
-    let background = slab.lattice.coefficient();
-    // Density-resolved buoyancy owns this step. Do not also add the slab's
-    // legacy beta*(T-Tref) load; restore that background for legacy callers.
-    let (mut trial, heat) = candidate_with_prepared_input::<S, BoussinesqMaterial<F>, D, Q>(
-        slab,
-        input,
-        &applied,
-        gate,
-        |candidate| candidate.set_coefficient(0.0),
+    let (trial, heat) = candidate_with_buoyancy::<S, BoussinesqMaterial<F>, D, Q>(
+        slab, input, forces, &applied, config, gate,
+        |material| material.resolved.density_kg_m3(),
     )?;
     let endpoint = sample::<S, BoussinesqMaterial<F>, D, Q>(
         slab,
@@ -241,7 +218,6 @@ fn advance<
         gate,
         &mut bounded,
     )?;
-    trial.set_coefficient(background);
     poll(gate)?;
     slab.lattice = trial;
     Ok(MaterialTransportStep {
@@ -249,6 +225,37 @@ fn advance<
         applied,
         endpoint,
     })
+}
+
+// Joule/Lorentz and prescribed-source callers share the SAME material force
+// projection and tentative transport step. The supplied density is from the
+// already admitted BoussinesqMaterial, never a second constitutive query.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::material::forcing) fn candidate_with_buoyancy<
+    S: Slab<D, Q> + BackgroundBuoyancy, F, const D: usize, const Q: usize,
+>(
+    slab: &MaterialSlab<S>, mut input: super::super::Inputs<D>, forces: &[[f64; D]],
+    applied: &[super::TransportSample<F>], config: BoussinesqConfig<D>,
+    gate: &CancelGate, density: impl Fn(&F) -> f64,
+) -> Result<(S, super::HeatBalance), MaterialTransportError> {
+    let units = slab.force_units;
+    for value in applied {
+        poll(gate)?;
+        let departure = density(&value.material) - units.transport.density_kg_m3();
+        for axis in 0..D {
+            let force = forces[value.cell][axis] + departure * config.gravity_m_s2[axis];
+            input.force[value.cell][axis] = units.component(force)
+                .map_err(|source| MaterialTransportError::State {
+                    cell: value.cell, temperature_k: value.temperature_k, source,
+                })?;
+        }
+    }
+    // Replace, rather than superpose, the legacy beta*(T-Tref) contribution.
+    let (mut trial, heat) = candidate_with_prepared_input::<S, F, D, Q>(
+        slab, input, applied, gate, |candidate| candidate.set_coefficient(0.0),
+    )?;
+    trial.set_coefficient(slab.lattice.coefficient());
+    Ok((trial, heat))
 }
 
 impl MaterialSlab<ThermalLbm> {

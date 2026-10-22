@@ -8,7 +8,7 @@ use crate::thermal::sources::{
     ThermalSourceLimits, source_step_mapped,
 };
 
-struct Inputs<const D: usize> {
+pub(in crate::material::forcing) struct Inputs<const D: usize> {
     heat: Vec<f64>,
     force: Vec<[f64; D]>,
     limits: ThermalSourceLimits,
@@ -21,7 +21,7 @@ fn invalid(what: &'static str) -> ThermalSourceError { ThermalSourceError::Inval
 fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
 
 impl<L> MaterialSlab<L> {
-    fn heat_inputs<const D: usize>(
+    pub(in crate::material::forcing) fn heat_inputs<const D: usize>(
         &self, power: &[f64], force: &[[f64; D]], cells: usize,
         depth_m: f64, limits: HeatSourceLimits,
     ) -> Result<Inputs<D>, ThermalSourceError> {

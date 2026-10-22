@@ -6,6 +6,8 @@
 //! sampling checks material support, not a coupled midpoint or an induction law.
 
 pub mod midpoint;
+/// One material state drives buoyancy, electrical transport, heat and flow.
+pub mod boussinesq;
 
 use super::{
     ChtError, ElectricHeatError, ElectricHeatInput, FluidTransportState,
@@ -18,6 +20,7 @@ use crate::material::transport::{
 };
 use fs_exec::CancelGate;
 use fs_material::{MaterialError, fluid_transport::FluidTransport};
+use crate::thermal::sources::HeatBalance;
 
 /// Electrical response and the concrete fluid-material owner at ONE query point.
 /// Missing electrical data must return an error; `None` explicitly means an
@@ -103,8 +106,11 @@ impl From<ThermalSourceError> for MaterialMagneticError {
 fn advance<S: MovingSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
     slab: &mut MaterialSlab<S>, domain: VoxelDomain, plane: usize,
     input: ElectricHeatInput<'_>, field_t: &[[f64; 3]], external: &[[f64; D]],
-    depth_m: f64, isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
+    isolated_current_tolerance_a: Option<f64>, gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<ElectricalTransport<F>, MaterialError>,
+    transport: impl FnOnce(
+        &MaterialSlab<S>, &[f64], &[[f64; D]], &[TransportSample<ElectricalTransport<F>>],
+    ) -> Result<(S, HeatBalance), MaterialTransportError>,
 ) -> Result<MaterialMagneticStep<F>, MaterialMagneticError> {
     poll(gate)?;
     let cells = domain.cell_count();
@@ -131,9 +137,7 @@ fn advance<S: MovingSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
         isolated_current_tolerance_a, gate, &mut electrical,
     )?;
     let forces = combined_forces(external, &source.motion, gate)?;
-    let (trial, heat) = candidate_with_samples::<S, ElectricalTransport<F>, D, Q>(
-        slab, &source.power, &forces, depth_m, input.limits.thermal, &applied, gate,
-    )?;
+    let (trial, heat) = transport(slab, &source.power, &forces, &applied)?;
     let next = MaterialSlab {
         lattice: trial, top_temperature_k: slab.top_temperature_k,
         temperature_difference_k: slab.temperature_difference_k,
@@ -200,7 +204,10 @@ impl MaterialSlab<ThermalLbm> {
         let domain = VoxelDomain::graded([
             vec![dx; self.lattice.grid.nx], vec![dx; self.lattice.grid.ny], vec![depth_m],
         ])?;
-        advance::<ThermalLbm, F, 2, 5>(self, domain, plane, input, field_t, forces, depth_m, isolated, gate, resolve)
+        advance::<ThermalLbm, F, 2, 5>(self, domain, plane, input, field_t, forces, isolated, gate, resolve,
+            |slab, power, forces, applied| candidate_with_samples::<ThermalLbm, ElectricalTransport<F>, 2, 5>(
+                slab, power, forces, depth_m, input.limits.thermal, applied, gate,
+            ))
     }
 }
 impl MaterialSlab<ThermalLbm3> {
@@ -236,6 +243,9 @@ impl MaterialSlab<ThermalLbm3> {
         let dx = self.force_units.cell_size_m;
         if !positive((dx * dx) * dx) { return Err(invalid("invalid represented 3D cell volume").into()); }
         let domain = VoxelDomain::new(g.nx, g.ny, g.nz, dx)?;
-        advance::<ThermalLbm3, F, 3, 7>(self, domain, plane, input, field_t, forces, dx, isolated, gate, resolve)
+        advance::<ThermalLbm3, F, 3, 7>(self, domain, plane, input, field_t, forces, isolated, gate, resolve,
+            |slab, power, forces, applied| candidate_with_samples::<ThermalLbm3, ElectricalTransport<F>, 3, 7>(
+                slab, power, forces, dx, input.limits.thermal, applied, gate,
+            ))
     }
 }

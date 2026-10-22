@@ -2098,3 +2098,22 @@ the reported work. Reynolds/power gates and thermal-step refinement still apply.
 Focused regressions cover wall/body/Darcy balance, absorbing and pressure-balanced
 forces, material substitution, thermal thinning, latent feedback and rollback.
 Their presence does not establish native execution or experimental validation.
+
+### Shared material buoyancy and electromagnetic transport
+
+`MaterialSlab::step_magnetothermal_with_boussinesq_material_transport` and its
+electrode-free counterpart compose the existing current/Joule/Lorentz owner
+with the existing Boussinesq material projection in both 2D and 3D. One local
+source evaluation supplies resistivity, density-driven buoyancy, viscosity and
+thermal conductivity. The original source object remains attached to each
+sample. Reference density and heat capacity retain inertia and sensible storage;
+explicit departure bounds apply at initial and endpoint states. Material buoyancy
+replaces the independent beta load for the step, and Joule heat is deposited once.
+The original source accounting, heat balance and atomic refusal gates apply.
+
+Coefficients and sources are explicit initial-state values, with endpoint support
+checks rather than within-step convergence. Buoyancy work is not Joule heat;
+gravitational/kinetic total-energy conservation, induction, compressible work,
+species evolution and phase change remain outside this model. Focused regressions
+cover direct force superposition, existing-owner equivalence, data-only material
+changes, depth scaling, retained source evaluations and transactional refusals.
