@@ -10,7 +10,8 @@
 //!
 //! This is a first-order reaction-then-motion split for one homogeneous,
 //! caller-declared stoichiometric mass-action law. Its rate scale is declared
-//! data, not an inferred Arrhenius law or a validated engine mechanism. Donor
+//! data, optionally resolved from a material card at the actual gas state;
+//! neither an Arrhenius law nor an engine mechanism is inferred. Donor
 //! consumption, source-domain, entropy and extensive-balance checks refuse
 //! an unresolved step instead of clipping species or renormalizing energy.
 //! Refine the interval to assess temporal error. No flame/shock propagation,
@@ -26,6 +27,8 @@
 pub mod thermal;
 /// Chemical composition coupled to the shared circuit and finite thermal network.
 pub mod network;
+/// Source-backed kinetic scales evaluated at the actual reacting gas state.
+pub mod material_rate;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -46,6 +49,7 @@ use fs_thermochem::{Composition, CompositionBasis, SpeciesId};
 pub struct GasReaction {
     catalog: ThermochemicalGasModel,
     kinetics: DeclaredStoichiometricMassActionV1,
+    rate_material: Option<material_rate::MaterialRateScale>,
 }
 
 /// Physical step admission. Consumption is measured from actual reacting
@@ -68,6 +72,8 @@ pub enum GasReactionError {
     Invalid(&'static str),
     Gas(GasEnergyError),
     Rates(StoichiometricMassActionErrorV1),
+    /// Original material source, dimensional or state-domain refusal.
+    RateMaterial(fs_material::state_point::MaterialStatePointError),
     Piston(PistonError),
     /// Shorten the physical interval; the consumed species is never clipped.
     ConsumptionLimit {
@@ -139,6 +145,8 @@ pub struct GasReactionSpecies {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasReactionStep {
     pub rate: DeclaredStoichiometricMassActionEvaluationV1,
+    /// Actual rate-scale material evaluation; None on the original fixed-scale path.
+    pub rate_material: Option<fs_material::state_point::ResolvedMaterialStatePoint>,
     /// Signed forward reaction extent [mol] over this one physical interval.
     pub extent_mol: f64,
     pub species: Vec<GasReactionSpecies>,
@@ -204,11 +212,13 @@ impl GasReaction {
                 "declared species molar masses do not conserve reaction mass within roundoff",
             ));
         }
-        Ok(Self { catalog, kinetics })
+        Ok(Self { catalog, kinetics, rate_material: None })
     }
     pub const fn catalog(&self) -> &ThermochemicalGasModel {
         &self.catalog
     }
+    /// Original declared kinetics. With a material source, the effective scale
+    /// and its source evaluation are retained in each GasReactionStep instead.
     pub const fn kinetics(&self) -> &DeclaredStoichiometricMassActionV1 {
         &self.kinetics
     }
@@ -321,10 +331,7 @@ impl GasReaction {
             )?);
         }
         poll(&mut cancelled)?;
-        let rate = self.kinetics.evaluate(
-            Temperature::new(gas.state().state().temperature),
-            activities,
-        )?;
+        let (rate, rate_material) = self.evaluate_rate(gas, activities, &mut cancelled)?;
         let progress = rate
             .net_progress_rate()
             .ok_or_else(|| {
@@ -440,6 +447,7 @@ impl GasReaction {
         Ok(GasReactionCandidate {
             step: GasReactionStep {
                 rate,
+                rate_material,
                 extent_mol: extent,
                 species,
                 maximum_consumed_fraction: consumed,
