@@ -110,7 +110,14 @@ fn relocated_maps_match_original_construction_with_material_memory_and_normal_re
                 near(x.velocity_m_sqrt_kg_per_s,y.velocity_m_sqrt_kg_per_s);
             }
             near(actual.material_memory()[0],expected.material_memory()[0]);
-            assert_eq!(actual.material_relaxation_branches(),&branches);
+            // RelaxationBranch has no PartialEq: compare every field bitwise.
+            let now=actual.material_relaxation_branches();
+            assert!(now.len()==branches.len() && now.iter().zip(&branches).all(|(x,y)|
+                x.stiffness.to_bits()==y.stiffness.to_bits()
+                && x.relaxation_time_s.to_bits()==y.relaxation_time_s.to_bits()
+                && x.projection.len()==y.projection.len()
+                && x.projection.iter().zip(&y.projection).all(|(p,q)| p.to_bits()==q.to_bits())),
+                "relaxation branches changed: {now:?}");
             assert!(a.energy_residual_j.abs()<=a.energy_tolerance_j);
             if stop!=0 && tick==0 { assert!(actual.last_obstacle_frames().unwrap()[0].normal_force_n>0.0); }
         }
