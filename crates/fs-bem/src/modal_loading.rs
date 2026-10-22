@@ -8,6 +8,7 @@
 use crate::helmholtz::rayleigh_modal::{self, AreaSample, PreparedSurface};
 use crate::helmholtz::{self, Formulation, HelmholtzError, Medium};
 use crate::panel3d::SpherePanels;
+use crate::radiation_policy::GeometryPolicy;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::c64::C64;
 use std::ops::Range;
@@ -31,6 +32,14 @@ pub enum LoadingRoute {
     /// Resonance-safe combined formulation. Only BurtonMiller is admitted;
     /// neither the plain interior-resonant nor mutation arm is a loading route.
     ClosedBodyBem(Formulation),
+    /// Per frequency row, [`GeometryPolicy`] selects plain CBIE below 80% of
+    /// the smallest closed component's interior Dirichlet box bound, and
+    /// Burton-Miller above it. Below ka of about 0.5, Burton-Miller's
+    /// alpha = i/k converges slowly for non-uniform modes. On the unit
+    /// icosphere at ka = 0.05 and 5120 panels, its dipole resistance is
+    /// 11.6 times the closed form, against plain CBIE's 0.2% (ts1,
+    /// cdf20cf10).
+    ClosedBodyGeometryPolicy,
     /// Original complete Rayleigh matrix with outgoing-power Gram resistance.
     PlanarBaffledRayleigh,
 }
@@ -130,7 +139,8 @@ pub fn admit_loading_work(
             rayleigh_modal::admit_modal_work(n * m * (n + m))?;
             Ok(1)
         }
-        LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller) => {
+        LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller)
+        | LoadingRoute::ClosedBodyGeometryPolicy => {
             Ok(modes.div_ceil(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH))
         }
         LoadingRoute::ClosedBodyBem(_) => Err(ModalLoadingError::Invalid(
@@ -357,7 +367,7 @@ pub fn modal_radiation_loading(
     let planar = match (traces, route) {
         (
             SurfaceModeTraces::ClosedBody { surface, shapes },
-            LoadingRoute::ClosedBodyBem(formulation),
+            LoadingRoute::ClosedBodyBem(_) | LoadingRoute::ClosedBodyGeometryPolicy,
         ) => {
             if shapes
                 .iter()
@@ -367,10 +377,10 @@ pub fn modal_radiation_loading(
                     "complete finite panel traces required",
                 ));
             }
-            hash.update(&[if formulation == Formulation::BurtonMiller {
-                1
-            } else {
-                2
+            hash.update(&[match route {
+                LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller) => 1,
+                LoadingRoute::ClosedBodyGeometryPolicy => 4,
+                _ => 2,
             }]);
             // Reuse the original exact closure/orientation admission. The
             // exterior probe is geometry only, never an acoustic observation.
@@ -413,6 +423,12 @@ pub fn modal_radiation_loading(
             ));
         }
     };
+    let policy = match (traces, route) {
+        (SurfaceModeTraces::ClosedBody { surface, .. }, LoadingRoute::ClosedBodyGeometryPolicy) => {
+            Some(GeometryPolicy::new(surface)?)
+        }
+        _ => None,
+    };
     let mut rows = reserved(omegas.len())?;
     for &omega in omegas {
         poll(&mut cancelled)?;
@@ -422,8 +438,12 @@ pub fn modal_radiation_loading(
                 .ok_or(ModalLoadingError::Invalid("missing planar preparation"))?
                 .power_consistent_impedance(omega, medium)?,
             SurfaceModeTraces::ClosedBody { surface, shapes } => {
-                let LoadingRoute::ClosedBodyBem(formulation) = route else {
-                    return Err(ModalLoadingError::Invalid("closed-body route changed"));
+                let formulation = match (route, &policy) {
+                    (LoadingRoute::ClosedBodyBem(formulation), _) => formulation,
+                    (LoadingRoute::ClosedBodyGeometryPolicy, Some(policy)) => {
+                        policy.formulation(omega / medium.sound_speed)?
+                    }
+                    _ => return Err(ModalLoadingError::Invalid("closed-body route changed")),
                 };
                 let mut z = reserved(modes * modes)?;
                 z.resize(modes * modes, C64::ZERO);

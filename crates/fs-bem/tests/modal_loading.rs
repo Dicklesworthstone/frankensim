@@ -476,6 +476,8 @@ fn sphere_modal_loading_closed_forms() {
     let started = Instant::now();
     let medium = air();
     let area = 4.0 * PI;
+    // Every ka is measured before the gate, so one run reports the band.
+    let mut unmet = Vec::new();
     for ka in [0.05_f64, 0.5, 1.0, PI, 5.0, 10.0] {
         let x2 = ka * ka;
         let x4 = x2 * x2;
@@ -497,7 +499,7 @@ fn sphere_modal_loading_closed_forms() {
                     surface: &surface,
                     shapes: &shapes,
                 },
-                LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller),
+                LoadingRoute::ClosedBodyGeometryPolicy,
                 &[ka * medium.sound_speed],
                 medium,
                 source(),
@@ -537,9 +539,150 @@ fn sphere_modal_loading_closed_forms() {
                 ),
             }
         }
+        if !(admitted == 3 && finest.is_some_and(|e| e <= 1e-3)) {
+            unmet.push((ka, finest));
+        }
+    }
+    assert!(
+        unmet.is_empty(),
+        "strict sphere qualification unmet at (ka, finest): {unmet:?}; refine the numerical owner, never relax 1e-3"
+    );
+}
+
+/// G1: the low-ka translation (dipole) mode, which motivated the
+/// geometry-policy route. Unit icosphere at 320, 1280 and 5120 panels,
+/// ka = 0.05, below the sphere's plain-CBIE limit of 0.8 * pi * sqrt(3) / 2.
+/// - The policy route equals a direct plain-CBIE batch solve bitwise, and
+///   the Burton-Miller route bitwise above the limit.
+/// - It converges at observed order >= 1.8 on both modes, and its finest
+///   dipole resistance is within 1% of the closed form.
+/// - The Burton-Miller route's errors are recorded beside it.
+#[test]
+fn geometry_policy_route_resolves_the_low_ka_dipole() {
+    let medium = air();
+    let area = 4.0 * PI;
+    let ka = 0.05_f64;
+    let (x2, x4) = (ka * ka, ka.powi(4));
+    let oracle = [
+        C64::new(x2, -ka).scale(area * medium.density * medium.sound_speed / (1.0 + x2)),
+        C64::new(x4, -ka * (2.0 + x2))
+            .scale(area * medium.density * medium.sound_speed / (3.0 * (4.0 + x4))),
+    ];
+    let shapes_of = |surface: &SpherePanels| {
+        vec![
+            vec![1.0; surface.areas().len()],
+            surface.normals().iter().map(|n| n[2]).collect::<Vec<f64>>(),
+        ]
+    };
+    let load = |surface: &SpherePanels, route, k: f64| {
+        let shapes = shapes_of(surface);
+        modal_radiation_loading(
+            SurfaceModeTraces::ClosedBody {
+                surface,
+                shapes: &shapes,
+            },
+            route,
+            &[k * medium.sound_speed],
+            medium,
+            source(),
+            4,
+            || false,
+        )
+        .unwrap()
+        .rows()[0]
+            .impedance()
+            .to_vec()
+    };
+    let policy = LoadingRoute::ClosedBodyGeometryPolicy;
+    let bm = LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller);
+
+    let coarse = SpherePanels::icosphere(1.0, 2).unwrap();
+    let shapes = shapes_of(&coarse);
+    let fields: Vec<Vec<C64>> = shapes
+        .iter()
+        .map(|s| s.iter().map(|&v| C64::from_re(v)).collect())
+        .collect();
+    let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
+    let solved =
+        helmholtz::solve_radiation_batch(&coarse, ka, medium, &refs, Formulation::PlainCbie)
+            .unwrap();
+    let areas = coarse.areas();
+    let direct: Vec<C64> = shapes
+        .iter()
+        .flat_map(|row| {
+            solved.iter().map(move |solution| {
+                row.iter()
+                    .zip(&solution.pressure)
+                    .zip(areas)
+                    .fold(C64::ZERO, |s, ((&phi, &p), &a)| s + p.scale(phi * a))
+            })
+        })
+        .collect();
+    let routed = load(&coarse, policy, ka);
+    assert!(
+        routed
+            .iter()
+            .zip(&direct)
+            .all(|(a, b)| a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()),
+        "below the limit the policy route must be the plain-CBIE solve"
+    );
+    let above = load(&coarse, policy, 3.0);
+    assert!(
+        above
+            .iter()
+            .zip(&load(&coarse, bm, 3.0))
+            .all(|(a, b)| a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits()),
+        "above the limit the policy route must be the Burton-Miller solve"
+    );
+
+    let mut errors = [[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]];
+    let mut resistance = [0.0_f64; 2];
+    for rung in 2..=4 {
+        let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+        for (r, route) in [policy, bm].into_iter().enumerate() {
+            let z = load(&surface, route, ka);
+            for mode in 0..2 {
+                let zm = z[mode * 2 + mode];
+                let error = (zm - oracle[mode]).abs() / oracle[mode].abs();
+                let resistance_error = (zm.re - oracle[mode].re).abs() / oracle[mode].re;
+                errors[r][mode].push(error);
+                if mode == 1 {
+                    resistance[r] = resistance_error;
+                }
+                println!(
+                    "{{\"suite\":\"fs-bem\",\"case\":\"policy-route-low-ka\",\"route\":\"{}\",\"panels\":{},\"ka\":{ka},\"mode\":{mode},\"err\":{error:e},\"resistance_err\":{resistance_error:e}}}",
+                    if r == 0 {
+                        "geometry-policy"
+                    } else {
+                        "burton-miller"
+                    },
+                    surface.areas().len()
+                );
+            }
+        }
+    }
+    // Panel size halves per icosphere rung, so the observed order is log2
+    // of the error ratio over the finest pair.
+    let order = |e: &Vec<f64>| (e[1] / e[2]).log2();
+    for mode in 0..2 {
         assert!(
-            admitted == 3 && finest.is_some_and(|e| e <= 1e-3),
-            "strict sphere qualification unmet at ka={ka}: {finest:?}; refine the numerical owner, never relax 1e-3"
+            errors[0][mode].windows(2).all(|w| w[1] < w[0]) && order(&errors[0][mode]) >= 1.8,
+            "policy route mode {mode} must converge at order >= 1.8: {:?}",
+            errors[0][mode]
         );
     }
+    assert!(
+        resistance[0] <= 1e-2,
+        "finest dipole resistance error {}",
+        resistance[0]
+    );
+    println!(
+        "{{\"suite\":\"fs-bem\",\"case\":\"policy-route-low-ka-orders\",\"geometry_policy\":[{:.3},{:.3}],\"burton_miller\":[{:.3},{:.3}],\"dipole_resistance_err\":[{:e},{:e}]}}",
+        order(&errors[0][0]),
+        order(&errors[0][1]),
+        order(&errors[1][0]),
+        order(&errors[1][1]),
+        resistance[0],
+        resistance[1]
+    );
 }
