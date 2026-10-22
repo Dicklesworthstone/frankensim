@@ -13,6 +13,13 @@ readonly -a EXPECTED_TESTS=(
 readonly REDUCE_TEST='reduce::reduce_tests::rl_005_tet10_cantilever_card'
 # M1.1-W1a (modal ZOH core moved to fs-modal::time): the cap test and the bitwise witnesses it must not move.
 readonly MODAL_TIME_TEST='g0_mode_cap_4096_admitted_4097_refused'
+# M1.3-W2a linear orthotropic viscoelastic TET10 elements: the G1 Prony
+# ladder and complex-stiffness checks, and the G3 rotation metamorphic.
+readonly -a VISCO_TESTS=(
+  g1_prony_ladder_modal_loss_certified
+  g1_time_domain_element_force_matches_complex_stiffness
+  g3_rotation_metamorphic
+)
 readonly -a ND_TESTS=(
   g0_nd_is_a_permutation_and_separators_separate
   g0_nd_deterministic_repeat_bitwise
@@ -86,6 +93,7 @@ readonly -a SHELL_TESTS=(
 list() {
   local test
   for test in "${EXPECTED_TESTS[@]}"; do printf 'fs-solid:tet10::%s\n' "$test"; done
+  for test in "${VISCO_TESTS[@]}"; do printf 'fs-solid:visco_elements::%s\n' "$test"; done
   printf 'fs-solid:lib::%s\n' "$REDUCE_TEST"
   for test in "${HEX_TESTS[@]}"; do printf 'fs-solid:hex::%s\n' "$test"; done
   for test in "${SHELL_TESTS[@]}"; do printf 'fs-plate:shell_obstacle_course::%s\n' "$test"; done
@@ -112,6 +120,11 @@ check() {
   done
   for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-modal/tests/parallel_windows.rs" || return 1
+  done
+  for test in "${VISCO_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-solid/tests/visco_elements.rs" || {
+      printf 'missing test: %s\n' "$test" >&2; return 1;
+    }
   done
   for test in "${EXPECTED_TESTS[@]}"; do
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-solid/tests/tet10.rs" || {
@@ -169,6 +182,7 @@ run() {
   host="$(uname -n)"
   printf 'IRP S1 live receipt: %s\n' "$output_dir"
   local -a tet_command lib_command shell_command outline_command arching_command hex_command
+  local -a visco_command
   if [[ -n "${IRP_S1_TET10_BIN:-}" && -n "${IRP_S1_LIB_BIN:-}" && -n "${IRP_S1_SHELL_BIN:-}" ]]; then
     tet_command=("$IRP_S1_TET10_BIN" --exact --test-threads=1 --show-output "${EXPECTED_TESTS[@]}")
     lib_command=("$IRP_S1_LIB_BIN" --exact --test-threads=1 --show-output "$REDUCE_TEST")
@@ -193,6 +207,11 @@ run() {
   else
     hex_command=(cargo test --locked -j 12 -p fs-solid --test hex -- --exact --test-threads=1 --show-output "${HEX_TESTS[@]}")
   fi
+  if [[ -n "${IRP_S1_VISCO_BIN:-}" ]]; then
+    visco_command=("$IRP_S1_VISCO_BIN" --exact --test-threads=1 --show-output "${VISCO_TESTS[@]}")
+  else
+    visco_command=(cargo test --release --locked -j 12 -p fs-solid --test visco_elements -- --exact --test-threads=1 --show-output "${VISCO_TESTS[@]}")
+  fi
   {
     printf 'host=%s\ngit_head=%s\nstarted_utc=%s\n' "$host" "$git_head" "$started"
     printf '%q ' "${tet_command[@]}"; printf '\n'
@@ -201,6 +220,7 @@ run() {
     printf '%q ' "${outline_command[@]}"; printf '\n'
     printf '%q ' "${arching_command[@]}"; printf '\n'
     printf '%q ' "${hex_command[@]}"; printf '\n'
+    printf '%q ' "${visco_command[@]}"; printf '\n'
     printf '%q ' cargo test --locked -j 12 -p fs-sparse --test nested_dissection -- --exact --test-threads=1 --show-output "${ND_TESTS[@]}"; printf '\n'
     printf '%q ' cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}"; printf '\n'
     printf '%q ' cargo test --release --locked -j 12 -p fs-mesh --test solid_parts --test tet_improve -- --exact --test-threads=1 --show-output "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}"; printf '\n'
@@ -228,6 +248,9 @@ run() {
   (cd "$REPO_ROOT" && "${hex_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  (cd "$REPO_ROOT" && "${visco_command[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
   set +e
   (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-sparse --test nested_dissection -- --exact --test-threads=1 --show-output "${ND_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
@@ -251,7 +274,7 @@ run() {
   for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}" "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}" "${GMSH_TESTS[@]}" "$STEP_TEST" "${CROSSCHECK_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then missing=1; fi
   done
-  for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do
+  for test in "${EXPECTED_TESTS[@]}" "${VISCO_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then
       printf 'missing or failed: %s\n' "$test" >&2; missing=1
     fi
