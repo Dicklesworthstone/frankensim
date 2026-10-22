@@ -1,4 +1,6 @@
 //! Fixed-budget adaptive pilots followed by independent, frozen production.
+mod checkpoint;
+
 use core::fmt::Display;
 use fs_evidence::Color;
 use super::{ImportanceFitConfig, ImportanceFitError, ImportanceProposalFit};
