@@ -112,10 +112,12 @@ pub use power::{
 pub use radiation::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
     AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
-    CoupledRadiationConfig, CoupledRadiationReport, CoupledRadiationSolution, EMISSIVITY_DIMS,
+    ConvectiveEnclosureSolution, CoupledRadiationConfig, CoupledRadiationReport,
+    CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
     RadiosityReport, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance, solve_with_gray_diffuse_enclosure,
+    solve_with_convective_gray_diffuse_enclosure,
 };
 pub use reduced_slab::{
     FirstModeSlabError, FirstModeSlabInput, FirstModeSlabStep, step_first_mode_slab_cooling,

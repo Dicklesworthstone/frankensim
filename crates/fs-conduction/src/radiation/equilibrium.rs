@@ -39,16 +39,20 @@ fn poll(cx: &Cx<'_>) -> Result<(), ConductionError> {
 /// Called only on an actual candidate from this exact immutable enclosure.
 /// Reuse its factorization, but never its previous temperature-dependent RHS.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn check(
+pub(super) fn check<F>(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
-    enclosure: &GrayDiffuseEnclosure,
     prepared: &PreparedRadiosity<'_>,
     candidate: &ConductionSolution,
     surface_temperatures_k: &[f64],
     applied: &RadiosityReport,
-) -> Result<EnclosureEquilibriumReport, ConductionError> {
+    apply_boundary: &F,
+    original_convection: Option<&GrayDiffuseEnclosure>,
+) -> Result<EnclosureEquilibriumReport, ConductionError>
+where
+    F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
+{
     poll(cx)?;
     let nonlinear = prepared.solve(cx, surface_temperatures_k)?;
     let mut max_patch_heat_mismatch_w = 0.0f64;
@@ -70,10 +74,10 @@ pub(super) fn check(
         return Err(radiation_error("enclosure-equilibrium", "nonfinite nonlinear radiation report",
             "retain finite physical radiation and conduction inputs"));
     }
-    let rows = enclosure.surfaces.iter().zip(&nonlinear.net_outward_flux_w_m2)
-        .map(|(surface, &flux)| (surface.name.clone(), surface.face_slots.clone(), flux))
-        .collect::<Vec<_>>();
-    let boundary = problem.boundary.with_uniform_outward_flux_overlays(problem.mesh, &rows)?;
+    let boundary = match original_convection {
+        Some(_) => problem.boundary.clone(),
+        None => apply_boundary(&nonlinear)?,
+    };
     let dofs = DofMap::new(&boundary, problem.mesh.vertex_count())?;
     // Crucially retain the original heterogeneous k(T), contact and source.
     // The matrix is assembled at T, not at the preceding radiation driver.
@@ -81,7 +85,29 @@ pub(super) fn check(
         problem.material, problem.source, &candidate.temperature, None, interfaces,
         problem.element_materials)?;
     poll(cx)?;
-    let values = residual(&system, &dofs, &candidate.temperature);
+    let mut values = residual(&system, &dofs, &candidate.temperature);
+    if let Some(enclosure) = original_convection {
+        // Reassemble the ORIGINAL convection and add actual radiative loads
+        // directly. Reconstructing a shifted Robin reference here could hide
+        // radiation when q/h rounds away against the reservoir temperature.
+        // Uniform outward flux contributes +area*q/3 to every face vertex.
+        for (surface, &flux) in enclosure.surfaces.iter().zip(&nonlinear.net_outward_flux_w_m2) {
+            for (ordinal, &slot) in surface.face_slots.iter().enumerate() {
+                if ordinal % crate::assemble::ASSEMBLY_TILE == 0 { poll(cx)?; }
+                let face = &problem.mesh.boundary()[slot];
+                let nodal_heat = face.area * (flux / 3.0);
+                if !nodal_heat.is_finite() {
+                    return Err(radiation_error(surface.name(), "nonfinite radiative nodal load",
+                        "use supported finite heat flux and surface geometry"));
+                }
+                for &vertex in &face.vertices {
+                    if let Some(index) = dofs.slot_of(vertex as usize) {
+                        values[index] += nodal_heat;
+                    }
+                }
+            }
+        }
+    }
     if values.iter().any(|v| !v.is_finite()) {
         return Err(radiation_error("enclosure-equilibrium", "nonfinite reassembled residual",
             "inspect the original physical model and numerical range"));

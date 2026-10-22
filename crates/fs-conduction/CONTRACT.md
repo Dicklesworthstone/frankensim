@@ -84,6 +84,19 @@ own evidence. These radiation rungs
 retain and enforce the selected emissivity claim's temperature-validity
 interval.
 
+`solve_with_convective_gray_diffuse_enclosure` explicitly composes that same
+closed-enclosure exchange with original convection on each exact same-named
+uniform Robin trace. A frozen radiative flux is represented by the algebraic
+reference `T_air - q_rad/h`; it is never an air temperature. The original
+radiosity/solid fixed point and final nonlinear residual gate remain the solver
+owners. The result retains the exact combined boundary and separately reports
+original convective heat for air coupling. Only that separated heat goes to
+air; closed-enclosure radiation remains internal exchange. Partial/nodal
+convective traces, non-Robin laws, nonpositive reservoir temperatures and
+unrepresentable composition refuse. No coupled radiation adjoint follows from
+the shifted boundary. `tests/radiation/convection.rs` checks an independent
+two-slab heat balance, channel separation, exact replay and admission/refusal.
+
 `estimate_diffuse_view_factors` samples area and cosine-weighted outward
 directions using independent Owen-scrambled Sobol replicates. Every boundary
 triangle remains an opaque first-hit obstacle, even when it is not a named
@@ -191,6 +204,7 @@ diameter.
 | `ViewFactorProjection` / `ProjectedViewFactors` | explicit sampled-matrix conservation correction with actual adjustment, work and geometry-QMC evidence retained |
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
+| `ConvectiveEnclosureSolution` | the same steady enclosure solver on exact original uniform Robin traces, with the actual combined boundary and separately identified convective heat for air coupling |
 | `AmbientRadiationPatch` / `AmbientRadiationConfig` / `AmbientRadiationSolution` | nonlinear ambient patch radiation sharing the original uniform Robin trace, with separate convection/radiation accounting, heterogeneous material and finite contact preserved, independent temperature/watt gates and exact final binding |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them. `from_claims_pinned` samples one explicit claim pin at every knot and still refuses invalid or out-of-domain use |
 | `LumpedThermalTransport` | reduced-body transport: explicitly provenance-free declared constants, sourced conductivity/emissivity, or sourced conductivity with radiation explicitly disabled; every active property receipt is retained, sampled models refuse extrapolation and bind to the same card as the phase curve |
@@ -833,9 +847,11 @@ authority.
   temperature and uses that mean's fourth power, so it neither computes nor
   bounds `area_mean(T⁴) - area_mean(T)⁴`.
 - THE ENCLOSURE COUPLING IS PARTITIONED. It applies one face-uniform frozen
-  flux per named P1 trace in an under-relaxed outer fixed point, and only to
-  faces that were explicit adiabatic remainder in the base boundary. It cannot
-  add radiation to an existing Robin/Neumann/Dirichlet row, cannot represent a
+  flux per named P1 trace in an under-relaxed outer fixed point. The original
+  radiation-only entry point requires explicit adiabatic-remainder faces;
+  the convective entry point explicitly composes exact uniform Robin traces
+  with separate air/radiation accounting. Neither overwrites an undeclared
+  physical row or adds radiation to Neumann/Dirichlet rows, nor represents a
   spatially varying trace flux, and is not a monolithic nonlinear operator.
   The report retains input emissivity uncertainty and measures the linearized
   point discrepancy, but it does not propagate a nonlinear radiosity or

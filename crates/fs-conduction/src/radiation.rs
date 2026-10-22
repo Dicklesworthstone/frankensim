@@ -38,10 +38,12 @@ use crate::solve::{
 };
 
 mod ambient;
+mod convection;
 mod prepared;
 mod equilibrium;
 pub use prepared::PreparedRadiosity;
 pub use equilibrium::EnclosureEquilibriumReport;
+pub use convection::{ConvectiveEnclosureSolution, solve_with_convective_gray_diffuse_enclosure};
 pub mod view_factors;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
@@ -1292,6 +1294,33 @@ pub fn solve_with_gray_diffuse_enclosure(
     conduction_config: SolveConfig,
     coupling_config: CoupledRadiationConfig,
 ) -> Result<CoupledRadiationSolution, ConductionError> {
+    let apply_boundary = |radiosity: &RadiosityReport| {
+        let rows = enclosure.surfaces.iter().zip(&radiosity.net_outward_flux_w_m2)
+            .map(|(surface, &flux)| (surface.name.clone(), surface.face_slots.clone(), flux))
+            .collect::<Vec<_>>();
+        problem.boundary.with_uniform_outward_flux_overlays(problem.mesh, &rows)
+    };
+    solve_enclosure(cx, problem, interfaces, enclosure, conduction_config, coupling_config,
+        &apply_boundary, false).map(|(solution, _)| solution)
+}
+
+// Both physical boundary choices use the same radiosity/solid iteration and
+// final nonlinear residual gate. The callback only composes a frozen load;
+// it neither evolves state nor changes the solid/material/contact owner.
+#[allow(clippy::too_many_arguments)]
+fn solve_enclosure<F>(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    enclosure: &GrayDiffuseEnclosure,
+    conduction_config: SolveConfig,
+    coupling_config: CoupledRadiationConfig,
+    apply_boundary: &F,
+    convection: bool,
+) -> Result<(CoupledRadiationSolution, crate::ThermalBoundary), ConductionError>
+where
+    F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
+{
     coupling_config.validate()?;
     enclosure.validate_for(problem.mesh)?;
     let mut conduction = run_conduction(cx, problem, interfaces, conduction_config.clone())?;
@@ -1309,19 +1338,11 @@ pub fn solve_with_gray_diffuse_enclosure(
             at: iteration,
         })?;
         let radiosity = prepared.solve(cx, &driving_temperatures)?;
-        let rows = enclosure
-            .surfaces
-            .iter()
-            .zip(&radiosity.net_outward_flux_w_m2)
-            .map(|(surface, &flux)| (surface.name.clone(), surface.face_slots.clone(), flux))
-            .collect::<Vec<_>>();
-        let overlaid = problem
-            .boundary
-            .with_uniform_outward_flux_overlays(problem.mesh, &rows)?;
+        let overlaid = apply_boundary(&radiosity)?;
         let dofs = DofMap::new(&overlaid, problem.mesh.vertex_count())?;
         let mut next_config = conduction_config.clone();
         next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
-        // Radiation replaces boundary loads, not the solid's material laws.
+        // Radiation changes boundary loads, not the solid's material laws.
         // Retain heterogeneous assignments (including k(T)) on EVERY iterate.
         let next_problem = ConductionProblem {
             boundary: &overlaid,
@@ -1354,12 +1375,13 @@ pub fn solve_with_gray_diffuse_enclosure(
         update_history.push(update);
         conduction = next;
         if update <= threshold {
-            let equilibrium = equilibrium::check(cx, problem, interfaces, enclosure,
-                &prepared, &conduction, &actual_temperatures, &radiosity)?;
+            let equilibrium = equilibrium::check(cx, problem, interfaces,
+                &prepared, &conduction, &actual_temperatures, &radiosity, apply_boundary,
+                convection.then_some(enclosure))?;
             equilibrium_checks += 1;
             last_equilibrium_residual = Some(equilibrium.residual_w);
             if equilibrium.residual_w <= equilibrium.residual_threshold_w {
-                return Ok(CoupledRadiationSolution {
+                return Ok((CoupledRadiationSolution {
                     conduction,
                     radiation: CoupledRadiationReport {
                         iterations: iteration + 1,
@@ -1369,7 +1391,7 @@ pub fn solve_with_gray_diffuse_enclosure(
                         equilibrium,
                         equilibrium_checks,
                     },
-                });
+                }, overlaid));
             }
         }
         for (driving, actual) in driving_temperatures.iter_mut().zip(actual_temperatures) {

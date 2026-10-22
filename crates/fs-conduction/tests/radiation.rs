@@ -1044,3 +1044,6 @@ fn emissivity_query_uses_absolute_temperature_dimensions() {
 
 #[path = "radiation/material_assignment.rs"]
 mod material_assignment;
+
+#[path = "radiation/convection.rs"]
+mod convection;
