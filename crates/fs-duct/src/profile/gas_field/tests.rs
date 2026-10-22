@@ -254,7 +254,8 @@ fn material_wall_and_composition_field_share_fourth_order_propagation() {
     }
     assert!(errors[3] < 2e-7, "{errors:?}");
     let rigid = solve(&fine, None);
-    let stiff = solve(&fine, Some(&WallPin { stiffness_per_area: 2.0 * wall.stiffness_per_area, ..wall }));
+    let stiffer = WallPin { stiffness_per_area: 2.0 * wall.stiffness_per_area, ..wall };
+    let stiff = solve(&fine, Some(&stiffer));
     assert!(relative(rigid.impedance, reference.impedance) > 1e-3);
     assert!(relative(stiff.impedance, reference.impedance) > 1e-3);
     assert!(reference.impedance.re > 0.0);
