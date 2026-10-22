@@ -13,6 +13,7 @@ mod design;
 mod qmc;
 mod sensitivity;
 mod mean_control;
+mod polynomial;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -24,6 +25,7 @@ pub(super) struct Options {
     qmc_replicates: Option<usize>,
     sobol_sensitivity: bool,
     adjoint_mean_control: bool,
+    polynomial: Option<polynomial::Settings>,
 }
 
 impl Options {
@@ -36,7 +38,9 @@ impl Options {
         while index < args.len() {
             let flag = &args[index];
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
-            if flag == "--mean-control" && !options.adjoint_mean_control {
+            if flag == "--pce" && options.polynomial.is_none() {
+                options.polynomial = Some(polynomial::Settings::parse(value)?);
+            } else if flag == "--mean-control" && !options.adjoint_mean_control {
                 if value != "adjoint" { return Err(bad("--mean-control supports only adjoint")); }
                 options.adjoint_mean_control = true;
             } else if flag == "--qmc-replicates" && options.qmc_replicates.is_none() {
@@ -93,6 +97,7 @@ impl Options {
             || options.sobol_sensitivity) {
             return Err(bad("adjoint mean control requires a fixed-count Monte Carlo plan; no sequential decisions, QMC, sensitivity or candidate selection"));
         }
+        polynomial::validate_options(&options)?;
         Ok(options)
     }
 
@@ -141,6 +146,9 @@ pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
 pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
+    if let Some(settings) = options.polynomial {
+        return polynomial::execute(&base, &config, settings);
+    }
     if options.sobol_sensitivity {
         return sensitivity::execute(base_text, &base, &config, options);
     }
