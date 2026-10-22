@@ -753,13 +753,11 @@ fn ag_011_arching_second_order_and_existing_mesh_lift() {
     )
     .unwrap();
     use fs_plate::shell::arching::{
-        ArchingParameters, ArchingSurface as PlateArch, ReferenceLoadState,
+        ArchingParameters, ArchingSurface as PlateArch, ReferenceLoadState, ThicknessField,
     };
-    let arch = PlateArch::new(
-        ArchingParameters::NurbsHeightMap(a.surface().clone()),
-        ReferenceLoadState::Unloaded,
-    )
-    .unwrap();
+    // The one measured route: the generator's own graph and load state.
+    let arch = PlateArch::from_measured(&a).unwrap();
+    assert!(ThicknessField::from_measured(&a).is_err());
     // 25 controls x 4 homogeneous coordinates x 5 evaluations: a node on a
     // seam corner of this degree-one chart needs four one-sided partials and
     // its exact point. The hole's axis points lie on the x = 0 and y = 0 seams.
@@ -769,6 +767,7 @@ fn ag_011_arching_second_order_and_existing_mesh_lift() {
         max_feature_evaluations: 500 * plate.nodes.len(),
     };
     let lifted = arch.lift(&plate, budget, || false).unwrap();
+    assert_eq!(lifted.reference_state, ReferenceLoadState::Unloaded);
     assert_eq!(lifted.mesh.tris, plate.tris);
     for ((x, y), p) in plate.nodes.iter().zip(&lifted.mesh.nodes) {
         assert_eq!(p[0].to_bits(), x.to_bits());
@@ -805,6 +804,57 @@ fn ag_011_arching_second_order_and_existing_mesh_lift() {
     )
     .unwrap();
     assert!(invalid.sample([0.5, 0.5]).is_err());
+    // Measured graduation and a loaded state lower with the same source: the
+    // nodal thickness is the generator's own value, and the shell admits it.
+    let (x, y) = a.axes();
+    let thickness = (0..x.len() * y.len())
+        .map(|k| {
+            dimension(
+                &format!("t{k}"),
+                0.003 + 0.0005 * (k % 3) as f64,
+                0.0002,
+                LENGTH,
+            )
+        })
+        .collect();
+    let graded = ArchingSurface::new(
+        LABEL.into(),
+        x.to_vec(),
+        y.to_vec(),
+        a.contour_heights().to_vec(),
+        Some(thickness),
+        ReferenceState::Strung,
+        B,
+    )
+    .unwrap();
+    let shell_lift = PlateArch::from_measured(&graded)
+        .unwrap()
+        .lift(&plate, budget, || false)
+        .unwrap();
+    assert_eq!(
+        shell_lift.reference_state,
+        ReferenceLoadState::Loaded {
+            description: format!("{LABEL} (Strung)")
+        }
+    );
+    let nodal = ThicknessField::from_measured(&graded)
+        .unwrap()
+        .sample_mesh(&plate, plate.nodes.len(), || false)
+        .unwrap();
+    for (&(x, y), &t) in plate.nodes.iter().zip(&nodal) {
+        assert!((t - graded.thickness_at([x, y]).unwrap().value.value).abs() < 1e-14);
+    }
+    use fs_plate::shell::survey::{IsotropicMaterial, MeshShell, SurveyMaterial};
+    let materials = vec![
+        SurveyMaterial::Isotropic(IsotropicMaterial {
+            young_pa: 1e10,
+            poisson: 0.3,
+            density_kg_m3: 450.0
+        });
+        plate.tris.len()
+    ];
+    let shell = MeshShell::new_with_materials(shell_lift.mesh, nodal, &materials, budget).unwrap();
+    assert_eq!(shell.mesh.tris, plate.tris);
 }
 
 #[test]

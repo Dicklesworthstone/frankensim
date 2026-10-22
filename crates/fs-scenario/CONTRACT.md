@@ -104,6 +104,10 @@ flagships.
   unmeasured interpolation/model discrepancy. Unknown dimensions have no default.
   There is no fs-mesh/fs-plate runtime dependency: polygons feed the existing
   planar mesher, and shared NURBS graphs feed fs-plate's existing arching lift.
+  Measured thickness gets its own degree-one graph on the same knots, and
+  `thickness_at` evaluates it. fs-plate's `from_measured` lowering (its
+  optional `scenario` feature) therefore shares one interpolant per field with
+  this crate; nothing is refitted downstream.
   Metadata construction is synchronous and capped before traversal; bore
   sampling polls before allocation and per station/segment without publishing
   partial results. Tests `ag_001`–`ag_012` in `assembly_generators.rs` cover G0

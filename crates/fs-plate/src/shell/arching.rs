@@ -466,5 +466,7 @@ impl ThicknessField {
     }
 }
 
+#[cfg(feature = "scenario")]
+mod measured;
 #[cfg(test)]
 mod tests;

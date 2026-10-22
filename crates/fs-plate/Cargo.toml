@@ -16,7 +16,13 @@ fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-nurbs = { path = "../fs-rep-nurbs" }
+# Lowering of the M6.1-W2 measured arching generator. Optional, so fs-plate
+# alone does not build fs-scenario's graph (fs-mesh, fs-motion, ...).
+fs-scenario = { path = "../fs-scenario", optional = true }
 fs-sparse = { path = "../fs-sparse" }
+
+[features]
+scenario = ["dep:fs-scenario"]
 
 [dev-dependencies]
 fs-mesh = { path = "../fs-mesh" }

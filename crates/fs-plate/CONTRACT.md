@@ -170,6 +170,17 @@ The bicubic C1 claim above applies only to the bicubic path.
 `fs-scenario::assembly_generators::ag_011_arching_second_order_and_existing_mesh_lift`
 tests the measured outline → existing mesher → shared NURBS → existing lift.
 
+With the optional `scenario` feature, `ArchingSurface::from_measured` and
+`ThicknessField::from_measured` lower fs-scenario's measured `ArchingSurface`
+generator, the one owner of measured arching and graduation. They take its
+height and thickness graphs and its declared reference state: `Unloaded`, or
+`Loaded` described by the source label and state. The caller declares nothing,
+and a source without a thickness table refuses. The feature is optional, so
+fs-plate alone does not build fs-scenario's graph. The section and bicubic charts above carry no
+source dimensions, bounds or ledger rows. They are declared-parameter charts
+(M1.2-W6), so measured geometry with provenance arrives only through this
+lowering.
+
 `shell::junction` (IRP M1.2-W2a) couples smooth `ShellComponent` charts along
 1-D edge polylines (`EdgeTie`) or 2-D overlapping patches (`FaceTie`) without
 averaging nodal directors across fold seams. On each 1-D seam, the Wohlmuth

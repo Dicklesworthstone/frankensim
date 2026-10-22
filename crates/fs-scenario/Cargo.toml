@@ -35,7 +35,7 @@ fs-alloc = { path = "../fs-alloc" }
 fs-assimilate = { path = "../fs-assimilate" }
 fs-ledger = { path = "../fs-ledger" }
 fs-mesh = { path = "../fs-mesh" }
-fs-plate = { path = "../fs-plate" }
+fs-plate = { path = "../fs-plate", features = ["scenario"] }
 
 [lints]
 workspace = true

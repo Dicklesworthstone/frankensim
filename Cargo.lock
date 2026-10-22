@@ -2248,6 +2248,7 @@ dependencies = [
  "fs-qty",
  "fs-rand",
  "fs-rep-nurbs",
+ "fs-scenario",
  "fs-sparse",
 ]
 

@@ -15,6 +15,27 @@ pub struct ArchingSurface {
     thickness: Option<Vec<MeasuredDimension>>,
     reference_state: ReferenceState,
     surface: Arc<NurbsSurface<f64>>,
+    thickness_surface: Option<Arc<NurbsSurface<f64>>>,
+}
+/// The degree-one tensor graph through every table value, with physical x/y
+/// as its parameters. Heights and thickness share this one interpolant.
+fn graph(
+    xs: &[f64],
+    ys: &[f64],
+    values: &[MeasuredDimension],
+) -> Result<Arc<NurbsSurface<f64>>, GeneratorError> {
+    let points: Vec<Vec<_>> = (0..xs.len())
+        .map(|i| {
+            (0..ys.len())
+                .map(|j| [xs[i], ys[j], values[j * xs.len() + i].value.value])
+                .collect()
+        })
+        .collect();
+    let weights = vec![vec![1.0; ys.len()]; xs.len()];
+    Ok(Arc::new(
+        NurbsSurface::new(linear_knots(xs)?, linear_knots(ys)?, &points, &weights)
+            .map_err(|e| bad(e.to_string()))?,
+    ))
 }
 impl ArchingSurface {
     pub const FORMAL_ORDER: u32 = 2;
@@ -74,18 +95,11 @@ impl ArchingSurface {
         }
         let xs: Vec<_> = x.iter().map(|d| d.value.value).collect();
         let ys: Vec<_> = y.iter().map(|d| d.value.value).collect();
-        let points: Vec<Vec<_>> = (0..x.len())
-            .map(|i| {
-                (0..y.len())
-                    .map(|j| [xs[i], ys[j], heights[j * x.len() + i].value.value])
-                    .collect()
-            })
-            .collect();
-        let weights = vec![vec![1.0; y.len()]; x.len()];
-        let surface = Arc::new(
-            NurbsSurface::new(linear_knots(&xs)?, linear_knots(&ys)?, &points, &weights)
-                .map_err(|e| bad(e.to_string()))?,
-        );
+        let surface = graph(&xs, &ys, &heights)?;
+        let thickness_surface = thickness
+            .as_deref()
+            .map(|values| graph(&xs, &ys, values))
+            .transpose()?;
         Ok(Self {
             label,
             x,
@@ -94,11 +108,22 @@ impl ArchingSurface {
             thickness,
             reference_state,
             surface,
+            thickness_surface,
         })
     }
-    /// Shared immutable graph consumed by fs-plate's existing ArchingSurface.
+    /// The source label: a ledger-backed description or a `test-fixture:`.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    /// Shared immutable height graph, lowered by fs-plate's
+    /// `ArchingSurface::from_measured`.
     pub fn surface(&self) -> &Arc<NurbsSurface<f64>> {
         &self.surface
+    }
+    /// The measured graduation on the same degree-one graph, lowered by
+    /// fs-plate's `ThicknessField::from_measured`; `None` when unmeasured.
+    pub fn thickness_surface(&self) -> Option<&Arc<NurbsSurface<f64>>> {
+        self.thickness_surface.as_ref()
     }
     pub fn axes(&self) -> (&[MeasuredDimension], &[MeasuredDimension]) {
         (&self.x, &self.y)
@@ -162,21 +187,22 @@ impl ArchingSurface {
                 self.inputs(thickness),
             );
         }
-        let mut value = 0.0;
         let mut enclosure = Interval::point(0.0);
         for (dx, wx) in [(0, 1.0 - t), (1, t)] {
             for (dy, wy) in [(0, 1.0 - u), (1, u)] {
                 let d = &values[(j + dy) * self.x.len() + i + dx];
-                value += wx * wy * d.value.value;
                 enclosure = enclosure + Interval::point(wx) * Interval::point(wy) * d.interval();
             }
         }
-        if !thickness {
-            value = self
-                .surface
-                .eval(p[0], p[1])
-                .map_err(|e| bad(e.to_string()))?[2];
-        }
+        // The value is the same graph fs-plate lowers, never a second fit.
+        let chart = if thickness {
+            self.thickness_surface
+                .as_ref()
+                .ok_or_else(|| bad("no measured thickness field"))?
+        } else {
+            &self.surface
+        };
+        let value = chart.eval(p[0], p[1]).map_err(|e| bad(e.to_string()))?[2];
         DerivedDimension::new(value, enclosure, LENGTH, self.inputs(thickness))
     }
     /// Bounds follow the same normalized cell coordinate as uncertain axes;
