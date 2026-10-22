@@ -397,7 +397,9 @@ fn main() -> Result<()> {
         println!("meta {k} = {v}");
     }
     if drilling_alpha != DRILLING_ALPHA {
-        println!("drilling_alpha = {drilling_alpha:e} (declared sensitivity; the default is {DRILLING_ALPHA:e})");
+        println!(
+            "drilling_alpha = {drilling_alpha:e} (declared sensitivity; the default is {DRILLING_ALPHA:e})"
+        );
     }
     let gate = CancelGate::new_clock_free();
     let requested = requirements()?;
