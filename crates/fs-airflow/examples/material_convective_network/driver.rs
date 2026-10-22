@@ -133,3 +133,6 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod exchange_tests;
