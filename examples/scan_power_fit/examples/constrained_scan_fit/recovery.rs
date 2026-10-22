@@ -39,7 +39,7 @@ impl Recovery {
             Ok(bytes)
         }).transpose()
     }
-    /// Bind actual executable bytes and both variable physical limits. Fixed
+    /// Bind actual executable bytes, physical limits and time discretization. Fixed
     /// model, solver and target settings are compiled into that executable.
     /// Fixed-size blocks make the identity independent of short filesystem reads.
     pub fn model(&self, cx: &Cx<'_>, input: Options) -> Result<[u8; 32]> {
@@ -68,6 +68,11 @@ impl Recovery {
         roots.extend_from_slice(&size.to_le_bytes());
         roots.extend_from_slice(&input.energy_j.to_bits().to_le_bytes());
         roots.extend_from_slice(&input.peak_fraction.to_bits().to_le_bytes());
+        roots.push(u8::from(input.power_slew.is_some()));
+        if let Some(rates) = input.power_slew {
+            for rate in rates { roots.extend_from_slice(&rate.to_bits().to_le_bytes()); }
+            roots.extend_from_slice(&(input.ramp_steps as u64).to_le_bytes());
+        }
         Ok(*fs_blake3::hash_domain("constrained-scan-fit-model-v1", &roots).as_bytes())
     }
     pub fn save(&self, bytes: &[u8]) -> Result<()> {

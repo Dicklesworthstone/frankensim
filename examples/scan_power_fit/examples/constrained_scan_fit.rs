@@ -3,7 +3,7 @@
 use scan_power_fit::population::{PopulationScanReplay, PopulationScanStudy};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
 use fs_ascent::scan_design::constraints::{ScanEnergyCap, ScanStateBound, ScanPeakBound,
-    ScanResponse, ScanPeakResponse};
+    ScanResponse, ScanPeakResponse, ScanPowerSlewBound};
 use fs_ascent::scan_design::constraints::value::{ValueConstrainedScanStudy, ScanValueConstraintBudget};
 use fs_ascent::scan_design::value::ScanValueResponseBudget;
 use fs_blake3::ContentHash;
@@ -35,12 +35,34 @@ use recovery::{Recovery, MAX_BYTES};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-8;
 const TOLERANCE: f64 = 1e-9;
-const USAGE: &str = "constrained_scan_fit [--workers 1..128] [energy_cap_J [peak_fraction [search_attempts]]] [--checkpoint FILE [--pause-after N]] [--resume FILE]";
+const USAGE: &str = "constrained_scan_fit [--workers 1..128] [--power-slew RISE_W_PER_S FALL_W_PER_S [--ramp-steps 8..128]] [energy_cap_J [peak_fraction [search_attempts]]] [--checkpoint FILE [--pause-after N]] [--resume FILE]";
 #[derive(Clone, Copy)]
-struct Options { energy_j: f64, peak_fraction: f64, attempts: usize, workers: Option<usize> }
+struct Options {
+    energy_j: f64, peak_fraction: f64, attempts: usize, workers: Option<usize>,
+    power_slew: Option<[f64; 2]>, ramp_steps: usize,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self { energy_j:60.0, peak_fraction:0.5, attempts:2400, workers:None,
+            power_slew:None, ramp_steps:16 }
+    }
+}
+impl Options {
+    fn endpoints(self) -> Vec<f64> {
+        if self.power_slew.is_some() {
+            (1..=3*self.ramp_steps).map(|i| i as f64 / self.ramp_steps as f64).collect()
+        } else { vec![1.0, 2.0] }
+    }
+    fn observation_endpoints(self) -> [usize; 2] {
+        if self.power_slew.is_some() { [2*self.ramp_steps-1, 3*self.ramp_steps-1] }
+        else { [0, 1] }
+    }
+}
 fn options(args: &[String]) -> Result<Options> {
     let mut values = Vec::new();
     let mut workers = None;
+    let mut power_slew = None;
+    let mut ramp_steps = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -48,16 +70,33 @@ fn options(args: &[String]) -> Result<Options> {
                 i += 1;
                 workers = Some(args.get(i).ok_or(USAGE)?.parse::<usize>()?);
             }
+            "--power-slew" if power_slew.is_none() => {
+                let rise = args.get(i+1).ok_or(USAGE)?.parse::<f64>()?;
+                let fall = args.get(i+2).ok_or(USAGE)?.parse::<f64>()?;
+                if [rise,fall].iter().any(|v| !v.is_finite() || *v < 0.0) {
+                    return Err("power slew limits must be finite nonnegative W/s".into());
+                }
+                power_slew = Some([rise,fall]);
+                i += 2;
+            }
+            "--ramp-steps" if ramp_steps.is_none() => {
+                i += 1;
+                ramp_steps = Some(args.get(i).ok_or(USAGE)?.parse::<usize>()?);
+            }
             value if !value.starts_with("--") => values.push(value),
             _ => return Err(USAGE.into()),
         }
         i += 1;
     }
-    if values.len() > 3 || workers.is_some_and(|n| !(1..=128).contains(&n)) { return Err(USAGE.into()); }
+    if values.len() > 3 || workers.is_some_and(|n| !(1..=128).contains(&n))
+        || ramp_steps.is_some_and(|n| !(8..=128).contains(&n))
+        || (ramp_steps.is_some() && power_slew.is_none())
+    { return Err(USAGE.into()); }
     let energy_j = values.first().map(|s| s.parse()).transpose()?.unwrap_or(60.0);
     let peak_fraction = values.get(1).map(|s| s.parse()).transpose()?.unwrap_or(0.5);
     let attempts = values.get(2).map(|s| s.parse()).transpose()?.unwrap_or(2400);
-    let out = Options { energy_j, peak_fraction, attempts, workers };
+    let out = Options { energy_j, peak_fraction, attempts, workers, power_slew,
+        ramp_steps:ramp_steps.unwrap_or(16) };
     if !out.energy_j.is_finite() || out.energy_j < 0.0 || out.energy_j > 100.0
         || !out.peak_fraction.is_finite() || !(0.0..=1.0).contains(&out.peak_fraction)
         || !(32..=10_000).contains(&out.attempts)
@@ -92,16 +131,24 @@ fn fit_with_recovery(cx: &Cx<'_>, input: Options, partitioned: bool, recovery: &
     let boundary = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&mesh)
         .remainder("surface", ThermalBc::adiabatic())?, &Environment::earth_lab(), vec![], 0.)?;
     let readout = ScanReadout::volume_mean(cx, &mesh, &[0,1,2,3,4,5], 6)?;
-    let observations: Vec<_> = [0.1,0.3].into_iter().enumerate().map(|(endpoint,target)|
+    let endpoints = input.endpoints();
+    let steps = endpoints.len();
+    let horizon_s = *endpoints.last().ok_or("missing thermal endpoints")?;
+    let observation_endpoints = input.observation_endpoints();
+    let observations: Vec<_> = observation_endpoints.into_iter().zip([0.1,0.3]).map(|(endpoint,target)|
         ScanSpatialObservation { endpoint, readout:readout.clone(),
             observable:ScanObservable::LiquidMassFraction, target, scale:0.1 }).collect();
     let length = Dims([1,0,0,0,0,0]);
     // All eight vertices have equal footprint weights: the analytic mean
     // balance is available as an oracle, not as a replacement solver.
+    // Rate-limited mode starts AND ends at fixed zero watts. Its final second
+    // is physically simulated; shutdown heat cannot disappear from state limits.
+    let (times, values, interp, control_values) = if input.power_slew.is_some() {
+        (vec![0.,1.,2.,3.], vec![0.;4], Interp::Linear, [1,2])
+    } else { (vec![0.,1.,2.], vec![0.;3], Interp::Hold, [0,1]) };
     let source = MovingHeatSource::new(
         std::array::from_fn(|_| TimeSignal::Constant(QtyAny::new(0.5, length))), [2.;3],
-        TimeSignal::Table { times:vec![0.,1.,2.], values:vec![0.;3],
-            dims:COMPONENT_POWER_DIMS, interp:Interp::Hold }, 0.,
+        TimeSignal::Table { times, values, dims:COMPONENT_POWER_DIMS, interp }, 0.,
         MovingHeatBudget { max_vertices:8, max_elements:6, min_active_vertices:1,
             power_relative_tolerance:1e-11 })?;
     let factory = |cx:&Cx<'_>, sources| -> std::result::Result<_, ScanSensitivityError> {
@@ -111,34 +158,38 @@ fn fit_with_recovery(cx: &Cx<'_>, input: Options, partitioned: bool, recovery: &
             EnthalpyHistoryMaterials { table:&[ReferenceEnthalpyMaterial {
                 curve:&curve, reference_density_kg_m3:1. }], of_element:&[0;6], phase_conductivity:None },
             &[80.;8], EnthalpyHistoryBudget {
-                spatial:EnthalpyBudget { max_vertices:8, max_elements:6 }, max_steps:2 })?;
+                spatial:EnthalpyBudget { max_vertices:8, max_elements:6 }, max_steps:steps })?;
         Ok(ScanningEnthalpyRun::new(cx, run, sources, 1, None)?)
     };
     let initial_cap = if partitioned { 7 } else { input.attempts };
     let study = ScanPowerStudy::new_joint_with_power_coordinates(cx, vec![source],
-        vec![ScanPowerControl { source:0, value:0, reference_w:1. },
-            ScanPowerControl { source:0, value:1, reference_w:1. }], vec![],
+        control_values.into_iter().map(|value| ScanPowerControl {
+            source:0, value, reference_w:1. }).collect(), vec![],
         ScanPowerCoordinates::NonnegativeLinear, ScanPowerObjective {
-            endpoints_s:vec![1.,2.], observations, sampling:ScanObjectiveSampling::EventLeft,
+            endpoints_s:endpoints, observations, sampling:ScanObjectiveSampling::EventLeft,
             step:EnthalpyStepConfig { newton:NewtonKrylovConfig { absolute_tolerance:1e-11,
                 relative_tolerance:1e-12, linear_restart:8, max_linear_cycles:16,
                 forcing_minimum:1e-12, forcing_maximum:1e-3, ..Default::default() },
                 max_newton_iterations:64, energy_tolerance_j:1e-8 },
             transpose:LinearConfig { tolerance:1e-10, max_iterations:1000, restart:8 },
-            budget:ScanObjectiveBudget { max_steps:2, max_observations:2,
+            budget:ScanObjectiveBudget { max_steps:steps, max_observations:2,
                 max_retained_vertices:0, max_retained_source_vertices:0,
                 max_schedule_controls:16, max_retained_radiation_entries:0 },
             source_reference_time_s:0.,
         }, factory, initial_cap + 1)?;
-    let study = ValueConstrainedScanStudy::new(cx, study, vec![],
-        vec![ScanEnergyCap { start_time_s:0., end_time_s:2., maximum_j:input.energy_j, scale_j:1. }],
-        vec![ScanStateBound { response:ScanResponse { endpoint:0, vertex:0,
+    let slew_bounds = input.power_slew.map(|[rise,fall]| ScanPowerSlewBound {
+        source:0, maximum_rise_w_s:rise, maximum_fall_w_s:fall, scale_w_s:1.0,
+    }).into_iter().collect();
+    let study = ValueConstrainedScanStudy::new_with_power_slew_bounds(cx, study, vec![],
+        vec![ScanEnergyCap { start_time_s:0., end_time_s:horizon_s, maximum_j:input.energy_j, scale_j:1. }],
+        vec![ScanStateBound { response:ScanResponse { endpoint:observation_endpoints[0], vertex:0,
             observable:ScanObservable::Temperature }, lower:None, upper:Some(311.), scale:1. }],
-        vec![ScanPeakBound { response:ScanPeakResponse { first_endpoint:0, last_endpoint:1,
+        vec![ScanPeakBound { response:ScanPeakResponse { first_endpoint:0, last_endpoint:steps-1,
             vertices:(0..8).collect(), observable:ScanObservable::LiquidMassFraction,
             smoothing_scale:0.001 }, maximum:input.peak_fraction, scale:1. }],
-        ScanValueConstraintBudget { max_rows:5, max_energy_weights:2,
-            responses:ScanValueResponseBudget { max_responses:2, max_peak_samples:16 } })?;
+        slew_bounds, if input.power_slew.is_some() {3} else {0},
+        ScanValueConstraintBudget { max_rows:if input.power_slew.is_some() {11} else {5}, max_energy_weights:2,
+            responses:ScanValueResponseBudget { max_responses:2, max_peak_samples:8*steps } })?;
     let config = DifferentialEvolutionConfig {
         population_size:24, differential_weight:0.8, crossover_probability:0.9, seed:17,
         max_evaluations:initial_cap, max_population_entries:48, target:Some(TARGET),
@@ -214,7 +265,10 @@ fn fit_with_recovery(cx: &Cx<'_>, input: Options, partitioned: bool, recovery: &
     {
         return Err("restored search or physical work exceeds its lifetime allowance".into());
     }
-    if replay.sources[0].absorbed_power_values(3)?[2].to_bits() != 0.0_f64.to_bits() {
+    let exported = replay.sources[0].absorbed_power_values(4)?;
+    if exported.last().copied().map(f64::to_bits) != Some(0.0_f64.to_bits())
+        || (input.power_slew.is_some() && exported[0].to_bits() != 0.0_f64.to_bits())
+    {
         return Err("source export changed the fixed shutdown".into());
     }
     Ok(FitResult::Finished(replay))
@@ -246,12 +300,26 @@ fn main() -> Result<()> {
         result.constraints.absorbed_energy_j[0], result.constraints.sampled_peak_values[0],
         result.constraints.peak_values[0], result.constraints.peak_smoothing_gaps[0]);
     println!("# search_attempts={}; physical_evaluations={}", result.search_evaluations, result.physical_evaluations);
-    println!("start_s,end_s,power_w,mean_liquid_mass_fraction,target");
-    for (i,target) in [0.1,0.3].into_iter().enumerate() {
-        println!("{},{},{:.17e},{:.17e},{}", i, i+1, result.physical.powers_w[i],
-            result.physical.physical.predictions[i], target);
+    if let Some([rise,fall]) = input.power_slew {
+        println!("# power_interpolation=linear; rise_limit_w_s={rise}; fall_limit_w_s={fall}; steps_per_second={}", input.ramp_steps);
+        println!("# signed_segment_rates_w_s={:?}", result.constraints.power_slew_values_w_s);
+        println!("time_s,power_w");
+        for (time,power) in result.sources[0].absorbed_power_values(4)?.into_iter().enumerate() {
+            println!("{time},{power:.17e}");
+        }
+        println!("# thermal_measurements");
+        println!("time_s,mean_liquid_mass_fraction,target");
+        for (i,target) in [0.1,0.3].into_iter().enumerate() {
+            println!("{},{:.17e},{}", i+2, result.physical.physical.predictions[i], target);
+        }
+    } else {
+        println!("start_s,end_s,power_w,mean_liquid_mass_fraction,target");
+        for (i,target) in [0.1,0.3].into_iter().enumerate() {
+            println!("{},{},{:.17e},{:.17e},{}", i, i+1, result.physical.powers_w[i],
+                result.physical.physical.predictions[i], target);
+        }
+        println!("2,2,0,,");
     }
-    println!("2,2,0,,");
     if !result.score.is_feasible() { return Err("search found no feasible design; this is not an infeasibility proof".into()); }
     if !result.target_recovered() { return Err("feasible best-so-far still misses fitting targets; no target recovery or optimum is claimed".into()); }
     Ok(())
@@ -278,7 +346,7 @@ mod tests {
 
     #[test]
     fn g5_saved_thermal_search_reconstructs_model_and_both_work_accounts() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let input = Options { energy_j:45., attempts:80, ..Options::default() };
         let expected = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         let saved = SavedRun::new();
         let paused = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
@@ -302,7 +370,7 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn g5_checkpoint_resume_may_change_worker_count_without_changing_fixed_work_physics() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:Some(4) };
+        let input = Options { energy_j:45., attempts:80, workers:Some(4), ..Options::default() };
         let expected = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         let saved = SavedRun::new();
         let paused = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
@@ -321,7 +389,7 @@ mod tests {
 
     #[test]
     fn g0_recovery_rejects_changed_physics_changed_work_caps_and_corrupt_files() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let input = Options { energy_j:45., attempts:80, ..Options::default() };
         let saved = SavedRun::new();
         with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
             checkpoint:Some(saved.path()), pause_after:Some(7), ..Default::default()
@@ -343,7 +411,7 @@ mod tests {
 
     #[test]
     fn g4_completed_checkpoint_does_not_refund_the_final_physical_replay() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:32, workers:None };
+        let input = Options { energy_j:45., attempts:32, ..Options::default() };
         let saved = SavedRun::new();
         let done = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
             checkpoint:Some(saved.path()), ..Default::default()
@@ -369,7 +437,7 @@ mod tests {
     }
     #[test]
     fn g1_tighter_energy_cap_returns_a_feasible_mismatch_not_a_false_recovery() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:2400, workers:None };
+        let input = Options { energy_j:45., ..Options::default() };
         let result = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         assert!(result.score.is_feasible());
         assert!(!result.target_recovered());
@@ -378,7 +446,7 @@ mod tests {
     }
     #[test]
     fn g5_pause_extension_replays_the_same_population_and_physical_result() {
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let input = Options { energy_j:45., attempts:80, ..Options::default() };
         let a = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         let b = with_cx(|_,cx| fit(cx, input, true)).unwrap();
         assert_eq!(a.coordinates, b.coordinates);
@@ -397,7 +465,7 @@ mod tests {
             assert!(fit(cx, options(&[])?, false).is_err());
             Ok(())
         }).unwrap();
-        let input = Options { energy_j:60., peak_fraction:0., attempts:32, workers:None };
+        let input = Options { peak_fraction:0., attempts:32, ..Options::default() };
         let result = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         assert!(!result.score.is_feasible());
         assert!(!result.target_recovered());
@@ -409,7 +477,7 @@ mod tests {
     fn g5_worker_counts_and_pause_partitions_preserve_constrained_physics_at_fixed_work() {
         // The target cannot be reached under this energy cap, so every mode
         // spends the same prefix; between-wave target stopping is not compared.
-        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let input = Options { energy_j:45., attempts:80, ..Options::default() };
         let serial = with_cx(|_,cx| fit(cx, input, false)).unwrap();
         for workers in [1,4] {
             for partitioned in [false,true] {
@@ -437,5 +505,87 @@ mod tests {
             vec!["--workers", "2", "--workers", "4"], vec!["--worker", "4"]] {
             assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
         }
+    }
+
+    #[test]
+    fn g0_ramped_mode_requires_explicit_finite_rates_and_an_event_aligned_grid() {
+        let original = options(&[]).unwrap();
+        assert!(original.power_slew.is_none());
+        assert_eq!(original.endpoints(), vec![1.0,2.0]);
+        for n in [8,16,31,128] {
+            let args = ["--power-slew".into(), "50".into(), "30".into(),
+                "--ramp-steps".into(), n.to_string()];
+            let input = options(&args).unwrap();
+            assert_eq!(input.power_slew, Some([50.0,30.0]));
+            let times = input.endpoints();
+            assert_eq!(times.len(), 3*n);
+            assert!(times.windows(2).all(|t| t[0] < t[1]));
+            assert_eq!([times[n-1],times[2*n-1],times[3*n-1]], [1.0,2.0,3.0]);
+            assert_eq!(input.observation_endpoints(), [2*n-1,3*n-1]);
+        }
+        for args in [vec!["--power-slew"], vec!["--power-slew","50"],
+            vec!["--power-slew","NaN","30"], vec!["--power-slew","50","-1"],
+            vec!["--power-slew","50","inf"], vec!["--ramp-steps","16"],
+            vec!["--power-slew","50","30","--power-slew","50","30"],
+            vec!["--power-slew","50","30","--ramp-steps","7"],
+            vec!["--power-slew","50","30","--ramp-steps","129"]] {
+            assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
+        }
+    }
+
+    #[test]
+    fn g1_ramped_physical_replay_includes_shutdown_heat_and_every_rate_row() {
+        for n in [8,16] {
+            let input = Options { attempts:80, power_slew:Some([50.0,30.0]),
+                ramp_steps:n, ..Options::default() };
+            let result = with_cx(|_,cx| fit(cx, input, true)).unwrap();
+            let p = &result.physical.powers_w;
+            // Exact uniform-specimen balance for this right-endpoint grid.
+            // The final second adds (N-1)/(2N) * P2, not zero joules.
+            let a = (n+1) as f64 / (2*n) as f64;
+            let h2 = 80.0 + p[0] + a*p[1];
+            let h3 = 80.0 + p[0] + p[1];
+            for (&actual, h) in result.physical.physical.predictions.iter().zip([h2,h3]) {
+                assert!((actual - ((h-100.0)/100.0).clamp(0.0,1.0)).abs() < 1e-7);
+            }
+            assert_eq!(result.physical.physical.endpoint_count, 3*n);
+            for &h in &result.physical.physical.final_step.solution().specific_enthalpy_j_kg {
+                assert!((h-h3).abs() < 1e-6);
+            }
+            assert!((result.constraints.absorbed_energy_j[0] - p[0] - p[1]).abs() < 1e-10);
+            assert_eq!(result.constraints.power_slew_values_w_s, vec![p[0],p[1]-p[0],-p[1]]);
+            assert_eq!(result.constraints.residuals.len(), 11);
+            assert!(result.constraints.is_feasible(TOLERANCE).unwrap());
+            let exported = result.sources[0].absorbed_power_values(4).unwrap();
+            assert_eq!(exported[0].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(exported[3].to_bits(), 0.0_f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn g5_ramped_restart_retains_rates_grid_and_shutdown_through_worker_changes() {
+        let input = Options { attempts:80, power_slew:Some([50.0,30.0]),
+            ramp_steps:8, ..Options::default() };
+        let expected = with_cx(|_,cx| fit(cx, input, false)).unwrap();
+        let saved = SavedRun::new();
+        let paused = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            checkpoint:Some(saved.path()), pause_after:Some(7), ..Default::default()
+        })).unwrap();
+        assert!(matches!(paused, FitResult::Paused { search_attempts:7, .. }));
+        let load = Recovery { resume:Some(saved.path()), ..Default::default() };
+        for changed in [Options { power_slew:Some([49.0,30.0]), ..input },
+            Options { power_slew:Some([50.0,31.0]), ..input },
+            Options { ramp_steps:16, ..input }, Options { power_slew:None, ..input }] {
+            assert!(with_cx(|_,cx| fit_with_recovery(cx, changed, false, &load)).is_err());
+        }
+        let workers = if cfg!(target_arch = "wasm32") {None} else {Some(2)};
+        let resumed = with_cx(|_,cx| fit_with_recovery(cx,
+            Options { workers, ..input }, false, &load)).unwrap();
+        let FitResult::Finished(actual) = resumed else { panic!("unexpected resumed pause") };
+        assert_eq!(actual.coordinates, expected.coordinates);
+        assert_eq!(actual.score, expected.score);
+        assert_eq!(actual.constraints, expected.constraints);
+        assert_eq!(actual.physical.physical.predictions, expected.physical.physical.predictions);
+        assert_eq!(actual.physical_evaluations, expected.physical_evaluations);
     }
 }
