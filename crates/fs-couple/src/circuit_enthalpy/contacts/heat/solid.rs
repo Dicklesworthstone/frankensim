@@ -96,6 +96,24 @@ impl<'m> ThermoplasticSolid<'m> {
         cx.checkpoint().map_err(|_| SolidHeatError::Cancelled)?;
         let observer = prepared.observe(cx, inner.clone(), config.energy_tolerance_j)
             .map_err(SolidHeatError::Heat)?;
+        self.admit_heat_network(thermal, prepared, cx)?;
+        let candidate = self.advance(thermal, &observer, target_s, prescribed_m, nodal_forces_n,
+            settings, thermal_config, config, cx).map_err(SolidHeatError::Coupled)?;
+        let report = candidate.report();
+        let audit = closed_account(report.external_heat_j, report.thermal_residual_j,
+            report.combined_residual_j, candidate.observer().first.closed_radiation_net_j(),
+            config.energy_tolerance_j).map_err(SolidHeatError::Invalid)?;
+        cx.checkpoint().map_err(|_| SolidHeatError::Cancelled)?;
+        Ok((candidate, audit))
+    }
+
+    // Both unpowered and finite-circuit solids must describe the same specimen.
+    // This admission performs no physical advance and does not discard circuit work.
+    pub(crate) fn admit_heat_network<E>(
+        &self, thermal: &DepositionSimulation<'_>, prepared: &PreparedHeatNetwork<'_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<(), SolidHeatError<E>> {
+        cx.checkpoint().map_err(|_| SolidHeatError::Cancelled)?;
         // Reuse the native material-to-cell lowering only for identity/context;
         // conductivity selections and evaluations stay with the prepared network.
         let roles = vec![None; self.materials().len()];
@@ -120,14 +138,8 @@ impl<'m> ThermoplasticSolid<'m> {
                 return Err(SolidHeatError::Invalid("heat and solid material conditions disagree"));
             }
         }
-        let candidate = self.advance(thermal, &observer, target_s, prescribed_m, nodal_forces_n,
-            settings, thermal_config, config, cx).map_err(SolidHeatError::Coupled)?;
-        let report = candidate.report();
-        let audit = closed_account(report.external_heat_j, report.thermal_residual_j,
-            report.combined_residual_j, candidate.observer().first.closed_radiation_net_j(),
-            config.energy_tolerance_j).map_err(SolidHeatError::Invalid)?;
         cx.checkpoint().map_err(|_| SolidHeatError::Cancelled)?;
-        Ok((candidate, audit))
+        Ok(())
     }
 }
 

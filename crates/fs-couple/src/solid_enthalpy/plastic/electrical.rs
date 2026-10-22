@@ -1,0 +1,297 @@
+//! Finite circuits and loaded 3D plastic solids on ONE enthalpy residual.
+//! Native electrical and tetrahedral proposals always start from accepted history.
+//! Only physical plastic/Joule heat and admitted reversible exchange enter heat;
+//! hardening storage and backward-Euler loss retain their original accounts.
+use super::*;
+use std::cell::Cell;
+use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpyInput,
+    CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients};
+use crate::circuit_enthalpy::contacts::{self, ContactThermalCoefficients, ContactThermalSample};
+use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
+use crate::circuit_enthalpy::contacts::heat::solid::SolidHeatError;
+use crate::material_circuit::{MaterialCircuit, MaterialResistor};
+use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
+
+/// The original circuit/enthalpy controls plus the work required by native solids.
+#[derive(Clone, Copy, Debug)]
+pub struct ElectricalSolidSolve {
+    pub coupled: CircuitEnthalpySolve,
+    /// Includes every stencil and the final fresh endpoint evaluation.
+    pub maximum_mechanical_trials: usize,
+    /// Native J2 yield-surface/history tolerance, Pa.
+    pub yield_tolerance_pa: f64,
+}
+
+#[derive(Debug)]
+pub enum ElectricalSolidSourceError {
+    Heat(HeatNetworkError),
+    Mechanical(ThermoplasticError),
+    Thermal(DepositionError),
+    Invalid(&'static str),
+    MechanicalBudget,
+}
+impl From<DepositionError> for ElectricalSolidSourceError {
+    fn from(error: DepositionError) -> Self { Self::Thermal(error) }
+}
+impl core::fmt::Display for ElectricalSolidSourceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "electrical/solid source: {self:?}")
+    }
+}
+impl std::error::Error for ElectricalSolidSourceError {}
+
+#[derive(Debug)]
+pub enum ElectricalSolidError {
+    Binding(SolidHeatError<Infallible>),
+    Mechanical(ThermoplasticError),
+    Heat(HeatNetworkError),
+    Coupled(CircuitEnthalpyError<ElectricalSolidSourceError>),
+    Invalid(&'static str),
+    Cancelled,
+}
+impl core::fmt::Display for ElectricalSolidError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "electrical/solid/enthalpy: {self:?}")
+    }
+}
+impl std::error::Error for ElectricalSolidError {}
+
+/// Original source/electrical/thermal reports and independent closed-system work.
+pub struct ElectricalSolidReport {
+    /// This subsystem report treats mechanical heat and radiative net roundoff
+    /// as callback supply. The CLOSED account below removes those internal terms.
+    pub circuit_thermal: CircuitEnthalpyReport<ContactThermalSample<HeatNetworkSample>>,
+    /// Original native J2 energy increments, in tetrahedron connectivity order.
+    pub element_energy: Vec<EnergyIncrement>,
+    pub mechanical_trials: usize,
+    pub physical_plastic_heat_j: f64,
+    pub reversible_heat_j: f64,
+    pub deposited_mechanical_heat_j: f64,
+    pub stored_mechanical_change_j: f64,
+    pub thermoelastic_storage_change_j: f64,
+    pub numerical_loss_j: f64,
+    /// Native nodal dead-force AND prescribed-reaction work, counted once.
+    pub mechanical_work_j: f64,
+    pub mechanical_residual_j: f64,
+    pub closed_radiation_net_j: f64,
+    /// Independent authored heat/reservoir/convection input, not internal loss.
+    pub external_heat_j: f64,
+    /// Closed caloric residual, including physical Joule/plastic/reversible heat.
+    pub thermal_residual_j: f64,
+    /// Electrical + elastic/hardening + thermoelastic + caloric + numerical
+    /// changes, minus electrical supply, mechanical work and true external heat.
+    pub combined_residual_j: f64,
+}
+
+pub struct ElectricalSolidCandidate<'m, 't> {
+    thermal: DepositionSimulation<'t>,
+    solid: ThermoplasticSolid<'m>,
+    circuit: MaterialCircuit,
+    report: ElectricalSolidReport,
+}
+impl<'m, 't> ElectricalSolidCandidate<'m, 't> {
+    pub const fn thermal(&self) -> &DepositionSimulation<'t> { &self.thermal }
+    pub const fn solid(&self) -> &ThermoplasticSolid<'m> { &self.solid }
+    pub const fn circuit(&self) -> &MaterialCircuit { &self.circuit }
+    pub const fn report(&self) -> &ElectricalSolidReport { &self.report }
+    pub fn into_parts(self) -> (DepositionSimulation<'t>, ThermoplasticSolid<'m>,
+        MaterialCircuit, ElectricalSolidReport) {
+        (self.thermal, self.solid, self.circuit, self.report)
+    }
+}
+
+struct Trial {
+    mechanical: MechanicalProposal,
+    material: HeatNetworkSample,
+    applied_heat_j: f64,
+    external_heat_j: f64,
+    radiation_net_j: f64,
+}
+fn number(value: f64) -> Result<f64, ElectricalSolidSourceError> {
+    if value.is_finite() { Ok(value) } else {
+        Err(ElectricalSolidSourceError::Invalid("unrepresentable electrical/solid heat or work"))
+    }
+}
+
+impl<'m> ThermoplasticSolid<'m> {
+    /// Jointly propose finite electrical storage, loaded native 3D plasticity,
+    /// thermal contact/radiation and the SAME caloric field.
+    ///
+    /// Uses the existing contact-capable circuit/enthalpy Newton solver. Its
+    /// callback evaluates this solid's original mechanics and caloric exchange;
+    /// no nested thermal solve or post-hoc mechanical refresh occurs. The final
+    /// callback's actual equilibrium and history are the returned solid.
+    ///
+    /// R(T), k(T), emissivity and yield see one endpoint. Joule heat is deposited
+    /// only by the circuit owner. The native J2 owner supplies physical plastic
+    /// and reversible heat, not hardening or numerical loss. Electrical and heat
+    /// routes come from the prepared network, not a separately authored mapping.
+    ///
+    /// Fixed geometry, C/L, electrical paths and source conditions during this
+    /// interval; no Lorentz force, piezoresistivity, melt or circuit topology
+    /// change is inferred. Mechanical-coordinate-dependent transport refuses.
+    /// Split at events/load discontinuities. Target events remain pending.
+    /// Endpoint thermal/mechanical rates and midpoint currents give generally
+    /// first-order coupled accuracy; refine intervals independently.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_electrical_candidate<'t>(
+        &self, thermal: &DepositionSimulation<'t>, circuit: &MaterialCircuit,
+        prepared: &PreparedHeatNetwork<'_, '_>, ports: &[f64], target_s: f64,
+        prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ElectricalSolidSolve,
+        guess_j: &[f64], cx: &Cx<'_>,
+    ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
+        let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
+        checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
+        let dt = target_s - self.time_s;
+        let tolerance = controls.coupled.total_energy_tolerance_j;
+        if self.time_s != thermal.time_s() || !positive(dt) || !target_s.is_finite()
+            || !positive(tolerance) || !positive(controls.yield_tolerance_pa)
+            || controls.maximum_mechanical_trials == 0 {
+            return Err(ElectricalSolidError::Invalid("matching clocks and bounded positive mechanical controls required"));
+        }
+        self.admit_heat_network::<Infallible>(thermal, prepared, cx)
+            .map_err(ElectricalSolidError::Binding)?;
+        self.enthalpies::<Infallible>(thermal, true, cx).map_err(ElectricalSolidError::Mechanical)?;
+        let destinations = prepared.resistor_destinations();
+        let contacts = prepared.heat_destinations(thermal).map_err(ElectricalSolidError::Heat)?;
+        let routes: BTreeMap<_, _> = destinations.iter().map(|d| (d.branch, d.cell)).collect();
+        // Check immutable source dependencies once. PreparedHeatNetwork retains
+        // these exact claims, and still re-evaluates their support and values at
+        // every endpoint; do not repeat the structural source queries per stencil.
+        let initial = prepared.resolve(cx, thermal).map_err(ElectricalSolidError::Heat)?;
+        self.admit_electrical_transport(thermal, &initial.bulk.source,
+            &initial.bulk.resistors, &routes, cx).map_err(|error|
+                ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(error)))?;
+        let mechanics = ThermoplasticConfig {
+            // Only the energy/yield controls are consumed by the native endpoint
+            // evaluator; the shared Newton owner supplies all coupling iteration.
+            maximum_iterations: 1, temperature_tolerance_k: f64::EPSILON,
+            energy_tolerance_j: tolerance, yield_tolerance_pa: controls.yield_tolerance_pa,
+            enthalpy_relaxation: 1.0,
+        };
+        let trials = Cell::new(0usize);
+        let result = contacts::step_candidate(thermal, target_s,
+            CircuitEnthalpyInput { circuit, ports, destinations: &destinations }, &contacts,
+            controls.coupled, guess_j, |endpoint| {
+                checkpoint()?;
+                if trials.get() >= controls.maximum_mechanical_trials {
+                    return Err(ElectricalSolidSourceError::MechanicalBudget);
+                }
+                trials.set(trials.get() + 1);
+                let ContactThermalCoefficients { bulk: mut coefficients, contacts } =
+                    prepared.resolve(cx, endpoint).map_err(ElectricalSolidSourceError::Heat)?;
+                let h = self.enthalpies::<Infallible>(endpoint, false, cx)
+                    .map_err(ElectricalSolidSourceError::Mechanical)?;
+                let mechanical = self.mechanics::<Infallible>(&h, prescribed_m,
+                    nodal_forces_n, settings, mechanics, cx)
+                    .map_err(ElectricalSolidSourceError::Mechanical)?;
+                let radiation_net_j = number(dt * coefficients.source.radiation_net_power_w())?;
+                let external_heat_j = number(number(dt * endpoint.external_step_power_w(
+                    &coefficients.sources_w, &coefficients.conductances_w_k, checkpoint)?)? - radiation_net_j)?;
+                let mut applied_heat_j = 0.0;
+                for (bound, heat) in self.cells.iter().zip(&mechanical.heat_j) {
+                    checkpoint()?;
+                    let watts = number(*heat / dt)?;
+                    let previous = coefficients.sources_w.get(&bound.accepted.id).copied().unwrap_or(0.0);
+                    let combined = number(previous + watts)?;
+                    if *heat != 0.0 && (watts == 0.0 || combined == previous) {
+                        return Err(ElectricalSolidSourceError::Invalid("mechanical heat disappeared from its receiving cell"));
+                    }
+                    if watts != 0.0 { coefficients.sources_w.insert(bound.accepted.id, combined); }
+                    applied_heat_j = number(applied_heat_j + number(dt * watts)?)?;
+                }
+                let heat_error = number(applied_heat_j - mechanical.physical_heat_j - mechanical.reversible_heat_j)?;
+                if heat_error.abs() > tolerance {
+                    return Err(ElectricalSolidSourceError::Invalid("native caloric heat and deposited mechanical heat disagree"));
+                }
+                checkpoint()?;
+                Ok(ContactThermalCoefficients { contacts, bulk: CircuitThermalCoefficients {
+                    resistors: coefficients.resistors, sources_w: coefficients.sources_w,
+                    conductances_w_k: coefficients.conductances_w_k,
+                    source: Trial { mechanical, material: coefficients.source, applied_heat_j,
+                        external_heat_j, radiation_net_j },
+                } })
+            }, || cx.checkpoint().is_err());
+        // Cancellation in a nested owner is still cancellation, not a usable
+        // numerical failure or a partial circuit/solid result.
+        checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
+        let candidate = result.map_err(ElectricalSolidError::Coupled)?;
+        let (thermal, circuit, r) = candidate.into_parts();
+        let trial = r.source.material;
+        let mechanical = trial.mechanical;
+        let thermal_residual_j = r.thermal.stored_energy_change_j - r.thermal.incoming_energy_j
+            - trial.external_heat_j - trial.applied_heat_j - r.deposited_joule_j;
+        let combined_residual_j = r.electrical.stored_after_j - r.electrical.stored_before_j
+            + mechanical.stored_change_j + mechanical.thermoelastic_storage_change_j
+            + r.thermal.stored_energy_change_j + mechanical.numerical_loss_j
+            - r.electrical.native.supplied - mechanical.external_work_j
+            - trial.external_heat_j - r.thermal.incoming_energy_j;
+        let source_residual_j = r.thermal.external_heat_j - trial.external_heat_j
+            - trial.radiation_net_j - trial.applied_heat_j - r.deposited_joule_j;
+        if [thermal_residual_j, combined_residual_j, source_residual_j].iter()
+            .any(|r| !r.is_finite() || r.abs() > tolerance) {
+            return Err(ElectricalSolidError::Invalid("closed electrical, native solid and caloric balances do not agree"));
+        }
+        let mut solid = self.clone();
+        solid.time_s = target_s;
+        solid.materials = mechanical.materials;
+        solid.solution = mechanical.solution;
+        for cell in &mut solid.cells { cell.accepted = thermal.cells()[&cell.accepted.id].clone(); }
+        let report = ElectricalSolidReport {
+            circuit_thermal: CircuitEnthalpyReport {
+                electrical: r.electrical, thermal: r.thermal,
+                source: ContactThermalSample { material: trial.material, destinations: r.source.destinations },
+                nonlinear: r.nonlinear, maximum_cell_residual_j: r.maximum_cell_residual_j,
+                circuit_trials: r.circuit_trials, deposited_joule_j: r.deposited_joule_j,
+                non_electrical_heat_j: r.non_electrical_heat_j, total_energy_residual_j: r.total_energy_residual_j,
+            },
+            element_energy: mechanical.energy, mechanical_trials: trials.get(),
+            physical_plastic_heat_j: mechanical.physical_heat_j, reversible_heat_j: mechanical.reversible_heat_j,
+            deposited_mechanical_heat_j: trial.applied_heat_j, stored_mechanical_change_j: mechanical.stored_change_j,
+            thermoelastic_storage_change_j: mechanical.thermoelastic_storage_change_j,
+            numerical_loss_j: mechanical.numerical_loss_j, mechanical_work_j: mechanical.external_work_j,
+            mechanical_residual_j: mechanical.mechanical_residual_j,
+            closed_radiation_net_j: trial.radiation_net_j, external_heat_j: trial.external_heat_j,
+            thermal_residual_j, combined_residual_j,
+        };
+        checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
+        Ok(ElectricalSolidCandidate { thermal, solid, circuit, report })
+    }
+
+    // The heat network already binds exact fixed conditions. Reuse the original
+    // material guard as well: k/rho_e/emissivity cannot freeze a strain, stress or
+    // frequency coordinate while the native solid actually changes that state.
+    fn admit_electrical_transport(
+        &self, thermal: &DepositionSimulation<'_>, sample: &HeatNetworkSample,
+        resistors: &[MaterialResistor], routes: &BTreeMap<usize, CellId>, cx: &Cx<'_>,
+    ) -> Result<(), ElectricalSolidSourceError> {
+        let admit = |id: CellId, state: &ResolvedMaterialStatePoint| {
+            let Some(bound) = self.cells.iter().find(|b| b.accepted.id == id) else { return Ok(()); };
+            let material = bound.source.thermal_material_point().material;
+            let h = thermal.cells()[&id].specific_h_j_kg;
+            for property in state.properties() {
+                poll::<Infallible>(cx).map_err(ElectricalSolidSourceError::Mechanical)?;
+                let selected = property.answer().receipt.selected;
+                let claim = material.claims().claim(selected)
+                    .ok_or(ElectricalSolidSourceError::Invalid("transport claim is not part of this structural material"))?;
+                bound.source.pin_thermal_transport(h, &claim.key,
+                    MaterialPropertySelection::PinnedByProperty(vec![(claim.key.name().to_owned(), selected)]))
+                    .map_err(|error| ElectricalSolidSourceError::Mechanical(ThermoplasticError::Material(error)))?;
+            }
+            Ok(())
+        };
+        for cell in &sample.material.cells {
+            if let Some(state) = &cell.conductivity { admit(cell.cell, state)?; }
+        }
+        if let Some(radiation) = &sample.radiation {
+            for surface in radiation.surfaces() { admit(surface.cell, &surface.material)?; }
+        }
+        for resistor in resistors {
+            let cell = *routes.get(&resistor.branch)
+                .ok_or(ElectricalSolidSourceError::Invalid("material resistor has no original receiving cell"))?;
+            admit(cell, resistor.conductor.material())?;
+        }
+        Ok(())
+    }
+}

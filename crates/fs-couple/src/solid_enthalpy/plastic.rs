@@ -15,6 +15,8 @@
 //! thermal substeps; a fixed-point gate is not a time-accuracy certificate.
 
 pub mod contact;
+/// Finite electrical storage, native 3D plasticity and one shared thermal solve.
+pub mod electrical;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;

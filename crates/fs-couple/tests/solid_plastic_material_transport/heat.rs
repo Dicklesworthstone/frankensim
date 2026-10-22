@@ -1,5 +1,6 @@
 //! G0/G3: source-backed radiation/contact data reach loaded native J2 tetrahedra.
 mod solid;
+mod electrical;
 
 use super::*;
 use fs_conduction::{GrayDiffuseEnclosure, RadiationSurface, SurfaceEmissivity,
@@ -17,10 +18,15 @@ use fs_matdb::{ClaimSelection, InterfaceSystemCard, SurfaceSpec, SystemContext};
 use fs_thermal::observers::ObserverCouplingError;
 
 fn fixture(emissivity: f64) -> Fixture {
+    fixture_with_property(emissivity, None)
+}
+
+fn fixture_with_property(emissivity: f64, extra: Option<PropertyClaim>) -> Fixture {
     let old = Fixture::new([5.0; 2], 0.01, false);
     let cards = old.cards.map(|card| {
         let mut claims = card.claims().clone();
         claims.insert_claim(scalar(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS, emissivity)).unwrap();
+        if let Some(property) = &extra { claims.insert_claim(property.clone()).unwrap(); }
         MaterialCard::assemble(card.id().clone(), claims, vec![]).unwrap()
     });
     // The augmented card is the authority for BOTH caloric and mechanical data.
@@ -39,8 +45,16 @@ fn fixture(emissivity: f64) -> Fixture {
 fn with_heat<R>(emissivity: f64, resistance: f64,
     run: impl FnOnce(&Cx<'_>, &CancelGate, &Fixture, &DepositionSimulation<'_>,
         &ThermoplasticSolid<'_>, &PreparedHeatNetwork<'_, '_>) -> R) -> R {
+    with_heat_fixture(fixture(emissivity), resistance, |cx, gate, f, thermal, solid, network| {
+        let prepared = network.prepare(cx, thermal).unwrap();
+        run(cx, gate, f, thermal, solid, &prepared)
+    })
+}
+
+fn with_heat_fixture<R>(f: Fixture, resistance: f64,
+    run: impl FnOnce(&Cx<'_>, &CancelGate, &Fixture, &DepositionSimulation<'_>,
+        &ThermoplasticSolid<'_>, &MaterialHeatNetwork<'_>) -> R) -> R {
     with_cx(|gate, cx| {
-        let f = fixture(emissivity);
         let thermal = f.thermal();
         let solid = f.solid(&thermal, cx);
         let keys = vec![Some((f.conductivity.clone(), MaterialPropertySelection::SingleClaimOnly)); 2];
@@ -79,8 +93,7 @@ fn with_heat<R>(emissivity: f64, resistance: f64,
             power_tolerance_w: 1e-11, radiosity_tolerance_w_m2: 1e-8 };
         let network = MaterialHeatNetwork { electrical: &electrical,
             thermal_contacts: &contacts, radiation: Some(&radiation) };
-        let prepared = network.prepare(cx, &thermal).unwrap();
-        run(cx, gate, &f, &thermal, &solid, &prepared)
+        run(cx, gate, &f, &thermal, &solid, &network)
     })
 }
 
