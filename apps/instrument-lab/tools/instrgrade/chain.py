@@ -5,10 +5,11 @@ The UIowa recordings were made through a chain: microphone, room, preamp/mixer, 
 convert_refs.py turns into the grader's 48 kHz floats. A render that skips the chain differs from them in ways no instrument
 physics can fix. This module gives a render what the chain measurably adds, and flags everything it cannot measure.
 
-  floor       ACTUAL recorded floor samples of the session: its ambient file(s) where the page lists one, plus the gaps
-              between the notes of its graded files, with breath, key and decay excluded by GAP_RULE (declared below,
-              before any grading; never tuned). Blocks of BLOCK_S are drawn from the clean stretches by a counter stream
-              keyed by (description, chain id, block), and joined by equal-power crossfades. Nothing is synthesised.
+  floor       ACTUAL recorded floor samples of the session: its ambient file(s) where the page lists one (then nothing else);
+              otherwise the gaps between the notes of its graded files, with breath, key and decay excluded by GAP_RULE
+              (declared below, before any grading; never tuned). Blocks of BLOCK_S are drawn from the clean stretches by a
+              counter stream keyed by (description, chain id, block), and joined by equal-power crossfades. Nothing is
+              synthesised. The receipt names the source (floor_source: ambient | gaps).
   grid        the render (already level-matched to its reference) is moved onto the recording's 44.1 kHz grid, the floor is
               added there, the sum is quantized to the graded files' bit depth (as probed: round half to even, no dither), back to 48 kHz
               by the same ffmpeg aresample that convert_refs.py applies to every reference.
@@ -22,10 +23,12 @@ committed: the files are read from FRANKENSIM_REFERENCE_DIR (fetch-references.sh
 NOT VALIDATED: the gap floor. Only one session documents an ambient file (B-flat clarinet, 2.24 s), and there the gap floor does
 not match it (bead pexfp.117, 2026-10-22; 248 s of gaps against the ambient):
 - 2-4 dB lower below 130 Hz, where the ambient holds more rumble;
-- 3-11 dB higher at 1-5 kHz, broadband with no lines (the player breathing between notes?), which a level rule cannot separate
+- 3-11 dB higher at 1-5 kHz, broadband with no lines (the player breathing between notes), which a level rule cannot separate
   from the floor;
 - 17 of 31 third-octave bands differ by more than 1 dB beyond their 95 % interval.
-Every chain whose floor uses gaps therefore carries the flag gap_floor_unvalidated.
+Ruling (MagentaBadger, verifier, 2026-10-22; the owner may override): where a page has an ambient file it is the floor, alone.
+Elsewhere the gap floor is used, flagged gap_floor_unvalidated, and no fidelity claim rests on it. No spectral breath rule:
+one tuned until the gaps match the ambient would be fitted to the very file it is judged against.
 
   chain.py floor PAGE --manifest references.json --refdir DIR --lib LIBRARY.json [--out floor.wav]
   chain.py apply IN.wav OUT.wav PAGE --description ID --manifest ... --refdir ... --lib ...
@@ -89,6 +92,11 @@ class Chain:
     bits: int  # the graded files' bits per sample, as probed
     fs: int = FS_REC  # their sample rate, as probed (after convert_refs.py's sample-rate-header repair)
     sources: list[dict] = field(default_factory=list)  # every file read: path, sha256, role
+
+    @property
+    def floor_source(self) -> str:
+        """Where the floor comes from: "ambient" (the page's ambient file, alone) or "gaps" (flagged gap_floor_unvalidated)."""
+        return "ambient" if any(s["role"] == "ambient" for s in self.sources) else "gaps"
     _audio: dict = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------------ building
@@ -116,7 +124,7 @@ class Chain:
             stretches.append(Stretch(f["path"], f["sha256"], 0, len(x), "ambient"))
         by_stem = {Path(f["path"]).stem.replace(" ", ""): f for f in m["files"] if f["page"] == page and f["kind"] == "chromatic-scale" and f["gradable"]}
         spans = {}
-        for e in library:
+        for e in library if not stretches else []:  # an ambient file is the floor, alone (the ruling in the module docstring)
             stem = Path(e["file"]).stem
             if stem in by_stem:
                 spans.setdefault(stem, []).append((e["start"], e["end"]))
@@ -185,7 +193,7 @@ class Chain:
         return y, self.receipt(description, fl, picks)
 
     def receipt(self, description, fl, picks):
-        return dict(stage="chain", version=CHAIN_VERSION, chain_id=self.id, description=description,
+        return dict(stage="chain", version=CHAIN_VERSION, chain_id=self.id, description=description, floor_source=self.floor_source,
                     ambient_sha256=[s["sha256"] for s in self.sources if s["role"] == "ambient"],
                     gap_sources=[dict(path=s["path"], sha256=s["sha256"]) for s in self.sources if s["role"] == "gaps"],
                     gap_rule=GAP_RULE, block_s=BLOCK_S, xfade_s=XFADE_S, blocks=picks,
