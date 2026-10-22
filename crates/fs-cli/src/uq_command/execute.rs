@@ -159,7 +159,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
     if let Some(settings) = &options.importance {
-        return importance::execute(&base, &config, settings);
+        return importance::execute(base_text, &base, &config, options, settings);
     }
     if let Some(settings) = options.polynomial {
         return polynomial::execute(&base, &config, settings);

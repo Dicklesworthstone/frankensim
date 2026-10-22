@@ -52,25 +52,85 @@ adapter. One transient observation is the initial/accepted-endpoint maximum of
 one COMPLETE declared trajectory, including fixed repeated cycles. It is not a
 single time step or a continuous-time peak certificate.
 
-The existing 10,000-call ceiling applies. One soft wall allowance includes
-setup, all physical solves and report construction. Bounded synchronous work
-is not preemptible, but a deadline reached before publication produces BUDGET,
-with no partial probability. Physical refusal remains a terminal failure even
-when a deadline also expires. There is no fallback to ordinary Monte Carlo.
+The existing 10,000-call ceiling applies. Without recovery options, one soft
+wall allowance includes setup, all physical solves and report construction.
+Bounded synchronous work is not preemptible; an expired allowance produces
+BUDGET and no partial probability. Physical refusal remains terminal even when
+a deadline also expires. There is no fallback to ordinary Monte Carlo.
 
-This command mode has no durable checkpoint. Recovery, explicit chunks, QMC,
-PCE, Sobol/Shapley sensitivity, mean controls, sequential compliance and design
-selection refuse before reading input files or reserving outputs. Existing
-modes without the new option retain their behavior.
+QMC, PCE, Sobol/Shapley sensitivity, mean controls, sequential compliance and
+candidate selection remain incompatible. These conflicts refuse before input
+reads or output reservation. The separate `--importance-pilot` mode learns a
+proposal but does not yet have a durable combined checkpoint; its recovery flags
+still refuse. See `PILOT_IMPORTANCE_UQ.md` for that mode.
+
+## Recover every completed physical solve
+
+Fixed `--importance` proposals now support the existing recovery options:
+
+```sh
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-importance-hotspot.json --importance 0.2,3 \
+  --checkpoint first.imp --max-new-samples 3
+
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-importance-hotspot.json --importance 0.2,3 \
+  --resume first.imp --checkpoint completed.imp
+```
+
+The first command saves three responses and their original scaled likelihood
+weights. It exits BUDGET with `importance.progress.v1`, not a probability report.
+The second evaluates only the remaining 61 inputs. Its final report and
+checkpoint match an uninterrupted run on the same deterministic runtime profile.
+Repeated chunking retains the original lifetime count. Explicit chunk limits,
+including zero, require a new checkpoint destination.
+
+A successful save is staged, synchronized and atomically published through the
+existing file transport after each accepted call. Source checkpoints are never
+overwritten: every output path must be new, and using the resume path as output
+refuses. Filesystem failures stop the command. A real physical/model failure
+invalidates this invocation's output with a terminal diagnosis, so a failed
+sample cannot be skipped by resuming its earlier successful prefix.
+
+Each invocation has a fresh evaluation-time `wall_seconds` allowance after
+admission/restoration; it never refunds paid calls. An unfinished cooling child
+is killed and reaped by the existing watchdog and retries the same ordinal on
+resume. An unfinished transient restarts from its declared initial state;
+completed trajectories are not repeated. When all original observations are
+already retained, resume returns the complete result with no further physical
+calls even under a tiny new evaluation-time allowance.
+
+A shortened run publishes only counts, next ordinal, proposal, observable and
+checkpoint location. Neither weighted failure probability nor empirical error
+is reported from that prefix. Without a destination, an interrupted resume
+returns a budget diagnostic; its source file remains unchanged. The complete
+result keeps the existing `importance.v1` schema and statistics unchanged.
+
+The `FSIMP001` codec binds every plan field, original budget, exact ordered
+proposal shifts, defensive mass, threshold, base-request bytes, target lowering,
+executable and sampler/likelihood version. A changed proposal, law, model, seed,
+threshold or allocation refuses before output reservation or physical work.
+Only the per-invocation wall allowance and chunk length may change. Each record
+retains 16 bytes (QoI and scaled weight); file reads are bounded independently
+of the smaller scalar checkpoint formats. No other sampler's codec changes.
+
+Checksums detect corruption, not authenticity or physical provenance. Restore
+only trusted files: weight range checks do not prove that the producer evaluated
+the right model or likelihood. Restoration recomputes failure flags and reports,
+not physics, and does not provide a model-validation or cross-runtime guarantee.
 
 Focused native checks:
 
 ```sh
 cargo test -p fs-cli --bin frankensim uq_command::execute::importance
 cargo test -p fs-cli --test cooling_importance
+cargo test -p fs-uq --test product_importance_checkpoint
 ```
 
 These tests exercise actual cooling calls, independent reconstruction through
 the library, target-MC identity, complete transient observations, admission,
-deadlines and terminal physics failures. They require native execution before
-claiming a Rust test pass or a physical-accuracy result.
+deadlines, terminal physics failures, process restarts, unchanged final report
+bytes, immutable proposal bindings and protected checkpoint inputs. They require
+native execution before claiming a Rust test pass or a physical-accuracy result.

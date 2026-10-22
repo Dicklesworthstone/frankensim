@@ -1,6 +1,7 @@
 //! Weighted rare-event probabilities from the original cooling producer.
 //! Proposal observations are not samples from the physical target distribution.
 mod pilot;
+mod recovery;
 
 use super::*;
 use fs_uq::{ImportanceConfig, ImportanceExecution, ImportanceReport};
@@ -39,34 +40,47 @@ fn finite(text: &str, name: &str) -> Result<f64> {
 }
 
 pub(super) fn validate_options(options: &Options) -> Result<()> {
-    if options.importance.is_some() && (options.checkpoint.is_some() || options.resume.is_some()
-        || options.max_new_samples.is_some() || options.compliance.is_some() || options.design.is_some()
+    if options.importance.is_some() && (options.compliance.is_some() || options.design.is_some()
         || options.qmc_replicates.is_some() || options.sobol_sensitivity || options.shapley_sensitivity
         || options.adjoint_mean_control || options.polynomial.is_some())
     {
-        return Err(bad("importance requires its complete fixed experiment; recovery, chunking, other sampling modes, mean controls and decision flags are incompatible"));
+        return Err(bad("importance requires a fixed experiment without other sampling modes, mean controls or decision flags"));
+    }
+    if matches!(options.importance.as_ref(), Some(Settings::Pilot(_)))
+        && (options.checkpoint.is_some() || options.resume.is_some() || options.max_new_samples.is_some())
+    {
+        return Err(bad("pilot importance has no durable combined checkpoint; recovery requires a fixed --importance proposal"));
     }
     Ok(())
 }
 
-pub(super) fn execute(base: &J, config: &Config, settings: &Settings) -> Result<ExecutionOutput> {
+pub(super) fn execute(
+    base_text: &str, base: &J, config: &Config, options: &Options, settings: &Settings,
+) -> Result<ExecutionOutput> {
     let proposal = match settings {
         Settings::Fixed(proposal) => proposal,
         Settings::Pilot(settings) => return pilot::execute(base, config, *settings),
     };
+    if options.checkpoint.is_some() || options.resume.is_some() {
+        return recovery::execute(base_text, base, config, options, proposal);
+    }
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
     let mut execution = ImportanceExecution::new(&config.plan(), proposal.clone()).map_err(bad)?;
     let report = execution.advance_interruptible(config.samples, || Instant::now() >= deadline,
         |values| evaluate(base, config, values, deadline));
     complete(report.status, report.rejection_reason.as_deref(), report.evaluations_attempted, deadline)?;
-    let stdout = format!(
-        "{{\"schema\":\"frankensim.cooling-network-uq.importance.v1\",\"authority\":\"estimated-model-importance-sampling\",\"method\":\"defensive-gaussian-importance\",\"status\":\"complete\",\"qoi\":{},\"seed\":{},\"proposal\":{}, {},\"correlation\":{},\"parameters\":[{}],\"no_claim\":{}}}\n",
-        config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()), proposal_json(proposal)?,
-        estimate_fields(&report)?, quote(config.correlation_label), config.render_parameters()?,
-        quote(&no_claim(config)),
-    );
+    let stdout = render(base, config, proposal, &report)?;
     complete(report.status, None, report.evaluations_attempted, deadline)?;
     Ok(ExecutionOutput { stdout, exit_code: exit::SUCCESS })
+}
+
+fn render(base: &J, config: &Config, proposal: &ImportanceConfig, report: &ImportanceReport) -> Result<String> {
+    Ok(format!(
+        "{{\"schema\":\"frankensim.cooling-network-uq.importance.v1\",\"authority\":\"estimated-model-importance-sampling\",\"method\":\"defensive-gaussian-importance\",\"status\":\"complete\",\"qoi\":{},\"seed\":{},\"proposal\":{}, {},\"correlation\":{},\"parameters\":[{}],\"no_claim\":{}}}\n",
+        config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()), proposal_json(proposal)?,
+        estimate_fields(report)?, quote(config.correlation_label), config.render_parameters()?,
+        quote(&no_claim(config)),
+    ))
 }
 
 fn evaluate(base: &J, config: &Config, values: &[f64], deadline: Instant) -> Result<Option<f64>> {
@@ -137,13 +151,24 @@ mod tests {
     }
 
     #[test]
+    fn fixed_recovery_is_admitted_but_pilot_history_cannot_use_its_codec() {
+        for extra in [vec!["--checkpoint", "new.bin", "--max-new-samples", "0"],
+            vec!["--resume", "old.bin"], vec!["--resume", "old.bin", "--checkpoint", "new.bin"]]
+        {
+            let mut fixed = args(&["--importance", "0.2,3"]); fixed.extend(args(&extra));
+            assert!(Options::parse(&fixed).is_ok());
+            let mut pilot = args(&["--importance-pilot", "1,2,0.2,0.5,1,8"]); pilot.extend(args(&extra));
+            assert!(Options::parse(&pilot).is_err());
+        }
+    }
+
+    #[test]
     fn conflicting_modes_are_rejected_in_either_option_order() {
         assert!(Options::parse(&args(&["--importance", "0.2,3"])).unwrap().importance.is_some());
         for other in [vec!["--importance", "0.5,0"], vec!["--importance-pilot", "1,2,0.2,0.5,1,8"], vec!["--pce", "1,6"],
             vec!["--pce-mean", "1,6,8"], vec!["--sensitivity", "sobol"],
             vec!["--sensitivity", "shapley"], vec!["--qmc-replicates", "2"],
-            vec!["--mean-control", "adjoint"], vec!["--checkpoint", "unused"],
-            vec!["--resume", "unused"], vec!["--max-new-samples", "0"],
+            vec!["--mean-control", "adjoint"], vec!["--max-new-samples", "0"],
             vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"]]
         {
             let fixed = args(&["--importance", "0.2,3"]);

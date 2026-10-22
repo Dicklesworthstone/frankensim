@@ -92,7 +92,7 @@ fn incompatible_laws_modes_timeouts_and_failed_physics_publish_no_probability() 
     let dir = scratch("refusals");
     let missing = dir.join("missing.json");
     let unused = dir.join("unused.checkpoint");
-    let output = command(&missing, &missing, "0.2,2").arg("--checkpoint").arg(&unused).output().unwrap();
+    let output = command(&missing, &missing, "0.2,2").args(["--qmc-replicates", "2"]).arg("--checkpoint").arg(&unused).output().unwrap();
     assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::USAGE)));
     assert!(!unused.exists()); assert!(output.stdout.is_empty());
     let base = example("fan-correlated-hotspot.json");
@@ -133,4 +133,103 @@ fn transient_failure_observations_are_complete_trajectory_peaks() {
     assert_eq!(qoi.str_field("temporal_scope"), Some("initial-state-and-accepted-endpoints"));
     assert_eq!(number(&result, "samples_evaluated"), 4.0);
     assert_eq!(result.str_field("failure_event"), Some("qoi > temperature_limit_k"));
+}
+
+fn progress(output: &Output) -> J {
+    assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::BUDGET)), "{}", String::from_utf8_lossy(&output.stderr));
+    let row = J::parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    assert_eq!(row.str_field("schema"), Some("frankensim.cooling-network-uq.importance.progress.v1"));
+    for name in ["estimated_failure_probability", "failure_standard_error", "failure_effective_samples", "proposal_failure_count"] {
+        assert!(row.get(name).is_none(), "published partial statistic {name}");
+    }
+    row
+}
+
+#[test]
+fn durable_importance_keeps_paid_calls_and_final_report_bytes() {
+    let dir = scratch("recovery"); let base = example("fan-correlated-hotspot.json");
+    let input = dir.join("uq.json"); fs::write(&input, request(8, 300.0, 303.0, false)).unwrap();
+    let full_path = dir.join("full.imp");
+    let full = command(&base, &input, "0.25,2").arg("--checkpoint").arg(&full_path).output().unwrap(); parsed(&full);
+    let first_path = dir.join("first.imp");
+    let first = command(&base, &input, "0.25,2").arg("--checkpoint").arg(&first_path)
+        .args(["--max-new-samples", "3"]).output().unwrap();
+    assert_eq!(number(&progress(&first), "samples_evaluated"), 3.0);
+    let retained = fs::read(&first_path).unwrap(); assert_eq!(&retained[..8], b"FSIMP001");
+    let second_path = dir.join("second.imp");
+    let second = command(&base, &input, "0.25,2").arg("--resume").arg(&first_path)
+        .arg("--checkpoint").arg(&second_path).args(["--max-new-samples", "2"]).output().unwrap();
+    let row = progress(&second); assert_eq!(number(&row, "samples_evaluated"), 5.0);
+    assert_eq!(number(&row, "samples_evaluated_this_run"), 2.0);
+    assert_eq!(fs::read(&first_path).unwrap(), retained);
+    let done_path = dir.join("done.imp");
+    let done = command(&base, &input, "0.25,2").arg("--resume").arg(&second_path)
+        .arg("--checkpoint").arg(&done_path).output().unwrap(); parsed(&done);
+    assert_eq!(done.stdout, full.stdout); assert_eq!(fs::read(&done_path).unwrap(), fs::read(&full_path).unwrap());
+    let plain = command(&base, &input, "0.25,2").output().unwrap(); parsed(&plain);
+    assert_eq!(plain.stdout, full.stdout);
+    fs::write(&input, request(8, 1e-9, 303.0, false)).unwrap();
+    let terminal = command(&base, &input, "0.25,2").arg("--resume").arg(&done_path).output().unwrap(); parsed(&terminal);
+    assert_eq!(terminal.stdout, full.stdout);
+}
+
+#[test]
+fn changed_proposals_corruption_and_existing_destinations_cannot_reweight_saved_work() {
+    let dir = scratch("binding"); let base = example("fan-correlated-hotspot.json");
+    let input = dir.join("uq.json"); fs::write(&input, request(8, 300.0, 303.0, false)).unwrap();
+    let saved = dir.join("original.imp");
+    let first = command(&base, &input, "0.25,2").arg("--checkpoint").arg(&saved)
+        .args(["--max-new-samples", "0"]).output().unwrap(); progress(&first);
+    let bytes = fs::read(&saved).unwrap();
+    for (i, proposal) in ["0.3,2", "0.25,3"].iter().enumerate() {
+        let next = dir.join(format!("changed-{i}.imp"));
+        let result = command(&base, &input, proposal).arg("--resume").arg(&saved)
+            .arg("--checkpoint").arg(&next).output().unwrap();
+        assert!(!result.status.success()); assert!(result.stdout.is_empty()); assert!(!next.exists());
+    }
+    let corrupt = dir.join("corrupt.imp"); let mut damaged = bytes.clone(); damaged[10] ^= 1;
+    fs::write(&corrupt, damaged).unwrap(); let next = dir.join("corrupt-next.imp");
+    let result = command(&base, &input, "0.25,2").arg("--resume").arg(&corrupt)
+        .arg("--checkpoint").arg(&next).output().unwrap();
+    assert!(!result.status.success()); assert!(!next.exists());
+    let result = command(&base, &input, "0.25,2").arg("--resume").arg(&saved)
+        .arg("--checkpoint").arg(&saved).output().unwrap();
+    assert!(!result.status.success()); assert_eq!(fs::read(&saved).unwrap(), bytes);
+}
+
+#[test]
+fn timeout_retains_recoverable_progress_but_physical_failure_invalidates_it() {
+    let dir = scratch("failure-recovery"); let base = example("fan-correlated-hotspot.json");
+    let input = dir.join("uq.json"); fs::write(&input, request(8, 1e-9, 303.0, false)).unwrap();
+    let saved = dir.join("timeout.imp");
+    let stopped = command(&base, &input, "0.25,2").arg("--checkpoint").arg(&saved).output().unwrap();
+    let row = progress(&stopped); assert_eq!(number(&row, "samples_evaluated"), 0.0);
+    assert_eq!(row.str_field("termination"), Some("wall-time-budget"));
+    fs::write(&input, request(8, 300.0, 303.0, false)).unwrap();
+    let resumed = command(&base, &input, "0.25,2").arg("--resume").arg(&saved).output().unwrap();
+    assert_eq!(number(&parsed(&resumed), "samples_evaluated"), 8.0);
+    let broken = dir.join("broken.json");
+    fs::write(&broken, fs::read_to_string(&base).unwrap().replace("\"linear_iterations\": 20000", "\"linear_iterations\": 0")).unwrap();
+    let failed = dir.join("failed.imp");
+    let output = command(&broken, &input, "0.25,2").arg("--checkpoint").arg(&failed).output().unwrap();
+    assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::REFUSED))); assert!(output.stdout.is_empty());
+    assert!(fs::read(&failed).unwrap().starts_with(b"FRANKENSIM-UQ-FAILED\n"));
+    let next = dir.join("must-not-exist.imp");
+    let retry = command(&broken, &input, "0.25,2").arg("--resume").arg(&failed)
+        .arg("--checkpoint").arg(&next).output().unwrap();
+    assert!(!retry.status.success()); assert!(!next.exists());
+}
+
+#[test]
+fn completed_transient_observations_survive_process_restart() {
+    let dir = scratch("transient-recovery"); let base = example("nonlinear-contact-pulse.json");
+    let input = dir.join("uq.json"); fs::write(&input, request(4, 300.0, 303.0, true)).unwrap();
+    let full = command(&base, &input, "0.25,2").output().unwrap(); parsed(&full);
+    let saved = dir.join("transient.imp");
+    let partial = command(&base, &input, "0.25,2").arg("--checkpoint").arg(&saved)
+        .args(["--max-new-samples", "1"]).output().unwrap();
+    let row = progress(&partial); assert_eq!(number(&row, "samples_evaluated"), 1.0);
+    assert_eq!(row.get("qoi").unwrap().str_field("observation"), Some("one-completed-trajectory"));
+    let resumed = command(&base, &input, "0.25,2").arg("--resume").arg(&saved).output().unwrap(); parsed(&resumed);
+    assert_eq!(resumed.stdout, full.stdout);
 }

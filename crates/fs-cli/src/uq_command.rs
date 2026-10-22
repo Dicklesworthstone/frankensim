@@ -69,7 +69,8 @@ See examples/cooling-network/SHAPLEY_SENSITIVITY.md.\n\
 learns from complete physical pilots, then freezes independent production.\n\
 The original sample and wall budgets cover every phase; pilots never enter\n\
 the final probability. Both modes require an explicit Gaussian law and ceiling.\n\
-No recovery or other sampling/decision modes; no partial probability on timeout.\n\
+Fixed proposals support checkpoint/resume; pilot recovery remains unavailable.\n\
+Other sampling/decision modes conflict; partial runs publish progress only.\n\
 See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,
