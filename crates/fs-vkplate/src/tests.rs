@@ -478,22 +478,95 @@ fn stencil_runs_sum_every_row_exactly_as_its_csr_row() {
 }
 
 #[test]
+fn centered_contact_preserves_elastic_impact_energy_and_dissipates_only_declared_loss() {
+    // G0/G3: the old endpoint force retained only 5.89% of relative kinetic
+    // energy at 48 kHz, even with mu=0. A zero-loss impact must be elastic.
+    for alpha in [1.0, 1.5, 2.0, 2.5] {
+        for rate in [48_000.0, 96_000.0, 192_000.0, 768_000.0] {
+            for mu in [0.0, 0.05] {
+                let (ma, reduced, speed) = (0.00724314, 0.0028, 2.5);
+                let mb = 1.0/(1.0/reduced-1.0/ma);
+                let dt = 1.0/rate;
+                let kk = 1_118_132_165.064117*5e-5_f64.powf(1.5-alpha);
+                let mut ins = Instrument::new(rate);
+                let mut striker = Body::point("stick", ma);
+                striker.w[0] = -2e-4;
+                striker.wp[0] = striker.w[0]-speed*dt;
+                ins.add(striker);
+                ins.add(Body::point("free surface mass", mb));
+                ins.contacts.push(Contact::new(vec![(0,0,1.0)],vec![(1,0,1.0)],0.0,
+                    Law::Power { k:kk, alpha, mu }));
+                let potential = |d: f64| kk*d.max(0.0).powf(alpha+1.0)/(alpha+1.0);
+                let initial = 0.5*reduced*speed*speed;
+                let (mut touched, mut separated) = (false,false);
+                let mut last_energy = initial;
+                for _ in 0..5000 {
+                    ins.step(&mut []);
+                    let (a,b) = (&ins.bodies[0],&ins.bodies[1]);
+                    let (now,previous) = (a.w[0]-b.w[0],a.wp[0]-b.wp[0]);
+                    let (va,vb) = ((a.w[0]-a.wp[0])/dt,(b.w[0]-b.wp[0])/dt);
+                    let velocity = (now-previous)/dt;
+                    let energy = 0.5*reduced*velocity*velocity+0.5*(potential(now)+potential(previous));
+                    assert!((ma*va+mb*vb-ma*speed).abs()<1e-12,"contact must conserve momentum");
+                    if mu == 0.0 {
+                        assert!((energy/initial-1.0).abs()<1e-9,
+                            "alpha {alpha}, rate {rate}: undeclared impact energy loss {energy}/{initial}");
+                    } else {
+                        assert!(energy<=last_energy+1e-11*initial,"declared loss added energy");
+                    }
+                    last_energy=energy;
+                    touched |= ins.contacts[0].force>0.0;
+                    // The secant still unloads while only the previous pose penetrates.
+                    if touched && now<0.0 && previous<0.0 && velocity<0.0 {
+                        if mu==0.0 { assert!((-velocity/speed-1.0).abs()<1e-9); }
+                        else { assert!(-velocity<speed); }
+                        separated=true;
+                        break;
+                    }
+                }
+                assert!(touched && separated,"the test must include a complete impact");
+            }
+        }
+    }
+}
+
+#[test]
+fn centered_contact_unloads_beyond_zero_penetration_and_the_old_bracket() {
+    let law=Law::Power { k:1e9, alpha:1.5, mu:0.0 };
+    for predicted in [-1e-4,1e-5] {
+        let (previous,comp,dt)=(2e-4,1e-7,1e-5);
+        let f=contact_force(predicted,comp,0.0,previous,law,true,dt);
+        let next=predicted-comp*f;
+        let expected=0.4e9*(next.max(0.0).powf(2.5)-previous.powf(2.5))/(next-previous);
+        assert!(f>0.0 && next<0.0,"unloading must retain the stored contact energy");
+        assert!((f/expected-1.0).abs()<1e-11);
+        if predicted>0.0 { assert!(f>predicted/comp,"the old upper bracket cannot contain this root"); }
+    }
+    for alpha in [1.0,1.5,2.0,2.3,100.0] {
+        let d=0.75_f64;
+        let (value,derivative)=power_secant(d,d,alpha);
+        assert!((value/d.powf(alpha)-1.0).abs()<1e-13);
+        assert!((derivative/(0.5*alpha*d.powf(alpha-1.0))-1.0).abs()<1e-13);
+    }
+}
+
+#[test]
 fn queued_contact_solves_match_solving_one_at_a_time() {
     // the reference: every active contact in list order, each seeing the earlier ones' updates
     fn one_at_a_time(bodies: &mut [Body], contacts: &mut [Contact], k: f64) {
         for c in contacts.iter_mut().filter(|c| c.active) {
-            let (mut d_pred, mut d_now, mut comp) = (-c.gap, -c.gap, 0.0);
+            let (mut d_pred, mut previous, mut comp) = (-c.gap, -c.gap, 0.0);
             for &(b, i, w) in &c.a {
                 d_pred += w * bodies[b].wn[i];
-                d_now += w * bodies[b].w[i];
+                previous += w * bodies[b].wp[i];
                 comp += w * w * bodies[b].compliance(i, k);
             }
             for &(b, i, w) in &c.b {
                 d_pred -= w * bodies[b].wn[i];
-                d_now -= w * bodies[b].w[i];
+                previous -= w * bodies[b].wp[i];
                 comp += w * w * bodies[b].compliance(i, k);
             }
-            let f = contact_force(d_pred, comp, c.force, d_now, c.law, c.fixed_point_exit, k);
+            let f = contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
         }
     }
@@ -578,30 +651,32 @@ fn empty_matrix_and_nan_penetration_do_nothing() {
 }
 
 #[test]
-fn endpoint_contact_loss_uses_current_shared_node_positions() {
+fn centered_contact_loss_uses_actual_previous_shared_node_positions() {
     // G0: another contact can move a shared node after this contact stores
-    // d_now. Its next damping force must use the actual current positions.
+    // d_now. The two-step secant must read the actual previous positions.
     for alpha in [1.5, 2.0] { // queued and scalar paths
         for stale in [-1e-3, 1e-3] {
             let mut bodies = vec![Body::point("upper", 0.01), Body::point("lower", 0.02)];
             bodies[0].w[0] = 2e-5;
+            bodies[0].wp[0] = 1e-5;
             bodies[0].wn[0] = 2e-5;
             let law = Law::Power { k: 3e7, alpha, mu: 0.35 };
             let mut contact = Contact::new(vec![(0, 0, 1.0)], vec![(1, 0, 1.0)], 5e-6, law);
             contact.d_now = stale;
-            let current = bodies[0].w[0] - bodies[1].w[0] - contact.gap;
+            let previous = bodies[0].wp[0] - bodies[1].wp[0] - contact.gap;
             let dt = 1e-5;
             let mut contacts = vec![contact];
             solve_contacts(&mut bodies, &mut contacts, &mut ContactQueue::default(), dt);
             let compression = bodies[0].wn[0] - bodies[1].wn[0] - contacts[0].gap;
             // Evaluate the constitutive equation directly, independently of
             // the scalar Newton implementation used by both solver paths.
-            let expected = 3e7 * compression.max(0.0).powf(alpha)
-                * (1.0 + 0.35 * (compression - current) / dt).max(0.0);
+            let potential = |d: f64| 3e7*d.max(0.0).powf(alpha+1.0)/(alpha+1.0);
+            let expected = (potential(compression)-potential(previous))/(compression-previous)
+                * (1.0 + 0.35 * (compression - previous) / (2.0*dt)).max(0.0);
             let force = contacts[0].force;
             assert!(expected > 0.0 && force > 0.0);
             assert!((force / expected - 1.0).abs() < 1e-11,
-                "alpha {alpha}, stale {stale}: force {force} does not satisfy current-state law {expected}");
+                "alpha {alpha}, stale {stale}: force {force} does not satisfy centered law {expected}");
             assert!((0.01 * (bodies[0].wn[0] - 2e-5) + 0.02 * bodies[1].wn[0]).abs() < 1e-20);
         }
     }

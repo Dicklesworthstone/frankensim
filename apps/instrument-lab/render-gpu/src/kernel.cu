@@ -97,22 +97,83 @@ __device__ __forceinline__ void wsums(double (&out)[NK], const double* part, int
   for (int k = 0; k < NK; k++) out[k] = bfly(a[k]);
 }
 
-// One contact's force (fs-vkplate contact_force): safeguarded Newton on g(f) = f - phi(d_pred - comp f).
-__device__ double contact_force(double d_pred, double comp, double force, double d_now, double kk, double alpha,
+// Secant of d_+^(alpha+1)/(alpha+1), matching fs-vkplate power_secant.
+// Centered leapfrog uses the previous and next positions, not the current one.
+// Bilbao et al., Numerical Modeling of Collisions, section 2.3, equation (11):
+// https://arxiv.org/abs/1405.2589. Whole coupled-system passivity is separate.
+__device__ __forceinline__ void power_secant(double d, double previous, double alpha,
+                                             double& value, double& derivative) {
+  if (d <= 0.0 && previous <= 0.0) { value = 0.0; derivative = 0.0; return; }
+  if (previous <= 0.0) {
+    const double den = d - previous;
+    if (alpha == 1.5) {
+      const double root = sqrt(d), ratio = d / den;
+      value = 0.4 * d * root * ratio;
+      derivative = 0.4 * root * ratio * (2.5 - ratio);
+      return;
+    }
+    const double p = pow(d, alpha);
+    value = d * p / ((alpha + 1.0) * den);
+    derivative = p * (alpha * d - (alpha + 1.0) * previous) / ((alpha + 1.0) * den * den);
+    return;
+  }
+  if (d <= 0.0) {
+    const double den = previous - d;
+    if (alpha == 1.5) {
+      const double root = sqrt(previous), ratio = previous / den;
+      value = 0.4 * previous * root * ratio;
+      derivative = 0.4 * root * ratio * ratio;
+      return;
+    }
+    const double potential = pow(previous, alpha + 1.0) / (alpha + 1.0);
+    value = potential / den;
+    derivative = potential / (den * den);
+    return;
+  }
+  if (alpha == 1.5) {
+    double a = sqrt(d), b = sqrt(previous);
+    const double m = fmax(a, b);
+    a = a / m; b = b / m;
+    const double a2 = a * a, b2 = b * b, sum = a + b;
+    value = 0.4 * m * m * m * (a2*a2 + a2*a*b + a2*b2 + a*b2*b + b2*b2) / sum;
+    derivative = 0.2 * m * (3.0*a2*a + 6.0*a2*b + 4.0*a*b2 + 2.0*b2*b) / (sum * sum);
+    return;
+  }
+  const double z = (d - previous) / previous, base = pow(previous, alpha);
+  if (fabs(z) * fmax(fabs(alpha), 1.0) < 1e-3) {
+    const double a2 = alpha * (alpha - 1.0), a3 = a2 * (alpha - 2.0);
+    const double a4 = a3 * (alpha - 3.0), a5 = a4 * (alpha - 4.0);
+    value = base * (1.0 + z * (0.5*alpha + z * (a2/6.0 + z * (a3/24.0 + z * (a4/120.0 + z*a5/720.0)))));
+    derivative = base / previous * (0.5*alpha + z * (a2/3.0 + z * (a3/8.0 + z * (a4/30.0 + z*a5/144.0))));
+  } else {
+    const double delta = expm1((alpha + 1.0) * log1p(z));
+    value = base * delta / ((alpha + 1.0) * z);
+    derivative = base / previous * ((alpha + 1.0) * z * pow(1.0 + z, alpha) - delta) / ((alpha + 1.0) * z * z);
+  }
+}
+
+__device__ __forceinline__ void contact_phi(double d, double previous, double kk, double alpha,
+                                            double mu, double k, double& value, double& derivative) {
+  double elastic, elastic_derivative;
+  power_secant(d, previous, alpha, elastic, elastic_derivative);
+  const double damping_rate = mu / (2.0 * k), damp = 1.0 + damping_rate * (d - previous);
+  value = kk * elastic * damp;
+  if (value <= 0.0) { value = 0.0; derivative = 0.0; }
+  else derivative = kk * (elastic_derivative * damp + elastic * damping_rate);
+}
+
+// f=phi(d_pred-comp*f). During unloading either endpoint can be separated;
+// phi(d_pred) brackets the force even when d_pred/comp would not.
+__device__ double contact_force(double d_pred, double comp, double force, double previous, double kk, double alpha,
                                 double mu, int fixed_exit, double k) {
-  if (isnan(d_pred) || d_pred <= 0.0) return 0.0;
-  double lo = 0.0, hi = d_pred / comp;
+  if (isnan(d_pred) || isnan(previous) || (d_pred <= 0.0 && previous <= 0.0)) return 0.0;
+  double lo = 0.0, hi, unused;
+  contact_phi(d_pred, previous, kk, alpha, mu, k, hi, unused);
+  if (hi <= 0.0) return 0.0;
   double x = (force > 0.0 && force < hi) ? force : 0.5 * hi;
   for (int it = 0; it < 60; it++) {
-    double d = d_pred - comp * x;
-    double v = 0.0, dv = 0.0;
-    if (d > 0.0) {
-      double pa1 = (alpha == 1.5) ? sqrt(d) : pow(d, alpha - 1.0);
-      double pa = pa1 * d;
-      double damp = 1.0 + mu * (d - d_now) / k;
-      double vv = kk * pa * damp;
-      if (vv > 0.0) { v = vv; dv = kk * (alpha * pa1 * damp + pa * mu / k); }
-    }
+    double v, dv;
+    contact_phi(d_pred - comp * x, previous, kk, alpha, mu, k, v, dv);
     double g = x - v;
     if (g > 0.0) hi = x; else lo = x;
     double next = x - g / (1.0 + comp * dv);
@@ -280,26 +341,27 @@ __device__ void airy_rows(const P& p, ll gwarp, ll nwarps) {
 }
 
 // Contact j of simulation s: its force from the predicted gap (implicit, one scalar Newton solve), applied.
-__device__ __forceinline__ void solve_contact(const P& p, ll s, int j, const double* W, double* Wn, double k) {
+__device__ __forceinline__ void solve_contact(const P& p, ll s, int j, const double* Wp, double* Wn, double k) {
   const ll o = s * p.NT, oj = s * p.NCON + j;
   if (!p.ct_active[oj]) return;
   double d_pred = -__ldg(&p.ct_gap[j]);
-  double d_now = d_pred;
+  double previous = d_pred;
   for (int e = __ldg(&p.ct_a0[j]); e < __ldg(&p.ct_b0[j]); e++) {
     const int nd = __ldg(&p.ct_node[e]);
     const double w = __ldg(&p.ct_w[e]);
     d_pred = d_pred + w * Wn[o + nd];
-    d_now = d_now + w * W[o + nd];
+    previous = previous + w * Wp[o + nd];
   }
   for (int e = __ldg(&p.ct_b0[j]); e < __ldg(&p.ct_end[j]); e++) {
     const int nd = __ldg(&p.ct_node[e]);
     const double w = __ldg(&p.ct_w[e]);
     d_pred = d_pred - w * Wn[o + nd];
-    d_now = d_now - w * W[o + nd];
+    previous = previous - w * Wp[o + nd];
   }
   const double comp = __ldg(&p.ct_comp[j]);
-  // Match the CPU: later shared-node forces can invalidate cached compression.
-  const double f = contact_force(d_pred, comp, p.ct_force[oj], d_now, __ldg(&p.ct_kk[j]), __ldg(&p.ct_alpha[j]),
+  // Read the previous trajectory directly; cached current compression belongs
+  // to a different time level and can also have stale shared-node updates.
+  const double f = contact_force(d_pred, comp, p.ct_force[oj], previous, __ldg(&p.ct_kk[j]), __ldg(&p.ct_alpha[j]),
                                  __ldg(&p.ct_mu[j]), __ldg(&p.ct_fx[j]), k);
   if (f > 0.0) {
     for (int e = __ldg(&p.ct_a0[j]); e < __ldg(&p.ct_b0[j]); e++) {
@@ -663,12 +725,12 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           for (ll e = (ll)tid * nbk + blockIdx.x; e < B * size; e += (ll)nbk * TPB) {
             const ll s = e / size;
             const int q = q0 + (int)(e % size);
-            if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), W, Wn, k);
+            if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), Wp, Wn, k);
           }
         } else {
           for (ll s = nbk - 1 - blockIdx.x; s < B; s += nbk)
             for (int q = q0 + tid; q < q1; q += TPB) {
-              if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), W, Wn, k);
+              if (fr) solve_friction(p, s, __ldg(&p.fb_idx[q]), W, Wn); else solve_contact(p, s, __ldg(&p.cb_idx[q]), Wp, Wn, k);
             }
           __syncthreads();
         }

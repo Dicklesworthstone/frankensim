@@ -1406,30 +1406,87 @@ impl Mic {
 }
 
 // --------------------------------------------------------------------- contact solves
-/// One contact's force: the root of g(f) = f - phi(d_pred - comp f), phi(d) = K d^a (1 + mu (d - d_now)/k)
-/// clipped at zero force. g is increasing with a root in [0, d_pred / comp]: safeguarded Newton (a
+/// Secant of U(d)=d_+^(alpha+1)/(alpha+1), and its derivative in the first argument.
+/// The Hertz factorization avoids subtracting nearly equal fractional powers.
+#[inline(always)]
+fn power_secant(d: f64, previous: f64, alpha: f64) -> (f64, f64) {
+    if d <= 0.0 && previous <= 0.0 { return (0.0, 0.0); }
+    if previous <= 0.0 {
+        let den = d - previous;
+        if alpha == 1.5 {
+            let (root, ratio) = (d.sqrt(), d/den);
+            return (0.4*d*root*ratio, 0.4*root*ratio*(2.5-ratio));
+        }
+        let p = d.powf(alpha);
+        return (d*p/((alpha+1.0)*den), p*(alpha*d-(alpha+1.0)*previous)/((alpha+1.0)*den*den));
+    }
+    if d <= 0.0 {
+        let den = previous - d;
+        if alpha == 1.5 {
+            let (root, ratio) = (previous.sqrt(), previous/den);
+            return (0.4*previous*root*ratio, 0.4*root*ratio*ratio);
+        }
+        let potential = previous.powf(alpha+1.0)/(alpha+1.0);
+        return (potential/den, potential/(den*den));
+    }
+    if alpha == 1.5 {
+        let (a, b) = (d.sqrt(), previous.sqrt());
+        let m = a.max(b);
+        let (a, b) = (a/m, b/m);
+        let (a2, b2, sum) = (a*a, b*b, a+b);
+        let value = 0.4*m*m*m*(a2*a2+a2*a*b+a2*b2+a*b2*b+b2*b2)/sum;
+        let derivative = 0.2*m*(3.0*a2*a+6.0*a2*b+4.0*a*b2+2.0*b2*b)/(sum*sum);
+        return (value, derivative);
+    }
+    let z = (d-previous)/previous;
+    let base = previous.powf(alpha);
+    if z.abs()*alpha.abs().max(1.0) < 1e-3 {
+        let a2 = alpha*(alpha-1.0);
+        let a3 = a2*(alpha-2.0);
+        let a4 = a3*(alpha-3.0);
+        let a5 = a4*(alpha-4.0);
+        let value = base*(1.0+z*(0.5*alpha+z*(a2/6.0+z*(a3/24.0+z*(a4/120.0+z*a5/720.0)))));
+        let derivative = base/previous*(0.5*alpha+z*(a2/3.0+z*(a3/8.0+z*(a4/30.0+z*a5/144.0))));
+        (value, derivative)
+    } else {
+        let delta = ((alpha+1.0)*z.ln_1p()).exp_m1();
+        (base*delta/((alpha+1.0)*z),
+         base/previous*((alpha+1.0)*z*(1.0+z).powf(alpha)-delta)/((alpha+1.0)*z*z))
+    }
+}
+
+#[inline(always)]
+fn contact_phi(d: f64, previous: f64, kk: f64, alpha: f64, mu: f64, k: f64) -> (f64, f64) {
+    let (elastic, derivative) = power_secant(d, previous, alpha);
+    let damping_rate = mu/(2.0*k);
+    let damp = 1.0+damping_rate*(d-previous);
+    let value = kk*elastic*damp;
+    if value <= 0.0 { (0.0, 0.0) }
+    else { (value, kk*(derivative*damp+elastic*damping_rate)) }
+}
+
+/// Centered discrete-gradient contact, phi = delta U / delta d times the
+/// Hunt--Crossley factor at (d_next-d_previous)/(2k), clipped at zero force.
+/// Thus zero-loss free masses conserve staggered kinetic plus contact energy.
+/// The discrete-potential construction follows Bilbao et al.,
+/// https://arxiv.org/abs/1405.2589, section 2.3, equation (11).
+/// phi is increasing, so f=phi(d_pred-comp*f) lies in [0,phi(d_pred)]; unloading
+/// can still exert force with negative predicted or final penetration.
+/// Safeguarded Newton (a
 /// bisection step whenever Newton leaves the bracket), from the last force when it lies in the bracket.
 /// With `fixed_exit`, a Newton step that lands exactly on the iterate stops the solve there: the
 /// correction is below half an ulp, so the iterate is the root to rounding. Without it the bracket
 /// update has just put that iterate on the bracket's edge, so the safeguard bisects away from the
 /// root and halves back down to it (30-47 iterations instead of about 3).
-fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, fixed_exit: bool, k: f64) -> f64 {
+fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fixed_exit: bool, k: f64) -> f64 {
     let Law::Power { k: kk, alpha, mu } = law;
-    let phi = |d: f64| -> (f64, f64) {
-        if d <= 0.0 {
-            return (0.0, 0.0);
-        }
-        let pa1 = if alpha == 1.5 { d.sqrt() } else { d.powf(alpha - 1.0) };
-        let pa = pa1 * d;
-        let damp = 1.0 + mu * (d - d_now) / k;
-        let v = kk * pa * damp;
-        if v <= 0.0 { (0.0, 0.0) } else { (v, kk * (alpha * pa1 * damp + pa * mu / k)) }
-    };
+    let phi = |d| contact_phi(d, previous, kk, alpha, mu, k);
     // no penetration, or a NaN one (a state already blown up): no force, and no 60 Newton steps on NaN
-    if d_pred.is_nan() || d_pred <= 0.0 {
+    if d_pred.is_nan() || previous.is_nan() || (d_pred <= 0.0 && previous <= 0.0) {
         return 0.0;
     }
-    let (mut lo, mut hi) = (0.0, d_pred / comp);
+    let (mut lo, mut hi) = (0.0, phi(d_pred).0);
+    if hi <= 0.0 { return 0.0; }
     // a contact held under load barely changes between steps: start from the last force
     let mut x = if force > 0.0 && force < hi { force } else { 0.5 * hi };
     for _ in 0..60 {
@@ -1455,14 +1512,7 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, d_now: f64, law: Law, fixed
 #[allow(clippy::too_many_arguments)]
 fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f64, kk: f64, mu: f64, fixed_exit: bool, k: f64) -> (f64, bool) {
     let d = dp - cm * x;
-    let pa1 = d.sqrt();
-    let pa = pa1 * d;
-    let damp = 1.0 + mu * (d - dn) / k;
-    let v = kk * pa * damp;
-    let dv = kk * (1.5 * pa1 * damp + pa * mu / k);
-    // phi is (0, 0) at d <= 0 (where v and dv above are not used) and wherever v <= 0
-    let zero = (d <= 0.0) | (v <= 0.0);
-    let (v, dv) = if zero { (0.0, 0.0) } else { (v, dv) };
+    let (v, dv) = contact_phi(d, dn, kk, 1.5, mu, k);
     let g = x - v;
     let up = g > 0.0;
     *hi = if up { x } else { *hi };
@@ -1477,7 +1527,7 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
 /// penetration, force and update are what solving them one at a time in list order gives.
 #[derive(Clone, Default)]
 struct ContactQueue {
-    /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_now, K, mu, fixed-point
+    /// Per queued contact: its index, d_pred, comp, first iterate, upper bracket, d_previous, K, mu, fixed-point
     /// exit; the force.
     j: Vec<usize>,
     dp: Vec<f64>,
@@ -1640,37 +1690,36 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         }
         let c = &mut contacts[jc];
         let mut d_pred = -c.gap;
-        let mut d_now = -c.gap;
+        let mut previous = -c.gap;
         let mut comp = 0.0;
         for &(b, i, w) in &c.a {
             d_pred += w * bodies[b].wn[i];
-            d_now += w * bodies[b].w[i];
+            previous += w * bodies[b].wp[i];
             comp += w * w * bodies[b].compliance(i, k);
         }
         for &(b, i, w) in &c.b {
             d_pred -= w * bodies[b].wn[i];
-            d_now -= w * bodies[b].w[i];
+            previous -= w * bodies[b].wp[i];
             comp += w * w * bodies[b].compliance(i, k);
         }
-        // A later contact or friction solve can move a shared node after
-        // apply_force records d_now. Damping needs the final current pose.
-        c.d_now = d_now;
-        if !queued || d_pred.is_nan() || d_pred <= 0.0 {
+        // Read the actual previous pose, not a cache another contact or
+        // friction solve may have invalidated. The secant spans two steps.
+        if !queued || d_pred.is_nan() || previous.is_nan() || (d_pred <= 0.0 && previous <= 0.0) {
             // solved now: the queue is empty, or this contact moves nothing
-            let f = contact_force(d_pred, comp, c.force, c.d_now, c.law, c.fixed_point_exit, k);
+            let f = contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k);
             apply_force(bodies, c, f, d_pred, comp, k);
             continue;
         }
         for &(b, i, _) in c.a.iter().chain(&c.b) {
             q.mark[b][i] = q.batch;
         }
-        let hi = d_pred / comp;
+        let hi = contact_phi(d_pred, previous, kk, alpha, mu, k).0;
         q.j.push(jc);
         q.dp.push(d_pred);
         q.cm.push(comp);
         q.x0.push(if c.force > 0.0 && c.force < hi { c.force } else { 0.5 * hi });
         q.hi.push(hi);
-        q.dn.push(c.d_now);
+        q.dn.push(previous);
         q.kk.push(kk);
         q.mu.push(mu);
         q.fx.push(c.fixed_point_exit);

@@ -23,6 +23,14 @@ mod wasm {
         pub fn new(piece: &str, grid_scale: f64) -> Result<KitPiece, JsError> {
             Live::new(piece, grid_scale).map(|live| KitPiece { live, scale: grid_scale }).map_err(|e| JsError::new(&e))
         }
+        /// One shared pair of hi-hat cymbals, settled under the declared downward
+        /// initial pedal force [N]. Open, closed and foot events can share its motion.
+        #[wasm_bindgen(js_name = withHiHatPedal)]
+        pub fn with_hihat_pedal(grid_scale: f64, initial_pedal_n: f64) -> Result<KitPiece, JsError> {
+            Live::with_hihat_pedal(grid_scale, initial_pedal_n)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
         /// Use the shared material gas grammar: `T P RH`, or
         /// `mixture T P mole|mass COUNT SPECIES FRACTION ...` (SI units).
         #[wasm_bindgen(js_name = withGas)]
@@ -113,6 +121,12 @@ mod wasm {
         /// Strike at (x, y) metres from the centre of the playing surface at `speed` m/s.
         pub fn strike(&mut self, x: f64, y: f64, speed: f64) {
             self.live.strike(x, y, speed);
+        }
+        /// Downward pedal force [N], with an explicit transition duration [s].
+        /// This moves the shared hi-hat rod; it does not truncate emitted audio.
+        #[wasm_bindgen(js_name = setPedalForce)]
+        pub fn set_pedal_force(&mut self, force_n: f64, transition_seconds: f64) -> Result<(), JsError> {
+            self.live.set_hihat_pedal(force_n, transition_seconds).map_err(|e| JsError::new(&e))
         }
         /// The next `frames` samples at 48 kHz: microphone pressure [Pa] times `gain`.
         pub fn render(&mut self, frames: usize, gain: f64) -> Vec<f32> {

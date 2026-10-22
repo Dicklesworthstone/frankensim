@@ -10,7 +10,14 @@ use fs_material::gas_species::input::{GasRecord, ThermochemicalPhase};
 use std::sync::Arc;
 
 /// Every piece the live kit knows, in the order a drummer names them.
-pub const PIECES: [&str; 9] = ["kick", "snare", "snare-off", "tom-12", "tom-14", "hihat-closed", "hihat-open", "crash", "ride"];
+pub const PIECES: [&str; 10] = ["kick", "snare", "snare-off", "tom-12", "tom-14", "hihat", "hihat-closed", "hihat-open", "crash", "ride"];
+
+#[derive(Clone)]
+struct HiHatPedal {
+    rod: usize,
+    drive: usize,
+    transition_end: f64,
+}
 
 /// A clone holds every bit of the piece's state, so it steps exactly as the original would from
 /// there on. The browser kit keeps a clone of each grid it builds and times, and plays the chosen
@@ -34,6 +41,8 @@ pub struct Live {
     sleep_frames: usize,
     sleep_peak: f64,
     sleep_force: f64,
+    /// One movable pair of cymbals. Fixed open/closed presets retain their original geometry.
+    pedal: Option<HiHatPedal>,
     /// Kinetic energy of every elastic body after the last block [J].
     pub kinetic: f64,
     /// Largest contact force of the last block [N].
@@ -61,6 +70,23 @@ fn gas_record(record: &str) -> Result<GasState, String> {
 impl Live {
     pub fn new(piece: &str, scale: f64) -> Result<Live, String> {
         Self::with_gas(piece, scale, standard_gas())
+    }
+
+    /// One shared hi-hat with a 2 mm rest opening and an explicitly prescribed initial
+    /// downward pedal force [N]. A nonzero initial load is settled before playback;
+    /// subsequent pedal commands move the same cymbals without resetting their motion.
+    pub fn with_hihat_pedal(scale: f64, initial_pedal_n: f64) -> Result<Live, String> {
+        if !initial_pedal_n.is_finite() || initial_pedal_n < 0.0 {
+            return Err("hi-hat pedal force must be finite and nonnegative [N]".into());
+        }
+        let mut live = Self::new("hihat", scale)?;
+        if initial_pedal_n > 0.0 {
+            live.set_hihat_pedal(initial_pedal_n, 0.12)?;
+            // Settle through the ordinary output path as well: the microphone and
+            // causal decimator must retain the sound immediately before playback.
+            live.render(&mut vec![0.0; (0.5 * OUT_RATE).round() as usize], 1.0);
+        }
+        Ok(live)
     }
 
     /// A declarative temperature/pressure/humidity or species-mixture record,
@@ -160,6 +186,7 @@ impl Live {
             "snare-off" => drum(kit::snare_wires_off())?,
             "tom-12" => drum(kit::tom(12.0))?,
             "tom-14" => drum(kit::tom(14.0))?,
+            "hihat" => (hihat(0.002, 0.0)?, hat, 0.0),
             "hihat-closed" => (hihat(0.0, 80.0)?, hat, 0.0),
             "hihat-open" => (hihat(0.002, 0.0)?, hat, 0.0),
             "crash" => cym(kit::crash())?,
@@ -198,13 +225,56 @@ impl Live {
         for _ in 0..settle {
             p.instrument.step(&mut out);
         }
+        let pedal = if piece == "hihat" {
+            let rod = p.instrument.bodies.iter().position(|b| b.name == "rod")
+                .ok_or_else(|| "shared hi-hat is missing its pull rod".to_string())?;
+            let drive = p.instrument.drives.len();
+            p.instrument.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0)] });
+            Some(HiHatPedal { rod, drive, transition_end: p.instrument.time() })
+        } else { None };
         Ok(Live {
             ins: p.instrument, name: piece.into(), target, radius, strikers: vec![(stick, contact)], foot,
             oversample: p.oversample, decimator: StreamingDecimator::new(p.oversample),
             asleep: false, quiet_samples: 0, ke_peak: 0.0, kinetic: 0.0, force: 0.0, strokes: 0,
             sleep_frames: 0, sleep_peak: 0.0, sleep_force: 0.0,
+            pedal,
             atmosphere_source: None,
         })
+    }
+
+    /// Prescribe downward force on the shared hi-hat's pull rod [N], ramped from its
+    /// current force over `transition_seconds`. This is an external mechanical input,
+    /// not a stick stroke or a PCM envelope. Zero force releases the return spring.
+    /// Fixed `hihat-open`/`hihat-closed` presets refuse because they have different rest gaps.
+    pub fn set_hihat_pedal(&mut self, force_n: f64, transition_seconds: f64) -> Result<(), String> {
+        if !force_n.is_finite() || force_n < 0.0 {
+            return Err("hi-hat pedal force must be finite and nonnegative [N]".into());
+        }
+        if !transition_seconds.is_finite() || transition_seconds < 0.0 {
+            return Err("hi-hat pedal transition must be finite and nonnegative [s]".into());
+        }
+        let now = self.ins.time();
+        let end = now + transition_seconds;
+        if !end.is_finite() || (transition_seconds > 0.0 && end <= now) {
+            return Err("hi-hat pedal transition is outside the integration clock's range".into());
+        }
+        let pedal = self.pedal.as_mut().ok_or_else(||
+            "pedal control requires the shared hihat instrument".to_string())?;
+        let drive = self.ins.drives.get_mut(pedal.drive).filter(|d| d.body == pedal.rod && d.node == 0)
+            .ok_or_else(|| "shared hi-hat pedal drive was modified externally".to_string())?;
+        let current = drive.at(now);
+        if pedal.transition_end <= now && current == -force_n {
+            return Ok(());
+        }
+        drive.knots = if transition_seconds == 0.0 {
+            vec![(now, -force_n)]
+        } else {
+            vec![(now, current), (end, -force_n)]
+        };
+        pedal.transition_end = end;
+        self.asleep = false;
+        self.quiet_samples = 0;
+        Ok(())
     }
 
     /// Strike at (x, y) [m] from the centre of the playing surface with the stick (or beater)
@@ -322,7 +392,8 @@ impl Live {
             if self.sleep_frames == SLEEP_FRAMES {
                 self.kinetic = self.kinetic_energy();
                 self.ke_peak = self.ke_peak.max(self.kinetic);
-                if self.kinetic <= 1e-7*self.ke_peak && self.sleep_peak < 3e-4 && self.sleep_force == 0.0 {
+                let pedal_moving = self.pedal.as_ref().is_some_and(|p| self.ins.time() < p.transition_end);
+                if !pedal_moving && self.kinetic <= 1e-7*self.ke_peak && self.sleep_peak < 3e-4 && self.sleep_force == 0.0 {
                     self.quiet_samples += SLEEP_FRAMES;
                     if self.quiet_samples as f64 >= QUIET_S*OUT_RATE {
                         self.asleep = true;
@@ -343,8 +414,8 @@ impl Live {
     fn kinetic_energy(&self) -> f64 {
         let k = self.ins.k();
         let mut ke = 0.0;
-        for b in &self.ins.bodies {
-            if b.n < 2 {
+        for (index, b) in self.ins.bodies.iter().enumerate() {
+            if b.n < 2 && !self.pedal.as_ref().is_some_and(|p| p.rod == index) {
                 continue;
             }
             for ((m, w), wp) in b.mass.iter().zip(&b.w).zip(&b.wp) {
@@ -381,6 +452,170 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncontrolled_shared_hihat_matches_fixed_open_pressure_and_clock() {
+        let mut shared = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        let mut fixed = Live::new("hihat-open", 7.0).unwrap();
+        assert_eq!(shared.ins.rate, fixed.ins.rate);
+        assert_eq!(shared.ins.step_index, fixed.ins.step_index);
+        for live in [&mut shared, &mut fixed] {
+            live.strike(0.85 * live.radius, 0.0, 2.5);
+        }
+        let (mut a, mut b) = (vec![0.0; 8192], vec![0.0; 8192]);
+        shared.render(&mut a, 1.0);
+        fixed.render(&mut b, 1.0);
+        assert!(a.iter().any(|v| *v != 0.0));
+        assert_eq!(a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "an unused pedal must not change contact policy, clock or pressure");
+    }
+
+    #[test]
+    fn shared_hihat_pedal_changes_force_without_resetting_ringing_state() {
+        let mut live = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        live.strike(0.85 * live.radius, 0.0, 2.5);
+        live.render(&mut [0.0; 1024], 1.0);
+        let state: Vec<_> = live.ins.bodies.iter().map(|b| (b.w.clone(), b.wp.clone())).collect();
+        let rings: Vec<_> = live.ins.mics.iter().map(|m| m.ring.clone()).collect();
+        let (step, strokes, bodies, contacts) = (live.ins.step_index, live.strokes,
+            live.ins.bodies.len(), live.ins.contacts.len());
+        let now = live.ins.time();
+        live.set_hihat_pedal(80.0, 0.04).unwrap();
+        let pedal = live.pedal.as_ref().unwrap();
+        let drive = &live.ins.drives[pedal.drive];
+        assert_eq!(drive.at(now), 0.0);
+        assert!((drive.at(now + 0.02) + 40.0).abs() < 1e-10);
+        assert_eq!(drive.at(now + 0.04), -80.0);
+        assert_eq!(live.ins.step_index, step);
+        assert_eq!(live.strokes, strokes, "pedal motion must not invent a stick stroke");
+        assert_eq!(live.ins.bodies.len(), bodies);
+        assert_eq!(live.ins.contacts.len(), contacts);
+        assert_eq!(live.ins.bodies.iter().map(|b| (b.w.clone(), b.wp.clone())).collect::<Vec<_>>(), state);
+        assert_eq!(live.ins.mics.iter().map(|m| m.ring.clone()).collect::<Vec<_>>(), rings);
+
+        let mut control = live.clone();
+        control.set_hihat_pedal(0.0, 0.0).unwrap();
+        let mut copy = live.clone();
+        let (mut a, mut b, mut unclosed) = (vec![0.0; 4096], vec![0.0; 4096], vec![0.0; 4096]);
+        live.render(&mut a, 1.0);
+        let mut at = 0;
+        for count in [1, 127, 511, 2048, 1409] {
+            copy.render(&mut b[at..at + count], 1.0);
+            at += count;
+        }
+        control.render(&mut unclosed, 1.0);
+        assert!(a.iter().all(|x| x.is_finite()));
+        assert_eq!(a, b, "copies must retain force ramps across arbitrary output blocks");
+        assert_ne!(a, unclosed, "a closure must affect the same ringing cymbals");
+        let rod = live.pedal.as_ref().unwrap().rod;
+        assert_ne!(live.ins.bodies[rod].w, control.ins.bodies[rod].w);
+    }
+
+    #[test]
+    fn shared_hihat_initial_load_is_settled_on_one_rest_geometry() {
+        let open = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        let mut closed = Live::with_hihat_pedal(7.0, 80.0).unwrap();
+        assert_eq!(open.ins.bodies.len(), closed.ins.bodies.len());
+        assert_eq!(open.ins.contacts.len(), closed.ins.contacts.len());
+        for (a, b) in open.ins.bodies.iter().zip(&closed.ins.bodies) {
+            assert_eq!(a.origin, b.origin, "the pedal must move bodies, not change their rest gap");
+            assert_eq!(a.rest_z, b.rest_z);
+        }
+        assert!(closed.ins.contacts.iter().any(|c| c.active && c.force > 0.0),
+            "a closed initial load must actually reach the rims");
+        assert_eq!(closed.strokes, 0);
+        let pedal = closed.pedal.as_ref().unwrap();
+        assert_eq!(closed.ins.drives[pedal.drive].at(closed.ins.time()), -80.0);
+        assert!(closed.ins.time() >= 0.5);
+
+        let mut manual = Live::new("hihat", 7.0).unwrap();
+        manual.set_hihat_pedal(80.0, 0.12).unwrap();
+        let mut remaining = (0.5 * OUT_RATE).round() as usize;
+        let mut scratch = [0.0; 128];
+        while remaining > 0 {
+            let count = remaining.min(scratch.len());
+            manual.render(&mut scratch[..count], 1.0);
+            remaining -= count;
+        }
+        assert_eq!(manual.ins.step_index, closed.ins.step_index);
+        let (mut a, mut b) = (vec![0.0; 1024], vec![0.0; 1024]);
+        manual.render(&mut a, 1.0);
+        closed.render(&mut b, 1.0);
+        assert_eq!(a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "initial settling must retain the same causal output history as manual playback");
+    }
+
+    #[test]
+    fn shared_hihat_pedal_interruptions_are_force_continuous_and_held_commands_are_noops() {
+        let mut live = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        live.set_hihat_pedal(80.0, 0.01).unwrap();
+        live.render(&mut [0.0; 240], 1.0);
+        let now = live.ins.time();
+        let pedal = live.pedal.as_ref().unwrap();
+        let before = live.ins.drives[pedal.drive].at(now);
+        assert!(before < 0.0 && before > -80.0, "the control must interrupt a real ramp");
+        live.set_hihat_pedal(0.0, 0.02).unwrap();
+        let pedal = live.pedal.as_ref().unwrap();
+        assert_eq!(live.ins.drives[pedal.drive].at(now), before);
+        assert_eq!(live.ins.drives[pedal.drive].at(now + 0.02), 0.0);
+        live.render(&mut [0.0; 1024], 1.0);
+        let pedal = live.pedal.as_ref().unwrap();
+        let held = live.ins.drives[pedal.drive].knots.clone();
+        let mut copy = live.clone();
+        live.set_hihat_pedal(0.0, 0.5).unwrap();
+        assert_eq!(live.ins.drives[live.pedal.as_ref().unwrap().drive].knots, held);
+        let (mut a, mut b) = ([0.0; 256], [0.0; 256]);
+        live.render(&mut a, 1.0);
+        copy.render(&mut b, 1.0);
+        assert_eq!(a, b, "repeating a held force must not restart its trajectory");
+    }
+
+    #[test]
+    fn shared_hihat_pedal_wakes_sleep_and_retains_unfinished_ramps() {
+        let mut live = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        // An exactly resting state is sufficient for the native sleep decision.
+        live.asleep = true;
+        live.quiet_samples = 48_000;
+        live.set_hihat_pedal(80.0, 1.0).unwrap();
+        assert!(!live.asleep());
+        assert_eq!(live.quiet_samples, 0);
+        // Interrupt before the clock advances: this now has a future ramp endpoint
+        // but identically zero force and motion. Only the pending-program guard
+        // can keep the engine awake through the ordinary 300 ms quiet threshold.
+        live.set_hihat_pedal(0.0, 1.0).unwrap();
+        let step = live.ins.step_index;
+        let mut out = vec![0.0; 16_384];
+        live.render(&mut out, 1.0);
+        assert!(out.iter().all(|v| *v == 0.0));
+        assert!(live.ins.step_index > step);
+        assert!(!live.asleep(), "an unfinished external force program cannot be skipped as silence");
+        assert_eq!(live.strokes, 0);
+        live.set_hihat_pedal(0.0, 0.0).unwrap();
+        let pedal = live.pedal.as_ref().unwrap();
+        assert_eq!(live.ins.drives[pedal.drive].knots, vec![(live.ins.time(), -0.0)]);
+        assert!(live.kinetic_energy().is_finite());
+    }
+
+    #[test]
+    fn shared_hihat_pedal_refuses_invalid_or_wrong_instrument_commands_atomically() {
+        for initial in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(Live::with_hihat_pedal(7.0, initial).is_err());
+        }
+        let mut live = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        let pedal = live.pedal.as_ref().unwrap();
+        let original = live.ins.drives[pedal.drive].knots.clone();
+        for (force, ramp) in [(-1.0, 0.0), (f64::NAN, 0.0), (f64::INFINITY, 0.0),
+            (80.0, -1.0), (80.0, f64::NAN), (80.0, f64::INFINITY)] {
+            assert!(live.set_hihat_pedal(force, ramp).is_err());
+            assert_eq!(live.ins.drives[live.pedal.as_ref().unwrap().drive].knots, original);
+        }
+        for name in ["kick", "hihat-open", "hihat-closed"] {
+            assert!(Live::new(name, 7.0).unwrap().set_hihat_pedal(80.0, 0.01).is_err(),
+                "{name} must not accept control for a different physical rest geometry");
+        }
+    }
 
     /// G0/G3: two MIDI strikes before the next sample must not become just the last strike.
     #[test]
