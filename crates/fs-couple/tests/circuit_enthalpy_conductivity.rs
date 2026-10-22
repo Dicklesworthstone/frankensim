@@ -1,5 +1,7 @@
 //! G1/G3: source-backed nonlinear conduction and finite heat on the real owners.
 //! The authored curves and surfaces below are synthetic numerical fixtures.
+#[path = "circuit_enthalpy_conductivity/motion.rs"]
+mod motion;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 

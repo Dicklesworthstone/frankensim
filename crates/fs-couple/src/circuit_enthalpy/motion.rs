@@ -4,6 +4,9 @@
 //! Endpoint conductivity/resistivity and contact resistance feed back into the
 //! SAME electrical trajectory that produces force and changes C/L geometry.
 
+/// Joint temperature/field/current-dependent conduction and actuator motion.
+pub mod conductivity;
+
 use super::*;
 use super::contacts::{ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};
 use crate::material_circuit::motion::{FieldMotionCandidate, FieldMotionInput,
@@ -50,15 +53,18 @@ impl ThermalDriver for FieldMotionCandidate {
     type Model = MaterialFieldMotion;
     type Step = FieldMotionStep;
     fn account(&self) -> DriverAccount<'_> {
-        let step = self.step();
-        DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
-            heat_j: step.heat_j,
-            stored_change_j: (step.electrical_energy_j[1]-step.electrical_energy_j[0])
-                +(step.kinetic_energy_j[1]-step.kinetic_energy_j[0])
-                +(step.elastic_energy_j[1]-step.elastic_energy_j[0]),
-            supplied_j: step.electrical_supply_j+step.mechanical_supply_j }
+        field_account(self.step())
     }
     fn into_parts(self) -> (Self::Model, Self::Step) { FieldMotionCandidate::into_parts(self) }
+}
+
+fn field_account(step: &FieldMotionStep) -> DriverAccount<'_> {
+    DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
+        heat_j: step.heat_j,
+        stored_change_j: (step.electrical_energy_j[1]-step.electrical_energy_j[0])
+            +(step.kinetic_energy_j[1]-step.kinetic_energy_j[0])
+            +(step.elastic_energy_j[1]-step.elastic_energy_j[0]),
+        supplied_j: step.electrical_supply_j+step.mechanical_supply_j }
 }
 
 /// Close material resistance, Joule heating and reciprocal gap motion in one

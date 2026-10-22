@@ -10,9 +10,10 @@ use crate::circuit_enthalpy::conductivity::{
     self as coupled_conductivity, ConductivityEnthalpyCandidate,
 };
 use crate::material_circuit::conductivity::{
-    ConductionAxis, ConductionCoordinate, ConductivitySolve, ConductorResponse,
-    MaterialConductivityStep,
+    ConductionAxis, ConductionCoordinate, ConductivitySample, ConductivitySolve, ConductorResponse,
 };
+use crate::circuit_enthalpy::motion::{FieldMotionEnthalpyInput, conductivity as motion_conductivity};
+use crate::material_circuit::motion::MaterialFieldMotion;
 
 /// Electrical response of an existing whole-cell resistor.
 /// Every original resistor needs exactly one entry, including constant laws.
@@ -168,18 +169,17 @@ impl<'a> MaterialNetwork<'a> {
     fn resolve_conductivity_transport(
         &self,
         thermal: &DepositionSimulation<'_>,
-        electrical: &MaterialConductivityStep,
+        electrical: &[ConductivitySample],
         coefficients: StepCoefficients<MaterialNetworkSample>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepCoefficients<MaterialNetworkSample>, MaterialNetworkError> {
         check_cancelled(&mut cancelled)?;
         let invalid = MaterialNetworkError::Invalid;
         let evaluated: BTreeMap<_, _> = electrical
-            .evaluated
             .iter()
             .map(|sample| (sample.point.branch, sample))
             .collect();
-        if evaluated.len() != electrical.evaluated.len() || evaluated.len() != self.resistors.len()
+        if evaluated.len() != electrical.len() || evaluated.len() != self.resistors.len()
         {
             return Err(invalid(
                 "exactly one solved-field sample per resistor is required",
@@ -342,7 +342,7 @@ impl PreparedMaterialNetwork<'_, '_> {
             },
             |state, electrical, coefficients| {
                 self.network
-                    .resolve_conductivity_transport(state, electrical, coefficients, || {
+                    .resolve_conductivity_transport(state, &electrical.evaluated, coefficients, || {
                         (*cancel.borrow_mut())()
                     })
             },
@@ -352,6 +352,51 @@ impl PreparedMaterialNetwork<'_, '_> {
             Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(
                 DepositionError::Cancelled,
             ))) => Err(CircuitEnthalpyError::Cancelled),
+            other => other,
+        }
+    }
+
+    /// The same data-bound E/J and thermal transport closure for an actual
+    /// electric/magnetic gap actuator. All source cards, pins, branch geometry,
+    /// caloric laws and heat destinations come from this prepared network.
+    /// Electrical operating axes come from `responses`; actual field motion
+    /// comes from the original reciprocal descriptor, including optional support.
+    /// The SAME solved-field bundle supplies resistor response and heat transport.
+    ///
+    /// Every trial restarts accepted electrical, body and thermal history. Only
+    /// original native Joule work is deposited; finite nonlinear residuals remain
+    /// separate. Stationary conductor geometry, fixed body/field material state
+    /// and bulk-only no-contact restrictions remain explicit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field_motion_conductivity_candidate<'m>(
+        &self, thermal: &DepositionSimulation<'m>, target_s: f64,
+        motion: &MaterialFieldMotion, ports: &[f64], external_force_n: f64,
+        responses: &[CellConductionResponse<'_>], controls: CircuitEnthalpySolve,
+        conductivity: ConductivitySolve, guess_j: &[f64], cancelled: impl FnMut() -> bool,
+    ) -> Result<motion_conductivity::FieldConductivityEnthalpyCandidate<'m, MaterialNetworkSample>,
+        CircuitEnthalpyError<MaterialNetworkError>> {
+        let cancel = RefCell::new(cancelled);
+        let plan = match response_plan(self.network, responses, &mut || (*cancel.borrow_mut())()) {
+            Err(MaterialNetworkError::Thermal(DepositionError::Cancelled)) =>
+                return Err(CircuitEnthalpyError::Cancelled),
+            other => other.map_err(CircuitEnthalpyError::Source)?,
+        };
+        if plan.bases != self.bases {
+            return Err(CircuitEnthalpyError::Source(MaterialNetworkError::Invalid(
+                "conductivity response bases must retain the prepared source choices")));
+        }
+        let destinations = self.resistor_destinations();
+        let result = motion_conductivity::step_candidate_with_transport(thermal, target_s,
+            FieldMotionEnthalpyInput { motion, ports, external_force_n, destinations: &destinations },
+            &plan.sources, controls, conductivity, guess_j,
+            |state| self.network.resolve_bound(state, &self.bases, Some(&self.pins),
+                Some(&plan.axes), || (*cancel.borrow_mut())()),
+            |state, electrical, coefficients| self.network.resolve_conductivity_transport(
+                state, &electrical.evaluated, coefficients, || (*cancel.borrow_mut())()),
+            || (*cancel.borrow_mut())());
+        match result {
+            Err(CircuitEnthalpyError::Source(MaterialNetworkError::Thermal(
+                DepositionError::Cancelled))) => Err(CircuitEnthalpyError::Cancelled),
             other => other,
         }
     }

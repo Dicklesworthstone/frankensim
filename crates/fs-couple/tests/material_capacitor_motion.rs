@@ -1,4 +1,6 @@
 //! Data-only material substitutions through reciprocal field/circuit/body motion.
+#[path = "material_capacitor_motion/conductivity.rs"]
+mod conductivity;
 #[path = "electrical_contacts/source.rs"]
 mod contact_source;
 use fs_couple::material_circuit::motion::{FieldMotionInput, MaterialFieldMotion};

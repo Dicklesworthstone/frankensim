@@ -3208,6 +3208,33 @@ second friction law or convert numerical loss into heat. The force-driven
 surface regression independently checks the resulting velocity, heating and
 momentum under data-only speed-slope changes.
 
+### Nonlinear conduction through actual field motion and finite heat
+
+`material_circuit::motion::conductivity` reuses the original conductivity
+iteration with the original reciprocal field/body descriptor. Every trial starts
+from the same charge/flux, gap, momentum and support history. Explicit source E/J
+axes are refreshed from that trajectory's actual bulk voltage/current; native
+Joule work stays authoritative and constitutive residuals never become heat.
+Resistance and power gates both precede joint acceptance.
+
+`circuit_enthalpy::motion::conductivity` deposits those native losses through the
+existing finite-enthalpy driver. Its global work cap includes all inner native
+descriptor solves, discarded thermal stencils and final admission.
+`PreparedMaterialNetwork::field_motion_conductivity_candidate` uses existing
+cards, cells, source pins, geometry and heat destinations directly. The same
+solved E/J bundle also refreshes thermal conductivity and original link transport;
+temperature, operating point, charge/flux and actual motion close together.
+
+The original uniform-gap, constant field coefficient, guided inertia and optional
+conservative-support scope remains. Conductor geometry is stationary; no moving
+conductor transport, Hall law, hysteresis, field entropy or series-contact
+response is added. The coupled thermal time level remains generally first order.
+Focused synthetic regressions cover native constant-law parity, E/J-source
+substitution, both electrical polarities, magnetic linkage, refinement against
+an independent RC/Maxwell-force ODE, closed-form external work/heating, complete
+prepared data, continuation, budget refusal and cancellation. Syntax parsing and
+independent equation checks passed; native Rust execution remains unverified.
+
 ## Reciprocal material electric and magnetic gap motion
 
 `material_circuit::motion::MaterialFieldMotion` composes the existing source-bound

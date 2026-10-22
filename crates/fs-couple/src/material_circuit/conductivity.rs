@@ -10,8 +10,8 @@ use fs_material::conductor::{ConductorError, ResolvedConductor, ResolvedConducto
 use fs_qty::{Dims, QuantitySpec};
 
 use super::{
-    MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialCircuitStep,
-    MaterialResistor, poll,
+    MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError, MaterialCircuitSolve,
+    MaterialCircuitStep, MaterialResistor, ResistorHeat, poll,
 };
 
 /// Work cap on complete circuit/source evaluations in one proposed time step.
@@ -300,6 +300,109 @@ fn refresh(
     )
 }
 
+// The constitutive iteration is shared by the original fixed and moving-field
+// descriptors. Each driver returns its OWN native candidate and loss account;
+// this seam cannot manufacture a circuit, force, heat or accepted history.
+pub(super) trait ConductivityDriver {
+    fn resistor_heats(&self) -> &[ResistorHeat];
+}
+impl ConductivityDriver for MaterialCircuitCandidate {
+    fn resistor_heats(&self) -> &[ResistorHeat] { &self.step().resistors }
+}
+pub(super) struct ConductivityTrial<D> {
+    pub candidate: D,
+    pub evaluated: Vec<ConductivitySample>,
+    pub iterations: usize,
+    pub source_evaluations: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
+    circuit: &MaterialCircuit,
+    mut seeds: Vec<MaterialResistor>,
+    sources: &[ConductorResponse<'_>],
+    controls: MaterialCircuitSolve,
+    solve: ConductivitySolve,
+    mut native: impl FnMut(Vec<MaterialResistor>, &mut C)
+        -> Result<D, MaterialCircuitError>,
+    mut cancelled: C,
+) -> Result<ConductivityTrial<D>, MaterialCircuitError> {
+    poll(&mut cancelled)?;
+    solve.validate()?;
+    if seeds.len() != circuit.resistors().len() {
+        return Err(invalid(
+            "every original resistor needs one refreshed material seed",
+        ));
+    }
+    seeds.sort_by_key(|seed| seed.branch);
+    let bindings = admit(circuit, &seeds, sources, &mut cancelled)?;
+    let mut applied = seeds.clone();
+    let mut maximum_resistance_defect = 0.0_f64;
+    let mut maximum_power_defect = 0.0_f64;
+    for iterations in 1..=solve.maximum_iterations {
+        poll(&mut cancelled)?;
+        let candidate = native(applied, &mut cancelled)?;
+        let mut evaluated = Vec::with_capacity(bindings.len());
+        let mut next = Vec::with_capacity(bindings.len());
+        let mut converged = true;
+        maximum_resistance_defect = 0.0;
+        maximum_power_defect = 0.0;
+        for ((heat, original), binding) in
+            candidate.resistor_heats().iter().zip(&seeds).zip(&bindings)
+        {
+            poll(&mut cancelled)?;
+            let point = ConductionPoint {
+                branch: original.branch,
+                voltage_v: heat.voltage_v,
+                current_a: heat.current_a,
+                electric_field_v_m: heat.voltage_v / original.conductor.length_m(),
+                current_density_a_m2: heat.current_a / original.conductor.area_m2(),
+            };
+            if !point.electric_field_v_m.is_finite()
+                || !point.current_density_a_m2.is_finite()
+                || point.voltage_v != 0.0 && point.electric_field_v_m == 0.0
+                || point.current_a != 0.0 && point.current_density_a_m2 == 0.0
+            {
+                return Err(invalid(
+                    "solved conductor field/current density is unrepresentable",
+                ));
+            }
+            let conductor = refresh(&original.conductor, binding, point)?;
+            let used = heat.material.conductor.resistance_ohm();
+            let actual = conductor.resistance_ohm();
+            let resistance_defect_ohm = actual - used;
+            let voltage_defect_v = point.voltage_v - point.current_a * actual;
+            let power_defect_w =
+                point.voltage_v * point.current_a - conductor.joule_power_w(point.current_a)?;
+            let tolerance = solve.absolute_resistance_tolerance_ohm
+                + solve.relative_resistance_tolerance * actual.max(used);
+            if [resistance_defect_ohm, voltage_defect_v, power_defect_w, tolerance]
+                .iter().any(|value| !value.is_finite())
+            {
+                return Err(invalid("constitutive residual or tolerance is unrepresentable"));
+            }
+            maximum_resistance_defect = maximum_resistance_defect.max(resistance_defect_ohm.abs());
+            maximum_power_defect = maximum_power_defect.max(power_defect_w.abs());
+            converged &= resistance_defect_ohm.abs() <= tolerance
+                && power_defect_w.abs() <= controls.power_tolerance_w;
+            next.push(MaterialResistor { branch: original.branch, conductor: conductor.clone() });
+            evaluated.push(ConductivitySample { point, conductor, resistance_defect_ohm,
+                voltage_defect_v, power_defect_w });
+        }
+        poll(&mut cancelled)?;
+        if converged {
+            return Ok(ConductivityTrial { candidate, evaluated, iterations,
+                source_evaluations: iterations * bindings.len() });
+        }
+        applied = next;
+    }
+    Err(MaterialCircuitError::ConductivityConvergence {
+        iterations: solve.maximum_iterations,
+        resistance_defect_ohm: maximum_resistance_defect,
+        power_defect_w: maximum_power_defect,
+    })
+}
+
 impl MaterialCircuit {
     /// Resolve conductivity/resistivity from the actual solved electric field
     /// and/or current density, retaining the original complete source bundle.
@@ -355,112 +458,19 @@ impl MaterialCircuit {
     #[allow(clippy::too_many_arguments)]
     pub fn conductivity_with_materials_candidate(
         &self,
-        mut seeds: Vec<MaterialResistor>,
+        seeds: Vec<MaterialResistor>,
         sources: &[ConductorResponse<'_>],
         inputs: &[f64],
         dt: f64,
         controls: MaterialCircuitSolve,
         solve: ConductivitySolve,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
-        poll(&mut cancelled)?;
-        solve.validate()?;
-        if seeds.len() != self.resistors().len() {
-            return Err(invalid(
-                "every original resistor needs one refreshed material seed",
-            ));
-        }
-        seeds.sort_by_key(|seed| seed.branch);
-        let bindings = admit(self, &seeds, sources, &mut cancelled)?;
-        let mut applied = seeds.clone();
-        let mut maximum_resistance_defect = 0.0_f64;
-        let mut maximum_power_defect = 0.0_f64;
-        for iterations in 1..=solve.maximum_iterations {
-            poll(&mut cancelled)?;
-            let candidate = self.step_candidate(applied, inputs, dt, controls, &mut cancelled)?;
-            let mut evaluated = Vec::with_capacity(bindings.len());
-            let mut next = Vec::with_capacity(bindings.len());
-            let mut converged = true;
-            maximum_resistance_defect = 0.0;
-            maximum_power_defect = 0.0;
-            for ((heat, original), binding) in
-                candidate.step().resistors.iter().zip(&seeds).zip(&bindings)
-            {
-                poll(&mut cancelled)?;
-                let point = ConductionPoint {
-                    branch: original.branch,
-                    voltage_v: heat.voltage_v,
-                    current_a: heat.current_a,
-                    electric_field_v_m: heat.voltage_v / original.conductor.length_m(),
-                    current_density_a_m2: heat.current_a / original.conductor.area_m2(),
-                };
-                if !point.electric_field_v_m.is_finite()
-                    || !point.current_density_a_m2.is_finite()
-                    || point.voltage_v != 0.0 && point.electric_field_v_m == 0.0
-                    || point.current_a != 0.0 && point.current_density_a_m2 == 0.0
-                {
-                    return Err(invalid(
-                        "solved conductor field/current density is unrepresentable",
-                    ));
-                }
-                let conductor = refresh(&original.conductor, binding, point)?;
-                let used = heat.material.conductor.resistance_ohm();
-                let actual = conductor.resistance_ohm();
-                let resistance_defect_ohm = actual - used;
-                let voltage_defect_v = point.voltage_v - point.current_a * actual;
-                let power_defect_w =
-                    point.voltage_v * point.current_a - conductor.joule_power_w(point.current_a)?;
-                let tolerance = solve.absolute_resistance_tolerance_ohm
-                    + solve.relative_resistance_tolerance * actual.max(used);
-                if [
-                    resistance_defect_ohm,
-                    voltage_defect_v,
-                    power_defect_w,
-                    tolerance,
-                ]
-                .iter()
-                .any(|value| !value.is_finite())
-                {
-                    return Err(invalid(
-                        "constitutive residual or tolerance is unrepresentable",
-                    ));
-                }
-                maximum_resistance_defect =
-                    maximum_resistance_defect.max(resistance_defect_ohm.abs());
-                maximum_power_defect = maximum_power_defect.max(power_defect_w.abs());
-                converged &= resistance_defect_ohm.abs() <= tolerance
-                    && power_defect_w.abs() <= controls.power_tolerance_w;
-                next.push(MaterialResistor {
-                    branch: original.branch,
-                    conductor: conductor.clone(),
-                });
-                evaluated.push(ConductivitySample {
-                    point,
-                    conductor,
-                    resistance_defect_ohm,
-                    voltage_defect_v,
-                    power_defect_w,
-                });
-            }
-            poll(&mut cancelled)?;
-            if converged {
-                let (circuit, electrical) = candidate.into_parts();
-                return Ok(MaterialConductivityCandidate {
-                    circuit,
-                    step: MaterialConductivityStep {
-                        electrical,
-                        evaluated,
-                        iterations,
-                        source_evaluations: iterations * bindings.len(),
-                    },
-                });
-            }
-            applied = next;
-        }
-        Err(MaterialCircuitError::ConductivityConvergence {
-            iterations: solve.maximum_iterations,
-            resistance_defect_ohm: maximum_resistance_defect,
-            power_defect_w: maximum_power_defect,
-        })
+        let trial = solve_native(self, seeds, sources, controls, solve,
+            |applied, check| self.step_candidate(applied, inputs, dt, controls, check), cancelled)?;
+        let (circuit, electrical) = trial.candidate.into_parts();
+        Ok(MaterialConductivityCandidate { circuit, step: MaterialConductivityStep {
+            electrical, evaluated: trial.evaluated, iterations: trial.iterations,
+            source_evaluations: trial.source_evaluations } })
     }
 }

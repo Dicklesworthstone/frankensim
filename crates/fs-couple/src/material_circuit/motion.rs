@@ -12,6 +12,8 @@
 
 /// Source-bound layered axial support, on the same gap and momentum coordinates.
 pub mod support;
+/// Material conduction at the operating fields solved with actual gap motion.
+pub mod conductivity;
 use support::AxialSupport;
 
 use fs_matdb::EvaluationDecision;
