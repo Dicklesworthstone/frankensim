@@ -81,4 +81,18 @@ mod tests {
         let mc = original.replace(":method latin-hypercube", ":method monte-carlo").replace(LAYOUT, "");
         assert!(UncertaintyStudy::parse(&mc).unwrap().lhs().is_none());
     }
+
+    #[test]
+    fn g0_frozen_mean_controls_preserve_the_explicit_lhs_layout() {
+        for method in ["coordinate-secant :max-solves 2", "nominal-adjoint :max-solves 1"] {
+            let text = source().replace(":version 1",
+                &format!(":version 3 :mean-control ({method})"));
+            let study = UncertaintyStudy::parse(&text).unwrap();
+            assert_eq!(study.lhs(), Some(LhsLayout { replicates: 2, samples_per_replicate: 3 }));
+            assert!(study.mean_control().is_some());
+            assert!(study.qmc().is_none() && study.compliance().is_none());
+            assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+            assert!(UncertaintyStudy::parse(&text.replace(":version 3", ":version 1")).is_err());
+        }
+    }
 }

@@ -39,6 +39,17 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   contract makes COUPLING explicit (level ℓ returns the correction
   Y_ℓ driven by one germ — that coupling is what makes variance
   decay); per-level statistics ledgered in the report.
+- `product_lhs::LhsExecution` executes independent replicated Latin hypercubes.
+  Its `freeze_linear_control_variate` and `assess_linear_control_variate`
+  methods share the existing physical marginal means and centered-control
+  arithmetic. The complete LHS plan and layout bind the frozen coefficients.
+  Assessment replays only sampler coordinates, uses complete hypercubes as the
+  independent statistical units, and leaves raw observations, compliance and
+  checkpoint bytes unchanged. Partial replicates are retained work, excluded
+  from both means. Errors are descriptive between-replicate estimates, not
+  confidence intervals, optional-stopping guarantees or model-error bounds;
+  variance reduction is measured rather than guaranteed. Assessment polls
+  cancellation during permutation replay, centering and reductions.
 
 - Slice 2 (bead o5kc): `seismic` — `KanaiTajimi` PSD + spectral-
   representation synthesis with counter-based phases (bit-replayable

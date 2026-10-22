@@ -344,8 +344,8 @@ impl UncertaintyStudy {
         if sobol_sensitivity && version != 1 {
             return Err(error("Sobol sensitivity requires a version 1 fixed design; mean controls and sequential compliance do not apply to pick-freeze rows"));
         }
-        if latin_hypercube && version != 1 {
-            return Err(error("Latin-hypercube sampling requires version 1 fixed-count studies; sequential Bernoulli compliance and mean controls are not supported"));
+        if latin_hypercube && version == 2 {
+            return Err(error("dependent Latin-hypercube points cannot use the version 2 Bernoulli-iid compliance policy"));
         }
         if latin_hypercube != f.contains_key("lhs") {
             return Err(error("latin-hypercube requires an explicit :lhs layout; other methods forbid it"));

@@ -62,6 +62,7 @@ pub use product_importance::proposal::execution::{
     PilotImportanceReport, PilotImportanceStage,
 };
 pub use product_lhs::{LhsEstimate, LhsExecution, LhsPlan, LhsReport};
+pub use product_lhs::mean_control::{LhsLinearControlEstimate, LhsLinearControlVariate};
 pub use product_mlmc::{MlmcEstimate, MlmcExecution, MlmcExecutionReport, MlmcLevelReport};
 pub use product_mlmc_allocation::{
     allocate_mlmc, MlmcAllocation, MlmcAllocationError, MlmcAllocationPolicy,

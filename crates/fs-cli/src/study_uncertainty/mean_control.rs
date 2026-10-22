@@ -6,7 +6,8 @@ use fs_exec::CancelGate;
 use fs_ledger::Ledger;
 use fs_package::Claim;
 use fs_project::uncertainty::mean_control::{self as design, MeanControlMethod, MeanControlPolicy};
-use fs_uq::{LinearControlEstimate, LinearControlVariate, UqStatus};
+use fs_uq::{LhsLinearControlEstimate, LhsLinearControlVariate,
+    LinearControlEstimate, LinearControlVariate, UqStatus};
 use fs_uq::product_copula::mean_control::CopulaLinearControlVariate;
 use fs_uq::product_qmc::mean_control::{QmcLinearControlEstimate, QmcLinearControlVariate};
 
@@ -29,6 +30,7 @@ enum Frozen {
     Copula(CopulaLinearControlVariate),
     QuasiMonteCarlo(QmcLinearControlVariate),
     CopulaQuasiMonteCarlo(QmcLinearControlVariate),
+    LatinHypercube(LhsLinearControlVariate),
 }
 
 pub(super) struct Calibration {
@@ -124,7 +126,7 @@ impl Calibration {
         let fresh = Execution::new(model)?;
         self.control = Some(match &fresh {
             Execution::SobolSensitivity(_) => return Err(invalid("pick-freeze sensitivity does not admit mean calibration")),
-            Execution::LatinHypercube(_) => return Err(invalid("Latin-hypercube mean calibration is not implemented")),
+            Execution::LatinHypercube(run) => Frozen::LatinHypercube(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::MonteCarlo(run) => Frozen::MonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::CopulaMonteCarlo(run) => Frozen::Copula(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::QuasiMonteCarlo(run) => Frozen::QuasiMonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
@@ -141,6 +143,7 @@ impl Calibration {
         self.control.as_ref().map(|control| match control {
             Frozen::MonteCarlo(c) => c.gradient(), Frozen::Copula(c) => c.gradient(),
             Frozen::QuasiMonteCarlo(c) | Frozen::CopulaQuasiMonteCarlo(c) => c.gradient(),
+            Frozen::LatinHypercube(c) => c.gradient(),
         })
     }
     pub(super) fn next(&self, model: &Model) -> Result<Vec<f64>> {
@@ -190,6 +193,8 @@ impl Calibration {
                 .map(|a| Some(Estimate::QuasiMonteCarlo(a))).map_err(|e| invalid(e.to_string())),
             (Execution::CopulaQuasiMonteCarlo(run), Frozen::CopulaQuasiMonteCarlo(c)) => run.assess_linear_control_variate(c)
                 .map(|a| Some(Estimate::QuasiMonteCarlo(a))).map_err(|e| invalid(e.to_string())),
+            (Execution::LatinHypercube(run), Frozen::LatinHypercube(c)) => run.assess_linear_control_variate(c)
+                .map(|a| Some(Estimate::LatinHypercube(a))).map_err(|e| invalid(e.to_string())),
             _ => Err(invalid("frozen control belongs to a different sampling method")),
         }?;
         Ok(estimate.map(|estimate| Assessment { estimate, method: self.method }))
@@ -208,7 +213,11 @@ impl Calibration {
     }
 }
 
-enum Estimate { MonteCarlo(LinearControlEstimate), QuasiMonteCarlo(QmcLinearControlEstimate) }
+enum Estimate {
+    MonteCarlo(LinearControlEstimate),
+    QuasiMonteCarlo(QmcLinearControlEstimate),
+    LatinHypercube(LhsLinearControlEstimate),
+}
 pub(super) struct Assessment { estimate: Estimate, method: MeanControlMethod }
 impl Assessment {
     fn summary(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, usize, &'static str) {
@@ -218,6 +227,9 @@ impl Assessment {
             Estimate::QuasiMonteCarlo(a) => (a.raw.as_ref().map(|v| v.mean), a.controlled.as_ref().map(|v| v.mean),
                 a.raw.as_ref().and_then(|v| v.standard_error), a.controlled.as_ref().and_then(|v| v.standard_error),
                 a.variance_ratio, a.samples_in_estimate, "complete-independent-scrambles"),
+            Estimate::LatinHypercube(a) => (a.raw.as_ref().map(|v| v.mean), a.controlled.as_ref().map(|v| v.mean),
+                a.raw.as_ref().and_then(|v| v.standard_error), a.controlled.as_ref().and_then(|v| v.standard_error),
+                a.variance_ratio, a.samples_in_estimate, "complete-independent-latin-hypercubes"),
         }
     }
     pub(super) fn json(&self) -> String {
@@ -225,6 +237,8 @@ impl Assessment {
         let nets = match &self.estimate {
             Estimate::MonteCarlo(_) => String::new(),
             Estimate::QuasiMonteCarlo(a) => format!(",\"completed_replicates\":{},\"samples_accepted\":{},\"raw_replicate_means_k\":{},\"controlled_replicate_means_k\":{}",
+                a.completed_replicates, a.samples_accepted, numbers(&a.raw_replicate_means), numbers(&a.controlled_replicate_means)),
+            Estimate::LatinHypercube(a) => format!(",\"completed_replicates\":{},\"samples_accepted\":{},\"raw_replicate_means_k\":{},\"controlled_replicate_means_k\":{}",
                 a.completed_replicates, a.samples_accepted, numbers(&a.raw_replicate_means), numbers(&a.controlled_replicate_means)),
         };
         format!("{{\"raw_mean_k\":{},\"controlled_mean_k\":{},\"raw_standard_error_k\":{},\"controlled_standard_error_k\":{},\"variance_ratio\":{},\"samples_in_estimate\":{n},\"statistical_unit\":{unit:?}{nets}}}",

@@ -176,3 +176,72 @@ fn g0_invalid_lhs_design_refuses_before_creating_a_native_ledger() {
     assert_eq!(result.str_field("status"), Some("refused"));
     assert!(!f.ledger.exists());
 }
+
+fn controlled_study(method: &str, cap: usize) -> String {
+    STUDY.replace(":version 1", &format!(":version 3 :mean-control ({method} :max-solves {cap})"))
+}
+
+#[test]
+fn g1_native_lhs_secant_and_adjoint_controls_keep_every_physical_observation() {
+    let raw = Fixture::new();
+    let raw_report = raw.report(&raw.study(None, exit::SUCCESS));
+    for (method, cap) in [("coordinate-secant", 4), ("nominal-adjoint", 1)] {
+        let f = Fixture::new();
+        std::fs::write(f.sources.join("study.fsim"), controlled_study(method, cap)).unwrap();
+        let result = f.study(None, exit::SUCCESS);
+        let report = f.report(&result);
+        assert_eq!(rows(&report), rows(&raw_report), "controls must not change physical solves");
+        assert_eq!(report.get("lhs"), raw_report.get("lhs"), "raw/compliance estimates stay identical");
+        let control = report.get("mean_control").unwrap();
+        assert_eq!(control.str_field("method"), Some(method));
+        assert_eq!(control.f64_field("probe_solves_completed"), Some(cap as f64));
+        let estimate = control.get("estimate").unwrap();
+        assert_eq!(estimate.str_field("statistical_unit"), Some("complete-independent-latin-hypercubes"));
+        assert_eq!(estimate.f64_field("samples_in_estimate"), Some(6.0));
+        assert_eq!(estimate.f64_field("completed_replicates"), Some(2.0));
+        assert_eq!(estimate.f64_field("raw_mean_k"), raw_report.get("lhs").unwrap()
+            .get("estimate").unwrap().f64_field("mean_k"));
+        // The actual conduction model is affine in power and ambient. Frozen
+        // derivatives/secants remove that variability without replacing physics.
+        assert!(estimate.f64_field("variance_ratio").unwrap() < 1e-4, "{estimate:?}");
+        let package = String::from_utf8(f.artifact(result.get("receipt").unwrap().str_field("package").unwrap())).unwrap();
+        assert!(fs_checker::check(&fs_package::EvidencePackage::from_json(&package).unwrap()).passed());
+    }
+}
+
+#[test]
+fn g4_g5_native_lhs_calibration_and_partial_replicates_resume_from_retained_inputs() {
+    let text = controlled_study("coordinate-secant", 4);
+    let whole = Fixture::new();
+    std::fs::write(whole.sources.join("study.fsim"), &text).unwrap();
+    let expected = whole.report(&whole.study(None, exit::SUCCESS));
+    let f = Fixture::new();
+    std::fs::write(f.sources.join("study.fsim"), &text).unwrap();
+    let calibration = f.study(Some("2"), exit::BUDGET);
+    let calibration_report = f.report(&calibration);
+    assert!(rows(&calibration_report).is_empty(), "calibration is not probability data");
+    let saved_probes = calibration_report.get("mean_control").unwrap().get("calibration").unwrap()
+        .get("probes").unwrap().as_array().unwrap().to_vec();
+    std::fs::rename(&f.sources, f.dir.join("parked-sources")).unwrap();
+    let prefix = f.resume(calibration.str_field("run").unwrap(), Some("4"), exit::BUDGET);
+    let report = f.report(&prefix);
+    assert_eq!(rows(&report).len(), 2);
+    let control = report.get("mean_control").unwrap();
+    assert_eq!(&control.get("calibration").unwrap().get("probes").unwrap().as_array().unwrap()[..2], saved_probes);
+    let frozen = control.get("calibration").unwrap().clone();
+    let estimate = control.get("estimate").unwrap();
+    assert_eq!(estimate.f64_field("samples_in_estimate"), Some(0.0));
+    assert_eq!(estimate.get("controlled_mean_k"), Some(&J::Null));
+    let one = f.resume(prefix.str_field("run").unwrap(), Some("1"), exit::BUDGET);
+    let one_report = f.report(&one);
+    let one_control = one_report.get("mean_control").unwrap();
+    assert_eq!(one_control.get("calibration"), Some(&frozen));
+    assert_eq!(one_control.get("estimate").unwrap().f64_field("samples_in_estimate"), Some(3.0));
+    assert_eq!(one_control.get("estimate").unwrap().get("controlled_standard_error_k"), Some(&J::Null));
+    let completed = f.resume(one.str_field("run").unwrap(), None, exit::SUCCESS);
+    let actual = f.report(&completed);
+    assert_eq!(signature(&actual), signature(&expected));
+    assert_eq!(actual.get("mean_control"), expected.get("mean_control"));
+    assert_eq!(actual.get("lhs"), expected.get("lhs"));
+    assert_eq!(f.resume(completed.str_field("run").unwrap(), None, exit::SUCCESS), completed);
+}

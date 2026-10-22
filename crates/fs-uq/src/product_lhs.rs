@@ -15,6 +15,8 @@
 //! identity binding. Its internal MonteCarlo plan is an admission/storage
 //! carrier only: this module never executes or reports Monte Carlo sampling.
 
+pub mod mean_control;
+
 use core::fmt::Display;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::Color;
@@ -308,18 +310,30 @@ impl LhsExecution {
 }
 
 fn scaled_mean(values: &[f64]) -> f64 {
-    let scale = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return 0.0; }
+    scaled_mean_interruptible(values, &mut || false).expect("uncancelled finite mean")
+}
+
+fn scaled_mean_interruptible(values: &[f64], cancelled: &mut impl FnMut() -> bool)
+    -> Result<f64, crate::UqControlError>
+{
+    use crate::product_control_variate::poll;
+    let mut scale = 0.0_f64;
+    for (i, value) in values.iter().enumerate() {
+        if i % 512 == 0 { poll(cancelled)?; }
+        scale = scale.max(value.abs());
+    }
+    if scale == 0.0 { return Ok(0.0); }
     let mut sum = 0.0;
     let mut correction = 0.0;
-    for &value in values {
+    for (i, &value) in values.iter().enumerate() {
+        if i % 512 == 0 { poll(cancelled)?; }
         let y = value / scale - correction;
         let next = sum + y;
         correction = (next - sum) - y;
         sum = next;
     }
     // A finite convex average lies in [-scale, scale]; contain roundoff overshoot.
-    (sum / values.len() as f64).clamp(-1.0, 1.0) * scale
+    Ok((sum / values.len() as f64).clamp(-1.0, 1.0) * scale)
 }
 
 fn replicate_estimate(replicate_means: &[f64]) -> Option<LhsEstimate> {

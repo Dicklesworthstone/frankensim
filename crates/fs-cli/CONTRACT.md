@@ -1124,6 +1124,17 @@ floating-point inversion is Estimated and is not an outward-rounded proof.
 No mean control variate, QMC-point confidence claim, replacement of failed
 samples, physical-error bound or safety-signoff authority is introduced.
 
+Version-3 frozen mean controls also compose with `:method latin-hypercube`
+and its explicit replicated layout. Coordinate-secant or nominal-adjoint
+calibration finishes before probability observations; its completed probes
+and frozen coefficients survive the existing native resume path. Only complete
+independent hypercubes enter the controlled mean and between-replicate error.
+The raw `lhs` report, retained child temperatures and numerical compliance
+remain unchanged. `mean_control.estimate.statistical_unit` explicitly names
+`complete-independent-latin-hypercubes`. Neither adjusted samples nor their
+errors acquire physical-QoI, confidence-sequence or compliance authority.
+See `docs/NATIVE_LATIN_HYPERCUBE.md` for the executable study declarations.
+
 ### Normalized thermal study
 
 `study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing
