@@ -266,7 +266,7 @@ impl<'m> ThermoplasticSolid<'m> {
         &self, thermal: &DepositionSimulation<'_>, sample: &HeatNetworkSample,
         resistors: &[MaterialResistor], routes: &BTreeMap<usize, CellId>, cx: &Cx<'_>,
     ) -> Result<(), ElectricalSolidSourceError> {
-        let admit = |id: CellId, state: &ResolvedMaterialStatePoint| {
+        let admit = |id: CellId, state: &ResolvedMaterialStatePoint| -> Result<(), ElectricalSolidSourceError> {
             let Some(bound) = self.cells.iter().find(|b| b.accepted.id == id) else { return Ok(()); };
             let material = bound.source.thermal_material_point().material;
             let h = thermal.cells()[&id].specific_h_j_kg;
