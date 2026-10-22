@@ -217,7 +217,8 @@ impl NsfLaw {
     }
     fn table(&self, tab: &[f64], theta: f64) -> f64 {
         let t = self.kelvin_of_theta(theta);
-        let x = ((t - self.t_low) / (self.t_high - self.t_low)).clamp(0.0, 1.0) * (tab.len() - 1) as f64;
+        let x = ((t - self.t_low) / (self.t_high - self.t_low)).clamp(0.0, 1.0)
+            * (tab.len() - 1) as f64;
         let i = (x.floor() as usize).min(tab.len() - 2);
         let w = x - i as f64;
         (1.0 - w) * tab[i] + w * tab[i + 1]
@@ -301,7 +302,11 @@ fn neq_second<L: Lattice3<27>>(f: &[f64; Q], feq: &[f64; Q]) -> [f64; 6] {
 }
 
 fn half_force_velocity(rho: f64, mom: [f64; 3], force: [f64; 3]) -> [f64; 3] {
-    [(mom[0] + 0.5 * force[0]) / rho, (mom[1] + 0.5 * force[1]) / rho, (mom[2] + 0.5 * force[2]) / rho]
+    [
+        (mom[0] + 0.5 * force[0]) / rho,
+        (mom[1] + 0.5 * force[1]) / rho,
+        (mom[2] + 0.5 * force[2]) / rho,
+    ]
 }
 
 /// Isothermal regularised collision with Guo forcing: shear relaxation `ws`, trace relaxation `wb`. The first-moment
@@ -313,7 +318,14 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
     let feq = equilibrium::<L>(rho, u, THETA0);
     let p = neq_second::<L>(f, &feq);
     let tr = p[0] + p[1] + p[2];
-    let d = [p[0] - tr / 3.0, p[1] - tr / 3.0, p[2] - tr / 3.0, p[3], p[4], p[5]];
+    let d = [
+        p[0] - tr / 3.0,
+        p[1] - tr / 3.0,
+        p[2] - tr / 3.0,
+        p[3],
+        p[4],
+        p[5],
+    ];
     let du = [
         d[0] * u[0] + d[3] * u[1] + d[4] * u[2],
         d[3] * u[0] + d[1] * u[1] + d[5] * u[2],
@@ -325,7 +337,10 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
         let c = L::E[q];
         let (x, y, z) = (f64::from(c[0]), f64::from(c[1]), f64::from(c[2]));
         let c2 = x * x + y * y + z * z;
-        let cdc = x * x * d[0] + y * y * d[1] + z * z * d[2] + 2.0 * (x * y * d[3] + x * z * d[4] + y * z * d[5]);
+        let cdc = x * x * d[0]
+            + y * y * d[1]
+            + z * z * d[2]
+            + 2.0 * (x * y * d[3] + x * z * d[4] + y * z * d[5]);
         let cu = x * u[0] + y * u[1] + z * u[2];
         let cdu = x * du[0] + y * du[1] + z * du[2];
         let cf = x * force[0] + y * force[1] + z * force[2];
@@ -335,7 +350,8 @@ fn collide<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> 
         let first = (1.0 - ws) * (-0.5) * cf / THETA0;
         out[q] = feq[q]
             + L::W[q]
-                * (h2 / (2.0 * THETA0 * THETA0) + h3 / (6.0 * THETA0 * THETA0 * THETA0)
+                * (h2 / (2.0 * THETA0 * THETA0)
+                    + h3 / (6.0 * THETA0 * THETA0 * THETA0)
                     + (1.0 - 0.5 * ws) * source
                     + first);
     }
@@ -361,7 +377,14 @@ fn stress<L: Lattice3<27>>(f: &[f64; Q], force: [f64; 3], ws: f64, wb: f64) -> [
     let tr = p[0] + p[1] + p[2];
     let a = 1.0 - ws / 2.0;
     let b = (1.0 - wb / 2.0) * tr / 3.0;
-    [-a * (p[0] - tr / 3.0) - b, -a * (p[1] - tr / 3.0) - b, -a * (p[2] - tr / 3.0) - b, -a * p[3], -a * p[4], -a * p[5]]
+    [
+        -a * (p[0] - tr / 3.0) - b,
+        -a * (p[1] - tr / 3.0) - b,
+        -a * (p[2] - tr / 3.0) - b,
+        -a * p[3],
+        -a * p[4],
+        -a * p[5],
+    ]
 }
 
 /// Fill `out[i] = f(i)` over `workers` scoped threads with fixed contiguous chunks; the value of every cell is a
@@ -443,30 +466,55 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
         sources: Option<SourceFn>,
     ) -> Result<Self, NsfError> {
-        let n = spec.dims.iter().try_fold(1usize, |a, &d| a.checked_mul(d)).ok_or(NsfError::Input("dimension overflow"))?;
+        let n = spec
+            .dims
+            .iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .ok_or(NsfError::Input("dimension overflow"))?;
         if spec.dims.contains(&0) {
             return Err(NsfError::Input("dimensions must be positive"));
         }
         if n > spec.maximum_cells {
-            return Err(NsfError::Cap { requested: n, maximum: spec.maximum_cells });
+            return Err(NsfError::Cap {
+                requested: n,
+                maximum: spec.maximum_cells,
+            });
         }
-        let ok = spec.dx_m.is_finite() && spec.dx_m > 0.0 && spec.maximum_mach.is_finite() && spec.maximum_mach > 0.0
-            && spec.maximum_temperature_ratio.is_finite() && spec.maximum_temperature_ratio > 0.0
-            && spec.bulk_to_shear_ratio.is_finite() && spec.bulk_to_shear_ratio > 0.0 && !spec.bulk_ratio_source.is_empty()
-            && spec.workers >= 1 && spec.transport_points >= 2
+        let ok = spec.dx_m.is_finite()
+            && spec.dx_m > 0.0
+            && spec.maximum_mach.is_finite()
+            && spec.maximum_mach > 0.0
+            && spec.maximum_temperature_ratio.is_finite()
+            && spec.maximum_temperature_ratio > 0.0
+            && spec.bulk_to_shear_ratio.is_finite()
+            && spec.bulk_to_shear_ratio > 0.0
+            && !spec.bulk_ratio_source.is_empty()
+            && spec.workers >= 1
+            && spec.transport_points >= 2
             && spec.temperature_window_k[0] < spec.temperature_window_k[1];
         if spec.maximum_mach.is_finite() && spec.maximum_mach > MAX_QUALIFIED_MACH {
-            return Err(NsfError::MachBound { requested: spec.maximum_mach, qualified: MAX_QUALIFIED_MACH });
+            return Err(NsfError::MachBound {
+                requested: spec.maximum_mach,
+                qualified: MAX_QUALIFIED_MACH,
+            });
         }
         if !ok {
-            return Err(NsfError::Input("dx, Mach and temperature bounds, a cited positive bulk-to-shear ratio, workers, table points, window"));
+            return Err(NsfError::Input(
+                "dx, Mach and temperature bounds, a cited positive bulk-to-shear ratio, workers, table points, window",
+            ));
         }
         if let WallThermal::Isothermal(t) = spec.wall {
-            if !(t.is_finite() && t >= spec.temperature_window_k[0] && t <= spec.temperature_window_k[1]) {
-                return Err(NsfError::Input("isothermal wall temperature must lie in the declared window"));
+            if !(t.is_finite()
+                && t >= spec.temperature_window_k[0]
+                && t <= spec.temperature_window_k[1])
+            {
+                return Err(NsfError::Input(
+                    "isothermal wall temperature must lie in the declared window",
+                ));
             }
         }
-        let state = GasState::try_new(&spec.gas, spec.temperature_k, spec.pressure_pa).map_err(|e| NsfError::Gas(e.to_string()))?;
+        let state = GasState::try_new(&spec.gas, spec.temperature_k, spec.pressure_pa)
+            .map_err(|e| NsfError::Gas(e.to_string()))?;
         let r = state.specific_gas_constant;
         let dt_s = spec.dx_m / (3.0 * r * state.temperature).sqrt();
         let sc = dt_s / (state.density * spec.dx_m * spec.dx_m);
@@ -474,14 +522,19 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut kappa = Vec::with_capacity(spec.transport_points);
         for i in 0..spec.transport_points {
             let t = spec.temperature_window_k[0]
-                + (spec.temperature_window_k[1] - spec.temperature_window_k[0]) * i as f64 / (spec.transport_points - 1) as f64;
-            let g = GasState::try_new(&spec.gas, t, spec.pressure_pa).map_err(|e| NsfError::Gas(e.to_string()))?;
+                + (spec.temperature_window_k[1] - spec.temperature_window_k[0]) * i as f64
+                    / (spec.transport_points - 1) as f64;
+            let g = GasState::try_new(&spec.gas, t, spec.pressure_pa)
+                .map_err(|e| NsfError::Gas(e.to_string()))?;
             mu.push(g.dynamic_viscosity * sc);
             kappa.push(g.thermal_conductivity * sc / r);
         }
         let max_nu = mu.iter().fold(0.0f64, |a, &v| a.max(v)); // rho0 = 1 in lattice units
         if max_nu > MAX_VERIFIED_LATTICE_VISCOSITY {
-            return Err(NsfError::Viscosity { observed: max_nu, maximum: MAX_VERIFIED_LATTICE_VISCOSITY });
+            return Err(NsfError::Viscosity {
+                observed: max_nu,
+                maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
+            });
         }
         let law = NsfLaw {
             gamma: state.gamma,
@@ -497,7 +550,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             kappa,
         };
         let cv = 1.0 / (law.gamma - 1.0);
-        let at = |i: usize| [i % spec.dims[0], (i / spec.dims[0]) % spec.dims[1], i / (spec.dims[0] * spec.dims[1])];
+        let at = |i: usize| {
+            [
+                i % spec.dims[0],
+                (i / spec.dims[0]) % spec.dims[1],
+                i / (spec.dims[0] * spec.dims[1]),
+            ]
+        };
         let mut rho = vec![1.0; n];
         let mut vel = vec![[0.0; 3]; n];
         let mut theta = vec![THETA0; n];
@@ -514,7 +573,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 return Err(NsfError::NonFinite { cell: i });
             }
             if t_k < spec.temperature_window_k[0] || t_k > spec.temperature_window_k[1] {
-                return Err(NsfError::Window { cell: i, temperature_k: t_k, low_k: spec.temperature_window_k[0], high_k: spec.temperature_window_k[1] });
+                return Err(NsfError::Window {
+                    cell: i,
+                    temperature_k: t_k,
+                    low_k: spec.temperature_window_k[0],
+                    high_k: spec.temperature_window_k[1],
+                });
             }
             let th = law.theta_of_kelvin(t_k);
             check_state(&spec, &law, i, r0, u, th)?;
@@ -559,7 +623,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 equilibrium::<L>(1.0, [0.0; 3], THETA0)
             } else {
                 let f = grid.force[i];
-                let u = [vel[i][0] - 0.5 * f[0] / rho[i], vel[i][1] - 0.5 * f[1] / rho[i], vel[i][2] - 0.5 * f[2] / rho[i]];
+                let u = [
+                    vel[i][0] - 0.5 * f[0] / rho[i],
+                    vel[i][1] - 0.5 * f[1] / rho[i],
+                    vel[i][2] - 0.5 * f[2] / rho[i],
+                ];
                 equilibrium::<L>(rho[i], u, THETA0)
             };
         }
@@ -605,7 +673,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if let Some(src) = &self.sources {
             let solid = &self.solid;
             par_fill(&mut out, self.spec.workers, &|i| {
-                if solid[i] { (0.0, [0.0; 3], 0.0) } else { src(self.at(i), t) }
+                if solid[i] {
+                    (0.0, [0.0; 3], 0.0)
+                } else {
+                    src(self.at(i), t)
+                }
             });
         }
         out
@@ -619,19 +691,34 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// # Errors
     /// [`NsfError::Input`] for a periodic axis, a non-finite or wall-normal velocity, or a speed above the declared Mach bound.
-    pub fn set_edge_velocity(&mut self, axis: usize, high: bool, velocity: [f64; 3]) -> Result<(), NsfError> {
+    pub fn set_edge_velocity(
+        &mut self,
+        axis: usize,
+        high: bool,
+        velocity: [f64; 3],
+    ) -> Result<(), NsfError> {
         if axis >= 3 || self.spec.periodic[axis] {
-            return Err(NsfError::Input("an edge wall exists only on a non-periodic axis"));
+            return Err(NsfError::Input(
+                "an edge wall exists only on a non-periodic axis",
+            ));
         }
         if !velocity.iter().all(|v| v.is_finite()) || velocity[axis] != 0.0 {
-            return Err(NsfError::Input("a wall velocity must be finite and tangential to the wall"));
+            return Err(NsfError::Input(
+                "a wall velocity must be finite and tangential to the wall",
+            ));
         }
-        let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]).sqrt();
+        let speed =
+            (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2])
+                .sqrt();
         if speed / (self.law.gamma * THETA0).sqrt() > self.spec.maximum_mach {
             return Err(NsfError::Input("wall speed above the declared Mach bound"));
         }
         self.edge_velocity[axis][usize::from(high)] = velocity;
-        self.moving_walls = self.edge_velocity.iter().flatten().any(|u| u.iter().any(|&v| v != 0.0));
+        self.moving_walls = self
+            .edge_velocity
+            .iter()
+            .flatten()
+            .any(|u| u.iter().any(|&v| v != 0.0));
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
         let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta);
@@ -644,37 +731,67 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     fn macro_fields(&self, f: &[[f64; Q]]) -> (Vec<f64>, Vec<[f64; 3]>) {
         let mut rm = vec![(1.0, [0.0; 3]); self.n];
         let solid = &self.solid;
-        par_fill(&mut rm, self.spec.workers, &|i| if solid[i] { (1.0, [0.0; 3]) } else { raw_moments::<L>(&f[i]) });
-        (rm.iter().map(|v| v.0).collect(), rm.iter().map(|v| v.1).collect())
+        par_fill(&mut rm, self.spec.workers, &|i| {
+            if solid[i] {
+                (1.0, [0.0; 3])
+            } else {
+                raw_moments::<L>(&f[i])
+            }
+        });
+        (
+            rm.iter().map(|v| v.0).collect(),
+            rm.iter().map(|v| v.1).collect(),
+        )
     }
 
     fn velocity_field(&self, rho: &[f64], mom: &[[f64; 3]], force: &[[f64; 3]]) -> Vec<[f64; 3]> {
         let mut out = vec![[0.0; 3]; self.n];
         let solid = &self.solid;
-        par_fill(&mut out, self.spec.workers, &|i| if solid[i] { [0.0; 3] } else { half_force_velocity(rho[i], mom[i], force[i]) });
+        par_fill(&mut out, self.spec.workers, &|i| {
+            if solid[i] {
+                [0.0; 3]
+            } else {
+                half_force_velocity(rho[i], mom[i], force[i])
+            }
+        });
         out
     }
 
     fn rates(&self, rho: f64, theta: f64) -> (f64, f64) {
         let mu = self.law.mu_lattice(theta);
         let nu = mu / (rho * THETA0);
-        (1.0 / (nu + 0.5), 1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu))
+        (
+            1.0 / (nu + 0.5),
+            1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu),
+        )
     }
 
     /// `F = -grad p'`, `p' = rho (theta - theta0)`, in conservative face form: fourth-order face values where the four
     /// stencil cells are fluid, the two-point value beside a solid cell, the cell's own value at a wall face.
     fn force_field(&self, rho: &[f64], theta: &[f64]) -> Vec<[f64; 3]> {
-        let pp: Vec<f64> = (0..self.n).map(|i| if self.solid[i] { 0.0 } else { rho[i] * (theta[i] - THETA0) }).collect();
+        let pp: Vec<f64> = (0..self.n)
+            .map(|i| {
+                if self.solid[i] {
+                    0.0
+                } else {
+                    rho[i] * (theta[i] - THETA0)
+                }
+            })
+            .collect();
         let solid = &self.solid;
         let face = |i: usize, a: usize, s: i64| -> f64 {
             // face value on the +a side (s = 1) or -a side (s = -1) of cell i
             let x = self.at(i);
-            let Some(j) = self.fluid_at(x, a, s) else { return pp[i] };
+            let Some(j) = self.fluid_at(x, a, s) else {
+                return pp[i];
+            };
             let xj = self.at(j);
             let far_i = self.fluid_at(x, a, -s);
             let far_j = self.fluid_at(xj, a, s);
             match (far_i, far_j) {
-                (Some(m), Some(p)) => (7.0 / 12.0) * (pp[i] + pp[j]) - (1.0 / 12.0) * (pp[m] + pp[p]),
+                (Some(m), Some(p)) => {
+                    (7.0 / 12.0) * (pp[i] + pp[j]) - (1.0 / 12.0) * (pp[m] + pp[p])
+                }
                 _ => 0.5 * (pp[i] + pp[j]),
             }
         };
@@ -683,12 +800,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if solid[i] {
                 return [0.0; 3];
             }
-            [-(face(i, 0, 1) - face(i, 0, -1)), -(face(i, 1, 1) - face(i, 1, -1)), -(face(i, 2, 1) - face(i, 2, -1))]
+            [
+                -(face(i, 0, 1) - face(i, 0, -1)),
+                -(face(i, 1, 1) - face(i, 1, -1)),
+                -(face(i, 2, 1) - face(i, 2, -1)),
+            ]
         });
         out
     }
 
-    fn stress_field(&self, f: &[[f64; Q]], force: &[[f64; 3]], rho: &[f64], theta: &[f64]) -> Vec<[f64; 6]> {
+    fn stress_field(
+        &self,
+        f: &[[f64; Q]],
+        force: &[[f64; 3]],
+        rho: &[f64],
+        theta: &[f64],
+    ) -> Vec<[f64; 6]> {
         let mut out = vec![[0.0; 6]; self.n];
         let solid = &self.solid;
         par_fill(&mut out, self.spec.workers, &|i| {
@@ -703,7 +830,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     }
 
     /// Divergence of the total-energy flux at ONE time level and the total heat leaving through the walls.
-    fn flux_divergence(&self, et: &[f64], rho: &[f64], u: &[[f64; 3]], theta: &[f64], sig: &[[f64; 6]]) -> (Vec<f64>, f64) {
+    fn flux_divergence(
+        &self,
+        et: &[f64],
+        rho: &[f64],
+        u: &[[f64; 3]],
+        theta: &[f64],
+        sig: &[[f64; 6]],
+    ) -> (Vec<f64>, f64) {
         let n = self.n;
         let mut g = vec![[0.0; 3]; n];
         let solid = &self.solid;
@@ -718,7 +852,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 s[3] * u[i][0] + s[1] * u[i][1] + s[5] * u[i][2],
                 s[4] * u[i][0] + s[5] * u[i][1] + s[2] * u[i][2],
             ];
-            [(et[i] + p) * u[i][0] - su[0], (et[i] + p) * u[i][1] - su[1], (et[i] + p) * u[i][2] - su[2]]
+            [
+                (et[i] + p) * u[i][0] - su[0],
+                (et[i] + p) * u[i][1] - su[1],
+                (et[i] + p) * u[i][2] - su[2],
+            ]
         });
         let wall_theta = match self.spec.wall {
             WallThermal::Adiabatic => None,
@@ -734,7 +872,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             };
             Some(match wide {
                 Some((m, p)) => {
-                    let gf = (7.0 / 12.0) * (g[i][a] + g[j][a]) - (1.0 / 12.0) * (g[m][a] + g[p][a]);
+                    let gf =
+                        (7.0 / 12.0) * (g[i][a] + g[j][a]) - (1.0 / 12.0) * (g[m][a] + g[p][a]);
                     let dt4 = (27.0 * (theta[j] - theta[i]) - (theta[p] - theta[m])) / 24.0;
                     gf - kf * dt4
                 }
@@ -746,7 +885,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if solid[i] {
                 return [0.0; 3];
             }
-            [face(i, 0).unwrap_or(0.0), face(i, 1).unwrap_or(0.0), face(i, 2).unwrap_or(0.0)]
+            [
+                face(i, 0).unwrap_or(0.0),
+                face(i, 1).unwrap_or(0.0),
+                face(i, 2).unwrap_or(0.0),
+            ]
         });
         // wall face: flux in the +axis direction. Heat through the half cell; the viscous work `-sigma_{a b} u_{w b}` of a moving
         // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
@@ -755,7 +898,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 None => 0.0,
                 Some(tw) => {
                     let kf = self.law.kappa_lattice(0.5 * (theta[i] + tw));
-                    if s > 0 { -kf * (tw - theta[i]) / 0.5 } else { -kf * (theta[i] - tw) / 0.5 }
+                    if s > 0 {
+                        -kf * (tw - theta[i]) / 0.5
+                    } else {
+                        -kf * (theta[i] - tw) / 0.5
+                    }
                 }
             };
             if !self.moving_walls || self.shifted(self.at(i), a, s).is_some() {
@@ -835,7 +982,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         let mut v = post[i][L::OPP[q]];
                         if let (true, Some((a, side))) = (self.moving_walls, edge) {
                             let uw = self.edge_velocity[a][side];
-                            let cu = f64::from(c[0]) * uw[0] + f64::from(c[1]) * uw[1] + f64::from(c[2]) * uw[2];
+                            let cu = f64::from(c[0]) * uw[0]
+                                + f64::from(c[1]) * uw[1]
+                                + f64::from(c[2]) * uw[2];
                             let rho: f64 = post[i].iter().sum();
                             v += 2.0 * L::W[q] * rho * cu / THETA0;
                         }
@@ -878,7 +1027,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // The mass increment of the step is injected half before and half after the stream: the stream's pressure gradient then
         // sees the mid-step density, as the momentum source (the average of the two levels) does. All of it before the stream
         // would leave a first-order mismatch of half theta0 grad(S) in the momentum.
-        let mass_half = if have_sources { self.source_field(self.steps as f64 + 0.5) } else { Vec::new() };
+        let mass_half = if have_sources {
+            self.source_field(self.steps as f64 + 0.5)
+        } else {
+            Vec::new()
+        };
         if have_sources {
             for i in 0..n {
                 if !self.solid[i] {
@@ -915,7 +1068,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             let u1 = self.velocity_field(&rho1, &mom1, &f1);
             let et_trial: Vec<f64> = (0..n)
-                .map(|i| rho1[i] * (cv * th1[i] + 0.5 * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2])))
+                .map(|i| {
+                    rho1[i]
+                        * (cv * th1[i]
+                            + 0.5
+                                * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]))
+                })
                 .collect();
             let sig = self.stress_field(&next, &f1, &rho1, &th1);
             let (div1, wall1) = self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig);
@@ -929,7 +1087,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if have_sources {
                     e1[i] += 0.5 * (src_next[i].2 + self.src_now[i].2);
                 }
-                let ke = 0.5 * rho1[i] * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
+                let ke = 0.5
+                    * rho1[i]
+                    * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
                 th_new[i] = (e1[i] - ke) / (rho1[i] * cv);
             }
             th1 = th_new;
@@ -940,13 +1100,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if self.solid[i] {
                 continue;
             }
-            if !(rho1[i].is_finite() && rho1[i] > 0.0 && e1[i].is_finite() && th1[i].is_finite() && th1[i] > 0.0) {
+            if !(rho1[i].is_finite()
+                && rho1[i] > 0.0
+                && e1[i].is_finite()
+                && th1[i].is_finite()
+                && th1[i] > 0.0)
+            {
                 return Err(NsfError::NonFinite { cell: i });
             }
             check_state(&self.spec, &self.law, i, rho1[i], u1[i], th1[i])?;
             let t_k = self.law.kelvin_of_theta(th1[i]);
             if t_k < self.spec.temperature_window_k[0] || t_k > self.spec.temperature_window_k[1] {
-                return Err(NsfError::Window { cell: i, temperature_k: t_k, low_k: self.spec.temperature_window_k[0], high_k: self.spec.temperature_window_k[1] });
+                return Err(NsfError::Window {
+                    cell: i,
+                    temperature_k: t_k,
+                    low_k: self.spec.temperature_window_k[0],
+                    high_k: self.spec.temperature_window_k[1],
+                });
             }
         }
         let unit = self.law.energy_unit_j();
@@ -955,8 +1125,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if self.solid[i] {
                 continue;
             }
-            ke0 += 0.5 * rho0[i] * (u0[i][0] * u0[i][0] + u0[i][1] * u0[i][1] + u0[i][2] * u0[i][2]);
-            ke1 += 0.5 * rho1[i] * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
+            ke0 +=
+                0.5 * rho0[i] * (u0[i][0] * u0[i][0] + u0[i][1] * u0[i][1] + u0[i][2] * u0[i][2]);
+            ke1 +=
+                0.5 * rho1[i] * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
             e_old += self.e[i];
             e_new += e1[i];
         }
@@ -1012,8 +1184,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for a in 0..3 {
                 let (p1, m1) = (self.fluid_at(x, a, 1), self.fluid_at(x, a, -1));
                 div += match (m1, p1) {
-                    (Some(m), Some(p)) => match (self.fluid_at(self.at(m), a, -1), self.fluid_at(self.at(p), a, 1)) {
-                        (Some(mm), Some(pp)) => (8.0 * (u[p][a] - u[m][a]) - (u[pp][a] - u[mm][a])) / 12.0,
+                    (Some(m), Some(p)) => match (
+                        self.fluid_at(self.at(m), a, -1),
+                        self.fluid_at(self.at(p), a, 1),
+                    ) {
+                        (Some(mm), Some(pp)) => {
+                            (8.0 * (u[p][a] - u[m][a]) - (u[pp][a] - u[mm][a])) / 12.0
+                        }
                         _ => 0.5 * (u[p][a] - u[m][a]),
                     },
                     (None, Some(p)) => 0.5 * (u[p][a] + u[i][a]),
@@ -1060,7 +1237,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn cell(&self, x: [usize; 3]) -> (f64, [f64; 3], f64) {
         let i = self.index(x);
         let (rho, mom) = raw_moments::<L>(&self.f[i]);
-        (rho, half_force_velocity(rho, mom, self.force[i]), self.law.kelvin_of_theta(self.theta[i]))
+        (
+            rho,
+            half_force_velocity(rho, mom, self.force[i]),
+            self.law.kelvin_of_theta(self.theta[i]),
+        )
     }
     /// The scaling and transport laws in force.
     #[must_use]
@@ -1092,17 +1273,32 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     }
 }
 
-fn check_state(spec: &NsfSpec, law: &NsfLaw, cell: usize, rho: f64, u: [f64; 3], theta: f64) -> Result<(), NsfError> {
+fn check_state(
+    spec: &NsfSpec,
+    law: &NsfLaw,
+    cell: usize,
+    rho: f64,
+    u: [f64; 3],
+    theta: f64,
+) -> Result<(), NsfError> {
     if !(theta.is_finite() && theta > 0.0 && rho.is_finite() && rho > 0.0) {
         return Err(NsfError::NonFinite { cell });
     }
     let ratio = theta / THETA0 - 1.0;
     if ratio.abs() > spec.maximum_temperature_ratio {
-        return Err(NsfError::TemperatureRatio { cell, observed: ratio.abs(), maximum: spec.maximum_temperature_ratio });
+        return Err(NsfError::TemperatureRatio {
+            cell,
+            observed: ratio.abs(),
+            maximum: spec.maximum_temperature_ratio,
+        });
     }
     let mach = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt() / (law.gamma * theta).sqrt();
     if !mach.is_finite() || mach > spec.maximum_mach {
-        return Err(NsfError::Mach { cell, observed: mach, maximum: spec.maximum_mach });
+        return Err(NsfError::Mach {
+            cell,
+            observed: mach,
+            maximum: spec.maximum_mach,
+        });
     }
     Ok(())
 }
