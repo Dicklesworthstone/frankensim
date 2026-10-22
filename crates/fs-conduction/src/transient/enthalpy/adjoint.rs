@@ -18,6 +18,9 @@
 //! tensor entries or table knots, moving geometry or chart selection is inferred.
 //! Chart corners and validity endpoints refuse classical two-sided derivatives; a latent
 //! plateau interior has exactly zero temperature sensitivity.
+//! Prescribed-temperature adjoints remain explicitly unsupported; their
+//! constraint, history and reservoir-control derivatives are not inferred from
+//! the unconstrained transport tangent.
 
 use std::{cell::RefCell, fmt};
 

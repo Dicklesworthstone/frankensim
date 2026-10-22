@@ -1079,8 +1079,23 @@ authority.
   Newton workspace/work arithmetic. Constitutive, assembly and operator tiles
   poll Cx, with final polling before publication.
   This initial lane binds one spatially uniform equilibrium chart and a declared
-  reference density. All Dirichlet rows refuse explicitly: a temperature on a
-  latent plateau does not determine enthalpy. Geometry and energetic internal
+  reference density. Prescribed endpoint temperatures select enthalpy by
+  inverting each node's original piecewise-linear chart. Temperatures equal
+  to a latent plateau (including either endpoint) or outside source support
+  refuse; a prescribed bath never chooses an interior liquid fraction.
+  Fixed rows impose `m_i*(h_i-h_prescribed_i)=0`, while free rows retain the
+  full nonlinear transport balance. The inward reservoir reaction includes
+  both transport and `m_i*(h_i-h_old_i)/dt`, so changing boundary temperature
+  charges its storage once. Fully prescribed bodies are admitted for this
+  transient balance even though steady spatial solvers still require a free
+  degree of freedom. `dirichlet_in_w` remains separate from volumetric and
+  natural-boundary heat. Ambient/enclosure acceptance recomputes the reaction
+  under the physical endpoint radiation law; `physical_dirichlet_in_w` belongs
+  to that audit while the inner solution retains its applied-boundary reaction.
+  The mixed-bath/radiation regression checks both against an independent scalar
+  balance and the shared physical endpoint evaluator. Prescribed-temperature adjoints
+  and the natural-boundary history runner remain explicitly unsupported.
+  Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
   remapping, phase kinetics or vaporization. The basic `advance` entry point
   has no implicit radiation law; the separate radiative entry point follows.
@@ -1088,7 +1103,9 @@ authority.
   temperature solver, latent heating with independent energy formulas and the
   exact uniform lumped limit, a nonlinear-conductivity endpoint with independent
   P1 algebra, mixed sensible/latent exchange with an exact one-Newton solution,
-  and immutable-history/cancellation refusals. These are numerical checks,
+  immutable-history/cancellation refusals, prescribed-wall P1 balances,
+  boundary-jump/repeated-step heat, full-bath cooling, nonlinear conductivity
+  and interior latent storage driven by a hot wall. These are numerical checks,
   not experimental material validation or interval error bounds.
   `cargo run -p fs-conduction --example enthalpy_stefan -- 40 120` evolves a
   melting front in a fixed tetrahedral slab from an initial similarity field

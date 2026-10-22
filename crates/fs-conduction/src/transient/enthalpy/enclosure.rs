@@ -59,6 +59,9 @@ pub struct EnthalpyEnclosureStepSolution {
     pub physical_residual_tolerance_j: f64,
     /// Storage minus net input using fresh enclosure exchange, J.
     pub physical_energy_residual_j: f64,
+    /// Inward bath reaction using fresh enclosure exchange, W, distinct from
+    /// the applied-boundary reaction in `conduction`.
+    pub physical_dirichlet_in_w: f64,
 }
 
 struct Patch {
@@ -122,7 +125,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 ..context
             };
             let mut initial = vec![0.0; old_h.len()];
-            trial_context.residual(old_h, &mut initial)?;
+            trial_context.residual(&trial_context.initial_values()?, &mut initial)?;
             let norm = finite(norm2(&initial))?;
             let mut inner = step_config;
             inner.newton.absolute_tolerance = target * 0.25;
@@ -204,11 +207,13 @@ impl EnthalpyBackwardEuler<'_, '_> {
             let mut residual = vec![0.0; old_h.len()];
             physical.residual(&solid.specific_enthalpy_j_kg, &mut residual)?;
             let residual_norm = finite(norm2(&residual))?;
+            let physical_dirichlet_in_w =
+                physical.physical_prescribed_heat_input_w(&solid.specific_enthalpy_j_kg)?;
             let energy = finite(
                 solid.stored_energy_change_j
                     + dt_s
                         * (solid.neumann_out_w + convective_out + fresh.enclosure_energy_closure_w
-                            - solid.source_w),
+                            - solid.source_w - physical_dirichlet_in_w),
             )?;
             if heat_ok
                 && last_change <= radiation_config.temperature_tolerance_k
@@ -232,6 +237,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     physical_residual_norm_j: residual_norm,
                     physical_residual_tolerance_j: target,
                     physical_energy_residual_j: energy,
+                    physical_dirichlet_in_w,
                 });
             }
             for (old, new) in driving.iter_mut().zip(actual) {
@@ -444,7 +450,8 @@ fn initial_target(
     patches: &[Patch],
     radiation_config: AmbientRadiationConfig,
 ) -> Result<f64, EnthalpyError> {
-    let temperature = context.temperatures(context.old)?;
+    let initial_h = context.initial_values()?;
+    let temperature = context.temperatures(&initial_h)?;
     let means = means(context.cx, context.problem, enclosure, &temperature)?;
     let initial = radiosity(context.cx, enclosure, &means, radiation_config)?;
     let boundary = shifted_boundary(context.problem, patches, &initial)?;
@@ -459,8 +466,8 @@ fn initial_target(
         old: context.old,
         dt: context.dt,
     };
-    let stage = physical.stage(context.old)?;
-    let initial = NewtonKrylovState::new(&stage, context.old.to_vec(), config.newton)
+    let stage = physical.stage(&initial_h)?;
+    let initial = NewtonKrylovState::new(&stage, initial_h, config.newton)
         .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
     finite(
         config

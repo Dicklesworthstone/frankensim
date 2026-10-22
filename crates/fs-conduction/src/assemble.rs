@@ -74,6 +74,29 @@ impl DofMap {
     /// # Errors
     /// [`ConductionError::NoFreeDofs`] when every vertex is pinned.
     pub fn new(boundary: &ThermalBoundary, vertex_count: usize) -> Result<DofMap, ConductionError> {
+        let dofs = Self::new_allow_fully_prescribed(boundary, vertex_count)?;
+        if dofs.free.is_empty() {
+            return Err(ConductionError::NoFreeDofs);
+        }
+        Ok(dofs)
+    }
+
+    /// Transient storage/reaction accounting also needs a map when every
+    /// temperature is prescribed and no spatial solve remains.
+    pub(crate) fn new_allow_fully_prescribed(
+        boundary: &ThermalBoundary,
+        vertex_count: usize,
+    ) -> Result<DofMap, ConductionError> {
+        if boundary
+            .dirichlet()
+            .iter()
+            .any(|&(vertex, _)| vertex >= vertex_count)
+        {
+            return Err(ConductionError::Config {
+                parameter: "prescribed temperature vertex",
+                what: "boundary vertex is outside the requested degree-of-freedom map".into(),
+            });
+        }
         let mut slot = vec![usize::MAX; vertex_count];
         let mut prescribed = vec![0.0f64; vertex_count];
         let mut fixed = Vec::with_capacity(boundary.dirichlet().len());
@@ -88,9 +111,6 @@ impl DofMap {
                 *s = free.len();
                 free.push(v);
             }
-        }
-        if free.is_empty() {
-            return Err(ConductionError::NoFreeDofs);
         }
         Ok(DofMap {
             free,

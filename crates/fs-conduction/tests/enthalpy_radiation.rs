@@ -173,6 +173,109 @@ fn scalar_mean(old_mean: f64, ambient: f64, dt: f64) -> f64 {
 }
 
 #[test]
+fn prescribed_bath_and_radiation_share_one_physical_heat_balance() {
+    let mesh = regular_tet();
+    let wall: f64 = 400.0;
+    let ambient: f64 = 500.0;
+    let dt = 0.2;
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "bath",
+            |face| face.centroid[2] == 0.0,
+            ThermalBc::dirichlet(wall).unwrap(),
+        )
+        .unwrap()
+        .remainder("exterior", ThermalBc::robin(HTC, 300.0).unwrap())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let curve = phase_curve(false);
+    let patches = [patch(ambient, 520.0)];
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+        element_materials: None,
+    };
+    with_cx(|cx| {
+        let stepper = EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, RHO, budget()).unwrap();
+        let old_h = [CP * (300.0 - 200.0); 4];
+        let got = stepper
+            .advance_with_ambient_radiation(
+                cx,
+                problem,
+                None,
+                &old_h,
+                dt,
+                config(),
+                &patches,
+                radiation_config(),
+            )
+            .unwrap();
+        // The apex is the only free node. Its squared shape gradient is 3/2;
+        // each side-face consistent mass row integrates (T_apex+T_wall)/6.
+        let volume = 2.0_f64.sqrt() / 12.0;
+        let area = 3.0 * 3.0_f64.sqrt() / 4.0;
+        let capacity = RHO * CP * volume / 4.0;
+        let conductance = 1.5 * K * volume;
+        let (mut lo, mut hi) = (300.0, 500.0);
+        for _ in 0..80 {
+            let t = (lo + hi) / 2.0;
+            let mean = (2.0 * wall + t) / 3.0;
+            let h_rad = EPSILON
+                * STEFAN_BOLTZMANN_W_M2_K4
+                * (mean + ambient)
+                * (mean * mean + ambient * ambient);
+            let residual = capacity * (t - 300.0)
+                + dt * conductance * (t - wall)
+                + dt * area / 6.0 * (HTC * (t + wall - 600.0) + h_rad * (t + wall - 2.0 * ambient));
+            if residual > 0.0 {
+                hi = t;
+            } else {
+                lo = t;
+            }
+        }
+        let expected = (lo + hi) / 2.0;
+        assert!((got.conduction.temperature[3] - expected).abs() < 1e-8);
+        let mean = (2.0 * wall + expected) / 3.0;
+        let convection = HTC * area * (mean - 300.0);
+        let radiation =
+            EPSILON * STEFAN_BOLTZMANN_W_M2_K4 * area * (mean.powi(4) - ambient.powi(4));
+        let storage = capacity * (3.0 * (wall - 300.0) + expected - 300.0);
+        let reaction = storage / dt + convection + radiation;
+        assert!((got.physical_dirichlet_in_w - reaction).abs() < 1e-7);
+        assert!((got.conduction.stored_energy_change_j - storage).abs() < 1e-8);
+        assert!(got.physical_energy_residual_j.abs() < config().energy_tolerance_j);
+        let audit = stepper
+            .evaluate_endpoint(
+                cx,
+                problem,
+                None,
+                &old_h,
+                &got.conduction.specific_enthalpy_j_kg,
+                dt,
+                config(),
+                Some(&patches),
+            )
+            .unwrap();
+        assert_eq!(audit.free_dofs, 1);
+        assert!((audit.dirichlet_in_w - got.physical_dirichlet_in_w).abs() < 1e-10);
+        assert!((audit.energy_residual_j - got.physical_energy_residual_j).abs() < 1e-10);
+        // The retained secant solve remains internally self-consistent too.
+        assert!(
+            (got.conduction.stored_energy_change_j
+                - dt * (got.conduction.dirichlet_in_w - got.conduction.robin_out_w))
+                .abs()
+                < 1e-8
+        );
+        assert_eq!(old_h, [1000.0; 4]);
+    });
+}
+
+#[test]
 fn implicit_radiation_matches_independent_mean_and_spatial_p1_modes() {
     let mesh = regular_tet();
     let boundary = ThermalBoundaryBuilder::new(&mesh)

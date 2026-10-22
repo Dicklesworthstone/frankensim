@@ -46,15 +46,19 @@ pub struct EnthalpyRadiationStepSolution {
     /// Euclidean nodal balance at the returned field with its own radiative
     /// coefficients, joules; independent of the frozen inner Newton report.
     pub physical_residual_norm_j: f64,
-    /// Caller Newton target from the complete radiative residual at history.
+    /// Caller Newton target from the complete radiative initial residual,
+    /// with prescribed endpoint values applied only to the initial iterate.
     pub physical_residual_tolerance_j: f64,
     /// Stored energy minus dt times net input using nonlinear radiative heat,
     /// joules; must also satisfy the caller's original absolute energy budget.
     pub physical_energy_residual_j: f64,
+    /// Inward prescribed-temperature reaction under fresh nonlinear radiation,
+    /// W. `conduction.dirichlet_in_w` belongs to the retained applied boundary.
+    pub physical_dirichlet_in_w: f64,
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
-    /// Advance natural-boundary enthalpy transport with implicit ambient
+    /// Advance enthalpy transport with implicit ambient
     /// radiation, preserving heterogeneous conductivity and finite contact.
     ///
     /// Patches bind distinct uniform Robin or named zero-flux regions. Initial
@@ -63,8 +67,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// old enthalpy; radiative iterations do not advance time or accumulate
     /// latent heat repeatedly. Zero-flux traces have no convection heat port.
     ///
-    /// The coupled residual target is `max(atol, rtol*||R(h_old)||)` in joules
-    /// with radiation evaluated at history. Inner residual budgets tighten to
+    /// The coupled residual target is `max(atol, rtol*||R(h_initial)||)` in joules,
+    /// where prescribed endpoint values initialize fixed nodes without changing
+    /// stored history. Inner residual budgets tighten to
     /// one quarter of that target. The public watt and raw-temperature gates
     /// remain independent, and the accepted nonlinear heat must close the
     /// original energy budget. Failure returns no endpoint.
@@ -115,7 +120,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     dt: dt_s,
                 };
                 let mut initial_residual = vec![0.0; old_h.len()];
-                context.residual(old_h, &mut initial_residual)?;
+                context.residual(&context.initial_values()?, &mut initial_residual)?;
                 let initial_norm = finite(norm2(&initial_residual))?;
                 let mut inner_config = step_config;
                 inner_config.newton.absolute_tolerance = target * 0.25;
@@ -145,7 +150,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     robin_out_w: conduction.robin_out_w,
                     solid_iterations: conduction.newton.iterations,
                     krylov_iterations,
-                    solution: (conduction, 0.0, 0.0),
+                    solution: (conduction, 0.0, 0.0, 0.0),
                 })
             },
             |trial, rows, convective_out_w| {
@@ -168,8 +173,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 let radiation_out_w = rows
                     .iter()
                     .try_fold(0.0, |sum, row| finite(sum + row.nonlinear_heat_w))?;
+                trial.3 = physical.physical_prescribed_heat_input_w(&trial.0.specific_enthalpy_j_kg)?;
                 let net_out_w = finite(
-                    trial.0.neumann_out_w + convective_out_w + radiation_out_w - trial.0.source_w,
+                    trial.0.neumann_out_w + convective_out_w + radiation_out_w - trial.0.source_w
+                        - trial.3,
                 )?;
                 trial.2 = finite(trial.0.stored_energy_change_j + dt_s * net_out_w)?;
                 poll(cx, old_h.len())?;
@@ -185,6 +192,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             physical_residual_norm_j: result.solution.1,
             physical_residual_tolerance_j: target,
             physical_energy_residual_j: result.solution.2,
+            physical_dirichlet_in_w: result.solution.3,
         })
     }
 }
@@ -208,7 +216,8 @@ fn initial_residual_tolerance_j(
         old: old_h,
         dt: dt_s,
     };
-    let old_temperature = context.temperatures(old_h)?;
+    let initial_h = context.initial_values()?;
+    let old_temperature = context.temperatures(&initial_h)?;
     let initial_boundary = boundary_at_temperature(cx, problem, patches, &old_temperature)?;
     let initial_context = StepContext {
         problem: ConductionProblem {
@@ -219,8 +228,8 @@ fn initial_residual_tolerance_j(
     };
     // The shared constructor validates all original Newton controls and
     // measures the complete physical initial residual without advancing it.
-    let stage = initial_context.stage(old_h)?;
-    let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), step_config.newton)
+    let stage = initial_context.stage(&initial_h)?;
+    let initial = NewtonKrylovState::new(&stage, initial_h, step_config.newton)
         .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
     let target = finite(step_config.newton.absolute_tolerance.max(
         step_config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE),

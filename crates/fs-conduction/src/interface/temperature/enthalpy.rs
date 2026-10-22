@@ -110,6 +110,9 @@ impl TemperatureContacts<'_, '_> {
     ) -> Result<ContactEnthalpyStep, EnthalpyError> {
         poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
+        if !problem.boundary.dirichlet().is_empty() {
+            return Err(EnthalpyError::UnsupportedDirichlet);
+        }
         step_config.newton.validate().map_err(EnthalpyError::Newton)?;
         let radiation_factor = match radiation {
             Some((patches, config)) => {

@@ -240,6 +240,29 @@ fn original_boundary_failure_and_cancel_leave_both_histories_unchanged() {
 }
 
 #[test]
+fn prescribed_bath_is_refused_before_advancing_either_storage_history() {
+    fixture(1.0, |cx, _, network, pump, state, mesh, material| {
+        let heat = ScalarField::uniform("20 W", 20.0/0.00006).unwrap();
+        let old_tank = state.reservoir().clone();
+        let old_h = state.solid_specific_enthalpy_j_kg().to_vec();
+        let result = network.advance_stored_solid_with_pump(cx, state, 1.0, 0.0, &[300.0], pump,
+            StoredSolidProblem { mesh, material, source: &heat, element_materials: None, interfaces: None },
+            controls(), |_, rows| {
+                ThermalBoundaryBuilder::new(mesh)
+                    .region("body", |f| f.outward_normal[2] > 0.99,
+                        rows[0].boundary_condition().clone())?
+                    .region("bath", |f| f.outward_normal[2] < -0.99,
+                        fs_conduction::bc::ThermalBc::dirichlet(320.0)?)?
+                    .adiabatic_remainder().finish()
+            });
+        assert!(matches!(result, Err(StoredCoolingError::Solid(
+            fs_conduction::transient::enthalpy::EnthalpyError::UnsupportedDirichlet))));
+        assert_eq!(state.reservoir(), &old_tank);
+        assert_eq!(state.solid_specific_enthalpy_j_kg(), old_h.as_slice());
+    });
+}
+
+#[test]
 fn budget_or_invalid_joint_control_cannot_publish_either_storage_state() {
     fixture(1.0, |cx, _, network, pump, state, mesh, material| {
         let heat = ScalarField::uniform("20 W", 20.0/0.00006).unwrap();

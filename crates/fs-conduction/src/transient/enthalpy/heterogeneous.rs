@@ -8,7 +8,8 @@
 //!
 //! This is a stationary reference-mass model: equilibrium density does not
 //! change storage, geometry does not move, and no phase-chart blending,
-//! material-selection derivative or Dirichlet enthalpy is inferred.
+//! material-selection derivative is inferred. Prescribed temperatures use each
+//! boundary node's own chart and must select unique enthalpies.
 
 use std::fmt;
 

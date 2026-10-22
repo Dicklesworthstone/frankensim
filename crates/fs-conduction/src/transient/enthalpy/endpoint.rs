@@ -31,6 +31,8 @@ pub struct EnthalpyEndpointEvaluation {
     pub source_w: f64,
     /// Outward endpoint Neumann heat, W.
     pub neumann_out_w: f64,
+    /// Inward prescribed-temperature reaction, including fixed-node storage, W.
+    pub dirichlet_in_w: f64,
     /// Original boundary convection only, W outward.
     pub convective_out_w: f64,
     /// Nonlinear area-mean ambient-radiation heat, W outward.
@@ -55,7 +57,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// defect even when they exceed the supplied step's acceptance tolerances.
     ///
     /// # Errors
-    /// Refuses invalid step controls, mismatched mesh/fields, Dirichlet data,
+    /// Refuses invalid step controls, mismatched mesh/fields, ambiguous prescribed
+    /// temperatures or a candidate that violates prescribed enthalpy,
     /// invalid phase/material/boundary states, nonfinite arithmetic or cancellation.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_endpoint(
@@ -93,6 +96,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             old: old_specific_h,
             dt: dt_s,
         };
+        context.check_prescribed_values(candidate_specific_h)?;
         let temperature = context.temperatures(candidate_specific_h)?;
         let combined_boundary = match patches {
             Some(patches) => Some(boundary_at_temperature(cx, problem, patches, &temperature)?),
@@ -110,7 +114,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let mut residual = vec![0.0; n];
         physical.assembled_residual(candidate_specific_h, &temperature, &system, &mut residual)?;
         let residual_norm_j = finite(norm2(&residual))?;
-        let dofs = DofMap::new(problem.boundary, n)?;
+        let dofs = DofMap::new_allow_fully_prescribed(problem.boundary, n)?;
         let (energy, convective_robin_fluxes) = energy_balance(
             self.mesh,
             problem.boundary,
@@ -123,6 +127,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let source_w = finite(energy.source_w)?;
         let neumann_out_w = finite(energy.neumann_out_w)?;
         let convective_out_w = finite(energy.robin_out_w)?;
+        let dirichlet_in_w =
+            physical.prescribed_heat_input_w(candidate_specific_h, &temperature, &system)?;
         for (index, flux) in convective_robin_fluxes.iter().enumerate() {
             if index % ASSEMBLY_TILE == 0 {
                 poll(cx, index)?;
@@ -163,16 +169,18 @@ impl EnthalpyBackwardEuler<'_, '_> {
             stored_energy_change_j =
                 finite(stored_energy_change_j + self.masses[vertex] * (new - old))?;
         }
-        let net_input_w = finite(source_w - neumann_out_w - convective_out_w - radiation_out_w)?;
+        let net_input_w =
+            finite(source_w + dirichlet_in_w - neumann_out_w - convective_out_w - radiation_out_w)?;
         let energy_residual_j = finite(stored_energy_change_j - dt_s * net_input_w)?;
         poll(cx, n)?;
         Ok(EnthalpyEndpointEvaluation {
             temperature,
             residual_norm_j,
-            free_dofs: n,
+            free_dofs: dofs.n(),
             stored_energy_change_j,
             source_w,
             neumann_out_w,
+            dirichlet_in_w,
             convective_out_w,
             radiation_out_w,
             energy_residual_j,

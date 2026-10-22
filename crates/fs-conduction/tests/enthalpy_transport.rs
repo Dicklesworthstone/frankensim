@@ -408,7 +408,7 @@ fn invalid_or_cancelled_steps_refuse_without_changing_history() {
             .region(
                 "fixed temperature",
                 |_| true,
-                ThermalBc::dirichlet(300.0).unwrap(),
+                ThermalBc::dirichlet(350.0).unwrap(),
             )
             .unwrap()
             .finish()
@@ -422,7 +422,7 @@ fn invalid_or_cancelled_steps_refuse_without_changing_history() {
                 1.0,
                 config()
             ),
-            Err(EnthalpyError::UnsupportedDirichlet)
+            Err(EnthalpyError::AmbiguousPrescribedTemperature { .. })
         ));
         with_cancelled_cx(|cancelled| {
             assert!(matches!(
@@ -431,5 +431,230 @@ fn invalid_or_cancelled_steps_refuse_without_changing_history() {
             ));
         });
         assert_eq!(bits(&old_h), saved);
+    });
+}
+
+fn prescribed_wall(mesh: &ConductionMesh, temperature: f64) -> ThermalBoundary {
+    ThermalBoundaryBuilder::new(mesh)
+        .region(
+            "bath",
+            |face| face.centroid[0] == 0.0,
+            ThermalBc::dirichlet(temperature).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap()
+}
+
+#[test]
+fn prescribed_wall_matches_independent_p1_balance_and_counts_boundary_storage_once() {
+    let mesh = tetrahedron();
+    let material = ConductivityModel::isotropic_declared(3.0).unwrap();
+    let source = ScalarField::uniform("generation", 4.0).unwrap();
+    let curve = sensible_curve();
+    with_cx(|cx| {
+        let stepper =
+            EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, REFERENCE_DENSITY, budget()).unwrap();
+        let mut old = vec![100.0; 4]; // 300 K everywhere.
+        let mut old_temperature = 300.0;
+        let mut old_wall = 300.0;
+        let dt = 0.2;
+        let mass = REFERENCE_DENSITY * VOLUME / 4.0;
+        for wall_temperature in [400.0, 400.0, 320.0] {
+            let boundary = prescribed_wall(&mesh, wall_temperature);
+            let p = problem(&mesh, &boundary, &material, &source);
+            let unchanged = bits(&old);
+            let got = stepper.advance(cx, p, None, &old, dt, config()).unwrap();
+            // Vertex 1 is the only free node. grad(N1)=e1 and K_10=-k/6;
+            // its exact P1 scalar balance is C*dT + dt*k/6*(T-Twall)=dt*q/24.
+            let capacity = mass * 5.0;
+            let conductance = 3.0 * VOLUME;
+            let expected = (capacity * old_temperature
+                + dt * conductance * wall_temperature
+                + dt * 4.0 * VOLUME / 4.0)
+                / (capacity + dt * conductance);
+            assert!((got.temperature[1] - expected).abs() < 1e-9);
+            for vertex in [0, 2, 3] {
+                assert!((got.temperature[vertex] - wall_temperature).abs() < 1e-12);
+            }
+            let reaction = 3.0 * capacity * (wall_temperature - old_wall) / dt
+                + conductance * (wall_temperature - expected)
+                - 3.0 * 4.0 * VOLUME / 4.0;
+            assert!((got.dirichlet_in_w - reaction).abs() < 1e-8);
+            assert!((got.stored_energy_change_j - dt * (4.0 * VOLUME + reaction)).abs() < 1e-9);
+            assert!(got.energy_residual_j.abs() < 1e-9);
+            let audit = stepper
+                .evaluate_endpoint(
+                    cx,
+                    p,
+                    None,
+                    &old,
+                    &got.specific_enthalpy_j_kg,
+                    dt,
+                    config(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(audit.free_dofs, 1);
+            assert!((audit.dirichlet_in_w - reaction).abs() < 1e-8);
+            assert!(audit.residual_norm_j < 1e-9 && audit.energy_residual_j.abs() < 1e-9);
+            assert!(matches!(
+                stepper.linearize_accepted(cx, p, None, &old, dt, config(), got.clone()),
+                Err(
+                    fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError::Enthalpy(
+                        EnthalpyError::UnsupportedDirichlet
+                    )
+                )
+            ));
+            let mut bad = got.specific_enthalpy_j_kg.clone();
+            bad[0] += 1.0;
+            assert!(
+                stepper
+                    .evaluate_endpoint(cx, p, None, &old, &bad, dt, config(), None)
+                    .is_err()
+            );
+            assert_eq!(bits(&old), unchanged);
+            old_temperature = expected;
+            old_wall = wall_temperature;
+            old = got.specific_enthalpy_j_kg;
+        }
+    });
+}
+
+#[test]
+fn prescribed_hot_wall_drives_latent_storage_without_fixing_the_interior_phase() {
+    let mesh = tetrahedron();
+    let boundary = prescribed_wall(&mesh, 400.0);
+    let material = ConductivityModel::isotropic_declared(3.0).unwrap();
+    let source = ScalarField::uniform("no generation", 0.0).unwrap();
+    let curve = latent_curve();
+    with_cx(|cx| {
+        let stepper =
+            EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, REFERENCE_DENSITY, budget()).unwrap();
+        let p = problem(&mesh, &boundary, &material, &source);
+        let mut old = vec![50.0; 4];
+        for expected_h in [110.0, 170.0, 230.0, 290.0] {
+            let got = stepper.advance(cx, p, None, &old, 0.2, config()).unwrap();
+            // On the interior plateau, m*(h-h_old)=dt*k/6*(400-350)=5 J.
+            // Boundary vertices melt through their original full chart once.
+            assert!((got.specific_enthalpy_j_kg[1] - expected_h).abs() < 1e-8);
+            assert_eq!(got.temperature[1], 350.0);
+            assert!((got.liquid_mass_fraction[1] - (expected_h - 100.0) / 200.0).abs() < 1e-10);
+            for vertex in [0, 2, 3] {
+                assert!((got.specific_enthalpy_j_kg[vertex] - 400.0).abs() < 1e-12);
+            }
+            let reaction = if expected_h == 110.0 { 462.5 } else { 25.0 };
+            assert!((got.dirichlet_in_w - reaction).abs() < 1e-8);
+            assert!((got.stored_energy_change_j - 0.2 * reaction).abs() < 1e-9);
+            old = got.specific_enthalpy_j_kg;
+        }
+    });
+}
+
+#[test]
+fn fully_prescribed_bath_accounts_cooling_and_rejects_invalid_boundary_or_hidden_history() {
+    let mesh = tetrahedron();
+    let material = ConductivityModel::isotropic_declared(3.0).unwrap();
+    let source = ScalarField::uniform("generation", 4.0).unwrap();
+    let curve = sensible_curve();
+    let bath = |temperature| {
+        ThermalBoundaryBuilder::new(&mesh)
+            .region("bath", |_| true, ThermalBc::dirichlet(temperature).unwrap())
+            .unwrap()
+            .finish()
+            .unwrap()
+    };
+    let boundary = bath(300.0);
+    let outside = bath(501.0);
+    with_cx(|cx| {
+        let stepper =
+            EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, REFERENCE_DENSITY, budget()).unwrap();
+        let old = vec![150.0; 4]; // 310 K, including all constrained mass.
+        let p = problem(&mesh, &boundary, &material, &source);
+        assert!(matches!(
+            stepper.advance(
+                cx,
+                problem(&mesh, &outside, &material, &source),
+                None,
+                &old,
+                0.5,
+                config()
+            ),
+            Err(EnthalpyError::PrescribedTemperatureOutsideDomain { .. })
+        ));
+        assert!(
+            stepper
+                .advance(cx, p, None, &[f64::NAN; 4], 0.5, config())
+                .is_err()
+        );
+        let got = stepper.advance(cx, p, None, &old, 0.5, config()).unwrap();
+        assert_eq!(got.newton.iterations, 0);
+        assert!(got.temperature.iter().all(|t| (*t - 300.0).abs() < 1e-12));
+        let storage = REFERENCE_DENSITY * VOLUME * (100.0 - 150.0);
+        assert!((got.stored_energy_change_j - storage).abs() < 1e-12);
+        assert!((got.dirichlet_in_w - (storage / 0.5 - 4.0 * VOLUME)).abs() < 1e-12);
+        let audit = stepper
+            .evaluate_endpoint(
+                cx,
+                p,
+                None,
+                &old,
+                &got.specific_enthalpy_j_kg,
+                0.5,
+                config(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(audit.free_dofs, 0);
+        assert_eq!(audit.residual_norm_j, 0.0);
+        assert!(audit.energy_residual_j.abs() < 1e-12);
+        let next = stepper
+            .advance(cx, p, None, &got.specific_enthalpy_j_kg, 0.5, config())
+            .unwrap();
+        assert_eq!(next.stored_energy_change_j, 0.0);
+        assert!((next.dirichlet_in_w + 4.0 * VOLUME).abs() < 1e-12);
+        assert_eq!(old, vec![150.0; 4]);
+    });
+}
+
+#[test]
+fn prescribed_wall_retains_nonlinear_conductivity_feedback() {
+    let mesh = tetrahedron();
+    let boundary = prescribed_wall(&mesh, 400.0);
+    // k(Tmean) = 1 + (Tmean - 280)/100, with all nodes in source support.
+    let table = ConductivityTable::declared_curve(vec![(280.0, 1.0), (500.0, 3.2)]).unwrap();
+    let material = ConductivityModel::isotropic(table);
+    let source = ScalarField::uniform("no generation", 0.0).unwrap();
+    let curve = sensible_curve();
+    with_cx(|cx| {
+        let stepper =
+            EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, REFERENCE_DENSITY, budget()).unwrap();
+        let got = stepper
+            .advance(
+                cx,
+                problem(&mesh, &boundary, &material, &source),
+                None,
+                &[100.0; 4],
+                0.4,
+                config(),
+            )
+            .unwrap();
+        // Independent scalar bisection of the exact one-free-node P1 balance.
+        let (mut lo, mut hi) = (300.0, 400.0);
+        for _ in 0..80 {
+            let t = (lo + hi) / 2.0;
+            let k = 1.0 + ((3.0 * 400.0 + t) / 4.0 - 280.0) / 100.0;
+            let residual = REFERENCE_DENSITY * VOLUME / 4.0 * 5.0 * (t - 300.0)
+                + 0.4 * k * VOLUME * (t - 400.0);
+            if residual > 0.0 {
+                hi = t;
+            } else {
+                lo = t;
+            }
+        }
+        assert!((got.temperature[1] - (lo + hi) / 2.0).abs() < 1e-8);
+        assert!(got.newton.iterations > 1);
+        assert!(got.energy_residual_j.abs() < 1e-9);
     });
 }

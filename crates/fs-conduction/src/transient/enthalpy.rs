@@ -22,8 +22,10 @@
 //! Uniform and explicitly assigned heterogeneous reference materials share this
 //! transport kernel, natural flux/Robin boundaries and finite-resistance
 //! contacts. Distinct materials require distinct interface vertices; no nodal
-//! mixture law is inferred. Every Dirichlet row is
-//! refused: temperature on a latent plateau does not determine enthalpy.
+//! mixture law is inferred. Prescribed endpoint temperatures are inverted only
+//! where the original chart gives one unique enthalpy. A latent-plateau
+//! temperature remains ambiguous and is refused. Reservoir reaction includes
+//! fixed-node storage and transport, including an initial temperature jump.
 //! Equilibrium density from the chart never changes the stored reference mass.
 //! This does not model expansion, material motion, pressure work or remapping.
 
@@ -52,7 +54,7 @@ use fs_solver::{
 use fs_sparse::Csr;
 
 use crate::{
-    ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux, ThermalBc,
+    ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux,
     ThermalInterfaces,
     assemble::{
         ASSEMBLY_TILE, AssembledSystem, DofMap,
@@ -98,8 +100,26 @@ pub enum EnthalpyError {
         /// Caller-provided ceiling.
         limit: usize,
     },
-    /// Fixed temperature does not select a unique state on a latent plateau.
+    /// The requesting consumer does not support prescribed-temperature rows.
     UnsupportedDirichlet,
+    /// A fixed temperature selects more than one enthalpy on a latent plateau.
+    AmbiguousPrescribedTemperature {
+        /// Boundary vertex whose chart contains the plateau.
+        vertex: usize,
+        /// Requested absolute temperature, K.
+        temperature_k: f64,
+    },
+    /// A prescribed temperature is outside the original constitutive chart.
+    PrescribedTemperatureOutsideDomain {
+        /// Boundary vertex with insufficient constitutive support.
+        vertex: usize,
+        /// Requested absolute temperature, K.
+        temperature_k: f64,
+        /// Lowest chart temperature, K.
+        lower_k: f64,
+        /// Highest chart temperature, K.
+        upper_k: f64,
+    },
     /// Existing spatial/material/interface refusal, including cancellation.
     Conduction(ConductionError),
     /// An exact nodal chart or derivative query was refused.
@@ -142,7 +162,15 @@ impl fmt::Display for EnthalpyError {
             }
             Self::UnsupportedDirichlet => write!(
                 formatter,
-                "enthalpy transport requires Neumann/Robin boundaries; a prescribed temperature does not select latent enthalpy"
+                "this enthalpy consumer does not support prescribed-temperature boundaries"
+            ),
+            Self::AmbiguousPrescribedTemperature { vertex, temperature_k } => write!(
+                formatter,
+                "enthalpy vertex {vertex}: prescribed {temperature_k} K selects a latent plateau, not a unique enthalpy"
+            ),
+            Self::PrescribedTemperatureOutsideDomain { vertex, temperature_k, lower_k, upper_k } => write!(
+                formatter,
+                "enthalpy vertex {vertex}: prescribed {temperature_k} K is outside [{lower_k}, {upper_k}] K"
             ),
             Self::Conduction(error) => error.fmt(formatter),
             Self::Phase { vertex, source } => {
@@ -197,6 +225,9 @@ pub struct EnthalpyStepSolution {
     pub neumann_out_w: f64,
     /// Endpoint outward Robin heat, W.
     pub robin_out_w: f64,
+    /// Prescribed-temperature reservoir heat, W inward, including fixed-node
+    /// storage changes. A first-step boundary jump is charged exactly once.
+    pub dirichlet_in_w: f64,
     /// `sum_i m_i*(h_new_i-h_old_i)` of the actual returned state, J.
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, J.
@@ -373,7 +404,9 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
     }
 
     /// Advance from immutable specific-enthalpy history, with current endpoint
-    /// source and natural boundary data. Conductivity is evaluated at every
+    /// source and boundary data. Prescribed temperatures may change from the
+    /// history, but must select unique enthalpies on their original charts.
+    /// Conductivity is evaluated at every
     /// actual nonlinear trial. No returned field escapes before both Newton's
     /// residual gate and the independent absolute joule-balance gate pass.
     ///
@@ -403,9 +436,10 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         };
         // Resolve history and the initial tangent before shared Newton admits it.
         // A chart/domain refusal here retains its original typed error.
-        let mut stage = context.stage(old_specific_h)?;
+        let initial_h = context.initial_values()?;
+        let mut stage = context.stage(&initial_h)?;
         let mut newton =
-            match NewtonKrylovState::new(&stage, old_specific_h.to_vec(), config.newton) {
+            match NewtonKrylovState::new(&stage, initial_h, config.newton) {
                 Ok(state) => state,
                 Err(error) => {
                     return Err(stage.take_failure().unwrap_or(EnthalpyError::Newton(error)));
@@ -470,19 +504,56 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 "reference mass and history must match the exact transport mesh",
             ));
         }
-        if problem
-            .boundary
-            .conditions()
-            .iter()
-            .any(|bc| matches!(bc, ThermalBc::Dirichlet { .. }))
-        {
-            return Err(EnthalpyError::UnsupportedDirichlet);
-        }
         validate_work(self.masses.len(), dt_s, config)?;
         for condition in problem.boundary.conditions() {
             condition.validate(self.masses.len())?;
         }
+        for (index, &(vertex, temperature)) in problem.boundary.dirichlet().iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(cx, index)?;
+            }
+            if vertex >= self.masses.len() {
+                return Err(EnthalpyError::InvalidInput(
+                    "prescribed vertex is outside the reference mesh",
+                ));
+            }
+            self.prescribed_enthalpy(vertex, temperature)?;
+        }
         Ok(())
+    }
+
+    // Invert the admitted piecewise-linear chart, never a separate Cp model.
+    // Monotone temperatures permit binary search; both ends of every plateau
+    // are ambiguous too, regardless of the history's liquid fraction.
+    fn prescribed_enthalpy(&self, vertex: usize, temperature_k: f64) -> Result<f64, EnthalpyError> {
+        let knots = self.curve_for_vertex(vertex).knots();
+        let lower_k = knots[0].temperature_k;
+        let upper_k = knots[knots.len() - 1].temperature_k;
+        if !temperature_k.is_finite() || temperature_k < lower_k || temperature_k > upper_k {
+            return Err(EnthalpyError::PrescribedTemperatureOutsideDomain {
+                vertex,
+                temperature_k,
+                lower_k,
+                upper_k,
+            });
+        }
+        let upper = knots.partition_point(|knot| knot.temperature_k < temperature_k);
+        if knots[upper].temperature_k == temperature_k {
+            if knots
+                .get(upper + 1)
+                .is_some_and(|next| next.temperature_k == temperature_k)
+            {
+                return Err(EnthalpyError::AmbiguousPrescribedTemperature {
+                    vertex,
+                    temperature_k,
+                });
+            }
+            return Ok(knots[upper].specific_enthalpy_j_kg);
+        }
+        let a = knots[upper - 1];
+        let b = knots[upper];
+        let fraction = (temperature_k - a.temperature_k) / (b.temperature_k - a.temperature_k);
+        finite(a.specific_enthalpy_j_kg * (1.0 - fraction) + b.specific_enthalpy_j_kg * fraction)
     }
 }
 
@@ -496,6 +567,83 @@ struct StepContext<'a, 'm, 'c, 'cx> {
 }
 
 impl StepContext<'_, '_, '_, '_> {
+    fn is_prescribed(&self, vertex: usize) -> bool {
+        self.problem
+            .boundary
+            .dirichlet()
+            .binary_search_by_key(&vertex, |&(v, _)| v)
+            .is_ok()
+    }
+
+    fn initial_values(&self) -> Result<Vec<f64>, EnthalpyError> {
+        // Validate even replaced boundary history before accepting its storage.
+        if !self.problem.boundary.dirichlet().is_empty() {
+            self.temperatures(self.old)?;
+        }
+        let mut initial = self.old.to_vec();
+        for (index, &(vertex, temperature)) in self.problem.boundary.dirichlet().iter().enumerate()
+        {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(self.cx, index)?;
+            }
+            initial[vertex] = self.storage.prescribed_enthalpy(vertex, temperature)?;
+        }
+        Ok(initial)
+    }
+
+    fn check_prescribed_values(&self, h: &[f64]) -> Result<(), EnthalpyError> {
+        for (index, &(vertex, temperature)) in self.problem.boundary.dirichlet().iter().enumerate()
+        {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(self.cx, index)?;
+            }
+            if h[vertex] != self.storage.prescribed_enthalpy(vertex, temperature)? {
+                return Err(EnthalpyError::InvalidInput(
+                    "candidate enthalpy violates prescribed endpoint temperature",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn prescribed_heat_input_w(
+        &self,
+        h: &[f64],
+        temperature: &[f64],
+        system: &AssembledSystem,
+    ) -> Result<f64, EnthalpyError> {
+        let mut heat = 0.0;
+        for (index, &(vertex, _)) in self.problem.boundary.dirichlet().iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(self.cx, index)?;
+            }
+            let (columns, entries) = system.operator.row(vertex);
+            let transport: f64 = columns
+                .iter()
+                .zip(entries)
+                .map(|(&column, &entry)| entry * temperature[column])
+                .sum();
+            heat = finite(
+                heat + finite(
+                    self.storage.masses[vertex] * (h[vertex] - self.old[vertex]) / self.dt
+                        + transport
+                        - system.load[vertex],
+                )?,
+            )?;
+        }
+        Ok(heat)
+    }
+
+    fn physical_prescribed_heat_input_w(&self, h: &[f64]) -> Result<f64, EnthalpyError> {
+        if self.problem.boundary.dirichlet().is_empty() {
+            return Ok(0.0);
+        }
+        let temperature = self.temperatures(h)?;
+        let scales = self.phase_scales(h)?;
+        let system = self.assemble(&temperature, scales.as_deref())?;
+        self.prescribed_heat_input_w(h, &temperature, &system)
+    }
+
     fn temperatures(&self, h: &[f64]) -> Result<Vec<f64>, EnthalpyError> {
         let mut temperature = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
@@ -625,10 +773,12 @@ impl StepContext<'_, '_, '_, '_> {
                 .curve_for_vertex(vertex)
                 .temperature_derivative_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
-            let diagonal = finite(
+            let diagonal = if self.is_prescribed(vertex) {
                 self.storage.masses[vertex]
-                    + self.dt * picard.operator.get(vertex, vertex) * derivative,
-            )?;
+            } else {
+                finite(self.storage.masses[vertex]
+                    + self.dt * picard.operator.get(vertex, vertex) * derivative)?
+            };
             if diagonal <= 0.0 {
                 return Err(EnthalpyError::InvalidInput(
                     "positive enthalpy Picard diagonal required",
@@ -690,6 +840,14 @@ impl StepContext<'_, '_, '_, '_> {
                     + self.dt * (transport - system.load[vertex]),
             )?;
         }
+        for (index, &(vertex, temperature)) in self.problem.boundary.dirichlet().iter().enumerate()
+        {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(self.cx, index)?;
+            }
+            let prescribed = self.storage.prescribed_enthalpy(vertex, temperature)?;
+            out[vertex] = finite(self.storage.masses[vertex] * (h[vertex] - prescribed))?;
+        }
         Ok(())
     }
 
@@ -699,6 +857,7 @@ impl StepContext<'_, '_, '_, '_> {
         newton: NewtonReport,
         tolerance_j: f64,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.check_prescribed_values(&h)?;
         let temperature = self.temperatures(&h)?;
         let phase_scales = self.phase_scales(&h)?;
         let system = self.assemble(&temperature, phase_scales.as_deref())?;
@@ -720,7 +879,7 @@ impl StepContext<'_, '_, '_, '_> {
         // Independent physical source/face integration, not the sum of Newton
         // residuals or an inferred heat input from storage. This shared owner
         // pass and its contact reporting are bounded by the admitted mesh.
-        let dofs = DofMap::new(self.problem.boundary, h.len())?;
+        let dofs = DofMap::new_allow_fully_prescribed(self.problem.boundary, h.len())?;
         let (energy, robin_fluxes) = energy_balance(
             self.storage.mesh,
             self.problem.boundary,
@@ -730,7 +889,9 @@ impl StepContext<'_, '_, '_, '_> {
             &temperature,
         );
         poll(self.cx, h.len())?;
-        let net = finite(energy.source_w - energy.neumann_out_w - energy.robin_out_w)?;
+        let dirichlet_in_w = self.prescribed_heat_input_w(&h, &temperature, &system)?;
+        let net =
+            finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
         let energy_residual_j = finite(storage - self.dt * net)?;
         if energy_residual_j.abs() > tolerance_j {
             return Err(EnthalpyError::EnergyBalance {
@@ -750,6 +911,7 @@ impl StepContext<'_, '_, '_, '_> {
             source_w: energy.source_w,
             neumann_out_w: energy.neumann_out_w,
             robin_out_w: energy.robin_out_w,
+            dirichlet_in_w,
             stored_energy_change_j: storage,
             energy_residual_j,
             robin_fluxes,
@@ -827,6 +989,10 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
             if row % ASSEMBLY_TILE == 0 && !self.poll_action(row) {
                 output.fill(f64::NAN);
                 return;
+            }
+            if self.context.is_prescribed(row) {
+                *value = self.context.storage.masses[row] * direction[row];
+                continue;
             }
             let (columns, entries) = self.tangent.row(row);
             let applied: f64 = columns

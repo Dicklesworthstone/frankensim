@@ -216,6 +216,7 @@ impl EnthalpyTape {
             source_w: finite(endpoint.source_w)?,
             neumann_out_w: finite(endpoint.neumann_out_w)?,
             robin_out_w: finite(endpoint.robin_out_w)?,
+            dirichlet_in_w: finite(endpoint.dirichlet_in_w)?,
             stored_energy_change_j: finite(endpoint.stored_energy_change_j)?,
             energy_residual_j: finite(endpoint.energy_residual_j)?,
             robin_fluxes: clone_rows(cx, &endpoint.robin_fluxes, deadline)?,

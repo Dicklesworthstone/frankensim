@@ -223,6 +223,11 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
             pump, &controls.pump, controls.reservoir, |cx, rows| {
                 let trial = (|| -> Result<_, StoredCoolingError> {
                     let mapped = boundary(cx, rows)?;
+                    // This transaction owns natural-boundary heat only; a bath
+                    // reaction is not part of its solid external-energy ledger.
+                    if !mapped.dirichlet().is_empty() {
+                        return Err(EnthalpyError::UnsupportedDirichlet.into());
+                    }
                     let solution = solve(cx, ConductionProblem {
                         mesh: problem.mesh, boundary: &mapped, material: problem.material,
                         element_materials: problem.element_materials, source: problem.source,
