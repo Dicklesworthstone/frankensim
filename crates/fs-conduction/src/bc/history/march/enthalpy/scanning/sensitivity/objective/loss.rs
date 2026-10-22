@@ -89,6 +89,7 @@ impl<O: ScanObservationSpec> ScanObservationSpec for ScanObservationWithLoss<O> 
     fn endpoint(&self) -> usize { self.observation.endpoint() }
     fn first_endpoint(&self) -> usize { self.observation.first_endpoint() }
     fn time_weight(&self, endpoint: usize) -> f64 { self.observation.time_weight(endpoint) }
+    fn prediction_offset(&self) -> f64 { self.observation.prediction_offset() }
     fn validate_times(&self, cx: &Cx<'_>, endpoints: &[f64]) -> Result<(), ScanSensitivityError> {
         self.observation.validate_times(cx, endpoints)
     }

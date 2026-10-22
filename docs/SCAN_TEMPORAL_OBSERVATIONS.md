@@ -106,3 +106,51 @@ Three additional authored G0/G1/G3 regressions exercise exposure-aware fitting
 versus the incorrect-endpoint interpretation, exact grid/order/sample accounting,
 invalid windows and resource caps. They have not been executed natively in the
 authoring environment.
+
+## First-order sensor response
+
+`ScanTemporalObservation::first_order_lag(cx, row, &endpoints_s, first_endpoint,
+ time_constant_s, initial_reading, max_samples)` represents the declared model
+`tau * dy/dt + y = u`. Here `u` is the original spatial/vertex readout reconstructed
+linearly between accepted endpoints; `y` is the sensor's reported quantity.
+The result is `y` at `row.endpoint`, NOT its exposure mean. The sensor's initial
+reading is specified at `first_endpoint` and is independent of the material's
+initial state. Its units match the observable. A liquid-fraction reading uses
+fractions, not percentages. Tau and the initial reading are fixed inputs, not
+additional optimization variables.
+
+For one interval, `r=dt/tau`, `a=exp(-r)`, `q=1-a`, and
+`y1=a*y0+(q/r-a)*u0+(1-q/r)*u1`. The constructor composes those exact linear-input
+updates into bounded temporal weights and a fixed contribution from the initial
+sensor state. `expm1` and a short-interval series avoid subtractive cancellation.
+No thermal trajectory is replaced by that sensor equation. Every contributing
+readout still uses the original material chart and spatial transpose.
+
+The sensor weights do NOT sum to one: the missing weight belongs to the known
+initial reading. They must not be normalized like exposure weights. The fixed
+contribution enters the shared scoring path exactly once and has no source or
+initial-material-state derivative. The weighted readout seeds use the original
+full-storage or checkpointed adjoints. Huber wrapping in either order retains
+this contribution and still produces one loss per complete reading. Hard state,
+peak, energy and actuator limits continue to constrain the actual physics,
+not the delayed sensor output.
+
+Clocks and sample allowances remain explicit and bound to the selected grid.
+No nested temporal operators, pure transport delay, sensor backreaction,
+unknown time-constant calibration or continuum-error bound is supplied. Every
+positive coefficient and surviving sensor-memory term must be representable;
+overflow/underflow refuses rather than silently dropping history. In particular,
+an extremely fast sensor across a very long window can exceed that range.
+
+In the synthetic latent-plateau fixture, a 152 J/kg reading at one second and
+`y(2)=154.83833820809153 J/kg`, with `y(1)=152 J/kg` and `tau=0.5 s`, recover
+2 W followed by 5 W. Treating the second reading as instantaneous instead fits
+2 W followed by approximately 2.838338208 W. This is a manufactured model
+comparison, not evidence about any particular physical sensor.
+
+Six added G0/G1/G3 regressions cover analytic constant/ramp responses, short-step
+coefficients, wrapper order, invalid data and cancellation, source/geometry
+finite differences, full/checkpoint/value agreement, inverse recovery and
+unchanged physical peak constraints. These Rust tests are authored, not executed
+in the authoring environment. Independent high-precision and matrix-exponential
+checks verify the sensor equations, not native compilation or solver behavior.

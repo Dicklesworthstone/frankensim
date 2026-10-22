@@ -4,7 +4,10 @@
 //! Trapezoidal weights integrate the piecewise-linear reconstruction of the
 //! selected spatial readout and divide by the declared exposure duration. The
 //! original physical time integrator and source sampling are unchanged. This is
-//! a discrete quadrature, not a continuum-error bound or a sensor-response model.
+//! a discrete quadrature, not a continuum-error bound. `first_order_lag` adds
+//! an explicitly declared linear sensor response without altering the physics.
+
+mod lag;
 
 use super::{ScanObservable, ScanSensitivityError, ScanStep, finite, invalid, poll, zeros};
 use super::loss::ScanResidualLoss;
@@ -12,8 +15,8 @@ use super::spatial::{ScanObservationSpec, sealed};
 use crate::ConductionMesh;
 use fs_exec::Cx;
 
-/// An instantaneous measurement or one time-averaged exposure. Both variants can
-/// coexist in the same observation vector, with vertex or spatial readouts and
+/// An instantaneous measurement, time-averaged exposure or lagged sensor reading.
+/// They can coexist in the same observation vector, with vertex or spatial readouts and
 /// quadratic/Huber loss. The target and scale keep the inner observation's units.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanTemporalObservation<O> {
@@ -26,6 +29,7 @@ struct Window {
     first: usize,
     times_s: Vec<f64>,
     weights: Vec<f64>,
+    offset: f64,
 }
 
 impl<O: ScanObservationSpec> ScanTemporalObservation<O> {
@@ -90,11 +94,13 @@ impl<O: ScanObservationSpec> ScanTemporalObservation<O> {
             *time = original;
         }
         poll(cx, count)?;
-        Ok(Self { observation, window: Some(Window { first: first_endpoint, times_s, weights }) })
+        Ok(Self { observation, window: Some(Window { first: first_endpoint, times_s, weights, offset: 0.0 }) })
     }
 
     pub fn observation(&self) -> &O { &self.observation }
-    /// Exact bound samples and dimensionless normalized quadrature coefficients.
+    /// Exact bound samples and dimensionless temporal coefficients. Time means
+    /// sum to one; lag coefficients exclude the surviving initial sensor state
+    /// and MUST NOT be renormalized. `prediction_offset` supplies that state.
     /// None denotes the unchanged inner observation, not a zero-length average.
     pub fn time_weights(&self) -> Option<(&[f64], &[f64])> {
         self.window.as_ref().map(|w| (w.times_s.as_slice(), w.weights.as_slice()))
@@ -113,15 +119,18 @@ impl<O: ScanObservationSpec> ScanObservationSpec for ScanTemporalObservation<O> 
             Some(w) => endpoint.checked_sub(w.first).and_then(|i| w.weights.get(i)).copied().unwrap_or(0.0),
         }
     }
+    fn prediction_offset(&self) -> f64 {
+        self.window.as_ref().map_or_else(|| self.observation.prediction_offset(), |w| w.offset)
+    }
     fn validate_times(&self, cx: &Cx<'_>, endpoints: &[f64]) -> Result<(), ScanSensitivityError> {
         self.observation.validate_times(cx, endpoints)?;
         if let Some(w) = &self.window {
             let actual = endpoints.get(w.first..=self.endpoint())
-                .ok_or_else(|| invalid("time mean names an absent endpoint window"))?;
-            if actual.len() != w.times_s.len() { return Err(invalid("time mean grid shape changed")); }
+                .ok_or_else(|| invalid("temporal readout names an absent endpoint window"))?;
+            if actual.len() != w.times_s.len() { return Err(invalid("temporal readout grid shape changed")); }
             for (i, (&a, &b)) in actual.iter().zip(&w.times_s).enumerate() {
                 if i % 256 == 0 { poll(cx, i)?; }
-                if a.to_bits() != b.to_bits() { return Err(invalid("time mean must be rebuilt for the selected physical grid")); }
+                if a.to_bits() != b.to_bits() { return Err(invalid("temporal readout must be rebuilt for the selected physical grid")); }
             }
         }
         poll(cx, self.endpoint())
@@ -156,7 +165,11 @@ impl ObservationValues {
         row: usize, endpoint: usize, prediction: f64) -> Result<(), ScanSensitivityError>
     {
         let contribution = finite(finite(prediction)? * observation.time_weight(endpoint))?;
-        self.predictions[row] = if endpoint == observation.first_endpoint() { contribution }
+        self.predictions[row] = if endpoint == observation.first_endpoint() {
+            let offset = finite(observation.prediction_offset())?;
+            // Preserve the original instantaneous signed-zero behavior.
+            if offset == 0.0 { contribution } else { finite(offset + contribution)? }
+        }
             else { finite(self.predictions[row] + contribution)? };
         if endpoint == observation.endpoint() {
             let residual = finite((self.predictions[row] - observation.target()) / observation.scale())?;

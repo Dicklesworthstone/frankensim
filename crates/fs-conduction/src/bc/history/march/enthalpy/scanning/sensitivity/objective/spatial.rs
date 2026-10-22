@@ -211,6 +211,10 @@ pub trait ScanObservationSpec: sealed::Sealed {
     fn time_weight(&self, endpoint: usize) -> f64 {
         if endpoint == self.endpoint() { 1.0 } else { 0.0 }
     }
+    /// Fixed physical contribution, such as the surviving initial sensor state.
+    /// It is added once, not once per endpoint, and has no design derivative.
+    #[doc(hidden)]
+    fn prediction_offset(&self) -> f64 { 0.0 }
     /// Temporal readouts bind their quadrature to the original physical grid.
     #[doc(hidden)]
     fn validate_times(&self, _cx: &Cx<'_>, _endpoints: &[f64]) -> Result<(), ScanSensitivityError> { Ok(()) }
