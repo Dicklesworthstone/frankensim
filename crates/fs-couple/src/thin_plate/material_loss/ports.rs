@@ -154,7 +154,7 @@ fn reduce_with_tensor(
     ).collect::<Result<Vec<_>, _>>()?;
     let model = chart.assemble(&[], &options.assembly).map_err(map_plate)?;
     let loss = specimen.bending_viscosity().map(|laws|
-        RegionalBendingLoss::new(specimen, laws, &model)
+        DiagonalPlateViscosity::new(specimen, laws, &model)
     ).transpose()?;
     let report = modes(&model, window, &fs_modal::SliceOptions::default()).map_err(map_plate)?;
     let keep = options.n_modes.min(report.modes.len());

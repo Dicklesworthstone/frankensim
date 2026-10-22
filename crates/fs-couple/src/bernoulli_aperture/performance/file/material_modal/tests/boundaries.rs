@@ -138,7 +138,7 @@ fn material_key_viscosity_reaches_the_original_plate_and_rendered_pressure() {
         let plate = aperture.plate_reduction().unwrap();
         let chart = plate.material_chart().unwrap();
         let material = &chart.regions()[0].input.material;
-        let law = &chart.bending_viscosity().unwrap()[0];
+        let law = chart.bending_viscosity().unwrap()[0].isotropic().expect("isotropic cane law");
         assert_eq!(material.card_identity(), source.boundary_records()[0].1.pack().card().content_hash());
         assert_eq!(material.query_point(), &[("T".into(), 293.15), ("omega".into(), 1000.0)]);
         assert_eq!(law.material_state_identity, Some(material.identity()));

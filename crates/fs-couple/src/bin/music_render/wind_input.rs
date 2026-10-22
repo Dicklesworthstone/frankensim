@@ -152,8 +152,11 @@ fn material_boundary_record(
         let loss = if chart.bending_viscosity().is_some() { "kelvin-voigt" }
             else if aperture.relaxation().is_some() { "maxwell" } else { "elastic" };
         let bending_viscosity = chart.bending_viscosity().map_or_else(|| "null".into(), |laws|
-            format!("{{\"viscosity_pa_s\":{:e},\"omega_band_rad_s\":[{:e},{:e}]}}",
-                laws[0].viscosity_pa_s, laws[0].omega_band_rad_s.0, laws[0].omega_band_rad_s.1));
+            match (laws[0].isotropic(), laws[0].omega_band_rad_s()) {
+                (Some(law), (lo, hi)) => format!("{{\"viscosity_pa_s\":{:e},\"omega_band_rad_s\":[{lo:e},{hi:e}]}}",
+                    law.viscosity_pa_s),
+                (None, (lo, hi)) => format!("{{\"plane_stress_tensor\":true,\"omega_band_rad_s\":[{lo:e},{hi:e}]}}"),
+            });
         let terms = aperture.relaxation().map_or_else(String::new, |memory|
             memory.spec().regions[0].material.terms.iter().map(|(modulus, time)|
                 format!("{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))

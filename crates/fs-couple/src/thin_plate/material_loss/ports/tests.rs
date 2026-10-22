@@ -55,7 +55,8 @@ fn reference_modes_match_original_harvesting_with_and_without_material_loss() {
         if eta.is_none() { o.damping_ratio = 0.002; }
         let model = s.chart().assemble(&[], &o.assembly).unwrap();
         let projection = PlateProjection::with_force_weights(&s.chart().mesh, &o.unit_force_weights).unwrap();
-        let loss = s.bending_viscosity().map(|laws| RegionalBendingLoss::new(&s, laws, &model).unwrap());
+        let loss = s.bending_viscosity().map(|laws|
+            crate::plate_viscosity::DiagonalPlateViscosity::new(&s, laws, &model).unwrap());
         let expected = harvest_radiators(&model, &projection, o.eigenvalue_window, o.n_modes,
             o.damping_ratio, loss.as_ref().map(|l| l as &dyn ModalBendingLoss)).unwrap();
         let (actual, ports) = s.certified_radiators_with_force_ports(&o,

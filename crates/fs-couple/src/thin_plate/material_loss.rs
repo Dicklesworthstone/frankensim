@@ -3,32 +3,91 @@
 //! viscosity, damping of conservative prestress, or second modal solve.
 //!
 //! This is the same diagonal, weak-loss modal approximation used by the uniform
-//! plate. Heterogeneous loss is generally nonproportional: off-diagonal modal
-//! damping and strongly damped complex modes are not represented by this image.
+//! plate; its one evaluator is `plate_viscosity::DiagonalPlateViscosity`.
+//! Heterogeneous or anisotropic loss is generally nonproportional: off-diagonal
+//! modal damping and strongly damped complex modes are not represented by this
+//! image (the full tensor image is `plate_viscosity::PlateViscosity`).
 
 use super::*;
+use crate::plate_viscosity::{DiagonalPlateViscosity, resolve_region_viscosity};
+use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES;
+
+/// One region's selected Kelvin-Voigt bending loss, in declared region order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RegionalBendingViscosity {
+    /// Uniaxial eta on an isotropic region: the viscous tensor is (eta/E) times
+    /// the region's elastic bending tensor (the proportional legacy law).
+    Isotropic(IsotropicPlateBendingViscosity),
+    /// Full reduced plane-stress viscosity of an orthotropic region, rotated to
+    /// its material axes and integrated over its thickness.
+    Orthotropic(OrthotropicPlateBendingViscosity),
+}
+impl RegionalBendingViscosity {
+    /// The proportional isotropic law, or `None` for a full-tensor region.
+    #[must_use]
+    pub const fn isotropic(&self) -> Option<&IsotropicPlateBendingViscosity> {
+        match self {
+            Self::Isotropic(law) => Some(law),
+            Self::Orthotropic(_) => None,
+        }
+    }
+    /// Applicability of every coefficient of this region [rad/s].
+    #[must_use]
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) {
+        match self {
+            Self::Isotropic(law) => law.omega_band_rad_s,
+            Self::Orthotropic(tensor) => tensor.omega_band_rad_s,
+        }
+    }
+}
+
+/// Rotated DKT bending viscosity of an orthotropic region, resolved from its
+/// six explicit `plane_stress_viscosity_*` coefficients by the same owner as the
+/// full tensor image. No missing or zero coefficient is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrthotropicPlateBendingViscosity {
+    bending_n_m_s: [f64; 9],
+    omega_band_rad_s: (f64, f64),
+    material_state_identity: ContentHash,
+}
+impl OrthotropicPlateBendingViscosity {
+    /// Bending viscosity tensor [N m s] in mesh coordinates (row-major 3 x 3).
+    #[must_use]
+    pub const fn bending_matrix_n_m_s(&self) -> &[f64; 9] { &self.bending_n_m_s }
+    /// Intersected viscous, elastic and density applicability [rad/s].
+    #[must_use]
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
+    /// Exact material state that produced the tensor; not a validity claim.
+    #[must_use]
+    pub const fn material_state_identity(&self) -> ContentHash { self.material_state_identity }
+}
 
 impl ResolvedPlateChart {
-    /// Select isotropic Kelvin-Voigt bending in EVERY region, from its retained
-    /// material state. Viscosity, density, E and nu use the exact same admission
-    /// and intersected frequency-domain policy as a uniform material specimen.
-    /// Zero viscosity remains an explicit law with a checked applicability band.
-    /// Replacing a region re-resolves this selection; it cannot silently drop it.
-    ///
-    /// The loss tensor is proportional to each region's elastic bending tensor.
-    /// This does not supply anisotropic viscosity or interface/joint damping.
+    /// Select Kelvin-Voigt bending in EVERY region, from its retained material
+    /// state. An isotropic region needs `kelvin_voigt_bending_viscosity`, with
+    /// density, E and nu under the same admission and intersected frequency
+    /// policy as a uniform material specimen; its loss tensor is proportional to
+    /// its elastic bending tensor. An orthotropic region needs all six
+    /// `plane_stress_viscosity_*` coefficients, resolved and rotated exactly as
+    /// for the full tensor image. Zero viscosity remains an explicit law with a
+    /// checked applicability band. Replacing a region re-resolves this selection;
+    /// it cannot silently drop it. Interface/joint damping is not supplied.
     /// Modal realization requires zero authored damping to avoid double counting.
     pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
         let mut viscosities = Vec::with_capacity(self.regions.len());
         for region in &self.regions {
             if region.input.model != PlateMaterialModel::Isotropic {
-                return Err(plate_assignment_error(Some(&region.input.region.name), None,
-                    "regional bending viscosity requires isotropic material elasticity"));
+                let (_, band, bending) = resolve_region_viscosity(region, PLANE_STRESS_VISCOSITY_PROPERTIES)?;
+                viscosities.push(RegionalBendingViscosity::Orthotropic(OrthotropicPlateBendingViscosity {
+                    bending_n_m_s: bending, omega_band_rad_s: band,
+                    material_state_identity: region.input.material.identity(),
+                }));
+                continue;
             }
             let law = resolve_viscosity(&region.input.material)?;
             let young = plate_property(&region.input.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
             viscous_time(law, young)?;
-            viscosities.push(law);
+            viscosities.push(RegionalBendingViscosity::Isotropic(law));
         }
         self.bending_viscosity = Some(viscosities);
         Ok(self)
@@ -38,7 +97,7 @@ impl ResolvedPlateChart {
     /// `None` retains the legacy authored-damping path. Geometry/specimen identity
     /// alone is not a complete scenario identity or a claim that loss is selected.
     #[must_use]
-    pub fn bending_viscosity(&self) -> Option<&[IsotropicPlateBendingViscosity]> {
+    pub fn bending_viscosity(&self) -> Option<&[RegionalBendingViscosity]> {
         self.bending_viscosity.as_deref()
     }
 
@@ -49,7 +108,7 @@ impl ResolvedPlateChart {
         &self, model: &PlateModel, phi: &[f64], omega: f64,
     ) -> Result<Option<f64>, AcousticRealizeError> {
         self.bending_viscosity().map(|laws| {
-            RegionalBendingLoss::new(self, laws, model)?.modal_zeta(model, phi, omega)
+            DiagonalPlateViscosity::new(self, laws, model)?.modal_zeta(model, phi, omega)
         }).transpose()
     }
 }
@@ -128,7 +187,7 @@ pub(super) fn resolve_viscosity(material: &ResolvedMaterialStatePoint)
 }
 
 // Same numeric refusal as the original uniform PlateBendingLaw.
-pub(super) fn viscous_time(viscous: IsotropicPlateBendingViscosity, young: f64)
+pub(crate) fn viscous_time(viscous: IsotropicPlateBendingViscosity, young: f64)
     -> Result<f64, AcousticRealizeError>
 {
     let (lo, hi) = viscous.omega_band_rad_s;
@@ -147,66 +206,6 @@ pub(super) fn viscous_time(viscous: IsotropicPlateBendingViscosity, young: f64)
         });
     }
     Ok(viscous_time_s)
-}
-
-struct BendingElement {
-    dofs: [Option<usize>; 9],
-    stiffness: [f64; 81],
-    region: usize,
-}
-struct RegionalBendingLoss {
-    laws: Vec<PlateBendingLaw>,
-    elements: Vec<BendingElement>,
-}
-impl RegionalBendingLoss {
-    fn new(specimen: &ResolvedPlateChart, viscosities: &[IsotropicPlateBendingViscosity],
-        model: &PlateModel) -> Result<Self, AcousticRealizeError>
-    {
-        let mut laws = Vec::with_capacity(viscosities.len());
-        for (region, &viscous) in specimen.regions.iter().zip(viscosities) {
-            let young = plate_property(&region.input.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
-            laws.push(PlateBendingLaw { thermal: None, viscous: Some(viscous),
-                viscous_time_s: viscous_time(viscous, young)?, thickness: region.section.thickness });
-        }
-        let mesh = &specimen.chart.mesh;
-        let mut elements = Vec::with_capacity(mesh.tris.len());
-        for (element, tri) in mesh.tris.iter().enumerate() {
-            let region = specimen.region_for_element[element];
-            let x = tri.map(|node| mesh.nodes[node].0);
-            let y = tri.map(|node| mesh.nodes[node].1);
-            // Original DKT element, same section, geometry and boundary map as
-            // the modal pencil. No geometric stiffness enters viscous storage.
-            let (stiffness, _) = fs_plate::dkt_stiffness(&x, &y,
-                &specimen.regions[region].section.d, element).map_err(map_plate)?;
-            let dofs = std::array::from_fn(|i| model.dof_map[3 * tri[i / 3] + i % 3]);
-            elements.push(BendingElement { dofs, stiffness, region });
-        }
-        Ok(Self { laws, elements })
-    }
-}
-impl ModalBendingLoss for RegionalBendingLoss {
-    fn modal_zeta(&self, total: &PlateModel, phi: &[f64], omega: f64)
-        -> Result<f64, AcousticRealizeError>
-    {
-        // Check ALL source bands, including silent/zero-viscosity regions.
-        let zetas: Vec<f64> = self.laws.iter().map(|law| law.zeta(omega)).collect::<Result<_, _>>()?;
-        let mut k_phi = vec![0.0; phi.len()];
-        total.k.spmv(phi, &mut k_phi);
-        let total_energy = phi.iter().zip(k_phi).map(|(p, k)| p * k).sum();
-        let mut weighted_bending = 0.0;
-        // Fixed element order, not region-declaration order or hash order.
-        for element in &self.elements {
-            let q: [f64; 9] = element.dofs.map(|dof| dof.map_or(0.0, |i| phi[i]));
-            let mut energy = 0.0;
-            for r in 0..9 {
-                for c in 0..9 {
-                    energy += q[r] * element.stiffness[9 * r + c] * q[c];
-                }
-            }
-            weighted_bending += zetas[element.region] * energy;
-        }
-        bending_energy_fraction(weighted_bending, total_energy)
-    }
 }
 
 #[cfg(test)]

@@ -1745,6 +1745,23 @@ clarinet is one filling of those objects.
   refuses. Extra authored lumped bodies still compose. The modal interval
   need not include the fundamental; certification applies only in that window.
   It does not certify stability or exclude buckling modes outside that window.
+  `ResolvedPlateChart::with_kelvin_voigt_bending_loss` selects regional scalar
+  loss (`RegionalBendingViscosity`): isotropic regions use the proportional law
+  above; orthotropic regions use their six explicit `plane_stress_viscosity_*`
+  coefficients, resolved and rotated by the same owner as the full tensor image
+  (`plate_viscosity::resolve_region_viscosity`; no coefficient is inferred). The
+  one diagonal evaluator, `plate_viscosity::DiagonalPlateViscosity`, gives
+  `zeta_i = sum_e w_r q_e^T K_e q_e / phi^T K phi`: isotropic regions use the
+  elastic DKT matrix with `w = tau omega / 2` (the legacy arithmetic, moved bit
+  for bit); orthotropic regions use the DKT matrix of the rotated viscous tensor
+  with `w = omega / 2`, equal to `C_ii / (2 omega_i)` of the full projection for
+  an exact eigenpair. This image omits off-diagonal modal damping;
+  `PlateViscosity` projects the full tensor, and a chart with scalar loss
+  selected cannot also select it. Tests:
+  `isotropic_regional_loss_routed_through_plate_viscosity_is_bitwise_legacy`
+  (zeta and radiator bits against a verbatim pre-move copy) and
+  `orthotropic_region_now_admitted_and_matches_full_matrix_diagonal` (1e-13 plus
+  twice the measured eigenpair residual).
   No spatial thermal-loss law, nonlinear membrane, remeshing, phase evolution
   or full-wave radiation is claimed. Interfaces are perfectly bonded, with
   thickness centered on one flat mid-surface as specified by fs-plate.

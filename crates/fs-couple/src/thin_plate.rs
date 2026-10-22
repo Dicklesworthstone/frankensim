@@ -8,6 +8,7 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, advance_exact_zoh};
+use crate::plate_viscosity::bending_energy_fraction;
 use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::gas::GasState;
@@ -829,11 +830,11 @@ fn harvest_radiators(
 // with the material bending laws. Static geometric stiffness changes
 // the mode and its total energy, but must not acquire that loss angle.
 // See Fedorov et al., https://arxiv.org/abs/1807.07086, Eq. (1), Sec. II.
-struct PlateBendingLaw {
-    thermal: Option<ThermoelasticZener>,
-    viscous: Option<IsotropicPlateBendingViscosity>,
-    viscous_time_s: f64,
-    thickness: f64,
+pub(crate) struct PlateBendingLaw {
+    pub(crate) thermal: Option<ThermoelasticZener>,
+    pub(crate) viscous: Option<IsotropicPlateBendingViscosity>,
+    pub(crate) viscous_time_s: f64,
+    pub(crate) thickness: f64,
 }
 
 impl PlateBendingLaw {
@@ -860,7 +861,7 @@ impl PlateBendingLaw {
         self.thermal.is_some() || self.viscous.is_some()
     }
 
-    fn zeta(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
+    pub(crate) fn zeta(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
         let mut zeta = match self.thermal {
             Some(law) => thermoelastic_zeta(law, omega, self.thickness)?,
             None => 0.0,
@@ -875,7 +876,7 @@ impl PlateBendingLaw {
             // Moment = D (curvature + (eta/E) curvature_rate), hence
             // C_b = (eta/E) K_b. The caller projects the bending/total energy
             // ratio, so this does not damp conservative geometric stiffness.
-            zeta += 0.5 * self.viscous_time_s * omega;
+            zeta += crate::plate_viscosity::kelvin_voigt_zeta(self.viscous_time_s, omega);
         }
         if !zeta.is_finite() {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -928,7 +929,7 @@ impl PlateBendingLoss {
 }
 
 // Uniform and regional losses share the same certified mode harvesting.
-trait ModalBendingLoss {
+pub(crate) trait ModalBendingLoss {
     fn modal_zeta(
         &self,
         total: &PlateModel,
@@ -956,22 +957,6 @@ impl ModalBendingLoss for PlateBendingLoss {
         };
         Ok(fraction * self.law.zeta(omega)?)
     }
-}
-
-fn bending_energy_fraction(bending: f64, total: f64) -> Result<f64, AcousticRealizeError> {
-    let fraction = bending / total;
-    if !bending.is_finite()
-        || bending < 0.0
-        || !total.is_finite()
-        || total <= 0.0
-        || !fraction.is_finite()
-    {
-        return Err(AcousticRealizeError::InvalidDescription {
-            what: "bending-loss participation requires finite nonnegative bending and positive total modal energy",
-        });
-    }
-    // Stable compressive prestress may produce a ratio above one; do not clamp it.
-    Ok(fraction)
 }
 
 // P1 surface quadrature on the DKT nodal displacement trace. The production
@@ -1161,7 +1146,7 @@ pub struct ResolvedPlateChart {
     chart: PlateChart,
     regions: Vec<ResolvedPlateRegion>,
     region_for_element: Vec<usize>,
-    bending_viscosity: Option<Vec<IsotropicPlateBendingViscosity>>,
+    bending_viscosity: Option<Vec<RegionalBendingViscosity>>,
     mass_kg: f64,
     identity: ContentHash,
 }
@@ -1177,6 +1162,12 @@ impl ResolvedPlateChart {
     #[must_use]
     pub fn regions(&self) -> &[ResolvedPlateRegion] {
         &self.regions
+    }
+
+    /// Region index of a triangle in declared region order; the index must be
+    /// a valid element of this chart.
+    pub(crate) fn region_of_element(&self, element: usize) -> usize {
+        self.region_for_element[element]
     }
 
     /// Exact material source for a triangle, or `None` for an invalid index.
@@ -2693,4 +2684,7 @@ mod tests {
 
 // Source-bound regional bending loss uses the same DKT and modal owners.
 mod material_loss;
-pub use material_loss::certified_material_chart_radiators;
+pub use material_loss::{
+    OrthotropicPlateBendingViscosity, RegionalBendingViscosity, certified_material_chart_radiators,
+};
+pub(crate) use material_loss::viscous_time;
