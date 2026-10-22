@@ -85,6 +85,8 @@ pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger
 /// Multimodal flanged circular-pipe radiation load, continuous in `ka`.
 pub mod flanged;
 pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance};
+/// Lossless variable-area plane-wave DG in the time domain (M2.2-W3a).
+pub mod dg;
 /// Tone holes whose chimney is a chain of duct sections (undercuts).
 mod chimney;
 pub use chimney::{
@@ -150,6 +152,13 @@ pub enum DuctError {
         /// Table upper bound [rad/s].
         omega_hi: f64,
     },
+    /// A time-domain propagator's eigen-residual or exponential-action certificate exceeded tolerance.
+    PropagatorCertificate {
+        /// Measured relative residual or error bound.
+        residual: f64,
+        /// Requested tolerance ceiling.
+        tol: f64,
+    },
     /// The duct has no segments.
     EmptyDuct,
     /// Singular local algebra or a declared composition condition bound exceeded.
@@ -182,6 +191,10 @@ impl core::fmt::Display for DuctError {
                 f,
                 "FS-DUCT-OUT-OF-TABLE: omega = {omega:.4e} outside the tabulated load support \
                  [{omega_lo:.4e}, {omega_hi:.4e}] (tables never extrapolate)"
+            ),
+            DuctError::PropagatorCertificate { residual, tol } => write!(
+                f,
+                "FS-DUCT-PROPAGATOR-CERTIFICATE: residual {residual:.4e} exceeds tolerance {tol:.4e}"
             ),
             DuctError::EmptyDuct => write!(f, "FS-DUCT-EMPTY: a duct needs at least one segment"),
             DuctError::Singular => write!(f, "FS-DUCT-SINGULAR: basis solve refused"),

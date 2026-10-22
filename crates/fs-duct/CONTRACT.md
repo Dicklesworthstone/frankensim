@@ -360,6 +360,40 @@ pipe `Z_in = +i Zc cot(kL)`.
     agrees with the `Segment::ToneHole` chain to 1.9e-15. Refusals are tested
     there too.
 
+- `dg` (IRP M2.2-W3a): the lossless variable-area plane-wave system
+  `(A/ρc²) p_t + q_x = 0`, `(ρ/A) q_t + p_x = 0` in the time domain, by
+  nodal DG on Legendre–Gauss–Lobatto elements of order `p`.
+  - `DgDuct::new(duct, gas, DgMesh { elements, order }, inlet, outlet)`
+    meshes `Cylinder`, `Cone` and `Profile` segments (at least one element
+    each). Its mass matrices integrate the exact `A(x)` by Gauss–Legendre
+    rules doubled until they repeat to 64 ulps.
+  - Interior faces use the alternating flux (`q̂` from the left, `p̂` from the
+    right). It is energy-conserving and optimal (`p + 1`) for every `p`;
+    `K_q = -K_pᵀ` holds exactly through LGL summation by parts.
+  - Boundaries: `Closed`, `IdealOpen`, `Matched` (upwind characteristic)
+    and `Port(PortId)`. A port holds an inflow `q` over a step and returns
+    the exact impulse `ΔX = ∫ p dt`, so its work is exactly `e ΔX`.
+  - `propagator(dt, tol)` is the exact exponential, with no RK, trapezoid,
+    implicit-midpoint or generalized-alpha step.
+    - With lossless boundaries the energy-coordinate operator is skew. It is
+      diagonalized by the SVD of its coupling block, from the symmetric
+      Jordan–Wielandt matrix (`householder_eigh`). The certificate is the
+      larger of the relative singular residual and the basis orthogonality
+      defects.
+    - `Matched` is dissipative and non-normal. It uses a scaled Taylor
+      series with squaring, certified by a rigorous truncation bound carried
+      through the squarings plus an a-posteriori halving estimate.
+    - A certificate above `tol` refuses (`FS-DUCT-PROPAGATOR-CERTIFICATE`).
+    - There is no Krylov path: more than `MAX_DG_PROPAGATOR_DOFS = 2048` DOFs
+      refuse in `new` and `propagator`.
+  - `DgPropagator::step` returns each port's `ΔX` and an `EnergyLedgerRow`
+    whose stored energy is that of the reconstructed physical state.
+    - For lossless boundaries `E(t) - E(0) - W` is a conservation check.
+    - For `Matched` the absorbed energy is inferred from the deficit
+      (unclamped), so `balance_checked` is false.
+  - Origin: QuietLotus's uncommitted 2026-10-16 work, reworked (see the
+    commit for what changed).
+
 - `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
   / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load
   lane (bead zolja). The TABLE is the source of truth: admission
@@ -530,6 +564,42 @@ measure-mode run caught a coarse-staircase artifact posing as a treble
 mode shift — the trigger is therefore judged with BOTH arms on the fine
 staircase).
 
+`src/dg/tests.rs` (IRP M2.2-W3a), one JSON line per rung:
+- `dg_lgl_nodes_exact` (G0): exact to degree `2p - 1` (1e-14), and
+  summation by parts.
+- `dg_mass_matrices_integrate_the_exact_area` (G0): a unit field mapped
+  through `to_energy_coords` gives `1ᵀ M 1` per cone element, which matches
+  the closed-form `∫ A/(ρc²)` and `∫ ρ/A` to 1e-13; measured 2.7e-15.
+- `dg_cylinder_ir_matches_dalembert` and `dg_cone_ir_matches_spherical_exact`
+  (G1/G2): Gaussian pulses at rest travel 0.75 L and reflect once.
+  - Exact solutions use images: even at a closed end and odd at an open end
+    for the cylinder; `r p` with odd images for the open/open cone.
+  - The h-ladder, K = 24..96, is gated at `p + 1 ± 0.2` through fs-mms.
+    Measured orders: p = 2 gives 3.01 and 3.06, p = 3 gives 4.02 and 4.03,
+    p = 4 gives 5.00 and 5.02 (cylinder, then cone). K = 16 was
+    pre-asymptotic.
+  - The p-ladder at K = 16 at least halves the error per order.
+  - A linear `Profile` reproduces the `Cone` to 2.4e-14.
+- `dg_energy_ledger_lossless` (G0):
+  - Over 1e5 steps on closed/closed and closed/open, physical-energy drift
+    is 1.3e-15 and 1.6e-15 (1e-12 allowed). The ledger agrees with the
+    independently computed nodal energy to 6e-16.
+  - Two ports balance their exact `e ΔX` work to 2.7e-13.
+  - A matched end is passive and absorbs the pulse.
+- `dg_impedance_matches_tmm_lossless` (G2): the first 6 peaks of a port/open
+  cylinder against the Lossless TMM poles, within 0.1 c.
+  - The DG impedance's own poles (port-coupled `σ_k / 2π`) match to 7.2e-8 c.
+  - FFT of a 1 s windowed impulse response matches to 0.0065 c. The window
+    biases peaks as `σ²`: 0.25 s gives 0.099 c.
+- `dg_port_coupling_dt_ladder` (G1): a step-averaged held effort converges
+  at order 2 ± 0.2 in Δt; measured 2.05.
+- `dg_propagator_certificate` (G0): measured 1.5e-15 (skew) and 1.3e-14
+  (matched) against 1e-13; an unachievable tolerance refuses by name.
+- `dg_refusals` (G0): order and element caps at cap and cap + 1, the DOF
+  cap, `A <= 0`, tone holes, an empty duct, shared port ids, `dt` and
+  `tol`, and unknown, non-finite or foreign port inputs.
+- `dg_bitwise_repeat` (G5).
+
 `src/modal/riccati/tests.rs` (IRP M2.1-W3b), one JSON line per rung:
 - `mm_bessel_certified_to_gamma16` (G0): `bessel_j0_certified`, `J1` and
   the `J0' = -J1` identity match an independent spectral quadrature to
@@ -599,6 +669,17 @@ refusals including too-coarse-never-extrapolate, and the
 divergence-theorem closure/orientation pin on the lathe).
 
 ## No-claim boundaries
+
+- Time-domain DG (M2.2-W3a) is lossless plane-wave propagation only.
+  - There are no viscothermal losses (M2.2-W3b), side branches or radiation
+    (W3c), moving geometry (W3d) or valve dynamics (W3e). Tone-hole segments
+    refuse.
+  - The matched boundary's certificate includes an a-posteriori estimate,
+    not an enclosure, and its absorbed energy is inferred, not checked.
+  - Propagators are dense, `O(N³)` to build, and capped at 2048 DOFs; there
+    is no Krylov path.
+  - Port coupling holds the effort for a step, which is first order in Δt
+    for point-sampled inputs and second order for step averages.
 
 - Continuous multimodal image (M2.1-W3b): published Pagneux benchmark
   results exist only as figures, so no 1 % comparison against printed
