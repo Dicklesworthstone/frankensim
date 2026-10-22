@@ -490,6 +490,11 @@ pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
     (top, bottom)
 }
 
+/// Reference-cell normal contact estimate for bronze hi-hat rims, shared by
+/// offline and live construction. Grid assembly scales K with cell area;
+/// Hunt-Crossley loss mu [s/m] and the Hertz exponent remain unchanged.
+pub const HIHAT_RIM_LAW: Law = Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 };
+
 /// Hi-hat: opposing shells on one rod. `gap` is the undeformed face-to-face rim opening [m].
 /// Bow clearance follows the supplied profiles; pedal loading deforms them from this geometry.
 pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, String> {
@@ -499,7 +504,7 @@ pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)]) -> Result<Piece, Strin
 /// The same physical hi-hat and rim loss on an explicitly coarsened grid.
 pub fn hihat_scaled(gap: f64, pedal_n: f64, hits: &[(f64, f64)], scale: f64) -> Result<Piece, String> {
     // bronze rims pressed together: stiff and lightly damped so rim chatter radiates 4-16 kHz sizzle
-    hihat_grid(gap, pedal_n, hits, Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.08 }, 0.8, scale)
+    hihat_grid(gap, pedal_n, hits, HIHAT_RIM_LAW, 0.8, scale)
 }
 
 /// The same with an explicit rim contact law and the inner edge of the contact annulus (fraction of the radius).

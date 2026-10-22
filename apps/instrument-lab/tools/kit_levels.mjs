@@ -28,6 +28,7 @@ for (const name of JSON.parse(mod.pieces())) {
   if (!(name in SPEED)) continue;
   const rows = {};
   for (const scale of SCALES) {
+    console.error(`${name}@${scale}: measuring`);
     let level = 0, peak = 0, complete = true;
     // One gain must cover the entire shared trajectory. Measure open and
     // closed stick strokes, plus a foot closure from either initial state;
@@ -35,28 +36,45 @@ for (const name of JSON.parse(mod.pieces())) {
     const states = name === 'hihat'
       ? [{ force: 0 }, { force: 80 }, { force: 0, foot: true }, { force: 80, foot: true }]
       : [{}];
-    for (const state of states) {
-      let p;
-      try {
-        p = name === 'hihat' ? mod.KitPiece.withHiHatPedal(scale, state.force) : new mod.KitPiece(name, scale);
-      } catch { complete = false; break; } // Unsupported physical grid/state; do not publish a partial shared row.
-      try {
-        if (state.foot) {
-          p.setPedalForce(state.force > 0 ? 0 : 80, .005);
-        } else {
-          const [x, y] = spot(name, p.radius());
-          p.strike(x, y, SPEED[name]);
+    const templates = new Map();
+    try {
+      if (name === 'hihat') {
+        try {
+          // Settling a loaded template is expensive. Copies preserve the exact
+          // immutable constructor state for both its stick and foot trajectory.
+          for (const force of [0, 80]) templates.set(force, mod.KitPiece.withHiHatPedal(scale, force));
+        } catch (error) {
+          complete = false;
+          console.error(`${name}@${scale}: initial state refused: ${String(error?.message ?? error)}`);
         }
-        const cs = new Float64Array(FRAMES + 1);
-        for (let k = 0; k < FRAMES; k += 128) {
-          if (state.foot && state.force > 0 && k === 1920) p.setPedalForce(80, .005);
-          const out = p.render(128, 1);
-          if (!out.every(Number.isFinite)) throw new Error(`${name}@${scale}: nonfinite calibration audio`);
-          for (let i = 0; i < out.length; i++) { const v = out[i]; cs[k + i + 1] = cs[k + i] + v * v; peak = Math.max(peak, Math.abs(v)); }
+      }
+      if (complete) for (const state of states) {
+        let p;
+        try {
+          p = name === 'hihat' ? templates.get(state.force).copy() : new mod.KitPiece(name, scale);
+        } catch (error) {
+          complete = false;
+          console.error(`${name}@${scale}: physical grid/state refused: ${String(error?.message ?? error)}`);
+          break; // Do not publish a partial shared row.
         }
-        for (let i = 0; i + WINDOW <= FRAMES; i += HOP) level = Math.max(level, Math.sqrt((cs[i + WINDOW] - cs[i]) / WINDOW));
-      } finally { p.free(); }
-    }
+        try {
+          if (state.foot) {
+            p.setPedalForce(state.force > 0 ? 0 : 80, .005);
+          } else {
+            const [x, y] = spot(name, p.radius());
+            p.strike(x, y, SPEED[name]);
+          }
+          const cs = new Float64Array(FRAMES + 1);
+          for (let k = 0; k < FRAMES; k += 128) {
+            if (state.foot && state.force > 0 && k === 1920) p.setPedalForce(80, .005);
+            const out = p.render(128, 1);
+            if (!out.every(Number.isFinite)) throw new Error(`${name}@${scale}: nonfinite calibration audio`);
+            for (let i = 0; i < out.length; i++) { const v = out[i]; cs[k + i + 1] = cs[k + i] + v * v; peak = Math.max(peak, Math.abs(v)); }
+          }
+          for (let i = 0; i + WINDOW <= FRAMES; i += HOP) level = Math.max(level, Math.sqrt((cs[i + WINDOW] - cs[i]) / WINDOW));
+        } finally { p.free(); }
+      }
+    } finally { for (const template of templates.values()) template.free(); }
     if (!complete) continue;
     rows[scale] = { level: Number(level.toPrecision(6)), peak: Number(peak.toPrecision(6)) };
   }

@@ -56,6 +56,8 @@ pub struct Live {
 /// Stays awake this long after the motion has died away.
 const QUIET_S: f64 = 0.3;
 const SLEEP_FRAMES: usize = 128;
+const HIHAT_PREPARE_MIN_S: f64 = 0.5;
+const HIHAT_PREPARE_EXTRA_S: f64 = 8.0;
 
 fn gas_record(record: &str) -> Result<GasState, String> {
     let mut fields = record.split_ascii_whitespace();
@@ -75,6 +77,8 @@ impl Live {
     /// One shared hi-hat with a 2 mm rest opening and an explicitly prescribed initial
     /// downward pedal force [N]. A nonzero initial load is settled before playback;
     /// subsequent pedal commands move the same cymbals without resetting their motion.
+    /// Preparation renders at least 0.5 s, then allows up to 8 s more for the
+    /// ordinary quiet condition. An unsettled or nonfinite initial state refuses.
     pub fn with_hihat_pedal(scale: f64, initial_pedal_n: f64) -> Result<Live, String> {
         if !initial_pedal_n.is_finite() || initial_pedal_n < 0.0 {
             return Err("hi-hat pedal force must be finite and nonnegative [N]".into());
@@ -82,11 +86,32 @@ impl Live {
         let mut live = Self::new("hihat", scale)?;
         if initial_pedal_n > 0.0 {
             live.set_hihat_pedal(initial_pedal_n, 0.12)?;
-            // Settle through the ordinary output path as well: the microphone and
-            // causal decimator must retain the sound immediately before playback.
-            live.render(&mut vec![0.0; (0.5 * OUT_RATE).round() as usize], 1.0);
+            live.settle_initial_hihat_load()?;
         }
         Ok(live)
+    }
+
+    fn settle_initial_hihat_load(&mut self) -> Result<(), String> {
+        let minimum = (HIHAT_PREPARE_MIN_S * OUT_RATE).round() as usize;
+        let limit = minimum + (HIHAT_PREPARE_EXTRA_S * OUT_RATE).round() as usize;
+        let mut rendered = 0;
+        let mut scratch = [0.0; SLEEP_FRAMES];
+        // Ordinary rendering preserves all physical and causal output state.
+        // Only its unchanged quiet gate may stop the motion and clear its filter.
+        while rendered < minimum || !self.asleep() {
+            if rendered == limit {
+                return Err(format!("hi-hat initial load did not become quiescent within {} s",
+                    HIHAT_PREPARE_MIN_S + HIHAT_PREPARE_EXTRA_S));
+            }
+            let boundary = if rendered < minimum { minimum } else { limit };
+            let count = scratch.len().min(boundary - rendered);
+            self.render(&mut scratch[..count], 1.0);
+            if scratch[..count].iter().any(|sample| !sample.is_finite()) || !self.kinetic.is_finite() {
+                return Err("hi-hat initial load produced nonfinite state during preparation".into());
+            }
+            rendered += count;
+        }
+        Ok(())
     }
 
     /// A declarative temperature/pressure/humidity or species-mixture record,
@@ -174,7 +199,7 @@ impl Live {
             };
             Ok((piece, c.radius, 0.0))
         };
-        let rim = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
+        let rim = kit::HIHAT_RIM_LAW;
         let hat = kit::hihat_spec().0.radius;
         let hihat = |gap, pedal| match materials {
             Some(m) => kit::hihat_grid_mu_with_materials(gap, pedal, &[], rim, 0.8, scale, kit::RIM_FRICTION, gas, m),
@@ -219,8 +244,11 @@ impl Live {
             }
         }
 
-        // settle (snare-wire preload, hi-hat pedal) before anyone can play
-        let settle = (p.settle * p.instrument.rate).round() as usize;
+        // Snare-wire preload retains its existing path. Loaded hi-hats settle
+        // below through Live::render, including the microphone/decimator history.
+        let settle = if piece == "hihat-closed" { 0 } else {
+            (p.settle * p.instrument.rate).round() as usize
+        };
         let mut out = [0.0; 1];
         for _ in 0..settle {
             p.instrument.step(&mut out);
@@ -232,14 +260,18 @@ impl Live {
             p.instrument.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0)] });
             Some(HiHatPedal { rod, drive, transition_end: p.instrument.time() })
         } else { None };
-        Ok(Live {
+        let mut live = Live {
             ins: p.instrument, name: piece.into(), target, radius, strikers: vec![(stick, contact)], foot,
             oversample: p.oversample, decimator: StreamingDecimator::new(p.oversample),
             asleep: false, quiet_samples: 0, ke_peak: 0.0, kinetic: 0.0, force: 0.0, strokes: 0,
             sleep_frames: 0, sleep_peak: 0.0, sleep_force: 0.0,
             pedal,
             atmosphere_source: None,
-        })
+        };
+        if piece == "hihat-closed" {
+            live.settle_initial_hihat_load()?;
+        }
+        Ok(live)
     }
 
     /// Prescribe downward force on the shared hi-hat's pull rod [N], ramped from its
@@ -454,6 +486,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_live_hihat_uses_the_same_area_scaled_rim_law_as_offline() {
+        let coefficients = |law| {
+            let Law::Power { k, alpha, mu } = law;
+            (k, alpha, mu)
+        };
+        assert_eq!(coefficients(kit::HIHAT_RIM_LAW), (2.0e9, 1.5, 0.08));
+        for scale in [4.0, 7.0] {
+            let offline = kit::hihat_scaled(0.002, 0.0, &[], scale).unwrap();
+            let expected = (2.0e9 * scale * scale, 1.5, 0.08);
+            assert!(!offline.instrument.contacts.is_empty());
+            for contact in &offline.instrument.contacts {
+                assert_eq!(coefficients(contact.law), expected);
+            }
+            for name in ["hihat", "hihat-open", "hihat-closed"] {
+                let live = Live::new(name, scale).unwrap();
+                let rims = &live.ins.contacts[..live.strikers[0].1];
+                assert_eq!(rims.len(), offline.instrument.contacts.len(), "{name}@{scale}");
+                for contact in rims {
+                    assert_eq!(coefficients(contact.law), expected, "{name}@{scale}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn uncontrolled_shared_hihat_matches_fixed_open_pressure_and_clock() {
         let mut shared = Live::with_hihat_pedal(7.0, 0.0).unwrap();
         let mut fixed = Live::new("hihat-open", 7.0).unwrap();
@@ -528,23 +585,64 @@ mod tests {
         let pedal = closed.pedal.as_ref().unwrap();
         assert_eq!(closed.ins.drives[pedal.drive].at(closed.ins.time()), -80.0);
         assert!(closed.ins.time() >= 0.5);
+        assert!(closed.asleep(), "held initial state must pass the ordinary quiet gate");
 
         let mut manual = Live::new("hihat", 7.0).unwrap();
         manual.set_hihat_pedal(80.0, 0.12).unwrap();
-        let mut remaining = (0.5 * OUT_RATE).round() as usize;
+        let minimum = (0.5 * OUT_RATE).round() as usize;
+        let limit = ((0.5 + 8.0) * OUT_RATE).round() as usize;
+        let mut rendered = 0;
         let mut scratch = [0.0; 128];
-        while remaining > 0 {
-            let count = remaining.min(scratch.len());
+        while rendered < minimum || !manual.asleep() {
+            assert!(rendered < limit, "manual physical preparation exhausted its budget");
+            let boundary = if rendered < minimum { minimum } else { limit };
+            let count = scratch.len().min(boundary - rendered);
             manual.render(&mut scratch[..count], 1.0);
-            remaining -= count;
+            assert!(scratch[..count].iter().all(|sample| sample.is_finite()));
+            rendered += count;
         }
         assert_eq!(manual.ins.step_index, closed.ins.step_index);
+        assert_eq!(manual.ins.mics.iter().map(|mic| mic.ring.clone()).collect::<Vec<_>>(),
+            closed.ins.mics.iter().map(|mic| mic.ring.clone()).collect::<Vec<_>>());
+        // Compare a fresh physical stroke, not only the now-quiet zero output.
+        for live in [&mut manual, &mut closed] { live.strike(0.85 * live.radius, 0.0, 2.5); }
         let (mut a, mut b) = (vec![0.0; 1024], vec![0.0; 1024]);
         manual.render(&mut a, 1.0);
         closed.render(&mut b, 1.0);
+        assert!(a.iter().any(|sample| *sample != 0.0));
         assert_eq!(a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "initial settling must retain the same causal output history as manual playback");
+    }
+
+    #[test]
+    fn loaded_hihat_initial_states_are_quiet_with_their_force_and_contact_preserved() {
+        for mut live in [Live::new("hihat-closed", 7.0).unwrap(),
+            Live::with_hihat_pedal(7.0, 80.0).unwrap()] {
+            assert!(live.asleep());
+            assert_eq!(live.strokes, 0);
+            assert!(live.ins.drives.iter().any(|drive| drive.at(live.ins.time()) == -80.0));
+            assert!(live.ins.contacts.iter().any(|contact| contact.active && contact.force > 0.0),
+                "quiescence must retain an actual loaded rim contact");
+            let state = live.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>();
+            let step = live.ins.step_index;
+            let mut output = [1.0; 1024];
+            live.render(&mut output, 1.0);
+            assert!(output.iter().all(|sample| *sample == 0.0));
+            assert_eq!(live.ins.step_index, step);
+            assert_eq!(live.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>(), state);
+            live.strike(0.85 * live.radius, 0.0, 2.5);
+            assert!(!live.asleep());
+            live.render(&mut output, 1.0);
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            assert!(output.iter().any(|sample| *sample != 0.0));
+        }
+        let mut unfinished = Live::new("hihat", 7.0).unwrap();
+        unfinished.set_hihat_pedal(80.0, 20.0).unwrap();
+        let error = unfinished.settle_initial_hihat_load().unwrap_err();
+        assert!(error.contains("did not become quiescent within 8.5 s"));
+        assert!(!unfinished.asleep(), "an unfinished external drive cannot be treated as quiet");
+        assert!((unfinished.ins.time() - 8.5).abs() < 1e-12);
     }
 
     #[test]

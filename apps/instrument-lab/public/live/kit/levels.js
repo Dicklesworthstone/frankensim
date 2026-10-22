@@ -10,8 +10,8 @@
 // counts and not only its first milliseconds) and its peak. levelFix() is the factor that gives a
 // stroke on `scale` the loudness it has on the reference grid.
 //
-// A cut is always applied. A boost is applied only while the standard stroke's peak stays at or
-// under PEAK_CEILING of full scale, the cap the gains were set with (the cymbals' sharp attacks).
+// The standard stroke stays at or under PEAK_CEILING of full scale whenever its measured peak
+// and page gain are valid. This can require an additional cut even at the reference grid.
 
 export const PEAK_CEILING = 0.55;
 
@@ -34,9 +34,10 @@ export function levelFix(table, piece, scale, gain) {
   const rows = table && table.pieces && table.pieces[piece];
   if (!rows) return 1;
   const ref = rows[table.reference], at = levelAt(rows, scale);
-  if (!ref || !at || !(ref.level > 0) || !(at.level > 0)) return 1;
+  if (!ref || !at || !Number.isFinite(ref.level) || !(ref.level > 0)
+    || !Number.isFinite(at.level) || !(at.level > 0)) return 1;
   const fix = ref.level / at.level;
-  if (fix <= 1) return fix;
-  const room = gain > 0 && at.peak > 0 ? PEAK_CEILING / (gain * at.peak) : Infinity;
-  return Math.max(1, Math.min(fix, room));
+  const room = Number.isFinite(gain) && gain > 0 && Number.isFinite(at.peak) && at.peak > 0
+    ? PEAK_CEILING / (gain * at.peak) : Infinity;
+  return Math.min(fix, room);
 }

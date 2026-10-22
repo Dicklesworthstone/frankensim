@@ -240,7 +240,10 @@ integrated over the physical annulus, independently of the grid node count.
 This is a small-slope impedance model, not resolved felt contact geometry.
 The bodies' existing inertia carries the rocking motion.
 These correct geometry and load semantics; acoustic improvement requires a separate comparison.
-The offline rim law uses Hunt-Crossley `mu` 0.08 s/m.
+The offline and live constructors share `kit::HIHAT_RIM_LAW`: reference-cell
+`K=2e9`, Hertz exponent 1.5 and Hunt-Crossley `mu` 0.08 s/m. Grid assembly scales
+`K` with cell area. This remains a declared contact estimate, not a measured law
+for these cymbals or an overall acoustic qualification.
 
 The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a plate's faces sideways by
 half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
@@ -251,8 +254,17 @@ that slip (stick) unless it exceeds 0.5 times the contact's normal force. Slidin
 the tangent compliance is anisotropic; radially clipping the sticking force does not do this.
 It acts through the same per-node compliances as normal contact and reduces free-mass
 kinetic energy. This backward-slip discretization does not establish passivity of the
-complete coupled oscillator. Hunt-Crossley damping reads the actual current node positions,
-because subsequent contacts can invalidate an earlier contact's cached compression.
+complete coupled oscillator. Normal contact reads the actual previous and predicted next
+node positions, including shared-node updates, rather than a cached compression.
+
+The centered normal solve uses `U(d) = K max(d,0)^(alpha+1)/(alpha+1)` and force
+`[U(d_next)-U(d_prev)]/(d_next-d_prev) * max(1 + mu*(d_next-d_prev)/(2*dt), 0)`.
+Here `d_prev` belongs to time step `n-1` and `d_next` to `n+1`; equal endpoints
+use the continuous secant limit `K max(d,0)^alpha`. Stable divided differences
+avoid subtracting nearly equal powers. For isolated free masses with `mu=0`,
+this balances the discrete contact-potential and kinetic-energy changes through
+compression and release. It is not a passivity theorem for the coupled shell,
+SAV, friction and multiple-contact system.
 Neither correction alone qualifies the timbre. The following grades used the earlier
 geometry, gap and clock, and do not qualify the
 corrected implementation. Graded against the Salamander closed hat, friction brought its octave-band decay inside
@@ -273,7 +285,8 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 - an empty matrix adds nothing, and a NaN penetration exerts no force, alone or queued;
 - rim friction stops the slip exactly inside its cone, slides opposite final slip at mu N outside
   it, and contracts backward slip; prescribed cone solutions cover rotated anisotropic compliance;
-- contact damping uses actual current compression after shared-node updates, in queued and scalar solves;
+- centered contact uses actual previous and predicted next positions after shared-node updates,
+  in queued and scalar solves; isolated zero-loss free-mass collisions conserve discrete energy;
 - every piece builds on the live grid, sounds, and the kick and snare stop being stepped once
   silent; a clone, taken settled or mid-ring, renders bit for bit what the original would (`live`).
 
@@ -285,10 +298,10 @@ Substepped output uses the offline sinc kernel with 16 output frames of causal f
 filter history and fixed 128-frame sleep windows survive arbitrary caller block sizes and clones.
 It stops stepping once its motion and microphone output have decayed. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their
-total stiffness and damping over the first ring of nodes instead. The live hi-hats keep the rim
-contact law from before the retuning (Hunt-Crossley `mu` 3.0 s/m, set in `live.rs`) and a 5 mm
-stick tip; the offline hat's lighter rim damping (0.08 s/m) and 4 mm tip were not carried over to
-real-time play. They rub with the same friction as offline. The following measurements predate
+total stiffness and damping over the first ring of nodes instead. The live hi-hats now use the
+same rim contact law as offline (`kit::HIHAT_RIM_LAW`, Hunt-Crossley `mu` 0.08 s/m),
+replacing the stale live-only 3.0 s/m value. Their 5 mm stick tip still differs from the
+offline hat's 4 mm tip. They rub with the same friction as offline. The following measurements predate
 the bilinear point-contact, opposing-geometry and internal-clock corrections and do not
 qualify their sound: at 4x / 4.5x the earlier closed hat's
 500 Hz-1 kHz T60 falls from 1.3-2.8 s to 0.5-0.7 s, and a stroke puts
@@ -296,6 +309,18 @@ qualify their sound: at 4x / 4.5x the earlier closed hat's
 22-25 mm it still carries little above ~3.5 kHz. A clone of a `Live` steps bit for bit as the original would, so the browser kit
 settles each grid once: it plays a clone kept from before the timing stroke.
 `apps/instrument-lab/engine-kit` compiles it for the browser.
+
+`Live::with_hihat_pedal(scale, force_n)` constructs one hi-hat with a 2 mm rest
+opening and an explicitly declared initial rod load. A nonzero load settles
+through the ordinary microphone/decimator output path before playback: at least
+0.5 s, then until the existing quiet gate passes, with at most 8 s extra.
+The fixed closed preset uses the same preparation from its initial clock.
+Nonfinite output or failure to become quiet within that budget returns an error;
+preparation does not clear state or substitute temporary damping to force a pass.
+`set_hihat_pedal(force_n, transition_seconds)` ramps force on that same rod;
+opening or closing retains the ringing shells, contact and filter history.
+The fixed `hihat-open` and `hihat-closed` presets keep their distinct rest gaps
+and refuse pedal commands. These force trajectories are performance inputs.
 
 Closed-hat rim solves now stop when a Newton update rounds to the same value;
 the stick and open-hat rim policies are unchanged. In Chrome 155 on an Apple
@@ -349,9 +374,10 @@ balance/decay worsen relative to the top-only arm (11.81 dB, 1.73 octaves), whil
 better than the pre-mount geometry result. At 16.5 mm, both mounts give open balance
 11.95 dB and 3.291% above 4 kHz; closed balance is 12.69 dB. The lower cup's physical
 axial totals and both mounts' tilt torques are checked across grid sizes.
-A fixed-settled-state rim-loss control (live `mu=3` versus offline `mu=0.08`) moves
+A pre-discrete-gradient fixed-settled-state rim-loss control (live `mu=3` versus offline `mu=0.08`) moves
 open balance by at most 0.19 dB at these two grids and leaves its decay descriptor
-unchanged. The live loss law is retained: this discrepancy does not explain the missing wash.
+unchanged. That negative result did not explain the missing wash. It predates the
+centered-contact work correction and does not qualify the current shared 0.08 s/m law.
 A zero-friction control also barely changes the open-hat result (at most 0.14 dB balance
 at these grids). It substantially lengthens the closed attack and decay; dry friction is
 retained rather than removed to improve one spectral score.
@@ -398,5 +424,5 @@ cargo run --release --example perform -- kick hits.csv kick.wav 17   # time_s,sp
 cargo run --release --example livebench -- 5                   # real-time factor per piece at grid x5
 cargo test --release
 ```
-Pieces: `kick snare snare-off tom-12 tom-14 hihat-closed hihat-open crash ride` (`kit` also renders
-`splash`).
+Live pieces: `kick snare snare-off tom-12 tom-14 hihat hihat-closed hihat-open crash ride`.
+The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also renders `splash`.
