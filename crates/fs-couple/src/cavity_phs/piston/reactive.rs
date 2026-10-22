@@ -1,15 +1,15 @@
-//! A declared reaction drives the original finite gas and inertial wall.
+//! Declared reaction channels drive the original finite gas and inertial wall.
 //!
 //! The existing mass-action owner supplies `r(T, p_i/p0)` in mol/(m3 s).
-//! At one accepted state, `dξ = dt V r` and `n_i' = n_i + ν_i dξ`.
+//! At one accepted state, `dξ_r = dt V r_r` and `n_i' = n_i + sum_r ν_ir dξ_r`.
 //! The original gas owner reconstructs temperature at conserved mass, volume
 //! and TOTAL internal energy, including species formation references. Chemical
 //! energy is therefore not added again as a heat input. The new composition,
 //! EOS, caloric, transport and acoustic state then drives the original piston
 //! pressure/work solve. One physical interval is used by both stages.
 //!
-//! This is a first-order reaction-then-motion split for one homogeneous,
-//! caller-declared stoichiometric mass-action law. Its rate scale is declared
+//! This is a first-order reaction-then-motion split for homogeneous,
+//! caller-declared stoichiometric mass-action laws. Each rate scale is declared
 //! data, optionally resolved from a material card at the actual gas state;
 //! neither an Arrhenius law nor an engine mechanism is inferred. Donor
 //! consumption, source-domain, entropy and extensive-balance checks refuse
@@ -29,6 +29,8 @@ pub mod thermal;
 pub mod network;
 /// Source-backed kinetic scales evaluated at the actual reacting gas state.
 pub mod material_rate;
+/// Competing reactions sharing one original inventory and energy reconstruction.
+pub mod mechanism;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -50,6 +52,7 @@ pub struct GasReaction {
     catalog: ThermochemicalGasModel,
     kinetics: DeclaredStoichiometricMassActionV1,
     rate_material: Option<material_rate::MaterialRateScale>,
+    additional_channels: Vec<mechanism::Channel>,
 }
 
 /// Physical step admission. Consumption is measured from actual reacting
@@ -58,7 +61,7 @@ pub struct GasReaction {
 pub struct GasReactionSolve {
     /// Original fixed-density internal-energy reconstruction controls.
     pub gas: GasEnergySolve,
-    /// Maximum fraction of any consumed species in `(0,1)` per explicit step.
+    /// Maximum gross fraction consumed across ALL net channel extents, in `(0,1)`.
     pub maximum_consumed_fraction: f64,
     /// Maximum discrepancy of any final `n_i` from its stoichiometric value [mol].
     pub species_tolerance_mol: f64,
@@ -137,18 +140,22 @@ pub struct GasReactionSpecies {
     pub species: SpeciesId,
     pub initial_mol: f64,
     pub final_mol: f64,
-    /// Exact declared coefficient times the accepted extent [mol]; zero for inert gas.
+    /// Sum of all declared coefficients times channel extents [mol]; zero for inert gas.
     pub stoichiometric_change_mol: f64,
 }
 
 /// Original kinetic evaluation and measured closed reaction balances.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasReactionStep {
+    /// Identity of the first canonical channel; legacy scalar fields describe it.
+    pub primary_reaction: fs_thermochem::ReactionId,
     pub rate: DeclaredStoichiometricMassActionEvaluationV1,
     /// Actual rate-scale material evaluation; None on the original fixed-scale path.
     pub rate_material: Option<fs_material::state_point::ResolvedMaterialStatePoint>,
-    /// Signed forward reaction extent [mol] over this one physical interval.
+    /// Signed extent [mol] of the PRIMARY channel, not a sum across reactions.
     pub extent_mol: f64,
+    /// Remaining canonical channel rates/extents; empty for the original API.
+    pub additional_reactions: Vec<mechanism::ReactionChannelStep>,
     pub species: Vec<GasReactionSpecies>,
     pub maximum_consumed_fraction: f64,
     pub maximum_species_residual_mol: f64,
@@ -212,12 +219,12 @@ impl GasReaction {
                 "declared species molar masses do not conserve reaction mass within roundoff",
             ));
         }
-        Ok(Self { catalog, kinetics, rate_material: None })
+        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new() })
     }
     pub const fn catalog(&self) -> &ThermochemicalGasModel {
         &self.catalog
     }
-    /// Original declared kinetics. With a material source, the effective scale
+    /// Original PRIMARY-channel kinetics. With a material source, the effective scale
     /// and its source evaluation are retained in each GasReactionStep instead.
     pub const fn kinetics(&self) -> &DeclaredStoichiometricMassActionV1 {
         &self.kinetics
@@ -280,7 +287,7 @@ impl GasReaction {
         Ok(amounts)
     }
 
-    /// Evolve one reaction at fixed volume and total internal energy. Inputs
+    /// Evolve every reaction on one original inventory at fixed total energy. Inputs
     /// are immutable and publication belongs to the surrounding coupled solve.
     /// Actual partial pressures come from this parcel, not a caller override.
     pub fn parcel_candidate(
@@ -304,81 +311,10 @@ impl GasReaction {
         }
         let initial = self.inventory(gas)?;
         let components = self.catalog.thermodynamics().components();
-        let terms = self.kinetics.reverse_rate_closure().equilibrium().terms();
-        let total: f64 = initial.iter().sum();
-        let pressure_ratio = gas.state().state().pressure
-            / self
-                .kinetics
-                .reverse_rate_closure()
-                .equilibrium()
-                .convention()
-                .reference_pressure()
-                .value();
-        let mut activities = Vec::with_capacity(terms.len());
-        for term in terms {
-            let index = components
-                .binary_search_by(|s| s.species().cmp(term.species()))
-                .map_err(|_| invalid("bound reaction species disappeared"))?;
-            let value = (initial[index] / total) * pressure_ratio;
-            if initial[index] > 0.0 && !positive(value) {
-                return Err(invalid(
-                    "positive species partial pressure is unrepresentable",
-                ));
-            }
-            activities.push(IdealGasSpeciesActivityV1::new(
-                term.species().clone(),
-                Dimensionless::new(value),
-            )?);
-        }
-        poll(&mut cancelled)?;
-        let (rate, rate_material) = self.evaluate_rate(gas, activities, &mut cancelled)?;
-        let progress = rate
-            .net_progress_rate()
-            .ok_or_else(|| {
-                invalid("reaction rate is log-only; no finite extent can be integrated")
-            })?
-            .value();
-        let extent = (progress * gas.volume_m3()) * duration_s;
-        if !extent.is_finite() || (progress != 0.0 && extent == 0.0) {
-            return Err(invalid("reaction extent overflowed or lost a nonzero rate"));
-        }
-        let mut changes = vec![0.0; components.len()];
-        let mut expected = initial.clone();
-        let mut consumed: f64 = 0.0;
-        for term in terms {
-            let index = components
-                .binary_search_by(|s| s.species().cmp(term.species()))
-                .map_err(|_| invalid("bound reaction species disappeared"))?;
-            let change = term.coefficient() as f64 * extent;
-            if !change.is_finite() {
-                return Err(invalid(
-                    "stoichiometric species increment is unrepresentable",
-                ));
-            }
-            if change < 0.0 {
-                let fraction = -change / initial[index];
-                if !fraction.is_finite() || fraction > controls.maximum_consumed_fraction {
-                    return Err(GasReactionError::ConsumptionLimit {
-                        species: term.species().clone(),
-                        fraction,
-                        maximum: controls.maximum_consumed_fraction,
-                    });
-                }
-                consumed = consumed.max(fraction);
-            }
-            changes[index] = change;
-            expected[index] += change;
-            if !expected[index].is_finite()
-                || expected[index] < 0.0
-                || (change != 0.0 && expected[index] == initial[index])
-            {
-                return Err(invalid(
-                    "reaction lost a species increment or made an invalid inventory",
-                ));
-            }
-        }
+        let mechanism::Progress { primary, additional, changes, expected, consumed } =
+            self.progress(gas, &initial, duration_s, controls, &mut cancelled)?;
         let mut next = gas.clone();
-        if extent != 0.0 {
+        if changes.iter().any(|change| *change != 0.0) {
             let total: f64 = expected.iter().sum();
             if !positive(total) {
                 return Err(invalid("reaction produced no represented total amount"));
@@ -446,9 +382,11 @@ impl GasReaction {
         poll(&mut cancelled)?;
         Ok(GasReactionCandidate {
             step: GasReactionStep {
-                rate,
-                rate_material,
-                extent_mol: extent,
+                primary_reaction: primary.reaction_id,
+                rate: primary.rate,
+                rate_material: primary.rate_material,
+                extent_mol: primary.extent_mol,
+                additional_reactions: additional,
                 species,
                 maximum_consumed_fraction: consumed,
                 maximum_species_residual_mol: maximum_residual,
