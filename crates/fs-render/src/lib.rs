@@ -55,6 +55,8 @@ pub mod dielectric;
 pub mod diff;
 #[cfg(feature = "tracer")]
 pub mod lighting;
+#[cfg(feature = "material-geometry")]
+pub mod material_geometry;
 #[cfg(feature = "material-state")]
 pub mod material_state;
 pub mod spectral;

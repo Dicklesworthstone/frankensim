@@ -1352,3 +1352,28 @@ ownership, chart refusal, reprojection classifications, deterministic replay,
 and exact 4K raster indexing. Aligned film buffers, checkpoint payloads, and EXR
 channels are intentionally owned by dependent bead `frankensim-h7xu5.6.1` and
 are not claimed by this kernel alone.
+
+## Accepted material-body geometry (MR41, fixed-topology rung)
+
+The optional `material-geometry` ingress maps `DeformedBody` (including the
+original `ThermalBody::body`) to the original `TriMesh` and deterministic BVH.
+`TetLoadGeometry3` owns finite/quality/incidence admission and exterior-face
+extraction. Original shared vertex IDs and accepted metre coordinates are
+preserved; internal faces are omitted and winding follows the solid owner's
+outward normals. Ray hits, silhouettes, shading normals and visibility use the
+actual accepted shape. No visual displacement, alternate solver or thermal
+state is introduced. The caller replaces a scene shape only after success.
+
+The original solid node/tet/face-entry bounds apply before extraction; checked
+renderer index bounds and finite cross-product norms greater than 1e-12 square
+metres admit the current triangle backend. Cancellation polls extraction and
+each copied vertex/face, then before and after the original bounded synchronous
+BVH build. Refusal/cancellation returns no partial scene mutation.
+
+The source is a conforming, non-overlapping P1 volume mesh; face-incidence
+admission does not establish global injectivity or T-junction freedom. Existing
+instances place the body's metre frame. Appearance is explicit through the
+existing material bindings; a combined thermoelastic fixture binds the same
+accepted temperature/card to gray-diffuse thermal emission. Regional optical
+assignment, remeshing, melt/free-surface evolution, and live trajectory sampling
+remain outside this fixed-topology rung.
