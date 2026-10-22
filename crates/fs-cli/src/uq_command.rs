@@ -62,7 +62,15 @@ independent or joint-gaussian dependence. samples=N*2*(2^d-1), N>=2.\n\
 Checkpoint/resume retains every paid conditional half-pair. Repeat the selector\n\
 on resume. Only a complete fixed design publishes effects; no causal or\n\
 confidence claim. Other sampling, mean-control and decision modes conflict.\n\
-See examples/cooling-network/SHAPLEY_SENSITIVITY.md.\n");
+See examples/cooling-network/SHAPLEY_SENSITIVITY.md.\n\
+\nRare-event cooling probabilities:\n\
+--importance EPSILON,SHIFT... runs a fixed defensive Gaussian proposal.\n\
+--importance-pilot ROUNDS,SAMPLES,DEFENSIVE,ELITE,RELAXATION,MAX_SHIFT_NORM\n\
+learns from complete physical pilots, then freezes independent production.\n\
+The original sample and wall budgets cover every phase; pilots never enter\n\
+the final probability. Both modes require an explicit Gaussian law and ceiling.\n\
+No recovery or other sampling/decision modes; no partial probability on timeout.\n\
+See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json_mode {

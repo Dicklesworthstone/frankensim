@@ -1,14 +1,21 @@
 //! Weighted rare-event probabilities from the original cooling producer.
 //! Proposal observations are not samples from the physical target distribution.
+mod pilot;
+
 use super::*;
 use fs_uq::{ImportanceConfig, ImportanceExecution, ImportanceReport};
 
 #[derive(Debug, Clone)]
 pub(super) enum Settings {
     Fixed(ImportanceConfig),
+    Pilot(pilot::Settings),
 }
 
 impl Settings {
+    pub(super) fn parse_pilot(value: &OsString) -> Result<Self> {
+        pilot::Settings::parse(value).map(Self::Pilot)
+    }
+
     pub(super) fn parse(value: &OsString) -> Result<Self> {
         let text = value.to_str().filter(|s| s.len() <= 16_384)
             .ok_or_else(|| bad("--importance requires bounded UTF-8 EPSILON,SHIFT..."))?;
@@ -43,8 +50,11 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
 }
 
 pub(super) fn execute(base: &J, config: &Config, settings: &Settings) -> Result<ExecutionOutput> {
+    let proposal = match settings {
+        Settings::Fixed(proposal) => proposal,
+        Settings::Pilot(settings) => return pilot::execute(base, config, *settings),
+    };
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
-    let Settings::Fixed(proposal) = settings;
     let mut execution = ImportanceExecution::new(&config.plan(), proposal.clone()).map_err(bad)?;
     let report = execution.advance_interruptible(config.samples, || Instant::now() >= deadline,
         |values| evaluate(base, config, values, deadline));
@@ -117,7 +127,7 @@ mod tests {
     #[test]
     fn explicit_proposal_is_bounded_and_keeps_signed_germ_coordinates() {
         let settings = Settings::parse(&OsString::from("0.2,3,-2,0")).unwrap();
-        let Settings::Fixed(proposal) = settings;
+        let Settings::Fixed(proposal) = settings else { panic!("expected fixed proposal"); };
         assert_eq!(proposal.defensive_fraction, 0.2);
         assert_eq!(proposal.germ_shift, [3.0, -2.0, 0.0]);
         for value in ["", "0.2", "0.2,", "0,1", "1.1,1", "1e-320,1", "NaN,1", "0.2,inf", "0.2,x"] {
@@ -129,7 +139,7 @@ mod tests {
     #[test]
     fn conflicting_modes_are_rejected_in_either_option_order() {
         assert!(Options::parse(&args(&["--importance", "0.2,3"])).unwrap().importance.is_some());
-        for other in [vec!["--importance", "0.5,0"], vec!["--pce", "1,6"],
+        for other in [vec!["--importance", "0.5,0"], vec!["--importance-pilot", "1,2,0.2,0.5,1,8"], vec!["--pce", "1,6"],
             vec!["--pce-mean", "1,6,8"], vec!["--sensitivity", "sobol"],
             vec!["--sensitivity", "shapley"], vec!["--qmc-replicates", "2"],
             vec!["--mean-control", "adjoint"], vec!["--checkpoint", "unused"],

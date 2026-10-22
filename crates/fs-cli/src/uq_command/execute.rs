@@ -44,6 +44,8 @@ impl Options {
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
             if flag == "--importance" && options.importance.is_none() {
                 options.importance = Some(importance::Settings::parse(value)?);
+            } else if flag == "--importance-pilot" && options.importance.is_none() {
+                options.importance = Some(importance::Settings::parse_pilot(value)?);
             } else if flag == "--pce" && options.polynomial.is_none() {
                 options.polynomial = Some(polynomial::Settings::parse(value)?);
             } else if flag == "--pce-mean" && options.polynomial.is_none() {
