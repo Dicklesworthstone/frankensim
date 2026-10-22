@@ -558,7 +558,7 @@ impl ModalAperture {
         let width = retained[0].width_m;
         if retained
             .iter()
-            .any(|p| p.width_m.to_bits() != width.to_bits())
+            .any(|p| (p.width_m - width).abs() > 64.0 * f64::EPSILON * width.max(p.width_m))
         {
             return Err(invalid(
                 "opposing modal plates require the same physical slit width",

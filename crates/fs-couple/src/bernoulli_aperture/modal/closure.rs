@@ -13,6 +13,8 @@ use crate::bernoulli_aperture::viscous::{ViscousProfileFlow, ViscousSlit};
 use fs_dcontact::{ContactStorage, Obstacle, OpeningContactStep};
 use fs_phs::Storage;
 
+mod interface;
+
 /// Physical point reactions pulled back into the original modal coordinates.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ClosureResponse {
@@ -21,11 +23,13 @@ pub(crate) struct ClosureResponse {
     pub dissipated_power_w: f64,
 }
 
-/// One matching planar interface attached to the original material modes.
+/// One common planar interface attached to the original material modes.
 /// Contact uses triangle area quadrature; flow integrates the positive P1 gap
 /// along each slit edge. Pressure faces and swept-volume projections remain
-/// those of the source plates. This is a fixed small-slope basis, not changing
-/// pressure footprints, nonmatching mesh contact or resolved moving-wall flow.
+/// those of the source plates. Independently meshed blades use the first blade's
+/// interface quadrature and work-conjugate P1 traces in the same physical frame.
+/// This is a fixed small-slope basis, not changing pressure footprints or
+/// resolved moving-wall flow; source and interface refinement remain distinct.
 pub struct ModalPlateClosure {
     spec: PlateClosureSpec,
     shapes: Vec<Vec<f64>>,
@@ -66,15 +70,9 @@ impl ModalPlateClosure {
                 .map(|&[a, b]| (a.min(b), a.max(b)))
                 .collect::<std::collections::BTreeSet<_>>()
         };
-        if plates.len() > 2
-            || plates.iter().any(|p| {
-                p.source().chart().mesh.nodes != mesh.nodes
-                    || p.source().chart().mesh.tris != mesh.tris
-                    || edges(p) != edges(first)
-            })
-        {
+        if plates.len() > 2 {
             return Err(invalid(
-                "modal contact requires matching original planar meshes and slit edges",
+                "modal contact requires one or two original material plates",
             ));
         }
         let modes = plates.last().expect("nonempty plates").mode_range().end;
@@ -85,8 +83,37 @@ impl ModalPlateClosure {
         }
         let mut shapes = vec![vec![0.0; modes]; mesh.node_count()];
         for plate in plates {
-            for (row, shape) in shapes.iter_mut().zip(plate.displacement_shapes()) {
-                row[plate.mode_range()].copy_from_slice(shape);
+            let source = &plate.source().chart().mesh;
+            if source.nodes == mesh.nodes && source.tris == mesh.tris {
+                if edges(plate) != edges(first) {
+                    return Err(invalid("modal blades must share the same physical slit"));
+                }
+                // Keep matching source columns bit-for-bit, including support zeros.
+                for (row, shape) in shapes.iter_mut().zip(plate.displacement_shapes()) {
+                    row[plate.mode_range()].copy_from_slice(shape);
+                }
+            } else {
+                let traces = interface::traces(
+                    mesh,
+                    &first.options().slit_edges,
+                    source,
+                    &plate.options().slit_edges,
+                    fs_plate::loading::PlateLoadBudget {
+                        max_nodes: plate.options().max_nodes,
+                        max_triangles: plate.options().max_triangles,
+                    },
+                    plate.options().max_projection_terms,
+                )?;
+                for (row, trace) in shapes.iter_mut().zip(traces) {
+                    for (local, column) in plate.mode_range().enumerate() {
+                        row[column] = trace
+                            .nodes()
+                            .into_iter()
+                            .zip(trace.weights())
+                            .map(|(node, weight)| weight * plate.displacement_shapes()[node][local])
+                            .sum();
+                    }
+                }
             }
         }
         Self::build(mesh, first.options().slit_edges.as_slice(), shapes, spec)
@@ -181,7 +208,8 @@ impl ModalPlateClosure {
     pub fn contact_nodes(&self) -> &[usize] {
         &self.nodes
     }
-    /// Original signed nodal displacement columns in complete modal order.
+    /// Signed P1 displacement columns on the first blade's interface, in original
+    /// modal order. These same rows transpose contact forces, preserving work.
     pub fn displacement_shapes(&self) -> &[Vec<f64>] {
         &self.shapes
     }
@@ -474,6 +502,109 @@ mod tests {
                     .sum();
                 assert!((e1 - expected).abs() < 2e-12 * expected.max(1e-30));
             }
+        }
+    }
+
+    fn independent_closure(
+        mesh: &fs_plate::PlateMesh,
+        source: &fs_plate::PlateMesh,
+        swap_roles: bool,
+    ) -> ModalPlateClosure {
+        let slit = |m: &fs_plate::PlateMesh| {
+            m.boundary_edges()
+                .into_iter()
+                .filter(|&(a, b)| {
+                    (m.nodes[a].0 - 1.0).abs() < 1e-14
+                        && (m.nodes[b].0 - 1.0).abs() < 1e-14
+                })
+                .map(|(a, b)| [a, b])
+                .collect::<Vec<_>>()
+        };
+        let traces = interface::traces(
+            mesh,
+            &slit(mesh),
+            source,
+            &slit(source),
+            fs_plate::loading::PlateLoadBudget {
+                max_nodes: 512,
+                max_triangles: 2048,
+            },
+            1_000_000,
+        )
+        .unwrap();
+        let field = |(x, y): (f64, f64), quadratic: bool| {
+            if quadratic { 1.0 + x * x + y * y } else { 1.0 }
+        };
+        let shapes = mesh.nodes.iter().zip(traces).map(|(&point, trace)| {
+            let other = trace.nodes().into_iter().zip(trace.weights())
+                .map(|(node, w)| w * field(source.nodes[node], !swap_roles))
+                .sum();
+            vec![field(point, swap_roles), other]
+        }).collect();
+        ModalPlateClosure::build(
+            mesh,
+            &slit(mesh),
+            shapes,
+            PlateClosureSpec {
+                nodal_rest_gap_m: vec![0.0; mesh.nodes.len()],
+                lay_triangles: (0..mesh.tris.len()).collect(),
+                stiffness_pa_per_m_alpha: 1.0,
+                alpha: 1.0,
+                internal_loss_s_per_m: 2.0,
+                provenance: "manufactured independent physical blade interfaces".into(),
+                max_penetration_m: 4.0,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g0_independent_blade_contact_retains_virtual_work_and_physical_dissipation() {
+        let a = fs_plate::PlateMesh::rectangle(1.0, 1.0, 3, 2);
+        let b = fs_plate::PlateMesh::rectangle(1.0, 1.0, 2, 3);
+        for swapped in [false, true] {
+            let c = independent_closure(&a, &b, swapped);
+            let dt = 0.002;
+            for before in [[0.0; 2], [-0.001, 0.0002], [0.0004, -0.0003]] {
+                let after = [-0.0003, -0.0004];
+                let v = std::array::from_fn::<_, 2, _>(|i| (after[i] - before[i]) / dt);
+                let reaction = c.response(&before, &after, &v).unwrap();
+                let work: f64 = (0..2)
+                    .map(|i| reaction.forces_n[i] * (after[i] - before[i]))
+                    .sum();
+                let e0 = c.stored_energy_j(&before).unwrap();
+                let e1 = c.stored_energy_j(&after).unwrap();
+                let loss = dt * reaction.dissipated_power_w;
+                assert!(reaction.normal_force_n > 0.0);
+                assert!(loss >= 0.0);
+                assert!(
+                    (e1 - e0 + work + loss).abs()
+                        < 3e-12 * (e0 + e1 + work.abs() + loss).max(1e-30)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3_independent_blade_quadrature_converges_under_refinement_and_role_swap() {
+        // Both physical modes are fixed: 1 and 1+x^2+y^2, each with q=-1/2.
+        // For K=1 and alpha=1, the continuum contact energy on the unit square
+        // is integral (1 + (x^2+y^2)/2)^2 / 2 = 41/45.
+        let expected = 41.0 / 45.0;
+        for swapped in [false, true] {
+            let mut errors = Vec::new();
+            for n in [2, 4, 8, 16] {
+                let a = fs_plate::PlateMesh::rectangle(1.0, 1.0, n, n);
+                let b = fs_plate::PlateMesh::rectangle(1.0, 1.0, n + 1, n + 1);
+                let c = if swapped {
+                    independent_closure(&b, &a, true)
+                } else {
+                    independent_closure(&a, &b, false)
+                };
+                errors.push((c.stored_energy_j(&[-0.5; 2]).unwrap() - expected).abs());
+            }
+            assert!(errors.windows(2).all(|e| e[1] < e[0]), "{errors:?}");
+            assert!(errors[3] < errors[0] / 20.0, "{errors:?}");
         }
     }
 }

@@ -107,6 +107,70 @@ pub struct PlatePointStencil {
     free: usize,
 }
 
+/// A P1 transverse trace on the original planar mesh, without a solver's DOF map.
+/// The same weights interpolate motion and transpose physical point forces.
+/// Coordinates are in the supplied undeformed frame; no frame alignment,
+/// nearest-node snapping or extrapolation is performed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlateTraceStencil {
+    triangle: usize,
+    nodes: [usize; 3],
+    weights: [f64; 3],
+}
+
+impl PlateTraceStencil {
+    /// Locate a trace with the same geometry admission and deterministic edge
+    /// tie-breaking as PlatePointStencil::locate. This is P1 interface
+    /// interpolation, not recovery of the full DKT interior displacement.
+    ///
+    /// # Errors
+    /// Exhausted bounds, invalid mesh/point, degenerate triangles or no containing
+    /// triangle. Mesh overlap remains the caller's topology responsibility.
+    pub fn locate(
+        mesh: &PlateMesh,
+        point: [f64; 2],
+        budget: PlateLoadBudget,
+    ) -> Result<Self, PlateLoadError> {
+        admit_geometry(mesh, point, budget)?;
+        Self::locate_admitted(mesh, point)
+    }
+
+    fn locate_admitted(mesh: &PlateMesh, point: [f64; 2]) -> Result<Self, PlateLoadError> {
+        let mut located = None;
+        for (triangle, &nodes) in mesh.tris.iter().enumerate() {
+            let geometry = TriangleGeometry::new(mesh, nodes, triangle)?;
+            if located.is_none()
+                && let Some(weights) = geometry.weights(point)
+            {
+                located = Some(Self {
+                    triangle,
+                    nodes,
+                    weights,
+                });
+            }
+        }
+        located.ok_or(PlateLoadError::Outside { point })
+    }
+
+    /// Original containing triangle, with lowest-index ties at shared edges.
+    #[must_use]
+    pub const fn triangle(&self) -> usize {
+        self.triangle
+    }
+
+    /// Original mesh node indices, in the containing triangle's order.
+    #[must_use]
+    pub const fn nodes(&self) -> [usize; 3] {
+        self.nodes
+    }
+
+    /// Nonnegative partition-of-unity P1 weights in the same node order.
+    #[must_use]
+    pub const fn weights(&self) -> [f64; 3] {
+        self.weights
+    }
+}
+
 impl PlatePointStencil {
     /// Locate a point without nearest-node snapping.
     ///
@@ -127,25 +191,17 @@ impl PlatePointStencil {
         budget: PlateLoadBudget,
     ) -> Result<Self, PlateLoadError> {
         admit(mesh, model, point, budget)?;
-        let mut located = None;
-        for (triangle, &nodes) in mesh.tris.iter().enumerate() {
-            let geometry = TriangleGeometry::new(mesh, nodes, triangle)?;
-            if located.is_none()
-                && let Some(weights) = geometry.weights(point)
-            {
-                located = Some(Self {
-                    triangle,
-                    nodes,
-                    weights,
-                    point,
-                    reduced: nodes.map(|node| {
-                        std::array::from_fn(|component| model.dof_map[3 * node + component])
-                    }),
-                    free: model.free,
-                });
-            }
-        }
-        located.ok_or(PlateLoadError::Outside { point })
+        let trace = PlateTraceStencil::locate_admitted(mesh, point)?;
+        Ok(Self {
+            triangle: trace.triangle,
+            nodes: trace.nodes,
+            weights: trace.weights,
+            point,
+            reduced: trace.nodes.map(|node| {
+                std::array::from_fn(|component| model.dof_map[3 * node + component])
+            }),
+            free: model.free,
+        })
     }
 
     /// Index of the containing triangle.
@@ -287,6 +343,35 @@ fn admit(
     point: [f64; 2],
     budget: PlateLoadBudget,
 ) -> Result<(), PlateLoadError> {
+    admit_geometry(mesh, point, budget)?;
+    let full = mesh
+        .nodes
+        .len()
+        .checked_mul(3)
+        .ok_or(PlateLoadError::InvalidMesh("full DOF count overflows"))?;
+    if model.dof_map.len() != full || model.free > full {
+        return Err(PlateLoadError::InvalidMesh("support map dimension"));
+    }
+    let mut seen = vec![false; model.free];
+    for &index in model.dof_map.iter().flatten() {
+        if index >= model.free || seen[index] {
+            return Err(PlateLoadError::InvalidMesh("support map is not one-to-one"));
+        }
+        seen[index] = true;
+    }
+    if seen.iter().any(|&present| !present) {
+        return Err(PlateLoadError::InvalidMesh(
+            "support map has missing free DOFs",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_geometry(
+    mesh: &PlateMesh,
+    point: [f64; 2],
+    budget: PlateLoadBudget,
+) -> Result<(), PlateLoadError> {
     for (what, required, limit) in [
         ("nodes", mesh.nodes.len(), budget.max_nodes),
         ("triangles", mesh.tris.len(), budget.max_triangles),
@@ -311,26 +396,6 @@ fn admit(
         .any(|&(x, y)| !x.is_finite() || !y.is_finite())
     {
         return Err(PlateLoadError::InvalidMesh("nonfinite node coordinates"));
-    }
-    let full = mesh
-        .nodes
-        .len()
-        .checked_mul(3)
-        .ok_or(PlateLoadError::InvalidMesh("full DOF count overflows"))?;
-    if model.dof_map.len() != full || model.free > full {
-        return Err(PlateLoadError::InvalidMesh("support map dimension"));
-    }
-    let mut seen = vec![false; model.free];
-    for &index in model.dof_map.iter().flatten() {
-        if index >= model.free || seen[index] {
-            return Err(PlateLoadError::InvalidMesh("support map is not one-to-one"));
-        }
-        seen[index] = true;
-    }
-    if seen.iter().any(|&present| !present) {
-        return Err(PlateLoadError::InvalidMesh(
-            "support map has missing free DOFs",
-        ));
     }
     Ok(())
 }

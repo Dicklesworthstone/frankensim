@@ -1,7 +1,7 @@
 //! G0/G3: physical force/moment ports, interpolation, and reduced support maps.
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateMesh, PlateModel, PlateSection, assemble,
-    loading::{PlateLoadBudget, PlatePointStencil},
+    loading::{PlateLoadBudget, PlatePointStencil, PlateTraceStencil},
 };
 
 fn mesh() -> PlateMesh {
@@ -300,4 +300,35 @@ fn additive_loading_and_failures_never_corrupt_existing_loads() {
     assert!(stencil.load_vjp(&bad).is_err());
     assert!(stencil.sample(&short, &combined).is_err());
     assert!(stencil.load_vjp(&short).is_err());
+}
+
+
+#[test]
+fn g0_original_trace_preserves_affine_motion_and_transpose_point_work() {
+    let mesh = mesh();
+    let model = model(&mesh, &[]);
+    let velocity = [0.13, -0.27, 0.41, 0.09];
+    let mut nodal_force = [0.0; 4];
+    let mut physical_power = 0.0;
+    for (point, force) in [
+        ([2.4, 0.2], 1.7),
+        ([2.0, 0.5], -0.8),
+        ([1.0, 2.0], 0.3),
+    ] {
+        let trace = PlateTraceStencil::locate(&mesh, point, budget()).unwrap();
+        let original = PlatePointStencil::locate(&mesh, &model, point, budget()).unwrap();
+        assert_eq!(trace.triangle(), original.triangle());
+        assert_eq!(trace.weights(), original.weights());
+        let mut motion = 0.0;
+        let mut point_velocity = 0.0;
+        for (node, weight) in trace.nodes().into_iter().zip(trace.weights()) {
+            let (x, y) = mesh.nodes[node];
+            motion += weight * (0.7 + 0.3 * y - 0.2 * x);
+            point_velocity += weight * velocity[node];
+            nodal_force[node] += weight * force;
+        }
+        close(motion, 0.7 + 0.3 * point[1] - 0.2 * point[0]);
+        physical_power += force * point_velocity;
+    }
+    close(dot(&nodal_force, &velocity), physical_power);
 }

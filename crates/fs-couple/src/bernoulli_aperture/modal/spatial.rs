@@ -22,14 +22,17 @@ impl SpatialTrial {
 impl ModalAperture {
     /// Replace the effective uniform slit/contact with actual nodal geometry.
     /// Uses every original signed DKT mode, one triangle contact quadrature and
-    /// the original physical slit edges. Two blades must share the same explicit
-    /// planar mesh/slit indexing; their materials and modal shapes may differ.
+    /// the first blade's original physical slit edges. Independently meshed
+    /// blades must cover the same simple planar footprint and slit in the same
+    /// frame. Original P1 traces and their transpose preserve contact work;
+    /// source and interface quadrature resolutions remain independent controls.
     /// Initial motion, full viscosity and exact material memory are preserved.
     /// Pressure and swept flow retain their original conjugate face projections.
     ///
     /// # Errors
-    /// Missing/nonmatching sources, repeated/late attachment, invalid clearances
-    /// or law, excessive local penetration, slope or complete stored energy.
+    /// Missing/noncovering or ambiguous sources, exhausted interpolation budget,
+    /// repeated/late attachment, invalid clearances or law, excessive local
+    /// penetration, slope or complete stored energy.
     pub fn with_plate_closure(
         mut self,
         spec: PlateClosureSpec,

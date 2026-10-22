@@ -4106,3 +4106,31 @@ shared-receiver cross-reactions, material-density changes reaching traction and
 actual body pressure, and direct/scheduled callback equality. This is an
 explicit mechanical connection, not a supplied bow-hair construction, rosin
 thermal model or measured violin/cello/bass qualification.
+
+
+### Independent material meshes on a common double-reed interface
+
+Opposing material-modal blades may retain different node counts, triangles and
+slit subdivisions when they cover the same simple planar footprint and complete
+physical slit in the same coordinate frame. The first blade remains the
+declared clearance, contact and slit integration surface. The second blade's
+P1 displacement trace uses the shared `fs_plate::loading::PlateTraceStencil`;
+the identical transpose returns contact forces into its original modal basis.
+Original pressure faces, swept-volume rows, full viscosity and material
+histories keep their existing owners. Identical meshes preserve the original
+columns exactly.
+
+Complete oriented boundary and slit coverage is checked before interpolation.
+Missing coverage, holes, disconnected sheets, duplicate or degenerate cells,
+nonmanifold topology and crossing boundaries refuse. Source budgets also bound
+trace construction; there is no nearest-node snap, extrapolation or inferred
+frame alignment.
+
+Regression sources cover rigid/affine traces, virtual-work and dissipation
+balance, independent mesh refinement against analytic contact energy in both
+blade orders, and independently refined material blades through the scheduled
+gas-loaded microphone. The P1 trace and chosen quadrature remain finite
+approximations: a coarse interface is not invariant to swapping blade order,
+and source/interface refinement must be assessed separately. Curved or
+noncoincident blades, moving contact footprints and measured reed fidelity
+remain outside this connection.
