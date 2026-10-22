@@ -192,7 +192,10 @@ fn multi_aperture_body_panel_ladder_converges() {
         .map(|f| core::f64::consts::TAU * f)
         .collect();
     let gate = CancelGate::new_clock_free();
-    // 360 / 1392 / 5664 panels solve dense; the 22848-panel rung is above the
+    // Workers and the M2L row cache are scheduling budgets only: every dense
+    // and iterative solve is bit-identical at any worker count.
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    // 360 / 1488 / 5856 panels solve dense; the 23232-panel rung is above the
     // dense cap and routes to the FMM/GMRES owner. Its order-5 interpolation
     // error is far below the finest ladder step.
     let route = ApertureRoute::Collocation {
@@ -202,6 +205,8 @@ fn multi_aperture_body_panel_ladder_converges() {
             // The near field dominates this rung's matvecs (b180 profile):
             // cache it once per frequency; values are unchanged.
             near_field_cache_bytes: 8 << 30,
+            workers,
+            m2l_cache_bytes: 16 << 30,
             ..IterativeOptions::default()
         }),
     };
@@ -220,8 +225,10 @@ fn multi_aperture_body_panel_ladder_converges() {
             })
             .collect();
         let started = std::time::Instant::now();
-        let matrix =
-            aperture_impedance(&surface, &apertures, &omegas, medium, &route, &gate).unwrap();
+        let matrix = fs_bem::helmholtz::with_dense_workers(workers, || {
+            aperture_impedance(&surface, &apertures, &omegas, medium, &route, &gate)
+        })
+        .unwrap();
         let expected = if rung < 3 { "dense" } else { "iterative" };
         assert!(matrix.rows.iter().all(|row| row.route == expected));
         for row in &matrix.rows {
