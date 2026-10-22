@@ -311,6 +311,19 @@ pipe `Z_in = +i Zc cot(kL)`.
     generated Hankel expansion.
   - The staircase image, its goldens and `MAX_MODES = 8` are unchanged;
     it is now the O(dx) comparison rung.
+- `modal::mm_profile_field(profile, state, omega, loss, load, modes, steps,
+  inlet_flow) -> ModalField` (IRP M2.1-W3b): the continuous field behind
+  that impedance, driven by a prescribed inlet modal flow (a plane piston
+  of volume flow `q` is `[q, 0, ..]`).
+  - It keeps the scaled impedance at every step station and each step's
+    inverse flow map. It then carries the inlet flow back toward the mouth
+    (`u_j = Y_j^-1 u_{j+1}`, which contracts evanescent components) and
+    sets `P = Z U` station by station.
+  - `ModalField` holds the stations (ascending from the inlet), `P_n`, `U_n`
+    and the axis pressure `sum_n P_n psi_n(0)`, `psi_n(0) = 1/|J0(gamma_n)|`.
+  - It refuses an inlet flow that is not one finite value per retained
+    mode, and a mouth with no finite plane-mode impedance. Memory is
+    `O(steps N^2)`. The impedance path is bit-identical.
 
 - `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
   / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load
@@ -508,6 +521,27 @@ staircase).
   (Part I App. E) to 1e-9, above and below cutoff; measured 9e-14.
   Also the Part I 45-degree cone at 7 and 17 modes: reciprocal, with a
   shrinking tail.
+  - It also checks the one open figure by the same authors: Amir, Pagneux
+    and Kergomard 1995 (WIT Computational Acoustics, Fig. 1). That is `|p|`
+    on the axis of a 0.5 to 4 m exponential horn at 0.3 and 0.9 f_c, read
+    at 20 points under OD17 with half-widths 0.005 and 0.015.
+  - The paper's "15 modes" does not say whether the plane mode counts, and
+    the on-axis series alternates between even and odd N near the mouth.
+    So a read passes when read +- half-width meets [N = 15, N = 16].
+  - Measured: N = 16 alone meets all 20 reads and N = 15 alone meets 19.
+    N = 15 misses z = 4 m at 0.9 f_c by 0.020 against 0.015; that is
+    disclosed, not gated. N = 1 misses 19 of 20, both piston reads among
+    them. Step refinement moves every point by at most 1.8e-9.
+- `mm_field_cylinder_modes_closed_form` (G2): per-mode outgoing and
+  decaying waves on a cylinder, with axis weights checked against quadrature,
+  to 1e-12; measured 9.4e-14.
+- `mm_field_n1_equals_exact_webster` (G2): the one-mode field of the
+  exponential horn station by station to 1e-9; measured 8.5e-13.
+- `mm_field_power_flux_conserved` (G0): the lossless axial power flux is
+  constant over every station to 1e-10, with propagating (8 kHz) and
+  evanescent (600 Hz) higher modes; measured 4.9e-14. Also checked: the inlet
+  `P = Z U_in` and the matched mouth `P_n = Zc_n U_n`.
+- `mm_field_refusals` (G0).
 - `mm_riccati_reciprocity_and_power` (G0): `Z = Z^T` and lossless power
   balance to 1e-10.
 - `mm_riccati_bitwise_repeat` (G5).
@@ -526,8 +560,9 @@ divergence-theorem closure/orientation pin on the lathe).
 
 - Continuous multimodal image (M2.1-W3b): published Pagneux benchmark
   results exist only as figures, so no 1 % comparison against printed
-  values is claimed. Agreement is shown against exact solutions, the
-  independent staircase limit and conservation laws.
+  values is claimed. The one open figure (WIT 1995 Fig. 1) is matched at
+  its read error, 1 to 5 %. Otherwise agreement is shown against exact
+  solutions, the independent staircase limit and conservation laws.
   - Mode convergence is algebraic. On the 45-degree cone, 7 vs 17 modes
     differ by 3.1 % in `Z00`, so `tail_bound_estimate` is an indicator,
     not a bound.

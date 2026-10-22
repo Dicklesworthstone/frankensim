@@ -70,6 +70,9 @@ impl GasReaction {
     /// An already bound source cannot be silently replaced by another source.
     /// This is an initialization choice; it does not mutate an accepted state.
     pub fn with_material_rate(mut self, source: MaterialRateScale) -> Result<Self, GasReactionError> {
+        if !self.additional_channels.is_empty() {
+            return Err(invalid("bind each channel's material rate before combining reactions"));
+        }
         if self.rate_material.is_some() {
             return Err(invalid("reaction already has an explicit material rate source"));
         }
@@ -81,43 +84,42 @@ impl GasReaction {
         self.rate_material = Some(source);
         Ok(self)
     }
-    /// Optional original material source. None retains the original fixed scale.
+    /// Optional PRIMARY-channel material source. Use `channels` for a mechanism.
     #[must_use]
     pub const fn rate_material(&self) -> Option<&MaterialRateScale> { self.rate_material.as_ref() }
+}
 
-    /// Evaluate once from the chemical stage's actual input, after transport
-    /// when applicable. Later nonlinear probes never reselect a kinetic rate.
-    /// The same rate evaluation and source receipt travel with the stage report.
-    pub(super) fn evaluate_rate(
-        &self, gas: &ClosedGasParcel, activities: Vec<IdealGasSpeciesActivityV1>,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(DeclaredStoichiometricMassActionEvaluationV1, Option<ResolvedMaterialStatePoint>), GasReactionError> {
-        let temperature = Temperature::new(gas.state().state().temperature);
-        let Some(source) = &self.rate_material else {
-            return Ok((self.kinetics.evaluate(temperature, activities)?, None));
-        };
-        poll(cancelled)?;
-        let required = [ScalarPropertyRequirement::try_new(
-            ACTIVITY_RATE_SCALE_PROPERTY, ACTIVITY_RATE_SCALE_DIMS,
-            ScalarAdmissibility::StrictlyPositive,
-        )?];
-        let resolved = resolve_material_state_point(
-            &source.material, gas.point(), &required, source.selection.clone(),
-        )?;
-        let scale = resolved.property(ACTIVITY_RATE_SCALE_PROPERTY)
-            .ok_or_else(|| invalid("resolved material omitted the required kinetic scale"))?.value_si();
-        let scale = ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(scale))
-            .map_err(|_| invalid("resolved material scale is outside the original kinetic quantity domain"))?;
-        // Reuse the certified equilibrium and declared activity orders. Reverse
-        // rates remain thermodynamically tied to this very same forward scale.
-        let kinetics = DeclaredStoichiometricMassActionV1::new(
-            ThermodynamicReverseRateClosureV1::new(
-                self.kinetics.reverse_rate_closure().equilibrium().clone(), scale,
-            ), self.kinetics.kinetic_order_convention(),
-        );
-        poll(cancelled)?;
-        let evaluated = kinetics.evaluate(temperature, activities)?;
-        poll(cancelled)?;
-        Ok((evaluated, Some(resolved)))
-    }
+/// Resolve one original channel at the actual gas state, once per chemical stage.
+pub(super) fn evaluate_rate_for(
+    kinetics: &DeclaredStoichiometricMassActionV1, source: Option<&MaterialRateScale>,
+    gas: &ClosedGasParcel, activities: Vec<IdealGasSpeciesActivityV1>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(DeclaredStoichiometricMassActionEvaluationV1, Option<ResolvedMaterialStatePoint>), GasReactionError> {
+    let temperature = Temperature::new(gas.state().state().temperature);
+    let Some(source) = source else {
+        return Ok((kinetics.evaluate(temperature, activities)?, None));
+    };
+    poll(cancelled)?;
+    let required = [ScalarPropertyRequirement::try_new(
+        ACTIVITY_RATE_SCALE_PROPERTY, ACTIVITY_RATE_SCALE_DIMS,
+        ScalarAdmissibility::StrictlyPositive,
+    )?];
+    let resolved = resolve_material_state_point(
+        &source.material, gas.point(), &required, source.selection.clone(),
+    )?;
+    let scale = resolved.property(ACTIVITY_RATE_SCALE_PROPERTY)
+        .ok_or_else(|| invalid("resolved material omitted the required kinetic scale"))?.value_si();
+    let scale = ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(scale))
+        .map_err(|_| invalid("resolved material scale is outside the original kinetic quantity domain"))?;
+    // Reuse the certified equilibrium and declared activity orders. Reverse
+    // rates remain thermodynamically tied to this very same forward scale.
+    let kinetics = DeclaredStoichiometricMassActionV1::new(
+        ThermodynamicReverseRateClosureV1::new(
+            kinetics.reverse_rate_closure().equilibrium().clone(), scale,
+        ), kinetics.kinetic_order_convention(),
+    );
+    poll(cancelled)?;
+    let evaluated = kinetics.evaluate(temperature, activities)?;
+    poll(cancelled)?;
+    Ok((evaluated, Some(resolved)))
 }

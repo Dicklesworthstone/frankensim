@@ -661,18 +661,20 @@ fn mm_riccati_mode_ladder() {
     );
 }
 
-/// Exact one-mode (Webster) input impedance of the exponential horn
+/// Exact one-mode (Webster) state `(P, U)` at `x` of the exponential horn
 /// `S = S0 e^{m x}`, lossless, with a mouth impedance `z_l` (Pagneux et al.
-/// 1996, Part I, App. E). `P = e^{-mx/2}(A e^{i b x} + B e^{-i b x})`,
-/// `b^2 = k^2 - m^2/4`, `U = S P'/(i omega rho)`.
-fn webster_exponential(
+/// 1996, Part I, App. E), up to a common factor.
+/// `P = e^{-mx/2}(A e^{i b x} + B e^{-i b x})`, `b^2 = k^2 - m^2/4`,
+/// `U = S P'/(i omega rho)`.
+fn webster_exponential_state(
     r0: f64,
     m: f64,
     length: f64,
     state: &GasState,
     omega: f64,
     z_l: C64,
-) -> C64 {
+    x: f64,
+) -> (C64, C64) {
     let k = omega / state.sound_speed;
     let beta = C64::from_re(k * k - 0.25 * m * m).sqrt();
     let i = C64::new(0.0, 1.0);
@@ -688,8 +690,57 @@ fn webster_exponential(
     let det = f1 * f2 * cl * (lam2 - lam1);
     let a = (z_l * cl * lam2 * f2 - f2) * det.recip();
     let b = (f1 - cl * lam1 * f1 * z_l) * det.recip();
-    (a + b) * (flow(0.0) * (lam1 * a + lam2 * b)).recip()
+    let (e1, e2) = (complex_exp(lam1.scale(x)), complex_exp(lam2.scale(x)));
+    (a * e1 + b * e2, flow(x) * (lam1 * a * e1 + lam2 * b * e2))
 }
+
+/// Exact one-mode input impedance of the exponential horn, `P(0)/U(0)`.
+fn webster_exponential(
+    r0: f64,
+    m: f64,
+    length: f64,
+    state: &GasState,
+    omega: f64,
+    z_l: C64,
+) -> C64 {
+    let (p, u) = webster_exponential_state(r0, m, length, state, omega, z_l, 0.0);
+    p * u.recip()
+}
+
+/// Amir, Pagneux & Kergomard (1995), "Wave propagation in acoustic horns
+/// through modal decomposition", Computational Acoustics, WIT Trans. Built
+/// Environment 10, 37-44 (doi 10.2495/COMAC950051, open access), Fig. 1
+/// (p. 42): `|p|` on the axis of an exponential horn, radius 0.5 -> 4 m over
+/// 4.5 m, ended by an infinite cylinder and driven by a plane piston at the
+/// small end, at 0.3 f_c (top panel) and 0.9 f_c (bottom panel), every 0.5 m
+/// from the piston. The figure plots ANSYS (solid line) and a 15-mode modal
+/// solution (circles); the paper prints no table.
+///
+/// Reads (OD17, figure-digitized, lane P8 2026-10-22): a 220 dpi render of
+/// the open PDF with a calibrated overlay grid. The stated half-width is
+/// 0.005 (top) and 0.015 (bottom) in the plotted units. The paper leaves two
+/// inputs implicit; both were identified from its own horn-equation (dashed)
+/// curve, which the exact Webster solution reproduces to the read error:
+/// f_c is the cutoff of the first axisymmetric mode at the mouth
+/// (`k a = gamma_1 = 3.8317`; the 1.8412 reading does not fit), and the
+/// plotted quantity is `|p|/(rho c q)` for a piston volume flow `q`.
+/// Rows: `(f/f_c, read half-width, |p| at z = 0, 0.5, .., 4.5 m)`.
+const WIT_1995_FIG1: [(f64, f64, [f64; 10]); 2] = [
+    (
+        0.3,
+        0.005,
+        [
+            0.479, 0.331, 0.225, 0.153, 0.109, 0.077, 0.056, 0.045, 0.036, 0.031,
+        ],
+    ),
+    (
+        0.9,
+        0.015,
+        [
+            1.159, 0.765, 0.490, 0.395, 0.400, 0.410, 0.390, 0.341, 0.285, 0.209,
+        ],
+    ),
+];
 
 #[test]
 fn mm_riccati_pagneux_cases() {
@@ -697,10 +748,12 @@ fn mm_riccati_pagneux_cases() {
     // benchmark results as figures only (checked 2026-10-20 on the authors'
     // site), so no 1 % comparison against printed numbers is claimed here.
     // What is reproducible: (a) the exact one-mode solution of Part I App. E
-    // for the exponential horn, above and below the horn cutoff, and (b) the
+    // for the exponential horn, above and below the horn cutoff, (b) the
     // Part I 45-degree truncated cone (0.08 -> 0.30 m, infinite-pipe end,
     // plane piston, 600 Hz, 7 and 17 modes), whose results must be
-    // reciprocal and settle with the mode count.
+    // reciprocal and settle with the mode count, and (c) the one open
+    // figure by the same authors, [`WIT_1995_FIG1`], at its stated read
+    // error.
     let state = air20();
     let horn = exp_horn();
     let m = 2.0 * det::ln(10.0) / 0.5;
@@ -764,6 +817,95 @@ fn mm_riccati_pagneux_cases() {
         "the tail bound must shrink from 7 to 17 modes ({:e} -> {:e})",
         z_by_n[0].1,
         z_by_n[1].1
+    );
+    // (c) The paper's "15 modes" does not say whether the plane mode is
+    // counted, and on the axis the truncated series alternates between even
+    // and odd N (near the mouth at 0.9 f_c, N = 15 and 16 differ by about
+    // 0.012). The paper's count is therefore the interval [N = 15, N = 16]:
+    // a read passes when read +- half-width meets it. Single-count results
+    // are printed, not gated. Liveness: the plane image (N = 1) must miss
+    // the piston read on both panels by more than the half-width.
+    const WIT_STEPS: usize = 576; // 9 x 64: stations land on z = 0.5 i (h = 2^-7 m)
+    let wit = RadiusProfile::exponential(0.5, 2.0 * det::ln(8.0) / 4.5, 4.5).unwrap();
+    let gamma1 = j1_roots_unchecked(1)[0];
+    let rho_c = state.density * state.sound_speed;
+    let axis = |modes: usize, k: f64, steps: usize| -> Vec<f64> {
+        let mut piston = vec![C64::ZERO; modes];
+        piston[0] = C64::ONE;
+        let field = mm_profile_field(
+            &wit,
+            &state,
+            k * state.sound_speed,
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(modes),
+            RiccatiSteps(steps),
+            &piston,
+        )
+        .unwrap();
+        (0..10)
+            .map(|i| {
+                let j = i * steps / 9;
+                assert!((field.x[j] - 0.5 * i as f64).abs() < 1e-12, "station on z");
+                field.axis_pressure[j].abs() / rho_c
+            })
+            .collect()
+    };
+    let (mut within, mut n1_outside) = ([0_usize; 2], 0_usize);
+    for &(fraction, half_width, reads) in &WIT_1995_FIG1 {
+        let k = fraction * gamma1 / 4.0;
+        let start = Instant::now();
+        let p15 = axis(15, k, WIT_STEPS);
+        let p16 = axis(16, k, WIT_STEPS);
+        let p16_fine = axis(16, k, 2 * WIT_STEPS);
+        let p21 = axis(21, k, WIT_STEPS);
+        let p1 = axis(1, k, WIT_STEPS);
+        for i in 0..10 {
+            let (lo, hi) = (p15[i].min(p16[i]), p15[i].max(p16[i]));
+            let miss = (lo - reads[i]).max(reads[i] - hi).max(0.0);
+            let step_move = (p16_fine[i] - p16[i]).abs();
+            for (slot, value) in within.iter_mut().zip([p15[i], p16[i]]) {
+                *slot += usize::from((value - reads[i]).abs() <= half_width);
+            }
+            n1_outside += usize::from((p1[i] - reads[i]).abs() > half_width);
+            println!(
+                "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-pagneux-wit1995\",\"inputs\":{{\"fixture\":\
+                 \"Amir-Pagneux-Kergomard 1995 Fig. 1 exp horn 0.5->4 m\",\"f_over_fc\":{fraction},\"z_m\":{}}},\
+                 \"modes\":[15,16],\"steps\":{WIT_STEPS},\"observed\":{{\"n15\":{:.5},\"n16\":{:.5},\"n21\":{:.5},\
+                 \"n1\":{:.5},\"step_move\":{step_move:.2e}}},\"oracle\":{},\"err\":{miss:.5},\"tol\":{half_width},\
+                 \"verdict\":\"{}\",\"elapsed_us\":{}}}",
+                0.5 * i as f64,
+                p15[i],
+                p16[i],
+                p21[i],
+                p1[i],
+                reads[i],
+                if miss <= half_width { "pass" } else { "fail" },
+                start.elapsed().as_micros()
+            );
+            assert!(
+                step_move < 1e-3 * half_width,
+                "WIT {fraction} f_c, z = {}: not step-converged ({step_move:e})",
+                0.5 * i as f64
+            );
+            assert!(
+                miss <= half_width,
+                "WIT {fraction} f_c, z = {}: [N15, N16] = [{lo:.4}, {hi:.4}] misses the read {} +- {half_width}",
+                0.5 * i as f64,
+                reads[i]
+            );
+        }
+        assert!(
+            (p1[0] - reads[0]).abs() > half_width,
+            "liveness: the plane image {:.4} must miss the piston read {} +- {half_width}",
+            p1[0],
+            reads[0]
+        );
+    }
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-riccati-pagneux-wit1995\",\"observed\":{{\"n15_within\":{},\
+         \"n16_within\":{},\"n1_outside\":{n1_outside},\"reads\":20}}}}",
+        within[0], within[1]
     );
 }
 
@@ -861,4 +1003,258 @@ fn mm_riccati_bitwise_repeat() {
             .zip(&b)
             .all(|(x, y)| x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits())
     );
+}
+
+#[test]
+fn mm_field_cylinder_modes_closed_form() {
+    // G2: on a cylinder each mode travels alone. A matched mouth leaves one
+    // outgoing (or decaying) wave per mode, `U_n(x) = U_n(0) e^{i k_n x}`,
+    // `P_n = Zc_n U_n`, `k_n = sqrt(k^2 - (gamma_n/R)^2)` with `Im k_n >= 0`;
+    // the axis weights `1/|J0(gamma_n)|` are checked against the quadrature.
+    let (r, length, f, n) = (0.05, 0.1, 900.0, 4);
+    let cyl = RadiusProfile::power(r, 1.0, 0.0, length).unwrap();
+    let state = air20();
+    let omega = tau_hz(f);
+    let zc = modal_characteristic_impedances(&state, r, omega, LossModel::Lossless, n).unwrap();
+    let k0 = omega / state.sound_speed;
+    let gammas: Vec<f64> = std::iter::once(0.0)
+        .chain(j1_roots_unchecked(n - 1))
+        .collect();
+    let drive: Vec<C64> = [1.0, 0.4, -0.3, 0.2]
+        .iter()
+        .map(|&v| C64::from_re(v))
+        .collect();
+    let steps = guarded_steps(length, r, n).max(64);
+    let field = mm_profile_field(
+        &cyl,
+        &state,
+        omega,
+        LossModel::Lossless,
+        MouthLoad::Matched,
+        ModeCount(n),
+        RiccatiSteps(steps),
+        &drive,
+    )
+    .unwrap();
+    assert_eq!(field.n_modes, n);
+    assert_eq!(field.x.len(), steps + 1);
+    assert!(field.x[0] == 0.0 && (field.x[steps] - length).abs() < 1e-15);
+    assert!(field.x.windows(2).all(|w| w[1] > w[0]), "stations ascend");
+    let i = C64::new(0.0, 1.0);
+    let (mut worst, mut worst_axis) = (0.0_f64, 0.0_f64);
+    for (j, &x) in field.x.iter().enumerate() {
+        let mut axis = C64::ZERO;
+        for m in 0..n {
+            let kt = gammas[m] / r;
+            let kn = C64::from_re(k0 * k0 - kt * kt).sqrt();
+            let u = drive[m] * complex_exp(i * kn.scale(x));
+            let p = zc[m] * u;
+            worst = worst
+                .max((field.flow[j][m] - u).abs() / u.abs())
+                .max((field.pressure[j][m] - p).abs() / p.abs());
+            axis = axis + p.scale(1.0 / quad_jn(0, gammas[m]).abs());
+        }
+        worst_axis = worst_axis.max((field.axis_pressure[j] - axis).abs() / axis.abs());
+    }
+    println!(
+        "{{\"suite\":\"fs-duct\",\"case\":\"mm-field-cylinder\",\"modes\":{n},\"steps\":{steps},\
+         \"observed\":{{\"modal_rel\":{worst:e},\"axis_rel\":{worst_axis:e}}},\"tol\":1e-12}}"
+    );
+    assert!(worst < 1e-12, "modal field vs closed form {worst:e}");
+    assert!(
+        worst_axis < 1e-12,
+        "axis pressure vs quadrature weights {worst_axis:e}"
+    );
+}
+
+#[test]
+fn mm_field_n1_equals_exact_webster() {
+    // G2: one mode on the exponential horn is the exact Webster field of
+    // Part I App. E, station by station, below and above the horn cutoff.
+    let state = air20();
+    let horn = exp_horn();
+    let m = 2.0 * det::ln(10.0) / 0.5;
+    let f_cut = state.sound_speed * m / (4.0 * core::f64::consts::PI);
+    let steps = 4096;
+    let mut worst = 0.0_f64;
+    for f in [0.5 * f_cut, 1000.0] {
+        let omega = tau_hz(f);
+        let z_l = segment_wave(&state, horn.outlet_radius(), omega, LossModel::Lossless)
+            .unwrap()
+            .characteristic_impedance;
+        let field = mm_profile_field(
+            &horn,
+            &state,
+            omega,
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(1),
+            RiccatiSteps(steps),
+            &[C64::ONE],
+        )
+        .unwrap();
+        let u0 = webster_exponential_state(0.006, m, 0.5, &state, omega, z_l, 0.0).1;
+        let exact: Vec<(C64, C64)> = field
+            .x
+            .iter()
+            .map(|&x| {
+                let (p, u) = webster_exponential_state(0.006, m, 0.5, &state, omega, z_l, x);
+                (p * u0.recip(), u * u0.recip())
+            })
+            .collect();
+        let p_scale = exact.iter().map(|e| e.0.abs()).fold(0.0, f64::max);
+        let u_scale = exact.iter().map(|e| e.1.abs()).fold(0.0, f64::max);
+        let (mut ep, mut eu) = (0.0_f64, 0.0_f64);
+        for (j, &(p, u)) in exact.iter().enumerate() {
+            assert!(field.axis_pressure[j] == field.pressure[j][0], "N = 1 axis");
+            ep = ep.max((field.pressure[j][0] - p).abs() / p_scale);
+            eu = eu.max((field.flow[j][0] - u).abs() / u_scale);
+        }
+        worst = worst.max(ep).max(eu);
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-field-webster\",\"inputs\":{{\"fixture\":\
+             \"exponential horn, Part I App. E\",\"f_hz\":{f:.2},\"f_cut_hz\":{f_cut:.2}}},\"modes\":1,\
+             \"steps\":{steps},\"observed\":{{\"p_rel\":{ep:e},\"u_rel\":{eu:e}}},\"tol\":1e-9}}"
+        );
+    }
+    assert!(worst < 1e-9, "one-mode field vs exact Webster {worst:e}");
+}
+
+#[test]
+fn mm_field_power_flux_conserved() {
+    // G0: lossless, the axial power flux `Re sum_n P_n conj(U_n)` (= `Re int
+    // p conj(v_x) dS`) is the same at every station, whether the higher
+    // modes propagate (8 kHz) or are evanescent (600 Hz). The inlet station
+    // is `P = Z U_in` with `Z` from `mm_profile_impedance`, and the matched
+    // mouth is `P_n = Zc_n U_n`.
+    let state = air20();
+    let cone = RadiusProfile::power(0.08, 0.08, 1.0, 0.22).unwrap();
+    for (f, n) in [(8000.0, 4_usize), (600.0, 8)] {
+        let omega = tau_hz(f);
+        let steps = guarded_steps(0.22, 0.08, n).max(512);
+        let drive: Vec<C64> = (0..n)
+            .map(|m| C64::new(1.0 / (1.0 + m as f64), 0.3 * m as f64 - 0.5))
+            .collect();
+        let field = mm_profile_field(
+            &cone,
+            &state,
+            omega,
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(n),
+            RiccatiSteps(steps),
+            &drive,
+        )
+        .unwrap();
+        let flux = |j: usize| -> f64 {
+            (0..n)
+                .map(|m| (field.pressure[j][m] * field.flow[j][m].conj()).re)
+                .sum()
+        };
+        let w_in = flux(0);
+        let drift = (0..=steps)
+            .map(|j| (flux(j) - w_in).abs())
+            .fold(0.0, f64::max)
+            / w_in.abs();
+        let z = mm_profile_impedance(
+            &cone,
+            &state,
+            omega,
+            LossModel::Lossless,
+            MouthLoad::Matched,
+            ModeCount(n),
+            RiccatiSteps(steps),
+        )
+        .unwrap()
+        .impedance_matrix;
+        let p_scale = field.pressure[0]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0, f64::max);
+        let inlet = (0..n)
+            .map(|r| {
+                let zu = (0..n).fold(C64::ZERO, |acc, c| acc + z[r * n + c] * drive[c]);
+                (field.pressure[0][r] - zu).abs()
+            })
+            .fold(0.0, f64::max)
+            / p_scale;
+        let zc = modal_characteristic_impedances(
+            &state,
+            cone.outlet_radius(),
+            omega,
+            LossModel::Lossless,
+            n,
+        )
+        .unwrap();
+        let mouth = (0..n)
+            .map(|m| {
+                let p = field.pressure[steps][m];
+                (p - zc[m] * field.flow[steps][m]).abs() / p.abs()
+            })
+            .fold(0.0, f64::max);
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"mm-field-power\",\"inputs\":{{\"fixture\":\
+             \"Pagneux Part I cone\",\"f_hz\":{f}}},\"modes\":{n},\"steps\":{steps},\"observed\":{{\
+             \"flux_drift_rel\":{drift:e},\"inlet_rel\":{inlet:e},\"mouth_rel\":{mouth:e}}},\"tol\":1e-10}}"
+        );
+        assert!(drift < 1e-10, "{f} Hz: power flux drift {drift:e}");
+        assert!(inlet < 1e-12, "{f} Hz: inlet P vs Z U_in {inlet:e}");
+        assert!(mouth < 1e-12, "{f} Hz: matched mouth {mouth:e}");
+    }
+}
+
+#[test]
+fn mm_field_refusals() {
+    // G0: one finite inlet flow per retained mode, a finite plane-mode mouth
+    // load, and the impedance image's own mode and step refusals.
+    fn call(
+        load: MouthLoad<'_>,
+        modes: usize,
+        steps: usize,
+        drive: &[C64],
+    ) -> Result<ModalField, DuctError> {
+        mm_profile_field(
+            &exp_horn(),
+            &air20(),
+            tau_hz(500.0),
+            LossModel::Lossless,
+            load,
+            ModeCount(modes),
+            RiccatiSteps(steps),
+            drive,
+        )
+    }
+    let bad_param =
+        |r: Result<ModalField, DuctError>| matches!(r, Err(DuctError::BadParameter { .. }));
+    let ok = [C64::ONE, C64::ZERO];
+    assert!(call(MouthLoad::Matched, 2, 256, &ok).is_ok());
+    assert!(bad_param(call(MouthLoad::Matched, 2, 256, &ok[..1])));
+    assert!(bad_param(call(
+        MouthLoad::Matched,
+        2,
+        256,
+        &[C64::ONE, C64::ZERO, C64::ZERO]
+    )));
+    assert!(bad_param(call(
+        MouthLoad::Matched,
+        2,
+        256,
+        &[C64::new(f64::NAN, 0.0), C64::ZERO]
+    )));
+    assert!(bad_param(call(
+        MouthLoad::Analytic(Termination::Closed),
+        2,
+        256,
+        &ok
+    )));
+    let cap = certified_mode_cap();
+    assert!(bad_param(call(
+        MouthLoad::Matched,
+        cap + 1,
+        256,
+        &vec![C64::ZERO; cap + 1]
+    )));
+    assert!(call(MouthLoad::Matched, 2, 0, &ok).is_err());
+    assert!(call(MouthLoad::Matched, 2, MAX_RICCATI_STEPS + 1, &ok).is_err());
+    println!("{{\"suite\":\"fs-duct\",\"case\":\"mm-field-refusals\",\"verdict\":\"pass\"}}");
 }

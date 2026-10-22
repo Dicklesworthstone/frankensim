@@ -61,8 +61,8 @@ pub const MAX_MODES: usize = 8;
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
-    BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModeCount, MouthLoad, certified_mode_cap,
-    mm_profile_impedance,
+    BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModalField, ModeCount, MouthLoad, certified_mode_cap,
+    mm_profile_field, mm_profile_impedance,
 };
 
 /// `J0(x)` by the staircase's legacy power series, kept bit-identical

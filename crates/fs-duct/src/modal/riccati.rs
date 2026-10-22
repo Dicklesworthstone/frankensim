@@ -55,6 +55,13 @@
 //! Higher modes always terminate matched, the staircase's disclosed closure;
 //! the radiation matrix is M2.1-W6's scope.
 //!
+//! **Field.** [`mm_profile_field`] keeps the scaled impedance at every step
+//! station and each step's inverse flow map, then carries a prescribed
+//! inlet modal flow back toward the mouth (`u_j = Y_j^-1 u_{j+1}`, which
+//! contracts evanescent components: they decay away from the source) and
+//! sets `P = Z U` station by station. The pressure on the axis is
+//! `sum_n P_n psi_n(0)`, `psi_n(0) = 1/|J0(gamma_n)|`.
+//!
 //! **Bounds.** Mode counts are admitted up to [`certified_mode_cap`]: every
 //! `gamma_n` used lies below [`BESSEL_CERTIFIED_X`], the range over which the
 //! tests certify `bessel_j0_certified` and `J1` against an independent
@@ -301,8 +308,17 @@ fn generator(
     })
 }
 
+/// Per-station record of a tracked propagation, mouth (index 0) to inlet:
+/// the scaled impedance at every station and each step's inverse flow map,
+/// `u_j = Y_j^-1 u_{j+1}`.
+struct Stations {
+    zeta: Vec<Vec<C64>>,
+    flow_back: Vec<Vec<C64>>,
+}
+
 /// Inlet impedance (scaled), diagnostics, and optionally the flow transfer
-/// `u_in = G u_out` (only for loads with a finite plane-mode impedance).
+/// `u_in = G u_out` with the station record (only for loads with a finite
+/// plane-mode impedance).
 struct Propagated {
     zeta: Vec<C64>,
     zref: f64,
@@ -310,6 +326,7 @@ struct Propagated {
     throat: f64,
     mouth_ka: f64,
     flow: Option<Vec<C64>>,
+    stations: Option<Stations>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -377,6 +394,10 @@ fn propagate(
         }
         g
     });
+    let mut stations = track_flow.then(|| Stations {
+        zeta: vec![x_blk.clone()],
+        flow_back: Vec::with_capacity(steps.0),
+    });
     let h = -length / steps.0 as f64;
     let root3 = det::sqrt(3.0);
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
@@ -423,9 +444,14 @@ fn propagate(
             *g = mul(&y_new, g, n);
         }
         // Moebius normalization: zeta = X' Y'^-1, then [X; Y] = [zeta; I].
-        x_blk = mul(&x_new, &mat_inv(&y_new, n)?, n);
+        let y_inv = mat_inv(&y_new, n)?;
+        x_blk = mul(&x_new, &y_inv, n);
         if x_blk.iter().any(|&v| !finite(v)) {
             return Err(DuctError::Singular);
+        }
+        if let Some(record) = &mut stations {
+            record.zeta.push(x_blk.clone());
+            record.flow_back.push(y_inv);
         }
         y_blk.fill(C64::ZERO);
         for k in 0..n {
@@ -439,6 +465,7 @@ fn propagate(
         throat,
         mouth_ka,
         flow,
+        stations,
     })
 }
 
@@ -487,6 +514,109 @@ pub fn mm_profile_impedance(
         steps_used: steps.0,
         tail_bound_estimate,
     })
+}
+
+/// Modal pressure and flow at every step station of a continuous
+/// propagation driven by a prescribed inlet modal flow.
+#[derive(Debug, Clone)]
+pub struct ModalField {
+    /// Retained mode count, including the plane mode.
+    pub n_modes: usize,
+    /// Station distances from the inlet [m], ascending: the step nodes.
+    pub x: Vec<f64>,
+    /// Modal pressures `P_n` [Pa], one row of `n_modes` per station.
+    pub pressure: Vec<Vec<C64>>,
+    /// Modal flows `U_n` [m^3/s], one row of `n_modes` per station.
+    pub flow: Vec<Vec<C64>>,
+    /// Pressure on the axis `r = 0` [Pa] per station,
+    /// `sum_n P_n psi_n(0)` with `psi_n(0) = 1/|J0(gamma_n)|`.
+    pub axis_pressure: Vec<C64>,
+}
+
+fn mat_vec(a: &[C64], v: &[C64], n: usize) -> Vec<C64> {
+    (0..n)
+        .map(|i| (0..n).fold(C64::ZERO, |acc, l| acc + a[i * n + l] * v[l]))
+        .collect()
+}
+
+/// Continuous multimodal field of a smooth hole-free profile driven at the
+/// inlet by the modal flow `inlet_flow` (`U_n` [m^3/s]). A plane piston of
+/// volume flow `q` is `[q, 0, ..]`: every higher mode integrates to zero over
+/// the section. Memory is `O(steps N^2)`.
+///
+/// # Errors
+/// As [`mm_profile_impedance`], plus an inlet flow that is not one finite
+/// value per retained mode, and a mouth load with no finite plane-mode
+/// impedance (a closed end).
+#[allow(clippy::too_many_arguments)]
+pub fn mm_profile_field(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MouthLoad<'_>,
+    modes: ModeCount,
+    steps: RiccatiSteps,
+    inlet_flow: &[C64],
+) -> Result<ModalField, DuctError> {
+    modes.validate()?;
+    let n = modes.0;
+    if inlet_flow.len() != n || !inlet_flow.iter().all(|&v| finite(v)) {
+        return Err(bad(
+            "inlet flow must hold one finite modal flow per retained mode",
+        ));
+    }
+    let run = propagate(profile, state, omega, loss, load, n, steps, true)?;
+    let Some(record) = run.stations else {
+        return Err(bad(
+            "flow tracking needs a finite plane-mode mouth impedance",
+        ));
+    };
+    let axis_weight: Vec<f64> = Basis::new(n)
+        .gammas
+        .iter()
+        .map(|&g| {
+            if g == 0.0 {
+                1.0
+            } else {
+                1.0 / bessel_j0_certified(g).abs()
+            }
+        })
+        .collect();
+    let s = record.flow_back.len();
+    let (length, h) = (profile.length(), -profile.length() / s as f64);
+    let mut field = ModalField {
+        n_modes: n,
+        x: Vec::with_capacity(s + 1),
+        pressure: Vec::with_capacity(s + 1),
+        flow: Vec::with_capacity(s + 1),
+        axis_pressure: Vec::with_capacity(s + 1),
+    };
+    // Station j counts steps from the mouth; walk back from the inlet (j = s).
+    let mut u = inlet_flow.to_vec();
+    for j in (0..=s).rev() {
+        if j < s {
+            u = mat_vec(&record.flow_back[j], &u, n);
+        }
+        let p: Vec<C64> = mat_vec(&record.zeta[j], &u, n)
+            .iter()
+            .map(|v| v.scale(run.zref))
+            .collect();
+        let axis = p
+            .iter()
+            .zip(&axis_weight)
+            .fold(C64::ZERO, |acc, (pn, w)| acc + pn.scale(*w));
+        if !(finite(axis) && u.iter().all(|&v| finite(v))) {
+            return Err(DuctError::Singular);
+        }
+        field
+            .x
+            .push(if j == s { 0.0 } else { length + j as f64 * h });
+        field.pressure.push(p);
+        field.flow.push(u.clone());
+        field.axis_pressure.push(axis);
+    }
+    Ok(field)
 }
 
 #[cfg(test)]

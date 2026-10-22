@@ -260,7 +260,7 @@ fn staged_candidate(
         exterior.add(drive.input.exterior_pressure_pa * dv)?;
         applied.add(drive.input.external_force_n * (dv / old.area_m2))?;
         heat.add(drive.input.heat_j)?;
-        let reacted = chemistry.get(&id).is_some_and(|r| r.extent_mol != 0.0);
+        let reacted = chemistry.get(&id).is_some_and(|r| r.has_progress());
         if open.contains(&id) || reacted {
             record_interval_account(old, &mut wall, drive, &report, du,
                 controls.total_energy_tolerance_j, open.contains(&id))
