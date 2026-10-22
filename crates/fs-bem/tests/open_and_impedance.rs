@@ -650,6 +650,129 @@ mod impedance_sphere_series {
     }
 }
 
+/// G1: the declared triangle near rule raises the closed Burton-Miller rows
+/// to second order. Dense icosphere rungs 2..4 at ka 1 and 3, rigid sphere;
+/// ka 5 refuses rung 2 as too coarse, so its ladder is the series above. The
+/// scattering far field must converge at observed order >= 1.8 under the
+/// rule. The pulsating mean impedance keeps the one-point far weights' O(h)
+/// remnant, so its order is recorded and it must only decrease. The centroid
+/// rows run on the same meshes, and the rule must beat them at the finest
+/// rung.
+#[test]
+fn impedance_sphere_triangle_rule_ladder() {
+    let medium = Medium::air();
+    let rho_c = medium.density * medium.sound_speed;
+    let directions: Vec<_> = (0..33)
+        .map(|i| {
+            let mu = -1.0 + 2.0 * i as f64 / 32.0;
+            [(1.0 - mu * mu).sqrt(), 0.0, mu]
+        })
+        .collect();
+    let rules = [
+        ("centroid", helmholtz::PanelRule::Centroid),
+        (
+            "triangle-near",
+            helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 20 },
+        ),
+    ];
+    for ka in [1.0, 3.0] {
+        let rigid = C64::new(ka * ka, -ka).scale(rho_c / (1.0 + ka * ka));
+        let want: Vec<_> = directions
+            .iter()
+            .map(|d| sphere_scattering(ka, C64::ZERO, d[2]))
+            .collect();
+        let mut finest = Vec::new();
+        for (label, rule) in rules {
+            let (mut hs, mut pulsating, mut scattering) = (Vec::new(), Vec::new(), Vec::new());
+            for rung in 2..=4 {
+                let start = Instant::now();
+                let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+                let drive = vec![C64::ONE; surface.areas().len()];
+                // Rigid plane-wave scattering along +z: v = -(d.n) p_inc/(rho c).
+                let incident: Vec<_> = surface
+                    .centroids()
+                    .iter()
+                    .zip(surface.normals())
+                    .map(|(x, normal)| {
+                        C64::new(det::cos(ka * x[2]), det::sin(ka * x[2])).scale(-normal[2] / rho_c)
+                    })
+                    .collect();
+                let solutions = helmholtz::with_dense_workers(16, || {
+                    helmholtz::solve_radiation_batch_with_rule(
+                        &surface,
+                        ka,
+                        medium,
+                        &[&drive, &incident],
+                        Formulation::BurtonMiller,
+                        rule,
+                    )
+                })
+                .unwrap();
+                let value = mean(&surface, &solutions[0].pressure);
+                let far =
+                    helmholtz::far_field_integrated(&surface, &solutions[1], medium, &directions);
+                let (numerator, denominator) = far
+                    .iter()
+                    .zip(&want)
+                    .fold((0.0, 0.0), |(a, b), (&got, &want)| {
+                        (a + (got - want).norm_sq(), b + want.norm_sq())
+                    });
+                let h = surface
+                    .areas()
+                    .iter()
+                    .fold(0.0_f64, |m, &a| m.max(a))
+                    .sqrt();
+                hs.push(h);
+                pulsating.push(relative(value, rigid));
+                scattering.push((numerator / denominator).sqrt());
+                println!(
+                    "{{\"suite\":\"fs-bem\",\"case\":\"triangle-rule-sphere\",\"inputs\":{{\"fixture\":\"rigid icosphere\",\"provenance\":\"analytic l=0 impedance; spherical Hankel partial waves, l<=32\"}},\"axis\":\"sphere-mesh\",\"rung\":{rung},\"rule\":\"{label}\",\"ka\":{ka},\"panels\":{},\"h\":{h:.17e},\"observed\":[{:.17e},{:.17e}],\"oracle\":[{:.17e},{:.17e}],\"err\":{{\"pulsating\":{:.17e},\"scattering\":{:.17e}}},\"tol\":null,\"verdict\":\"measured\",\"elapsed_s\":{:.6}}}",
+                    surface.areas().len(),
+                    value.re,
+                    value.im,
+                    rigid.re,
+                    rigid.im,
+                    pulsating[pulsating.len() - 1],
+                    scattering[scattering.len() - 1],
+                    start.elapsed().as_secs_f64()
+                );
+            }
+            let fit = |errors: &[f64]| {
+                fs_mms::fit_order(
+                    &fs_mms::RefinementLadder::new(hs.clone(), errors.to_vec()).unwrap(),
+                )
+            };
+            let (p_fit, s_fit) = (fit(&pulsating), fit(&scattering));
+            let triangle = label == "triangle-near";
+            let held =
+                !triangle || (s_fit.observed >= 1.8 && pulsating.windows(2).all(|w| w[1] < w[0]));
+            println!(
+                "{{\"suite\":\"fs-bem\",\"case\":\"triangle-rule-order\",\"inputs\":{{\"provenance\":\"fs_mms fit over rungs 2-4\"}},\"axis\":\"sphere-mesh\",\"rung\":4,\"rule\":\"{label}\",\"ka\":{ka},\"observed\":{{\"pulsating\":{},\"scattering\":{}}},\"rms_residual\":{{\"pulsating\":{},\"scattering\":{}}},\"err\":{:.17e},\"tol\":{},\"verdict\":\"{}\",\"elapsed_s\":0}}",
+                p_fit.observed,
+                s_fit.observed,
+                p_fit.rms_residual,
+                s_fit.rms_residual,
+                scattering[2],
+                if triangle {
+                    "\"scattering order >= 1.8\""
+                } else {
+                    "null"
+                },
+                if !triangle {
+                    "measured"
+                } else if held {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            );
+            assert!(held, "ka={ka} {label}: {pulsating:?} {scattering:?}");
+            finest.push(scattering[2]);
+        }
+        assert!(finest[1] < finest[0], "ka={ka}: rule {finest:?}");
+    }
+}
+
 #[test]
 fn impedance_bc_beta_zero_bitwise() {
     let start = Instant::now();

@@ -91,6 +91,11 @@ pub use iterative::{
 #[path = "helmholtz_bc.rs"]
 pub mod bc;
 
+/// Declared triangle near rule for the closed Burton-Miller rows.
+#[path = "helmholtz_triangle_rule.rs"]
+mod triangle_rule;
+pub use triangle_rule::{PanelRule, solve_radiation_batch_with_rule, solve_radiation_with_rule};
+
 /// Reciprocal Rayleigh loading of complete planar modal velocity fields.
 #[path = "rayleigh_modal.rs"]
 pub mod rayleigh_modal;
@@ -177,6 +182,14 @@ pub enum HelmholtzError {
     Cancelled,
     /// The dense complex LU reported singularity.
     Singular,
+    /// A declared [`PanelRule::TriangleNear`] admits fewer corrected panel
+    /// pairs than the surface's near zone holds.
+    NearRuleBudget {
+        /// Near (target, source) pairs the surface requires.
+        required_pairs: usize,
+        /// Declared maximum.
+        maximum_pairs: usize,
+    },
 }
 
 impl core::fmt::Display for HelmholtzError {
@@ -213,6 +226,13 @@ impl core::fmt::Display for HelmholtzError {
                 write!(f, "FS-BEM-HELM-CANCELLED: geometry preparation cancelled")
             }
             HelmholtzError::Singular => write!(f, "FS-BEM-HELM-SINGULAR: dense LU refused"),
+            HelmholtzError::NearRuleBudget {
+                required_pairs,
+                maximum_pairs,
+            } => write!(
+                f,
+                "FS-BEM-HELM-NEAR-RULE-BUDGET: {required_pairs} near panel pairs exceeds the declared {maximum_pairs}"
+            ),
         }
     }
 }
@@ -917,6 +937,42 @@ fn admit_resolution(surface: &SpherePanels, k: f64) -> Result<f64, HelmholtzErro
     Ok(ppw)
 }
 
+// Dense radiation-operator admission: frequency, medium, batch shape and
+// resolution, in this order, before any assembly.
+fn admit_operator(
+    surface: &SpherePanels,
+    k: f64,
+    medium: Medium,
+    velocity_fields: &[&[C64]],
+) -> Result<f64, HelmholtzError> {
+    if !(k > 0.0 && k.is_finite()) {
+        return Err(HelmholtzError::BadParameter {
+            what: "wavenumber k must be positive and finite",
+        });
+    }
+    if !(medium.density > 0.0
+        && medium.density.is_finite()
+        && medium.sound_speed > 0.0
+        && medium.sound_speed.is_finite())
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "medium density and sound speed must be positive and finite",
+        });
+    }
+    let n = surface.centroids().len();
+    if velocity_fields.is_empty() || velocity_fields.len() > MAX_RADIATION_FIELDS_PER_BATCH {
+        return Err(HelmholtzError::BadParameter {
+            what: "velocity-field batch must be nonempty and within MAX_RADIATION_FIELDS_PER_BATCH",
+        });
+    }
+    if velocity_fields.iter().any(|velocity| velocity.len() != n) {
+        return Err(HelmholtzError::ShapeMismatch {
+            what: "velocity length must equal the panel count",
+        });
+    }
+    admit_resolution(surface, k)
+}
+
 fn surface_fingerprint(surface: &SpherePanels) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     hash ^= surface.centroids().len() as u64;
@@ -1012,32 +1068,8 @@ impl<'a> RadiationOperator<'a> {
         formulation: Formulation,
         static_layers: Option<&[(f64, f64)]>,
     ) -> Result<Self, HelmholtzError> {
-        if !(k > 0.0 && k.is_finite()) {
-            return Err(HelmholtzError::BadParameter {
-                what: "wavenumber k must be positive and finite",
-            });
-        }
-        if !(medium.density > 0.0
-            && medium.density.is_finite()
-            && medium.sound_speed > 0.0
-            && medium.sound_speed.is_finite())
-        {
-            return Err(HelmholtzError::BadParameter {
-                what: "medium density and sound speed must be positive and finite",
-            });
-        }
+        let ppw = admit_operator(surface, k, medium, velocity_fields)?;
         let n = surface.centroids().len();
-        if velocity_fields.is_empty() || velocity_fields.len() > MAX_RADIATION_FIELDS_PER_BATCH {
-            return Err(HelmholtzError::BadParameter {
-                what: "velocity-field batch must be nonempty and within MAX_RADIATION_FIELDS_PER_BATCH",
-            });
-        }
-        if velocity_fields.iter().any(|velocity| velocity.len() != n) {
-            return Err(HelmholtzError::ShapeMismatch {
-                what: "velocity length must equal the panel count",
-            });
-        }
-        let ppw = admit_resolution(surface, k)?;
 
         let alpha = alpha_for(formulation, k);
         let (matrix, bmat) = assemble_dense_with_static(surface, k, alpha, static_layers);

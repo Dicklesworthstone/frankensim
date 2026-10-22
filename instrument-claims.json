@@ -37,6 +37,7 @@
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_disc_radiation_and_scattering"},
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::open_disc_edge_grading_ladder"},
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_sphere_series"},
+        {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_sphere_triangle_rule_ladder"},
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_beta_zero_bitwise"},
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_passivity"},
         {"kind":"test","ref":"crates/fs-bem/tests/open_and_impedance.rs::impedance_bc_fictitious_frequency_robust"},
