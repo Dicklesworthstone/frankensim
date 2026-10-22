@@ -548,13 +548,20 @@ staircase).
     and Kergomard 1995 (WIT Computational Acoustics, Fig. 1). That is `|p|`
     on the axis of a 0.5 to 4 m exponential horn at 0.3 and 0.9 f_c, read
     at 20 points under OD17 with half-widths 0.005 and 0.015.
-  - The paper's "15 modes" does not say whether the plane mode counts, and
-    the on-axis series alternates between even and odd N near the mouth.
-    So a read passes when read +- half-width meets [N = 15, N = 16].
-  - Measured: N = 16 alone meets all 20 reads and N = 15 alone meets 19.
-    N = 15 misses z = 4 m at 0.9 f_c by 0.020 against 0.015; that is
-    disclosed, not gated. N = 1 misses 19 of 20, both piston reads among
-    them. Step refinement moves every point by at most 1.8e-9.
+  - The reads follow the paper's ANSYS line, a converged reference. So the
+    comparison uses our converged value: |p| at the admitted mode cap (21).
+    The allowance is the half-width plus the declared algebraic mode tail
+    (`mode_tail`, shared with `mm_riccati_mode_ladder`). That tail is fitted
+    per point on the N = 1..16 increments, carried to the cap and multiplied
+    by the safety factor 2.
+  - The agreement is reported, not gated. Measured: 18 of 20 reads agree.
+    - z = 4 m at 0.9 f_c misses by 0.0003 (0.0168 against 0.0150 + 0.0015).
+    - z = 4.5 m at 0.9 f_c has no declared tail: its fitted order is 0.26,
+      against the model's own order > 0.5 condition. The on-axis series
+      alternates between even and odd N near the mouth.
+  - Gated: N = 1 misses both piston reads by more than the half-width (it
+    misses 19 of 20 reads), and step refinement moves every compared value
+    by less than 1e-3 of the half-width (at most 3.3e-9).
 - `mm_field_cylinder_modes_closed_form` (G2): per-mode outgoing and
   decaying waves on a cylinder, with axis weights checked against quadrature,
   to 1e-12; measured 9.4e-14.
@@ -583,8 +590,9 @@ divergence-theorem closure/orientation pin on the lathe).
 
 - Continuous multimodal image (M2.1-W3b): published Pagneux benchmark
   results exist only as figures, so no 1 % comparison against printed
-  values is claimed. The one open figure (WIT 1995 Fig. 1) is matched at
-  its read error, 1 to 5 %. Otherwise agreement is shown against exact
+  values is claimed. The one open figure (WIT 1995 Fig. 1) agrees at 18
+  of 20 reads, at read error (1 to 5 %) plus the declared mode tail. That is
+  reported, not gated. Otherwise agreement is shown against exact
   solutions, the independent staircase limit and conservation laws.
   - Mode convergence is algebraic. On the 45-degree cone, 7 vs 17 modes
     differ by 3.1 % in `Z00`, so `tail_bound_estimate` is an indicator,
