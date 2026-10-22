@@ -215,11 +215,15 @@ through typed selection, retain typed coordinates in every receipt and require p
 temperature in kelvin, an increasing sample grid, and fixed non-temperature
 coordinates and axis descriptors. They infer neither axis aliases nor missing
 source conditions. The single-axis convenience constructors use `T` only.
-All four source-backed constructors require one continuously supported claim
-throughout the requested temperature span. They retain every source knot on
-that temperature axis, with the original fixed context and replayable receipts.
-A coarse caller grid cannot replace a source curve with its endpoint chord;
-tabulated-only temperature support refuses even when both endpoints exist.
+All four source-backed constructors use the canonical typed material source
+line and require one continuously supported claim throughout the requested
+temperature span. They retain every source curve knot and crossed surface-cell
+edge, with the original fixed context, exact property key and replayable
+receipts. Caller-added samples pin that same admitted claim. A coarse caller
+grid cannot replace a source curve or surface slice with its endpoint chord;
+support holes, source handoffs and tabulated-only temperature support refuse
+even when both endpoints exist. Source coordinates named as temperature must
+also carry temperature dimensions.
 Declared curves remain explicitly authored models without database authority.
 The real NIST 304/316/6061 source-compiler/store/conduction test in
 `xtask/tests/matdb_pack_cli.rs` checks a manufactured steady temperature field,
@@ -1304,8 +1308,10 @@ authority.
   that phase curve; each accepted state evaluates those properties at its own
   temperature. Each property requires one continuously supported source claim
   throughout the requested temperature span. Every source curve knot in that
-  span is retained, so coarse caller grids cannot erase interior extrema or
-  bridge tabulated-only data. The Biot gate conservatively uses the resulting
+  span is retained; the typed conductivity path also retains every crossed
+  surface-cell edge at its declared fixed pressure or other source context.
+  Coarse caller grids cannot erase interior extrema or bridge tabulated-only
+  data. The Biot gate conservatively uses the resulting
   minimum conductivity and maximum emissivity. The explicit
   `from_material_card_without_radiation` path accepts complete typed query points,
   retains conductivity source knots and receipts, and requires no emissivity

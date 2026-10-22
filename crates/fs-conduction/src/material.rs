@@ -11,8 +11,9 @@
 //! function of the iteration path.
 //!
 //! So a [`ConductivityTable`] is built ONCE from a DECLARED temperature
-//! grid augmented with every source temperature knot: one matdb query per
-//! retained point, every receipt retained. The solve then reads the table:
+//! grid augmented with every source temperature knot and crossed surface-cell
+//! edge at fixed nonthermal context. Every canonical query receipt is retained.
+//! The solve then reads the table:
 //!
 //! - the KNOT VALUES are matdb's claim, and each carries its receipt;
 //! - values BETWEEN knots preserve the selected source's continuous scalar
@@ -382,8 +383,10 @@ impl ConductivityTable {
     /// coordinate in kelvin. All other coordinates and their descriptors must
     /// remain fixed: this table models only `k(T)`, not a changing pressure,
     /// moisture or process state. Axis aliases and source conditions are never
-    /// inferred. Source temperature knots are retained so interpolation
-    /// preserves the selected source law throughout the requested span.
+    /// inferred. The canonical material source line retains every curve knot
+    /// and crossed surface-cell edge. Caller-added samples pin that admitted
+    /// claim, so interpolation preserves one continuously supported source
+    /// law throughout the requested span.
     ///
     /// # Errors
     /// The refusals of [`Self::from_claims`], plus a missing temperature axis,
@@ -534,54 +537,75 @@ impl ConductivityTable {
         };
         let lower = point_at(grid[0])?;
         let upper = point_at(grid[grid.len() - 1])?;
-        let support = match queries {
-            Some((key, _, _)) => claims.query_envelope_typed(key, &lower, &upper, selection),
-            None => claims.query_envelope(property, &lower, &upper, selection),
-        }
-        .map_err(|error| ConductionError::MaterialQuery {
-            property: property.to_string(),
-            temperature: grid[0],
-            upstream: format!("continuous temperature support required: {error:?}"),
-        })?;
-        let selected = claims
-            .claim(support.lower.receipt.selected)
-            .expect("envelope selected an existing immutable claim");
-        let mut source_grid = grid.to_vec();
-        if let PropertyValue::Curve {
-            abscissa, knots, ..
-        } = &selected.value
-            && abscissa == temperature_axis
+        let key = match queries {
+            Some((key, _, _)) => key.clone(),
+            None => {
+                // Keep the legacy name-only query's dimensional/context
+                // refusals, then carry its complete immutable key into the
+                // canonical source-line owner. Do not infer a key from a
+                // familiar property name or erase semantic source metadata.
+                let answer = match selection {
+                    ClaimSelection::Policy(policy) => claims.query(property, &lower, policy),
+                    ClaimSelection::Pinned(pinned) => claims.query_pinned(property, &lower, pinned),
+                }
+                .map_err(|error| ConductionError::MaterialQuery {
+                    property: property.to_string(),
+                    temperature: grid[0],
+                    upstream: error.to_string(),
+                })?;
+                claims
+                    .claim(answer.receipt.selected)
+                    .expect("query selected an existing immutable claim")
+                    .key
+                    .clone()
+            }
+        };
+        let line = claims
+            .query_line_typed(&key, temperature_axis, &lower, &upper, selection)
+            .map_err(|error| ConductionError::MaterialQuery {
+                property: property.to_string(),
+                temperature: grid[0],
+                upstream: format!("continuous temperature support required: {error:?}"),
+            })?;
+        let selected = line.knots[0].1.receipt.selected;
+        if claims
+            .claim(selected)
+            .expect("source line selected an existing immutable claim")
+            .value
+            .axes()
+            .any(|(axis, dims)| axis == temperature_axis && dims != crate::TEMPERATURE_DIMS)
         {
-            source_grid.extend(
-                knots
-                    .iter()
-                    .map(|(t, _)| *t)
-                    .filter(|t| (grid[0]..=grid[grid.len() - 1]).contains(t)),
-            );
-            source_grid.sort_by(f64::total_cmp);
-            source_grid.dedup();
+            return Err(ConductionError::Conductivity {
+                what: format!("source axis {temperature_axis:?} must have temperature dimensions"),
+            });
         }
+        let mut source_grid = grid.to_vec();
+        source_grid.extend(line.knots.iter().map(|(temperature, _)| *temperature));
+        source_grid.sort_by(f64::total_cmp);
+        source_grid.dedup();
+        let mut source_answers = line.knots.into_iter().peekable();
         let mut knots = Vec::with_capacity(source_grid.len());
         let mut receipts = Vec::with_capacity(source_grid.len());
         for t in source_grid {
-            let point = point_at(t)?;
-            let answer = match (selection, queries) {
-                (ClaimSelection::Policy(policy), Some((key, _, _))) => {
-                    claims.query_typed(key, &point, policy)
-                }
-                (ClaimSelection::Pinned(pinned), Some((key, _, _))) => {
-                    claims.query_pinned_typed(key, &point, pinned)
-                }
-                (ClaimSelection::Policy(policy), None) => claims.query(property, &point, policy),
-                (ClaimSelection::Pinned(pinned), None) => {
-                    claims.query_pinned(property, &point, pinned)
-                }
-            }
-            .map_err(|e| ConductionError::MaterialQuery {
-                property: property.to_string(),
-                temperature: t,
-                upstream: e.to_string(),
-            })?;
+            let answer = if source_answers
+                .peek()
+                .is_some_and(|(source_t, _)| *source_t == t)
+            {
+                source_answers
+                    .next()
+                    .expect("peeked canonical source answer")
+                    .1
+            } else {
+                // The line owner has proved one source over the entire span.
+                // Sampling that law more densely must not select a new source.
+                claims
+                    .query_pinned_typed(&key, &point_at(t)?, selected)
+                    .map_err(|error| ConductionError::MaterialQuery {
+                        property: property.to_string(),
+                        temperature: t,
+                        upstream: error.to_string(),
+                    })?
+            };
             let sample = &answer.evidence.value;
             if sample.dims != CONDUCTIVITY_DIMS {
                 return Err(ConductionError::Dimensions {
