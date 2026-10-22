@@ -222,8 +222,10 @@ The certificate is Rouché's theorem on the Schur complement of
 - `certify_modal_damping_windowed_far_rows` takes the far-row bound itself.
   FE callers form it as the mass norm of the residual
   `M⁻¹x_j − Σ_{k∈near∪{j}} φ̂_k C_kj`, with a floor of about `ε‖C e_j‖`.
-  The plate owner's `PlateViscosity` windowed projection in fs-couple does
-  this, and adds the measured mass-orthonormality defect of its modes.
+  `residual_far_row_bounds` does this for a lumped mass. It charges the
+  measured defect of `ΦᵀMΦ = I`, the caller's bound on the rounding of
+  `x_j = C_FE φ̂_j`, and first-order `γ_k` allowances. The plate owner's
+  windowed projection in fs-couple calls it.
 - `FarCouplingBound` reports the bounds used.
 
 Comparisons carry `ROUCHE_SAFETY = 1e-9` relative; this is not interval

@@ -68,7 +68,8 @@
 //!   `r_j = M⁻¹x_j − Σ_{k∈near∪{j}} φ̂_k C_kj`: for M-orthonormal modes,
 //!   `C_kj = ⟨φ̂_k, r_j⟩_M` for every unread k, so `Σ_far C_kj² ≤ ‖r_j‖²_M`.
 //!   The residual is formed by subtracting vectors, not squares, and its
-//!   floor is about `ε‖C e_j‖`.
+//!   floor is about `ε‖C e_j‖`. [`residual_far_row_bounds`] forms it for a
+//!   lumped mass, charging the measured defect of ΦᵀMΦ = I and the rounding.
 //! - Splitting the complement into modes within `window/2` of the disc and the
 //!   rest gives `e ≤ max(‖Ē_NN‖, ‖Ē_FF‖) + ‖Ē_NF‖`. Only the first term needs
 //!   matrix entries.
@@ -311,6 +312,156 @@ pub fn damping_window_neighbours(
         neighbours[i] = row;
     }
     Ok(neighbours)
+}
+
+/// Window entries and Bessel bounds on the rest of each row, from
+/// [`residual_far_row_bounds`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidualFarBounds {
+    /// Row j holds `(k, C_jk)` for k = j and every window neighbour,
+    /// ascending. Each pair is formed once, so `C_jk` and `C_kj` are one value.
+    pub near: Vec<Vec<(usize, f64)>>,
+    /// Bound on the norm of each row's unformed off-diagonal entries.
+    pub far_row_norm: Vec<f64>,
+    /// Bound on each column norm `‖C e_j‖`.
+    pub column_norm: Vec<f64>,
+    /// Bound on `‖ΦᵀMΦ − I‖₂` of the given modes, charged to both bounds.
+    pub basis_defect: f64,
+}
+
+/// Form `C_kj = φ_kᵀx_j` inside the window and bound the rest of each row
+/// from the residual `r_j = M⁻¹x_j − Σ_{k∈near∪{j}} φ_k C_kj`.
+///
+/// - `mass` is the diagonal of a lumped positive mass matrix.
+/// - `modes` are the retained shapes φ_j on the same DOFs, mass-normalized.
+///   They need not be exactly M-orthonormal: the measured defect
+///   `E = ΦᵀMΦ − I` is charged.
+/// - `applied[j]` is `x_j = C_FE φ_j` as the caller computed it, and
+///   `applied_error[j]` bounds its distance from the exact product in the
+///   M⁻¹ norm.
+///
+/// For every unformed retained k, and for ANY near coefficients,
+/// `C_kj = ⟨φ_k, r_j⟩_M + Σ_l E_kl C_lj − φ_kᵀδx_j`. Hence
+/// `‖far_j‖ ≤ √(1+‖E‖)(‖r_j‖_M + ‖δx_j‖_{M⁻¹}) + ‖E‖‖C_near,j‖`, and Bessel
+/// covers every mode of the underlying space, retained or not. The rounding
+/// of r_j, of the Gram sums and of the norms enters as first-order `γ_k`
+/// allowances; this is not interval arithmetic. Cost: O(n²·dofs) for the
+/// defect plus O(Σ|near|·dofs).
+///
+/// # Errors
+/// [`ModalError::DampingInput`] for mismatched shapes, a bad frequency,
+/// window or mass, a non-finite mode or applied vector, a negative or
+/// non-finite error bound, or a bound that overflows.
+pub fn residual_far_row_bounds(
+    omega: &[f64],
+    window: f64,
+    mass: &[f64],
+    modes: &[Vec<f64>],
+    applied: &[Vec<f64>],
+    applied_error: &[f64],
+) -> Result<ResidualFarBounds, ModalError> {
+    let n = omega.len();
+    let dofs = mass.len();
+    if n == 0 || modes.len() != n || applied.len() != n || applied_error.len() != n {
+        return Err(input("residual bound shape", n));
+    }
+    let neighbours = damping_window_neighbours(omega, window)?;
+    for (d, &m) in mass.iter().enumerate() {
+        if !(m.is_finite() && m > 0.0) {
+            return Err(input("lumped mass", d));
+        }
+    }
+    for j in 0..n {
+        if modes[j].len() != dofs || applied[j].len() != dofs {
+            return Err(input("residual bound shape", j));
+        }
+        if modes[j].iter().chain(&applied[j]).any(|v| !v.is_finite()) {
+            return Err(input("non-finite mode or applied vector", j));
+        }
+        if !(applied_error[j].is_finite() && applied_error[j] >= 0.0) {
+            return Err(input("applied error bound", j));
+        }
+    }
+    let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
+    let mass_norm = |v: &[f64]| det::sqrt(v.iter().zip(mass).map(|(p, m)| m * p * p).sum::<f64>());
+    let inverse_norm =
+        |v: &[f64]| det::sqrt(v.iter().zip(mass).map(|(p, m)| p * p / m).sum::<f64>());
+    let mut near: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for j in 0..n {
+        near[j].push((j, dot(&modes[j], &applied[j])));
+        for &k in neighbours[j].iter().filter(|&&k| k > j) {
+            let value = dot(&modes[k], &applied[j]);
+            near[j].push((k, value));
+            near[k].push((j, value));
+        }
+    }
+    for row in &mut near {
+        row.sort_by_key(|&(k, _)| k);
+    }
+    // ‖E‖_F ≥ ‖E‖₂. Each Gram sum is within γ‖φ_k‖_M‖φ_l‖_M ≤ γ(1 + ‖E‖)
+    // of exact, so ‖E‖ ≤ (g + nγ)/(1 − nγ) for the computed Frobenius norm g.
+    let mut defect_sq = 0.0_f64;
+    for k in 0..n {
+        for l in k..n {
+            let gram: f64 = modes[k]
+                .iter()
+                .zip(&modes[l])
+                .zip(mass)
+                .map(|((p, q), m)| p * m * q)
+                .sum();
+            let e = gram - if k == l { 1.0 } else { 0.0 };
+            defect_sq += if k == l { e * e } else { 2.0 * e * e };
+        }
+    }
+    let spread = n as f64 * gamma(dofs + 2);
+    if !(spread < 0.5) {
+        return Err(input("residual bound size", n));
+    }
+    let g = det::sqrt(defect_sq) * (1.0 + gamma(n * n + 2));
+    let basis_defect = (g + spread) / (1.0 - spread);
+    let inflate = det::sqrt(1.0 + basis_defect);
+    // A computed norm is within γ_{dofs+2} of exact (positive terms, sqrt).
+    let norms = 1.0 + gamma(dofs + 2);
+    let mut far = Vec::with_capacity(n);
+    let mut column = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut r: Vec<f64> = applied[j].iter().zip(mass).map(|(x, m)| x / m).collect();
+        let mut magnitude: Vec<f64> = r.iter().map(|v| v.abs()).collect();
+        let mut near_sq = 0.0_f64;
+        for &(k, value) in &near[j] {
+            near_sq = value.mul_add(value, near_sq);
+            for ((r, size), &p) in r.iter_mut().zip(&mut magnitude).zip(&modes[k]) {
+                let t = p * value;
+                *r -= t;
+                *size += t.abs();
+            }
+        }
+        // Each residual entry took one division and |near| products and
+        // subtractions: within γ_{2|near|+2} of its magnitude sum.
+        let residual_rounding = gamma(2 * near[j].len() + 2) * mass_norm(&magnitude) * norms;
+        column.push(inflate * (inverse_norm(&applied[j]) * norms + applied_error[j]));
+        far.push(
+            inflate * (mass_norm(&r) * norms + residual_rounding + applied_error[j])
+                + basis_defect * det::sqrt(near_sq) * norms,
+        );
+    }
+    if let Some(j) = (0..n).find(|&j| {
+        !(far[j].is_finite() && column[j].is_finite() && near[j].iter().all(|(_, v)| v.is_finite()))
+    }) {
+        return Err(input("residual bound overflow", j));
+    }
+    Ok(ResidualFarBounds {
+        near,
+        far_row_norm: far,
+        column_norm: column,
+        basis_defect,
+    })
+}
+
+/// `γ_k = kε/(1 − kε)`: the relative error bound of k rounded operations.
+fn gamma(k: usize) -> f64 {
+    let ke = k as f64 * f64::EPSILON;
+    ke / (1.0 - ke)
 }
 
 /// How a windowed certificate bounds the entries it does not read.

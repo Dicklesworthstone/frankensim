@@ -46,6 +46,7 @@ readonly -a MODAL_DAMPING_TESTS=(
   g0_windowed_certificate_encloses_dense_truth
   g0_window_neighbours_are_exactly_the_entries_read
   g0_far_row_bound_path_encloses_dense_truth_and_refuses_bad_bounds
+  g0_residual_far_row_bound_encloses_exact_far_norm
 )
 readonly PLATE_DAMPING_MODULE=thin_plate::material_loss::ports::tensor_tests
 readonly -a PLATE_DAMPING_TESTS=(

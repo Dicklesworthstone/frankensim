@@ -209,20 +209,16 @@ impl PlateViscosity {
     /// path). Entries are formed only for `|w_i - w_k| < window` [rad/s]; the
     /// rest of each row is bounded, never formed.
     ///
-    /// `x_j = C_FE phi_j` comes from the same element loop. The lumped mass
-    /// makes `y_j = M^-1 x_j` exact per entry. The residual
-    /// `r_j = y_j - sum_{k in near+j} phi_k C_kj` is M-orthogonal to the near
-    /// modes, so every unformed retained entry is
-    /// `C_kj = <phi_k,r_j>_M + sum_l E_kl C_lj` with `E = Phi^T M Phi - I`,
-    /// and `||far_j|| <= sqrt(1+||E||) ||r_j||_M + ||E|| ||C_near,j||`.
-    /// Bessel covers every mode of the plate, retained or not. Rounding enters
-    /// as first-order allowances; this is not interval arithmetic.
+    /// `x_j = C_FE phi_j` comes from the same element loop, with a bound on its
+    /// own rounding. `fs_modal::residual_far_row_bounds` then forms the window
+    /// entries and bounds every other entry of the row by Bessel on the
+    /// lumped-mass residual `r_j = M^-1 x_j - sum_{k in near+j} phi_k C_kj`,
+    /// charging the measured defect of `Phi^T M Phi = I`.
     pub(crate) fn project_windowed(&self, chart:&ResolvedPlateChart, model:&PlateModel,
         phi:&[Vec<f64>], omega:&[f64], window:f64, limits:PlateViscosityLimits, gate:&CancelGate)
         -> Result<WindowedPlateViscosity,AcousticRealizeError>
     {
         let n = self.admit(chart,phi,omega,limits,gate)?;
-        let neighbours = fs_modal::damping_window_neighbours(omega,window).map_err(owner)?;
         let free = model.free;
         if phi.iter().any(|v|v.len() != free) { return Err(invalid("windowed viscosity needs reduced-DOF modal vectors")); }
         let mut mass = vec![0.0; free];
@@ -254,57 +250,17 @@ impl PlateViscosity {
                 }
             }
         }
-        let dot = |a:&[f64],b:&[f64]| a.iter().zip(b).map(|(p,q)|p*q).sum::<f64>();
-        let mass_norm = |v:&[f64]| v.iter().zip(&mass).map(|(p,m)|m*p*p).sum::<f64>().sqrt();
-        let inverse_norm = |v:&[f64]| v.iter().zip(&mass).map(|(p,m)|p*p/m).sum::<f64>().sqrt();
-        // Each near entry is formed once, so both of its rows hold one value.
-        let mut near:Vec<Vec<(usize,f64)>> = vec![Vec::new(); n];
-        for j in 0..n {
-            poll(gate)?;
-            near[j].push((j,dot(&phi[j],&x[j])));
-            for &k in neighbours[j].iter().filter(|&&k|k > j) {
-                let value = dot(&phi[k],&x[j]);
-                near[j].push((k,value)); near[k].push((j,value));
-            }
-        }
-        for row in &mut near { row.sort_by_key(|&(k,_)|k); }
-        if near.iter().flatten().any(|(_,v)|!v.is_finite()) { return Err(invalid("windowed material damping is not finite")); }
-        // ||E||_F >= ||E||_2 on the actual basis, plus the rounding of its sums.
-        let eps = f64::EPSILON;
-        let mut defect_sq = 0.0;
-        for k in 0..n {
-            poll(gate)?;
-            for l in k..n {
-                let e = (0..free).map(|d|phi[k][d]*mass[d]*phi[l][d]).sum::<f64>() - if k == l {1.0} else {0.0};
-                defect_sq += if k == l {e*e} else {2.0*e*e};
-            }
-        }
-        let gram = defect_sq.sqrt();
-        let defect = gram + 1.01*(free as f64 + 1.0)*eps*n as f64*(1.0 + gram);
-        let widest = terms.iter().copied().max().unwrap_or(0) as f64;
-        let inflate = (1.0 + defect).sqrt();
-        let (mut far, mut column) = (Vec::with_capacity(n), Vec::with_capacity(n));
-        for j in 0..n {
-            poll(gate)?;
-            let mut r:Vec<f64> = x[j].iter().zip(&mass).map(|(v,m)|v/m).collect();
-            let mut magnitude:Vec<f64> = r.iter().map(|v|v.abs()).collect();
-            let mut near_sq = 0.0;
-            for &(k,value) in &near[j] {
-                near_sq += value*value;
-                for d in 0..free { let t = phi[k][d]*value; r[d] -= t; magnitude[d] += t.abs(); }
-            }
-            // First-order rounding of the residual's own steps, of the element
-            // sums in x_j, of the near dot products, and of the final norms.
-            let steps = (near[j].len() + 2) as f64;
-            let column_j = inverse_norm(&x[j]);
-            let rounding = 1.01*eps*(2.0*steps*mass_norm(&magnitude) + widest*inverse_norm(&size[j])
-                + (free as f64 + 1.0)*steps.sqrt()*column_j);
-            let norms = 1.0 + 1.01*(free as f64 + 1.0)*eps;
-            column.push(inflate*(column_j*norms + rounding));
-            far.push(inflate*(mass_norm(&r)*norms + rounding) + defect*near_sq.sqrt());
-        }
-        if far.iter().chain(&column).any(|v|!v.is_finite()) { return Err(invalid("windowed material damping bound is not finite")); }
-        Ok(WindowedPlateViscosity { omega:omega.to_vec(), window, near, far, column, defect })
+        // |dx_d| <= gamma_K (|C_FE||phi_j|)_d with K terms summed into any DOF.
+        let k_eps = terms.iter().copied().max().unwrap_or(0) as f64*f64::EPSILON;
+        let applied_error:Vec<f64> = size.iter().map(|s| {
+            let norm = s.iter().zip(&mass).map(|(v,m)|v*v/m).sum::<f64>().sqrt();
+            1.01*k_eps/(1.0-k_eps)*norm
+        }).collect();
+        poll(gate)?;
+        let bounds = fs_modal::residual_far_row_bounds(omega,window,&mass,phi,&x,&applied_error).map_err(owner)?;
+        poll(gate)?;
+        Ok(WindowedPlateViscosity { omega:omega.to_vec(), window, near:bounds.near, far:bounds.far_row_norm,
+            column:bounds.column_norm, defect:bounds.basis_defect })
     }
 }
 

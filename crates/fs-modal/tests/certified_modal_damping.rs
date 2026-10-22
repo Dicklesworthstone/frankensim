@@ -802,3 +802,190 @@ fn g0_far_row_bound_path_encloses_dense_truth_and_refuses_bad_bounds() {
     );
     assert_eq!(violations, 0);
 }
+
+/// `Σ aᵢbᵢ` as an unevaluated pair `hi + lo`, about ε² relative to `Σ|aᵢbᵢ|`:
+/// every product and partial sum keeps its exact rounding error (Dot2,
+/// Ogita, Rump and Oishi 2005).
+fn dot2(a: &[f64], b: &[f64]) -> (f64, f64) {
+    let (mut sum, mut carry) = (0.0_f64, 0.0_f64);
+    for (&x, &y) in a.iter().zip(b) {
+        let p = x * y;
+        let product_error = x.mul_add(y, -p);
+        let t = sum + p;
+        let z = t - sum;
+        carry += (sum - (t - z)) + (p - z) + product_error;
+        sum = t;
+    }
+    (sum, carry)
+}
+
+#[test]
+fn g0_residual_far_row_bound_encloses_exact_far_norm() {
+    // The residual route must still be an UPPER bound. Each trial builds a
+    // random lumped space: a diagonal mass spanning six decades (rotary-like
+    // DOFs), an SPD stiffness and a PSD C_FE. Modes come from the dense
+    // generalized solve, all of them or a lowest subset retained. In a
+    // quarter of the trials the retained shapes are perturbed by 1e-14..1e-6,
+    // so the charged basis defect carries weight. Truth is every unformed
+    // retained entry φ_kᵀC_FEφ_j, computed in compensated arithmetic on the
+    // same f64 inputs.
+    let started = std::time::Instant::now();
+    let (mut checked, mut far_violations, mut column_violations) = (0usize, 0usize, 0usize);
+    let (mut worst, mut worst_trial) = (0.0_f64, 0u32);
+    let mut tight_ratios = Vec::new();
+    let (mut complete_trials, mut perturbed_trials, mut max_defect) = (0usize, 0usize, 0.0_f64);
+    for trial in 0..4096_u32 {
+        let mut s = StreamKey {
+            seed: 0x4d30_3257_3561,
+            kernel: 10,
+            tile: trial,
+        }
+        .stream();
+        let dofs = 4 + s.next_below(41) as usize;
+        let mass: Vec<f64> = (0..dofs).map(|_| log_uniform(&mut s, 1e-6, 1.0)).collect();
+        let a: Vec<f64> = (0..dofs * dofs).map(|_| 2.0 * s.next_f64() - 1.0).collect();
+        let (mut k, mut m) = (vec![0.0; dofs * dofs], vec![0.0; dofs * dofs]);
+        for i in 0..dofs {
+            m[dofs * i + i] = mass[i];
+            for j in 0..=i {
+                let sum: f64 = (0..dofs).map(|r| a[dofs * i + r] * a[dofs * j + r]).sum();
+                k[dofs * i + j] = sum;
+                k[dofs * j + i] = sum;
+            }
+            k[dofs * i + i] += 1e-3 * dofs as f64;
+        }
+        let pairs = fs_modal::eigh_gen_dense(&k, &m, dofs).expect("dense modes");
+        let complete = s.next_f64() < 0.5;
+        let n = if complete {
+            dofs
+        } else {
+            2 + s.next_below(dofs as u64 - 1) as usize
+        };
+        complete_trials += usize::from(n == dofs);
+        let omega: Vec<f64> = pairs[..n].iter().map(|p| det::sqrt(p.lambda)).collect();
+        let mut phi: Vec<Vec<f64>> = pairs[..n].iter().map(|p| p.phi.clone()).collect();
+        if s.next_f64() < 0.25 {
+            perturbed_trials += 1;
+            let level = det::exp(-det::ln(10.0) * (6.0 + 8.0 * s.next_f64()));
+            for v in &mut phi {
+                for x in v.iter_mut() {
+                    *x *= 1.0 + level * (2.0 * s.next_f64() - 1.0);
+                }
+            }
+        }
+        let rank = 1 + s.next_below(dofs as u64) as usize;
+        let b: Vec<f64> = (0..dofs * rank).map(|_| 2.0 * s.next_f64() - 1.0).collect();
+        let mut c_fe = vec![0.0; dofs * dofs];
+        for i in 0..dofs {
+            for j in 0..=i {
+                let sum: f64 = (0..rank).map(|r| b[rank * i + r] * b[rank * j + r]).sum();
+                c_fe[dofs * i + j] = sum;
+                c_fe[dofs * j + i] = sum;
+            }
+        }
+        // x_j = C_FE φ_j in f64, and its rounding: |δx| ≤ γ_dofs |C_FE||φ_j|.
+        let gamma = dofs as f64 * f64::EPSILON / (1.0 - dofs as f64 * f64::EPSILON);
+        let applied: Vec<Vec<f64>> = phi
+            .iter()
+            .map(|p| {
+                (0..dofs)
+                    .map(|r| (0..dofs).map(|q| c_fe[dofs * r + q] * p[q]).sum())
+                    .collect()
+            })
+            .collect();
+        let applied_error: Vec<f64> = phi
+            .iter()
+            .map(|p| {
+                let size_sq: f64 = (0..dofs)
+                    .map(|r| {
+                        let size: f64 = (0..dofs).map(|q| (c_fe[dofs * r + q] * p[q]).abs()).sum();
+                        size * size / mass[r]
+                    })
+                    .sum();
+                1.01 * gamma * det::sqrt(size_sq)
+            })
+            .collect();
+        let window = log_uniform(&mut s, 1e-3 * omega[n - 1], 2.0 * omega[n - 1]);
+        let bounds = fs_modal::residual_far_row_bounds(
+            &omega,
+            window,
+            &mass,
+            &phi,
+            &applied,
+            &applied_error,
+        )
+        .expect("bounds");
+        max_defect = max_defect.max(bounds.basis_defect);
+        let neighbours = damping_window_neighbours(&omega, window).unwrap();
+        // Exact x_j as hi + lo pairs, then exact retained entries C_kj.
+        let exact: Vec<Vec<f64>> = phi
+            .iter()
+            .map(|p| {
+                let (mut hi, mut lo) = (vec![0.0; dofs], vec![0.0; dofs]);
+                for r in 0..dofs {
+                    (hi[r], lo[r]) = dot2(&c_fe[dofs * r..dofs * (r + 1)], p);
+                }
+                hi.extend(lo);
+                hi
+            })
+            .collect();
+        for j in 0..n {
+            let entries: Vec<f64> = (0..n)
+                .map(|kk| {
+                    let doubled: Vec<f64> = phi[kk].iter().chain(&phi[kk]).copied().collect();
+                    let (hi, lo) = dot2(&doubled, &exact[j]);
+                    hi + lo
+                })
+                .collect();
+            let far: Vec<f64> = (0..n)
+                .filter(|&kk| kk != j && neighbours[j].binary_search(&kk).is_err())
+                .map(|kk| entries[kk])
+                .collect();
+            let (hi, lo) = dot2(&far, &far);
+            let true_far = det::sqrt(hi + lo);
+            let (hi, lo) = dot2(&entries, &entries);
+            let true_column = det::sqrt(hi + lo);
+            checked += 1;
+            let bound = bounds.far_row_norm[j];
+            if true_far > bound {
+                far_violations += 1;
+            }
+            if true_column > bounds.column_norm[j] {
+                column_violations += 1;
+            }
+            let ratio = true_far / bound;
+            if ratio > worst {
+                (worst, worst_trial) = (ratio, trial);
+            }
+            // Complete spaces are where the bound can be tight.
+            if n == dofs && true_far > 0.0 {
+                tight_ratios.push(ratio);
+            }
+        }
+    }
+    tight_ratios.sort_by(f64::total_cmp);
+    let median = tight_ratios
+        .get(tight_ratios.len() / 2)
+        .copied()
+        .unwrap_or(0.0);
+    println!(
+        "{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g0_residual_far_row_bound_encloses_exact_far_norm\",\"tier\":\"G0\",\"inputs\":{{\"trials\":4096,\"dofs\":[4,44],\"mass_decades\":6,\"complete_trials\":{complete_trials},\"perturbed_trials\":{perturbed_trials}}},\"provenance\":\"fs-rand seed 0x4d3032573561 kernel 10\",\"observed\":{{\"rows_checked\":{checked},\"far_violations\":{far_violations},\"column_violations\":{column_violations},\"max_true_over_bound\":{worst:e},\"worst_trial\":{worst_trial},\"complete_space_median_true_over_bound\":{median:e},\"complete_space_samples\":{},\"max_basis_defect\":{max_defect:e}}},\"tolerance\":{{\"true_over_bound\":1.0}},\"verdict\":\"{}\",\"elapsed_s\":{:.1}}}",
+        tight_ratios.len(),
+        if far_violations == 0 && column_violations == 0 {
+            "pass"
+        } else {
+            "fail"
+        },
+        started.elapsed().as_secs_f64()
+    );
+    assert_eq!(
+        far_violations, 0,
+        "far-row bounds must enclose the exact far norm"
+    );
+    assert_eq!(
+        column_violations, 0,
+        "column bounds must enclose the exact column norm"
+    );
+    // Coverage, not a quality claim: both kinds of trial must be live.
+    assert!(complete_trials >= 1000 && perturbed_trials >= 500);
+}
