@@ -248,6 +248,54 @@ fn lowest_positive_eigenvalues(model: &ShellModel, count: usize) -> Vec<f64> {
         .collect()
 }
 
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Reduced coordinates of a nodal field given on every component.
+fn reduced_from_field(
+    tied: &TiedShellModel,
+    meshes: &[&ShellMesh],
+    field: impl Fn([f64; 3]) -> [f64; 6],
+) -> Vec<f64> {
+    let mut u_r = vec![0.0; tied.model.free];
+    for (c, mesh) in meshes.iter().enumerate() {
+        for (n, &p) in mesh.nodes.iter().enumerate() {
+            let value = field(p);
+            for d in 0..6 {
+                if let Some(r) = tied.map[c][n][d] {
+                    u_r[r] = value[d];
+                }
+            }
+        }
+    }
+    u_r
+}
+
+/// Largest deviation of the expanded components from `field`.
+fn expansion_error(
+    tied: &TiedShellModel,
+    meshes: &[&ShellMesh],
+    u_r: &[f64],
+    field: impl Fn([f64; 3]) -> [f64; 6],
+) -> f64 {
+    let full = tied.expand_components(u_r).expect("expansion succeeds");
+    let mut err = 0.0_f64;
+    for (c, mesh) in meshes.iter().enumerate() {
+        for (n, &p) in mesh.nodes.iter().enumerate() {
+            let value = field(p);
+            for d in 0..6 {
+                err = err.max((full[c][6 * n + d] - value[d]).abs());
+            }
+        }
+    }
+    err
+}
+
 #[test]
 fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
     let started = std::time::Instant::now();
@@ -258,17 +306,18 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
     let lx = 0.30;
     let ly = 0.20;
     let hz = 0.12;
-    let nx = 3usize;
-    let ny = 2usize;
-    let nz = 2usize;
 
-    // Horizontal flange: x in [0, lx], y in [-ly/2, ly/2], z = 0 (seam at y = 0 -> row j = 1).
-    let flange_mesh = rect_xy_mesh(0.0, lx, -0.5 * ly, 0.5 * ly, 0.0, nx, ny);
-    // Vertical web: x in [0, lx], y = 0, z in [-hz, 0] (seam at z = 0 -> row k = nz).
-    let web_mesh = rect_xz_mesh(0.0, lx, 0.0, -hz, 0.0, nx, nz);
-
-    let master_seam: Vec<usize> = (0..=nx).map(|i| 1 * (nx + 1) + i).collect();
-    let slave_seam: Vec<usize> = (0..=nx).map(|i| nz * (nx + 1) + i).collect();
+    // Three components meet at the seam y = z = 0: two flange halves and a web.
+    // The left half is the master with 6 seam nodes; the right half and the web
+    // are slaves with 4, a 2:3 node ratio on both mortar edges.
+    let (nx_master, nx_slave, nz) = (5usize, 3usize, 2usize);
+    let flange_left = rect_xy_mesh(0.0, lx, -0.5 * ly, 0.0, 0.0, nx_master, 1);
+    let flange_right = rect_xy_mesh(0.0, lx, 0.0, 0.5 * ly, 0.0, nx_slave, 1);
+    let web = rect_xz_mesh(0.0, lx, 0.0, -hz, 0.0, nx_slave, nz);
+    let meshes = [&flange_left, &flange_right, &web];
+    let master_seam: Vec<usize> = (0..=nx_master).map(|i| (nx_master + 1) + i).collect();
+    let right_seam: Vec<usize> = (0..=nx_slave).collect();
+    let web_seam: Vec<usize> = (0..=nx_slave).map(|i| nz * (nx_slave + 1) + i).collect();
 
     for (kind, rotations) in [ElementKind::CstDkt, ElementKind::Mitc3p]
         .into_iter()
@@ -277,43 +326,43 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
                 .map(|rotations| (kind, rotations))
         })
     {
-        // 1. Unconstrained T-junction: check 6 rigid-body modes (|lambda_i| / lambda_7 < 1e-12).
-        let mod_flange =
-            assemble_component_model(kind, &flange_mesh, e_pa, nu, h_m, rho, &[], DRILLING_ALPHA);
-        let mod_web =
-            assemble_component_model(kind, &web_mesh, e_pa, nu, h_m, rho, &[], DRILLING_ALPHA);
-        let h_flange = vec![h_m; flange_mesh.nodes.len()];
-        let h_web = vec![h_m; web_mesh.nodes.len()];
-        let comps = [
-            ShellComponent {
-                id: 0,
-                mesh: &flange_mesh,
-                model: &mod_flange,
-                nodal_thickness_m: &h_flange,
-            },
-            ShellComponent {
-                id: 1,
-                mesh: &web_mesh,
-                model: &mod_web,
-                nodal_thickness_m: &h_web,
-            },
-        ];
-        let ties = [EdgeTie {
+        let models: Vec<ShellModel> = meshes
+            .iter()
+            .map(|mesh| {
+                assemble_component_model(kind, mesh, e_pa, nu, h_m, rho, &[], DRILLING_ALPHA)
+            })
+            .collect();
+        let thickness: Vec<Vec<f64>> = meshes.iter().map(|m| vec![h_m; m.nodes.len()]).collect();
+        let comps: Vec<ShellComponent> = (0..3)
+            .map(|c| ShellComponent {
+                id: c,
+                mesh: meshes[c],
+                model: &models[c],
+                nodal_thickness_m: &thickness[c],
+            })
+            .collect();
+        let tie = |component: usize, nodes: &[usize], rotations: RotationCoupling| EdgeTie {
             a: TieSide {
                 component: 0,
                 nodes: master_seam.clone(),
             },
             b: TieSide {
-                component: 1,
-                nodes: slave_seam.clone(),
+                component,
+                nodes: nodes.to_vec(),
             },
             offset: TieOffset::Midsurface,
             rotations,
             kind: TieKind::Rigid,
-        }];
+        };
+        // The coplanar half shares all six rotations; the web is the fold.
+        let ties = [
+            tie(1, &right_seam, RotationCoupling::Full),
+            tie(2, &web_seam, rotations),
+        ];
         let tied = tie_shells(&comps, &ties, default_tie_budget(), || false)
             .expect("T-junction tie succeeds");
 
+        // 1. Exactly six rigid-body modes (|lambda_i| / lambda_7 < 1e-12).
         let eigs = lowest_eigenvalues_shifted(&tied.model, 8, 1.0);
         let lambda_7 = eigs[6];
         assert!(
@@ -331,29 +380,55 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
             );
         }
 
-        // 2. Constant-membrane-strain patch test across the seam:
-        // Prescribe uniaxial stress sigma_xx = E * eps_0 along x on both flange and web.
-        // At x = 0: fix u_x = 0 (and minimal rigid support at (0,0,0) and (0, ly/2, 0)).
-        // At x = lx: apply consistent nodal traction forces F_x = E * h * L_edge_share * eps_0.
-        // Verify that the static solution K_r u_r = f_r (with minimal isostatic support)
-        // recovers constant strain du_x/dx = eps_0, du_y/dy = -nu * eps_0 (flange),
-        // du_z/dz = -nu * eps_0 (web) across the T-junction seam to 1e-12!
-        let eps_0 = 1e-4;
-        let patch_err = verify_t_junction_constant_strain_patch(
-            &flange_mesh,
-            &web_mesh,
-            &tied,
-            e_pa,
-            nu,
-            h_m,
-            lx,
-            ly,
-            hz,
-            nx,
-            ny,
-            nz,
-            eps_0,
+        // 2. Tie forces under each of the six rigid motions: every component's
+        // internal force K_c q_c, row by row relative to its absolute sum, and
+        // the expanded slave field against the rigid field.
+        let mut max_force_ratio = 0.0_f64;
+        let mut max_rigid_field_err = 0.0_f64;
+        for motion in 0..6 {
+            let field = |p: [f64; 3]| -> [f64; 6] {
+                let mut t = [0.0; 3];
+                let mut w = [0.0; 3];
+                if motion < 3 {
+                    t[motion] = 1.0;
+                } else {
+                    w[motion - 3] = 1.0 / lx;
+                }
+                let r = cross3(w, p);
+                [t[0] + r[0], t[1] + r[1], t[2] + r[2], w[0], w[1], w[2]]
+            };
+            let u_r = reduced_from_field(&tied, &meshes, field);
+            max_rigid_field_err =
+                max_rigid_field_err.max(expansion_error(&tied, &meshes, &u_r, field));
+            let free = tied
+                .expand_component_free(&u_r)
+                .expect("expansion succeeds");
+            for (c, model) in models.iter().enumerate() {
+                let mut force = vec![0.0; model.free];
+                model.k.spmv(&free[c], &mut force);
+                for (i, &f) in force.iter().enumerate() {
+                    let (cols, vals) = model.k.row(i);
+                    let scale: f64 = cols
+                        .iter()
+                        .zip(vals)
+                        .map(|(&j, &v)| (v * free[c][j]).abs())
+                        .sum();
+                    if scale > 0.0 {
+                        max_force_ratio = max_force_ratio.max(f.abs() / scale);
+                    }
+                }
+            }
+        }
+        assert!(
+            max_force_ratio <= 1e-12 && max_rigid_field_err <= 1e-12,
+            "{} {rotations:?}: rigid-motion tie force ratio {max_force_ratio:e}, field error {max_rigid_field_err:e}",
+            kind.name()
         );
+
+        // 3. Constant membrane strain across both 2:3 mortar edges.
+        let eps_0 = 1e-4;
+        let patch_err =
+            verify_t_junction_constant_strain_patch(&meshes, &tied, e_pa, nu, h_m, lx, eps_0);
         assert!(
             patch_err < 1e-12,
             "{} {rotations:?}: T-junction constant-strain patch relative error {patch_err:e} >= 1e-12",
@@ -361,102 +436,98 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
         );
 
         println!(
-            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_t_junction_rigid_modes_and_constant_strain_patch\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"max_rigid_ratio\":{:e},\"lambda_7\":{},\"constant_strain_patch_err\":{:e},\"elapsed_s\":{}}}",
+            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_t_junction_rigid_modes_and_constant_strain_patch\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"components\":3,\"seam_nodes\":[{},{},{}],\"max_rigid_ratio\":{:e},\"lambda_7\":{},\"rigid_tie_force_ratio\":{:e},\"rigid_field_err\":{:e},\"constant_strain_patch_err\":{:e},\"elapsed_s\":{}}}",
             kind.name(),
+            master_seam.len(),
+            right_seam.len(),
+            web_seam.len(),
             max_rigid_ratio,
             lambda_7,
+            max_force_ratio,
+            max_rigid_field_err,
             patch_err,
             started.elapsed().as_secs_f64()
         );
     }
 }
 
+/// Uniaxial stress sigma_xx = E eps_0 on every component: u = eps_0 (x, -nu y,
+/// -nu z), no rotation, end tractions on x = 0 and x = lx. The exact field must
+/// balance the projected loads at every reduced DOF, seam DOFs included, and
+/// the expanded slaves must reproduce it.
 #[allow(clippy::too_many_arguments)]
 fn verify_t_junction_constant_strain_patch(
-    flange_mesh: &ShellMesh,
-    web_mesh: &ShellMesh,
+    meshes: &[&ShellMesh],
     tied: &TiedShellModel,
     e_pa: f64,
     nu: f64,
     h_m: f64,
     lx: f64,
-    ly: f64,
-    hz: f64,
-    nx: usize,
-    ny: usize,
-    nz: usize,
     eps_0: f64,
 ) -> f64 {
-    // Exact uniaxial stress state sigma_xx = E * eps_0, sigma_yy = sigma_zz = 0:
-    // u_x(x, y, z) = eps_0 * x
-    // On flange (z = 0): u_y = -nu * eps_0 * y, u_z = 0, theta = 0
-    // On web (y = 0):    u_y = 0, u_z = -nu * eps_0 * z, theta = 0
-    // Evaluate K_c * u_exact on both components and project f_r = T^T f_exact:
-    // On all interior and seam nodes (where boundary tractions are zero), (K_r u_r)_i must be 0!
-    // And solving K_r u_r = f_r with boundary DOFs pinned to u_exact recovers u_exact everywhere to < 1e-12.
-    let mut u_r_exact = vec![0.0; tied.model.free];
-    for (n, &[x, y, _z]) in flange_mesh.nodes.iter().enumerate() {
-        let exact = [eps_0 * x, -nu * eps_0 * y, 0.0, 0.0, 0.0, 0.0];
-        for d in 0..6 {
-            if let Some(r) = tied.map[0][n][d] {
-                u_r_exact[r] = exact[d];
-            }
-        }
-    }
-    for (n, &[x, _y, z]) in web_mesh.nodes.iter().enumerate() {
-        let exact = [eps_0 * x, 0.0, -nu * eps_0 * z, 0.0, 0.0, 0.0];
-        for d in 0..6 {
-            if let Some(r) = tied.map[1][n][d] {
-                u_r_exact[r] = exact[d];
-            }
-        }
-    }
+    let field = |p: [f64; 3]| {
+        [
+            eps_0 * p[0],
+            -nu * eps_0 * p[1],
+            -nu * eps_0 * p[2],
+            0.0,
+            0.0,
+            0.0,
+        ]
+    };
+    let u_r_exact = reduced_from_field(tied, meshes, field);
 
-    // Build boundary load vector f_full at x = 0 and x = lx for uniaxial traction sigma_xx = E * eps_0.
+    // Consistent end loads: sigma_xx h over each end node's tributary length.
+    // Every end edge here runs along y (flange, z = 0) or z (web, y = 0), so
+    // y + z is the coordinate along it.
     let sigma_xx = e_pa * eps_0;
-    let mut f0 = vec![0.0; 6 * flange_mesh.nodes.len()];
-    let dy = ly / ny as f64;
-    for j in 0..=ny {
-        let weight = if j == 0 || j == ny { 0.5 * dy } else { dy };
-        let n_left = j * (nx + 1);
-        let n_right = j * (nx + 1) + nx;
-        f0[6 * n_left] -= sigma_xx * h_m * weight;
-        f0[6 * n_right] += sigma_xx * h_m * weight;
-    }
-    let mut f1 = vec![0.0; 6 * web_mesh.nodes.len()];
-    let dz = hz / nz as f64;
-    for k in 0..=nz {
-        let weight = if k == 0 || k == nz { 0.5 * dz } else { dz };
-        let n_left = k * (nx + 1);
-        let n_right = k * (nx + 1) + nx;
-        f1[6 * n_left] -= sigma_xx * h_m * weight;
-        f1[6 * n_right] += sigma_xx * h_m * weight;
-    }
+    let mut edge_length = 0.0;
+    let loads: Vec<Vec<f64>> = meshes
+        .iter()
+        .map(|mesh| {
+            let mut f = vec![0.0; 6 * mesh.nodes.len()];
+            for (end, sign) in [(0.0, -1.0), (lx, 1.0)] {
+                let mut edge: Vec<(f64, usize)> = mesh
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p[0] == end)
+                    .map(|(n, p)| (p[1] + p[2], n))
+                    .collect();
+                edge.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if sign > 0.0 {
+                    edge_length += edge.last().unwrap().0 - edge[0].0;
+                }
+                for i in 0..edge.len() {
+                    let below = if i > 0 {
+                        edge[i].0 - edge[i - 1].0
+                    } else {
+                        0.0
+                    };
+                    let above = if i + 1 < edge.len() {
+                        edge[i + 1].0 - edge[i].0
+                    } else {
+                        0.0
+                    };
+                    f[6 * edge[i].1] += sign * sigma_xx * h_m * 0.5 * (below + above);
+                }
+            }
+            f
+        })
+        .collect();
+    let load_refs: Vec<&[f64]> = loads.iter().map(Vec::as_slice).collect();
     let f_r = tied
-        .project_loads(&[&f0, &f1])
+        .project_loads(&load_refs)
         .expect("load projection succeeds");
 
-    // Check residual r = K_r * u_r_exact - f_r across all reduced DOFs (including seam DOFs!).
     let mut r_vec = vec![0.0; tied.model.free];
     tied.model.k.spmv(&u_r_exact, &mut r_vec);
-    let force_scale = sigma_xx * h_m * (ly + hz);
+    let force_scale = sigma_xx * h_m * edge_length;
     let mut max_rel_res = 0.0_f64;
     for i in 0..tied.model.free {
-        let err = (r_vec[i] - f_r[i]).abs() / force_scale;
-        max_rel_res = max_rel_res.max(err);
+        max_rel_res = max_rel_res.max((r_vec[i] - f_r[i]).abs() / force_scale);
     }
-
-    // Also check expanded slave displacements at the seam match exact field.
-    let expanded = tied.expand_components(&u_r_exact).unwrap();
-    let disp_scale = eps_0 * lx;
-    for (n, &[x, _y, z]) in web_mesh.nodes.iter().enumerate() {
-        let exact = [eps_0 * x, 0.0, -nu * eps_0 * z, 0.0, 0.0, 0.0];
-        for d in 0..6 {
-            let err = (expanded[1][6 * n + d] - exact[d]).abs() / disp_scale;
-            max_rel_res = max_rel_res.max(err);
-        }
-    }
-    max_rel_res
+    max_rel_res.max(expansion_error(tied, meshes, &u_r_exact, field) / (eps_0 * lx))
 }
 
 #[test]
@@ -525,7 +596,8 @@ fn g0_tie_virtual_work_identity() {
         }
         .stream();
         let mut max_rel_power_err = 0.0_f64;
-        for _trial in 0..64 {
+        let mut min_cancellation = f64::INFINITY;
+        for _trial in 0..1000 {
             let v_r: Vec<f64> = (0..tied.model.free)
                 .map(|_| 2.0 * rng.next_f64() - 1.0)
                 .collect();
@@ -535,10 +607,27 @@ fn g0_tie_virtual_work_identity() {
             let (p_m, p_s) = tied
                 .interface_virtual_power(&v_r, &lambda)
                 .expect("virtual power evaluation succeeds");
-            let denom = p_m.abs() + p_s.abs();
-            assert!(denom > 1e-9);
-            let rel_err = (p_m + p_s).abs() / denom;
+            // Relative to the absolute work exchanged through the couplings,
+            // sum_k |lambda_k| sum_r |w_kr v_r|, which bounds |P_m| and |P_s|.
+            // A random draw whose P cancels to a small sum has its roundoff
+            // set by this scale, not by |P|.
+            let scale: f64 = tied
+                .slave_couplings()
+                .iter()
+                .zip(&lambda)
+                .map(|(coupling, &lam)| {
+                    lam.abs()
+                        * coupling
+                            .master_terms
+                            .iter()
+                            .map(|&(r, w)| (w * v_r[r]).abs())
+                            .sum::<f64>()
+                })
+                .sum();
+            assert!(scale > 0.0);
+            let rel_err = (p_m + p_s).abs() / scale;
             max_rel_power_err = max_rel_power_err.max(rel_err);
+            min_cancellation = min_cancellation.min(p_m.abs() / scale);
             assert!(
                 rel_err <= 1e-13,
                 "{} {rotations:?}: virtual work identity violated: P_m={p_m}, P_s={p_s}, rel_err={rel_err:e}",
@@ -547,7 +636,7 @@ fn g0_tie_virtual_work_identity() {
         }
 
         println!(
-            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_tie_virtual_work_identity\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"trials\":64,\"max_rel_power_err\":{:e},\"elapsed_s\":{}}}",
+            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_tie_virtual_work_identity\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"trials\":1000,\"max_rel_power_err\":{:e},\"min_abs_power_over_scale\":{min_cancellation:e},\"elapsed_s\":{}}}",
             kind.name(),
             max_rel_power_err,
             started.elapsed().as_secs_f64()
