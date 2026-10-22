@@ -185,3 +185,6 @@ mod heating;
 
 #[path = "thermoelastic_body/vibration.rs"]
 mod vibration;
+
+#[path = "thermoelastic_body/loads.rs"]
+mod loads;

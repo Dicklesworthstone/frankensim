@@ -11,14 +11,15 @@ pub(super) struct Linearization {
     pub materials: Vec<TetElasticMaterial>,
     pub strains: Vec<TetThermalStrainState>,
     pub fixed_dofs: Vec<usize>,
+    pub nodal_forces_n: Vec<(usize, f64)>,
     pub config: ThermalSolveConfig,
 }
 impl ThermalBody<'_> {
     /// Assemble the initial-stress vibration pencil of THIS accepted thermal state.
     ///
     /// Current source-resolved E/nu, reference density, thermal strains, mesh,
-    /// supports and actual displacement are retained at the successful shape
-    /// solve. No new card lookup, density query, stress multiplier or hand-entered
+    /// supports, mechanical dead forces and actual displacement are retained at
+    /// the successful shape solve. No new card lookup, density query, stress multiplier or hand-entered
     /// modal coefficient is needed. The original solid owner rechecks solution
     /// binding and supplies the ordinary (K_e + K_g, M) carrier for fs-modal.
     /// The source-backed heat path exposes this through
@@ -45,8 +46,14 @@ impl ThermalBody<'_> {
             fixed_dofs: &input.fixed_dofs,
             budget: input.config.assembly,
         };
-        Ok(problem.assemble_thermal_tangent(&self.displacement,
-            TetThermalStrainField::PerElement(&input.strains),
-            input.config.mesh_frame, input.config.maximum_absolute_mandel_strain, cx)?)
+        let field = TetThermalStrainField::PerElement(&input.strains);
+        if input.nodal_forces_n.is_empty() {
+            Ok(problem.assemble_thermal_tangent(&self.displacement, field,
+                input.config.mesh_frame, input.config.maximum_absolute_mandel_strain, cx)?)
+        } else {
+            Ok(problem.assemble_thermal_tangent_with_nodal_forces(&self.displacement,
+                field, &input.nodal_forces_n, input.config.mesh_frame,
+                input.config.maximum_absolute_mandel_strain, cx)?)
+        }
     }
 }

@@ -97,3 +97,26 @@ momentum, mechanical work and stress is outside this adapter. Source claims,
 uniform-region assumptions and refinement still bound accuracy.
 
 Focused native regressions: `cargo test -p fs-mbd-material --test heating`.
+
+## Loaded material heat and shape (MR21/MR70)
+
+`TetrahedralMass::solve_thermal_with_nodal_forces` composes the existing source
+resolution and compatible thermal solve with the original solid owner's dead
+nodal forces. Current E(T), integrated expansion, reference density, constraints
+and exact mechanical loads remain attached to the accepted shape and its
+`initial_stress_pencil`. `support_reactions_n` subtracts applied support loads
+from the original internal forces; free components remain zero.
+
+`gravity_nodal_forces` integrates original per-region density through
+`TetLoadGeometry3` on the same reference mesh and region/element map. Heating
+changes actual shape and density without changing reference matter or weight.
+`ConstrainedHeatedBody::new_with_nodal_forces` keeps the immutable force vector
+through every actual thermal substep, generated-heat observer composition,
+cooling and restart. Empty forces retain the thermal-only operator identity.
+
+This is quasistatic, fixed-topology small-strain mechanics with reference-frame
+dead loads, not follower-load or inertial dynamics. The heat audit stays thermal;
+mechanical work and elastic storage are not silently added to or claimed by it.
+Focused synthetic cases exercise density/weight, loaded softening and modes,
+correct support reactions, heterogeneous element order, heat/cool/restart and
+refusal. Native Rust execution remains a separate verification requirement.
