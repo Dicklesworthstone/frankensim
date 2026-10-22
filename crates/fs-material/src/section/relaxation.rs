@@ -1,11 +1,11 @@
 //! Material-bound relaxation of perfectly bonded concentric sections.
 //!
-//! All layers share curvature, so their bending moments add:
-//! `D*(omega) = sum(I_i E_i*(omega))`. Each Maxwell arm therefore contributes
-//! `I_i delta_E_ij` with its ORIGINAL relaxation time. Averaging time constants
-//! would change both storage and dissipation. This uses the same parallel-arm
-//! constitutive model as `visco::GeneralizedMaxwell` (Roylance, MIT 3.11,
-//! "Linear Viscoelasticity", Wiechert model).
+//! Layers share curvature or twist gradient, so their moments add. A bending
+//! arm contributes `I_i delta_E_ij`; a circular torsional arm contributes
+//! `J_i delta_G_ij`, with `J_i = 2 I_i`. Every source relaxation time survives.
+//! Averaging time constants would change both storage and dissipation.
+//! This is the parallel-arm model used by `visco::GeneralizedMaxwell`
+//! (Roylance, MIT 3.11, "Linear Viscoelasticity", Wiechert model).
 //!
 //! The section is frozen at the resolved material states. Axial creep, thermal
 //! history, interlayer slip and helical winding are not modeled by this binding.
@@ -18,36 +18,52 @@ use fs_qty::{Density, Pressure, QuantitySpec, Time};
 /// Cold-path bound on the total declared arms across all layers.
 pub const MAX_SECTION_RELAXATION_BRANCHES: usize = 128;
 
-/// Explicit source roles in one layer's original resolved material bundle.
+/// Explicit source roles for one layer's selected strain channel.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LayerBendingRelaxationProperties {
-    /// Long-time modulus [Pa], which must equal this layer's elastic Young modulus.
+pub struct LayerRelaxationProperties {
+    /// Long-time modulus [Pa], matching the channel's elastic Young/shear modulus.
     pub equilibrium_modulus: String,
     /// Ordered (modulus increment [Pa], relaxation time [s]) property names.
-    /// An empty list declares elastic bending; the equilibrium claim must then
+    /// An empty list declares an elastic channel; the equilibrium claim must
     /// supply explicit frequency support. Missing source data is never zero loss.
     pub branches: Vec<(String, String)>,
 }
 
-/// One original layer arm after integrating over its actual annular geometry.
+/// Bending selections use the same source-role data as other section channels.
+pub use self::LayerRelaxationProperties as LayerBendingRelaxationProperties;
+
+/// One original layer arm integrated over the actual bending/polar area moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LayerBendingRelaxationBranch {
+pub struct LayerRelaxationBranch {
     /// Index into the retained section's spatially ordered layers.
     pub layer_index: usize,
-    /// Nonnegative `delta_E * I` [N m2].
+    /// Nonnegative `delta_E * I` or `delta_G * J` [N m2].
     pub relaxing_stiffness_n_m2: f64,
     /// Original source time [s], not averaged with another layer or arm.
     pub relaxation_time_s: f64,
+}
+
+/// The bending-channel spelling of the shared integrated-arm representation.
+pub use self::LayerRelaxationBranch as LayerBendingRelaxationBranch;
+
+/// Distinct strain channels select their actual section integral.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SectionRelaxationAxis { Bending, Torsion }
+
+/// Shared coefficient admission; physical section wrappers keep channel identity.
+#[derive(Clone, Debug)]
+pub(super) struct SectionPronySpectrum {
+    pub(super) properties: Vec<LayerRelaxationProperties>,
+    pub(super) branches: Vec<LayerRelaxationBranch>,
+    pub(super) spectra: Vec<GeneralizedMaxwell>,
+    pub(super) omega_band_rad_s: (f64, f64),
 }
 
 /// A passive bending spectrum on the same source-bound elastic section.
 #[derive(Clone, Debug)]
 pub struct ConcentricPronySection {
     elastic: ConcentricElasticSection,
-    properties: Vec<LayerBendingRelaxationProperties>,
-    branches: Vec<LayerBendingRelaxationBranch>,
-    spectra: Vec<GeneralizedMaxwell>,
-    omega_band_rad_s: (f64, f64),
+    spectrum: SectionPronySpectrum,
 }
 
 impl ConcentricElasticSection {
@@ -66,9 +82,23 @@ impl ConcentricElasticSection {
     /// overflow/underflow. Every layer needs a binding and at most 128 total arms.
     pub fn with_prony_bending(
         self,
-        properties: &[LayerBendingRelaxationProperties],
+        properties: &[LayerRelaxationProperties],
     ) -> Result<ConcentricPronySection, MaterialStatePointError> {
-        if properties.len() != self.layers().len() {
+        let spectrum = SectionPronySpectrum::resolve(&self, YOUNG_MODULUS_PROPERTY,
+            self.bending_stiffness_n_m2(), SectionRelaxationAxis::Bending, properties)?;
+        Ok(ConcentricPronySection { elastic: self, spectrum })
+    }
+}
+
+impl SectionPronySpectrum {
+    pub(super) fn resolve(
+        elastic: &ConcentricElasticSection,
+        elastic_modulus_property: &str,
+        equilibrium_stiffness_n_m2: f64,
+        axis: SectionRelaxationAxis,
+        properties: &[LayerRelaxationProperties],
+    ) -> Result<Self, MaterialStatePointError> {
+        if properties.len() != elastic.layers().len() {
             return Err(invalid("section relaxation needs one source binding per layer"));
         }
         let mut count = 0_usize;
@@ -81,9 +111,9 @@ impl ConcentricElasticSection {
         let mut branches = Vec::with_capacity(count);
         let mut spectra = Vec::with_capacity(properties.len());
         let mut band = (0.0_f64, f64::MAX);
-        let mut instantaneous = self.bending_stiffness_n_m2();
-        for (layer_index, ((layer, geometry), binding)) in self.layers().iter()
-            .zip(self.layer_integrals()).zip(properties).enumerate()
+        let mut instantaneous = equilibrium_stiffness_n_m2;
+        for (layer_index, ((layer, geometry), binding)) in elastic.layers().iter()
+            .zip(elastic.layer_integrals()).zip(properties).enumerate()
         {
             let mut coefficient = |key: &str, quantity: QuantitySpec, needs_band: bool| {
                 let property = layer.material.property(key)
@@ -101,15 +131,19 @@ impl ConcentricElasticSection {
                 Ok(property.value_si())
             };
             coefficient(DENSITY_PROPERTY, QuantitySpec::dimensional(Density::DIMS), false)?;
-            let young = coefficient(YOUNG_MODULUS_PROPERTY,
+            let elastic_modulus = coefficient(elastic_modulus_property,
                 QuantitySpec::dimensional(Pressure::DIMS), false)?;
             let equilibrium = coefficient(&binding.equilibrium_modulus,
                 QuantitySpec::dimensional(Pressure::DIMS), binding.branches.is_empty())?;
             if !equilibrium.is_finite() || equilibrium <= 0.0
-                || equilibrium.to_bits() != young.to_bits()
+                || equilibrium.to_bits() != elastic_modulus.to_bits()
             {
-                return Err(invalid("each elastic layer must use its explicit equilibrium Young modulus"));
+                return Err(invalid("each elastic layer must use its explicit equilibrium modulus"));
             }
+            let moment = match axis {
+                SectionRelaxationAxis::Bending => geometry.second_moment_m4(),
+                SectionRelaxationAxis::Torsion => 2.0 * geometry.second_moment_m4(),
+            };
             let mut terms = Vec::with_capacity(binding.branches.len());
             for (index, pair) in binding.branches.iter().enumerate() {
                 if binding.branches[..index].contains(pair) {
@@ -120,14 +154,14 @@ impl ConcentricElasticSection {
                 if !delta.is_finite() || delta < 0.0 || !tau.is_finite() || tau <= 0.0 {
                     return Err(invalid("layer relaxation needs nonnegative modulus increments and positive times"));
                 }
-                let stiffness = delta * geometry.second_moment_m4();
+                let stiffness = delta * moment;
                 instantaneous += stiffness;
                 if !stiffness.is_finite() || (delta > 0.0 && stiffness == 0.0)
                     || !instantaneous.is_finite()
                 {
                     return Err(invalid("section relaxation stiffness is unrepresentable"));
                 }
-                branches.push(LayerBendingRelaxationBranch {
+                branches.push(LayerRelaxationBranch {
                     layer_index, relaxing_stiffness_n_m2: stiffness, relaxation_time_s: tau,
                 });
                 terms.push((delta, tau));
@@ -138,8 +172,7 @@ impl ConcentricElasticSection {
         if !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 || band.1 < band.0 {
             return Err(invalid("layer relaxation frequency bands do not intersect"));
         }
-        Ok(ConcentricPronySection { elastic: self, properties: properties.to_vec(),
-            branches, spectra, omega_band_rad_s: band })
+        Ok(Self { properties: properties.to_vec(), branches, spectra, omega_band_rad_s: band })
     }
 }
 
@@ -149,16 +182,16 @@ impl ConcentricPronySection {
     pub const fn elastic(&self) -> &ConcentricElasticSection { &self.elastic }
     /// Source selectors in the original spatial layer order.
     #[must_use]
-    pub fn properties(&self) -> &[LayerBendingRelaxationProperties] { &self.properties }
+    pub fn properties(&self) -> &[LayerRelaxationProperties] { &self.spectrum.properties }
     /// Every source arm, ordered by layer and then declaration within that layer.
     #[must_use]
-    pub fn branches(&self) -> &[LayerBendingRelaxationBranch] { &self.branches }
+    pub fn branches(&self) -> &[LayerRelaxationBranch] { &self.spectrum.branches }
     /// Original constitutive spectra [Pa, s], one per spatial layer.
     #[must_use]
-    pub fn spectra(&self) -> &[GeneralizedMaxwell] { &self.spectra }
+    pub fn spectra(&self) -> &[GeneralizedMaxwell] { &self.spectrum.spectra }
     /// Intersection of all contributing source frequency supports [rad/s].
     #[must_use]
-    pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.spectrum.omega_band_rad_s }
 }
 
 #[cfg(test)]

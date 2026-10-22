@@ -110,6 +110,14 @@ impl PolarizedStringSource {
         self.total_modes
     }
 
+    pub(super) fn add_torsional_relaxation(
+        self,
+        properties: &[fs_material::section::relaxation::LayerRelaxationProperties],
+    ) -> Result<MaterialStringSource, MaterialStatePointError> {
+        self.source.with_torsional_relaxation(properties)?
+            .with_transverse_polarizations(self.directions)
+    }
+
     pub(super) fn add_torsion(
         self,
         shear: &str,

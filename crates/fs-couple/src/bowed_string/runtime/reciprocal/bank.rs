@@ -66,6 +66,9 @@ impl MaterialStringSource {
     fn lower(&self, cx: &Cx<'_>, gas: &GasState, rate: u32)
         -> Result<BowedStringCard, ReciprocalStringError>
     {
+        if self.torsion_source().is_some_and(|twist| twist.relaxation().is_some()) {
+            return Err(invalid("this scalar string-card consumer cannot retain torsional material history"));
+        }
         match self {
             Self::WithPolarizations(p) => return p.source().lower(cx, gas, rate),
             Self::WithTorsion(t) => return t.bending().lower(cx, gas, rate),

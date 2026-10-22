@@ -4217,3 +4217,22 @@ heat and numerical loss remain separately balanced. Proposals retain atomic
 mechanical/thermal acceptance. This remains the existing small-strain,
 single-solid-phase, fixed-reference-mass and fixed-geometry model; it does not
 supply evolving-pressure work or a new constitutive or heat-transfer solver.
+
+### Source-bound torsional material memory
+
+Original string sources may bind independent per-layer shear spectra through
+`with_torsional_relaxation` after sourced torsion. The shared material section
+owner supplies each `delta_G * J` and relaxation time; the existing exact owner
+projects `delta_GJ * (n*pi/L)^2 / sum(rho*J)` into the original twist coordinates.
+These histories follow original bending histories and precede body and explicit
+bending additions. They survive gas, torque and axial rebuilds and act through
+the existing surface-friction and rotational-bridge maps, with no direct twist
+acoustic gain. Existing shear Kelvin viscosity remains a separate parallel loss.
+
+Complete instantaneous frequency support, positive-arm `dt/tau <= 2`, original
+memory/setup ceilings and cancellation gates apply. Unsupported scalar/impact
+conversion refuses instead of dropping history. This is frozen small-angle
+torsion of bonded circular sections; it does not add axial Prony loss, winding
+slip, heating or measured-alloy accuracy. Focused source and runtime regressions
+cover layer subdivision, independent complex shear response, body/pressure
+coupling, history preservation and explicit zero-arm reduction.

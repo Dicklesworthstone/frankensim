@@ -10,6 +10,9 @@
 
 use super::{ConcentricShearSection, MaterialStatePointError, positive, invalid};
 use fs_qty::{Density, DynViscosity, QuantitySpec};
+use super::relaxation::{LayerRelaxationProperties, LayerRelaxationBranch,
+    SectionPronySpectrum, SectionRelaxationAxis};
+use crate::visco::GeneralizedMaxwell;
 
 /// Original source section with rotary mass and a separately selected shear law.
 #[derive(Clone, Debug, PartialEq)]
@@ -103,4 +106,65 @@ impl ConcentricTorsionalSection {
     /// Intersection of the actual fixed-state material-law bands [rad/s].
     #[must_use]
     pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
+}
+
+/// Frozen circular torsion with independent per-layer shear-relaxation histories.
+/// The existing Kelvin dashpot remains a separately sourced parallel mechanism.
+#[derive(Clone, Debug)]
+pub struct ConcentricPronyTorsionalSection {
+    torsional: ConcentricTorsionalSection,
+    spectrum: SectionPronySpectrum,
+}
+
+impl ConcentricTorsionalSection {
+    /// Bind each layer's shear spectrum using its actual polar area moment.
+    ///
+    /// The selected equilibrium modulus must match that layer's original G;
+    /// a bending/Young modulus cannot silently replace it. A positive arm adds
+    /// `delta_G * J` without changing equilibrium GJ or rotary inertia.
+    /// Original time scales and source identities survive independently.
+    /// Explicit empty spectra are elastic; omitted layers and source claims refuse.
+    /// The existing shear viscosity supplies an independent parallel dashpot.
+    ///
+    /// This is fixed-state small-angle circular torsion for rods, shafts or
+    /// strings. It does not supply axial creep, winding slip, noncircular
+    /// warping, evolving temperature or a finite-strain constitutive model.
+    ///
+    /// # Errors
+    /// The shared section-spectrum coefficient, frequency-support and arm-budget
+    /// refusals apply. The original torsional material band must also intersect.
+    pub fn with_prony_torsion(
+        self,
+        properties: &[LayerRelaxationProperties],
+    ) -> Result<ConcentricPronyTorsionalSection, MaterialStatePointError> {
+        let mut spectrum = SectionPronySpectrum::resolve(self.shear.elastic(),
+            self.shear.shear_property(), self.stiffness_n_m2(),
+            SectionRelaxationAxis::Torsion, properties)?;
+        spectrum.omega_band_rad_s = (
+            spectrum.omega_band_rad_s.0.max(self.omega_band_rad_s.0),
+            spectrum.omega_band_rad_s.1.min(self.omega_band_rad_s.1),
+        );
+        if spectrum.omega_band_rad_s.0 > spectrum.omega_band_rad_s.1 {
+            return Err(invalid("torsional relaxation and dashpot frequency bands do not intersect"));
+        }
+        Ok(ConcentricPronyTorsionalSection { torsional: self, spectrum })
+    }
+}
+
+impl ConcentricPronyTorsionalSection {
+    /// Original GJ, rotary inertia, independent Kelvin loss and all material receipts.
+    #[must_use]
+    pub const fn torsional(&self) -> &ConcentricTorsionalSection { &self.torsional }
+    /// Source roles in physical core/sleeve order.
+    #[must_use]
+    pub fn properties(&self) -> &[LayerRelaxationProperties] { &self.spectrum.properties }
+    /// Independent `delta_G * J` arms in layer/declaration order.
+    #[must_use]
+    pub fn branches(&self) -> &[LayerRelaxationBranch] { &self.spectrum.branches }
+    /// Original shear-modulus spectra [Pa, s], one per layer.
+    #[must_use]
+    pub fn spectra(&self) -> &[GeneralizedMaxwell] { &self.spectrum.spectra }
+    /// Intersection of all original elastic, viscous and relaxation supports.
+    #[must_use]
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.spectrum.omega_band_rad_s }
 }

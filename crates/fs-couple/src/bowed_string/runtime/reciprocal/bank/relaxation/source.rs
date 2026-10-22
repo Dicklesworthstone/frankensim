@@ -1,11 +1,18 @@
-//! Preserve an original specimen's exclusive Prony bending law in the bank.
+//! Preserve original bending and torsional Prony laws in the same bank owner.
 //!
 //! Source histories precede regional body histories and explicit layered
 //! additions. All use the original exact mechanical and material-memory owner.
 use super::*;
 use fs_scenario::acoustic::PronyBending;
+use fs_material::section::torsion::ConcentricPronyTorsionalSection;
 
 impl MaterialStringSource {
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn torsional_relaxation(&self)
+        -> Option<&ConcentricPronyTorsionalSection>
+    {
+        self.torsion_source().and_then(|twist| twist.relaxation())
+    }
+
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn bending_relaxation(&self)
         -> Option<PronyBending>
     {
@@ -50,6 +57,13 @@ impl MaterialStringBankSource {
                     return Err(invalid("string material memory requires source support from DC through the complete instantaneous coupled band and dt/tau <= 2"));
                 }
             }
+            if let Some(law) = member.source.torsional_relaxation() {
+                let (lo, hi) = law.omega_band_rad_s();
+                if lo != 0.0 || hi < high || law.branches().iter().any(|arm|
+                    arm.relaxing_stiffness_n_m2 > 0.0 && dt / arm.relaxation_time_s > 2.0) {
+                    return Err(invalid("torsional material memory requires source support from DC through the complete instantaneous coupled band and dt/tau <= 2"));
+                }
+            }
         }
         Ok(())
     }
@@ -72,6 +86,15 @@ impl MaterialStringBankSource {
                 count = positive.checked_mul(planes).and_then(|n| n.checked_mul(card.mode_count))
                     .and_then(|n| n.checked_add(count))
                     .ok_or_else(|| invalid("complete string material history extent overflow"))?;
+            }
+            if let Some(twist) = member.source.torsion_source() {
+                if let Some(law) = twist.relaxation() {
+                    let positive = law.branches().iter()
+                        .filter(|arm| arm.relaxing_stiffness_n_m2 > 0.0).count();
+                    count = positive.checked_mul(twist.mode_count())
+                        .and_then(|n| n.checked_add(count))
+                        .ok_or_else(|| invalid("complete torsional material history extent overflow"))?;
+                }
             }
         }
         if count > 256 {
@@ -122,6 +145,39 @@ impl MaterialStringBankSource {
             }
             start += component.modes().len();
         }
+        // Keep every original bending history first, then append source twist
+        // histories in string/layer/arm/mode order. Body and explicit bending
+        // additions remain after this source block in the same accepted state.
+        start = 0;
+        for (index, (member, card)) in self.strings.iter().zip(cards).enumerate() {
+            poll(gate)?;
+            let component = &system.components()[index];
+            if let Some(twist) = member.source.torsion_source() {
+                if let Some(law) = twist.relaxation() {
+                    let offset = component.modes().len().checked_sub(twist.mode_count())
+                        .ok_or_else(|| invalid("torsional memory lost its original twist coordinates"))?;
+                    let inertia = law.torsional().rotary_inertia_kg_m();
+                    for arm in law.branches().iter().filter(|arm| arm.relaxing_stiffness_n_m2 > 0.0) {
+                        for mode in 0..twist.mode_count() {
+                            poll(gate)?;
+                            let wave_number = (mode + 1) as f64 * core::f64::consts::PI / card.length_m;
+                            // Integral of twist-gradient storage in the actual
+                            // rotary mass basis: delta_GJ * k^2 / sum(rho J).
+                            let stiffness = arm.relaxing_stiffness_n_m2
+                                * wave_number.powi(2) / inertia;
+                            if !stiffness.is_finite() || stiffness <= 0.0 {
+                                return Err(invalid("torsional memory stiffness is unrepresentable in its rotary mass basis"));
+                            }
+                            let mut projection = vec![0.0; dimension];
+                            projection[2 * (start + offset + mode)] = 1.0;
+                            branches.push(RelaxationBranch { projection, stiffness,
+                                relaxation_time_s: arm.relaxation_time_s });
+                        }
+                    }
+                }
+            }
+            start += component.modes().len();
+        }
         Ok(branches)
     }
 
@@ -134,7 +190,8 @@ impl MaterialStringBankSource {
     ) -> Result<FrictionModalSystem, ReciprocalStringError> {
         poll(gate)?;
         if self.material_chart_relaxation.is_none() && self.string_bending_relaxation.is_none()
-            && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()) {
+            && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()
+                && m.source.torsional_relaxation().is_none()) {
             if memory.as_ref().is_some_and(|z| !z.is_empty()) {
                 return Err(invalid("material history has no original source binding"));
             }

@@ -18,7 +18,8 @@
 
 use super::*;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
-use fs_material::section::torsion::ConcentricTorsionalSection;
+use fs_material::section::torsion::{ConcentricTorsionalSection, ConcentricPronyTorsionalSection};
+use fs_material::section::relaxation::LayerRelaxationProperties;
 use fs_material::state_point::MaterialStatePointError;
 
 /// Angular displacement/torque participation in the supplied body's SAME basis.
@@ -256,6 +257,7 @@ impl ReciprocalStringBank {
 pub struct TorsionalStringSource {
     bending: MaterialStringSource,
     section: ConcentricTorsionalSection,
+    relaxation: Option<ConcentricPronyTorsionalSection>,
     mode_count: usize,
     total_modes: usize,
 }
@@ -296,8 +298,42 @@ impl MaterialStringSource {
         let section = elastic.with_shear_modulus(shear_property, 1.0)?
             .with_torsional_viscosity(viscosity_property)?;
         Ok(Self::WithTorsion(Box::new(TorsionalStringSource {
-            bending: self, section, mode_count: modes, total_modes,
+            bending: self, section, relaxation: None, mode_count: modes, total_modes,
         })))
+    }
+
+    /// Add independently selected per-layer shear memory to original torsion.
+    ///
+    /// Call after `with_torsion`; either transverse-polarization order is valid.
+    /// All source moduli, times and equilibrium roles must already be resolved.
+    /// Kelvin shear viscosity remains a separately sourced parallel dashpot.
+    /// The bank automatically projects these histories onto its actual twist
+    /// modes, in the same friction/bridge/body solve and energy account.
+    /// Source bending histories precede torsional histories; regional body and
+    /// explicitly added layered bending histories follow both.
+    ///
+    /// # Errors
+    /// Absent torsion, a second shear-memory selection, or shared material-law
+    /// admission failure. Other consumers refuse if they cannot retain history.
+    pub fn with_torsional_relaxation(
+        self, properties: &[LayerRelaxationProperties],
+    ) -> Result<Self, MaterialStatePointError> {
+        match self {
+            Self::WithPolarizations(p) => p.add_torsional_relaxation(properties),
+            Self::WithTorsion(mut twist) => {
+                if twist.relaxation.is_some() {
+                    return Err(MaterialStatePointError::InvalidDerived {
+                        quantity: "torsional relaxation requires one original source binding",
+                    });
+                }
+                twist.relaxation = Some(twist.section.clone().with_prony_torsion(properties)?);
+                Ok(Self::WithTorsion(twist))
+            }
+            Self::Homogeneous(_) | Self::Concentric { .. } =>
+                Err(MaterialStatePointError::InvalidDerived {
+                    quantity: "shear relaxation requires the original torsional source",
+                }),
+        }
     }
 
     pub(super) fn surface_shape(&self, card: &BowedStringCard, station: f64)
@@ -324,6 +360,11 @@ impl TorsionalStringSource {
     /// Original material section with independent shear loss and rotary inertia.
     #[must_use]
     pub const fn section(&self) -> &ConcentricTorsionalSection { &self.section }
+    /// Optional independent shear spectra, retained on the original source.
+    #[must_use]
+    pub const fn relaxation(&self) -> Option<&ConcentricPronyTorsionalSection> {
+        self.relaxation.as_ref()
+    }
     /// Number of appended twist modes; bending coordinates always come first.
     #[must_use]
     pub const fn mode_count(&self) -> usize { self.mode_count }

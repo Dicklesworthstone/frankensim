@@ -20,23 +20,29 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
-- `section::relaxation::ConcentricPronySection` composes independently selected
-  generalized-Maxwell bending spectra on the existing bonded concentric geometry.
-  Each layer declares its equilibrium-modulus role and zero or more modulus/time
-  source pairs; an explicitly empty spectrum is elastic, whereas an omitted layer
-  or absent property refuses. The selected equilibrium value must equal that
-  layer's elastic Young modulus. Actual annular integrals give each arm
-  `delta_E * I`; source time constants and layer identities are never averaged.
-  Density and every coefficient must be constant at the resolved temperature;
-  relaxation times (or equilibrium modulus for an empty spectrum) declare frequency
-  support, intersected with all other coefficient domains. At most 128 total arms
-  are admitted. Missing/ambiguous/incorrect quantities, incompatible support,
-  negative increments, nonpositive times and unrepresentable stiffness refuse
-  atomically. Source receipts are retained without authority promotion. G1/G3
-  unit tests check independent complex bending stiffness and homogeneous-section
-  subdivision; G0 covers explicit elastic layers and invalid source combinations.
-  This is frozen-state small-curvature bonded bending, not helical winding,
-  axial creep, interlayer slip, heating or an experimental material validation.
+- `section::relaxation::ConcentricPronySection` and
+  `section::torsion::ConcentricPronyTorsionalSection` compose independent
+  generalized-Maxwell bending/shear spectra on the existing bonded concentric
+  geometry. Both use one `LayerRelaxationProperties` coefficient resolver;
+  the bending-specific spelling names the same source-role type. Each layer
+  selects its equilibrium modulus and zero or more modulus/time pairs.
+  An explicit empty spectrum is elastic; an omitted layer or absent claim
+  refuses. Equilibrium must match the actual channel's Young/shear modulus.
+  Each arm retains `delta_E * I` for bending or `delta_G * J`, `J=2I`,
+  for circular torsion. Time constants and layer identities are never averaged.
+  The original torsional Kelvin viscosity remains a separate parallel dashpot;
+  it is not counted again in the Prony spectrum. Geometry, mass, equilibrium
+  stiffness and all source receipts survive without authority promotion.
+  Density and every coefficient must be constant at the resolved temperature.
+  Each relaxation time (or equilibrium modulus for an empty spectrum) supplies
+  frequency support, intersected with every other active coefficient domain.
+  At most 128 arms per selected section channel are admitted. Missing, ambiguous,
+  wrong-quantity, incompatible-band, negative-increment, nonpositive-time and
+  unrepresentable-stiffness inputs refuse atomically. G1/G3 tests check independent
+  complex bending/torsional stiffness, unchanged parallel viscous loss and
+  homogeneous subdivision; G0 covers empty layers and invalid source roles.
+  This is frozen-state small-strain bonded bending/circular torsion, not helical
+  winding, axial creep, interlayer slip, heating or experimental validation.
 - `state_point` is the fail-closed bridge from immutable `fs-matdb`
   `MaterialCard`s to executable scalar property bundles. Consumers declare
   property names, dimensions, numerical domains, the complete physical query
