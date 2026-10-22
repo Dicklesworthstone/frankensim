@@ -158,33 +158,55 @@ impl BranchEnergy {
         }
     }
 
-    // Energy, its gradient and the diagonal of its Hessian in the three
-    // principal logarithmic stretches x (full, unprojected).
-    fn terms(&self, x: &[f64; 3]) -> (f64, [f64; 3], [f64; 3]) {
+    // Energy and the diagonal of its Hessian in the three principal
+    // logarithmic stretches x (full, unprojected).
+    fn terms(&self, x: &[f64; 3]) -> (f64, [f64; 3]) {
         let mut psi = 0.0;
-        let mut grad = [0.0; 3];
         let mut hess = [0.0; 3];
         match self {
             Self::NeoHookean { mu_pa } => {
                 for a in 0..3 {
                     psi += 0.5 * mu_pa * det::expm1(2.0 * x[a]);
-                    let e = det::exp(2.0 * x[a]);
-                    grad[a] = mu_pa * e;
-                    hess[a] = 2.0 * mu_pa * e;
+                    hess[a] = 2.0 * mu_pa * det::exp(2.0 * x[a]);
                 }
             }
             Self::Ogden { terms } => {
                 for t in terms {
                     for a in 0..3 {
                         psi += t.mu_pa / t.alpha * det::expm1(t.alpha * x[a]);
-                        let e = det::exp(t.alpha * x[a]);
-                        grad[a] += t.mu_pa * e;
-                        hess[a] += t.mu_pa * t.alpha * e;
+                        hess[a] += t.mu_pa * t.alpha * det::exp(t.alpha * x[a]);
                     }
                 }
             }
         }
-        (psi, grad, hess)
+        (psi, hess)
+    }
+
+    // The gradient of the energy projected on the volume-preserving plane,
+    // E^T grad psi, written without cancellation: each exponential
+    // difference is an expm1 of a stretch difference, so the result keeps
+    // its relative accuracy as it tends to zero. A step that is huge against
+    // tau drives the relaxed stretches to ~1e-17, where a difference of
+    // exponentials would carry an absolute error of mu * eps and, times the
+    // step factor c, an unreachable Newton residual.
+    fn reduced_gradient(&self, x: &[f64; 3]) -> [f64; 2] {
+        let mut g = [0.0; 2];
+        let mut add = |coefficient: f64, rate: f64| {
+            g[0] += S2 * coefficient * det::exp(rate * x[1]) * det::expm1(rate * (x[0] - x[1]));
+            g[1] += S6
+                * coefficient
+                * det::exp(rate * x[2])
+                * (det::expm1(rate * (x[0] - x[2])) + det::expm1(rate * (x[1] - x[2])));
+        };
+        match self {
+            Self::NeoHookean { mu_pa } => add(*mu_pa, 2.0),
+            Self::Ogden { terms } => {
+                for t in terms {
+                    add(t.mu_pa, t.alpha);
+                }
+            }
+        }
+        g
     }
 
     // psi(b + delta) - psi(b) - grad psi(b) . delta, term by term, without
@@ -297,14 +319,15 @@ fn local_solve(
     max_iterations: usize,
 ) -> Result<Local, MaterialError> {
     let x_tr = expand(eta_tr);
-    let (psi_tr, grad_tr, hess_tr) = energy.terms(&x_tr);
-    if !(psi_tr.is_finite() && grad_tr.iter().all(|g| g.is_finite())) {
+    let (psi_tr, hess_tr) = energy.terms(&x_tr);
+    let g_tr = energy.reduced_gradient(&x_tr);
+    if !(psi_tr.is_finite() && g_tr.iter().all(|g| g.is_finite())) {
         return Err(state_error(
             "branch energy overflowed at the trial stretches".to_string(),
         ));
     }
     if dt == 0.0 {
-        let tau = expand(reduce(grad_tr));
+        let tau = expand(g_tr);
         return Ok(Local {
             eta: eta_tr,
             psi_tr,
@@ -325,8 +348,8 @@ fn local_solve(
     // eval: energy terms and residual r = eta - eta_tr + c g(eta).
     let eval = |eta: [f64; 2]| -> Result<(f64, [f64; 2], [f64; 3], [f64; 2]), MaterialError> {
         let x = expand(eta);
-        let (psi, grad, hess) = energy.terms(&x);
-        let g2 = reduce(grad);
+        let (psi, hess) = energy.terms(&x);
+        let g2 = energy.reduced_gradient(&x);
         let r = [
             eta[0] - eta_tr[0] + c * g2[0],
             eta[1] - eta_tr[1] + c * g2[1],
