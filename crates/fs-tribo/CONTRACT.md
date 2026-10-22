@@ -257,9 +257,13 @@ Both laws implement `TangentialLaw`:
 - A rate-and-state root that needs a speed outside the admitted range returns `OutsideApplicability`.
 - Parameter caps are checked at `cap` and at the next representable value above it.
 
-The Smith & Woodhouse (2000) lumped thermal model is **not implemented**. Its
-constitutive form and fitted parameters were not accessible, and no form is
-guessed.
+`SmithWoodhouse` is the plastic thermal model of rosin from Smith & Woodhouse
+(2000), J. Mech. Phys. Solids 48:1633-1681. Equation numbers are the paper's.
+- Friction (Eq. 21): `mu N = A k_y(T) sgn v`, set-valued in sticking, with `A = pi a^2` proportional to `N`.
+- Temperature: the heat balance of Eq. (6) per unit area. Conduction into the stationary and the moving solids uses the discrete half-space Green's function of Eqs. (10)-(14). The moving solid sees only the history within slip `8a/(3 pi)` (Eq. 16 at constant speed), with the cut pulse weighted exactly.
+- `k_y(T)` is calibrated from the steady-sliding fit (Eq. 2) through Eq. (20) (section 5.3). `SmithWoodhouse::new` certifies with an interval bound that the calibration temperature increases with speed, and refuses otherwise.
+- Time stepping: backward Euler in the losses, with friction from the step-start temperature, over a declared uniform step. The paper uses a forward difference.
+- Refusals: a different step length, zero load, a temperature above the calibrated range, a history beyond the declared capacity (at most `MAX_HISTORY_STEPS`), and non-positive parameters.
 
 ## Conformance tests
 
@@ -298,13 +302,19 @@ source-card/patch replay mutation, and a no-target-field source scan.
 - **G0 LuGre bristle map:** passivity over Philox-seeded histories (12,800 intervals).
 - **G1 LuGre drive-spring:** stick-slip exists and is periodic.
 - **G0:** parameter cap and cap+1.
+- **G1 Smith & Woodhouse Green's function:** the weights match Eq. (13), its telescoped partial sums and Eq. (15).
+- **G1 Smith & Woodhouse calibration:** Eq. (20) temperatures and Eq. (2) friction at relative 1e-12, over 1e-4..0.3 m/s for four rig geometries.
+- **G1 Smith & Woodhouse steady sliding:** friction approaches Eq. (2) as `t^{-1/2}`, the stationary half-space tail. One Richardson step leaves under 10 % of the 4 s deviation.
+- **G1 Smith & Woodhouse sinusoidal sliding (Fig. 18):** clockwise loops confined to low speed, which close at the reversal as `O(h)`. The three-rung step ladder has order in [0.8, 1.2]. The temperature levels are printed and not gated: they do not reproduce Fig. 18(a) or the 75-115 K stated for a 0.25 mm radius.
+- **G0 Smith & Woodhouse:** caps, refusals and the set-valued stick/slip branch.
 - **G0 reachability scan.**
 
 ## No-claim boundaries
 
-The benchmark laws carry synthetic parameters. They claim no material
-calibration, no bow or rosin data, no thermal friction model, and no
-equivalence to any render law. A benchmark result names a comparison and does
+The rate-and-state and LuGre benchmarks carry synthetic parameters. The Smith
+& Woodhouse tests use that paper's published rosin, perspex and steady-sliding
+inputs, for comparison only. No benchmark claims a material admission, bow
+data, or equivalence to any render law. A benchmark result names a comparison and does
 not admit a law.
 
 This crate does not mint material admission, calibration, the upstream

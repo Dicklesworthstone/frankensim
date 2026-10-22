@@ -16,8 +16,9 @@ pub mod tangential;
 pub use tangential::{
     DryTangentialState, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
 };
-/// Benchmark tangential laws (rate-and-state, LuGre) for named comparisons;
-/// test-only or the non-default `benchmark-laws` feature, never render laws.
+/// Benchmark tangential laws (rate-and-state, LuGre, Smith & Woodhouse
+/// thermal) for named comparisons; test-only or the non-default
+/// `benchmark-laws` feature, never render laws.
 #[cfg(any(test, feature = "benchmark-laws"))]
 pub mod benchmark;
 

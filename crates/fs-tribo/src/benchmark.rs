@@ -1,6 +1,7 @@
 //! Benchmark tangential laws (IRP M4.2-W4): rate-and-state friction
-//! (Dieterich 1979; Ruina 1983) with the aging and slip evolution laws, and
-//! LuGre (Canudas de Wit, Olsson, Astrom & Lischinsky 1995). They exist only
+//! (Dieterich 1979; Ruina 1983) with the aging and slip evolution laws,
+//! LuGre (Canudas de Wit, Olsson, Astrom & Lischinsky 1995), and the Smith &
+//! Woodhouse (2000) plastic thermal model of rosin. They exist only
 //! under `cfg(test)` or the non-default `benchmark-laws` feature: named
 //! comparisons for experiments such as X-Bw2, never render laws.
 //!
@@ -24,10 +25,9 @@
 //! dissipation would be negative refuses, because passivity of the full
 //! force map depends on `sigma1` and is not assumed here.
 //!
-//! **Not implemented.** The Smith & Woodhouse (2000) lumped thermal model.
-//! Its constitutive form and fitted parameters must come from that paper (or
-//! Woodhouse 2003), which was not accessible when this module was written; no
-//! form is guessed.
+//! [`SmithWoodhouse`] (in `smith_woodhouse.rs`) follows the paper's Eqs.
+//! (2), (6), (10)-(16), (20) and (21). Its module documentation lists the
+//! two discretization choices that are not the paper's.
 
 use crate::tangential::{TangentialLaw, TangentialStep, TangentialStepInput};
 use crate::{
@@ -35,6 +35,12 @@ use crate::{
     positive_finite,
 };
 use fs_math::det;
+
+mod smith_woodhouse;
+pub use smith_woodhouse::{
+    MAX_HISTORY_STEPS, RosinContact, SmithWoodhouse, SmithWoodhouseParams, SmithWoodhouseState,
+    SteadySlidingFit, ThermalSolid, half_space_unit_weight,
+};
 
 fn checked(value: f64, field: &'static str) -> Result<f64, TriboError> {
     finite(value, field)?;
