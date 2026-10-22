@@ -228,6 +228,13 @@ The certificate is Rouché's theorem on the Schur complement of
   windowed projection in fs-couple calls it.
 - `FarCouplingBound` reports the bounds used.
 
+`certify_modal_damping_owned_diagonal(omega, C, zeta_owner, budget)` is for a
+caller whose diagonal decay rates have their own owner, such as a plate's
+energy-quotient image. It certifies on C as above. Each `Diagonal` block then
+reports `zeta_owner[i]` bit for bit, with its closed-form pole, and its radius
+grows by the centre shift so the exact pole stays enclosed. An owner ζ that
+breaks the budget or moves a disc into another refuses by name.
+
 Comparisons carry `ROUCHE_SAFETY = 1e-9` relative; this is not interval
 arithmetic.
 - Singleton centres are closed-form roots. Their rounding bound `2εν` enters

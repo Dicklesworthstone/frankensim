@@ -156,6 +156,12 @@ fn reduce_with_tensor(
     let loss = specimen.bending_viscosity().map(|laws|
         DiagonalPlateViscosity::new(specimen, laws, &model)
     ).transpose()?;
+    // The full tensor image also carries the one diagonal evaluator's zeta on
+    // the SAME eigenpairs, so its certified Diagonal blocks report those bits.
+    let tensor_diagonal = tensor.map(|(law, _, _)|
+        DiagonalPlateViscosity::from_tensor(specimen, law, &model)
+    ).transpose()?;
+    let mut tensor_zetas = Vec::new();
     let report = modes(&model, window, &fs_modal::SliceOptions::default()).map_err(map_plate)?;
     let keep = options.n_modes.min(report.modes.len());
     let mut radiators = Vec::with_capacity(keep);
@@ -188,6 +194,9 @@ fn reduce_with_tensor(
             Some(loss) => loss.modal_zeta(&model, &pair.phi, omega)?,
             None => 0.0,
         });
+        if let Some(diagonal) = &tensor_diagonal {
+            tensor_zetas.push(diagonal.modal_zeta(&model, &pair.phi, omega)?);
+        }
         radiators.push(radiator);
     }
     if radiators.is_empty() { return Err(refuse("plate modal window returned no usable modes")); }
@@ -211,6 +220,7 @@ fn reduce_with_tensor(
         (tensor, _) => tensor.map(|(law, limits, gate)| {
             let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
             law.project(specimen, &model, &normalized, &omega, limits, gate)
+                .map(|damping| damping.with_diagonal_zeta(tensor_zetas))
         }).transpose()?,
     };
     if let Some(basis) = retain {

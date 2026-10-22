@@ -52,8 +52,8 @@ mod damping;
 pub use damping::{
     CertifiedModalDamping, FarCouplingBound, MAX_DAMPING_CLUSTER, ModalDampingBlock,
     ModalDampingBudget, ROUCHE_SAFETY, certify_modal_damping, certify_modal_damping_windowed,
-    ResidualFarBounds, certify_modal_damping_windowed_far_rows, damping_window_neighbours,
-    residual_far_row_bounds,
+    ResidualFarBounds, certify_modal_damping_owned_diagonal,
+    certify_modal_damping_windowed_far_rows, damping_window_neighbours, residual_far_row_bounds,
 };
 
 /// Crate version, re-exported for provenance stamping.

@@ -140,6 +140,32 @@ impl DiagonalPlateViscosity {
                 }
             }
         }
+        let tensors: Vec<&[f64; 9]> = viscosities.iter().enumerate().map(|(region, law)| match law {
+            RegionalBendingViscosity::Isotropic(_) => &specimen.regions()[region].section.d,
+            RegionalBendingViscosity::Orthotropic(tensor) => tensor.bending_matrix_n_m_s(),
+        }).collect();
+        Self::assemble(specimen, laws, &tensors, model)
+    }
+
+    /// The diagonal image of a full tensor selection, on the same modes. Every
+    /// region takes the `Orthotropic` branch of [`Self::new`]: its rotated
+    /// viscous DKT matrix with `w = omega / 2`. A region with the same tensor
+    /// and band therefore gives the same bits through either constructor.
+    pub(crate) fn from_tensor(specimen: &ResolvedPlateChart, viscosity: &PlateViscosity,
+        model: &PlateModel) -> Result<Self, AcousticRealizeError>
+    {
+        if viscosity.chart_identity != specimen.specimen_identity() {
+            return Err(invalid("diagonal tensor image needs its exact chart"));
+        }
+        let laws = viscosity.regions.iter().map(|r| DiagonalLaw::Orthotropic(r.band)).collect();
+        let tensors: Vec<&[f64; 9]> = viscosity.regions.iter().map(|r| &r.bending).collect();
+        Self::assemble(specimen, laws, &tensors, model)
+    }
+
+    // One element loop for both constructors.
+    fn assemble(specimen: &ResolvedPlateChart, laws: Vec<DiagonalLaw>, tensors: &[&[f64; 9]],
+        model: &PlateModel) -> Result<Self, AcousticRealizeError>
+    {
         let mesh = &specimen.chart().mesh;
         let mut elements = Vec::with_capacity(mesh.tris.len());
         for (element, tri) in mesh.tris.iter().enumerate() {
@@ -148,10 +174,7 @@ impl DiagonalPlateViscosity {
             let y = tri.map(|node| mesh.nodes[node].1);
             // Original DKT element, same section, geometry and boundary map as
             // the modal pencil. No geometric stiffness enters viscous storage.
-            let tensor = match &viscosities[region] {
-                RegionalBendingViscosity::Isotropic(_) => &specimen.regions()[region].section.d,
-                RegionalBendingViscosity::Orthotropic(tensor) => tensor.bending_matrix_n_m_s(),
-            };
+            let tensor = tensors[region];
             let stiffness = if tensor.iter().all(|v| *v == 0.0) { [0.0; 81] } else {
                 fs_plate::dkt_stiffness(&x, &y, tensor, element).map_err(AcousticRealizeError::Plate)?.0
             };
@@ -448,13 +471,13 @@ impl WindowedPlateViscosity {
 /// The tensor is not reduced to one decay rate per mode.
 #[derive(Clone,Debug)]
 pub struct ModalPlateViscosity {
-    matrix:Vec<f64>, columns:Vec<Vec<f64>>, resistance:f64, modes:usize,
+    matrix:Vec<f64>, columns:Vec<Vec<f64>>, resistance:f64, modes:usize, diagonal_zeta:Option<Vec<f64>>,
 }
 impl ModalPlateViscosity {
     pub(crate) fn factor(matrix:Vec<f64>,n:usize,resistance:f64,gate:&CancelGate)->Result<Self,AcousticRealizeError> {
         if matrix.iter().any(|v|!v.is_finite()) { return Err(invalid("projected material damping is not finite")); }
         if matrix.iter().all(|v|*v == 0.0) {
-            return Ok(Self {matrix,columns:Vec::new(),resistance,modes:n});
+            return Ok(Self {matrix,columns:Vec::new(),resistance,modes:n,diagonal_zeta:None});
         }
         let scale:Vec<_> = (0..n).map(|i|matrix[n*i+i].sqrt()).collect();
         if scale.iter().any(|s|!s.is_finite() || *s <= 0.0) {
@@ -480,8 +503,14 @@ impl ModalPlateViscosity {
                 return Err(invalid("material damping factor does not reconstruct its original full tensor"));
             }
         } }
-        Ok(Self {matrix,columns,resistance,modes:n})
+        Ok(Self {matrix,columns,resistance,modes:n,diagonal_zeta:None})
     }
+    /// Attach the one diagonal evaluator's zeta per mode (IRP M0.2-W3/W5),
+    /// computed by the caller on the SAME eigenpairs.
+    pub(crate) fn with_diagonal_zeta(mut self, zeta:Vec<f64>)->Self { self.diagonal_zeta = Some(zeta); self }
+    /// `DiagonalPlateViscosity`'s zeta on these modes, when the projecting
+    /// eigensolve supplied it; certified Diagonal blocks report exactly these.
+    #[must_use] pub fn diagonal_zeta(&self)->Option<&[f64]> { self.diagonal_zeta.as_deref() }
     /// Dense symmetric C [1/s], row-major in the original mass-normalized basis.
     #[must_use] pub fn matrix_per_s(&self)->&[f64] { &self.matrix }
     /// Mode count, including modes with explicit zero dissipation.
@@ -515,4 +544,20 @@ impl ViscousPlateImage {
     #[must_use] pub fn radiators(&self)->&[CompactBody] {&self.radiators}
     /// Full nonproportional damping projected on these exact modes.
     #[must_use] pub const fn damping(&self)->&ModalPlateViscosity {&self.damping}
+    /// Certified modal damping (IRP M0.2-W5) of this image. It is certified on
+    /// the full matrix, and every Diagonal block reports the one diagonal
+    /// owner's zeta (`DiagonalPlateViscosity`), with its radius grown to keep
+    /// the exact pole enclosed.
+    ///
+    /// # Errors
+    /// Any `fs_modal::certify_modal_damping_owned_diagonal` refusal, or a
+    /// `DampingInput` when this image carries no diagonal zeta.
+    pub fn certified_modal_damping(&self, budget:&fs_modal::ModalDampingBudget)
+        -> Result<fs_modal::CertifiedModalDamping,fs_modal::ModalError>
+    {
+        let zeta = self.damping.diagonal_zeta().ok_or(fs_modal::ModalError::DampingInput {
+            field:"plate image without its diagonal zeta", index:0 })?;
+        let omega:Vec<f64> = self.radiators.iter().map(|r|r.omega).collect();
+        fs_modal::certify_modal_damping_owned_diagonal(&omega,self.damping.matrix_per_s(),zeta,budget)
+    }
 }

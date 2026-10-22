@@ -693,3 +693,59 @@ fn g0_bessel_far_coupling_bound_dominates_true_norm() {
     assert!(floor <= 1e-10, "complete space, full window: far bound {floor:e} of the column norm");
     assert!(excess <= 1e-10, "complete space: column bound exceeds the true norm by {excess:e}");
 }
+
+#[test]
+fn g1_certified_plate_zeta_is_the_w3_evaluator() {
+    // One owner: the certified Diagonal blocks of the full tensor image report
+    // DiagonalPlateViscosity's zeta, the same bits a consumer gets by selecting
+    // scalar regional loss (M0.2-W3) on the same chart and single eigensolve.
+    // The routed disc grows by its centre shift, and it must still enclose the
+    // refined dense truth of the full modal pencil.
+    let mut rows = Vec::new();
+    for (label, corner, rest, aspect, budget) in [
+        ("proportional", 2e-5, 2e-5, 1.07, damping_budget()),
+        ("clustered", 6.5e-6, 1.3e-7, 1.002, fs_modal::ModalDampingBudget { max_rel_decay_error: 1e9,
+            max_freq_error_cents: 1e9, max_cluster_size: fs_modal::MAX_DAMPING_CLUSTER }),
+    ] {
+        let (chart, mut reduction, viscosity) = two_region_chart(corner, rest, aspect, 6, 100000.0);
+        reduction.n_modes = 4;
+        reduction.eigenvalue_window = (1.0, 1e8);
+        let gate = CancelGate::new_clock_free();
+        let image = chart.certified_viscous_radiators(&reduction, &viscosity, limits(), &gate).unwrap();
+        let omega: Vec<f64> = image.radiators().iter().map(|r| r.omega).collect();
+        let c = image.damping().matrix_per_s();
+        let n = omega.len();
+        let routed = image.certified_modal_damping(&budget).unwrap();
+        let plain = fs_modal::certify_modal_damping(&omega, c, &budget).unwrap();
+        let (w3, _) = chart.clone().with_kelvin_voigt_bending_loss().unwrap()
+            .certified_radiators_with_force_ports(&reduction, &[], 0).unwrap();
+        let mut omega_sq = vec![0.0; n * n];
+        let mut identity = vec![0.0; n * n];
+        for i in 0..n {
+            omega_sq[n * i + i] = omega[i] * omega[i];
+            identity[n * i + i] = 1.0;
+        }
+        let truth: Vec<C64> = fs_modal::quadratic_eigenvalues(&identity, c, &omega_sq, n).unwrap()
+            .into_iter().filter(|p| p.im > 0.0).map(|p| refined_pole(&omega, c, p)).collect();
+        let mut diagonal = 0;
+        for (r, p) in routed.blocks.iter().zip(&plain.blocks) {
+            if let fs_modal::ModalDampingBlock::Diagonal { mode, zeta, eigenvalue, radius } = r {
+                diagonal += 1;
+                assert_eq!(w3[*mode].omega.to_bits(), omega[*mode].to_bits(), "{label}: the same eigensolve");
+                assert_eq!(zeta.to_bits(), w3[*mode].zeta.to_bits(), "{label}: mode {mode} zeta is W3's");
+                let distance = truth.iter().map(|t| (*t - *eigenvalue).abs()).fold(f64::INFINITY, f64::min);
+                assert!(distance <= *radius, "{label}: mode {mode} truth {distance:e} outside {radius:e}");
+                let fs_modal::ModalDampingBlock::Diagonal { radius: base, .. } = p else {
+                    panic!("{label}: routing changed the block structure");
+                };
+                rows.push(format!("{{\"chart\":\"{label}\",\"mode\":{mode},\"radius_over_decay\":{:e},\"unrouted_radius_over_decay\":{:e},\"truth_distance_over_radius\":{:e}}}",
+                    radius / eigenvalue.re.abs(), base / eigenvalue.re.abs(), distance / radius));
+            } else {
+                assert_eq!(r, p, "{label}: full blocks are untouched");
+            }
+        }
+        assert_eq!(diagonal, n, "{label}: every mode certified diagonal under this budget");
+    }
+    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g1_certified_plate_zeta_is_the_w3_evaluator\",\"tier\":\"G1\",\"inputs\":{{\"fixture\":\"quadrant/rest isotropic plate: proportional and clustered\"}},\"provenance\":\"named fixture\",\"observed\":[{}],\"tolerance\":{{\"zeta\":\"bitwise to M0.2-W3\",\"enclosure\":\"refined dense truth inside the routed radius\"}},\"verdict\":\"pass\"}}",
+        rows.join(","));
+}

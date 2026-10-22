@@ -15,8 +15,8 @@ use fs_math::det;
 use fs_mms::{RefinementLadder, fit_order};
 use fs_modal::{
     CertifiedModalDamping, MAX_DAMPING_CLUSTER, ModalDampingBlock, ModalDampingBudget, ModalError,
-    certify_modal_damping, certify_modal_damping_windowed, certify_modal_damping_windowed_far_rows,
-    damping_window_neighbours, quadratic_eigenvalues,
+    certify_modal_damping, certify_modal_damping_owned_diagonal, certify_modal_damping_windowed,
+    certify_modal_damping_windowed_far_rows, damping_window_neighbours, quadratic_eigenvalues,
 };
 use fs_rand::StreamKey;
 
@@ -988,4 +988,94 @@ fn g0_residual_far_row_bound_encloses_exact_far_norm() {
     );
     // Coverage, not a quality claim: both kinds of trial must be live.
     assert!(complete_trials >= 1000 && perturbed_trials >= 500);
+}
+
+#[test]
+fn g0_owned_diagonal_reports_owner_zeta_and_keeps_enclosure() {
+    // An owner's ζ that differs from C_ii/(2ω_i) in its last digits (here
+    // by up to 1e-9 relative) is reported bit for bit; the grown radius must
+    // still enclose dense truth, and `Full` blocks must not change.
+    let (mut checked, mut violations, mut diagonal) = (0usize, 0usize, 0usize);
+    let mut largest_growth = 0.0_f64;
+    for trial in 0..512_u32 {
+        let mut s = StreamKey {
+            seed: 0x4d30_3257_3561,
+            kernel: 11,
+            tile: trial,
+        }
+        .stream();
+        let n = 4 + s.next_below(29) as usize;
+        let omega: Vec<f64> = (0..n)
+            .map(|_| log_uniform(&mut s, 2.0 * PI * 50.0, 2.0 * PI * 5000.0))
+            .collect();
+        let zeta: Vec<f64> = (0..n).map(|_| log_uniform(&mut s, 1e-4, 5e-2)).collect();
+        let rank = 1 + s.next_below(n as u64) as usize;
+        let kappa = log_uniform(&mut s, 1e-4, 1.0);
+        let c = random_damping(&omega, &zeta, rank, kappa, &mut s);
+        let owner: Vec<f64> = (0..n)
+            .map(|i| c[n * i + i] / (2.0 * omega[i]) * (1.0 + 1e-9 * (2.0 * s.next_f64() - 1.0)))
+            .collect();
+        let base = certify_modal_damping(&omega, &c, &budget()).expect("certified");
+        let owned = certify_modal_damping_owned_diagonal(&omega, &c, &owner, &budget())
+            .expect("owner zeta within budget");
+        assert_eq!(base.blocks.len(), owned.blocks.len());
+        for (b, o) in base.blocks.iter().zip(&owned.blocks) {
+            match (b, o) {
+                (
+                    ModalDampingBlock::Diagonal { radius: rb, .. },
+                    ModalDampingBlock::Diagonal {
+                        mode, zeta, radius, ..
+                    },
+                ) => {
+                    diagonal += 1;
+                    assert_eq!(zeta.to_bits(), owner[*mode].to_bits(), "owner zeta bits");
+                    assert!(radius >= rb, "a moved disc never shrinks");
+                    largest_growth = largest_growth.max(radius - rb);
+                }
+                (ModalDampingBlock::Full { .. }, ModalDampingBlock::Full { .. }) => {
+                    assert_eq!(b, o, "full blocks are unchanged");
+                }
+                _ => panic!("trial {trial}: block kinds changed"),
+            }
+        }
+        let (poles, slack, _) = truth(&omega, &c);
+        for (mu, r) in certified_poles(&owned) {
+            checked += 1;
+            if nearest(&poles, mu) > r + slack {
+                violations += 1;
+            }
+        }
+    }
+    // Refusals: shape, non-finite, negative, overdamped, and an owner that
+    // disagrees with the matrix beyond the budget.
+    let omega = [100.0, 250.0];
+    let c = [0.2, 0.001, 0.001, 0.5];
+    let quotient = [0.2 / 200.0, 0.5 / 500.0];
+    for (owner, what) in [
+        (vec![quotient[0]], "length"),
+        (vec![f64::NAN, quotient[1]], "non-finite"),
+        (vec![-1e-3, quotient[1]], "negative"),
+        (vec![2.0 * quotient[0], quotient[1]], "beyond the budget"),
+    ] {
+        assert!(
+            matches!(
+                certify_modal_damping_owned_diagonal(&omega, &c, &owner, &budget()),
+                Err(ModalError::DampingInput { .. })
+            ),
+            "{what} must refuse"
+        );
+    }
+    assert!(matches!(
+        certify_modal_damping_owned_diagonal(&omega, &c, &[1.0, quotient[1]], &loose()),
+        Err(ModalError::DampingNotUnderdamped { modes }) if modes == vec![0]
+    ));
+    println!(
+        "{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g0_owned_diagonal_reports_owner_zeta_and_keeps_enclosure\",\"tier\":\"G0\",\"inputs\":{{\"trials\":512,\"owner_rel_perturbation\":1e-9}},\"provenance\":\"fs-rand seed 0x4d3032573561 kernel 11\",\"observed\":{{\"poles_checked\":{checked},\"violations\":{violations},\"diagonal_blocks\":{diagonal},\"largest_radius_growth\":{largest_growth:e}}},\"verdict\":\"{}\"}}",
+        if violations == 0 { "pass" } else { "fail" }
+    );
+    assert_eq!(violations, 0, "grown radii must enclose dense truth");
+    assert!(
+        diagonal >= 1000,
+        "diagonal path barely exercised: {diagonal}"
+    );
 }

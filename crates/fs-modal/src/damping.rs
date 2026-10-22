@@ -314,6 +314,114 @@ pub fn damping_window_neighbours(
     Ok(neighbours)
 }
 
+/// Largest radius around `mu` that still meets the budget.
+fn budget_radius(budget: &ModalDampingBudget, mu: C64) -> f64 {
+    let k = budget.max_freq_error_cents * core::f64::consts::LN_2 / 1200.0;
+    (budget.max_rel_decay_error * mu.re.abs()).min(mu.im * k / (1.0 + k))
+}
+
+/// [`certify_modal_damping`] with the diagonal decay rates owned by the
+/// caller. `zeta_owner[i]` is the caller's own evaluator for mode i (for a
+/// plate, its energy-quotient image), which can differ from `C_ii/(2ω_i)` in
+/// its last bits.
+///
+/// The certificate is computed on C exactly as in [`certify_modal_damping`].
+/// Each `Diagonal` block then reports `zeta_owner[i]` and its closed-form pole
+/// `λ̂ᵒ = −ζω + i√((ω − ζω)(ω + ζω))`. Its radius grows by `|λ̂ᵒ − λ̂|` plus
+/// the new centre's rounding, so by the triangle inequality the disc still
+/// encloses the exact pole. `Full` blocks are unchanged.
+///
+/// # Errors
+/// - As [`certify_modal_damping`].
+/// - [`ModalError::DampingInput`] for a wrong length or a negative or
+///   non-finite owner ζ, for an owner ζ whose grown disc breaks the budget,
+///   or for one that reaches another certified disc.
+/// - [`ModalError::DampingNotUnderdamped`] when an owner ζ is not underdamped.
+pub fn certify_modal_damping_owned_diagonal(
+    omega: &[f64],
+    c: &[f64],
+    zeta_owner: &[f64],
+    budget: &ModalDampingBudget,
+) -> Result<CertifiedModalDamping, ModalError> {
+    if zeta_owner.len() != omega.len() {
+        return Err(input("owner zeta length", zeta_owner.len()));
+    }
+    if let Some(i) = zeta_owner
+        .iter()
+        .position(|z| !(z.is_finite() && *z >= 0.0))
+    {
+        return Err(input("owner zeta", i));
+    }
+    let mut result = certify_modal_damping(omega, c, budget)?;
+    for block in &mut result.blocks {
+        if let ModalDampingBlock::Diagonal {
+            mode,
+            zeta,
+            eigenvalue,
+            radius,
+        } = block
+        {
+            let (w, z) = (omega[*mode], zeta_owner[*mode]);
+            let half = z * w;
+            if half >= w {
+                return Err(ModalError::DampingNotUnderdamped { modes: vec![*mode] });
+            }
+            let nu = det::sqrt((w - half) * (w + half));
+            let centre = C64::new(-half, nu);
+            // The owner's closed form: one product for the real part, and
+            // as in `Certifier::new`, 2εν for the imaginary part.
+            let rounding = f64::EPSILON * half + 2.0 * f64::EPSILON * nu;
+            let grown = (*radius + (centre - *eigenvalue).abs() + rounding) * (1.0 + ROUCHE_SAFETY);
+            if !(grown <= budget_radius(budget, centre)) {
+                return Err(input(
+                    "owner zeta disagrees with the damping diagonal beyond the budget",
+                    *mode,
+                ));
+            }
+            (*zeta, *eigenvalue, *radius) = (z, centre, grown);
+        }
+    }
+    // Every pole's disc, as (centre, radius, block). A `Full` pole's disc
+    // contains its group's certified disc, so only pairs with a moved
+    // `Diagonal` disc are checked: the certifier made the rest disjoint.
+    let mut discs: Vec<(C64, f64, usize)> = Vec::new();
+    for (b, block) in result.blocks.iter().enumerate() {
+        match block {
+            ModalDampingBlock::Diagonal {
+                eigenvalue, radius, ..
+            } => discs.push((*eigenvalue, *radius, b)),
+            ModalDampingBlock::Full {
+                eigenvalues, radii, ..
+            } => discs.extend(eigenvalues.iter().zip(radii).map(|(&e, &r)| (e, r, b))),
+        }
+    }
+    for (x, &(cx, rx, bx)) in discs.iter().enumerate() {
+        for &(cy, ry, by) in &discs[x + 1..] {
+            let moved = |b: usize| matches!(result.blocks[b], ModalDampingBlock::Diagonal { .. });
+            if bx != by && (moved(bx) || moved(by)) && (cx - cy).abs() <= rx + ry {
+                let mode = match &result.blocks[bx] {
+                    ModalDampingBlock::Diagonal { mode, .. } => *mode,
+                    ModalDampingBlock::Full { modes, .. } => modes[0],
+                };
+                return Err(input(
+                    "owner zeta moves a certified disc into another",
+                    mode,
+                ));
+            }
+        }
+    }
+    let (mut worst_rel_decay, mut worst_freq_cents) = (0.0_f64, 0.0_f64);
+    for &(centre, radius, _) in &discs {
+        if radius > 0.0 {
+            worst_rel_decay = worst_rel_decay.max(radius / centre.re.abs());
+            worst_freq_cents = worst_freq_cents.max(cents_bound(radius, centre.im));
+        }
+    }
+    result.worst_rel_decay = worst_rel_decay;
+    result.worst_freq_cents = worst_freq_cents;
+    Ok(result)
+}
+
 /// Window entries and Bessel bounds on the rest of each row, from
 /// [`residual_far_row_bounds`].
 #[derive(Debug, Clone, PartialEq)]
@@ -689,8 +797,7 @@ impl<'a> Certifier<'a> {
 
     /// Largest radius around `mu` that still meets the budget.
     fn budget_radius(&self, mu: C64) -> f64 {
-        let k = self.budget.max_freq_error_cents * core::f64::consts::LN_2 / 1200.0;
-        (self.budget.max_rel_decay_error * mu.re.abs()).min(mu.im * k / (1.0 + k))
+        budget_radius(&self.budget, mu)
     }
 
     fn run(&self) -> Result<CertifiedModalDamping, ModalError> {
