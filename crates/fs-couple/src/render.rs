@@ -51,7 +51,7 @@ use crate::reed_bore::{
 };
 use crate::thin_plate::PlateBank;
 use fs_dcontact::Obstacle;
-use fs_duct::{Duct, Termination};
+use fs_duct::{Duct, MouthLoad, Termination};
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_scenario::BeatingReed;
@@ -293,11 +293,11 @@ impl ReedBoreVoice {
     /// # Errors
     /// Domain, TMM, or solver refusals — identical to the one-shot path.
     #[allow(clippy::too_many_arguments)] // mirrors the realizer signature
-    pub fn new(
+    pub fn new<'a>(
         physics: &Duct,
         gas: &GasState,
         reed: BeatingReed,
-        termination: Termination,
+        termination: impl Into<fs_duct::MouthLoad<'a>>,
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
@@ -323,11 +323,11 @@ impl ReedBoreVoice {
     /// # Errors
     /// Domain, TMM, ladder-convergence, or solver refusals.
     #[allow(clippy::too_many_arguments)] // mirrors the realizer signature
-    pub fn new_with_ladder(
+    pub fn new_with_ladder<'a>(
         physics: &Duct,
         gas: &GasState,
         reed: BeatingReed,
-        termination: Termination,
+        termination: impl Into<fs_duct::MouthLoad<'a>>,
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
@@ -335,6 +335,7 @@ impl ReedBoreVoice {
         wall: Option<&fs_phs::WallPin>,
         ladder: Option<&crate::driving_point::LineLadder>,
     ) -> Result<Self, AcousticRealizeError> {
+        let termination = termination.into();
         Self::with_line(physics, gas, reed, plates, listener_m, sample_rate_hz, |zc| {
             crate::driving_point::characteristic_line_realized_with_ladder(
                 physics,
@@ -363,11 +364,12 @@ impl ReedBoreVoice {
     /// Original reed/line refusals, incomplete or unequal-pressure gas binding,
     /// or unsupported cross-region mutual-hole interactions.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_segment_gases(
+    pub fn new_with_segment_gases<'a>(
         physics: &Duct, gases: &[GasState], reed: BeatingReed,
-        termination: Termination, plates: PlateBank, listener_m: f64,
+        termination: impl Into<fs_duct::MouthLoad<'a>>, plates: PlateBank, listener_m: f64,
         sample_rate_hz: u32, line_samples: usize, wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
+        let termination = termination.into();
         let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
             .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
@@ -389,12 +391,12 @@ impl ReedBoreVoice {
     /// # Errors
     /// Existing field/source, geometry/subdivision, reed or line refusals.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_gas_field(
+    pub fn new_with_gas_field<'a>(
         physics: &Duct,
         field: &fs_material::gas_field::AxialGasField,
         cells_per_segment: usize,
         reed: BeatingReed,
-        termination: Termination,
+        termination: impl Into<MouthLoad<'a>>,
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
@@ -402,6 +404,7 @@ impl ReedBoreVoice {
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
         use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
+        let termination = termination.into();
         let regional = RegionalDuct::from_gas_field(physics, field, cells_per_segment)
             .map_err(|error| match error {
                 GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),
@@ -424,12 +427,12 @@ impl ReedBoreVoice {
     /// Nonuniform wall pins and tone holes refuse until their resolved spatial
     /// material law is available.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_continuous_gas_field(
+    pub fn new_with_continuous_gas_field<'a>(
         physics: &Duct,
         field: &fs_material::gas_field::AxialGasField,
         steps_per_span: fs_duct::RiccatiSteps,
         reed: BeatingReed,
-        termination: Termination,
+        termination: impl Into<MouthLoad<'a>>,
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
@@ -437,6 +440,7 @@ impl ReedBoreVoice {
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
         use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
+        let termination = termination.into();
         let regional = RegionalDuct::from_continuous_gas_field(physics, field, steps_per_span)
             .map_err(|error| match error {
                 GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),

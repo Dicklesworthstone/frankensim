@@ -1,7 +1,6 @@
 //! Measurement seams on the existing reed stepper; no alternate renderer.
 use super::{
     AcousticRealizeError, BeatingReed, Duct, GasState, PlateBank, ReedBoreVoice, ReedSolverMode,
-    Termination,
 };
 
 /// Actual filter dimensions and solver stopping rule of a constructed voice.
@@ -24,11 +23,11 @@ impl ReedBoreVoice {
     /// Admission, mechanical initialization and priming share `with_line` with
     /// the ordinary constructor; only the existing dense-line override differs.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_fft_length(
+    pub fn new_with_fft_length<'a>(
         physics: &Duct,
         gas: &GasState,
         reed: BeatingReed,
-        termination: Termination,
+        termination: impl Into<fs_duct::MouthLoad<'a>>,
         plates: PlateBank,
         listener_m: f64,
         sample_rate_hz: u32,
@@ -36,6 +35,7 @@ impl ReedBoreVoice {
         wall: Option<&fs_phs::WallPin>,
         n_fft: usize,
     ) -> Result<Self, AcousticRealizeError> {
+        let termination = termination.into();
         Self::with_line(
             physics,
             gas,

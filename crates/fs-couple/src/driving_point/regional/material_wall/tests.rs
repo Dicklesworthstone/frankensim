@@ -73,6 +73,28 @@ fn relative(actual: C64, expected: C64) -> f64 {
 }
 
 #[test]
+fn tabulated_material_wall_refuses_when_static_wall_data_is_unavailable() {
+    let gas = *field(300.0).state_at(0.0).unwrap().state();
+    let bound = RegionalDuct::new(&cylinder(), &[gas]).unwrap().with_material_wall(wall(0.0003));
+    // Every positive 8 kHz / 512-point FFT bin is supported by this wall.
+    for omega in [TAU * 8000.0 / 512.0, TAU * 4000.0] {
+        assert!(bound.wall().specific_impedance(RADIUS, omega).is_ok());
+    }
+    assert!(bound.characteristic_line(Termination::FlangedOpen, 8000, 4801, Some(512)).is_ok());
+    let table = fs_duct::TabulatedLoad::try_new(
+        vec![TAU * 10.0, TAU * 4000.0], vec![C64::ZERO; 2],
+        "ideal-open static-domain control", 0.0,
+    ).unwrap().with_mouth(fs_duct::TabulatedMouth {
+        axial_position_m: LENGTH, radius_m: RADIUS, gas, dc_impedance: 0.0,
+    }).unwrap();
+    // Mouth metadata supplies only the terminal DC load, not a source-backed
+    // static law for the compliant wall. Do not silently use rigid-wall DC.
+    assert!(bound.wall().specific_impedance(RADIUS, 1e-3).is_err());
+    assert!(matches!(bound.characteristic_line(MouthLoad::Tabulated(&table),
+        8000, 4801, Some(512)), Err(DrivingPointError::Duct(DuctError::BadParameter { .. }))));
+}
+
+#[test]
 fn sourced_relaxation_rejects_a_foreign_wall_even_when_equilibrium_modulus_matches() {
     let original = material(0.0003);
     let foreign = material(0.003);

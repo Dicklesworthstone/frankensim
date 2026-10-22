@@ -16,13 +16,14 @@ pub mod exterior;
 pub mod field;
 /// Source-bound membrane walls on the same regional/continuous propagation.
 pub mod material_wall;
+mod baked;
 
 use super::{
     DrivingPointError, LineRealization, PoleState, bulk_delay_pole_state,
     characteristic_line_response_with_poles, duct_reflectance, impedance_reflectance,
     sealed_volume_compliance_gain,
 };
-use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
+use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, Segment, Termination,
     WallModel, input_impedance_load_with_wall, input_impedance_with_wall};
 use fs_material::gas::GasState;
 use fs_phs::WallPin;
@@ -217,7 +218,7 @@ impl RegionalDuct {
     ///
     /// # Errors
     /// As [`Self::response`], plus original history/Fourier/filter admission.
-    pub fn characteristic_line(&self, termination: Termination, sample_rate_hz: u32,
+    pub fn characteristic_line<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, wall: Option<&WallPin>, n_fft_override: Option<usize>)
         -> Result<DelayedFilter, DrivingPointError> {
         self.characteristic_line_realized(termination, sample_rate_hz, n, wall, n_fft_override)
@@ -228,7 +229,7 @@ impl RegionalDuct {
     ///
     /// # Errors
     /// As [`Self::characteristic_line`].
-    pub fn characteristic_line_realized(&self, termination: Termination, sample_rate_hz: u32,
+    pub fn characteristic_line_realized<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, wall: Option<&WallPin>, n_fft_override: Option<usize>)
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
         self.characteristic_line_with_wall_realized(termination, sample_rate_hz, n,
@@ -236,7 +237,7 @@ impl RegionalDuct {
     }
 
     /// Original FIR owner with one complete source-owned wall binding.
-    pub fn characteristic_line_with_wall(&self, termination: Termination, sample_rate_hz: u32,
+    pub fn characteristic_line_with_wall<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, wall: WallModel<'_>, n_fft_override: Option<usize>)
         -> Result<DelayedFilter, DrivingPointError> {
         self.characteristic_line_with_wall_realized(termination, sample_rate_hz, n,
@@ -244,9 +245,14 @@ impl RegionalDuct {
     }
 
     /// Complete wall-frequency response and the original line-realization receipt.
-    pub fn characteristic_line_with_wall_realized(&self, termination: Termination, sample_rate_hz: u32,
+    pub fn characteristic_line_with_wall_realized<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, wall: WallModel<'_>, n_fft_override: Option<usize>)
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+        let termination = match termination.into() {
+            MouthLoad::Analytic(t) => t,
+            MouthLoad::Tabulated(table) => return self.tabulated_line(table, sample_rate_hz, n, wall, n_fft_override),
+            MouthLoad::Matched => return Err(super::baked::matched_refusal()),
+        };
         // Delegate constant pins verbatim, including travel-time arithmetic.
         if let WallModel::Rigid | WallModel::Pin(_) = wall
             && self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()

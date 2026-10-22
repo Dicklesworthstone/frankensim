@@ -9,10 +9,11 @@ pub mod regional;
 pub mod network;
 /// Mouth volume flow of a duct from the wave incident on its inlet.
 pub mod outlet;
+mod baked;
 
 use fs_duct::compose::input_reflection_wall;
 use fs_duct::{
-    Duct, DuctError, DuctResponse, HoleState, LossModel, Segment, Termination,
+    Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, Segment, Termination,
     input_impedance_wall, segment_wave,
 };
 use fs_fft::{C64 as FftC64, Fft};
@@ -26,6 +27,17 @@ pub const PASSIVITY_TOL: f64 = 1.0e-12;
 
 /// Lightly-damped modal pole threshold (`σ / ω < 1e-3`) for explicit ZOH [`PoleState::Resonance`] extraction.
 pub const LIGHT_DAMPING_RATIO_MAX: f64 = 1.0e-3;
+
+/// The static reflection is supplied separately from positive-frequency bins.
+/// Tables have an explicit DC limit; they never extrapolate or splice a fit.
+#[derive(Clone, Copy)]
+pub(crate) enum LineDc {
+    Analytic(Termination),
+    Explicit(f64),
+}
+impl From<Termination> for LineDc {
+    fn from(value: Termination) -> Self { Self::Analytic(value) }
+}
 
 /// Convergence ladder specification for [`realize_line`] and [`realize_impedance_line`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -463,15 +475,21 @@ pub(crate) fn analyze_reflectance_ir(
 /// # Errors
 /// Empty geometry, non-positive sample rate or port impedance, TMM refusal,
 /// non-passive converged reflectance, or ladder non-convergence at `ladder.max_taps`.
-pub fn realize_line(
+pub fn realize_line<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     zc: f64,
     wall: Option<&WallPin>,
     ladder: &LineLadder,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    let termination = match termination.into() {
+        MouthLoad::Analytic(t) => t,
+        MouthLoad::Tabulated(table) => return baked::characteristic(
+            physics, gas, table, sample_rate_hz, usize::MAX, zc, wall, None, Some(ladder)),
+        MouthLoad::Matched => return Err(baked::matched_refusal()),
+    };
     let length = duct_axial_length(physics);
     if !(length > 0.0 && length.is_finite()) {
         return Err(DrivingPointError::Invalid {
@@ -534,7 +552,7 @@ pub(crate) fn duct_reflectance(
 /// characteristic line must stay realizable at lossless Z poles.
 pub(crate) fn realize_characteristic_response(
     geo_delay: f64,
-    termination: Termination,
+    termination: impl Into<LineDc>,
     sample_rate_hz: u32,
     zc: f64,
     pole_states: Vec<PoleState>,
@@ -553,12 +571,18 @@ pub(crate) fn realize_characteristic_response(
     }
     let max_taps = validate_ladder(ladder)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let r_dc = match termination {
-        Termination::Closed => C64::new(1.0, 0.0),
-        Termination::IdealOpen
+    let r_dc = match termination.into() {
+        LineDc::Explicit(value) => {
+            if !value.is_finite() || value.abs() > 1.0 + PASSIVITY_TOL {
+                return Err(DrivingPointError::Invalid { what: "static reflection must be finite and passive" });
+            }
+            C64::new(value, 0.0)
+        }
+        LineDc::Analytic(Termination::Closed) => C64::new(1.0, 0.0),
+        LineDc::Analytic(Termination::IdealOpen
         | Termination::UnflangedOpen
         | Termination::UnflangedThinWall { .. }
-        | Termination::FlangedOpen => {
+        | Termination::FlangedOpen) => {
             if let Ok(r0) = reflectance_at(1.0e-3) {
                 if r0.re.is_finite() {
                     C64::new(r0.re.clamp(-1.0, 1.0), 0.0)
@@ -695,10 +719,10 @@ pub(crate) fn realize_characteristic_response(
 ///
 /// # Errors
 /// Empty geometry, a delay that does not fit `n` samples, TMM, or DFT.
-pub fn characteristic_line(
+pub fn characteristic_line<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
@@ -716,10 +740,10 @@ pub fn characteristic_line(
 /// # Errors
 /// As [`characteristic_line`].
 #[allow(clippy::too_many_arguments)]
-pub fn characteristic_line_dense(
+pub fn characteristic_line_dense<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
@@ -745,10 +769,10 @@ pub fn characteristic_line_dense(
 /// # Errors
 /// As [`characteristic_line`].
 #[allow(clippy::too_many_arguments)]
-pub fn characteristic_line_realized(
+pub fn characteristic_line_realized<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
@@ -773,10 +797,10 @@ pub fn characteristic_line_realized(
 /// # Errors
 /// As [`characteristic_line`].
 #[allow(clippy::too_many_arguments)]
-pub fn characteristic_line_realized_with_ladder(
+pub fn characteristic_line_realized_with_ladder<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
@@ -784,6 +808,12 @@ pub fn characteristic_line_realized_with_ladder(
     n_fft_override: Option<usize>,
     ladder: Option<&LineLadder>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    let termination = match termination.into() {
+        MouthLoad::Analytic(t) => t,
+        MouthLoad::Tabulated(table) => return baked::characteristic(
+            physics, gas, table, sample_rate_hz, n, zc, wall, n_fft_override, ladder),
+        MouthLoad::Matched => return Err(baked::matched_refusal()),
+    };
     let length = duct_axial_length(physics);
     if !(length > 0.0) {
         return Err(DrivingPointError::Invalid {
@@ -855,7 +885,7 @@ fn characteristic_line_response(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn characteristic_line_response_with_poles(
     geo_delay: f64,
-    termination: Termination,
+    termination: impl Into<LineDc>,
     sample_rate_hz: u32,
     n: usize,
     zc: f64,
@@ -863,6 +893,7 @@ pub(crate) fn characteristic_line_response_with_poles(
     pole_states: Vec<PoleState>,
     mut reflectance_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    let termination = termination.into();
     if sample_rate_hz == 0 || !zc.is_finite() || zc <= 0.0 {
         return Err(DrivingPointError::Invalid {
             what: "positive sample rate and finite positive port impedance required",
@@ -891,12 +922,19 @@ pub(crate) fn characteristic_line_response_with_poles(
     let n_fft = override_v.clamp(256, 8192).next_power_of_two();
     let fft = Fft::new(n_fft);
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
+    let enforce_passivity = matches!(termination, LineDc::Explicit(_));
     buf[0] = match termination {
-        Termination::Closed => FftC64::new(1.0, 0.0),
-        Termination::IdealOpen
+        LineDc::Explicit(value) => {
+            if !value.is_finite() || value.abs() > 1.0 + PASSIVITY_TOL {
+                return Err(DrivingPointError::Invalid { what: "static reflection must be finite and passive" });
+            }
+            FftC64::new(value, 0.0)
+        }
+        LineDc::Analytic(Termination::Closed) => FftC64::new(1.0, 0.0),
+        LineDc::Analytic(Termination::IdealOpen
         | Termination::UnflangedOpen
         | Termination::UnflangedThinWall { .. }
-        | Termination::FlangedOpen => FftC64::new(-1.0, 0.0),
+        | Termination::FlangedOpen) => FftC64::new(-1.0, 0.0),
     };
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
@@ -910,6 +948,9 @@ pub(crate) fn characteristic_line_response_with_poles(
     let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
     fft.inverse(&mut buf, &mut scratch);
     let ir: Vec<f64> = buf.iter().map(|c| c.re).collect();
+    if enforce_passivity && analyze_reflectance_ir(&ir, dt, geo_delay).0 > 1.0 + PASSIVITY_TOL {
+        return Err(DrivingPointError::Invalid { what: "tabulated characteristic line violates 4x-oversampled passivity" });
+    }
     let total_energy: f64 = ir.iter().map(|&h| h * h).sum();
     let tail_energy = if total_energy > 0.0 {
         ir[3 * (n_fft / 4)..].iter().map(|&h| h * h).sum::<f64>() / total_energy
@@ -1133,18 +1174,28 @@ fn build_impedance_filter(
     compliance_gain: f64,
     resonance_poles: &[(f64, f64, C64)],
 ) -> Result<DelayedFilter, DrivingPointError> {
-    let fft = Fft::new(n_fft);
-    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
-    for k in 1..=n_fft / 2 {
-        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let response = input_impedance_wall(physics, gas, omega, loss, termination, wall)
-            .map_err(DrivingPointError::Duct)?;
-        let mut z = match termination {
+    build_impedance_response_filter(dt, n_fft, 0.0, compliance_gain, resonance_poles, |omega| {
+        let response = input_impedance_wall(physics, gas, omega, loss, termination, wall)?;
+        Ok(match termination {
             Termination::Closed | Termination::IdealOpen => response.impedance,
             Termination::UnflangedOpen
             | Termination::UnflangedThinWall { .. }
             | Termination::FlangedOpen => response.p_mouth_over_u_in,
-        };
+        })
+    })
+}
+
+fn build_impedance_response_filter(
+    dt: f64, n_fft: usize, dc_impedance: f64, compliance_gain: f64,
+    resonance_poles: &[(f64, f64, C64)],
+    mut response_at: impl FnMut(f64) -> Result<C64, DuctError>,
+) -> Result<DelayedFilter, DrivingPointError> {
+    let fft = Fft::new(n_fft);
+    let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
+    buf[0] = FftC64::new(dc_impedance, 0.0);
+    for k in 1..=n_fft / 2 {
+        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
+        let mut z = response_at(omega).map_err(DrivingPointError::Duct)?;
         if compliance_gain > 0.0 && k < n_fft / 2 {
             // Peel the discrete trapezoidal compliance integrator:
             // Z_comp(ω_k) = +i (g_comp * dt / 2) cot(ω_k dt / 2) under e^{-iωt}.
@@ -1182,14 +1233,19 @@ fn build_impedance_filter(
 ///
 /// # Errors
 /// Empty geometry, TMM, or DFT.
-pub fn impedance_line(
+pub fn impedance_line<'a>(
     physics: &Duct,
     gas: &GasState,
-    termination: Termination,
+    termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     n: usize,
     wall: Option<&WallPin>,
 ) -> Result<DelayedFilter, DrivingPointError> {
+    let termination = match termination.into() {
+        MouthLoad::Analytic(t) => t,
+        MouthLoad::Tabulated(table) => return baked::impedance(physics, gas, table, sample_rate_hz, n, wall),
+        MouthLoad::Matched => return Err(baked::matched_refusal()),
+    };
     if physics.segments.is_empty() {
         return Err(DrivingPointError::Invalid {
             what: "line needs positive axial length",

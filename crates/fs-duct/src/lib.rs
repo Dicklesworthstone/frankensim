@@ -69,6 +69,8 @@
 //! multimodal structure by ~15 cents.
 
 pub mod modal;
+/// Shared analytic/tabulated mouth-load selection for acoustic consumers.
+pub use modal::MouthLoad;
 /// Stable wave/reflection and Redheffer composition with explicit conditioning.
 pub mod compose;
 /// Smooth plane-wave profiles and declared integration/slice axes.
@@ -1462,6 +1464,27 @@ pub struct TabulatedLoad {
     omegas: Vec<f64>,
     z: Vec<C64>,
     source_id: String,
+    mouth: Option<TabulatedMouth>,
+}
+
+/// Physical reference of a measured or baked load, independent of its table grid.
+/// The axial coordinate is measured from the consuming duct's inlet. The DC
+/// impedance is an explicitly supplied finite, real static limit; an exterior
+/// radiation load has zero DC impedance. It is not extrapolated from row one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabulatedMouth {
+    /// Mouth reference plane [m] from the inlet.
+    pub axial_position_m: f64,
+    /// Circular mouth radius [m].
+    pub radius_m: f64,
+    /// Exterior medium used to compute or measure the load.
+    pub gas: GasState,
+    /// Static pressure / volume-flow impedance [Pa s/m^3].
+    pub dc_impedance: f64,
+}
+
+impl<'a> From<Termination> for MouthLoad<'a> {
+    fn from(value: Termination) -> Self { Self::Analytic(value) }
 }
 
 impl TabulatedLoad {
@@ -1511,7 +1534,56 @@ impl TabulatedLoad {
             omegas,
             z,
             source_id: source_id.to_string(),
+            mouth: None,
         })
+    }
+
+    /// Bind the table to its measured/baked mouth and explicit static limit.
+    /// This supplies caller-declared physical metadata, not a validation of the
+    /// measurement or bake. Time-domain consumers require this binding so that
+    /// a changed geometry or medium cannot silently reuse the old load.
+    ///
+    /// # Errors
+    /// Nonphysical geometry, incoherent gas, or negative/nonfinite DC impedance.
+    pub fn with_mouth(mut self, mouth: TabulatedMouth) -> Result<Self, DuctError> {
+        if !mouth.axial_position_m.is_finite() || mouth.axial_position_m <= 0.0
+            || !mouth.radius_m.is_finite() || mouth.radius_m <= 0.0
+            || !mouth.dc_impedance.is_finite() || mouth.dc_impedance < 0.0
+            || mouth.gas.validate_coherence().is_err()
+        {
+            return Err(DuctError::BadParameter { what: "tabulated mouth needs positive geometry, coherent gas and nonnegative finite DC impedance" });
+        }
+        self.mouth = Some(mouth);
+        Ok(self)
+    }
+
+    /// Explicit physical reference, when supplied by the table producer.
+    #[must_use]
+    pub fn mouth(&self) -> Option<&TabulatedMouth> { self.mouth.as_ref() }
+
+    /// Check the physical reference before realizing a time-domain load.
+    /// Geometry agrees within 1 nm; the resolved exterior gas must agree exactly.
+    /// Every stored row must be passive to the line's fixed 1e-12 relative
+    /// tolerance, regardless of a looser tolerance used to import source data.
+    ///
+    /// # Errors
+    /// Missing reference, changed mouth geometry, or changed exterior medium.
+    pub fn validate_mouth(&self, axial_position_m: f64, radius_m: f64,
+        gas: &GasState) -> Result<&TabulatedMouth, DuctError>
+    {
+        let mouth = self.mouth.as_ref().ok_or(DuctError::BadParameter {
+            what: "time-domain tabulated load requires an explicit mouth reference and DC limit",
+        })?;
+        if !axial_position_m.is_finite() || !radius_m.is_finite()
+            || (mouth.axial_position_m - axial_position_m).abs() > 1.0e-9
+            || (mouth.radius_m - radius_m).abs() > 1.0e-9 || mouth.gas != *gas
+        {
+            return Err(DuctError::BadParameter { what: "tabulated load mouth plane, radius or exterior gas does not match the duct" });
+        }
+        if self.z.iter().any(|z| z.re < -1.0e-12 * z.abs()) {
+            return Err(DuctError::BadParameter { what: "time-domain mouth load is not passive at the fixed consumer tolerance" });
+        }
+        Ok(mouth)
     }
 
     /// The caller-supplied provenance identity.

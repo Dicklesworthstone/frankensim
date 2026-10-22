@@ -490,10 +490,33 @@ Boundary facts a consumer must
 know, both discovered by this bead's battery: the characteristic-line
 realization refuses `UnflangedOpen`/`FlangedOpen` terminations whose
 Nyquist `ka` exceeds 1 (at 48 kHz that is every bore wider than
-~2.27 mm radius — the measured-load `Termination::Tabulated` lane,
-bead zolja, is the lift), and the Zwikker–Kosten Bessel path's former
+~2.27 mm radius — the measured-load `MouthLoad::Tabulated` lane
+is the lift), and the Zwikker–Kosten Bessel path's former
 `r_v ≈ 160` continued-fraction ceiling was an iteration-budget bug fixed
 in `fs-phs` (budget now scales with `|z|`).
+
+The scalar characteristic-line constructors, `realize_line`, `impedance_line`,
+regional/material-wall lines and all duct/field reed-voice constructors accept
+the shared `MouthLoad` selection. Existing `Termination` arguments retain the
+analytic path. A tabulated load requires an explicit `TabulatedMouth`: the
+mouth plane/radius and exterior gas must match, and its real DC impedance is
+supplied separately rather than extrapolated. Every positive-frequency bin
+comes from the table, with no analytic splice or out-of-band fallback. The
+complete declared FFT/ladder band is admitted before realization. Raw terminal
+data alone cannot supply the bore's static behavior: the gas/wall propagation
+must also admit the existing 1e-3 rad/s quasi-static probe. A material wall
+whose source band excludes that probe explicitly refuses, even when its
+positive FFT band is covered; no static wall response is extrapolated. Raw terminal
+passivity is checked before propagation, so bore loss cannot conceal an active
+mouth; characteristic FIRs also retain the 4x-oversampled passivity refusal.
+The existing Bessel propagation, FIR/ladder and reed stepper remain the numerical
+owners. Scalar lines refuse `Matched`, which is a multimodal continuation.
+The full-band regressions compare characteristic reflection and mouth-pressure
+transfer with frequency-domain TMM at 48/96 kHz, plus uniform-regional identity,
+changed-load sensitivity, physical-reference/band refusals and active-load
+mutations. They use an explicit resistive control, not a validated exterior
+radiation bake; table convergence, complete-instrument realism and multimodal
+runtime adoption are separate work.
 
 ### Aperture-junction solver modes (bead frankensim-2s4i5)
 

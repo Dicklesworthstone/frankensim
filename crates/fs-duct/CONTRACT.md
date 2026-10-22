@@ -406,6 +406,16 @@ pipe `Z_in = +i Zc cot(kL)`.
   loads the PLANE mode; higher modes keep the disclosed matched-mouth
   closure (tl-001..tl-004).
 
+  `TabulatedMouth` optionally binds that table to an explicit axial mouth
+  reference, radius, resolved exterior gas and finite nonnegative real DC
+  impedance. `validate_mouth` requires geometry agreement within 1 nm, exact
+  gas agreement and every stored impedance row to be passive at a fixed
+  1e-12 relative tolerance, regardless of the source import tolerance.
+  This is caller-declared metadata, not validation of the source measurement
+  or bake. The root `MouthLoad` re-export is the same selection type used by
+  the modal authority. Existing frequency-domain calls remain compatible;
+  scalar time-domain consumers require the physical reference and full band.
+
 - `FingeringTable` / `Fingering` (music bead 3ez8g.6.1 — the deferred
   fingering-tables slice consumed): typed chart-side fingering data
   over a duct template. The template's tone-hole GEOMETRY never

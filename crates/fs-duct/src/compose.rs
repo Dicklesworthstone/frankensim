@@ -486,6 +486,19 @@ pub fn input_reflection_with_wall(
     compose_chain_reflection(&chain.blocks, z_load, options)
 }
 
+/// Stable reflection for an explicitly supplied finite mouth impedance.
+/// Uses the same local propagation and conditioning as the analytic-load path;
+/// a pressure/flow impedance pole need not become a reflection-coordinate pole.
+pub fn input_reflection_load_with_wall(
+    duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
+    load: C64, wall: WallModel<'_>,
+) -> Result<InputReflection, DuctError> {
+    if !finite(load) { return Err(bad("finite mouth impedance required")); }
+    let options = ComposeOptions::default();
+    let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
+    compose_chain_reflection(&chain.blocks, Some(load), options)
+}
+
 // A finite load Z=-R is a reflection-coordinate pole, not necessarily a
 // physical pole. Contract its homogeneous [Z-R,Z+R] data directly instead of
 // manufacturing an infinity or refusing a valid active algebraic probe.

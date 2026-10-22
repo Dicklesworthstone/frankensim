@@ -10,7 +10,7 @@ use super::outlet::{OutletError, OutletPressure};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 pub use crate::bernoulli_aperture::wall::material::LocalMaterialWall;
-use fs_duct::{DuctError, DuctResponse, LossModel, Termination, WallLaw, WallModel};
+use fs_duct::{DuctError, DuctResponse, LossModel, MouthLoad, Termination, WallLaw, WallModel};
 use fs_math::c64::C64;
 use fs_vfit::discretize::DelayedFilter;
 
@@ -67,14 +67,17 @@ impl MaterialWallDuct {
     /// Every sampled frequency must lie in the original material's support.
     /// Maxwell midpoint-state limits belong to the graph integrator; this
     /// frequency-domain image uses the original FIR sampling/history controls.
-    pub fn characteristic_line(&self, termination: Termination, sample_rate_hz: u32,
+    /// A tabulated mouth also requires wall support at the existing 1e-3 rad/s
+    /// quasi-static bore probe. Positive FFT-band coverage alone does not
+    /// authorize unavailable static wall data; that case explicitly refuses.
+    pub fn characteristic_line<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, n_fft_override: Option<usize>) -> Result<DelayedFilter, DrivingPointError> {
         self.duct.characteristic_line_with_wall(termination, sample_rate_hz, n,
             WallModel::Law(&self.wall), n_fft_override)
     }
 
     /// Same feedback realization, retaining its original discretization receipt.
-    pub fn characteristic_line_realized(&self, termination: Termination, sample_rate_hz: u32,
+    pub fn characteristic_line_realized<'a>(&self, termination: impl Into<MouthLoad<'a>>, sample_rate_hz: u32,
         n: usize, n_fft_override: Option<usize>)
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
         self.duct.characteristic_line_with_wall_realized(termination, sample_rate_hz, n,
