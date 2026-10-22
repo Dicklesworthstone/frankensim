@@ -4,7 +4,7 @@
 use super::{Failure, MAX_PRODUCT_SAMPLES, Result};
 use super::mean_control::MeanControl;
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_uq::{QmcConfig, QmcExecution, SobolExecution, UqExecution, UqPlan};
+use fs_uq::{QmcConfig, QmcExecution, ShapleyExecution, SobolExecution, UqExecution, UqPlan};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -81,6 +81,13 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+pub(super) fn restore_shapley(
+    path: &Path, plan: &UqPlan, identity: ContentHash,
+) -> Result<ShapleyExecution> {
+    ShapleyExecution::restore(plan, identity, &read(path)?)
+        .map_err(|error| failure(format!("{}: {error}", path.display())))
+}
+
 /// One fresh output owned by this invocation. Never opens an existing file
 /// for replacement, so a resume input or another user's file cannot be lost.
 /// Successful sample boundaries replace this output atomically; a partial
@@ -128,6 +135,11 @@ impl Output {
     }
 
     pub(super) fn save_sobol(&self, execution: &SobolExecution, identity: ContentHash) -> Result<()> {
+        let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
+        self.publish(&bytes)
+    }
+
+    pub(super) fn save_shapley(&self, execution: &ShapleyExecution, identity: ContentHash) -> Result<()> {
         let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
         self.publish(&bytes)
     }

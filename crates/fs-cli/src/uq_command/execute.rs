@@ -12,6 +12,7 @@ mod compliance;
 mod design;
 mod qmc;
 mod sensitivity;
+mod shapley;
 mod mean_control;
 mod polynomial;
 
@@ -24,6 +25,7 @@ pub(super) struct Options {
     design: Option<DesignGrid>,
     qmc_replicates: Option<usize>,
     sobol_sensitivity: bool,
+    shapley_sensitivity: bool,
     adjoint_mean_control: bool,
     polynomial: Option<polynomial::Settings>,
 }
@@ -49,9 +51,10 @@ impl Options {
                 let count = count_option(value, "--qmc-replicates")?;
                 if !(2..=256).contains(&count) { return Err(bad("--qmc-replicates must be in 2..=256")); }
                 options.qmc_replicates = Some(count);
-            } else if flag == "--sensitivity" && !options.sobol_sensitivity {
-                if value != "sobol" { return Err(bad("--sensitivity supports only sobol")); }
-                options.sobol_sensitivity = true;
+            } else if flag == "--sensitivity" && !options.sobol_sensitivity && !options.shapley_sensitivity {
+                if value == "sobol" { options.sobol_sensitivity = true; }
+                else if value == "shapley" { options.shapley_sensitivity = true; }
+                else { return Err(bad("--sensitivity supports sobol or shapley")); }
             } else if flag == "--checkpoint" && options.checkpoint.is_none() {
                 options.checkpoint = Some(PathBuf::from(value.as_os_str()));
             } else if flag == "--resume" && options.resume.is_none() {
@@ -89,14 +92,14 @@ impl Options {
             && (options.compliance.is_some() || options.design.is_some()) {
             return Err(bad("QMC requires a fixed sample layout without sequential compliance or candidate-selection flags"));
         }
-        if options.sobol_sensitivity
+        if (options.sobol_sensitivity || options.shapley_sensitivity)
             && (options.qmc_replicates.is_some() || options.compliance.is_some()
-                || options.design.is_some()) {
-            return Err(bad("Sobol sensitivity requires a fixed design without QMC, sequential compliance or candidate-selection flags"));
+                || options.design.is_some() || options.polynomial.is_some()) {
+            return Err(bad("sensitivity requires a fixed design without QMC, polynomial, sequential compliance or candidate-selection flags"));
         }
         if options.adjoint_mean_control && (options.compliance.is_some()
             || options.design.is_some() || options.qmc_replicates.is_some()
-            || options.sobol_sensitivity) {
+            || options.sobol_sensitivity || options.shapley_sensitivity) {
             return Err(bad("adjoint mean control requires a fixed-count Monte Carlo plan; no sequential decisions, QMC, sensitivity or candidate selection"));
         }
         polynomial::validate_options(&options)?;
@@ -153,6 +156,9 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
     }
     if options.sobol_sensitivity {
         return sensitivity::execute(base_text, &base, &config, options);
+    }
+    if options.shapley_sensitivity {
+        return shapley::execute(base_text, &base, &config, options);
     }
     if let Some(replicates) = options.qmc_replicates {
         return qmc::execute(base_text, &base, &config, options, replicates);

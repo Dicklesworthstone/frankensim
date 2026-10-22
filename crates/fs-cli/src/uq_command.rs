@@ -56,12 +56,19 @@ fn model_failure(message: impl Into<String>) -> Failure {
 
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
+        let help = format!("{HELP}\nCorrelated physical-input variance sensitivity:\n\
+--sensitivity shapley supports 1..8 varying Gaussian inputs under explicit\n\
+independent or joint-gaussian dependence. samples=N*2*(2^d-1), N>=2.\n\
+Checkpoint/resume retains every paid conditional half-pair. Repeat the selector\n\
+on resume. Only a complete fixed design publishes effects; no causal or\n\
+confidence claim. Other sampling, mean-control and decision modes conflict.\n\
+See examples/cooling-network/SHAPLEY_SENSITIVITY.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json_mode {
-                format!("{{\"schema\":{},\"help\":{}}}\n", quote(RESULT_SCHEMA), quote(HELP))
+                format!("{{\"schema\":{},\"help\":{}}}\n", quote(RESULT_SCHEMA), quote(&help))
             } else {
-                HELP.into()
+                help
             },
             stderr: String::new(),
         };
