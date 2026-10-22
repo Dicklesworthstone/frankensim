@@ -102,7 +102,8 @@ pub const MAX_PROPERTY_USAGE_SOURCE_HASHES: usize = 8_192;
 /// Version 2 refuses interval support for exact-only scalar claims.
 pub const MATDB_EVALUATOR_VERSION: u32 = 2;
 /// Evaluator semantics for explicit sampled two-coordinate support.
-pub const SURFACE_MATDB_EVALUATOR_VERSION: u32 = 3;
+/// Version 4 preserves constant cells/edges and exact coordinate independence.
+pub const SURFACE_MATDB_EVALUATOR_VERSION: u32 = 4;
 
 /// A fail-closed refusal at the portable property-usage receipt boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]

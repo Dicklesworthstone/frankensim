@@ -341,6 +341,40 @@ pub(crate) fn line_knots(
     Ok(ordered)
 }
 
+// Equal ordinates along a coordinate-aligned edge prove that this affine
+// cell depends only on the other coordinate. Canonical endpoint ordering
+// makes the same one-coordinate law identical in adjacent source cells.
+fn axis_independent_value(
+    positions: [[f64; 2]; 3],
+    values: [f64; 3],
+    point: [f64; 2],
+) -> Option<f64> {
+    for axis in 0..2 {
+        for a in 0..3 {
+            let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+            if positions[a][axis].to_bits() != positions[b][axis].to_bits()
+                || values[a].to_bits() != values[b].to_bits()
+            {
+                continue;
+            }
+            let (low, high) = if positions[a][axis] < positions[c][axis] {
+                (a, c)
+            } else {
+                (c, a)
+            };
+            let fraction = (point[axis] - positions[low][axis])
+                / (positions[high][axis] - positions[low][axis]);
+            let value = values[low] + fraction * (values[high] - values[low]);
+            if value.is_finite() {
+                return Some(value);
+            }
+        }
+    }
+    // Opposite extreme ordinates can overflow their difference even when
+    // the original weighted sum is representable; retain that evaluator.
+    None
+}
+
 pub(crate) fn evaluate(
     axes: &[String; 2],
     samples: &[([f64; 2], f64)],
@@ -390,12 +424,39 @@ pub(crate) fn evaluate(
                 }
             }
             let total: f64 = weights.iter().sum();
-            let value: f64 = weights
+            if !total.is_finite() || total <= 0.0 {
+                return Err(MatDbError::UnsupportedEvaluation {
+                    reason: "surface interpolation is not representable as a finite scalar",
+                });
+            }
+            // A constant cell or edge must retain its source value exactly:
+            // rounded normalized weights need not sum to one. Only vertices
+            // with exactly nonzero weights participate, so an off-edge vertex
+            // cannot perturb a constant edge or hide variation inside a cell.
+            let mut active_values = weights
                 .iter()
                 .zip(triangle)
-                .map(|(weight, vertex)| (weight / total) * samples[vertex as usize].1)
-                .sum();
-            if !value.is_finite() || !total.is_finite() || total <= 0.0 {
+                .filter(|(weight, _)| **weight != 0.0)
+                .map(|(_, vertex)| samples[vertex as usize].1);
+            let constant = active_values
+                .next()
+                .filter(|first| active_values.all(|value| value.to_bits() == first.to_bits()));
+            let value = constant
+                .or_else(|| {
+                    axis_independent_value(
+                        positions,
+                        triangle.map(|v| samples[v as usize].1),
+                        point,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    weights
+                        .iter()
+                        .zip(triangle)
+                        .map(|(weight, vertex)| (weight / total) * samples[vertex as usize].1)
+                        .sum::<f64>()
+                });
+            if !value.is_finite() {
                 return Err(MatDbError::UnsupportedEvaluation {
                     reason: "surface interpolation is not representable as a finite scalar",
                 });

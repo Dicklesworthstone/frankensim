@@ -116,6 +116,197 @@ fn g1_one_source_law_changes_with_both_temperature_and_shear() {
     );
 }
 
+fn pressure_surface(values: [f64; 4]) -> PropertyClaim {
+    PropertyClaim {
+        key: PropertyKey::new("coefficient", Dims::NONE),
+        value: PropertyValue::Surface2D {
+            axes: ["T".into(), "p".into()],
+            axis_dims: [TEMPERATURE, fs_qty::Pressure::DIMS],
+            samples: [[280.0, 1e5], [320.0, 1e5], [280.0, 3e5], [320.0, 3e5]]
+                .into_iter()
+                .zip(values)
+                .collect(),
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: Dims::NONE,
+        },
+        validity: ValidityDomain::unconstrained()
+            .with_quantity("T", temperature(), 280.0, 320.0)
+            .with_quantity(
+                "p",
+                QuantitySpec::dimensional(fs_qty::Pressure::DIMS),
+                1e5,
+                3e5,
+            ),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: Vec::new(),
+        provenance: Provenance {
+            source: "synthetic coefficient(T, p); not measured material data".into(),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        },
+    }
+}
+
+fn pressure_point(t: f64, p: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity("T", temperature(), t)
+        .unwrap()
+        .with_quantity("p", QuantitySpec::dimensional(fs_qty::Pressure::DIMS), p)
+        .unwrap()
+}
+
+#[test]
+fn g1_constant_cells_and_temperature_lines_preserve_source_bits() {
+    // The first two non-dyadic queries previously changed constant 0.2 and
+    // 1e8 ordinates by one ulp, falsely making constant mechanical data vary.
+    for value in [0.2_f64, 1e8, -0.0] {
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(pressure_surface([value; 4])).unwrap();
+        let key = PropertyKey::new("coefficient", Dims::NONE);
+        for (t, p) in [
+            (280.01367521367524, 134579.123),
+            (280.05470085470085, 134579.123),
+            (319.137, 278923.75),
+        ] {
+            let answer = claims
+                .query_pinned_typed(&key, &pressure_point(t, p), id)
+                .unwrap();
+            assert_eq!(answer.evidence.value.value.to_bits(), value.to_bits());
+            assert!(matches!(
+                answer.receipt.decision,
+                EvaluationDecision::LinearInsideTriangle { .. }
+            ));
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+        let line = claims
+            .query_line_typed(
+                &key,
+                "T",
+                &pressure_point(280.0, 134579.123),
+                &pressure_point(320.0, 134579.123),
+                ClaimSelection::Pinned(id),
+            )
+            .unwrap();
+        assert_eq!(
+            line.knots.len(),
+            3,
+            "the source-cell edge must remain a breakpoint"
+        );
+        for (_, answer) in line.knots {
+            assert_eq!(answer.evidence.value.value.to_bits(), value.to_bits());
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g1_constant_shared_edge_does_not_flatten_either_nonconstant_cell() {
+    for reverse_cells in [false, true] {
+        let mut source = pressure_surface([1.0, 0.2, 0.2, 2.0]);
+        if reverse_cells {
+            let PropertyValue::Surface2D { triangles, .. } = &mut source.value else {
+                unreachable!()
+            };
+            triangles.reverse();
+        }
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(source).unwrap();
+        let key = PropertyKey::new("coefficient", Dims::NONE);
+        // Exactly on the shared diagonal, with unequal, non-dyadic weights.
+        let edge = claims
+            .query_pinned_typed(&key, &pressure_point(300.125, 199375.0), id)
+            .unwrap();
+        assert_eq!(edge.evidence.value.value.to_bits(), 0.2_f64.to_bits());
+        assert_eq!(
+            edge.receipt.decision,
+            EvaluationDecision::LinearInsideTriangle { triangle: 0 }
+        );
+        claims.verify_receipt(&edge.receipt).unwrap();
+        // Halfway from the edge midpoint to each opposite vertex. The two
+        // affine source laws remain different and retain their full variation.
+        for (t, p, expected) in [(290.0, 150000.0, 0.6), (310.0, 250000.0, 1.1)] {
+            let answer = claims
+                .query_pinned_typed(&key, &pressure_point(t, p), id)
+                .unwrap();
+            assert_close(answer.evidence.value.value, expected);
+            assert_ne!(answer.evidence.value.value.to_bits(), 0.2_f64.to_bits());
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g1_axis_independent_slices_agree_across_cells_and_interior_queries() {
+    for (values, axis, lower, upper, queries, expected) in [
+        (
+            [1e8, 1e8, 1.2e8, 1.2e8],
+            "T",
+            [280.0, 134579.123],
+            [320.0, 134579.123],
+            [
+                [280.0099, 134579.123],
+                [300.0, 134579.123],
+                [319.137, 134579.123],
+            ],
+            103457912.3_f64,
+        ),
+        (
+            [1e8, 1.2e8, 1e8, 1.2e8],
+            "p",
+            [300.125, 1e5],
+            [300.125, 3e5],
+            [
+                [300.125, 100123.75],
+                [300.125, 200000.0],
+                [300.125, 299000.0],
+            ],
+            110062500.0,
+        ),
+    ] {
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(pressure_surface(values)).unwrap();
+        let key = PropertyKey::new("coefficient", Dims::NONE);
+        for [t, p] in queries {
+            let answer = claims
+                .query_pinned_typed(&key, &pressure_point(t, p), id)
+                .unwrap();
+            assert_eq!(answer.evidence.value.value.to_bits(), expected.to_bits());
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+        let line = claims
+            .query_line_typed(
+                &key,
+                axis,
+                &pressure_point(lower[0], lower[1]),
+                &pressure_point(upper[0], upper[1]),
+                ClaimSelection::Pinned(id),
+            )
+            .unwrap();
+        assert_eq!(line.knots.len(), 3);
+        for (_, answer) in line.knots {
+            assert_eq!(answer.evidence.value.value.to_bits(), expected.to_bits());
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g0_axis_reduction_overflow_retains_finite_weighted_sum() {
+    let mut claims = ClaimSet::new();
+    let id = claims
+        .insert_claim(pressure_surface([-f64::MAX, -f64::MAX, f64::MAX, f64::MAX]))
+        .unwrap();
+    let key = PropertyKey::new("coefficient", Dims::NONE);
+    for t in [290.0, 310.0] {
+        let answer = claims
+            .query_pinned_typed(&key, &pressure_point(t, 2e5), id)
+            .unwrap();
+        assert_eq!(answer.evidence.value.value, 0.0);
+        claims.verify_receipt(&answer.receipt).unwrap();
+    }
+}
+
 #[test]
 fn g1_fixed_context_line_retains_cell_crossings_and_canonical_receipts() {
     let mut source = claim();
@@ -580,7 +771,7 @@ fn g0_surface_receipts_bind_source_cell_and_preserve_legacy_versions() {
         .unwrap();
     let receipt = answer.receipt;
     assert_eq!(receipt.schema_version, 4);
-    assert_eq!(receipt.evaluator_version, 3);
+    assert_eq!(receipt.evaluator_version, 4);
     let bytes = receipt.to_bytes().unwrap();
     assert!(bytes.starts_with(b"FSMATU4\0"));
     let loaded = PropertyUsageReceipt::from_bytes_verified(&bytes, receipt.content_hash()).unwrap();
@@ -602,8 +793,14 @@ fn g0_surface_receipts_bind_source_cell_and_preserve_legacy_versions() {
     wrong_schema.schema_version = 3;
     assert!(wrong_schema.to_bytes().is_err());
     let mut wrong_evaluator = receipt;
-    wrong_evaluator.evaluator_version = 2;
-    assert!(claims.verify_receipt(&wrong_evaluator).is_err());
+    wrong_evaluator.evaluator_version = 3;
+    assert!(matches!(
+        claims.verify_receipt(&wrong_evaluator),
+        Err(MatDbError::EvaluatorVersionDrift {
+            receipt: 3,
+            current: 4
+        })
+    ));
 
     let mut untyped = claim();
     untyped.validity = ValidityDomain::unconstrained()

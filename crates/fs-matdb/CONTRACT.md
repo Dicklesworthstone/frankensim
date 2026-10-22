@@ -286,11 +286,19 @@ Membership and topology use `fs_ivl::orient2d`. Source and query coordinates
 must be zero or have magnitude in `[2^-200, 2^200]`, within that owner's
 finite, no-underflow predicate domain. One response admits at most 4096
 samples and 1024 triangles; admission checks are explicitly bounded.
+When every vertex with a nonzero barycentric weight has a bit-identical
+ordinate, interpolation preserves that source value exactly, including its
+zero sign. This covers constant cells and constant edges without flattening
+nonconstant interiors. Equal ordinates on a coordinate-aligned edge also
+prove that an affine cell depends only on the other coordinate: canonical
+low/high interpolation preserves that independence across adjacent cells.
+When this reduction overflows, or no such exact reduction exists, the
+original weighted-sum interpolation remains in use.
 
 Pack schema v8 preserves source order, both coordinate dimensions, ordinates,
 cells, and source-component covariance/normalization targets. Existing v1–v7
 packs retain their bytes. Surface usage receipts use identity/wire v4 and
-evaluator v3; scalar and curve receipts retain v2/v3 and evaluator v2.
+evaluator v4; scalar and curve receipts retain v2/v3 and evaluator v2.
 The receipt identifies the exact sample or source cell used.
 
 Affine interpolation is the source's declared model, not an additional
