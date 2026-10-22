@@ -525,6 +525,29 @@ was changed.
   refusal, a live closure refusal and a worker-bitwise, option-bound
   declaration at 20480 panels.
 
+G3, loaded modes of a real free aluminium bar (`fs-couple/tests/loaded_free_bar.rs`):
+- Fixture: beam 40 of NASA TM X-2852 (specimen `aluminum-beams-howell1974`)
+  with the 2024-T3 matdb constants, a declared temper substitution, on the
+  TET10 solid. Faces of the same Kuhn grid carry the vertex average of u.n,
+  and `GeometryPolicy` selects plain CBIE.
+- `loaded_modes_match_coupled_solve` compares two routes for every elastic
+  mode below 1.6 kHz, on [12,2,1] and [16,4,1] grids:
+  - one routed single-mode bake per mode, which is reciprocal by
+    construction;
+  - the coupled FE+BEM system in the complete in-vacuo basis of the same FE
+    model, rigid modes included.
+  They agree within 4.1e-4 cents and 1.5% in decay (gates 0.1 cent and 2%).
+  The decay difference is the fluid coupling to other modes that a
+  single-mode bake leaves out. Multi-mode bakes stay refused: the complete
+  matrix's collocation reciprocity defect is 1e-2, against the 1e-12 gate.
+- `loaded_free_bar_radiation_decay_ladder` puts the fundamental on a fixed
+  [96,16,2] TET10 structure and nests BEM panels at 496/1760/6592. In vacuo
+  it gives 371.4 Hz against the measured 369 Hz; air lowers it by 0.80 Hz.
+  The radiation decay rate 5.69/5.94/6.05e-5 1/s changes by 4.1% then 1.8%
+  (order about 1.2). Its log decrement 1.6e-7 is 5e-4 of the measured
+  air-minus-vacuum 3.2e-4, which also holds viscous loss: a one-sided bound
+  (ts1, a2e2fb443).
+
 1. G0 Gauss identity: the assembled Neumann operator applied to ones
    gives −1 at every centroid within discretization tolerance
    (bem-001) — sign conventions cannot drift silently.
