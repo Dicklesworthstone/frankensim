@@ -7,7 +7,8 @@
 //! does not repair collocation data or claim a positive-real time realization.
 use crate::helmholtz::rayleigh_modal::{self, AreaSample, PreparedSurface};
 use crate::helmholtz::{
-    self, Formulation, HelmholtzError, IterativeError, IterativeOptions, IterativeRadiation, Medium,
+    self, Formulation, HelmholtzError, IterativeError, IterativeOptions, IterativeRadiation,
+    Medium, PanelRule,
 };
 use crate::panel3d::SpherePanels;
 use crate::radiation_policy::GeometryPolicy;
@@ -386,8 +387,9 @@ pub fn modal_radiation_loading(
 ///   `iterative`, each in its own formulation: plain CBIE on the dense
 ///   owner's triangle quadrature, Burton-Miller on centroid kernels. Every
 ///   field must converge to the declared GMRES tolerance, or the bake
-///   refuses. The declaration identity then binds the numerical options
-///   (not workers or caches, which change no bits).
+///   refuses. The declaration identity then binds the numerical options,
+///   panel rule included (not workers, caches or the rule's pair budget,
+///   which change no bits).
 ///
 /// Cancellation is also polled between fields; one GMRES solve is not
 /// interrupted by `cancelled`.
@@ -510,6 +512,11 @@ fn load(
                     precond,
                     o.max_translation_work as u64,
                     u64::from(o.directional.is_some()),
+                    // The rule changes the numbers; its pair budget does not.
+                    match o.panel_rule {
+                        PanelRule::Centroid => 0,
+                        PanelRule::TriangleNear { .. } => 1,
+                    },
                 ] {
                     hash.update(&v.to_le_bytes());
                 }

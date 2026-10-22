@@ -714,6 +714,25 @@ fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
             .declaration_hash(),
         routed.declaration_hash()
     );
+    // A Burton-Miller row (ka 3) binds its panel rule: the triangle near rule
+    // changes the numbers, so it is a different declaration. The smallest
+    // lat-long sphere past the cap (8280 panels) and a loose GMRES tolerance
+    // keep this cheap: the rule's effect is far above the solver error.
+    let just_above = resolved_sphere(46);
+    assert!(just_above.areas().len() > helmholtz::MAX_DENSE_PANELS);
+    let centroid = IterativeOptions {
+        tol: 1e-6,
+        fmm_order: 4,
+        ..options.clone()
+    };
+    let rule = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 24 },
+        ..centroid.clone()
+    };
+    let centroid_bm = bake_modes(&just_above, 1, 3.0, Some(&centroid)).unwrap();
+    let rule_bm = bake_modes(&just_above, 1, 3.0, Some(&rule)).unwrap();
+    assert_ne!(rule_bm.declaration_hash(), centroid_bm.declaration_hash());
+    assert_ne!(bits(&rule_bm), bits(&centroid_bm));
     match bake(&above, 0.05, Some(&options)) {
         Err(ModalLoadingError::NonReciprocal {
             relative_defect,

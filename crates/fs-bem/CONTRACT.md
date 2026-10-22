@@ -278,6 +278,37 @@ low-frequency partition. The static constant-density identities close under
 the computed zero-k operator. Static-sum and cross-route FMM approximation
 remain part of the operator error, independently tested against dense LU.
 
+That centroid rule is first order. One-point weights near the collocation
+point carry O(h) errors in S, D and N; under exact integration plain CBIE
+converges at h^2 while Burton-Miller stays at h^1 (pexfp.111). The declared
+`PanelRule::TriangleNear { max_pairs }` (`helmholtz_triangle_rule.rs`)
+replaces every `triangle_is_near` pair as follows:
+- S and D: exact static layers plus 8x8 remainders, as plain CBIE;
+- N: the exact constant-density finite part,
+  `(n_x.n)[k^2 S_T + SUM_e m_e.I_e] - SUM_e (n_x.m_e)(n.I_e)` with
+  `I_e = INT_e grad G`;
+- self terms: the flat triangle's;
+- both static closures: recomputed under the same rule;
+- D': keeps its centroid kernel and point closure. Exact flat-facet D' is
+  itself first order, since `D'_0[1] + 1/2 = O(h)` on facets.
+
+Routes and measurements:
+- Dense: `solve_radiation_with_rule` / `solve_radiation_batch_with_rule`.
+- Iterative: `IterativeOptions.panel_rule`, through the one `NearRows`
+  mechanism; `impedance_sphere_triangle_rule_iterative_matches_dense` holds
+  iterative to dense within 1.2e-6.
+- `impedance_sphere_triangle_rule_ladder` measures dense orders (pulsating /
+  scattering) of 2.07 / 2.03 at ka 1 and 1.91 / 2.01 at ka 3, against 1.4-1.7
+  for the centroid rows.
+- `PanelRule::Centroid` is the unchanged default, bit for bit.
+
+Known limit: far pairs keep one-point weights, which leave an O(h) remnant
+that alpha = i/k amplifies at low ka. In a dense replica at ka 0.05 the
+dipole radiation resistance stalls at about 2.8x the exact value (centroid
+rule: 11.6x). A degree >= 2 far rule converges it (0.29 / 0.64 / 0.86 of
+exact over rungs 2-4). So the default stays centroid until a multi-point
+far field exists.
+
 Plain CBIE (`Formulation::PlainCbie`, IRP .105) keeps the dense owner's
 triangle quadrature; it is not replaced by centroid kernels.
 - The far field is a far-field-only W5a double layer (single layer for the
@@ -511,7 +542,8 @@ was changed.
   options, each in its own formulation (the route's or `GeometryPolicy`'s).
   Every field must converge to the GMRES tolerance or the bake refuses with
   `Iterative`. The declaration identity binds the numerical options, not
-  workers or caches. Closure and orientation are admitted by
+  workers, caches or the panel rule's pair budget; the rule itself is bound.
+  Closure and orientation are admitted by
   `near_field::components`, the owner `near_field::Geometry` uses below the
   cap; that receiver admission itself stops at the dense cap.
   `GeometryPolicy::new` admits surfaces up to `MAX_SURFACE_PANELS`, since its
