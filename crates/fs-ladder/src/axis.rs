@@ -8,6 +8,12 @@ use fs_blake3::{ContentHash, hash_domain};
 
 use crate::convergence::{PowerFit, fit_power_law};
 
+mod equivalence;
+pub use equivalence::{
+    BoundSource, BoundedSolution, EquivalenceDomain, EquivalenceReport, EquivalenceVerdict, Metric,
+    compare_equivalence, qoi_bound,
+};
+
 /// Applicable numerical error model; no model is selected implicitly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErrorModel {

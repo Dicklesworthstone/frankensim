@@ -46,6 +46,37 @@ ordered ladder remains supported exactly as a path-graph specialization.
   The report retains inputs/outputs in declaration order and hashes its framed
   internal representation with domain-separated fs-blake3. Timings are retained
   and therefore different measured timings intentionally change its identity.
+- `axis::compare_equivalence` (IRP M5.5-W2, plan §1.4) compares a detailed and
+  a simplified frozen description on raw complex output over a predeclared
+  `EquivalenceDomain`: nested sampling rungs (at least three), lines along one
+  refined coordinate, an ensemble declaration (a seed ensemble refuses
+  pointwise comparison) and model-form limitations. It knows no physics.
+  - Each side is a `BoundedSolution`. `from_ladder` takes values from the
+    finest joint rung of that side's own `LadderReport`, and per-observable
+    bounds from `qoi_bound`, which sums the per-axis bounds and the largest
+    joint interaction.
+  - Bound sources (`BoundSource`):
+    - `Gci`: GCI times |finest|, for `Asymptotic` verdicts.
+    - `Roundoff`: the flatness threshold `ROUNDOFF_ULPS eps max|y|`, for
+      `Unresolved` verdicts.
+    - `Declared`: for `Bounded` verdicts.
+    - `Spread`: the spread of all admitted rungs, for verdicts with no GCI
+      (pre-asymptotic, scattered, oscillatory).
+    - `ObservedOnly`, `InsufficientRungs` and `Refused` give no bound, and
+      the comparison refuses.
+  - Point bounds: `Absolute` uses `|a - b| +- (b_a + b_b)`. `LevelDb` uses
+    `|20 log10(|a|/|b|)|` over the moduli intervals.
+  - Sampling term: at each sampled local maximum of a line, the curvature of
+    the nearest three-point stencil gives at most `|u''| H^2/8` above the
+    samples. The reported term is the finest rung's, and it is infinite
+    unless the last three rungs' terms do not grow.
+  - Verdict: `NotEquivalent` when a sampled lower bound exceeds the
+    tolerance, `Equivalent` when sampled maximum plus term is within it,
+    else `Inconclusive`. `authorizes_omission()` requires `Equivalent` and no
+    limitation.
+  - The report retains every point bound, the per-rung terms, the per-side
+    count of spread-bounded points and the description and ladder hashes,
+    and is content-hashed.
 - Legacy `ConvergenceEvaluator` delegates to the same power-law arithmetic,
   retains all valid rungs, and preserves its API. Its preexisting color contract
   is retained; new axis reports do not mint Verified authority from a GCI.
@@ -180,6 +211,19 @@ hand values (relative tolerance 1e-12); oscillatory, scattered, wrong-order,
 zero/flat, two-rung, unknown-model, missing-bound and changed-regime refusals;
 G3 capped-axis liveness and coupled physical-duration invariants; all-rung
 legacy regression; G5 content identity and measured-input binding.
+M5.5-W2 additions:
+- `equivalence_verdict_three_way`: all three verdicts on a sampled parabola,
+  whose curvature terms 0.04, 0.01 and 0.0025 are exact. A spike only the
+  finest rung sees gives an infinite term. Also the level-metric bounds.
+- `equivalence_requires_both_bounds`: mismatched, negative, non-finite,
+  unsourced or mis-united bounds refuse; oscillating rungs are spread-bounded;
+  an `ObservedOnly` observable refuses.
+- `domain_sampling_cap_three_rungs`: three rungs pass and two refuse, along
+  with non-nested rungs, uncovered points, bad lines or coordinates, seed
+  ensembles and invalid tolerances.
+- `ladder_bounds_follow_axis_verdicts`: the GCI bound is 1.25 times the
+  manufactured error, plus the roundoff and declared sources.
+- `equivalence_report_identity_and_limitations`.
 
 `tests/ladder.rs` (Proposal 3, 12 cases): total rung ordering; out-of-range
 rung structured error; adjacency empty in the correct direction at the ends;
@@ -222,6 +266,12 @@ determinism.
   See also NASA/NPARC's grid-convergence tutorial for the constant `E/h^p`
   asymptotic requirement and the Fs=1.25 three-or-more-grid GCI convention:
   <https://www.grc.nasa.gov/www/wind/valid/tutorial/spatconv.html>.
+- An equivalence verdict is not a rigorous enclosure.
+  - GCI bounds carry Fs = 1.25.
+  - Spread bounds assume the rungs contract or vary by roundoff.
+  - The sampling term assumes the upper bound is C2 between samples and that
+    the finest rungs resolve its narrowest feature. A feature narrower than
+    the grid can be missed; a growing term is the only signal of it.
 - Typed roots assert exact binding, not truth, provenance, or promotion. In
   particular, current `fs-evidence::DiscrepancyModel` does not yet expose a
   durable native artifact identity; the empirical edge-population successor

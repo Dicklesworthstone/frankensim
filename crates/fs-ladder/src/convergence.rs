@@ -65,6 +65,10 @@ fn linear_power_fit(data: &[(f64, f64)], p: f64) -> Option<(f64, f64, f64)> {
     (a.is_finite() && b.is_finite() && sse.is_finite()).then_some((a, b, sse))
 }
 
+/// Rungs within `ROUNDOFF_ULPS` ulps of their largest magnitude are flat:
+/// `Unresolved`, with no observable order.
+pub(crate) const ROUNDOFF_ULPS: f64 = 128.0;
+
 /// Fit `f(h)=f0+C h^p` to ALL supplied points. Positive finite h values
 /// must be ordered coarse to fine. Observations may have either sign.
 ///
@@ -106,7 +110,7 @@ pub fn fit_power_law(data: &[(f64, f64)], formal_order: f64, policy: &AnalysisPo
         .map(|(_, y)| *y)
         .fold(f64::NEG_INFINITY, f64::max);
     let scale = hi - lo;
-    let roundoff = 128.0 * f64::EPSILON * lo.abs().max(hi.abs()).max(f64::MIN_POSITIVE);
+    let roundoff = ROUNDOFF_ULPS * f64::EPSILON * lo.abs().max(hi.abs()).max(f64::MIN_POSITIVE);
     if !scale.is_finite() || scale <= roundoff {
         result.verdict = AxisVerdict::Unresolved;
         return result;

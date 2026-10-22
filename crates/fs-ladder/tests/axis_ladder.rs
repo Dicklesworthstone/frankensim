@@ -356,3 +356,303 @@ fn legacy_evaluator_uses_all_rungs_without_scattered_gci() {
     assert!(r.discretization_error_gci.is_none());
     assert!(r.richardson_extrapolated_qoi.is_none());
 }
+
+// ---- M5.5-W2 simplification-equivalence comparison ----
+
+const Z_UNIT: &str = "Pa s/m^3";
+
+fn solution(tag: u8, values: &[(f64, f64)], bounds: &[f64]) -> BoundedSolution {
+    BoundedSolution {
+        description: fs_blake3::ContentHash([tag; 32]),
+        ladder: fs_blake3::ContentHash([tag + 1; 32]),
+        unit: Z_UNIT.into(),
+        values: values.to_vec(),
+        bounds: bounds.to_vec(),
+        sources: vec![BoundSource::Declared; values.len()],
+    }
+}
+/// Nine points at x = 0..8 on one line, sampled on nested rungs
+/// {0,4,8} < {0,2,4,6,8} < all.
+fn domain9() -> EquivalenceDomain {
+    EquivalenceDomain {
+        description: "synthetic: nine points, three nested rungs".into(),
+        rungs: vec![vec![0, 4, 8], vec![0, 2, 4, 6, 8], (0..9).collect()],
+        lines: vec![(0..9).collect()],
+        coordinate: (0..9).map(f64::from).collect(),
+        ensemble: EnsembleDecl::Deterministic {
+            reason: "passive, no stochastic source".into(),
+        },
+        limitations: vec![],
+    }
+}
+/// Simplified side at 1 + 0i everywhere; the detailed side differs by `d[i]`.
+fn pair(d: &[f64; 9], b: f64) -> (BoundedSolution, BoundedSolution) {
+    let detailed: Vec<_> = d.iter().map(|x| (1.0 + x, 0.0)).collect();
+    (
+        solution(1, &detailed, &[b; 9]),
+        solution(3, &[(1.0, 0.0); 9], &[b; 9]),
+    )
+}
+
+#[test]
+fn equivalence_verdict_three_way() {
+    // |d| = 1 - (x - 3.3)^2 / 100 on x = 0..8: supremum 1 between samples.
+    // Every rung's stencil sees u'' = -0.02, so the curvature terms are
+    // 0.02 H^2 / 8 = 0.04, 0.01, 0.0025 for H = 4, 2, 1, and the sampled
+    // maximum 0.9991 plus 0.0025 covers the supremum.
+    let parabola: [f64; 9] =
+        core::array::from_fn(|i| 1.0 - (i as f64 - 3.3) * (i as f64 - 3.3) / 100.0);
+    let (a, b) = pair(&parabola, 0.0);
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::Absolute, 1.01).unwrap();
+    for (got, want) in report.sampling_terms.iter().zip([0.04, 0.01, 0.0025]) {
+        assert!((got - want).abs() < 1e-12, "{:?}", report.sampling_terms);
+    }
+    assert!((report.sampling_term - 0.0025).abs() < 1e-12);
+    let EquivalenceVerdict::Equivalent { max_upper } = report.verdict else {
+        panic!("{:?}", report.verdict);
+    };
+    assert!(max_upper >= 1.0 && (max_upper - 1.0016).abs() < 1e-12);
+    assert!(report.authorizes_omission());
+    // The sampled lower bound 0.9991 exceeds a 0.999 tolerance at x = 3.
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::Absolute, 0.999).unwrap();
+    let EquivalenceVerdict::NotEquivalent { max_lower, at } = report.verdict else {
+        panic!("{:?}", report.verdict);
+    };
+    assert!(at == 3 && (max_lower - 0.9991).abs() < 1e-12);
+    assert!(!report.authorizes_omission());
+    // Tolerance 1: lower 0.9991 <= 1 < 0.9991 + 0.0025 straddles at x = 3 only.
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::Absolute, 1.0).unwrap();
+    assert_eq!(
+        report.verdict,
+        EquivalenceVerdict::Inconclusive {
+            straddling: vec![3]
+        }
+    );
+    // A spike only the finest rung sees makes the term grow (0, 0, 0.25):
+    // an unresolved feature, so the sampling term is infinite.
+    let mut spike = [0.0; 9];
+    spike[5] = 1.0;
+    let (a, b) = pair(&spike, 0.0);
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::Absolute, 10.0).unwrap();
+    assert_eq!(report.sampling_terms, vec![0.0, 0.0, 0.25]);
+    assert!(report.sampling_term.is_infinite());
+    assert!(matches!(
+        report.verdict,
+        EquivalenceVerdict::Inconclusive { .. }
+    ));
+    // Level metric: 10x the modulus is 20 dB; a modulus interval reaching
+    // zero has no finite upper bound.
+    let mut tenfold = [0.0; 9];
+    tenfold[0] = 9.0;
+    let (a, b) = pair(&tenfold, 0.0);
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::LevelDb, 25.0).unwrap();
+    assert!((report.upper[0] - 20.0).abs() < 1e-12 && (report.lower[0] - 20.0).abs() < 1e-12);
+    assert!(report.upper[1] == 0.0 && report.lower[1] == 0.0);
+    let (a, b) = pair(&tenfold, 1.5);
+    let report = compare_equivalence(&a, &b, &domain9(), Metric::LevelDb, 25.0).unwrap();
+    assert!(report.upper[1].is_infinite() && report.lower[1] == 0.0);
+    // |a| in [8.5, 11.5], |b| in [0, 2.5]: at least 20 log10(8.5/2.5).
+    let floor = 20.0 * (8.5_f64 / 2.5).log10();
+    assert!(
+        (report.lower[0] - floor).abs() < 1e-12,
+        "{}",
+        report.lower[0]
+    );
+}
+
+#[test]
+fn equivalence_requires_both_bounds() {
+    let (a, b) = pair(&[0.0; 9], 0.0);
+    let domain = domain9();
+    assert!(compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).is_ok());
+    let mut short = b.clone();
+    short.bounds.pop();
+    assert!(compare_equivalence(&a, &short, &domain, Metric::Absolute, 1.0).is_err());
+    let mut negative = b.clone();
+    negative.bounds[3] = -1e-9;
+    assert!(compare_equivalence(&a, &negative, &domain, Metric::Absolute, 1.0).is_err());
+    let mut missing = b.clone();
+    missing.bounds[3] = f64::NAN;
+    assert!(compare_equivalence(&missing, &a, &domain, Metric::Absolute, 1.0).is_err());
+    let mut other_unit = b.clone();
+    other_unit.unit = "Pa/(m^3/s)".into();
+    assert!(compare_equivalence(&a, &other_unit, &domain, Metric::Absolute, 1.0).is_err());
+    let mut unsourced = b.clone();
+    unsourced.sources.pop();
+    assert!(compare_equivalence(&a, &unsourced, &domain, Metric::Absolute, 1.0).is_err());
+    // Oscillating rungs have no GCI: their spread (2 - 1) is the bound, and
+    // the point is marked as spread-bounded.
+    let oscillating = ladder(&[(1.0, 2.0), (0.5, 1.0), (0.25, 1.5), (0.125, 1.2)]);
+    let points = [("re".to_string(), "im".to_string())];
+    let hash = fs_blake3::ContentHash([7; 32]);
+    let spread = BoundedSolution::from_ladder(hash, &oscillating, Z_UNIT, &points).unwrap();
+    assert_eq!(spread.sources, vec![BoundSource::Spread]);
+    assert!((spread.bounds[0] - 1.0).abs() < 1e-12);
+    // An observable a non-algebraic axis does not bound (ObservedOnly)
+    // refuses when the solution is built, before any comparison.
+    let refused = BoundedSolution::from_ladder(hash, &spectral_ladder(), Z_UNIT, &points);
+    assert!(refused.unwrap_err().contains("im has no ladder bound"));
+    let wrong = [("re".to_string(), "absent".to_string())];
+    let manufactured = ladder(&[(1.0, 5.0), (0.5, 3.125), (0.25, 3.0 + 2.0 / 256.0)]);
+    assert!(BoundedSolution::from_ladder(hash, &manufactured, Z_UNIT, &wrong).is_err());
+    assert!(BoundedSolution::from_ladder(hash, &manufactured, "Pa", &points).is_err());
+}
+
+#[test]
+fn domain_sampling_cap_three_rungs() {
+    let (a, b) = pair(&[0.0; 9], 0.0);
+    let mut domain = domain9();
+    assert!(compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).is_ok());
+    domain.rungs.remove(0);
+    assert!(compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).is_err());
+    let mut not_nested = domain9();
+    not_nested.rungs[1] = vec![1, 2, 4, 6, 8];
+    assert!(compare_equivalence(&a, &b, &not_nested, Metric::Absolute, 1.0).is_err());
+    let mut omits = domain9();
+    omits.rungs[2].pop();
+    assert!(compare_equivalence(&a, &b, &omits, Metric::Absolute, 1.0).is_err());
+    let refuses = |edit: &dyn Fn(&mut EquivalenceDomain)| {
+        let mut bad = domain9();
+        edit(&mut bad);
+        compare_equivalence(&a, &b, &bad, Metric::Absolute, 1.0).is_err()
+    };
+    assert!(refuses(&|d| d.coordinate.truncate(8)));
+    assert!(refuses(&|d| d.coordinate[4] = f64::NAN));
+    assert!(refuses(&|d| d.coordinate.reverse()));
+    assert!(refuses(&|d| d.lines = vec![(0..8).collect()]));
+    assert!(refuses(&|d| d.lines.push(vec![3])));
+    // The coarsest rung keeps one point of the first line: no stencil.
+    assert!(refuses(
+        &|d| d.lines = vec![vec![0, 1, 2, 3], (4..9).collect()]
+    ));
+    let mut seeded = domain9();
+    seeded.ensemble = EnsembleDecl::Seeds {
+        seeds: vec![1, 2],
+        uncertainty: "bootstrap".into(),
+    };
+    assert!(compare_equivalence(&a, &b, &seeded, Metric::Absolute, 1.0).is_err());
+    for tolerance in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert!(compare_equivalence(&a, &b, &domain9(), Metric::Absolute, tolerance).is_err());
+    }
+}
+
+/// A one-axis report with observables `re` (the given rungs, `h` coarse to
+/// fine) and `im` (flat at -4).
+fn ladder(rungs: &[(f64, f64)]) -> LadderReport {
+    let records: Vec<RungRecord> = rungs
+        .iter()
+        .map(|&(h, y)| {
+            let mut r = rung(h, y);
+            r.qoi = vec![
+                Observable {
+                    name: "re".into(),
+                    value: y,
+                    unit: Z_UNIT.into(),
+                },
+                Observable {
+                    name: "im".into(),
+                    value: -4.0,
+                    unit: Z_UNIT.into(),
+                },
+            ];
+            r
+        })
+        .collect();
+    let report = evaluate_axis(
+        &axis(ErrorModel::Algebraic { formal_order: 4.0 }),
+        &records,
+        &sensitivity(),
+        &policy(),
+    );
+    LadderReport::new(
+        policy(),
+        vec![report],
+        vec![],
+        records,
+        EnsembleDecl::Deterministic {
+            reason: "no stochastic source".into(),
+        },
+    )
+    .unwrap()
+}
+
+/// A spectral-tail axis that declares a bound for `re` only.
+fn spectral_ladder() -> LadderReport {
+    let mut spectral = axis(ErrorModel::SpectralTail);
+    spectral.bound_targets = vec!["re".into()];
+    let records: Vec<RungRecord> = [(1.0, 3.5), (0.5, 3.25), (0.25, 3.125)]
+        .iter()
+        .map(|&(h, y)| {
+            let mut r = rung(h, y);
+            let observable = |name: &str, value| Observable {
+                name: name.into(),
+                value,
+                unit: Z_UNIT.into(),
+            };
+            r.qoi = vec![observable("re", y), observable("im", -4.0)];
+            r.bounds = vec![observable("re", h)];
+            r
+        })
+        .collect();
+    let report = evaluate_axis(&spectral, &records, &sensitivity(), &policy());
+    LadderReport::new(
+        policy(),
+        vec![report],
+        vec![],
+        records,
+        EnsembleDecl::Deterministic {
+            reason: "no stochastic source".into(),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn ladder_bounds_follow_axis_verdicts() {
+    // y = 3 + 2 h^4: the finest rung's true error is 2 h^4, and the GCI bound
+    // (Fs = 1.25 on an exact power law) is 1.25 times it. The flat imaginary
+    // part is Unresolved and bounded at the flatness threshold.
+    let rungs: Vec<(f64, f64)> = [1.0, 0.5, 0.25, 0.125]
+        .iter()
+        .map(|&h| (h, 3.0 + 2.0 * fs_math::det::pow(h, 4.0)))
+        .collect();
+    let report = ladder(&rungs);
+    let (re, re_source) = qoi_bound(&report, "re").unwrap();
+    let truth = 2.0 * fs_math::det::pow(0.125, 4.0);
+    assert!((re / truth - 1.25).abs() < 1e-3, "{re} vs {truth}");
+    assert_eq!(re_source, BoundSource::Gci);
+    let (im, im_source) = qoi_bound(&report, "im").unwrap();
+    assert!(im == 128.0 * f64::EPSILON * 4.0, "{im}");
+    assert_eq!(im_source, BoundSource::Roundoff);
+    assert!(qoi_bound(&report, "absent").is_none());
+    // A declared spectral bound is the finest rung's: 0.25.
+    let declared = qoi_bound(&spectral_ladder(), "re").unwrap();
+    assert_eq!(declared, (0.25, BoundSource::Declared));
+    let points = [("re".to_string(), "im".to_string())];
+    let hash = fs_blake3::ContentHash([9; 32]);
+    let s = BoundedSolution::from_ladder(hash, &report, Z_UNIT, &points).unwrap();
+    assert_eq!(s.values, vec![(rungs[3].1, -4.0)]);
+    assert!((s.bounds[0] - (re * re + im * im).sqrt()).abs() <= 1e-15 * s.bounds[0]);
+    assert_eq!(s.ladder, report.hash);
+    assert_eq!(s.sources, vec![BoundSource::Gci]);
+}
+
+#[test]
+fn equivalence_report_identity_and_limitations() {
+    let (a, b) = pair(&[0.01; 9], 0.0);
+    let mut domain = domain9();
+    domain.limitations = vec!["1-D chimney: evanescent near field omitted".into()];
+    let one = compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).unwrap();
+    let two = compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).unwrap();
+    assert_eq!(one.hash, two.hash);
+    assert!(matches!(one.verdict, EquivalenceVerdict::Equivalent { .. }));
+    assert!(
+        !one.authorizes_omission(),
+        "a limitation withholds authorization"
+    );
+    assert_eq!(one.limitations, domain.limitations);
+    let three = compare_equivalence(&a, &b, &domain, Metric::Absolute, 0.9).unwrap();
+    assert_ne!(one.hash, three.hash);
+    assert_eq!(one.descriptions, [a.description, b.description]);
+    assert_eq!(one.ladders, [a.ladder, b.ladder]);
+}
