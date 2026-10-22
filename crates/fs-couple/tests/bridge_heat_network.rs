@@ -1,6 +1,8 @@
 //! Original radiative, interface, charge, Maxwell and beam owners in one solve.
 #[path="bridge_heat_network/common.rs"]
 mod common;
+#[path="bridge_heat_network/continuation.rs"]
+mod continuation;
 use common::*;
 use fs_couple::strip_enthalpy::bridge::electrical::*;
 

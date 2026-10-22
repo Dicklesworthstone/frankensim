@@ -17,6 +17,8 @@ use fs_exec::Cx;
 use fs_matdb::ClaimSelection;
 use fs_material::state_point::MaterialPropertySelection;
 
+mod extension;
+
 /// A single declarative assembly, with optional physical heat-transfer paths.
 /// Empty electrical contacts are valid; bulk resistor bindings remain required.
 /// None for radiation means no authored enclosure, not missing emissivity data.
@@ -111,21 +113,36 @@ impl<'a> MaterialHeatNetwork<'a> {
     {
         check(cx)?;
         let electrical = self.electrical.prepare(thermal, || cx.checkpoint().is_err())?;
+        self.prepare_bound(cx, thermal, electrical, self.thermal_contacts,
+            self.radiation.map_or(&[], |radiation| radiation.cells))
+    }
+
+    // Fresh preparation and topology continuation share the original evaluators.
+    // Supplied bindings may already contain retained pins; never select over them.
+    fn prepare_bound<'n>(&'n self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        electrical: PreparedElectricalContactNetwork<'n, 'a>,
+        contact_bindings: &[MaterialContactLink<'a>], surface_bindings: &[RadiatingCell<'a>])
+        -> Result<PreparedHeatNetwork<'n, 'a>, HeatNetworkError>
+    {
+        check(cx)?;
         let mut initial = electrical.resolve(thermal, || cx.checkpoint().is_err())?;
-        let contacts = apply_material_contacts(thermal, self.thermal_contacts,
+        let contacts = apply_material_contacts(thermal, contact_bindings,
             &mut initial.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let mut thermal_contacts = Vec::with_capacity(contacts.len());
         for sample in &contacts {
             check(cx)?;
-            let mut binding = *self.thermal_contacts.iter().find(|c| c.link == sample.link)
+            let mut binding = *contact_bindings.iter().find(|c| c.link == sample.link)
                 .ok_or(HeatNetworkError::Invalid("thermal contact binding disappeared"))?;
             binding.selection = ClaimSelection::Pinned(sample.interface.receipt().selected);
             thermal_contacts.push(binding);
         }
         let mut radiating_cells = Vec::new();
-        if let Some(radiation) = self.radiation {
+        if let Some(original) = self.radiation {
+            let radiation = MaterialRadiation { enclosure: original.enclosure, cells: surface_bindings,
+                power_tolerance_w: original.power_tolerance_w,
+                radiosity_tolerance_w_m2: original.radiosity_tolerance_w_m2 };
             let evaluated = radiation.resolve(cx, thermal)?;
-            for binding in radiation.cells {
+            for binding in surface_bindings {
                 check(cx)?;
                 let cell = self.electrical.bulk.cells.iter().find(|c| c.cell == binding.cell)
                     .ok_or(HeatNetworkError::Invalid("radiation cell lacks its bulk material binding"))?;
