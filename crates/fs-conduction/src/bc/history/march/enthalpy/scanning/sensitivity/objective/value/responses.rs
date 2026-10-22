@@ -7,8 +7,8 @@
 
 use super::{ScanValueBudget, ScanValueEvaluation, ScanObjectiveSampling,
     ScanSensitivityError, ScanningEnthalpyRun, EnthalpyStepConfig,
-    evaluate_with_observer, finite, invalid, poll, zeros};
-use super::super::{observed, spatial::ScanObservationSpec};
+    evaluate_with_observer, invalid, poll};
+use super::super::{finite, observed, spatial::ScanObservationSpec, zeros};
 use super::super::responses::ScanResponse;
 use super::super::responses::peaks::{ScanPeakResponse, summarize_samples};
 use fs_exec::Cx;
