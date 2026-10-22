@@ -4,7 +4,8 @@
 use core::convert::Infallible;
 use crate::material_circuit::MaterialCircuit;
 use crate::circuit_enthalpy::material::{MaterialNetworkSample, PreparedMaterialNetwork};
-use crate::circuit_enthalpy::contacts::heat::{HeatNetworkSample, PreparedHeatNetwork};
+use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSample,
+    MaterialHeatNetwork, PreparedHeatNetwork};
 use fs_exec::Cx;
 use crate::circuit_enthalpy::contacts::material::PreparedElectricalContactNetwork;
 use fs_solid::bridge as solid;
@@ -15,6 +16,8 @@ use super::super::{BridgeEnthalpyError, invalid, electrical as feedback};
 pub enum ElectricalGrowthError {
     Interval(feedback::ElectricalError),
     Birth(BridgeEnthalpyError<Infallible>),
+    /// The physical interval/births passed, but their declared successor did not.
+    Successor(HeatNetworkError),
 }
 impl core::fmt::Display for ElectricalGrowthError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -105,6 +108,37 @@ impl<'t,'m> GrowingBridge<'t,'m> {
             circuit,transport,ports,target_s,gravity_m_s2,loads_n_m,config,guess_j)
             .map_err(ElectricalGrowthError::Interval)?;
         self.finish_electrical_candidate(candidate,config,&mut ||cx.checkpoint().is_err())
+    }
+
+    /// Accept the physical interval, birth batch AND source-preserving successor
+    /// heat network together. A late source or exposed-surface refusal returns
+    /// none of the circuit, beam, heat field or successor binding.
+    ///
+    /// `transport` describes the old topology; `successor` describes the complete
+    /// post-event topology. The surface map has the exact semantics of
+    /// [`PreparedHeatNetwork::extend_fixed_circuit`]. Surviving source claims are
+    /// retained before new coefficients are evaluated. Returned bindings borrow
+    /// only the authored successor, not the returned mutable physical state.
+    ///
+    /// This performs no extra physical step or source debit. Use the returned
+    /// circuit and prepared network for the next interval. New surfaces, view
+    /// factors and thermal links must be authored; the circuit stays unchanged.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_heat_network_with_successor_candidate<'n, 'a>(
+        &self, cx: &Cx<'_>, circuit: &MaterialCircuit,
+        transport: &PreparedHeatNetwork<'_,'_>, successor: &'n MaterialHeatNetwork<'a>,
+        surface_successors: &[Option<usize>], ports: &[f64],
+        target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
+        config: feedback::ElectricalConfig, guess_j: &[f64],
+    ) -> Result<(Self,MaterialCircuit,PreparedHeatNetwork<'n,'a>,
+        ElectricalGrowthReport<HeatNetworkSample>),ElectricalGrowthError> {
+        let (next,next_circuit,report)=self.step_heat_network_candidate(
+            cx,circuit,transport,ports,target_s,gravity_m_s2,loads_n_m,config,guess_j)?;
+        let prepared=transport.extend_fixed_circuit(cx,successor,next.thermal(),surface_successors)
+            .map_err(ElectricalGrowthError::Successor)?;
+        // The extension reuses original source/geometry admission and its final
+        // checkpoint. Neither it nor this composition advances a second clock.
+        Ok((next,next_circuit,prepared,report))
     }
 
     // One birth/energy/publication path for every admitted heat-network payload.

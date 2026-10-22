@@ -1,6 +1,8 @@
 //! Radiation/contact heat and scheduled spatial births publish together.
 #[path="bridge_heat_network/common.rs"]
 mod common;
+#[path="bridge_heat_growth/continuation.rs"]
+mod continuation;
 use common::*;
 use fs_couple::strip_enthalpy::bridge::{BridgeThermalBinding, electrical};
 use fs_couple::strip_enthalpy::bridge::growth::{GrowingBridge, TipBirth};
