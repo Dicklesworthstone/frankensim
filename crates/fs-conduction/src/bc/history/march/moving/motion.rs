@@ -8,6 +8,9 @@
 //! supplied coefficients. This is conservative in exact arithmetic but is not
 //! an interval-arithmetic certificate or a spatial/temporal solution-error bound.
 
+/// Physical path velocities and authored-coordinate derivatives, not timestep caps.
+pub mod velocity;
+
 use super::{MovingHeatSource, invalid, poll};
 use crate::ConductionError;
 use fs_exec::Cx;
