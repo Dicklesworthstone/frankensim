@@ -409,3 +409,88 @@ fn complex_storage_and_direct_envelopes_apply_before_pass_allocation_g0() {
     ));
     assert_eq!(core::mem::size_of::<C64>(), 2 * core::mem::size_of::<f64>());
 }
+
+#[test]
+fn declared_workers_leave_potentials_bitwise_g0() {
+    // Several tree levels (leaf cap 2), all five operator shapes, with and
+    // without the near-field cache, against the untouched serial path.
+    let points: Vec<[f64; 3]> = (0..240)
+        .map(|i| {
+            let j = 0.07 * det::cos(i as f64);
+            [
+                (i % 8) as f64 + j,
+                ((i / 8) % 6) as f64 - j,
+                (i / 48) as f64 + 0.5 * j,
+            ]
+        })
+        .collect();
+    let normals: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| {
+            let v = [p[0] + 1.0, p[1] + 2.0, p[2] + 3.0];
+            let n = det::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            [v[0] / n, v[1] / n, v[2] / n]
+        })
+        .collect();
+    let q: Vec<C64> = (0..240)
+        .map(|i| C64::new(det::sin(i as f64), 0.2 - i as f64 / 240.0))
+        .collect();
+    let bits = |p: Vec<C64>| -> Vec<(u64, u64)> {
+        p.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
+    };
+    let single = HelmholtzSingle { k: 0.6 };
+    let gradient = HelmholtzGradient::new(0.6, 1).unwrap();
+    let build = |shape: usize| {
+        let (p, n) = (points.clone(), normals.clone());
+        match shape {
+            0 => FmmC64::new(&single, p, 3, 2),
+            1 => FmmC64::new(&gradient, p, 3, 2),
+            2 => FmmC64::new_double(HelmholtzDouble { k: 0.6 }, p, n, 3, 2),
+            3 => FmmC64::new_adjoint_double(HelmholtzAdjointDouble { k: 0.6 }, p, n, 3, 2),
+            _ => FmmC64::new_hypersingular(HelmholtzHypersingular { k: 0.6 }, p, n, 3, 2),
+        }
+        .unwrap()
+    };
+    for shape in 0..5 {
+        for cached in [false, true] {
+            let mut engine = build(shape);
+            if cached {
+                engine.cache_near_field(usize::MAX).unwrap();
+            }
+            assert!(engine.geometry.cells.keys().map(|k| k.0).max() >= Some(3));
+            let serial = bits(engine.potentials(&q).unwrap());
+            for workers in [2, 3, 7, 300] {
+                engine.set_workers(workers).unwrap();
+                assert_eq!(
+                    bits(engine.potentials(&q).unwrap()),
+                    serial,
+                    "shape {shape}, cached {cached}, workers {workers}"
+                );
+            }
+        }
+    }
+    // Each extra worker's M2L row is charged to the slot envelope.
+    let mut engine = build(4);
+    let base = engine.coefficient_slots;
+    let row = 3usize.pow(3) * 3 * 3;
+    engine.set_workers(5).unwrap();
+    assert_eq!(engine.coefficient_slots, base + 4 * row);
+    engine.set_workers(1).unwrap();
+    assert_eq!(engine.coefficient_slots, base);
+    assert!(matches!(
+        engine.set_workers(usize::MAX / 4),
+        Err(FmmError::WorkEnvelopeExceeded { .. })
+    ));
+    assert_eq!((engine.coefficient_slots, engine.workers), (base, 1));
+    // A non-finite M2L block reports the serial path's first error.
+    struct Broken;
+    impl ComplexKernel for Broken {
+        fn eval(&self, _: [f64; 3], _: [f64; 3]) -> C64 {
+            C64::new(f64::NAN, 0.0)
+        }
+    }
+    let mut broken = FmmC64::new(&Broken, points.clone(), 3, 2).unwrap();
+    let serial = broken.potentials(&q).unwrap_err();
+    broken.set_workers(4).unwrap();
+    assert_eq!(broken.potentials(&q).unwrap_err(), serial);
+}

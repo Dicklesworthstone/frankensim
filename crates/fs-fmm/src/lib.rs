@@ -212,8 +212,9 @@ impl core::fmt::Display for FmmError {
 
 impl std::error::Error for FmmError {}
 
-/// A smooth-off-diagonal kernel K(x, y).
-pub trait Kernel {
+/// A smooth-off-diagonal kernel K(x, y). `Sync`, so complex FMM passes may
+/// share their geometry across declared workers.
+pub trait Kernel: Sync {
     /// Evaluate K(target, source).
     fn eval(&self, x: [f64; 3], y: [f64; 3]) -> f64;
 }

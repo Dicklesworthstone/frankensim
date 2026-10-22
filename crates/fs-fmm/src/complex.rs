@@ -154,6 +154,9 @@ pub struct FmmC64<'k> {
     near: Option<Vec<C64>>,
     coefficient_slots: usize,
     directional: Option<directional::DirectionalPlan>,
+    /// Declared worker threads for the non-directional passes; see
+    /// [`Self::set_workers`].
+    workers: usize,
 }
 
 impl<'k> FmmC64<'k> {
@@ -428,6 +431,7 @@ impl<'k> FmmC64<'k> {
             near: None,
             coefficient_slots,
             directional: None,
+            workers: 1,
         })
     }
 
@@ -532,6 +536,9 @@ impl<'k> FmmC64<'k> {
         self.validate_charges(charges)?;
         if let Some(plan) = &self.directional {
             return plan.potentials(self, charges);
+        }
+        if self.workers > 1 {
+            return self.potentials_on_workers(charges);
         }
         let (ns, nt) = self.operator.dimensions();
         let np = self.nodes.len().pow(3);
@@ -652,6 +659,266 @@ impl<'k> FmmC64<'k> {
                         }
                     }
                 }
+            }
+        }
+        validate_output(out)
+    }
+
+    /// Declare `workers` threads (at least one) for the non-directional
+    /// `potentials` passes. Potentials are bit-identical for every count:
+    /// - upward and downward passes split each level's cells;
+    /// - M2L splits target cells, and each worker applies the translation
+    ///   groups in their fixed order to its own targets only;
+    /// - leaves accumulate their own points, in the serial order.
+    ///
+    /// Each extra worker holds one M2L kernel row, charged to the
+    /// coefficient-slot envelope. The directional route stays serial.
+    ///
+    /// # Errors
+    /// `WorkEnvelopeExceeded` when the worker rows would exceed the
+    /// coefficient-slot ceiling; the previous declaration is kept.
+    pub fn set_workers(&mut self, workers: usize) -> Result<(), FmmError> {
+        let workers = workers.max(1);
+        if self.directional.is_none() {
+            let (ns, nt) = self.operator.dimensions();
+            let row = self.nodes.len().pow(3) * ns * nt;
+            let base = self.coefficient_slots - (self.workers - 1) * row;
+            let slots = base.saturating_add((workers - 1).saturating_mul(row));
+            Self::validate_coefficient_slots(slots)?;
+            self.coefficient_slots = slots;
+        }
+        self.workers = workers;
+        Ok(())
+    }
+
+    /// [`Self::potentials`] on the declared workers. Every coefficient and
+    /// output receives the serial path's operations in the serial order.
+    #[allow(clippy::too_many_lines)] // the four passes share one channel layout
+    fn potentials_on_workers(&self, charges: &[C64]) -> Result<Vec<C64>, FmmError> {
+        let (ns, nt) = self.operator.dimensions();
+        let np = self.nodes.len().pow(3);
+        let workers = self.workers;
+        let keys: Vec<CellKey> = self.geometry.cells.keys().copied().collect();
+        let cells: Vec<&crate::Cell> = self.geometry.cells.values().collect();
+        let index: BTreeMap<CellKey, usize> =
+            keys.iter().enumerate().map(|(i, &k)| (k, i)).collect();
+        // Keys sort by level first, so each level is one contiguous range.
+        let mut levels: Vec<(usize, usize)> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            if levels
+                .last()
+                .is_some_and(|r: &(usize, usize)| keys[r.0].0 == key.0)
+            {
+                levels.last_mut().expect("nonempty").1 = i + 1;
+            } else {
+                levels.push((i, i + 1));
+            }
+        }
+        // Upward: deepest level first; a cell reads only its children.
+        let mut multipoles: Vec<Vec<C64>> = vec![Vec::new(); keys.len()];
+        for &(start, end) in levels.iter().rev() {
+            let (head, deeper) = multipoles.split_at_mut(end);
+            let deeper: &[Vec<C64>] = deeper;
+            let upward = |i: usize| -> Vec<C64> {
+                let (key, cell) = (keys[i], cells[i]);
+                let mut m = vec![C64::ZERO; np * ns];
+                if cell.leaf {
+                    for &idx in &cell.points {
+                        let weights = self.weights(key, self.geometry.points[idx]);
+                        for a in 0..ns {
+                            let q = charges[idx].scale(self.source_weight(idx, a));
+                            for (j, &w) in weights.iter().enumerate() {
+                                m[ns * j + a] = m[ns * j + a] + q.scale(w);
+                            }
+                        }
+                    }
+                } else {
+                    for di in 0..2 {
+                        for dj in 0..2 {
+                            for dk in 0..2 {
+                                let child =
+                                    (key.0 + 1, 2 * key.1 + di, 2 * key.2 + dj, 2 * key.3 + dk);
+                                let Some(&c) = index.get(&child) else {
+                                    continue;
+                                };
+                                let cm = &deeper[c - end];
+                                for (j, point) in self.grid(child).into_iter().enumerate() {
+                                    let weights = self.weights(key, point);
+                                    for (i, &w) in weights.iter().enumerate() {
+                                        for a in 0..ns {
+                                            m[ns * i + a] = m[ns * i + a] + cm[ns * j + a].scale(w);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                m
+            };
+            let fill = |i: usize, slot: &mut Vec<C64>| *slot = upward(i);
+            split_run(&mut head[start..end], start, workers, &fill);
+        }
+        // M2L: workers own contiguous target-cell ranges, balanced by pairs.
+        let mut incoming = vec![0usize; keys.len()];
+        for &(a, _) in &self.interactions {
+            incoming[index[&a]] += 1;
+        }
+        let total: usize = incoming.iter().sum();
+        let mut bounds = vec![0usize];
+        let mut running = 0usize;
+        for (i, &count) in incoming.iter().enumerate() {
+            running += count;
+            let filled = bounds.len();
+            if filled < workers && running * workers >= filled * total.max(1) {
+                bounds.push(i + 1);
+            }
+        }
+        while bounds.len() <= workers {
+            bounds.push(keys.len());
+        }
+        let span = np * ns;
+        let mut locals: Vec<Vec<C64>> = vec![vec![C64::ZERO; np * nt]; keys.len()];
+        let multipoles = &multipoles;
+        let m2l = |range: (usize, usize), owned: &mut [Vec<C64>]| -> Result<(), (usize, usize)> {
+            let mut row = vec![C64::ZERO; nt * span];
+            for (g, group) in self.translations.iter().enumerate() {
+                let targets: Vec<(usize, usize)> = group
+                    .iter()
+                    .filter_map(|&pair| {
+                        let (a, b) = self.interactions[pair];
+                        let ta = index[&a];
+                        (range.0..range.1).contains(&ta).then(|| (ta, index[&b]))
+                    })
+                    .collect();
+                if targets.is_empty() {
+                    continue;
+                }
+                let (a0, b0) = self.interactions[group[0]];
+                let (ga, gb) = (self.grid(a0), self.grid(b0));
+                for (i, &x) in ga.iter().enumerate() {
+                    for (j, &y) in gb.iter().enumerate() {
+                        let block = self.operator.block(x, y);
+                        if block[..ns * nt].iter().any(|&z| !finite(z)) {
+                            return Err((g, i));
+                        }
+                        for ta in 0..nt {
+                            row[ta * span + ns * j..ta * span + ns * (j + 1)]
+                                .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
+                        }
+                    }
+                    for &(ta_cell, b_cell) in &targets {
+                        let m = &multipoles[b_cell];
+                        let local = &mut owned[ta_cell - range.0];
+                        for ta in 0..nt {
+                            let slot = nt * i + ta;
+                            local[slot] = local[slot] + dot(&row[ta * span..(ta + 1) * span], m);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        let mut first_error: Option<(usize, usize)> = None;
+        {
+            let mut rest = &mut locals[..];
+            let mut parts = Vec::with_capacity(workers);
+            for w in 0..workers {
+                let (head, tail) =
+                    core::mem::take(&mut rest).split_at_mut(bounds[w + 1] - bounds[w]);
+                rest = tail;
+                parts.push(((bounds[w], bounds[w + 1]), head));
+            }
+            let m2l = &m2l;
+            let results: Vec<Result<(), (usize, usize)>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = parts
+                    .into_iter()
+                    .map(|(range, owned)| scope.spawn(move || m2l(range, owned)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("M2L worker"))
+                    .collect()
+            });
+            for result in results {
+                if let Err(at) = result {
+                    first_error = Some(first_error.map_or(at, |e: (usize, usize)| e.min(at)));
+                }
+            }
+        }
+        if let Some((_, i)) = first_error {
+            return Err(FmmError::NonFiniteOutput { index: i });
+        }
+        // Downward: parents first; a cell reads only its finished parent.
+        for &(start, end) in levels.iter().skip(1) {
+            let (parents, rest) = locals.split_at_mut(start);
+            let parents: &[Vec<C64>] = parents;
+            split_run(
+                &mut rest[..end - start],
+                start,
+                workers,
+                &|c, local: &mut Vec<C64>| {
+                    let key = keys[c];
+                    let parent = (key.0 - 1, key.1 >> 1, key.2 >> 1, key.3 >> 1);
+                    let lp = &parents[index[&parent]];
+                    for (i, point) in self.grid(key).into_iter().enumerate() {
+                        let weights = self.weights(parent, point);
+                        for (j, &w) in weights.iter().enumerate() {
+                            for a in 0..nt {
+                                local[nt * i + a] = local[nt * i + a] + lp[nt * j + a].scale(w);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+        // Leaves: L2P then the adjacent-leaf sums, each point in its own leaf.
+        let leaves: Vec<usize> = (0..keys.len()).filter(|&c| cells[c].leaf).collect();
+        let mut offsets = Vec::with_capacity(leaves.len());
+        let mut next = 0usize;
+        for &c in &leaves {
+            offsets.push(next);
+            for source in self.neighbors(keys[c]) {
+                next += cells[c].points.len() * source.points.len();
+            }
+            next -= cells[c].points.len();
+        }
+        let locals = &locals;
+        let mut values: Vec<Vec<C64>> = vec![Vec::new(); leaves.len()];
+        split_run(&mut values, 0, workers, &|l, out: &mut Vec<C64>| {
+            let (c, mut next) = (leaves[l], offsets[l]);
+            let (key, cell, local) = (keys[c], cells[c], &locals[c]);
+            let mut sums = vec![C64::ZERO; cell.points.len()];
+            for (p, &idx) in cell.points.iter().enumerate() {
+                let weights = self.weights(key, self.geometry.points[idx]);
+                for (j, &w) in weights.iter().enumerate() {
+                    for a in 0..nt {
+                        sums[p] = sums[p] + local[nt * j + a].scale(w * self.target_weight(idx, a));
+                    }
+                }
+            }
+            for source in self.neighbors(key) {
+                for (p, &t) in cell.points.iter().enumerate() {
+                    for &s in &source.points {
+                        if t != s {
+                            let value = match &self.near {
+                                Some(cache) => {
+                                    next += 1;
+                                    cache[next - 1]
+                                }
+                                None => self.pair(t, s),
+                            };
+                            sums[p] = sums[p] + value * charges[s];
+                        }
+                    }
+                }
+            }
+            *out = sums;
+        });
+        let mut out = vec![C64::ZERO; charges.len()];
+        for (l, sums) in values.into_iter().enumerate() {
+            for (&idx, value) in cells[leaves[l]].points.iter().zip(sums) {
+                out[idx] = value;
             }
         }
         validate_output(out)
@@ -800,6 +1067,37 @@ impl<'k> FmmC64<'k> {
                 .map_or(0, |v| v.len() * core::mem::size_of::<C64>())
         )
     }
+}
+
+/// Run `f(offset + i, &mut slots[i])` for every slot, in contiguous chunks
+/// on `workers` scoped threads (inline for one). Each call owns its slot.
+fn split_run<T: Send>(
+    slots: &mut [T],
+    offset: usize,
+    workers: usize,
+    f: &(impl Fn(usize, &mut T) + Sync),
+) {
+    let parts = workers.min(slots.len());
+    if parts <= 1 {
+        for (i, slot) in slots.iter_mut().enumerate() {
+            f(offset + i, slot);
+        }
+        return;
+    }
+    let len = slots.len();
+    let mut rest = slots;
+    std::thread::scope(|scope| {
+        for p in 0..parts {
+            let (start, end) = (p * len / parts, (p + 1) * len / parts);
+            let (head, tail) = core::mem::take(&mut rest).split_at_mut(end - start);
+            rest = tail;
+            scope.spawn(move || {
+                for (i, slot) in head.iter_mut().enumerate() {
+                    f(offset + start + i, slot);
+                }
+            });
+        }
+    });
 }
 
 fn finite(z: C64) -> bool {

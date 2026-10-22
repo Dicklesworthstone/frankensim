@@ -3,8 +3,9 @@
 
 use fs_math::{c64::C64, det};
 
-/// A complex-valued kernel smooth away from x=y.
-pub trait ComplexKernel {
+/// A complex-valued kernel smooth away from x=y. `Sync`, so FMM passes may
+/// evaluate it on declared workers.
+pub trait ComplexKernel: Sync {
     /// Evaluate K(target, source). The FMM excludes self interactions by index.
     fn eval(&self, x: [f64; 3], y: [f64; 3]) -> C64;
 

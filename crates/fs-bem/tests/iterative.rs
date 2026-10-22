@@ -844,3 +844,45 @@ fn bem_directional_matches_dense_above_w5a_regime() {
         "directional BM dense error: {errors:?}"
     );
 }
+
+/// G0: declared W5a workers change no bit of an iterative solve. Pressures,
+/// GMRES iterations and the residual claim equal those of one worker.
+#[test]
+fn declared_fmm_workers_leave_the_iterative_solve_bitwise() {
+    let surface = SpherePanels::icosphere(1.0, 3).unwrap();
+    let v = velocity(&surface);
+    let gate = CancelGate::new_clock_free();
+    let solve = |workers: usize| {
+        let o = IterativeOptions {
+            tol: 1e-8,
+            leaf_capacity: 16,
+            workers,
+            ..opts()
+        };
+        solve_radiation_iterative(
+            &surface,
+            1.0,
+            Medium::air(),
+            &v,
+            Formulation::BurtonMiller,
+            &o,
+            &gate,
+        )
+        .unwrap()
+    };
+    let (serial, serial_report, _) = solve(1);
+    for workers in [3, 8] {
+        let (actual, report, _) = solve(workers);
+        assert_eq!(
+            bits(&actual.pressure),
+            bits(&serial.pressure),
+            "workers {workers}"
+        );
+        assert_eq!(report.iters, serial_report.iters, "workers {workers}");
+        assert_eq!(
+            report.rel_residual.to_bits(),
+            serial_report.rel_residual.to_bits(),
+            "workers {workers}"
+        );
+    }
+}

@@ -214,6 +214,24 @@ passes.
 - `near_field_cache_is_bitwise_and_budgeted_g0` checks bitwise equality and the
   cap / cap-1 boundary.
 
+`FmmC64::set_workers(n)` declares worker threads for the non-directional
+passes; one worker (the default) runs the serial pass unchanged.
+- Every coefficient and output receives the serial operations in the serial
+  order, so potentials are bit-identical for every count:
+  - upward and downward passes split each level's cells;
+  - M2L splits target cells, and each worker applies the translation groups
+    in their fixed order to its own targets;
+  - leaves accumulate their own points, using near-cache offsets in the
+    serial order.
+- A non-finite M2L block reports the serial path's first error.
+- Each extra worker's M2L kernel row is charged to the coefficient-slot
+  envelope; a refused declaration keeps the previous one.
+- The directional route stays serial.
+- `Kernel` and `ComplexKernel` are `Sync` so that workers can share the
+  engine.
+- `declared_workers_leave_potentials_bitwise_g0` covers five operator shapes,
+  with and without the cache, at 2, 3, 7 and 300 workers.
+
 `tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
 It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/
 mixed checks, `1e-12` translation, high-kD refusal (including an unguarded

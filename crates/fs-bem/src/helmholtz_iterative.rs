@@ -63,6 +63,10 @@ pub struct IterativeOptions {
     /// cancellable. Defaults to the fs-fmm v1 `MAX_TRANSLATION_WORK`. The
     /// directional route declares its envelopes in its own options.
     pub max_translation_work: usize,
+    /// Declared worker threads for every W5a operator pass
+    /// ([`FmmC64::set_workers`]). Potentials are bit-identical for every
+    /// count; the directional route stays serial. Defaults to one.
+    pub workers: usize,
 }
 
 impl Default for IterativeOptions {
@@ -80,6 +84,7 @@ impl Default for IterativeOptions {
             max_near_entries: 4_194_304,
             near_field_cache_bytes: 1 << 29,
             max_translation_work: MAX_TRANSLATION_WORK,
+            workers: 1,
         }
     }
 }
@@ -97,7 +102,7 @@ impl IterativeOptions {
         points: Vec<[f64; 3]>,
         normals: Vec<[f64; 3]>,
     ) -> Result<FmmC64<'static>, FmmError> {
-        match (layer, &self.directional) {
+        let mut fmm = match (layer, &self.directional) {
             (NormalLayer::Double, Some(o)) => FmmC64::new_double_directional(
                 HelmholtzDouble { k },
                 points,
@@ -140,7 +145,9 @@ impl IterativeOptions {
                 self.leaf_capacity,
                 self.budget(),
             ),
-        }
+        }?;
+        fmm.set_workers(self.workers)?;
+        Ok(fmm)
     }
     fn budget(&self) -> ComplexBudget {
         ComplexBudget {
@@ -555,7 +562,7 @@ impl<'a> IterativeRadiation<'a> {
             .map(|(&q, &a)| q.scale(a))
             .collect();
         let kernel = HelmholtzSingle { k: self.k };
-        let single = match &self.options.directional {
+        let mut single = match &self.options.directional {
             Some(o) => FmmC64::new_directional(
                 &kernel,
                 self.surface.centroids(),
@@ -568,8 +575,9 @@ impl<'a> IterativeRadiation<'a> {
                 self.options.leaf_capacity,
                 self.options.budget(),
             )?,
-        }
-        .potentials(&weighted)?;
+        };
+        single.set_workers(self.options.workers)?;
+        let single = single.potentials(&weighted)?;
         poll(gate)?;
         let adjoint = self
             .options
