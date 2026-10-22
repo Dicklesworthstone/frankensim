@@ -221,3 +221,41 @@ impl ObstacleSet {
         Ok(pressure)
     }
 }
+
+impl ObstacleSet {
+    // A moved tangent changes BOTH mixed force responses even when every
+    // normal stays fixed. Normal geometry, storage and source laws are unchanged.
+    pub(in super::super) fn stage_friction_geometry(&mut self, network: &CoupledModalSystem,
+        friction: &[Point], gate: &CancelGate)
+        -> Result<Option<(Vec<f64>, Vec<f64>)>, ModalCouplingError>
+    {
+        poll(Some(gate))?;
+        if let Some(geometry) = &mut self.geometry {
+            // prepare_geometry rebuilds all mixed maps once for this step,
+            // including any simultaneous normal endpoint motion.
+            geometry.matrices_at_accepted = false;
+            return Ok(None);
+        }
+        let q = self.points.len(); let p = friction.len();
+        let mut nt = vec![0.0; q*p]; let mut tn = vec![0.0; p*q];
+        for j in 0..q {
+            let response = network_response(network, &self.points[j].column, gate)?;
+            for i in 0..p { poll(Some(gate))?; tn[i*q+j] = dot(&friction[i].column, &response)?; }
+        }
+        for j in 0..p {
+            let response = network_response(network, &friction[j].column, gate)?;
+            for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(&self.points[i].column, &response)?; }
+        }
+        poll(Some(gate))?;
+        Ok(Some((std::mem::replace(&mut self.nt, nt), std::mem::replace(&mut self.tn, tn))))
+    }
+
+    pub(in super::super) fn restore_friction_geometry(&mut self, old: Option<(Vec<f64>, Vec<f64>)>) {
+        if let Some((nt, tn)) = old { self.nt = nt; self.tn = tn; }
+        if let Some(geometry) = &mut self.geometry {
+            // A refused combined update may have overwritten trial normal maps.
+            // The next HOLD/retry must reconstruct from accepted geometry.
+            geometry.matrices_at_accepted = false;
+        }
+    }
+}

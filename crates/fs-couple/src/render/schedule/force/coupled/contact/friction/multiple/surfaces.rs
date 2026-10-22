@@ -8,6 +8,9 @@
 
 use super::*;
 
+/// Atomic held-map changes during playback, using this same response compiler.
+pub mod geometry;
+
 /// A physical receiving surface in the original complete component basis.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrictionSurfaceAttachment {
@@ -60,6 +63,25 @@ impl MultiFrictionModalSystem {
             }
             port.right = Some(attachment.surface);
         }
+        let (points, compliance) = self.prepare_surface_maps(ports, gate)?;
+        self.points = points;
+        self.compliance = compliance;
+        // The one-port fast path must use exactly the same new physical map.
+        self.core.port = self.points[0].port.clone();
+        self.core.column = self.points[0].column.clone();
+        self.core.compliance = self.compliance[0];
+        Ok(self)
+    }
+
+    // Shared by cold surface binding and live held-map changes. No mechanical,
+    // interface or constitutive history is rebuilt by geometric preparation.
+    fn prepare_surface_maps(&self, ports: Vec<ModalFrictionPort>, gate: &CancelGate)
+        -> Result<(Vec<Point>, Vec<f64>), ModalFrictionError>
+    {
+        let p = self.points.len();
+        if ports.len() != p {
+            return Err(invalid("surface maps must retain every original friction port").into());
+        }
         let mut columns = Vec::with_capacity(p);
         for (port, point) in ports.iter().zip(&self.points) {
             poll(Some(gate))?;
@@ -82,15 +104,8 @@ impl MultiFrictionModalSystem {
             }
         }
         poll(Some(gate))?;
-        for ((point, port), column) in self.points.iter_mut().zip(ports).zip(columns) {
-            point.port = port;
-            point.column = column;
-        }
-        self.compliance = compliance;
-        // The one-port fast path must use exactly the same new physical map.
-        self.core.port = self.points[0].port.clone();
-        self.core.column = self.points[0].column.clone();
-        self.core.compliance = self.compliance[0];
-        Ok(self)
+        let points = self.points.iter().zip(ports).zip(columns)
+            .map(|((old, port), column)| Point { port, column, config: old.config }).collect();
+        Ok((points, compliance))
     }
 }
