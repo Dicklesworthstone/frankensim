@@ -125,3 +125,6 @@ pub fn step_candidate<'m>(
         other => other,
     }
 }
+
+/// Mixed gas heat laws on the complete reacting/contact/radiative assembly.
+pub mod exchange;
