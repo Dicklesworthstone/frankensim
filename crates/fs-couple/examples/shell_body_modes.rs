@@ -7,7 +7,7 @@
 //! wood constant comes from a normalized matdb pack named by the component. Nothing is fitted: no frequency, damping or gain
 //! is edited here. `drive` records name the node nearest a point on a part and the global direction of a unit force there.
 //!
-//!   shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--shapes PATH]
+//!   shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]
 //!
 //! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table.
 use std::{collections::BTreeMap, error::Error, fs, io::Write, path::Path};
@@ -45,6 +45,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const TEMPERATURE_K: f64 = 293.15;
 const SHEAR_CORRECTION: f64 = 5.0 / 6.0;
+/// Default drilling penalty of the shell elements; `--drilling-alpha` changes it for a declared sensitivity (the junction stiffness of a fully tied T-junction depends on it).
 const DRILLING_ALPHA: f64 = 1e-3;
 const MIN_DIRECTOR_DOT: f64 = 0.9;
 
@@ -254,6 +255,7 @@ fn requirements() -> Result<Vec<Requirement>> {
 fn component(
     part: &Part,
     material: &ResolvedMaterialStatePoint,
+    drilling_alpha: f64,
     gate: &CancelGate,
 ) -> Result<MaterialShellComponent> {
     let mesh = ShellMesh::new(part.nodes.clone(), part.tris.clone())?;
@@ -307,7 +309,7 @@ fn component(
         directors,
         constraints: Vec::<ShellConstraint>::new(),
         mass: ShellMass::Consistent,
-        drilling_alpha: DRILLING_ALPHA,
+        drilling_alpha,
         assembly_budget: budget,
     })
 }
@@ -366,7 +368,7 @@ fn jacobi(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--shapes PATH]".into());
+        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]".into());
     }
     let (mut n_modes, mut fmin, mut fmax, mut omega) = (
         10usize,
@@ -375,6 +377,7 @@ fn main() -> Result<()> {
         2.0 * std::f64::consts::PI * 200.0,
     );
     let mut shapes: Option<String> = None;
+    let mut drilling_alpha = DRILLING_ALPHA;
     let mut it = args[3..].iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or("flag without a value")?;
@@ -383,6 +386,7 @@ fn main() -> Result<()> {
             "--fmin" => fmin = value.parse()?,
             "--fmax" => fmax = value.parse()?,
             "--omega" => omega = value.parse()?,
+            "--drilling-alpha" => drilling_alpha = value.parse()?,
             "--shapes" => shapes = Some(value.clone()),
             other => return Err(format!("unknown flag {other}").into()),
         }
@@ -391,6 +395,9 @@ fn main() -> Result<()> {
     let dir = Path::new(&args[2]);
     for (k, v) in &table.meta {
         println!("meta {k} = {v}");
+    }
+    if drilling_alpha != DRILLING_ALPHA {
+        println!("drilling_alpha = {drilling_alpha:e} (declared sensitivity; the default is {DRILLING_ALPHA:e})");
     }
     let gate = CancelGate::new_clock_free();
     let requested = requirements()?;
@@ -415,7 +422,7 @@ fn main() -> Result<()> {
             part.nodes.len(),
             part.tris.len()
         );
-        parts.push(component(part, &material, &gate)?);
+        parts.push(component(part, &material, drilling_alpha, &gate)?);
     }
     let position = |name: &str| -> Result<usize> {
         table
