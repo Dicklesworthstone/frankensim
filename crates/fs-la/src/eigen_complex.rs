@@ -15,7 +15,7 @@
 use fs_math::c64::C64;
 
 mod cancellable;
-pub use cancellable::{LuComplexError, lu_complex_with_cancel};
+pub use cancellable::{LuComplexError, lu_complex_blocked_with_cancel, lu_complex_with_cancel};
 
 /// Typed convergence failure: which eigenvalue window stalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,10 +221,33 @@ pub struct LuComplex {
     perm: Vec<usize>,
 }
 
-/// Factor. # Errors: [`EigFailure`] reused as a typed singularity signal
+std::thread_local! {
+    static LU_WORKERS: core::cell::Cell<usize> = const { core::cell::Cell::new(1) };
+}
+
+/// Run `f` with `workers` (at least one) threads declared for every
+/// [`lu_complex`] factorization it makes on this thread, then restore the
+/// previous declaration, also on unwind. This is a scheduling budget only:
+/// factors are bit-identical for every worker count.
+pub fn with_lu_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LU_WORKERS.with(|w| w.set(self.0));
+        }
+    }
+    let _restore = Restore(LU_WORKERS.with(|w| w.replace(workers.max(1))));
+    f()
+}
+
+/// Factor with the blocked elimination ([`lu_complex_blocked_with_cancel`])
+/// on the workers declared by [`with_lu_workers`], one by default. Factors
+/// are bit-identical to [`lu_complex_with_cancel`].
+/// # Errors: [`EigFailure`] reused as a typed singularity signal
 /// (`window_hi` = failing elimination step).
 pub fn lu_complex(a: &[C64], n: usize) -> Result<LuComplex, EigFailure> {
-    lu_complex_with_cancel(a, n, || false).map_err(|error| match error {
+    let workers = LU_WORKERS.with(core::cell::Cell::get);
+    lu_complex_blocked_with_cancel(a, n, workers, || false).map_err(|error| match error {
         LuComplexError::Singular { index } => EigFailure { window_hi: index },
         LuComplexError::Cancelled => unreachable!("cancellation is disabled"),
     })

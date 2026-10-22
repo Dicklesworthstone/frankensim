@@ -247,6 +247,22 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   embedded symmetric matrices (1e-10), trace/determinant identities
   against an independent Gaussian-elimination `det_complex` oracle,
   Hermitian spectral reality, T6 colleague-matrix roots.
+- `eigen_complex::{lu_complex, lu_complex_with_cancel,
+  lu_complex_blocked_with_cancel, with_lu_workers}` — complex LU with
+  magnitude pivots (lowest index on ties) and atomic publication.
+  - `lu_complex_with_cancel` is the unblocked elimination, with its
+    documented poll points.
+  - `lu_complex_blocked_with_cancel` is the blocked, thread-parallel
+    elimination. Each element keeps its ascending-pivot sequence of fused
+    updates, so factors, permutations and singular indices are bit-identical
+    for every block size and worker count.
+  - `lu_complex` runs the blocked path on the workers that a scoped
+    `with_lu_workers` declares, one by default.
+  - x86-64 FMA codegen lives in a registered capsule.
+  - Tested bitwise against a frozen copy of the original operation graph:
+    block sizes 1 to 1000, 1 to 8 workers, pivot ties, a singular pivot
+    inside a panel, and cancellation at every checkpoint. The ignored
+    `blocked_lu_timing_probe` measures speed.
 - `rand_nla::{range_finder, rsvd, nystrom_psd, sketch_ls, hutchinson,
   hutch_pp, RangeReport, TraceReport}` — randomized NLA [F].
   REPLAYABILITY BY CONSTRUCTION: all randomness flows from keyed Philox

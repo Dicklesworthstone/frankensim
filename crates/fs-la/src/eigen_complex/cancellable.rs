@@ -4,6 +4,8 @@ use super::{C64, LuComplex};
 /// Registered capsule: the factor and solve bodies below recompiled with
 /// native fused multiply-add on x86-64 CPUs that have it.
 mod fma;
+/// Blocked, thread-parallel elimination with the same operation graph.
+mod blocked;
 
 /// A cancelled operation is distinct from a numerically singular factorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +143,45 @@ pub fn lu_complex_with_cancel(
     let mut m = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     fma::factor(&mut m, &mut perm, n, &mut cancelled)?;
+    poll(&mut cancelled)?;
+    Ok(LuComplex { n, data: m, perm })
+}
+
+/// Factor with the blocked, thread-parallel elimination.
+///
+/// The result is bit-identical to [`lu_complex_with_cancel`] for every thread
+/// count: the same magnitude pivots, lowest-index ties and singular index, and
+/// each element's same ascending-pivot sequence of fused updates. Only the
+/// order in which different elements are updated changes. That order is
+/// cache-blocked, and `threads` workers (at least one) share each block's
+/// upper-block and trailing updates, so the result never depends on them.
+///
+/// Polls before copying input, at every pivot, before each block's upper and
+/// trailing updates, and before publishing. Between polls at most one block's
+/// update of the trailing matrix runs, about 64 (n - k)^2 complex updates
+/// shared by the workers. The immutable input is unchanged on every outcome,
+/// and no partial factor escapes.
+///
+/// # Errors
+/// [`LuComplexError::Cancelled`] or [`LuComplexError::Singular`].
+/// # Panics
+/// If n*n overflows or `a` does not contain exactly n*n entries.
+pub fn lu_complex_blocked_with_cancel(
+    a: &[C64], n: usize, threads: usize, cancelled: impl FnMut() -> bool,
+) -> Result<LuComplex, LuComplexError> {
+    lu_complex_blocked_with(a, n, blocked::BLOCK, threads, cancelled)
+}
+
+/// [`lu_complex_blocked_with_cancel`] with an explicit block size, for tests.
+fn lu_complex_blocked_with(
+    a: &[C64], n: usize, block: usize, threads: usize, mut cancelled: impl FnMut() -> bool,
+) -> Result<LuComplex, LuComplexError> {
+    let entries = n.checked_mul(n).expect("complex matrix extent overflow");
+    assert_eq!(a.len(), entries, "a must be n*n = {entries}");
+    poll(&mut cancelled)?;
+    let mut m = a.to_vec();
+    let mut perm: Vec<usize> = (0..n).collect();
+    blocked::factor_blocked(&mut m, &mut perm, n, block, threads, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(LuComplex { n, data: m, perm })
 }

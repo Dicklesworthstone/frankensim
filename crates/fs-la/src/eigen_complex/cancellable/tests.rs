@@ -206,3 +206,141 @@ fn fma_capsule_is_bitwise_the_original_operation_graph() {
         assert_eq!(bits(&actual), bits(&expected), "n = {n}");
     }
 }
+
+/// Ok factors match in permutation and data bits; failures in pivot index.
+fn assert_same(a: &[C64], n: usize, block: usize, threads: usize) {
+    let original = reference_factor(a, n);
+    let blocked = lu_complex_blocked_with(a, n, block, threads, || false);
+    let at = format!("n = {n}, block = {block}, threads = {threads}");
+    match (original, blocked) {
+        (Ok(original), Ok(blocked)) => {
+            assert_eq!(blocked.perm, original.perm, "{at}");
+            assert_eq!(bits(&blocked.data), bits(&original.data), "{at}");
+        }
+        (Err(original), Err(blocked)) => {
+            assert_eq!(blocked, LuComplexError::Singular { index: original.window_hi }, "{at}");
+        }
+        (original, blocked) => panic!("{at}: original {original:?}, blocked {blocked:?}"),
+    }
+}
+
+/// Unit-magnitude entries in {1, i, -1, -i}: exact pivot ties at every
+/// candidate of the first column, and rows i and i + 4 start identical.
+fn ties(n: usize) -> Vec<C64> {
+    let units = [C64::ONE, C64::new(0.0, 1.0), C64::from_re(-1.0), C64::new(0.0, -1.0)];
+    (0..n * n).map(|e| units[(7 * (e / n) + 3 * (e % n)) % 4]).collect()
+}
+
+#[test]
+fn blocked_elimination_is_bitwise_the_original_graph_at_every_block_and_thread_count() {
+    let small = [(0, matrix(0)), (1, matrix(1)), (7, matrix(7)), (17, matrix(17)),
+        (40, ties(40)), (64, random(64 * 64, 4))];
+    for (n, a) in &small {
+        for block in [1, 2, 3, 16, 64, 1000] {
+            for threads in [1, 2, 3, 8] {
+                assert_same(a, *n, block, threads);
+            }
+        }
+    }
+    for (n, a) in [(150, bem_like(150)), (201, random(201 * 201, 5))] {
+        for (block, threads) in [(3, 3), (16, 8), (64, 1), (64, 3), (128, 5)] {
+            assert_same(&a, n, block, threads);
+        }
+        let public = lu_complex_blocked_with_cancel(&a, n, 4, || false).unwrap();
+        let original = reference_factor(&a, n).unwrap();
+        assert_eq!(bits(&public.data), bits(&original.data), "n = {n}");
+        let rhs = random(n, 6);
+        let (mut expected, mut actual) = (rhs.clone(), rhs);
+        original.reference_solve(&mut expected);
+        public.solve_with_cancel(&mut actual, || false).unwrap();
+        assert_eq!(bits(&actual), bits(&expected), "n = {n}");
+    }
+    // Equal-magnitude complex pivots keep the lowest row index.
+    let a = [C64::new(0.0, 1.0), C64::from_re(2.0), C64::new(0.0, -1.0), C64::from_re(3.0)];
+    assert_eq!(lu_complex_blocked_with(&a, 2, 1, 2, || false).unwrap().perm, [0, 1]);
+}
+
+#[test]
+fn blocked_singularity_keeps_its_pivot_index_inside_any_panel() {
+    // Column 5 is zero, so every path stops at pivot 5: in the second panel
+    // for block 4, the first for block 8, and alone for block 1.
+    let n = 12;
+    let mut a = matrix(n);
+    for i in 0..n {
+        a[i * n + 5] = C64::ZERO;
+    }
+    for (block, threads) in [(1, 1), (4, 3), (8, 2), (64, 4)] {
+        assert_eq!(
+            lu_complex_blocked_with(&a, n, block, threads, || false).unwrap_err(),
+            LuComplexError::Singular { index: 5 }
+        );
+        assert_same(&a, n, block, threads);
+    }
+    assert_eq!(lu_complex_blocked_with_cancel(&a, n, 2, || true).unwrap_err(), LuComplexError::Cancelled);
+}
+
+#[test]
+fn blocked_cancellation_at_every_checkpoint_publishes_no_partial_factor() {
+    let (n, block) = (10, 4);
+    let a = matrix(n);
+    let before = bits(&a);
+    let mut total = 0;
+    lu_complex_blocked_with(&a, n, block, 3, || { total += 1; false }).unwrap();
+    // Input and publication, every pivot, and the upper and trailing phases of
+    // the two blocks [0, 4) and [4, 8) that have a trailing part.
+    assert_eq!(total, 2 + n + 2 * 2);
+    for stop in 1..=total {
+        let mut polls = 0;
+        let error = lu_complex_blocked_with(&a, n, block, 3, || { polls += 1; polls == stop }).unwrap_err();
+        assert_eq!(error, LuComplexError::Cancelled);
+        assert_eq!(polls, stop);
+        assert_eq!(bits(&a), before);
+    }
+}
+
+/// Timing probe, not a gate. Prints one JSON row per (n, block, threads);
+/// every factor is also compared bitwise with the unblocked owner.
+#[test]
+#[ignore = "timing probe: --release --ignored --nocapture on a quiet many-core host"]
+fn blocked_lu_timing_probe() {
+    use std::time::Instant;
+    for n in [2000, 4096, 6240] {
+        let a = bem_like(n);
+        let started = Instant::now();
+        let serial = lu_complex_with_cancel(&a, n, || false).unwrap();
+        let serial_s = started.elapsed().as_secs_f64();
+        println!("{{\"probe\":\"lu-blocked\",\"n\":{n},\"path\":\"unblocked\",\"s\":{serial_s:.3}}}");
+        for (block, threads) in [(64, 1), (32, 32), (64, 8), (64, 16), (64, 32), (128, 32)] {
+            let started = Instant::now();
+            let factor = lu_complex_blocked_with(&a, n, block, threads, || false).unwrap();
+            let s = started.elapsed().as_secs_f64();
+            assert_eq!(factor.perm, serial.perm);
+            assert!(bits(&factor.data) == bits(&serial.data), "n = {n}, block = {block}, threads = {threads}");
+            println!(
+                "{{\"probe\":\"lu-blocked\",\"n\":{n},\"block\":{block},\"threads\":{threads},\"s\":{s:.3},\"speedup\":{:.2},\"bitwise\":true}}",
+                serial_s / s
+            );
+        }
+    }
+}
+
+#[test]
+fn lu_complex_is_the_original_graph_under_any_declared_worker_count() {
+    use super::super::with_lu_workers;
+    let (n, a) = (150, bem_like(150));
+    let original = reference_factor(&a, n).unwrap();
+    for workers in [None, Some(1), Some(3), Some(7)] {
+        let factor = match workers {
+            None => lu_complex(&a, n).unwrap(),
+            Some(w) => with_lu_workers(w, || lu_complex(&a, n).unwrap()),
+        };
+        assert_eq!(factor.perm, original.perm, "{workers:?}");
+        assert_eq!(bits(&factor.data), bits(&original.data), "{workers:?}");
+    }
+    // The declaration is scoped and restored, also after a panic.
+    let unwound = std::panic::catch_unwind(|| with_lu_workers(5, || panic!("inside")));
+    assert!(unwound.is_err());
+    assert_eq!(super::super::LU_WORKERS.with(core::cell::Cell::get), 1);
+    assert_eq!(with_lu_workers(4, || with_lu_workers(2, || super::super::LU_WORKERS.with(core::cell::Cell::get))), 2);
+    assert_eq!(lu_complex(&[C64::ZERO], 1).unwrap_err().window_hi, 0);
+}
