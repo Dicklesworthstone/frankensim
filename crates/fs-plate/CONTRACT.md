@@ -195,7 +195,15 @@ evaluates the rigid attachment arm `d = side * 0.5 * h_master * n_master` from
 explicit component nodal thickness and area-weighted nodal normals, enforcing
 `u_slave = u_master + theta_master x d`. `RotationCoupling::Full` eliminates
 all 6 slave DOFs per node; `RotationCoupling::TranslationsOnly` eliminates only
-translations, leaving slave rotations free. Congruence reduction
+translations, leaving slave rotations free. `RotationCoupling::SeamTangent`
+eliminates the translations and only the rotation about the seam tangent
+(taken from the master polyline through `C`). That is the fold kinematics: at
+a fold, `Full` would tie one side's bending slope to the other side's drilling
+spin, so the drilling penalty would enter the junction. On a T-junction across
+alpha 1e-4..1e-2, `Full` moves the first ten frequencies by 6.6e-4 (CST/DKT)
+and 2.4e-3 (MITC3+), and `SeamTangent` by 3.2e-6 and 1.4e-6. `Full` stays
+the coplanar-seam coupling and reproduces a conforming monolithic mesh, which
+shares all six DOFs. A `FaceTie` refuses `SeamTangent`. Congruence reduction
 `K_r = T^T K T`, `M_r = T^T M T` preserves exact symmetry, positive-semidefinite
 strain energy, and zero net virtual interface power `P_m + P_s = 0`.
 `TieBudget` enforces explicit caps on `max_segments`, `max_slave_dofs`,

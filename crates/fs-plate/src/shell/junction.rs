@@ -69,6 +69,13 @@ pub enum RotationCoupling {
     Full,
     /// Couple only translations $(u, v, w)$ (hinged seam; slave rotations remain independent free DOFs).
     TranslationsOnly,
+    /// Couple translations and only the rotation about the seam tangent,
+    /// $\boldsymbol\theta_s\cdot\mathbf t = \mathbf t\cdot\sum_j C_{ij}\boldsymbol\theta_{m,j}$.
+    /// At a fold the other two rotations are each side's slope along the seam or
+    /// its drilling spin. The translational ties already make the slopes
+    /// continuous, and tying one side's slope to the other's drilling spin would
+    /// put the drilling penalty into the junction. Edge ties only.
+    SeamTangent,
 }
 
 /// Constitutive nature of the interface tie.
@@ -1039,6 +1046,7 @@ pub fn tie_shells_with_faces(
         )?;
         max_gap_m = max_gap_m.max(ops.max_gap_m);
         max_angle_rad = max_angle_rad.max(ops.max_angle_rad);
+        let tangents = slave_seam_tangents(&master_midsurface, &ops.c)?;
 
         record_slave_nodal_couplings(
             c_m,
@@ -1048,6 +1056,7 @@ pub fn tie_shells_with_faces(
             &tie.b.nodes,
             &ops.c,
             tie.rotations,
+            Some(&tangents),
             &mut nodal_slave_constraints,
         );
     }
@@ -1073,6 +1082,11 @@ pub fn tie_shells_with_faces(
                 f64::from(side)
             }
         };
+        if ftie.rotations == RotationCoupling::SeamTangent {
+            return Err(PlateError::BadConstraint {
+                what: "RotationCoupling::SeamTangent needs a 1-D seam; a FaceTie has none",
+            });
+        }
         let c_m = ftie.master_component;
         let c_s = ftie.slave_component;
         if c_m >= components.len()
@@ -1208,6 +1222,7 @@ pub fn tie_shells_with_faces(
             &s_nodes,
             &c_mat,
             ftie.rotations,
+            None,
             &mut nodal_slave_constraints,
         );
     }
@@ -1338,6 +1353,41 @@ pub fn tie_shells_with_faces(
     })
 }
 
+/// Unit seam tangent at each slave node: the master polyline's unit nodal
+/// tangents (central differences, one-sided at the ends) carried by the mortar
+/// transfer `c`, so a straight seam gets its exact direction.
+fn slave_seam_tangents(master: &[[f64; 3]], c: &[Vec<f64>]) -> Result<Vec<[f64; 3]>, PlateError> {
+    let degenerate = || PlateError::BadConstraint {
+        what: "EdgeTie seam tangent is degenerate",
+    };
+    let last = master.len() - 1;
+    let mut nodal = Vec::with_capacity(master.len());
+    for j in 0..=last {
+        let d = sub(master[(j + 1).min(last)], master[j.saturating_sub(1)]);
+        let len = norm3(d);
+        if !(len.is_finite() && len > 0.0) {
+            return Err(degenerate());
+        }
+        nodal.push(scale3(d, 1.0 / len));
+    }
+    c.iter()
+        .map(|row| {
+            let t = row
+                .iter()
+                .zip(&nodal)
+                .fold([0.0; 3], |t, (&w, &tj)| add3(t, scale3(tj, w)));
+            // A seam folding back within one mortar support cancels its
+            // tangents; refuse rather than pick a direction.
+            let len = norm3(t);
+            if len.is_finite() && len > 0.5 {
+                Ok(scale3(t, 1.0 / len))
+            } else {
+                Err(degenerate())
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_slave_nodal_couplings(
     c_m: usize,
@@ -1347,6 +1397,7 @@ fn record_slave_nodal_couplings(
     s_nodes: &[usize],
     c_mat: &[Vec<f64>],
     rotations: RotationCoupling,
+    seam_tangents: Option<&[[f64; 3]]>,
     out: &mut BTreeMap<(usize, usize, usize), Vec<(usize, usize, usize, f64)>>,
 ) {
     for (si, &sn) in s_nodes.iter().enumerate() {
@@ -1382,6 +1433,26 @@ fn record_slave_nodal_couplings(
                 }
                 out.insert((c_s, sn, 3 + a), terms);
             }
+        }
+        // SeamTangent: eliminate the slave's dominant tangent component k from
+        // t.theta_s = t.sum_j C_ij theta_m,j; its other two rotations stay free.
+        if let (RotationCoupling::SeamTangent, Some(tangents)) = (rotations, seam_tangents) {
+            let t = tangents[si];
+            let k = (1..3).fold(0, |k, a| if t[a].abs() > t[k].abs() { a } else { k });
+            let mut terms = Vec::new();
+            for (mj_slot, &mn) in m_nodes.iter().enumerate() {
+                let c_ij = c_mat[si][mj_slot];
+                if c_ij.abs() <= 1e-16 {
+                    continue;
+                }
+                for a in (0..3).filter(|&a| t[a] != 0.0) {
+                    terms.push((c_m, mn, 3 + a, c_ij * t[a] / t[k]));
+                }
+            }
+            for a in (0..3).filter(|&a| a != k && t[a] != 0.0) {
+                terms.push((c_s, sn, 3 + a, -t[a] / t[k]));
+            }
+            out.insert((c_s, sn, 3 + k), terms);
         }
     }
 }
@@ -1735,6 +1806,55 @@ mod tests {
         };
         let err = tie_shells(&comps, &ties, budget, || false).unwrap_err();
         assert!(matches!(err, PlateError::BadConstraint { .. }));
+    }
+
+    #[test]
+    fn g0_seam_tangent_needs_an_edge_seam() {
+        // A lap joint has no seam tangent, so SeamTangent refuses rather than
+        // picking an axis.
+        let sec = PlateSection::isotropic(10e9, 0.3, 0.003, 500.0).unwrap();
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let m1 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.003);
+        let mod0 = assemble_shell(&m0, &sec, &[], ShellSupport::Free).unwrap();
+        let mod1 = assemble_shell(&m1, &sec, &[], ShellSupport::Free).unwrap();
+        let h0 = vec![0.003; m0.nodes.len()];
+        let h1 = vec![0.003; m1.nodes.len()];
+        let comps = [
+            ShellComponent {
+                id: 0,
+                mesh: &m0,
+                model: &mod0,
+                nodal_thickness_m: &h0,
+            },
+            ShellComponent {
+                id: 1,
+                mesh: &m1,
+                model: &mod1,
+                nodal_thickness_m: &h1,
+            },
+        ];
+        let face = FaceTie {
+            master_component: 0,
+            master_tris: (0..m0.tris.len()).collect(),
+            slave_component: 1,
+            slave_tris: (0..m1.tris.len()).collect(),
+            offset: TieOffset::Skin { side: 1 },
+            rotations: RotationCoupling::SeamTangent,
+            kind: TieKind::Rigid,
+        };
+        let budget = TieBudget {
+            max_segments: 16,
+            max_slave_dofs: 64,
+            gap_tolerance_m: 1e-6,
+            angle_tolerance_rad: 1e-4,
+        };
+        let err = tie_shells_with_faces(&comps, &[], &[face], budget, || false).unwrap_err();
+        assert_eq!(
+            err,
+            PlateError::BadConstraint {
+                what: "RotationCoupling::SeamTangent needs a 1-D seam; a FaceTie has none",
+            }
+        );
     }
 
     #[test]

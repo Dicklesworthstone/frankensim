@@ -270,7 +270,13 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
     let master_seam: Vec<usize> = (0..=nx).map(|i| 1 * (nx + 1) + i).collect();
     let slave_seam: Vec<usize> = (0..=nx).map(|i| nz * (nx + 1) + i).collect();
 
-    for kind in [ElementKind::CstDkt, ElementKind::Mitc3p] {
+    for (kind, rotations) in [ElementKind::CstDkt, ElementKind::Mitc3p]
+        .into_iter()
+        .flat_map(|kind| {
+            [RotationCoupling::Full, RotationCoupling::SeamTangent]
+                .map(|rotations| (kind, rotations))
+        })
+    {
         // 1. Unconstrained T-junction: check 6 rigid-body modes (|lambda_i| / lambda_7 < 1e-12).
         let mod_flange =
             assemble_component_model(kind, &flange_mesh, e_pa, nu, h_m, rho, &[], DRILLING_ALPHA);
@@ -302,7 +308,7 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
                 nodes: slave_seam.clone(),
             },
             offset: TieOffset::Midsurface,
-            rotations: RotationCoupling::Full,
+            rotations,
             kind: TieKind::Rigid,
         }];
         let tied = tie_shells(&comps, &ties, default_tie_budget(), || false)
@@ -320,7 +326,7 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
             max_rigid_ratio = max_rigid_ratio.max(ratio);
             assert!(
                 ratio < 1e-12,
-                "{}: rigid mode {i} ratio |lambda_{i}|/lambda_7 = {ratio:e} >= 1e-12 (lambda_{i}={lam:e}, lambda_7={lambda_7:e})",
+                "{} {rotations:?}: rigid mode {i} ratio |lambda_{i}|/lambda_7 = {ratio:e} >= 1e-12 (lambda_{i}={lam:e}, lambda_7={lambda_7:e})",
                 kind.name()
             );
         }
@@ -350,12 +356,12 @@ fn g0_t_junction_rigid_modes_and_constant_strain_patch() {
         );
         assert!(
             patch_err < 1e-12,
-            "{}: T-junction constant-strain patch relative error {patch_err:e} >= 1e-12",
+            "{} {rotations:?}: T-junction constant-strain patch relative error {patch_err:e} >= 1e-12",
             kind.name()
         );
 
         println!(
-            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_t_junction_rigid_modes_and_constant_strain_patch\",\"tier\":\"G0\",\"element\":\"{}\",\"max_rigid_ratio\":{:e},\"lambda_7\":{},\"constant_strain_patch_err\":{:e},\"elapsed_s\":{}}}",
+            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_t_junction_rigid_modes_and_constant_strain_patch\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"max_rigid_ratio\":{:e},\"lambda_7\":{},\"constant_strain_patch_err\":{:e},\"elapsed_s\":{}}}",
             kind.name(),
             max_rigid_ratio,
             lambda_7,
@@ -469,7 +475,13 @@ fn g0_tie_virtual_work_identity() {
     let master_seam: Vec<usize> = (0..=3).map(|i| 1 * 4 + i).collect();
     let slave_seam: Vec<usize> = (0..=2).map(|i| 2 * 3 + i).collect();
 
-    for kind in [ElementKind::CstDkt, ElementKind::Mitc3p] {
+    for (kind, rotations) in [ElementKind::CstDkt, ElementKind::Mitc3p]
+        .into_iter()
+        .flat_map(|kind| {
+            [RotationCoupling::Full, RotationCoupling::SeamTangent]
+                .map(|rotations| (kind, rotations))
+        })
+    {
         let mod0 =
             assemble_component_model(kind, &flange_mesh, e_pa, nu, h_m, rho, &[], DRILLING_ALPHA);
         let mod1 =
@@ -500,7 +512,7 @@ fn g0_tie_virtual_work_identity() {
                 nodes: slave_seam.clone(),
             },
             offset: TieOffset::Skin { side: -1 },
-            rotations: RotationCoupling::Full,
+            rotations,
             kind: TieKind::Rigid,
         }];
         let tied = tie_shells(&comps, &ties, default_tie_budget(), || false)
@@ -529,13 +541,13 @@ fn g0_tie_virtual_work_identity() {
             max_rel_power_err = max_rel_power_err.max(rel_err);
             assert!(
                 rel_err <= 1e-13,
-                "{}: virtual work identity violated: P_m={p_m}, P_s={p_s}, rel_err={rel_err:e}",
+                "{} {rotations:?}: virtual work identity violated: P_m={p_m}, P_s={p_s}, rel_err={rel_err:e}",
                 kind.name()
             );
         }
 
         println!(
-            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_tie_virtual_work_identity\",\"tier\":\"G0\",\"element\":\"{}\",\"trials\":64,\"max_rel_power_err\":{:e},\"elapsed_s\":{}}}",
+            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2a\",\"test\":\"g0_tie_virtual_work_identity\",\"tier\":\"G0\",\"element\":\"{}\",\"rotations\":\"{rotations:?}\",\"trials\":64,\"max_rel_power_err\":{:e},\"elapsed_s\":{}}}",
             kind.name(),
             max_rel_power_err,
             started.elapsed().as_secs_f64()
@@ -1003,6 +1015,12 @@ fn g0_drilling_alpha_insensitivity_at_junction() {
     let master_seam: Vec<usize> = (0..=nx).map(|i| (ny / 2) * (nx + 1) + i).collect();
     let slave_seam: Vec<usize> = (0..=nx).map(|i| nz * (nx + 1) + i).collect();
 
+    // A fold ties only the rotation about the seam. `Full` would also tie the
+    // flange's bending slope to the web's drilling spin (and the reverse), so
+    // the drilling penalty would enter the junction. Measured at origin
+    // 8378586d9, across alpha 1e-4..1e-2: Full moves the first ten
+    // frequencies by 6.6e-4 (CST/DKT) and 2.4e-3 (MITC3+), SeamTangent by
+    // 3.2e-6 and 1.4e-6, and the flange alone by 1.6e-13 and 1.2e-13.
     for kind in [ElementKind::CstDkt, ElementKind::Mitc3p] {
         let solve_for_alpha = |alpha: f64| -> Vec<f64> {
             let mod0 = assemble_component_model(kind, &flange_mesh, e_pa, nu, h_m, rho, &[], alpha);
@@ -1033,7 +1051,7 @@ fn g0_drilling_alpha_insensitivity_at_junction() {
                     nodes: slave_seam.clone(),
                 },
                 offset: TieOffset::Midsurface,
-                rotations: RotationCoupling::Full,
+                rotations: RotationCoupling::SeamTangent,
                 kind: TieKind::Rigid,
             }];
             let tied = tie_shells(&comps, &ties, default_tie_budget(), || false).unwrap();
@@ -1054,11 +1072,10 @@ fn g0_drilling_alpha_insensitivity_at_junction() {
             let rel_lo_hi = (freqs_hi[m] - freqs_lo[m]).abs() / freqs_mid[m];
             max_rel_change = max_rel_change.max(rel_lo_hi);
             assert!(
-                rel_lo_hi < 0.005,
-                "{}: mode {} frequency changed by {:.4}% >= 0.5% across alpha in [1e-4, 1e-2] (f_lo={}, f_mid={}, f_hi={})",
+                rel_lo_hi < 1e-4,
+                "{}: mode {} frequency changed by {rel_lo_hi:e} >= 1e-4 across alpha in [1e-4, 1e-2] (f_lo={}, f_mid={}, f_hi={})",
                 kind.name(),
                 m + 1,
-                100.0 * rel_lo_hi,
                 freqs_lo[m],
                 freqs_mid[m],
                 freqs_hi[m]
