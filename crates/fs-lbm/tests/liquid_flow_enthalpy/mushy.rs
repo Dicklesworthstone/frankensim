@@ -8,6 +8,9 @@ use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 #[path = "mushy/heating.rs"]
 mod heating;
 
+#[path = "mushy/conduction.rs"]
+mod conduction;
+
 #[path = "mushy/electrical.rs"]
 mod electrical;
 

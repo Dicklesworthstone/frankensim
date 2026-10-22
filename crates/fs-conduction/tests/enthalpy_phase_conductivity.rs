@@ -469,6 +469,19 @@ fn fraction_only_kink_refuses_only_when_conductivity_depends_on_phase() {
 
 #[test]
 fn invalid_phase_laws_and_assignment_shapes_refuse_and_builder_polls_cancellation() {
+    let shared =
+        fs_material::phase::conductivity::LiquidMassFractionConductivity::declared(4.0, 1.0)
+            .unwrap();
+    let facade = LiquidMassFractionConductivity::from(shared);
+    assert_eq!(facade.material_law(), shared);
+    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        assert_eq!(
+            facade.multiplier_at(fraction).unwrap(),
+            shared.multiplier_at(fraction).unwrap()
+        );
+    }
+    assert!(matches!(facade.multiplier_at(-0.1), Err(ConductionError::Conductivity { what })
+        if what == "phase conductivity requires a liquid mass fraction in [0, 1]"));
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(LiquidMassFractionConductivity::declared(invalid, 1.0).is_err());
         assert!(LiquidMassFractionConductivity::declared(1.0, invalid).is_err());

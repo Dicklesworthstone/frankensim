@@ -34,6 +34,8 @@ pub mod electrical;
 mod viscous;
 use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
+mod phase_conduction;
+use phase_conduction::PhaseConduction;
 
 /// A coupled refusal retains the originating material, flow or history error.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +117,8 @@ pub struct MaterialFlowEpoch<F> {
 /// stay with the actual registered caloric law; source Cp never replaces it.
 /// Conductivity/contact evolution stays with the wrapped observer except for
 /// explicitly assigned full fluid faces (see `Self::with_fluid_conduction`).
+/// `Self::with_phase_conductivity` optionally scales those same half-cell
+/// coefficients with the shared material law at the actual liquid mass fraction.
 /// A solid/liquid fraction supplies mobility only through an explicitly
 /// attached `Self::with_mushy_mobility` closure; it is never inferred from T.
 ///
@@ -140,6 +144,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
+    phase_conduction: Option<PhaseConduction<'a>>,
     viscous_heating: Option<ViscousHeating>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
@@ -200,6 +205,7 @@ where
             buoyancy: None,
             external_force_n_m3: None,
             mushy: None,
+            phase_conduction: None,
             viscous_heating: None,
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
@@ -629,6 +635,7 @@ where
             check,
         )?;
         admit_density(&samples, self.reference.density_kg_m3())?;
+        self.check_phase_conduction(&samples, check)?;
         let mut viscosities =
             vec![self.reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
         for value in &samples {
@@ -812,13 +819,12 @@ where
             }
             let mut k = [0.0; 2];
             for (i, id) in [cells.0, cells.1].into_iter().enumerate() {
-                k[i] = samples
+                let sample = samples
                     .get(&id)
                     .ok_or(invalid(
                         "fluid conduction lacks an applied transport sample",
-                    ))?
-                    .transport
-                    .thermal_conductivity_w_m_k();
+                    ))?;
+                k[i] = self.effective_conductivity(sample)?;
             }
             let distances = face
                 .voxels
@@ -875,6 +881,7 @@ where
         )?;
         admit_density(&self.endpoint, self.reference.density_kg_m3())?;
         self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
+        self.check_phase_conduction(&self.endpoint, &mut || Ok(()))?;
         self.advected
             .as_mut()
             .ok_or(invalid("unfinished material-flow source epoch"))?
@@ -901,6 +908,7 @@ where
         )?;
         admit_density(&self.endpoint, self.reference.density_kg_m3())?;
         self.mushy_drag(&self.endpoint, check)?;
+        self.check_phase_conduction(&self.endpoint, check)?;
         let advected = self
             .advected
             .as_mut()

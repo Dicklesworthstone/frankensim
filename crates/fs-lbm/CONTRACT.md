@@ -2148,3 +2148,28 @@ Focused synthetic-card regressions compare independent series-current,
 contact-heat, Darcy, conduction and donor-cell enthalpy balances; exercise
 constant-temperature phase changes, data swaps and zero-current reduction; and
 check exact sample identity/query counts plus refused endpoint/retry behavior.
+
+### Shared phase conductivity on the live momentum/enthalpy timeline
+
+`MaterialFlowFeedback::with_phase_conductivity` binds the original registered
+equilibrium h chart and shared `LiquidMassFractionConductivity` to owned fluid
+faces. The actual local liquid mass fraction scales each source-backed k(T)
+before the existing half-cell series resistance. The same conductances feed
+pairwise heat exchange and the existing conductive/advective CFL. At a latent
+plateau h can therefore change both this conduction and separately attached
+mushy Darcy mobility while temperature stays fixed. Base material samples and
+receipts remain intact; `phase_conductivity_law()` exposes the applied model.
+
+Admission requires the exact caloric object and constant reference density at
+every chart knot. Source and endpoint evaluations refuse unsupported phase
+states or unrepresentable scaled conductivity before publishing a coupled
+candidate. The ordinary no-law path is unchanged; an identity-law regression
+compares accepted heat, flow and history bitwise. A four-cell test independently
+closes series-Darcy, half-cell conduction, donor-cell total-h and external-energy
+balances; endpoint overflow/cancellation retain the accepted state. Native Rust
+execution remains a separate verification requirement.
+
+This is a declared mass-fraction scaling law, not an inferred universal mixture
+rule. It does not supply variable-density continuity, distinct phase velocities,
+solid locking, moving geometry or a free surface, and it does not add latent heat
+or replace the original caloric/source/history owners.

@@ -12,6 +12,8 @@
 
 /// Declared stationary solid/liquid mixture mobility on this same h chart.
 pub mod mushy;
+/// Shared declared phase dependence of thermal conductivity.
+pub mod conductivity;
 
 use core::fmt;
 

@@ -1805,3 +1805,13 @@ coordinates and a second temperature coordinate cannot be frozen into a thermal
 law. Frequency-dependent values refuse; thermovisco frequency applicability
 alone must retain its static/relaxed endpoint. The original caloric restrictions
 on spring energy, free strain, density and phase remain unchanged.
+
+### Shared phase-dependent conductivity
+
+`phase::conductivity::LiquidMassFractionConductivity` owns the declared positive
+multiplier linear in liquid mass fraction. It preserves the existing FEM law's
+nearer-endpoint arithmetic and derivative. This explicit phenomenological model
+scales a separately admitted base k(T); it does not infer a volume-mixture rule,
+solid/liquid material measurements, or additional source authority. The original
+fs-conduction facade and live material-flow thermal coupling consume this same
+law. The immutable equilibrium h chart remains the phase-state owner.

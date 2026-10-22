@@ -1679,3 +1679,9 @@ the gate can fail.
   scheme on the same mesh. It shows the scheme converges at its nominal rate;
   it does not show the semi-discrete system it converges TO is the right one.
   That is what the slab response and the steady-recovery test cover.
+
+The existing `material::LiquidMassFractionConductivity` facade delegates its
+constitutive arithmetic to `fs-material::phase::conductivity`, retaining the
+original constructors, derivatives, `ConductionError` variants and messages.
+`material_law()` and `From` transfer that exact declared law between the FEM and
+flowing consumers; the existing FEM residual/Newton/adjoint paths are unchanged.

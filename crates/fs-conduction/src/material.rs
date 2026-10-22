@@ -52,8 +52,7 @@ pub const TEMPERATURE_AXIS: &str = "T";
 /// replacement for the base tensor's temperature dependence and provenance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LiquidMassFractionConductivity {
-    solid_multiplier: f64,
-    liquid_multiplier: f64,
+    law: fs_material::phase::conductivity::LiquidMassFractionConductivity,
 }
 
 impl LiquidMassFractionConductivity {
@@ -64,60 +63,58 @@ impl LiquidMassFractionConductivity {
         solid_multiplier: f64,
         liquid_multiplier: f64,
     ) -> Result<Self, ConductionError> {
-        if !solid_multiplier.is_finite()
-            || solid_multiplier <= 0.0
-            || !liquid_multiplier.is_finite()
-            || liquid_multiplier <= 0.0
-        {
-            return Err(ConductionError::Conductivity {
-                what: "phase conductivity multipliers must be finite and positive".into(),
-            });
-        }
-        Ok(Self {
+        fs_material::phase::conductivity::LiquidMassFractionConductivity::declared(
             solid_multiplier,
             liquid_multiplier,
+        )
+        .map(Self::from)
+        .map_err(|error| ConductionError::Conductivity {
+            what: error.to_string(),
         })
     }
 
     /// Multiplier at zero liquid mass fraction.
     #[must_use]
     pub const fn solid_multiplier(self) -> f64 {
-        self.solid_multiplier
+        self.law.solid_multiplier()
     }
 
     /// Multiplier at unit liquid mass fraction.
     #[must_use]
     pub const fn liquid_multiplier(self) -> f64 {
-        self.liquid_multiplier
+        self.law.liquid_multiplier()
     }
 
     /// Exact derivative with respect to the declared liquid mass coordinate.
     #[must_use]
     pub fn derivative(self) -> f64 {
-        self.liquid_multiplier - self.solid_multiplier
+        self.law.derivative()
     }
 
     /// Evaluate within `[0, 1]`, without extrapolation or clipping.
     pub fn multiplier_at(self, liquid_mass_fraction: f64) -> Result<f64, ConductionError> {
-        if !liquid_mass_fraction.is_finite() || !(0.0..=1.0).contains(&liquid_mass_fraction) {
-            return Err(ConductionError::Conductivity {
-                what: "phase conductivity requires a liquid mass fraction in [0, 1]".into(),
-            });
-        }
-        // Interpolate from the nearer endpoint, retaining positive endpoint
-        // values even when their magnitudes differ by many orders of magnitude.
-        let multiplier = if liquid_mass_fraction <= 0.5 {
-            self.derivative()
-                .mul_add(liquid_mass_fraction, self.solid_multiplier)
-        } else {
-            (-self.derivative()).mul_add(1.0 - liquid_mass_fraction, self.liquid_multiplier)
-        };
-        if !multiplier.is_finite() || multiplier <= 0.0 {
-            return Err(ConductionError::Conductivity {
-                what: "phase conductivity multiplier is not representable".into(),
-            });
-        }
-        Ok(multiplier)
+        self.law
+            .multiplier_at(liquid_mass_fraction)
+            .map_err(|error| ConductionError::Conductivity {
+                what: error.to_string(),
+            })
+    }
+
+    /// The same constitutive law for flowing thermal consumers. This wrapper
+    /// retains the existing FEM public error type and endpoint arithmetic.
+    #[must_use]
+    pub const fn material_law(
+        self,
+    ) -> fs_material::phase::conductivity::LiquidMassFractionConductivity {
+        self.law
+    }
+}
+
+impl From<fs_material::phase::conductivity::LiquidMassFractionConductivity>
+    for LiquidMassFractionConductivity
+{
+    fn from(law: fs_material::phase::conductivity::LiquidMassFractionConductivity) -> Self {
+        Self { law }
     }
 }
 
