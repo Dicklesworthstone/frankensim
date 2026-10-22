@@ -145,6 +145,8 @@ struct BankMode {
     w2: f64,
     beta: f64,
     c_int: f64,
+    /// Gas part of c_int: acts on absolute z', unlike material strain and pad loss.
+    c_gas: f64,
     c_pad: f64,
     z: f64,
     v: f64,
@@ -1477,10 +1479,13 @@ type CoursePadCache = (usize, Vec<(Vec<f64>, f64, f64)>);
 
 pub struct LivePiano {
     cfg: Config,
-    /// Exact admitted acoustic medium used by the Rayleigh receiver.
+    /// Exact admitted gas shared by source-material string drag and the receiver.
     acoustic_gas: fs_material::gas::GasState,
     /// Full immutable source packs and the section integrals actually installed.
     string_materials: Option<std::sync::Arc<crate::preparation::materials::StringMaterials>>,
+    /// Retained-mode cylinder resistance divided by the ORIGINAL solid line mass.
+    /// Empty on the effective-scale path, whose radius/loss split is unspecified.
+    string_gas_drag_rates: Vec<f64>,
     r: usize,
     dt: f64,
     courses: Vec<Course>,
@@ -1584,6 +1589,7 @@ impl Clone for LivePiano {
             cfg: self.cfg.clone(),
             acoustic_gas: self.acoustic_gas,
             string_materials: self.string_materials.clone(),
+            string_gas_drag_rates: self.string_gas_drag_rates.clone(),
             r: self.r,
             dt: self.dt,
             courses: self.courses.clone(),
@@ -1662,8 +1668,11 @@ fn validate_acoustic_gas(gas: &fs_material::gas::GasState) -> Result<(), String>
 impl LivePiano {
     /// Construct from a completely prepared source-bound scale. The same
     /// reference Bank owns string frequencies, losses, bridge inertia and
-    /// hammer projections. Source viscosity replaces the per-key loss preset;
-    /// a mismatched or only partially prepared description refuses.
+    /// hammer projections. Source viscosity replaces the per-key loss preset.
+    /// The same gas as the receiver supplies the existing small-amplitude
+    /// cylinder resistance at each actual modal frequency and outer radius.
+    /// This frozen modal drag omits added mass, viscous memory and the unresolved
+    /// chord's fluid load; a mismatched or partial material description refuses.
     pub fn new_with_materials(desc: &Description, cfg: Config,
         gas: fs_material::gas::GasState,
         materials: std::sync::Arc<crate::preparation::materials::StringMaterials>)
@@ -1672,9 +1681,7 @@ impl LivePiano {
         if cfg.rt0425_string_damping {
             return Err("source-bound string sections require their own material damping".into());
         }
-        let mut piano = Self::new_with_gas(desc, cfg, gas)?;
-        piano.string_materials = Some(materials);
-        Ok(piano)
+        Self::build(desc, cfg, gas, Some(materials))
     }
 
     /// Original normalized material and resolved-state owners retained by the
@@ -1706,6 +1713,12 @@ impl LivePiano {
         cfg: Config,
         gas: fs_material::gas::GasState,
     ) -> Result<Self, String> {
+        Self::build(desc, cfg, gas, None)
+    }
+
+    fn build(desc: &Description, cfg: Config, gas: fs_material::gas::GasState,
+        string_materials: Option<std::sync::Arc<crate::preparation::materials::StringMaterials>>)
+        -> Result<Self, String> {
         validate_acoustic_gas(&gas)?;
         let rate = cfg.sample_rate;
         if !(8_000..=192_000).contains(&rate) {
@@ -1726,8 +1739,33 @@ impl LivePiano {
         // (frequency, bridge cross inertia, strike projection, intrinsic loss).
         let bank = Bank::new_with_string_damping(&courses, board, rate, 0.45 * f64::from(rate),
             cfg.max_partials, true, None, cfg.rt0425_string_damping)?;
-        let (losses, _) = crate::refmods::bank_string_losses(&bank);
+        let (material_losses, _) = crate::refmods::bank_string_losses(&bank);
+        let mut losses = material_losses.to_vec();
         let n_total = bank.modes.len();
+        let mut string_gas_drag_rates = Vec::new();
+        if let Some(materials) = &string_materials {
+            string_gas_drag_rates.resize(n_total, 0.0);
+            for string in &bank.strings {
+                let course = &courses[string.course];
+                let section = materials.sections().get(&course.midi)
+                    .ok_or("string gas loading requires its original material section")?;
+                let radius = section.elastic().outer_radius_m();
+                for k in string.modes.clone() {
+                    let resistance = fs_couple::air_path::oscillating_cylinder_air_resistance_per_length(
+                        radius, bank.modes[k].omega, &gas).map_err(|e| e.to_string())?;
+                    let rate = resistance / course.linear_density_kg_m;
+                    // Original completed-square coordinates represent the
+                    // retained ABSOLUTE-velocity sine projection. The residual
+                    // chord is outside this frozen modal fluid approximation.
+                    let combined = material_losses[k].mass_rate + rate;
+                    if !rate.is_finite() || rate <= 0.0 || !combined.is_finite() {
+                        return Err("string gas resistance is not representable at its actual mode".into());
+                    }
+                    string_gas_drag_rates[k] = rate;
+                    losses[k].mass_rate = combined;
+                }
+            }
+        }
         let omega: Vec<f64> = bank.modes.iter().map(|m| m.omega).collect();
         let zoh = zoh_probe(rate, &omega)?;
         let dur = 0.5 * dt; // each loss half-flow spans half a step
@@ -1768,7 +1806,9 @@ impl LivePiano {
             let cents = (s.member as f64 - 0.5 * (c.unison - 1) as f64) * c.detune_cents;
             let tension = c.tension_at_cents(cents)?;
             let length = if s.duplex { c.duplex_length_m } else { c.length_m };
-            let mass_rate = s.modes.clone().next().map_or(0.0, |k| losses[k].mass_rate);
+            // A frequency-dependent modal gas rate must never be extrapolated
+            // into an invented frequency-independent drag on the residual chord.
+            let mass_rate = s.modes.clone().next().map_or(0.0, |k| material_losses[k].mass_rate);
             let strain_time = if cfg.rt0425_string_damping { 2.0 * steinway_scale::string_damping_rt0425(c.midi)?.1 } else { 0.0 };
             segs.push(Seg {
                 course: s.course,
@@ -1846,7 +1886,8 @@ impl LivePiano {
                         if c_int + c_pad >= 1.9 * m.omega[k] {
                             return Err("a silent-bank partial would be overdamped".into());
                         }
-                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0], share: 0.0 });
+                        let c_gas = string_gas_drag_rates.get(k).copied().unwrap_or(0.0);
+                        bank_modes.push(BankMode { k, w2: m.w2[k], beta: m.beta[k], c_int, c_gas, c_pad, z: 0.0, v: 0.0, p: [1.0, 0.0, 0.0, 1.0], share: 0.0 });
                     }
                     if bank_modes.len() > first {
                         course_segs.push(BankSeg { seg: si, start: first, end: bank_modes.len(), taken: 0 });
@@ -2012,7 +2053,8 @@ impl LivePiano {
         let n_courses = courses.len();
         let mut piano = Self {
             acoustic_gas: gas,
-            string_materials: None,
+            string_materials,
+            string_gas_drag_rates,
             r,
             dt,
             courses,
@@ -3507,9 +3549,11 @@ impl LivePiano {
     /// One step of the silent-string bank, after the dynamic set's step. Over the step the
     /// bridge moved from where the last one left it to where this one did; taking that
     /// motion as linear, each partial's motion relative to its chord, u = z - beta b,
-    /// obeys u'' + c u' + w^2 u = 0 exactly, its losses acting on the relative velocity
-    /// as the dynamic set's do. The pad's share of that loss is its share of c, exactly
-    /// (both are viscous on u'). Their reaction w^2 beta z (the rest of the coupling is
+    /// obeys u'' + c u' + w^2 u = -g beta rate, where g is gas drag on absolute
+    /// velocity z'=u'+beta rate. Source material strain and pad losses act on u'.
+    /// The effective-scale legacy loss retains its original relative approximation.
+    /// The existing exact damped transition is shifted by -g beta rate/w^2.
+    /// Their reaction w^2 beta z (the rest of the coupling is
     /// in the loaded pencil) then kicks the board's velocity.
     ///
     /// Two approximations. Each partial feels its pad on its own (a dynamic string's pad
@@ -3519,8 +3563,10 @@ impl LivePiano {
     /// with the kicks' kinetic energy, is that exchange's work, booked in
     /// `Ledger::coupling_j`. Per partial that change is
     ///   (v1^2 + w^2 u1^2)/2 - (v0^2 + w^2 u0^2)/2 + loss - w^2 beta^2 (b^2 - b0^2)/2
-    ///   = beta rate (du1 - du0) - w^2 beta^2 (b^2 - b0^2)/2,
-    /// since v = du + beta rate on both sides of the step; the loop sums that form.
+    ///   = beta rate (du1 - du0) + g beta rate (z1-z0)
+    ///     - w^2 beta^2 (b^2 - b0^2)/2,
+    /// since v = du + beta rate on both sides. Pad heat uses the relative
+    /// velocity integral; physical gas heat uses the absolute one, exactly.
     /// Returns (string loss, damper loss) [J].
     fn step_bank(&mut self) -> (f64, f64) {
         let r = self.r;
@@ -3546,14 +3592,33 @@ impl LivePiano {
                 }
             }
             let (mut force, mut loss, mut pad_loss, mut drive, mut stiffness) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let mut gas_drive = 0.0;
             for seg in &course.segs {
                 for m in &mut self.bank[seg.start + seg.taken..seg.end] {
                     let (u, du) = (m.z - m.beta * b0, m.v - m.beta * rate);
-                    let u1 = m.p[0] * u + m.p[1] * du;
-                    let du1 = m.p[2] * u + m.p[3] * du;
-                    let lost = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
-                    loss += lost;
-                    pad_loss += m.share * lost;
+                    let mut u1 = m.p[0] * u + m.p[1] * du;
+                    let mut du1 = m.p[2] * u + m.p[3] * du;
+                    let gas_force = m.c_gas * m.beta * rate;
+                    if m.c_gas != 0.0 {
+                        let equilibrium = -gas_force / m.w2;
+                        u1 += equilibrium * (1.0 - m.p[0]);
+                        du1 -= equilibrium * m.p[2];
+                    }
+                    let relative_change = 0.5 * (du * du - du1 * du1 + m.w2 * (u * u - u1 * u1));
+                    if m.c_gas == 0.0 {
+                        loss += relative_change;
+                        pad_loss += m.share * relative_change;
+                    } else {
+                        // c*integral(u'^2) = H_rel(0)-H_rel(1)-g*B*delta_u.
+                        // Add 2*g*B*delta_u+g*B^2*dt for gas on z'=u'+B.
+                        // The same extra term closes the existing explicit
+                        // bridge-exchange ledger; it is not extra dissipated heat.
+                        let relative_work = gas_force * (u1 - u);
+                        let extra = gas_force * (u1 - u + m.beta * (b - b0));
+                        loss += relative_change + extra;
+                        pad_loss += m.share * (relative_change - relative_work);
+                        gas_drive += extra;
+                    }
                     m.z = m.beta * b + u1;
                     m.v = du1 + m.beta * rate;
                     let wb = m.w2 * m.beta;
@@ -3565,6 +3630,7 @@ impl LivePiano {
             damper_loss += pad_loss;
             string_loss += loss - pad_loss;
             exchange += rate * drive - 0.5 * stiffness * (b * b - b0 * b0);
+            if gas_drive != 0.0 { exchange += gas_drive; }
             if force != 0.0 {
                 let kick = dt * force;
                 for (x, g) in self.bvel.iter_mut().zip(gl) {
@@ -3680,11 +3746,23 @@ impl LivePiano {
     // Observation (display only; never feeds back into the mechanics).
     // ------------------------------------------------------------------
 
-    /// Exact acoustic gas used by the receiver. This is retained separately
-    /// from mechanical material data so callers can audit medium substitutions.
+    /// Exact gas used by the receiver and, with source-material sections, the
+    /// retained transverse modes' cylinder resistance.
     #[must_use]
     pub const fn acoustic_gas(&self) -> fs_material::gas::GasState {
         self.acoustic_gas
+    }
+
+    /// Gas-only velocity-loss rates [1/s] of the first speaking unison member,
+    /// in the same granted partial order as `partials_hz`. These are the coefficients
+    /// used in both the dynamic and silent-string flow, before mode retirement.
+    /// None means an effective scale without a resolved radius/loss separation.
+    pub fn string_gas_drag_rates_per_s(&self, midi: u8) -> Option<&[f64]> {
+        if self.string_gas_drag_rates.is_empty() { return None; }
+        let ci = self.key_index(midi)?;
+        let (n, _) = self.grant(ci);
+        let seg = self.segs.iter().find(|s| s.course == ci && !s.duplex)?;
+        Some(&self.string_gas_drag_rates[seg.off..seg.off + n])
     }
 
     /// Physical bare-board (FE) modal displacements, mass-normalized.

@@ -102,6 +102,54 @@ option preserves even the original course allocation. Both operations are
 transactional together: invalid text, missing neighbours, inadmissible tension
 or an empty target band leaves the original Description unchanged.
 
+## Atmosphere loading of source-material strings
+
+`PianoAudio::new_with_materials` and the browser's canonical material-pack path
+use the supplied atmosphere for string drag as well as microphone propagation.
+The outermost radius comes from each actual concentric section, including all
+of its declared layers. Its solid line mass remains the material integral.
+The shared `fs-couple::air_path::oscillating_cylinder_air_resistance_per_length`
+owner evaluates the small-amplitude transverse-cylinder resistance at each
+actual partial frequency. Resistance divided by line mass supplies the gas-only
+velocity-loss rate. Pressure, temperature or composition can therefore alter
+the solved string/bridge motion and decay as well as received pressure.
+
+The sampled rate is frozen during construction and enters the existing passive
+loss flow. Sounding strings and the silent-string bank use the same prepared
+coefficients at every supported mechanical clock. Physical gas loss is included
+once in the original `string_loss_j` account. Source Kelvin–Voigt bending loss
+keeps its separate constitutive origin; imported solid coefficients are not
+modified to impersonate the atmosphere. The same admitted gas sets Rayleigh
+density and propagation speed. Copies retain both that gas and the drag rates.
+`string_gas_drag_rates_per_s(key)` exposes the granted speaking partials' gas
+coefficients; `info().stringGasLoading` names the selected reduction.
+
+The silent bank keeps its existing explicit linear-bridge trajectory. Gas drag
+acts on absolute modal velocity there too: in the bank's relative-to-chord
+coordinate it supplies the constant force `-gas_rate * beta * bridge_velocity`.
+The original damped transition advances that forced equation by an equilibrium
+shift. Gas work and pad work use their distinct absolute and relative velocity
+integrals, and the same transfer enters the existing coupling-work account.
+
+This is the existing sampled, linear, unconfined, circular-cylinder approximation
+on retained absolute-velocity modes. It does not add fluid inertia, viscous
+memory, inter-string or end interactions, or the unresolved chord's fluid load.
+It does not retune elastic frequencies. Finite-amplitude, rarefied and confined
+flows need their own admitted models. The generic causal `CylinderFlow` remains
+a separate model whose fluid history needs explicit transfer through the live
+engine's changing voice basis before it can be used here.
+
+Effective scale CSVs do not declare outer radius or separate their aggregate
+loss into material and gas contributions. `new_with_gas` retains its explicit
+receiver-only meaning for that path; radius is never guessed from density and
+an additional air loss is never stacked onto the aggregate preset. Source-pack
+construction supplies the complete geometry and loss separation needed above.
+
+Focused additions to `--test scale_preparation` check independent SI resistance
+values, pressure/composition substitutions, actual bridge and decay response
+after dividing out receiver density gain, silent-bank use and cloned playback.
+Native execution of these additions remains pending.
+
 ## Scope and verification
 
 The tuner fits nominal pinned-string partials, not the coupled board/string

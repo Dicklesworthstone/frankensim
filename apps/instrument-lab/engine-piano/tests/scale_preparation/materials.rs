@@ -185,6 +185,104 @@ fn config() -> Config {
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }
+
+#[test]
+fn material_geometry_and_the_same_atmosphere_determine_live_cylinder_drag() {
+    let mut desc = small_description();
+    let source = load(&desc.courses, &pack(CORE), &pack(COATING));
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let gases = [
+        preparation::resolve_atmosphere("293.15 50000 0").unwrap(),
+        preparation::resolve_atmosphere("293.15 100000 0").unwrap(),
+        preparation::resolve_atmosphere("mixture 293.15 100000 mole 1 CO2 1").unwrap(),
+    ];
+    let mut prepared = Vec::new();
+    for atmosphere in gases {
+        let piano = LivePiano::new_with_materials(&desc, config(), atmosphere, source.clone()).unwrap();
+        assert_eq!(piano.acoustic_gas(), atmosphere);
+        for course in piano.courses() {
+            let frequencies = piano.partials_hz(course.midi);
+            let rates = piano.string_gas_drag_rates_per_s(course.midi).unwrap();
+            assert_eq!(frequencies.len(), rates.len());
+            for (&frequency, &rate) in frequencies.iter().zip(rates) {
+                // Independent dimensional reference for the existing model:
+                // resistance per length / solid mass per length, both SI.
+                let expected = TAU * atmosphere.dynamic_viscosity
+                    * (1.0 + OUTER * (2.0 * atmosphere.density * TAU * frequency
+                        / atmosphere.dynamic_viscosity).sqrt())
+                    / course.linear_density_kg_m;
+                near(rate, expected);
+            }
+        }
+        assert!(fs_live_piano::describe(&piano).contains(
+            "\"stringGasLoading\":\"sampled-cylinder-retained-modes\""));
+        prepared.push(piano);
+    }
+    let a = prepared[0].string_gas_drag_rates_per_s(69).unwrap();
+    let b = prepared[1].string_gas_drag_rates_per_s(69).unwrap();
+    let c = prepared[2].string_gas_drag_rates_per_s(69).unwrap();
+    assert!(a.iter().zip(b).all(|(a, b)| b > a));
+    assert_ne!(b, c);
+    // This reduced resistance carries no fluid inertia; gas substitutions do
+    // not retune the source's elastic frequencies or installed tension.
+    assert_eq!(prepared[0].partials_hz(69), prepared[1].partials_hz(69));
+    assert_eq!(prepared[0].partials_hz(69), prepared[2].partials_hz(69));
+    assert_eq!(prepared[1].courses(), desc.courses.as_slice());
+    let effective = LivePiano::new_with_gas(&small_description(), config(), gases[1]).unwrap();
+    assert!(effective.string_gas_drag_rates_per_s(69).is_none());
+}
+
+#[test]
+fn atmosphere_changes_mechanics_and_decay_with_lossless_solid_sources_at_both_clocks() {
+    let mut desc = small_description();
+    let source = load(&desc.courses,
+        &pack([CORE[0], CORE[1], 0.0]), &pack([COATING[0], COATING[1], 0.0]));
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let low = preparation::resolve_atmosphere("293.15 50000 0").unwrap();
+    let high = preparation::resolve_atmosphere("293.15 100000 0").unwrap();
+    assert_eq!(low.sound_speed, high.sound_speed);
+    for silent_band in [0.0, 800.0] {
+        for ratio in [1, 2] {
+            let mut cfg = config();
+            cfg.silent_bank_hz = silent_band;
+            let mut a = PianoAudio::new_with_materials(&desc, cfg.clone(), ratio, low, source.clone()).unwrap();
+            let mut b = PianoAudio::new_with_materials(&desc, cfg, ratio, high, source.clone()).unwrap();
+            a.note_on(69, 0.25).unwrap();
+            b.note_on(69, 0.25).unwrap();
+            let (mut pressure, mut difference, mut motion_difference) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for _ in 0..4096 {
+                // Remove the Rayleigh receiver's known density gain. Any
+                // remaining difference comes from the solved source history.
+                let x = a.step_pressure().unwrap() / low.density;
+                let y = b.step_pressure().unwrap() / high.density;
+                pressure = pressure.max(x.abs());
+                difference = difference.max((x-y).abs());
+                motion_difference = motion_difference.max((a.piano().bridge_velocity(69).unwrap()
+                    - b.piano().bridge_velocity(69).unwrap()).abs());
+            }
+            assert!(pressure > 1e-9);
+            assert!(difference > 1e-8 * pressure, "source response must change beyond receiver gain");
+            assert!(motion_difference > 1e-14, "actual bridge motion must respond to gas drag");
+            let la = a.close_ledger();
+            let lb = b.close_ledger();
+            // There is no material bending loss in this fixture. Gas loss
+            // enters the original string ledger once, with no extra heat credit.
+            assert!(la.string_loss_j > 0.0 && lb.string_loss_j > 0.0);
+            assert_ne!(la.string_loss_j, lb.string_loss_j);
+            assert!(la.residual_j.abs() < 1e-7 * la.input_j.max(1.0));
+            assert!(lb.residual_j.abs() < 1e-7 * lb.input_j.max(1.0));
+            let mut copied = b.clone();
+            assert_eq!(b.piano().string_gas_drag_rates_per_s(69), copied.piano().string_gas_drag_rates_per_s(69));
+            let mut whole = [0.0_f32; 257];
+            let mut blocks = [0.0_f32; 257];
+            b.render(&mut whole).unwrap();
+            for block in blocks.chunks_mut(37) { copied.render(block).unwrap(); }
+            assert_eq!(whole, blocks);
+            assert_eq!(format!("{:?}", b.close_ledger()), format!("{:?}", copied.close_ledger()));
+        }
+    }
+}
+
 fn near(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() <= 3e-13 * actual.abs().max(expected.abs()),
