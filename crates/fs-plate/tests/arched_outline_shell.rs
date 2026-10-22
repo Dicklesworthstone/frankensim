@@ -169,17 +169,21 @@ fn shifted(k: &Csr, m: &Csr, s: f64) -> Csr {
     }
     out.assemble()
 }
-fn first_ten(k: &Csr, m: &Csr) -> Vec<ModePair> {
-    let mut hi = 1.0;
+/// The lowest `count` modes. `bound` only seeds the search window; the
+/// Sylvester inertia count proves the window holds them. Seeding it from the
+/// previous rung keeps the certified slice near `count` modes on fine rungs
+/// (an unbounded (0, 1) slice ran > 52 min at the 77k-triangle rung).
+fn lowest_modes(k: &Csr, m: &Csr, count: usize, bound: Option<f64>) -> Vec<ModePair> {
+    let mut hi = bound.unwrap_or(1.0);
     for _ in 0..32 {
         let pencil = shifted(k, m, hi);
         let symbolic = SymbolicLdlt::analyze(&pencil, DirectOrdering::Amd).unwrap();
-        let count = symbolic
+        let below = symbolic
             .factor(&pencil, &LdltOptions::default())
             .unwrap()
             .inertia()
             .negative;
-        if count >= 10 {
+        if below >= count {
             let report = slice_window(
                 k,
                 m,
@@ -193,22 +197,43 @@ fn first_ten(k: &Csr, m: &Csr) -> Vec<ModePair> {
                 },
             )
             .unwrap();
-            assert!(report.modes.len() >= 10);
-            return report.modes.into_iter().take(10).collect();
+            assert!(report.modes.len() >= count);
+            return report.modes.into_iter().take(count).collect();
         }
-        hi *= 2.0;
+        hi *= 1.3;
     }
-    panic!("explicit first-ten spectral search budget exhausted");
+    panic!("explicit lowest-mode spectral search budget exhausted");
+}
+
+/// Runs of the finest rung whose consecutive relative gaps are below `tau`.
+fn clusters(finest: &[f64], tau: f64) -> Vec<Vec<usize>> {
+    let mut out = vec![vec![0]];
+    for i in 1..finest.len() {
+        if finest[i] / finest[i - 1] - 1.0 < tau {
+            out.last_mut().unwrap().push(i);
+        } else {
+            out.push(vec![i]);
+        }
+    }
+    out
+}
+
+fn spread(row: &[f64], cluster: &[usize]) -> f64 {
+    row[*cluster.last().unwrap()] / row[cluster[0]] - 1.0
 }
 
 #[test]
 fn g1_plate_with_hole_modes_converge() {
+    // First ten eigenvalues, plus room to close the cluster holding the tenth.
+    const WANTED: usize = 10;
+    const COMPUTED: usize = 12;
+    const RUNGS: usize = 5;
     with_cx(|cx| {
         let mut planar = annulus(64, 0.25, cx);
-        let mut dkt = Vec::new();
-        let mut mitc = Vec::new();
+        let mut dkt: Vec<Vec<f64>> = Vec::new();
+        let mut mitc: Vec<Vec<f64>> = Vec::new();
         let mut hs = Vec::new();
-        for rung in 0..4 {
+        for rung in 0..RUNGS {
             let mesh = plate(&planar);
             let boundary = mesh.boundary_nodes();
             let section = PlateSection::isotropic(1.0, 0.3, 0.01, 1.0).unwrap();
@@ -223,8 +248,9 @@ fn g1_plate_with_hole_modes_converge() {
                 },
             )
             .unwrap();
-            let modes = first_ten(&model.k, &model.m);
-            dkt.push(modes.iter().map(|m| m.lambda).collect::<Vec<_>>());
+            let bound = dkt.last().map(|row| 1.3 * row[COMPUTED - 1]);
+            let modes = lowest_modes(&model.k, &model.m, COMPUTED, bound);
+            dkt.push(modes.iter().map(|m| m.lambda).collect());
             let flat = ArchingSurface::new(
                 ArchingParameters::HeightMap(grid(|_, _| 0.0)),
                 ReferenceLoadState::Unloaded,
@@ -268,8 +294,9 @@ fn g1_plate_with_hole_modes_converge() {
                 || false,
             )
             .unwrap();
-            let modes = first_ten(&shell.pencil().k, &shell.pencil().m);
-            mitc.push(modes.iter().map(|m| m.lambda).collect::<Vec<_>>());
+            let bound = mitc.last().map(|row| 1.3 * row[COMPUTED - 1]);
+            let modes = lowest_modes(&shell.pencil().k, &shell.pencil().m, COMPUTED, bound);
+            mitc.push(modes.iter().map(|m| m.lambda).collect());
             hs.push(1.0 / (1usize << rung) as f64);
             println!(
                 "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W6\",\"test\":\"g1_plate_with_hole_modes_converge\",\"tier\":\"G1\",\"rung\":{rung},\"geometry_axis\":\"fixed-64-edge-dyadic-annulus\",\"vertices\":{},\"triangles\":{},\"dkt\":{:?},\"mitc3p\":{:?}}}",
@@ -278,30 +305,80 @@ fn g1_plate_with_hole_modes_converge() {
                 dkt.last().unwrap(),
                 mitc.last().unwrap()
             );
-            if rung < 3 {
+            if rung < RUNGS - 1 {
                 planar = planar.refine_uniform(budget(), cx).unwrap();
             }
         }
-        for (name, rows) in [("DKT", dkt), ("MITC3+", mitc)] {
-            for mode in 0..10 {
-                // Fixed geometry; three successive eigenvalue differences
-                // remove an unknown continuum limit without using a fixture
-                // answer. Nonzero changes make the h axis load-bearing.
-                let errors: Vec<_> = rows
+        // Fixed geometry; eigenvalue changes between rungs remove an unknown
+        // continuum limit without using a fixture answer. Nonzero changes make
+        // the h axis load-bearing.
+        //
+        // Window: rung 0 has two or three linear-deflection MITC3+ elements
+        // across the 0.5 m width and is 66 % stiff in mode 0, so its first
+        // change is pre-asymptotic (9ab6189d4: local orders 2.38, 2.09; a
+        // locking-free linear Timoshenko strip gives 2.36, 2.09, 2.06). Both
+        // elements are gated on the same three finest changes.
+        //
+        // Clusters: the annulus is D64-symmetric, so each cos/sin pair is a
+        // double eigenvalue split only by mesh asymmetry. A member moves by
+        // the pair mean's change plus or minus half the split's change, and
+        // that difference can cancel (DKT mode 5: 1.61 on the finest three,
+        // while its pair mean gave 2.25 and its split converges at 2.0). The
+        // largest member change |d mean| + |d split|/2 bounds every member
+        // and cannot cancel, so it is gated per cluster.
+        let mut failures = Vec::new();
+        for (name, rows) in [("DKT", &dkt), ("MITC3+", &mitc)] {
+            let all = clusters(rows.last().unwrap(), 5e-3);
+            let gated = all.iter().take_while(|c| c[0] < WANTED).count();
+            assert!(
+                all[..gated].iter().all(|c| c.len() <= 2) && gated < all.len(),
+                "{name}: a D64 fixture has only simple and double eigenvalues, and the \
+                 cluster of the tenth must close inside the computed modes: {all:?}"
+            );
+            // Index tracking is valid only while every cluster stays farther
+            // from its neighbours than twice its own spread.
+            for (rung, row) in rows.iter().enumerate().skip(1) {
+                for pair in all[..=gated].windows(2) {
+                    let gap = row[pair[1][0]] / row[*pair[0].last().unwrap()] - 1.0;
+                    let wider = spread(row, &pair[0]).max(spread(row, &pair[1]));
+                    assert!(
+                        gap > 2.0 * wider,
+                        "{name} rung {rung}: clusters {pair:?} gap {gap:e} vs spread {wider:e}"
+                    );
+                }
+            }
+            for cluster in &all[..gated] {
+                let changes: Vec<f64> = rows
                     .windows(2)
-                    .map(|p| (p[1][mode] - p[0][mode]).abs())
+                    .map(|p| {
+                        cluster
+                            .iter()
+                            .map(|&j| (p[1][j] - p[0][j]).abs())
+                            .fold(0.0, f64::max)
+                    })
                     .collect();
-                let ladder = fs_mms::RefinementLadder::new(hs[..3].to_vec(), errors).unwrap();
-                let verdict = fs_mms::OrderGate { theoretical: 2.0 }
-                    .check(
-                        &format!("{name}-annulus-mode-{mode}"),
-                        fs_mms::LadderSide::Primal,
-                        &ladder,
-                    )
-                    .unwrap();
-                println!("{}", verdict.json_line(true));
+                let members: Vec<_> = cluster.iter().map(usize::to_string).collect();
+                let case = format!("{name}-annulus-modes-{}", members.join("-"));
+                println!(
+                    "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W6\",\"test\":\"g1_plate_with_hole_modes_converge\",\"case\":\"{case}\",\"h\":{hs:?},\"largest_member_changes\":{changes:?},\"gated_changes\":\"finest three\"}}"
+                );
+                let ladder =
+                    fs_mms::RefinementLadder::new(hs[1..RUNGS - 1].to_vec(), changes[1..].to_vec())
+                        .unwrap();
+                match (fs_mms::OrderGate { theoretical: 2.0 }).check(
+                    &case,
+                    fs_mms::LadderSide::Primal,
+                    &ladder,
+                ) {
+                    Ok(verdict) => println!("{}", verdict.json_line(true)),
+                    Err(refusal) => {
+                        println!("{}", refusal.detail());
+                        failures.push(case);
+                    }
+                }
             }
         }
+        assert!(failures.is_empty(), "order gate failed for {failures:?}");
     });
 }
 
