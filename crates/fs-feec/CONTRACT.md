@@ -1048,9 +1048,11 @@ fs-feec, a dev-only cycle that cargo allows and the layer check exempts).
   per port. Without the static vectors a boundary-forced modal expansion converges only like `1/N`; the test logs both. A frequency is one
   dense complex solve of the reduced dimension (at most `MAX_REDUCED_DIM`, 640). `response` returns the outward volume flow and mean
   pressure of every port; `transfer_to` is the volume-velocity transfer function (outward flow over inflow).
-- Tests (in-module, `cargo test -p fs-feec --lib acoustics`): `helmholtz_rigid_box_modes` (20 modes of a 1.0 x 0.7 x 0.4 m box to
-  1e-4 at the finest rung, certified count 21 with the constant mode, observed order of the lowest eigenvalue over the last two rungs for
-  r = 2 and 3), `helmholtz_duct_driven_transfer_matches_plane_wave_theory` (exact 1-D duct with an impedance end, a ladder over mesh and over
+- Tests (in-module, `cargo test -p fs-feec --lib acoustics`): `helmholtz_rigid_box_modes` (a 1.0 x 0.7 x 0.4 m box, ladders r = 2: n = 3, 4,
+  6, 8; r = 3: n = 2, 3, 4, 6; r = 4: n = 2, 3, 4, 6; certified count 21 with the constant mode at the finest rung; pre-registered gates: the
+  slope of the lowest nonzero frequency error over the finest pair of rungs is at least 2r - 0.2 for every order, and the 20 modes at the
+  finest rung of r = 4 are within 1e-4; every rung prints its dofs and times and every pair of rungs its slope before a shortfall fails),
+  `helmholtz_duct_driven_transfer_matches_plane_wave_theory` (exact 1-D duct with an impedance end, a ladder over mesh and over
   static vectors), `helmholtz_refusals`, `helmholtz_modes_repeat_bitwise`.
 - Not claimed: isoparametric (curved) walls, the closed-cylinder and resonator tests, the p-ladder, viscothermal boundary-layer admittance
   (M2.4-W1b), a radiation solve (the admittance is an input law), multiport extraction, a direct complex solve for cross-checking the

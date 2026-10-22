@@ -802,20 +802,29 @@ mod tests {
         let dims = [1.0, 0.7, 0.4];
         let exact = box_frequencies(dims, 24);
         let window = (-1.0, 0.5 * (exact[19] + exact[20]));
+        // Pre-registered gates, fixed before the order slopes were measured: the finest pair of rungs of every
+        // order must show a slope of the lowest nonzero frequency error of at least 2r - 0.2 (asymptotic order
+        // 2r), and the 20 modes at the finest rung of r = 4 must be within 1e-4. A shortfall fails the test
+        // after every order has printed: report it as pre-asymptotic (add a finer rung) or as a defect, never
+        // lower the target here.
+        let mut shortfalls = Vec::new();
         for (order, rungs) in [
             (2usize, vec![3usize, 4, 6, 8]),
             (3, vec![2, 3, 4, 6]),
-            (4, vec![2, 3, 4]),
+            (4, vec![2, 3, 4, 6]),
         ] {
             let mut first_mode_err = Vec::new();
             for &n in &rungs {
+                let t0 = std::time::Instant::now();
                 let (complex, pos) = scaled_box(n, dims);
                 let fe = HelmholtzFe::new(&complex, &pos, order, AIR).expect("fe");
+                let t_assemble = t0.elapsed().as_secs_f64();
                 let modes = fe.modes(window, &SliceOptions::default()).expect("modes");
+                let t_modes = t0.elapsed().as_secs_f64() - t_assemble;
                 assert_eq!(modes.below_high - modes.below_low, modes.lambda.len());
                 let found = modes.frequency_hz.len();
                 println!(
-                    "{{\"suite\":\"fs-feec/acoustics\",\"case\":\"rigid_box\",\"r\":{order},\"mesh_n\":{n},\"dofs\":{},\"modes\":{found}}}",
+                    "{{\"suite\":\"fs-feec/acoustics\",\"case\":\"rigid_box\",\"r\":{order},\"mesh_n\":{n},\"dofs\":{},\"modes\":{found},\"t_assemble_s\":{t_assemble:.3},\"t_modes_s\":{t_modes:.3}}}",
                     fe.ndof()
                 );
                 assert!(modes.frequency_hz[0] < 1e-3 * exact[0], "constant mode");
@@ -833,11 +842,10 @@ mod tests {
                     println!(
                         "{{\"suite\":\"fs-feec/acoustics\",\"case\":\"rigid_box\",\"r\":{order},\"mesh_n\":{n},\"worst_rel_err_20\":{worst:e}}}"
                     );
-                    if order == 4 && n == *rungs.last().expect("rungs") {
-                        assert!(
-                            worst < 1e-4,
-                            "r={order} n={n}: worst relative error {worst:e}"
-                        );
+                    if order == 4 && n == *rungs.last().expect("rungs") && worst >= 1e-4 {
+                        shortfalls.push(format!(
+                            "r={order} n={n}: worst relative error {worst:e} >= 1e-4"
+                        ));
                     }
                 }
                 first_mode_err.push((
@@ -845,19 +853,33 @@ mod tests {
                     (modes.frequency_hz[1] / exact[0] - 1.0).abs(),
                 ));
             }
-            // observed order of the lowest nonzero eigenvalue over the last two rungs
+            // observed order of the lowest nonzero frequency over every pair of rungs
+            for pair in first_mode_err.windows(2) {
+                let (h1, e1) = pair[0];
+                let (h2, e2) = pair[1];
+                if e1 > 1e-13 && e2 > 1e-13 {
+                    let slope = (e1 / e2).ln() / (h1 / h2).ln();
+                    println!(
+                        "{{\"suite\":\"fs-feec/acoustics\",\"case\":\"rigid_box_order\",\"r\":{order},\"h_coarse\":{h1},\"h_fine\":{h2},\"observed_order\":{slope}}}"
+                    );
+                }
+            }
+            let target = 2.0 * order as f64 - 0.2;
             let (h1, e1) = first_mode_err[first_mode_err.len() - 2];
             let (h2, e2) = first_mode_err[first_mode_err.len() - 1];
             if e1 > 1e-13 && e2 > 1e-13 {
                 let slope = (e1 / e2).ln() / (h1 / h2).ln();
-                println!(
-                    "{{\"suite\":\"fs-feec/acoustics\",\"case\":\"rigid_box_order\",\"r\":{order},\"observed_order\":{slope}}}"
-                );
-                // the asymptotic order is 2r; the coarse rungs are not asymptotic everywhere, so the gate here is
-                // the weak sanity bound r, and the logged slope is the evidence
-                assert!(slope > order as f64, "r={order}: observed order {slope}");
+                if slope < target {
+                    shortfalls.push(format!("r={order}: observed order {slope} < {target}"));
+                }
+            } else {
+                shortfalls.push(format!(
+                    "r={order}: the finest pair is at the rounding floor ({e1:e}, {e2:e})"
+                ));
             }
         }
+        // every order has printed its slopes before any shortfall fails the test
+        assert!(shortfalls.is_empty(), "{shortfalls:?}");
     }
 
     /// Exact transfer of a uniform duct driven by inflow velocity at x = 0 and closed by the specific admittance y at x = L.
