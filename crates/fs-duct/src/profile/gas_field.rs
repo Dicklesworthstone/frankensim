@@ -64,6 +64,15 @@ struct QuadratureStep {
     gases: [GasState; 2],
 }
 
+#[derive(Clone, Debug)]
+struct ToneHoleStep {
+    /// Keep the zero-length junction at its exact authored axial station.
+    before_step: usize,
+    segment: usize,
+    gas: GasState,
+    extra_series_m: f64,
+}
+
 /// Acoustic binding of existing geometry to the one shared material field.
 ///
 /// This is a frozen, no-mean-flow plane-wave operator. An explicit wall pin
@@ -77,13 +86,15 @@ pub struct GasFieldDuct {
     duct: Duct,
     field: AxialGasField,
     quadrature: Vec<QuadratureStep>,
+    holes: Vec<ToneHoleStep>,
     inlet: GasState,
     outlet: GasState,
     one_way_time_s: f64,
 }
 
 impl GasFieldDuct {
-    /// Bind the complete field to a cylinder/cone/smooth-profile chain.
+    /// Bind the complete field to a cylinder/cone/smooth-profile chain with
+    /// optional local tone-hole junctions.
     ///
     /// For a nonuniform field, steps_per_span controls the shared Magnus
     /// integration on EACH smooth interval. Authored geometry boundaries,
@@ -94,8 +105,12 @@ impl GasFieldDuct {
     /// the field varies; a uniform field needs no field discretization.
     ///
     /// All local material states are admitted before this binding is returned.
-    /// Nonuniform fields with tone holes refuse: their chimney and mutual-hole
-    /// laws need a spatial material binding that this axial operator cannot infer.
+    /// Each tone hole uses the exact gas at its axial station for its junction
+    /// and homogeneous chimney, as in the regional-duct model. Closed holes may
+    /// lie anywhere in the field. Multiple open/vented holes require a constant
+    /// primitive state throughout their connecting span, preserving the existing
+    /// homogeneous mutual-hole law. A gradient across that span refuses; no
+    /// averaged medium or omitted mutual correction is substituted.
     pub fn new(
         duct: &Duct,
         field: &AxialGasField,
@@ -135,6 +150,7 @@ impl GasFieldDuct {
             duct: duct.clone(),
             field: field.clone(),
             quadrature: Vec::new(),
+            holes: Vec::new(),
             inlet,
             outlet,
             one_way_time_s: length / inlet.sound_speed,
@@ -142,18 +158,74 @@ impl GasFieldDuct {
         if field.uniform_state().is_some() {
             return Ok(result);
         }
-        if duct
-            .segments
-            .iter()
-            .any(|segment| matches!(segment, Segment::ToneHole { .. }))
-        {
-            return Err(bad("continuous gas fields need an axial duct without tone holes").into());
+        let mut open_sites = Vec::new();
+        let mut position = 0.0;
+        for segment in &duct.segments {
+            if let Segment::ToneHole {
+                hole_radius,
+                bore_radius,
+                state,
+                ..
+            } = *segment
+            {
+                let sigma = crate::hole_sigma(state);
+                if sigma > 0.0 {
+                    open_sites.push((position, hole_radius * sigma.sqrt(), bore_radius));
+                }
+            }
+            position += segment.axial_length();
+        }
+        if let (Some(first), Some(last)) = (open_sites.first(), open_sites.last()) {
+            // Equal endpoint coefficients alone are insufficient: temperature
+            // or composition could change between them. Inspect every primitive
+            // interpolation span that intersects the near-field coupling span.
+            for (positions, states) in field
+                .stations_m()
+                .windows(2)
+                .zip(field.primitive_states().windows(2))
+            {
+                if first.0 < last.0
+                    && positions[1] > first.0
+                    && positions[0] < last.0
+                    && states[0] != states[1]
+                {
+                    return Err(bad("open tone holes across a varying gas field need an unavailable mutual-hole law").into());
+                }
+            }
         }
         let root3 = det::sqrt(3.0);
         let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
         let mut offset = 0.0;
         let mut travel = 0.0;
-        for segment in &duct.segments {
+        let mut open_index = 0;
+        for (segment_index, segment) in duct.segments.iter().enumerate() {
+            if let Segment::ToneHole { state, .. } = *segment {
+                if result.steps_used() == MAX_RICCATI_STEPS {
+                    return Err(bad("gas-field integration exceeds MAX_RICCATI_STEPS").into());
+                }
+                if cancelled() {
+                    return Err(DuctError::Cancelled {
+                        completed_steps: result.steps_used(),
+                    }
+                    .into());
+                }
+                let mut extra_series_m = 0.0;
+                if crate::hole_sigma(state) > 0.0 {
+                    let (xi, bi, ai) = open_sites[open_index];
+                    for &(xj, bj, _) in &open_sites {
+                        extra_series_m +=
+                            fs_phs::side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
+                    }
+                    open_index += 1;
+                }
+                result.holes.push(ToneHoleStep {
+                    before_step: result.quadrature.len(),
+                    segment: segment_index,
+                    gas: *field.state_at(offset)?.state(),
+                    extra_series_m,
+                });
+                continue;
+            }
             let length = segment.axial_length();
             let end = offset + length;
             let mut boundaries = vec![0.0, length];
@@ -178,7 +250,7 @@ impl GasFieldDuct {
             let count = (boundaries.len() - 1)
                 .checked_mul(steps_per_span.0)
                 .and_then(|count| result.quadrature.len().checked_add(count))
-                .filter(|&count| count <= MAX_RICCATI_STEPS)
+                .filter(|&count| count <= MAX_RICCATI_STEPS - result.holes.len())
                 .ok_or_else(|| bad("gas-field integration exceeds MAX_RICCATI_STEPS"))?;
             result.quadrature.reserve(count - result.quadrature.len());
             let radius = |x: f64| -> Result<f64, DuctError> {
@@ -212,7 +284,7 @@ impl GasFieldDuct {
                 for index in 0..steps_per_span.0 {
                     if cancelled() {
                         return Err(DuctError::Cancelled {
-                            completed_steps: result.quadrature.len(),
+                            completed_steps: result.steps_used(),
                         }
                         .into());
                     }
@@ -271,9 +343,10 @@ impl GasFieldDuct {
     pub const fn one_way_time_s(&self) -> f64 {
         self.one_way_time_s
     }
-    /// Actual field integration work; zero for the original uniform path.
+    /// Actual field integration blocks, including zero-length tone-hole
+    /// junctions; zero for the original uniform path.
     pub fn steps_used(&self) -> usize {
-        self.quadrature.len()
+        self.quadrature.len() + self.holes.len()
     }
     /// Exact inlet rho*c/area, with no independently supplied medium knob.
     pub fn inlet_impedance(&self) -> f64 {
@@ -310,7 +383,10 @@ impl GasFieldDuct {
 
     /// Complete wall-frequency law at every retained material/geometry sample.
     pub fn chain_with_wall_controlled(
-        &self, omega: f64, loss: LossModel, wall: WallModel<'_>,
+        &self,
+        omega: f64,
+        loss: LossModel,
+        wall: WallModel<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
         if self.field.uniform_state().is_some() {
@@ -335,14 +411,52 @@ impl GasFieldDuct {
             ));
         }
         let root3 = det::sqrt(3.0);
-        let mut blocks = Vec::with_capacity(self.quadrature.len());
+        let mut blocks = Vec::with_capacity(self.steps_used());
         let mut min_shear = f64::INFINITY;
-        for (index, step) in self.quadrature.iter().enumerate() {
+        let mut axial_index = 0;
+        let mut hole_index = 0;
+        for index in 0..self.steps_used() {
             if cancelled() {
                 return Err(DuctError::Cancelled {
                     completed_steps: index,
                 });
             }
+            if let Some(hole) = self
+                .holes
+                .get(hole_index)
+                .filter(|hole| hole.before_step == axial_index)
+            {
+                let Segment::ToneHole {
+                    hole_radius,
+                    chimney_height,
+                    bore_radius,
+                    state,
+                } = self.duct.segments[hole.segment]
+                else {
+                    unreachable!("admitted tone hole")
+                };
+                if matches!(loss, LossModel::WideTube | LossModel::Bessel) {
+                    min_shear = min_shear.min(
+                        hole_radius
+                            * (hole.gas.density * omega / hole.gas.dynamic_viscosity).sqrt(),
+                    );
+                }
+                let matrix = crate::tone_hole_t_junction_with_wall(
+                    &hole.gas,
+                    hole_radius,
+                    chimney_height,
+                    state,
+                    omega,
+                    loss,
+                    bore_radius,
+                    hole.extra_series_m,
+                    wall,
+                )?;
+                blocks.push(TwoPort::from_abcd(matrix, reference)?);
+                hole_index += 1;
+                continue;
+            }
+            let step = &self.quadrature[axial_index];
             let (a, shear_a) = local_generator(
                 &step.gases[0], step.radii[0], omega, loss, reference, wall, step.slants[0],
             )?;
@@ -354,6 +468,7 @@ impl GasFieldDuct {
             matrix[2] = matrix[2].scale(1.0 / reference);
             blocks.push(TwoPort::from_abcd(matrix, reference)?);
             min_shear = min_shear.min(shear_a).min(shear_b);
+            axial_index += 1;
         }
         Ok(PreparedChain {
             blocks,

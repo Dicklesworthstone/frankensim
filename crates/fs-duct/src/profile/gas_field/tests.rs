@@ -567,3 +567,224 @@ fn continuous_field_refuses_missing_geometry_bad_resolution_and_partial_work() {
             .is_err()
     );
 }
+
+fn tone_hole(state: crate::HoleState) -> Segment {
+    Segment::ToneHole {
+        hole_radius: 0.002,
+        chimney_height: 0.005,
+        bore_radius: RADIUS,
+        state,
+    }
+}
+
+fn fingered_bore(states: [crate::HoleState; 2]) -> Duct {
+    let axial = Segment::Cylinder {
+        radius: RADIUS,
+        length: LENGTH / 3.0,
+    };
+    Duct {
+        segments: vec![
+            axial.clone(),
+            tone_hole(states[0]),
+            axial.clone(),
+            tone_hole(states[1]),
+            axial,
+        ],
+    }
+}
+
+#[test]
+fn uniform_fingered_field_preserves_original_bits() {
+    let source = field([300.0, 300.0], [0.8, 0.8], 101325.0);
+    let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
+    let bound = GasFieldDuct::new(&geometry, &source, RiccatiSteps(8)).unwrap();
+    assert_eq!(bound.steps_used(), 0);
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for frequency in [210.0, 470.0, 900.0] {
+            let expected = input_impedance(
+                &geometry,
+                bound.inlet_gas(),
+                TAU * frequency,
+                loss,
+                Termination::FlangedOpen,
+            )
+            .unwrap();
+            let actual = bound
+                .response(TAU * frequency, loss, Termination::FlangedOpen, None)
+                .unwrap();
+            assert_eq!(actual.impedance, expected.impedance);
+            assert_eq!(actual.u_mouth_over_u_in, expected.u_mouth_over_u_in);
+            assert_eq!(actual.p_mouth_over_u_in, expected.p_mouth_over_u_in);
+        }
+    }
+}
+
+#[test]
+fn warmed_entry_preserves_the_complete_homogeneous_hole_cluster() {
+    let length = LENGTH / 3.0;
+    let source = AxialGasField::new(
+        vec![0.0, length, LENGTH],
+        101325.0,
+        vec![
+            primitive(330.0, 0.8),
+            primitive(300.0, 0.5),
+            primitive(300.0, 0.5),
+        ],
+        gas_model(),
+        QueryPoint::new(),
+        ThermochemicalPhase::FrozenGas,
+    )
+    .unwrap();
+    let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
+    let bound = GasFieldDuct::new(&geometry, &source, RiccatiSteps(32)).unwrap();
+    let prefix_field = AxialGasField::new(
+        vec![0.0, length],
+        101325.0,
+        vec![primitive(330.0, 0.8), primitive(300.0, 0.5)],
+        gas_model(),
+        QueryPoint::new(),
+        ThermochemicalPhase::FrozenGas,
+    )
+    .unwrap();
+    let prefix = GasFieldDuct::new(
+        &Duct {
+            segments: vec![geometry.segments[0].clone()],
+        },
+        &prefix_field,
+        RiccatiSteps(32),
+    )
+    .unwrap();
+    let tail = Duct {
+        segments: geometry.segments[1..].to_vec(),
+    };
+    let tail_gas = source.state_at(length).unwrap();
+    let wall = WallPin {
+        surface_density: 0.2,
+        stiffness_per_area: 4e7,
+        resistance: 300.0,
+    };
+    // Independent cascade: solve the entire existing uniform hole cluster as
+    // one physical load, then apply only the warm prefix. This retains both
+    // mutual corrections and the original lossy chimney/wall laws.
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for wall in [None, Some(&wall)] {
+            let omega = TAU * 430.0;
+            let tail_response = crate::input_impedance_wall(
+                &tail,
+                tail_gas.state(),
+                omega,
+                loss,
+                Termination::FlangedOpen,
+                wall,
+            )
+            .unwrap();
+            let prefix_chain = prefix
+                .chain_wall_controlled(omega, loss, wall, &mut || false)
+                .unwrap();
+            let expected = compose_chain(
+                &prefix_chain.blocks,
+                Some(tail_response.impedance),
+                ComposeOptions::default(),
+            )
+            .unwrap();
+            let actual = bound
+                .response_wall(omega, loss, Termination::FlangedOpen, None, wall)
+                .unwrap();
+            assert!(relative(actual.impedance, expected.z_in) < 2e-11);
+            assert!(
+                relative(
+                    actual.u_mouth_over_u_in,
+                    expected.u_out_over_u_in * tail_response.u_mouth_over_u_in
+                ) < 2e-11
+            );
+            assert!(
+                relative(
+                    actual.p_mouth_over_u_in,
+                    expected.u_out_over_u_in * tail_response.p_mouth_over_u_in
+                ) < 2e-11
+            );
+        }
+    }
+}
+
+#[test]
+fn single_open_hole_with_closed_fingerings_retains_fourth_order_field_convergence() {
+    let source = field([300.0, 390.0], [0.95, 0.5], 101325.0);
+    let geometry = fingered_bore([crate::HoleState::Closed, crate::HoleState::Open]);
+    let response = |steps| {
+        GasFieldDuct::new(&geometry, &source, RiccatiSteps(steps))
+            .unwrap()
+            .response(
+                TAU * 900.0,
+                LossModel::Bessel,
+                Termination::FlangedOpen,
+                None,
+            )
+            .unwrap()
+            .impedance
+    };
+    let reference = response(256);
+    let errors: Vec<_> = [2, 4, 8, 16]
+        .into_iter()
+        .map(|steps| relative(response(steps), reference))
+        .collect();
+    assert!(
+        errors[0] > 1e-7,
+        "field resolution must affect the fingered bore: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        let order = det::ln(pair[0] / pair[1]) / det::ln(2.0);
+        assert!((order - 4.0).abs() < 0.4, "field order={order}: {errors:?}");
+    }
+    let uniform = field([300.0, 300.0], [0.95, 0.95], 101325.0);
+    let baseline = GasFieldDuct::new(&geometry, &uniform, RiccatiSteps(16))
+        .unwrap()
+        .response(
+            TAU * 900.0,
+            LossModel::Bessel,
+            Termination::FlangedOpen,
+            None,
+        )
+        .unwrap();
+    assert!(
+        relative(reference, baseline.impedance) > 1e-3,
+        "the primitive field must change the physical response"
+    );
+}
+
+#[test]
+fn varying_mutual_hole_media_refuse_even_when_endpoint_states_match() {
+    let geometry = fingered_bore([crate::HoleState::Open, crate::HoleState::Vent(0.4)]);
+    let gradient = field([300.0, 330.0], [0.8, 0.8], 101325.0);
+    assert!(GasFieldDuct::new(&geometry, &gradient, RiccatiSteps(8)).is_err());
+    let hidden_gradient = AxialGasField::new(
+        vec![0.0, LENGTH / 3.0, LENGTH / 2.0, 2.0 * LENGTH / 3.0, LENGTH],
+        101325.0,
+        vec![
+            primitive(300.0, 0.8),
+            primitive(300.0, 0.8),
+            primitive(330.0, 0.8),
+            primitive(300.0, 0.8),
+            primitive(300.0, 0.8),
+        ],
+        gas_model(),
+        QueryPoint::new(),
+        ThermochemicalPhase::FrozenGas,
+    )
+    .unwrap();
+    assert!(GasFieldDuct::new(&geometry, &hidden_gradient, RiccatiSteps(8)).is_err());
+    // Closed pads have no mutual open-hole term and remain local shunts.
+    let closed = fingered_bore([crate::HoleState::Closed, crate::HoleState::Closed]);
+    assert!(GasFieldDuct::new(&closed, &hidden_gradient, RiccatiSteps(8)).is_ok());
+    // A hole consumes a cancellable cascade block despite zero axial length.
+    let bound = GasFieldDuct::new(&closed, &gradient, RiccatiSteps(1)).unwrap();
+    assert_eq!(bound.steps_used(), 5);
+    let mut polls = 0;
+    assert!(matches!(
+        bound.chain_controlled(TAU * 430.0, LossModel::Bessel, &mut || {
+            polls += 1;
+            polls == 2
+        }),
+        Err(DuctError::Cancelled { completed_steps: 1 })
+    ));
+}

@@ -1285,7 +1285,13 @@ characteristic-line feedback and baffled outlet pressure retain that common
 wall binding. The wall's explicitly supplied per-area mass/stiffness/resistance
 remain constant; actual radius and slope set the surface coupling. This is a
 locally reacting wall, not an axial shell, evolving wall temperature or a
-nonlocal wall-radiation model. Nonuniform side-hole laws still refuse.
+nonlocal wall-radiation model. The continuous binding now admits tone holes
+at their exact local gas state through the original homogeneous-chimney and
+junction laws. Closed holes and a single open/vented hole may lie in a
+gradient. Multiple open/vented holes retain every mutual correction and
+require a constant primitive field throughout their connecting span;
+unsupported varying inter-hole media still refuse. This also reaches the
+existing scheduled reed renderer without a separate propagation path.
 A focused impulse regression covers the combined wall/field changes to
 both incoming feedback and causal external microphone pressure.
 

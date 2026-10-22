@@ -397,7 +397,7 @@ fn midpoint_field_is_a_second_order_rung_of_continuous_propagation() {
 }
 
 #[test]
-fn continuous_field_rejects_unmodeled_side_holes() {
+fn continuous_regional_field_requires_axial_end_segments() {
     let mut geometry = cylinder();
     geometry.segments.insert(0, Segment::ToneHole {
         hole_radius: 0.002,
@@ -408,6 +408,74 @@ fn continuous_field_rejects_unmodeled_side_holes() {
     assert!(RegionalDuct::from_continuous_gas_field(
         &geometry, &field(280.0), fs_duct::RiccatiSteps(16),
     ).is_err());
+}
+
+#[test]
+fn continuous_field_routes_local_tone_holes_into_the_characteristic_line() {
+    let axial = Segment::Cylinder {
+        radius: RADIUS,
+        length: LENGTH / 3.0,
+    };
+    let hole = |state| Segment::ToneHole {
+        hole_radius: 0.002,
+        chimney_height: 0.005,
+        bore_radius: RADIUS,
+        state,
+    };
+    let geometry = Duct {
+        segments: vec![
+            axial.clone(),
+            hole(fs_duct::HoleState::Closed),
+            axial.clone(),
+            hole(fs_duct::HoleState::Open),
+            axial,
+        ],
+    };
+    let source = field(280.0);
+    let regional =
+        RegionalDuct::from_continuous_gas_field(&geometry, &source, fs_duct::RiccatiSteps(16))
+            .unwrap();
+    let owner = regional.continuous_gas_field().unwrap();
+    assert_eq!(owner.steps_used(), 50);
+    assert_eq!(
+        regional.segment_gases()[1],
+        *source.state_at(LENGTH / 3.0).unwrap().state()
+    );
+    assert_eq!(
+        regional.segment_gases()[3],
+        *source.state_at(2.0 * LENGTH / 3.0).unwrap().state()
+    );
+    let response = regional
+        .response(
+            TAU * 430.0,
+            LossModel::Bessel,
+            Termination::UnflangedOpen,
+            None,
+        )
+        .unwrap();
+    let direct = owner
+        .response(
+            TAU * 430.0,
+            LossModel::Bessel,
+            Termination::UnflangedOpen,
+            None,
+        )
+        .unwrap();
+    assert_eq!(response.impedance, direct.impedance);
+    assert_eq!(response.u_mouth_over_u_in, direct.u_mouth_over_u_in);
+    let mut line = regional
+        .characteristic_line(Termination::UnflangedOpen, 8000, 2048, None, Some(512))
+        .unwrap();
+    let mut energy = 0.0;
+    for sample in 0..2048 {
+        let incoming = line.push(if sample == 0 { 1.0 } else { 0.0 }).unwrap();
+        assert!(incoming.is_finite());
+        energy += incoming * incoming;
+    }
+    assert!(
+        energy > 0.0,
+        "the fingered field must actually feed pressure back"
+    );
 }
 
 #[test]

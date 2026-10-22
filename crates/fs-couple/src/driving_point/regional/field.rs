@@ -28,7 +28,10 @@ impl RegionalDuct {
     ///
     /// This freezes the field during rendering. Supplied wall pins use the
     /// shared local wall law at the actual gas/geometry quadrature points.
-    /// Nonuniform tone holes still require a spatial chimney/mutual-hole law.
+    /// Tone-hole junctions and homogeneous chimneys use the exact gas at their
+    /// authored station. Multiple open/vented holes require a constant primitive
+    /// field throughout their connecting span, preserving the original mutual
+    /// correction. A single open hole and any closed holes may lie in a gradient.
     pub fn from_continuous_gas_field(
         duct: &Duct,
         field: &AxialGasField,

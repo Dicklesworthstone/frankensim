@@ -76,8 +76,8 @@ fn gas_field_reaches_rendered_pressure_and_exact_inlet_source() {
 }
 
 #[test]
-fn continuous_smooth_bore_material_gradient_changes_actual_rendered_pressure() {
-    let geometry = fs_duct::Duct {
+fn continuous_smooth_and_fingered_bores_carry_material_gradients_to_rendered_pressure() {
+    let smooth = fs_duct::Duct {
         segments: vec![fs_duct::Segment::Profile {
             profile: std::sync::Arc::new(
                 fs_duct::RadiusProfile::exponential(0.0073, 0.6, 0.57).unwrap(),
@@ -85,6 +85,30 @@ fn continuous_smooth_bore_material_gradient_changes_actual_rendered_pressure() {
             steps: fs_duct::RiccatiSteps(32),
         }],
     };
+    let fingered = fs_duct::Duct {
+        segments: vec![
+            fs_duct::Segment::Cylinder {
+                radius: 0.0073,
+                length: 0.285,
+            },
+            fs_duct::Segment::ToneHole {
+                hole_radius: 0.002,
+                chimney_height: 0.005,
+                bore_radius: 0.0073,
+                state: fs_duct::HoleState::Open,
+            },
+            fs_duct::Segment::Cylinder {
+                radius: 0.0073,
+                length: 0.285,
+            },
+        ],
+    };
+    for geometry in [smooth, fingered] {
+        check_continuous_bore_render(&geometry);
+    }
+}
+
+fn check_continuous_bore_render(geometry: &fs_duct::Duct) {
     let uniform = field(300.0);
     let gradient = field(275.0);
     let inlet = *uniform.state_at(0.0).unwrap().state();
@@ -100,7 +124,7 @@ fn continuous_smooth_bore_material_gradient_changes_actual_rendered_pressure() {
     };
     let make = |field: &fs_material::gas_field::AxialGasField, steps| {
         ReedBoreVoice::new_with_continuous_gas_field(
-            &geometry, field, fs_duct::RiccatiSteps(steps), reed,
+            geometry, field, fs_duct::RiccatiSteps(steps), reed,
             Termination::UnflangedOpen, PlateBank::default(), 1.0, 8000, 2048, None,
         ).unwrap()
     };
@@ -108,7 +132,7 @@ fn continuous_smooth_bore_material_gradient_changes_actual_rendered_pressure() {
     let mut b = make(&gradient, 16);
     let mut c = make(&gradient, 32);
     let mut original = ReedBoreVoice::new(
-        &geometry, &inlet, reed, Termination::UnflangedOpen,
+        geometry, &inlet, reed, Termination::UnflangedOpen,
         PlateBank::default(), 1.0, 8000, 2048, None,
     ).unwrap();
     for voice in [&a, &b, &c] {

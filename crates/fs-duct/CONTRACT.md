@@ -130,8 +130,17 @@ piecewise-constant comparison rung. Scheduled `ReedPerformance` selects
 `from_bytes_with_field_resolution`; its existing schedule, massive reed,
 terminal loading and baffled microphone share that binding. The existing
 midpoint constructor and input records retain their behavior.
-Nonuniform fields with tone holes still refuse: no spatial chimney/mutual-hole
-law is inferred. `chain_wall_controlled`, `response_wall` and `reflection_wall`
+Tone-hole junctions retain their exact authored station and use its resolved
+gas in the original junction and homogeneous-chimney law. Closed holes may
+lie anywhere in the field. Multiple open/vented holes require a constant
+primitive temperature/composition state throughout the span between them:
+the original mutual-hole correction is retained in full. A single open hole
+may lie in a gradient. A varying inter-hole span refuses, including equal
+endpoint states with an intervening gradient; no effective medium or omitted
+mutual term is inferred. The chimney is explicitly the local homogeneous
+model, not transverse heat/species transport. Junction blocks consume the
+same work budget and cancellation checkpoints as propagation blocks.
+`chain_wall_controlled`, `response_wall` and `reflection_wall`
 apply the SAME local wall-admittance owner at each retained gas/geometry
 quadrature point. Regional responses, characteristic feedback and baffled
 outlet observations all pass through this wall-aware path. Uniform fields

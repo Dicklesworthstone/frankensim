@@ -424,8 +424,8 @@ impl ReedBoreVoice {
     ///
     /// This is the existing reed and compact-source observer with a frozen
     /// axial field, not a species/thermal transport or complete-player model.
-    /// Nonuniform wall pins and tone holes refuse until their resolved spatial
-    /// material law is available.
+    /// Tone-hole junctions use their local gas. Multiple active holes require
+    /// a homogeneous connecting field for the existing mutual-hole law.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_continuous_gas_field<'a>(
         physics: &Duct,
