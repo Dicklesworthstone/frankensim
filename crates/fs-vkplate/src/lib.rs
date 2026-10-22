@@ -80,7 +80,7 @@ struct Run {
 }
 
 /// Shortest run worth a stencil loop.
-const MIN_RUN: usize = 2;
+const MIN_RUN: usize = 4;
 
 impl Csr {
     fn from_rows(rows: &[BTreeMap<usize, f64>]) -> Csr {
@@ -148,8 +148,36 @@ impl Csr {
     /// y += s * A x on rows `a..b`, from the CSR arrays.
     #[inline]
     fn rows_add(&self, a: usize, b: usize, x: &[f64], s: f64, y: &mut [f64]) {
-        for (yi, p) in y[a..b].iter_mut().zip(self.ptr[a..=b].windows(2)) {
-            let (cols, vals) = (&self.col[p[0]..p[1]], &self.val[p[0]..p[1]]);
+        // Interleave independent rows; each accumulator still follows its own ascending columns.
+        let mut row = a;
+        let mut pairs = y[a..b].chunks_exact_mut(2);
+        for pair in pairs.by_ref() {
+            let (start, middle, end) = (self.ptr[row], self.ptr[row + 1], self.ptr[row + 2]);
+            let (cols0, vals0) = (&self.col[start..middle], &self.val[start..middle]);
+            let (cols1, vals1) = (&self.col[middle..end], &self.val[middle..end]);
+            let common = cols0.len().min(cols1.len());
+            let (mut acc0, mut acc1) = (0.0, 0.0);
+            for ((&j0, &v0), (&j1, &v1)) in cols0[..common]
+                .iter()
+                .zip(&vals0[..common])
+                .zip(cols1[..common].iter().zip(&vals1[..common]))
+            {
+                acc0 += v0 * x[j0];
+                acc1 += v1 * x[j1];
+            }
+            for (&j, &v) in cols0[common..].iter().zip(&vals0[common..]) {
+                acc0 += v * x[j];
+            }
+            for (&j, &v) in cols1[common..].iter().zip(&vals1[common..]) {
+                acc1 += v * x[j];
+            }
+            pair[0] += s * acc0;
+            pair[1] += s * acc1;
+            row += 2;
+        }
+        for yi in pairs.into_remainder() {
+            let (start, end) = (self.ptr[row], self.ptr[row + 1]);
+            let (cols, vals) = (&self.col[start..end], &self.val[start..end]);
             let mut acc = 0.0;
             for (&j, &v) in cols.iter().zip(vals) {
                 acc += v * x[j];

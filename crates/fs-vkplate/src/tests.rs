@@ -464,11 +464,20 @@ fn stencil_runs_sum_every_row_exactly_as_its_csr_row() {
                 let x: Vec<f64> = (0..b.n).map(|i| val(i, 3)).collect();
                 let y0: Vec<f64> = (0..b.n).map(|i| val(i, 11)).collect();
                 for s in [1.0, -1.0, 0.37] {
-                    let (mut ya, mut yb) = (y0.clone(), y0.clone());
+                    let (mut ya, mut yb, mut yc) = (y0.clone(), y0.clone(), y0.clone());
                     m.mul_add(&x, s, &mut ya);
-                    m.rows_add(0, m.n, &x, s, &mut yb);
+                    // Keep the scalar CSR specification independent of both optimized paths.
+                    for i in 0..m.n {
+                        let mut acc = 0.0;
+                        for p in m.ptr[i]..m.ptr[i + 1] {
+                            acc += m.val[p] * x[m.col[p]];
+                        }
+                        yb[i] += s * acc;
+                    }
+                    m.rows_add(0, m.n, &x, s, &mut yc);
                     for i in 0..b.n {
                         assert_eq!(ya[i].to_bits(), yb[i].to_bits(), "{name}@{scale} {} row {i}", b.name);
+                        assert_eq!(yc[i].to_bits(), yb[i].to_bits(), "{name}@{scale} {} scalar row {i}", b.name);
                     }
                 }
             }
