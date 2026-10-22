@@ -6,6 +6,7 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
     MultiBowStringBank, stops::{MaterialStringStop, StringStopSide},
+    surfaces::BowBodySurface,
 };
 use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
@@ -36,18 +37,34 @@ struct Entry {
     limits: ModalContactConfig,
 }
 #[derive(Clone, Debug)]
+struct BowSurface {
+    bow: usize,
+    receiver_bridge: usize,
+}
+#[derive(Clone, Debug)]
 pub struct Profile {
     pub bytes: Vec<u8>,
     entries: Vec<Entry>,
     motion: Option<StopMotionProgram>,
     station_motion: Option<StopStationProgram>,
     bow_contacts: Vec<BowContactLoad>,
+    bow_surfaces: Vec<BowSurface>,
 }
 
 fn scalar(word: &str) -> Result<f64> {
     let value: f64 = word.parse()?;
     if !value.is_finite() { return Err("stop scalar must be finite".into()); }
     Ok(value)
+}
+// A scalar physical footprint cannot stand in for an oblique displacement.
+// Both directions use the profile's explicitly shared transverse frame.
+fn surface_sign(tangent: [f64; 2], axis: [f64; 2]) -> Result<f64> {
+    let cross = tangent[0]*axis[1] - tangent[1]*axis[0];
+    let dot = tangent[0]*axis[0] + tangent[1]*axis[1];
+    if cross.abs() > 1e-12 || (dot.abs()-1.0).abs() > 1e-12 {
+        return Err("bow tangent must align with the selected receiver bridge axis".into());
+    }
+    Ok(dot.signum())
 }
 impl Profile {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
@@ -61,6 +78,7 @@ impl Profile {
         let mut motion = None;
         let mut station_motion = None;
         let mut bow_contacts: Vec<BowContactLoad> = Vec::new();
+        let mut bow_surfaces: Vec<BowSurface> = Vec::new();
         while let Some(line) = lines.next() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             if fields.first() == Some(&"motion") {
@@ -74,7 +92,18 @@ impl Profile {
                 continue;
             }
             if motion.is_some() || station_motion.is_some() {
-                return Err("stop and bow-contact declarations must precede the geometry motion blocks".into());
+                return Err("stop, bow-contact and bow-surface declarations must precede the geometry motion blocks".into());
+            }
+            if fields.first() == Some(&"bow-surface") {
+                if fields.len() != 3 { return Err("expected bow-surface BOW_INDEX bridge:STRING".into()); }
+                let bow: usize = fields[1].parse()?;
+                let receiver_bridge = fields[2].strip_prefix("bridge:")
+                    .ok_or("bow surface requires an actual bridge:STRING receiver")?.parse::<usize>()?;
+                if bow >= 16 || bow_surfaces.iter().any(|surface| surface.bow == bow) {
+                    return Err("bow surfaces require distinct actual bows below the 16-contact bound".into());
+                }
+                bow_surfaces.push(BowSurface { bow, receiver_bridge });
+                continue;
             }
             if fields.first() == Some(&"bow-contact") {
                 if fields.len() != 3 { return Err("expected bow-contact BOW_INDEX STOP_ID".into()); }
@@ -127,14 +156,17 @@ impl Profile {
                     maximum_penetration_m: max_penetration, force_absolute_tolerance_n: 1e-11,
                     force_relative_tolerance: 1e-9 } });
         }
-        if entries.is_empty() { return Err("stop profile must declare at least one contact".into()); }
-        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts })
+        if entries.is_empty() && bow_surfaces.is_empty() {
+            return Err("stop profile must declare at least one contact or bow surface".into());
+        }
+        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts, bow_surfaces })
     }
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
     pub fn validate_members(&self, strings: usize) -> Result<()> {
         if self.entries.iter().any(|e| e.location.string >= strings
-            || e.receiver_bridge.is_some_and(|i| i >= strings)) {
+            || e.receiver_bridge.is_some_and(|i| i >= strings))
+            || self.bow_surfaces.iter().any(|surface| surface.receiver_bridge >= strings) {
             return Err("stop or receiver footprint names an absent material string".into());
         }
         Ok(())
@@ -144,8 +176,19 @@ impl Profile {
     pub fn validate_performance(&self, spec: &input::Spec, gate: &CancelGate) -> Result<()> {
         poll(gate)?;
         self.validate_members(spec.strings.len())?;
-        if spec.bow_ribbon.is_some() && !self.bow_contacts.is_empty() {
-            return Err("uniform bow ribbon requires prescribed total load, not a bow-contact normal-load binding".into());
+        if spec.bow_ribbon.is_some() && (!self.bow_contacts.is_empty() || !self.bow_surfaces.is_empty()) {
+            return Err("uniform bow ribbon does not declare individual normal or tangential receiver footprints".into());
+        }
+        for surface in &self.bow_surfaces {
+            let track = spec.schedule.tracks().get(surface.bow)
+                .ok_or("bow-surface names an absent scheduled bow")?;
+            let string = fs_scenario::gesture::path::legacy_member(&track.target, "bow")
+                .and_then(|index| spec.strings.get(index))
+                .ok_or("bow-surface requires an actual material-string bow")?;
+            let tangent = string.polarizations.map_or([1.0, 0.0], |directions| directions.bow());
+            let axis = spec.strings[surface.receiver_bridge].polarizations
+                .map_or([1.0, 0.0], |directions| directions.bridge());
+            surface_sign(tangent, axis)?;
         }
         for binding in &self.bow_contacts {
             let track = spec.schedule.tracks().get(binding.bow)
@@ -197,6 +240,31 @@ impl Profile {
         poll(gate)?;
         let strings = bank.source().bank().strings();
         self.validate_members(strings.len())?;
+        if bank.source().ribbon().is_some() && !self.bow_surfaces.is_empty() {
+            return Err("uniform bow ribbon does not declare individual tangential receiver footprints".into());
+        }
+        let mut surfaces = Vec::with_capacity(self.bow_surfaces.len());
+        for surface in &self.bow_surfaces {
+            poll(gate)?;
+            let bow = bank.source().bows().get(surface.bow)
+                .ok_or("bow-surface names an absent material bow")?;
+            let tangent = match &strings[bow.location.string].source {
+                MaterialStringSource::WithPolarizations(p) => p.directions().bow(),
+                _ => [1.0, 0.0],
+            };
+            let receiver = &strings[surface.receiver_bridge];
+            if receiver.connections.len() != 1 {
+                return Err("receiver bridge must have exactly one actual body footprint".into());
+            }
+            let axis = match &receiver.source {
+                MaterialStringSource::WithPolarizations(p) => p.directions().bridge(),
+                _ => [1.0, 0.0],
+            };
+            let sign = surface_sign(tangent, axis)?;
+            let mut body = receiver.connections[0].body.clone();
+            for value in &mut body.shapes { *value *= sign; }
+            surfaces.push(BowBodySurface { bow: surface.bow, body });
+        }
         let mut stops = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             poll(gate)?;
@@ -228,6 +296,7 @@ impl Profile {
         }
         // This admission precedes scheduled preload; the stops cannot disappear
         // from equilibrium and reappear only after a pluck has been initialized.
+        let bank = bank.with_bow_body_surfaces(surfaces, gate)?;
         let bank = bank.with_string_stops(stops, FrictionObstacleConfig {
             max_contacts: MAX_STOPS, max_setup_terms: 1_048_576,
         }, gate)?;

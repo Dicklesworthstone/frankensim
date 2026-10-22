@@ -198,3 +198,113 @@ fn explicit_receiver_normals_require_a_real_collinear_bridge_footprint() {
         for (x,y) in receiver.iter().zip(bridge) { assert_eq!(*x, -*y); }
     });
 }
+
+
+const BOW_SURFACE: &str = "frankensim-string-stops-v1\nbow-surface 0 bridge:0\n";
+
+fn surface_input() -> String {
+    include_str!("../pluck.material-strings").replace("48000 4096", "48000 128")
+        .replace("initial\tbow\t0e0\t0e0", "initial\tbow\t1e-3\t1e-1")
+}
+
+fn surface_ready(cx: &Cx<'_>, gate: &CancelGate, profile: Option<&str>, body_rho: f64) -> Ready {
+    input::Spec::parse(surface_input().as_bytes()).unwrap().compile_with_profiles(cx, gate, None,
+        profile.map(|text| Profile::parse(text.as_bytes()).unwrap()),
+        |name| Ok(pack(name, if name == "body.fsmatpk" { body_rho } else { 7800.0 }, 200_000.0, None))).unwrap()
+}
+
+#[test]
+fn data_selected_bow_surface_returns_reaction_to_original_material_body_and_pressure() {
+    scoped(|cx, gate| {
+        let mut a = surface_ready(cx, gate, Some(BOW_SURFACE), 7800.0);
+        let mut heavy = surface_ready(cx, gate, Some(BOW_SURFACE), 15600.0);
+        let mut prescribed = surface_ready(cx, gate, None, 7800.0);
+        let bank = a.performance.bank();
+        assert_eq!(bank.system().obstacle_count(), 0, "surfaces-only profile adds no normal law");
+        assert_eq!(a.stop_profile.as_ref().unwrap().bytes, BOW_SURFACE.as_bytes());
+        let surface = &bank.source().body_surfaces()[0];
+        let bridge = &bank.source().bank().strings()[0].connections[0].body;
+        assert_eq!(surface.bow, 0);
+        assert_eq!(&surface.body, bridge);
+        let right = bank.system().port(0).unwrap().right.as_ref().unwrap();
+        assert_eq!(right.component, bank.cards().len() + bridge.component);
+        assert_eq!(right.shapes, bridge.shapes);
+        for (light, dense) in right.shapes.iter().zip(
+            &heavy.performance.bank().system().port(0).unwrap().right.as_ref().unwrap().shapes) {
+            assert!((dense - light*0.5_f64.sqrt()).abs() < 1e-12*light.abs().max(1.0));
+        }
+        assert_eq!(bank.system().port(0).unwrap().left, heavy.performance.bank().system().port(0).unwrap().left);
+        for (a, b) in bank.system().components().iter().zip(prescribed.performance.bank().system().components()) {
+            assert_eq!(a.modes(), b.modes(), "binding must not retune the original body/string modes");
+        }
+        assert_eq!(bank.system().acceleration_pressure_weights(),
+            prescribed.performance.bank().system().acceleration_pressure_weights());
+        assert!(a.performance.preload_energy_j().unwrap() > 0.0);
+        assert_eq!(a.performance.preload_energy_j(), prescribed.performance.preload_energy_j());
+        let (mut out, mut dense_out) = (Vec::new(), Vec::new());
+        let mut traction_difference = 0.0;
+        let mut traction_magnitude = 0.0;
+        for _ in 0..a.spec.samples {
+            let (mut sample, mut dense_sample) = ([0.0], [0.0]);
+            a.performance.block(&mut sample).unwrap();
+            heavy.performance.block(&mut dense_sample).unwrap();
+            out.push(sample[0]); dense_out.push(dense_sample[0]);
+            let frame = a.performance.bank().system().last_frame().unwrap();
+            let dense = heavy.performance.bank().system().last_frame().unwrap();
+            traction_difference += (frame.ports[0].traction_n - dense.ports[0].traction_n).abs();
+            traction_magnitude += frame.ports[0].traction_n.abs();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            assert!(dense.energy_residual_j.abs() <= dense.energy_tolerance_j);
+        }
+        assert!(out.iter().all(|p| p.is_finite()) && out.iter().any(|p| p.abs() > 1e-12));
+        assert!(out.iter().zip(dense_out).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert!(traction_difference > 1e-12 && traction_magnitude > 1e-12);
+        assert!(out.iter().zip(pressure(&mut prescribed, 37)).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert_eq!(out, pressure(&mut surface_ready(cx, gate, Some(BOW_SURFACE), 7800.0), 37));
+        let combined = format!("{PROFILE}bow-surface 0 bridge:0\n");
+        let mut stopped = surface_ready(cx, gate, Some(&combined), 7800.0);
+        assert_eq!(stopped.performance.bank().system().obstacle_count(), 1);
+        assert_eq!(stopped.performance.bank().source().body_surfaces().len(), 1);
+        assert!(pressure(&mut stopped, 37).iter().any(|p| p.abs() > 1e-12));
+    });
+}
+
+#[test]
+fn bow_surface_uses_the_signed_collinear_receiver_and_refuses_unsupported_data_before_io() {
+    for row in ["bow-surface 0", "bow-surface 0 fixed", "bow-surface 0 bridge:no",
+        "bow-surface 16 bridge:0", "bow-surface 0 bridge:0 extra",
+        "bow-surface 0 bridge:0\nbow-surface 0 bridge:0"] {
+        assert!(Profile::parse(format!("frankensim-string-stops-v1\n{row}\n").as_bytes()).is_err());
+    }
+    // Distinct physical contacts may share the same receiving footprint.
+    assert!(Profile::parse(format!("{BOW_SURFACE}bow-surface 1 bridge:0\n").as_bytes()).is_ok());
+    assert!(Profile::parse(format!("{BOW_SURFACE}motion 0.001 1 1\nknot 1 0\n").as_bytes()).is_err());
+    assert!(Profile::parse(format!("{PROFILE}motion 0.001 1 1\nknot 1 0\nbow-surface 0 bridge:0\n").as_bytes()).is_err());
+    scoped(|cx, gate| {
+        for (input, profile) in [
+            (surface_input(), BOW_SURFACE.replace("surface 0", "surface 1")),
+            (surface_input(), BOW_SURFACE.replace("bridge:0", "bridge:1")),
+            (surface_input().replace("friction stribeck 0.8 0.4 0.1 0", "friction stribeck 0.8 0.4 0.1 0\nbow_ribbon 0.01 3"), BOW_SURFACE.into()),
+            (DIRECTED.replace("48000 4096", "48000 128"), BOW_SURFACE.into()),
+        ] {
+            let mut calls = 0;
+            let result = input::Spec::parse(input.as_bytes()).unwrap().compile_with_profiles(cx, gate, None,
+                Some(Profile::parse(profile.as_bytes()).unwrap()), |name| {
+                    calls += 1; Ok(pack(name, 7800.0, 200_000.0, None))
+                });
+            assert!(result.is_err()); assert_eq!(calls, 0);
+        }
+        for (direction, sign) in [("1 0", 1.0), ("-1 0", -1.0)] {
+            let text = DIRECTED.replace("48000 4096", "48000 128")
+                .replace("polarizations two 1 0 0.6 0.8", &format!("polarizations two 1 0 {direction}"));
+            let a = input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(cx, gate, None,
+                Some(Profile::parse(BOW_SURFACE.as_bytes()).unwrap()),
+                |name| Ok(pack(name, 7800.0, 200_000.0, None))).unwrap();
+            let bank = a.performance.bank();
+            let bridge = &bank.source().bank().strings()[0].connections[0].body.shapes;
+            for (actual, original) in bank.system().port(0).unwrap().right.as_ref().unwrap().shapes.iter().zip(bridge) {
+                assert_eq!(*actual, sign*original);
+            }
+        }
+    });
+}

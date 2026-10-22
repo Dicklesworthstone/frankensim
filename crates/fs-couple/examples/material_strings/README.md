@@ -345,6 +345,52 @@ loads may ramp or reverse; zero normal load lifts that bow without silencing the
 instrument. Commands outside the observed control window and station changes
 refuse rather than disappearing or silently rebuilding geometry.
 
+### Tangential contact with an existing material body
+
+A stop profile can return a bow contact's tangential reaction to a physical
+receiver already present in the material instrument:
+
+```text
+frankensim-string-stops-v1
+bow-surface 0 bridge:0
+```
+
+Pass that file with `--stop-profile`. The first index selects the zero-based
+bow track in the original schedule. `bridge:STRING` selects the actual body
+footprint used by that string's sole bridge connection; it does not select
+the string's displacement or create another body. The footprint is projected
+from the receiver's original material basis. Changing the receiver material
+therefore updates the contact's inertia, compliance, loss and force/displacement
+map in the same solve that produces string motion and body/cavity pressure.
+
+The selected bridge axis must be collinear with the contacted string's bow
+tangent in the profile's common transverse frame. Opposite axes reverse the
+receiver map's sign; oblique axes refuse because one scalar footprint cannot
+describe motion in an unrepresented direction. Single-plane sources use their
+existing first transverse axis. Two-plane sources retain their explicitly
+declared bow and bridge directions. Source-defined friction and normal-load
+laws keep their original applicability requirements.
+
+These records can be the entire profile, or accompany independent `stop` and
+`bow-contact` records before the motion blocks. Surface binding precedes normal
+contact and static preload. Each bow may bind once; distinct bows may share a
+receiver and retain their coupled reactions. Absent indices, repeated bow
+bindings and uniform ribbon profiles refuse before material loading. Ribbons
+do not declare individual receiver footprints in this format. If a
+`bow-contact` also supplies this bow's normal load, its normal receiver must
+belong to the same physical body, with a supported perpendicular footprint.
+One scalar bridge cannot supply both perpendicular rows; use distinct authored
+footprints on that body when both directions are dynamically resolved. A fixed
+normal stop cannot supply this dynamically resolved receiver's normal contact.
+
+The gesture speed remains an additional prescribed relative actuator speed;
+use zero when the relative surface motion should come entirely from the solved
+mechanics and physical applied forces. This profile describes a string rubbing
+an existing material body. It does not infer a bow-hair structure, rotated
+receiver frame or measured instrument qualification. The existing observation,
+gesture scheduling, contact energy accounting and PCM writer use the same
+accepted mechanical state.
+
 ## Rotational bridges from physical footprints
 
 All three input versions accept an optional block after ALL string/section/polarization records
