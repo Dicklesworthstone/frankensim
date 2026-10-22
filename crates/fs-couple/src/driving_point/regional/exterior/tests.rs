@@ -1,5 +1,5 @@
 use super::*;
-use fs_duct::Duct;
+use fs_duct::{Duct, input_impedance_load};
 use fs_material::gas::GasSpec;
 use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_qty::semantic::{Composition, CompositionBasis};

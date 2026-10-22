@@ -1,4 +1,5 @@
 use super::*;
+use fs_duct::{input_impedance_load, input_impedance_wall};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_math::c64::C64;

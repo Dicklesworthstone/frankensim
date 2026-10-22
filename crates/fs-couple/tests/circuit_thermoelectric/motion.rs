@@ -134,7 +134,7 @@ fn g3_zero_seebeck_is_the_exact_existing_electrothermal_motion_path() {
 
 #[test]
 fn g3_seebeck_polarity_reverses_current_but_preserves_heat_and_attraction() {
-    let run = |sign| {
+    let run = |sign: f64| {
         let (cards, curves) = fixture(sign*0.02, -sign*0.01, 3.0, 1.0);
         let context = point(350.0);
         let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);

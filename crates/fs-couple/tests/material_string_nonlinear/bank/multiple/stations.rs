@@ -103,7 +103,7 @@ fn moving_finger_keeps_shared_strain_actual_bow_load_and_full_source_history() {
         }
         assert!(attachment_work > 0.0 && stretch > 0.0 && difference > 1e-12);
         for (i, bank) in banks.iter().enumerate() {
-            assert_eq!(bank.source().bank().gas(), media[i]);
+            assert_eq!(bank.source().bank().gas(), &media[i]);
             assert_eq!(bank.source().bank().cylinder_gas_loading().unwrap().strings().len(), 1);
             assert_ne!(bank.system().components()[0].states()[2].velocity_m_sqrt_kg_per_s, 0.0);
             assert!(bank.system().components()[1].states().iter().any(|s| s.velocity_m_sqrt_kg_per_s != 0.0));
