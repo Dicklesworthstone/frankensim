@@ -655,7 +655,7 @@ impl<'a> AdmittedLighting<'a> {
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
     ) -> Result<Self, LightingError> {
-        Self::try_new_controlled(rectangles, environment, || Ok(()))
+        Self::try_new_controlled(rectangles, environment, false, || Ok(()))
     }
 
     /// Cancellable form of [`Self::try_new`] used by production render
@@ -667,7 +667,20 @@ impl<'a> AdmittedLighting<'a> {
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
     ) -> Result<Self, LightingError> {
-        Self::try_new_controlled(rectangles, environment, || {
+        Self::try_new_controlled(rectangles, environment, false, || {
+            cx.checkpoint().map_err(|_| LightingError::Cancelled)
+        })
+    }
+
+    /// The scene has already admitted a physical thermal emitter sampled only
+    /// by camera paths. No fake rectangle/environment is added to the proposal
+    /// distribution; an empty NEE distribution simply returns no light sample.
+    pub(crate) fn with_unsampled_surface_emission(
+        cx: &Cx<'_>,
+        rectangles: &'a [RectLight],
+        environment: Option<&'a EnvironmentMap>,
+    ) -> Result<Self, LightingError> {
+        Self::try_new_controlled(rectangles, environment, true, || {
             cx.checkpoint().map_err(|_| LightingError::Cancelled)
         })
     }
@@ -675,6 +688,7 @@ impl<'a> AdmittedLighting<'a> {
     fn try_new_controlled(
         rectangles: &'a [RectLight],
         environment: Option<&'a EnvironmentMap>,
+        has_unsampled_surface_emission: bool,
         mut checkpoint: impl FnMut() -> Result<(), LightingError>,
     ) -> Result<Self, LightingError> {
         checkpoint()?;
@@ -746,7 +760,10 @@ impl<'a> AdmittedLighting<'a> {
         if let Some((_, first, second)) = duplicate_rectangle {
             return Err(LightingError::DuplicateRectangle { first, second });
         }
-        if rectangles.is_empty() && environment.is_none_or(EnvironmentMap::is_black) {
+        if !has_unsampled_surface_emission
+            && rectangles.is_empty()
+            && environment.is_none_or(EnvironmentMap::is_black)
+        {
             return Err(LightingError::NoFiniteEmitter);
         }
         let mut candidates = Vec::new();
@@ -1566,7 +1583,7 @@ mod tests {
         // storage. These pins keep both phases bounded without timing races.
         for cancellation_poll in [4, 6] {
             let mut polls = 0;
-            let result = AdmittedLighting::try_new_controlled(&lights, None, || {
+            let result = AdmittedLighting::try_new_controlled(&lights, None, false, || {
                 polls += 1;
                 if polls == cancellation_poll {
                     Err(LightingError::Cancelled)

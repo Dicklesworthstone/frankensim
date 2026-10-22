@@ -132,6 +132,19 @@ pub struct BidirectionalRenderExecutionOutput {
 const BIDIRECTIONAL_SAMPLE_BLOCK: u32 = 8;
 const BIDIRECTIONAL_SAMPLE_KERNEL: &str = "fs-render/bidirectional-sample-block-v1";
 
+// Camera-only surface emission has no corresponding light-subpath proposal in
+// this integrator yet. Refuse before publishing a partial film, even when no
+// sampled camera ray happened to see the unsupported emitter.
+fn admit_thermal_sources(scene: &Scene, cx: &Cx<'_>) -> Result<(), TracerError> {
+    for primitive in &scene.primitives {
+        cx.checkpoint()?;
+        if matches!(primitive.material, Material::GrayDiffuseThermal { .. }) {
+            return Err(TracerError::ThermalSurfaceUnsupported);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum VertexKind {
     Camera,
@@ -227,6 +240,7 @@ impl Vertex {
                 )
             }
             Material::Lambertian { .. }
+            | Material::GrayDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => {
@@ -259,6 +273,7 @@ impl Vertex {
                 match scene.primitives[primitive_index].material {
                     Material::Dielectric { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
+                    | Material::GrayDiffuseThermal { .. }
                     | Material::Ggx { .. }
                     | Material::Conductor { .. }
                     | Material::BrushedConductor { .. } => true,
@@ -479,6 +494,7 @@ fn surface_scattering(
             )
         }
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -537,6 +553,7 @@ fn surface_pdf_solid_angle(
             ))
         }
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -577,6 +594,7 @@ fn sample_surface(
     let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
     match material {
         Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
+        Material::GrayDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
         Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
             let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1], None)
             else {
@@ -2272,11 +2290,12 @@ fn merge_block(
 /// The serial oracle and parallel executor share the same fixed eight-sample
 /// reduction blocks. This keeps floating-point image bits invariant to worker
 /// count while supporting `t=1` light-tracing strategies that splat into
-/// arbitrary pixels. The estimator supports all current opaque and
+/// arbitrary pixels. The estimator supports ordinary opaque and
 /// smooth/rough dielectric materials, finite rectangle emitters, animated
 /// geometry at sampled shutter time, and a pinhole cinematic camera. A finite
 /// aperture refuses rather than pretending an optical-centre connection
-/// represents the lens integral.
+/// represents the lens integral. Gray/diffuse thermal surfaces refuse until
+/// their physical spectra have a matching light-subpath proposal.
 #[allow(clippy::too_many_arguments)]
 pub fn render_cinematic_bidirectional(
     scene: &Scene,
@@ -2315,6 +2334,7 @@ pub fn render_cinematic_bidirectional_with_strategy_set(
     strategy_set: BidirectionalStrategySet,
 ) -> Result<BidirectionalRenderOutput, TracerError> {
     cx.checkpoint()?;
+    admit_thermal_sources(scene, cx)?;
     let exposure = camera.admit_shutter(cx, shutter, cut_side)?;
     let camera_path = CameraPath::Cinematic { camera, exposure };
     let (lighting, time_mode) = preflight_render(
@@ -2471,6 +2491,7 @@ pub(super) fn render_cinematic_bidirectional_execution_impl<R: RenderPoolRunner>
 ) -> Result<BidirectionalRenderExecutionOutput, RenderExecutionError> {
     let setup_started = Instant::now();
     cx.checkpoint()?;
+    admit_thermal_sources(scene, cx)?;
     let exposure = camera
         .admit_shutter(cx, shutter, cut_side)
         .map_err(TracerError::from)?;
@@ -3517,6 +3538,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn g0_thermal_surface_refuses_before_bidirectional_film_publication() {
+        with_test_cx(|cx| {
+            let (mut scene, camera, shutter) = direct_emitter_scene(true);
+            scene.primitives[0].material = Material::GrayDiffuseThermal {
+                surface: crate::thermal_surface::GrayDiffuseThermalSurface::try_new(
+                    1800.0, 0.4, fs_blake3::ContentHash([40; 32]),
+                ).unwrap(),
+            };
+            scene.primitives[0].emission = None;
+            scene.lights.clear();
+            let settings = Settings {
+                width: 1, height: 1, spp: 1, max_depth: 2,
+                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 40,
+            };
+            for strategy_set in [BidirectionalStrategySet::Complete,
+                BidirectionalStrategySet::CameraConnected] {
+                assert!(matches!(render_cinematic_bidirectional_with_strategy_set(
+                    &scene, &camera, CutSide::After, cx, &settings, shutter, strategy_set,
+                ), Err(TracerError::ThermalSurfaceUnsupported)));
+            }
+        });
     }
 
     #[test]

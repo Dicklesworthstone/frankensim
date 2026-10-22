@@ -41,7 +41,7 @@ differentiable lift). Pure Rust throughout.
   table/source/material identities prove replay binding, not specimen fidelity.
 
 - `material_state` (opt-in `material-state`, including `tracer` and L3
-  `fs-material`): `MaterialOpticalBinding` converts resolved visible conductor
+  `fs-material`/`fs-conduction`): `MaterialOpticalBinding` converts resolved visible conductor
   or dielectric data directly to the existing tracer `Material`. Mechanics and
   optics must share one exact card and query point; mechanical requirements
   remain consumer-owned. Surface identity and roughness are independent inputs.
@@ -53,11 +53,39 @@ differentiable lift). Pure Rust throughout.
   Binding identities establish replay consistency, not measurement authority;
   conductor source status is `MaterialStateClaims`, preserving query identity
   without labeling authored or unmeasured inputs as measured. Dielectric RGB
-  lifting remains an approximation. No thermal emission, birefringence, phase evolution,
-  or measured-spectrum validation is added. Focused G0/G1 regressions in the
+  lifting remains an approximation. This optical binding adds no thermal
+  emission, birefringence, phase evolution, or measured-spectrum validation.
+  Focused G0/G1 regressions in the
   existing Euler scene-adapter unit seam exercise both generic optical families,
   minimal string versus disc mechanical requirements, Fresnel and absorption
   formulas, SI conversion, material replacement, and mismatch refusals.
+
+- `thermal_surface` (feature `tracer`): `GrayDiffuseThermalSurface` declares an
+  opaque gray/diffuse local-equilibrium approximation explicitly. Its source,
+  temperature and emissivity identity drives SI Planck spectral radiance in
+  W/(m² sr nm), with reciprocal diffuse reflectance `1-epsilon`. This material
+  emits on camera-path hits and continues reflected-light transport; it is not
+  an RGB temperature-color curve or a second debit to thermal storage.
+  `MaterialThermalBinding::try_gray_diffuse` retains the original
+  `fs-conduction::radiation::SurfaceEmissivity` sample and requires its exact
+  card and temperature to match an accepted `ResolvedMaterialStatePoint`.
+  Changed thermal endpoints require rebinding. The declaration does not infer
+  spectral/directional emissivity from a total measurement or visible n+k,
+  and replaces rather than adds to the independent conductor/dielectric law.
+  Like the existing opaque material convention, each side emits into its
+  outward hemisphere; `epsilon*sigma*T^4` is power per emitting side's area.
+  Emission into an active dielectric medium refuses: this law describes a
+  vacuum/exterior-air side, with no inferred refractive-index correction.
+  The observer integrates the visible band under the existing normalized CIE
+  convention; conduction retains the full bolometric cooling budget. Thermal
+  emitters are sampled by camera paths only, so their hit weight is one under
+  every direct-light strategy and an otherwise dark scene is admitted without
+  inventing an NEE source. Separate `Primitive::emission` is refused for this
+  material. BDPT refuses it before film publication until a physical thermal
+  light-subpath proposal exists. Focused regressions cover the Planck integral
+  against Stefan--Boltzmann, emitted pixel intensity/color, retained reflection,
+  original cooling flux, material swaps and mismatched-state refusals. These
+  are numerical consistency checks, not experimental spectral validation.
 
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT

@@ -752,6 +752,13 @@ pub enum Material {
         /// Reflectance spectrum (bounded (0,1) by construction).
         reflectance: LiftedSpectrum,
     },
+    /// Explicit opaque gray/diffuse equilibrium surface. It emits physical
+    /// Planck radiance and still reflects with albedo `1-emissivity`.
+    /// `Primitive::emission` must be absent: this is its sole emission owner.
+    GrayDiffuseThermal {
+        /// Accepted temperature, gray emissivity and physical-source identity.
+        surface: crate::thermal_surface::GrayDiffuseThermalSurface,
+    },
     /// GGX microfacet (Smith separable shadowing, Schlick Fresnel with
     /// the spectral reflectance as F0).
     Ggx {
@@ -796,7 +803,8 @@ impl Material {
     ///
     /// This binds the numerical visual model, including declared glass
     /// provenance, but is not evidence that those parameters match a physical
-    /// specimen. Emission remains separate primitive metadata.
+    /// specimen. Gray/diffuse thermal emission is included in this material's
+    /// identity; other emission remains separate primitive metadata.
     #[must_use]
     pub fn content_identity(self) -> ContentHash {
         let mut hasher = DomainHasher::new(MATERIAL_CONTENT_IDENTITY_DOMAIN);
@@ -804,6 +812,10 @@ impl Material {
             Self::Lambertian { reflectance } => {
                 hasher.update(&[0]);
                 update_material_scalars(&mut hasher, reflectance.c);
+            }
+            Self::GrayDiffuseThermal { surface } => {
+                hasher.update(&[6]);
+                hasher.update(surface.identity().as_bytes());
             }
             Self::Ggx { reflectance, alpha } => {
                 hasher.update(&[1]);
@@ -2783,6 +2795,15 @@ pub enum TracerError {
     /// Bidirectional transport does not yet carry the body-locked brushed
     /// tangent frame; brushed conductors refuse rather than render isotropic.
     BrushedConductorUnsupported,
+    /// The bidirectional light-source construction does not yet sample thermal
+    /// surfaces. Ordinary camera-path transport supports this material.
+    ThermalSurfaceUnsupported,
+    /// The gray/diffuse Planck law is defined for an exterior vacuum/air side;
+    /// emission into an active dielectric needs a different radiative model.
+    ThermalSurfaceMediumUnsupported,
+    /// A primitive supplied both a physical thermal material and another
+    /// emission value, which would bypass or duplicate its physical spectrum.
+    DuplicateThermalEmission,
     /// Rectangular light metadata did not name a matching emissive primitive.
     LightPrimitiveMismatch {
         /// Primitive index named by the rejected light.
@@ -2877,6 +2898,15 @@ impl core::fmt::Display for TracerError {
             Self::BrushedConductorUnsupported => {
                 formatter.write_str("bidirectional transport does not support brushed conductors")
             }
+            Self::ThermalSurfaceUnsupported => formatter.write_str(
+                "bidirectional transport does not support gray/diffuse thermal sources",
+            ),
+            Self::ThermalSurfaceMediumUnsupported => formatter.write_str(
+                "gray/diffuse thermal emission requires an exterior vacuum/air side",
+            ),
+            Self::DuplicateThermalEmission => formatter.write_str(
+                "a gray/diffuse thermal surface must own its primitive's emission",
+            ),
             Self::AnimatedLightUnsupported => {
                 formatter.write_str("animated area-light geometry is unsupported")
             }
@@ -8804,6 +8834,7 @@ impl AovAlbedoCache {
             .get(primitive_index)
             .ok_or(CinematicAovError::InvalidPrimary)?;
         match *slot.get_or_init(|| match material {
+            Material::GrayDiffuseThermal { surface } => Ok(Some([surface.reflectance(); 3])),
             Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
                 let rgb = reflectance.rgb();
                 if rgb.iter().any(|value| !value.is_finite()) {
@@ -9747,6 +9778,7 @@ fn discover_parallel_slab(
     let (glass, surface) = match scene.primitives[boundary_primitive].material {
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
+        | Material::GrayDiffuseThermal { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. }
         | Material::BrushedConductor { .. } => {
@@ -10562,6 +10594,7 @@ fn discover_planar_manifold_boundary(
     let (glass, surface) = match scene.primitives[boundary_primitive].material {
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
+        | Material::GrayDiffuseThermal { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. }
         | Material::BrushedConductor { .. } => {
@@ -12828,6 +12861,26 @@ fn trace_path(
             break; // v1: emitters do not reflect
         }
 
+        if let Material::GrayDiffuseThermal { surface } = prim.material {
+            if !medium_stack.is_empty() {
+                return Err(TracerError::ThermalSurfaceMediumUnsupported);
+            }
+            // These surfaces have no separate NEE light proposal. Every camera
+            // path hit contributes with unit weight, including NeeOnly, then
+            // continues through the SAME reciprocal diffuse reflection law.
+            // The observer never subtracts emitted energy from thermal storage.
+            for (lane, &lambda) in lambdas.iter().enumerate() {
+                let emitted = surface
+                    .radiance_w_m2_sr_nm(lambda)
+                    .map_err(|_| TracerError::InvalidInput)?;
+                let contribution = throughput[lane] * emitted;
+                radiance[lane] += contribution;
+                if let Some(contributions) = &mut contribution_radiance {
+                    contributions.record(emissive_contribution_class(depth), lane, contribution);
+                }
+            }
+        }
+
         let dielectric_boundary = match prim.material {
             Material::Dielectric { glass, .. } => Some(boundary_media(
                 prim_idx,
@@ -12836,6 +12889,7 @@ fn trace_path(
                 &medium_stack,
             )?),
             Material::Lambertian { .. }
+            | Material::GrayDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => None,
@@ -12970,6 +13024,7 @@ fn trace_path(
                     }
                 }
                 Material::Lambertian { .. }
+                | Material::GrayDiffuseThermal { .. }
                 | Material::Ggx { .. }
                 | Material::Conductor { .. }
                 | Material::BrushedConductor { .. } => {
@@ -13733,6 +13788,7 @@ fn trace_path(
                 };
             }
             Material::Lambertian { .. }
+            | Material::GrayDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => {
@@ -14402,8 +14458,25 @@ fn validate_scene<'scene>(
     cx: &Cx<'_>,
     shutter: Option<ShutterInterval>,
 ) -> Result<AdmittedLighting<'scene>, TracerError> {
-    let lighting =
-        AdmittedLighting::try_new_cancellable(cx, &scene.lights, scene.environment.as_ref())?;
+    let mut thermal_emission = false;
+    for primitive in &scene.primitives {
+        cx.checkpoint()?;
+        if let Material::GrayDiffuseThermal { surface } = primitive.material {
+            if primitive.emission.is_some() {
+                return Err(TracerError::DuplicateThermalEmission);
+            }
+            thermal_emission |= surface.bolometric_exitance_w_m2() > 0.0;
+        }
+    }
+    let lighting = if thermal_emission {
+        AdmittedLighting::with_unsampled_surface_emission(
+            cx,
+            &scene.lights,
+            scene.environment.as_ref(),
+        )?
+    } else {
+        AdmittedLighting::try_new_cancellable(cx, &scene.lights, scene.environment.as_ref())?
+    };
     for light in &scene.lights {
         cx.checkpoint()?;
         let Some(light_primitive) = scene.primitives.get(light.prim) else {
@@ -18604,6 +18677,7 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
     }
     match mat {
         Material::Lambertian { reflectance } => reflectance.eval(lambda) / PI,
+        Material::GrayDiffuseThermal { surface } => surface.reflectance() / PI,
         Material::Ggx { reflectance, alpha } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
             let hn = hsum.norm();
@@ -18724,7 +18798,7 @@ fn bsdf_pdf(
         return 0.0;
     }
     match mat {
-        Material::Lambertian { .. } => cos_i / PI,
+        Material::Lambertian { .. } | Material::GrayDiffuseThermal { .. } => cos_i / PI,
         Material::Ggx { alpha, .. } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
             let hn = hsum.norm();
@@ -18777,7 +18851,7 @@ fn bsdf_sample(
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Option<(Vec3, f64)> {
     match mat {
-        Material::Lambertian { .. } => {
+        Material::Lambertian { .. } | Material::GrayDiffuseThermal { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);
             (pdf > 0.0).then_some((wi, pdf))
         }

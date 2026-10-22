@@ -59,6 +59,8 @@ pub mod lighting;
 pub mod material_state;
 pub mod spectral;
 #[cfg(feature = "tracer")]
+pub mod thermal_surface;
+#[cfg(feature = "tracer")]
 pub mod tracer;
 #[cfg(feature = "volumes")]
 pub mod volumes;

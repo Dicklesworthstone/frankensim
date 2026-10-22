@@ -3,9 +3,12 @@
 //! Bulk optics and mechanics must come from one immutable card at one query
 //! point. Surface finish is an independent input, not inferred from chemistry.
 //! Conversion retains the existing visible-band conductor/Cauchy/Beer-Lambert
-//! approximations; it does not authenticate measurements or model thermal light.
+//! approximations. The separately declared gray/diffuse thermal binding reuses
+//! a conduction emissivity sample at the same accepted physical temperature.
+//! Neither binding authenticates measurements or supplies experimental validation.
 
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_conduction::radiation::SurfaceEmissivity;
 use fs_material::state_point::{
     ResolvedMaterialStatePoint, VisibleConductorStatePoint, VisibleDielectricStatePoint,
     VisibleOpticalStatePoint,
@@ -19,7 +22,113 @@ use crate::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricError, DielectricGlass, DielectricSurface,
     GlassProvenance,
 };
+use crate::thermal_surface::{GrayDiffuseThermalSurface, ThermalSurfaceError};
 use crate::tracer::Material;
+
+/// Explicit opaque gray/diffuse observation of a material state. The original
+/// emissivity sample is retained, so cooling and rendering can share the exact
+/// source and temperature. Gray/diffuse behavior is an additional declared
+/// approximation; it is not inferred from a total emissivity measurement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialThermalBinding {
+    emissivity: SurfaceEmissivity,
+    surface: GrayDiffuseThermalSurface,
+}
+
+impl MaterialThermalBinding {
+    /// Resolve a rendered thermal material from the same card and temperature
+    /// as the supplied accepted mechanical/thermal state bundle.
+    ///
+    /// The selected model emits Planck radiance and reflects `1-epsilon`.
+    /// It replaces visible-band conductor/dielectric scattering; combining
+    /// those independent models would require a matched spectral/directional
+    /// absorptivity law. A later thermal endpoint requires a fresh binding.
+    pub fn try_gray_diffuse(
+        accepted: &ResolvedMaterialStatePoint,
+        emissivity: &SurfaceEmissivity,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, MaterialThermalError> {
+        let temperature = accepted
+            .query_point()
+            .iter()
+            .find_map(|(axis, value)| (axis == "T").then_some(*value));
+        if accepted.card_identity() != emissivity.card_identity()
+            || temperature != Some(emissivity.temperature_k())
+        {
+            return Err(MaterialThermalError::StateMismatch);
+        }
+        if surface_state_identity == ContentHash([0; 32]) {
+            return Err(MaterialThermalError::MissingSurfaceIdentity);
+        }
+        let mut h = DomainHasher::new("org.frankensim.render.material-thermal-binding.v1");
+        h.update(accepted.identity().as_bytes());
+        h.update(emissivity.receipt().content_hash().as_bytes());
+        h.update(surface_state_identity.as_bytes());
+        Ok(Self {
+            emissivity: emissivity.clone(),
+            surface: GrayDiffuseThermalSurface::try_new(
+                emissivity.temperature_k(),
+                emissivity.value(),
+                h.finalize(),
+            )
+            .map_err(MaterialThermalError::Thermal)?,
+        })
+    }
+
+    /// Direct input to the original tracer, for the actual accepted geometry.
+    #[must_use]
+    pub const fn material(&self) -> Material {
+        Material::GrayDiffuseThermal {
+            surface: self.surface,
+        }
+    }
+
+    /// Original emissivity source, uncertainty and selected query receipt.
+    #[must_use]
+    pub const fn emissivity(&self) -> &SurfaceEmissivity {
+        &self.emissivity
+    }
+
+    /// Physical spectral radiance and the declared gray/diffuse assumption.
+    #[must_use]
+    pub const fn surface(&self) -> GrayDiffuseThermalSurface {
+        self.surface
+    }
+}
+
+/// Refusal before thermal appearance can alter a scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialThermalError {
+    /// Accepted state and emissivity do not share one card and temperature.
+    StateMismatch,
+    /// The caller did not identify the independently declared surface state.
+    MissingSurfaceIdentity,
+    /// The gray/diffuse constitutive model refused its physical inputs.
+    Thermal(ThermalSurfaceError),
+}
+
+impl core::fmt::Display for MaterialThermalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::StateMismatch => {
+                f.write_str("thermal appearance requires the accepted card and temperature")
+            }
+            Self::MissingSurfaceIdentity => {
+                f.write_str("surface-state identity must not be zero")
+            }
+            Self::Thermal(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for MaterialThermalError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Thermal(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Supported bulk optical models, without a fallback to an artistic preset.
 #[derive(Clone, Copy, Debug, PartialEq)]
