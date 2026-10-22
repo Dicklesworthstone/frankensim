@@ -6,6 +6,7 @@
 //! for the existing bounded-mean confidence-sequence owner.
 //! Bead: `frankensim-ext-uq-reliability-upgrades-pwui`.
 pub mod proposal;
+mod checkpoint;
 
 use core::fmt::Display;
 use fs_eproc::GaussianMixtureCs;
@@ -85,8 +86,9 @@ pub struct ImportanceReport {
 ///
 /// Clone retains paid calls. Cancellation is checked between calls; expensive
 /// solvers own their internal cancellation. The original one-million-call cap
-/// bounds retained observations. No durable checkpoint or population-model
-/// validation is implied by the estimate or its sampling-confidence sequence.
+/// bounds retained observations. `checkpoint`/`restore` retain the fixed proposal
+/// and paid weights across restarts. Neither recovery nor sampling confidence
+/// validates a physical population model.
 #[derive(Debug, Clone)]
 pub struct ImportanceExecution {
     plan: UqPlan,
