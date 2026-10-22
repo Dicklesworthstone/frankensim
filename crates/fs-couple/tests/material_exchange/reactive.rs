@@ -129,3 +129,6 @@ fn reaction_mapping_consumption_and_late_exchange_failure_preserve_all_originals
 
 #[path = "state.rs"]
 mod state_tests;
+
+#[path = "gas_law.rs"]
+mod gas_law_tests;
