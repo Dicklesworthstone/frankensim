@@ -1,4 +1,6 @@
 //! G0/G3: source-backed radiation/contact data reach loaded native J2 tetrahedra.
+mod solid;
+
 use super::*;
 use fs_conduction::{GrayDiffuseEnclosure, RadiationSurface, SurfaceEmissivity,
     ViewFactorMatrix, SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS,

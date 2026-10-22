@@ -20,6 +20,7 @@ use fs_material::state_point::MaterialPropertySelection;
 mod extension;
 mod observer;
 pub use observer::MaterialHeatObserver;
+pub mod solid;
 
 /// A single declarative assembly, with optional physical heat-transfer paths.
 /// Empty electrical contacts are valid; bulk resistor bindings remain required.

@@ -80,3 +80,38 @@ The reference fixture is synthetic, not experimentally calibrated. Its parallel
 plate enclosure is an algebraic limiting case, not a reconstructed tetrahedral
 radiative geometry. No melting, moving contact, finite-strain deformation,
 changing radiative geometry, or unconditional stability is claimed.
+
+## Direct loaded-solid admission
+
+`ThermoplasticSolid::advance_heat_network_candidate` wraps the SAME native
+advance with joint source and closed-energy admission. It returns the original
+`ThermoplasticCandidate` and a `SolidHeatAudit`; it does not reconstruct or advance
+any state a second time. Each structural cell must retain the same material card,
+borrowed caloric object, coordinate conventions and complete fixed conditions as
+its heat-network binding. A valid heat network at another pressure or process
+point is not automatically valid for this solid.
+
+```rust,ignore
+let (candidate, closed) = solid.advance_heat_network_candidate(
+    &thermal, &prepared, &existing_observer, target_s,
+    &prescribed_displacements_m, &nodal_forces_n,
+    mechanical_settings, thermal_settings, coupling_settings, cx,
+)?;
+// Continue with candidate.solid(), candidate.thermal(), and the original
+// inner history at candidate.observer().second. Do not wrap the pair twice.
+```
+
+The original component report is unchanged. The returned closed audit subtracts
+only the integrated radiative NET error from external heat and adds it to the
+native thermal and combined residuals. Both corrected residuals must satisfy the
+original `ThermoplasticConfig::energy_tolerance_j`, not twice that allowance.
+Otherwise no candidate is returned. This prevents two independently passing
+energy gates from masking a failing combined balance. Independent inner observers
+retain their original work/heat contracts; this is not a generic certification of
+arbitrary other physics or side effects.
+
+Two additional integration regressions cover exact native-state replay, retained
+unloading history, a same-card/same-chart but different-pressure refusal, and
+scope cancellation. A focused unit regression rejects positive and negative
+radiative errors that individually fit the tolerance but fail the closed sum.
+These checks are authored but native execution remains unverified here.
