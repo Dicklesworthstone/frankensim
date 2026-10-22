@@ -230,7 +230,17 @@ passes; one worker (the default) runs the serial pass unchanged.
 - A non-finite M2L block reports the serial path's first error.
 - Each extra worker's M2L kernel row is charged to the coefficient-slot
   envelope; a refused declaration keeps the previous one.
-- The directional route stays serial.
+- On the directional route the same declaration runs the M2L stage and the
+  direct near pass (pexfp.111); its upward and downward passes stay serial.
+  - M2L groups pairs by target expansion. Workers own whole target
+    expansions, and each local receives its pairs in pair order through one
+    `translate` helper shared with the serial loop.
+  - The near pass groups pairs by target leaf. A target starts from its
+    far-field value and adds its pairs in near-list, then source, order.
+  - A refusal is the lowest-index failing pair's, which is the serial error.
+  - `dfmm_declared_workers_leave_every_potential_bitwise` covers four kernel
+    kinds at 2/3/16/4096 workers. On 20480 sphere points (mixed, k = 5,
+    tolerance 1e-4) one pass took 41.6 s serial and 6.3 s on 16 workers.
 - `Kernel` and `ComplexKernel` are `Sync` so that workers can share the
   engine.
 - `declared_workers_leave_potentials_bitwise_g0` covers five operator shapes
@@ -355,7 +365,7 @@ products (compressed or tensor), interlevel transfers and leaf interpolation
 before complex pass allocation. Storage accounts for source and target
 active cone sets, retained factors and transient coefficients/matrices.
 
-Two directional envelopes are caller-declared in `DirectionalOptions`.
+Three directional envelopes are caller-declared in `DirectionalOptions`.
 `for_tolerance` sets each to its v1 ceiling, so the defaults refuse exactly
 what v1 refused.
 - `max_coefficient_slots` (C64 units) bounds that storage. The default is
@@ -365,10 +375,25 @@ what v1 refused.
 - `max_setup_work` bounds the counted coupling-setup products. The default is
   `MAX_TRANSLATION_WORK`. Construction polls no cancellation, so a larger
   budget is a longer uncancellable construction, chosen explicitly.
-- Neither budget changes the plan or its arithmetic, only what is admitted.
+- `max_near_pairs` bounds the counted near-field point pairs. The route
+  caches none, so it also bounds the direct work of every pass. The default
+  is `MAX_NEAR_FIELD_PAIR_WORK`; zero is refused. A plan is refused during
+  the pair traversal, before any coupling setup
+  (`dfmm_declared_near_pair_envelope_is_neutral_and_enforced`: exact count
+  admitted, one below refused).
+- No budget changes the plan or its arithmetic, only what is admitted.
   `dfmm_declared_envelopes_are_neutral_and_enforced` checks that the widest
   budgets give bit-identical potentials, and that each budget is enforced at
   its counted value (setup at its exact count, refused one below).
+- `setup_workers` (default one, the original loop) declares threads for the
+  coupling setup. A shared block's factor depends on no envelope, so workers
+  compress every (block, channel) under unbounded ceilings. One serial replay
+  then makes each admission check of the serial path, in order, so factors,
+  statistics and refusals are bit-identical for every count
+  (`dfmm_declared_setup_workers_are_bitwise_and_refuse_identically`). Each
+  extra worker's residual matrix is charged to the slot envelope during
+  setup. On 20480 sphere points (mixed, k = 5, tolerance 1e-4) setup took
+  687 s serial and 53 s on 16 workers.
 - A request whose root kD is at most `low_freq_threshold` delegates whole to
   W5a, at the directional order and leaf capacity, under
   `DirectionalOptions::w5a_budget` (default `ComplexBudget::V1`).
