@@ -19,7 +19,7 @@ mod.initSync({ module: wasm });
 // every grid a page asks for (worker default 2.5-8, the hats' 4.5, Strandbar from 2, the player's restarts up to 10)
 const SCALES = [2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10];
 const REFERENCE = 5;
-const SPEED = { kick: 3.0, snare: 4.5, 'snare-off': 4.5, 'tom-12': 3.5, 'tom-14': 3.5, 'hihat-closed': 2.5, 'hihat-open': 2.5, crash: 6.0, ride: 2.5 };
+const SPEED = { kick: 3.0, snare: 4.5, 'snare-off': 4.5, 'tom-12': 3.5, 'tom-14': 3.5, hihat: 2.5, 'hihat-closed': 2.5, 'hihat-open': 2.5, crash: 6.0, ride: 2.5 };
 const spot = (name, R) => (name === 'kick' ? [0, 0.02] : name.startsWith('hihat') || name === 'crash' ? [0.85 * R, 0] : name === 'ride' ? [0.6 * R, 0] : [0.35 * R, 0.1 * R]);
 const FRAMES = 48000, WINDOW = 19200, HOP = 960;
 
@@ -28,22 +28,39 @@ for (const name of JSON.parse(mod.pieces())) {
   if (!(name in SPEED)) continue;
   const rows = {};
   for (const scale of SCALES) {
-    let p;
-    try { p = new mod.KitPiece(name, scale); } catch { continue; } // grid too fine for 48 kHz
-    const [x, y] = spot(name, p.radius());
-    p.strike(x, y, SPEED[name]);
-    const cs = new Float64Array(FRAMES + 1);
-    let peak = 0;
-    for (let k = 0; k < FRAMES; k += 128) {
-      const out = p.render(128, 1);
-      for (let i = 0; i < out.length; i++) { const v = out[i]; cs[k + i + 1] = cs[k + i] + v * v; peak = Math.max(peak, Math.abs(v)); }
+    let level = 0, peak = 0, complete = true;
+    // One gain must cover the entire shared trajectory. Measure open and
+    // closed stick strokes, plus a foot closure from either initial state;
+    // never normalize open and closed samples separately during playback.
+    const states = name === 'hihat'
+      ? [{ force: 0 }, { force: 80 }, { force: 0, foot: true }, { force: 80, foot: true }]
+      : [{}];
+    for (const state of states) {
+      let p;
+      try {
+        p = name === 'hihat' ? mod.KitPiece.withHiHatPedal(scale, state.force) : new mod.KitPiece(name, scale);
+      } catch { complete = false; break; } // Unsupported physical grid/state; do not publish a partial shared row.
+      try {
+        if (state.foot) {
+          p.setPedalForce(state.force > 0 ? 0 : 80, .005);
+        } else {
+          const [x, y] = spot(name, p.radius());
+          p.strike(x, y, SPEED[name]);
+        }
+        const cs = new Float64Array(FRAMES + 1);
+        for (let k = 0; k < FRAMES; k += 128) {
+          if (state.foot && state.force > 0 && k === 1920) p.setPedalForce(80, .005);
+          const out = p.render(128, 1);
+          if (!out.every(Number.isFinite)) throw new Error(`${name}@${scale}: nonfinite calibration audio`);
+          for (let i = 0; i < out.length; i++) { const v = out[i]; cs[k + i + 1] = cs[k + i] + v * v; peak = Math.max(peak, Math.abs(v)); }
+        }
+        for (let i = 0; i + WINDOW <= FRAMES; i += HOP) level = Math.max(level, Math.sqrt((cs[i + WINDOW] - cs[i]) / WINDOW));
+      } finally { p.free(); }
     }
-    p.free();
-    let level = 0;
-    for (let i = 0; i + WINDOW <= FRAMES; i += HOP) level = Math.max(level, Math.sqrt((cs[i + WINDOW] - cs[i]) / WINDOW));
+    if (!complete) continue;
     rows[scale] = { level: Number(level.toPrecision(6)), peak: Number(peak.toPrecision(6)) };
   }
-  pieces[name] = rows;
+  pieces[name] = name === 'hihat' ? { ...rows, states: ['open', 'closed', 'foot'] } : rows;
   console.error(`${name}: ${Object.keys(rows).length} grids`);
 }
 console.log(JSON.stringify({
