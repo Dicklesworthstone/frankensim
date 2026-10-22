@@ -31,6 +31,8 @@ pub mod network;
 pub mod material_rate;
 /// Competing reactions sharing one original inventory and energy reconstruction.
 pub mod mechanism;
+/// Bounded temporal refinement of the existing conservative chemistry update.
+pub mod subcycling;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -53,6 +55,7 @@ pub struct GasReaction {
     kinetics: DeclaredStoichiometricMassActionV1,
     rate_material: Option<material_rate::MaterialRateScale>,
     additional_channels: Vec<mechanism::Channel>,
+    subcycling: Option<subcycling::ReactionSubcycling>,
 }
 
 /// Physical step admission. Consumption is measured from actual reacting
@@ -61,7 +64,7 @@ pub struct GasReaction {
 pub struct GasReactionSolve {
     /// Original fixed-density internal-energy reconstruction controls.
     pub gas: GasEnergySolve,
-    /// Maximum gross fraction consumed across ALL net channel extents, in `(0,1)`.
+    /// Maximum gross fraction consumed across ALL channels per admitted substep, in `(0,1)`.
     pub maximum_consumed_fraction: f64,
     /// Maximum discrepancy of any final `n_i` from its stoichiometric value [mol].
     pub species_tolerance_mol: f64,
@@ -84,6 +87,10 @@ pub enum GasReactionError {
         fraction: f64,
         maximum: f64,
     },
+    /// A finite chemical step decreases entropy beyond its rounding allowance.
+    EntropyDecrease { change_j_k: f64, tolerance_j_k: f64 },
+    /// No complete error-admitted trajectory fits the explicit work limits.
+    SubcyclingLimit { evaluations: usize, substeps: usize, last_error_ratio: Option<f64> },
     Cancelled,
 }
 impl core::fmt::Display for GasReactionError {
@@ -149,6 +156,7 @@ pub struct GasReactionSpecies {
 pub struct GasReactionStep {
     /// Identity of the first canonical channel; legacy scalar fields describe it.
     pub primary_reaction: fs_thermochem::ReactionId,
+    /// Initial rate; with subcycling, the first accepted substep's rate.
     pub rate: DeclaredStoichiometricMassActionEvaluationV1,
     /// Actual rate-scale material evaluation; None on the original fixed-scale path.
     pub rate_material: Option<fs_material::state_point::ResolvedMaterialStatePoint>,
@@ -157,6 +165,7 @@ pub struct GasReactionStep {
     /// Remaining canonical channel rates/extents; empty for the original API.
     pub additional_reactions: Vec<mechanism::ReactionChannelStep>,
     pub species: Vec<GasReactionSpecies>,
+    /// Maximum gross consumption fraction of an accepted chemical substep.
     pub maximum_consumed_fraction: f64,
     pub maximum_species_residual_mol: f64,
     /// Actual total mass discrepancy (the original parcel preserves mass exactly) [kg].
@@ -165,6 +174,8 @@ pub struct GasReactionStep {
     pub stored_energy_change_j: f64,
     /// Measured entropy change of this isolated chemical stage [J/K].
     pub entropy_change_j_k: f64,
+    /// Actual accepted substeps and estimate; None on the original one-step path.
+    pub subcycling: Option<subcycling::ReactionSubcyclingReport>,
 }
 
 /// A proposed gas state usable by the existing flow, thermal and acoustic paths.
@@ -219,7 +230,7 @@ impl GasReaction {
                 "declared species molar masses do not conserve reaction mass within roundoff",
             ));
         }
-        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new() })
+        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new(), subcycling: None })
     }
     pub const fn catalog(&self) -> &ThermochemicalGasModel {
         &self.catalog
@@ -290,11 +301,24 @@ impl GasReaction {
     /// Evolve every reaction on one original inventory at fixed total energy. Inputs
     /// are immutable and publication belongs to the surrounding coupled solve.
     /// Actual partial pressures come from this parcel, not a caller override.
+    /// An explicitly bound subcycling policy refines chemistry here, before
+    /// any existing mechanical or thermal consumer advances.
     pub fn parcel_candidate(
         &self,
         gas: &ClosedGasParcel,
         duration_s: f64,
         controls: GasReactionSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasReactionCandidate, GasReactionError> {
+        if let Some(policy) = self.subcycling {
+            return subcycling::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
+        }
+        self.single_step_candidate(gas, duration_s, controls, cancelled)
+    }
+
+    // One numerical/constitutive primitive for direct and refined chemistry.
+    fn single_step_candidate(
+        &self, gas: &ClosedGasParcel, duration_s: f64, controls: GasReactionSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasReactionCandidate, GasReactionError> {
         poll(&mut cancelled)?;
@@ -373,11 +397,15 @@ impl GasReaction {
             || !energy.is_finite()
             || energy.abs() > gas.mass_kg() * controls.gas.energy_tolerance_j_kg
             || !entropy.is_finite()
-            || entropy < -controls.entropy_tolerance_j_k
         {
             return Err(invalid(
                 "closed reaction species, total internal energy or entropy did not close; refine the interval",
             ));
+        }
+        if entropy < -controls.entropy_tolerance_j_k {
+            return Err(GasReactionError::EntropyDecrease {
+                change_j_k: entropy, tolerance_j_k: controls.entropy_tolerance_j_k,
+            });
         }
         poll(&mut cancelled)?;
         Ok(GasReactionCandidate {
@@ -393,6 +421,7 @@ impl GasReaction {
                 mass_residual_kg: next.mass_kg() - gas.mass_kg(),
                 stored_energy_change_j: energy,
                 entropy_change_j_k: entropy,
+                subcycling: None,
             },
             gas: next,
         })

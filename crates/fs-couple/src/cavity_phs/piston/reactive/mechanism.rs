@@ -42,7 +42,8 @@ impl GasReaction {
     /// Each retains its own reverse-equilibrium closure
     /// and optional material rate. Bind rate sources BEFORE combining channels.
     /// Nested combinations are flattened; no inventories or time histories are
-    /// copied into the mechanism. Duplicate reaction IDs and source conflicts
+    /// copied into the mechanism. Bind a shared subcycling policy AFTER combining.
+    /// Duplicate reaction IDs and source conflicts
     /// refuse. Canonical reaction-ID order removes caller-order dependence.
     ///
     /// A singleton preserves the original object and numerical path. For more
@@ -60,6 +61,12 @@ impl GasReaction {
         if count == 0 || count > MAX_COUPLED_REACTIONS {
             return Err(invalid("a coupled mechanism needs 1..=32 reaction channels"));
         }
+        if reactions.len() == 1 {
+            return Ok(reactions.into_iter().next().expect("nonempty admitted mechanism"));
+        }
+        if reactions.iter().any(|r| r.subcycling.is_some()) {
+            return Err(invalid("combine channels before binding one shared subcycling policy"));
+        }
         let catalog = &reactions[0].catalog;
         if reactions.iter().any(|r| &r.catalog != catalog) {
             return Err(invalid("reaction channels require one identical complete source catalog"));
@@ -75,7 +82,7 @@ impl GasReaction {
         let mut inputs = reactions.into_iter();
         let first = inputs.next().expect("nonempty admitted mechanism");
         if count == 1 { return Ok(first); }
-        let GasReaction { catalog, kinetics, rate_material, additional_channels } = first;
+        let GasReaction { catalog, kinetics, rate_material, additional_channels, subcycling: _ } = first;
         let mut channels = Vec::with_capacity(count);
         channels.push(Channel { kinetics, rate_material });
         channels.extend(additional_channels);
@@ -90,7 +97,7 @@ impl GasReaction {
         let mut channels = channels.into_iter();
         let primary = channels.next().expect("admitted channel count");
         Ok(Self { catalog, kinetics: primary.kinetics, rate_material: primary.rate_material,
-            additional_channels: channels.collect() })
+            additional_channels: channels.collect(), subcycling: None })
     }
 
     /// Original immutable kinetic laws and source bindings, in canonical order.
@@ -112,6 +119,8 @@ impl GasReactionStep {
     #[must_use]
     pub fn has_progress(&self) -> bool {
         self.reaction_extents().any(|(_, extent)| extent != 0.0)
+            || self.subcycling.as_ref().is_some_and(|r|
+                r.steps.iter().any(|s| s.reaction.has_progress()))
     }
 }
 
