@@ -1,0 +1,14 @@
+{
+  "schema": "frankensim.cooling-network-uq.v1",
+  "seed": "73",
+  "samples": 64,
+  "wall_seconds": 300,
+  "temperature_limit_k": 303,
+  "correlation": { "kind": "independent" },
+  "parameters": [
+    {
+      "target": { "kind": "inlet-temperature", "index": 0 },
+      "distribution": { "kind": "gaussian", "mean": 300, "std_dev": 0.25 }
+    }
+  ]
+}
