@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""gate_run: one run of the Q2 gate as the beads define it today (identity.bead_q2) over its controls and the renders, as one table.
+"""gate_run: one run of Q2 Alive (identity.q2_alive, registered on pexfp.357) over its controls and the renders, as one table.
 
   real controls   real recordings of the instrument from ANOTHER library, graded as if they were renders (P2's certify candidates:
                   TinySOL, CC BY 4.0; VocalSet's held-out singer m6, CC BY 4.0, against a voice library without him). Required:
-                  >= 80 % pass.
-  piano           the POD-round piano renders, which the owner accepted. Required: A3 mf, A3 ff and C6 mf pass.
-  nulls           the five null baselines (freeze.null_signals) of every graded note's reference recording, judged against that
-                  reference. Required: none passes.
-  pitch shift     every real control and piano render shifted +20 cents (band-limited). Required: no margin moves by 1 dB or more.
-  renders         every live render pair under ANALYSIS: reported, never required. Beside each family, Q3: the share of measures
-                  inside the loose real-vs-real ruler (decompose's pair.json verdicts) for its renders and for its real controls.
-  candidates      with --eval, identity_eval.py's numbers for the UNREGISTERED candidates A, B, C, measured on library recordings
-                  only: printed under the table, never applied to a render here.
+                  >= 80 % pass, every one graded.
+  nulls           the five null baselines (freeze.null_signals) of every sustained graded note's reference recording, judged
+                  against that note's set. Required: none passes.
+  pitch shift     every real control shifted +20 cents (band-limited). Required: no Q2 Alive margin moves by 1 dB or more.
+  piano           the POD-round piano renders: struck, so Q2 Alive makes no claim (owner, 2026-10-22); listed, never required.
+  renders         every live render pair under ANALYSIS: reported, never required; struck and plucked families get no claim.
+                  Beside each family, Q3: the share of measures inside the loose real-vs-real ruler (decompose's pair.json
+                  verdicts) for its renders and for its real controls.
+  beside          never gating: identity (identity.nearest_set: is the note's nearest real recording on the tilt-corrected
+                  cepstral envelope of its own instrument?), confusion (does a real control pass Q2 Alive against ANOTHER
+                  instrument's set?), and the retired definition identity.bead_q2, so the 2026-10-22 table can be reproduced.
+  candidates      with --eval, identity_eval.py's numbers for the candidates Q2 Alive was chosen from, on library recordings only.
 
-A note passes the current definition when d_o - d_t >= identity.BEAD_MARGIN_DB, d_t the spectral distance (spec_db) to the pair's
-reference recording, d_o to the nearest note of another instrument of the same kind within 2 semitones, any dynamic or
-articulation (UIowa; for the voice too). Every candidate goes the render route (decompose.render_floor, align, Note), every library
-note the reference route (decompose.Refs.note). Writes OUT/gate.json (every margin) and OUT/gate.txt (the table).
-It is a final validation: no number here may be used to choose, tune or fit physics.
+Every candidate goes the render route (decompose.render_floor, align, Note), every library note the reference route
+(decompose.Refs.note). With --chain-refdir a render first goes through its reference session's recording chain (chain.py).
+Writes OUT/gate.json (every margin) and OUT/gate.txt (the table). It is a final validation: no number here may be used to
+choose, tune or fit physics.
 
 usage (trj; numpy, pillow, matplotlib):
   gate_run.py --out DIR --piano PIANO.json [--eval DIR/identity-eval.json] [--analysis ...] [--certify CANDS.json ...] [--jobs 12]
@@ -56,7 +58,6 @@ CERTIFY = ["/data/tmp/wa-inst/p2/certify/cands-tinysol-mf.json", "/data/tmp/wa-i
            "/data/tmp/wa-inst/p2/certify/cands-voice-m6.json"]
 OTHERS_SEMITONES = 2
 REQUIRED_REAL = 0.80
-PIANO_REQUIRED = (("A3", "mf"), ("A3", "ff"), ("C6", "mf"))
 REFUSALS = dc.REFUSALS + (FloatingPointError, ZeroDivisionError)
 
 
@@ -200,7 +201,7 @@ def build_candidates(a, lib):
             seen.setdefault((c["which"], ekey(c["ref_entry"], c.get("band_hz"))), c)
     nulls = [dict(source="null", which=c["which"], family=c["family"], inst=c["inst"], art=c["art"], note=c["ref_entry"]["name"], slot=c["slot"],
                   kind=c["kind"], label=f'nulls of {c["ref_entry"]["file"]}@{c["ref_entry"]["name"]}', band_hz=c.get("band_hz"),
-                  ref_entry=c["ref_entry"]) for c in seen.values()]
+                  ref_entry=c["ref_entry"]) for c in seen.values() if c["kind"] == "sustained"]  # Q2 Alive judges sustained notes only
     return cands, nulls
 
 
@@ -228,6 +229,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     if a.rows:
         prev = json.loads(Path(a.rows).read_text())
+        if prev.get("statistic") != idn.STATISTIC:
+            raise SystemExit(f"IRPGATE_STATISTIC: {a.rows} was graded with {prev.get('statistic') or prev.get('definition')!r}, not {idn.STATISTIC}")
         ev = json.loads(Path(a.eval).read_text()) if a.eval else None
         table = report(prev["rows"], q3(Path(a.analysis), Path(a.certify_analysis)), ev)
         (out / "gate.json").write_text(json.dumps(dict(prev, table=table, eval=a.eval, candidates_on_library_recordings=ev, rebuilt_from=a.rows,
@@ -247,6 +250,9 @@ def main():
             want.setdefault((c["which"], ekey(c["ref_entry"], c.get("band_hz"))), (c["which"], c["ref_entry"], c.get("band_hz")))
         for e in others_of(c, lib):
             want.setdefault(("iowa", ekey(e, c.get("band_hz"))), ("iowa", e, c.get("band_hz")))
+        for e in lib[c["which"]]:  # the candidate's own set, which Q2 Alive judges it against
+            if idn.in_set(e, c["inst"], c["art"], c["kind"], midi_of(c["note"])):
+                want.setdefault((c["which"], ekey(e, c.get("band_hz"))), (c["which"], e, c.get("band_hz")))
     cache_p = out / "features-cache.json"
     cache = json.loads(cache_p.read_text()) if cache_p.exists() else {}
     cache = {k: v for k, v in cache.items() if (v.get("features") or {}).get("version") == idn.IDENTITY_VERSION or "refused" in v}
@@ -259,27 +265,50 @@ def main():
         cache_p.write_text(json.dumps(cache))
         done = list(pool.map(cand_job, cands + nulls, chunksize=1))
     feats = {k: v["features"] for k, v in cache.items() if v.get("features")}
+    canon = {}  # each instrument's canonical articulation (decompose's choice): the set another instrument's note is judged against
+    for e in lib["iowa"]:
+        canon.setdefault(e["inst"], set()).add(e["art"])
+    canon = {inst: dc.canon_art(arts) for inst, arts in canon.items()}
+    rulers = {}
+
+    def alive(f, S, kind):
+        k = (tuple(la for la, _ in S), kind)
+        if k not in rulers and kind == "sustained" and len(S) >= idn.MIN_SET:
+            rulers[k] = {m: idn.ruler(S, m) for m in idn.LIFE_MEASURES}
+        return idn.q2_alive(f, S, kind, rulers.get(k))
+
     rows = []
     for c in done:
         r = {k: v for k, v in c.items() if k not in ("ref_entry", "features", "shifted", "nulls")}
-        ref = feats.get(f"{c['which']}:{ekey(c['ref_entry'], c.get('band_hz'))}") if c.get("ref_entry") else None
+        band = c.get("band_hz")
+        ref = feats.get(f"{c['which']}:{ekey(c['ref_entry'], band)}") if c.get("ref_entry") else None
         r["reference"] = ekey(c["ref_entry"]) if c.get("ref_entry") else None
         r["mean_flux_db"] = (c.get("features") or {}).get("mean_flux_db")
-        others = [(ekey(e), feats[k]) for e in others_of(c, lib) if (k := f"iowa:{ekey(e, c.get('band_hz'))}") in feats]
-        if ref is None and "refused" not in r:
-            r["refused"] = "the reference recording has no features (refused or missing)"
+        m = midi_of(c["note"])
+        S = [(ekey(e), feats[k]) for e in lib[c["which"]] if idn.in_set(e, c["inst"], c["art"], c["kind"], m)
+             and (k := f"{c['which']}:{ekey(e, band)}") in feats]
+        others = [(ekey(e), feats[k]) for e in others_of(c, lib) if (k := f"iowa:{ekey(e, band)}") in feats]
+        by_inst = defaultdict(list)  # other instruments' sets at this pitch, canonical articulation
+        for e in others_of(c, lib):
+            if e["art"] == canon.get(e["inst"]) and (k := f"iowa:{ekey(e, band)}") in feats:
+                by_inst[e["inst"]].append((ekey(e), feats[k]))
+        r["set_size"] = len(S)
         if c["source"] == "null":
-            r["nulls"] = {n: (dict(recognisable=None, refused=f["refused"]) if "refused" in f else idn.bead_q2(f, ref, others))
-                          for n, f in c["nulls"].items()} if ref is not None else {}
-        elif "features" in c and ref is not None:
-            r["q2"] = idn.bead_q2(c["features"], ref, others)
-            if "shifted" in c and "refused" not in c["shifted"]:
-                qs = idn.bead_q2(c["shifted"], ref, others)
-                r["shift"] = dict(q2=qs, margin_change_db=abs(qs["margin_db"] - r["q2"]["margin_db"]))
+            r["nulls"] = {n: (dict(recognisable=None, refused=f["refused"]) if "refused" in f else alive(f, S, c["kind"]))
+                          for n, f in c["nulls"].items()}
+        elif "features" in c:
+            r["q2"] = alive(c["features"], S, c["kind"])
+            r["identity"] = idn.nearest_set(c["features"], S, dict(by_inst)) if S and by_inst else None
+            r["retired_bead_q2"] = idn.bead_q2(c["features"], ref, others) if ref is not None else None
+            if "shifted" in c and "refused" not in c["shifted"] and r["q2"]["margin_db"] is not None:
+                qs = alive(c["shifted"], S, c["kind"])
+                r["shift"] = dict(q2=qs, margin_change_db=abs(qs["margin_db"] - r["q2"]["margin_db"]) if qs["margin_db"] is not None else None)
+            if c["source"] == "real":
+                r["confusion"] = {inst: alive(c["features"], So, c["kind"])["recognisable"] for inst, So in by_inst.items() if len(So) >= idn.MIN_SET}
         rows.append(r)
     ev = json.loads(Path(a.eval).read_text()) if a.eval else None
     table = report(rows, q3(Path(a.analysis), Path(a.certify_analysis)), ev)
-    meta = dict(schema="frankensim.q2-gate-run.v1", definition="bead (identity.bead_q2)", margin_db=idn.BEAD_MARGIN_DB,
+    meta = dict(schema="frankensim.q2-gate-run.v2", statistic=idn.STATISTIC, definition="Q2 Alive (identity.q2_alive, pexfp.357)",
                 identity_version=idn.IDENTITY_VERSION, utc=datetime.now(timezone.utc).isoformat(), elapsed_s=round(time.time() - t_start, 1),
                 tools_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).resolve().parent.glob("*.py"))},
                 libraries=LIBS, analysis=a.analysis, certify=a.certify, piano=a.piano, eval=a.eval)
@@ -307,50 +336,60 @@ def rate(vs):
 
 def fmt(t):
     k, n, none = t
-    return (f"{k:3d}/{n:<3d} {100 * k / n:5.1f} %" if n else "  -/-        ") + (f" ({none} refused)" if none else "")
+    return (f"{k:3d}/{n:<3d} {100 * k / n:5.1f} %" if n else "  -/-        ") + (f" ({none} no claim)" if none else "")
 
 
 def passes(r):
     return (r.get("q2") or {}).get("recognisable")
 
 
+def ident(rs):
+    """Identity beside Q2 Alive: how many have their own instrument's recording nearest (identity.nearest_set)."""
+    return fmt(rate([(r.get("identity") or {}).get("own_nearest") for r in rs]))
+
+
+def retired(rs):
+    return fmt(rate([(r.get("retired_bead_q2") or {}).get("recognisable") for r in rs]))
+
+
 def report(rows, q3s, ev):
-    L = [f"Q2 gate run, the CURRENT definition (identity.bead_q2: spec_db margin to the nearest other instrument >= {idn.BEAD_MARGIN_DB:g} dB)", ""]
-    L.append(f'{"group":44s} {"passes":>24s}   {"required":20s} verdict')
+    L = [f"Q2 Alive gate run ({idn.STATISTIC}: mean spectral flux after the attack, as a level, inside the spread of the instrument's "
+         f"real recordings within {idn.SEMITONES} semitones; sustained families only)", ""]
+    L.append(f'{"group":44s} {"Q2 Alive passes":>24s}   {"required":20s} {"verdict":8s} {"identity (beside)":>22s} {"retired bead_q2":>22s}')
     real = [r for r in rows if r["source"] == "real"]
     k, n, none = rate([passes(r) for r in real])
     ok_real = n > 0 and k / n >= REQUIRED_REAL and none == 0
-    L.append(f'{"real recordings, another library (all)":44s} {fmt((k, n, none)):>24s}   {">= 80 %, all graded":20s} {"PASS" if ok_real else "FAIL"}')
+    L.append(f'{"real recordings, another library (all)":44s} {fmt((k, n, none)):>24s}   {">= 80 %, all graded":20s} {"PASS" if ok_real else "FAIL":8s} '
+             f"{ident(real):>22s} {retired(real):>22s}")
     for f in sorted({r["family"] for r in real}):
         rf = [r for r in real if r["family"] == f]
-        med = np.median([r["q2"]["margin_db"] for r in rf if r.get("q2")]) if any(r.get("q2") for r in rf) else float("nan")
-        L.append(f'{"  " + f:44s} {fmt(rate([passes(r) for r in rf])):>24s}   median margin {med:+.1f} dB')
-    ok_piano = True
-    for r in [r for r in rows if r["source"] == "piano"]:
-        req = (r["note"], r.get("dyn")) in PIANO_REQUIRED
-        got = passes(r)
-        ok_piano &= (got is True) or not req
-        mg = (r.get("q2") or {}).get("margin_db")
-        txt = (f"{got} ({mg:+.1f} dB)" if mg is not None else str(r.get("refused", got)))[:24]
-        L.append(f'{"piano render " + r["slot"]:44s} {txt:>24s}   {"pass" if req else "reported":20s} {("PASS" if got else "FAIL") if req else ""}')
-    ok_null = any(r["source"] == "null" for r in rows)  # nulls not graded in this run: not a pass
+        L.append(f'{"  " + f:44s} {fmt(rate([passes(r) for r in rf])):>24s}   {"":20s} {"":8s} {ident(rf):>22s} {retired(rf):>22s}')
+    nl = [r for r in rows if r["source"] == "null"]
+    ok_null = bool(nl)  # nulls not graded in this run: not a pass
     for name in freeze.NULLS:
-        vs = [r["nulls"][name].get("recognisable") for r in rows if r["source"] == "null" and name in r.get("nulls", {})]
+        vs = [r["nulls"][name].get("recognisable") for r in nl if name in r.get("nulls", {})]
         k, n, none = rate(vs)
         ok_null &= k == 0
-        L.append(f'{"null " + name:44s} {fmt((k, n, none)):>24s}   {"none":20s} {("PASS" if k == 0 else "FAIL") if n else "not graded"}')
-    sh = [r["shift"]["margin_change_db"] for r in rows if r.get("shift")]
-    flips = sum(1 for r in rows if r.get("shift") and r["shift"]["q2"]["recognisable"] != r["q2"]["recognisable"])
+        L.append(f'{"null " + name + " (sustained references)":44s} {fmt((k, n, none)):>24s}   {"none":20s} '
+                 f'{("PASS" if k == 0 else "FAIL") if n else "not graded"}')
+    sh = [r["shift"]["margin_change_db"] for r in real if r.get("shift") and r["shift"]["margin_change_db"] is not None]
+    flips = sum(1 for r in real if r.get("shift") and r["shift"]["q2"]["recognisable"] != r["q2"]["recognisable"])
     ok_shift = bool(sh) and max(sh) < 1.0
-    L.append(f'{"+20 c shift: largest margin change":44s} {(f"{max(sh):.3f} dB" if sh else "-"):>24s}   {"< 1 dB":20s} {"PASS" if ok_shift else "FAIL"}'
-             f"   ({len(sh)} notes, median {np.median(sh) if sh else float('nan'):.3f} dB, {flips} verdict flips)")
+    L.append(f'{"+20 c shift: largest Q2 Alive margin change":44s} {(f"{max(sh):.3f} dB" if sh else "-"):>24s}   {"< 1 dB":20s} '
+             f'{"PASS" if ok_shift else "FAIL":8s} ({len(sh)} real controls, median {np.median(sh) if sh else float("nan"):.3f} dB, {flips} verdict flips)')
+    for r in [r for r in rows if r["source"] == "piano"]:
+        L.append(f'{"piano render " + r["slot"]:44s} {"no claim (struck)":>24s}   {"owner 2026-10-22":20s}')
     rend = [r for r in rows if r["source"] == "render"]
     for f in sorted({r["family"] for r in rend}):
+        rr = [r for r in rend if r["family"] == f]
         q = q3s.get(f, {})
         q3txt = "  Q3 inside: " + ", ".join(f"{k} {q[k][0]}/{q[k][1]} ({100 * q[k][0] / q[k][1]:.0f} %)" for k in ("renders", "real") if q[k][1]) if q else ""
         realf = [passes(x) for x in real if x["family"] == f]
-        L.append(f'{"renders " + f:44s} {fmt(rate([passes(r) for r in rend if r["family"] == f])):>24s}   reported'
-                 + (f"  (real controls {fmt(rate(realf)).strip()})" if realf else "") + q3txt)
+        verdict = fmt(rate([passes(r) for r in rr])) if any(r["kind"] == "sustained" for r in rr) else "no claim (struck/plucked)"
+        L.append(f'{"renders " + f:44s} {verdict:>24s}   {"reported":20s} {"":8s} {ident(rr):>22s} {retired(rr):>22s}'
+                 + (f"  real controls {fmt(rate(realf)).strip()}" if realf else "") + q3txt)
+    conf = [x for r in real for x in (r.get("confusion") or {}).values()]
+    L.append(f'{"confusion: real control passes as ANOTHER":44s} {fmt(rate(conf)):>24s}   {"reported":20s}')
     ch = [r for r in rows if r.get("chain")]
     if ch:
         through = [r for r in ch if "refused" not in r["chain"]]
@@ -358,14 +397,11 @@ def report(rows, q3s, ev):
         flags = sorted({f["flag"] for r in through for f in r["chain"]["flags"]})
         L.append(f"chain: {len(through)} renders graded through their reference session's recording chain, {len(ch) - len(through)} "
                  f"without one {why}; flags {flags}")
-    ok_piano &= any(r["source"] == "piano" for r in rows)
-    L += ["", f'GATE {"VALID" if (ok_real and ok_piano and ok_null and ok_shift) else "NOT VALID"}: real controls {ok_real}, piano {ok_piano}, '
-               f"nulls {ok_null}, pitch shift {ok_shift}"]
+    L += ["", f'GATE {"VALID" if (ok_real and ok_null and ok_shift) else "NOT VALID"}: real controls {ok_real}, nulls {ok_null}, '
+               f"pitch shift {ok_shift} (the piano and every struck or plucked family: no claim, owner 2026-10-22)"]
     if ev:
-        L += ["", "UNREGISTERED candidates, library recordings only (identity_eval.py; never applied to a render here):",
-              identity_eval.report(ev)]
+        L += ["", "The candidates Q2 Alive was chosen from, library recordings only (identity_eval.py):", identity_eval.report(ev)]
     return "\n".join(L)
-
 
 if __name__ == "__main__":
     main()

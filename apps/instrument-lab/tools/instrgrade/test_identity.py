@@ -107,6 +107,20 @@ class SyntheticInstrumentTests(unittest.TestCase):
         show(name, j)
         return j
 
+    def test_q2_alive_is_the_life_rule_on_sustained_notes_and_makes_no_claim_on_struck_ones(self):
+        """The registered statistic (pexfp.357): candidate B on a sustained note; no claim at all on a decaying one."""
+        f, frozen = feats(self.cand, 69), feats(freeze.split(self.cand, 440.0).frozen, 69)
+        alive, still, struck = idn.q2_alive(f, self.members, "sustained"), idn.q2_alive(frozen, self.members, "sustained"), \
+            idn.q2_alive(f, self.members, "decaying")
+        print(f"\n  {idn.STATISTIC}: living A4 {alive['recognisable']} ({alive['margin_db']:+.2f} dB), frozen {still['recognisable']} "
+              f"({still['margin_db']:+.2f} dB), as a decaying note {struck['recognisable']} ({struck['reason']})")
+        self.assertEqual(alive["statistic"], idn.STATISTIC)
+        self.assertTrue(alive["recognisable"])
+        self.assertEqual(alive["margin_db"], idn.judge(f, self.members, idn.LIFE_MEASURES)["margin_db"])
+        self.assertFalse(still["recognisable"])
+        self.assertIsNone(struck["recognisable"])
+        self.assertIn("no claim", struck["reason"])
+
     def test_life_passes_a_living_note_of_the_instrument(self):
         self.assertTrue(self.judge("B: another living A4 of A", self.cand)["recognisable"])
 

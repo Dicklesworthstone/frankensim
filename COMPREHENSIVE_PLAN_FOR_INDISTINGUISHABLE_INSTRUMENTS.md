@@ -2100,7 +2100,7 @@ Each candidate exercises existing generic modules, and none needs instrument-spe
 | Q0 Builds and renders | radiated pressure at a virtual receiver via any committed CLI, natively built | native build + render receipt |
 | QP Passive chain | linear, player-independent behaviour matches measurements of the **same specimen** where one exists (otherwise population data, flagged) | input impedance per fingering; bridge admittance and signature modes; modal ratios |
 | Q1 Speaks | intended regime, right note within ±10 c after the allowed tuning action, threshold/onset within the literature range (first against machine-player data); thresholds/hysteresis mapped | time-domain sweeps on the render path (M5.6 cross-checks) |
-| Q2 Recognisable | identity margin ≥ 3 dB on ≥ 80 % of held-out graded notes, using the fixed grader (M7.1-W2) | grader |
+| Q2 Alive (registered 2026-10-22, pexfp.357) | **sustained families:** the note's mean spectral flux after the attack, as a level, lies within the spread of its instrument's real recordings within 2 semitones (`instrgrade/identity.py: q2_alive`), on ≥ 80 % of held-out graded notes. In the same run: real recordings from a second library pass at ≥ 80 %, the five null baselines all fail, +20 c moves no margin by ≥ 1 dB. Identity (nearest set) and confusion are reported beside it, never gating; which instrument it is, is Q4's. **Struck and plucked families:** no Q2 claim until a decay-domain measure is registered (pexfp.360). Retired: identity margin ≥ 3 dB (it passed 1 of 46 real recordings from a second library and 28 of 56 frozen nulls) | `instrgrade/gate_run.py` |
 | Q3 Inside the ruler | same-type real-vs-real ruler; descriptor changes pp→mf→ff and along scales match; each bound descriptor is inside the real spread; graded as a simulation ensemble marginalized over the observation prior | grader scorecard |
 | Q4 Owner blind test | **discrimination-equivalence**, below | listening harness |
 | Q5 Phrases | scales, slurs, articulation and dynamics changes pass Q3/Q4 | phrase grading |
@@ -2154,14 +2154,14 @@ A data item is done only when its named consumer consumes it successfully. A mis
 
 **Essentials.**
 - **References:** UIowa raw chromatic scales (the per-pitch edits are processed); `novib` until vibrato is modelled. The 2012 strings are non-vibrato.
-- **Rulers and baselines:** same-type rulers (pre-2012 vs 2012 Iowa strings; TU Berlin anechoic after licence; RWC flagged non-anechoic); null baselines (sine, 1/n, odd 1/n, 1/n²) with margins.
+- **Rulers and baselines:** same-type rulers (pre-2012 vs 2012 Iowa strings; TU Berlin anechoic after licence; RWC flagged non-anechoic); null baselines (sine, 1/n, odd 1/n, 1/n², and the reference with its life removed: `instrgrade/freeze.py: null_signals`) with margins.
 - **Uncertainty, by kind:**
   - **Aleatory and population variables** (player micro-variation, observation position, specimen-to-specimen spread) use justified probability distributions. Ensembles are sized by a convergence check on the reported statistic, not by a fixed N. The observation prior is scored by its median.
   - **Epistemic unknowns** (unmeasured geometry or material properties) use admissible, correlated envelopes: bounds or scenario sets. Results are reported as envelopes, never as a median over invented draws. Eight draws are not coverage.
 - **Other descriptors:** ERB-rate onset-aligned spectrogram distance split into attack, sustain and release; log-attack time; spectral flux; AM/FM modulation spectrum; jitter and shimmer; band HNR; fs-psycho descriptors.
 - **Band split:** at the transition frequency (strings ≈ 1 kHz; winds at the tone-hole cutoff), with statistics above it.
 - **Perceptual tolerances** where published (violin: Fritz et al. 2007).
-- **Checks:** segmentation; pitch-shift invariance (+20 c ⇒ < 1 dB); baseline ordering; identity control.
+- **Checks:** segmentation; pitch-shift invariance (+20 c ⇒ < 1 dB); baseline ordering; real recordings of the instrument from a second library graded beside every family (`instrgrade/gate_run.py`).
 
 **Blind spots of the 2026-10-15 grader, fixed by M7.1-W2 before any Q2 claim:**
 - **Windows** (`steady_window`: 0.30–1.10 s sustained, 0.02–0.52 s decaying) exclude the attack and the late decay.

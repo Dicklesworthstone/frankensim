@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""identity_eval: the UNREGISTERED Q2 candidates of identity.py measured on library recordings only, for the owner's choice.
+"""identity_eval: the Q2 candidates of identity.py measured on library recordings only; the owner chose B (Q2 Alive, 2026-10-22).
 
 No render and no recording from a second library is read here (those are gate_run.py's). Each library note sampled below is a
 candidate against its own instrument's set with the note held out:
@@ -280,7 +280,7 @@ def pct(kn):
 
 
 def report(o):
-    L = [f"UNREGISTERED Q2 candidates on library recordings only ({o['identity_version']}; A set membership, B life in the set, "
+    L = [f"Q2 candidates on library recordings only ({o['identity_version']}; A set membership, B life in the set = Q2 Alive, "
          "C life + nearest-set identity)", "", f'{"real notes, held out":42s}' + "".join(f"{c:>18s}" for c in CANDIDATES)]
     for gp, cc in o["real"].items():
         L.append(f"  {gp.replace('|', '  '):40s}" + "".join(f"{pct(cc[c]):>18s}" for c in CANDIDATES))

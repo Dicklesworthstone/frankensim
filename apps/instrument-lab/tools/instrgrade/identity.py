@@ -1,18 +1,26 @@
-"""identity: the Q2 ("recognisable") statistic as the beads define it today, and the candidate redefinitions put to the owner.
+"""identity: Q2 Alive, the registered Q2 statistic, with the retired definition and the candidates it was chosen from.
 
-UNREGISTERED. None of the candidates below is a gate until the owner chooses one on bead pexfp.357. Until then no render may be
-graded with them: gate_run.py grades renders with the CURRENT definition only and reports the candidates' numbers on library
-recordings alone (identity_eval.py). None of this may be used to choose, tune or fit physics (owner, 2026-10-21).
+REGISTERED 2026-10-22: Q2 Alive (STATISTIC), the owner's choice (a) on bead pexfp.357, relayed by MagentaBadger (mail 5833).
+"Moves like a real recording of the instrument", for SUSTAINED families only (bowed strings arco, winds, brass, voice):
+  q2_alive(c, S, kind) = judge(c, S, LIFE_MEASURES): the note's mean spectral flux after the attack, as a level, lies within the
+  spread of its instrument's real recordings S (below). A held-out note passes at margin >= 0 dB; a family passes Q2 when >= 80 %
+  of its held-out graded notes pass and gate_run.py's controls hold in the same run (real recordings from a second library pass at
+  >= 80 %; the five null baselines of freeze.null_signals all fail; +20 c moves no margin by 1 dB or more).
+It is NOT an identity test: a real recording passes as another instrument most of the time. Which instrument it is goes to the
+owner's blind test (Q4); nearest_set() is reported beside Q2 Alive, never gating. Struck and plucked notes (piano, bars, guitar,
+pizzicato) get NO claim (q2_alive returns None): after the attack a real decay is as still as a null, and the flux of a short
+pizzicato is not stable under +20 c (identity_eval.py). It is a final validation and must never be used to choose, tune or fit
+physics (owner, 2026-10-21).
 
-The current definition, bead_q2(): m = d_o - d_t on the spectral distance spec_db (instrgrade.distance: third-octave envelope and
-harmonic levels), d_t to the ONE reference recording the pair is graded against, d_o to the nearest note of another instrument
-of the same kind within 2 semitones, any dynamic; a note passes at m >= BEAD_MARGIN_DB, a family at >= 80 % of its notes. In
-WhiteGull's audit (2026-10-22) it passed real recordings from a second library on 1 of 46 and the accepted piano on 0 of 2: the
-distance to one recording measures its room, microphone, player and specimen. And it passes a recording frozen (freeze.py),
-whose spectrum is the recording's.
+RETIRED, bead_q2(): m = d_o - d_t on the spectral distance spec_db (instrgrade.distance: third-octave envelope and harmonic
+levels), d_t to the ONE reference recording the pair is graded against, d_o to the nearest note of another instrument of the same
+kind within 2 semitones, any dynamic; pass at m >= BEAD_MARGIN_DB. It passed real recordings from a second library on 1 of 46 and
+the piano on 0 of 3, and the frozen null on 28 of 56 (gate_run.py, 2026-10-22): the distance to one recording measures its room,
+microphone, player and specimen. Kept so that table can be reproduced.
 
-The candidates judge a note c of instrument I against the SET S of the library's recordings of I with the same articulation and
-kind within SEMITONES of c's note: every dynamic, take and string (at least MIN_SET of them, otherwise no claim). On a measure m:
+The candidates the owner chose from judge a note c of instrument I against the SET S of the library's recordings of I with the
+same articulation and kind within SEMITONES of c's note: every dynamic, take and string (at least MIN_SET of them, otherwise no
+claim). On a measure m:
 
   nearest_m(c) = min over e in S of gap_m(c, e)                                 how far c is from the nearest real recording
   ruler_m(S)   = max over e in S of min over e' in S, e' != e, of gap_m(e, e')    how far a real recording of S can sit from
@@ -20,15 +28,17 @@ kind within SEMITONES of c's note: every dynamic, take and string (at least MIN_
   margin_m     = ruler_m - nearest_m                                            judge(): c passes when every margin_m >= 0
 
   A  set membership    judge() on SET_MEASURES (spec_db, cepstral_env_db, flux_level_db): the note sits among its instrument's
-                       recordings on its spectrum and on how much it moves.
+                       recordings on its spectrum and on how much it moves. Not chosen: across specimens it passes 34.5 %.
   B  life in the set   judge() on LIFE_MEASURES (flux_level_db alone): the note moves as much as its instrument's recordings do.
                        A frame-to-frame difference of log spectra, so a fixed recording chain cancels out of it; it says nothing
-                       about WHICH instrument (stationary noise moves a spectrum too).
+                       about WHICH instrument (stationary noise in the map moves a spectrum too). CHOSEN: Q2 Alive, sustained only.
   C  life + identity   B, and nearest_set(): c's nearest recording on IDENTITY_MEASURE (the cepstral envelope with its best
                        straight line in log frequency taken out, so a smooth recording-chain tilt does not count) is one of I's.
+                       Not chosen as a gate (36.2 % across specimens); its identity is reported beside Q2 Alive.
 
 identity_eval.py measures each on library recordings only, held out across specimens (UIowa's two violins, violas, cellos and
-basses), singers (VocalSet) or files, with the five nulls of freeze.null_signals and a +20 c copy of every note.
+basses), singers (VocalSet) or files, with the five nulls of freeze.null_signals and a +20 c copy of every note. On sustained
+notes B passed 83.5 % of them, 1 of 2155 nulls, and moved 2 of 428 notes by 1.0-1.2 dB under +20 c.
 
 flux_level_db = |20 log10| of the ratio of two notes' mean spectral flux (decompose.flux_curve over the sounding frames of
 [FLUX_SKIP_S, FLUX_SPAN_S]): a level, so a note that does not move (a periodic render, a frozen recording) is far from every real
@@ -46,8 +56,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from decompose import HOP, SR, Note  # noqa: E402
 from instrgrade import rms_gap  # noqa: E402
 
-IDENTITY_VERSION = "identity-1"
-BEAD_MARGIN_DB = 3.0  # the current definition's pass margin
+IDENTITY_VERSION = "identity-1"  # the features' version (a cache of them stays valid while it does not change)
+STATISTIC = "q2-alive-1"  # the registered Q2 statistic (pexfp.357)
+BEAD_MARGIN_DB = 3.0  # the retired definition's pass margin
 SEMITONES = 2  # a candidate's set: notes within this many semitones of its own
 MIN_SET = 3  # fewer real recordings than this in the set: no claim
 SET_MEASURES = ("spec_db", "cepstral_env_db", "flux_level_db")  # candidate A
@@ -109,8 +120,17 @@ def ruler(members, m):
     return worst, who
 
 
+def q2_alive(cand, members, kind, rulers=None):
+    """Q2 Alive, the registered Q2 statistic (module docstring): judge() on LIFE_MEASURES against the set `members` of the
+    instrument's real recordings. A note of kind "decaying" (struck or plucked) gets no claim: recognisable None and the reason."""
+    if kind != "sustained":
+        return dict(statistic=STATISTIC, version=IDENTITY_VERSION, recognisable=None, margin_db=None, measures={}, set_size=len(members),
+                    reason="no claim: Q2 Alive makes no realism claim for struck and plucked notes (owner, 2026-10-22)")
+    return dict(judge(cand, members, LIFE_MEASURES, rulers), statistic=STATISTIC)
+
+
 def bead_q2(cand, ref, others, margin_db=BEAD_MARGIN_DB):
-    """The CURRENT definition (module docstring): d_t = spec_db to the pair's one reference `ref` (features), d_o = spec_db to the
+    """The RETIRED definition (module docstring): d_t = spec_db to the pair's one reference `ref` (features), d_o = spec_db to the
     nearest of `others` [(label, features)]: the notes of other instruments of the same kind within 2 semitones, any dynamic.
     Returns {d_t_db, d_o_db, nearest_other, margin_db = d_o - d_t, recognisable: margin >= margin_db} or None without others."""
     best = min(((gap("spec_db", cand, f), la) for la, f in others), default=None)
