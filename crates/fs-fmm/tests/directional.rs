@@ -863,6 +863,55 @@ fn dfmm_declared_envelopes_are_neutral_and_enforced() {
 }
 
 #[test]
+fn dfmm_declared_near_pair_envelope_is_neutral_and_enforced() {
+    // The near field is admitted at exactly its counted point pairs and
+    // refused one below, during the pair traversal and so before any coupling
+    // setup. Any admitting budget leaves every potential bit unchanged.
+    let started = Instant::now();
+    let points = sphere(1024);
+    let q = charges(points.len());
+    let kernel = HelmholtzSingle { k: 5.0 };
+    let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+    o.leaf_capacity = 16;
+    let build = |o: DirectionalOptions| FmmC64::new_directional(&kernel, &points, o);
+    let base = build(o.clone()).unwrap();
+    let pairs = base.directional_stats().unwrap().near_pairs;
+    assert!(pairs > 0, "the fixture must have a direct near field");
+    let reference = bits(&base.potentials(&q).unwrap());
+    for declared in [pairs, usize::MAX] {
+        let mut admitted = o.clone();
+        admitted.max_near_pairs = declared;
+        assert_eq!(
+            reference,
+            bits(&build(admitted).unwrap().potentials(&q).unwrap())
+        );
+    }
+    let mut refused = o.clone();
+    refused.max_near_pairs = pairs - 1;
+    assert!(matches!(
+        build(refused),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "directional near-field point pair",
+            requested,
+            max,
+        }) if requested == pairs && max == pairs - 1
+    ));
+    let mut zero = o.clone();
+    zero.max_near_pairs = 0;
+    assert!(matches!(
+        zero.validate(),
+        Err(FmmError::ComplexRequest { .. })
+    ));
+    emit(
+        "dfmm-declared-near-pairs",
+        format!(
+            "{{\"case\":\"dfmm-declared-near-pairs\",\"inputs\":\"Fibonacci unit sphere, 1024 points, k=5\",\"axis\":\"near-pair budget\",\"rung\":0,\"observed\":{{\"near_pairs\":{pairs}}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+            started.elapsed().as_secs_f64()
+        ),
+    );
+}
+
+#[test]
 fn dfmm_bitwise_repeat() {
     let (points, normals) = fixture(16);
     let q = charges(16);

@@ -59,6 +59,10 @@ pub struct DirectionalOptions {
     /// `low_freq_threshold`, which delegates whole to W5a at this order and
     /// leaf capacity. Defaults to [`ComplexBudget::V1`].
     pub w5a_budget: ComplexBudget,
+    /// Counted near-field point pairs. This route caches none, so every pass
+    /// evaluates them directly. Defaults to [`MAX_NEAR_FIELD_PAIR_WORK`]; a
+    /// plan with more pairs is refused before any coupling setup.
+    pub max_near_pairs: usize,
 }
 impl DirectionalOptions {
     /// Order selected by the explicit 4^-p design indicator, not a universal
@@ -77,6 +81,7 @@ impl DirectionalOptions {
             max_coefficient_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
             max_setup_work: MAX_TRANSLATION_WORK,
             w5a_budget: ComplexBudget::V1,
+            max_near_pairs: MAX_NEAR_FIELD_PAIR_WORK,
         })
     }
     /// Validate parameters without building geometry or evaluating a kernel.
@@ -134,9 +139,9 @@ impl DirectionalOptions {
             self.max_coefficient_slots,
             MAX_DECLARED_COEFFICIENT_SLOTS,
         )?;
-        if self.max_coefficient_slots == 0 || self.max_setup_work == 0 {
+        if self.max_coefficient_slots == 0 || self.max_setup_work == 0 || self.max_near_pairs == 0 {
             return Err(FmmError::ComplexRequest {
-                reason: "directional coefficient-slot and setup-work budgets must be positive",
+                reason: "directional coefficient-slot, setup-work and near-pair budgets must be positive",
             });
         }
         Ok(())
@@ -639,7 +644,7 @@ impl DirectionalPlan {
                 budget(
                     "directional near-field point pair",
                     plan.stats.near_pairs,
-                    MAX_NEAR_FIELD_PAIR_WORK,
+                    plan.options.max_near_pairs,
                 )?;
                 plan.near.push((a, b));
             } else {
