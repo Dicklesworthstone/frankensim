@@ -398,6 +398,11 @@ fn cold_rebind_requires_new_source_tensors_and_never_discards_an_existing_loss()
 /// Isotropic state whose six reduced viscosities are `beta` [s] times its own
 /// plane-stress stiffness, so the projected damping is exactly `beta*K`.
 fn isotropic_state(beta: f64) -> ResolvedMaterialStatePoint {
+    isotropic_state_valid_to(beta, 100000.0)
+}
+
+/// The same state, admitted up to `omega_max` [rad/s].
+fn isotropic_state_valid_to(beta: f64, omega_max: f64) -> ResolvedMaterialStatePoint {
     let (e, nu) = (8e9, 0.2);
     let q11 = e / (1.0 - nu * nu);
     let g = e / (2.0 * (1.0 + nu));
@@ -413,7 +418,7 @@ fn isotropic_state(beta: f64) -> ResolvedMaterialStatePoint {
     for (key,dims,value) in values {
         claims.insert_claim(PropertyClaim { key:PropertyKey::new(key,dims),
             value:PropertyValue::Scalar {value,dims},
-            validity:ValidityDomain::unconstrained().with("T",280.0,310.0).with("omega",0.0,100000.0),
+            validity:ValidityDomain::unconstrained().with("T",280.0,310.0).with("omega",0.0,omega_max),
             uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
             observations:vec![],provenance:Provenance {source:"synthetic isotropic viscous body; not a measured material".into(),
                 license:"CC0-1.0".into(),artifact:None}}).unwrap();
@@ -431,7 +436,21 @@ fn isotropic_state(beta: f64) -> ResolvedMaterialStatePoint {
 /// unlike a left/right split, couples (2,1) with (1,2): their y-shapes are
 /// orthogonal over any region spanning all of y.
 fn two_region_plate(beta_corner: f64, beta_rest: f64, aspect: f64) -> (Vec<f64>, Vec<f64>) {
-    let (nx, ny) = (6, 6);
+    let (chart, mut reduction, viscosity) = two_region_chart(beta_corner, beta_rest, aspect, 6, 100000.0);
+    reduction.n_modes = 4;
+    reduction.eigenvalue_window = (1.0, 1e8);
+    let gate = CancelGate::new_clock_free();
+    let image = chart.certified_viscous_radiators(&reduction, &viscosity, limits(), &gate).unwrap();
+    let omega = image.radiators().iter().map(|r| r.omega).collect();
+    (omega, image.damping().matrix_per_s().to_vec())
+}
+
+/// The same quadrant/rest chart on a `cells` x `cells` mesh, its materials
+/// admitted up to `omega_max` [rad/s], asking for 64 modes in (1, omega_max^2].
+fn two_region_chart(beta_corner: f64, beta_rest: f64, aspect: f64, cells: usize, omega_max: f64)
+    -> (ResolvedPlateChart, PlateChartRadiation, PlateViscosity)
+{
+    let (nx, ny) = (cells, cells);
     let (a, b) = (0.3, 0.3 * aspect);
     let mesh = PlateMesh::rectangle(a, b, nx, ny);
     let regions = [("corner", beta_corner), ("rest", beta_rest)].into_iter().enumerate()
@@ -443,23 +462,21 @@ fn two_region_plate(beta_corner: f64, beta_rest: f64, aspect: f64) -> (Vec<f64>,
                     let corner = x < 0.5 * a && y < 0.5 * b;
                     (corner == (r == 0)).then_some(e)
                 }).collect() },
-            material: isotropic_state(beta), model: PlateMaterialModel::Orthotropic12,
+            material: isotropic_state_valid_to(beta, omega_max), model: PlateMaterialModel::Orthotropic12,
             thickness_constraint: PlateThicknessConstraint::FixedThickness(0.002),
             material_angle_rad: 0.0,
         }).collect();
-    // Node (2,2): off every nodal line of the four lowest modes.
+    // Node (2,2) on the 6x6 mesh: off every nodal line of the four lowest modes.
     let mut force = vec![0.0; mesh.nodes.len()];
-    force[2 * (nx + 1) + 2] = 1.0;
+    let at = cells / 3;
+    force[at * (nx + 1) + at] = 1.0;
     let chart = compile_plate_material_chart(mesh, PlateMesh::rectangle_boundary(nx, ny), regions).unwrap();
     let reduction = PlateChartRadiation {
         assembly: AssemblyOptions { pretension: 0.0, support: EdgeSupport::SimplySupported },
-        eigenvalue_window: (1.0, 1e8), n_modes: 4, damping_ratio: 0.0, unit_force_weights: force,
+        eigenvalue_window: (1.0, omega_max * omega_max), n_modes: 64, damping_ratio: 0.0, unit_force_weights: force,
     };
-    let gate = CancelGate::new_clock_free();
-    let viscosity = PlateViscosity::from_chart(&chart, KEYS, &gate).unwrap();
-    let image = chart.certified_viscous_radiators(&reduction, &viscosity, limits(), &gate).unwrap();
-    let omega = image.radiators().iter().map(|r| r.omega).collect();
-    (omega, image.damping().matrix_per_s().to_vec())
+    let viscosity = PlateViscosity::from_chart(&chart, KEYS, &CancelGate::new_clock_free()).unwrap();
+    (chart, reduction, viscosity)
 }
 
 /// One pole of `lambda^2 I + lambda C + Omega^2`, refined from a dense seed by
@@ -551,8 +568,11 @@ fn g1_clustered_pair_triggers_full_block_fallback() {
     assert!(raw_correction <= 1e-6, "refinement wandered: {raw_correction:e}");
     let nearest = |z: C64| truth.iter().copied()
         .min_by(|a, b| (*a - z).abs().total_cmp(&(*b - z).abs())).unwrap();
+    let nearest_raw = |z: C64| raw.iter().copied()
+        .min_by(|a, b| (*a - z).abs().total_cmp(&(*b - z).abs())).unwrap();
     let mut pair_block = None;
     let (mut worst_decay, mut worst_cents) = (0.0_f64, 0.0_f64);
+    let (mut raw_decay, mut raw_cents) = (0.0_f64, 0.0_f64);
     for block in &result.blocks {
         if let fs_modal::ModalDampingBlock::Full { modes, eigenvalues, radii, .. } = block {
             if modes.contains(&1) && modes.contains(&2) { pair_block = Some(modes.clone()); }
@@ -562,11 +582,16 @@ fn g1_clustered_pair_triggers_full_block_fallback() {
                     "block pole off by {:e}, radius {r:e}", (t - mu).abs());
                 worst_decay = worst_decay.max((t.re - mu.re).abs() / t.re.abs());
                 worst_cents = worst_cents.max(1200.0 / core::f64::consts::LN_2 * ((t.im - mu.im) / t.im).abs());
+                // The unrefined `quadratic_eigenvalues` poles as truth, too.
+                let t = nearest_raw(mu);
+                raw_decay = raw_decay.max((t.re - mu.re).abs() / t.re.abs());
+                raw_cents = raw_cents.max(1200.0 / core::f64::consts::LN_2 * ((t.im - mu.im) / t.im).abs());
             }
         }
     }
     let pair_block = pair_block.expect("the near-degenerate pair must be one full block");
     assert!(worst_decay <= 1e-3 && worst_cents <= 0.01, "block poles {worst_decay:e} / {worst_cents:e} c");
+    assert!(raw_decay <= 1e-3 && raw_cents <= 0.01, "block poles vs raw dense truth {raw_decay:e} / {raw_cents:e} c");
     // Forcing the diagonal on the same matrix.
     let loose = fs_modal::ModalDampingBudget { max_rel_decay_error: 1e9, max_freq_error_cents: 1e9,
         max_cluster_size: fs_modal::MAX_DAMPING_CLUSTER };
@@ -585,7 +610,86 @@ fn g1_clustered_pair_triggers_full_block_fallback() {
         fs_modal::ModalDampingBlock::Diagonal { mode, .. } => format!("{mode}"),
         fs_modal::ModalDampingBlock::Full { modes, .. } => format!("{modes:?}"),
     }).collect();
-    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g1_clustered_pair_triggers_full_block_fallback\",\"tier\":\"G1\",\"inputs\":{{\"fixture\":\"quadrant/rest isotropic plate, viscosity 50:1, aspect 1.002\",\"n_modes\":{n},\"pair_split\":{split:e}}},\"provenance\":\"named fixture\",\"observed\":{{\"blocks\":\"{}\",\"pair_block\":{pair_block:?},\"block_rel_decay_error\":{worst_decay:e},\"block_freq_error_cents\":{worst_cents:e},\"forced_diagonal_rel_decay_error\":{forced_decay:e},\"forced_diagonal_freq_error_cents\":{forced_cents:e},\"raw_dense_truth_max_rel_correction\":{raw_correction:e}}},\"tolerance\":{{\"decay\":1e-3,\"cents\":0.01}},\"verdict\":\"pass\"}}", shape.join(" "));
+    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g1_clustered_pair_triggers_full_block_fallback\",\"tier\":\"G1\",\"inputs\":{{\"fixture\":\"quadrant/rest isotropic plate, viscosity 50:1, aspect 1.002\",\"n_modes\":{n},\"pair_split\":{split:e}}},\"provenance\":\"named fixture\",\"observed\":{{\"blocks\":\"{}\",\"pair_block\":{pair_block:?},\"block_rel_decay_error\":{worst_decay:e},\"block_freq_error_cents\":{worst_cents:e},\"block_rel_decay_error_vs_raw_dense\":{raw_decay:e},\"block_freq_error_cents_vs_raw_dense\":{raw_cents:e},\"forced_diagonal_rel_decay_error\":{forced_decay:e},\"forced_diagonal_freq_error_cents\":{forced_cents:e},\"raw_dense_truth_max_rel_correction\":{raw_correction:e}}},\"tolerance\":{{\"decay\":1e-3,\"cents\":0.01}},\"verdict\":\"pass\"}}", shape.join(" "));
     assert!(forced_decay > 1e-3 || forced_cents > 0.01,
         "forcing the diagonal must break the budget: {forced_decay:e} / {forced_cents:e} c");
+}
+
+#[test]
+fn g0_bessel_far_coupling_bound_dominates_true_norm() {
+    // The windowed plate projection forms entries only inside the window and
+    // bounds the rest of each row by Bessel's inequality on the mass-norm
+    // residual. Truth is the dense `matrix_per_s()` of the same modes.
+    // - "partial": the 6x6 clustered chart at its 64-mode ceiling (123 DOFs),
+    //   so the bound also covers modes that were never retained.
+    // - "complete": the same quadrant/rest chart on a 4x4 mesh, all 59 DOFs
+    //   retained. Bessel is then Parseval, and with the window covering
+    //   everything the bound must vanish to 1e-10 of each column norm.
+    // Viscosities are the clustered test's scaled down 130x, so the stiffest
+    // rotary modes stay underdamped.
+    let gate = CancelGate::new_clock_free();
+    let limits = PlateViscosityLimits { max_modes: 64, max_projection_terms: 100_000_000,
+        reference_resistance_n_s_m: 1.0 };
+    let loose = fs_modal::ModalDampingBudget { max_rel_decay_error: 1e9, max_freq_error_cents: 1e9,
+        max_cluster_size: fs_modal::MAX_DAMPING_CLUSTER };
+    let mut rows = Vec::new();
+    let mut complete_floor = None;
+    for (label, cells) in [("partial", 6), ("complete", 4)] {
+        let (chart, reduction, viscosity) = two_region_chart(5e-8, 1e-9, 1.002, cells, 1e8);
+        let free = chart.chart().assemble(&[], &reduction.assembly).unwrap().free;
+        let dense = chart.certified_viscous_radiators(&reduction, &viscosity, limits, &gate).unwrap();
+        let omega: Vec<f64> = dense.radiators().iter().map(|r| r.omega).collect();
+        let n = omega.len();
+        assert_eq!(n, free.min(64), "{label}: retained modes");
+        let c = dense.damping().matrix_per_s();
+        let column: Vec<f64> = (0..n).map(|j| (0..n).map(|k| c[n * j + k] * c[n * j + k]).sum::<f64>().sqrt()).collect();
+        let span = omega[n - 1] - omega[0];
+        for window in [0.02 * omega[0], 0.5 * omega[0], 0.1 * span, 2.0 * span] {
+            let (radiators, windowed) = chart.certified_viscous_radiators_windowed(&reduction, &viscosity,
+                limits, window, &gate).unwrap();
+            assert!(radiators.iter().zip(&omega).all(|(r, w)| r.omega.to_bits() == w.to_bits()),
+                "the same single eigensolve and modes");
+            let neighbours = fs_modal::damping_window_neighbours(&omega, window).unwrap();
+            let everything = neighbours.iter().all(|row| row.len() == n - 1);
+            let (mut margin, mut far_rel, mut column_excess, mut entry_error) = (f64::INFINITY, 0.0_f64, 0.0_f64, 0.0_f64);
+            for j in 0..n {
+                for &k in neighbours[j].iter().chain(std::iter::once(&j)) {
+                    let formed = windowed.entry(j, k).expect("formed inside the window");
+                    entry_error = entry_error.max((formed - c[n * j + k]).abs() / column[j]);
+                }
+                assert!(neighbours[j].iter().all(|&k| windowed.entry(k, j) == windowed.entry(j, k)), "symmetric");
+                let true_far = (0..n).filter(|&k| k != j && neighbours[j].binary_search(&k).is_err())
+                    .map(|k| c[n * j + k] * c[n * j + k]).sum::<f64>().sqrt();
+                let bound = windowed.far_row_norm_bound()[j];
+                assert!(bound >= true_far, "{label}, window {window:e}: mode {j} far bound {bound:e} < true {true_far:e}");
+                let column_bound = windowed.column_norm_bound()[j];
+                assert!(column_bound >= column[j], "{label}: mode {j} column bound {column_bound:e} < true {:e}", column[j]);
+                margin = margin.min((bound - true_far) / column[j]);
+                far_rel = far_rel.max(bound / column[j]);
+                column_excess = column_excess.max(column_bound / column[j] - 1.0);
+            }
+            assert!(entry_error <= 1e-10, "{label}: formed entries off the dense projection by {entry_error:e}");
+            // The certifier consumes exactly this bound.
+            let certified = match windowed.certify(&loose) {
+                Ok(result) => {
+                    assert_eq!(result.far_coupling.far_row_norm, windowed.far_row_norm_bound());
+                    true
+                }
+                Err(fs_modal::ModalError::DampingBlockSpansWindow { .. }) if !everything => false,
+                Err(e) => panic!("{label}, window {window:e}: {e}"),
+            };
+            // The same column bound through a difference of squares, for the record.
+            let near = |i: usize, k: usize| windowed.entry(i, k).unwrap_or(f64::NAN);
+            let squares = fs_modal::certify_modal_damping_windowed(&omega, &near, windowed.column_norm_bound(),
+                window, &loose).map(|r| (0..n).map(|j| r.far_coupling.far_row_norm[j] / column[j]).fold(0.0, f64::max));
+            let squares = squares.map_or_else(|e| format!("\"{e}\""), |v| format!("{v:e}"));
+            if everything && label == "complete" { complete_floor = Some((far_rel, column_excess)); }
+            rows.push(format!("{{\"chart\":\"{label}\",\"cells\":{cells},\"free_dofs\":{free},\"n_modes\":{n},\"window_rad_s\":{window:e},\"full_window\":{everything},\"certified\":{certified},\"basis_defect\":{:e},\"min_rel_margin\":{margin:e},\"max_rel_far_bound\":{far_rel:e},\"max_rel_column_excess\":{column_excess:e},\"max_rel_entry_error\":{entry_error:e},\"squares_path_max_rel_far_bound\":{squares}}}", windowed.basis_defect()));
+        }
+    }
+    let (floor, excess) = complete_floor.expect("the complete chart's full window ran");
+    println!("{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g0_bessel_far_coupling_bound_dominates_true_norm\",\"tier\":\"G0\",\"inputs\":{{\"fixture\":\"quadrant/rest isotropic plate, viscosity 50:1, aspect 1.002\",\"beta_s\":[5e-8,1e-9]}},\"provenance\":\"named fixture\",\"observed\":[{}],\"tolerance\":{{\"complete_full_window_rel_far_bound\":1e-10,\"complete_rel_column_excess\":1e-10}},\"verdict\":\"{}\"}}",
+        rows.join(","), if floor <= 1e-10 && excess <= 1e-10 { "pass" } else { "fail" });
+    assert!(floor <= 1e-10, "complete space, full window: far bound {floor:e} of the column norm");
+    assert!(excess <= 1e-10, "complete space: column bound exceeds the true norm by {excess:e}");
 }

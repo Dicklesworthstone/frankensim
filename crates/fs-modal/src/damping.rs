@@ -57,10 +57,18 @@
 //! channels restricted to it; this module adds no projection.
 //!
 //! **Scalable path.** [`certify_modal_damping_windowed`] never forms C.
-//! - It reads `C_jk` only for `|ω_j − ω_k| < window`.
+//! - It reads `C_jk` only for `|ω_j − ω_k| < window`
+//!   ([`damping_window_neighbours`]).
 //! - It bounds the rest of each row by Bessel's inequality:
 //!   `Σ_far C_jk² ≤ ‖C e_j‖² − Σ_near C_jk²`, with the caller's column bound
-//!   `‖C e_j‖ ≤ √(xᵀM⁻¹x)`, `x = C_FE φ̂_j`.
+//!   `‖C e_j‖ ≤ √(xᵀM⁻¹x)`, `x = C_FE φ̂_j`. A difference of squares keeps
+//!   only half the digits, so this bound never falls below about `√ε‖C e_j‖`.
+//! - [`certify_modal_damping_windowed_far_rows`] instead takes the far norm
+//!   itself. Its natural source is the mass norm of the residual
+//!   `r_j = M⁻¹x_j − Σ_{k∈near∪{j}} φ̂_k C_kj`: for M-orthonormal modes,
+//!   `C_kj = ⟨φ̂_k, r_j⟩_M` for every unread k, so `Σ_far C_kj² ≤ ‖r_j‖²_M`.
+//!   The residual is formed by subtracting vectors, not squares, and its
+//!   floor is about `ε‖C e_j‖`.
 //! - Splitting the complement into modes within `window/2` of the disc and the
 //!   rest gives `e ≤ max(‖Ē_NN‖, ‖Ē_FF‖) + ‖Ē_NF‖`. Only the first term needs
 //!   matrix entries.
@@ -226,57 +234,154 @@ pub fn certify_modal_damping_windowed(
     window: f64,
     budget: &ModalDampingBudget,
 ) -> Result<CertifiedModalDamping, ModalError> {
-    let n = omega.len();
-    if n == 0 || column_norm_bound.len() != n {
-        return Err(input("column bound length", column_norm_bound.len()));
-    }
+    windowed(
+        omega,
+        near,
+        FarInput::ColumnNorm(column_norm_bound),
+        window,
+        budget,
+    )
+}
+
+/// Certify without forming C, with the caller's own bound on what is not
+/// read. `near` is as in [`certify_modal_damping_windowed`].
+/// `far_row_norm_bound[j]` must bound the norm of row j's off-diagonal
+/// entries outside [`damping_window_neighbours`]`(omega, window)[j]`. The
+/// mass norm of the residual `M⁻¹x_j − Σ_{k∈near∪{j}} φ̂_k C_kj` is such a
+/// bound for M-orthonormal modes, over every mode of the underlying space,
+/// without the √ε floor of a difference of squares.
+///
+/// # Errors
+/// - As [`certify_modal_damping`].
+/// - [`ModalError::DampingInput`] for a bad window, a negative or
+///   non-finite far bound, or an asymmetric `near`.
+/// - [`ModalError::DampingBlockSpansWindow`] when a required block needs
+///   entries outside the window.
+pub fn certify_modal_damping_windowed_far_rows(
+    omega: &[f64],
+    near: &dyn Fn(usize, usize) -> f64,
+    far_row_norm_bound: &[f64],
+    window: f64,
+    budget: &ModalDampingBudget,
+) -> Result<CertifiedModalDamping, ModalError> {
+    windowed(
+        omega,
+        near,
+        FarInput::FarRows(far_row_norm_bound),
+        window,
+        budget,
+    )
+}
+
+/// The off-diagonal entries a windowed certificate reads: for each mode i,
+/// every other mode k with `|ω_i − ω_k| < window`, ascending. The relation
+/// is symmetric. A caller that bounds the unread entries itself must exclude
+/// exactly these.
+///
+/// # Errors
+/// [`ModalError::DampingInput`] for a non-positive or non-finite window or
+/// frequency.
+pub fn damping_window_neighbours(
+    omega: &[f64],
+    window: f64,
+) -> Result<Vec<Vec<usize>>, ModalError> {
     if !window.is_finite() || window <= 0.0 {
         return Err(input("coupling window", 0));
     }
-    validate(omega, budget)?;
+    for (i, &w) in omega.iter().enumerate() {
+        if !(w.is_finite() && w > 0.0) {
+            return Err(input("undamped frequency", i));
+        }
+    }
+    let n = omega.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| omega[a].total_cmp(&omega[b]).then(a.cmp(&b)));
-    let mut diag = vec![0.0; n];
-    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    let mut far = vec![0.0; n];
+    let mut neighbours = vec![Vec::new(); n];
     for (position, &i) in order.iter().enumerate() {
-        let mut sum_sq = 0.0_f64;
-        // Sorted sweep: only modes inside the window are ever read.
+        // Sorted sweep: only modes inside the window are ever visited.
         let low = order[..position]
             .iter()
             .rev()
             .take_while(|&&j| omega[i] - omega[j] < window);
-        let high = order[position..]
+        let high = order[position + 1..]
             .iter()
             .take_while(|&&j| omega[j] - omega[i] < window);
-        for &j in low.chain(high) {
+        let mut row: Vec<usize> = low.chain(high).copied().collect();
+        row.sort_unstable();
+        neighbours[i] = row;
+    }
+    Ok(neighbours)
+}
+
+/// How a windowed certificate bounds the entries it does not read.
+#[derive(Clone, Copy)]
+enum FarInput<'a> {
+    /// `‖C e_j‖₂` over the complete space; Bessel by a difference of squares.
+    ColumnNorm(&'a [f64]),
+    /// The caller's bound on each row's unread off-diagonal norm.
+    FarRows(&'a [f64]),
+}
+
+fn windowed(
+    omega: &[f64],
+    near: &dyn Fn(usize, usize) -> f64,
+    far_input: FarInput<'_>,
+    window: f64,
+    budget: &ModalDampingBudget,
+) -> Result<CertifiedModalDamping, ModalError> {
+    let n = omega.len();
+    let (supplied, length_field) = match far_input {
+        FarInput::ColumnNorm(bounds) => (bounds, "column bound length"),
+        FarInput::FarRows(bounds) => (bounds, "far row bound length"),
+    };
+    if n == 0 || supplied.len() != n {
+        return Err(input(length_field, supplied.len()));
+    }
+    let neighbours = damping_window_neighbours(omega, window)?;
+    validate(omega, budget)?;
+    let mut diag = vec![0.0; n];
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut far = vec![0.0; n];
+    for i in 0..n {
+        let value = near(i, i);
+        if !value.is_finite() {
+            return Err(input("non-finite damping entry", n * i + i));
+        }
+        diag[i] = value;
+        let mut sum_sq = value * value;
+        for &j in &neighbours[i] {
             let value = near(i, j);
             if !value.is_finite() {
                 return Err(input("non-finite damping entry", n * i + j));
             }
-            if j == i {
-                diag[i] = value;
-            } else {
-                if value - near(j, i) != 0.0 {
-                    return Err(input("asymmetric damping entry", n * i + j));
-                }
-                if value != 0.0 {
-                    rows[i].push((j, value));
-                }
+            if value - near(j, i) != 0.0 {
+                return Err(input("asymmetric damping entry", n * i + j));
+            }
+            if value != 0.0 {
+                rows[i].push((j, value));
             }
             sum_sq = value.mul_add(value, sum_sq);
         }
-        rows[i].sort_by_key(|&(j, _)| j);
-        let bound = column_norm_bound[i];
-        if !bound.is_finite() || bound < 0.0 || bound * bound < sum_sq * (1.0 - 1e-12) {
-            return Err(input("column norm bound below the entries read", i));
-        }
-        // Bessel's difference, inflated for the rounding of the sums above
-        // (a difference of squares loses half the digits: the floor is
-        // about √ε·bound, never a vanishing bound).
-        let terms = (rows[i].len() + 2) as f64;
-        let rounding = 4.0 * terms * f64::EPSILON * bound * bound;
-        far[i] = det::sqrt((bound * bound - sum_sq).max(0.0) + rounding);
+        let bound = supplied[i];
+        far[i] = match far_input {
+            FarInput::ColumnNorm(_) => {
+                if !bound.is_finite() || bound < 0.0 || bound * bound < sum_sq * (1.0 - 1e-12) {
+                    return Err(input("column norm bound below the entries read", i));
+                }
+                // Bessel's difference, inflated for the rounding of the sums
+                // above (a difference of squares loses half the digits: the
+                // floor is about √ε·bound, never a vanishing bound).
+                let terms = (rows[i].len() + 2) as f64;
+                let rounding = 4.0 * terms * f64::EPSILON * bound * bound;
+                det::sqrt((bound * bound - sum_sq).max(0.0) + rounding)
+            }
+            FarInput::FarRows(_) => {
+                if !bound.is_finite() || bound < 0.0 {
+                    return Err(input("far row norm bound", i));
+                }
+                bound
+            }
+        };
     }
     let coupling = Coupling::new(diag, rows, far, Some(window));
     Certifier::new(omega, coupling, budget)?.run()

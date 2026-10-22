@@ -213,10 +213,17 @@ The certificate is Rouché's theorem on the Schur complement of
   `1..=MAX_DAMPING_CLUSTER` (64, the connection ceiling).
 
 `certify_modal_damping_windowed` never forms C.
-- It reads `C_jk` only for `|ω_j − ω_k| < window`.
+- It reads `C_jk` only for `|ω_j − ω_k| < window`. `damping_window_neighbours`
+  returns exactly those sets.
 - It bounds each row's unread entries with Bessel's inequality from a
   caller-supplied column-norm bound. For FE callers that bound is
-  `√(xᵀM⁻¹x)`, `x = C_FE φ̂_j`.
+  `√(xᵀM⁻¹x)`, `x = C_FE φ̂_j`. The difference of squares puts a floor of
+  about `√ε‖C e_j‖` under every far bound.
+- `certify_modal_damping_windowed_far_rows` takes the far-row bound itself.
+  FE callers form it as the mass norm of the residual
+  `M⁻¹x_j − Σ_{k∈near∪{j}} φ̂_k C_kj`, with a floor of about `ε‖C e_j‖`.
+  The plate owner's `PlateViscosity` windowed projection in fs-couple does
+  this, and adds the measured mass-orthonormality defect of its modes.
 - `FarCouplingBound` reports the bounds used.
 
 Comparisons carry `ROUCHE_SAFETY = 1e-9` relative; this is not interval

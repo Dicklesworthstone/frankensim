@@ -2,7 +2,8 @@
 //! No per-footprint eigensolves: signs and degenerate eigenspaces must be shared.
 
 use super::*;
-use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits, ModalPlateViscosity, ViscousPlateImage};
+use crate::plate_viscosity::{PlateViscosity, PlateViscosityLimits, ModalPlateViscosity, ViscousPlateImage,
+    WindowedPlateViscosity};
 use fs_exec::CancelGate;
 
 impl ResolvedPlateChart {
@@ -47,7 +48,7 @@ pub(super) fn reduce(
     additional: &[Vec<f64>],
     max_projection_terms: usize,
 ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>), AcousticRealizeError> {
-    reduce_with_tensor(specimen, options, additional, max_projection_terms, None, None)
+    reduce_with_tensor(specimen, options, additional, max_projection_terms, None, None, None)
         .map(|(radiators, ports, _)| (radiators, ports))
 }
 
@@ -74,7 +75,7 @@ impl ResolvedPlateChart {
         -> Result<(ViscousPlateImage, Vec<Vec<f64>>), AcousticRealizeError>
     {
         let (radiators, ports, damping) = reduce_with_tensor(self, options,
-            additional_force_weights, max_force_projection_terms, Some((viscosity, limits, gate)), None)?;
+            additional_force_weights, max_force_projection_terms, Some((viscosity, limits, gate)), None, None)?;
         Ok((ViscousPlateImage { source: viscosity.clone(), radiators,
             damping: damping.expect("selected tensor projection returns its full matrix") }, ports))
     }
@@ -96,9 +97,24 @@ impl ResolvedPlateChart {
         }
         let mut basis = None;
         let (radiators, ports, damping) = reduce_with_tensor(self, options, additional,
-            max_projection_terms, tensor, Some(&mut basis))?;
+            max_projection_terms, tensor, Some(&mut basis), None)?;
         if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
         Ok((radiators, ports, damping, basis.expect("selected original basis is retained")))
+    }
+
+    /// Scalable sibling of [`Self::certified_viscous_radiators`] (IRP M0.2-W5):
+    /// the same single eigensolve and modes, with damping entries projected
+    /// only for `|w_i - w_k| < window` [rad/s]. Bessel's inequality on the
+    /// mass-norm residual bounds the rest of each row; the dense modal matrix
+    /// is never formed. Radiators again carry zero scalar loss.
+    pub fn certified_viscous_radiators_windowed(&self, options: &PlateChartRadiation,
+        viscosity: &PlateViscosity, limits: PlateViscosityLimits, window: f64, gate: &CancelGate)
+        -> Result<(Vec<CompactBody>, WindowedPlateViscosity), AcousticRealizeError>
+    {
+        let mut windowed = None;
+        let (radiators, _, _) = reduce_with_tensor(self, options, &[], 0,
+            Some((viscosity, limits, gate)), None, Some((window, &mut windowed)))?;
+        Ok((radiators, windowed.expect("selected windowed projection returns its bounds")))
     }
 }
 
@@ -107,6 +123,7 @@ fn reduce_with_tensor(
     additional: &[Vec<f64>], max_projection_terms: usize,
     tensor: Option<(&PlateViscosity, PlateViscosityLimits, &CancelGate)>,
     retain: Option<&mut Option<RetainedPlateBasis>>,
+    windowed: Option<(f64, &mut Option<WindowedPlateViscosity>)>,
 ) -> Result<(Vec<CompactBody>, Vec<Vec<f64>>, Option<ModalPlateViscosity>), AcousticRealizeError> {
     if let Some((law, limits, gate)) = tensor {
         law.preflight(specimen, options.n_modes, limits, gate)?;
@@ -185,10 +202,17 @@ fn reduce_with_tensor(
         }
     }
     for (body, bending_zeta) in radiators.iter_mut().zip(bending_zetas) { body.zeta += bending_zeta; }
-    let damping = tensor.map(|(law, limits, gate)| {
-        let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
-        law.project(specimen, &model, &normalized, &omega, limits, gate)
-    }).transpose()?;
+    let damping = match (tensor, windowed) {
+        (Some((law, limits, gate)), Some((window, out))) => {
+            let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
+            *out = Some(law.project_windowed(specimen, &model, &normalized, &omega, window, limits, gate)?);
+            None
+        }
+        (tensor, _) => tensor.map(|(law, limits, gate)| {
+            let omega: Vec<_> = radiators.iter().map(|r|r.omega).collect();
+            law.project(specimen, &model, &normalized, &omega, limits, gate)
+        }).transpose()?,
+    };
     if let Some(basis) = retain {
         *basis = Some(RetainedPlateBasis {
             source_identity: specimen.specimen_identity(),

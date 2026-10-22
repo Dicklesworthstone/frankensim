@@ -15,7 +15,8 @@ use fs_math::det;
 use fs_mms::{RefinementLadder, fit_order};
 use fs_modal::{
     CertifiedModalDamping, MAX_DAMPING_CLUSTER, ModalDampingBlock, ModalDampingBudget, ModalError,
-    certify_modal_damping, certify_modal_damping_windowed, quadratic_eigenvalues,
+    certify_modal_damping, certify_modal_damping_windowed, certify_modal_damping_windowed_far_rows,
+    damping_window_neighbours, quadratic_eigenvalues,
 };
 use fs_rand::StreamKey;
 
@@ -639,6 +640,165 @@ fn g0_windowed_certificate_encloses_dense_truth() {
     assert!(
         certified_trials >= 64,
         "only {certified_trials}/128 trials certified"
+    );
+    assert_eq!(violations, 0);
+}
+
+#[test]
+fn g0_window_neighbours_are_exactly_the_entries_read() {
+    // A caller bounding the unread entries itself must exclude exactly what
+    // the certifier reads; record every read and compare.
+    let mut s = StreamKey {
+        seed: 0x4d30_3257_3561,
+        kernel: 9,
+        tile: 0,
+    }
+    .stream();
+    let n = 30;
+    let mut omega: Vec<f64> = (0..n).map(|_| log_uniform(&mut s, 300.0, 3000.0)).collect();
+    // A tie and a gap of exactly the window: both sides of `<` are exercised.
+    omega[7] = omega[3];
+    omega[4] = 1000.0;
+    omega[9] = 1100.0;
+    let zeta: Vec<f64> = (0..n).map(|_| log_uniform(&mut s, 1e-4, 1e-3)).collect();
+    let c = random_damping(&omega, &zeta, 4, 1e-3, &mut s);
+    let window = 100.0;
+    let neighbours = damping_window_neighbours(&omega, window).unwrap();
+    for (i, row) in neighbours.iter().enumerate() {
+        assert!(row.windows(2).all(|w| w[0] < w[1]), "ascending");
+        for k in 0..n {
+            let inside = k != i && (omega[i] - omega[k]).abs() < window;
+            assert_eq!(row.contains(&k), inside, "mode {i} vs {k}");
+            assert_eq!(neighbours[k].contains(&i), row.contains(&k), "symmetric");
+        }
+    }
+    assert!(
+        !neighbours[4].contains(&9),
+        "a gap of exactly the window is far"
+    );
+    assert!(neighbours[3].contains(&7), "a tie is near");
+    let read = std::cell::RefCell::new(std::collections::BTreeSet::new());
+    let near = |i: usize, j: usize| {
+        read.borrow_mut().insert((i, j));
+        c[n * i + j]
+    };
+    let far: Vec<f64> = (0..n)
+        .map(|j| {
+            det::sqrt(
+                (0..n)
+                    .filter(|&k| k != j && !neighbours[j].contains(&k))
+                    .map(|k| c[n * j + k] * c[n * j + k])
+                    .sum(),
+            )
+        })
+        .collect();
+    certify_modal_damping_windowed_far_rows(&omega, &near, &far, window, &loose()).unwrap();
+    let expected: std::collections::BTreeSet<(usize, usize)> = (0..n)
+        .flat_map(|i| {
+            neighbours[i]
+                .iter()
+                .map(move |&k| (i, k))
+                .chain(std::iter::once((i, i)))
+        })
+        .collect();
+    assert_eq!(*read.borrow(), expected);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            damping_window_neighbours(&omega, bad),
+            Err(ModalError::DampingInput { .. })
+        ));
+        assert!(matches!(
+            damping_window_neighbours(&[1.0, bad], 1.0),
+            Err(ModalError::DampingInput { .. })
+        ));
+    }
+}
+
+#[test]
+fn g0_far_row_bound_path_encloses_dense_truth_and_refuses_bad_bounds() {
+    // The same trials as the windowed column-norm path, with each row's far
+    // norm summed directly: no difference of squares, and a far bound that
+    // vanishes exactly when the window covers everything.
+    let (mut checked, mut violations, mut certified_trials) = (0usize, 0usize, 0usize);
+    let mut full_window_far = 0.0_f64;
+    for trial in 0..128_u32 {
+        let mut s = StreamKey {
+            seed: 0x4d30_3257_3561,
+            kernel: 8,
+            tile: trial,
+        }
+        .stream();
+        let n = 6 + s.next_below(20) as usize;
+        let mut omega: Vec<f64> = (0..n)
+            .map(|_| log_uniform(&mut s, 300.0, 30_000.0))
+            .collect();
+        omega.sort_by(f64::total_cmp);
+        let zeta: Vec<f64> = (0..n).map(|_| log_uniform(&mut s, 1e-4, 1e-2)).collect();
+        let rank = 1 + s.next_below(n as u64) as usize;
+        let c = random_damping(&omega, &zeta, rank, 0.05, &mut s);
+        let window = log_uniform(&mut s, 50.0, 5000.0);
+        let moderate = ModalDampingBudget {
+            max_rel_decay_error: 0.1,
+            max_freq_error_cents: 1.0,
+            max_cluster_size: MAX_DAMPING_CLUSTER,
+        };
+        let near = |i: usize, j: usize| c[n * i + j];
+        for w in [window, 2.0 * (omega[n - 1] - omega[0])] {
+            let neighbours = damping_window_neighbours(&omega, w).unwrap();
+            let far: Vec<f64> = (0..n)
+                .map(|j| {
+                    det::sqrt(
+                        (0..n)
+                            .filter(|&k| k != j && !neighbours[j].contains(&k))
+                            .map(|k| c[n * j + k] * c[n * j + k])
+                            .sum(),
+                    )
+                })
+                .collect();
+            let result =
+                match certify_modal_damping_windowed_far_rows(&omega, &near, &far, w, &moderate) {
+                    Ok(result) => result,
+                    Err(ModalError::DampingBlockSpansWindow { .. }) if w == window => continue,
+                    Err(e) => panic!("trial {trial}, window {w}: {e}"),
+                };
+            assert_eq!(result.far_coupling.far_row_norm, far, "bounds pass through");
+            if w != window {
+                certified_trials += 1;
+                full_window_far = full_window_far.max(far.iter().copied().fold(0.0, f64::max));
+            }
+            let (poles, slack, _) = truth(&omega, &c);
+            for (mu, r) in certified_poles(&result) {
+                checked += 1;
+                if nearest(&poles, mu) > r + slack {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    let omega = [10.0, 20.0];
+    let c = [0.1, 0.01, 0.01, 0.2];
+    let near = |i: usize, j: usize| c[2 * i + j];
+    for far in [
+        vec![0.0],
+        vec![-1e-3, 0.0],
+        vec![f64::NAN, 0.0],
+        vec![0.0, f64::INFINITY],
+    ] {
+        assert!(
+            matches!(
+                certify_modal_damping_windowed_far_rows(&omega, &near, &far, 5.0, &budget()),
+                Err(ModalError::DampingInput { .. })
+            ),
+            "far bound {far:?} must refuse"
+        );
+    }
+    println!(
+        "{{\"suite\":\"irp-s0\",\"bead\":\"M0.2-W5\",\"test\":\"g0_far_row_bound_path_encloses_dense_truth_and_refuses_bad_bounds\",\"tier\":\"G0\",\"observed\":{{\"full_window_certified_trials\":{certified_trials},\"of\":128,\"poles_checked\":{checked},\"violations\":{violations},\"full_window_max_far_bound\":{full_window_far:e}}}}}"
+    );
+    assert_eq!(certified_trials, 128, "the full window spans no block");
+    assert_eq!(
+        full_window_far, 0.0,
+        "nothing is unread when the window covers everything"
     );
     assert_eq!(violations, 0);
 }
