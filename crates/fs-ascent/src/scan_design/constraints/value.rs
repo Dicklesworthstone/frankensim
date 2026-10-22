@@ -38,12 +38,14 @@ pub struct ScanConstraintValues {
     pub absorbed_energy_j: Vec<f64>,
     /// Signed W/s in source-declaration/segment order, including fixed ramps.
     pub power_slew_values_w_s: Vec<f64>,
+    pub path_speed_values: Vec<super::ScanPathSpeedValue>,
     pub state_values: Vec<f64>,
     pub peak_values: Vec<f64>,
     pub sampled_peak_values: Vec<f64>,
     pub peak_smoothing_gaps: Vec<f64>,
     /// Same order/scales as SQP: nonnegative powers, control lower/upper,
-    /// energy caps, slew rise/fall, state lower/upper, then peak caps. Each must be <= 0.
+    /// energy caps, slew rise/fall, path squared-speed, state lower/upper,
+    /// then peak caps. Each must be <= 0.
     pub residuals: Vec<f64>,
 }
 
@@ -53,6 +55,7 @@ impl ScanConstraintValues {
         Self { nonnegative_power_values_w: input.nonnegative_power_values_w,
             bound_values: input.bound_values, absorbed_energy_j: input.absorbed_energy_j,
             power_slew_values_w_s: input.power_slew_values_w_s,
+            path_speed_values: input.path_speed_values,
             state_values: input.state_values, peak_values: input.peak_values,
             sampled_peak_values: input.sampled_peak_values,
             peak_smoothing_gaps: input.peak_smoothing_gaps, residuals: input.residuals }
@@ -65,8 +68,9 @@ impl ScanConstraintValues {
     }
 
     /// Check all declared rows with an explicit nonnegative scaled tolerance.
-    /// Tolerance permits tolerance*row.scale physical violation; it does not
-    /// include solver error or provide coverage of unselected times/vertices.
+    /// Tolerance permits tolerance*row.scale physical violation for linear
+    /// rows. Path-speed rows instead permit tolerance*scale_m_s^2 excess in
+    /// squared speed. This excludes solver error and unselected times/vertices.
     pub fn is_feasible(&self, tolerance: f64) -> Result<bool, ScanSensitivityError> {
         if !tolerance.is_finite() || tolerance < 0.0 {
             return Err(invalid("scan feasibility tolerance must be finite and nonnegative"));
@@ -151,6 +155,24 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
             budget.responses.max_peak_samples, slew_bounds, max_slew_segments,
             LimitAdmission::Values { max_rows: budget.max_rows,
                 max_energy_weights: budget.max_energy_weights })?;
+        Ok(Self { study, limits })
+    }
+
+    /// Include vector path-speed limits and optional power slew in the original
+    /// value-only model. Fixed endpoints and heater-off travel participate.
+    /// Admission performs no physics; serial/batch/scenario consumers receive
+    /// all added rows, and adjoint polishing uses their coordinate derivatives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_actuator_bounds(cx: &Cx<'_>, study: ScanPowerStudy<F, O>,
+        bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
+        peaks: Vec<ScanPeakBound>, actuators: super::ScanActuatorBounds,
+        budget: ScanValueConstraintBudget) -> Result<Self, ScanSensitivityError>
+    {
+        let limits = Limits::compile_with_actuators(cx, &study, bounds, energy, states, peaks,
+            ScanResponseBudget { max_responses: budget.responses.max_responses,
+                max_gradient_entries: 0, max_transpose_solves: 0 },
+            budget.responses.max_peak_samples, actuators, LimitAdmission::Values {
+                max_rows: budget.max_rows, max_energy_weights: budget.max_energy_weights })?;
         Ok(Self { study, limits })
     }
 

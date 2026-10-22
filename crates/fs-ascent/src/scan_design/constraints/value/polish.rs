@@ -68,10 +68,11 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
             .ok_or(SqpError::Invalid("SQP box rows exceed the dense dimension allowance"))?;
         // Reuse original bounds/energy admission and exact row order. Only the
         // derivative-work allowances change; this does not alter owner.limits.
-        let limits = Limits::new(cx, &self.study, self.limits.bounds.clone(),
+        let limits = Limits::compile_with_actuators(cx, &self.study, self.limits.bounds.clone(),
             self.limits.energy.iter().map(|row| row.cap).collect(),
             self.limits.states.clone(), self.limits.peaks.clone(), response_budget,
-            self.limits.max_peak_samples, original_cap).map_err(SqpError::Evaluation)?;
+            self.limits.max_peak_samples, self.limits.actuators.clone(),
+            super::LimitAdmission::Differentiated(original_cap)).map_err(SqpError::Evaluation)?;
         let boxes = coordinate_bounds.to_vec();
         let state = SqpState::try_new(point, max_kkt_dimension, &mut |point| {
             sample(cx, self, &limits, &boxes, point)
@@ -109,7 +110,7 @@ impl<F, O: ScanObservationSpec> ScanSqpPolish<'_, F, O> {
             .ok_or(SqpError::Invalid("SQP polish callback ceiling overflow"))?;
         let Self { owner, limits, boxes, state } = self;
         state.try_run(&mut |point| sample(cx, owner, limits, boxes, point),
-            tolerance, additional_iterations, ceiling, Some(cx))
+            tolerance, additional_iterations,ceiling,Some(cx))
     }
 
     /// Run the accepted design through the original value-only owner. Require

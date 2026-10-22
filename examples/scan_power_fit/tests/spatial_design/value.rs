@@ -7,6 +7,7 @@ mod feasibility;
 mod batch;
 mod polish;
 mod slew;
+mod path_speed;
 
 #[test]
 fn g3_value_only_matches_physical_scores_and_preserves_shared_work_accounting() {

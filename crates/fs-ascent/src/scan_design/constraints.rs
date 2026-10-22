@@ -12,6 +12,10 @@ pub mod value;
 pub mod slew;
 pub use slew::ScanPowerSlewBound;
 
+/// Three-dimensional travel-speed limits on continuous authored paths.
+pub mod path_speed;
+pub use path_speed::{ScanActuatorBounds, ScanPathSpeedBound, ScanPathSpeedBudget, ScanPathSpeedValue};
+
 use super::{ScanGeometryControl,ScanPowerStudy,ScanPowerEvaluation,ScanSensitivityError,
     MovingHeatSource,ScanningEnthalpyRun,ScanObservation,ScanObservationSpec,finite,invalid,poll};
 use crate::{SqpState,SqpSample,SqpError,SqpRunReport};
@@ -83,6 +87,8 @@ pub struct ScanConstraintEvaluation {
     pub absorbed_energy_j: Vec<f64>,
     /// Signed W/s per declared source segment, including fixed shutdown ramps.
     pub power_slew_values_w_s: Vec<f64>,
+    /// Actual velocity/speed on every merged-clock path interval.
+    pub path_speed_values: Vec<ScanPathSpeedValue>,
     /// Actual kelvin/J-per-kg responses in state-bound declaration order.
     pub state_values: Vec<f64>,
     /// Smooth upper envelopes, in peak-bound declaration order.
@@ -92,7 +98,7 @@ pub struct ScanConstraintEvaluation {
     /// Added smoothing margins in physical units, not solver-error estimates.
     pub peak_smoothing_gaps: Vec<f64>,
     /// <= 0 is feasible. Nonnegative-domain rows, control lower/upper rows, energy rows,
-    /// power-slew rise/fall rows, then state
+    /// power-slew rise/fall rows, path squared-speed rows, then state
     /// lower/upper rows, then peak upper rows, in original declaration order.
     pub residuals: Vec<f64>,
     /// Row-major derivatives with respect to original optimizer coordinates.
@@ -114,7 +120,9 @@ enum LimitAdmission {
     Values { max_rows: usize, max_energy_weights: usize },
 }
 struct Limits { bounds: Vec<ScanControlBound>, energy: Vec<EnergyRow>,
+    actuators: ScanActuatorBounds,
     slew: Vec<slew::PowerSlewRow>,
+    path_speed: Vec<path_speed::PathSpeedRow>,
     states: Vec<ScanStateBound>, peaks: Vec<ScanPeakBound>, max_peak_samples: usize,
     response_budget: ScanResponseBudget, rows: usize }
 
@@ -290,6 +298,20 @@ impl Limits {
         slew_bounds: Vec<ScanPowerSlewBound>, max_slew_segments: usize, admission: LimitAdmission)
         -> Result<Self,ScanSensitivityError>
     {
+        Self::compile_with_actuators(cx, study, bounds, caps, states, peaks,
+            response_budget, max_peak_samples, ScanActuatorBounds {
+                power_slew: slew_bounds, max_power_segments: max_slew_segments,
+                ..Default::default()
+            }, admission)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_with_actuators<F, O: ScanObservationSpec>(cx: &Cx<'_>, study: &ScanPowerStudy<F, O>,
+        bounds: Vec<ScanControlBound>, caps: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
+        peaks: Vec<ScanPeakBound>, response_budget: ScanResponseBudget, max_peak_samples: usize,
+        actuators: ScanActuatorBounds, admission: LimitAdmission)
+        -> Result<Self,ScanSensitivityError>
+    {
         poll(cx)?;
         let n=study.initial.len();
         let mut rows=caps.len().checked_add(if study.has_nonnegative_powers() {study.controls.len()} else {0})
@@ -355,9 +377,11 @@ impl Limits {
             rows=rows.checked_add(usize::from(bound.lower.is_some())+usize::from(bound.upper.is_some()))
                 .ok_or_else(||invalid("scan constraint count overflow"))?;
         }
-        let slew = slew::compile(cx, study, &slew_bounds, max_slew_segments)?;
+        let slew = slew::compile(cx, study, &actuators.power_slew, actuators.max_power_segments)?;
         rows = slew.len().checked_mul(2).and_then(|count| rows.checked_add(count))
             .ok_or_else(|| invalid("power slew constraint count overflow"))?;
+        let path_speed = path_speed::compile(cx, study, &actuators.path_speed, actuators.path_budget)?;
+        rows = rows.checked_add(path_speed.len()).ok_or_else(|| invalid("path speed constraint count overflow"))?;
         if rows == 0 { return Err(invalid("constrained scan needs nonempty constraints")); }
         match admission {
             LimitAdmission::Differentiated(maximum) => {
@@ -397,7 +421,7 @@ impl Limits {
             energy.push(row);
         }
         poll(cx)?;
-        Ok(Self {bounds,energy,slew,states,peaks,max_peak_samples,response_budget,rows})
+        Ok(Self {bounds,energy,actuators,slew,path_speed,states,peaks,max_peak_samples,response_budget,rows})
     }
 
     fn at<F, O: ScanObservationSpec>(&self,cx: &Cx<'_>,study: &ScanPowerStudy<F, O>,point: &[f64])
@@ -413,6 +437,7 @@ impl Limits {
             bound_values:Vec::with_capacity(self.bounds.len()),
             absorbed_energy_j:Vec::with_capacity(self.energy.len()),residuals:Vec::with_capacity(self.rows),
             power_slew_values_w_s:Vec::with_capacity(self.slew.len()),
+            path_speed_values:Vec::with_capacity(self.path_speed.len()),
             state_values:Vec::with_capacity(self.states.len()),
             jacobian:if derivatives {vec![0.0;self.rows*n]} else {Vec::new()},
             peak_values:Vec::with_capacity(self.peaks.len()),sampled_peak_values:Vec::with_capacity(self.peaks.len()),
@@ -457,6 +482,7 @@ impl Limits {
             out.residuals.push(finite(finite(joules-row.cap.maximum_j)?/row.cap.scale_j)?);
         }
         slew::append(cx, study, &self.slew, &powers, derivatives, &mut out)?;
+        path_speed::append(cx, study, &self.path_speed, &geometry, derivatives, &mut out)?;
         poll(cx)?;
         Ok(out)
     }
