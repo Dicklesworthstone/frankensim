@@ -5,6 +5,13 @@
 //! Provides bounded, hardened parsing and deterministic emission of Gmsh MSH
 //! unstructured meshes. Parsed meshes enter through the [`Quarantined`] boundary
 //! with explicit element censuses, tags, and cryptographic receipts.
+//!
+//! Second-order solids (Gmsh ids 11, 17 and 12; IRP M1.3-W4) keep Gmsh's
+//! local node order in [`GmshElement::node_ids`]. [`GmshElementType::canonical_permutation`]
+//! maps it onto the canonical local orders of M1.3-W1a (TET10: vertices, then
+//! edges (0,1),(1,2),(0,2),(0,3),(1,3),(2,3)) and M1.3-W1b (HEX20/HEX27:
+//! corners, bottom and top perimeter edges, vertical edges, face centres
+//! z-,z+,y-,x+,y+,x-, body centre). Every other Gmsh type refuses.
 
 use crate::quarantine::Quarantined;
 use crate::{IoError, MAX_ELEMENTS};
@@ -30,9 +37,36 @@ pub enum GmshElementType {
     Prism = 6,
     /// 5-node pyramid.
     Pyramid = 7,
+    /// 10-node second-order tetrahedron.
+    Tetrahedron10 = 11,
+    /// 27-node second-order (Lagrange) hexahedron.
+    Hexahedron27 = 12,
     /// 1-node point.
     Point = 15,
+    /// 20-node second-order (serendipity) hexahedron.
+    Hexahedron20 = 17,
 }
+
+/// Gmsh local node `g` of a 10-node tetrahedron is canonical node
+/// `GMSH_TET10_TO_CANONICAL[g]`. Gmsh orders the edges (0,1),(1,2),(2,0),
+/// (3,0),(3,2),(3,1) (src/geo/MTetrahedron.h `edges_tetra`), so only the last
+/// two midside nodes trade places.
+pub const GMSH_TET10_TO_CANONICAL: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8];
+/// Gmsh local node `g` of a 20-node hexahedron is canonical node
+/// `GMSH_HEX20_TO_CANONICAL[g]` (Gmsh edges per src/geo/MHexahedron.h
+/// `edges_hexa`). Equal to `fs_mesh::structured_hex::GMSH20_TO_CANONICAL`.
+pub const GMSH_HEX20_TO_CANONICAL: [usize; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 16, 9, 17, 10, 18, 19, 12, 15, 13, 14,
+];
+/// Gmsh local node `g` of a 27-node hexahedron is canonical node
+/// `GMSH_HEX27_TO_CANONICAL[g]` (Gmsh faces per `faces_hexa`: z-, y-, x-,
+/// x+, y+, z+). Equal to `fs_mesh::structured_hex::GMSH27_TO_CANONICAL`.
+pub const GMSH_HEX27_TO_CANONICAL: [usize; 27] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 16, 9, 17, 10, 18, 19, 12, 15, 13, 14, 20, 22, 25, 23, 24, 21,
+    26,
+];
+const IDENTITY_4: [usize; 4] = [0, 1, 2, 3];
+const IDENTITY_8: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
 
 impl GmshElementType {
     /// Parse from Gmsh integer type ID.
@@ -46,7 +80,10 @@ impl GmshElementType {
             5 => Some(Self::Hexahedron),
             6 => Some(Self::Prism),
             7 => Some(Self::Pyramid),
+            11 => Some(Self::Tetrahedron10),
+            12 => Some(Self::Hexahedron27),
             15 => Some(Self::Point),
+            17 => Some(Self::Hexahedron20),
             _ => None,
         }
     }
@@ -68,6 +105,30 @@ impl GmshElementType {
             Self::Pyramid => 5,
             Self::Prism => 6,
             Self::Hexahedron => 8,
+            Self::Tetrahedron10 => 10,
+            Self::Hexahedron20 => 20,
+            Self::Hexahedron27 => 27,
+        }
+    }
+
+    /// Gmsh-local to canonical-local node map of a volume element: Gmsh node
+    /// `g` is canonical node `map[g]`. Linear tets and hexes share Gmsh's
+    /// vertex order. `None` means no canonical solid order exists for this
+    /// type; a consumer must refuse it rather than guess.
+    #[must_use]
+    pub const fn canonical_permutation(self) -> Option<&'static [usize]> {
+        match self {
+            Self::Tetrahedron => Some(&IDENTITY_4),
+            Self::Hexahedron => Some(&IDENTITY_8),
+            Self::Tetrahedron10 => Some(&GMSH_TET10_TO_CANONICAL),
+            Self::Hexahedron20 => Some(&GMSH_HEX20_TO_CANONICAL),
+            Self::Hexahedron27 => Some(&GMSH_HEX27_TO_CANONICAL),
+            Self::Point
+            | Self::Line
+            | Self::Triangle
+            | Self::Quad
+            | Self::Prism
+            | Self::Pyramid => None,
         }
     }
 }
@@ -92,6 +153,43 @@ pub struct GmshElement {
     pub tags: Vec<i32>,
     /// Node IDs referenced by this element.
     pub node_ids: Vec<u64>,
+}
+
+impl GmshElement {
+    /// Node IDs in the canonical local order of
+    /// [`GmshElementType::canonical_permutation`].
+    ///
+    /// # Errors
+    /// [`IoError::Unsupported`] for a type without a canonical solid order;
+    /// [`IoError::Malformed`] when the node list does not match the type.
+    pub fn canonical_node_ids(&self) -> Result<Vec<u64>, IoError> {
+        let map =
+            self.element_type
+                .canonical_permutation()
+                .ok_or_else(|| IoError::Unsupported {
+                    what: format!(
+                        "Gmsh element type {} has no canonical solid node order",
+                        self.element_type.type_id()
+                    ),
+                })?;
+        if self.node_ids.len() != map.len() {
+            return Err(IoError::Malformed {
+                at: 0,
+                what: format!(
+                    "element {} lists {} nodes; type {} has {}",
+                    self.id,
+                    self.node_ids.len(),
+                    self.element_type.type_id(),
+                    map.len()
+                ),
+            });
+        }
+        let mut canonical = vec![0; map.len()];
+        for (gmsh, &node) in self.node_ids.iter().enumerate() {
+            canonical[map[gmsh]] = node;
+        }
+        Ok(canonical)
+    }
 }
 
 /// A parsed Gmsh mesh data structure.
@@ -465,7 +563,10 @@ pub fn parse_gmsh_with_limits(
     Ok((Quarantined::new(mesh, source_receipt, Vec::new()), receipt))
 }
 
-/// Write a GmshMesh to deterministic MSH 2.2 ASCII format.
+/// Write a GmshMesh to deterministic MSH 2.2 ASCII format. Coordinates use
+/// the shortest decimal that parses back to the same `f64`, so
+/// `parse_gmsh(write_gmsh_msh2(m))` reproduces every coordinate bit and
+/// rewriting the parsed mesh reproduces the text byte for byte.
 #[must_use]
 pub fn write_gmsh_msh2(mesh: &GmshMesh) -> String {
     let mut out = String::with_capacity(mesh.nodes.len() * 40 + mesh.elements.len() * 40 + 1024);
@@ -483,7 +584,7 @@ pub fn write_gmsh_msh2(mesh: &GmshMesh) -> String {
     for n in &mesh.nodes {
         let _ = writeln!(
             out,
-            "{} {:.12e} {:.12e} {:.12e}",
+            "{} {:e} {:e} {:e}",
             n.id, n.coords[0], n.coords[1], n.coords[2]
         );
     }

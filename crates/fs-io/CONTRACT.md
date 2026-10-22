@@ -867,3 +867,21 @@ No-claim boundaries:
 - Admitting rows makes no statement about whether they balance, cover the
   design, or bind to anything. The balance refusal is `PowerMap`'s, and the
   name-to-region resolution is the scenario layer's.
+
+## Second-order Gmsh solids (`gmsh` module, IRP M1.3-W4)
+
+- MSH 2.2 element ids 11 (TET10), 17 (HEX20) and 12 (HEX27) parse with their
+  node counts; every other unlisted id refuses with `IoError::Unsupported`, and
+  a record with too few nodes is `IoError::Malformed`.
+- `GmshElement::node_ids` keeps Gmsh's local order. `GmshElementType::canonical_permutation`
+  (and `GmshElement::canonical_node_ids`) map it onto the M1.3-W1a TET10 order
+  (`fs_solid::linear3::tet10::TET10_EDGES`) and the M1.3-W1b HEX20/HEX27 order
+  (`fs_mesh::structured_hex`). Types without a canonical solid order return
+  `None`/`Unsupported`; nothing is guessed.
+- `write_gmsh_msh2` prints coordinates as the shortest decimal that parses back
+  to the same `f64`: parse(write(m)) reproduces every coordinate bit, and
+  rewriting a parsed canonical file reproduces it byte for byte.
+- Pinned by `tests/gmsh_high_order.rs`: bitwise round trip, midside/face/body
+  nodes at their affine reference positions within 1e-12 (with a negative
+  control on the raw Gmsh order), refusals, and node/element/byte caps at cap
+  and cap+1.

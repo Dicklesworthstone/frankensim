@@ -1818,6 +1818,7 @@ dependencies = [
  "fs-obs",
  "fs-rep-mesh",
  "fs-rep-sdf",
+ "fs-solid",
 ]
 
 [[package]]
