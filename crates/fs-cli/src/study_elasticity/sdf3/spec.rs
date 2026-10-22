@@ -52,6 +52,8 @@ pub(super) struct Spec {
     pub stress: Option<StressDesignOptions3>,
     /// Explicit functional; included in canonical optimizer type and identity.
     pub stress_measure: StressMeasure3,
+    /// Minimum dilated material under a cap on all simultaneous load combinations.
+    pub load_space: Option<load_space::Config>,
 }
 
 fn invalid(message: impl Into<String>) -> Failure {
@@ -206,9 +208,9 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         &["fixed-boundary", if mixed { "loads" } else { "body-loads" }],
     )?;
     let fixed = boundary(scenario[0])?;
-    let load_nodes = super::super::list(scenario[1], "independent loads")?;
+    let load_nodes = super::super::list(scenario[1], "reference loads")?;
     if load_nodes.is_empty() || load_nodes.len() > 4 {
-        return Err(invalid("declare 1..=4 independent reference loads"));
+        return Err(invalid("declare 1..=4 reference loads"));
     }
     let mut loads = Vec::with_capacity(load_nodes.len());
     let mut surfaces = Vec::with_capacity(load_nodes.len());
@@ -226,12 +228,38 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     let objective = fields(&items[11], "objective", &["type", "sense", "unit"])?;
     let stress_mode = matches!(&objective[0].kind,
         NodeKind::Symbol(s) | NodeKind::Str(s) if s == "volume-fraction");
+    let load_space_mode = matches!(&objective[0].kind,
+        NodeKind::Symbol(s) | NodeKind::Str(s) if s == "dilated-volume-fraction");
     let objective_words = if stress_mode { ["volume-fraction", "minimize", "1"] }
+        else if load_space_mode { ["dilated-volume-fraction", "minimize", "1"] }
         else { ["compliance", "minimize", "J"] };
     for (value, expected) in objective.iter().zip(objective_words) { word(value, expected)?; }
     let mut stress_measure = StressMeasure3::NormalizedAverage;
+    let mut load_space = None;
     let (density, volume, radius, updates, move_limit, marking, max_marks, schedule, stress) =
-        if stress_mode {
+        if load_space_mode {
+            let opt = fields(&items[12], "optimizer", &[
+                "type", "initial-density", "filter-radius-m", "max-updates", "density-floor",
+                "compliance-limit-j", "spectral-temperature", "threshold-offset",
+                "max-optimizer-evaluations", "max-backtracks", "tolerance", "penal", "beta",
+            ])?;
+            word(opt[0], "load-space-limited-simp")?;
+            load_space = Some(load_space::Config {
+                cap_j: scalar(opt[5])?, temperature: scalar(opt[6])?,
+                options: fs_topopt::sdf3::robust::envelope::load_space::design::limits::LoadSpaceLimitedOptions3 {
+                    robustness: fs_topopt::sdf3::robust::RobustOptions3 { threshold_offset: scalar(opt[7])? },
+                    density_floor: scalar(opt[4])?,
+                    optimizer: ProjectedAlOptions {
+                        max_dimension: count(physics[3])?, max_evaluations: count(opt[8])?,
+                        max_backtracks: count(opt[9])?, tolerance: scalar(opt[10])?,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            });
+            let params = SimpParams { penal: scalar(opt[11])?, beta: scalar(opt[12])?, ..Default::default() };
+            (scalar(opt[1])?, 1.0, scalar(opt[2])?, count(opt[3])?, 0.0, 0.0, 0, vec![params], None)
+        } else if stress_mode {
             let opt = fields(&items[12], "optimizer", &[
                 "type", "initial-density", "filter-radius-m", "max-updates", "density-floor",
                 "stress-limit-pa", "relaxation-power", "aggregation-power", "max-stress-points",
@@ -299,7 +327,8 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     }
     let canonical = fs_ir::sexpr::print(&root).map_err(|e| invalid(e.to_string()))?;
     let id = hash_domain("org.frankensim.cli.sdf3-study.v1", format!(
-        "{}\n{}\n{canonical}", if stress_mode { STRESS3_DRIVER } else { SDF3_DRIVER },
+        "{}\n{}\n{canonical}", if stress_mode { STRESS3_DRIVER }
+            else if load_space_mode { LOAD_SPACE3_DRIVER } else { SDF3_DRIVER },
         hash_bytes(include_bytes!("../../../../../constellation.lock")).to_hex(),
     ).as_bytes());
     let mut spec = Spec {
@@ -313,7 +342,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         max_level: u32::try_from(count(physics[2])?).map_err(|_| invalid("maximum-level overflow"))?,
         leaves: count(physics[3])?, youngs: scalar(physics[4])?, poisson: scalar(physics[5])?,
         loads, surfaces, density, volume, radius, updates, move_limit, marking, max_marks,
-        schedule, regions: Vec::new(), solver, stress, stress_measure,
+        schedule, regions: Vec::new(), solver, stress, stress_measure, load_space,
     };
     // Validate the physical frame and grid envelope before deriving any indices.
     spec.validate()?;
@@ -343,7 +372,7 @@ impl Spec {
         if !(1..=2).contains(&self.level)
             || !(self.level..=5).contains(&self.max_level)
             || !(8usize.pow(self.level)..=2048).contains(&self.leaves)
-            || (self.stress.is_none() && !(1..=8).contains(&self.max_marks))
+            || (self.stress.is_none() && self.load_space.is_none() && !(1..=8).contains(&self.max_marks))
         {
             return Err(invalid("initial octree level must be 1..=2, maximum 5, at most 2048 leaves and 1..=8 marks"));
         }
@@ -352,6 +381,7 @@ impl Spec {
         let stress_memory = self.stress.map_or(0, |s| 1024usize.saturating_mul(s.stress.max_points));
         let admitted_memory = (64 * 1024 * 1024 + 256 * self.points + 65_536 * self.leaves)
             .saturating_add(stress_memory)
+            .saturating_add(if self.load_space.is_some() { 64 * self.leaves * self.leaves } else { 0 })
             .saturating_add(self.sampled.as_ref().map_or(0, |s| s.memory_envelope))
             .saturating_add(self.solver.memory_envelope(self.level));
         if admitted_memory > self.memory {
@@ -368,6 +398,9 @@ impl Spec {
             return Err(invalid("at least one positive load-family weight is required"));
         }
         for ((f, w), surface) in self.loads.iter().zip(&self.surfaces) {
+            if self.load_space.is_some() && *w != 1.0 {
+                return Err(invalid("load-space basis weights must be exactly one; author amplitudes and correlations in the force columns, not scenario probabilities"));
+            }
             if !(0.0 <= *w && *w <= 1.0) || (!peak && *w == 0.0)
                 || f.iter().any(|v| !v.is_finite() || v.abs() > 1e12)
                 || (f.iter().all(|v| *v == 0.0) && surface.is_none())
@@ -379,7 +412,9 @@ impl Spec {
         if self.schedule.iter().any(|s| !(1.0..=5.0).contains(&s.penal) || !(0.0..=16.0).contains(&s.beta)) {
             return Err(invalid("SIMP penal must be 1..=5 and projection beta 0..=16"));
         }
-        if let Some(stress) = self.stress {
+        if let Some(config) = self.load_space {
+            config.validate(self)?;
+        } else if let Some(stress) = self.stress {
             stress.optimizer.validate::<fs_topopt::sdf3::stress::StressError3>(self.leaves)
                 .map_err(|e| invalid(e.to_string()))?;
             let params = self.schedule[0];

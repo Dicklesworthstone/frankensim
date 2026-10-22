@@ -1041,6 +1041,31 @@ intact.
 The structural evidence package grants no continuum, manufacturing, global
 optimality or physical-validation authority.
 
+### Fixed-grid 3-D robust load-space minimum-material study
+
+With `sdf3-study`, `fsim-sdf3-study` also admits objective
+`dilated-volume-fraction` and optimizer `load-space-limited-simp`. This uses
+`fs_topopt::sdf3::robust::envelope::load_space::design::limits::LoadSpaceLimitedDesign3`:
+the complete compliance Gram matrix and its checked spectrum cover the authored
+zero-centered force ellipsoid `f=Fq`, `||q||_2<=1`. Every basis weight must be
+one; force amplitudes and correlations belong to the physical columns.
+
+The minimized objective is dilated material fraction; equilibrium and the
+hard compliance cap use eroded material. The smooth spectral constraint does
+not relax the physical cap. Initial spectral/material gradients pass the
+existing finite-difference gate. Only accepted cap-feasible iterates may become
+the least-material incumbent. KKT diagnostics continue to describe the last
+accepted AL iterate, which can differ from the exported incumbent.
+
+Geometry, supports, material, physical regions and projection thresholds stay
+fixed. The original wall, Krylov and quadrature budgets cover all solves;
+`max-optimizer-evaluations` excludes the separately reported initial gradient
+probes. Accepted prefixes are committed before further updates and standard
+report/package exports contain their actual fields without a re-solve. This
+mode explicitly refuses cross-process optimizer resume. Authority remains
+Estimated, with no stress, buckling, continuum, mesh-independent optimum,
+geometric manufacturing tolerance or experimental-validation claim.
+
 ### Native cooling probability study
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes

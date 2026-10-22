@@ -1,0 +1,50 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "3d-robust-minimum-material"
+    :created "2026-10-22"
+    :context-of-use "Numerical light-weight design for a continuous simultaneous-load ellipsoid"
+    :intended-decision "Reduce dilated material while all declared load combinations meet the eroded compliance cap"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 300.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities "optimization.marquee-topopt" "geometry.sdf" "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type curved-height-sdf
+    :bounds ((0.0 0.0 0.0) (1.0 1.0 1.0))
+    :height-m 0.7
+    :curvature-per-m 0.1)
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 1
+    :maximum-leaves 8
+    :youngs-modulus-pa 1.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :body-loads (
+      (load :density-n-m3 (0.0 -1.0 0.0) :weight 1.0)
+      (load :density-n-m3 (0.0 -1.0 -0.5) :weight 1.0)))
+  (objective :type dilated-volume-fraction :sense minimize :unit "1")
+  (optimizer
+    :type load-space-limited-simp
+    :initial-density 0.75
+    :filter-radius-m 0.15
+    :max-updates 80
+    :density-floor 0.05
+    :compliance-limit-j 10.0
+    :spectral-temperature 0.05
+    :threshold-offset 0.1
+    :max-optimizer-evaluations 2000
+    :max-backtracks 40
+    :tolerance 0.000002
+    :penal 3.0
+    :beta 2.0))

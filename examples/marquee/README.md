@@ -1,4 +1,44 @@
-# Thermal cooling-hole radius study
+# Native design studies
+
+## Robust 3-D minimum-material design
+
+`bracket-3d-load-space.fsim` uses the existing 3-D CutFEM, density filter,
+three-field projection and augmented-Lagrangian optimizer to minimize dilated
+material while every simultaneous force combination `f = Fq`, `||q||₂ <= 1`,
+meets the declared compliance cap on eroded material. Build with
+`--features sdf3-study`, then run:
+
+```sh
+frankensim --json study examples/marquee/bracket-3d-load-space.fsim robust.db
+frankensim --json report study-<receipt-hash> robust.db
+frankensim --json package study-<receipt-hash> robust.db
+```
+
+Each declared load is a column of `F`; its SI force components contain its
+amplitude and correlation with other columns. Weights must be exactly one.
+The full cross-compliance matrix determines the worst combination. Checking
+only the separately applied columns would miss correlated combinations.
+`compliance-limit-j` is a physical upper bound in joules; the dimensionless
+`spectral-temperature` controls the conservative smooth maximum used by the
+optimizer. `threshold-offset` shifts the eroded/dilated projection thresholds;
+it does not specify a geometric tolerance in metres.
+
+The report distinguishes the last accepted optimizer point from the accepted
+feasible point with least dilated material. It retains the worst combination,
+cross-compliance spectrum, separate material fields, actual displacement
+fields, initial directional gradient checks and original work consumption.
+Accepted prefixes are durable and exportable. `--budget N` limits updates in
+this invocation; an incomplete run exits 6. This new fixed-grid mode does not
+yet restore optimizer state across processes, so `study --resume` refuses it.
+`max-optimizer-evaluations` limits the optimizer's evaluations; the initial
+gradient probes additionally consume the same total Krylov and wall budgets.
+
+These results are numerical estimates for the declared linear-elastic model.
+They do not establish continuum error, stress/buckling safety, global
+optimality, physical validation or a manufacturing tolerance. The example's
+modulus and geometry are numerical demonstration inputs, not a calibrated part.
+
+## Thermal cooling-hole radius study
 
 `thermal-2d.fsim` runs normalized scalar Poisson physics through the CLI,
 optimizer, ledger, report and evidence package. It solves `-laplacian(u) = 1`

@@ -13,6 +13,34 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const FIXTURE: &str = include_str!("../../../examples/marquee/bracket-3d-adaptive.fsim");
 
+#[test]
+fn g1_load_space_cli_uses_the_continuous_force_set_and_exports_its_actual_fields() {
+    let source = include_str!("../../../examples/marquee/bracket-3d-load-space.fsim")
+        .replace(":max-updates 80", ":max-updates 2");
+    let dir = scratch("load-space");
+    let (ledger, result) = run(&dir, "robust", &source, 6);
+    let report = data(&ledger, &result, "report_json");
+    assert_eq!(report.str_field("objective"), Some("dilated-volume-fraction"));
+    assert_eq!(report.path(&["gradient_check", "passed"]), Some(&J::Bool(true)));
+    let selected = report.get("selected").unwrap();
+    let basis = selected.get("basis_compliances_j").and_then(J::as_array).unwrap();
+    let basis_max = basis.iter().map(|v| v.as_f64().unwrap()).fold(0.0_f64, f64::max);
+    assert!(number(selected, "worst_compliance_j") > basis_max);
+    let design = data(&ledger, &result, "design");
+    let fields = design.path(&["selected", "basis_displacements_m"]).and_then(J::as_array).unwrap();
+    assert_eq!(fields.len(), 2);
+    assert_ne!(fields[0], fields[1]);
+    assert_eq!(result.path(&["receipt", "resume_supported"]), Some(&J::Bool(false)));
+    let pointer = result.str_field("run_id").unwrap();
+    let exported = document(&command("report").arg(pointer).arg(&ledger).output().unwrap(), 0);
+    let bytes = fs::read(exported.str_field("report_json").unwrap()).unwrap();
+    assert_eq!(bytes, retained(&ledger, &result, "report_json"));
+    document(&command("package").arg(pointer).arg(&ledger).output().unwrap(), 0);
+    let refused = command("study").args(["--resume", pointer]).arg(&ledger).output().unwrap();
+    assert_eq!(refused.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("cli-study-sdf3-resume-unsupported"));
+}
+
 fn scratch(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

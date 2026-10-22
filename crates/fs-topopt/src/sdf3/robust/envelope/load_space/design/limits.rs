@@ -88,6 +88,9 @@ impl<'a, 'callback, O: Sdf3Elasticity> LoadSpaceLimitedDesign3<'a, 'callback, O>
     #[must_use] pub fn gradient_check(&self) -> &LoadSpaceGradientCheck3 { self.inner.gradient_check() }
     #[must_use] pub fn work(&self) -> SolveWork { self.inner.work() }
     #[must_use] pub fn optimizer_work(&self) -> ProjectedAlWork { self.inner.optimizer_work() }
+    /// Read the fixed geometry and physical field layout of accepted results.
+    /// This cannot mutate the optimizer's model or its cumulative work budget.
+    #[must_use] pub fn study(&self) -> &CutDensityStudy3<O> { self.inner.study }
     pub fn run(&mut self, additional_steps: usize) -> Result<ProjectedAlReport, ProjectedAlError<EvaluationStop>> {
         self.inner.run(additional_steps)
     }

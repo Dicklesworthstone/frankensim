@@ -51,6 +51,8 @@ mod spec;
 use spec::Spec;
 #[path = "sdf3/stress.rs"]
 mod stress;
+#[path = "sdf3/load_space.rs"]
+mod load_space;
 
 const SCOPE: &str = "Estimated 3-D linear-elastic SIMP compliance on a fixed raw implicit domain. The octree background is refined by numerical two-grid goal residuals; raw densities are transferred, physical-volume feasibility restored, and compliance/volume directional derivatives checked before every stage. Declared whole-cell solid/void density constraints survive projection and refinement; void retains the declared ersatz stiffness and is not a geometric hole. These are discrete numerical comparisons, not continuum error enclosures, moving-boundary optimization, mesh-independent optima, manufacturing guarantees or physical validation. Compliance descent applies within each stage. Memory admission is an envelope, not measured RSS. Cancellation and wall time are checked at cooperative quadrature/solver boundaries; individual kernels and ledger I/O are indivisible. Every completed stage is durably retained before more physics. Resume verifies the retained stage prefix by replay under the same executable; replay spends the original wall, Krylov and geometry allowances. This is not direct optimizer-state restoration. Failed replay or a process crash preserves previous checkpoints but cannot durably charge later uncheckpointed work. The final ledger write is outside its own recorded wall measurement.";
 
@@ -312,6 +314,7 @@ pub(super) fn study(
     let ledger = Ledger::open(ledger_path.to_str()
         .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?)?;
     if spec.stress.is_some() { return stress::drive(&spec, &ledger, cap, gate); }
+    if spec.load_space.is_some() { return load_space::drive(&spec, &ledger, cap, gate); }
     checkpoint::drive(&spec, &ledger, cap, gate, None, checkpoint::announce)
 }
 
@@ -321,6 +324,10 @@ pub(super) fn resume(
     override_text: Option<&str>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
+    if old.value.str_field("driver") == Some(LOAD_SPACE3_DRIVER) {
+        return Err(fail("cli-study-sdf3-resume-unsupported",
+            "load-space studies retain accepted designs and reports, but do not yet restore optimizer state; export this run or start a new explicitly budgeted study"));
+    }
     if old.value.str_field("driver") == Some(STRESS3_DRIVER) {
         return stress::resume(ledger, old, budget(override_text)?, gate);
     }
