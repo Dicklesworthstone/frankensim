@@ -376,13 +376,31 @@ fn solution(tag: u8, values: &[(f64, f64)], bounds: &[f64]) -> BoundedSolution {
 fn domain9() -> EquivalenceDomain {
     EquivalenceDomain {
         description: "synthetic: nine points, three nested rungs".into(),
-        rungs: vec![vec![0, 4, 8], vec![0, 2, 4, 6, 8], (0..9).collect()],
-        lines: vec![(0..9).collect()],
-        coordinate: (0..9).map(f64::from).collect(),
+        coverage: Coverage::Sampled {
+            rungs: vec![vec![0, 4, 8], vec![0, 2, 4, 6, 8], (0..9).collect()],
+            lines: vec![(0..9).collect()],
+            coordinate: (0..9).map(f64::from).collect(),
+        },
         ensemble: EnsembleDecl::Deterministic {
             reason: "passive, no stochastic source".into(),
         },
         limitations: vec![],
+    }
+}
+type Sampling<'a> = (
+    &'a mut Vec<Vec<usize>>,
+    &'a mut Vec<Vec<usize>>,
+    &'a mut Vec<f64>,
+);
+/// The rungs, lines and coordinate of a sampled domain.
+fn sampled(d: &mut EquivalenceDomain) -> Sampling<'_> {
+    match &mut d.coverage {
+        Coverage::Sampled {
+            rungs,
+            lines,
+            coordinate,
+        } => (rungs, lines, coordinate),
+        Coverage::Enumerated => panic!("not a sampled domain"),
     }
 }
 /// Simplified side at 1 + 0i everywhere; the detailed side differs by `d[i]`.
@@ -503,27 +521,27 @@ fn domain_sampling_cap_three_rungs() {
     let (a, b) = pair(&[0.0; 9], 0.0);
     let mut domain = domain9();
     assert!(compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).is_ok());
-    domain.rungs.remove(0);
+    sampled(&mut domain).0.remove(0);
     assert!(compare_equivalence(&a, &b, &domain, Metric::Absolute, 1.0).is_err());
     let mut not_nested = domain9();
-    not_nested.rungs[1] = vec![1, 2, 4, 6, 8];
+    sampled(&mut not_nested).0[1] = vec![1, 2, 4, 6, 8];
     assert!(compare_equivalence(&a, &b, &not_nested, Metric::Absolute, 1.0).is_err());
     let mut omits = domain9();
-    omits.rungs[2].pop();
+    sampled(&mut omits).0[2].pop();
     assert!(compare_equivalence(&a, &b, &omits, Metric::Absolute, 1.0).is_err());
     let refuses = |edit: &dyn Fn(&mut EquivalenceDomain)| {
         let mut bad = domain9();
         edit(&mut bad);
         compare_equivalence(&a, &b, &bad, Metric::Absolute, 1.0).is_err()
     };
-    assert!(refuses(&|d| d.coordinate.truncate(8)));
-    assert!(refuses(&|d| d.coordinate[4] = f64::NAN));
-    assert!(refuses(&|d| d.coordinate.reverse()));
-    assert!(refuses(&|d| d.lines = vec![(0..8).collect()]));
-    assert!(refuses(&|d| d.lines.push(vec![3])));
+    assert!(refuses(&|d| sampled(d).2.truncate(8)));
+    assert!(refuses(&|d| sampled(d).2[4] = f64::NAN));
+    assert!(refuses(&|d| sampled(d).2.reverse()));
+    assert!(refuses(&|d| *sampled(d).1 = vec![(0..8).collect()]));
+    assert!(refuses(&|d| sampled(d).1.push(vec![3])));
     // The coarsest rung keeps one point of the first line: no stencil.
     assert!(refuses(
-        &|d| d.lines = vec![vec![0, 1, 2, 3], (4..9).collect()]
+        &|d| *sampled(d).1 = vec![vec![0, 1, 2, 3], (4..9).collect()]
     ));
     let mut seeded = domain9();
     seeded.ensemble = EnsembleDecl::Seeds {
@@ -635,6 +653,63 @@ fn ladder_bounds_follow_axis_verdicts() {
     assert!((s.bounds[0] - (re * re + im * im).sqrt()).abs() <= 1e-15 * s.bounds[0]);
     assert_eq!(s.ladder, report.hash);
     assert_eq!(s.sources, vec![BoundSource::Gci]);
+}
+
+#[test]
+fn equivalence_cents_on_an_enumerated_domain() {
+    // Three resonances: the detailed side sits 0.5, 0 and 2 cents above the
+    // simplified one, each side bounded by 1e-6 relative. An enumerated
+    // domain has no sampling term.
+    let simplified = [100.0, 200.0, 300.0];
+    let shift = [0.5, 0.0, 2.0];
+    let detailed: Vec<(f64, f64)> = simplified
+        .iter()
+        .zip(shift)
+        .map(|(f, c)| (f * (c / 1200.0_f64).exp2(), 0.0))
+        .collect();
+    let bounds: Vec<f64> = simplified.iter().map(|f| 1e-6 * f).collect();
+    let domain = EquivalenceDomain {
+        description: "synthetic: three resonances, enumerated".into(),
+        coverage: Coverage::Enumerated,
+        ensemble: EnsembleDecl::Deterministic {
+            reason: "passive, no stochastic source".into(),
+        },
+        limitations: vec![],
+    };
+    let a = solution(1, &detailed, &bounds);
+    let b = solution(3, &simplified.map(|f| (f, 0.0)), &bounds);
+    let report = compare_equivalence(&a, &b, &domain, Metric::Cents, 1.0).unwrap();
+    assert_eq!(report.sampling_terms, vec![0.0]);
+    assert_eq!(report.sampling_term, 0.0);
+    // The interval is recomputed here with std log2, independently of the
+    // comparator; a 1e-6 relative bound per side widens it by ~3.46e-3 c.
+    let slack = 2.0 * 1200.0 * (1.0 + 1e-6_f64).log2();
+    for i in 0..3 {
+        let (x, y, e) = (detailed[i].0, simplified[i], bounds[i]);
+        let (lo, hi) = (
+            1200.0 * ((x - e) / (y + e)).log2(),
+            1200.0 * ((x + e) / (y - e)).log2(),
+        );
+        let lower = if lo > 0.0 {
+            lo
+        } else if hi < 0.0 {
+            -hi
+        } else {
+            0.0
+        };
+        assert!((report.lower[i] - lower).abs() < 1e-9, "{report:?}");
+        assert!((report.upper[i] - lo.abs().max(hi.abs())).abs() < 1e-9);
+        assert!((report.upper[i] - shift[i]).abs() <= 1.01 * slack);
+    }
+    let EquivalenceVerdict::NotEquivalent { at, .. } = report.verdict else {
+        panic!("{:?}", report.verdict);
+    };
+    assert_eq!(at, 2);
+    let report = compare_equivalence(&a, &b, &domain, Metric::Cents, 2.5).unwrap();
+    assert!(matches!(
+        report.verdict,
+        EquivalenceVerdict::Equivalent { .. }
+    ));
 }
 
 #[test]

@@ -6,11 +6,20 @@
 //! JSON line.
 //!
 //! Synthetic declared fixtures (§1.3), no specimen claimed: dry air at
-//! 293.15 K; a 7.5 mm bore, 0.25 m above and 0.12 m below one side hole,
-//! flanged open end; hole radius 3.5 mm. The equivalence tolerance, 0.1 dB
-//! on raw complex outputs, is declared here before any evaluation. The
-//! domain is 200 Hz to 2 kHz on 1025 frequencies (1.76 Hz, a quarter of the
-//! narrowest bore resonance's half-power width, about 6.6 Hz at 230 Hz).
+//! 293.15 K; a clarinet-like 0.6 m bore of radius 7.5 mm, 0.42 m above and
+//! 0.18 m below one side hole of radius 3.5 mm, flanged open end. The
+//! equivalence tolerances, 0.1 dB on raw complex outputs and 1 cent on
+//! resonance frequencies, are declared here before any evaluation.
+//!
+//! The band runs from 50 Hz to the bore's first non-plane mode,
+//! `1.8412 c / (2 pi a)` (about 13.4 kHz), the validity limit of the
+//! plane-wave chain; a single hole has no lattice cutoff, and the hole's own
+//! `k b = 1` point (about 15.6 kHz at b = 3.5 mm) lies above it, so the bore
+//! limit binds. Its 2177 frequencies
+//! are uniform in `sqrt(f)`, so the spacing follows the resonance width
+//! (which grows like `sqrt(f)` under boundary-layer loss): about 1.2 Hz at
+//! the first resonance (143 Hz, half-power width about 5 Hz) and 12 Hz at the
+//! top (width about 50 Hz).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,9 +31,10 @@ use fs_duct::{
     profiled_tone_hole_shunt, segment_wave, tone_hole_shunt,
 };
 use fs_ladder::axis::{
-    AnalysisPolicy, AxisVerdict, BoundSource, BoundedSolution, Coordinate, Dimension, EnsembleDecl,
-    EquivalenceDomain, EquivalenceReport, EquivalenceVerdict, ErrorModel, LadderReport, Metric,
-    Observable, RefinableAxis, RungRecord, SensitivityFixture, compare_equivalence, evaluate_axis,
+    AnalysisPolicy, AxisVerdict, BoundSource, BoundedSolution, Coordinate, Coverage, Dimension,
+    EnsembleDecl, EquivalenceDomain, EquivalenceReport, EquivalenceVerdict, ErrorModel,
+    LadderReport, Metric, Observable, RefinableAxis, RungRecord, SensitivityFixture,
+    compare_equivalence, evaluate_axis, qoi_bound,
 };
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
@@ -32,21 +42,26 @@ use fs_math::det;
 
 /// Declared before evaluation: 0.1 dB on |Z_in| and on |p_out/U_in|.
 const TOLERANCE_DB: f64 = 0.1;
+/// Declared before evaluation: 1 cent on every resonance frequency.
+const TOLERANCE_CENTS: f64 = 1.0;
 const Z_UNIT: &str = "Pa s/m^3";
 const P_UNIT: &str = "Pa/(m^3/s)";
+const F_UNIT: &str = "Hz";
 const STEPS_AXIS: &str = "riccati_steps";
 /// Riccati step rungs of every chimney profile (fourth-order Magnus). The
 /// closed hole's low-frequency outputs reach roundoff by 32 steps, so the
 /// ladder stops at 16.
 const STEP_RUNGS: [usize; 4] = [2, 4, 8, 16];
 const BORE: f64 = 0.0075;
-const UPSTREAM: f64 = 0.25;
-const DOWNSTREAM: f64 = 0.12;
+const UPSTREAM: f64 = 0.42;
+const DOWNSTREAM: f64 = 0.18;
 const HOLE: f64 = 0.0035;
-/// Frequency grid: 1025 points over 200 Hz to 2 kHz, sampled on nested
-/// rungs of 129, 257, 513 and 1025 points.
-const BAND_HZ: (f64, f64) = (200.0, 2000.0);
-const GRID_POINTS: usize = 1025;
+/// First zero of `J1'`: the first non-plane mode's `k a`.
+const J1_PRIME_ZERO: f64 = 1.841_183_781_340_659;
+const BAND_LOW_HZ: f64 = 50.0;
+/// Frequency grid: 2177 points uniform in `sqrt(f)`, sampled on nested
+/// rungs of 273, 545, 1089 and 2177 points.
+const GRID_POINTS: usize = 2177;
 const GRID_STRIDES: [usize; 4] = [8, 4, 2, 1];
 const STATES: [HoleState; 2] = [HoleState::Open, HoleState::Closed];
 
@@ -56,10 +71,38 @@ fn air() -> GasState {
 fn tau(f: f64) -> f64 {
     core::f64::consts::TAU * f
 }
+/// The bore's plane-wave cutoff, the top of the band [Hz].
+fn band_high_hz() -> f64 {
+    J1_PRIME_ZERO * air().sound_speed / (core::f64::consts::TAU * BORE)
+}
 fn freqs() -> Vec<f64> {
+    let (u0, u1) = (det::sqrt(BAND_LOW_HZ), det::sqrt(band_high_hz()));
     (0..GRID_POINTS)
-        .map(|j| BAND_HZ.0 + (BAND_HZ.1 - BAND_HZ.0) * j as f64 / (GRID_POINTS - 1) as f64)
+        .map(|j| {
+            let u = u0 + (u1 - u0) * j as f64 / (GRID_POINTS - 1) as f64;
+            u * u
+        })
         .collect()
+}
+
+/// Location of the maximum of a unimodal `eval` on `[a, b]` by golden-section
+/// search, to the floating-point resolution of the bracket.
+fn golden_max(eval: &dyn Fn(f64) -> f64, mut a: f64, mut b: f64) -> f64 {
+    let g = 0.5 * (det::sqrt(5.0) - 1.0);
+    let (mut c, mut d) = (b - g * (b - a), a + g * (b - a));
+    let (mut fc, mut fd) = (eval(c), eval(d));
+    for _ in 0..80 {
+        if fc > fd {
+            (b, d, fd) = (d, c, fc);
+            c = b - g * (b - a);
+            fc = eval(c);
+        } else {
+            (a, c, fc) = (c, d, fd);
+            d = a + g * (b - a);
+            fd = eval(d);
+        }
+    }
+    0.5 * (a + b)
 }
 
 /// A frozen chimney description: an optional undercut cone (bore-side
@@ -227,6 +270,67 @@ fn ladder(chimney: &Chimney) -> LadderReport {
             }
         })
         .collect();
+    finish("chimney-ladder", chimney, rungs)
+}
+
+/// Every |Z_in| maximum of each hole state: bracketed by the finest grid
+/// rung of `grid` (a sample above its left and not below its right
+/// neighbour), then refined by golden-section search on the continuous
+/// frequency at every Riccati-step rung. Returns the M5.5-W1 report and the
+/// observable names, `fres[state.k]` in order.
+fn resonance_ladder(chimney: &Chimney, grid: &LadderReport) -> (LadderReport, Vec<String>) {
+    let f = freqs();
+    let n = f.len();
+    let finest = grid.joint.rungs.last().expect("grid ladder rungs");
+    let mut brackets = Vec::new();
+    for s in 0..STATES.len() {
+        let magnitude = |j: usize| {
+            let i = 4 * (s * n + j);
+            C64::new(finest.qoi[i].value, finest.qoi[i + 1].value).abs()
+        };
+        let mut k = 0;
+        for j in 1..n - 1 {
+            if magnitude(j) > magnitude(j - 1) && magnitude(j) >= magnitude(j + 1) {
+                brackets.push((format!("fres[{s}.{k}]"), s, f[j - 1], f[j + 1]));
+                k += 1;
+            }
+        }
+    }
+    let rungs: Vec<RungRecord> = STEP_RUNGS
+        .iter()
+        .map(|&steps| {
+            let start = Instant::now();
+            let qoi = brackets
+                .iter()
+                .map(|(name, s, lo, hi)| {
+                    let hole = STATES[*s];
+                    let peak =
+                        golden_max(&|hz| outputs(chimney, steps, hz, hole).0.abs(), *lo, *hi);
+                    observable(name.clone(), peak, F_UNIT)
+                })
+                .collect();
+            RungRecord {
+                requested: steps as f64,
+                dimensions: vec![Dimension {
+                    name: STEPS_AXIS.into(),
+                    value: steps as f64,
+                    unit: "1".into(),
+                }],
+                qoi,
+                bounds: vec![],
+                regime: "plane-wave chain, |Z_in| maxima, hole open and closed".into(),
+                solver_residual: 0.0,
+                wall_s: start.elapsed().as_secs_f64(),
+            }
+        })
+        .collect();
+    let names = brackets.into_iter().map(|b| b.0).collect();
+    (finish("resonance-ladder", chimney, rungs), names)
+}
+
+/// The Riccati-step M5.5-W1 report of one set of rungs, with a receipt line
+/// counting the per-observable verdicts.
+fn finish(case: &str, chimney: &Chimney, rungs: Vec<RungRecord>) -> LadderReport {
     let axis = RefinableAxis {
         name: STEPS_AXIS.into(),
         unit: "1".into(),
@@ -269,7 +373,7 @@ fn ladder(chimney: &Chimney) -> LadderReport {
         })
         .collect();
     println!(
-        "{{\"suite\":\"fs-couple\",\"case\":\"chimney-ladder\",\"inputs\":\"{chimney:?}\",\
+        "{{\"suite\":\"fs-couple\",\"case\":\"{case}\",\"inputs\":\"{chimney:?}\",\
          \"axis\":\"{STEPS_AXIS}\",\"rungs\":{STEP_RUNGS:?},\"qois\":{},\"verdicts\":{counts:?},\
          \"unbounded_examples\":{unbounded:?},\"wall_s\":{:?}}}",
         report.qois.len(),
@@ -291,22 +395,25 @@ fn domain(limitations: Vec<String>) -> EquivalenceDomain {
     let n = GRID_POINTS;
     EquivalenceDomain {
         description: format!(
-            "{}-{} Hz, {n} points; holes open and closed; receivers: inlet impedance and \
-             open-end plane pressure per inlet volume flow",
-            BAND_HZ.0, BAND_HZ.1
+            "{BAND_LOW_HZ}-{:.1} Hz (bore plane-wave cutoff), {n} points uniform in sqrt(f); \
+             holes open and closed; receivers: inlet impedance and open-end plane pressure per \
+             inlet volume flow",
+            band_high_hz()
         ),
-        rungs: GRID_STRIDES
-            .iter()
-            .map(|&stride| {
-                (0..STATES.len())
-                    .flat_map(|s| (0..n).step_by(stride).map(move |j| s * n + j))
-                    .collect()
-            })
-            .collect(),
-        lines: (0..STATES.len())
-            .map(|s| (s * n..(s + 1) * n).collect())
-            .collect(),
-        coordinate: STATES.iter().flat_map(|_| freqs()).collect(),
+        coverage: Coverage::Sampled {
+            rungs: GRID_STRIDES
+                .iter()
+                .map(|&stride| {
+                    (0..STATES.len())
+                        .flat_map(|s| (0..n).step_by(stride).map(move |j| s * n + j))
+                        .collect()
+                })
+                .collect(),
+            lines: (0..STATES.len())
+                .map(|s| (s * n..(s + 1) * n).collect())
+                .collect(),
+            coordinate: STATES.iter().flat_map(|_| freqs()).collect(),
+        },
         ensemble: EnsembleDecl::Deterministic {
             reason: "passive frequency-domain chain".into(),
         },
@@ -314,9 +421,66 @@ fn domain(limitations: Vec<String>) -> EquivalenceDomain {
     }
 }
 
-/// Both raw outputs of a detailed vs simplified pair, each from its own
-/// ladder, with the 1-D chimney limitation carried.
-fn compare(detailed: &Chimney, simplified: &Chimney, case: &str) -> [EquivalenceReport; 2] {
+/// A resonance set's values and bounds, from its own report.
+fn resonance_side(chimney: &Chimney, report: &LadderReport, names: &[String]) -> BoundedSolution {
+    let finest = report.joint.rungs.last().expect("resonance rungs");
+    let mut side = BoundedSolution {
+        description: chimney.identity(),
+        ladder: report.hash,
+        unit: F_UNIT.into(),
+        values: vec![],
+        bounds: vec![],
+        sources: vec![],
+    };
+    for name in names {
+        let q = finest
+            .qoi
+            .iter()
+            .find(|q| &q.name == name)
+            .expect("resonance");
+        let (bound, source) =
+            qoi_bound(report, name).unwrap_or_else(|| panic!("{name}: no ladder bound"));
+        side.values.push((q.value, 0.0));
+        side.bounds.push(bound);
+        side.sources.push(source);
+    }
+    side
+}
+
+fn receipt(case: &str, kind: &str, report: &EquivalenceReport, start: Instant) {
+    let (max_lower, max_upper) = (
+        report.lower.iter().copied().fold(0.0, f64::max),
+        report.sampled_maxima.last().unwrap() + report.sampling_term,
+    );
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"{case}\",\"receiver\":\"{kind}\",\
+         \"detailed_hash\":\"{}\",\"simplified_hash\":\"{}\",\"domain_points\":{},\
+         \"metric\":\"{:?}\",\"tolerance\":{},\"max_upper\":{max_upper:.6e},\
+         \"max_lower\":{max_lower:.6e},\"sampled_maxima\":{:?},\"sampling_terms\":{:?},\
+         \"sampling_term\":{:.3e},\"spread_bounded_points\":{:?},\
+         \"verdict\":\"{}\",\"limitations\":{:?},\"ladder_report_hashes\":[\"{}\",\"{}\"],\
+         \"elapsed_s\":{:.3}}}",
+        report.descriptions[0].to_hex(),
+        report.descriptions[1].to_hex(),
+        report.upper.len(),
+        report.metric,
+        report.tolerance,
+        report.sampled_maxima,
+        report.sampling_terms,
+        report.sampling_term,
+        report.spread_bounded,
+        verdict_name(&report.verdict),
+        report.limitations,
+        report.ladders[0].to_hex(),
+        report.ladders[1].to_hex(),
+        start.elapsed().as_secs_f64()
+    );
+}
+
+/// A detailed vs simplified pair, each resolved on its own ladders, with the
+/// 1-D chimney limitation carried: input impedance and receiver transfer in
+/// dB over the sampled band, then every resonance frequency in cents.
+fn compare(detailed: &Chimney, simplified: &Chimney, case: &str) -> [EquivalenceReport; 3] {
     let start = Instant::now();
     let reports = [ladder(detailed), ladder(simplified)];
     let points = |kind: &str| -> Vec<(String, String)> {
@@ -324,7 +488,8 @@ fn compare(detailed: &Chimney, simplified: &Chimney, case: &str) -> [Equivalence
             .map(|i| (format!("{kind}.re[{i}]"), format!("{kind}.im[{i}]")))
             .collect()
     };
-    let out = [("zin", Z_UNIT), ("pout", P_UNIT)].map(|(kind, unit)| {
+    let limitation = vec![PROFILED_CHIMNEY_LIMITATION.to_string()];
+    let [zin, pout] = [("zin", Z_UNIT), ("pout", P_UNIT)].map(|(kind, unit)| {
         let side = |c: &Chimney, r: &LadderReport| {
             BoundedSolution::from_ladder(c.identity(), r, unit, &points(kind))
                 .unwrap_or_else(|e| panic!("{case} {kind}: {e}"))
@@ -332,40 +497,42 @@ fn compare(detailed: &Chimney, simplified: &Chimney, case: &str) -> [Equivalence
         let report = compare_equivalence(
             &side(detailed, &reports[0]),
             &side(simplified, &reports[1]),
-            &domain(vec![PROFILED_CHIMNEY_LIMITATION.into()]),
+            &domain(limitation.clone()),
             Metric::LevelDb,
             TOLERANCE_DB,
         )
         .unwrap();
-        let (max_lower, max_upper) = (
-            report.lower.iter().copied().fold(0.0, f64::max),
-            report.sampled_maxima.last().unwrap() + report.sampling_term,
-        );
-        println!(
-            "{{\"suite\":\"fs-couple\",\"case\":\"{case}\",\"receiver\":\"{kind}\",\
-             \"detailed_hash\":\"{}\",\"simplified_hash\":\"{}\",\"domain_points\":{},\
-             \"sampling_rungs\":{},\"tolerance_db\":{TOLERANCE_DB},\"max_upper_db\":{max_upper:.6e},\
-             \"max_lower_db\":{max_lower:.6e},\"sampled_maxima_db\":{:?},\"sampling_terms_db\":{:?},\
-             \"sampling_term_db\":{:.3e},\"spread_bounded_points\":{:?},\
-             \"verdict\":\"{}\",\"limitations\":{:?},\"ladder_report_hashes\":[\"{}\",\"{}\"],\
-             \"elapsed_s\":{:.3}}}",
-            report.descriptions[0].to_hex(),
-            report.descriptions[1].to_hex(),
-            report.upper.len(),
-            GRID_STRIDES.len(),
-            report.sampled_maxima,
-            report.sampling_terms,
-            report.sampling_term,
-            report.spread_bounded,
-            verdict_name(&report.verdict),
-            report.limitations,
-            report.ladders[0].to_hex(),
-            report.ladders[1].to_hex(),
-            start.elapsed().as_secs_f64()
-        );
+        receipt(case, kind, &report, start);
         report
     });
-    out
+    let (detailed_peaks, names) = resonance_ladder(detailed, &reports[0]);
+    let (simplified_peaks, simplified_names) = resonance_ladder(simplified, &reports[1]);
+    assert_eq!(
+        names, simplified_names,
+        "{case}: the two descriptions have different resonance sets in the band"
+    );
+    let resonances = compare_equivalence(
+        &resonance_side(detailed, &detailed_peaks, &names),
+        &resonance_side(simplified, &simplified_peaks, &names),
+        &EquivalenceDomain {
+            description: format!(
+                "every |Z_in| maximum in {BAND_LOW_HZ}-{:.1} Hz, holes open and closed, found on \
+                 the {GRID_POINTS}-point grid and refined: {} resonances",
+                band_high_hz(),
+                names.len()
+            ),
+            coverage: Coverage::Enumerated,
+            ensemble: EnsembleDecl::Deterministic {
+                reason: "passive frequency-domain chain".into(),
+            },
+            limitations: limitation,
+        },
+        Metric::Cents,
+        TOLERANCE_CENTS,
+    )
+    .unwrap();
+    receipt(case, "resonance-frequency", &resonances, start);
+    [zin, pout, resonances]
 }
 
 fn verdict_name(v: &EquivalenceVerdict) -> &'static str {
@@ -626,9 +793,11 @@ fn plain_domain(n: usize, count: usize) -> EquivalenceDomain {
     let kept = &strides[strides.len() - count..];
     EquivalenceDomain {
         description: format!("closed cylinders, {n} frequencies"),
-        rungs: kept.iter().map(|&s| (0..n).step_by(s).collect()).collect(),
-        lines: vec![(0..n).collect()],
-        coordinate: (0..n).map(|j| j as f64).collect(),
+        coverage: Coverage::Sampled {
+            rungs: kept.iter().map(|&s| (0..n).step_by(s).collect()).collect(),
+            lines: vec![(0..n).collect()],
+            coordinate: (0..n).map(|j| j as f64).collect(),
+        },
         ensemble: EnsembleDecl::Deterministic {
             reason: "passive frequency-domain chain".into(),
         },
@@ -779,7 +948,9 @@ fn undercut_pair_reports_bound_with_1d_limitation() {
             vec![PROFILED_CHIMNEY_LIMITATION.to_string()]
         );
         assert!(!report.authorizes_omission());
-        assert_eq!(report.upper.len(), STATES.len() * GRID_POINTS);
+        if !matches!(report.metric, Metric::Cents) {
+            assert_eq!(report.upper.len(), STATES.len() * GRID_POINTS);
+        }
         assert!(report.sampled_maxima.windows(2).all(|w| w[1] >= w[0]));
         assert!(
             report

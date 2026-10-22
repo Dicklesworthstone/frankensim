@@ -10,8 +10,8 @@ use crate::convergence::{PowerFit, fit_power_law};
 
 mod equivalence;
 pub use equivalence::{
-    BoundSource, BoundedSolution, EquivalenceDomain, EquivalenceReport, EquivalenceVerdict, Metric,
-    compare_equivalence, qoi_bound,
+    BoundSource, BoundedSolution, Coverage, EquivalenceDomain, EquivalenceReport,
+    EquivalenceVerdict, Metric, compare_equivalence, qoi_bound,
 };
 
 /// Applicable numerical error model; no model is selected implicitly.

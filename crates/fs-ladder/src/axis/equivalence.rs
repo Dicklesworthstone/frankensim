@@ -15,9 +15,13 @@
 //! - [`Metric::Absolute`]: `|a - b| +- (bound_a + bound_b)`, floored at 0.
 //! - [`Metric::LevelDb`]: `|20 log10(|a|/|b|)|` over the moduli intervals;
 //!   a modulus interval reaching zero makes `upper_i` infinite.
+//! - [`Metric::Cents`]: `|1200 log2(|a|/|b|)|` the same way, for a ratio of
+//!   positive quantities such as resonance frequencies.
 //!
-//! **Sampling term.** The domain is sampled on at least three nested rungs
-//! and declared as lines: ordered points along one refined coordinate (for
+//! **Sampling term.** A discrete domain enumerated in full
+//! ([`Coverage::Enumerated`], for example every resonance in a band) has
+//! none. A continuum ([`Coverage::Sampled`]) is sampled on at least three
+//! nested rungs and declared as lines: ordered points along one refined coordinate (for
 //! example frequency, one line per hole state). Between samples the upper
 //! bound is assumed C2, and the finest rungs are assumed to resolve its
 //! narrowest feature. At every sampled local maximum of a line, a concave
@@ -237,6 +241,32 @@ pub enum Metric {
     Absolute,
     /// `|20 log10(|a|/|b|)|` in dB: a level difference of raw outputs.
     LevelDb,
+    /// `|1200 log2(|a|/|b|)|` in cents: a ratio of positive quantities such
+    /// as resonance frequencies.
+    Cents,
+}
+
+/// How a predeclared domain is covered by its points.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Coverage {
+    /// A continuum sampled on nested rungs along lines.
+    Sampled {
+        /// Nested sampling rungs, coarse to fine, as indices into the points.
+        /// Each rung strictly contains the previous; the last holds every
+        /// point.
+        rungs: Vec<Vec<usize>>,
+        /// Ordered point sequences along the refined coordinate, one per
+        /// case; together they hold every point once, and every rung keeps
+        /// at least three points of each line.
+        lines: Vec<Vec<usize>>,
+        /// The refined coordinate of each point, strictly increasing along a
+        /// line.
+        coordinate: Vec<f64>,
+    },
+    /// A discrete domain enumerated in full (for example every resonance in
+    /// a band, found on a resolved grid): no point is left unsampled, and
+    /// the sampling term is zero. Completeness is the producer's claim.
+    Enumerated,
 }
 
 /// A predeclared comparison domain, fixed before either side is evaluated.
@@ -245,15 +275,8 @@ pub struct EquivalenceDomain {
     /// Coverage: band, states, receivers and, for played cases, the notes,
     /// dynamics, attacks and releases.
     pub description: String,
-    /// Nested sampling rungs, coarse to fine, as indices into the points.
-    /// Each rung strictly contains the previous; the last holds every point.
-    pub rungs: Vec<Vec<usize>>,
-    /// Ordered point sequences along the refined coordinate, one per case;
-    /// together they hold every point once, and every rung keeps at least
-    /// three points of each line.
-    pub lines: Vec<Vec<usize>>,
-    /// The refined coordinate of each point, strictly increasing along a line.
-    pub coordinate: Vec<f64>,
+    /// How the points cover the domain.
+    pub coverage: Coverage,
     /// A stochastic source needs a distributional comparison: seeds refuse.
     pub ensemble: EnsembleDecl,
     /// Model-form caveats, carried into the report verbatim.
@@ -295,9 +318,9 @@ pub struct EquivalenceReport {
     pub upper: Vec<f64>,
     /// Lower bound per point.
     pub lower: Vec<f64>,
-    /// Sampled maximum `U_k` per rung.
+    /// Sampled maximum `U_k` per rung (one entry for an enumerated domain).
     pub sampled_maxima: Vec<f64>,
-    /// Curvature sampling term `T_k` per rung.
+    /// Curvature sampling term `T_k` per rung (zero when enumerated).
     pub sampling_terms: Vec<f64>,
     /// Reported sampling term: `T_K`, or infinite when the last three
     /// rungs' terms grow.
@@ -327,8 +350,12 @@ fn modulus(v: (f64, f64)) -> f64 {
     det::sqrt(v.0 * v.0 + v.1 * v.1)
 }
 
-fn db(ratio: f64) -> f64 {
-    20.0 * det::ln(ratio) / det::ln(10.0)
+/// The signed log-ratio of a level or cents metric.
+fn log_ratio(metric: Metric, ratio: f64) -> f64 {
+    match metric {
+        Metric::Cents => 1200.0 * det::ln(ratio) / det::ln(2.0),
+        _ => 20.0 * det::ln(ratio) / det::ln(10.0),
+    }
 }
 
 /// `(lower, upper)` of the metric of `a - b` when each side lies within
@@ -339,7 +366,8 @@ fn point_bounds(metric: Metric, a: (f64, f64), ba: f64, b: (f64, f64), bb: f64) 
             let d = modulus((a.0 - b.0, a.1 - b.1));
             ((d - ba - bb).max(0.0), d + ba + bb)
         }
-        Metric::LevelDb => {
+        Metric::LevelDb | Metric::Cents => {
+            let db = |ratio| log_ratio(metric, ratio);
             let (ma, mb) = (modulus(a), modulus(b));
             let (a_lo, a_hi, b_lo, b_hi) = (ma - ba, ma + ba, mb - bb, mb + bb);
             if a_lo <= 0.0 || b_lo <= 0.0 {
@@ -405,14 +433,100 @@ fn valid(s: &BoundedSolution, n: usize) -> bool {
         && s.sources.len() == n
 }
 
+/// Validate a sampled coverage of `n` points.
+fn check_sampling(
+    rungs: &[Vec<usize>],
+    lines: &[Vec<usize>],
+    x: &[f64],
+    n: usize,
+) -> Result<(), String> {
+    if rungs.len() < 3 {
+        return Err("a sampled domain needs at least three sampling rungs".into());
+    }
+    for (k, rung) in rungs.iter().enumerate() {
+        let distinct = rung.iter().enumerate().all(|(i, p)| !rung[..i].contains(p));
+        let nested = k == 0
+            || (rung.len() > rungs[k - 1].len() && rungs[k - 1].iter().all(|p| rung.contains(p)));
+        if rung.is_empty() || !distinct || !nested || rung.iter().any(|&p| p >= n) {
+            return Err("sampling rungs must be distinct, in range and strictly nested".into());
+        }
+    }
+    if rungs[rungs.len() - 1].len() != n {
+        return Err("the finest sampling rung must hold every domain point".into());
+    }
+    if x.len() != n || !x.iter().all(|v| v.is_finite()) {
+        return Err("one finite coordinate per point".into());
+    }
+    let mut seen = vec![false; n];
+    for line in lines {
+        for (j, &p) in line.iter().enumerate() {
+            if p >= n || seen[p] || (j > 0 && !(x[p] > x[line[j - 1]])) {
+                return Err("lines must hold each point once, in increasing coordinate".into());
+            }
+            seen[p] = true;
+        }
+    }
+    if seen.contains(&false) {
+        return Err("the lines must cover every point".into());
+    }
+    for rung in rungs {
+        let mut member = vec![false; n];
+        for &p in rung {
+            member[p] = true;
+        }
+        if lines
+            .iter()
+            .any(|line| line.iter().filter(|&&p| member[p]).count() < 3)
+        {
+            return Err("every rung must keep at least three points of each line".into());
+        }
+    }
+    Ok(())
+}
+
+/// Sampled maxima, per-rung curvature terms and the reported term of a
+/// validated sampled coverage.
+fn sampling(
+    rungs: &[Vec<usize>],
+    lines: &[Vec<usize>],
+    x: &[f64],
+    upper: &[f64],
+) -> (Vec<f64>, Vec<f64>, f64) {
+    let n = upper.len();
+    let mut maxima = Vec::with_capacity(rungs.len());
+    let mut terms = Vec::with_capacity(rungs.len());
+    for rung in rungs {
+        let mut member = vec![false; n];
+        for &p in rung {
+            member[p] = true;
+        }
+        let sampled = rung.iter().map(|&i| upper[i]).fold(0.0, f64::max);
+        let mut reach = sampled;
+        for line in lines {
+            let pts: Vec<usize> = line.iter().copied().filter(|&p| member[p]).collect();
+            reach = reach.max(line_reach(&pts, upper, x));
+        }
+        maxima.push(sampled);
+        terms.push(if reach.is_finite() {
+            reach - sampled
+        } else {
+            f64::INFINITY
+        });
+    }
+    let k = terms.len() - 1;
+    let settled = terms[k] <= terms[k - 1] && terms[k - 1] <= terms[k - 2];
+    let term = if settled { terms[k] } else { f64::INFINITY };
+    (maxima, terms, term)
+}
+
 /// Compare a detailed and a simplified solution over a predeclared domain.
 ///
 /// # Errors
-/// Mismatched or non-finite solutions, a missing bound, fewer than three
-/// nested sampling rungs, a last rung that omits a point, lines that do not
-/// cover every point once in increasing coordinate or keep fewer than three
-/// points on a rung, a declared seed ensemble (pointwise comparison
-/// refused), or an invalid tolerance.
+/// Mismatched or non-finite solutions, a missing bound, a declared seed
+/// ensemble (pointwise comparison refused), or an invalid tolerance. For a
+/// sampled domain also: fewer than three nested rungs, a last rung that
+/// omits a point, or lines that do not cover every point once in
+/// increasing coordinate or keep fewer than three points on a rung.
 pub fn compare_equivalence(
     detailed: &BoundedSolution,
     simplified: &BoundedSolution,
@@ -438,49 +552,16 @@ pub fn compare_equivalence(
             );
         }
     }
-    if domain.description.is_empty() || domain.rungs.len() < 3 {
-        return Err("the domain needs a description and at least three sampling rungs".into());
+    if domain.description.is_empty() {
+        return Err("the domain needs a description".into());
     }
-    for (k, rung) in domain.rungs.iter().enumerate() {
-        let distinct = rung.iter().enumerate().all(|(i, p)| !rung[..i].contains(p));
-        let nested = k == 0
-            || (rung.len() > domain.rungs[k - 1].len()
-                && domain.rungs[k - 1].iter().all(|p| rung.contains(p)));
-        if rung.is_empty() || !distinct || !nested || rung.iter().any(|&p| p >= n) {
-            return Err("sampling rungs must be distinct, in range and strictly nested".into());
-        }
-    }
-    if domain.rungs[domain.rungs.len() - 1].len() != n {
-        return Err("the finest sampling rung must hold every domain point".into());
-    }
-    let x = &domain.coordinate;
-    if x.len() != n || !x.iter().all(|v| v.is_finite()) {
-        return Err("one finite coordinate per point".into());
-    }
-    let mut seen = vec![false; n];
-    for line in &domain.lines {
-        for (j, &p) in line.iter().enumerate() {
-            if p >= n || seen[p] || (j > 0 && !(x[p] > x[line[j - 1]])) {
-                return Err("lines must hold each point once, in increasing coordinate".into());
-            }
-            seen[p] = true;
-        }
-    }
-    if seen.contains(&false) {
-        return Err("the lines must cover every point".into());
-    }
-    let mut in_rung = vec![vec![false; n]; domain.rungs.len()];
-    for (k, rung) in domain.rungs.iter().enumerate() {
-        for &p in rung {
-            in_rung[k][p] = true;
-        }
-        if domain
-            .lines
-            .iter()
-            .any(|line| line.iter().filter(|&&p| in_rung[k][p]).count() < 3)
-        {
-            return Err("every rung must keep at least three points of each line".into());
-        }
+    if let Coverage::Sampled {
+        rungs,
+        lines,
+        coordinate,
+    } = &domain.coverage
+    {
+        check_sampling(rungs, lines, coordinate, n)?;
     }
     let (mut lower, mut upper) = (Vec::with_capacity(n), Vec::with_capacity(n));
     for i in 0..n {
@@ -494,35 +575,19 @@ pub fn compare_equivalence(
         lower.push(lo);
         upper.push(hi);
     }
-    let sampled_maxima: Vec<f64> = domain
-        .rungs
-        .iter()
-        .map(|rung| rung.iter().map(|&i| upper[i]).fold(0.0, f64::max))
-        .collect();
-    let sampling_terms: Vec<f64> = in_rung
-        .iter()
-        .zip(&sampled_maxima)
-        .map(|(member, &sampled)| {
-            let mut reach = sampled;
-            for line in &domain.lines {
-                let pts: Vec<usize> = line.iter().copied().filter(|&p| member[p]).collect();
-                reach = reach.max(line_reach(&pts, &upper, x));
-            }
-            if reach.is_finite() {
-                reach - sampled
-            } else {
-                f64::INFINITY
-            }
-        })
-        .collect();
-    let k = sampled_maxima.len() - 1;
-    let settled = sampling_terms[k] <= sampling_terms[k - 1]
-        && sampling_terms[k - 1] <= sampling_terms[k - 2];
-    let sampling_term = if settled {
-        sampling_terms[k]
-    } else {
-        f64::INFINITY
+    let (sampled_maxima, sampling_terms, sampling_term) = match &domain.coverage {
+        Coverage::Enumerated => (
+            vec![upper.iter().copied().fold(0.0, f64::max)],
+            vec![0.0],
+            0.0,
+        ),
+        Coverage::Sampled {
+            rungs,
+            lines,
+            coordinate,
+        } => sampling(rungs, lines, coordinate, &upper),
     };
+    let k = sampled_maxima.len() - 1;
     let (mut at, mut max_lower) = (0, f64::NEG_INFINITY);
     for (i, &v) in lower.iter().enumerate() {
         if v > max_lower {
@@ -561,10 +626,7 @@ pub fn compare_equivalence(
         }),
         hash: ContentHash([0; 32]),
     };
-    let bytes = format!(
-        "{:?}{:?}{:?}{:?}{report:?}",
-        domain.description, domain.rungs, domain.lines, domain.coordinate
-    );
+    let bytes = format!("{:?}{:?}{report:?}", domain.description, domain.coverage);
     report.hash = hash_domain("org.frankensim.equivalence.v1", bytes.as_bytes());
     Ok(report)
 }

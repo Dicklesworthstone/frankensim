@@ -48,9 +48,12 @@ ordered ladder remains supported exactly as a path-graph specialization.
   and therefore different measured timings intentionally change its identity.
 - `axis::compare_equivalence` (IRP M5.5-W2, plan §1.4) compares a detailed and
   a simplified frozen description on raw complex output over a predeclared
-  `EquivalenceDomain`: nested sampling rungs (at least three), lines along one
-  refined coordinate, an ensemble declaration (a seed ensemble refuses
-  pointwise comparison) and model-form limitations. It knows no physics.
+  `EquivalenceDomain`. The domain's `Coverage` is either `Sampled` (nested
+  sampling rungs, at least three, and lines along one refined coordinate) or
+  `Enumerated` (a discrete set listed in full, such as every resonance in a
+  band, with no sampling term). The domain also carries an ensemble
+  declaration (a seed ensemble refuses pointwise comparison) and model-form
+  limitations. It knows no physics.
   - Each side is a `BoundedSolution`. `from_ladder` takes values from the
     finest joint rung of that side's own `LadderReport`, and per-observable
     bounds from `qoi_bound`, which sums the per-axis bounds and the largest
@@ -65,7 +68,8 @@ ordered ladder remains supported exactly as a path-graph specialization.
     - `ObservedOnly`, `InsufficientRungs` and `Refused` give no bound, and
       the comparison refuses.
   - Point bounds: `Absolute` uses `|a - b| +- (b_a + b_b)`. `LevelDb` uses
-    `|20 log10(|a|/|b|)|` over the moduli intervals.
+    `|20 log10(|a|/|b|)|` over the moduli intervals, and `Cents` uses
+    `|1200 log2(|a|/|b|)|` the same way (for resonance frequencies).
   - Sampling term: at each sampled local maximum of a line, the curvature of
     the nearest three-point stencil gives at most `|u''| H^2/8` above the
     samples. The reported term is the finest rung's, and it is infinite
@@ -223,6 +227,8 @@ M5.5-W2 additions:
   ensembles and invalid tolerances.
 - `ladder_bounds_follow_axis_verdicts`: the GCI bound is 1.25 times the
   manufactured error, plus the roundoff and declared sources.
+- `equivalence_cents_on_an_enumerated_domain`: cents intervals recomputed
+  independently, no sampling term, and both verdicts at 1 c and 2.5 c.
 - `equivalence_report_identity_and_limitations`.
 
 `tests/ladder.rs` (Proposal 3, 12 cases): total rung ordering; out-of-range
