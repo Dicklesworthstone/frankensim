@@ -48,3 +48,18 @@ in `body-mode-preregistration.tsv`).
 The owner's code refuses, before any frequency: neighbouring facets or a facet and its director more than about 26 degrees apart (the post is a 16-gon),
 a component that is not one edge-connected body with one fan at every vertex, a node that is a slave in one tie and a master in another, a node twice in one tie
 (rings are cut into two chains) and a table of 72 components (63 and 61 were accepted; the exact bound is not stated here, and the scaled variants are merged to fit).
+
+## Independent check of the shell and tie machinery (no specimen data)
+
+`gen_check_strip.py REPO_ROOT KIND OUT.tsv NX [K=..]` writes free spruce strips (500 x 25 x 3 mm, grain along the length, the guitar spruce shell pack) as tables for this example and prints the
+closed-form free-free Euler-Bernoulli bending frequencies f_n = (beta_n L)^2 / (2 pi L^2) sqrt(E_L I / rho A), beta_n L = 4.73004, 7.85320, 10.99561, 14.13717 (roots of cos x cosh x = 1), and a Timoshenko
+estimate. KIND `plate` is one component, `split` the same strip as two components tied end to end at the midsurface, `tbeam` the strip with a 12 x 3 mm wall standing on its upper skin along the whole length,
+tied on the skin (side +1, full rotations): the junction that every body table uses for ribs, bar, post and bridge. Run 2026-10-22 with the binary of 8a0fb7ec1 (drilling penalty 1e-3), trj, free in vacuo:
+
+- plate, closed form 63.520, 175.095, 343.256, 567.420 Hz (Timoshenko estimate 63.48, 174.76, 341.97, 563.93): shell 20 / 40 / 80 / 160 elements along the length: 63.68, 63.53, 63.49, 63.48 (mode 1);
+  176.80, 175.18, 174.82, 174.73 (mode 2); modes 4 and 5 of the 80 and 160 element runs (the third listed mode, 309 Hz, lies near the first-torsion estimate of a thin strip and is not compared): 342.09 and 564.08 (80), 341.72 and 563.01 (160). At 160 elements the shell is within 0.1 percent of the
+  Timoshenko estimate on all four bending modes and 0.06, 0.2, 0.4 and 0.8 percent below the Euler-Bernoulli value on modes 1, 2, 4 and 5 (the shear and rotary-inertia effect it leaves out).
+- split: the same strip as two components with one midsurface tie gives the frequencies of `plate` at 20 and 40 elements to the printed digit (63.68, 176.80, 306.58 and 63.53, 175.18, 308.38).
+- tbeam: closed form (parallel axis, E_L for flange and web) 299.96 Hz for the first vertical bending mode; shell 304.52 (20), 303.36 (40), 298.29 (80, 4 layers in the wall), 297.18 (160, 4 layers),
+  295.53 (80, 8 layers), 294.24 (160, 8 layers). The wall's shear flexibility is not in the Euler-Bernoulli value (a Timoshenko estimate with the wall as the shear area is 286 to 295 Hz), so the skin-tied
+  T-junction sits 1.9 percent below the closed form and still falling slowly: not a 40 percent stiffness defect.
