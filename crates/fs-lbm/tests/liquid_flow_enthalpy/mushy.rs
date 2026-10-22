@@ -8,6 +8,9 @@ use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 #[path = "mushy/heating.rs"]
 mod heating;
 
+#[path = "mushy/electrical.rs"]
+mod electrical;
+
 fn phase_curve(card: &MaterialCard, rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
         card.content_hash(),

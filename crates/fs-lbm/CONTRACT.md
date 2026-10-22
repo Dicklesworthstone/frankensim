@@ -2117,3 +2117,34 @@ gravitational/kinetic total-energy conservation, induction, compressible work,
 species evolution and phase change remain outside this model. Focused regressions
 cover direct force superposition, existing-owner equivalence, data-only material
 changes, depth scaling, retained source evaluations and transactional refusals.
+
+### Shared phase-material current, flow and enthalpy evolution
+
+`conjugate::enthalpy::advection::feedback::electrical::advance_joule_enthalpy_with_material_flow`
+feeds the existing Ohmic current/account owner from the EXACT applied samples of
+`MaterialFlowFeedback`. Each actual thermal substep resolves h-derived phase/T
+once per flow sample; those objects drive viscosity, declared buoyancy/mushy
+mobility, owned fluid-face conductivity, current and irreversible electrical heat.
+The original MAC face mass fluxes advect total enthalpy, including latent heat.
+Electrical contact heat keeps its original partition and is deposited once.
+Independent inner sources and admitted viscous/Darcy heating remain on the same
+conservative timeline. The electrical accessor reads retained material response;
+it must not resolve a separate state or mutate external physical history.
+
+The electrical and flow maps must use the same borrowed all-fluid domain and
+identical active receiving cells, including ideal electrode voxels. Source and
+endpoint h/T/cell identities are checked; final current support uses already
+resolved endpoint objects and does not perform another momentum solve. The
+original whole-advance current budget includes this final solve. Thermal state,
+flow/inner history and electrical work/deposition reports publish together; any
+map, material, solver, endpoint, budget or cancellation refusal preserves both
+accepted inputs. Joule energy is already inside the thermal external-heat audit.
+
+This retains the original explicit quasisteady, fixed-mass/fixed-volume domain.
+It adds no magnetic/motional EMF, induction, charge convection, phase-volume
+source, free surface or kinetic-plus-thermal conservation claim. Thermal timestep
+refinement and momentum-equilibration assumptions remain caller obligations.
+Focused synthetic-card regressions compare independent series-current,
+contact-heat, Darcy, conduction and donor-cell enthalpy balances; exercise
+constant-temperature phase changes, data swaps and zero-current reduction; and
+check exact sample identity/query counts plus refused endpoint/retry behavior.

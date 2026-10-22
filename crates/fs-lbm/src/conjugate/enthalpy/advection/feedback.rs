@@ -28,6 +28,9 @@ use crate::conjugate::{
 };
 use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMaterial};
 
+/// Current and irreversible heat from these exact live-flow material samples.
+pub mod electrical;
+
 mod viscous;
 use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
