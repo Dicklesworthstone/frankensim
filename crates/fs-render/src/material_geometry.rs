@@ -19,6 +19,9 @@ use fs_solid::loads3::{LoadError3, TetLoadGeometry3};
 
 use crate::charts::TriMesh;
 
+/// Exterior material regions and their accepted local optical/thermal appearance.
+pub mod regional;
+
 /// A refusal before a complete rendered shape is returned.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialGeometryError {
@@ -104,6 +107,24 @@ pub fn deformed_body_mesh(
     maximum_face_entries: usize,
     cx: &Cx<'_>,
 ) -> Result<TriMesh, MaterialGeometryError> {
+    let triangles = boundary_triangles(body, budget, maximum_face_entries, cx)?;
+    let mut vertices = Vec::with_capacity(body.nodes_m().len());
+    for &node in body.nodes_m() {
+        poll(cx)?;
+        vertices.push(node);
+    }
+    poll(cx)?;
+    let mesh = TriMesh::new(vertices, triangles);
+    poll(cx)?;
+    Ok(mesh)
+}
+
+fn boundary_triangles(
+    body: &DeformedBody<'_>,
+    budget: TetAssemblyBudget,
+    maximum_face_entries: usize,
+    cx: &Cx<'_>,
+) -> Result<Vec<[u32; 3]>, MaterialGeometryError> {
     poll(cx)?;
     u32::try_from(body.nodes_m().len()).map_err(|_| MaterialGeometryError::RendererCapacity)?;
     let boundary = TetLoadGeometry3::new(
@@ -151,15 +172,8 @@ pub fn deformed_body_mesh(
         }
         triangles.push(triangle);
     }
-    let mut vertices = Vec::with_capacity(body.nodes_m().len());
-    for &node in body.nodes_m() {
-        poll(cx)?;
-        vertices.push(node);
-    }
     poll(cx)?;
-    let mesh = TriMesh::new(vertices, triangles);
-    poll(cx)?;
-    Ok(mesh)
+    Ok(triangles)
 }
 
 /// Observe the geometry already accepted by the original thermoelastic solve.

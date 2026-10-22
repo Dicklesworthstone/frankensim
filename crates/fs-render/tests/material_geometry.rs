@@ -1,4 +1,6 @@
 //! Material data -> accepted solid shape -> real ray hits and thermal pixels.
+mod regional;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_conduction::radiation::{EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity};

@@ -51,6 +51,7 @@ pub struct DeformedBody<'a> {
     reference: &'a ResolvedBody,
     nodes_m: Vec<[f64; 3]>,
     tetrahedra: Vec<[usize; 4]>,
+    elements: Vec<usize>,
     regions: Vec<DeformedRegion>,
     inertia: SpatialInertia,
 }
@@ -61,6 +62,10 @@ impl<'a> DeformedBody<'a> {
     pub fn nodes_m(&self) -> &[[f64; 3]] { &self.nodes_m }
     /// Original fixed-topology element order.
     pub fn tetrahedra(&self) -> &[[usize; 4]] { &self.tetrahedra }
+    /// Canonical reference region -> original solver element map.
+    /// Retained through deformation so downstream observers never infer material
+    /// identity from spatial proximity or assume region and element orders agree.
+    pub fn region_elements(&self) -> &[usize] { &self.elements }
     /// Current regions in the reference body's canonical region-key order.
     pub fn regions(&self) -> &[DeformedRegion] { &self.regions }
     /// Feed directly to the existing body or articulated dynamics owner.
@@ -180,7 +185,7 @@ impl<'a> TetrahedralMass<'a> {
         inertia.matrix()?;
         poll(&mut cancelled)?;
         Ok(DeformedBody { reference: self.reference, nodes_m: nodes_m.to_vec(),
-            tetrahedra: self.tetrahedra.clone(), regions, inertia })
+            tetrahedra: self.tetrahedra.clone(), elements: self.elements.clone(), regions, inertia })
     }
 }
 

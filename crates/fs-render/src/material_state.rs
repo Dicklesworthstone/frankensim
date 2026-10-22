@@ -31,6 +31,7 @@ use crate::tracer::Material;
 /// approximation; it is not inferred from a total emissivity measurement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialThermalBinding {
+    accepted_state_identity: ContentHash,
     emissivity: SurfaceEmissivity,
     surface: GrayDiffuseThermalSurface,
 }
@@ -65,6 +66,7 @@ impl MaterialThermalBinding {
         h.update(emissivity.receipt().content_hash().as_bytes());
         h.update(surface_state_identity.as_bytes());
         Ok(Self {
+            accepted_state_identity: accepted.identity(),
             emissivity: emissivity.clone(),
             surface: GrayDiffuseThermalSurface::try_new(
                 emissivity.temperature_k(),
@@ -81,6 +83,13 @@ impl MaterialThermalBinding {
         Material::GrayDiffuseThermal {
             surface: self.surface,
         }
+    }
+
+    /// Exact accepted constitutive state observed by this binding.
+    /// A later state requires rebinding before attaching it to physical geometry.
+    #[must_use]
+    pub const fn accepted_state_identity(&self) -> ContentHash {
+        self.accepted_state_identity
     }
 
     /// Original emissivity source, uncertainty and selected query receipt.
@@ -290,6 +299,12 @@ impl MaterialOpticalBinding {
     #[must_use]
     pub const fn appearance(self) -> OpticalAppearance {
         self.appearance
+    }
+
+    /// Exact accepted mechanical state used to admit the optical observation.
+    #[must_use]
+    pub const fn accepted_state_identity(self) -> ContentHash {
+        self.mechanical_state_identity
     }
 
     /// Direct input to any existing tracer primitive, independent of specimen.

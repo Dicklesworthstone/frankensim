@@ -1375,5 +1375,23 @@ admission does not establish global injectivity or T-junction freedom. Existing
 instances place the body's metre frame. Appearance is explicit through the
 existing material bindings; a combined thermoelastic fixture binds the same
 accepted temperature/card to gray-diffuse thermal emission. Regional optical
-assignment, remeshing, melt/free-surface evolution, and live trajectory sampling
-remain outside this fixed-topology rung.
+assignment is explicit through the regional ingress below. Remeshing,
+melt/free-surface evolution, and live trajectory sampling remain outside this
+fixed-topology rung.
+
+`material_geometry::regional::deformed_body_regions` partitions the globally
+extracted exterior by the original region-to-element map retained by
+`DeformedBody`. Canonical material-region order does not imply solver element
+order. Each patch retains its original node IDs and four bitwise accepted cell
+coordinates; only exterior triangles enter the original mesh/BVH. Bonded
+internal faces stay absent, and storage is linear in the admitted cell count.
+
+With `material-state`, `thermal_body_primitives` matches explicit surface bindings
+by region key and requires their exact accepted constitutive-state identities.
+Each exterior cell can therefore carry its own conductor optics or gray/diffuse
+thermal emission at its actual accepted temperature. Interior cells do not gain
+optical-data requirements. Stale, foreign, missing and duplicate assignments
+refuse before returning any candidate scene replacement. This observer adds no
+thermal debit or state update. Dielectric bindings refuse: an exterior-only
+regional partition does not supply the internal optical interfaces and shared
+medium-boundary tracking required for transparent multi-material bodies.
