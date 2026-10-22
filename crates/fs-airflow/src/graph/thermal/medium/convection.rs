@@ -269,3 +269,6 @@ mod tests {
             Temperature::new(300.0), Temperature::new(300.0), Length::new(0.1)).is_err());
     }
 }
+
+/// Material-driven boundary powers on the shared finite-cell thermal history.
+pub mod deposition;

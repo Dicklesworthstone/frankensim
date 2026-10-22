@@ -1,0 +1,179 @@
+//! Material-driven forced convection on the shared finite-cell enthalpy state.
+//!
+//! The fluid is an explicitly prescribed reservoir, not another finite thermal
+//! store. One original transport snapshot supplies Re, Pr and h for each binding.
+//! The original thermal owner supplies wall temperature and currently exposed
+//! area. Evaluate inside a thermal residual callback, never only at step start.
+//! Fluid property/film conditions, speed and correlation geometry are held fixed
+//! during an interval; this is not a resolved flow or evolving gas energy model.
+
+use std::collections::{BTreeMap, BTreeSet};
+use fs_conduction::transient::deposition::{CellId, DepositionError, DepositionSimulation};
+use super::*;
+
+/// Explicit reservoir and forced-flow geometry for one whole exposed cell.
+/// Several cells may borrow the SAME gas mixture or liquid source. The wall's
+/// temperature is solved; the fluid source's property state is authored.
+#[derive(Clone, Copy)]
+pub struct ConvectiveCell<'a> {
+    pub cell: CellId,
+    pub fluid: &'a dyn FluidTransport,
+    pub reference_temperature: Temperature,
+    pub characteristic_length: Length,
+    pub correlation: CorrelationId,
+    pub speed_m_s: f64,
+    /// Geometry settings; Dittus-Boelter heating/cooling direction is derived
+    /// from the actual wall/reservoir temperatures at each trial.
+    pub settings: ForcedConvectionSettings,
+}
+
+/// Original dimensional/correlation result and the exact thermal destination.
+#[derive(Debug)]
+pub struct CellConvectionSample {
+    pub cell: CellId,
+    pub wall_temperature_k: f64,
+    pub reference_temperature_k: f64,
+    pub exposed_area_m2: f64,
+    pub transport: FluidTransportState,
+    pub nusselt: NusseltEvaluation,
+    pub coefficient: Evidence<HeatTransferCoefficient>,
+    /// Signed external power into the finite body. Cooling is negative.
+    pub heat_into_cell_w: f64,
+}
+
+#[derive(Debug)]
+pub enum ConvectionSourceError {
+    Invalid(&'static str),
+    Material(MaterialConvectionError),
+    Thermal(DepositionError),
+    Cancelled,
+}
+impl From<DepositionError> for ConvectionSourceError {
+    fn from(error: DepositionError) -> Self {
+        if error == DepositionError::Cancelled { Self::Cancelled } else { Self::Thermal(error) }
+    }
+}
+impl fmt::Display for ConvectionSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "material convection source: {self:?}")
+    }
+}
+impl std::error::Error for ConvectionSourceError {}
+fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), ConvectionSourceError> {
+    if cancelled() { Err(ConvectionSourceError::Cancelled) } else { Ok(()) }
+}
+fn finite(value: f64) -> Result<f64, ConvectionSourceError> {
+    if value.is_finite() { Ok(value) } else {
+        Err(ConvectionSourceError::Invalid("convective power is unrepresentable"))
+    }
+}
+
+/// Endpoint powers and original source evaluations, with no state advanced.
+#[derive(Debug)]
+pub struct CellConvectionSources {
+    sources_w: BTreeMap<CellId, f64>,
+    samples: Vec<CellConvectionSample>,
+    total_w: f64,
+}
+impl CellConvectionSources {
+    pub fn sources_w(&self) -> &BTreeMap<CellId, f64> { &self.sources_w }
+    pub fn samples(&self) -> &[CellConvectionSample] { &self.samples }
+    /// External heat into the simulated bodies. The prescribed reservoir receives
+    /// the opposite power; it has no invented finite mass or temperature history.
+    pub const fn total_heat_into_cells_w(&self) -> f64 { self.total_w }
+
+    /// Add once to a trial's additional source map, retaining independent heaters,
+    /// contact/Joule heat and radiation. Validate every sum before publication.
+    /// The shared thermal owner separately retains authored boundary sources.
+    pub fn add_to(&self, destination: &mut BTreeMap<CellId, f64>,
+        mut cancelled: impl FnMut() -> bool) -> Result<(), ConvectionSourceError> {
+        check(&mut cancelled)?;
+        let mut staged = Vec::with_capacity(self.sources_w.len());
+        for (&cell, &power) in &self.sources_w {
+            check(&mut cancelled)?;
+            let old = destination.get(&cell).copied().unwrap_or(0.0);
+            let next = finite(finite(old)? + power)?;
+            if power != 0.0 && next == old {
+                return Err(ConvectionSourceError::Invalid("convective power disappears in source addition"));
+            }
+            staged.push((cell, next));
+        }
+        check(&mut cancelled)?;
+        for (cell, power) in staged { destination.insert(cell, power); }
+        Ok(())
+    }
+}
+
+/// Resolve forced convection at the ACTUAL proposed caloric endpoint.
+///
+/// The thermal owner's exposed area already excludes active contact/reservoir
+/// coverage. Never add a second ambient Robin term: a bound cell with nonzero
+/// authored `htc_w_m2_k` refuses. Independent authored heaters remain valid.
+/// Missing/duplicate cells, invalid reservoirs, correlation-domain failure or
+/// cancellation return no partial map. `maximum_cells` bounds material queries.
+/// Source order is stable CellId order, not input order.
+///
+/// A caller must retain the borrowed fluid source alongside the report to retain
+/// its material receipts. A transport tuple is not independent material evidence.
+/// No molecular identity, fluid expansion, correlation or film temperature is
+/// inferred from the material name. Unsupported zero-flow groups still refuse.
+pub fn evaluate_cell_convection(
+    thermal: &DepositionSimulation<'_>, bindings: &[ConvectiveCell<'_>],
+    maximum_cells: usize, mut cancelled: impl FnMut() -> bool,
+) -> Result<CellConvectionSources, ConvectionSourceError> {
+    check(&mut cancelled)?;
+    if bindings.len() > maximum_cells || bindings.len() > thermal.cells().len() {
+        return Err(ConvectionSourceError::Invalid("convective cells exceed their explicit work bound"));
+    }
+    let mut ids = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        check(&mut cancelled)?;
+        if !ids.insert(binding.cell) {
+            return Err(ConvectionSourceError::Invalid("duplicate convective cell"));
+        }
+        let cell = thermal.cells().get(&binding.cell)
+            .ok_or(ConvectionSourceError::Invalid("inactive convective cell"))?;
+        if cell.boundary.htc_w_m2_k != 0.0 {
+            return Err(ConvectionSourceError::Invalid("material convection would duplicate the authored ambient coefficient"));
+        }
+        let reference = binding.reference_temperature.value();
+        if !reference.is_finite() || reference <= 0.0 {
+            return Err(ConvectionSourceError::Invalid("reservoir temperature must be positive finite kelvin"));
+        }
+        ordered.push(binding);
+    }
+    ordered.sort_by_key(|binding| binding.cell);
+    let mut samples = Vec::with_capacity(ordered.len());
+    let mut sources_w = BTreeMap::new();
+    let mut total_w = 0.0;
+    for binding in ordered {
+        check(&mut cancelled)?;
+        let wall = thermal.temperature_k(binding.cell)?;
+        let area = thermal.exposed_area_m2(binding.cell)?;
+        let mut settings = binding.settings;
+        if wall > binding.reference_temperature.value() {
+            settings.direction = ThermalDirection::HeatingFluid;
+        } else if wall < binding.reference_temperature.value() {
+            settings.direction = ThermalDirection::CoolingFluid;
+        }
+        let result = evaluate_forced_from_material(binding.correlation, binding.fluid,
+            binding.speed_m_s, binding.characteristic_length, settings)
+            .map_err(ConvectionSourceError::Material)?;
+        let (transport, nusselt, coefficient) = result.into_parts();
+        let delta = finite(binding.reference_temperature.value() - wall)?;
+        let conductance = finite(coefficient.value.value() * area)?;
+        let power = finite(conductance * delta)?;
+        if (area > 0.0 && coefficient.value.value() > 0.0 && conductance == 0.0)
+            || (conductance != 0.0 && delta != 0.0 && power == 0.0) {
+            return Err(ConvectionSourceError::Invalid("convective transfer underflowed to zero"));
+        }
+        total_w = finite(total_w + power)?;
+        sources_w.insert(binding.cell, power);
+        samples.push(CellConvectionSample { cell: binding.cell, wall_temperature_k: wall,
+            reference_temperature_k: binding.reference_temperature.value(), exposed_area_m2: area,
+            transport, nusselt, coefficient, heat_into_cell_w: power });
+    }
+    check(&mut cancelled)?;
+    Ok(CellConvectionSources { sources_w, samples, total_w })
+}
