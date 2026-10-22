@@ -5,7 +5,10 @@
 //! kinetic solve, ignition model or validated combustion mechanism.
 use super::exchange::{PreparedMaterialExchangeNetwork, MaterialExchangeSample, MaterialExchangeError};
 use super::MaterialContact;
-use super::super::{Chamber, NetworkError, NetworkSolve};
+use super::super::{Chamber, NetworkCandidate, NetworkError, NetworkSolve};
+use super::exchange::gas_law::GasSurface;
+use crate::cavity_phs::piston::thermal::ConductanceSample;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use crate::circuit_enthalpy::{CircuitEnthalpyError, contacts::ContactThermalSample, material::MaterialNetworkError};
 use crate::material_circuit::MaterialCircuit;
 use fs_exec::Cx;
@@ -44,60 +47,60 @@ pub struct ChamberReactionStep {
 /// `boundary` retains its post-reaction pressure/work reference; the reaction
 /// report above supplies the chemical stage and whole-interval energy change.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ReactiveExchangeChamber {
+pub struct ReactiveExchangeChamber<I = ResolvedMaterialStatePoint> {
     pub id: u64,
     pub piston: GasPiston,
-    pub surfaces: Vec<ThermalPortSample<(Contact, ResolvedMaterialStatePoint)>>,
+    pub surfaces: Vec<ThermalPortSample<(Contact, I)>>,
     pub boundary: BoundaryHeatStep,
 }
 
 #[derive(Debug)]
-pub enum ReactiveExchangeError {
+pub enum ReactiveExchangeError<E = MaterialNetworkError> {
     Invalid(&'static str),
     Reaction { chamber: u64, error: GasReactionError },
-    Exchange(CircuitEnthalpyError<NetworkError<MaterialExchangeError, MaterialNetworkError>>),
+    Exchange(CircuitEnthalpyError<NetworkError<MaterialExchangeError, E>>),
     Cancelled,
 }
-impl core::fmt::Display for ReactiveExchangeError {
+impl<E: core::fmt::Debug> core::fmt::Display for ReactiveExchangeError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "reactive material exchange: {self:?}")
     }
 }
-impl std::error::Error for ReactiveExchangeError {}
+impl<E: core::fmt::Debug> std::error::Error for ReactiveExchangeError<E> {}
 
 /// Sources and physical endpoints from one accepted interval. The circuit and
 /// thermal report's energy reference is unchanged; reactions contribute no net
 /// supplied heat. Whole-interval balance is in `ReactiveExchangeCandidate::step`.
-pub struct ReactiveExchangeSources {
+pub struct ReactiveExchangeSources<I = ResolvedMaterialStatePoint> {
     pub material: ContactThermalSample<MaterialExchangeSample>,
-    pub chambers: Vec<ReactiveExchangeChamber>,
+    pub chambers: Vec<ReactiveExchangeChamber<I>>,
     pub reactions: Vec<ChamberReactionStep>,
     pub transferred_heat_j: f64,
 }
 
 /// No input is mutated, including on late chemistry/material/work refusal.
-pub struct ReactiveExchangeCandidate<'m> {
+pub struct ReactiveExchangeCandidate<'m, I = ResolvedMaterialStatePoint> {
     thermal: DepositionSimulation<'m>,
     circuit: MaterialCircuit,
-    report: CircuitEnthalpyReport<ReactiveExchangeSources>,
+    report: CircuitEnthalpyReport<ReactiveExchangeSources<I>>,
     step: NetworkStep,
 }
-impl<'m> ReactiveExchangeCandidate<'m> {
+impl<'m, I> ReactiveExchangeCandidate<'m, I> {
     pub fn thermal(&self) -> &DepositionSimulation<'m> { &self.thermal }
     pub fn circuit(&self) -> &MaterialCircuit { &self.circuit }
-    pub fn chambers(&self) -> &[ReactiveExchangeChamber] { &self.report.source.chambers }
+    pub fn chambers(&self) -> &[ReactiveExchangeChamber<I>] { &self.report.source.chambers }
     pub fn reactions(&self) -> &[ChamberReactionStep] { &self.report.source.reactions }
-    pub fn report(&self) -> &CircuitEnthalpyReport<ReactiveExchangeSources> { &self.report }
+    pub fn report(&self) -> &CircuitEnthalpyReport<ReactiveExchangeSources<I>> { &self.report }
     pub const fn step(&self) -> &NetworkStep { &self.step }
     /// All energy transfers are already included; publish all these histories
     /// together. Reaction extent must not be applied again on consumption.
     pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit,
-        CircuitEnthalpyReport<ReactiveExchangeSources>, NetworkStep) {
+        CircuitEnthalpyReport<ReactiveExchangeSources<I>>, NetworkStep) {
         (self.thermal, self.circuit, self.report, self.step)
     }
 }
 
-fn check(cx: &Cx<'_>) -> Result<(), ReactiveExchangeError> {
+fn check<E>(cx: &Cx<'_>) -> Result<(), ReactiveExchangeError<E>> {
     cx.checkpoint().map_err(|_| ReactiveExchangeError::Cancelled)
 }
 
@@ -120,16 +123,52 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
         reactions: &[ChamberReaction<'_>], gas_patches: &[MaterialContact],
         controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<ReactiveExchangeCandidate<'m>, ReactiveExchangeError> {
+        self.reactive_bound(cx, thermal, target_s, chambers, reactions,
+            gas_patches.len(), controls, |staged| self.step_candidate(cx, thermal,
+                target_s, circuit, ports, staged, gas_patches, controls, guess_j))
+    }
+
+    /// Stage the SAME chemistry once, then solve the complete assembly with a
+    /// caller-selected gas heat law. The law sees reacted gas energy midpoints
+    /// and exact trial cell material samples. Its typed source payload survives
+    /// in every surface report. No second chemistry or whole-energy audit.
+    ///
+    /// See `step_with_gas_law_candidate` for surface, purity and physical limits.
+    /// Source errors retain E; cancellation through cx remains cancellation.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn reactive_with_gas_law_candidate<'m, I, E>(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        circuit: &MaterialCircuit, ports: &[f64], chambers: &[Chamber<'_>],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<ReactiveExchangeCandidate<'m, I>, ReactiveExchangeError<E>> {
+        self.reactive_bound(cx, thermal, target_s, chambers, reactions,
+            surfaces.len(), controls, |staged| self.step_with_gas_law_candidate(cx,
+                thermal, target_s, circuit, ports, staged, surfaces, controls, guess_j, resolve))
+    }
+
+    // All contact laws enter the original staging, balance and one-tick account.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn reactive_bound<'m, I, E>(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+        chambers: &[Chamber<'_>], reactions: &[ChamberReaction<'_>],
+        surface_count: usize, controls: NetworkSolve,
+        evolve: impl FnOnce(&[Chamber<'_>]) -> Result<
+            NetworkCandidate<'m, ContactThermalSample<MaterialExchangeSample>, I>,
+            CircuitEnthalpyError<NetworkError<MaterialExchangeError, E>>>,
+    ) -> Result<ReactiveExchangeCandidate<'m, I>, ReactiveExchangeError<E>> {
         use ReactiveExchangeError as Error;
-        check(cx)?;
+        check::<E>(cx)?;
         let dt = target_s - thermal.time_s();
         if !dt.is_finite() || dt <= 0.0 || chambers.len() > controls.maximum_chambers
-            || reactions.len() > chambers.len() || gas_patches.len() > controls.maximum_contacts {
+            || reactions.len() > chambers.len() || surface_count > controls.maximum_contacts {
             return Err(Error::Invalid("one positive clock and bounded chamber/reaction/surface lists required"));
         }
         let mut originals = BTreeMap::new();
         for (i, chamber) in chambers.iter().enumerate() {
-            check(cx)?;
+            check::<E>(cx)?;
             if chamber.input.duration_s != dt || originals.insert(chamber.id, chamber).is_some()
                 || chambers[..i].iter().any(|c| std::ptr::eq(c.piston, chamber.piston)) {
                 return Err(Error::Invalid("unique original chamber IDs, gas owners and matching clocks required"));
@@ -137,7 +176,7 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
         }
         let mut kinetics = BTreeMap::new();
         for reaction in reactions {
-            check(cx)?;
+            check::<E>(cx)?;
             if !originals.contains_key(&reaction.chamber)
                 || kinetics.insert(reaction.chamber, reaction).is_some() {
                 return Err(Error::Invalid("exactly one optional reaction per existing chamber required"));
@@ -147,7 +186,7 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
         let mut staged = BTreeMap::new();
         let mut chemical = BTreeMap::new();
         for (&id, original) in &originals {
-            check(cx)?;
+            check::<E>(cx)?;
             let mut piston = original.piston.clone();
             if let Some(binding) = kinetics.get(&id) {
                 let proposal = binding.reaction.parcel_candidate(piston.gas(), dt,
@@ -167,15 +206,14 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
             id, piston: &staged[&id], input: original.input,
             piston_solve: original.piston_solve, exchange: original.exchange,
         }).collect::<Vec<_>>();
-        let proposal = self.step_candidate(cx, thermal, target_s, circuit, ports,
-            &staged_chambers, gas_patches, controls, guess_j).map_err(|error| match error {
+        let proposal = evolve(&staged_chambers).map_err(|error| match error {
                 CircuitEnthalpyError::Cancelled => Error::Cancelled,
                 other => Error::Exchange(other),
             })?;
         let mut reactions = Vec::with_capacity(chemical.len());
         let mut chemical_energy_j = 0.0;
         for chamber in proposal.chambers() {
-            check(cx)?;
+            check::<E>(cx)?;
             let Some(reaction) = chemical.get(&chamber.id) else { continue; };
             let original = originals[&chamber.id];
             let gas = chamber.boundary.piston().gas();
@@ -205,11 +243,11 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
             || step.total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
             return Err(Error::Invalid("chemistry, circuit, finite bodies and all gas/motion energy do not close"));
         }
-        check(cx)?;
+        check::<E>(cx)?;
         let (thermal, circuit, report, _) = proposal.into_parts();
         let mut final_chambers = Vec::with_capacity(report.source.chambers.len());
         for chamber in report.source.chambers {
-            check(cx)?;
+            check::<E>(cx)?;
             let id = chamber.id;
             let (mut piston, surfaces, boundary) = chamber.boundary.into_parts();
             if let Some(reaction) = reactions.iter().find(|r| r.chamber == id) {
@@ -238,7 +276,7 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
             maximum_cell_residual_j: report.maximum_cell_residual_j, circuit_trials: report.circuit_trials,
             deposited_joule_j: report.deposited_joule_j, non_electrical_heat_j: report.non_electrical_heat_j,
             total_energy_residual_j: report.total_energy_residual_j };
-        check(cx)?;
+        check::<E>(cx)?;
         Ok(ReactiveExchangeCandidate { thermal, circuit, report, step })
     }
 }
