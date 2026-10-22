@@ -63,6 +63,11 @@ pub struct DirectionalOptions {
     /// evaluates them directly. Defaults to [`MAX_NEAR_FIELD_PAIR_WORK`]; a
     /// plan with more pairs is refused before any coupling setup.
     pub max_near_pairs: usize,
+    /// Declared worker threads (at least one) for the coupling setup. Every
+    /// factor, statistic and refusal is bit-identical for every count; each
+    /// extra worker holds one more residual matrix, charged to the slot
+    /// envelope while the setup runs. Defaults to one.
+    pub setup_workers: usize,
 }
 impl DirectionalOptions {
     /// Order selected by the explicit 4^-p design indicator, not a universal
@@ -82,6 +87,7 @@ impl DirectionalOptions {
             max_setup_work: MAX_TRANSLATION_WORK,
             w5a_budget: ComplexBudget::V1,
             max_near_pairs: MAX_NEAR_FIELD_PAIR_WORK,
+            setup_workers: 1,
         })
     }
     /// Validate parameters without building geometry or evaluating a kernel.
@@ -794,6 +800,9 @@ impl DirectionalPlan {
         )
     }
     fn prepare_couplings(&mut self, op: &FmmC64<'_>) -> Result<(), FmmError> {
+        if self.options.setup_workers > 1 {
+            return self.prepare_couplings_on_workers(op);
+        }
         let (ns, nt) = op.operator.dimensions();
         let n = op.nodes.len().pow(3);
         // Includes simultaneous pass coefficients, every retained factor,
@@ -861,6 +870,140 @@ impl DirectionalPlan {
                         channels.push(factor);
                     }
                     self.couplings.insert(key, Coupling::Compressed(channels));
+                }
+            }
+            let work = match &self.couplings[&key] {
+                Coupling::TensorGrid => n * n * ns * nt,
+                Coupling::Compressed(channels) => {
+                    channels.iter().map(|f| 2 * n * f.rank()).sum::<usize>()
+                }
+            };
+            self.stats.m2l_work = self.stats.m2l_work.saturating_add(work);
+            budget(
+                "directional compressed M2L",
+                self.stats.m2l_work,
+                MAX_TRANSLATION_WORK,
+            )?;
+            self.coupling_keys.push(key);
+        }
+        self.stats.coupling_blocks = self.couplings.len();
+        self.stats.coefficient_slots = retained;
+        Ok(())
+    }
+    /// [`Self::prepare_couplings`] on the declared setup workers. A shared
+    /// block's factor depends on no envelope, so the workers compress every
+    /// (block, channel) in first-use order under unbounded ceilings and record
+    /// its rank steps. One serial replay then makes each admission check of
+    /// the serial path, in its order and with its cumulative counts, so every
+    /// factor, statistic and refusal is the serial path's.
+    fn prepare_couplings_on_workers(&mut self, op: &FmmC64<'_>) -> Result<(), FmmError> {
+        let (ns, nt) = op.operator.dimensions();
+        let n = op.nodes.len().pow(3);
+        let mut uses = BTreeMap::new();
+        for &(a, b, c) in &self.pairs {
+            *uses.entry(self.coupling_key(op, a, b, c)).or_insert(0usize) += 1;
+        }
+        let mut seen = BTreeSet::new();
+        let shared: Vec<(CellKey, CellKey, Cone)> = self
+            .pairs
+            .iter()
+            .copied()
+            .filter(|&(a, b, c)| {
+                let key = self.coupling_key(op, a, b, c);
+                uses[&key] >= 2 && seen.insert(key)
+            })
+            .collect();
+        let channels = ns * nt;
+        let jobs = shared.len() * channels;
+        let workers = self.options.setup_workers.min(jobs).max(1);
+        let unbounded = Envelope {
+            retained: 0,
+            max_slots: usize::MAX,
+            max_setup: usize::MAX,
+        };
+        let (tolerance, max_rank, k) = (
+            self.options.compression_tolerance,
+            self.options.max_rank,
+            self.k,
+        );
+        let bins = &self.bins;
+        let job = |index: usize| -> (Result<LowRank, FmmError>, usize) {
+            let (a, b, c) = shared[index / channels];
+            let channel = index % channels;
+            let u = direction(c, bins[a.0 as usize]);
+            let (ca, cb) = (center(op, a), center(op, b));
+            let (ga, gb) = (op.grid(a), op.grid(b));
+            let mut matrix = vec![C64::ZERO; n * n];
+            for (i, &x) in ga.iter().enumerate() {
+                for (j, &y) in gb.iter().enumerate() {
+                    let value = modulate(
+                        op.operator.block(x, y)[channel],
+                        wave(-k, u, sub(sub(x, ca), sub(y, cb))),
+                    );
+                    if !finite(value) {
+                        return (Err(FmmError::NonFiniteOutput { index: i }), 0);
+                    }
+                    matrix[i * n + j] = value;
+                }
+            }
+            let mut work = 0;
+            let factor = compress(matrix, n, tolerance, max_rank, unbounded, &mut work);
+            (factor, work / (n * n))
+        };
+        let outcomes: Vec<(Result<LowRank, FmmError>, usize)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|w| {
+                    let job = &job;
+                    scope.spawn(move || {
+                        (w * jobs / workers..(w + 1) * jobs / workers)
+                            .map(job)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("directional setup worker panicked"))
+                .collect()
+        });
+        let extra = (workers - 1).saturating_mul(n * n);
+        let mut retained = self.stats.coefficient_slots;
+        let mut outcomes = outcomes.into_iter();
+        for index in 0..self.pairs.len() {
+            let (a, b, c) = self.pairs[index];
+            let key = self.coupling_key(op, a, b, c);
+            if !self.couplings.contains_key(&key) {
+                if uses[&key] < 2 {
+                    self.couplings.insert(key, Coupling::TensorGrid);
+                } else {
+                    let mut factors = Vec::with_capacity(channels);
+                    for _ in 0..channels {
+                        let (factor, steps) =
+                            outcomes.next().expect("one outcome per shared channel");
+                        // Step 0 is the matrix fill; step q > 0 is rank q.
+                        for step in 0..=steps {
+                            FmmC64::validate_coefficient_slots_within(
+                                retained
+                                    .saturating_add(extra)
+                                    .saturating_add(n * n)
+                                    .saturating_add(2 * n * step.max(1)),
+                                self.options.max_coefficient_slots,
+                            )?;
+                            self.stats.setup_work = self.stats.setup_work.saturating_add(n * n);
+                            budget(
+                                "directional coupling setup",
+                                self.stats.setup_work,
+                                self.options.max_setup_work,
+                            )?;
+                        }
+                        let factor = factor?;
+                        retained = retained.saturating_add(factor.slots());
+                        self.stats.maximum_rank = self.stats.maximum_rank.max(factor.rank());
+                        self.stats.compression_residual =
+                            self.stats.compression_residual.max(factor.residual);
+                        factors.push(factor);
+                    }
+                    self.couplings.insert(key, Coupling::Compressed(factors));
                 }
             }
             let work = match &self.couplings[&key] {

@@ -947,6 +947,91 @@ fn dfmm_declared_workers_leave_every_potential_bitwise() {
 }
 
 #[test]
+fn dfmm_declared_setup_workers_are_bitwise_and_refuse_identically() {
+    // The coupling setup runs on the declared setup workers. Every kernel
+    // kind keeps the serial plan's statistics and potentials bit for bit, and
+    // the setup and rank envelopes refuse with the serial values.
+    let points = sphere(1024);
+    let normals = points.clone();
+    let q = charges(points.len());
+    let kernel = HelmholtzSingle { k: 5.0 };
+    let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+    o.leaf_capacity = 16;
+    for kind in 0..4 {
+        let started = Instant::now();
+        let serial = operator(kind, &kernel, &points, &normals, o.clone());
+        let stats = serial.directional_stats().unwrap().clone();
+        assert!(
+            stats.coupling_blocks > 0 && stats.maximum_rank > 1,
+            "{stats:?}"
+        );
+        let reference = bits(&serial.potentials(&q).unwrap());
+        for workers in [2, 3, 16] {
+            let mut declared = o.clone();
+            declared.setup_workers = workers;
+            let parallel = operator(kind, &kernel, &points, &normals, declared);
+            assert_eq!(
+                stats.to_json(),
+                parallel.directional_stats().unwrap().to_json(),
+                "workers={workers}"
+            );
+            assert_eq!(reference, bits(&parallel.potentials(&q).unwrap()));
+        }
+        let build = |o: DirectionalOptions| match kind {
+            0 => FmmC64::new_directional(&kernel, &points, o).map(|_| ()),
+            1 => FmmC64::new_double_directional(
+                HelmholtzDouble { k: kernel.k },
+                points.clone(),
+                normals.clone(),
+                o,
+            )
+            .map(|_| ()),
+            2 => FmmC64::new_adjoint_double_directional(
+                HelmholtzAdjointDouble { k: kernel.k },
+                points.clone(),
+                normals.clone(),
+                o,
+            )
+            .map(|_| ()),
+            _ => FmmC64::new_hypersingular_directional(
+                HelmholtzHypersingular { k: kernel.k },
+                points.clone(),
+                normals.clone(),
+                o,
+            )
+            .map(|_| ()),
+        };
+        let mut setup = o.clone();
+        setup.setup_workers = 3;
+        setup.max_setup_work = stats.setup_work;
+        assert_eq!(build(setup.clone()), Ok(()));
+        let mut rank = o.clone();
+        rank.max_rank = stats.maximum_rank - 1;
+        for (mut refused, cap) in [(setup, "setup"), (rank, "rank")] {
+            if cap == "setup" {
+                refused.max_setup_work = stats.setup_work - 1;
+            }
+            let mut serial_refused = refused.clone();
+            serial_refused.setup_workers = 1;
+            let want = build(serial_refused);
+            assert!(want.is_err(), "{cap}");
+            refused.setup_workers = 3;
+            assert_eq!(build(refused), want, "{cap}");
+        }
+        emit(
+            "dfmm-setup-workers",
+            format!(
+                "{{\"case\":\"dfmm-setup-workers\",\"inputs\":\"Fibonacci unit sphere, 1024 points, k=5\",\"axis\":\"kernel-kind\",\"rung\":{kind},\"observed\":{{\"coupling_blocks\":{},\"setup_work\":{},\"maximum_rank\":{}}},\"workers\":[1,2,3,16],\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                stats.coupling_blocks,
+                stats.setup_work,
+                stats.maximum_rank,
+                started.elapsed().as_secs_f64()
+            ),
+        );
+    }
+}
+
+#[test]
 fn dfmm_bitwise_repeat() {
     let (points, normals) = fixture(16);
     let q = charges(16);
