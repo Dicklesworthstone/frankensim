@@ -12,6 +12,7 @@
 use super::*;
 use fs_conduction::ConductionError;
 use fs_conduction::interface::{InterfaceResistance, SeriesThermalResistance};
+use fs_conduction::{ResistanceUncertainty, ThermalResistanceTerm};
 use fs_matdb::ClaimId;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use fs_material::thermal::interface::ThermalInterfacePoint;
@@ -102,6 +103,9 @@ pub struct ContactSample {
     pub outward_normal: [f64; 3],
     pub area_m2: f64,
     pub resistance: InterfaceResistance,
+    /// Original bulk-only coefficient when finite layers participate in series.
+    /// None denotes the original interface-only support reduction.
+    pub bulk_conductance_w_k: Option<f64>,
     pub conductance_w_k: f64,
     pub heat_a_to_b_j: f64,
 }
@@ -218,11 +222,41 @@ impl ThermalSupportContact<'_> {
             outward_normal: normal,
             area_m2: link.area_m2,
             resistance,
+            bulk_conductance_w_k: None,
             conductance_w_k: conductance,
             heat_a_to_b_j: number(
                 duration_s * conductance * (phases[0].temperature_k() - phases[1].temperature_k()),
             )?,
         })
+    }
+}
+
+impl ContactSample {
+    // A zero bulk coefficient explicitly insulates; missing bulk data is not
+    // zero. The original resistance owner composes the two physical terms.
+    pub(super) fn with_bulk<E>(mut self, bulk: f64, duration_s: f64)
+        -> Result<Self, ContactError<E>> {
+        if !bulk.is_finite() || bulk < 0.0 {
+            return Err(ContactError::Invalid("finite nonnegative bulk conductance required"));
+        }
+        let conductance = if bulk == 0.0 { 0.0 } else {
+            let term = ThermalResistanceTerm::declared("bulk", 1.0 / bulk,
+                ResistanceUncertainty::Unstated,
+                "original endpoint bulk conductance; source report retained by caller")
+                .map_err(ContactError::Conduction)?;
+            let series = SeriesThermalResistance::new(vec![term,
+                self.resistance.term_for_area("thermal support", self.area_m2)
+                    .map_err(ContactError::Conduction)?])
+                .map_err(ContactError::Conduction)?;
+            let g = number(1.0 / series.budget().value_k_per_w)?;
+            if g <= 0.0 { return Err(ContactError::Invalid("series conductance underflow")); }
+            g
+        };
+        self.bulk_conductance_w_k = Some(bulk);
+        self.conductance_w_k = conductance;
+        self.heat_a_to_b_j = number(duration_s * conductance
+            * (self.phases[0].temperature_k() - self.phases[1].temperature_k()))?;
+        Ok(self)
     }
 }
 
@@ -246,6 +280,40 @@ impl<'m> ThermoplasticSolid<'m> {
         guess_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
         cx: &Cx<'_>,
+    ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
+        self.advance_contacts_candidate(thermal, contacts, target_s, prescribed_m,
+            nodal_forces_n, settings, controls, guess_j, resolve, false, cx)
+    }
+
+    /// Combine solved support pressure with finite bulk conduction in series.
+    /// The callback MUST provide a fresh bulk-only coefficient for every support
+    /// link; it must not already include that interface resistance. Both source
+    /// records remain available: bulk in `report.source`, interface and actual
+    /// combined conductance/heat in `report.contacts`. Explicit zero bulk
+    /// conductivity insulates without skipping source or geometry admission.
+    ///
+    /// This shares the original contact/solid/enthalpy solve and all energy gates.
+    /// It does not change the fixed-footprint, compressive, prescribed-support
+    /// assumptions or infer opening, friction, contact area or electrical forces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_series_thermal_contacts<'t, S, E>(
+        &self, thermal: &DepositionSimulation<'t>, contacts: &[ThermalSupportContact<'_>],
+        target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ContactSolve, guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        cx: &Cx<'_>,
+    ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
+        self.advance_contacts_candidate(thermal, contacts, target_s, prescribed_m,
+            nodal_forces_n, settings, controls, guess_j, resolve, true, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_contacts_candidate<'t, S, E>(
+        &self, thermal: &DepositionSimulation<'t>, contacts: &[ThermalSupportContact<'_>],
+        target_s: f64, prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ContactSolve, guess_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+        series_bulk: bool, cx: &Cx<'_>,
     ) -> Result<ContactCandidate<'m, 't, S>, ContactError<E>> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
@@ -403,16 +471,22 @@ impl<'m> ThermoplasticSolid<'m> {
                     let mut samples = Vec::with_capacity(contacts.len());
                     for (binding, &(element, normal)) in contacts.iter().zip(&routes) {
                         checkpoint()?;
-                        let sample = binding.sample(
+                        let mut sample = binding.sample(
                             endpoint,
                             &mechanical.solution.element_stress[element],
                             normal,
                             dt,
                         )?;
+                        if series_bulk {
+                            let bulk = *coefficients.conductances_w_k.get(&binding.link)
+                                .ok_or(ContactError::Invalid("support lacks explicit bulk-only conductance"))?;
+                            sample = sample.with_bulk(bulk, dt)?;
+                        }
                         if coefficients
                             .conductances_w_k
                             .insert(binding.link, sample.conductance_w_k)
                             .is_some()
+                            && !series_bulk
                         {
                             return Err(ContactError::Invalid(
                                 "contact conductance supplied twice",
