@@ -33,7 +33,7 @@ const MAX_ROWS: usize = 256;
 const MAX_STEPS: usize = 4096;
 const MAX_SAMPLES: usize = 65_536;
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold] [--substeps 1..128]; time_s may be start..end for a time mean";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold] [--substeps 1..128]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
 
 struct Options {
     path: String,
@@ -71,7 +71,27 @@ struct Measurements<'m> {
     endpoints: Vec<f64>,
     rows: Vec<ScanSpatialObservation<'m>>,
     starts: Vec<Option<usize>>,
+    sensor_lags: Vec<Option<SensorLag>>,
     contributions: usize,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SensorLag { time_constant_s: f64, initial_reading: f64 }
+
+fn measurement_time(text: &str) -> Result<(Option<f64>, f64, Option<SensorLag>)> {
+    if let Some(spec) = text.strip_prefix("lag:") {
+        let values: Vec<_> = spec.split(':').take(5).map(str::trim).collect();
+        if values.len() != 4 { return Err("lag syntax is lag:start_s:end_s:tau_s:initial_reading".into()); }
+        let start = finite(values[0])?;
+        let end = finite(values[1])?;
+        let time_constant_s = finite(values[2])?;
+        let initial_reading = finite(values[3])?;
+        if time_constant_s <= 0.0 { return Err("sensor time constant must be positive seconds".into()); }
+        return Ok((Some(start), end, Some(SensorLag { time_constant_s, initial_reading })));
+    }
+    Ok(match text.split_once("..") {
+        Some((start,end)) => (Some(finite(start.trim())?),finite(end.trim())?,None),
+        None => (None,finite(text)?,None),
+    })
 }
 fn finite(text: &str) -> Result<f64> {
     let value: f64=text.parse()?;
@@ -126,13 +146,10 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
             if fields.len()!=6 || fields.iter().any(|p|p.is_empty()) {
                 return Err("each unquoted numeric measurement needs exactly six fields".into());
             }
-            let (start,time)=match fields[0].split_once("..") {
-                Some((start,end)) => (Some(finite(start.trim())?),finite(end.trim())?),
-                None => (None,finite(fields[0])?),
-            };
+            let (start,time,sensor_lag)=measurement_time(fields[0])?;
             if time<=0. || time>2. { return Err("reference specimen measurements require 0 < time_s <= 2".into()); }
             if start.is_some_and(|start|start<=0. || start>=time) {
-                return Err("time mean needs 0 < start < end <= 2 seconds; initial-state windows are unsupported".into());
+                return Err("temporal readout needs 0 < start < end <= 2 seconds; initial-state windows are unsupported".into());
             }
             let observable=match fields[1] {
                 "temperature_k" => ScanObservable::Temperature,
@@ -145,7 +162,11 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
             if observable==ScanObservable::LiquidMassFraction && !(0.0..=1.0).contains(&target) {
                 return Err("liquid mass fraction is a fraction in [0,1], not a percentage".into());
             }
-            Ok(((start,time),ScanSpatialObservation {endpoint:0,readout:readout(cx,mesh,fields[4],fields[5])?,observable,target,scale}))
+            if observable==ScanObservable::LiquidMassFraction
+                && sensor_lag.is_some_and(|lag| !(0.0..=1.0).contains(&lag.initial_reading)) {
+                return Err("initial sensor fraction must be in [0,1], not percent".into());
+            }
+            Ok(((start,time,sensor_lag),ScanSpatialObservation {endpoint:0,readout:readout(cx,mesh,fields[4],fields[5])?,observable,target,scale}))
         })().map_err(|e|format!("measurement line {}: {e}",line_index+2))?;
         times.push(row.0); rows.push(row.1);
     }
@@ -153,7 +174,7 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
     // Preserve exact representable times and every source switch. Inserting
     // measurements cannot make the grid step over the one-second power change.
     let mut endpoints=Vec::new();
-    for &(start,end) in &times {endpoints.extend(start);endpoints.push(end);}
+    for &(start,end,_) in &times {endpoints.extend(start);endpoints.push(end);}
     endpoints.extend([1.0,2.0]);
     endpoints.sort_by(f64::total_cmp); endpoints.dedup();
     let count=endpoints.len().checked_mul(substeps).filter(|&n|n<=MAX_STEPS)
@@ -174,22 +195,25 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
     }
     endpoints=refined;
     let mut starts=Vec::with_capacity(rows.len());let mut contributions=0usize;
-    for (row,(start,time)) in rows.iter_mut().zip(times) {
+    let mut sensor_lags=Vec::with_capacity(rows.len());
+    for (row,(start,time,sensor_lag)) in rows.iter_mut().zip(times) {
         row.endpoint=endpoints.binary_search_by(|t|t.total_cmp(&time)).map_err(|_| "measurement endpoint missing")?;
         let start=start.map(|start|endpoints.binary_search_by(|t|t.total_cmp(&start))
             .map_err(|_|"measurement window start missing")).transpose()?;
         contributions=contributions.checked_add(start.map_or(1,|first|row.endpoint-first+1))
             .filter(|&n|n<=MAX_SAMPLES).ok_or("time-window contributions exceed 65536 samples")?;
         starts.push(start);
+        sensor_lags.push(sensor_lag);
     }
     cx.checkpoint().map_err(|_| "measurement parsing cancelled")?;
-    Ok(Measurements {endpoints,rows,starts,contributions})
+    Ok(Measurements {endpoints,rows,starts,sensor_lags,contributions})
 }
 
 struct Fit {
     powers: Vec<f64>,
     measurements: Vec<(f64, ScanObservable, f64, f64, f64)>,
     exposure_starts_s: Vec<Option<f64>>,
+    sensor_lags: Vec<Option<SensorLag>>,
     objective: f64,
     evaluations: usize,
     converged: bool,
@@ -225,10 +249,14 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, subste
         Ok(ScanningEnthalpyRun::new(cx,base,sources,1,None)?)
     };
     let segment=n.min(8);
-    let observations=data.rows.iter().cloned().zip(&data.starts).map(|(row,&start)| {
+    let observations=data.rows.iter().cloned().zip(&data.starts).zip(&data.sensor_lags).map(|((row,&start),&lag)| {
         let temporal=match start {
             None=>ScanTemporalObservation::instantaneous(row),
-            Some(first)=>ScanTemporalObservation::trapezoidal_mean(cx,row,&data.endpoints,first,MAX_STEPS)?,
+            Some(first)=>match lag {
+                Some(lag)=>ScanTemporalObservation::first_order_lag(cx,row,&data.endpoints,first,
+                    lag.time_constant_s,lag.initial_reading,MAX_STEPS)?,
+                None=>ScanTemporalObservation::trapezoidal_mean(cx,row,&data.endpoints,first,MAX_STEPS)?,
+            },
         };
         ScanObservationWithLoss::new(temporal,loss)
     })
@@ -262,7 +290,8 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, subste
         .zip(&replay.physical.standardized_residuals).map(|((row,&prediction),&residual)|
             (data.endpoints[row.endpoint],row.observable,row.target,prediction,residual)).collect();
     let exposure_starts_s=data.starts.iter().map(|start|start.map(|i|data.endpoints[i])).collect();
-    Ok(Fit {powers,measurements,exposure_starts_s,objective:replay.physical.value,evaluations:study.evaluations(),
+    Ok(Fit {powers,measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
+        objective:replay.physical.value,evaluations:study.evaluations(),
         converged:report.solution.converged,violation:limits.max_scaled_violation()})
 }
 fn main() -> Result<()> {
@@ -283,7 +312,12 @@ fn main() -> Result<()> {
     for (i,(time,quantity,target,prediction,residual)) in result.measurements.iter().enumerate() {
         let (term,slope)=options.loss.value_derivative(*residual)?;
         if let Some(start)=result.exposure_starts_s[i] {
-            println!("# measurement={i} interpretation=time_mean exposure_start_s={start:.17e} exposure_end_s={time:.17e}");
+            if let Some(lag)=result.sensor_lags[i] {
+                println!("# measurement={i} interpretation=first_order_lag response_start_s={start:.17e} response_end_s={time:.17e} tau_s={:.17e} initial_reading={:.17e}",
+                    lag.time_constant_s,lag.initial_reading);
+            } else {
+                println!("# measurement={i} interpretation=time_mean exposure_start_s={start:.17e} exposure_end_s={time:.17e}");
+            }
         }
         println!("# measurement={i} time_s={time:.17e} observable={quantity:?} target={target:.17e} prediction={prediction:.17e} standardized_residual={residual:.17e} loss_term={term:.17e} dloss_dstandardized_residual={slope:.17e}");
     }
@@ -448,6 +482,69 @@ mod robust_tests {
                 let manual:f64=result.measurements.iter().map(|m|loss.value_derivative(m.4).unwrap().0).sum();
                 assert!((result.objective-manual).abs()<1e-10*(1.+manual));
             }
+        });
+    }
+}
+
+#[cfg(test)]
+mod sensor_tests {
+    use super::*;
+    const DATA: &str=include_str!("sensor_measurements.csv");
+    fn with_cx(f: impl FnOnce(&CancelGate,&Cx<'_>)) {
+        let gate=CancelGate::new(); let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena|f(&gate,&Cx::new(&gate,arena,StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},
+            Budget::INFINITE,ExecMode::Deterministic)));
+    }
+
+    #[test]
+    fn g1_lagged_csv_recovers_powers_and_exposes_instantaneous_misinterpretation() {
+        with_cx(|_,cx| {
+            for substeps in [1,4] {
+                let actual=fit(cx,DATA,[0.,0.],ScanResidualLoss::Quadratic,substeps).unwrap();
+                assert!(actual.converged && actual.violation<=1e-8 && actual.objective<1e-12);
+                assert!((actual.powers[0]-2.).abs()<1e-4 && (actual.powers[1]-5.).abs()<1e-4);
+                assert_eq!(actual.powers[2],0.);
+                assert_eq!(actual.sensor_lags[0],None);
+                assert_eq!(actual.sensor_lags[1],Some(SensorLag {time_constant_s:0.5,initial_reading:152.}));
+                let wrong=DATA.replace("lag:1:2:0.5:152","2").replace("lag:1:2:0.5:0.52","2");
+                let wrong=fit(cx,&wrong,[0.,0.],ScanResidualLoss::Quadratic,substeps).unwrap();
+                assert!(wrong.converged && wrong.objective<1e-12);
+                assert!((wrong.powers[0]-2.).abs()<1e-4);
+                assert!((wrong.powers[1]-2.83833820809153).abs()<1e-4);
+            }
+        });
+    }
+
+    #[test]
+    fn g3_sensor_csv_keeps_declared_clock_initial_reading_and_sample_accounting() {
+        with_cx(|_,cx| {
+            let (complex,positions)=fs_conduction::fixtures::box_grid([1,1,1],[1.;3]);
+            let mesh=ConductionMesh::new(complex,positions).unwrap();
+            let text=format!("{HEADER}\nlag:0.25:1.75:0.5:151,specific_enthalpy_j_kg,154,10,volume,0;1;2;3;4;5\n1,temperature_k,310,1,vertex,0\n");
+            let data=parse(cx,&mesh,&text,2).unwrap();
+            for time in [0.25,1.0,1.75,2.0] {assert!(data.endpoints.contains(&time));}
+            let first=data.starts[0].unwrap();
+            assert_eq!(data.endpoints[first],0.25);
+            assert_eq!(data.endpoints[data.rows[0].endpoint],1.75);
+            assert_eq!(data.contributions,data.rows[0].endpoint-first+2);
+            assert_eq!(data.sensor_lags,vec![Some(SensorLag {time_constant_s:0.5,initial_reading:151.}),None]);
+        });
+    }
+
+    #[test]
+    fn g0_sensor_csv_refuses_bad_units_policies_and_cancelled_input() {
+        with_cx(|gate,cx| {
+            let (complex,positions)=fs_conduction::fixtures::box_grid([1,1,1],[1.;3]);
+            let mesh=ConductionMesh::new(complex,positions).unwrap();
+            for spec in ["lag:1:2:0:0.5","lag:1:2:-1:0.5","lag:1:2:NaN:0.5",
+                "lag:1:2:0.5:60","lag:1:2:0.5:NaN","lag:0:2:0.5:0.5",
+                "lag:2:1:0.5:0.5","lag:1:2:0.5","lag:1:2:0.5:0.5:9"] {
+                let text=format!("{HEADER}\n{spec},liquid_mass_fraction,0.55,0.1,vertex,0\n");
+                let error=parse(cx,&mesh,&text,1).err().unwrap().to_string();
+                assert!(error.contains("line 2"),"{error}");
+            }
+            gate.request();
+            assert!(parse(cx,&mesh,DATA,1).is_err());
         });
     }
 }

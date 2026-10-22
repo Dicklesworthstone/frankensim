@@ -154,3 +154,33 @@ finite differences, full/checkpoint/value agreement, inverse recovery and
 unchanged physical peak constraints. These Rust tests are authored, not executed
 in the authoring environment. Independent high-precision and matrix-exponential
 checks verify the sensor equations, not native compilation or solver behavior.
+
+### CSV sensor readings
+
+The same six-column CSV now accepts `lag:start:end:tau:initial` in `time_s`.
+Start, end and tau are seconds; initial is the sensor reading at start in the
+row's observable units. This requests a terminal filtered reading, not an
+exposure average. Instantaneous numbers and `start..end` retain their previous
+meaning and may coexist with lagged rows. No sensor state is inferred from an
+adjacent row or silently initialized to the simulated field.
+
+```csv
+time_s,observable,target,scale,readout,selection
+1,specific_enthalpy_j_kg,152,10,volume,0;1;2;3;4;5
+lag:1:2:0.5:152,specific_enthalpy_j_kg,154.83833820809153,10,volume,0;1;2;3;4;5
+```
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example spatial_measurement_fit -- \
+  examples/scan_power_fit/examples/sensor_measurements.csv 0 0 --substeps 4
+```
+
+`--huber` also applies to these complete readings. Output labels the response
+start/end, tau and initial reading separately from the prediction and raw
+residual. Every response-start/end and heater switch remains an exact grid
+knot; substeps refine the physical input reconstruction, not the declared tau.
+The existing positive-start restriction and all file/grid/sample limits remain.
+Three authored integration regressions cover fitting/negative control, mixed
+clock/sample accounting, malformed policies and cancellation. They have not
+been executed natively in this environment.
