@@ -20,10 +20,7 @@ pub use expansion::{ThermalJ2, ThermoplasticIncrement};
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
-use super::source::{
-    HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
-    resolve_j2_plasticity,
-};
+use super::source::{HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements};
 use crate::phase::{
     EquilibriumPhaseState, PhaseStateError, ResolvedHeatCapacityCurve, UniformEnthalpyStep,
     UniformEnthalpyStepInput,
@@ -34,9 +31,9 @@ use crate::state_point::{
 };
 use crate::{SmallStrainLaw, Voigt};
 use core::{convert::Infallible, fmt};
-use fs_matdb::{ClaimSelection, EvaluationDecision, MaterialCard, PropertyValue, QueryPoint};
+use fs_matdb::{ClaimSelection, MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Dims, Frequency, QuantitySpec, Temperature};
+use fs_qty::{Dims, QuantitySpec, Temperature};
 
 /// Hard ceiling on coupled within-step proposals; caller controls may tighten it.
 pub const MAX_FEEDBACK_ITERATIONS: usize = 256;
@@ -204,8 +201,9 @@ impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
     /// The six source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
-    /// E, nu, H (or Et), density and expansion must be validity-wide scalar constants;
-    /// equal endpoint samples of a varying energetic coefficient do not suffice.
+    /// E, nu, H (or Et), density and expansion must be constant over every
+    /// canonical source-line segment at the fixed external conditions. Every
+    /// crossed surface cell edge is checked; equal endpoints alone do not suffice.
     pub fn try_new(
         query: SourceQuery<'a>,
         specific_enthalpy_j_kg: f64,
@@ -246,10 +244,21 @@ impl<'a> ThermoplasticSource<'a> {
                 "initial source temperature must match h0; renamed axes require explicit absolute-temperature semantics",
             ));
         }
-        let first = resolve_j2_plasticity(
+        let mut requirements = j2_requirements(query.hardening_basis)
+            .map_err(|e| FeedbackError::Source(e.into()))?
+            .to_vec();
+        let first_material = resolve_material_state_point(
             query.card,
             &query.context,
+            &requirements,
             query.selection,
+        )
+        .map_err(|e| FeedbackError::Source(e.into()))?;
+        for property in first_material.properties() {
+            admit_rate_independent_property(property, &query.temperature_axis)?;
+        }
+        let first = ResolvedJ2Plasticity::try_from_material(
+            first_material,
             query.hardening_basis,
             query.strain_limit,
         )
@@ -260,9 +269,6 @@ impl<'a> ThermoplasticSource<'a> {
                 "caloric owner lacks paired Cp and density source receipts",
             ));
         }
-        let mut requirements = j2_requirements(query.hardening_basis)
-            .map_err(|e| FeedbackError::Source(e.into()))?
-            .to_vec();
         let mut pins: Vec<_> = first
             .material()
             .properties()
@@ -387,45 +393,15 @@ impl<'a> ThermoplasticSource<'a> {
                 || name == query.hardening_basis.property_name()
                 || name == density_name
                 || name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
-            match &claim.value {
-                PropertyValue::Scalar { .. }
-                    if receipt.decision == EvaluationDecision::ConstantWithinValidity =>
-                {
-                    ()
-                }
-                PropertyValue::Curve {
-                    abscissa,
-                    abscissa_dims,
-                    knots: samples,
-                    ..
-                } if !fixed
-                    && abscissa == &query.temperature_axis
-                    && *abscissa_dims == Temperature::DIMS =>
-                {
-                    if samples.iter().any(|&(t, value)| {
-                        t >= knots[0].temperature_k
-                            && t <= knots[knots.len() - 1].temperature_k
-                            && !positive(value)
-                    }) {
-                        return Err(FeedbackError::Invalid(
-                            "yield and Cp curves must stay positive throughout the admitted thermal span",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(FeedbackError::Invalid(
-                        "elasticity, hardening, density and expansion require scalar constants; only yield and Cp may be temperature curves",
-                    ));
-                }
-            }
             // Mechanics, caloric data and linked transport use the same
             // rate-independent source admission.
-            admit_rate_independent_property(property)?;
+            admit_rate_independent_property(property, &query.temperature_axis)?;
             let support = query
                 .card
                 .claims()
-                .query_envelope_typed(
+                .query_line_typed(
                     &claim.key,
+                    &query.temperature_axis,
                     &lower,
                     &upper,
                     ClaimSelection::Pinned(receipt.selected),
@@ -434,13 +410,18 @@ impl<'a> ThermoplasticSource<'a> {
                     property: name.to_owned(),
                     reason: e.to_string(),
                 })?;
-            if !fixed
-                && (!positive(support.lower.evidence.value.value)
-                    || !positive(support.upper.evidence.value.value))
-            {
-                return Err(FeedbackError::Invalid(
-                    "yield and Cp must be positive at both thermal support boundaries",
-                ));
+            for (_, sample) in support.knots {
+                let value = sample.evidence.value.value;
+                if fixed && value != property.value_si() {
+                    return Err(FeedbackError::Invalid(
+                        "elasticity, hardening, density and expansion must be constant on every source-line segment",
+                    ));
+                }
+                if !fixed && !positive(value) {
+                    return Err(FeedbackError::Invalid(
+                        "yield and Cp must be positive at every source-line breakpoint",
+                    ));
+                }
             }
         }
         let source = ResolvedJ2Plasticity::try_from_material(
@@ -526,7 +507,7 @@ impl<'a> ThermoplasticSource<'a> {
             .map_err(|e| FeedbackError::Source(e.into()))?;
         let property = &material.properties()[0];
         thermal.admit_static(property).map_err(support_error)?;
-        admit_rate_independent_property(property)?;
+        admit_rate_independent_property(property, &self.temperature_axis)?;
         Ok(MaterialPropertySelection::PinnedByProperty(vec![(
             key.name().to_owned(),
             property.answer().receipt.selected,
@@ -839,53 +820,12 @@ impl<'a> CaloricPoint<'a> {
 
 fn admit_rate_independent_property<E>(
     property: &crate::state_point::ResolvedScalarProperty,
+    temperature_axis: &str,
 ) -> Result<(), FeedbackError<E>> {
-    let receipt = &property.answer().receipt;
-    for (axis, _) in &receipt.query_point {
-        if property
-            .answer()
-            .evidence
-            .model
-            .validity
-            .bound(axis)
-            .is_none()
-        {
-            continue;
-        }
-        let quantity = receipt.axis_quantities.get(axis).copied();
-        let kind = quantity
-            .and_then(QuantitySpec::semantic_type)
-            .map(|ty| ty.kind());
-        let dynamic_kind = matches!(
-            kind,
-            Some(
-                QuantityKind::Frequency(_)
-                    | QuantityKind::AngularVelocity(_)
-                    | QuantityKind::Strain { .. }
-                    | QuantityKind::Stress
-            )
-        );
-        let rate_dimension = quantity.is_some_and(|q| q.dims() == Frequency::DIMS);
-        let legacy_dynamic_axis = kind.is_none()
-            && [
-                "omega",
-                "frequency",
-                "strain",
-                "epsilon",
-                "eps",
-                "shear_strain",
-                "strain_rate",
-                "shear_rate",
-                "plastic_strain",
-                "equivalent_plastic_strain",
-                "stress",
-            ]
-            .contains(&axis.as_str());
-        if dynamic_kind || rate_dimension || legacy_dynamic_axis {
-            return Err(FeedbackError::Invalid(
-                "mechanically bounded coefficients require their evolving strain, stress or rate coordinate",
-            ));
-        }
+    if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
+        return Err(FeedbackError::Invalid(
+            "coefficients require the owned temperature and fixed external conditions; mechanical, rate and additional temperature axes need an evolving owner",
+        ));
     }
     if property
         .angular_frequency_band_rad_s()

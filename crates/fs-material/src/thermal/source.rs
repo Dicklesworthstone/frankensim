@@ -51,30 +51,46 @@ impl ThermalMaterialPoint<'_> {
     pub fn at(&self, body: EquilibriumPhaseState) -> Result<QueryPoint, ThermalMaterialError> {
         let invalid = ThermalMaterialError::Invalid;
         if self.material.content_hash() != body.material_card_identity() {
-            return Err(invalid("property and enthalpy must use the same material card"));
+            return Err(invalid(
+                "property and enthalpy must use the same material card",
+            ));
         }
         let tq = self.context.axis_quantities().get(self.temperature_axis);
         if !self.context.axes().contains_key(self.temperature_axis)
-            || tq.is_some_and(|q| *q != QuantitySpec::dimensional(Temperature::DIMS)
-                && *q != semantic(QuantityKind::AbsoluteTemperature)) {
+            || tq.is_some_and(|q| {
+                *q != QuantitySpec::dimensional(Temperature::DIMS)
+                    && *q != semantic(QuantityKind::AbsoluteTemperature)
+            })
+        {
             return Err(invalid("an existing absolute-temperature axis is required"));
         }
-        let mut point = self.context.clone().with(self.temperature_axis, body.temperature_k())
+        let mut point = self
+            .context
+            .clone()
+            .with(self.temperature_axis, body.temperature_k())
             .map_err(|e| ThermalMaterialError::Coordinate(e.to_string()))?;
         if let Some(axis) = self.liquid_fraction_axis {
-            if axis == self.temperature_axis || !point.axes().contains_key(axis)
-                || point.axis_quantities().get(axis).is_some_and(|q|
-                    *q != QuantitySpec::dimensional(Dims([0;6]))) {
-                return Err(invalid("liquid mass fraction needs a distinct existing dimensional scalar axis"));
+            if axis == self.temperature_axis
+                || !point.axes().contains_key(axis)
+                || point
+                    .axis_quantities()
+                    .get(axis)
+                    .is_some_and(|q| *q != QuantitySpec::dimensional(Dims([0; 6])))
+            {
+                return Err(invalid(
+                    "liquid mass fraction needs a distinct existing dimensional scalar axis",
+                ));
             }
-            point = point.with(axis, body.liquid_mass_fraction())
+            point = point
+                .with(axis, body.liquid_mass_fraction())
                 .map_err(|e| ThermalMaterialError::Coordinate(e.to_string()))?;
         }
         Ok(point)
     }
 
     /// Admit a scalar static property already resolved from this binding's card.
-    /// Every source axis must be a declared temperature or liquid-mass-fraction axis.
+    /// Source axes may be the declared temperature/liquid-mass-fraction axes or
+    /// typed fixed pressure, composition, moisture and concentration conditions.
     /// This checks source form and frequency support, not the property's units,
     /// physical range, or continuous support between sampled states. Call `at`
     /// and the common state-point resolver before admitting the returned property.
@@ -99,6 +115,7 @@ impl ThermalMaterialPoint<'_> {
         for (index, (axis, quantity)) in additional_axes.iter().enumerate() {
             if *axis == self.temperature_axis
                 || Some(*axis) == self.liquid_fraction_axis
+                || quantity.dims() == Temperature::DIMS
                 || !self.context.axes().contains_key(*axis)
                 || self.context.axis_quantities().get(*axis) != Some(quantity)
                 || additional_axes[..index]
@@ -115,15 +132,40 @@ impl ThermalMaterialPoint<'_> {
             .claims()
             .claim(property.answer().receipt.selected)
             .ok_or(invalid("selected thermal property claim is absent"))?;
+        if claim.validity.bounds().keys().any(|axis| {
+            axis != self.temperature_axis
+                && (self
+                    .context
+                    .axis_quantities()
+                    .get(axis)
+                    .is_some_and(|q| q.dims() == Temperature::DIMS)
+                    || axis == "T" && !self.context.axis_quantities().contains_key(axis))
+        }) {
+            return Err(invalid(
+                "a second source temperature requires an explicitly coupled thermal owner",
+            ));
+        }
         if !claim.value.axes().all(|(axis, dims)| {
             (axis == self.temperature_axis && dims == Temperature::DIMS)
                 || (Some(axis) == self.liquid_fraction_axis && dims == Dims([0; 6]))
                 || additional_axes.iter().any(|(declared_axis, quantity)| {
                     *declared_axis == axis && quantity.dims() == dims
                 })
+                || (axis != self.temperature_axis
+                    && dims != Temperature::DIMS
+                    && self
+                        .context
+                        .axis_quantities()
+                        .get(axis)
+                        .is_some_and(|q| q.dims() == dims)
+                    && crate::state_point::is_fixed_external_coordinate(
+                        axis,
+                        self.context.axis_quantities().get(axis).copied(),
+                        self.context.axes().get(axis).copied(),
+                    ))
         }) {
             return Err(invalid(if additional_axes.is_empty() {
-                "static property must depend only on declared thermal coordinates"
+                "static property must depend only on owned thermal coordinates and typed fixed external conditions"
             } else {
                 "static property must depend only on explicitly coupled coordinates"
             }));

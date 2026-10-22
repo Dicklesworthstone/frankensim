@@ -1627,6 +1627,10 @@ state. `ResolvedJ2Plasticity::try_from_material` retains an existing complete
 multiphysics bundle, including additional properties and original source receipts.
 Its `law()` supplies the existing J2 radial return and consistent tangent directly
 to native small-strain solvers, including `fs-solid::SmallStrainTetProblem`.
+Scalar, curve and sampled-surface coefficients may depend on typed fixed
+pressure, composition, moisture or concentration, alongside fixed absolute
+temperature. The shared external-condition admission rejects mechanical,
+frequency and rate coordinates that would require an evolving physical owner.
 
 The selected hardening basis is either the plastic-strain modulus H or a
 monotonic uniaxial total-strain tangent Et. For the latter, H = Et E/(E-Et) is
@@ -1704,8 +1708,11 @@ yield reduction at fixed strain, and invalid-history refusal.
 source-resolved, strictly increasing solid caloric chart. Yield stress and heat
 capacity may vary with absolute temperature. Elastic coefficients, the chosen
 hardening datum, density and reference thermal geometry remain fixed; all six
-property roles share one material card and source context, with continuously
-supported claims pinned over the full chart. Mechanically bounded strain,
+property roles share one material card and source context. Each selected claim
+supplies one continuously supported canonical temperature line over the full
+chart. Every crossed curve knot and surface-cell edge participates in exact
+energetic-coefficient constancy and positive yield/Cp checks; equal endpoints
+alone cannot establish either condition. Mechanically bounded strain,
 stress or rate coefficients cannot be frozen while their histories evolve.
 Renamed temperature coordinates require explicit absolute-temperature semantics.
 
@@ -1726,8 +1733,10 @@ source receipts and residual gates do not establish empirical accuracy.
 
 `SourceQuery::thermal_expansion` explicitly selects either zero eigenstrain or
 the canonical instantaneous linear expansion coefficient on the same card.
-The selected claim must be a finite scalar constant continuously supporting the
-complete caloric chart. A missing or temperature-varying expansion source refuses.
+The selected claim must be finite and constant along the complete canonical
+temperature line at the fixed external conditions. Scalar, curve and sampled
+surface sources must continuously support that line and retain the same value
+on every segment. A missing or temperature-varying expansion source refuses.
 `ThermalJ2` passes `eps-alpha(T-T_ref)I` to the original native J2 stress,
 consistent tangent and history update. The reference temperature is fixed at
 specimen birth, including across accepted thermal/mechanical continuation.
@@ -1752,7 +1761,10 @@ selects a nonnegative static property at the actual accepted caloric state,
 applies the same mechanical-coordinate/frequency guard as the six native
 thermoplastic roles, and returns its original claim pin. The consuming
 transport owner admits the property quantity. No material state, caloric law,
-plastic history or transport formula is duplicated.
+plastic history or transport formula is duplicated. `ThermalMaterialPoint`
+admits the same typed fixed external conditions for conductivity source axes.
+Its explicitly coupled additional axes keep their original physical owners;
+an additional temperature cannot be frozen or introduced as a nonthermal axis.
 
 
 ### Declared mushy-phase volume and mobility
@@ -1780,7 +1792,7 @@ constant across the complete line; the declared modulus/time/free-strain laws
 provide the supported temperature response. Source gaps and discrete-only
 intervals refuse rather than supplying interpolated coverage.
 
-Hyperelastic and hereditary source bindings share a single
+Hyperelastic, hereditary and J2 source bindings share a single
 fixed-external-coordinate policy. Typed pressure, composition, moisture and
 concentration may describe fixed external conditions. Evolving mechanical
 coordinates and a second temperature coordinate cannot be frozen into a thermal

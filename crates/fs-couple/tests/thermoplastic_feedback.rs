@@ -831,3 +831,188 @@ fn renamed_temperature_requires_semantics_and_retains_the_typed_source_context()
         assert!(step.combined_residual_j.abs() <= config().energy_tolerance_j);
     });
 }
+
+fn pressure_surface(property: &mut PropertyClaim, values: [f64; 4]) {
+    property.value = PropertyValue::Surface2D {
+        axes: ["T".into(), "pressure".into()],
+        axis_dims: [Temperature::DIMS, Pressure::DIMS],
+        samples: [[280.0, 1e5], [320.0, 1e5], [280.0, 3e5], [320.0, 3e5]]
+            .into_iter()
+            .zip(values)
+            .collect(),
+        triangles: vec![[0, 1, 2], [1, 3, 2]],
+        dims: property.key.quantity().dims(),
+    };
+    property.validity = ValidityDomain::unconstrained()
+        .with("T", 280.0, 320.0)
+        .with_quantity(
+            "pressure",
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
+            1e5,
+            3e5,
+        );
+    property.interpolation = InterpolationPolicy::LinearInside;
+}
+
+fn pressure_properties() -> Vec<PropertyClaim> {
+    let mut data = properties(5.0, false);
+    for (property, values) in data.iter_mut().zip([
+        [1e9, 1e9, 1.4e9, 1.4e9],
+        [0.125, 0.125, 0.375, 0.375],
+        [5e6, 1e6, 5e6, 1e6],
+        [0.5e8, 0.5e8, 1.5e8, 1.5e8],
+        [5.0, 5.0, 15.0, 15.0],
+        [800.0, 800.0, 1200.0, 1200.0],
+    ]) {
+        pressure_surface(property, values);
+    }
+    data
+}
+
+fn pressure_context(pressure_pa: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with("T", 300.0)
+        .unwrap()
+        .with_quantity(
+            "pressure",
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
+            pressure_pa,
+        )
+        .unwrap()
+}
+
+#[test]
+fn source_surfaces_admit_energetic_constants_over_the_complete_fixed_pressure_line() {
+    let mut data = pressure_properties();
+    let mut expansion = scalar(
+        fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+        fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
+        2e-5,
+    );
+    pressure_surface(&mut expansion, [1e-5, 1e-5, 3e-5, 3e-5]);
+    data.push(expansion);
+    let fixture = Fixture::from_properties(
+        data,
+        10.0,
+        pressure_context(2e5),
+        "T",
+        SolidLiquidPhase::Solid,
+    );
+    let mut query = fixture.query();
+    query.thermal_expansion = Some(MaterialPropertySelection::SingleClaimOnly);
+    let point = CaloricPoint::try_new(query, 0.0, VOLUME, SURFACE).unwrap();
+    close(point.resolved().law().elastic.youngs, 1.2e9, 1e-6);
+    close(point.resolved().law().elastic.poisson, 0.25, 1e-15);
+    close(point.resolved().hardening_modulus_pa(), 1e8, 1e-7);
+    close(point.mass_kg(), 0.001, 1e-15);
+    assert_eq!(point.resolved().material().properties().len(), 7);
+    for property in point.resolved().material().properties() {
+        fixture
+            .card
+            .claims()
+            .verify_receipt(&property.answer().receipt)
+            .unwrap();
+    }
+}
+
+#[test]
+fn every_surface_cell_crossing_checks_energetic_constancy_and_positive_yield() {
+    for (index, value) in [(0, 1.2e9), (1, 0.25), (3, 1e8), (5, 1000.0)] {
+        let mut data = pressure_properties();
+        // At this pressure the two endpoints agree, but the diagonal cut has
+        // a different energetic coefficient. Sampling endpoints is unsound.
+        pressure_surface(&mut data[index], [value, 0.8 * value, 0.8 * value, value]);
+        let fixture = Fixture::from_properties(
+            data,
+            10.0,
+            pressure_context(2e5),
+            "T",
+            SolidLiquidPhase::Solid,
+        );
+        assert!(CaloricPoint::try_new(fixture.query(), 0.0, VOLUME, SURFACE).is_err());
+    }
+    let mut data = pressure_properties();
+    pressure_surface(&mut data[2], [6e6, -1e6, -1e6, 6e6]);
+    let fixture = Fixture::from_properties(
+        data,
+        7.5,
+        pressure_context(1.5e5),
+        "T",
+        SolidLiquidPhase::Solid,
+    );
+    // Initial T=300 K and both thermal boundaries have positive strength;
+    // the negative interior cut at T=310 K still forbids this source path.
+    assert!(
+        resolve_j2_plasticity(
+            &fixture.card,
+            &fixture.context,
+            MaterialPropertySelection::SingleClaimOnly,
+            BASIS,
+            0.04
+        )
+        .is_ok()
+    );
+    assert!(CaloricPoint::try_new(fixture.query(), 0.0, VOLUME, SURFACE).is_err());
+}
+
+#[test]
+fn surface_source_holes_and_second_temperature_bounds_cannot_be_frozen_away() {
+    let mut data = pressure_properties();
+    let right = f64::from_bits(310_f64.to_bits() + 1);
+    data[2].value = PropertyValue::Surface2D {
+        axes: ["T".into(), "pressure".into()],
+        axis_dims: [Temperature::DIMS, Pressure::DIMS],
+        samples: [
+            [280.0, 1e5],
+            [310.0, 1e5],
+            [280.0, 3e5],
+            [310.0, 3e5],
+            [right, 1e5],
+            [320.0, 1e5],
+            [right, 3e5],
+            [320.0, 3e5],
+        ]
+        .map(|at| (at, 3e6))
+        .to_vec(),
+        triangles: vec![[0, 1, 2], [1, 3, 2], [4, 5, 6], [5, 7, 6]],
+        dims: Pressure::DIMS,
+    };
+    let gap = Fixture::from_properties(
+        data,
+        10.0,
+        pressure_context(2e5),
+        "T",
+        SolidLiquidPhase::Solid,
+    );
+    assert!(
+        resolve_j2_plasticity(
+            &gap.card,
+            &gap.context,
+            MaterialPropertySelection::SingleClaimOnly,
+            BASIS,
+            0.04
+        )
+        .is_ok()
+    );
+    assert!(CaloricPoint::try_new(gap.query(), 0.0, VOLUME, SURFACE).is_err());
+
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    for index in 0..6 {
+        let mut data = properties(5.0, false);
+        data[index].validity =
+            data[index]
+                .validity
+                .clone()
+                .with_quantity("other_temperature", absolute, 290.0, 310.0);
+        let query = QueryPoint::new()
+            .with("T", 300.0)
+            .unwrap()
+            .with_quantity("other_temperature", absolute, 300.0)
+            .unwrap();
+        let fixture = Fixture::from_properties(data, 5.0, query, "T", SolidLiquidPhase::Solid);
+        assert!(CaloricPoint::try_new(fixture.query(), 0.0, VOLUME, SURFACE).is_err());
+    }
+}

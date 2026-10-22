@@ -4182,3 +4182,21 @@ Source continuity, role pins and shared material identity remain enforced.
 Non-temperature coordinates stay fixed external conditions; this adds no
 evolving pressure/composition work, phase transition, variable reference mass
 or alternate caloric model. Numerical dissipation is not converted to heat.
+
+### Environmental material surfaces in thermoplastic conduction
+
+The existing native tetrahedral plasticity solve and prepared material heat
+network consume the same fixed-context source surfaces. `ThermoplasticSource`
+retains every crossed temperature-line breakpoint, original role pin, material
+identity and typed external condition. At fixed pressure, energetic coefficients
+must remain exactly constant while yield and heat capacity may vary with
+supported temperature; conductivity resolves at the actual thermal endpoint.
+
+The spatial regression changes only the pressure query on identical material
+cards and checks the resulting free-node displacement, plastic history,
+temperatures and conduction against independent mechanical and thermal
+reductions. Physical plastic heat, stored elastic/hardening energy, boundary
+heat and numerical loss remain separately balanced. Proposals retain atomic
+mechanical/thermal acceptance. This remains the existing small-strain,
+single-solid-phase, fixed-reference-mass and fixed-geometry model; it does not
+supply evolving-pressure work or a new constitutive or heat-transfer solver.

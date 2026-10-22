@@ -16,7 +16,8 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, POISSON_RATIO_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
     YIELD_STRESS_PROPERTY, YOUNG_MODULUS_PROPERTY,
 };
-use fs_qty::{Density, Dims, Pressure, Temperature};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::plastic3::IncrementSettings;
 use fs_thermal::enthalpy::{
@@ -64,6 +65,37 @@ fn scalar(name: &str, dims: Dims, value: f64) -> PropertyClaim {
     }
 }
 
+fn pressure_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
+fn pressure_surface(property: &mut PropertyClaim, scales: [f64; 2]) {
+    let knots = match &property.value {
+        PropertyValue::Scalar { value, .. } => vec![(280.0, *value), (320.0, *value)],
+        PropertyValue::Curve { knots, .. } => knots.clone(),
+        PropertyValue::Surface2D { .. } => unreachable!("fixture starts from scalar/T data"),
+    };
+    property.value = PropertyValue::Surface2D {
+        axes: ["T".into(), "p".into()],
+        axis_dims: [Temperature::DIMS, Pressure::DIMS],
+        samples: knots
+            .iter()
+            .flat_map(|&(t, value)| [([t, 1e5], scales[0] * value), ([t, 3e5], scales[1] * value)])
+            .collect(),
+        triangles: (0..knots.len() as u32 - 1)
+            .flat_map(|index| {
+                let left = 2 * index;
+                [[left, left + 2, left + 1], [left + 2, left + 3, left + 1]]
+            })
+            .collect(),
+        dims: property.key.quantity().dims(),
+    };
+    property.validity = ValidityDomain::unconstrained()
+        .with("T", 280.0, 320.0)
+        .with_quantity("p", pressure_quantity(), 1e5, 3e5);
+    property.interpolation = InterpolationPolicy::LinearInside;
+}
+
 struct Fixture {
     cards: [MaterialCard; 2],
     caloric: [ResolvedHeatCapacityCurve; 2],
@@ -80,15 +112,35 @@ impl Fixture {
         conductivity_gap: bool,
         mechanical_axis: Option<&str>,
     ) -> Self {
+        Self::with_conditions(cp, k, conductivity_gap, mechanical_axis, None)
+    }
+    fn with_pressure(cp: [f64; 2], k: f64, pressure_pa: f64) -> Self {
+        Self::with_conditions(cp, k, false, None, Some(pressure_pa))
+    }
+    fn with_conditions(
+        cp: [f64; 2],
+        k: f64,
+        conductivity_gap: bool,
+        mechanical_axis: Option<&str>,
+        pressure_pa: Option<f64>,
+    ) -> Self {
         let cards = [0, 1].map(|side| {
             let mut claims = ClaimSet::new();
-            for property in [
+            for mut property in [
                 scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, 1.2e9),
                 scalar(POISSON_RATIO_PROPERTY, Dims([0; 6]), 0.2),
                 scalar(BASIS.property_name(), Pressure::DIMS, 1e8),
                 scalar(DENSITY_PROPERTY, Density::DIMS, 1000.0),
                 scalar(CP, CP_DIMS, cp[side]),
             ] {
+                if pressure_pa.is_some() {
+                    let scales = if property.key.name() == CP {
+                        [1.0, 2.0]
+                    } else {
+                        [1.0, 1.0]
+                    };
+                    pressure_surface(&mut property, scales);
+                }
                 claims.insert_claim(property).unwrap();
             }
             let mut strength = scalar(YIELD_STRESS_PROPERTY, Pressure::DIMS, 40e6);
@@ -102,6 +154,9 @@ impl Fixture {
                 strength.validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
                 strength.interpolation = InterpolationPolicy::LinearInside;
             }
+            if pressure_pa.is_some() {
+                pressure_surface(&mut strength, [1.0, 1.0]);
+            }
             claims.insert_claim(strength).unwrap();
             let mut transport = scalar(K, THERMAL_CONDUCTIVITY_DIMS, k);
             transport.validity = ValidityDomain::unconstrained().with("p", 199999.0, 200001.0);
@@ -110,6 +165,9 @@ impl Fixture {
             }
             if conductivity_gap && side == 0 {
                 transport.validity = transport.validity.with("T", 280.0, 300.1);
+            }
+            if pressure_pa.is_some() {
+                pressure_surface(&mut transport, [1.0, 10.0]);
             }
             claims.insert_claim(transport).unwrap();
             if conductivity_gap && side == 0 {
@@ -134,7 +192,7 @@ impl Fixture {
         let mut point = QueryPoint::new()
             .with("T", 300.0)
             .unwrap()
-            .with("p", PRESSURE_PA)
+            .with_quantity("p", pressure_quantity(), pressure_pa.unwrap_or(PRESSURE_PA))
             .unwrap();
         if let Some(axis) = mechanical_axis {
             point = point.with(axis, 0.0).unwrap();
@@ -144,6 +202,13 @@ impl Fixture {
         let cp_key = PropertyKey::new(CP, CP_DIMS);
         let density_key = PropertyKey::new(DENSITY_PROPERTY, Density::DIMS);
         let caloric = [0, 1].map(|side| {
+            let reference_cp = cards[side]
+                .claims()
+                .query_typed(&cp_key, &point, SelectionPolicy::SingleClaimOnly)
+                .unwrap()
+                .evidence
+                .value
+                .value;
             ResolvedHeatCapacityCurve::try_new(
                 &cards[side],
                 HeatCapacitySourceQuery {
@@ -155,7 +220,7 @@ impl Fixture {
                     selection: SelectionPolicy::SingleClaimOnly,
                 },
                 SolidLiquidPhase::Solid,
-                -20.0 * cp[side],
+                -20.0 * reference_cp,
                 1e-4,
             )
             .unwrap()
@@ -732,6 +797,134 @@ fn heating_past_the_original_conductivity_claim_refuses_the_whole_coupled_interv
         for cell in CELLS {
             assert_eq!(thermal.temperature_k(cell).unwrap(), 300.0);
         }
+    });
+}
+
+#[test]
+fn pressure_surface_data_changes_actual_plastic_equilibrium_and_material_conduction() {
+    with_cx(|_, cx| {
+        let mut observations = Vec::new();
+        let mut card_ids = Vec::new();
+        for pressure in [1.5e5, 2.5e5] {
+            let fixture = Fixture::with_pressure([5.0, 5.0], 0.01, pressure);
+            let thermal = fixture.thermal();
+            let solid = fixture.solid(&thermal, cx);
+            card_ids.push(fixture.cards.each_ref().map(MaterialCard::content_hash));
+            let conductivity = vec![
+                Some((
+                    fixture.conductivity.clone(),
+                    MaterialPropertySelection::SingleClaimOnly
+                ));
+                2
+            ];
+            let materials = solid.thermal_material_cells(&conductivity).unwrap();
+            let links = links();
+            let network = MaterialNetwork {
+                cells: &materials,
+                resistors: &[],
+                links: &links,
+            };
+            let prepared = network.prepare(&thermal, || false).unwrap();
+            let observer = prepared.observe(()).unwrap();
+            let step = solid
+                .advance(
+                    &thermal,
+                    &observer,
+                    1.0,
+                    &supports(SHEAR),
+                    &applied(),
+                    IncrementSettings::default(),
+                    thermal_config(),
+                    control(),
+                    cx,
+                )
+                .unwrap();
+            let fraction = (pressure - 1e5) / 2e5;
+            let cp = 5.0 * (1.0 + fraction);
+            let k = 0.01 * (1.0 + 9.0 * fraction);
+            let expected = coupled_oracle(k, [cp, cp]);
+            let actual = (
+                step.thermal().temperature_k(CELLS[0]).unwrap(),
+                step.thermal().temperature_k(CELLS[1]).unwrap(),
+                step.solid().solution().displacement_m[3][0],
+                step.solid().solution().element_states[0].alpha,
+            );
+            close(actual.0, expected.0, 3e-7);
+            close(actual.1, expected.1, 3e-7);
+            close(actual.2, expected.2, 2e-11);
+            close(actual.3, expected.3, 2e-10);
+            assert!(actual.0 > actual.1 && actual.1 > 300.0);
+            assert!(actual.3 > 0.0);
+            assert_eq!(step.solid().solution().element_states[1].alpha, 0.0);
+            let report = step.report();
+            assert!(report.physical_heat_j > 0.0);
+            assert!(report.numerical_loss_j > 0.0);
+            close(report.external_heat_j, 0.0, 1e-10);
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                report.physical_heat_j,
+                control().energy_tolerance_j,
+            );
+            close(
+                report.mechanical_work_j,
+                report.stored_mechanical_change_j
+                    + report.physical_heat_j
+                    + report.numerical_loss_j,
+                control().energy_tolerance_j,
+            );
+            assert!(report.combined_residual_j.abs() <= control().energy_tolerance_j);
+            let transport_sample = step.observer().first.sample().unwrap();
+            for (index, material) in step.solid().materials().iter().enumerate() {
+                let cell = transport_sample
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell == CELLS[index])
+                    .unwrap();
+                let transport = cell.conductivity.as_ref().unwrap();
+                close(transport.property(K).unwrap().value_si(), k, 1e-14);
+                assert_eq!(
+                    transport.card_identity(),
+                    material.material().card_identity()
+                );
+                for bundle in [material.material(), transport] {
+                    for property in bundle.properties() {
+                        let receipt = &property.answer().receipt;
+                        fixture.cards[index]
+                            .claims()
+                            .verify_receipt(receipt)
+                            .unwrap();
+                        assert!(receipt.query_point.contains(&("p".into(), pressure)));
+                        assert!(
+                            receipt
+                                .query_point
+                                .contains(&("T".into(), cell.phase.temperature_k()))
+                        );
+                        assert_eq!(receipt.axis_quantities.get("p"), Some(&pressure_quantity()));
+                    }
+                }
+                for property in material.material().properties() {
+                    assert_eq!(
+                        property.answer().receipt.selected,
+                        solid.materials()[index]
+                            .material()
+                            .property(property.requirement().name())
+                            .unwrap()
+                            .answer()
+                            .receipt
+                            .selected
+                    );
+                }
+            }
+            assert_eq!(solid.time_s(), 0.0);
+            assert_eq!(thermal.time_s(), 0.0);
+            observations.push(actual);
+        }
+        assert_eq!(
+            card_ids[0], card_ids[1],
+            "the same material cards serve both pressure contexts"
+        );
+        assert!((observations[0].0 - observations[1].0).abs() > 0.01);
+        assert!((observations[0].2 - observations[1].2).abs() > 1e-8);
     });
 }
 

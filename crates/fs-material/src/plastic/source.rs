@@ -18,7 +18,6 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, Pressure, QuantitySpec};
 
 use super::{J2Plasticity, J2State};
-use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use crate::elastic::IsotropicElastic;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, POISSON_RATIO_PROPERTY,
@@ -26,6 +25,7 @@ use crate::state_point::{
     ScalarPropertyRequirement, YIELD_STRESS_PROPERTY, YOUNG_MODULUS_PROPERTY,
     resolve_material_state_point,
 };
+use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 
 /// Slope of the yield stress with respect to equivalent plastic strain [Pa].
 pub const ISOTROPIC_HARDENING_MODULUS_PROPERTY: &str = "isotropic_hardening_modulus";
@@ -78,7 +78,10 @@ pub fn j2_requirements(
         ScalarPropertyRequirement::try_new(
             POISSON_RATIO_PROPERTY,
             Dims([0; 6]),
-            ScalarAdmissibility::OpenInterval { lower: -1.0, upper: 0.5 },
+            ScalarAdmissibility::OpenInterval {
+                lower: -1.0,
+                upper: 0.5,
+            },
         )?,
         ScalarPropertyRequirement::try_new(
             YIELD_STRESS_PROPERTY,
@@ -106,8 +109,10 @@ impl ResolvedJ2Plasticity {
     /// Adopt an already resolved bundle without losing other physics receipts.
     ///
     /// `basis` remains explicit even if the bundle contains both independent
-    /// hardening sources. They are not reconciled or averaged. Temperature
-    /// curves are evaluated by the common material owner before conversion.
+    /// hardening sources. They are not reconciled or averaged. Curves and
+    /// surfaces at supported fixed external conditions are evaluated by the
+    /// common material owner before conversion. Mechanical source coordinates
+    /// and rates cannot be frozen into these coefficients.
     ///
     /// # Errors
     /// Missing/ambiguous sources, wrong quantities, unsupported coefficient
@@ -119,21 +124,29 @@ impl ResolvedJ2Plasticity {
         strain_limit: f64,
     ) -> Result<Self, J2SourceError> {
         if !(strain_limit.is_finite() && strain_limit > 0.0 && strain_limit <= 0.05) {
-            return Err(J2SourceError::Invalid("small-strain bound must be in (0, 0.05]"));
+            return Err(J2SourceError::Invalid(
+                "small-strain bound must be in (0, 0.05]",
+            ));
         }
         let youngs = coefficient(&material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?.value_si();
         let poisson = coefficient(&material, POISSON_RATIO_PROPERTY, Dims([0; 6]))?.value_si();
-        let yield_stress = coefficient(&material, YIELD_STRESS_PROPERTY, Pressure::DIMS)?.value_si();
-        let source_hardening = coefficient(&material, basis.property_name(), Pressure::DIMS)?.value_si();
+        let yield_stress =
+            coefficient(&material, YIELD_STRESS_PROPERTY, Pressure::DIMS)?.value_si();
+        let source_hardening =
+            coefficient(&material, basis.property_name(), Pressure::DIMS)?.value_si();
         if !(source_hardening >= 0.0 && source_hardening.is_finite()) {
-            return Err(J2SourceError::Invalid("hardening source must be finite and nonnegative"));
+            return Err(J2SourceError::Invalid(
+                "hardening source must be finite and nonnegative",
+            ));
         }
         let elastic = IsotropicElastic::new(youngs, poisson, strain_limit)?;
         let hardening = match basis {
             HardeningPropertyBasis::PlasticStrainModulus => source_hardening,
             HardeningPropertyBasis::UniaxialTangentModulus => {
                 if source_hardening >= youngs {
-                    return Err(J2SourceError::Invalid("uniaxial tangent must be smaller than Young's modulus"));
+                    return Err(J2SourceError::Invalid(
+                        "uniaxial tangent must be smaller than Young's modulus",
+                    ));
                 }
                 // Evaluate the ratio first: E*Et can overflow even when H fits.
                 source_hardening * (youngs / (youngs - source_hardening))
@@ -143,20 +156,36 @@ impl ResolvedJ2Plasticity {
             && hardening >= 0.0
             && (source_hardening == 0.0 || hardening > 0.0))
         {
-            return Err(J2SourceError::Invalid("hardening conversion is not representable"));
+            return Err(J2SourceError::Invalid(
+                "hardening conversion is not representable",
+            ));
         }
         let law = J2Plasticity::new(elastic, yield_stress, hardening)?;
         let (lambda, mu) = law.elastic.lame();
         let bulk = lambda + 2.0 * mu / 3.0;
         let denominator = 3.0 * mu + hardening;
-        if !(mu.is_finite() && mu > 0.0
-            && bulk.is_finite() && bulk > 0.0
-            && denominator.is_finite() && denominator > 0.0)
-            || !law.elastic.stiffness().iter().flatten().all(|v| v.is_finite())
+        if !(mu.is_finite()
+            && mu > 0.0
+            && bulk.is_finite()
+            && bulk > 0.0
+            && denominator.is_finite()
+            && denominator > 0.0)
+            || !law
+                .elastic
+                .stiffness()
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite())
         {
-            return Err(J2SourceError::Invalid("native elastic or return-map coefficients are not representable"));
+            return Err(J2SourceError::Invalid(
+                "native elastic or return-map coefficients are not representable",
+            ));
         }
-        Ok(Self { material, basis, law })
+        Ok(Self {
+            material,
+            basis,
+            law,
+        })
     }
 
     /// Complete original material snapshot, including additional properties.
@@ -186,7 +215,8 @@ impl ResolvedJ2Plasticity {
     /// Original H or Et source, retaining its selection receipt and uncertainty.
     #[must_use]
     pub fn hardening_source(&self) -> &ResolvedScalarProperty {
-        self.material.property(self.basis.property_name())
+        self.material
+            .property(self.basis.property_name())
             .expect("the immutable J2 bundle retains its admitted hardening source")
     }
 }
@@ -276,14 +306,15 @@ fn coefficient<'a>(
     name: &'static str,
     dims: Dims,
 ) -> Result<&'a ResolvedScalarProperty, J2SourceError> {
-    let property = material.property(name)
-        .ok_or(J2SourceError::Invalid("missing or ambiguous J2 coefficient"))?;
+    let property = material.property(name).ok_or(J2SourceError::Invalid(
+        "missing or ambiguous J2 coefficient",
+    ))?;
     if property.requirement().quantity() != QuantitySpec::dimensional(dims)
         || !property.value_si().is_finite()
-        || !property.is_constant_at_fixed_temperature()
+        || !property.has_only_fixed_external_conditions(None, false)
     {
         return Err(J2SourceError::Invalid(
-            "J2 needs absolute SI scalar constants or temperature-only coefficients",
+            "J2 needs absolute SI coefficients at fixed external conditions, without evolving mechanical or frequency coordinates",
         ));
     }
     if property.angular_frequency_band_rad_s()?.is_some() {
