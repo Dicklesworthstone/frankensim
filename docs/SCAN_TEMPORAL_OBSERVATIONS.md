@@ -58,3 +58,51 @@ value agreement, constrained-row invariance and inverse recovery with a negative
 control. G0/G4 tests cover clock/sample-budget refusals and cancellation.
 Native Rust compilation/execution was unavailable in the authoring environment;
 independent NumPy P1/SciPy checks do not replace those native tests.
+
+## CSV-driven fitting
+
+The existing `spatial_measurement_fit` executable accepts `start..end` in the
+`time_s` column to request one exposure mean. A single number keeps the original
+instantaneous interpretation; the six-column header and spatial selection syntax
+are unchanged. For example:
+
+```csv
+time_s,observable,target,scale,readout,selection
+1,specific_enthalpy_j_kg,152,10,volume,0;1;2;3;4;5
+1..2,specific_enthalpy_j_kg,154.5,10,volume,0;1;2;3;4;5
+1..2,liquid_mass_fraction,0.545,0.1,volume,0;1;2;3;4;5
+```
+
+Run the shipped fixture with four substeps in every measurement/event interval:
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example spatial_measurement_fit -- \
+  examples/scan_power_fit/examples/temporal_measurements.csv 0 0 --substeps 4
+```
+
+`--huber positive_threshold` remains available with either interpretation. Flags
+may appear before or after positional arguments. `--substeps` defaults to one
+and accepts 1 through 128. The grid always includes exact exposure endpoints,
+instantaneous measurement times and source switches. Substeps that cannot be
+represented distinctly in binary64 are refused, not silently merged.
+
+This executable still uses its declared synthetic specimen and accepts only
+`0 < start < end <= 2` seconds. It does not infer a laboratory setup from CSV,
+include the initial state in an exposure, or calibrate sensor dynamics. Refining
+the fixed grid is explicit; it is not an automatic time-error certificate.
+File, measurement-row, physical-endpoint and total measurement-sample caps are
+128 KiB, 256, 4096 and 65536 respectively. Overlapping windows each consume their
+own contribution count. The constructor and physical solver retain their other
+budgets and rejection checks.
+
+Output identifies exposure starts/ends separately from the raw physical
+prediction, residual and loss. The optimizer retains nonnegative powers, exact
+shutdown, checkpointed adjoints and its reserved final physical replay.
+Convergence and target mismatch remain distinct; robust or inconsistent data
+can yield a converged fit with nonzero residuals.
+
+Three additional authored G0/G1/G3 regressions exercise exposure-aware fitting
+versus the incorrect-endpoint interpretation, exact grid/order/sample accounting,
+invalid windows and resource caps. They have not been executed natively in the
+authoring environment.

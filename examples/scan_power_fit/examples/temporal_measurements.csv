@@ -1,0 +1,5 @@
+time_s,observable,target,scale,readout,selection
+# Synthetic 1 kg reference specimen: 2 W then 5 W, initially 150 J/kg.
+1,specific_enthalpy_j_kg,152,10,volume,0;1;2;3;4;5
+1..2,specific_enthalpy_j_kg,154.5,10,volume,0;1;2;3;4;5
+1..2,liquid_mass_fraction,0.545,0.1,volume,0;1;2;3;4;5
