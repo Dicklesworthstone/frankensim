@@ -14,10 +14,11 @@
 //! sums of those of its nodes the far pass already covers. A panel with all
 //! nodes in separated leaves enters through its seven-point sum alone.
 
+use super::triangle_rule::NearRule;
 use super::{
     Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, Medium,
-    RadiationSolution, alpha_for, characteristic_panel_size, evaluate_radiated_power, kernels,
-    self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
+    PanelRule, RadiationSolution, alpha_for, characteristic_panel_size, evaluate_radiated_power,
+    kernels, self_terms, surface_fingerprint, triangle_is_near, triangle_self_terms,
     triangle_weak_influence, triangle_weak_influence_with_rule,
 };
 use crate::{BemError, panel3d::SpherePanels};
@@ -74,8 +75,10 @@ pub struct IterativeOptions {
     /// directional route declares its envelopes in its own options.
     pub max_translation_work: usize,
     /// Declared worker threads for every W5a operator pass
-    /// ([`FmmC64::set_workers`]). Potentials are bit-identical for every
-    /// count; the directional route stays serial. Defaults to one.
+    /// ([`FmmC64::set_workers`]) and for the directional route's M2L and
+    /// direct near passes. Potentials are bit-identical for every count. The
+    /// directional coupling setup declares its own `setup_workers`. Defaults
+    /// to one.
     pub workers: usize,
     /// Byte budget for caching the double and mixed operators' M2L kernel
     /// rows (half each), which are otherwise re-evaluated by every pass and
@@ -84,6 +87,11 @@ pub struct IterativeOptions {
     /// exceeds its share, and the directional route, stay uncached.
     /// Zero (the default) disables it.
     pub m2l_cache_bytes: usize,
+    /// Burton-Miller panel rule. [`PanelRule::TriangleNear`] adds the dense
+    /// owner's triangle near rule as this owner's sparse near rows, built on
+    /// the declared workers and refused above its declared pair count. The
+    /// default [`PanelRule::Centroid`] is the centroid operator, bitwise.
+    pub panel_rule: PanelRule,
 }
 
 impl Default for IterativeOptions {
@@ -103,6 +111,7 @@ impl Default for IterativeOptions {
             max_translation_work: MAX_TRANSLATION_WORK,
             workers: 1,
             m2l_cache_bytes: 0,
+            panel_rule: PanelRule::Centroid,
         }
     }
 }
@@ -630,7 +639,23 @@ impl<'a> IterativeRadiation<'a> {
         options: &IterativeOptions,
         gate: &CancelGate,
     ) -> Result<Self, IterativeError> {
-        Self::prepare_with_near(surface, k, medium, formulation, options, None, gate)
+        let PanelRule::TriangleNear { max_pairs } = options.panel_rule else {
+            return Self::prepare_with_near(surface, k, medium, formulation, options, None, gate);
+        };
+        if formulation == Formulation::PlainCbie {
+            return Err(IterativeError::Invalid {
+                what: "plain CBIE already stores the dense triangle near entries",
+            });
+        }
+        poll(gate)?;
+        let rule = NearRule::build(surface, k, max_pairs, options.workers, &|| {
+            gate.is_requested()
+        })
+        .map_err(|e| match e {
+            HelmholtzError::Cancelled => IterativeError::Cancelled { matvecs: 0 },
+            other => other.into(),
+        })?;
+        Self::prepare_with_near(surface, k, medium, formulation, options, Some(&rule), gate)
     }
 
     /// [`Self::prepare`] with an optional Burton-Miller near-field rule. Its

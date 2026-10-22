@@ -4,7 +4,7 @@
 //! ladder gates the convergence of its sequence and its extrapolated limit at
 //! 1e-3 (the 2026-10-16 .47 ruling); its finest rung keeps a declared 1% band.
 use fs_bem::helmholtz::bc::{self, Admittance, BoundaryOperator, PlaneWave, SurfaceBc};
-use fs_bem::helmholtz::iterative::{IterativeOptions, IterativeRadiation};
+use fs_bem::helmholtz::iterative::{IterativeError, IterativeOptions, IterativeRadiation};
 use fs_bem::helmholtz::{self, Formulation, HelmholtzError, Medium};
 use fs_bem::panel3d::SpherePanels;
 use fs_bem::reciprocal_radiation::open_screen::{OpenOptions, OpenPanels, PreparedScreen};
@@ -432,6 +432,20 @@ fn iterative_options() -> IterativeOptions {
     }
 }
 
+/// The series' options: the shared iterative envelope, the second-order
+/// triangle near rule (impedance_sphere_triangle_rule_ladder) and
+/// bit-identical scheduling. 81920 panels hold about 3.4e6 near pairs, stored
+/// as three operators each beside the block-Jacobi blocks.
+fn series_options() -> IterativeOptions {
+    IterativeOptions {
+        panel_rule: helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 23 },
+        max_near_entries: 1 << 25,
+        workers: 16,
+        m2l_cache_bytes: 1 << 30,
+        ..iterative_options()
+    }
+}
+
 /// The series is ka in {0.1, 1, 5} by beta in {0, 0.5, 1, 2 + 1i}, one test
 /// per case. Each case solves alone, and in sequence the twelve take more
 /// than 12 h, so the harness may run them in parallel.
@@ -463,6 +477,10 @@ mod impedance_sphere_series {
             let mut directional = fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap();
             directional.max_coefficient_slots = 1 << 29;
             directional.max_setup_work = 100_000_000_000;
+            // 81920 panels keep about 4.0e8 direct near pairs per operator
+            // pass (the volume depth rule), past the v1 2.7e8.
+            directional.max_near_pairs = 600_000_000;
+            directional.setup_workers = 16;
             // The static k = 0 rows delegate whole to W5a at this order 7.
             // At 5120 panels their mixed pass counts past 8e9 M2L
             // multiply-adds (ts1, 610ada520, ka5_beta0). Each static pass
@@ -470,10 +488,10 @@ mod impedance_sphere_series {
             IterativeOptions {
                 directional: Some(directional),
                 max_translation_work: 200_000_000_000,
-                ..iterative_options()
+                ..series_options()
             }
         } else {
-            iterative_options()
+            series_options()
         };
         let rigid = C64::new(ka * ka, -ka).scale(1.0 / (1.0 + ka * ka));
         let oracle = (rigid / (C64::ONE + beta * rigid)).scale(rho_c);
@@ -517,7 +535,7 @@ mod impedance_sphere_series {
                 TOL,
                 start,
                 &format!(
-                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{},\"peak_rss_bytes\":{},\"fmm_stats\":[{},{}]",
+                    ",\"rule\":\"triangle-near\",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n},\"iterations\":{},\"rel_residual\":{},\"near_field_bytes\":{},\"peak_rss_bytes\":{},\"fmm_stats\":[{},{}]",
                     beta.re,
                     beta.im,
                     report.iters,
@@ -567,7 +585,7 @@ mod impedance_sphere_series {
                 TOL,
                 start,
                 &format!(
-                    ",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n}",
+                    ",\"rule\":\"triangle-near\",\"ka\":{ka},\"beta\":[{},{}],\"panels\":{n}",
                     beta.re, beta.im
                 ),
             );
@@ -771,6 +789,104 @@ fn impedance_sphere_triangle_rule_ladder() {
         }
         assert!(finest[1] < finest[0], "ka={ka}: rule {finest:?}");
     }
+}
+
+/// G5: the iterative owner applies the dense owner's triangle near rule as
+/// its sparse near rows. Sphere rungs 2-4 at k = 1 and pi agree within ten
+/// times the GMRES tolerance at FMM order 7, the bound bem_iterative_matches
+/// _dense holds the centroid rows to. The rule's refusals reach this owner.
+#[test]
+fn impedance_sphere_triangle_rule_iterative_matches_dense() {
+    let gate = CancelGate::new_clock_free();
+    let rule = helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 20 };
+    let options = IterativeOptions {
+        tol: 1e-6,
+        fmm_order: 7,
+        leaf_capacity: 128,
+        workers: 16,
+        panel_rule: rule,
+        ..IterativeOptions::default()
+    };
+    for rung in 2..=4 {
+        let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+        let velocity: Vec<_> = surface
+            .normals()
+            .iter()
+            .enumerate()
+            .map(|(i, n)| C64::new(1.0 + 0.2 * n[0] + 0.03 * det::sin(i as f64), 0.1 * n[1]))
+            .collect();
+        for k in [1.0, PI] {
+            let start = Instant::now();
+            let dense = helmholtz::with_dense_workers(16, || {
+                helmholtz::solve_radiation_with_rule(
+                    &surface,
+                    k,
+                    Medium::air(),
+                    &velocity,
+                    Formulation::BurtonMiller,
+                    rule,
+                )
+            })
+            .unwrap();
+            let (iterative, report, _) = helmholtz::solve_radiation_iterative(
+                &surface,
+                k,
+                Medium::air(),
+                &velocity,
+                Formulation::BurtonMiller,
+                &options,
+                &gate,
+            )
+            .unwrap();
+            assert!(report.converged_euclidean());
+            let (numerator, denominator) = iterative
+                .pressure
+                .iter()
+                .zip(&dense.pressure)
+                .fold((0.0, 0.0), |(a, b), (&x, &y)| {
+                    (a + (x - y).norm_sq(), b + y.norm_sq())
+                });
+            let error = (numerator / denominator).sqrt();
+            let tol = 10.0 * options.tol;
+            println!(
+                "{{\"suite\":\"fs-bem\",\"case\":\"triangle-rule-iterative-dense\",\"inputs\":{{\"fixture\":\"icosphere, smooth complex velocity\",\"provenance\":\"dense LU under the same rule\"}},\"axis\":\"sphere-mesh\",\"rung\":{rung},\"k\":{k},\"panels\":{},\"iterations\":{},\"err\":{error:.17e},\"tol\":{tol:.17e},\"verdict\":\"{}\",\"elapsed_s\":{:.6}}}",
+                surface.areas().len(),
+                report.iters,
+                if error <= tol { "pass" } else { "fail" },
+                start.elapsed().as_secs_f64()
+            );
+            assert!(error <= tol, "rung {rung} k={k}: {error}");
+        }
+    }
+    let surface = SpherePanels::icosphere(1.0, 2).unwrap();
+    let velocity = vec![C64::ONE; surface.areas().len()];
+    let solve = |formulation, o: &IterativeOptions| {
+        helmholtz::solve_radiation_iterative(
+            &surface,
+            1.0,
+            Medium::air(),
+            &velocity,
+            formulation,
+            o,
+            &gate,
+        )
+        .map(|_| ())
+    };
+    let tight = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::TriangleNear { max_pairs: 1 },
+        ..options.clone()
+    };
+    assert!(matches!(
+        solve(Formulation::BurtonMiller, &tight),
+        Err(IterativeError::Helmholtz(HelmholtzError::NearRuleBudget {
+            maximum_pairs: 1,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        solve(Formulation::PlainCbie, &options),
+        Err(IterativeError::Invalid { .. })
+    ));
 }
 
 #[test]

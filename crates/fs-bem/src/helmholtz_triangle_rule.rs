@@ -27,6 +27,7 @@
 //! one-point weights, so the FMM route applies the rule as a sparse correction
 //! without touching its expansions.
 
+use super::iterative::{NearOperator, NearRows};
 use super::{
     DENSE_WORKERS, Formulation, GL8_W, GL8_X, HelmholtzError, Medium, RadiationOperator,
     RadiationSolution, alpha_for, assemble_dense, condition_lower_bound, cross, dot, kernels, norm,
@@ -475,6 +476,37 @@ impl<'a> RadiationOperator<'a> {
             lu,
             condition_lower_bound,
         })
+    }
+}
+
+/// The iterative owner's near rows are this rule's corrections: pair-major
+/// `(dS, dD, dN)` on top of its centroid FMM operator, D' unchanged.
+impl NearRows for NearRule {
+    fn operators(&self) -> &[NearOperator] {
+        &[
+            NearOperator::Single,
+            NearOperator::Double,
+            NearOperator::Hypersingular,
+        ]
+    }
+    fn row_len(&self, i: usize) -> usize {
+        self.starts[i + 1] - self.starts[i]
+    }
+    fn fill_row(&self, i: usize, cols: &mut [u32], values: &mut [C64]) {
+        for (p, (j, single, double, hyper)) in self.for_row(i).enumerate() {
+            // Surfaces hold at most MAX_SURFACE_PANELS, far below u32::MAX.
+            cols[p] = j as u32;
+            values[3 * p] = single;
+            values[3 * p + 1] = double;
+            values[3 * p + 2] = hyper;
+        }
+    }
+    fn diagonal(&self, i: usize, alpha: C64) -> (C64, C64) {
+        NearRule::diagonal(self, i, alpha)
+    }
+    fn stamp(&self) -> u64 {
+        // The rule's tag, "tri-near".
+        0x7472_692d_6e65_6172
     }
 }
 
