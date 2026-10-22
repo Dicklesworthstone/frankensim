@@ -36,12 +36,14 @@ pub struct ScanConstraintValues {
     pub nonnegative_power_values_w: Vec<f64>,
     pub bound_values: Vec<f64>,
     pub absorbed_energy_j: Vec<f64>,
+    /// Signed W/s in source-declaration/segment order, including fixed ramps.
+    pub power_slew_values_w_s: Vec<f64>,
     pub state_values: Vec<f64>,
     pub peak_values: Vec<f64>,
     pub sampled_peak_values: Vec<f64>,
     pub peak_smoothing_gaps: Vec<f64>,
     /// Same order/scales as SQP: nonnegative powers, control lower/upper,
-    /// energy caps, state lower/upper, then peak caps. Each must be <= 0.
+    /// energy caps, slew rise/fall, state lower/upper, then peak caps. Each must be <= 0.
     pub residuals: Vec<f64>,
 }
 
@@ -50,6 +52,7 @@ impl ScanConstraintValues {
         debug_assert!(input.jacobian.is_empty());
         Self { nonnegative_power_values_w: input.nonnegative_power_values_w,
             bound_values: input.bound_values, absorbed_energy_j: input.absorbed_energy_j,
+            power_slew_values_w_s: input.power_slew_values_w_s,
             state_values: input.state_values, peak_values: input.peak_values,
             sampled_peak_values: input.sampled_peak_values,
             peak_smoothing_gaps: input.peak_smoothing_gaps, residuals: input.residuals }
@@ -127,6 +130,27 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
                 max_gradient_entries: 0, max_transpose_solves: 0 },
             budget.responses.max_peak_samples, LimitAdmission::Values {
                 max_rows: budget.max_rows, max_energy_weights: budget.max_energy_weights })?;
+        Ok(Self { study, limits })
+    }
+
+    /// Add rise/fall bounds on every segment of each named continuous power
+    /// schedule. Fixed and unselected values participate, including shutdown.
+    /// Held tables refuse: timestamp differences do not bound their jumps.
+    /// No physical solve is run during admission. All later serial/batch/scenario
+    /// evaluations return these rows through the same original value collector.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_power_slew_bounds(cx: &Cx<'_>, study: ScanPowerStudy<F, O>,
+        bounds: Vec<ScanControlBound>, energy: Vec<ScanEnergyCap>, states: Vec<ScanStateBound>,
+        peaks: Vec<ScanPeakBound>, slew_bounds: Vec<super::ScanPowerSlewBound>,
+        max_slew_segments: usize, budget: ScanValueConstraintBudget)
+        -> Result<Self, ScanSensitivityError>
+    {
+        let limits = Limits::compile_with_slew(cx, &study, bounds, energy, states, peaks,
+            ScanResponseBudget { max_responses: budget.responses.max_responses,
+                max_gradient_entries: 0, max_transpose_solves: 0 },
+            budget.responses.max_peak_samples, slew_bounds, max_slew_segments,
+            LimitAdmission::Values { max_rows: budget.max_rows,
+                max_energy_weights: budget.max_energy_weights })?;
         Ok(Self { study, limits })
     }
 
