@@ -108,19 +108,51 @@ fn bake_band_complete_ladder() {
     }
 }
 
-/// G2 strict qualification. If the current dense owner caps before meeting this
-/// test, that is a genuine blocked qualification, never a relaxed tolerance.
+/// G2 strict qualification, on the M2.5-W5 route. The dense owner alone
+/// caps at 8192 panels before the three-rung rule completes at 1e-3, which
+/// stays a genuine blocked qualification, never a relaxed tolerance
+/// (bake_dense_cap_blocks_and_routes). Routed, the ladder runs to icosphere-6
+/// (81920 panels), with Burton-Miller on every rung.
+/// - At ka = 0.05 the dense Burton-Miller sphere errors are 7.7e-3, 2.8e-3
+///   and 1.2e-3 at 320, 1280 and 5120 panels (ts1, dd1052e20), so two
+///   successive changes under 1e-3 need the 20480 and 81920 rungs.
+/// - At ka = 0.5 the successive changes were 1.1e-2, 2.5e-3 and 4.1e-4 up to
+///   20480 panels (trj b181).
+/// - 81920 panels at order 6 count about 2.9e10 M2L multiply-adds per pass,
+///   so the run declares max_translation_work.
 #[test]
 fn bake_pulsating_sphere_band() {
     let source = Sphere { radius: 1.0 };
     let declaration = declare(&source, &[0.05, 0.5, 1.0], 1e-3);
-    let ladder = PanelLadder::new(&source, vec![1, 2, 3, 4, 5]).unwrap();
-    let bake = bake_declared(&declaration, &ladder, || false).unwrap();
+    let ladder = PanelLadder::new(&source, vec![1, 2, 3, 4, 5, 6]).unwrap();
+    // Workers and the M2L row cache are scheduling budgets only: every dense
+    // and iterative solve is bit-identical at any worker count.
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    let iterative = IterativeOptions {
+        tol: 1e-9,
+        fmm_order: 6,
+        max_iters: 900,
+        near_field_cache_bytes: 1 << 31,
+        max_translation_work: 40_000_000_000,
+        workers,
+        m2l_cache_bytes: 1 << 34,
+        ..IterativeOptions::default()
+    };
+    let bake = fs_bem::helmholtz::with_dense_workers(workers, || {
+        bake_declared_routed(&declaration, &ladder, Some(&iterative), || false)
+    })
+    .unwrap();
     print_rows(&bake);
     assert_eq!(
         bake.status(),
         BakeStatus::Complete,
-        "strict sphere qualification is blocked by the dense route"
+        "strict sphere qualification did not complete on the routed ladder"
+    );
+    assert!(
+        bake.refinement()
+            .iter()
+            .any(|r| r.route == "iterative" && r.panels > MAX_DENSE_PANELS),
+        "the qualification must exercise the iterative route"
     );
     for row in bake.rows() {
         let ka = row.k * source.radius;
@@ -140,29 +172,35 @@ fn bake_pulsating_sphere_band() {
 
 /// G2 (M2.5-W5 route): the same pulsating-sphere oracle on a Burton-Miller
 /// band (mouth ka >= 0.5) whose ladder needs the 20480-panel rung, past the
-/// dense cap. The iterative owner solves that rung. Plain-CBIE rows (mouth
-/// ka < 0.5, the low end of bake_pulsating_sphere_band) have no iterative
-/// quadrature and refuse there.
+/// dense cap. The iterative owner solves that rung. A routed ladder is
+/// Burton-Miller on every rung, including mouth ka < 0.5, which has no
+/// iterative plain-CBIE quadrature.
 ///
 /// The declared operator tolerance is 5e-3, and the closed-form check below
 /// stays at 1e-3. At 1e-3 the three-rung rule cannot complete on this ladder.
 /// trj b181 measured successive changes at ka = 0.5 of 1.1e-2, 2.5e-3 and
 /// 4.1e-4 (SH 1.2e-2, 3.1e-3, 7.5e-4) over 320, 1280, 5120 and 20480 panels.
-/// Completing at 1e-3 needs icosphere-6 (81920 panels) at an FMM order whose
-/// M2L work exceeds MAX_TRANSLATION_WORK. That remains the strict
-/// qualification's blocker (bake_pulsating_sphere_band).
+/// Completing at 1e-3 needs icosphere-6 (81920 panels), which
+/// bake_pulsating_sphere_band runs with a declared max_translation_work.
 #[test]
 fn bake_routes_burton_miller_rows_past_the_dense_cap() {
     let source = Sphere { radius: 1.0 };
     let declaration = declare(&source, &[0.5, 1.0], 5e-3);
     let ladder = PanelLadder::new(&source, vec![2, 3, 4, 5]).unwrap();
+    // Scheduling budgets only; every solve is bit-identical at any count.
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
     let iterative = IterativeOptions {
         tol: 1e-9,
         fmm_order: 6,
         max_iters: 900,
+        workers,
+        m2l_cache_bytes: 1 << 33,
         ..IterativeOptions::default()
     };
-    let bake = bake_declared_routed(&declaration, &ladder, Some(&iterative), || false).unwrap();
+    let bake = fs_bem::helmholtz::with_dense_workers(workers, || {
+        bake_declared_routed(&declaration, &ladder, Some(&iterative), || false)
+    })
+    .unwrap();
     print_rows(&bake);
     assert_eq!(bake.status(), BakeStatus::Complete);
     assert!(

@@ -4,7 +4,10 @@
 //! tolerance at EVERY declared frequency, after at least three solved rungs.
 //! It is finite-grid discretization evidence, not a uniform-in-frequency error
 //! enclosure, a validated instrument, or a passive rational realization.
-use super::{RadiationLoadRow, bake_radiation_load, bake_radiation_load_iterative};
+use super::{
+    RadiationLoadRow, bake_radiation_load, bake_radiation_load_burton_miller,
+    bake_radiation_load_iterative,
+};
 use crate::helmholtz::iterative::{IterativeError, IterativeOptions};
 use crate::helmholtz::{
     HelmholtzError, MAX_DENSE_PANELS, MAX_SH_DEGREE, MIN_PANELS_PER_WAVELENGTH, Medium,
@@ -523,8 +526,11 @@ pub fn bake_declared(
 /// those explicit tolerance, FMM-order and storage budgets instead of being
 /// `Blocked`. Rungs within the dense cap stay dense. The same ladder,
 /// operator tolerance and three-rung rule decide completeness, and every
-/// refinement row records its route. `cancelled` is polled between rungs and
-/// frequencies; one iterative rung runs to completion once started.
+/// refinement row records its route. With `iterative`, every rung, dense or
+/// iterative, is Burton-Miller at every ka, so a ladder never mixes
+/// formulations (see [`bake_radiation_load_iterative`]). `cancelled` is
+/// polled between rungs and frequencies; one iterative rung runs to
+/// completion once started.
 pub fn bake_declared_routed(
     declaration: &BakeDeclaration,
     ladder: &PanelLadder<'_>,
@@ -647,6 +653,18 @@ pub fn bake_declared_routed(
                         what: other.to_string(),
                     },
                 }),
+                // A routed ladder keeps one formulation across its rungs:
+                // its dense rungs are Burton-Miller too, because the
+                // iterative owner has no plain-CBIE quadrature.
+                None if iterative.is_some() => bake_radiation_load_burton_miller(
+                    &mesh.surface,
+                    &mesh.driven,
+                    &omega,
+                    medium,
+                    degree,
+                    &source_id,
+                )
+                .map_err(BakeError::Solver),
                 None => bake_radiation_load(
                     &mesh.surface,
                     &mesh.driven,

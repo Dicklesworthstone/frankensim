@@ -143,9 +143,13 @@ impl RadiationLoadBake {
 ///
 /// `driven[i]` marks the panels of the radiating mouth (unit outward
 /// normal velocity there, rigid elsewhere). The formulation switches at
-/// `ka = 0.5` on the equivalent mouth radius (plain CBIE below — the
-/// Burton–Miller low-`ka` resistance artifact is a recorded boundary —
-/// Burton–Miller above, which owns the fictitious-frequency band).
+/// `ka = 0.5` on the equivalent mouth radius: plain CBIE below, Burton–Miller
+/// above, which owns the fictitious-frequency band. Below `ka = 0.5` the
+/// dense plain CBIE converges at about h^2 against Burton–Miller's h^1.3
+/// (see [`bake_radiation_load_iterative`]). Since the alpha = +i/k
+/// correction, the negative-resistance artifact that first motivated the
+/// switch does not appear on the dense pulsating sphere: Burton–Miller's
+/// resistance is within 2 % at 320 panels and converges.
 ///
 /// # Errors
 /// [`HelmholtzError`] on refusal: empty/non-increasing omegas, mask
@@ -168,6 +172,7 @@ pub fn bake_radiation_load(
         medium,
         l_max,
         source_id,
+        LowKa::PlainCbie,
         |k, formulation, velocity| solve_radiation(surface, k, medium, velocity, formulation),
     )
 }
@@ -177,6 +182,20 @@ pub fn bake_radiation_load(
 /// explicit `options`, the route past the dense panel cap. Every row is the
 /// same post-processing of a converged surface solution; an unconverged
 /// solve refuses.
+///
+/// Every row is Burton-Miller, at every mouth ka, because the iterative owner
+/// has no plain-CBIE quadrature. For a uniform field, Burton-Miller is passive
+/// and convergent below ka = 0.5 since the alpha = +i/k correction
+/// (40122769f). On the dense pulsating unit sphere at ka = 0.05 it gives
+/// 7.7e-3, 2.8e-3 and 1.2e-3 at 320, 1280 and 5120 panels, against plain
+/// CBIE's 5.9e-3, 1.5e-3 and 3.6e-4: about h^1.3 against h^2 (ts1,
+/// dd1052e20).
+///
+/// A non-uniform field converges much more slowly at low ka, and its
+/// resistance most of all. On the sphere's dipole at ka = 0.05 and 5120
+/// panels, the Burton-Miller resistance is 11.6 times the closed form,
+/// against plain CBIE's 0.35% (modal_loading, 8476279df). A driven mouth is
+/// such a field, so low-ka rows routed here carry that resistance bias.
 ///
 /// # Errors
 /// As [`bake_radiation_load`], plus every [`IterativeError`] refusal.
@@ -197,11 +216,41 @@ pub fn bake_radiation_load_iterative(
         medium,
         l_max,
         source_id,
+        LowKa::BurtonMiller,
         |k, formulation, velocity| {
             solve_radiation_iterative(surface, k, medium, velocity, formulation, options, &gate)
                 .map(|(solution, _, _)| solution)
         },
     )
+}
+
+/// [`bake_radiation_load`] with Burton-Miller at every mouth ka, the dense
+/// rungs of a routed ladder, so one formulation spans the ladder.
+pub(crate) fn bake_radiation_load_burton_miller(
+    surface: &SpherePanels,
+    driven: &[bool],
+    omegas: &[f64],
+    medium: Medium,
+    l_max: usize,
+    source_id: &str,
+) -> Result<RadiationLoadBake, HelmholtzError> {
+    bake_radiation_load_with(
+        surface,
+        driven,
+        omegas,
+        medium,
+        l_max,
+        source_id,
+        LowKa::BurtonMiller,
+        |k, formulation, velocity| solve_radiation(surface, k, medium, velocity, formulation),
+    )
+}
+
+/// The formulation of a row whose mouth ka is below 0.5.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LowKa {
+    PlainCbie,
+    BurtonMiller,
 }
 
 fn bake_radiation_load_with<E: From<HelmholtzError>>(
@@ -211,6 +260,7 @@ fn bake_radiation_load_with<E: From<HelmholtzError>>(
     medium: Medium,
     l_max: usize,
     source_id: &str,
+    low_ka: LowKa,
     mut solve: impl FnMut(f64, Formulation, &[C64]) -> Result<RadiationSolution, E>,
 ) -> Result<RadiationLoadBake, E> {
     let n = surface.areas().len();
@@ -258,7 +308,7 @@ fn bake_radiation_load_with<E: From<HelmholtzError>>(
     for &omega in omegas {
         let k = omega / medium.sound_speed;
         let mouth_ka = k * mouth_radius;
-        let formulation = if mouth_ka < 0.5 {
+        let formulation = if mouth_ka < 0.5 && low_ka == LowKa::PlainCbie {
             Formulation::PlainCbie
         } else {
             Formulation::BurtonMiller
