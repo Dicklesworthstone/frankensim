@@ -523,8 +523,9 @@ fn declared_workers_leave_potentials_bitwise_g0() {
 
 #[test]
 fn far_field_route_omits_exactly_the_named_near_pairs_g0() {
-    // Several levels (leaf cap 2), both far-field shapes, on the untouched
-    // serial and worker passes.
+    // Several levels (leaf cap 2), every far-field shape (borrowed and owned
+    // single layer, double and hypersingular), on the untouched serial and
+    // worker passes.
     let points: Vec<[f64; 3]> = (0..240)
         .map(|i| {
             let j = 0.07 * det::cos(i as f64);
@@ -551,18 +552,27 @@ fn far_field_route_omits_exactly_the_named_near_pairs_g0() {
     };
     let single = HelmholtzSingle { k: 0.6 };
     let double = HelmholtzDouble { k: 0.6 };
-    for shape in 0..2 {
+    let mixed = HelmholtzHypersingular { k: 0.6 };
+    for shape in 0..4 {
         let (p, n) = (points.clone(), normals.clone());
-        let (full, far) = if shape == 0 {
-            (
+        let (full, far) = match shape {
+            0 => (
                 FmmC64::new(&single, p.clone(), 3, 2).unwrap(),
                 FmmC64::new_far_field_within(&single, p, 3, 2, ComplexBudget::V1).unwrap(),
-            )
-        } else {
-            (
+            ),
+            1 => (
                 FmmC64::new_double(double, p.clone(), n.clone(), 3, 2).unwrap(),
                 FmmC64::new_double_far_field_within(double, p, n, 3, 2, ComplexBudget::V1).unwrap(),
-            )
+            ),
+            2 => (
+                FmmC64::new_hypersingular(mixed, p.clone(), n.clone(), 3, 2).unwrap(),
+                FmmC64::new_hypersingular_far_field_within(mixed, p, n, 3, 2, ComplexBudget::V1)
+                    .unwrap(),
+            ),
+            _ => (
+                FmmC64::new_single_within(single, p.clone(), 3, 2, ComplexBudget::V1).unwrap(),
+                FmmC64::new_single_far_field_within(single, p, 3, 2, ComplexBudget::V1).unwrap(),
+            ),
         };
         let depth = far.geometry.cells.keys().map(|k| k.0).max().unwrap();
         assert!(depth >= 3);
@@ -620,6 +630,50 @@ fn far_field_route_omits_exactly_the_named_near_pairs_g0() {
             Err(FmmError::ComplexRequest { .. })
         ));
     }
+}
+
+#[test]
+fn owned_single_layer_is_the_borrowed_kernel_bitwise_g0() {
+    // The owned arm evaluates through the same ComplexKernel::eval, so the
+    // full, far-field-only and worker passes keep the borrowed engine's bits.
+    let points: Vec<[f64; 3]> = (0..400)
+        .map(|i| {
+            let t = i as f64;
+            [
+                det::sin(0.9 * t),
+                det::cos(1.7 * t),
+                det::sin(0.3 * t + 0.4),
+            ]
+        })
+        .collect();
+    let q: Vec<C64> = (0..400)
+        .map(|i| C64::new(det::cos(i as f64), 0.1 + i as f64 / 400.0))
+        .collect();
+    let bits = |p: Vec<C64>| -> Vec<(u64, u64)> {
+        p.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect()
+    };
+    let kernel = HelmholtzSingle { k: 1.1 };
+    let mut borrowed =
+        FmmC64::new_within(&kernel, points.clone(), 4, 8, ComplexBudget::V1).unwrap();
+    let mut owned =
+        FmmC64::new_single_within(kernel, points.clone(), 4, 8, ComplexBudget::V1).unwrap();
+    assert_eq!(borrowed.stats(), owned.stats());
+    for workers in [1, 3] {
+        borrowed.set_workers(workers).unwrap();
+        owned.set_workers(workers).unwrap();
+        assert_eq!(
+            bits(borrowed.potentials(&q).unwrap()),
+            bits(owned.potentials(&q).unwrap())
+        );
+    }
+    let borrowed_far =
+        FmmC64::new_far_field_within(&kernel, points.clone(), 4, 8, ComplexBudget::V1).unwrap();
+    let owned_far =
+        FmmC64::new_single_far_field_within(kernel, points, 4, 8, ComplexBudget::V1).unwrap();
+    assert_eq!(
+        bits(borrowed_far.far_potentials(&q).unwrap()),
+        bits(owned_far.far_potentials(&q).unwrap())
+    );
 }
 
 #[test]

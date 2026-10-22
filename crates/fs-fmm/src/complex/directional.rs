@@ -7,7 +7,7 @@
 use super::{ComplexBudget, FmmC64, Operator, finite, kernels, validate_output};
 use crate::{
     Cell, CellKey, ComplexKernel, Fmm, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
-    HelmholtzHypersingular, Laplace3d, MAX_BB_HELMHOLTZ_KD, MAX_CELL_PAIR_SCANS,
+    HelmholtzHypersingular, HelmholtzSingle, Laplace3d, MAX_BB_HELMHOLTZ_KD, MAX_CELL_PAIR_SCANS,
     MAX_COMPLEX_COEFFICIENT_SLOTS, MAX_INTERPOLATION_ORDER, MAX_NEAR_FIELD_PAIR_WORK, MAX_POINTS,
     MAX_TRANSLATION_WORK, MIN_INTERPOLATION_ORDER, point_leaves,
 };
@@ -68,6 +68,11 @@ pub struct DirectionalOptions {
     /// extra worker holds one more residual matrix, charged to the slot
     /// envelope while the setup runs. Defaults to one.
     pub setup_workers: usize,
+    /// Counted multiply-adds of one directional pass: compressed M2L, basis
+    /// transfers and leaf work. One pass is not cancellable, so a larger
+    /// value is a longer uncancellable pass, chosen explicitly. Defaults to
+    /// [`MAX_TRANSLATION_WORK`]; the W5a delegation keeps `w5a_budget`.
+    pub max_translation_work: usize,
 }
 impl DirectionalOptions {
     /// Order selected by the explicit 4^-p design indicator, not a universal
@@ -88,6 +93,7 @@ impl DirectionalOptions {
             w5a_budget: ComplexBudget::V1,
             max_near_pairs: MAX_NEAR_FIELD_PAIR_WORK,
             setup_workers: 1,
+            max_translation_work: MAX_TRANSLATION_WORK,
         })
     }
     /// Validate parameters without building geometry or evaluating a kernel.
@@ -145,9 +151,13 @@ impl DirectionalOptions {
             self.max_coefficient_slots,
             MAX_DECLARED_COEFFICIENT_SLOTS,
         )?;
-        if self.max_coefficient_slots == 0 || self.max_setup_work == 0 || self.max_near_pairs == 0 {
+        if self.max_coefficient_slots == 0
+            || self.max_setup_work == 0
+            || self.max_near_pairs == 0
+            || self.max_translation_work == 0
+        {
             return Err(FmmError::ComplexRequest {
-                reason: "directional coefficient-slot, setup-work and near-pair budgets must be positive",
+                reason: "directional coefficient-slot, setup-work, near-pair and translation budgets must be positive",
             });
         }
         Ok(())
@@ -297,6 +307,15 @@ impl<'k> FmmC64<'k> {
         options: DirectionalOptions,
     ) -> Result<Self, FmmError> {
         Self::build_directional(Operator::Scalar(kernel), points.to_vec(), None, options)
+    }
+    /// [`Self::new_directional`] with the single layer held by value, so the
+    /// engine borrows no kernel. Its potentials are the borrowed kernel's.
+    pub fn new_single_directional(
+        kernel: HelmholtzSingle,
+        points: &[[f64; 3]],
+        options: DirectionalOptions,
+    ) -> Result<Self, FmmError> {
+        Self::build_directional(Operator::Single(kernel), points.to_vec(), None, options)
     }
     /// Source-normal derivative with directional interpolation of its channels.
     pub fn new_double_directional(
@@ -674,7 +693,7 @@ impl DirectionalPlan {
                 .m2l_work
                 .saturating_add(plan.stats.transfer_work)
                 .saturating_add(plan.stats.leaf_work),
-            MAX_TRANSLATION_WORK,
+            plan.options.max_translation_work,
         )?;
         plan.stats.coefficient_slots = (plan.sources.len().saturating_mul(ns)
             + plan.targets.len().saturating_mul(nt)
@@ -691,7 +710,7 @@ impl DirectionalPlan {
                 .m2l_work
                 .saturating_add(plan.stats.transfer_work)
                 .saturating_add(plan.stats.leaf_work),
-            MAX_TRANSLATION_WORK,
+            plan.options.max_translation_work,
         )?;
         plan.stats.source_expansions = plan.sources.len();
         plan.stats.target_expansions = plan.targets.len();
@@ -755,7 +774,11 @@ impl DirectionalPlan {
                 records.len().saturating_mul(p3 * channels),
                 self.options.max_coefficient_slots,
             )?;
-            budget("directional basis transfer", work, MAX_TRANSLATION_WORK)?;
+            budget(
+                "directional basis transfer",
+                work,
+                self.options.max_translation_work,
+            )?;
         }
         Ok((work, leaf_work))
     }
@@ -883,7 +906,7 @@ impl DirectionalPlan {
             budget(
                 "directional compressed M2L",
                 self.stats.m2l_work,
-                MAX_TRANSLATION_WORK,
+                self.options.max_translation_work,
             )?;
             self.coupling_keys.push(key);
         }
@@ -1017,7 +1040,7 @@ impl DirectionalPlan {
             budget(
                 "directional compressed M2L",
                 self.stats.m2l_work,
-                MAX_TRANSLATION_WORK,
+                self.options.max_translation_work,
             )?;
             self.coupling_keys.push(key);
         }

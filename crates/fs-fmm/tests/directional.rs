@@ -1032,6 +1032,90 @@ fn dfmm_declared_setup_workers_are_bitwise_and_refuse_identically() {
 }
 
 #[test]
+fn dfmm_declared_translation_envelope_is_neutral_and_enforced() {
+    // One pass's counted work (compressed M2L, basis transfers, leaf work) is
+    // admitted at exactly its count and refused one below; any admitting
+    // budget leaves every potential bit unchanged.
+    let started = Instant::now();
+    let points = sphere(1024);
+    let q = charges(points.len());
+    let kernel = HelmholtzSingle { k: 5.0 };
+    let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+    o.leaf_capacity = 16;
+    let build = |o: DirectionalOptions| FmmC64::new_directional(&kernel, &points, o);
+    let base = build(o.clone()).unwrap();
+    let stats = base.directional_stats().unwrap().clone();
+    let total = stats.m2l_work + stats.transfer_work + stats.leaf_work;
+    assert!(stats.m2l_work > 0 && stats.transfer_work + stats.leaf_work > 0);
+    let reference = bits(&base.potentials(&q).unwrap());
+    for declared in [total, usize::MAX] {
+        let mut admitted = o.clone();
+        admitted.max_translation_work = declared;
+        assert_eq!(
+            reference,
+            bits(&build(admitted).unwrap().potentials(&q).unwrap())
+        );
+    }
+    let mut refused = o.clone();
+    refused.max_translation_work = total - 1;
+    assert!(matches!(
+        build(refused),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "directional total translation",
+            requested,
+            max,
+        }) if requested == total && max == total - 1
+    ));
+    let mut zero = o.clone();
+    zero.max_translation_work = 0;
+    assert!(matches!(
+        zero.validate(),
+        Err(FmmError::ComplexRequest { .. })
+    ));
+    emit(
+        "dfmm-declared-translation",
+        format!(
+            "{{\"case\":\"dfmm-declared-translation\",\"inputs\":\"Fibonacci unit sphere, 1024 points, k=5\",\"axis\":\"translation budget\",\"rung\":0,\"observed\":{{\"pass_work\":{total}}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+            started.elapsed().as_secs_f64()
+        ),
+    );
+}
+
+#[test]
+fn dfmm_owned_single_layer_is_the_borrowed_kernel_bitwise() {
+    // new_single_directional holds the kernel by value, so a BEM owner can
+    // keep the engine; plan and potentials are the borrowed kernel's. The
+    // second case delegates whole to W5a (root kD below the threshold).
+    let points = sphere(1024);
+    let q = charges(points.len());
+    for k in [5.0, 0.5] {
+        let started = Instant::now();
+        let kernel = HelmholtzSingle { k };
+        let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+        o.leaf_capacity = 16;
+        let mut borrowed = FmmC64::new_directional(&kernel, &points, o.clone()).unwrap();
+        let mut owned = FmmC64::new_single_directional(kernel, &points, o).unwrap();
+        assert_eq!(borrowed.stats(), owned.stats());
+        for workers in [1, 4] {
+            borrowed.set_workers(workers).unwrap();
+            owned.set_workers(workers).unwrap();
+            assert_eq!(
+                bits(&borrowed.potentials(&q).unwrap()),
+                bits(&owned.potentials(&q).unwrap())
+            );
+        }
+        emit(
+            "dfmm-owned-single",
+            format!(
+                "{{\"case\":\"dfmm-owned-single\",\"inputs\":\"Fibonacci unit sphere, 1024 points\",\"axis\":\"wavenumber\",\"rung\":0,\"observed\":{{\"k\":{k},\"directional\":{}}},\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                owned.directional_stats().is_some(),
+                started.elapsed().as_secs_f64()
+            ),
+        );
+    }
+}
+
+#[test]
 fn dfmm_bitwise_repeat() {
     let (points, normals) = fixture(16);
     let q = charges(16);

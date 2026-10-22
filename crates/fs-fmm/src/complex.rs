@@ -66,6 +66,9 @@ pub fn helmholtz_order_for(kd: f64, tol: f64) -> Result<usize, FmmError> {
 
 enum Operator<'k> {
     Scalar(&'k dyn ComplexKernel),
+    // The single layer held by value, so an engine borrows no kernel; it
+    // evaluates through the same ComplexKernel::eval as Scalar.
+    Single(HelmholtzSingle),
     // Two diagonal radial channels retain (x_axis-y_axis) exactly, instead
     // of spending one interpolation degree on this vanishing linear factor.
     Gradient(HelmholtzGradient),
@@ -77,7 +80,7 @@ enum Operator<'k> {
 impl Operator<'_> {
     fn dimensions(&self) -> (usize, usize) {
         match self {
-            Self::Scalar(_) => (1, 1),
+            Self::Scalar(_) | Self::Single(_) => (1, 1),
             Self::Gradient(_) => (2, 2),
             Self::Double(_) => (3, 1),
             Self::Adjoint(_) => (1, 3),
@@ -88,6 +91,7 @@ impl Operator<'_> {
     fn wavenumber(&self) -> Option<f64> {
         match self {
             Self::Scalar(k) => k.wavenumber(),
+            Self::Single(k) => k.wavenumber(),
             Self::Gradient(k) => Some(k.k),
             Self::Double(k) => Some(k.k),
             Self::Adjoint(k) => Some(k.k),
@@ -100,6 +104,10 @@ impl Operator<'_> {
     fn block(&self, x: [f64; 3], y: [f64; 3]) -> [C64; 9] {
         let mut block = [C64::ZERO; 9];
         if let Self::Scalar(k) = self {
+            block[0] = k.eval(x, y);
+            return block;
+        }
+        if let Self::Single(k) = self {
             block[0] = k.eval(x, y);
             return block;
         }
@@ -133,7 +141,7 @@ impl Operator<'_> {
                     }
                 }
             }
-            Self::Scalar(_) => unreachable!("handled above"),
+            Self::Scalar(_) | Self::Single(_) => unreachable!("handled above"),
         }
         block
     }
@@ -333,6 +341,66 @@ impl<'k> FmmC64<'k> {
         )
     }
 
+    /// [`Self::new_within`] with the single layer held by value, so the
+    /// engine borrows no kernel and can be kept by its owner. Its potentials
+    /// are the borrowed kernel's, bit for bit.
+    pub fn new_single_within(
+        kernel: HelmholtzSingle,
+        points: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build(
+            Operator::Single(kernel),
+            points,
+            None,
+            order,
+            leaf_cap,
+            budget,
+        )
+    }
+
+    /// [`Self::new_far_field_within`] with the single layer held by value.
+    pub fn new_single_far_field_within(
+        kernel: HelmholtzSingle,
+        points: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build_with(
+            Operator::Single(kernel),
+            points,
+            None,
+            order,
+            leaf_cap,
+            budget,
+            true,
+        )
+    }
+
+    /// Hypersingular layer (both normals) on the far-field route of
+    /// [`Self::new_far_field_within`].
+    pub fn new_hypersingular_far_field_within(
+        kernel: HelmholtzHypersingular,
+        points: Vec<[f64; 3]>,
+        normals: Vec<[f64; 3]>,
+        order: usize,
+        leaf_cap: usize,
+        budget: ComplexBudget,
+    ) -> Result<Self, FmmError> {
+        Self::build_with(
+            Operator::Mixed(kernel),
+            points,
+            Some(normals),
+            order,
+            leaf_cap,
+            budget,
+            true,
+        )
+    }
+
     /// Validate a peak complex coefficient count before allocation. The bound
     /// includes both passes and transient cell buffers, in C64 units.
     pub fn validate_coefficient_slots(slots: usize) -> Result<(), FmmError> {
@@ -460,6 +528,7 @@ impl<'k> FmmC64<'k> {
         // Same-level grids are translates, so b-a fixes every node displacement.
         let invariant = match &operator {
             Operator::Scalar(k) => k.translation_invariant(),
+            Operator::Single(k) => k.translation_invariant(),
             _ => true,
         };
         let mut translations: Vec<Vec<usize>> = Vec::new();
