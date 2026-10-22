@@ -64,6 +64,15 @@ readonly -a GMSH_TESTS=(
   g0_promotion_refuses_undeclared_and_unsupported
 )
 readonly STEP_TEST='g1_step_tessellation_reaches_volume_mesh'
+# M1.2-W1c: MITC3+ and DKT against a TET10 reference on real spruce.
+readonly -a CROSSCHECK_TESTS=(
+  g0_symmetry_class_merge_recovers_full_model_spectrum
+  g0_mac_pairing_refuses_ambiguous_pairs
+  g1_3d_reference_ladder_converges
+  g2_shear_shell_matches_3d_reference_2_to_8_khz
+  g2_dkt_deviation_table_and_refusal_band
+  g1_isotropic_thin_plate_three_way_agreement
+)
 readonly -a SHELL_TESTS=(
   g2_scordelis_lo_roof
   g2_pinched_cylinder_with_diaphragms
@@ -85,6 +94,7 @@ list() {
   for test in "${TET_IMPROVE_TESTS[@]}"; do printf 'fs-mesh:tet_improve::%s\n' "$test"; done
   for test in "${GMSH_TESTS[@]}"; do printf 'fs-io:gmsh_high_order::%s\n' "$test"; done
   printf 'fs-io:step_import::%s\n' "$STEP_TEST"
+  for test in "${CROSSCHECK_TESTS[@]}"; do printf 'fs-couple:shell_solid_crosscheck::%s\n' "$test"; done
   for test in "${ARCHING_TESTS[@]}"; do printf 'fs-plate:arched_outline_shell::%s\n' "$test"; done
   for test in "${ND_TESTS[@]}" g1_nd_fill_beats_amd_on_3d_grids; do printf 'fs-sparse:nested_dissection::%s\n' "$test"; done
   for test in "${WINDOW_TESTS[@]}" g2_million_dof_window_timing_receipt report_elastic_p1_tet10_fill; do printf 'fs-modal:parallel_windows::%s\n' "$test"; done
@@ -133,6 +143,9 @@ check() {
     grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-io/tests/gmsh_high_order.rs" || { printf 'missing test: %s\n' "$test" >&2; return 1; }
   done
   grep -Fq "fn ${STEP_TEST}(" "${REPO_ROOT}/crates/fs-io/tests/step_import.rs" || { printf 'missing test: %s\n' "$STEP_TEST" >&2; return 1; }
+  for test in "${CROSSCHECK_TESTS[@]}"; do
+    grep -Fq "fn ${test}(" "${REPO_ROOT}/crates/fs-couple/tests/shell_solid_crosscheck.rs" || { printf 'missing test: %s\n' "$test" >&2; return 1; }
+  done
   grep -Fq "fn ${MODAL_TIME_TEST}(" "${REPO_ROOT}/crates/fs-modal/src/time.rs" || { printf 'missing test: %s\n' "$MODAL_TIME_TEST" >&2; return 1; }
   grep -Fq 'fn string_bakeoff_receipt_is_reproduced_and_golden_pinned(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_string.rs" || return 1
   grep -Fq 'fn committed_dispersion_receipt_decides_and_modal_rows_are_untouched(' "${REPO_ROOT}/crates/fs-couple/tests/bakeoff_dispersion.rs" || return 1
@@ -192,6 +205,7 @@ run() {
     printf '%q ' cargo test --locked -j 12 -p fs-modal --test parallel_windows -- --exact --test-threads=1 --show-output "${WINDOW_TESTS[@]}"; printf '\n'
     printf '%q ' cargo test --release --locked -j 12 -p fs-mesh --test solid_parts --test tet_improve -- --exact --test-threads=1 --show-output "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}"; printf '\n'
     printf '%q ' cargo test --locked -j 12 -p fs-io --test gmsh_high_order --test step_import -- --exact --test-threads=1 --show-output "${GMSH_TESTS[@]}" "$STEP_TEST"; printf '\n'
+    printf '%q ' cargo test --release --locked -j 12 -p fs-couple --test shell_solid_crosscheck -- --exact --test-threads=1 --show-output "${CROSSCHECK_TESTS[@]}"; printf '\n'
   } >"${output_dir}/command.txt"
   export CARGO_BUILD_JOBS=12
   export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test"
@@ -229,8 +243,12 @@ run() {
   (cd "$REPO_ROOT" && cargo test --locked -j 12 -p fs-io --test gmsh_high_order --test step_import -- --exact --test-threads=1 --show-output "${GMSH_TESTS[@]}" "$STEP_TEST") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
   status=$?
   if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
+  # The spruce TET10 ladder reaches ~7.9e4 DOF per mirror class: release only.
+  (cd "$REPO_ROOT" && cargo test --release --locked -j 12 -p fs-couple --test shell_solid_crosscheck -- --exact --test-threads=1 --show-output "${CROSSCHECK_TESTS[@]}") >>"${output_dir}/stdout.log" 2>>"${output_dir}/stderr.log"
+  status=$?
+  if [[ "$status" -ne 0 ]]; then producer_exit="$status"; fi
   set -e
-  for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}" "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}" "${GMSH_TESTS[@]}" "$STEP_TEST"; do
+  for test in "${ND_TESTS[@]}" "${WINDOW_TESTS[@]}" "${SOLID_PARTS_TESTS[@]}" "${TET_IMPROVE_TESTS[@]}" "${GMSH_TESTS[@]}" "$STEP_TEST" "${CROSSCHECK_TESTS[@]}"; do
     if ! grep -Fqx "test ${test} ... ok" "${output_dir}/stdout.log" "${output_dir}/stderr.log"; then missing=1; fi
   done
   for test in "${EXPECTED_TESTS[@]}" "$REDUCE_TEST" "${SHELL_TESTS[@]}" "${OUTLINE_TESTS[@]}" "${ARCHING_TESTS[@]}" "${HEX_TESTS[@]}"; do

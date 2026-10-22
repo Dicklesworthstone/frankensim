@@ -1331,6 +1331,7 @@ dependencies = [
  "fs-scenario",
  "fs-solid",
  "fs-solver",
+ "fs-sparse",
  "fs-substrate",
  "fs-thermal",
  "fs-thermochem",

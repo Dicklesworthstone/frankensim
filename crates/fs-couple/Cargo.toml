@@ -59,6 +59,8 @@ fs-plate = { path = "../fs-plate" }
 fs-query = { path = "../fs-query" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
+# Nested-dissection ordering for the TET10 factorizations in shell_solid_crosscheck.
+fs-sparse = { path = "../fs-sparse" }
 [lints]
 workspace = true
 
