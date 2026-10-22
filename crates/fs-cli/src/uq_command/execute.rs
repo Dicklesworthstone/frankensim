@@ -40,6 +40,8 @@ impl Options {
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
             if flag == "--pce" && options.polynomial.is_none() {
                 options.polynomial = Some(polynomial::Settings::parse(value)?);
+            } else if flag == "--pce-mean" && options.polynomial.is_none() {
+                options.polynomial = Some(polynomial::Settings::parse_mean(value)?);
             } else if flag == "--mean-control" && !options.adjoint_mean_control {
                 if value != "adjoint" { return Err(bad("--mean-control supports only adjoint")); }
                 options.adjoint_mean_control = true;

@@ -2,11 +2,13 @@
 //! A complete fixed fit exposes surrogate moments, not a physical mean bound.
 use super::*;
 use fs_uq::{PceBasis, PceConfig, PceExecution, PceReport, ProductPceModel};
+mod mean;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Settings {
     degree: usize,
     training: usize,
+    fit_samples: Option<usize>,
 }
 impl Settings {
     pub(super) fn parse(value: &OsString) -> Result<Self> {
@@ -18,7 +20,19 @@ impl Settings {
         if degree > 8 || training < 2 {
             return Err(bad("PCE degree must be in 0..=8 and training count at least two"));
         }
-        Ok(Self { degree, training })
+        Ok(Self { degree, training, fit_samples: None })
+    }
+    pub(super) fn parse_mean(value: &OsString) -> Result<Self> {
+        let text = value.to_str().ok_or_else(|| bad("--pce-mean requires DEGREE,TRAINING,FIT"))?;
+        let (regression, fit) = text.rsplit_once(',')
+            .ok_or_else(|| bad("--pce-mean requires DEGREE,TRAINING,FIT"))?;
+        let mut settings = Self::parse(&OsString::from(regression))?;
+        let fit = count_option(&OsString::from(fit), "PCE fit count")?;
+        if settings.training.checked_add(2).is_none_or(|n| n > fit) {
+            return Err(bad("PCE fit count must include training and at least two held-out calls"));
+        }
+        settings.fit_samples = Some(fit);
+        Ok(settings)
     }
     fn regression(self) -> PceConfig { PceConfig::new(self.degree, self.training) }
 }
@@ -36,6 +50,9 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
 }
 
 pub(super) fn execute(base: &J, config: &Config, settings: Settings) -> Result<ExecutionOutput> {
+    if let Some(fit_samples) = settings.fit_samples {
+        return mean::execute(base, config, settings, fit_samples);
+    }
     // Include design setup and fitting in the same soft wall allowance as all
     // child solves. Bounded synchronous library reductions are not preemptible.
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
@@ -134,5 +151,21 @@ mod tests {
             values.extend(args(&tail));
             assert!(Options::parse(&values).is_err(), "{tail:?}");
         }
+    }
+
+    #[test]
+    fn physical_mean_mode_cannot_hide_fitting_work_or_combine_with_a_surrogate_run() {
+        let settings = Options::parse(&args(&["--pce-mean", "1,6,8"])).unwrap().polynomial.unwrap();
+        assert_eq!(settings.fit_samples, Some(8));
+        for value in ["1,6", "1,6,7", "1,6,8,12", "1,6,-8", "1,6,10001"] {
+            assert!(Options::parse(&args(&["--pce-mean", value])).is_err(), "{value}");
+        }
+        for tail in [vec!["--pce", "1,6"], vec!["--pce-mean", "1,6,8"],
+            vec!["--mean-control", "adjoint"], vec!["--resume", "old.bin"]] {
+            let mut values = args(&["--pce-mean", "1,6,8"]);
+            values.extend(args(&tail));
+            assert!(Options::parse(&values).is_err(), "{tail:?}");
+        }
+        assert!(Options::parse(&args(&["--pce", "1,6", "--pce-mean", "1,6,8"])).is_err());
     }
 }
