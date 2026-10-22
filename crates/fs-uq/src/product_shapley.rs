@@ -8,6 +8,8 @@
 //! Beads: `frankensim-ext-uq-reliability-upgrades-pwui`,
 //! `frankensim-extreal-program-f85xj.6.7`.
 
+mod checkpoint;
+
 use core::fmt::Display;
 use fs_evidence::Color;
 
@@ -95,8 +97,10 @@ struct Coalition {
 /// Physical inputs always use original parameter order and units. Long solvers
 /// must implement their own cancellation; this owner polls between every call.
 /// Clone retains paid work, including one completed half of a conditional pair.
-/// Reports use bounded synchronous reductions. No durable checkpoint, adaptive
-/// subset selection, causal interpretation or anytime stopping is supplied.
+/// `checkpoint`/`restore` retain that work across process lifetimes under the
+/// same model and deterministic runtime profile. Reports use bounded synchronous
+/// reductions. No adaptive subset selection, causal interpretation or anytime
+/// stopping is supplied.
 #[derive(Debug, Clone)]
 pub struct ShapleyExecution {
     plan: UqPlan,
