@@ -201,8 +201,19 @@ pub(super) mod sealed {
 /// Every stored sparse row has an explicit constructor cap; at most
 /// `max_observations * mesh.vertex_count()` coefficients can be represented.
 pub trait ScanObservationSpec: sealed::Sealed {
-    /// Fixed-grid endpoint.
+    /// Last fixed-grid endpoint contributing to this measurement.
     fn endpoint(&self) -> usize;
+    /// First contributing endpoint; ordinary readouts use exactly one sample.
+    #[doc(hidden)]
+    fn first_endpoint(&self) -> usize { self.endpoint() }
+    /// Positive weight on each contributing endpoint, zero outside the window.
+    #[doc(hidden)]
+    fn time_weight(&self, endpoint: usize) -> f64 {
+        if endpoint == self.endpoint() { 1.0 } else { 0.0 }
+    }
+    /// Temporal readouts bind their quadrature to the original physical grid.
+    #[doc(hidden)]
+    fn validate_times(&self, _cx: &Cx<'_>, _endpoints: &[f64]) -> Result<(), ScanSensitivityError> { Ok(()) }
     /// Original physical coordinate, before any spatial reduction.
     fn observable(&self) -> ScanObservable;
     /// Physical fitting target.

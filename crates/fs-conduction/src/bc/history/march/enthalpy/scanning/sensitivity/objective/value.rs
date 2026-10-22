@@ -11,8 +11,9 @@
 pub mod responses;
 
 use super::{ScanObservable, ScanObjectiveSampling, ScanSensitivityError,
-    ScanStep, ScanningEnthalpyRun, EnthalpyStepConfig, finite, invalid, poll, zeros};
+    ScanStep, ScanningEnthalpyRun, EnthalpyStepConfig, invalid, poll};
 use super::spatial::ScanObservationSpec;
+use super::temporal::ObservationValues;
 use fs_exec::Cx;
 
 /// Whole-trajectory admission without irrelevant retained-tangent allowances.
@@ -20,7 +21,8 @@ use fs_exec::Cx;
 pub struct ScanValueBudget {
     /// Maximum original physical endpoints, also limited by the run's allowance.
     pub max_steps: usize,
-    /// Maximum physical readouts and retained scalar predictions/residuals.
+    /// Total endpoint contributions across all measurements, not just rows.
+    /// A time mean charges every contributing sample; an instant charges one.
     pub max_observations: usize,
     /// Combined authored source coordinates and half widths.
     pub max_schedule_controls: usize,
@@ -69,9 +71,7 @@ fn evaluate_with_observer<O: ScanObservationSpec>(
     mut observe: impl FnMut(usize, &ScanStep) -> Result<(), ScanSensitivityError>,
 ) -> Result<ScanValueEvaluation, ScanSensitivityError> {
     let at_endpoint = admit_values(cx, &run, endpoints, observations, budget)?;
-    let mut predictions = zeros(observations.len())?;
-    let mut residuals = zeros(observations.len())?;
-    let mut value = 0.0;
+    let mut measured = ObservationValues::new(observations.len())?;
     let mut final_step = None;
     for (index, &time) in endpoints.iter().enumerate() {
         poll(cx, index)?;
@@ -89,16 +89,14 @@ fn evaluate_with_observer<O: ScanObservationSpec>(
             poll(cx, i)?;
             let observation = &observations[i];
             let prediction = observation.prediction(cx, &report)?;
-            let residual = finite((prediction - observation.target()) / observation.scale())?;
-            value = finite(value + observation.loss().value_derivative(residual)?.0)?;
-            predictions[i] = prediction;
-            residuals[i] = residual;
+            measured.record(observation, i, index, prediction)?;
         }
         observe(index, &report)?;
         if index + 1 == endpoints.len() { final_step = Some(report); }
     }
     poll(cx, endpoints.len())?;
-    Ok(ScanValueEvaluation { value, predictions, standardized_residuals: residuals,
+    Ok(ScanValueEvaluation { value: measured.value, predictions: measured.predictions,
+        standardized_residuals: measured.residuals,
         final_step: final_step.ok_or_else(|| invalid("missing scan value endpoint"))?,
         endpoint_count: endpoints.len() })
 }
@@ -132,17 +130,32 @@ pub(super) fn admit_values<O: ScanObservationSpec>(cx: &Cx<'_>,
     let mut at_endpoint = Vec::new();
     at_endpoint.try_reserve_exact(count).map_err(|_| invalid("scan observation index allocation refused"))?;
     at_endpoint.resize_with(count, Vec::new);
+    let mut samples = 0usize;
     for (i, observation) in observations.iter().enumerate() {
         poll(cx, i)?;
-        if observation.endpoint() >= count || !observation.target().is_finite()
+        if observation.endpoint() >= count || observation.first_endpoint() > observation.endpoint()
+            || !observation.target().is_finite()
             || !observation.scale().is_finite() || observation.scale() <= 0.0
         { return Err(invalid("scan observation needs an existing endpoint/vertex, finite target and positive finite physical scale")); }
         observation.validate_readout(run.run.problem.boundary.mesh())?;
+        observation.validate_times(cx, endpoints)?;
         observation.loss().validate()?;
         if observation.observable() == ScanObservable::LiquidMassFraction
             && !(0.0..=1.0).contains(&observation.target())
         { return Err(invalid("liquid mass fraction targets must be dimensionless values in [0,1], not percentages")); }
-        at_endpoint[observation.endpoint()].push(i);
+        let support = observation.endpoint() - observation.first_endpoint() + 1;
+        samples = samples.checked_add(support).filter(|&n| n <= budget.max_observations)
+            .ok_or_else(|| invalid("scan measurement endpoint contributions exceed their observation allowance"))?;
+        for endpoint in observation.first_endpoint()..=observation.endpoint() {
+            poll(cx, endpoint)?;
+            let weight = observation.time_weight(endpoint);
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(invalid("scan temporal weights must be finite and positive inside their declared support"));
+            }
+            at_endpoint[endpoint].try_reserve(1)
+                .map_err(|_| invalid("scan observation index allocation refused"))?;
+            at_endpoint[endpoint].push(i);
+        }
     }
     poll(cx, count)?;
     Ok(at_endpoint)

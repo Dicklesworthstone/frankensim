@@ -264,3 +264,6 @@ mod robust;
 
 #[path = "spatial_design/value.rs"]
 mod value;
+
+#[path = "spatial_design/temporal.rs"]
+mod temporal;

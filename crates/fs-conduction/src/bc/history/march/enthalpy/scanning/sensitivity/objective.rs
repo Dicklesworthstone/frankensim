@@ -16,6 +16,8 @@ pub mod responses;
 pub mod checkpoint;
 /// Mesh-bound interior probes and finite spatial readouts.
 pub mod spatial;
+/// Exposure-averaged measurements on the original fixed physical time grid.
+pub mod temporal;
 /// Explicit quadratic or outlier-resistant losses on physical measurements.
 pub mod loss;
 /// Original physical objective without tangent construction or reverse storage.
@@ -28,6 +30,7 @@ use crate::{ConductionError, LinearConfig};
 use crate::transient::enthalpy::EnthalpyStepConfig;
 use fs_exec::Cx;
 use spatial::ScanObservationSpec;
+use temporal::ObservationValues;
 
 /// Physical quantity measured at a retained mesh vertex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,8 @@ pub enum ScanObjectiveSampling {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanObjectiveBudget {
     pub max_steps: usize,
+    /// Total endpoint contributions across all observations. Instantaneous rows
+    /// use one; a time mean uses every endpoint of its exposure window.
     pub max_observations: usize,
     /// Endpoints times mesh vertices. Reports/tangents retain several arrays;
     /// this is a shape count, not a peak allocation or byte bound.
@@ -158,9 +163,7 @@ fn evaluate_with_tape<R, O: ScanObservationSpec>(
     let vertices = run.conduction().temperature().len();
     let mut tape: Vec<ScanStepLinearization<'_>> = Vec::new();
     tape.try_reserve_exact(count).map_err(|_| invalid("scan objective endpoint allocation refused"))?;
-    let mut predictions = zeros(observations.len())?;
-    let mut residuals = zeros(observations.len())?;
-    let mut value = 0.0;
+    let mut measured = ObservationValues::new(observations.len())?;
     for (index, &time) in endpoints.iter().enumerate() {
         poll(cx, index)?;
         let binding = advance_binding(cx, &mut run, time, sampling, step, per_step)?;
@@ -168,24 +171,21 @@ fn evaluate_with_tape<R, O: ScanObservationSpec>(
             poll(cx, i)?;
             let observation = &observations[i];
             let prediction = observation.prediction(cx, binding.report())?;
-            let residual = finite((prediction-observation.target())/observation.scale())?;
-            let (term, _) = observation.loss().value_derivative(residual)?;
-            value = finite(value + term)?;
-            predictions[i] = prediction;
-            residuals[i] = residual;
+            measured.record(observation, i, index, prediction)?;
         }
         tape.push(binding);
     }
     let mut reverse = ReverseState::new(vertices)?;
     for index in (0..count).rev() {
-        reverse.inject_observations(cx, &tape[index], observations, &at_endpoint[index], &residuals)?;
+        reverse.inject_observations(cx, &tape[index], index, observations, &at_endpoint[index], &measured.residuals)?;
         reverse.pull(cx, &run, &tape[index], sampling, transpose, budget.max_schedule_controls)?;
     }
     let final_step = tape.last().ok_or_else(|| invalid("missing scan endpoint"))?.report().clone();
     poll(cx, count)?;
     let extra = responses(&run, &tape)?;
     poll(cx, count)?;
-    Ok((ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
+    Ok((ScanObjectiveEvaluation { value: measured.value, predictions: measured.predictions,
+        standardized_residuals: measured.residuals,
         sources: reverse.sources.ok_or_else(|| invalid("missing scan reverse sweep"))?,
         initial_specific_enthalpy: reverse.seed, final_step, endpoint_count: count,
         transpose_iterations: reverse.iterations, max_transpose_relative_residual: reverse.residual }, extra))
@@ -260,7 +260,7 @@ impl ReverseState {
         Ok(Self { seed: zeros(vertices)?, sources: None, iterations: 0, residual: 0.0 })
     }
 
-    fn inject_observations<O: ScanObservationSpec>(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>,
+    fn inject_observations<O: ScanObservationSpec>(&mut self, cx: &Cx<'_>, binding: &ScanStepLinearization<'_>, endpoint: usize,
         observations: &[O], indices: &[usize], residuals: &[f64],
     ) -> Result<(), ScanSensitivityError> {
         let mut temperature_seed = zeros(self.seed.len())?;
@@ -269,7 +269,7 @@ impl ReverseState {
             poll(cx, i)?;
             let observation = &observations[i];
             let (_, slope) = observation.loss().value_derivative(residuals[i])?;
-            let local = finite(slope/observation.scale())?;
+            let local = finite(finite(slope/observation.scale())? * observation.time_weight(endpoint))?;
             let target = match observation.observable() {
                 ScanObservable::Temperature => &mut temperature_seed,
                 ScanObservable::SpecificEnthalpy => &mut self.seed,

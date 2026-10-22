@@ -14,6 +14,7 @@ use super::super::responses::peaks::{ScanPeakResponse, ScanPeakEvaluation,
     PeakSummary, admit_rows, summarize_samples, weight};
 use fs_exec::Cx;
 use super::super::spatial::ScanObservationSpec;
+use super::super::temporal::ObservationValues;
 
 /// Original objective, physical constraint values/gradients and actual replay work.
 #[derive(Debug)]
@@ -61,22 +62,27 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
     let (at_endpoint, per_step) = admit_layout(cx, &run, endpoints, observations, budget, segment)?;
     let sample_counts = admit_rows(cx, &run, endpoints.len(), responses, peaks, response_budget, max_peak_samples)?;
     let vertices = run.conduction().temperature().len();
-    let mut predictions = zeros(observations.len())?;
-    let mut residuals = zeros(observations.len())?;
+    let mut measured = ObservationValues::new(observations.len())?;
+    // Store each original readout, not only its time mean, so replay checks
+    // cannot hide two changed samples whose weighted errors cancel.
+    let mut observation_samples = Vec::new();
+    observation_samples.try_reserve_exact(at_endpoint.len())
+        .map_err(|_| invalid("checkpoint observation sample allocation refused"))?;
+    for (index, indices) in at_endpoint.iter().enumerate() {
+        poll(cx, index)?;
+        observation_samples.push(zeros(indices.len())?);
+    }
     let mut point_values = zeros(responses.len())?;
     let mut peak_values: Vec<Vec<f64>> = Vec::with_capacity(peaks.len());
     for &count in &sample_counts { peak_values.push(zeros(count)?); }
-    let mut value = 0.0;
     let mut replay = ReplayedScan::forward(cx, run, endpoints, sampling, step, segment,
         |index, report| {
-            for &i in &at_endpoint[index] {
+            for (slot, &i) in at_endpoint[index].iter().enumerate() {
                 poll(cx, i)?;
                 let o = &observations[i];
                 let prediction = o.prediction(cx, report)?;
-                let residual = finite((prediction-o.target())/o.scale())?;
-                let (term, _) = o.loss().value_derivative(residual)?;
-                value = finite(value + term)?;
-                predictions[i] = prediction; residuals[i] = residual;
+                observation_samples[index][slot] = prediction;
+                measured.record(o, i, index, prediction)?;
             }
             for (i, response) in responses.iter().enumerate() {
                 poll(cx, i)?;
@@ -109,12 +115,12 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
         for local in (0..tape.len()).rev() {
             let index = begin+local;
             let binding = &tape[local];
-            for &i in &at_endpoint[index] {
+            for (slot, &i) in at_endpoint[index].iter().enumerate() {
                 poll(cx, i)?;
                 let o = &observations[i];
-                same_scalar(o.prediction(cx, binding.report())?, predictions[i])?;
+                same_scalar(o.prediction(cx, binding.report())?, observation_samples[index][slot])?;
             }
-            objective.inject_observations(cx, binding, observations, &at_endpoint[index], &residuals)?;
+            objective.inject_observations(cx, binding, index, observations, &at_endpoint[index], &measured.residuals)?;
             objective.pull(cx, &replay.run, binding, sampling, transpose, budget.max_schedule_controls)?;
             for (i, (response, reverse)) in responses.iter().zip(&mut point_reverse).enumerate() {
                 poll(cx, i)?;
@@ -167,7 +173,8 @@ pub(crate) fn evaluate_observations_checkpointed<O: ScanObservationSpec>(
     }
     poll(cx, endpoints.len())?;
     Ok(CheckpointedScanResponses {
-        objective: ScanObjectiveEvaluation { value, predictions, standardized_residuals: residuals,
+        objective: ScanObjectiveEvaluation { value: measured.value, predictions: measured.predictions,
+            standardized_residuals: measured.residuals,
             sources: objective.sources.ok_or_else(|| invalid("missing checkpointed objective sweep"))?,
             initial_specific_enthalpy: objective.seed, final_step: replay.final_step,
             endpoint_count: endpoints.len(), transpose_iterations: objective.iterations,
