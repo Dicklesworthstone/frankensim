@@ -60,3 +60,41 @@ no evolving geometry, contact detection, optical ray tracing, melting or field
 force is inferred. Endpoint material/thermal rates and midpoint circuit current
 are generally a first-order composition. Split intervals at scheduled events and
 load/source discontinuities. Target events remain pending until joint acceptance.
+
+## Scheduled deposition with the same complete heat network
+
+`GrowingBridge::step_heat_network_candidate` invokes the same interval above,
+then the existing scheduled birth transaction. Its defaulted report payload
+preserves the original `HeatNetworkSample` through final acceptance. Bulk-only,
+electrical-contact and full heat-network growth all share one completion function.
+
+```rust,ignore
+let (next, circuit_next, report) = specimen.step_heat_network_candidate(
+    cx, &circuit, &prepared_heat_network, &ports, target_s, gravity_m_s2,
+    &old_cell_loads_n_m, controls, &old_cell_energy_guesses_j,
+)?;
+```
+
+No birth occurs inside a radiation, circuit or Newton trial. A final invalid
+arrival rejects the solved interval, passive receivers' heat changes, finite
+charge/flux proposal and all earlier appends. Incoming enthalpy is included once;
+zero-duration arrivals perform no additional radiosity, mechanical or circuit
+advance. The returned mechanical state still reports whether new material awaits
+equilibrium under its enlarged load field.
+
+The caller must supply complete bindings for the new topology before the next
+interval. This method does not infer new radiative surfaces, change enclosure
+view factors, migrate selected surface claims or add circuit branches. The
+single-layer clamped-seed growth restrictions remain unchanged.
+
+Three further regressions compare original interval/event/append replay, reject
+a late invalid birth after a valid append, and retain passive incoming enthalpy
+without debiting the circuit or adding a beam segment. Run:
+
+```sh
+rch exec -- cargo test -p fs-couple --test bridge_heat_growth \
+  --test bridge_heat_network --test bridge_electrical_growth
+```
+
+These additional Rust event tests are authored but unexecuted here. Independent
+component equations do not establish native event ordering or rollback behavior.

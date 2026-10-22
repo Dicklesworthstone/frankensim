@@ -3,7 +3,9 @@
 
 use core::convert::Infallible;
 use crate::material_circuit::MaterialCircuit;
-use crate::circuit_enthalpy::material::PreparedMaterialNetwork;
+use crate::circuit_enthalpy::material::{MaterialNetworkSample, PreparedMaterialNetwork};
+use crate::circuit_enthalpy::contacts::heat::{HeatNetworkSample, PreparedHeatNetwork};
+use fs_exec::Cx;
 use crate::circuit_enthalpy::contacts::material::PreparedElectricalContactNetwork;
 use fs_solid::bridge as solid;
 use super::{BirthAudit, GrowingBridge, poll};
@@ -21,9 +23,9 @@ impl core::fmt::Display for ElectricalGrowthError {
 }
 impl std::error::Error for ElectricalGrowthError {}
 
-pub struct ElectricalGrowthReport {
+pub struct ElectricalGrowthReport<S = MaterialNetworkSample> {
     /// Original left-limit electrical, mechanical and thermal interval accounts.
-    pub interval: feedback::ElectricalReport,
+    pub interval: feedback::ElectricalReport<S>,
     /// Actual zero-duration arrivals, including passive-body incoming enthalpy.
     pub births: BirthAudit,
     /// New material has not equilibrated under the enlarged load field yet.
@@ -84,13 +86,34 @@ impl<'t,'m> GrowingBridge<'t,'m> {
         self.finish_electrical_candidate(candidate,config,&mut cancelled)
     }
 
-    // One birth/energy/publication path for bulk and contact-heated intervals.
+    /// Material thermal contacts and closed radiation share the existing
+    /// electrical/beam interval and the SAME atomic birth-completion path.
+    /// A late birth failure discards radiative changes in passive receivers as
+    /// well as the finite circuit debit, beam update and all earlier appends.
+    ///
+    /// The network describes pre-event geometry. After accepted births, supply
+    /// a complete successor network before continuing; no newborn radiator,
+    /// conductive contact, circuit branch or view factor is inferred here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_network_candidate(
+        &self, cx: &Cx<'_>, circuit: &MaterialCircuit,
+        transport: &PreparedHeatNetwork<'_,'_>, ports: &[f64],
+        target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
+        config: feedback::ElectricalConfig, guess_j: &[f64],
+    ) -> Result<(Self,MaterialCircuit,ElectricalGrowthReport<HeatNetworkSample>),ElectricalGrowthError> {
+        let candidate=feedback::step_heat_network_candidate(cx,&self.thermal,&self.bridge,&self.bindings,
+            circuit,transport,ports,target_s,gravity_m_s2,loads_n_m,config,guess_j)
+            .map_err(ElectricalGrowthError::Interval)?;
+        self.finish_electrical_candidate(candidate,config,&mut ||cx.checkpoint().is_err())
+    }
+
+    // One birth/energy/publication path for every admitted heat-network payload.
     // The candidate carries the original admitted circuit, not a reconstructed
     // charge/flux state or a second electrical advance during deposition.
-    fn finish_electrical_candidate(
-        &self, candidate: feedback::ElectricalCandidate<'t,'m>,
+    fn finish_electrical_candidate<S>(
+        &self, candidate: feedback::ElectricalCandidate<'t,'m,S>,
         config: feedback::ElectricalConfig, cancelled: &mut impl FnMut()->bool,
-    ) -> Result<(Self,MaterialCircuit,ElectricalGrowthReport),ElectricalGrowthError> {
+    ) -> Result<(Self,MaterialCircuit,ElectricalGrowthReport<S>),ElectricalGrowthError> {
         let (thermal,bridge,next_circuit,interval)=candidate.into_parts();
         let staged=Self {thermal,bridge,bindings:self.bindings.clone(),future:self.future.clone(),
             body:self.body,pending:false};
