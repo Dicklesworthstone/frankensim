@@ -5,7 +5,8 @@ mod support;
 use support::{with_cx,template,gas};
 use fs_couple::bowed_string::runtime::reciprocal::{InteriorStringConnection,bank::{
     MaterialStringMember,MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation,
-    polarization::TransverseDirections,relaxation::StringBendingRelaxationSelection,
+    polarization::TransverseDirections,relaxation::{StringBendingRelaxationSelection,
+        LayeredStringBendingRelaxationSelection},
 }};
 use fs_couple::modal_acoustic_time::{ModalAcousticMode,ModalAcousticTimeBudget,ModalAcousticTimeModel};
 use fs_couple::render::schedule::force::coupled::{ModalAttachment,ModalCouplingConfig};
@@ -13,6 +14,7 @@ use fs_couple::render::schedule::force::coupled::contact::friction::{FrictionDri
 use fs_couple::string_specimen::{StringPrestress,KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY as ETA};
 use fs_exec::{Cx,CancelGate};
 use fs_material::section::{ConcentricElasticSection,ConcentricMaterialLayer};
+use fs_material::section::relaxation::LayerBendingRelaxationProperties;
 use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirement,
     ScalarAdmissibility,MaterialPropertySelection,resolve_material_state_point};
 use fs_matdb::{ClaimSet,PropertyClaim,PropertyKey,PropertyValue,Provenance,MaterialCard,
@@ -23,13 +25,19 @@ use fs_qty::{Dims,Density,Pressure,DynViscosity};
 use fs_tribo::FrictionLaw;
 
 fn material(delta: f64,tau: f64,band: f64) -> ResolvedMaterialStatePoint {
+    material_with_arms(&[("bending_delta","bending_time",delta,tau)],band)
+}
+fn material_with_arms(arms: &[(&str,&str,f64,f64)],band: f64) -> ResolvedMaterialStatePoint {
     let mut claims=ClaimSet::new(); let mut requirements=Vec::new();
-    for (name,dims,value) in [("density",Density::DIMS,7800.0),
+    let mut values=vec![("density",Density::DIMS,7800.0),
         ("young_modulus",Pressure::DIMS,200e9),
         ("equilibrium_young_modulus",Pressure::DIMS,200e9),(ETA,DynViscosity::DIMS,0.0),
-        ("G",Pressure::DIMS,60e9),("eta_s",DynViscosity::DIMS,1000.0),
-        ("bending_delta",Pressure::DIMS,delta),("bending_time",Dims([0,0,1,0,0,0]),tau)] {
-        let high=if name.starts_with("bending_") { band } else {200_000.0};
+        ("G",Pressure::DIMS,60e9),("eta_s",DynViscosity::DIMS,1000.0)];
+    for &(modulus,time,delta,tau) in arms {
+        values.extend([(modulus,Pressure::DIMS,delta),(time,Dims([0,0,1,0,0,0]),tau)]);
+    }
+    for (name,dims,value) in values {
+        let high=if arms.iter().any(|(modulus,time,_,_)|name==*modulus || name==*time) { band } else {200_000.0};
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
             value:PropertyValue::Scalar {value,dims},
             validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,high),
@@ -44,9 +52,14 @@ fn material(delta: f64,tau: f64,band: f64) -> ResolvedMaterialStatePoint {
         &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 fn bank(cx:&Cx<'_>,gate:&CancelGate,delta:f64,tau:f64,band:f64,modes:usize,count:usize) -> ReciprocalStringBank {
+    bank_from_materials(cx,gate,[material(delta,0.002,band),material(delta,tau,band)],modes,count)
+}
+fn bank_from_materials(cx:&Cx<'_>,gate:&CancelGate,materials:[ResolvedMaterialStatePoint;2],
+    modes:usize,count:usize) -> ReciprocalStringBank {
+    let [core,sleeve]=materials;
     let section=ConcentricElasticSection::try_new(0.0,vec![
-        ConcentricMaterialLayer {outer_radius_m:0.0002,material:material(delta,0.002,band)},
-        ConcentricMaterialLayer {outer_radius_m:0.0003,material:material(delta,tau,band)},
+        ConcentricMaterialLayer {outer_radius_m:0.0002,material:core},
+        ConcentricMaterialLayer {outer_radius_m:0.0003,material:sleeve},
     ]).unwrap().with_kelvin_voigt_bending(ETA).unwrap();
     let source=MaterialStringSource::Concentric {template:template(modes),section,
         prestress:StringPrestress::FixedTension(20.0)}.with_torsion("G","eta_s",1).unwrap()
@@ -262,5 +275,62 @@ fn original_zero_memory_preserves_elastic_trajectory_and_source_limits_refuse() 
             assert!(bank_with_sources(cx,gate,
                 vec![original_source(40e9,tau,band,true)]).is_err());
         }
+    });
+}
+
+#[test]
+fn uniform_selectors_lower_to_the_same_layered_operator_and_pressure_bits() {
+    with_cx(|cx,gate| {
+        let make=||bank(cx,gate,40e9,0.004,200_000.0,2,2);
+        let layers=vec![LayerBendingRelaxationProperties {
+            equilibrium_modulus:"young_modulus".into(),branches:selection()[0].properties.clone(),
+        };2];
+        let mut uniform=make().with_material_string_bending_relaxation(selection(),None,16,gate).unwrap();
+        let mut explicit=make().with_material_layered_string_bending_relaxation(vec![
+            LayeredStringBendingRelaxationSelection {string:0,layers:layers.clone()},
+        ],None,16,gate).unwrap();
+        assert_eq!(uniform.source().string_bending_relaxation().unwrap().channels(),
+            explicit.source().string_bending_relaxation().unwrap().channels());
+        assert_eq!(explicit.source().string_bending_relaxation().unwrap().layered_selections()[0].layers,layers);
+        let bits=|pressure:Vec<f64>|pressure.into_iter().map(f64::to_bits).collect::<Vec<_>>();
+        assert_eq!(bits(render(&mut uniform)),bits(render(&mut explicit)));
+    });
+}
+
+#[test]
+fn elastic_core_and_independent_two_arm_coating_reach_shared_body_and_pressure() {
+    with_cx(|cx,gate| {
+        let layers=vec![
+            LayerBendingRelaxationProperties {equilibrium_modulus:"young_modulus".into(),branches:vec![]},
+            LayerBendingRelaxationProperties {equilibrium_modulus:"young_modulus".into(),branches:vec![
+                ("coating_fast".into(),"coating_fast_time".into()),
+                ("coating_slow".into(),"coating_slow_time".into()),
+            ]},
+        ];
+        let make=|tau|bank_from_materials(cx,gate,[
+            material_with_arms(&[],200_000.0),
+            material_with_arms(&[("coating_fast","coating_fast_time",20e9,0.002),
+                ("coating_slow","coating_slow_time",40e9,tau)],200_000.0),
+        ],1,2);
+        let bind=|tau|make(tau).with_material_layered_string_bending_relaxation(vec![
+            LayeredStringBendingRelaxationSelection {string:0,layers:layers.clone()},
+        ],None,16,gate).unwrap();
+        let mut first=bind(0.004); let mut changed=bind(0.012);
+        let image=first.source().string_bending_relaxation().unwrap();
+        assert!(image.spectra()[0][0].terms.is_empty());
+        assert_eq!(image.spectra()[0][1].terms,vec![(20e9,0.002),(40e9,0.004)]);
+        assert_eq!(image.channels().len(),4); // Two coating arms, two bending planes.
+        for (a,b) in first.system().components().iter().zip(changed.system().components()) {
+            assert_eq!(a.modes(),b.modes());
+        }
+        let pressure=render(&mut first); let altered=render(&mut changed);
+        assert!(pressure.iter().any(|p|p.abs()>1e-15));
+        assert!(pressure.iter().zip(altered).any(|(a,b)|(a-b).abs()>1e-18));
+        assert_ne!(first.system().components()[1].states(),changed.system().components()[1].states());
+        assert!(first.system().coupled_frame().unwrap().material_dissipation_j>0.0);
+        assert!(make(0.004).with_material_string_bending_relaxation(selection(),None,16,gate).is_err());
+        assert!(make(0.004).with_material_layered_string_bending_relaxation(vec![
+            LayeredStringBendingRelaxationSelection {string:0,layers:vec![layers[1].clone()]},
+        ],None,16,gate).is_err());
     });
 }

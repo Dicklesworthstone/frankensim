@@ -8,11 +8,10 @@
 use super::*;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
-use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::section::relaxation::LayerBendingRelaxationProperties;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::det;
 use fs_phs::RelaxationBranch;
-use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 // Original specimens can already select an exclusive constitutive spectrum.
 // They join the same owner before optional regional and layered additions.
@@ -24,6 +23,16 @@ mod source;
 pub struct StringBendingRelaxationSelection {
     pub string: usize,
     pub properties: Vec<(String, String)>,
+}
+
+/// Independent source roles for every spatial layer of one original string.
+/// A coating and core may use different arm counts and material property names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredStringBendingRelaxationSelection {
+    pub string: usize,
+    /// Core first, then sleeves in the original section order. Empty branch
+    /// lists explicitly select elastic layers; omitted layers are an error.
+    pub layers: Vec<LayerBendingRelaxationProperties>,
 }
 
 /// One source-projected internal strain, in original component/modal coordinates.
@@ -40,7 +49,7 @@ pub struct StringBendingMemoryChannel {
 /// Immutable source selection and its exact uniform-span curvature projection.
 #[derive(Clone, Debug)]
 pub struct StringBankBendingRelaxation {
-    selections: Vec<StringBendingRelaxationSelection>,
+    selections: Vec<LayeredStringBendingRelaxationSelection>,
     sections: Vec<ConcentricElasticSection>,
     spectra: Vec<Vec<GeneralizedMaxwell>>,
     bands: Vec<(f64, f64)>,
@@ -49,7 +58,8 @@ pub struct StringBankBendingRelaxation {
     max_memory_states: usize,
 }
 impl StringBankBendingRelaxation {
-    #[must_use] pub fn selections(&self) -> &[StringBendingRelaxationSelection] { &self.selections }
+    /// Normalized source roles, including explicitly elastic layers.
+    #[must_use] pub fn layered_selections(&self) -> &[LayeredStringBendingRelaxationSelection] { &self.selections }
     /// Original material bundles and section integrals, in selection order.
     #[must_use] pub fn sections(&self) -> &[ConcentricElasticSection] { &self.sections }
     /// One original spectrum per layer, nested in selection order.
@@ -58,7 +68,7 @@ impl StringBankBendingRelaxation {
     #[must_use] pub fn channels(&self) -> &[StringBendingMemoryChannel] { &self.channels }
     #[must_use] pub const fn max_memory_states(&self) -> usize { self.max_memory_states }
 
-    fn bind(bank: &ReciprocalStringBank, selections: Vec<StringBendingRelaxationSelection>,
+    fn bind(bank: &ReciprocalStringBank, selections: Vec<LayeredStringBendingRelaxationSelection>,
         max_memory_states: usize, gate: &CancelGate) -> Result<Self, ReciprocalStringError>
     {
         if selections.is_empty() || selections.len() > bank.cards.len()
@@ -80,59 +90,43 @@ impl StringBankBendingRelaxation {
             if member.source.bending_relaxation().is_some() {
                 return Err(invalid("an original Prony string cannot select a second bending-memory owner"));
             }
-            validate_properties(&selection.properties)?;
-            let section = section(&member.source)?;
+            let section = section(&member.source)?.with_prony_bending(&selection.layers)
+                .map_err(owner)?;
             let card = &bank.cards[selection.string];
-            let planes = if matches!(&member.source, MaterialStringSource::WithPolarizations(_)) { 2 } else { 1 };
+            let planes: usize = if matches!(&member.source, MaterialStringSource::WithPolarizations(_)) { 2 } else { 1 };
             let component = &bank.system.components()[selection.string];
             if component.modes().len() != member.source.modes()
                 || planes * card.mode_count > component.modes().len() {
                 return Err(invalid("bending memory lost the complete original string basis"));
             }
             basis.push((selection.string, component.modes().to_vec()));
-            let mut layer_spectra = Vec::new();
-            for (layer, geometry) in section.layers().iter().zip(section.layer_integrals()) {
+            for branch in section.branches() {
                 poll(gate)?;
-                let mut band = (0.0_f64, f64::MAX);
-                coefficient(&layer.material, "density", Density::DIMS, &mut band)?;
-                let equilibrium = coefficient(&layer.material, "young_modulus", Pressure::DIMS, &mut band)?;
-                let terms = selection.properties.iter().map(|(modulus, time)| Ok((
-                    coefficient(&layer.material, modulus, Pressure::DIMS, &mut band)?,
-                    coefficient(&layer.material, time, Dims([0,0,1,0,0,0]), &mut band)?,
-                ))).collect::<Result<Vec<_>, ReciprocalStringError>>()?;
-                let spectrum = GeneralizedMaxwell::new(equilibrium, terms).map_err(owner)?;
-                if band.0 > band.1 || !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 {
-                    return Err(invalid("string bending spectrum has no common source frequency domain"));
-                }
-                let positive = spectrum.terms.iter().filter(|(e,_)| *e > 0.0).count();
-                if positive.checked_mul(planes).and_then(|n| n.checked_mul(card.mode_count))
+                if branch.relaxing_stiffness_n_m2 == 0.0 { continue; }
+                if planes.checked_mul(card.mode_count)
                     .and_then(|n| n.checked_add(channels.len())).is_none_or(|n| n > max_memory_states) {
                     return Err(invalid("complete per-layer bending memory exceeds its declared state budget"));
                 }
-                for &(modulus, tau) in &spectrum.terms {
-                    if modulus == 0.0 { continue; }
-                    let delta_ei = modulus * geometry.second_moment_m4();
-                    let scale = det::sqrt(delta_ei / card.linear_density_kg_m);
-                    if !delta_ei.is_finite() || delta_ei <= 0.0 || !scale.is_finite() || scale <= 0.0 {
-                        return Err(invalid("string bending memory stiffness is unrepresentable"));
-                    }
-                    for plane in 0..planes { for mode in 0..card.mode_count {
-                        poll(gate)?;
-                        let k = (mode+1) as f64 * core::f64::consts::PI / card.length_m;
-                        let coupling = scale * k * k;
-                        if !coupling.is_finite() || coupling <= 0.0 {
-                            return Err(invalid("string curvature projection lost a positive material channel"));
-                        }
-                        channels.push(StringBendingMemoryChannel { string: selection.string,
-                            mode: plane*card.mode_count+mode, coupling_per_s: coupling,
-                            relaxation_time_s: tau });
-                    }}
+                let delta_ei = branch.relaxing_stiffness_n_m2;
+                let scale = det::sqrt(delta_ei / card.linear_density_kg_m);
+                if !delta_ei.is_finite() || delta_ei <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+                    return Err(invalid("string bending memory stiffness is unrepresentable"));
                 }
-                bands.push(band);
-                layer_spectra.push(spectrum);
+                for plane in 0..planes { for mode in 0..card.mode_count {
+                    poll(gate)?;
+                    let k = (mode+1) as f64 * core::f64::consts::PI / card.length_m;
+                    let coupling = scale * k * k;
+                    if !coupling.is_finite() || coupling <= 0.0 {
+                        return Err(invalid("string curvature projection lost a positive material channel"));
+                    }
+                    channels.push(StringBendingMemoryChannel { string: selection.string,
+                        mode: plane*card.mode_count+mode, coupling_per_s: coupling,
+                        relaxation_time_s: branch.relaxation_time_s });
+                }}
             }
-            sections.push(section);
-            spectra.push(layer_spectra);
+            bands.push(section.omega_band_rad_s());
+            sections.push(section.elastic().clone());
+            spectra.push(section.spectra().to_vec());
         }
         Ok(Self { selections, sections, spectra, bands, channels, basis, max_memory_states })
     }
@@ -200,19 +194,6 @@ fn validate_properties(properties: &[(String,String)]) -> Result<(), ReciprocalS
     }
     Ok(())
 }
-fn coefficient(source: &ResolvedMaterialStatePoint, key: &str, dims: Dims,
-    band: &mut (f64,f64)) -> Result<f64, ReciprocalStringError>
-{
-    let p = source.property(key).ok_or_else(|| invalid("string memory lacks an explicit source coefficient"))?;
-    if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() {
-        return Err(invalid("string memory requires dimensioned constant coefficients at the original material state"));
-    }
-    if let Some((lo,hi)) = p.angular_frequency_band_rad_s().map_err(owner)? {
-        band.0=band.0.max(lo); band.1=band.1.min(hi);
-    }
-    Ok(p.value_si())
-}
 
 impl MaterialStringBankSource {
     /// Source sections and spectra survive multibow, forcing and PCM ownership.
@@ -243,7 +224,43 @@ impl ReciprocalStringBank {
     /// memory, finite-strain viscoelasticity, winding slip, heat evolution or
     /// measured instrument-fidelity claim is supplied by this selection.
     pub fn with_material_string_bending_relaxation(
-        mut self, selections: Vec<StringBendingRelaxationSelection>,
+        self, selections: Vec<StringBendingRelaxationSelection>,
+        initial_memory: Option<Vec<f64>>, max_memory_states: usize, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        if selections.is_empty() || selections.len() > self.cards.len()
+            || !(1..=256).contains(&max_memory_states) {
+            return Err(invalid("string bending memory needs bounded explicit selections and 1..=256 states"));
+        }
+        let mut layered = Vec::with_capacity(selections.len());
+        for selection in selections {
+            poll(gate)?;
+            validate_properties(&selection.properties)?;
+            let member = self.source.strings.get(selection.string)
+                .ok_or_else(|| invalid("bending memory names an absent original string"))?;
+            let layer_count = section(&member.source)?.layers().len();
+            layered.push(LayeredStringBendingRelaxationSelection {
+                string: selection.string,
+                layers: vec![LayerBendingRelaxationProperties {
+                    equilibrium_modulus: "young_modulus".into(), branches: selection.properties,
+                }; layer_count],
+            });
+        }
+        self.with_material_layered_string_bending_relaxation(layered, initial_memory,
+            max_memory_states, gate)
+    }
+
+    /// Bind a separate source spectrum for each core/coating layer using the
+    /// shared material-section owner. Layer-specific names and arm counts need
+    /// no new string equation. Explicit empty spectra are elastic, but missing
+    /// layer bindings or required property support refuse atomically.
+    ///
+    /// The same cold-state, memory-budget, complete-band and exact-runtime
+    /// requirements as `with_material_string_bending_relaxation` apply. Every
+    /// layer explicitly identifies its equilibrium modulus; a sampled storage
+    /// modulus cannot silently replace it. No new thermal or axial memory is added.
+    pub fn with_material_layered_string_bending_relaxation(
+        mut self, selections: Vec<LayeredStringBendingRelaxationSelection>,
         initial_memory: Option<Vec<f64>>, max_memory_states: usize, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;

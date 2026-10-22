@@ -339,12 +339,31 @@ impl Spec {
             let max_states=row.count(256)?; let selected=row.count(count)?; row.end()?;
             let mut selections=Vec::with_capacity(selected);
             for _ in 0..selected {
-                let mut row=r.row("string-memory")?;
-                let string=row.count(count-1)?; let terms=row.count(8)?;
-                let mut properties=Vec::with_capacity(terms);
-                for _ in 0..terms { properties.push((row.word()?.to_string(),row.word()?.to_string())); }
-                row.end()?;
-                selections.push(bending_memory::Selection {string,properties});
+                let mut row=r.raw_row()?;
+                match row.word()? {
+                    "string-memory" => {
+                        let string=row.count(count-1)?; let terms=row.count(8)?;
+                        let mut properties=Vec::with_capacity(terms);
+                        for _ in 0..terms { properties.push((row.word()?.to_string(),row.word()?.to_string())); }
+                        row.end()?;
+                        selections.push(bending_memory::Input::uniform_selection(string,properties,&strings)?);
+                    },
+                    "layered-string-memory" => {
+                        let string=row.count(count-1)?; let count=row.count(MAX_LAYERS)?;
+                        row.end()?;
+                        let mut layers=Vec::with_capacity(count);
+                        for _ in 0..count {
+                            let mut row=r.row("layer-memory")?;
+                            let equilibrium_modulus=row.word()?.to_string(); let terms=row.count(8)?;
+                            let mut branches=Vec::with_capacity(terms);
+                            for _ in 0..terms { branches.push((row.word()?.to_string(),row.word()?.to_string())); }
+                            row.end()?;
+                            layers.push(bending_memory::LayerProperties {equilibrium_modulus,branches});
+                        }
+                        selections.push(bending_memory::Selection {string,layers});
+                    },
+                    _ => return Err("expected string-memory or layered-string-memory".into()),
+                }
             }
             Some(bending_memory::Input::new(max_states,selections,&strings)?)
         } else { None };

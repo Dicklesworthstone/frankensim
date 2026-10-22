@@ -797,6 +797,29 @@ The runtime owns visible per-filter state, superposes in fixed input order, and 
 whole samples transactionally. EstimateOnly covers the fixed reference before `1/r`;
 moving-source, FW-H, near-field, feedback, room, head, and passivity remain unclaimed.
 
+### Layer-specific material memory in the reciprocal string bank
+
+`with_material_layered_string_bending_relaxation` selects an independent
+equilibrium-modulus role and ordered Maxwell-arm property pairs for every
+original core/coating layer. Layers may have different names and arm counts;
+an explicitly empty spectrum represents an elastic layer without invented loss
+data. The existing uniform-selector API lowers through this same path.
+`fs-material::section::relaxation` now owns source admission and section
+integration instead of duplicating them in the acoustic coupling layer.
+
+The bank retains its existing mass-normalized curvature projection, per-arm
+history, reciprocal body/bridge loading and exact propagation. Explicit
+Kelvin-Voigt viscosity remains a separate parallel dashpot; supplied Maxwell
+increments must describe additional relaxing stiffness. Source frequency bands,
+memory-state budgets, cold binding and sample-clock admission still apply.
+Source images expose normalized `layered_selections()` plus the original
+sections, layer spectra and channels. Focused G3 regressions cover bitwise
+uniform/explicit layer equality and a two-arm coating/elastic-core substitution
+through actual pressure and sympathetic body response, retaining the original
+energy-balance assertions. These are numerical coupling checks, not physical
+instrument qualification. Helical winding, axial/torsional memory, evolving
+temperature and finite-strain material history remain outside this binding.
+
 ### Material string bank rotational bridges
 
 `bowed_string::runtime::reciprocal::bank` admits explicit small-angle

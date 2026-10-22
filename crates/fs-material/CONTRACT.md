@@ -20,6 +20,23 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `section::relaxation::ConcentricPronySection` composes independently selected
+  generalized-Maxwell bending spectra on the existing bonded concentric geometry.
+  Each layer declares its equilibrium-modulus role and zero or more modulus/time
+  source pairs; an explicitly empty spectrum is elastic, whereas an omitted layer
+  or absent property refuses. The selected equilibrium value must equal that
+  layer's elastic Young modulus. Actual annular integrals give each arm
+  `delta_E * I`; source time constants and layer identities are never averaged.
+  Density and every coefficient must be constant at the resolved temperature;
+  relaxation times (or equilibrium modulus for an empty spectrum) declare frequency
+  support, intersected with all other coefficient domains. At most 128 total arms
+  are admitted. Missing/ambiguous/incorrect quantities, incompatible support,
+  negative increments, nonpositive times and unrepresentable stiffness refuse
+  atomically. Source receipts are retained without authority promotion. G1/G3
+  unit tests check independent complex bending stiffness and homogeneous-section
+  subdivision; G0 covers explicit elastic layers and invalid source combinations.
+  This is frozen-state small-curvature bonded bending, not helical winding,
+  axial creep, interlayer slip, heating or an experimental material validation.
 - `state_point` is the fail-closed bridge from immutable `fs-matdb`
   `MaterialCard`s to executable scalar property bundles. Consumers declare
   property names, dimensions, numerical domains, the complete physical query

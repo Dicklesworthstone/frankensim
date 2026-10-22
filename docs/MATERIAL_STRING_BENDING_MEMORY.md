@@ -45,6 +45,32 @@ supplies its own values from its existing material pack. Unrelated packs and the
 body gain no new requirement. Shared packs resolve the union of explicitly
 selected properties once. The existing source cache and byte limits remain.
 
+Materials with different spectra can select each physical layer independently:
+
+```text
+bending-memory 16 1
+layered-string-memory 0 2
+layer-memory young_modulus 0
+layer-memory young_modulus 2 coating_delta_1 coating_tau_1 coating_delta_2 coating_tau_2
+```
+
+Here the core is explicitly elastic, and the coating supplies two relaxation
+arms. Layer records follow physical order: core first, then each sleeve from
+inside to outside. Each names its equilibrium-modulus property, an arm count
+from zero through eight, and that many modulus/time pairs. No dummy loss
+properties are demanded from the elastic core. The equilibrium value must match
+the already resolved Young modulus so selecting history cannot silently retune
+the original elastic operator. Every selected source must supply an explicit
+valid frequency band; layer count must exactly match the physical section.
+
+Only a layer's own pack gains its selected requirements; shared packs receive
+their union once. Existing `string-memory` records lower through the same shared
+owner with uniform property names. Substituting original material data therefore
+changes the shared dynamics and observed pressure without changing physics code.
+Library callers use `LayerBendingRelaxationProperties` from
+`fs_material::section::relaxation`, `LayeredStringBendingRelaxationSelection`, and
+`with_material_layered_string_bending_relaxation` for the same binding.
+
 Construction binds body memory first, then string memory, after gas and axial
 coordinates have been selected. New string memories start relaxed. All original
 schedules, bow interfaces, stops, pressure observation and PCM callbacks remain

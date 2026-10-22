@@ -14,6 +14,8 @@
 
 /// Explicit uniaxial viscosity and longitudinal modal loss.
 pub mod axial;
+/// Per-layer generalized-Maxwell bending spectra without averaged time constants.
+pub mod relaxation;
 pub mod thermal;
 pub mod transport;
 /// Rotary inertia and explicitly sourced torsional shear loss.

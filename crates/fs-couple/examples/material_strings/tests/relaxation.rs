@@ -147,9 +147,11 @@ fn exclusive_and_additional_string_spectra_share_one_body_history_and_budget() {
         other.bending_loss=input::BendingLoss::KelvinVoigt;
         other.prestress=StringPrestress::FixedTension(22.0);
         s.strings.push(other);
-        s.bending_memory=Some(bending_memory::Input::new(4,vec![bending_memory::Selection {
-            string:1,properties:vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
-        }],&s.strings).unwrap());
+        s.bending_memory=Some(bending_memory::Input::new(4,vec![
+            bending_memory::Input::uniform_selection(1,
+                vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
+                &s.strings).unwrap(),
+        ],&s.strings).unwrap());
         let text=include_str!("../orthotropic.body")
             .replace("elastic orthotropic12","elastic isotropic");
         let profile=body::Profile::parse(format!("{text}loss regional-maxwell relaxed 4 1000000 1 relaxing_bending_modulus bending_relaxation_time\n").as_bytes()).unwrap();
@@ -206,15 +208,19 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
         };
         let plain=spec();
         let mut twice=selected();
-        twice.bending_memory=Some(bending_memory::Input::new(4,vec![bending_memory::Selection {
-            string:0,properties:vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
-        }],&plain.strings).unwrap());
+        twice.bending_memory=Some(bending_memory::Input::new(4,vec![
+            bending_memory::Input::uniform_selection(0,
+                vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
+                &plain.strings).unwrap(),
+        ],&plain.strings).unwrap());
         let mut too_many=selected();
         let mut other=too_many.strings[0].clone();other.bending_loss=input::BendingLoss::KelvinVoigt;
         too_many.strings.push(other);
-        too_many.bending_memory=Some(bending_memory::Input::new(253,vec![bending_memory::Selection {
-            string:1,properties:vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
-        }],&too_many.strings).unwrap());
+        too_many.bending_memory=Some(bending_memory::Input::new(253,vec![
+            bending_memory::Input::uniform_selection(1,
+                vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
+                &too_many.strings).unwrap(),
+        ],&too_many.strings).unwrap());
         for rejected in [unsupported,layered,twice,too_many] {
             let mut calls=0;
             assert!(rejected.compile(cx,gate,|name| {
