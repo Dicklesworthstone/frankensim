@@ -272,3 +272,6 @@ mod tests {
 
 /// Material-driven boundary powers on the shared finite-cell thermal history.
 pub mod deposition;
+
+/// Reciprocal convection with the existing finite gas, enthalpy and wall dynamics.
+pub mod finite_gas;
