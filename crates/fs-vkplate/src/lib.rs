@@ -80,7 +80,7 @@ struct Run {
 }
 
 /// Shortest run worth a stencil loop.
-const MIN_RUN: usize = 4;
+const MIN_RUN: usize = 2;
 
 impl Csr {
     fn from_rows(rows: &[BTreeMap<usize, f64>]) -> Csr {
