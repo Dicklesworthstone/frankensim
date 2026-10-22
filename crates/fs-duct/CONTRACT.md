@@ -325,6 +325,29 @@ pipe `Z_in = +i Zc cot(kL)`.
     mode, and a mouth with no finite plane-mode impedance. Memory is
     `O(steps N^2)`. The impedance path is bit-identical.
 
+- `profiled_tone_hole_shunt` / `profiled_tone_hole_junction` (IRP M5.5-W2
+  seam qualification): a tone hole whose chimney is a chain of duct sections
+  (cylinders, cones, profiles) from the bore outward, for example an undercut
+  cone under a cylinder. There is no new `Segment` variant.
+  - The chimney is the plane-wave chain of its sections, terminated flanged
+    open, rigid closed, or as the vent admittance blend.
+  - The junction keeps the cylindrical hole's Dalmont inner length (it
+    extends a cylindrical first section, otherwise a cylinder of the
+    bore-side radius is prepended) and the Nederveen series length, at the
+    bore-side radius. There is no mutual term.
+  - One cylindrical section is `tone_hole_shunt` bit for bit.
+  - Refuses: no sections, a tone-hole section, an invalid section, or a
+    bore-side radius not below the bore.
+  - `PROFILED_CHIMNEY_LIMITATION` states the 1-D model's omission of the
+    junction's evanescent near field. Comparisons through it carry that
+    limitation, so they never authorize omitting a real undercut; the 3-D
+    multiport (M2.4-W2) is the acceptance route.
+  - Tested in `fs-couple/tests/simplification_equivalence.rs`
+    (`profiled_chimney_reduces_to_cylindrical_tone_hole`): the shunt is bit
+    identical, a constant-radius profile agrees to 8.2e-14, and the 2-port
+    agrees with the `Segment::ToneHole` chain to 1.9e-15. Refusals are tested
+    there too.
+
 - `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
   / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load
   lane (bead zolja). The TABLE is the source of truth: admission

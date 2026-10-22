@@ -82,6 +82,11 @@ pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger
 /// Multimodal flanged circular-pipe radiation load, continuous in `ka`.
 pub mod flanged;
 pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance};
+/// Tone holes whose chimney is a chain of duct sections (undercuts).
+mod chimney;
+pub use chimney::{
+    PROFILED_CHIMNEY_LIMITATION, profiled_tone_hole_junction, profiled_tone_hole_shunt,
+};
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
