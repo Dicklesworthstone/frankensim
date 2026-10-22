@@ -55,6 +55,17 @@ pub enum NetworkLoad {
     },
     /// A measured/baked load; its own support and passivity admission apply.
     Tabulated(TabulatedLoad),
+    /// Gas-filled rigid-frame absorber over a uniform-pressure boundary.
+    /// The solve's actual gas refreshes drag, inertia and thermal relaxation.
+    /// This is a normal-incidence load, not a distributed duct-wall model.
+    PorousRigid {
+        /// Original porous skeleton and characterization-gas viscosity.
+        material: fs_material::porous::gas::PorousGasLaw,
+        /// Porous layer thickness against its rigid backing [m].
+        thickness_m: f64,
+        /// Exposed area carrying the boundary's volume flow [m2].
+        area_m2: f64,
+    },
 }
 
 /// Nodal boundary condition. A bare junction has common pressure and zero net
@@ -367,6 +378,22 @@ fn load_impedance(
             )?)?))
         }
         NetworkLoad::Tabulated(table) => Ok(Some(finite_impedance(table.z_at(omega)?)?)),
+        NetworkLoad::PorousRigid { material, thickness_m, area_m2 } => {
+            if !area_m2.is_finite() || *area_m2 <= 0.0 {
+                return Err(bad("porous boundary area must be positive and finite"));
+            }
+            let surface = material.surface_impedance_rigid(gas, omega, *thickness_m)
+                .map_err(|_| bad("porous boundary gas, geometry or material support refused"))?;
+            // The material owner uses exp(+i wt); the network uses exp(-i wt).
+            // U = A v, so the pressure/volume-flow load is conj(Z_surface)/A.
+            let load = C64::new(surface.re / *area_m2, -surface.im / *area_m2);
+            if (surface.re != 0.0 && load.re == 0.0)
+                || (surface.im != 0.0 && load.im == 0.0)
+            {
+                return Err(bad("porous boundary impedance conversion underflows"));
+            }
+            Ok(Some(finite_impedance(load)?))
+        }
     }
 }
 

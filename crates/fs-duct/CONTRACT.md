@@ -540,7 +540,8 @@ divergence-theorem closure/orientation pin on the lathe).
   `Y' = 2π a slant / (r − iωσ + i K/ω)` to the gas `Y'`
   (`slant = √(1+(dr/dx)²)`, `1` on a cylinder; same pin
   as the ODE cell shunt). `input_impedance` is rigid.
-  No roughness, no porous liners, no mean flow (QUIESCENT medium,
+  No roughness or distributed porous liners; the network's separate
+  `PorousRigid` termination is a normal-incidence boundary. No mean flow (QUIESCENT medium,
   `M̄ = 0`; through-flow absent by construction), no nonlinear
   (high-amplitude) propagation. AMPLITUDE BOUNDARY: these claims hold
   for peak local acoustic Mach < 0.01; beyond that they shrink or
@@ -642,7 +643,7 @@ Accepted edge estimates and the nodal estimate accompany the response. These
 are floating-point solves, not interval accuracy certificates for every graph.
 
 Loads are explicit closed, pressure-release, passive finite impedances,
-tabulated loads, or an explicit radiation model/radius. Exact thin-wall LS is
+tabulated loads, a material-backed rigid porous termination, or an explicit radiation model/radius. Exact thin-wall LS is
 consumed through its existing owner and explicit quadrature; legacy fits keep
 their own refusals. `NetworkResponse::drive` / `driving_point` require exactly
 one assignment for EVERY other external port, and the same `GasState` as the
@@ -651,6 +652,19 @@ there is no omitted-port load, medium, wall or clock fallback. Uniform gas is
 explicit per solve; axial-field edges and time-domain characteristic networks
 are not claimed. Calls are synchronous and bounded; frequency sweeps can be
 caller-chunked, with the same existing no-Cx boundary.
+
+`NetworkLoad::PorousRigid` uses the existing `PorousGasLaw` and JCA(L)
+material owner in both graph-boundary assembly and labelled-port termination.
+The exact solve gas refreshes drag, inertia and thermal relaxation while pore
+geometry and intrinsic permeability remain fixed. Its normal-incidence surface
+impedance is conjugated from `exp(+i omega t)` to the network convention and
+divided by exposed area to obtain `p/U`. Invalid geometry, incoherent gas,
+source-band departure and unrepresentable conversions refuse. The existing
+response gas check also prevents using an old network with a new atmosphere.
+Independent cylinder solutions and `0.5 Re(p conj(U))` power balances cover
+both routes, lossless and Bessel duct walls, and data-only gas/pore changes.
+This uniform-pressure termination does not establish distributed lining,
+moving porous frames, liquid saturation or transient thermal deposition.
 
 `NetworkResponse::drive_coupled` also takes one `CoupledTermination`: a
 row-major acoustic impedance matrix [Pa s/m³] over named external ports, with

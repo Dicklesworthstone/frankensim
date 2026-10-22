@@ -11,12 +11,12 @@
 //! finite-thickness layer on a rigid backing, and the
 //! normal-incidence absorption coefficient.
 //!
-//! D23 consumption seam, decided here: the model lives in
-//! fs-material next to `gas`/`visco` (a lining is a material law);
-//! fs-duct's locally-reacting wall path and fs-phs's wall-pin family
-//! consume `surface_impedance_rigid` as a frequency-dependent wall
-//! admittance through thin adapters (displacement note in
-//! CONTRACT.md — no new crate, no parallel implementation).
+//! D23 consumption seam: the model lives in fs-material next to `gas`/`visco`
+//! (a lining is a material law). [`gas::PorousGasLaw`] resolves the same law in
+//! the canonical gas snapshot; fs-duct's `NetworkLoad::PorousRigid` consumes it
+//! as a frequency-dependent pressure/volume-flow boundary. Distributed lining
+//! and time-domain wall-pin realizations are not implied by that boundary;
+//! consumers must not reimplement the porous constitutive model.
 //!
 //! Cards (licensing-first, no figure digitization anywhere):
 //! - `melamine_uf_nguyen2024`: MEASURED characterization of the UF
@@ -50,6 +50,9 @@ use fs_math::c64::C64;
 use fs_math::det;
 
 use crate::MaterialError;
+
+/// Resolve the existing rigid-frame law in a shared, changing gas state.
+pub mod gas;
 
 /// Ambient gas seen by the equivalent fluid (SI).
 #[derive(Debug, Clone, Copy, PartialEq)]

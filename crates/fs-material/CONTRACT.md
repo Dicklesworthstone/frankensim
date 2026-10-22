@@ -730,11 +730,22 @@ None.
   spectra (machine-readable CC-BY data; no figure digitization) —
   the model reproduces measured absorption to worst 0.041 / mean
   0.018 (Basotect 60 mm) and 0.029 / 0.006 (Pinta 50 mm) inside
-  authored 0.06/0.03 bands. D23 SEAM: fs-duct's locally-reacting
-  wall path and fs-phs's wall-pin family consume
-  `surface_impedance_rigid` as a wall admittance through thin
-  adapters — displacement note: no porous model may be
-  re-implemented there.
+  authored 0.06/0.03 bands. `porous::gas::PorousGasLaw` retains the
+  original card, provenance, frequency support and explicitly supplied
+  characterization-gas viscosity. Intrinsic permeability
+  `k0 = mu_ref / sigma_ref` stays fixed; current `GasState` viscosity
+  supplies `sigma = mu / k0`. Density, sound speed, viscosity, gamma,
+  pressure and Prandtl number come from that same coherent gas snapshot,
+  then the original JCA(L) evaluator. `fs-duct::network::NetworkLoad::PorousRigid`
+  consumes the rigid-backed response as a normal-incidence boundary,
+  with the exact phasor and exposed-area conversion. Source/geometry
+  refusals remain explicit. No porous constitutive model is duplicated.
+  The skeleton remains rigid and gas-filled; gas substitution does not
+  establish liquid saturation, condensation, swelling, moving-frame waves,
+  distributed lining or transient deposition of absorbed acoustic heat.
+  Focused gas-source and duct-cylinder tests exercise data-only changes of
+  temperature, pressure, gas mixture and pore permeability, including
+  independent acoustic power balance through both network load paths.
 
 ## Conformance tests
 
