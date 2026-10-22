@@ -1,7 +1,10 @@
 //! Electrical losses, contact conduction and enclosure radiation on one state.
 //! This composes existing material/heat owners; it introduces no transfer law,
 //! nonlinear solver, thermal history, or material-name-based default.
-use super::{admit_surfaces, MaterialContact};
+/// Pluggable gas heat laws on this same complete physical assembly.
+pub mod gas_law;
+
+use super::MaterialContact;
 use super::super::{Chamber, NetworkCandidate, NetworkError, NetworkSolve};
 use crate::cavity_phs::piston::thermal::boundary::network::material::resolve_contact;
 use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpyInput, CircuitThermalCoefficients};
@@ -235,36 +238,29 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
     ) -> Result<NetworkCandidate<'m, ContactThermalSample<MaterialExchangeSample>, ResolvedMaterialStatePoint>,
         CircuitEnthalpyError<NetworkError<MaterialExchangeError, MaterialNetworkError>>>
     {
-        let mapped = admit_surfaces(thermal, chambers, gas_patches, controls, || cx.checkpoint().is_err())?;
-        let binding = self.binding.electrical;
-        let routes = binding.heat_destinations(thermal).map_err(|e| coupled_error(e.into()))?;
-        let destinations = binding.bulk.resistors.iter().map(|r| r.destination).collect::<Vec<_>>();
-        let patches = mapped.values().map(|p| p.contact).collect::<Vec<_>>();
-        let result = super::super::step_with_contacts_candidate(thermal, target_s,
-            CircuitEnthalpyInput { circuit, ports, destinations: &destinations }, &routes,
-            chambers, &patches, controls, guess_j, |state| self.resolve(cx, state),
-            |contact, state, source, gas| resolve_contact(binding.bulk, contact.cell, state,
-                &source.bulk, gas, mapped[&contact.id].geometry), || cx.checkpoint().is_err());
-        let mut candidate = match result {
-            Err(CircuitEnthalpyError::Source(NetworkError::Material(e))) => return Err(coupled_error(e)),
-            other => other?,
-        };
-        let radiation_j = candidate.material().material.radiation.as_ref()
-            .map_or(0.0, |r| (target_s - thermal.time_s()) * r.net_heat_w());
-        let external = candidate.step().external_network_heat_j - radiation_j;
-        let residual = candidate.step().total_energy_residual_j + radiation_j;
-        if !radiation_j.is_finite() || !external.is_finite() || !residual.is_finite()
-            || residual.abs() > controls.total_energy_tolerance_j {
-            return Err(coupled_error(MaterialExchangeError::Invalid("closed radiation cannot supply combined physical energy")));
+        if gas_patches.len() > controls.maximum_contacts {
+            return Err(CircuitEnthalpyError::Invalid("material gas contact capacity exceeded"));
         }
-        checkpoint(cx).map_err(coupled_error)?;
-        candidate.step.external_network_heat_j = external;
-        candidate.step.total_energy_residual_j = residual;
-        Ok(candidate)
+        let mut surfaces = Vec::with_capacity(gas_patches.len());
+        let mut mapped = std::collections::BTreeMap::new();
+        for patch in gas_patches {
+            checkpoint(cx).map_err(coupled_error)?;
+            let geometry = patch.geometry;
+            if ![geometry.gas_distance_m, geometry.cell_distance_m].iter()
+                .all(|length| length.is_finite() && *length > 0.0)
+                || mapped.insert(patch.contact.id, patch).is_some() {
+                return Err(CircuitEnthalpyError::Invalid("unique gas contacts and positive finite layer distances required"));
+            }
+            surfaces.push(gas_law::GasSurface { contact: patch.contact, area_m2: geometry.area_m2 });
+        }
+        self.step_with_gas_law_candidate(cx, thermal, target_s, circuit, ports,
+            chambers, &surfaces, controls, guess_j, |contact, state, source, gas| {
+                self.resolve_conductive_gas_contact(*mapped[&contact.id], state, source, gas)
+            })
     }
 }
-fn coupled_error(e: MaterialExchangeError)
-    -> CircuitEnthalpyError<NetworkError<MaterialExchangeError, MaterialNetworkError>>
+fn coupled_error<E>(e: MaterialExchangeError)
+    -> CircuitEnthalpyError<NetworkError<MaterialExchangeError, E>>
 {
     match e {
         MaterialExchangeError::Cancelled => CircuitEnthalpyError::Cancelled,
