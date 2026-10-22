@@ -1,0 +1,25 @@
+[package]
+name = "material-convective-network-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Cross-owner executable only; do not expand the production airflow dependency graph.
+[workspace]
+
+[[bin]]
+name = "material_convective_network"
+path = "driver.rs"
+
+[dependencies]
+fs-airflow = { path = "../.." }
+fs-blake3 = { path = "../../../fs-blake3" }
+fs-convection = { path = "../../../fs-convection" }
+fs-couple = { path = "../../../fs-couple" }
+fs-evidence = { path = "../../../fs-evidence" }
+fs-material = { path = "../../../fs-material" }
+fs-matdb = { path = "../../../fs-matdb" }
+fs-phs = { path = "../../../fs-phs" }
+fs-qty = { path = "../../../fs-qty" }
+fs-solver = { path = "../../../fs-solver" }
+fs-thermal = { path = "../../../fs-thermal" }

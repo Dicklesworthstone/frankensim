@@ -5,6 +5,9 @@
 //! transfer, body enthalpy (including latent heat), gas energy and wall momentum.
 //! No fixed-temperature reservoir, second gas law, or convection integrator.
 
+/// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
+pub mod network;
+
 use super::{ForcedConvectionSettings, MaterialConvectionError, evaluate_forced_from_material};
 use fs_convection::{CorrelationId, HeatTransferCoefficient, NusseltEvaluation, ThermalDirection};
 use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
