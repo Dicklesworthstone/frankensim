@@ -156,6 +156,17 @@ impl<'a> MaterialHeatNetwork<'a> {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Original bulk heat routes for consumers composing additional physics.
+    pub fn resistor_destinations(&self) -> Vec<super::ResistorCell> {
+        self.electrical.resistor_destinations()
+    }
+
+    /// Original A/B contact heat partitions; no independent caller heat map.
+    pub fn heat_destinations(&self, thermal: &DepositionSimulation<'_>)
+        -> Result<Vec<super::ContactHeatCells>, HeatNetworkError> {
+        self.electrical.heat_destinations(thermal).map_err(HeatNetworkError::from)
+    }
+
     /// Re-evaluate all mechanisms at ONE trial. Contact resistance is applied to
     /// fresh bulk-only conductances once; radiation is added to the original
     /// source map once. Electrical loss is left to the existing circuit owner.

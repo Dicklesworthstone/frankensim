@@ -21,6 +21,9 @@ use crate::material_circuit::{MaterialCircuit, MaterialCircuitSolve, MaterialCir
 use crate::circuit_enthalpy::material::MaterialNetworkError;
 use fs_material::thermovisco::source::SourceError;
 use fs_thermal::enthalpy::CellId;
+use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
+use fs_conduction::transient::deposition::radiation::RadiationCellSources;
+use fs_exec::Cx;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ElectricalConfig {
@@ -35,6 +38,7 @@ pub struct ElectricalConfig {
 pub enum EvaluationError {
     Material(MaterialNetworkError),
     Contact(ElectricalContactNetworkError),
+    Heat(HeatNetworkError),
     Context { cell: CellId, error: SourceError },
     Mechanical(solid::Error),
     Thermal(DepositionError),
@@ -65,7 +69,7 @@ impl core::fmt::Display for ElectricalError {
 }
 impl std::error::Error for ElectricalError {}
 
-pub struct ElectricalReport {
+pub struct ElectricalReport<S = MaterialNetworkSample> {
     pub electrical: MaterialCircuitStep,
     /// Original explicit A/B contact heat fractions; no default partition.
     /// Contact losses and source snapshots are in `electrical.contacts`.
@@ -75,41 +79,45 @@ pub struct ElectricalReport {
     /// Includes both physical Joule and Maxwell heat; neither is added again.
     pub thermal: EnergyAudit,
     /// Original complete transport/electrical material samples at the endpoint.
-    pub material: MaterialNetworkSample,
+    pub material: S,
     pub nonlinear: NewtonReport,
     pub circuit_trials: usize,
     pub structural_trials: usize,
     pub maximum_cell_residual_j: f64,
     pub deposited_joule_j: f64,
     pub deposited_mechanical_heat_j: f64,
-    /// Independently evaluated boundaries/heaters, excluding both internal losses.
+    /// Roundoff-net energy of closed radiative exchange, not external supply.
+    /// It is retained in the thermal source account but excluded from external heat.
+    pub closed_radiation_net_j: f64,
+    /// Independently evaluated boundaries/heaters, excluding internal losses and radiation.
     pub other_external_heat_j: f64,
     /// Delta electrical + elastic + thermal + numerical - supply - load - heat.
     pub total_energy_residual_j: f64,
 }
 
-pub struct ElectricalCandidate<'t,'m> {
+pub struct ElectricalCandidate<'t,'m,S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     bridge: solid::Bridge<'m>,
     circuit: MaterialCircuit,
-    report: ElectricalReport,
+    report: ElectricalReport<S>,
 }
-impl<'t,'m> ElectricalCandidate<'t,'m> {
+impl<'t,'m,S> ElectricalCandidate<'t,'m,S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> { &self.thermal }
     pub fn bridge(&self) -> &solid::Bridge<'m> { &self.bridge }
     pub fn circuit(&self) -> &MaterialCircuit { &self.circuit }
-    pub fn report(&self) -> &ElectricalReport { &self.report }
-    pub fn into_parts(self) -> (DepositionSimulation<'t>,solid::Bridge<'m>,MaterialCircuit,ElectricalReport) {
+    pub fn report(&self) -> &ElectricalReport<S> { &self.report }
+    pub fn into_parts(self) -> (DepositionSimulation<'t>,solid::Bridge<'m>,MaterialCircuit,ElectricalReport<S>) {
         (self.thermal,self.bridge,self.circuit,self.report)
     }
 }
-struct Trial<'m> {
+struct Trial<'m,S> {
     bridge: solid::Bridge<'m>,
     mechanical: solid::Report,
     local: BTreeMap<(u64,u64),Energy>,
-    material: MaterialNetworkSample,
+    material: S,
     heat_j: f64,
     other_j: f64,
+    radiation_net_j: f64,
 }
 
 /// Simultaneously solve material R(T), k(T), relaxation and all thermal cells.
@@ -169,20 +177,66 @@ pub fn step_with_contacts_candidate<'t,'m>(
         ||(*cancel.borrow_mut())())
 }
 
-// Both entry points use the original contact-capable circuit driver. With no
+/// Include source-backed thermal contact resistance and closed gray-diffuse
+/// radiation in the SAME electrical/beam/enthalpy residual. The prepared network
+/// owns material selection, contact series resistance, radiosity and heat routes;
+/// no heat step is performed before or after the shared nonlinear solve.
+///
+/// Retain this prepared network across accepted intervals. Its original endpoint
+/// reports survive in `report.material`. Radiation is internal exchange: its
+/// roundoff-net power is reported, never treated as external supply or silently
+/// redistributed. Fixed reference areas/view factors are not deformed-beam geometry.
+#[allow(clippy::too_many_arguments)]
+pub fn step_heat_network_candidate<'t,'m>(
+    cx: &Cx<'_>, thermal: &DepositionSimulation<'t>, bridge: &solid::Bridge<'m>,
+    bindings: &[BridgeThermalBinding<'_>], circuit: &MaterialCircuit,
+    transport: &PreparedHeatNetwork<'_,'_>, ports: &[f64],
+    target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
+    config: ElectricalConfig, guess_j: &[f64],
+) -> Result<ElectricalCandidate<'t,'m,HeatNetworkSample>,ElectricalError> {
+    cx.checkpoint().map_err(|_|ElectricalError::Cancelled)?;
+    let destinations=transport.resistor_destinations();
+    let contacts=transport.heat_destinations(thermal).map_err(|error|
+        ElectricalError::Coupled(CircuitEnthalpyError::Source(EvaluationError::Heat(error))))?;
+    let result=driven_candidate(thermal,bridge,bindings,circuit,&destinations,&contacts,ports,
+        target_s,gravity_m_s2,loads_n_m,config,guess_j,
+        |endpoint|transport.resolve(cx,endpoint).map_err(EvaluationError::Heat),
+        ||cx.checkpoint().is_err());
+    match result {
+        Err(ElectricalError::Coupled(CircuitEnthalpyError::Source(
+            EvaluationError::Heat(HeatNetworkError::Cancelled))))=>Err(ElectricalError::Cancelled),
+        other=>other,
+    }
+}
+
+// Keep concrete source reports; only original source owners enter this private
+// adapter. No caller can forge a radiative loss or replace its physical solver.
+trait SourceSample {
+    fn bulk(&self) -> &MaterialNetworkSample;
+    fn radiation(&self) -> Option<&RadiationCellSources> { None }
+}
+impl SourceSample for MaterialNetworkSample {
+    fn bulk(&self) -> &MaterialNetworkSample { self }
+}
+impl SourceSample for HeatNetworkSample {
+    fn bulk(&self) -> &MaterialNetworkSample { &self.material }
+    fn radiation(&self) -> Option<&RadiationCellSources> { self.radiation.as_ref() }
+}
+
+// All entry points use the original contact-capable circuit driver. With no
 // contacts that driver calls the original bulk-only circuit update unchanged.
 // Share beam admission, physical heat generation and combined energy accounting.
 #[allow(clippy::too_many_arguments)]
-fn driven_candidate<'t,'m>(
+fn driven_candidate<'t,'m,S: SourceSample>(
     thermal: &DepositionSimulation<'t>, bridge: &solid::Bridge<'m>,
     bindings: &[BridgeThermalBinding<'_>], circuit: &MaterialCircuit,
     destinations: &[ResistorCell], contact_routes: &[ContactHeatCells], ports: &[f64],
     target_s: f64, gravity_m_s2: f64, loads_n_m: &[f64],
     config: ElectricalConfig, guess_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'t>)
-        -> Result<ContactThermalCoefficients<MaterialNetworkSample>,EvaluationError>,
+        -> Result<ContactThermalCoefficients<S>,EvaluationError>,
     cancelled: impl FnMut()->bool,
-) -> Result<ElectricalCandidate<'t,'m>,ElectricalError> {
+) -> Result<ElectricalCandidate<'t,'m,S>,ElectricalError> {
     let cancel=RefCell::new(cancelled);
     let checkpoint=|| if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint().map_err(|_|ElectricalError::Cancelled)?;
@@ -210,11 +264,22 @@ fn driven_candidate<'t,'m>(
         let ContactThermalCoefficients {bulk:mut material,contacts}=resolve(endpoint)?;
         // Conductive and electrical-only cells both need the original mechanical
         // source context; absence of k does not bypass electrical admission.
-        for sample in &material.source.cells {
+        for sample in &material.source.bulk().cells {
             checkpoint()?;
             if let (Some(binding),Some(state))=(by_heat.get(&sample.cell),&sample.conductivity) {
                 binding.section.material.admit_state_point(state)
                     .map_err(|error|EvaluationError::Context {cell:sample.cell,error})?;
+            }
+        }
+        // Radiation-only material also needs the mechanical source conditions;
+        // absence of a resistor or conductive link cannot bypass that admission.
+        if let Some(radiation)=material.source.radiation() {
+            for sample in radiation.surfaces() {
+                checkpoint()?;
+                if let Some(binding)=by_heat.get(&sample.cell) {
+                    binding.section.material.admit_state_point(&sample.material)
+                        .map_err(|error|EvaluationError::Context {cell:sample.cell,error})?;
+                }
             }
         }
         for resistor in &material.resistors {
@@ -226,8 +291,10 @@ fn driven_candidate<'t,'m>(
                     .map_err(|error|EvaluationError::Context {cell,error})?;
             }
         }
-        let other_j=finite(dt*endpoint.external_step_power_w(&material.sources_w,
-            &material.conductances_w_k,checkpoint)?)?;
+        let radiation_net_j=finite(dt*material.source.radiation().map_or(0.0,
+            RadiationCellSources::net_heat_w))?;
+        let other_j=finite(finite(dt*endpoint.external_step_power_w(&material.sources_w,
+            &material.conductances_w_k,checkpoint)?)?-radiation_net_j)?;
         let mut temperatures=BTreeMap::new();
         for (&id,binding) in &bound {
             checkpoint()?;
@@ -259,7 +326,7 @@ fn driven_candidate<'t,'m>(
         Ok(ContactThermalCoefficients {contacts,bulk:CircuitThermalCoefficients {
             resistors:material.resistors,sources_w:material.sources_w,
             conductances_w_k:material.conductances_w_k,source:Trial {bridge:next,mechanical,local,
-                material:material.source,heat_j,other_j}}})
+                material:material.source,heat_j,other_j,radiation_net_j}}})
     },||(*cancel.borrow_mut())()).map_err(ElectricalError::Coupled)?;
     let (thermal,next_circuit,r)=candidate.into_parts();
     let contact_heat_destinations=r.source.destinations;
@@ -268,7 +335,8 @@ fn driven_candidate<'t,'m>(
         +(trial.bridge.stored_energy_j()-bridge.stored_energy_j())+r.thermal.stored_energy_change_j
         +trial.mechanical.energy_j.numerical_dissipation-r.electrical.native.supplied
         -trial.mechanical.load_work_j-trial.other_j;
-    let heat_defect=r.thermal.external_heat_j-r.deposited_joule_j-trial.heat_j-trial.other_j;
+    let heat_defect=r.thermal.external_heat_j-r.deposited_joule_j-trial.heat_j
+        -trial.other_j-trial.radiation_net_j;
     if !total.is_finite() || !heat_defect.is_finite() || total.abs()>c.total_energy_tolerance_j
         || heat_defect.abs()>c.total_energy_tolerance_j {
         return Err(ElectricalError::Invalid("electrical, mechanical and thermal work/storage do not close"));
@@ -280,5 +348,6 @@ fn driven_candidate<'t,'m>(
             circuit_trials:r.circuit_trials,structural_trials:trials.get(),
             maximum_cell_residual_j:r.maximum_cell_residual_j,deposited_joule_j:r.deposited_joule_j,
             deposited_mechanical_heat_j:trial.heat_j,other_external_heat_j:trial.other_j,
+            closed_radiation_net_j:trial.radiation_net_j,
             total_energy_residual_j:total}})
 }
