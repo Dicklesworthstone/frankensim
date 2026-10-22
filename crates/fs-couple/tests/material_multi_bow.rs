@@ -64,10 +64,13 @@ fn options()->StringBankOptions {
 fn joint_limits()->MultiFrictionConfig {MultiFrictionConfig {max_ports:4,max_sweeps:128,max_setup_terms:100000}}
 fn extra()->MaterialBowContact {MaterialBowContact {location:StringBowLocation {string:1,station_fraction:0.3},law:law(),friction:options().friction}}
 fn base(cx:&Cx<'_>,gate:&CancelGate,rho:f64)->ReciprocalStringBank {
+    base_with_body_density(cx,gate,rho,7800.0)
+}
+fn base_with_body_density(cx:&Cx<'_>,gate:&CancelGate,rho:f64,body_rho:f64)->ReciprocalStringBank {
     let plate=with_uniform_plate_material_state(ThinPlate {length_m:0.4,width_m:0.3,thickness_m:1.0,density_kg_m3:1.0,
         e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,damping_ratio:0.0,thermoelastic:None,
         kelvin_voigt_bending:None,n_modes:2,geometric_nonlinearity:false,pretension_n_m:0.0,clamped:false},
-        &material(7800.0),PlateMaterialModel::Isotropic,PlateThicknessConstraint::FixedThickness(0.001))
+        &material(body_rho),PlateMaterialModel::Isotropic,PlateThicknessConstraint::FixedThickness(0.001))
         .unwrap().with_kelvin_voigt_bending_loss().unwrap();
     let body=SharedMaterialPlateBody {specimen:plate,bridges:vec![SharedPlateBridge {station_fraction:0.8,
         stiffness_n_m:3000.0,damping_n_s_m:0.1,rest_extension_m:0.0};2],
@@ -102,6 +105,69 @@ fn performance_config()->MultiBowPerformanceConfig {
     MultiBowPerformanceConfig {samples:513,max_block:128,max_work:10000,max_events:128}
 }
 fn drive(speed:f64,load:f64)->FrictionDrive {FrictionDrive {speed_m_s:speed,normal_force_n:load}}
+
+fn reacting_surface(mut bank:MultiBowStringBank,gate:&CancelGate)->MultiBowStringBank {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::surfaces::BowBodySurface;
+    // A synthetic string rubbing a plate at a retained physical footprint.
+    // These are the source-projected rows, not invented bow-hair parameters.
+    let surfaces=bank.source().bank().strings().iter().enumerate().map(|(bow,string)|
+        BowBodySurface {bow,body:string.connections[0].body.clone()}).collect();
+    let before=states(&bank);
+    bank=bank.with_bow_body_surfaces(surfaces,gate).unwrap();
+    assert_eq!(states(&bank),before);
+    bank
+}
+
+#[test]
+fn a_cavity_neck_cannot_be_relabeled_as_a_solid_friction_receiver() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::surfaces::BowBodySurface;
+    use fs_couple::render::schedule::force::coupled::ModalAttachment;
+    with_cx(|cx, gate| {
+        let bank = joint(cx, gate, 7800.0);
+        assert!(bank.source().bank().material_cavity().is_some());
+        let cavity_modes = bank.system().components()[3].modes().len();
+        assert!(bank.with_bow_body_surfaces(vec![BowBodySurface {
+            bow: 0, body: ModalAttachment { component: 1, shapes: vec![1.0; cavity_modes] },
+        }], gate).is_err());
+    });
+}
+
+#[test]
+fn receiving_material_changes_contact_motion_and_shared_body_pressure() {
+    with_cx(|cx,gate| {
+        let make=|density| reacting_surface(base_with_body_density(cx,gate,7800.0,density)
+            .with_additional_bows(vec![extra()],joint_limits(),gate).unwrap(),gate);
+        let mut a=make(7800.0);let mut b=make(15600.0);
+        assert_eq!(a.source().body_surfaces().len(),2);
+        for port in 0..2 {
+            let pa=a.system().port(port).unwrap();let pb=b.system().port(port).unwrap();
+            assert_eq!(pa.left,pb.left);
+            let ra=pa.right.as_ref().unwrap();let rb=pb.right.as_ref().unwrap();
+            assert_eq!(ra.component,2);assert_eq!(rb.component,2);
+            assert_eq!(ra.shapes,a.source().body_surfaces()[port].body.shapes);
+            for (x,y) in ra.shapes.iter().zip(&rb.shapes) {
+                assert!((y-x*0.5_f64.sqrt()).abs()<1e-12*x.abs().max(1.0));
+            }
+        }
+        let zero=vec![0.0;a.system().mode_count()];
+        let (mut pressure_difference,mut traction_difference)=(0.0,0.0);
+        for _ in 0..256 {
+            let drives=[drive(0.001,0.1),drive(-0.0005,0.1)];
+            let fa=a.step(&zero,&drives).unwrap().clone();
+            let fb=b.step(&zero,&drives).unwrap().clone();
+            pressure_difference+=(fa.observer_pressure_pa-fb.observer_pressure_pa).abs();
+            traction_difference+=(fa.ports[0].traction_n-fb.ports[0].traction_n).abs();
+            assert!(fa.energy_residual_j.abs()<=fa.energy_tolerance_j);
+            assert!(fb.energy_residual_j.abs()<=fb.energy_tolerance_j);
+        }
+        assert!(pressure_difference>1e-12 && traction_difference>1e-12);
+        assert!(a.system().components()[2].states().iter().any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+        let surface=a.source().body_surfaces()[0].clone();
+        assert!(a.with_bow_body_surfaces(vec![surface.clone()],gate).is_err());
+        let mut absent=surface;absent.body.component=2; // after the plate and cavity
+        assert!(joint(cx,gate,7800.0).with_bow_body_surfaces(vec![absent],gate).is_err());
+    });
+}
 
 fn ribbon_limits()->MultiFrictionConfig {
     MultiFrictionConfig {max_ports:15,max_sweeps:128,max_setup_terms:1_000_000}
@@ -273,7 +339,12 @@ fn second_material_and_contact_change_joint_reactions_and_radiated_sound() {
 #[test]
 fn all_tracks_use_source_ramps_before_one_joint_step_independent_of_callbacks() {
     with_cx(|cx,gate| {
-        let source=schedule();let mut direct=joint(cx,gate,7800.0);
+        for reacted in [false,true] {
+        let make=|| {
+            let bank=joint(cx,gate,7800.0);
+            if reacted {reacting_surface(bank,gate)} else {bank}
+        };
+        let source=schedule();let mut direct=make();
         let zero=vec![0.0;direct.system().mode_count()];let mut expected=Vec::new();
         for sample in 0..513_u64 {
             let tick=sample*700/48000;
@@ -284,13 +355,15 @@ fn all_tracks_use_source_ramps_before_one_joint_step_independent_of_callbacks() 
             expected.push(direct.step(&zero,&drives).unwrap().observer_pressure_pa.to_bits());
         }
         for partition in [1,37,128] {
-            let mut performance=joint(cx,gate,7800.0).into_scheduled(source.clone(),tracks(),performance_config()).unwrap();
+            let mut performance=make().into_scheduled(source.clone(),tracks(),performance_config()).unwrap();
             assert!(performance.events().windows(2).any(|e|e[0].sample==e[1].sample && e[0].port!=e[1].port));
             let mut output=vec![0.0;513];for block in output.chunks_mut(partition) {performance.block(block).unwrap();}
             assert_eq!(output.iter().map(|p|p.to_bits()).collect::<Vec<_>>(),expected);
             assert_eq!(states(performance.bank()),states(&direct));
+            assert_eq!(performance.bank().source().body_surfaces(),direct.source().body_surfaces());
             assert_eq!(performance.samples_rendered(),513);assert_eq!(performance.remaining_samples(),0);
             let mut sentinel=[123.0];assert!(performance.block(&mut sentinel).is_err());assert_eq!(sentinel,[123.0]);
+        }
         }
     });
 }

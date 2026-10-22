@@ -6,8 +6,9 @@
 //! time integration. Adding contacts preserves existing vibration and clocks.
 //!
 //! Loads are prescribed by default. Explicit co-located normal-contact bindings
-//! instead resolve each load from contact mechanics. Surface speeds remain
-//! prescribed; a shared bow-hair structure is not inferred by this adapter.
+//! instead resolve each load from contact mechanics. Optional receiving-body
+//! attachments also return tangential traction and resolve surface motion;
+//! a shared bow-hair structure is not inferred by this adapter.
 //! Bow stations are fixed; independently admitted compliant stops can migrate.
 //! The underlying bounded nonlinear solve may
 //! refuse a step; global uniqueness and measured instrument timbre are not claimed.
@@ -39,6 +40,7 @@ pub struct MultiBowStringBankSource {
     stops: Vec<stops::MaterialStringStop>,
     bow_contact_loads: Vec<contact_load::BowContactLoad>,
     ribbon: Option<ribbon::UniformBowRibbon>,
+    body_surfaces: Vec<surfaces::BowBodySurface>,
 }
 impl MultiBowStringBankSource {
     /// Original strings, layers, regional/uniform body, cavity, gas and supports.
@@ -111,7 +113,7 @@ impl ReciprocalStringBank {
         poll(gate)?;
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
             bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
-            ribbon: None,
+            ribbon: None, body_surfaces: Vec::new(),
         }, cards: self.cards, system, stop_stations: None })
     }
 }
@@ -155,3 +157,6 @@ pub mod contact_load;
 
 /// Finite-width prescribed ribbons resolved by the original joint contact solver.
 pub mod ribbon;
+
+/// Resolved receiving-body motion and opposite tangential contact reactions.
+pub mod surfaces;

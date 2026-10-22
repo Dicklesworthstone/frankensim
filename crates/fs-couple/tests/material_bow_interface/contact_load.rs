@@ -185,3 +185,26 @@ fn geometry_binding_cannot_relabel_distant_oblique_or_opposite_torque_contacts()
             .with_bow_contact_loads(vec![b,b],gate).is_err());
     });
 }
+
+#[test]
+fn resolved_tangent_and_normal_cannot_name_different_receiving_surfaces() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::surfaces::BowBodySurface;
+    with_cx(|cx,gate| {
+        for same_body in [false,true] {
+            let source=source_at_density(7800.0).with_transverse_polarizations(
+                TransverseDirections::try_new([1.0,0.0],[0.6,0.8]).unwrap()).unwrap();
+            let bank=ReciprocalStringBank::from_material_plate(cx,vec![source],
+                GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.0).unwrap(),body(),
+                binding(0.4,1e6).card().friction_law().clone(),options(),gate).unwrap()
+                .with_additional_bows(vec![],MultiFrictionConfig {max_ports:4,max_sweeps:128,max_setup_terms:100000},gate).unwrap();
+            let footprint=bank.source().bank().strings()[0].connections[0].body.clone();
+            let bank=bank.with_bow_body_surfaces(vec![BowBodySurface {bow:0,body:footprint.clone()}],gate).unwrap();
+            let mut stop=contact();
+            if same_body {stop.body=Some(footprint);}
+            let bank=bank.with_string_stops(vec![stop],
+                FrictionObstacleConfig {max_contacts:4,max_setup_terms:100000},gate).unwrap();
+            let result=bank.with_bow_contact_loads(vec![BowContactLoad {bow:0,stop:0}],gate);
+            assert_eq!(result.is_ok(),same_body);
+        }
+    });
+}

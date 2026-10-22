@@ -38,8 +38,10 @@ impl MultiBowStringBank {
     ///
     /// This adds no material query, modal reduction, bow-hair structure or time
     /// loop. A normal receiver footprint may be attached to an existing body;
-    /// tangential surface motion is still externally prescribed, not the body's
-    /// unsupplied tangential displacement. The original law producers retain
+    /// tangential surface motion is externally prescribed unless that same
+    /// receiving body is bound through `with_bow_body_surfaces`. Normal and
+    /// tangential receiver maps may differ, but must name the same body when
+    /// both are dynamically resolved. The original law producers retain
     /// responsibility for material correspondence, contact area and validity.
     ///
     /// Bind once at sample zero, possibly after contact-aware preload. All
@@ -64,6 +66,12 @@ impl MultiBowStringBank {
             if bow.location.string != stop.location.string
                 || bow.location.station_fraction.to_bits() != stop.location.station_fraction.to_bits() {
                 return Err(error("normal and tangential contacts must occupy the same string station"));
+            }
+            if let Some(surface) = self.system.port(binding.bow).and_then(|port| port.right.as_ref()) {
+                if stop.body.as_ref().is_none_or(|body|
+                    body.component.checked_add(self.cards.len()) != Some(surface.component)) {
+                    return Err(error("resolved normal and tangential surfaces must belong to the same receiving body"));
+                }
             }
             let source = &self.source.bank.strings()[bow.location.string].source;
             let MaterialStringSource::WithPolarizations(polarized) = source else {

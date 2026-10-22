@@ -4054,3 +4054,28 @@ partition equality and the flute CLI's PCM output. These are synthetic
 coupling checks. The inherited fixed-state, isotropic thin-cylinder membrane
 limits remain; this does not add orthotropic bore shells, thermal evolution,
 exterior wall radiation or measured instrument qualification.
+
+
+### Reciprocal tangential receivers for material bow contacts
+
+`MultiFrictionModalSystem::with_surface_attachments` binds an existing
+receiving component through its physical displacement row. Relative slip and
+equal/opposite traction use the same signed column in the original coupled
+solver. The complete contact compliance matrix is rebuilt, including reactions
+between contacts sharing a receiver; the single-contact path uses that same
+map. Initial motion, material histories, source interfaces, pressure observation
+and existing budgets remain with their original owners.
+
+`MultiBowStringBank::with_bow_body_surfaces` accepts original body indices and
+retains the source declarations through scheduled playback. Body maps must come
+from the same geometry/material basis as the receiver dynamics. Bind before
+playback and normal obstacles; a contact cannot be rebound. A resolved normal
+and tangential counterpart must identify the same receiving body. Prescribed
+gesture speed remains additional actuator motion and contributes external work;
+zero speed makes the tangential interface passive.
+
+Focused regression sources cover an analytic two-mass momentum/work balance,
+shared-receiver cross-reactions, material-density changes reaching traction and
+actual body pressure, and direct/scheduled callback equality. This is an
+explicit mechanical connection, not a supplied bow-hair construction, rosin
+thermal model or measured violin/cello/bass qualification.

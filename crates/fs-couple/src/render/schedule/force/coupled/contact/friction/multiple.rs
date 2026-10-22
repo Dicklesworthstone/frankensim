@@ -24,6 +24,9 @@ pub mod obstacles;
 /// One normal-contact reaction driving the corresponding tangential law.
 pub mod normal_load;
 
+/// Reciprocal moving-surface attachments in the original mechanical network.
+pub mod surfaces;
+
 mod stretching;
 
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.

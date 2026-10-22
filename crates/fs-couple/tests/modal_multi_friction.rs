@@ -73,6 +73,88 @@ fn all_states(s: &MultiFrictionModalSystem) -> Vec<ModalAcousticState> {
 }
 
 #[test]
+fn resolved_surface_returns_opposite_impulse_without_an_actuator() {
+    // G1: two freely moving masses, an internal Coulomb brake and no external
+    // work. Linear momentum and both impulses are independent analytic checks.
+    use fs_couple::render::schedule::force::coupled::contact::friction::multiple::surfaces::FrictionSurfaceAttachment;
+    let gate = CancelGate::new_clock_free();
+    let masses: [f64; 2] = [0.002, 0.01];
+    let mut models = Vec::new();
+    for (mass, velocity) in masses.into_iter().zip([0.0, 0.4]) {
+        let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(48000,
+            vec![ModalAcousticMode { angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO }],
+            ModalAcousticTimeBudget::audible_reference()).unwrap();
+        model.restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: 0.0,
+            velocity_m_sqrt_kg_per_s: mass.sqrt()*velocity }]).unwrap();
+        models.push(model);
+    }
+    let core = FrictionModalSystem::new(CoupledModalSystem::new(models, vec![], budgets(), &gate).unwrap(),
+        ModalFrictionPort { left: attachment(0), right: None,
+            law: FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 } },
+        ModalFrictionConfig {force_absolute_tolerance_n:1e-14,force_relative_tolerance:1e-12,..config()},&gate).unwrap();
+    let initial_energy = core.total_energy_j().unwrap();
+    let mut bank = core.with_additional_ports(vec![], joint_config(), &gate).unwrap()
+        .with_surface_attachments(vec![FrictionSurfaceAttachment { port: 0, surface: attachment(1) }], &gate).unwrap();
+    let mut dissipation = 0.0;
+    for sample in 1..=64 {
+        let frame = bank.step(&[0.0, 0.0], &[drive(0.0, 0.001)]).unwrap().clone();
+        let impulse = 0.4*0.001*sample as f64/48000.0;
+        let velocities: Vec<_> = bank.components().iter().zip(masses).map(|(m, mass)|
+            m.states()[0].velocity_m_sqrt_kg_per_s/mass.sqrt()).collect();
+        assert!((velocities[0]-impulse/masses[0]).abs() < 1e-12);
+        assert!((velocities[1]-(0.4-impulse/masses[1])).abs() < 1e-12);
+        assert!((masses[0]*velocities[0]+masses[1]*velocities[1]-0.004).abs() < 1e-14);
+        assert_eq!(frame.drive_work_j, 0.0);
+        assert_eq!(frame.ports[0].regime, ModalFrictionRegime::Sliding);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        dissipation += frame.friction_dissipation_j;
+    }
+    assert!(dissipation > 0.0);
+    assert!((bank.total_energy_j().unwrap()+dissipation-initial_energy).abs() < 1e-12);
+}
+
+#[test]
+fn shared_surface_binding_matches_an_upfront_two_sided_network() {
+    // Both contacts react through a common third body. This exercises the full
+    // off-diagonal response, in addition to the primary port's cached response.
+    use fs_couple::render::schedule::force::coupled::contact::friction::multiple::surfaces::FrictionSurfaceAttachment;
+    let gate = CancelGate::new_clock_free();
+    let receiver = || ModalAttachment { component: 2, shapes: vec![10.0] };
+    let make = |bound: bool| {
+        let network = CoupledModalSystem::new(vec![image(800.0, 0.0, 0.0),
+            image(1100.0, 0.0, 0.0), image(600.0, 0.0, 0.001)], vec![], budgets(), &gate).unwrap();
+        let core = FrictionModalSystem::new(network, ModalFrictionPort {
+            left: attachment(0), right: bound.then(receiver), law: law(),
+        }, config(), &gate).unwrap();
+        core.with_additional_ports(vec![(ModalFrictionPort {
+            left: attachment(1), right: bound.then(receiver), law: law(),
+        }, config())], joint_config(), &gate).unwrap()
+    };
+    let mut expected = make(true);
+    let mut actual = make(false).with_surface_attachments(vec![
+        FrictionSurfaceAttachment { port: 0, surface: receiver() },
+        FrictionSurfaceAttachment { port: 1, surface: receiver() },
+    ], &gate).unwrap();
+    assert_eq!(all_states(&actual), all_states(&expected));
+    for sample in 0..128 {
+        let drives = [drive(if sample < 64 { 0.001 } else { -0.001 }, 1.0), drive(-0.0005, 0.8)];
+        let a = actual.step(&[0.0; 3], &drives).unwrap().clone();
+        let e = expected.step(&[0.0; 3], &drives).unwrap();
+        assert_eq!(&a, e);
+        assert_eq!(all_states(&actual), all_states(&expected));
+    }
+    let bind = |bank: MultiFrictionModalSystem, entries| bank.with_surface_attachments(entries, &gate);
+    let a = FrictionSurfaceAttachment { port: 0, surface: receiver() };
+    assert!(bind(actual, vec![a.clone()]).is_err());
+    assert!(bind(make(false), vec![a.clone(), a.clone()]).is_err());
+    assert!(bind(make(true), vec![a.clone()]).is_err());
+    assert!(bind(make(false), vec![FrictionSurfaceAttachment { port: 4, ..a.clone() }]).is_err());
+    assert!(bind(make(false), vec![FrictionSurfaceAttachment { surface: ModalAttachment {
+        component: 2, shapes: vec![0.0] }, ..a }]).is_err());
+}
+
+#[test]
 fn single_port_is_exactly_the_original_even_after_prior_vibration() {
     let mut expected = system(true);
     let mut original = system(true);
