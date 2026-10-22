@@ -203,13 +203,34 @@ spin, so the drilling penalty would enter the junction. On a T-junction across
 alpha 1e-4..1e-2, `Full` moves the first ten frequencies by 6.6e-4 (CST/DKT)
 and 2.4e-3 (MITC3+), and `SeamTangent` by 3.2e-6 and 1.4e-6. `Full` stays
 the coplanar-seam coupling and reproduces a conforming monolithic mesh, which
-shares all six DOFs. A `FaceTie` refuses `SeamTangent`. Congruence reduction
+shares all six DOFs. A `FaceTie`, or a compliant glue tie, refuses
+`SeamTangent`. Congruence reduction
 `K_r = T^T K T`, `M_r = T^T M T` preserves exact symmetry, positive-semidefinite
 strain energy, and zero net virtual interface power `P_m + P_s = 0`.
 `TieBudget` enforces explicit caps on `max_segments`, `max_slave_dofs`,
 `gap_tolerance_m`, and `angle_tolerance_rad`, returning an auditable
-`TieReceipt`; cross-point double constraints and `TieKind::Compliant` (reserved
-for `M1.2-W2b`) refuse with `PlateError::BadConstraint`.
+`TieReceipt`; conflicting cross-point constraints and duplicate slave edge spans
+refuse with `PlateError::BadConstraint`.
+
+`shell::junction::{GlueLine, TieKind::Compliant}` and `shell::ownership`
+(IRP M1.2-W2b) extend multi-component shell assemblies to closed 3-D boxes and
+Kelvin–Voigt compliant adhesive seams. At 3-way closed-box corners where three
+`EdgeTie` polylines meet, Wohlmuth (2000, §2.3) wirebasket corner pinning and
+transitive slave resolution eliminate corner slave DOFs against the shared
+master corner root without double-constraining the third edge. `TieKind::Compliant(GlueLine)`
+retains both sides' DOFs in the reduced basis and adds a symmetric positive-semidefinite
+dual-mortar interface stiffness `glue_stiffness` (`N/m^3 * width_m` integrated
+against the Wohlmuth linear dual basis along 1-D `EdgeTie`s or exact 2-D triangle
+patches on `FaceTie`s) and optional viscous damping `glue_damping` (`N*s/m^3 * width_m`),
+preserving all 6 rigid-body modes (`1/2 q_r^T K_glue q_r <= 1e-14`) and converging
+at `O(1/k)` to the `TieKind::Rigid` spectrum as glue stiffness scales by `10^k`.
+`FluidBoundaryOwnership::audit` verifies complete single-owner fluid-domain
+attribution across all `(component, facet, side)` skin faces, classifies
+`FaceTie` and tied-edge glue-overlap strips as `SolidInterior`, checks manifold
+orientation compatibility across every tied edge, refuses untied cavity boundary
+edges that are not covered by a declared `ApertureLoop`, and computes enclosed
+cavity volume `1/6 sum_f (x_0 . (x_1 x x_2))` on the inner skin surface closed by
+tied-edge bevel and corner triangles.
 
 `shell::mitc::{MitcShellModel::strain_energy, interpolate_nested_shell, s_norm_error}`
 (IRP M1.2-W1b) evaluate the elastic strain energy `1/2 u^T K u` and the Hiller &

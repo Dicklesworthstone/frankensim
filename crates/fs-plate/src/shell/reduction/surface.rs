@@ -7,7 +7,7 @@
 use super::{PlateError, ShellReduction, bad, dot};
 
 /// Which side of the oriented midsurface carries the material point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShellFace {
     /// Along the area-weighted oriented vertex director.
     Positive,

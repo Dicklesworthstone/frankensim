@@ -38,6 +38,9 @@ pub mod arching;
 /// Work-conjugate dual-mortar ties and eccentric junctions between shell components.
 pub mod junction;
 
+/// Acoustic fluid-boundary ownership audit and cavity skin closure.
+pub mod ownership;
+
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
 

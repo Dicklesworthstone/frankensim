@@ -78,17 +78,64 @@ pub enum RotationCoupling {
     SeamTangent,
 }
 
+/// Area-specific Kelvin–Voigt adhesive compliance along a 1-D glue line or 2-D glue patch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlueLine {
+    /// Area-specific normal stiffness $k_n$ [$\text{N/m}^3$].
+    pub normal_n_m3: f64,
+    /// Area-specific tangential shear stiffnesses $[k_{s1}, k_{s2}]$ [$\text{N/m}^3$]
+    /// along the local seam tangent $\mathbf{t}_1$ and transverse in-plane direction $\mathbf{t}_2$.
+    pub shear_n_m3: [f64; 2],
+    /// Optional area-specific Kelvin–Voigt viscosities $[\eta_n, \eta_{s1}, \eta_{s2}]$ [$\text{N}\cdot\text{s/m}^3$].
+    pub viscosity_n_s_m3: Option<[f64; 3]>,
+    /// Physical glue-line width $w_g$ [m] for 1-D [`EdgeTie`]s ($dA = w_g\,ds$).
+    pub width_m: f64,
+}
+
+impl GlueLine {
+    /// Validate that all stiffnesses and width are finite and strictly positive, and optional
+    /// Kelvin–Voigt viscosities are finite and non-negative.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] if any parameter is non-finite or out of range.
+    pub fn validate(&self) -> Result<(), PlateError> {
+        if !self.normal_n_m3.is_finite()
+            || self.normal_n_m3 <= 0.0
+            || !self.shear_n_m3[0].is_finite()
+            || self.shear_n_m3[0] <= 0.0
+            || !self.shear_n_m3[1].is_finite()
+            || self.shear_n_m3[1] <= 0.0
+            || !self.width_m.is_finite()
+            || self.width_m <= 0.0
+        {
+            return Err(PlateError::BadConstraint {
+                what: "GlueLine requires finite positive normal_n_m3, shear_n_m3, and width_m",
+            });
+        }
+        if let Some(visc) = self.viscosity_n_s_m3
+            && visc.iter().any(|&v| !v.is_finite() || v < 0.0)
+        {
+            return Err(PlateError::BadConstraint {
+                what: "GlueLine viscosity_n_s_m3 entries must be finite and non-negative",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Constitutive nature of the interface tie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TieKind {
     /// Rigid work-conjugate master-slave elimination ($K_r = T^T K T$, $M_r = T^T M T$).
     Rigid,
-    /// Compliant glue/penalty tie reserved for `M1.2-W2b` (refused in `M1.2-W2a`).
-    Compliant,
+    /// Compliant Kelvin–Voigt adhesive tie adding positive interface stiffness
+    /// $\int_\Gamma (\mathbf{u}_a - \mathbf{u}_b)^T K_g (\mathbf{u}_a - \mathbf{u}_b)\,d\Gamma$
+    /// and optional viscous damping without slave-DOF elimination.
+    Compliant(GlueLine),
 }
 
 /// 1-D polyline mortar tie between master side `a` and slave side `b`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeTie {
     /// Master component and ordered edge polyline.
     pub a: TieSide,
@@ -98,12 +145,12 @@ pub struct EdgeTie {
     pub offset: TieOffset,
     /// Full 6-DOF vs 3-DOF translational coupling.
     pub rotations: RotationCoupling,
-    /// Rigid elimination (`TieKind::Compliant` is refused until `M1.2-W2b`).
+    /// Rigid elimination or compliant Kelvin–Voigt glue line.
     pub kind: TieKind,
 }
 
 /// 2-D overlapping facet tie (e.g., bridge plate or lap joint) between master and slave components.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FaceTie {
     /// Master component index.
     pub master_component: usize,
@@ -117,7 +164,7 @@ pub struct FaceTie {
     pub offset: TieOffset,
     /// Full 6-DOF vs 3-DOF translational coupling.
     pub rotations: RotationCoupling,
-    /// Rigid elimination (`TieKind::Compliant` is refused until `M1.2-W2b`).
+    /// Rigid elimination or compliant Kelvin–Voigt glue patch.
     pub kind: TieKind,
 }
 
@@ -126,7 +173,7 @@ pub struct FaceTie {
 pub struct TieBudget {
     /// Maximum mortar integration segments across all ties.
     pub max_segments: usize,
-    /// Maximum eliminated slave scalar DOFs across all ties.
+    /// Maximum eliminated slave (or compliant interface) scalar DOFs across all ties.
     pub max_slave_dofs: usize,
     /// Maximum admissible normal/interface gap [m] between slave and master geometry.
     pub gap_tolerance_m: f64,
@@ -143,7 +190,7 @@ pub struct TieReceipt {
     pub max_angle_rad: f64,
     /// Total number of mortar integration segments processed.
     pub segments: usize,
-    /// Total number of eliminated slave scalar DOFs.
+    /// Total number of eliminated slave (or compliant interface) scalar DOFs.
     pub slave_dofs: usize,
 }
 
@@ -165,13 +212,17 @@ pub struct SlaveDofCoupling {
 /// Coupled multi-component shell pencil produced by [`tie_shells`].
 #[derive(Debug, Clone)]
 pub struct TiedShellModel {
-    /// Congruence-reduced stiffness and mass pencil $(K_r = T^T K T,\ M_r = T^T M T)$.
+    /// Congruence-reduced stiffness and mass pencil $(K_r = T^T K T + K_{\text{glue}},\ M_r = T^T M T)$.
     pub model: ShellModel,
     /// Per-component `[component][node][dof_0..6]` map to retained reduced coordinate in `0..model.free`.
     /// Eliminated slave DOFs and essential-BC fixed DOFs have `None`.
     pub map: Vec<Vec<[Option<usize>; 6]>>,
     /// Auditable tie geometry and budget receipt.
     pub receipt: TieReceipt,
+    /// Pure compliant interface stiffness matrix $K_{\text{glue}}$ (`model.free × model.free`).
+    pub glue_stiffness: Csr,
+    /// Optional compliant Kelvin–Voigt interface damping matrix $C_{\text{glue}}$ (`model.free × model.free`).
+    pub glue_damping: Option<Csr>,
     /// Per-component sparse rows of $T_c$: `comp_t[c][local_free]` is a list of `(reduced_dof, weight)`.
     comp_t: Vec<Vec<Vec<(usize, f64)>>>,
     /// Per-component full-DOF (`6 * node + d`) to component-free index (`components[c].model.dof_map`).
@@ -185,6 +236,74 @@ impl TiedShellModel {
     #[must_use]
     pub fn slave_couplings(&self) -> &[SlaveDofCoupling] {
         &self.slave_couplings
+    }
+
+    /// Evaluate the compliant glue strain energy $\frac{1}{2} \mathbf{q}_r^T K_{\text{glue}} \mathbf{q}_r$ [J].
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] if `reduced.len() != self.model.free` or contains non-finite entries.
+    pub fn glue_strain_energy(&self, reduced: &[f64]) -> Result<f64, PlateError> {
+        if reduced.len() != self.model.free || reduced.iter().any(|x| !x.is_finite()) {
+            return Err(PlateError::BadConstraint {
+                what: "reduced vector length must equal model.free and be finite",
+            });
+        }
+        let mut kq = vec![0.0; self.model.free];
+        self.glue_stiffness.spmv(reduced, &mut kq);
+        Ok(0.5 * dot_slice(reduced, &kq))
+    }
+
+    /// Evaluate the compliant glue viscous dissipation rate $\dot{\mathbf{q}}_r^T C_{\text{glue}} \dot{\mathbf{q}}_r$ [W].
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] if `reduced_velocity.len() != self.model.free` or contains non-finite entries.
+    pub fn glue_dissipation_rate(&self, reduced_velocity: &[f64]) -> Result<f64, PlateError> {
+        if reduced_velocity.len() != self.model.free
+            || reduced_velocity.iter().any(|x| !x.is_finite())
+        {
+            return Err(PlateError::BadConstraint {
+                what: "reduced_velocity length must equal model.free and be finite",
+            });
+        }
+        let Some(c_glue) = &self.glue_damping else {
+            return Ok(0.0);
+        };
+        let mut cq = vec![0.0; self.model.free];
+        c_glue.spmv(reduced_velocity, &mut cq);
+        Ok(dot_slice(reduced_velocity, &cq))
+    }
+
+    /// Project the compliant glue damping matrix $C_{\text{glue}}$ onto a set of reduced modal
+    /// vectors $\Phi = [\boldsymbol{\phi}_0, \dots, \boldsymbol{\phi}_{m-1}]$, returning the
+    /// row-major $m \times m$ symmetric positive-semidefinite matrix $C_{\text{modal}} = \Phi^T C_{\text{glue}} \Phi$.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] if any mode vector length mismatches `model.free` or is non-finite.
+    pub fn project_glue_damping(&self, modes: &[Vec<f64>]) -> Result<Vec<f64>, PlateError> {
+        let m = modes.len();
+        if m == 0
+            || modes
+                .iter()
+                .any(|phi| phi.len() != self.model.free || phi.iter().any(|x| !x.is_finite()))
+        {
+            return Err(PlateError::BadConstraint {
+                what: "modes must be non-empty, finite, and have length equal to model.free",
+            });
+        }
+        let Some(c_glue) = &self.glue_damping else {
+            return Ok(vec![0.0; m * m]);
+        };
+        let mut out = vec![0.0; m * m];
+        let mut c_phi_j = vec![0.0; self.model.free];
+        for j in 0..m {
+            c_glue.spmv(&modes[j], &mut c_phi_j);
+            for i in 0..=j {
+                let val = dot_slice(&modes[i], &c_phi_j);
+                out[i * m + j] = val;
+                out[j * m + i] = val;
+            }
+        }
+        Ok(out)
     }
 
     /// Expand a reduced coordinate vector `reduced` (`len == self.model.free`) into each
@@ -930,12 +1049,44 @@ pub fn tie_shells_with_faces(
 
     let mut slave_nodes_seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     let mut master_nodes_seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut slave_edge_spans_seen: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+    let mut corner_parent: BTreeMap<(usize, usize), (usize, usize)> = BTreeMap::new();
+
+    // Count how many EdgeTies touch each (component, endpoint_node) so multi-tie 3-way corner
+    // crosspoints use Wohlmuth (2000) §2.3 wirebasket corner pinning and consistent corner root resolution.
+    let mut endpoint_degree: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for tie in edge_ties {
+        if let (Some(&m_first), Some(&m_last)) = (tie.a.nodes.first(), tie.a.nodes.last()) {
+            *endpoint_degree
+                .entry((tie.a.component, m_first))
+                .or_insert(0) += 1;
+            if m_last != m_first {
+                *endpoint_degree
+                    .entry((tie.a.component, m_last))
+                    .or_insert(0) += 1;
+            }
+        }
+        if let (Some(&s_first), Some(&s_last)) = (tie.b.nodes.first(), tie.b.nodes.last()) {
+            *endpoint_degree
+                .entry((tie.b.component, s_first))
+                .or_insert(0) += 1;
+            if s_last != s_first {
+                *endpoint_degree
+                    .entry((tie.b.component, s_last))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
 
     // Map from (slave_comp, slave_node, slave_dof_0..6) -> Vec<(master_comp, master_node, master_dof_0..6, weight)>
     let mut nodal_slave_constraints: BTreeMap<
         (usize, usize, usize),
         Vec<(usize, usize, usize, f64)>,
     > = BTreeMap::new();
+
+    // Pending compliant glue nodal patches to assemble after reduced DOFs and T_c are constructed.
+    let mut compliant_patches: Vec<CompliantNodalPatch> = Vec::new();
+    let mut compliant_dofs_count = 0usize;
 
     let mut segments_used = 0usize;
     let mut max_gap_m = 0.0_f64;
@@ -946,10 +1097,8 @@ pub fn tie_shells_with_faces(
         if cancelled() {
             return Err(PlateError::Cancelled);
         }
-        if tie.kind == TieKind::Compliant {
-            return Err(PlateError::BadConstraint {
-                what: "TieKind::Compliant is reserved for M1.2-W2b; only TieKind::Rigid is admitted in M1.2-W2a",
-            });
+        if let TieKind::Compliant(glue) = &tie.kind {
+            glue.validate()?;
         }
         let side_sign = match tie.offset {
             TieOffset::Midsurface => 0.0,
@@ -970,23 +1119,20 @@ pub fn tie_shells_with_faces(
                 what: "EdgeTie component indices must be in range and distinct",
             });
         }
-        if tie.a.nodes.len() < 2 || tie.b.nodes.len() < 2 {
+        let n_m = tie.a.nodes.len();
+        let n_s = tie.b.nodes.len();
+        if n_m < 2 || n_s < 2 {
             return Err(PlateError::BadConstraint {
                 what: "EdgeTie polylines must contain at least 2 nodes",
             });
         }
 
-        // Check in-range and duplicate nodes within each side, plus cross-point double constraints.
+        // Check in-range and duplicate nodes within each side.
         let mut local_m_seen = BTreeSet::new();
         for &mn in &tie.a.nodes {
             if mn >= components[c_m].mesh.nodes.len() || !local_m_seen.insert(mn) {
                 return Err(PlateError::BadConstraint {
                     what: "EdgeTie master node out of range or duplicated within tie",
-                });
-            }
-            if slave_nodes_seen.contains(&(c_m, mn)) {
-                return Err(PlateError::BadConstraint {
-                    what: "cross-point double constraint: master node is already a slave node",
                 });
             }
         }
@@ -997,17 +1143,103 @@ pub fn tie_shells_with_faces(
                     what: "EdgeTie slave node out of range or duplicated within tie",
                 });
             }
-            if slave_nodes_seen.contains(&(c_s, sn)) || master_nodes_seen.contains(&(c_s, sn)) {
-                return Err(PlateError::BadConstraint {
-                    what: "cross-point double constraint: slave node cannot be constrained twice or act as master",
-                });
+        }
+
+        let s_first = tie.b.nodes[0];
+        let s_last = tie.b.nodes[n_s - 1];
+        let s_span = (c_s, s_first.min(s_last), s_first.max(s_last));
+        if !slave_edge_spans_seen.insert(s_span) {
+            return Err(PlateError::BadConstraint {
+                what: "cross-point double constraint: duplicate slave edge span on component",
+            });
+        }
+
+        let mut skip_slave_node = vec![false; n_s];
+        let corner_0_shared = endpoint_degree
+            .get(&(c_m, tie.a.nodes[0]))
+            .copied()
+            .unwrap_or(0)
+            > 1
+            || endpoint_degree
+                .get(&(c_s, tie.b.nodes[0]))
+                .copied()
+                .unwrap_or(0)
+                > 1;
+        let corner_last_shared = endpoint_degree
+            .get(&(c_m, tie.a.nodes[n_m - 1]))
+            .copied()
+            .unwrap_or(0)
+            > 1
+            || endpoint_degree
+                .get(&(c_s, tie.b.nodes[n_s - 1]))
+                .copied()
+                .unwrap_or(0)
+                > 1;
+
+        if matches!(tie.kind, TieKind::Rigid) {
+            for (mi, &mn) in tie.a.nodes.iter().enumerate() {
+                let is_end = mi == 0 || mi == n_m - 1;
+                let shared_corner =
+                    (mi == 0 && corner_0_shared) || (mi == n_m - 1 && corner_last_shared);
+                if (!is_end || !shared_corner) && slave_nodes_seen.contains(&(c_m, mn)) {
+                    return Err(PlateError::BadConstraint {
+                        what: "cross-point double constraint: master node is already a slave node",
+                    });
+                }
             }
-        }
-        for &mn in &tie.a.nodes {
-            master_nodes_seen.insert((c_m, mn));
-        }
-        for &sn in &tie.b.nodes {
-            slave_nodes_seen.insert((c_s, sn));
+            for (si, &sn) in tie.b.nodes.iter().enumerate() {
+                let is_end = si == 0 || si == n_s - 1;
+                let shared_corner =
+                    (si == 0 && corner_0_shared) || (si == n_s - 1 && corner_last_shared);
+                if !is_end || !shared_corner {
+                    if slave_nodes_seen.contains(&(c_s, sn))
+                        || master_nodes_seen.contains(&(c_s, sn))
+                    {
+                        return Err(PlateError::BadConstraint {
+                            what: "cross-point double constraint: slave node cannot be constrained twice or act as master",
+                        });
+                    }
+                    if is_end {
+                        let mn_end = if si == 0 {
+                            tie.a.nodes[0]
+                        } else {
+                            tie.a.nodes[n_m - 1]
+                        };
+                        corner_parent.insert((c_s, sn), (c_m, mn_end));
+                    }
+                } else {
+                    // Multi-tie 3-way corner crosspoint: resolve corner roots of (c_s, sn) and (c_m, mn_end).
+                    let mn_end = if si == 0 {
+                        tie.a.nodes[0]
+                    } else {
+                        tie.a.nodes[n_m - 1]
+                    };
+                    let root_s = find_corner_root(&corner_parent, (c_s, sn), components.len())?;
+                    let root_m = find_corner_root(&corner_parent, (c_m, mn_end), components.len())?;
+                    if root_s == root_m {
+                        // This 3-way corner triangle is already closed to the same root master corner.
+                        skip_slave_node[si] = true;
+                    } else if root_s == (c_s, sn) && !master_nodes_seen.contains(&(c_s, sn)) {
+                        corner_parent.insert((c_s, sn), (c_m, mn_end));
+                    } else {
+                        return Err(PlateError::BadConstraint {
+                            what: "cross-point double constraint: conflicting master roots at corner",
+                        });
+                    }
+                }
+            }
+            for (mi, &mn) in tie.a.nodes.iter().enumerate() {
+                let shared_corner =
+                    (mi == 0 && corner_0_shared) || (mi == n_m - 1 && corner_last_shared);
+                if !shared_corner {
+                    master_nodes_seen.insert((c_m, mn));
+                }
+            }
+            for (si, &sn) in tie.b.nodes.iter().enumerate() {
+                if !skip_slave_node[si] {
+                    slave_nodes_seen.insert((c_s, sn));
+                }
+            }
         }
 
         let master_midsurface: Vec<[f64; 3]> = tie
@@ -1036,7 +1268,7 @@ pub fn tie_shells_with_faces(
             .map(|&sn| components[c_s].mesh.nodes[sn])
             .collect();
 
-        let ops = assemble_polyline_dual_mortar(
+        let mut ops = assemble_polyline_dual_mortar(
             &master_midsurface,
             &master_offsets,
             &slave_points,
@@ -1046,19 +1278,63 @@ pub fn tie_shells_with_faces(
         )?;
         max_gap_m = max_gap_m.max(ops.max_gap_m);
         max_angle_rad = max_angle_rad.max(ops.max_angle_rad);
-        let tangents = slave_seam_tangents(&master_midsurface, &ops.c)?;
 
-        record_slave_nodal_couplings(
-            c_m,
-            &tie.a.nodes,
-            &master_offsets,
-            c_s,
-            &tie.b.nodes,
-            &ops.c,
-            tie.rotations,
-            Some(&tangents),
-            &mut nodal_slave_constraints,
-        );
+        // Wohlmuth (2000) §2.3 wirebasket crosspoint condition: at multi-tie corner crosspoints
+        // where master and slave endpoints coincide, pin the corner row of C to the master corner.
+        if corner_0_shared {
+            for val in &mut ops.c[0] {
+                *val = 0.0;
+            }
+            ops.c[0][0] = 1.0;
+        }
+        if corner_last_shared {
+            for val in &mut ops.c[n_s - 1] {
+                *val = 0.0;
+            }
+            ops.c[n_s - 1][n_m - 1] = 1.0;
+        }
+
+        // After the crosspoint pinning, so a pinned corner row takes the master
+        // corner's tangent.
+        let tangents = slave_seam_tangents(&master_midsurface, &ops.c)?;
+        match tie.kind {
+            TieKind::Rigid => {
+                record_slave_nodal_couplings_filtered(
+                    c_m,
+                    &tie.a.nodes,
+                    &master_offsets,
+                    c_s,
+                    &tie.b.nodes,
+                    &ops.c,
+                    &skip_slave_node,
+                    tie.rotations,
+                    Some(&tangents),
+                    &mut nodal_slave_constraints,
+                );
+            }
+            TieKind::Compliant(glue) => {
+                if tie.rotations == RotationCoupling::SeamTangent {
+                    return Err(PlateError::BadConstraint {
+                        what: "a compliant glue tie couples Full or TranslationsOnly rotations; SeamTangent is rigid-tie kinematics",
+                    });
+                }
+                build_compliant_polyline_patches(
+                    components,
+                    &comp_normals,
+                    c_m,
+                    &tie.a.nodes,
+                    &master_offsets,
+                    c_s,
+                    &tie.b.nodes,
+                    &slave_points,
+                    &ops,
+                    tie.rotations,
+                    &glue,
+                    &mut compliant_patches,
+                    &mut compliant_dofs_count,
+                )?;
+            }
+        }
     }
 
     // Process 2-D FaceTies (if any).
@@ -1066,10 +1342,8 @@ pub fn tie_shells_with_faces(
         if cancelled() {
             return Err(PlateError::Cancelled);
         }
-        if ftie.kind == TieKind::Compliant {
-            return Err(PlateError::BadConstraint {
-                what: "TieKind::Compliant is reserved for M1.2-W2b; only TieKind::Rigid is admitted in M1.2-W2a",
-            });
+        if let TieKind::Compliant(glue) = &ftie.kind {
+            glue.validate()?;
         }
         let side_sign = match ftie.offset {
             TieOffset::Midsurface => 0.0,
@@ -1107,7 +1381,7 @@ pub fn tie_shells_with_faces(
                 what: "FaceTie master triangle index out of range",
             })?;
             for n in tri {
-                if slave_nodes_seen.contains(&(c_m, n)) {
+                if matches!(ftie.kind, TieKind::Rigid) && slave_nodes_seen.contains(&(c_m, n)) {
                     return Err(PlateError::BadConstraint {
                         what: "cross-point double constraint in FaceTie master node",
                     });
@@ -1116,6 +1390,7 @@ pub fn tie_shells_with_faces(
             }
         }
         let mut s_nodes_set = BTreeSet::new();
+        let mut s_nodal_area: BTreeMap<usize, f64> = BTreeMap::new();
         for &t in &ftie.slave_tris {
             let tri = *s_mesh.tris.get(t).ok_or(PlateError::BadConstraint {
                 what: "FaceTie slave triangle index out of range",
@@ -1143,20 +1418,23 @@ pub fn tie_shells_with_faces(
             }
             for n in tri {
                 s_nodes_set.insert(n);
+                *s_nodal_area.entry(n).or_insert(0.0) += gs.area_m2 / 3.0;
             }
         }
-        for &n in &s_nodes_set {
-            if slave_nodes_seen.contains(&(c_s, n)) || master_nodes_seen.contains(&(c_s, n)) {
-                return Err(PlateError::BadConstraint {
-                    what: "cross-point double constraint in FaceTie slave node",
-                });
+        if matches!(ftie.kind, TieKind::Rigid) {
+            for &n in &s_nodes_set {
+                if slave_nodes_seen.contains(&(c_s, n)) || master_nodes_seen.contains(&(c_s, n)) {
+                    return Err(PlateError::BadConstraint {
+                        what: "cross-point double constraint in FaceTie slave node",
+                    });
+                }
             }
-        }
-        for &n in &m_nodes_set {
-            master_nodes_seen.insert((c_m, n));
-        }
-        for &n in &s_nodes_set {
-            slave_nodes_seen.insert((c_s, n));
+            for &n in &m_nodes_set {
+                master_nodes_seen.insert((c_m, n));
+            }
+            for &n in &s_nodes_set {
+                slave_nodes_seen.insert((c_s, n));
+            }
         }
 
         let m_nodes: Vec<usize> = m_nodes_set.into_iter().collect();
@@ -1214,18 +1492,51 @@ pub fn tie_shells_with_faces(
                 }
             }
         }
-        record_slave_nodal_couplings(
-            c_m,
-            &m_nodes,
-            &m_offsets,
-            c_s,
-            &s_nodes,
-            &c_mat,
-            ftie.rotations,
-            None,
-            &mut nodal_slave_constraints,
-        );
+        match ftie.kind {
+            TieKind::Rigid => {
+                let no_skip = vec![false; s_nodes.len()];
+                record_slave_nodal_couplings_filtered(
+                    c_m,
+                    &m_nodes,
+                    &m_offsets,
+                    c_s,
+                    &s_nodes,
+                    &c_mat,
+                    &no_skip,
+                    ftie.rotations,
+                    None,
+                    &mut nodal_slave_constraints,
+                );
+            }
+            TieKind::Compliant(glue) => {
+                let g0 = m_mesh.facet(ftie.master_tris[0])?;
+                for (si, &sn) in s_nodes.iter().enumerate() {
+                    let area_i = s_nodal_area.get(&sn).copied().unwrap_or(0.0);
+                    append_compliant_nodal_patch(
+                        components,
+                        c_m,
+                        &m_nodes,
+                        &m_offsets,
+                        c_s,
+                        sn,
+                        &c_mat[si],
+                        g0.frame[2],
+                        g0.frame[0],
+                        g0.frame[1],
+                        area_i,
+                        ftie.rotations,
+                        &glue,
+                        &mut compliant_patches,
+                        &mut compliant_dofs_count,
+                    );
+                }
+            }
+        }
     }
+
+    // Transitively resolve slave -> master references at multi-tie corners so every slave DOF
+    // is expressed strictly in terms of unconstrained root master DOFs.
+    resolve_transitive_slave_constraints(&mut nodal_slave_constraints, components.len())?;
 
     // Count active slave DOFs (those that were free in their component model) and check budget.
     let mut slave_dofs_count = 0usize;
@@ -1234,10 +1545,11 @@ pub fn tie_shells_with_faces(
             slave_dofs_count += 1;
         }
     }
-    if slave_dofs_count > budget.max_slave_dofs {
+    let total_budget_dofs = slave_dofs_count + compliant_dofs_count;
+    if total_budget_dofs > budget.max_slave_dofs {
         return Err(PlateError::Budget {
             what: "tie_slave_dofs",
-            requested: slave_dofs_count,
+            requested: total_budget_dofs,
             limit: budget.max_slave_dofs,
         });
     }
@@ -1310,7 +1622,7 @@ pub fn tie_shells_with_faces(
         comp_t.push(rows);
     }
 
-    // Assemble K_r = sum_c T_c^T K_c T_c and M_r = sum_c T_c^T M_c T_c with exact symmetry.
+    // Assemble K_r = sum_c T_c^T K_c T_c + K_glue and M_r = sum_c T_c^T M_c T_c with exact symmetry.
     let mut k_coo = Coo::new(reduced_free, reduced_free);
     let mut m_coo = Coo::new(reduced_free, reduced_free);
     for (c, comp) in components.iter().enumerate() {
@@ -1321,8 +1633,32 @@ pub fn tie_shells_with_faces(
         accumulate_congruence(&comp.model.m, &comp_t[c], &mut m_coo, &mut cancelled)?;
     }
 
+    let mut k_glue_coo = Coo::new(reduced_free, reduced_free);
+    let mut c_glue_coo = Coo::new(reduced_free, reduced_free);
+    let mut has_glue_damping = false;
+    for patch in &compliant_patches {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        accumulate_compliant_patch(
+            patch,
+            &comp_dof_maps,
+            &comp_t,
+            &mut k_coo,
+            &mut k_glue_coo,
+            &mut c_glue_coo,
+            &mut has_glue_damping,
+        );
+    }
+
     let k_r = k_coo.assemble();
     let m_r = m_coo.assemble();
+    let glue_stiffness = k_glue_coo.assemble();
+    let glue_damping = if has_glue_damping {
+        Some(c_glue_coo.assemble())
+    } else {
+        None
+    };
 
     // Concatenate global dof_map across components.
     let total_full_dofs: usize = components.iter().map(|c| 6 * c.mesh.nodes.len()).sum();
@@ -1345,8 +1681,10 @@ pub fn tie_shells_with_faces(
             max_gap_m,
             max_angle_rad,
             segments: segments_used,
-            slave_dofs: slave_dofs_count,
+            slave_dofs: total_budget_dofs,
         },
+        glue_stiffness,
+        glue_damping,
         comp_t,
         comp_dof_maps,
         slave_couplings,
@@ -1388,19 +1726,399 @@ fn slave_seam_tangents(master: &[[f64; 3]], c: &[Vec<f64>]) -> Result<Vec<[f64; 
         .collect()
 }
 
+fn find_corner_root(
+    corner_parent: &BTreeMap<(usize, usize), (usize, usize)>,
+    start: (usize, usize),
+    max_hops: usize,
+) -> Result<(usize, usize), PlateError> {
+    let mut cur = start;
+    for _ in 0..=max_hops {
+        if let Some(&next) = corner_parent.get(&cur) {
+            if next == start {
+                return Err(PlateError::BadConstraint {
+                    what: "cyclic corner constraint chain in EdgeTies",
+                });
+            }
+            cur = next;
+        } else {
+            return Ok(cur);
+        }
+    }
+    Err(PlateError::BadConstraint {
+        what: "cyclic corner constraint chain in EdgeTies",
+    })
+}
+
+fn resolve_transitive_slave_constraints(
+    constraints: &mut BTreeMap<(usize, usize, usize), Vec<(usize, usize, usize, f64)>>,
+    max_hops: usize,
+) -> Result<(), PlateError> {
+    for _ in 0..=max_hops {
+        let mut any_expanded = false;
+        let snapshot = constraints.clone();
+        for terms in constraints.values_mut() {
+            let mut needs_expand = false;
+            for &(c_m, mn, d_m, _) in terms.iter() {
+                if snapshot.contains_key(&(c_m, mn, d_m)) {
+                    needs_expand = true;
+                    break;
+                }
+            }
+            if !needs_expand {
+                continue;
+            }
+            any_expanded = true;
+            let mut accum: BTreeMap<(usize, usize, usize), f64> = BTreeMap::new();
+            for &(c_m, mn, d_m, w) in terms.iter() {
+                if let Some(sub_terms) = snapshot.get(&(c_m, mn, d_m)) {
+                    for &(c_r, mr, d_r, w_sub) in sub_terms {
+                        *accum.entry((c_r, mr, d_r)).or_insert(0.0) += w * w_sub;
+                    }
+                } else {
+                    *accum.entry((c_m, mn, d_m)).or_insert(0.0) += w;
+                }
+            }
+            *terms = accum
+                .into_iter()
+                .filter(|&(_, w)| w.abs() > 1e-16)
+                .map(|((c, n, d), w)| (c, n, d, w))
+                .collect();
+        }
+        if !any_expanded {
+            return Ok(());
+        }
+    }
+    Err(PlateError::BadConstraint {
+        what: "cyclic slave constraint chain in tied shells",
+    })
+}
+
+struct CompliantNodalPatch {
+    /// For each translational axis a in 0..3: list of `(comp, node, dof_0..6, weight)` for $\Delta u_a$.
+    u_rows: [Vec<(usize, usize, usize, f64)>; 3],
+    /// Global 3x3 translational stiffness matrix $A_i \mathbf{K}_{g,i}^u$ [N/m].
+    k_u: [[f64; 3]; 3],
+    /// Optional global 3x3 translational damping matrix $A_i \mathbf{C}_{g,i}^u$ [N*s/m].
+    c_u: Option<[[f64; 3]; 3]>,
+    /// Optional rotational jump rows and global 3x3 rotational stiffness/damping matrices when `RotationCoupling::Full`.
+    rot: Option<(
+        [Vec<(usize, usize, usize, f64)>; 3],
+        [[f64; 3]; 3],
+        Option<[[f64; 3]; 3]>,
+    )>,
+}
+
+fn frame_tensor_3x3(
+    n: [f64; 3],
+    t1: [f64; 3],
+    t2: [f64; 3],
+    val_n: f64,
+    val_s1: f64,
+    val_s2: f64,
+    area_scale: f64,
+) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for a in 0..3 {
+        for b in 0..3 {
+            out[a][b] = area_scale
+                * (val_n * n[a] * n[b] + val_s1 * t1[a] * t1[b] + val_s2 * t2[a] * t2[b]);
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
-fn record_slave_nodal_couplings(
+fn build_compliant_polyline_patches(
+    components: &[ShellComponent<'_>],
+    comp_normals: &[Vec<[f64; 3]>],
+    c_m: usize,
+    m_nodes: &[usize],
+    m_offsets: &[[f64; 3]],
+    c_s: usize,
+    s_nodes: &[usize],
+    s_points: &[[f64; 3]],
+    ops: &PolylineMortarOperators,
+    rotations: RotationCoupling,
+    glue: &GlueLine,
+    out: &mut Vec<CompliantNodalPatch>,
+    compliant_dofs_count: &mut usize,
+) -> Result<(), PlateError> {
+    let n_s = s_nodes.len();
+    for (si, &sn) in s_nodes.iter().enumerate() {
+        let chord = if si == 0 {
+            sub(s_points[1], s_points[0])
+        } else if si == n_s - 1 {
+            sub(s_points[n_s - 1], s_points[n_s - 2])
+        } else {
+            sub(s_points[si + 1], s_points[si - 1])
+        };
+        let c_len = norm3(chord);
+        if !c_len.is_finite() || c_len <= 1e-12 {
+            return Err(PlateError::BadConstraint {
+                what: "degenerate tangent on compliant glue polyline",
+            });
+        }
+        let t1 = scale3(chord, 1.0 / c_len);
+        let mut n_interp = [0.0; 3];
+        for (mj_slot, &mn) in m_nodes.iter().enumerate() {
+            let w = ops.c[si][mj_slot];
+            let nm = comp_normals[c_m][mn];
+            n_interp[0] += w * nm[0];
+            n_interp[1] += w * nm[1];
+            n_interp[2] += w * nm[2];
+        }
+        // Orthogonalize n against t1 so [n, t1, t2] is an exact right-handed orthonormal frame.
+        let n_proj = sub(n_interp, scale3(t1, dot(n_interp, t1)));
+        let n_len = norm3(n_proj);
+        let n_unit = if n_len > 1e-12 {
+            scale3(n_proj, 1.0 / n_len)
+        } else {
+            comp_normals[c_m][m_nodes[0]]
+        };
+        let t2 = super::cross(n_unit, t1);
+        let area_i = glue.width_m * ops.d_diag[si];
+
+        append_compliant_nodal_patch(
+            components,
+            c_m,
+            m_nodes,
+            m_offsets,
+            c_s,
+            sn,
+            &ops.c[si],
+            n_unit,
+            t1,
+            t2,
+            area_i,
+            rotations,
+            glue,
+            out,
+            compliant_dofs_count,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_compliant_nodal_patch(
+    components: &[ShellComponent<'_>],
+    c_m: usize,
+    m_nodes: &[usize],
+    m_offsets: &[[f64; 3]],
+    c_s: usize,
+    sn: usize,
+    c_row: &[f64],
+    n_unit: [f64; 3],
+    t1: [f64; 3],
+    t2: [f64; 3],
+    area_i: f64,
+    rotations: RotationCoupling,
+    glue: &GlueLine,
+    out: &mut Vec<CompliantNodalPatch>,
+    compliant_dofs_count: &mut usize,
+) {
+    let dof_cap = match rotations {
+        RotationCoupling::Full => 6,
+        // SeamTangent refuses before compliant assembly (rigid-tie kinematics).
+        RotationCoupling::TranslationsOnly | RotationCoupling::SeamTangent => 3,
+    };
+    for d in 0..dof_cap {
+        if components[c_s].model.dof_map[6 * sn + d].is_some() {
+            *compliant_dofs_count += 1;
+        }
+    }
+
+    let u_rows: [Vec<(usize, usize, usize, f64)>; 3] = core::array::from_fn(|a| {
+        let mut row = Vec::new();
+        row.push((c_s, sn, a, 1.0));
+        for (mj_slot, &mn) in m_nodes.iter().enumerate() {
+            let c_ij = c_row[mj_slot];
+            if c_ij.abs() <= 1e-16 {
+                continue;
+            }
+            row.push((c_m, mn, a, -c_ij));
+            let skew = skew_theta_cross_d(m_offsets[mj_slot]);
+            for b in 0..3 {
+                let s_ab = skew[a][b];
+                if s_ab != 0.0 {
+                    row.push((c_m, mn, 3 + b, -c_ij * s_ab));
+                }
+            }
+        }
+        row
+    });
+
+    let k_u = frame_tensor_3x3(
+        n_unit,
+        t1,
+        t2,
+        glue.normal_n_m3,
+        glue.shear_n_m3[0],
+        glue.shear_n_m3[1],
+        area_i,
+    );
+    let c_u = glue
+        .viscosity_n_s_m3
+        .filter(|v| v.iter().any(|&x| x > 0.0))
+        .map(|v| frame_tensor_3x3(n_unit, t1, t2, v[0], v[1], v[2], area_i));
+
+    let rot = if rotations == RotationCoupling::Full {
+        let rot_scale = area_i * (glue.width_m * glue.width_m / 12.0);
+        let theta_rows: [Vec<(usize, usize, usize, f64)>; 3] = core::array::from_fn(|a| {
+            let mut row = Vec::new();
+            row.push((c_s, sn, 3 + a, 1.0));
+            for (mj_slot, &mn) in m_nodes.iter().enumerate() {
+                let c_ij = c_row[mj_slot];
+                if c_ij.abs() <= 1e-16 {
+                    continue;
+                }
+                row.push((c_m, mn, 3 + a, -c_ij));
+            }
+            row
+        });
+        let k_theta = frame_tensor_3x3(
+            n_unit,
+            t1,
+            t2,
+            glue.normal_n_m3,
+            glue.shear_n_m3[0],
+            glue.shear_n_m3[1],
+            rot_scale,
+        );
+        let c_theta = glue
+            .viscosity_n_s_m3
+            .filter(|v| v.iter().any(|&x| x > 0.0))
+            .map(|v| frame_tensor_3x3(n_unit, t1, t2, v[0], v[1], v[2], rot_scale));
+        Some((theta_rows, k_theta, c_theta))
+    } else {
+        None
+    };
+
+    out.push(CompliantNodalPatch {
+        u_rows,
+        k_u,
+        c_u,
+        rot,
+    });
+}
+
+fn project_jump_row_to_reduced(
+    row: &[(usize, usize, usize, f64)],
+    comp_dof_maps: &[Vec<Option<usize>>],
+    comp_t: &[Vec<Vec<(usize, f64)>>],
+) -> Vec<(usize, f64)> {
+    let mut accum: BTreeMap<usize, f64> = BTreeMap::new();
+    for &(c, n, d, w) in row {
+        if let Some(local_free) = comp_dof_maps[c][6 * n + d] {
+            for &(r_idx, t_w) in &comp_t[c][local_free] {
+                *accum.entry(r_idx).or_insert(0.0) += w * t_w;
+            }
+        }
+    }
+    accum
+        .into_iter()
+        .filter(|&(_, v)| v.abs() > 1e-16)
+        .collect()
+}
+
+fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .fold(0.0, |acc, (&x, &y)| x.mul_add(y, acc))
+}
+
+fn accumulate_quadratic_3x3(
+    r_rows: &[Vec<(usize, f64)>; 3],
+    mat3: &[[f64; 3]; 3],
+    coo_a: &mut Coo,
+    coo_b: Option<&mut Coo>,
+) {
+    let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
+    for a in 0..3 {
+        for b in 0..3 {
+            let k_ab = mat3[a][b];
+            if k_ab.abs() <= 1e-24 {
+                continue;
+            }
+            for &(ri, wi) in &r_rows[a] {
+                for &(rj, wj) in &r_rows[b] {
+                    *entries.entry((ri, rj)).or_insert(0.0) += k_ab * wi * wj;
+                }
+            }
+        }
+    }
+    let mut sym_entries: Vec<(usize, usize, f64)> = Vec::new();
+    for (&(ri, rj), &val) in &entries {
+        if ri <= rj {
+            let rev = entries.get(&(rj, ri)).copied().unwrap_or(val);
+            let sym = 0.5 * (val + rev);
+            if sym.abs() > 0.0 {
+                sym_entries.push((ri, rj, sym));
+            }
+        }
+    }
+    for &(ri, rj, sym) in &sym_entries {
+        coo_a.push(ri, rj, sym);
+        if ri != rj {
+            coo_a.push(rj, ri, sym);
+        }
+    }
+    if let Some(cb) = coo_b {
+        for &(ri, rj, sym) in &sym_entries {
+            cb.push(ri, rj, sym);
+            if ri != rj {
+                cb.push(rj, ri, sym);
+            }
+        }
+    }
+}
+
+fn accumulate_compliant_patch(
+    patch: &CompliantNodalPatch,
+    comp_dof_maps: &[Vec<Option<usize>>],
+    comp_t: &[Vec<Vec<(usize, f64)>>],
+    k_coo: &mut Coo,
+    k_glue_coo: &mut Coo,
+    c_glue_coo: &mut Coo,
+    has_glue_damping: &mut bool,
+) {
+    let r_u: [Vec<(usize, f64)>; 3] = core::array::from_fn(|a| {
+        project_jump_row_to_reduced(&patch.u_rows[a], comp_dof_maps, comp_t)
+    });
+    accumulate_quadratic_3x3(&r_u, &patch.k_u, k_coo, Some(k_glue_coo));
+    if let Some(c_u) = &patch.c_u {
+        *has_glue_damping = true;
+        accumulate_quadratic_3x3(&r_u, c_u, c_glue_coo, None);
+    }
+    if let Some((theta_rows, k_theta, c_theta)) = &patch.rot {
+        let r_theta: [Vec<(usize, f64)>; 3] = core::array::from_fn(|a| {
+            project_jump_row_to_reduced(&theta_rows[a], comp_dof_maps, comp_t)
+        });
+        accumulate_quadratic_3x3(&r_theta, k_theta, k_coo, Some(k_glue_coo));
+        if let Some(c_t) = c_theta {
+            *has_glue_damping = true;
+            accumulate_quadratic_3x3(&r_theta, c_t, c_glue_coo, None);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_slave_nodal_couplings_filtered(
     c_m: usize,
     m_nodes: &[usize],
     m_offsets: &[[f64; 3]],
     c_s: usize,
     s_nodes: &[usize],
     c_mat: &[Vec<f64>],
+    skip_slave_node: &[bool],
     rotations: RotationCoupling,
     seam_tangents: Option<&[[f64; 3]]>,
     out: &mut BTreeMap<(usize, usize, usize), Vec<(usize, usize, usize, f64)>>,
 ) {
     for (si, &sn) in s_nodes.iter().enumerate() {
+        if skip_slave_node.get(si).copied().unwrap_or(false) {
+            continue;
+        }
         // Translations a in 0..3: u_{s,a} = sum_j C_{si,j} (u_{m,a} + (theta_m x d_j)_a)
         for a in 0..3 {
             let mut terms = Vec::new();
@@ -1785,6 +2503,13 @@ mod tests {
                 nodal_thickness_m: &h1,
             },
         ];
+        // Non-positive glue stiffness or width must refuse cleanly.
+        let bad_glue = GlueLine {
+            normal_n_m3: 0.0,
+            shear_n_m3: [1e10, 1e10],
+            viscosity_n_s_m3: None,
+            width_m: 0.003,
+        };
         let ties = [EdgeTie {
             a: TieSide {
                 component: 0,
@@ -1796,7 +2521,7 @@ mod tests {
             },
             offset: TieOffset::Midsurface,
             rotations: RotationCoupling::Full,
-            kind: TieKind::Compliant,
+            kind: TieKind::Compliant(bad_glue),
         }];
         let budget = TieBudget {
             max_segments: 16,
@@ -1855,6 +2580,202 @@ mod tests {
                 what: "RotationCoupling::SeamTangent needs a 1-D seam; a FaceTie has none",
             }
         );
+    }
+
+    #[test]
+    fn g0_glue_line_stiffness_spd_and_rigid_motion_free() {
+        let sec = PlateSection::isotropic(10e9, 0.3, 0.003, 500.0).unwrap();
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let m1 = sample_rect_shell(0.2, 0.4, 0.0, 0.2, 2, 3, 0.0);
+        let mod0 = assemble_shell(&m0, &sec, &[], ShellSupport::Free).unwrap();
+        let mod1 = assemble_shell(&m1, &sec, &[], ShellSupport::Free).unwrap();
+        let h0 = vec![0.003; m0.nodes.len()];
+        let h1 = vec![0.003; m1.nodes.len()];
+        let comps = [
+            ShellComponent {
+                id: 0,
+                mesh: &m0,
+                model: &mod0,
+                nodal_thickness_m: &h0,
+            },
+            ShellComponent {
+                id: 1,
+                mesh: &m1,
+                model: &mod1,
+                nodal_thickness_m: &h1,
+            },
+        ];
+        let glue = GlueLine {
+            normal_n_m3: 2.5e11,
+            shear_n_m3: [1.2e11, 1.5e11],
+            viscosity_n_s_m3: Some([2.5e5, 1.2e5, 1.5e5]),
+            width_m: 0.003,
+        };
+        let ties = [EdgeTie {
+            a: TieSide {
+                component: 0,
+                nodes: vec![2, 5, 8],
+            },
+            b: TieSide {
+                component: 1,
+                nodes: vec![0, 3, 6, 9],
+            },
+            offset: TieOffset::Midsurface,
+            rotations: RotationCoupling::Full,
+            kind: TieKind::Compliant(glue),
+        }];
+        let budget = TieBudget {
+            max_segments: 32,
+            max_slave_dofs: 64,
+            gap_tolerance_m: 1e-6,
+            angle_tolerance_rad: 1e-4,
+        };
+        let tied =
+            tie_shells(&comps, &ties, budget, || false).expect("compliant glue tie succeeds");
+        assert!(
+            tied.slave_couplings().is_empty(),
+            "compliant tie eliminates no DOFs"
+        );
+
+        // 1. Check symmetry and positive definiteness on any relative interface jump vector.
+        let mut jump_q = vec![0.0; tied.model.free];
+        for &sn in &[0usize, 3, 6, 9] {
+            for d in 0..6 {
+                if let Some(r_idx) = tied.map[1][sn][d] {
+                    jump_q[r_idx] = 1e-3 * (1.0 + 0.25 * (d as f64));
+                }
+            }
+        }
+        let e_jump = tied.glue_strain_energy(&jump_q).unwrap();
+        let d_jump = tied.glue_dissipation_rate(&jump_q).unwrap();
+        assert!(
+            e_jump > 0.0,
+            "glue stiffness must be strictly positive on interface jumps: {e_jump}"
+        );
+        assert!(
+            d_jump > 0.0,
+            "glue viscosity must be strictly positive on interface jumps: {d_jump}"
+        );
+        let e_scale = 1.0e6 * e_jump;
+        let d_scale = 1.0e6 * d_jump;
+
+        // 2. Check all 6 common 3-D rigid-body motions (3 translations + 3 rotations) produce zero glue energy <= 1e-14 * e_scale.
+        let motions: [([f64; 3], [f64; 3]); 7] = [
+            ([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 0.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]),
+            ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.37, -0.51, 0.83], [0.41, -0.29, 0.67]),
+        ];
+        for (u0, omega) in motions {
+            let mut q_rigid = vec![0.0; tied.model.free];
+            for (c, comp) in comps.iter().enumerate() {
+                for (n, &pos) in comp.mesh.nodes.iter().enumerate() {
+                    let u = add3(u0, crate::shell::cross(omega, pos));
+                    let vals = [u[0], u[1], u[2], omega[0], omega[1], omega[2]];
+                    for d in 0..6 {
+                        if let Some(r_idx) = tied.map[c][n][d] {
+                            q_rigid[r_idx] = vals[d];
+                        }
+                    }
+                }
+            }
+            let e_rigid = tied.glue_strain_energy(&q_rigid).unwrap();
+            let d_rigid = tied.glue_dissipation_rate(&q_rigid).unwrap();
+            assert!(
+                e_rigid.abs() <= 1e-14 * e_scale,
+                "rigid motion ({u0:?}, {omega:?}) glue energy {e_rigid:.3e} > 1e-14 * {e_scale:.3e}"
+            );
+            assert!(
+                d_rigid.abs() <= 1e-14 * d_scale,
+                "rigid motion ({u0:?}, {omega:?}) glue dissipation {d_rigid:.3e} > 1e-14 * {d_scale:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_glue_budget_cap_and_cap_plus_one() {
+        let sec = PlateSection::isotropic(10e9, 0.3, 0.003, 500.0).unwrap();
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 3, 0.0);
+        let m1 = sample_rect_shell(0.2, 0.4, 0.0, 0.2, 2, 3, 0.0);
+        let mod0 = assemble_shell(&m0, &sec, &[], ShellSupport::Free).unwrap();
+        let mod1 = assemble_shell(&m1, &sec, &[], ShellSupport::Free).unwrap();
+        let h0 = vec![0.003; m0.nodes.len()];
+        let h1 = vec![0.003; m1.nodes.len()];
+        let comps = [
+            ShellComponent {
+                id: 0,
+                mesh: &m0,
+                model: &mod0,
+                nodal_thickness_m: &h0,
+            },
+            ShellComponent {
+                id: 1,
+                mesh: &m1,
+                model: &mod1,
+                nodal_thickness_m: &h1,
+            },
+        ];
+        let glue = GlueLine {
+            normal_n_m3: 1.0e11,
+            shear_n_m3: [5.0e10, 5.0e10],
+            viscosity_n_s_m3: None,
+            width_m: 0.003,
+        };
+        // 4 seam nodes -> N = 3 segments, M = 24 compliant interface DOFs.
+        let ties = [EdgeTie {
+            a: TieSide {
+                component: 0,
+                nodes: vec![2, 5, 8, 11],
+            },
+            b: TieSide {
+                component: 1,
+                nodes: vec![0, 3, 6, 9],
+            },
+            offset: TieOffset::Midsurface,
+            rotations: RotationCoupling::Full,
+            kind: TieKind::Compliant(glue),
+        }];
+        let n_segments = 3usize;
+        let n_glue_dofs = 24usize;
+        let ok_budget = TieBudget {
+            max_segments: n_segments,
+            max_slave_dofs: n_glue_dofs,
+            gap_tolerance_m: 1e-6,
+            angle_tolerance_rad: 1e-4,
+        };
+        let tied =
+            tie_shells(&comps, &ties, ok_budget, || false).expect("passes at exact glue cap");
+        assert_eq!(tied.receipt.segments, n_segments);
+        assert_eq!(tied.receipt.slave_dofs, n_glue_dofs);
+
+        let over_seg_budget = TieBudget {
+            max_segments: n_segments - 1,
+            ..ok_budget
+        };
+        let err_seg = tie_shells(&comps, &ties, over_seg_budget, || false).unwrap_err();
+        assert!(matches!(
+            err_seg,
+            PlateError::Budget {
+                what: "tie_segments",
+                ..
+            }
+        ));
+
+        let over_dof_budget = TieBudget {
+            max_slave_dofs: n_glue_dofs - 1,
+            ..ok_budget
+        };
+        let err_dof = tie_shells(&comps, &ties, over_dof_budget, || false).unwrap_err();
+        assert!(matches!(
+            err_dof,
+            PlateError::Budget {
+                what: "tie_slave_dofs",
+                ..
+            }
+        ));
     }
 
     #[test]
