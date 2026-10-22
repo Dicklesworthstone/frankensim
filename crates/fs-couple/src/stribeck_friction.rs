@@ -199,9 +199,10 @@ pub fn solve_implicit_friction<E>(
 /// and at two stable sliding roots. A contact stays on the branch it occupies
 /// and leaves it only where that branch ends. There is no capture window: every
 /// transition is fixed by the law, the normal load and the discrete mobility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContactBranch {
     /// No retained history: the first step after the load is applied.
+    #[default]
     Fresh,
     /// Endpoint no-slip inside the static cone.
     Stuck,
@@ -226,6 +227,13 @@ pub struct SetValuedFrictionStep {
     pub relative_velocity_m_s: f64,
     /// Branch the contact occupies after this step.
     pub branch: ContactBranch,
+    /// Intersections of the discrete load line with the friction graph:
+    /// the static cone (when it admits the held no-slip force) plus every
+    /// sliding root, so 1 or 3 away from a fold.
+    pub roots: u8,
+    /// Zero-based index of the committed intersection, ordered by slip speed
+    /// with the static cone first.
+    pub selected: u8,
 }
 
 /// Discrete load line of the fs-tribo Stribeck law
@@ -422,13 +430,39 @@ impl StribeckLoadLine {
             None if !stick_admissible => Some((root_on(0.0, speed)?, false)),
             other => other,
         };
+        // Disclosure. The residual rises on (0, a], falls on (a, b] and rises
+        // on (b, speed], with a and b its critical slips clipped to the free
+        // slip. The low root exists when the cone refuses and g(a) > 0, the
+        // middle one when g(a) > 0 > g(b), and the high one when g(b) <= 0
+        // (the same existence tests the branch selection uses).
+        let a = self.local_max_m_s.min(speed);
+        let b = self.local_min_m_s.min(speed);
+        let g_a = if a > 0.0 { residual(a)? } else { 0.0 };
+        let g_b = if b < speed { residual(b)? } else { 1.0 };
+        let has_low = !stick_admissible && g_a > 0.0;
+        let has_middle = b < speed && g_a > 0.0 && g_b < 0.0;
+        let has_high = b < speed && g_b <= 0.0;
+        let counted = u8::from(stick_admissible)
+            + u8::from(has_low)
+            + u8::from(has_middle)
+            + u8::from(has_high);
         let Some((slip, on_high)) = choice else {
             return Ok(SetValuedFrictionStep {
                 traction_n: pin,
                 relative_velocity_m_s: 0.0,
                 branch: ContactBranch::Stuck,
+                roots: counted,
+                selected: 0,
             });
         };
+        // The high root is the last intersection. Otherwise this is the first
+        // sliding root: the low one, or the fold fallback above.
+        let selected = if on_high {
+            counted.saturating_sub(1)
+        } else {
+            u8::from(stick_admissible)
+        };
+        let roots = counted.max(selected + 1);
         let sign = if positive { 1.0 } else { -1.0 };
         let traction = sign * force(slip)?;
         let endpoint = free_relative_velocity_m_s - mobility * traction;
@@ -444,6 +478,8 @@ impl StribeckLoadLine {
             } else {
                 ContactBranch::SlidingLow { positive }
             },
+            roots,
+            selected,
         })
     }
 }

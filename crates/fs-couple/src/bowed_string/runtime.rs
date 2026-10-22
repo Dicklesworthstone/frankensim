@@ -38,6 +38,26 @@ pub struct BowedSample {
     pub radiated_pressure_pa: Option<f64>,
     /// Endpoint string modal energy [J]; does not include soundboard energy.
     pub total_modal_energy_j: f64,
+    /// Contact receipt of this sample's last substep.
+    pub contact: BowContactReceipt,
+    /// Substeps of this sample that ended stuck.
+    pub stuck_substeps: u32,
+}
+
+/// Disclosure of one held-force contact step (one substep).
+///
+/// `roots` counts the intersections of the discrete load line with the
+/// friction graph, the static cone included; `selected` is the zero-based
+/// index of the committed one by slip speed, cone first. A lifted bow has no
+/// contact and reports zero roots. The viscous falsifier has one root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BowContactReceipt {
+    /// Branch after the step; `Fresh` while lifted.
+    pub branch: ContactBranch,
+    /// Intersections found, 0..=3.
+    pub roots: u8,
+    /// Index of the committed intersection.
+    pub selected: u8,
 }
 
 /// State of the original bowed-string physics across audio callbacks.
@@ -65,6 +85,7 @@ pub struct BowedStringState {
     kinetic_law: Option<fs_tribo::FrictionLaw>,
     load_line: Option<StribeckLoadLine>,
     branch: ContactBranch,
+    receipts: Vec<BowContactReceipt>,
     gesture: BowGesture,
     model: ModalAcousticTimeModel,
     workspace: ModalAcousticWorkspace,
@@ -190,6 +211,7 @@ impl BowedStringState {
         Ok(Self {
             card: card.clone(), island: config.island.clone(), stribeck,
             kinetic_law: config.island.kinetic_law(), load_line: None, branch: ContactBranch::Fresh,
+            receipts: Vec::with_capacity(subsamples),
             gesture: config.gesture, model, workspace, shapes_at_bow, contact_velocity_rows,
             bridge_force_factors, bridge_viscous_factors, plate,
             listener_m: config.listener_m, forces: vec![0.0; card.mode_count],
@@ -217,6 +239,22 @@ impl BowedStringState {
     /// Largest string energy observed, including substep endpoints and initial rest.
     #[must_use]
     pub const fn peak_modal_energy_j(&self) -> f64 { self.peak_energy_j }
+
+    /// Replace the string's modal state through the modal model's transactional
+    /// restart seam, for example to begin from a known motion. Gesture and clock
+    /// are unchanged; the contact history restarts fresh. A refusal leaves the
+    /// voice unchanged.
+    pub fn restore_string_states(&mut self, states: &[ModalAcousticState]) -> Result<(), BowedRunError> {
+        self.check_live()?;
+        self.model.restore_states(states).map_err(BowedRunError::Model)?;
+        self.branch = ContactBranch::Fresh;
+        self.peak_energy_j = self.peak_energy_j.max(frame_total_energy(&self.model));
+        Ok(())
+    }
+
+    /// Contact receipts of every substep of the last completed sample, in order.
+    #[must_use]
+    pub fn last_contact_receipts(&self) -> &[BowContactReceipt] { &self.receipts }
 
     /// Whether this voice has an actual pressure observer.
     #[must_use]
@@ -352,7 +390,9 @@ impl BowedStringState {
     // The owner's set-valued step: stick inside the static cone or slide on the
     // unregularized kinetic law, keeping the branch the contact is on. Source
     // applicability is checked at the committed endpoint, zero when sticking.
-    fn set_valued_traction(&mut self, free_relative: f64, mobility: f64) -> Result<f64, BowedRunError> {
+    fn set_valued_traction(&mut self, free_relative: f64, mobility: f64)
+        -> Result<(f64, BowContactReceipt), BowedRunError>
+    {
         let normal = self.gesture.normal_force_n;
         if !self.load_line.as_ref().is_some_and(|line| line.matches(normal, mobility)) {
             let law = self.kinetic_law.as_ref().ok_or(BowedRunError::Friction("missing Stribeck law"))?;
@@ -365,28 +405,32 @@ impl BowedStringState {
             .map_err(|error| friction_refusal(error, BowedRunError::Interface))?;
         self.island.check_state(step.relative_velocity_m_s, normal)?;
         self.branch = step.branch;
-        Ok(step.traction_n)
+        Ok((step.traction_n, BowContactReceipt { branch: step.branch, roots: step.roots, selected: step.selected }))
     }
 
     fn advance_sample(&mut self) -> Result<BowedSample, BowedRunError> {
+        self.receipts.clear();
         for _ in 0..self.subsamples {
             let v_str: f64 = self.model.states().iter().zip(&self.shapes_at_bow)
                 .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s).sum();
             let v_rel = self.gesture.v_bow_m_s - v_str;
             // No contact exists while the bow is lifted. In particular the
             // interface's positive-load domain is not queried at zero load.
-            let traction = if self.gesture.normal_force_n == 0.0 {
+            let (traction, receipt) = if self.gesture.normal_force_n == 0.0 {
                 self.branch = ContactBranch::Fresh;
-                0.0
+                (0.0, BowContactReceipt::default())
             } else {
                 self.island.check_state(v_rel, self.gesture.normal_force_n)?;
                 let (free_relative, mobility) = self.contact_response()?;
                 if let FrictionIsland::ViscousOnly { viscous_n_s_per_m } = self.island {
-                    self.implicit_viscous_traction(viscous_n_s_per_m, free_relative, mobility)?
+                    let traction = self.implicit_viscous_traction(viscous_n_s_per_m, free_relative, mobility)?;
+                    let branch = ContactBranch::SlidingLow { positive: free_relative > 0.0 };
+                    (traction, BowContactReceipt { branch, roots: 1, selected: 0 })
                 } else {
                     self.set_valued_traction(free_relative, mobility)?
                 }
             };
+            self.receipts.push(receipt);
             for (q, phi) in self.forces.iter_mut().zip(&self.shapes_at_bow) { *q = traction * phi; }
             let stepped = self.model.step_duration_into(&self.forces, self.sub_dt, &mut self.workspace)
                 .map_err(BowedRunError::LimitExceeded)?;
@@ -420,11 +464,14 @@ impl BowedStringState {
             }
             (Some(velocity), Some(pressure))
         } else { (None, None) };
+        let stuck = self.receipts.iter().filter(|r| r.branch == ContactBranch::Stuck).count();
         Ok(BowedSample {
             bow_point_velocity_m_s: endpoint_velocity,
             relative_velocity_m_s: self.gesture.v_bow_m_s - endpoint_velocity,
             bridge_force_n: bridge_force, body_volume_velocity_m3_s, radiated_pressure_pa,
             total_modal_energy_j: frame_total_energy(&self.model),
+            contact: self.receipts.last().copied().unwrap_or_default(),
+            stuck_substeps: u32::try_from(stuck).map_err(|_| invalid("bow substep count exceeds u32"))?,
         })
     }
 
