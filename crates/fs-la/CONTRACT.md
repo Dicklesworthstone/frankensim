@@ -228,6 +228,15 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   split-vs-straight plus same-run replay for both Lanczos and LOBPCG, and
   carries a disclosed seeded eigenvalue-reference corruption that turns the
   suite red.
+- `nonlinear_eig::rayleigh_newton_pole` — an isolated eigenvalue of a
+  dense complex-symmetric nonlinear matrix function `T(s) v = 0` by
+  Newton on the Rayleigh functional with nonlinear inverse iteration
+  (Ruhe 1973), using `lu_complex`. Returns the pair with its computed
+  residual `||T v|| / (||T||_F ||v||)`. Typed refusals: bad input, a
+  refused function value, a vanishing functional derivative, no
+  convergence within the cap. Tested: a damped quadratic pencil against
+  the companion-matrix spectrum of `eig` (1e-12), a square-root
+  nonlinearity, refusals, bitwise repeat.
 - `eigen_complex::{eig, det_complex, EigFailure}` — general complex
   nonsymmetric eigenvalues: Givens Hessenberg reduction + explicitly
   shifted QR (Wilkinson shifts with total_cmp tie-breaks, exceptional

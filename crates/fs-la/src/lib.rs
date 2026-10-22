@@ -16,6 +16,7 @@ pub mod eigen_complex;
 pub mod factor;
 pub mod gemm;
 pub mod mixed;
+pub mod nonlinear_eig;
 pub mod rand_nla;
 /// Reusable dense solves for repeated small nonlinear systems.
 pub mod prepared_lu;
