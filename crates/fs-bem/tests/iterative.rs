@@ -796,6 +796,12 @@ fn bem_directional_matches_dense_above_w5a_regime() {
         directional.order = p;
         directional.low_freq_threshold = 0.5;
         directional.leaf_capacity = 128;
+        // On this bell the mixed operator's plan holds 7.9e6, 13.6e6 and
+        // 21.9e6 C64 slots at p = 5, 6 and 7 (ts1, dd1052e20), so p >= 6 is
+        // past the v1 ceiling of 8.39e6. 610ada520 and the pre-envelope
+        // 3dd6552ad both refused it. The envelope is declared with about 1.5x
+        // headroom; the accuracy gate below is unchanged.
+        directional.max_coefficient_slots = 1 << 25;
         let o = IterativeOptions {
             directional: Some(directional),
             ..opts()
