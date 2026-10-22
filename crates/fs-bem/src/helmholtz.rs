@@ -104,6 +104,26 @@ pub mod aperture;
 /// is already a 1 GiB matrix). The FMM path is the recorded follow-up.
 pub const MAX_DENSE_PANELS: usize = 8192;
 
+std::thread_local! {
+    static DENSE_WORKERS: core::cell::Cell<usize> = const { core::cell::Cell::new(1) };
+}
+
+/// Run `f` with `workers` (at least one) threads declared for this thread's
+/// dense operator assembly and its LU factorization
+/// ([`fs_la::eigen_complex::with_lu_workers`]), then restore the previous
+/// declaration, also on unwind. This is a scheduling budget only: every
+/// matrix entry and factor is bit-identical for every worker count.
+pub fn with_dense_workers<R>(workers: usize, f: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DENSE_WORKERS.with(|w| w.set(self.0));
+        }
+    }
+    let _restore = Restore(DENSE_WORKERS.with(|w| w.replace(workers.max(1))));
+    fs_la::eigen_complex::with_lu_workers(workers, f)
+}
+
 /// Maximum number of boundary-velocity fields solved against one shared
 /// Helmholtz factorization. This bounds the aggregate output and triangular
 /// solve work while still covering modal/directivity batches without forcing
@@ -332,7 +352,7 @@ fn green_dr<K: WaveNumber>(k: K, r: f64) -> C64 {
 // Real-frequency solves retain their original operation graph. The damped
 // extension supplies only the analytic scalar kernels; matrix geometry, static
 // closures, normal derivatives and LU assembly remain this owner's code.
-pub(crate) trait WaveNumber: Copy {
+pub(crate) trait WaveNumber: Copy + Send + Sync {
     fn value(self) -> C64;
     fn outgoing(self, r: f64) -> C64;
     fn radial_factor(self, r: f64) -> C64;
@@ -1322,6 +1342,47 @@ fn assemble_dense(surface: &SpherePanels, k: f64, alpha: C64) -> (Vec<C64>, Vec<
     assemble_dense_with_static(surface, k, alpha, None)
 }
 
+/// Fill a row-major n x n pair row by row on this thread's declared dense
+/// workers ([`with_dense_workers`]). `fill_row(i, a_row, b_row)` must write
+/// row i from shared data only, so the worker count never changes a bit.
+fn fill_rows(
+    amat: &mut [C64],
+    bmat: &mut [C64],
+    n: usize,
+    fill_row: &(impl Fn(usize, &mut [C64], &mut [C64]) + Sync),
+) {
+    let workers = DENSE_WORKERS.with(core::cell::Cell::get).min(n);
+    if workers <= 1 {
+        for (i, (arow, brow)) in amat
+            .chunks_exact_mut(n.max(1))
+            .zip(bmat.chunks_exact_mut(n.max(1)))
+            .enumerate()
+        {
+            fill_row(i, arow, brow);
+        }
+    } else {
+        let (mut a_rest, mut b_rest) = (amat, bmat);
+        std::thread::scope(|scope| {
+            for p in 0..workers {
+                let (start, end) = (p * n / workers, (p + 1) * n / workers);
+                let entries = (end - start) * n;
+                let (a_head, a_tail) = core::mem::take(&mut a_rest).split_at_mut(entries);
+                let (b_head, b_tail) = core::mem::take(&mut b_rest).split_at_mut(entries);
+                (a_rest, b_rest) = (a_tail, b_tail);
+                scope.spawn(move || {
+                    for (r, (arow, brow)) in a_head
+                        .chunks_exact_mut(n)
+                        .zip(b_head.chunks_exact_mut(n))
+                        .enumerate()
+                    {
+                        fill_row(start + r, arow, brow);
+                    }
+                });
+            }
+        });
+    }
+}
+
 fn assemble_dense_with_static<K: WaveNumber>(
     surface: &SpherePanels,
     k: K,
@@ -1345,7 +1406,9 @@ fn assemble_dense_with_static<K: WaveNumber>(
     let half = C64::new(0.5, 0.0);
     let mut amat = vec![C64::ZERO; n * n];
     let mut bmat = vec![C64::ZERO; n * n];
-    for i in 0..n {
+    // Each row reads only shared geometry and writes only its own entries, so
+    // rows split across the declared workers give the same bits.
+    let fill_row = |i: usize, arow: &mut [C64], brow: &mut [C64]| {
         let xi = centroids[i];
         let ni = normals[i];
         // Static hypersingular row sum: N_0[1] = 0 on a closed surface,
@@ -1442,10 +1505,11 @@ fn assemble_dense_with_static<K: WaveNumber>(
                 aij = aij - half;
                 bij = bij + alpha * half;
             }
-            amat[i * n + j] = aij;
-            bmat[i * n + j] = bij;
+            arow[j] = aij;
+            brow[j] = bij;
         }
-    }
+    };
+    fill_rows(&mut amat, &mut bmat, n, &fill_row);
     (amat, bmat)
 }
 
@@ -3760,5 +3824,55 @@ mod tests {
         let err = directivity_sh_table(&surface, &sol, Medium::air(), MAX_SH_DEGREE + 1)
             .expect_err("degree cap");
         assert!(err.to_string().contains("FS-BEM-HELM-BAD-PARAMETER"));
+    }
+
+    #[test]
+    fn declared_dense_workers_leave_every_entry_and_solution_bitwise() {
+        fn bits(values: &[C64]) -> Vec<(u64, u64)> {
+            values
+                .iter()
+                .map(|v| (v.re.to_bits(), v.im.to_bits()))
+                .collect()
+        }
+        let surface = SpherePanels::icosphere(1.0, 2).expect("icosphere");
+        let n = surface.centroids().len();
+        let velocity: Vec<C64> = surface
+            .normals()
+            .iter()
+            .map(|v| C64::new(v[2], 0.25))
+            .collect();
+        for (k, formulation) in [
+            (0.5, Formulation::PlainCbie),
+            (2.0, Formulation::BurtonMiller),
+        ] {
+            let alpha = alpha_for(formulation, k);
+            let (a, b) = assemble_dense(&surface, k, alpha);
+            let solved = solve_radiation(&surface, k, Medium::air(), &velocity, formulation)
+                .expect("solve")
+                .pressure;
+            for workers in [3, 7, n + 5] {
+                let (wa, wb, ws) = with_dense_workers(workers, || {
+                    let (wa, wb) = assemble_dense(&surface, k, alpha);
+                    let ws = solve_radiation(&surface, k, Medium::air(), &velocity, formulation)
+                        .expect("solve")
+                        .pressure;
+                    (wa, wb, ws)
+                });
+                assert_eq!(bits(&wa), bits(&a), "{formulation:?} workers {workers}");
+                assert_eq!(bits(&wb), bits(&b), "{formulation:?} workers {workers}");
+                assert_eq!(
+                    bits(&ws),
+                    bits(&solved),
+                    "{formulation:?} workers {workers}"
+                );
+            }
+        }
+        // The declaration is scoped and restored, also after a panic.
+        assert!(std::panic::catch_unwind(|| with_dense_workers(4, || panic!("inside"))).is_err());
+        assert_eq!(DENSE_WORKERS.with(core::cell::Cell::get), 1);
+        assert_eq!(
+            with_dense_workers(4, || DENSE_WORKERS.with(core::cell::Cell::get)),
+            4
+        );
     }
 }
