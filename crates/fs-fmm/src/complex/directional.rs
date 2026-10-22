@@ -1014,16 +1014,84 @@ impl DirectionalPlan {
         }
         // The same exact normal-factored point kernel as W5a; no quadrature,
         // self term, charge modification or global direct fallback.
-        for &(a, b) in &self.near {
-            for &t in &op.geometry.cells[&a].points {
-                for &s in &op.geometry.cells[&b].points {
-                    if t != s {
-                        out[t] = out[t] + op.pair(t, s) * charges[s];
+        if op.workers > 1 {
+            self.near_on_workers(op, charges, &mut out);
+        } else {
+            for &(a, b) in &self.near {
+                for &t in &op.geometry.cells[&a].points {
+                    for &s in &op.geometry.cells[&b].points {
+                        if t != s {
+                            out[t] = out[t] + op.pair(t, s) * charges[s];
+                        }
                     }
                 }
             }
         }
         validate_output(out)
+    }
+
+    /// The direct near pass on the operator's declared workers. Each worker
+    /// owns whole target leaves; a target starts from its far-field value and
+    /// adds its pairs in the serial order (near-list order, then source
+    /// order), so every potential keeps its serial bits.
+    fn near_on_workers(&self, op: &FmmC64<'_>, charges: &[C64], out: &mut [C64]) {
+        let mut groups: BTreeMap<CellKey, Vec<CellKey>> = BTreeMap::new();
+        for &(a, b) in &self.near {
+            groups.entry(a).or_default().push(b);
+        }
+        let groups: Vec<(CellKey, Vec<CellKey>)> = groups.into_iter().collect();
+        let cost = |(a, sources): &(CellKey, Vec<CellKey>)| {
+            op.geometry.cells[a].points.len()
+                * sources
+                    .iter()
+                    .map(|b| op.geometry.cells[b].points.len())
+                    .sum::<usize>()
+        };
+        let total = groups.iter().map(cost).sum::<usize>().max(1);
+        let workers = op.workers.min(groups.len()).max(1);
+        // Contiguous group ranges with balanced pair counts.
+        let mut bounds = vec![0];
+        let mut running = 0;
+        for (g, group) in groups.iter().enumerate() {
+            running += cost(group);
+            if bounds.len() < workers && running * workers >= bounds.len() * total {
+                bounds.push(g + 1);
+            }
+        }
+        bounds.push(groups.len());
+        let far: &[C64] = out;
+        let parts: Vec<Vec<(usize, C64)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = bounds
+                .windows(2)
+                .map(|range| {
+                    let groups = &groups[range[0]..range[1]];
+                    scope.spawn(move || {
+                        let mut values = Vec::new();
+                        for (a, sources) in groups {
+                            for &t in &op.geometry.cells[a].points {
+                                let mut value = far[t];
+                                for b in sources {
+                                    for &s in &op.geometry.cells[b].points {
+                                        if t != s {
+                                            value = value + op.pair(t, s) * charges[s];
+                                        }
+                                    }
+                                }
+                                values.push((t, value));
+                            }
+                        }
+                        values
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("directional near worker panicked"))
+                .collect()
+        });
+        for (t, value) in parts.into_iter().flatten() {
+            out[t] = value;
+        }
     }
 }
 

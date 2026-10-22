@@ -912,6 +912,41 @@ fn dfmm_declared_near_pair_envelope_is_neutral_and_enforced() {
 }
 
 #[test]
+fn dfmm_declared_workers_leave_every_potential_bitwise() {
+    // The direct near pass runs on the declared workers. The unit sphere at
+    // k = 5 (the impedance sphere series' ka = 5 regime) keeps a large near
+    // field; every kernel kind must keep the serial bits at every count.
+    let points = sphere(1024);
+    let normals = points.clone();
+    let q = charges(points.len());
+    let kernel = HelmholtzSingle { k: 5.0 };
+    let mut o = DirectionalOptions::for_tolerance(1e-3).unwrap();
+    o.leaf_capacity = 16;
+    for kind in 0..4 {
+        let started = Instant::now();
+        let mut op = operator(kind, &kernel, &points, &normals, o.clone());
+        let near_pairs = op.directional_stats().unwrap().near_pairs;
+        assert!(near_pairs > 0, "the fixture must have a direct near field");
+        let reference = bits(&op.potentials(&q).unwrap());
+        for workers in [2, 3, 16, 4096] {
+            op.set_workers(workers).unwrap();
+            assert_eq!(
+                reference,
+                bits(&op.potentials(&q).unwrap()),
+                "workers={workers}"
+            );
+        }
+        emit(
+            "dfmm-workers-bitwise",
+            format!(
+                "{{\"case\":\"dfmm-workers-bitwise\",\"inputs\":\"Fibonacci unit sphere, 1024 points, k=5\",\"axis\":\"kernel-kind\",\"rung\":{kind},\"observed\":{{\"near_pairs\":{near_pairs}}},\"workers\":[1,2,3,16,4096],\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+                started.elapsed().as_secs_f64()
+            ),
+        );
+    }
+}
+
+#[test]
 fn dfmm_bitwise_repeat() {
     let (points, normals) = fixture(16);
     let q = charges(16);
