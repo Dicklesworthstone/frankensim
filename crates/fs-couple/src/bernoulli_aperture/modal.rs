@@ -27,6 +27,8 @@ pub mod closure;
 mod spatial;
 /// Original regional material plates and same-basis spatial ports.
 pub mod material;
+/// Prescribed spatial pressure loads on the original material modal basis.
+pub mod pressure;
 /// Source-bound proportional Maxwell memory in the original modal basis.
 pub mod relaxation;
 mod viscosity;
@@ -89,7 +91,10 @@ pub struct ModalApertureFrame {
     pub work_certificate: SolveCertificate,
     /// Observed flow closure and its declared volume-flow budget [m^3/s].
     pub flow_certificate: SolveCertificate,
-    port_transfers: [crate::port_adoption::PortTransfer; 4],
+    /// Additional spatial pressure ports, separate from the uniform bore load.
+    /// Their work is already included in aperture.mechanical_work_j.
+    pub spatial_pressure: [pressure::MaterialPressureFrame; 2],
+    port_transfers: [crate::port_adoption::PortTransfer; 6],
     memory: Option<Vec<Vec<f64>>>,
 }
 
@@ -102,6 +107,7 @@ pub struct ModalAperture {
     closure: Option<closure::ModalPlateClosure>,
     samples: u64,
     material_plates: Vec<material::MaterialModalPlate>,
+    pressure_ports: [Option<pressure::MaterialPressurePort>; 2],
     material_gas: Option<fs_material::gas::GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
     viscosity: Option<viscosity::ApertureViscosity>,
@@ -238,6 +244,7 @@ impl ModalAperture {
             closure: None,
             samples: 0,
             material_plates: Vec::new(),
+            pressure_ports: [None, None],
             material_gas: None,
             viscous_slit: None,
             viscosity: None,
@@ -440,7 +447,7 @@ impl ModalAperture {
                 tolerance_j: Some(frame.work_certificate.effective_budget),
                 unavailable: None,
             },
-            frame.port_transfers,
+            frame.port_transfers.into_iter().take(self.ports.schemas.len()),
         );
         self.state.copy_from_slice(&frame.modes);
         if let (Some(relaxation), Some(states)) = (&mut self.relaxation, &frame.memory) {
@@ -453,8 +460,17 @@ impl ModalAperture {
         drive: ApertureDrive,
         forces: [f64; 2],
     ) -> Result<ModalApertureFrame, AcousticRealizeError> {
+        self.preview_with_pressures(drive, forces, [0.0; 2])
+    }
+    pub(super) fn preview_with_pressures(
+        &self,
+        drive: ApertureDrive,
+        forces: [f64; 2],
+        pressures_pa: [f64; 2],
+    ) -> Result<ModalApertureFrame, AcousticRealizeError> {
         self.admit_linear_clock()?;
         self.validate_forces(forces)?;
+        self.validate_pressures(pressures_pa)?;
         if self.samples >= self.spec.max_steps
             || ![
                 drive.upstream_pressure_pa,
@@ -480,6 +496,18 @@ impl ModalAperture {
         );
         for (i, (m, s)) in self.spec.modes.iter().zip(&self.state).enumerate() {
             external[i] = m.force_projection[0] * forces[0] + m.force_projection[1] * forces[1];
+            for (port, pressure) in self.pressure_ports.iter().zip(pressures_pa) {
+                if let Some(port) = port {
+                    // Keep the original arithmetic when this additional source
+                    // is absent or released; the uniform pressure face is intact.
+                    if pressure != 0.0 {
+                        external[i] += port.modal_area_m2()[i] * pressure;
+                    }
+                }
+            }
+            if !external[i].is_finite() {
+                return Err(invalid("material pressure traction overflowed its modal force"));
+            }
             area[i] = m.pressure_area_m2;
             shape[i] = m.gap_projection;
             if self.exact.is_some() {
@@ -792,11 +820,22 @@ impl ModalAperture {
                     .map(|(m, v)| m.force_projection[column] * v)
                     .sum::<f64>()
         };
+        let spatial_pressure = std::array::from_fn(|blade| {
+            self.pressure_ports[blade].as_ref().map_or(
+                pressure::MaterialPressureFrame::default(),
+                |port| port.observe(pressures_pa[blade], &trial.velocity[..n], dt),
+            )
+        });
+        if spatial_pressure.iter().any(|p| !p.flow_m3_s.is_finite() || !p.work_j.is_finite()) {
+            return Err(invalid("material pressure work or conjugate flow overflowed"));
+        }
         let port_transfers = [
             crate::port_adoption::PortTransfer::work(drive.upstream_pressure_pa * volume, true),
             crate::port_adoption::PortTransfer::work(-aperture.bore_pressure_pa * volume, true),
             crate::port_adoption::PortTransfer::work(plate_work(0), true),
             crate::port_adoption::PortTransfer::work(plate_work(1), true),
+            crate::port_adoption::PortTransfer::work(spatial_pressure[0].work_j, true),
+            crate::port_adoption::PortTransfer::work(spatial_pressure[1].work_j, true),
         ];
         Ok(ModalApertureFrame {
             aperture,
@@ -807,6 +846,7 @@ impl ModalAperture {
             momentum_residual_n: momentum,
             work_certificate,
             flow_certificate,
+            spatial_pressure,
             memory: self
                 .relaxation
                 .as_ref()

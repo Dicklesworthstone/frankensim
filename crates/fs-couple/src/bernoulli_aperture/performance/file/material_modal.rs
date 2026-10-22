@@ -27,6 +27,7 @@ mod radiation;
 mod wall;
 mod forces;
 mod closure;
+mod pressure;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -300,9 +301,11 @@ impl MaterialModalValvePerformance {
             plates.push((source, options));
         }
         let modes = states.len();
+        let pressure_shapes = pressure::shapes(&mut rows, blades, gate)?;
         let closure = closure::read(&mut rows, gate)?;
         let boundaries = boundaries::Inputs::read(&mut rows)?;
         let forces = forces::read(&mut rows, blades, mechanical_samples, gate)?;
+        let pressure_events = pressure::events(&mut rows, blades, mechanical_samples, gate)?;
         let mut row = rows.row("compile_limits")?;
         let max_compile_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -339,6 +342,9 @@ impl MaterialModalValvePerformance {
                     } else { valve.with_material_relaxation(&properties, initial, gate) })
             }
         }.map_err(PlateValveInputError::Physics)?;
+        for pressure in pressure_shapes {
+            valve = pressure.bind(valve, gate)?;
+        }
         if let Some(closure) = closure {
             valve = valve.with_plate_closure(closure).map_err(PlateValveInputError::Physics)?;
         }
@@ -358,6 +364,12 @@ impl MaterialModalValvePerformance {
         for (blade, events) in forces.into_iter().enumerate() {
             if !events.is_empty() {
                 renderer = renderer.with_material_plate_force_controls(blade, events)
+                    .map_err(PlateValveInputError::Gesture)?;
+            }
+        }
+        for (blade, events) in pressure_events.into_iter().enumerate() {
+            if !events.is_empty() {
+                renderer = renderer.with_material_pressure_controls(blade, events)
                     .map_err(PlateValveInputError::Gesture)?;
             }
         }

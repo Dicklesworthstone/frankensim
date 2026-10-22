@@ -81,6 +81,12 @@ impl ScheduledTwoSidedPressure {
             work = work.checked_sub(force.work)
                 .ok_or_else(|| invalid("source forces exceed the auxiliary compilation work budget"))?;
         }
+        for pressure in self.spatial_pressures.iter().flatten() {
+            assignments = assignments.checked_sub(pressure.events.len())
+                .ok_or_else(|| invalid("spatial pressure exceeds the combined control storage budget"))?;
+            work = work.checked_sub(pressure.work)
+                .ok_or_else(|| invalid("spatial pressure exceeds auxiliary compilation work"))?;
+        }
         for boundary in self.boundaries.iter().flatten() {
             assignments = assignments.checked_sub(boundary.assignment_count())
                 .ok_or_else(|| invalid("boundaries exceed the combined control storage budget"))?;

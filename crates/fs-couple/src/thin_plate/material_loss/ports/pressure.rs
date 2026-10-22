@@ -2,6 +2,16 @@
 use super::*;
 
 impl ResolvedPlateChart {
+    /// Consistent P1 pressure loads on this original mesh, without another
+    /// eigensolve. Retained-basis consumers use the same quadrature as the
+    /// pressure-port reducer below, then project their existing signed shapes.
+    pub(crate) fn nodal_pressure_loads(
+        &self, pressure_at_nodes: &[Vec<f64>], max_projection_terms: usize,
+    ) -> Result<Vec<Vec<f64>>, AcousticRealizeError> {
+        pressure_loads(&self.chart().mesh, pressure_at_nodes, max_projection_terms)
+            .map(|(loads, _)| loads)
+    }
+
     /// Reduce the material body once and project nodal pressure basis functions
     /// on EXACTLY those modes. Returns radiators and row-major structural-by-
     /// pressure overlaps C[r,j] = integral(phi_r * psi_j dA)/sqrt(modal_mass).

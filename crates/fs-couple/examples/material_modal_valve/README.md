@@ -68,6 +68,17 @@ cargo run --release -p fs-couple --bin music_render -- wind \
   "$modal_demo_dir/paired-forced.performance" "$modal_demo_dir/paired-forced.wav" --block 37
 ```
 
+`paired-pressure.performance` supplies independent distributed pressure loads
+on both source blades through the same renderer. The first trace changes sign
+from root to tip and has zero net force, yet it bends the blade because the
+retained displacement modes are nonuniform. The second trace rises from zero
+at the root to its reference amplitude at the tip. These are manufactured
+external pressure fields, not pressures inferred from the reed gap or acquired
+player measurements. Selecting a different material pack rebuilds their modal
+force/velocity overlaps on the new specimen and changes actual exterior sound.
+Both fields retain separate signed work accounts; uniform blowing pressure and
+the existing physical blade swept flow remain coupled exactly once.
+
 `paired-mutual.performance` selects an externally supplied two-port operator
 in `mutual.radiation`. Run it through the same command with a new output path.
 It adds a second explicitly declared downstream branch and uses the shared
@@ -133,6 +144,7 @@ contact EFFECTIVE_STIFFNESS_N_PER_M_ALPHA EXPONENT INTERNAL_LOSS_S_PER_M
 loss tensor V11 V22 V66 V12 V16 V26 REFERENCE_RESISTANCE_N_S_M PROJECTION_TERMS
 blades COUNT
 BLADE_RECORDS
+OPTIONAL_PRESSURE_SHAPE_RECORDS
 OPTIONAL_SPATIAL_CLOSURE_RECORDS
 upstream_boundaries
 BOUNDARY_RECORDS
@@ -141,10 +153,50 @@ BOUNDARY_RECORDS
 control_source ASSEMBLY PART
 source_forces COUNT
 source_force MECHANICAL_SAMPLE BLADE_INDEX FORCE_N
+source_pressures COUNT
+source_pressure MECHANICAL_SAMPLE BLADE_INDEX PRESSURE_PA
 compile_limits WORK CONTROLS
 schedule
 CANONICAL_GESTURE_BYTES
 ```
+
+Optional additional pressure traces follow all blade records, before spatial
+closure or boundary declarations:
+
+```text
+pressure_shapes COUNT
+pressure_shape BLADE_INDEX PROJECTION_TERMS SOURCE_LABEL
+pressure_nodes ORIGINAL_NODE_COUNT
+pressure_node DIMENSIONLESS_SHAPE_VALUE
+```
+
+Repeat the node row for every original node, and the shape block for each
+selected blade. At most one trace per blade is admitted. All values are signed
+and finite; they are **not normalized**. An amplitude `P` in pascals applies
+the local pressure `shape(x) * P`. This permits balanced and zero-net-force
+loads without dividing by their resultant force. The shared consistent P1
+triangle quadrature projects each trace onto the blade's already retained
+material modes. Complete source identity, all original node addresses and the
+explicit projection-work budget are retained. Missing nodes, duplicate blade
+bindings, ineffective or nonfinite projections, and late attachment refuse.
+
+The optional `source_pressures` block follows `source_forces` (when present)
+and precedes `compile_limits`. Count zero explicitly supplies no assignments;
+omission preserves the original pressure-only or force-driven render. Pressure
+events use mechanical sample addresses, not output frames. Unsorted records
+are stably ordered; the last assignment at an equal sample wins. Zero releases
+the source while keeping vibration, contact and material histories. The same
+combined control/work budgets include these records, ordinary blowing pressure,
+mechanical forces and moving keys.
+
+Spatial pressure work is `P * integral(shape * blade_velocity dA) * dt`, with
+the displacement increment from the original exact or midpoint solver. It is
+reported separately per blade and included once in total mechanical work.
+That generalized volume flow is not added to acoustic through-flow. These
+explicit external pressure inputs do not solve a moving-gap fluid field and
+must not repeat the uniform bore-pressure difference already owned by the
+valve. Original elastic, tensor-loss, Maxwell and spatial-contact paths all
+use the same traction input and pressure observer.
 
 Both inlets must contain the same complete gas state. Remote gas states and the
 exterior must share static pressure. Gas records accept the original named

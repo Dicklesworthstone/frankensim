@@ -14,6 +14,7 @@ mod boundaries;
 mod keyed;
 mod walls;
 mod forces;
+mod pressure;
 mod relaxation;
 
 fn pack(rho: f64, missing: bool) -> NormalizedMaterialCardPack {

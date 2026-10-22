@@ -28,6 +28,7 @@ pub struct TwoSidedPressure {
     rate: u32,
     max_block: usize,
     held: TwoSidedDrive,
+    held_spatial_pressures_pa: [f64; 2],
     gate: CancelGate,
     completed: u64,
     last: Option<TwoSidedFrame>,
@@ -139,6 +140,7 @@ impl TwoSidedPressure {
             rate,
             max_block,
             held: TwoSidedDrive::default(),
+            held_spatial_pressures_pa: [0.0; 2],
             gate: CancelGate::new_clock_free(),
             completed: 0,
             last: None,
@@ -163,6 +165,18 @@ impl TwoSidedPressure {
         self.held = drive;
         Ok(())
     }
+    /// Set independently prescribed spatial blade pressure amplitudes [Pa].
+    /// The material port retains its complete signed nodal trace. This does not
+    /// change the uniform series source or either acoustic inlet's swept volume.
+    pub fn set_spatial_pressures(&mut self, pressures_pa: [f64; 2]) -> Result<(), RenderError> {
+        if self.poisoned { return Err(RenderError::Poisoned); }
+        self.system.valve.validate_pressures(pressures_pa).map_err(RenderError::Voice)?;
+        self.held_spatial_pressures_pa = pressures_pa;
+        Ok(())
+    }
+    /// Last selected spatial pressure amplitudes; scheduled controls publish
+    /// their accepted values separately after successful physical ingestion.
+    pub const fn spatial_pressures_pa(&self) -> [f64; 2] { self.held_spatial_pressures_pa }
     /// Read physical states and all original material/geometry/gas declarations.
     #[must_use]
     pub const fn system(&self) -> &TwoSidedAperture { &self.system }
@@ -209,7 +223,8 @@ impl TwoSidedPressure {
     {
         if self.poisoned { return Err(RenderError::Poisoned); }
         let result = (|| {
-            let frame = self.system.step_with_boundaries_under_gate(self.held, drives, &self.gate)
+            let frame = self.system.step_with_boundaries_and_pressures_under_gate(
+                self.held, drives, self.held_spatial_pressures_pa, &self.gate)
                 .map_err(RenderError::Voice)?;
             let system = &self.system;
             let pressure = self.receiver.push_frame(|network, node| {

@@ -15,6 +15,8 @@ use crate::bernoulli_aperture::performance::boundaries::BoundarySchedule;
 use crate::bernoulli_aperture::two_sided::ValveSide;
 
 mod plate_forces;
+/// Mechanical-sample amplitudes of source-bound spatial pressure traces.
+pub mod spatial_pressures;
 /// Shared physical boundary programs and typed source/key gestures.
 pub mod boundaries;
 
@@ -31,6 +33,7 @@ pub struct ScheduledTwoSidedPressure {
     next: usize,
     held_pressure_pa: f64,
     plate_forces: [Option<ForceSchedule>; 2],
+    spatial_pressures: [Option<spatial_pressures::PressureSchedule>; 2],
     boundaries: [Option<BoundarySchedule>; 2],
     gesture_work: u64,
     poisoned: bool,
@@ -72,7 +75,8 @@ impl ScheduledTwoSidedPressure {
         };
         let controls = compile_schedule(&schedule, &mechanical_config)?;
         Ok(Self { source, schedule, config, controls, next: 0, held_pressure_pa: 0.0,
-            plate_forces: [None, None], boundaries: [None, None], gesture_work: 0, poisoned: false })
+            plate_forces: [None, None], spatial_pressures: [None, None],
+            boundaries: [None, None], gesture_work: 0, poisoned: false })
     }
     /// Original loaded mechanics and pressure receiver. Mutable access would
     /// permit stepping around the source schedule and is intentionally absent.
@@ -149,18 +153,22 @@ impl PressureRenderer for ScheduledTwoSidedPressure {
                 let drive = TwoSidedDrive {
                     source_pressure_pa: pressure, blade_forces_n: forces,
                 };
+                let spatial = std::array::from_fn(|i| self.spatial_pressures[i].as_ref()
+                    .map_or(self.source.held_spatial_pressures_pa[i], |p| p.candidate(sample)));
                 for boundaries in self.boundaries.iter_mut().flatten() { boundaries.prepare(sample); }
                 let boundary_drives = self.boundaries.each_ref().map(|side|
                     side.as_ref().map_or(&[][..], BoundarySchedule::candidate));
                 // Same physical/receiver step as held playback. Partial traces
                 // survive every control boundary instead of endpoint sampling.
-                let result = self.source.set_drive(drive)
+                let result = self.source.set_spatial_pressures(spatial)
+                    .and_then(|()| self.source.set_drive(drive))
                     .and_then(|()| self.source.advance_mechanical_with_boundaries(boundary_drives));
                 match result {
                     Ok(output) => {
                         self.next = next;
                         self.held_pressure_pa = pressure;
                         for force in self.plate_forces.iter_mut().flatten() { force.accept(sample); }
+                        for pressure in self.spatial_pressures.iter_mut().flatten() { pressure.accept(sample); }
                         for boundaries in self.boundaries.iter_mut().flatten() { boundaries.accept(); }
                         if let Some(p) = output { *slot = p; }
                     }

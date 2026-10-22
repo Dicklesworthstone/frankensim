@@ -33,6 +33,7 @@ use super::network::keyed as keyed_network;
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 use super::paired::{PairedAperture, PairedTrial};
 use super::modal::{ModalAperture, ModalApertureFrame};
+use super::modal::pressure::MaterialPressureFrame;
 use super::radiation::environment::multiport::MimoEnvironment;
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
     with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
@@ -115,14 +116,23 @@ impl LoadedAperture {
         match self { Self::Single(a) => a.stored_energy_j(), Self::Paired(a) => a.stored_energy_j(),
             Self::Modal(a) => a.stored_energy_j() }
     }
-    fn preview(&self, drive: ApertureDrive, forces: [f64; 2]) -> Result<ValveTrial, AcousticRealizeError> {
+    /// Validate independent spatial pressure sources without changing controls.
+    pub fn validate_pressures(&self, pressures_pa: [f64; 2]) -> Result<(), AcousticRealizeError> {
+        match self {
+            Self::Modal(a) => a.validate_pressures(pressures_pa),
+            _ if pressures_pa == [0.0; 2] => Ok(()),
+            _ => Err(invalid("spatial pressure inputs require original material modal ports")),
+        }
+    }
+    fn preview(&self, drive: ApertureDrive, forces: [f64; 2], pressures_pa: [f64; 2]) -> Result<ValveTrial, AcousticRealizeError> {
+        self.validate_pressures(pressures_pa)?;
         match self {
             Self::Single(a) => {
                 if forces[1] != 0.0 { return Err(invalid("single-coordinate valve has no second force port")); }
                 a.preview_step_with_force(drive, forces[0]).map(ValveTrial::Single)
             }
             Self::Paired(a) => a.preview(drive, forces).map(ValveTrial::Paired),
-            Self::Modal(a) => a.preview(drive, forces).map(ValveTrial::Modal),
+            Self::Modal(a) => a.preview_with_pressures(drive, forces, pressures_pa).map(ValveTrial::Modal),
         }
     }
     fn accept(&mut self, trial: ValveTrial) {
@@ -139,6 +149,12 @@ impl ValveTrial {
     fn frame(&self) -> ApertureFrame {
         match self { Self::Single(t) => t.frame, Self::Paired(t) => t.frame.aperture,
             Self::Modal(t) => t.aperture }
+    }
+    fn spatial_pressure(&self) -> [MaterialPressureFrame; 2] {
+        match self {
+            Self::Modal(t) => t.spatial_pressure,
+            _ => [MaterialPressureFrame::default(); 2],
+        }
     }
 }
 
@@ -214,6 +230,9 @@ pub struct TwoSidedFrame {
     pub coupled_terminal_work_j: f64,
     /// Explicit series-source work P_s Q dt [J], which may be negative.
     pub source_work_j: f64,
+    /// Additional prescribed spatial blade pressure, separate from series-source
+    /// work and uniform blade pressure. Work is included in mechanical_work_j.
+    pub spatial_pressure: [MaterialPressureFrame; 2],
 }
 impl TwoSidedFrame {
     /// No junction or nonlinear-solve defect is subtracted from this balance.
@@ -278,6 +297,7 @@ pub struct TwoSidedAperture {
     limits: TwoSidedLimits,
     material_ducts: [Option<material::MaterialDuctWalls>; 2],
     supply_channel: Option<SlitChannel>,
+    spatial_pressure_work_j: [f64; 2],
 }
 impl TwoSidedAperture {
     /// Attach two quiescent networks to an unadvanced valve, preserving initial
@@ -346,7 +366,8 @@ impl TwoSidedAperture {
         };
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
-            prepare(down, policies.map(|p|p[1]))?], limits, material_ducts: [None, None], supply_channel };
+            prepare(down, policies.map(|p|p[1]))?], limits, material_ducts: [None, None], supply_channel,
+            spatial_pressure_work_j: [0.0; 2] };
         // A lowering must preserve the exact boundary used in the mechanical solve.
         let actual_z = model.sides.iter().map(|s| s.network.inlet_impedance_pa_s_m3()).sum::<f64>();
         if actual_z.to_bits() != duct_z.to_bits() || !model.stored_energy_j().is_finite()
@@ -359,6 +380,10 @@ impl TwoSidedAperture {
     /// Read-only valve including its original material/geometry and accepted state.
     #[must_use]
     pub const fn valve(&self) -> &LoadedAperture { &self.valve }
+    /// Cumulative signed work from each independently prescribed spatial
+    /// pressure port [J]. Accepted mechanics owns this account even if an
+    /// exterior observation subsequently refuses. Series-source work is separate.
+    pub const fn spatial_pressure_work_j(&self) -> [f64; 2] { self.spatial_pressure_work_j }
     /// Exact source data before distributed-loss subdivision or terminal controls.
     #[must_use]
     pub fn source(&self, side: ValveSide) -> &ApertureDuctSpec { &self.sides[side.index()].source }
@@ -448,6 +473,17 @@ impl TwoSidedAperture {
         boundaries: [&[BoundaryDrive]; 2],
         gate: &CancelGate,
     ) -> Result<TwoSidedFrame, AcousticRealizeError> {
+        self.step_with_boundaries_and_pressures_under_gate(drive, boundaries, [0.0; 2], gate)
+    }
+
+    /// The same transaction with additional source-bound spatial blade pressure
+    /// amplitudes [Pa]. These act through material traction/velocity ports;
+    /// their work is counted once and their projected flow never enters either
+    /// duct as an extra volume source. Uniform bore pressure stays unchanged.
+    pub fn step_with_boundaries_and_pressures_under_gate(
+        &mut self, drive: TwoSidedDrive, boundaries: [&[BoundaryDrive]; 2],
+        pressures_pa: [f64; 2], gate: &CancelGate,
+    ) -> Result<TwoSidedFrame, AcousticRealizeError> {
         poll(gate)?;
         if !drive.source_pressure_pa.is_finite()
             || drive.blade_forces_n.iter().any(|f| !f.is_finite()) {
@@ -464,7 +500,13 @@ impl TwoSidedAperture {
         };
         let trial = self.valve.preview(ApertureDrive {
             upstream_pressure_pa: effective_source, incoming_pressure_pa: a[1], body_flow_m3_s: 0.0,
-        }, drive.blade_forces_n)?;
+        }, drive.blade_forces_n, pressures_pa)?;
+        let spatial_pressure = trial.spatial_pressure();
+        let pressure_work: [f64; 2] = std::array::from_fn(|i|
+            self.spatial_pressure_work_j[i] + spatial_pressure[i].work_j);
+        if pressure_work.iter().any(|w| !w.is_finite()) {
+            return Err(invalid("cumulative spatial pressure work overflowed"));
+        }
         let mut aperture = trial.frame();
         let q = aperture.bore_flow_m3_s;
         let supply_trial = self.supply_channel.as_ref().map(|c| c.preview_at_flow(q)).transpose()?;
@@ -504,6 +546,7 @@ impl TwoSidedAperture {
                 + down.terminal_loss_j + down.interior_loss_j,
             coupled_terminal_work_j: up.coupled_terminal_work_j + down.coupled_terminal_work_j,
             source_work_j: drive.source_pressure_pa * (q * dt),
+            spatial_pressure,
         };
         if frame.boundaries.iter().any(Option::is_some) {
             // Each optional boundary frame already includes its original graph.
@@ -561,6 +604,7 @@ impl TwoSidedAperture {
         )?;
         self.valve.accept(trial);
         self.supply_channel = supply_trial;
+        self.spatial_pressure_work_j = pressure_work;
         Ok(frame)
     }
     /// Caller-sized blocks with exact accepted prefixes on cancellation/exhaustion.
