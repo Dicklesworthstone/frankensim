@@ -69,9 +69,15 @@ See examples/cooling-network/SHAPLEY_SENSITIVITY.md.\n\
 learns from complete physical pilots, then freezes independent production.\n\
 The original sample and wall budgets cover every phase; pilots never enter\n\
 the final probability. Both modes require an explicit Gaussian law and ceiling.\n\
-Fixed proposals support checkpoint/resume; pilot recovery remains unavailable.\n\
+Both fixed and pilot proposals support checkpoint/resume.\n\
 Other sampling/decision modes conflict; partial runs publish progress only.\n\
-See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n");
+See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n\
+\nConcurrent fixed-count physical evaluations:\n\
+--workers N runs at most N simultaneous cooling children, N in 1..64.\n\
+Original samples and reductions retain serial order. Recovery preserves later\n\
+successful siblings behind interrupted calls; worker count may change on resume.\n\
+Use --workers 1 to resume a parallel checkpoint serially. Other sampling modes,\n\
+mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json_mode {

@@ -16,6 +16,7 @@ mod shapley;
 mod mean_control;
 mod polynomial;
 mod importance;
+mod parallel;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -25,6 +26,7 @@ pub(super) struct Options {
     compliance: Option<Policy>,
     design: Option<DesignGrid>,
     qmc_replicates: Option<usize>,
+    workers: Option<usize>,
     sobol_sensitivity: bool,
     shapley_sensitivity: bool,
     adjoint_mean_control: bool,
@@ -42,7 +44,11 @@ impl Options {
         while index < args.len() {
             let flag = &args[index];
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
-            if flag == "--importance" && options.importance.is_none() {
+            if flag == "--workers" && options.workers.is_none() {
+                let workers = count_option(value, "--workers")?;
+                if !(1..=64).contains(&workers) { return Err(bad("--workers must be in 1..=64")); }
+                options.workers = Some(workers);
+            } else if flag == "--importance" && options.importance.is_none() {
                 options.importance = Some(importance::Settings::parse(value)?);
             } else if flag == "--importance-pilot" && options.importance.is_none() {
                 options.importance = Some(importance::Settings::parse_pilot(value)?);
@@ -110,6 +116,7 @@ impl Options {
         }
         polynomial::validate_options(&options)?;
         importance::validate_options(&options)?;
+        parallel::validate_options(&options)?;
         Ok(options)
     }
 
@@ -158,6 +165,9 @@ pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
 pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
+    if let Some(workers) = options.workers {
+        return parallel::execute(base_text, &base, &config, options, workers);
+    }
     if let Some(settings) = &options.importance {
         return importance::execute(base_text, &base, &config, options, settings);
     }
