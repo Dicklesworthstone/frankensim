@@ -1,4 +1,7 @@
 //! Native global equilibrium, original caloric/source transport and energy feedback.
+#[path = "solid_plastic_material_transport/heat.rs"]
+mod heat;
+
 use fs_couple::circuit_enthalpy::material::{ConductionLink, MaterialNetwork};
 use fs_couple::solid_enthalpy::plastic::{
     ThermoplasticCell, ThermoplasticConfig, ThermoplasticError, ThermoplasticSolid,

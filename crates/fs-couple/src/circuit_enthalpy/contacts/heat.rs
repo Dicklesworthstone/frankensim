@@ -18,6 +18,8 @@ use fs_matdb::ClaimSelection;
 use fs_material::state_point::MaterialPropertySelection;
 
 mod extension;
+mod observer;
+pub use observer::MaterialHeatObserver;
 
 /// A single declarative assembly, with optional physical heat-transfer paths.
 /// Empty electrical contacts are valid; bulk resistor bindings remain required.
@@ -43,8 +45,15 @@ pub enum HeatNetworkError {
     Contact(ConductionError),
     /// Existing radiation/material/geometry refusal.
     Radiation(RadiationCellError),
+    /// Original shared-timeline checkpoint or thermal-state failure.
+    Thermal(DepositionError),
     /// Cancellation before returning a source or any physical endpoint.
     Cancelled,
+}
+impl From<DepositionError> for HeatNetworkError {
+    fn from(e: DepositionError) -> Self {
+        match e { DepositionError::Cancelled => Self::Cancelled, other => Self::Thermal(other) }
+    }
 }
 impl From<ElectricalContactNetworkError> for HeatNetworkError {
     fn from(e: ElectricalContactNetworkError) -> Self {
