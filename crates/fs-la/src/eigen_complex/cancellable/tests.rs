@@ -337,6 +337,14 @@ fn lu_complex_is_the_original_graph_under_any_declared_worker_count() {
         assert_eq!(factor.perm, original.perm, "{workers:?}");
         assert_eq!(bits(&factor.data), bits(&original.data), "{workers:?}");
     }
+    // Declared workers also route the cancellable entry to the blocked path:
+    // the same bits, with the blocked poll points (here 2 + 150 + 2 * 2).
+    let mut polls = 0;
+    let declared = with_lu_workers(3, || {
+        lu_complex_with_cancel(&a, n, || { polls += 1; false }).unwrap()
+    });
+    assert_eq!(bits(&declared.data), bits(&original.data));
+    assert_eq!(polls, 2 + n + 2 * 2);
     // The declaration is scoped and restored, also after a panic.
     let unwound = std::panic::catch_unwind(|| with_lu_workers(5, || panic!("inside")));
     assert!(unwound.is_err());

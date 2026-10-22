@@ -251,7 +251,8 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   lu_complex_blocked_with_cancel, with_lu_workers}` — complex LU with
   magnitude pivots (lowest index on ties) and atomic publication.
   - `lu_complex_with_cancel` is the unblocked elimination, with its
-    documented poll points.
+    documented poll points. Inside `with_lu_workers` with more than one
+    worker, it runs the blocked path on those workers instead.
   - `lu_complex_blocked_with_cancel` is the blocked, thread-parallel
     elimination. Each element keeps its ascending-pivot sequence of fused
     updates, so factors, permutations and singular indices are bit-identical

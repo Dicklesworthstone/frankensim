@@ -130,6 +130,10 @@ fn solve_body(
 /// The callback can borrow a caller's cancellation gate; no executor or thread
 /// identity is introduced into the numerical result.
 ///
+/// Inside [`super::with_lu_workers`] with more than one declared worker, this
+/// runs [`lu_complex_blocked_with_cancel`] on them instead: the same bits, with
+/// that function's poll points. Undeclared, the poll points above hold.
+///
 /// # Errors
 /// [`LuComplexError::Cancelled`] or [`LuComplexError::Singular`].
 /// # Panics
@@ -137,6 +141,10 @@ fn solve_body(
 pub fn lu_complex_with_cancel(
     a: &[C64], n: usize, mut cancelled: impl FnMut() -> bool,
 ) -> Result<LuComplex, LuComplexError> {
+    let workers = super::LU_WORKERS.with(core::cell::Cell::get);
+    if workers > 1 {
+        return lu_complex_blocked_with(a, n, blocked::BLOCK, workers, cancelled);
+    }
     let entries = n.checked_mul(n).expect("complex matrix extent overflow");
     assert_eq!(a.len(), entries, "a must be n*n = {entries}");
     poll(&mut cancelled)?;
