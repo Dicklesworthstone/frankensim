@@ -14,6 +14,10 @@ use fs_math::det;
 use fs_phs::RelaxationBranch;
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
+// Original specimens can already select an exclusive constitutive spectrum.
+// They join the same owner before optional regional and layered additions.
+mod source;
+
 /// Explicit bending-modulus increment [Pa] / relaxation-time [s] selectors.
 /// An unlisted string receives no new constitutive mechanism.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +76,9 @@ impl StringBankBendingRelaxation {
                 .ok_or_else(|| invalid("bending memory names an absent original string"))?;
             if selections[..index].iter().any(|s| s.string == selection.string) {
                 return Err(invalid("each original string may select bending memory only once"));
+            }
+            if member.source.bending_relaxation().is_some() {
+                return Err(invalid("an original Prony string cannot select a second bending-memory owner"));
             }
             validate_properties(&selection.properties)?;
             let section = section(&member.source)?;
@@ -228,6 +235,9 @@ impl ReciprocalStringBank {
     /// paths. Prepared mechanical-only propagation refuses rather than losing z.
     /// `initial_memory` follows channels() order: None is relaxed; an explicit
     /// zero vector is unrelaxed. Existing body history is never reset.
+    /// Original exclusive Prony specimens already carry their histories and
+    /// cannot be selected again. Selections on other strings compose after
+    /// those original histories and any regional body history.
     ///
     /// Frozen uniform-span small-curvature bending only. No axial/torsional
     /// memory, finite-strain viscoelasticity, winding slip, heat evolution or
@@ -239,8 +249,10 @@ impl ReciprocalStringBank {
         poll(gate)?;
         let body_count = self.source.material_chart_relaxation.as_ref()
             .map_or(0, |image| image.coupling_rows_per_s().len());
+        let existing_count = self.source.source_memory_count(&self.cards, gate)?
+            .checked_add(body_count).ok_or_else(|| invalid("complete material history extent overflow"))?;
         if self.system.samples_rendered()!=0 || self.source.string_bending_relaxation.is_some()
-            || self.system.material_relaxation_branches().len()!=body_count {
+            || self.system.material_relaxation_branches().len()!=existing_count {
             return Err(invalid("string bending memory requires one cold binding after declared body memory"));
         }
         let image = StringBankBendingRelaxation::bind(&self,selections,max_memory_states,gate)?;

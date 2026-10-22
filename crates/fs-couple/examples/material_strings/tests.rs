@@ -179,3 +179,6 @@ mod migrating_stops;
 
 #[path = "tests/thermal_support.rs"]
 mod thermal_support;
+
+#[path = "tests/relaxation.rs"]
+mod relaxation;

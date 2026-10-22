@@ -25,6 +25,9 @@ impl Input {
                 || !(1..=8).contains(&selection.properties.len()) {
                 return Err("string-memory needs distinct existing strings and 1..=8 source pairs".into());
             }
+            if matches!(&strings[selection.string].bending_loss,input::BendingLoss::Prony { .. }) {
+                return Err("one string cannot select both original-specimen Prony loss and additional bending-memory".into());
+            }
             let mut roles=BTreeMap::new();
             let mut pairs=std::collections::BTreeSet::new();
             for (modulus,time) in &selection.properties {
@@ -72,22 +75,8 @@ impl Input {
         }
         Ok(())
     }
-    /// Reserve augmented setup before source I/O. The body decoder separately
-    /// caps its material history at 256; include the cross term with that ceiling
-    /// rather than assuming independent materials create independent operators.
-    pub fn reserve_setup(&self, settings: &mut StringBankOptions) -> Result<()> {
-        let core=settings.network.max_modes.checked_mul(2).ok_or("string memory dimension overflow")?;
-        let m=self.max_states;
-        let extra=core.checked_add(m).and_then(|d|d.checked_mul(d))
-            .and_then(|d|core.checked_mul(m).and_then(|v|d.checked_add(v)))
-            .and_then(|d|512usize.checked_mul(m).and_then(|v|d.checked_add(v)))
-            .ok_or("combined string/body memory setup overflow")?;
-        let total=settings.network.max_setup_terms.checked_add(extra)
-            .ok_or("complete memory setup overflow")?;
-        if total as u64>input::MAX_WORK { return Err("material memories exceed the original instrument work budget".into()); }
-        settings.network.max_setup_terms=total;
-        Ok(())
-    }
+    /// This bound joins original-specimen and body histories in one setup budget.
+    pub const fn max_memory_states(&self) -> usize { self.max_states }
     pub fn bind(&self, bank: ReciprocalStringBank, gate: &CancelGate) -> Result<ReciprocalStringBank> {
         poll(gate)?;
         Ok(bank.with_material_string_bending_relaxation(self.selections.clone(),None,self.max_states,gate)?)

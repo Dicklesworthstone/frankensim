@@ -30,6 +30,31 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 }
 
 impl BowedStringCard {
+    // Private to a bank constructor which immediately binds the original
+    // source's material histories. Memoryless cards retain their refusal.
+    pub(crate) fn material_relaxation_backbone_with_gas(
+        cx: &Cx<'_>, specimen: &ResolvedStringSpecimen, gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = specimen.string();
+        let law = string.relaxation_bending.as_ref()
+            .ok_or_else(|| invalid("material bank backbone requires original bending memory"))?;
+        if law.material_state_identity != Some(specimen.material().identity())
+            || law.source_properties.as_ref().is_none_or(|p| p.len() != law.branches.len())
+            || law.branches.len() > 8 || string.kelvin_voigt_bending.is_some()
+            || string.rayleigh.is_some() || string.damping_ratio != 0.0 {
+            return Err(invalid("material bank memory needs its original exclusive bounded source spectrum"));
+        }
+        // Validate the unchanged mechanical geometry without asking a
+        // memoryless consumer to admit memory. The bank keeps the full source,
+        // including explicit zero arms, and checks its complete coupled band.
+        let mut elastic = string.clone();
+        elastic.relaxation_bending = None;
+        validate_incremental_string(&elastic)?;
+        lower_backbone(cx, &string, gas, sample_rate_hz, 0.0)
+    }
+
     /// Lower a homogeneous material specimen in an explicitly supplied gas.
     ///
     /// The supplied coherent state may describe air, another ideal gas, or an
@@ -103,12 +128,21 @@ fn lower(
     validate_incremental_string(string)?;
     let law = string.kelvin_voigt_bending
         .ok_or_else(|| invalid("material bow card requires a resolved Kelvin-Voigt bending law"))?;
+    lower_backbone(cx, string, gas, sample_rate_hz, law.viscous_stiffness_n_m2_s)
+}
+
+fn lower_backbone(
+    cx: &Cx<'_>, string: &PrestressedString, gas: &GasState, sample_rate_hz: u32,
+    viscous_bending_n_m2_s: f64,
+) -> Result<BowedStringCard, AcousticRealizeError> {
+    poll(cx)?;
+    gas.validate_coherence().map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
     let mut card = BowedStringCard {
         length_m: string.length_m,
         tension_n: string.tension_n,
         linear_density_kg_m: string.lin_density_kg_m,
         bending_stiffness_n_m2: string.bending_stiffness_n_m2,
-        viscous_bending_n_m2_s: law.viscous_stiffness_n_m2_s,
+        viscous_bending_n_m2_s,
         mode_count: string.n_modes,
         zetas: Vec::with_capacity(string.n_modes),
         sample_rate_hz,

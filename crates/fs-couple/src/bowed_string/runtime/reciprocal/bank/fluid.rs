@@ -124,9 +124,11 @@ fn geometry_and_band(source: &MaterialStringSource)
         MaterialStringSource::WithPolarizations(p) => geometry_and_band(p.source()),
         MaterialStringSource::WithTorsion(t) => geometry_and_band(t.bending()),
         MaterialStringSource::Homogeneous(s) => {
-            let law = s.string().kelvin_voigt_bending
+            let string = s.string();
+            let band = string.kelvin_voigt_bending.map(|law| law.omega_band_rad_s)
+                .or_else(|| string.relaxation_bending.as_ref().map(|law| law.omega_band_rad_s))
                 .ok_or_else(|| invalid("cylinder loading needs the original material bending-loss law"))?;
-            Ok((s.radius_m(), law.omega_band_rad_s))
+            Ok((s.radius_m(), band))
         }
         MaterialStringSource::Concentric { section, .. } =>
             Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
@@ -141,6 +143,9 @@ impl ReciprocalStringBank {
     /// damping contains ONLY material Kelvin-Voigt loss and the collapsed slow
     /// fluid tail. Every remaining viscous contribution is a coupled fluid mass,
     /// so it cannot be double-counted as old per-mode gas resistance.
+    /// Original Prony specimens retain their actual internal strains and use
+    /// the loaded transverse mass in their bending-memory projection. Bind an
+    /// explicit layered-string spectrum only after selecting gas loading.
     ///
     /// Gas density and viscosity come from source().gas(), radius from each
     /// original circular section. Additional free components follow all physical
@@ -241,7 +246,7 @@ impl ReciprocalStringBank {
         if let Some(binding) = self.system.interface() {
             system = system.with_interface(binding.clone()).map_err(ReciprocalStringError::Friction)?;
         }
-        system = self.source.restore_body_memory(system,
+        system = self.source.restore_material_memory(system, &cards,
             Some(self.system.material_memory().to_vec()), gate)?;
         self.source.validate_material_bridge_frequencies(&system, gate)?;
         poll(gate)?;

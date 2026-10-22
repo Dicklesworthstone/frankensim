@@ -103,11 +103,12 @@ impl Profile {
             BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
         }
     }
-    /// Include actual internal material coordinates in the existing cold
-    /// setup allowance, before any material-pack I/O or modal construction.
-    pub fn reserve_material_memory(&self, settings: &mut StringBankOptions) -> Result<()> {
-        if let BodyModel::Plate(plate) = &self.model { plate.loss.reserve_setup(settings)?; }
-        Ok(())
+    /// Reserve body and string histories together before material-pack I/O.
+    pub fn material_memory_states(&self) -> usize {
+        match &self.model {
+            BodyModel::Plate(plate) => plate.loss.max_memory_states(),
+            _ => 0,
+        }
     }
     /// All solid/gas/axial coordinates are now fixed; memory enters the SAME
     /// coupled mechanical owner before conversion to multiple bows and PCM.

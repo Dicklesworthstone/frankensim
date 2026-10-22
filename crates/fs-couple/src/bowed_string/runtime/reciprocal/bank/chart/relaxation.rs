@@ -16,6 +16,7 @@ impl MaterialStringBankSource {
         &self, system: &FrictionModalSystem, gate: &CancelGate,
     ) -> Result<(), ReciprocalStringError> {
         poll(gate)?;
+        self.validate_source_memory_frequencies(system, gate)?;
         if let Some(image) = &self.material_chart_relaxation {
             // A coupled body receives forcing and relaxation below its bare
             // resonances as well as at the instantaneous coupled frequencies.
@@ -31,12 +32,11 @@ impl MaterialStringBankSource {
         Ok(())
     }
 
-    // Reconstruct only the shared owner's coordinate embedding after a cold
-    // topology change. Body and string material factors are NEVER re-resolved.
-    // The stable history order is body first, then selected string channels.
-    pub(in crate::bowed_string::runtime::reciprocal::bank) fn restore_body_memory(
-        &self, mut system: FrictionModalSystem, memory: Option<Vec<f64>>, gate: &CancelGate,
-    ) -> Result<FrictionModalSystem, ReciprocalStringError> {
+    // Re-embed the retained body factors without resolving material or modes
+    // again. The common owner orders source strings, body, then added layers.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn body_memory_branches(
+        &self, system: &FrictionModalSystem, gate: &CancelGate,
+    ) -> Result<Vec<fs_phs::RelaxationBranch>, ReciprocalStringError> {
         poll(gate)?;
         let mut branches = Vec::new();
         if let Some(image) = &self.material_chart_relaxation {
@@ -57,19 +57,8 @@ impl MaterialStringBankSource {
                     fs_phs::RelaxationBranch { projection, stiffness: 1.0, relaxation_time_s: time }
                 }));
         }
-        if let Some(image) = &self.string_bending_relaxation {
-            branches.extend(image.branches(&system, gate)?);
-        }
-        if self.material_chart_relaxation.is_some() || self.string_bending_relaxation.is_some() {
-            system = system.with_material_relaxation(branches, memory, gate)
-                .map_err(ReciprocalStringError::Friction)?;
-            self.validate_body_memory_frequencies(&system, gate)?;
-            self.validate_material_bridge_frequencies(&system, gate)?;
-        } else if memory.as_ref().is_some_and(|z| !z.is_empty()) {
-            return Err(invalid("cold rebuild cannot discard untracked material history"));
-        }
         poll(gate)?;
-        Ok(system)
+        Ok(branches)
     }
 }
 
@@ -78,6 +67,8 @@ impl ReciprocalStringBank {
     /// retained DKT basis and attach their internal strains to the SAME coupled
     /// string/body/cavity/friction owner. Material changes therefore modify both
     /// physical pressure and the bridge reactions back onto every string.
+    /// Original string Prony histories remain unchanged; new regional body
+    /// histories follow them and precede any explicit layered-string addition.
     ///
     /// Each region's selected excess modulus scales its actual rotated bending
     /// tensor; all modal cross terms survive. The equilibrium elastic pencil,
@@ -100,9 +91,11 @@ impl ReciprocalStringBank {
         limits: PlateRelaxationLimits, gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
+        let source_count = self.source.source_memory_count(&self.cards, gate)?;
         if self.system.samples_rendered() != 0 || self.source.material_chart_relaxation.is_some()
             || self.source.material_chart_viscosity.is_some()
-            || !self.system.material_relaxation_branches().is_empty() {
+            || self.source.string_bending_relaxation.is_some()
+            || self.system.material_relaxation_branches().len() != source_count {
             return Err(invalid("body material memory requires one cold attachment without parallel intrinsic damping"));
         }
         let body = self.source.material_chart.as_ref()
@@ -121,7 +114,12 @@ impl ReciprocalStringBank {
             InitialPlateMemory::Unrelaxed => Some(vec![0.0; image.coupling_rows_per_s().len()]),
         };
         self.source.material_chart_relaxation = Some(image);
-        self.system = self.source.restore_body_memory(self.system, memory, gate)?;
+        let branches = self.source.body_memory_branches(&self.system, gate)?;
+        self.system = self.system.with_additional_material_relaxation(branches, memory, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        self.source.validate_body_memory_frequencies(&self.system, gate)?;
+        self.source.validate_material_bridge_frequencies(&self.system, gate)?;
+        poll(gate)?;
         Ok(self)
     }
 }

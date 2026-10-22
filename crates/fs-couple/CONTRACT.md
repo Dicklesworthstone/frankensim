@@ -3441,6 +3441,44 @@ zero parity; callback partitions; source/budget refusals; and cancellation
 rollback. Rust parsing and scoped whitespace checks passed. Native compilation
 and execution remain required; no measured violin/cello/bass fidelity is claimed.
 
+### Original string-material spectra in the shared instrument owner
+
+An original homogeneous `ResolvedStringSpecimen` selected with
+`with_prony_bending_loss` now retains that exclusive constitutive law when
+lowered into `ReciprocalStringBank`. A private elastic-backbone lowering path
+checks the original material identity, property selection and loss exclusivity;
+public memoryless card and impact consumers still refuse the same law. Each
+positive source arm contributes one internal strain per retained transverse
+plane and sine mode, with stiffness `DeltaEI*(n*pi/L)^4/mu_loaded`. The actual
+gas-loaded mass supplies `mu_loaded`; tension, axial stiffness and torsional
+stiffness do not acquire an invented relaxation law.
+
+Automatic source histories, regional body histories and the existing explicit
+per-layer string selection share the same exact mechanical/material owner, in
+that order. Explicit selection on another string preserves all prior history;
+selecting a second bending-memory mechanism on an already exclusive Prony
+string refuses, even when its selected strengths are zero. Cold gas changes
+reproject automatic source histories with the new mass while preserving their
+accepted energy-normalized strain. Explicit layered selections retain their
+existing requirement to bind after gas loading. Torque reconstruction and
+axial extension preserve all history groups. Every attachment validates source
+support through the complete instantaneous coupled frequency bound.
+
+The ordinary performer accepts `bending-loss prony COUNT MODULUS TIME ...`
+after each string's versioned section/polarization rows. It requires original
+equilibrium Young modulus and source excess-modulus/time pairs, without
+requiring unselected bending viscosity. The existing `bending-memory` block
+remains the additional per-layer path for homogeneous or bonded sections.
+Automatic, explicit and regional body history allowances share one checked
+setup budget before material I/O. Static preload initializes relaxed history;
+material reactions reach the common body, neighboring strings and PCM writer.
+`relaxing-strings.material-strings` and its source pack are synthetic examples.
+Focused regression sources cover pressure/PCM substitution, coexistence,
+gas/torsion/axial composition, zero parity and duplicate/band/budget refusals.
+Syntax and whitespace checks passed; native compilation and execution remain
+required. Frozen small-curvature bending does not establish axial/torsional
+creep, interlayer slip, measured wound-string behavior or instrument fidelity.
+
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` extends
 that same support owner with material-solid axial inertia and selected
 longitudinal sine modes. Actual 3D span endpoints, a declared transverse frame

@@ -80,19 +80,11 @@ impl PlateLoss {
             },
         }
     }
-    pub(super) fn reserve_setup(&self, settings: &mut StringBankOptions) -> Result<()> {
-        if let Self::RegionalMaxwell { limits, .. } = self {
-            let n = settings.network.max_modes;
-            let memory = limits.max_memory_states;
-            let core = n.checked_mul(2).ok_or("body memory setup dimension overflow")?;
-            let terms = core.checked_add(memory).and_then(|d| d.checked_mul(d))
-                .and_then(|d| core.checked_mul(memory).and_then(|m| d.checked_add(m)))
-                .and_then(|d| settings.network.max_setup_terms.checked_add(d))
-                .ok_or("body memory setup work overflow")?;
-            if terms as u64 > input::MAX_WORK { return Err("body memory exceeds the original instrument work budget".into()); }
-            settings.network.max_setup_terms = terms;
+    pub(super) fn max_memory_states(&self) -> usize {
+        match self {
+            Self::Tensor => 0,
+            Self::RegionalMaxwell { limits, .. } => limits.max_memory_states,
         }
-        Ok(())
     }
     pub(super) fn bind(&self, bank: ReciprocalStringBank, gate: &CancelGate)
         -> Result<ReciprocalStringBank>

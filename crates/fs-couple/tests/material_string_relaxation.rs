@@ -25,7 +25,8 @@ use fs_tribo::FrictionLaw;
 fn material(delta: f64,tau: f64,band: f64) -> ResolvedMaterialStatePoint {
     let mut claims=ClaimSet::new(); let mut requirements=Vec::new();
     for (name,dims,value) in [("density",Density::DIMS,7800.0),
-        ("young_modulus",Pressure::DIMS,200e9),(ETA,DynViscosity::DIMS,0.0),
+        ("young_modulus",Pressure::DIMS,200e9),
+        ("equilibrium_young_modulus",Pressure::DIMS,200e9),(ETA,DynViscosity::DIMS,0.0),
         ("G",Pressure::DIMS,60e9),("eta_s",DynViscosity::DIMS,1000.0),
         ("bending_delta",Pressure::DIMS,delta),("bending_time",Dims([0,0,1,0,0,0]),tau)] {
         let high=if name.starts_with("bending_") { band } else {200_000.0};
@@ -50,7 +51,12 @@ fn bank(cx:&Cx<'_>,gate:&CancelGate,delta:f64,tau:f64,band:f64,modes:usize,count
     let source=MaterialStringSource::Concentric {template:template(modes),section,
         prestress:StringPrestress::FixedTension(20.0)}.with_torsion("G","eta_s",1).unwrap()
         .with_transverse_polarizations(TransverseDirections::try_new([0.6,0.8],[1.0,0.0]).unwrap()).unwrap();
-    let members=(0..count).map(|_|MaterialStringMember {source:source.clone(),connections:vec![
+    bank_with_sources(cx,gate,vec![source;count]).unwrap()
+}
+fn bank_with_sources(cx:&Cx<'_>,gate:&CancelGate,sources:Vec<MaterialStringSource>)
+    -> Result<ReciprocalStringBank,fs_couple::bowed_string::runtime::reciprocal::ReciprocalStringError>
+{
+    let members=sources.into_iter().map(|source|MaterialStringMember {source,connections:vec![
         InteriorStringConnection {station_fraction:0.8,body:ModalAttachment {component:0,shapes:vec![1.0]},
             stiffness_n_m:3000.0,damping_n_s_m:0.1,rest_extension_m:0.0},
     ]}).collect();
@@ -67,7 +73,7 @@ fn bank(cx:&Cx<'_>,gate:&CancelGate,delta:f64,tau:f64,band:f64,modes:usize,count
                 energy_absolute_tolerance_j:1e-12,energy_relative_tolerance:1e-8},
             friction:ModalFrictionConfig {max_iterations:96,maximum_force_n:100.0,
                 maximum_slip_speed_m_s:10.0,force_absolute_tolerance_n:1e-10,
-                force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12}},gate).unwrap()
+                force_relative_tolerance:1e-9,sticking_tolerance_m:1e-12}},gate)
 }
 fn selection() -> Vec<StringBendingRelaxationSelection> {
     vec![StringBendingRelaxationSelection {string:0,
@@ -165,5 +171,96 @@ fn gas_mass_enters_projection_and_axial_extension_retains_bending_history() {
         assert!(axial.system().material_relaxation_branches().iter()
             .all(|branch|branch.projection.len()==2*axial.system().mode_count()));
         assert!(render(&mut axial).iter().all(|p|p.is_finite()));
+    });
+}
+
+fn original_source(delta:f64,tau:f64,band:f64,prony:bool) -> MaterialStringSource {
+    use fs_couple::string_specimen::with_uniform_circular_material_state;
+    use fs_scenario::acoustic::BendingRelaxationProperties;
+    let specimen=with_uniform_circular_material_state(template(2),0.0003,
+        &material(delta,tau,band)).unwrap();
+    let specimen=if prony {
+        specimen.with_prony_bending_loss(&[BendingRelaxationProperties {
+            modulus:"bending_delta".into(),relaxation_time:"bending_time".into(),
+        }])
+    } else { specimen.with_kelvin_voigt_bending_loss() }.unwrap();
+    MaterialStringSource::Homogeneous(specimen).with_torsion("G","eta_s",1).unwrap()
+        .with_transverse_polarizations(TransverseDirections::try_new([0.6,0.8],[1.0,0.0]).unwrap()).unwrap()
+}
+
+#[test]
+fn original_prony_material_reaches_pressure_and_sympathetic_string_without_reselection() {
+    with_cx(|cx,gate| {
+        let make=|tau|bank_with_sources(cx,gate,vec![
+            original_source(40e9,tau,200_000.0,true),
+            original_source(40e9,0.004,200_000.0,false),
+        ]).unwrap();
+        let mut a=make(0.004); let mut b=make(0.012);
+        assert_eq!(a.system().material_memory().len(),4);
+        assert!(a.source().string_bending_relaxation().is_none());
+        for (a,b) in a.system().components().iter().zip(b.system().components()) {
+            assert_eq!(a.modes(),b.modes());
+        }
+        let p=render(&mut a); let q=render(&mut b);
+        assert!(p.iter().any(|x|x.abs()>1e-15));
+        assert!(p.iter().zip(q).any(|(a,b)|(a-b).abs()>1e-18));
+        assert_ne!(a.system().components()[1].states(),b.system().components()[1].states());
+        assert!(a.system().material_memory().iter().any(|z|*z!=0.0));
+        assert!(a.system().coupled_frame().unwrap().material_dissipation_j>0.0);
+    });
+}
+
+#[test]
+fn original_and_explicit_string_memory_share_gas_axial_and_friction_owners() {
+    use fs_couple::air_path::cylinder::CylinderFlowResolution;
+    use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::LongitudinalStringResolution;
+    use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig;
+    with_cx(|cx,gate| {
+        let make=||bank_with_sources(cx,gate,vec![
+            original_source(40e9,0.004,200_000.0,true),
+            original_source(20e9,0.008,200_000.0,false),
+        ]).unwrap();
+        let dry=make();
+        let loaded=make().with_cylinder_gas_loading(CylinderFlowResolution {
+            minimum_wavenumber_radius:0.001,maximum_wavenumber_radius:30.0,intervals:4,
+        },gate).unwrap();
+        let dry_k=dry.system().material_relaxation_branches()[0].stiffness;
+        let wet_k=loaded.system().material_relaxation_branches()[0].stiffness;
+        assert!((wet_k/dry_k-dry.cards()[0].linear_density_kg_m/loaded.cards()[0].linear_density_kg_m).abs()<1e-12);
+        let before=loaded.system().material_memory().to_vec();
+        let mut other=selection(); other[0].string=1;
+        let joined=loaded.with_material_string_bending_relaxation(other,None,8,gate).unwrap();
+        assert_eq!(&joined.system().material_memory()[..4],before);
+        assert_eq!(joined.system().material_memory().len(),8);
+        assert_eq!(joined.source().string_bending_relaxation().unwrap().channels().len(),4);
+        let states=joined.system().material_memory().to_vec();
+        let resolution=LongitudinalStringResolution {
+            axial_modes:vec![1],maximum_slope:0.2,maximum_strain:0.01,
+        };
+        let mut axial=joined.with_longitudinal_waves(vec![resolution.clone(),resolution],
+            NonlinearModalConfig {max_iterations:64,maximum_generalized_force:1e5,
+                force_absolute_tolerance:1e-11,force_relative_tolerance:1e-10},gate).unwrap();
+        assert_eq!(axial.system().material_memory(),states);
+        assert!(axial.system().material_relaxation_branches().iter()
+            .all(|b|b.projection.len()==2*axial.system().mode_count()));
+        assert!(render(&mut axial).iter().all(|p|p.is_finite()));
+        assert!(axial.system().material_memory()[..4].iter().any(|z|*z!=0.0));
+        assert!(axial.system().material_memory()[4..].iter().any(|z|*z!=0.0));
+        assert!(make().with_material_string_bending_relaxation(selection(),None,8,gate).is_err());
+    });
+}
+
+#[test]
+fn original_zero_memory_preserves_elastic_trajectory_and_source_limits_refuse() {
+    with_cx(|cx,gate| {
+        let make=|prony|bank_with_sources(cx,gate,
+            vec![original_source(0.0,0.004,200_000.0,prony)]).unwrap();
+        let mut elastic=make(false); let mut zero=make(true);
+        assert!(zero.system().material_memory().is_empty());
+        assert_eq!(render(&mut elastic),render(&mut zero));
+        for (tau,band) in [(1e-7,200_000.0),(0.004,8_000.0)] {
+            assert!(bank_with_sources(cx,gate,
+                vec![original_source(40e9,tau,band,true)]).is_err());
+        }
     });
 }

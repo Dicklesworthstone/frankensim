@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic relaxing wire	Manufactured coefficients for material-memory integration	Not measurements or a real alloy, polymer, wound string or instrument material
+scalar	density	synthetic	density	7800	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus	synthetic	young_modulus	200000000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	200000	rad/s
+scalar	equilibrium_young_modulus	synthetic	equilibrium_young_modulus	200000000000	Pa	constant
+uncertainty	equilibrium_young_modulus	unstated	-	-	-	-
+validity	equilibrium_young_modulus	T	280	320	K
+validity	equilibrium_young_modulus	omega	0	200000	rad/s
+scalar	relaxing_bending_modulus	synthetic	relaxing_bending_modulus	80000000000	Pa	constant
+uncertainty	relaxing_bending_modulus	unstated	-	-	-	-
+validity	relaxing_bending_modulus	T	280	320	K
+validity	relaxing_bending_modulus	omega	0	200000	rad/s
+scalar	bending_relaxation_time	synthetic	bending_relaxation_time	0.001	s	constant
+uncertainty	bending_relaxation_time	unstated	-	-	-	-
+validity	bending_relaxation_time	T	280	320	K
+validity	bending_relaxation_time	omega	0	200000	rad/s
+scalar	shear_modulus	synthetic	shear_modulus	80000000000	Pa	constant
+uncertainty	shear_modulus	unstated	-	-	-	-
+validity	shear_modulus	T	280	320	K
+validity	shear_modulus	omega	0	200000	rad/s
+scalar	kelvin_voigt_shear_viscosity	synthetic	kelvin_voigt_shear_viscosity	1000	Pa*s	constant
+uncertainty	kelvin_voigt_shear_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_shear_viscosity	T	280	320	K
+validity	kelvin_voigt_shear_viscosity	omega	0	200000	rad/s

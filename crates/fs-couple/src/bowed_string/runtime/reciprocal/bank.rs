@@ -211,6 +211,9 @@ impl ReciprocalStringBank {
     /// Strings begin at rest; existing body modal states are preserved. The
     /// selected bow's traction is solved against the complete coupled response,
     /// including unplayed strings. External forcing can excite any component.
+    /// Original homogeneous Prony specimens keep one material history per
+    /// positive arm and transverse mode in this same exact owner. Their
+    /// selected bending loss is never collapsed to a modal decay ratio.
     /// Supplied body pressure observations and material validity remain their
     /// producer's responsibility; no velocity is relabeled as pressure here.
     ///
@@ -262,7 +265,7 @@ impl ReciprocalStringBank {
         let mut cards = Vec::with_capacity(strings.len());
         for member in &strings {
             poll(gate)?;
-            cards.push(member.source.lower(cx, &gas, options.sample_rate_hz)?);
+            cards.push(member.source.lower_for_bank(cx, &gas, options.sample_rate_hz)?);
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
@@ -270,7 +273,9 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        Ok(Self { source: MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None }, cards, system })
+        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None };
+        let system = source.restore_material_memory(system, &cards, None, gate)?;
+        Ok(Self { source, cards, system })
     }
 
     /// Select bounded cold exact propagation before playback or before adding

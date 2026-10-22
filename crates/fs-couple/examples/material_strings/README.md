@@ -43,6 +43,68 @@ Use the same performance geometry/tension to compare materials without hidden
 pitch normalization. The original packs, normalization records, rights and
 physical-source identities remain available throughout rendering.
 
+### Material bending memory on coupled strings
+
+`relaxing-strings.material-strings` selects one source-defined Maxwell arm on
+each of two homogeneous strings. Each retains four bending modes and two
+torsional modes at its declared tension, 20 N or 22 N. The original pluck-and-bow
+schedule drives the first string; both load the same body and physical cavity
+neck in the same gas mixture. Build its synthetic wire pack and render after
+the copy and body-pack commands above:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/relaxing-wire-manifest.tsv" --out "$demo/relaxing-wire.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/relaxing-strings.material-strings" "$demo/relaxing-strings.wav"
+```
+
+The optional per-string constitutive selector is accepted in every input version:
+
+```text
+bending-loss prony COUNT EXCESS_MODULUS_PROPERTY RELAXATION_TIME_PROPERTY ...
+```
+
+Place it immediately after the `string` row in v1, after the complete `section`
+declaration in v2, or after `polarizations` in v3. Supply 1–8 property pairs;
+moduli are nonnegative excess stiffness in Pa and times are positive seconds.
+Omission or `bending-loss kelvin-voigt` retains the existing viscosity selection.
+Prony selection requires an explicit positive `equilibrium_young_modulus` that
+equals `young_modulus` exactly. The latter describes the relaxed backbone.
+The selected path does not require `kelvin_voigt_bending_viscosity`;
+`relaxing-wire.tsv` deliberately has none. Torsion retains its independently
+selected shear modulus and shear viscosity.
+
+The existing `bending-memory` / `string-memory` block before `cavity` remains
+available for additional per-layer memory alongside explicitly selected
+Kelvin–Voigt loss, including perfectly bonded sections. See
+[the shared string-memory interface](../../../../docs/MATERIAL_STRING_BENDING_MEMORY.md).
+The two selections may coexist on different strings and share body histories,
+gas loading, bow contact and PCM output. Selecting the same string through both
+records refuses before material loading, preventing duplicate physical loss.
+All declared string and body histories share one setup-work reservation.
+
+The fixture declares density 7800 kg/m³, equilibrium modulus 200 GPa, excess
+bending modulus 80 GPa and relaxation time 0.001 s. Every property covers
+280–320 K and 0–200000 rad/s. Source admission requires coverage from zero
+through the complete coupled instantaneous frequency bound, including later gas
+and body changes. Every positive arm also requires `dt / tau <= 2`; at 48 kHz
+this example has `dt / tau = 1/48`. Unsupported coefficients or bands refuse
+before output creation.
+
+The original shared solver carries eight internal material histories alongside
+15 mechanical modes, including torsion, body and cavity. Changing a selected
+modulus or time in the TSV, rebuilding its pack and changing only the pack path
+in the performance changes the constitutive history loading the common body.
+Its pressure is what the existing PCM writer receives. Static preload
+initializes relaxed histories, and neighboring-string motion uses the same
+reciprocal mechanics. The exclusive per-string selection requires homogeneous
+strings on the exact solver; bonded sections use the existing additional-memory
+interface and `prepared-linear` refuses constitutive histories. These models
+supply bending relaxation; axial or torsional relaxation, interlayer slip and
+measured wound-string behavior remain outside their scope. All supplied values
+are synthetic integration data, not measured instrument properties.
+
 ### Material-derived string/body joints
 
 Every input version can replace the numeric bridge stiffness and damping at

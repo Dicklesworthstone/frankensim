@@ -29,6 +29,7 @@ fn memory_material(
     for (key, dims, value, omega) in [
         ("density", Density::DIMS, rho, (0.0, 100_000.0)),
         ("young_modulus", Pressure::DIMS, 200e9, (0.0, 100_000.0)),
+        ("equilibrium_young_modulus", Pressure::DIMS, 200e9, (0.0, 100_000.0)),
         ("poisson_ratio", Dims::NONE, 0.3, (0.0, 100_000.0)),
         ("maxwell_modulus", Pressure::DIMS, excess, band),
         ("maxwell_time", Dims([0, 0, 1, 0, 0, 0]), tau, band),
@@ -95,6 +96,13 @@ fn base(
     gate: &CancelGate,
     body: SharedMaterialPlateChartBody,
 ) -> ReciprocalStringBank {
+    base_with_sources(cx, gate, body, sources())
+}
+
+fn base_with_sources(
+    cx: &Cx<'_>, gate: &CancelGate, body: SharedMaterialPlateChartBody,
+    strings: Vec<MaterialStringSource>,
+) -> ReciprocalStringBank {
     let mut config = options();
     config.network.max_modes = 64;
     config.network.max_connections = 64;
@@ -102,7 +110,7 @@ fn base(
     let medium = gas(101_325.0);
     ReciprocalStringBank::from_material_plate_chart(
         cx,
-        sources(),
+        strings,
         medium,
         body,
         Some(cavity(medium)),
@@ -116,6 +124,63 @@ fn base(
 fn memory(bank: ReciprocalStringBank, gate: &CancelGate) -> ReciprocalStringBank {
     bank.with_material_plate_relaxation(&properties(), InitialPlateMemory::Relaxed, limits(), gate)
         .unwrap()
+}
+
+#[test]
+fn original_string_and_regional_body_memories_survive_gas_rebuild_together() {
+    use fs_scenario::acoustic::BendingRelaxationProperties;
+    with_cx(|cx, gate| {
+        let make = || {
+            let strings = sources().into_iter().map(|source| {
+                let MaterialStringSource::Homogeneous(specimen) = source else { panic!("fixture") };
+                let mut geometry = specimen.string();
+                geometry.kelvin_voigt_bending = None;
+                let source = with_uniform_circular_material_state(geometry, specimen.radius_m(),
+                    &memory_material(7800.0, 40e9, 0.002, (0.0, 100_000.0))).unwrap()
+                    .with_prony_bending_loss(&[BendingRelaxationProperties {
+                        modulus: "maxwell_modulus".into(), relaxation_time: "maxwell_time".into(),
+                    }]).unwrap();
+                MaterialStringSource::Homogeneous(source)
+            }).collect();
+            base_with_sources(cx, gate, memory_body(0.004, (0.0, 100_000.0)), strings)
+        };
+        let before = make();
+        assert_eq!(before.system().material_memory().len(), 7);
+        let original_history = before.system().material_memory().to_vec();
+        let body_first = memory(before, gate);
+        assert_eq!(&body_first.system().material_memory()[..7], original_history);
+        let mut a = extend(body_first, false, gate);
+        let mut b = memory(extend(make(), false, gate), gate);
+        assert_eq!(a.system().mode_count(), 25);
+        assert_eq!(a.system().material_memory().len(), 13);
+        let image_a = a.source().material_chart_relaxation().unwrap();
+        let image_b = b.source().material_chart_relaxation().unwrap();
+        assert_eq!(image_a.source().chart_identity(), image_b.source().chart_identity());
+        assert_eq!(image_a.coupling_rows_per_s(), image_b.coupling_rows_per_s());
+        for (index, (left, right)) in a.system().material_relaxation_branches().iter()
+            .zip(b.system().material_relaxation_branches()).enumerate() {
+            assert_eq!(left.projection, right.projection);
+            assert_eq!(left.stiffness, right.stiffness);
+            assert_eq!(left.relaxation_time_s, right.relaxation_time_s);
+            assert!(left.projection.iter().enumerate().all(|(i, &v)| v == 0.0
+                || (i % 2 == 0 && if index < 7 { i/2 < 7 } else { (7..10).contains(&(i/2)) })));
+        }
+        let force = vec![0.0; a.system().mode_count()];
+        let mut pressure = 0.0_f64;
+        for _ in 0..48 {
+            let fa = *a.step(&force, drive()).unwrap();
+            let fb = *b.step(&force, drive()).unwrap();
+            assert_eq!(fa, fb);
+            assert!(fa.energy_residual_j.abs() <= fa.energy_tolerance_j);
+            assert_eq!(a.system().material_memory(), b.system().material_memory());
+            pressure = pressure.max(fa.observer_pressure_pa.abs());
+        }
+        assert!(pressure > 0.0);
+        assert!(a.system().material_memory()[..7].iter().any(|z| *z != 0.0));
+        assert!(a.system().material_memory()[7..].iter().any(|z| *z != 0.0));
+        assert!(a.system().coupled_frame().unwrap().material_dissipation_j > 0.0);
+        assert_eq!(a.source().gas(), a.source().material_cavity().unwrap().cavity.gas());
+    });
 }
 
 fn extend(bank: ReciprocalStringBank, axial: bool, gate: &CancelGate) -> ReciprocalStringBank {

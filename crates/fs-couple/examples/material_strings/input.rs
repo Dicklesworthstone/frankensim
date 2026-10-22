@@ -4,6 +4,7 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
+use fs_scenario::acoustic::BendingRelaxationProperties;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -26,12 +27,42 @@ pub const MAX_WORK: u64 = 16_777_216;
 pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
+    pub bending_loss: BendingLoss,
     /// With fixed extension, L0 is stress-free at this explicit reference T.
     /// Bonded layers share that reference but retain their own expansion curves.
     /// None preserves the original same-temperature mechanical prescription.
     pub thermal_reference_kelvin: Option<f64>,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
     pub polarizations: Option<TransverseDirections>,
+}
+/// A source-property selection; the original specimen owns every loss law.
+#[derive(Clone, Debug)]
+pub enum BendingLoss {
+    KelvinVoigt,
+    Prony { properties: Vec<BendingRelaxationProperties> },
+}
+impl BendingLoss {
+    fn validate(&self) -> Result<()> {
+        let Self::Prony { properties } = self else { return Ok(()); };
+        if !(1..=8).contains(&properties.len()) {
+            return Err("string Prony bending needs 1..=8 explicit modulus/time pairs".into());
+        }
+        let mut moduli = std::collections::BTreeSet::new();
+        let mut times = std::collections::BTreeSet::new();
+        for (i, pair) in properties.iter().enumerate() {
+            let modulus = pair.modulus.as_str();
+            let time = pair.relaxation_time.as_str();
+            if modulus.is_empty() || time.is_empty() || modulus.len() > 256 || time.len() > 256
+                || modulus.split_ascii_whitespace().count() != 1
+                || time.split_ascii_whitespace().count() != 1
+                || modulus == time || properties[..i].contains(pair)
+                || times.contains(modulus) || moduli.contains(time) {
+                return Err("string memory requires distinct bounded property pairs with consistent physical quantities".into());
+            }
+            moduli.insert(modulus); times.insert(time);
+        }
+        Ok(())
+    }
 }
 /// V2 describes perfectly bonded circular layers, never helical winding/slip.
 #[derive(Clone, Debug)]
@@ -142,6 +173,7 @@ impl Spec {
                 (0.0, 0.0)
             } else { (row.scalar()?, row.scalar()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
+                bending_loss: BendingLoss::KelvinVoigt,
                 thermal_reference_kelvin: None,
                 polarizations: None, bending_modes, twist_modes,
                 bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
@@ -156,6 +188,25 @@ impl Spec {
                     _ => return Err("polarizations must be single or two BOW_X BOW_Y BRIDGE_X BRIDGE_Y".into()),
                 };
                 row.end()?;
+            }
+            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("bending-loss") {
+                let mut row = r.row("bending-loss")?;
+                wire.bending_loss = match row.word()? {
+                    "kelvin-voigt" => BendingLoss::KelvinVoigt,
+                    "prony" => {
+                        let count = row.count(8)?;
+                        let mut properties = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            properties.push(BendingRelaxationProperties {
+                                modulus: row.word()?.into(), relaxation_time: row.word()?.into(),
+                            });
+                        }
+                        BendingLoss::Prony { properties }
+                    },
+                    _ => return Err("bending-loss must be kelvin-voigt or prony COUNT MODULUS TIME ...".into()),
+                };
+                row.end()?;
+                wire.bending_loss.validate()?;
             }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0
@@ -490,6 +541,32 @@ impl Spec {
         self.bow_ribbon.map_or(self.schedule.tracks().len(), |(_, cells)| cells)
     }
 
+    /// Reserve every declared original-specimen arm before material I/O.
+    /// Explicit zero strengths may need fewer states in the physical owner.
+    pub fn string_memory_states(&self) -> Result<usize> {
+        let mut states = 0usize;
+        for wire in &self.strings {
+            wire.bending_loss.validate()?;
+            if let BendingLoss::Prony { properties } = &wire.bending_loss {
+                if !matches!(wire.section, WireSection::Homogeneous) {
+                    return Err("string Prony bending currently requires an original homogeneous specimen".into());
+                }
+                if self.prepared_linear.is_some() {
+                    return Err("string material memory requires the exact owner; prepared-linear has no internal-strain states".into());
+                }
+                let planes = if wire.polarizations.is_some() { 2 } else { 1 };
+                states = wire.bending_modes.checked_mul(planes)
+                    .and_then(|n| n.checked_mul(properties.len()))
+                    .and_then(|n| states.checked_add(n))
+                    .ok_or("complete string memory-state count overflow")?;
+                if states > 256 {
+                    return Err("complete declared string memory exceeds the original exact-state ceiling".into());
+                }
+            }
+        }
+        Ok(states)
+    }
+
     /// Complete numerical allocation before source I/O. A tensor body can need
     /// one damping column per retained body mode; explicit zero viscosity may
     /// use fewer. The allowance never drops requested modes or fluid branches.
@@ -503,6 +580,7 @@ impl Spec {
     pub fn network_dimensions_with_body_connections(&self, tensor_body: bool,
         additional_body_connections: usize) -> Result<(usize, usize, usize)>
     {
+        self.string_memory_states()?;
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .ok_or("complete mode count overflow")?;

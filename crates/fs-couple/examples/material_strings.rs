@@ -88,11 +88,30 @@ fn template(w:&input::Wire) -> PrestressedString {
 struct CatalogEntry { pack: NormalizedPack, card: MaterialCard }
 type Catalog = BTreeMap<String,CatalogEntry>;
 fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
-    spec:&input::Spec, body:bool, twist:bool) -> Result<ResolvedMaterialStatePoint>
+    spec:&input::Spec, body:bool, twist:bool, loss:&input::BendingLoss) -> Result<ResolvedMaterialStatePoint>
 {
     let mut requirements=vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?,
-        Requirement::try_new("young_modulus",Pressure::DIMS,Admit::StrictlyPositive)?,
-        Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?];
+        Requirement::try_new("young_modulus",Pressure::DIMS,Admit::StrictlyPositive)?];
+    match loss {
+        input::BendingLoss::KelvinVoigt =>
+            requirements.push(Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?),
+        input::BendingLoss::Prony { properties } => {
+            if body { return Err("string memory selection cannot replace a body constitutive law".into()); }
+            requirements.push(Requirement::try_new(
+                fs_couple::string_specimen::EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+                Pressure::DIMS,Admit::StrictlyPositive)?);
+            for pair in properties {
+                for (name,dims,admission) in [(&pair.modulus,Pressure::DIMS,Admit::NonNegative),
+                    (&pair.relaxation_time,Dims([0,0,1,0,0,0]),Admit::StrictlyPositive)] {
+                    if let Some(prior) = requirements.iter().find(|r| r.name() == name) {
+                        if prior.dims() != dims {
+                            return Err("selected string source property has incompatible physical quantities".into());
+                        }
+                    } else { requirements.push(Requirement::try_new(name.as_str(),dims,admission)?); }
+                }
+            }
+        },
+    }
     if body { requirements.push(Requirement::try_new("poisson_ratio",Dims::NONE,Admit::Finite)?); }
     if twist {
         requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
@@ -164,8 +183,21 @@ impl input::Spec {
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
         let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
-        if let Some(body)=&profile { body.reserve_material_memory(&mut settings)?; }
-        if let Some(memory)=&self.bending_memory { memory.reserve_setup(&mut settings)?; }
+        let memory = self.string_memory_states()?
+            .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
+            .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
+            .ok_or("complete material memory extent overflow")?;
+        if memory != 0 {
+            let core = settings.network.max_modes.checked_mul(2).ok_or("material setup dimension overflow")?;
+            let terms = core.checked_add(memory).and_then(|d| d.checked_mul(d))
+                .and_then(|d| core.checked_mul(memory).and_then(|m| d.checked_add(m)))
+                .and_then(|d| settings.network.max_setup_terms.checked_add(d))
+                .ok_or("complete material setup work overflow")?;
+            if memory > 256 || terms > input::MAX_WORK as usize {
+                return Err("complete string/body memory exceeds the original state or setup-work ceiling".into());
+            }
+            settings.network.max_setup_terms = terms;
+        }
         let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
@@ -200,7 +232,7 @@ impl input::Spec {
                 return Err(format!("flat plate bodies admit 1..={} retained body modes",
                     input::MAX_PLATE_BODY_MODES).into());
             }
-            let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false)?;
+            let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false,&input::BendingLoss::KelvinVoigt)?;
             let body=SharedMaterialPlateBody {
                 specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
                     thickness_m:1.0,density_kg_m3:1.0,e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,

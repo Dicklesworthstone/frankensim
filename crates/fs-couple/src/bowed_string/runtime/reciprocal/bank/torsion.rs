@@ -240,7 +240,7 @@ impl ReciprocalStringBank {
         if let Some(binding) = self.system.interface() {
             system = system.with_interface(binding.clone()).map_err(ReciprocalStringError::Friction)?;
         }
-        system = self.source.restore_body_memory(system,
+        system = self.source.restore_material_memory(system, &self.cards,
             Some(self.system.material_memory().to_vec()), gate)?;
         self.source.validate_material_bridge_frequencies(&system, gate)?;
         poll(gate)?;

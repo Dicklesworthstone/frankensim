@@ -44,7 +44,7 @@ impl input::Wire {
             None => None,
         };
         let twist = self.twist_modes > 0;
-        let core = resolve(&self.pack, catalog, loader, spec, false, twist)?;
+        let core = resolve(&self.pack, catalog, loader, spec, false, twist, &self.bending_loss)?;
         let mut source = match &self.section {
             input::WireSection::Homogeneous => {
                 // V1 and explicit V2 fixed-tension specimens take precisely the
@@ -59,7 +59,11 @@ impl input::Wire {
                         with_uniform_circular_material_state(template(self), self.radius, &core)?,
                     _ => with_uniform_circular_material_and_constraints(template(self),
                         StringGeometryConstraint::FixedRadius(self.radius), &core, self.prestress)?,
-                } }.with_kelvin_voigt_bending_loss()?;
+                } };
+                let specimen = match &self.bending_loss {
+                    input::BendingLoss::KelvinVoigt => specimen.with_kelvin_voigt_bending_loss()?,
+                    input::BendingLoss::Prony { properties } => specimen.with_prony_bending_loss(properties)?,
+                };
                 MaterialStringSource::Homogeneous(specimen)
             }
             input::WireSection::Bonded { core_radius_m, sleeves } => {
@@ -68,7 +72,7 @@ impl input::Wire {
                 for sleeve in sleeves {
                     poll(gate)?;
                     layers.push(ConcentricMaterialLayer { outer_radius_m: sleeve.outer_radius_m,
-                        material: resolve(&sleeve.pack, catalog, loader, spec, false, twist)? });
+                        material: resolve(&sleeve.pack, catalog, loader, spec, false, twist, &self.bending_loss)? });
                 }
                 let elastic = ConcentricElasticSection::try_new(0.0, layers)?;
                 if elastic.outer_radius_m().to_bits() != self.radius.to_bits() {
