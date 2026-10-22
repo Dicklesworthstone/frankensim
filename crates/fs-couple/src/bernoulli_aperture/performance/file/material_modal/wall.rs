@@ -2,14 +2,12 @@
 use super::{PlateValveInputError, Reader, ValveSide, bad, checkpoint};
 use super::plate::{MaterialCache, relative_path};
 use crate::bernoulli_aperture::wall::material::{
-    AxialConstraint, MaterialWallAssignment, MaterialWallInput, WallMaterialLoss,
-    YOUNG_VISCOSITY_PROPERTY,
+    AxialConstraint, MaterialWallAssignment, MaterialWallInput,
 };
+use crate::bernoulli_aperture::wall::material::source::WallMaterialLossSource;
 use fs_exec::CancelGate;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
-use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility as Admit,
-    ScalarPropertyRequirement as Requirement, resolve_material_state_point};
-use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use fs_material::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use std::sync::Arc;
 
 /// One solid source at an original tract or bore node, before numerical lowering.
@@ -81,11 +79,8 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
             "strain-fixed" => AxialConstraint::StrainFixed,
             _ => return Err(bad(row.line, "wall axial restraint must be stress-free or strain-fixed")),
         };
-        let loss = match row.word()? {
-            "elastic" => WallMaterialLoss::Elastic,
-            "kelvin-voigt" => WallMaterialLoss::KelvinVoigt,
-            _ => return Err(bad(row.line, "wall loss must be elastic or sourced kelvin-voigt")),
-        };
+        let loss = WallMaterialLossSource::read(&mut row.fields)
+            .map_err(|what| bad(row.line, what))?;
         let line = row.line;
         row.finish()?;
         if temperature <= 0.0 || omega < 0.0 || thickness_m <= 0.0 {
@@ -96,19 +91,11 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
             .and_then(|p| p.with("omega", omega))
             .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
         let material = (|| {
-            let mut required = vec![
-                Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
-                Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,
-                Requirement::try_new("poisson_ratio", Dims::NONE,
-                    Admit::OpenInterval { lower: -1.0, upper: 0.5 })?,
-            ];
-            if matches!(loss, WallMaterialLoss::KelvinVoigt) {
-                required.push(Requirement::try_new(YOUNG_VISCOSITY_PROPERTY,
-                    DynViscosity::DIMS, Admit::NonNegative)?);
-            }
+            let required = loss.requirements()?;
             resolve_material_state_point(pack.card(), &point, &required,
                 MaterialPropertySelection::SingleClaimOnly)
         })().map_err(|source| PlateValveInputError::Material { line, source })?;
+        let loss = loss.resolve(&material, band_hz).map_err(PlateValveInputError::Physics)?;
         assignments[index].push(MaterialWallAssignment { node, material, thickness_m, axial, loss });
         records.push(ModalValveWallRecord { side, node, path, pack });
     }

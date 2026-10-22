@@ -17,21 +17,38 @@ fn with_walls(text: &str, rows: &str) -> String {
     upstream(text).replacen("valve 0.0004\n", &format!("{rows}valve 0.0004\n"), 1)
 }
 fn wall_pack(young: f64, omit: Option<&str>, max_omega: f64) -> NormalizedMaterialCardPack {
+    wall_pack_with_memory(young, omit, max_omega, None)
+}
+fn wall_pack_with_memory(young: f64, omit: Option<&str>, max_omega: f64,
+    memory: Option<(f64, Dims, f64)>) -> NormalizedMaterialCardPack
+{
     let mut claims = ClaimSet::new();
-    let artifact = hash_domain("org.frankensim.test.modal-duct-wall", &young.to_le_bytes());
+    let mut identity = young.to_le_bytes().to_vec();
+    if let Some((time, _, upper_omega)) = memory {
+        identity.extend_from_slice(&time.to_le_bytes());
+        identity.extend_from_slice(&upper_omega.to_le_bytes());
+    }
+    let artifact = hash_domain("org.frankensim.test.modal-duct-wall", &identity);
     let provenance = Provenance { source: "manufactured local membrane, not measured airway tissue".into(),
         license: "CC0-1.0".into(), artifact: Some(artifact) };
     let observation = claims.register_observation(ObservationDataset {
         specimen: "synthetic duct wall".into(), method: "manufactured regression".into(), artifact,
         caveats: "not a measured material or instrument".into(), provenance: provenance.clone(),
     }).unwrap();
-    for (name, value, dims) in [("density", 1000.0, Density::DIMS),
+    let mut properties: Vec<_> = [("density", 1000.0, Density::DIMS),
         ("young_modulus", young, Pressure::DIMS), ("poisson_ratio", 0.3, Dims::NONE),
-        ("kelvin_voigt_young_viscosity", 2.0, DynViscosity::DIMS)] {
+        ("kelvin_voigt_young_viscosity", 2.0, DynViscosity::DIMS)]
+        .into_iter().map(|(name, value, dims)| (name, value, dims, max_omega)).collect();
+    if let Some((time, dims, upper_omega)) = memory {
+        properties.extend([("wall_modulus_1", 8e5, Pressure::DIMS, max_omega),
+            ("wall_modulus_2", 4e5, Pressure::DIMS, max_omega),
+            ("wall_time", time, dims, upper_omega)]);
+    }
+    for (name, value, dims, upper_omega) in properties {
         if omit == Some(name) { continue; }
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },
-            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, max_omega),
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, upper_omega),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
             provenance: provenance.clone(), observations: vec![observation.clone()] }).unwrap();
     }
@@ -150,4 +167,102 @@ fn g0_missing_out_of_band_and_incompatible_wall_sources_refuse() {
         text.replace("wall.matpack 303.15", "wall.matpack 500"),
         text.replace("0.0002 strain-fixed", "0.001 strain-fixed"),
     ] { assert!(loaded(&changed, &material, 37).is_err()); }
+}
+
+const WALL_MAXWELL: &str =
+    "maxwell 2 1 0.1 wall_modulus_1 wall_time wall_modulus_2 wall_time";
+const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+
+#[test]
+fn g3_source_wall_relaxation_reaches_both_ducts_reed_motion_and_microphone() {
+    let text = input_walls().replace("kelvin-voigt", WALL_MAXWELL)
+        .replace("wall upstream 2 isotropic wall.matpack", "wall upstream 2 isotropic tract-wall.matpack")
+        .replace("wall downstream 1 isotropic wall.matpack", "wall downstream 1 isotropic bore-wall.matpack");
+    let original = wall_pack_with_memory(1e6, None, 100000.0, Some((0.001, TIME, 100000.0)));
+    let substituted = wall_pack_with_memory(1e6, None, 100000.0, Some((0.0001, TIME, 100000.0)));
+    // The performance bytes, gas states, equilibrium stiffness, geometry and
+    // reed sources stay fixed. Only one wall card's relaxation time changes.
+    let make = |changed: Option<&str>, block| {
+        MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), block,
+            &CancelGate::new_clock_free(), None, |path| Ok(match path {
+                "tract-wall.matpack" | "bore-wall.matpack" => {
+                    if Some(path) == changed { substituted.clone() } else { original.clone() }
+                }
+                _ => pack(900.0, false),
+            })).unwrap()
+    };
+    let p = make(None, 37);
+    let reed = valve(&p).material_plates()[0].source().specimen_identity();
+    for record in p.wall_records() { assert_eq!(record.pack(), &original); }
+    let system = p.renderer().source().system();
+    for side in [ValveSide::Upstream, ValveSide::Downstream] {
+        let wall = &system.material_walls(side)[0];
+        let crate::bernoulli_aperture::wall::material::WallMaterialLoss::Maxwell(spectrum)
+            = &wall.source().loss else { panic!("source spectrum was not retained"); };
+        assert_eq!(spectrum.material().e_inf, 1e6);
+        assert_eq!(spectrum.material().terms, vec![(8e5, 0.001), (4e5, 0.001)]);
+        assert_eq!(wall.load().compliance_terms().len(), 2);
+        assert_eq!(wall.patch().wall.resistance, 0.0, "Maxwell must not also add Kelvin-Voigt loss");
+    }
+    let mut renderer = p.into_renderer();
+    let mut pressure = Vec::new();
+    let mut maximum_memory_energy = [0.0_f64; 2];
+    while renderer.remaining_samples() != 0 {
+        let mut sample = [0.0];
+        renderer.block(&mut sample).unwrap();
+        pressure.push(sample[0]);
+        let system = renderer.source().system();
+        let frame = renderer.source().last_frame().unwrap();
+        let scale = frame.stored_energy_j + frame.storage_change_j.abs()
+            + frame.source_work_j.abs() + frame.aperture.mechanical_work_j.abs();
+        assert!(frame.balance_residual_j().abs() <= 1e-16 + 1e-7 * scale);
+        for (i, side, node) in [(0, ValveSide::Upstream, 2), (1, ValveSide::Downstream, 1)] {
+            let memory = system.wall_relaxation_energy_j(side, node).unwrap();
+            assert!(memory.is_finite() && memory >= 0.0);
+            maximum_memory_energy[i] = maximum_memory_energy[i].max(memory);
+        }
+    }
+    assert!(maximum_memory_energy.iter().all(|e| *e > 0.0));
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    let (partitioned, chunked) = render(make(None, 37));
+    assert_eq!(pressure, partitioned);
+    assert_eq!(renderer.source().last_frame().unwrap().aperture,
+        chunked.source().last_frame().unwrap().aperture);
+    for (side, node) in [(ValveSide::Upstream, 2), (ValveSide::Downstream, 1)] {
+        assert_eq!(renderer.source().system().wall_relaxation_energy_j(side, node).unwrap(),
+            chunked.source().system().wall_relaxation_energy_j(side, node).unwrap());
+    }
+    for source in ["tract-wall.matpack", "bore-wall.matpack"] {
+        let p = make(Some(source), 37);
+        assert_eq!(valve(&p).material_plates()[0].source().specimen_identity(), reed);
+        let (changed_pressure, changed) = render(p);
+        assert!(pressure.iter().zip(changed_pressure).any(|(a, b)| (a - b).abs() > 1e-15));
+        assert_ne!(renderer.source().last_frame().unwrap().aperture,
+            changed.source().last_frame().unwrap().aperture);
+    }
+}
+
+#[test]
+fn g0_wall_relaxation_requires_source_dimensions_band_and_resolved_times() {
+    let text = input_walls().replace("kelvin-voigt", WALL_MAXWELL);
+    for material in [
+        wall_pack_with_memory(1e6, Some("wall_modulus_1"), 100000.0, Some((0.001, TIME, 100000.0))),
+        wall_pack_with_memory(1e6, Some("wall_time"), 100000.0, Some((0.001, TIME, 100000.0))),
+        wall_pack_with_memory(1e6, None, 100000.0, Some((0.001, Pressure::DIMS, 100000.0))),
+        wall_pack_with_memory(1e6, None, 100000.0, Some((0.001, TIME, 1000.0))),
+        wall_pack_with_memory(1e6, None, 100000.0, Some((0.0, TIME, 100000.0))),
+        wall_pack_with_memory(1e6, None, 100000.0, Some((1e-7, TIME, 100000.0))),
+    ] {
+        assert!(loaded(&text, &material, 37).is_err(), "invalid hereditary source was accepted");
+    }
+    let material = wall_pack_with_memory(1e6, None, 100000.0, Some((0.001, TIME, 100000.0)));
+    for changed in [
+        text.replace("maxwell 2", "maxwell 0"),
+        text.replace("maxwell 2", "maxwell 9"),
+        text.replace("wall_modulus_2 wall_time", "wall_modulus_1 wall_time"),
+        text.replace("maxwell 2 1 0.1", "maxwell 2 1 0.0001"),
+    ] {
+        assert!(loaded(&changed, &material, 37).is_err(), "invalid spectrum declaration was accepted");
+    }
 }

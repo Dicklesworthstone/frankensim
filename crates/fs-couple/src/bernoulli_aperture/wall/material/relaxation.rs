@@ -5,6 +5,8 @@
 use super::{BoundMaterialWall, WallMaterialLoss, WallPatch, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::visco::GeneralizedMaxwell;
+use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_qty::{Dims, Pressure};
 use fs_vfit::relaxation::{ComplianceRelaxationTerm, RelaxationImpedanceSpec, MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, WaveguideNetwork};
 
@@ -26,6 +28,38 @@ impl PartialEq for WallRelaxation {
     }
 }
 impl WallRelaxation {
+    /// Resolve a spectrum from the SAME material snapshot as the wall mass and
+    /// equilibrium stiffness. Each pair names a modulus [Pa] and time [s].
+    /// `young_modulus` is the equilibrium modulus, never the instantaneous one.
+    /// Every selected coefficient, including a zero-modulus arm's time, must
+    /// be constant at the declared temperature and cover the complete use band.
+    /// The state identity retains the original claims, query and provenance.
+    ///
+    /// # Errors
+    /// Missing, incorrectly dimensioned, nonconstant or out-of-band properties;
+    /// duplicate branches, more than eight arms, or the original law/clock limits.
+    pub fn from_state_point(material: &ResolvedMaterialStatePoint,
+        properties: &[(String, String)], band_hz: [f64; 2],
+        max_dt_over_tau: f64, max_angular_step: f64) -> Result<Self, AcousticRealizeError>
+    {
+        if properties.is_empty() || properties.len() > MAX_RELAXATION_BRANCHES {
+            return Err(invalid("material wall needs 1..=8 sourced relaxation branches"));
+        }
+        let equilibrium = super::property(material, "young_modulus", Pressure::DIMS, band_hz)?;
+        let mut terms = Vec::with_capacity(properties.len());
+        for (index, (modulus, time)) in properties.iter().enumerate() {
+            if properties[..index].iter().any(|(e, tau)| e == modulus && tau == time) {
+                return Err(invalid("material wall must not duplicate a sourced relaxation branch"));
+            }
+            terms.push((super::property(material, modulus, Pressure::DIMS, band_hz)?,
+                super::property(material, time, Dims([0, 0, 1, 0, 0, 0]), band_hz)?));
+        }
+        let law = GeneralizedMaxwell::new(equilibrium, terms)
+            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+        Self::new(law, format!("material-state:{}; branches:{properties:?}", material.identity()),
+            band_hz, max_dt_over_tau, max_angular_step)
+    }
+
     /// Admit an existing `GeneralizedMaxwell` law and retain its source/conditions.
     /// The wall card's Young modulus must be its EQUILIBRIUM modulus, with one
     /// constant Poisson ratio shared by all branches. No instantaneous modulus

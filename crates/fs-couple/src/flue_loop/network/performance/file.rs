@@ -175,8 +175,14 @@ impl FlueFilePerformance {
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
-    /// AXIAL is `stress-free` or `strain-fixed`; LOSS is `elastic` or
-    /// `kelvin-voigt`. Each source binds an existing empty degree-two cylindrical
+    /// AXIAL is `stress-free` or `strain-fixed`; LOSS is `elastic`,
+    /// `kelvin-voigt`, or `maxwell COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP
+    /// MODULUS_PROPERTY TIME_PROPERTY ...`. Maxwell uses 1..=8 source-property
+    /// pairs in Pa and seconds, with `young_modulus` as the equilibrium modulus.
+    /// Each coefficient must cover the wall band; the actual mechanics clock
+    /// must resolve the declared time and instantaneous-frequency limits.
+    /// The same source selector and passive wall evolution serve reed ducts.
+    /// Each source binds an existing empty degree-two cylindrical
     /// junction; geometry and gas assignments stay unchanged. The original wall
     /// owner covers half of each adjacent physical section, leaving unselected
     /// and endpoint half-strips rigid. `walls none` or no row retains rigid walls.

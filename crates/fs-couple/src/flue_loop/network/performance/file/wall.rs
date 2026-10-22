@@ -3,16 +3,14 @@
 use super::{FlueInputError, Row, Rows, bad, poll};
 use fs_exec::CancelGate;
 use crate::bernoulli_aperture::wall::material::{
-    AxialConstraint, MaterialWallAssignment, MaterialWallInput, WallMaterialLoss,
-    YOUNG_VISCOSITY_PROPERTY,
+    AxialConstraint, MaterialWallAssignment, MaterialWallInput,
 };
+use crate::bernoulli_aperture::wall::material::source::WallMaterialLossSource;
 use crate::material_assembly::MaterialSource;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{
-    MaterialPropertySelection, ScalarAdmissibility as Admit,
-    ScalarPropertyRequirement as Requirement, resolve_material_state_point,
+    MaterialPropertySelection, resolve_material_state_point,
 };
-use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use std::sync::Arc;
 use super::material::Sources;
 
@@ -45,7 +43,7 @@ struct ParsedWall {
     angular_frequency_rad_s: f64,
     thickness_m: f64,
     axial: AxialConstraint,
-    loss: WallMaterialLoss,
+    loss: WallMaterialLossSource,
 }
 pub(super) struct ParsedWalls {
     line: usize,
@@ -86,11 +84,8 @@ impl ParsedWalls {
                 Some("strain-fixed") => AxialConstraint::StrainFixed,
                 _ => return Err(bad(row.line, "wall axial constraint must be stress-free or strain-fixed")),
             };
-            let loss = match row.fields.next() {
-                Some("elastic") => WallMaterialLoss::Elastic,
-                Some("kelvin-voigt") => WallMaterialLoss::KelvinVoigt,
-                _ => return Err(bad(row.line, "wall loss must be elastic or sourced kelvin-voigt")),
-            };
+            let loss = WallMaterialLossSource::read(&mut row.fields)
+                .map_err(|what| bad(row.line, what))?;
             let source_line = row.line;
             row.end()?;
             if temperature_k <= 0.0 || angular_frequency_rad_s < 0.0 || thickness_m <= 0.0 {
@@ -121,20 +116,13 @@ impl ParsedWalls {
             let source = MaterialSource { card: pack.card(), point: &point,
                 selection: MaterialPropertySelection::SingleClaimOnly };
             let material = (|| {
-                let mut required = vec![
-                    Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
-                    Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,
-                    Requirement::try_new("poisson_ratio", Dims::NONE,
-                        Admit::OpenInterval { lower: -1.0, upper: 0.5 })?,
-                ];
-                if matches!(wall.loss, WallMaterialLoss::KelvinVoigt) {
-                    required.push(Requirement::try_new(YOUNG_VISCOSITY_PROPERTY,
-                        DynViscosity::DIMS, Admit::NonNegative)?);
-                }
+                let required = wall.loss.requirements()?;
                 resolve_material_state_point(source.card, source.point, &required, source.selection)
             })().map_err(|source| FlueInputError::Material { line: wall.line, source })?;
+            let loss = wall.loss.resolve(&material, self.band_hz)
+                .map_err(|source| FlueInputError::Physics(super::FlueError::Physics(source)))?;
             assignments.push(MaterialWallAssignment { node: wall.node, material,
-                thickness_m: wall.thickness_m, axial: wall.axial, loss: wall.loss });
+                thickness_m: wall.thickness_m, axial: wall.axial, loss });
             records.push(FlueWallRecord { node: wall.node, path: wall.path, pack });
         }
         let max_walls = assignments.len();

@@ -13,8 +13,15 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 mod boundaries;
 #[path = "material/mimo.rs"]
 mod mimo;
+#[path = "material/wall_memory.rs"]
+mod wall_memory;
 
 fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
+    -> NormalizedMaterialCardPack
+{
+    pack_with_time(density, young, omit, upper_omega, 0.001)
+}
+fn pack_with_time(density: f64, young: f64, omit: Option<&str>, upper_omega: f64, time_s: f64)
     -> NormalizedMaterialCardPack
 {
     let mut claims = ClaimSet::new();
@@ -29,7 +36,7 @@ fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
         ("young_modulus", Pressure::DIMS, young), ("poisson_ratio", Dims::NONE, 0.3),
         ("kelvin_voigt_young_viscosity", DynViscosity::DIMS, 2.0),
         ("boundary_modulus", Pressure::DIMS, 0.5 * young),
-        ("boundary_time", Dims([0, 0, 1, 0, 0, 0]), 0.001)] {
+        ("boundary_time", Dims([0, 0, 1, 0, 0, 0]), time_s)] {
         if omit == Some(name) { continue; }
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },

@@ -4028,3 +4028,29 @@ runtime source families. Native execution remains required. Keys remain
 one-mode material cantilever slits with prescribed exterior reservoirs; this
 does not add circular pads, linkages, direct key radiation or instrument
 qualification.
+
+
+### Shared material-card relaxation for flute and reed duct walls
+
+Both wind-performance readers use one bounded wall-loss selector.
+`maxwell COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP MODULUS_PROPERTY TIME_PROPERTY ...`
+selects 1..=8 original modulus/time claim pairs from each wall's normalized
+material card. Density, equilibrium Young modulus and Poisson ratio come from
+that same resolved state. Every coefficient must have its physical units,
+fixed-temperature constancy and frequency coverage; duplicate identical
+branches and unresolved source times or instantaneous wall frequencies refuse.
+
+`WallRelaxation::from_state_point` lowers those claims through the existing
+generalized-Maxwell and passive pressure/volume-flow owners. The original
+two-sided reed and flute network equations carry wall memory, returning
+pressure and radiation without an extra wall integrator or Kelvin-Voigt loss.
+Distinct branches may share a time claim; each selected property is resolved
+once and all source branches remain visible.
+
+Regression sources change only relaxation-time material data while holding
+geometry, gases, equilibrium stiffness and performance bytes fixed, and check
+wall-memory energy, source feedback, actual microphone pressure, callback
+partition equality and the flute CLI's PCM output. These are synthetic
+coupling checks. The inherited fixed-state, isotropic thin-cylinder membrane
+limits remain; this does not add orthotropic bore shells, thermal evolution,
+exterior wall radiation or measured instrument qualification.

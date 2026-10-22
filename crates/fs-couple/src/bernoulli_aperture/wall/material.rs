@@ -15,6 +15,7 @@
 /// Hereditary material spectra through the shared passive acoustic load.
 pub mod relaxation;
 pub use relaxation::WallRelaxation;
+pub(crate) mod source;
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, WallPin, invalid};

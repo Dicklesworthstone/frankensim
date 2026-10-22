@@ -14,6 +14,13 @@
 //! selects additional Young-modulus/time claims from every original material
 //! card. It requires exact-zoh, zero prestress and a proportional spectrum per
 //! blade; every retained mode keeps separate material memory and physical loss.
+//! Duct-wall LOSS also accepts `maxwell COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP
+//! MODULUS_PROPERTY TIME_PROPERTY ...`, shared with flute inputs. The 1..=8
+//! pairs select Pa and second claims from that wall's material card, whose
+//! `young_modulus` is the equilibrium modulus. All claims must cover the wall
+//! band and the mechanics clock must resolve the declared temporal limits.
+//! These passive memories act through the original tract/bore pressure solve;
+//! they do not add Kelvin-Voigt loss or a second wall-motion integrator.
 mod plate;
 mod boundaries;
 mod radiation;
