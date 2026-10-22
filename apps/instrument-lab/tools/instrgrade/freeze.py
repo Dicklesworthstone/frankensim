@@ -144,6 +144,30 @@ def split(x, f0_hz, B=0.0, smooth_s=SMOOTH_S, attack_s=ATTACK_S, bw_hz=None):
                  envelope=np.sqrt(power))
 
 
+NULLS = ("sine", "1/n", "odd_1/n", "1/n2", "frozen")
+
+
+def null_signals(y, f0_hz, B=0.0):
+    """The five null baselines for one aligned real note `y` near `f0_hz`: {name: signal of len(y)}.
+
+    "frozen" is the note itself frozen (split). The four tones are the plan's sine, 1/n, odd 1/n and 1/n^2 at the note's measured
+    median f0, partials up to F_TOP, each carrying the frozen note's own RMS envelope (its attack as recorded, its swell or decay
+    smoothed), so they differ from the recording in their spectrum and their stillness, not in their shape over time: a stricter
+    null than a steady tone, which a decaying note's set would reject for its shape alone."""
+    s = split(y, f0_hz, B)
+    t = np.arange(len(y)) / SR
+    f0 = s.f0_median_hz
+    kmax = max(1, int(F_TOP // f0))
+    amps = {"sine": {1: 1.0}, "1/n": {k: 1.0 / k for k in range(1, kmax + 1)},
+            "odd_1/n": {k: 1.0 / k for k in range(1, kmax + 1, 2)}, "1/n2": {k: 1.0 / k ** 2 for k in range(1, kmax + 1)}}
+    out = {}
+    for name, a in amps.items():
+        tone = sum(v * np.sin(2 * np.pi * k * f0 * t + 0.3 * k) for k, v in a.items())
+        out[name] = s.envelope * tone / math.sqrt(sum(v * v for v in a.values()) / 2)  # unit-RMS tone times the note's RMS envelope
+    out["frozen"] = s.frozen
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("wav")

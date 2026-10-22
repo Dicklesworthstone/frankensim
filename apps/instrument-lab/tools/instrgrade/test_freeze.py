@@ -44,15 +44,15 @@ def living(f0=F0, dur=2.5, vib_cents=15.0, vib_hz=5.0, shimmer_db=1.5, noise_db=
     return h + noise, h, noise
 
 
-def mean_flux(y, f0=F0):
-    """The graded flux (decompose.flux_curve) averaged over the sounding frames past the first 0.1 s."""
+def mean_flux(y, f0=F0, skip_s=0.1):
+    """The graded flux (decompose.flux_curve) averaged over the sounding frames past the first `skip_s`."""
     S, sf = dc.stft_db(y, 4096)
     frames = max(1, (len(y) - 2048) // dc.HOP)
     S = S[:, :frames].astype(np.float64)
     fl = dc.flux_curve(S, sf)
     rms = 10 * np.log10(np.sum(10 ** (S / 10), axis=0) + 1e-20)
     t = np.arange(frames) * dc.HOP / SR
-    use = (rms > rms.max() - 40) & (t > 0.1)
+    use = (rms > rms.max() - 40) & (t > skip_s)
     return float(np.mean(fl[use]))
 
 
@@ -136,6 +136,34 @@ class FreezeTests(unittest.TestCase):
         print(f"\n  attack 10-90 %: original {ax:.1f} ms, frozen {af:.1f} ms; decay: original {dx:.2f} dB/s, frozen {df:.2f} dB/s")
         self.assertLess(abs(af - ax), max(3.0, 0.2 * ax))
         self.assertLess(abs(df - dx), 1.0)
+
+
+    def test_the_four_tone_nulls_carry_the_notes_pitch_and_shape_and_nothing_else(self):
+        x, _, _ = living(decay_db_s=8.0, noise_db=-40.0)
+        nulls = freeze.null_signals(x, F0)
+        s = freeze.split(x, F0)
+        self.assertEqual(tuple(nulls), freeze.NULLS)
+        self.assertTrue(np.array_equal(nulls["frozen"], s.frozen))
+        w = int(0.05 * SR)
+        n = len(x) // w
+
+        def lv(y):
+            return 10 * np.log10(np.mean(y[: n * w].reshape(n, w) ** 2, axis=1) + 1e-30)
+
+        t = (np.arange(n) + 0.5) * w / SR
+        sel = (t > 0.3) & (t < 2.2)
+        nfft = 1 << 19
+        fr = np.fft.rfftfreq(nfft, 1 / SR)
+        for name in ("sine", "1/n", "odd_1/n", "1/n2"):
+            z = nulls[name]
+            shape = float(np.max(np.abs(lv(z)[sel] - lv(s.frozen)[sel])))
+            A = np.abs(np.fft.rfft(z[sel.argmax() * w:] * np.hanning(len(z) - sel.argmax() * w), nfft))
+            peak = float(fr[np.argmax(A)])
+            print(f"\n  null {name}: level curve within {shape:.2f} dB of the frozen note's, strongest line {peak:.2f} Hz "
+                  f"(note median {s.f0_median_hz:.2f} Hz), flux after the attack {mean_flux(z, skip_s=0.25):.3f} dB")
+            self.assertLess(shape, 1.0)
+            self.assertAlmostEqual(peak, s.f0_median_hz, delta=0.5)
+            self.assertLess(mean_flux(z, skip_s=0.25), 0.1)  # the kept attack is the note's; after it, nothing moves
 
 
 if __name__ == "__main__":
