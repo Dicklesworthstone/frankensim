@@ -969,8 +969,8 @@ impl FlueVoice {
             Some(loss) => mouth_loss::solve(boundary, source-radiation_history, self.q_prev, l, r, zc, dt, loss),
             None => Ok((solve_mouth_port(boundary, source-radiation_history, self.q_prev, l, r, zc, dt)?, 0.0)),
         };
-        // Spatial windway transport and delays >= dt have no current-sample
-        // coefficient. A closed wave boundary instead fixes q independently.
+        // Traces with no current-sample coefficient are explicit. A closed
+        // wave boundary instead fixes q independently of the current jet.
         if delayed.current_weight == 0.0 || c.q_max == 0.0 || boundary.direct_reflection == 1.0 {
             let trial = jet(if boundary.direct_reflection == 1.0 {
                 -boundary.history_pressure_pa/zc
@@ -1119,25 +1119,27 @@ impl FlueVoice {
         let mut windway_numerical = 0.0;
         let mut windway_defect = 0.0;
         for slot in out.iter_mut() {
-            let convected = if let Some(windway) = &mut self.unsteady_windway {
-                let (frame, velocity) = windway.advance(self.blow_pa, self.q_prev / s_m)?;
+            let windway_trial = self.unsteady_windway.as_ref()
+                .map(|windway| windway.prepare(self.blow_pa)).transpose()?;
+            let u = if let Some(windway) = &windway_trial {
+                let frame = windway.frame();
                 // Spatial transport admits arbitrarily slow transient motion;
                 // the actual source Mach cap remains enforced every sample.
                 self.line.validate_jet_speed(frame.bulk_speed_m_s, false)?;
-                self.jet_speed_m_s = frame.bulk_speed_m_s;
                 windway_work += frame.pressure_work_j;
                 windway_stored_delta += frame.stored_delta_j;
                 windway_viscous += frame.viscous_dissipation_j;
                 windway_exit += frame.exit_work_j;
                 windway_numerical += frame.numerical_dissipation_j;
                 windway_defect += frame.energy_residual_j;
-                Some(velocity)
-            } else { None };
-            let u = self.jet_speed_m_s();
+                frame.bulk_speed_m_s
+            } else { self.jet_speed_m_s() };
             let q_max = u * self.geometry.flue_height_m * self.geometry.flue_width_m;
-            let transit = if u > 0.0 { self.transit_s() } else { f64::INFINITY };
+            let transit = if u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
+                self.geometry.cut_up_m / (self.island.convection_ratio * u)
+            } else { self.transit_s() };
             let seed_scale = self.island.seed_amplitude_rel * u;
-            let reynolds = self.reynolds();
+            let reynolds = u * self.geometry.flue_height_m / self.nu;
             reynolds_min = reynolds_min.min(reynolds);
             reynolds_max = reynolds_max.max(reynolds);
             // The existing card's growth band follows THIS sample's actual speed.
@@ -1167,15 +1169,15 @@ impl FlueVoice {
                     transit_samples
                 }
             } else { 0.0 };
-            // The unsteady channel keeps its original spatial transport. The
+            // The unsteady channel supplies its affine spatial trace. The
             // quasi-steady history is sampled at THIS time minus the physical
             // transit, including a current-mouth term when transit < dt.
             let delayed = if self.nolle.is_some() {
                 // The published transfer owns the jet response; the island chain idles at zero.
                 RetardedVelocity { past_m_s: 0.0, current_weight: 0.0 }
             } else {
-                match convected {
-                    Some(velocity) => RetardedVelocity { past_m_s: velocity, current_weight: 0.0 },
+                match &windway_trial {
+                    Some(windway) => windway.mouth_response(),
                     None => retarded_velocity(&self.history, self.head, delay_samples)?,
                 }
             };
@@ -1220,10 +1222,18 @@ impl FlueVoice {
             }
             let radiation_candidate = self.mouth_radiation.as_ref()
                 .map(|load| load.candidate(q)).transpose()?;
+            // Validate the entire source field with the solved current mouth
+            // velocity before either the wave or source history can publish.
+            let windway_candidate = windway_trial
+                .map(|windway| windway.finish(q / s_m)).transpose()?;
             let committed = self.line.push(p_plus)?;
             if matches!(&self.line, FlueResonator::Tmm(_))
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
                 return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });
+            }
+            if let Some(windway) = windway_candidate {
+                self.unsteady_windway = Some(windway);
+                self.jet_speed_m_s = u;
             }
             self.band_state = trial.band_state;
             self.band_hp = trial.band_hp;

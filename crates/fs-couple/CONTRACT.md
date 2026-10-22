@@ -677,6 +677,18 @@ across the actual mouth cut-up at the evolving speed, including stop and
 startup, without a minimum-speed history clamp. The voice's original failure
 poisoning applies to the combined sample. Channel and acoustic mouth work
 ledgers retain their distinct ports; numerical damping is not material heat.
+Characteristics entering during a sample interpolate the accepted old boundary
+velocity and the current solved mouth velocity at their physical entry time.
+The affine current coefficient participates in the existing joint jet/mouth
+equation; interior characteristics use the preceding spatial field. Zero speed
+preserves interior parcels and retains the accepted boundary trace for restart.
+Channel momentum, convection and bulk speed remain private candidates until
+the mouth and wave step accepts. A rejected trial preserves their preceding
+accepted state under the existing poisoned-voice policy. Convection uses a
+piecewise-constant accepted bulk speed during each source sample. Focused
+characteristic, source-history and gas-to-PCM regressions are authored; syntax
+parsing and an independent characteristic/refinement oracle passed. Native
+execution remains required.
 Single-tube and regional-gas branched file sources use this same builder and
 the same physical receiver. Independent steady Poiseuille and transient
 sine-series regressions exercise space/time refinement, signed release,

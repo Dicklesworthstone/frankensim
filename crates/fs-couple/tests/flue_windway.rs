@@ -21,8 +21,11 @@ fn gas(viscosity_scale: f64) -> GasState {
     GasState::try_new(&spec, 293.15, 101_325.0).unwrap()
 }
 fn voice(gas: GasState, maximum_mach: f64) -> FlueVoice {
+    voice_geometry(gas, maximum_mach, 0.004, 90.0)
+}
+fn voice_geometry(gas: GasState, maximum_mach: f64, cut_up_m: f64, gain: f64) -> FlueVoice {
     let geometry = FlueGeometry {
-        flue_width_m: 0.01, flue_height_m: HEIGHT, cut_up_m: 0.004,
+        flue_width_m: 0.01, flue_height_m: HEIGHT, cut_up_m,
         labium_offset_m: 0.0, jet_angle_rad: 0.0,
         bore_area_m2: core::f64::consts::PI * 0.006 * 0.006, mouth_loss_rel: 0.02,
     };
@@ -36,7 +39,7 @@ fn voice(gas: GasState, maximum_mach: f64) -> FlueVoice {
         gases: vec![gas], viscothermal: vec![], minimum_jet_speed_m_s: 1.0,
         maximum_jet_mach: maximum_mach, max_jet_history_samples: 4096,
     };
-    FlueVoice::from_network(Some(&mint_tonal_interim_card().unwrap()), 90.0, 1e-6,
+    FlueVoice::from_network(Some(&mint_tonal_interim_card().unwrap()), gain, 1e-6,
         geometry, source, RATE, 3, 0, &CancelGate::new_clock_free()).unwrap()
 }
 fn schedule(pressure: f64) -> GestureSchedule {
@@ -162,6 +165,8 @@ fn resolved_windway_changes_real_receiver_and_preserves_callback_independence() 
     let second = many.voice().unsteady_windway().unwrap();
     assert_eq!(first.channel().velocities_m_s(), second.channel().velocities_m_s());
     assert_eq!(first.channel().last_step(), second.channel().last_step());
+    assert_eq!(first.convected_velocity_m_s(), second.convected_velocity_m_s());
+    assert_eq!(first.boundary_velocity_m_s(), second.boundary_velocity_m_s());
     assert_eq!(first.channel().gas(), one.voice().gas());
     assert_eq!(first.channel().spec().transverse_cells, 32);
     assert_eq!(first.channel().spec().length_m, LENGTH);
@@ -230,4 +235,76 @@ fn unsteady_admission_retains_mach_cap_and_refuses_ambiguous_or_late_attachments
         .with_unsteady_windway(LENGTH, 32, 64).is_err());
     v.step_block(&mut [0.0]).unwrap();
     assert!(v.with_unsteady_windway(LENGTH, 32, 64).is_err());
+}
+
+#[test]
+fn transported_feedback_uses_the_solved_current_mouth_at_physical_entry_time() {
+    // The small manufactured cut-up crosses within one source sample. The
+    // ordinary cut-up instead exercises boundary entry into interior cells.
+    for cut_up in [0.004, 0.00002] {
+        let cells = 64;
+        let mut v = voice_geometry(gas(1.0), 0.3, cut_up, 0.01)
+            .with_unsteady_windway(LENGTH, 32, cells).unwrap();
+        v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+        let mut current_outlet_steps = 0;
+        let mut live_boundary_steps = 0;
+        for _ in 0..256 {
+            let before = v.unsteady_windway().unwrap();
+            let old = before.convected_velocity_m_s().to_vec();
+            let previous_boundary = before.boundary_velocity_m_s();
+            v.step_block(&mut [0.0]).unwrap();
+            let after = v.unsteady_windway().unwrap();
+            let current_boundary = v.mouth_flow_m3_s() / (0.01 * cut_up);
+            assert_eq!(after.boundary_velocity_m_s(), current_boundary);
+            let travel = after.channel().last_step().bulk_speed_m_s
+                * v.island().convection_ratio / f64::from(RATE);
+            let dx = cut_up / cells as f64;
+            if travel > cut_up { current_outlet_steps += 1; }
+            for (index, &actual) in after.convected_velocity_m_s().iter().enumerate() {
+                let x = (index + 1) as f64 * dx;
+                let departure = x - travel;
+                let expected = if departure <= 0.0 {
+                    // The exact characteristic entered at t_new-x/c. Its
+                    // linear boundary trace interpolates accepted endpoints.
+                    live_boundary_steps += usize::from(current_boundary != previous_boundary);
+                    current_boundary + (previous_boundary-current_boundary)*(x/travel)
+                } else {
+                    let position = departure/dx;
+                    let lower = position.floor() as usize;
+                    let left = if lower == 0 { previous_boundary } else { old[lower-1] };
+                    let fraction = position-lower as f64;
+                    if fraction == 0.0 { left }
+                    else { left+(old[lower]-left)*fraction }
+                };
+                assert!((actual-expected).abs() <= 2e-12*(1.0+expected.abs()),
+                    "cut_up={cut_up}, cell={index}, actual={actual}, expected={expected}");
+            }
+        }
+        assert!(live_boundary_steps > 0);
+        assert_eq!(current_outlet_steps > 0, cut_up < 0.0001);
+    }
+}
+
+#[test]
+fn rejected_mouth_solve_keeps_the_accepted_source_momentum_and_feedback() {
+    let mut v = voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 64).unwrap()
+        .with_mouth_contraction(ContractionSpec { area_ratio: 0.6,
+            maximum_contracted_mach: 1e-15, provenance: "manufactured mouth refusal".into() }).unwrap();
+    v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    let before = v.unsteady_windway().unwrap().clone();
+    let speed = v.jet_speed_m_s();
+    let wave_energy = v.network().unwrap().stored_energy_j();
+    assert!(v.step_block(&mut [0.0]).is_err());
+    let after = v.unsteady_windway().unwrap();
+    assert_eq!(after.channel().velocities_m_s(), before.channel().velocities_m_s());
+    assert_eq!(after.channel().last_step(), before.channel().last_step());
+    assert_eq!(after.convected_velocity_m_s(), before.convected_velocity_m_s());
+    assert_eq!(after.boundary_velocity_m_s(), before.boundary_velocity_m_s());
+    assert_eq!(v.jet_speed_m_s(), speed);
+    assert_eq!(v.samples_rendered(), 0);
+    assert_eq!(v.network().unwrap().stored_energy_j(), wave_energy);
+    // Preserving physical source state does not relax the voice's existing
+    // poison policy or promise resumability of unrelated source participants.
+    assert!(v.apply(FlueControl::SetBlowingPressure(0.0)).is_err());
+    assert!(v.step_block(&mut [0.0]).is_err());
 }

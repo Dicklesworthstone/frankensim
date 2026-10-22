@@ -135,6 +135,45 @@ fn unsteady_windway_data_reaches_regional_source_and_physical_cli_output() {
     }
 }
 
+#[test]
+fn current_sample_windway_feedback_retains_regional_gas_pressure_and_pcm() {
+    // A manufactured short cut-up makes transit less than the mechanical
+    // sample period. Its current-mouth term must use the same physical
+    // source, multirate receiver and PCM owner as the ordinary geometry.
+    let text = source().replace("windway slit 0.015", "windway unsteady 0.015 32 64")
+        .replace("flue 0.010 0.001 0.004", "flue 0.010 0.001 0.00002")
+        .replace("jet 90 1e-6", "jet 0.01 1e-6");
+    let changed = text.replace("N2 0.77 O2 0.2 CO2 0.03", "N2 0.5 O2 0.2 CO2 0.3");
+    let gate = CancelGate::new_clock_free();
+    let render = |input: &str, block: usize| {
+        let mut renderer = FlueFilePerformance::from_bytes(input.as_bytes(), block, &gate)
+            .unwrap().into_renderer();
+        let mut pressure = vec![0.0; 1024];
+        for chunk in pressure.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        let v = renderer.voice();
+        let field = v.unsteady_windway().unwrap();
+        assert_eq!(field.channel().gas(), &v.network().unwrap().source().gases[1]);
+        assert!(v.jet_speed_m_s()*v.island().convection_ratio/96_000.0 > 0.00002,
+            "the fixture must exercise a current-mouth outlet coefficient");
+        assert!(pressure.iter().all(|p| p.is_finite()));
+        assert!(pressure.iter().any(|p| p.abs() > 1e-10));
+        pressure
+    };
+    let expected = render(&text, 37);
+    assert_eq!(expected, render(&text, 1));
+    assert_eq!(expected, render(&text, 137));
+    let altered = render(&changed, 37);
+    assert_ne!(expected, altered, "source-gas data must reach actual receiver pressure");
+    let wav = encode_pcm16_wav(&expected, 48_000, 1.0).unwrap().0;
+    assert_ne!(wav, encode_pcm16_wav(&altered, 48_000, 1.0).unwrap().0);
+    let dir = directory();
+    let input = dir.join("current-windway.performance");
+    let output = dir.join("current-windway.wav");
+    std::fs::write(&input, &text).unwrap();
+    success(run(&input, &output, 137, false));
+    assert_eq!(std::fs::read(output).unwrap(), wav);
+}
+
 
 fn articulated_source() -> String {
     use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
