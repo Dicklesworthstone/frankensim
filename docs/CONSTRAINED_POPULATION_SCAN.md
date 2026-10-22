@@ -123,8 +123,9 @@ still has to reproduce the selected score bit-for-bit.
 The example supplies a 64 MiB executor lease, separately from the physical
 solver's spatial/work budgets. This does not cap total callback-owned heap or
 process memory. Increasing workers increases simultaneous physical workspace.
-No new snapshot format, KKT certificate, global optimum, continuous-peak coverage
-or experimental calibration is added. The example is not a hardware controller.
+Parallel execution adds no KKT certificate, global-optimum guarantee,
+continuous-peak coverage or experimental calibration. Restart support is
+described below. The example is not a hardware controller.
 
 ## Verification boundary
 
@@ -144,3 +145,63 @@ pause-partition equivalence at fixed work; and CLI admission. They remain
 unexecuted. In the parallel-integration session DSR, its documented fallback,
 RCH, Cargo and rustc were absent. No native compilation, race-freedom test pass,
 physical runtime pass, or wall-time improvement is claimed by this document.
+
+## Saving and restarting a complete constrained fit
+
+The CLI now saves the constrained search **and the independent physical-work
+account**, not just its best powers. For example:
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example constrained_scan_fit -- --workers 4 \
+  --checkpoint scan.checkpoint --pause-after 48
+
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example constrained_scan_fit -- --workers 8 \
+  --resume scan.checkpoint --checkpoint scan.checkpoint
+```
+
+An explicit pause exits normally and prints `paused=true`, not a target-recovery
+claim. `--pause-after` counts new search attempts in this invocation and requires
+an output checkpoint. With `--checkpoint`, snapshots are saved after each batch
+of at most 24 attempts, after final replay, and, where possible, after a drained
+failure. Saving after a cancelled simulation uses a fresh context for the already
+completed search state, not to restart cancelled physics. Successful cached
+siblings remain available for serial or parallel continuation.
+
+Search and physical counts need not be equal after an interrupted callback:
+cancellation can arrive after the search charges an attempt but before the
+physical evaluator reserves a solve. Both original counts are retained and
+checked against their own lifetime allowances, rather than reconciled by
+inventing or refunding work.
+
+The example fingerprints the actual executable in bounded 64 KiB blocks and
+binds both variable physical limits. Use the same executable and physical/search
+arguments on resume; changing worker count is permitted. A different binary,
+physical limit, search configuration, box, initial design, feasibility tolerance,
+row count or physical allowance refuses. The executable fingerprint reads at most
+1 GiB; checkpoint files are limited to 1 MiB. File publication writes and syncs a
+new same-directory temporary file, renames it into place, and syncs the parent on
+Unix. Filesystem-specific failure guarantees still apply. An interrupted process
+may lose work after the last successfully saved snapshot.
+
+`PopulationScanStudy::checkpoint_bytes` and `from_checkpoint_bytes` expose the
+same restart path to callers with their own model factories and storage. The
+caller reconstructs an unevaluated `ValueConstrainedScanStudy`, supplies an
+identity covering all physical inputs and the numerical build, and supplies the
+expected search declarations. The loader runs no physics, keeps spent attempts
+and physical evaluations separate, and restores both original allowances.
+The model identity is a caller assertion, not a way to inspect arbitrary
+closures. Checksums detect accidental corruption, not malicious rewriting.
+
+Budget extension remains explicit through `extend_evaluation_budgets` after
+loading. Restoring a completed checkpoint does not refund its final replay: a
+fully spent physical allowance cannot fund another solve. The CLI intentionally
+refuses a second replay from such a terminal file rather than manufacturing a
+fresh allowance; application callers can explicitly extend budgets. A saved
+best-so-far still carries neither global-optimality nor unsampled-peak guarantees.
+
+Four additional Rust regressions cover whole-model reconstruction and counters,
+worker-count changes across restart, changed-model/configuration/corruption
+refusal, and preservation of an already spent replay. Native compilation and
+execution remain unverified in the delivery environment.

@@ -5,6 +5,9 @@
 //! a typed error, rather than an infeasible score or a fabricated penalty.
 //! One physical-evaluation slot is held back for replay of the selected design.
 
+/// Whole-study restart, including the independent physical-work account.
+pub mod restart;
+
 use fs_ascent::scan_design::constraints::value::{ScanConstraintValues, ValueConstrainedScanStudy};
 use fs_ascent::scan_design::value::ScanPowerValueEvaluation;
 use fs_conduction::bc::history::march::enthalpy::scanning::ScanningEnthalpyRun;

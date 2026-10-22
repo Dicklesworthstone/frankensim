@@ -24,6 +24,11 @@ const MAGIC: &[u8; 8] = b"FSDECF01";
 const DOMAIN: &str = "fs-dfo/constrained-differential-evolution-checkpoint-v1";
 
 impl ConstrainedDifferentialEvolutionState {
+    /// Immutable declarations for binding a reconstructed physical owner.
+    pub fn configuration(&self) -> &super::DifferentialEvolutionConfig { &self.state.config }
+    pub fn bounds(&self) -> &[[f64; 2]] { &self.state.bounds }
+    pub fn initial_coordinates(&self) -> Option<&[f64]> { self.state.initial.as_deref() }
+
     /// Capture only a drained search. No callback or budget charge occurs.
     /// Successful cached siblings, failed-candidate retry coordinates and all
     /// charged attempts remain available after restoring in a fresh process.

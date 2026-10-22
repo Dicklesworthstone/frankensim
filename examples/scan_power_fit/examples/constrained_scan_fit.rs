@@ -27,11 +27,15 @@ use fs_qty::{Dims, QtyAny};
 use fs_scenario::scenario::Environment;
 use fs_scenario::signal::{TimeSignal, Interp};
 use fs_solver::NewtonKrylovConfig;
+use scan_power_fit::population::restart::DifferentialEvolutionRestoreLimits;
+#[path = "constrained_scan_fit/recovery.rs"]
+mod recovery;
+use recovery::{Recovery, MAX_BYTES};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-8;
 const TOLERANCE: f64 = 1e-9;
-const USAGE: &str = "constrained_scan_fit [--workers 1..128] [energy_cap_J [peak_fraction [search_attempts]]]";
+const USAGE: &str = "constrained_scan_fit [--workers 1..128] [energy_cap_J [peak_fraction [search_attempts]]] [--checkpoint FILE [--pause-after N]] [--resume FILE]";
 #[derive(Clone, Copy)]
 struct Options { energy_j: f64, peak_fraction: f64, attempts: usize, workers: Option<usize> }
 fn options(args: &[String]) -> Result<Options> {
@@ -61,7 +65,23 @@ fn options(args: &[String]) -> Result<Options> {
     Ok(out)
 }
 
+#[cfg(test)]
 fn fit(cx: &Cx<'_>, input: Options, partitioned: bool) -> Result<PopulationScanReplay> {
+    match fit_with_recovery(cx, input, partitioned, &Recovery::default())? {
+        FitResult::Finished(result) => Ok(result),
+        FitResult::Paused { .. } => Err("unexpected checkpoint pause".into()),
+    }
+}
+enum FitResult {
+    Finished(PopulationScanReplay),
+    Paused { search_attempts: usize, physical_evaluations: usize },
+}
+fn fit_with_recovery(cx: &Cx<'_>, input: Options, partitioned: bool, recovery: &Recovery)
+    -> Result<FitResult>
+{
+    let model = recovery.model(cx, input)?;
+    let saved = recovery.load()?;
+    let partitioned = partitioned && !recovery.active();
     let (complex, positions) = fs_conduction::fixtures::box_grid([1,1,1], [1.;3]);
     let mesh = ConductionMesh::new(complex, positions)?;
     let material = ConductivityModel::isotropic_declared(2.)?;
@@ -119,11 +139,17 @@ fn fit(cx: &Cx<'_>, input: Options, partitioned: bool) -> Result<PopulationScanR
             smoothing_scale:0.001 }, maximum:input.peak_fraction, scale:1. }],
         ScanValueConstraintBudget { max_rows:5, max_energy_weights:2,
             responses:ScanValueResponseBudget { max_responses:2, max_peak_samples:16 } })?;
-    let mut driver = PopulationScanStudy::new(cx, study, &[[0.,50.];2], DifferentialEvolutionConfig {
+    let config = DifferentialEvolutionConfig {
         population_size:24, differential_weight:0.8, crossover_probability:0.9, seed:17,
         max_evaluations:initial_cap, max_population_entries:48, target:Some(TARGET),
-    }, TOLERANCE)?;
-    assert_eq!(driver.physical_evaluations(), 0);
+    };
+    let mut driver = match saved {
+        Some(bytes) => PopulationScanStudy::from_checkpoint_bytes(cx, study, &bytes, model,
+            &[[0.,50.];2], &config, TOLERANCE, DifferentialEvolutionRestoreLimits {
+                max_bytes:MAX_BYTES, max_dimension:2, max_population_entries:48 })?,
+        None => PopulationScanStudy::new(cx, study, &[[0.,50.];2], config, TOLERANCE)?,
+    };
+    let start_attempts = driver.search_evaluations();
     let pool = input.workers.map(|threads| TilePool::for_host(threads, 17));
     // Executor bookkeeping is leased separately from the original physical
     // solver's own spatial/work budgets; this is not a total RSS guarantee.
@@ -137,21 +163,61 @@ fn fit(cx: &Cx<'_>, input: Options, partitioned: bool) -> Result<PopulationScanR
         driver.extend_evaluation_budgets(input.attempts, input.attempts + 1)?;
     }
     loop {
-        let additional = if partitioned { 13 } else { input.attempts };
-        let report = match &pool {
-            Some(pool) => driver.advance_parallel(cx, pool, &lease, additional, 24)?,
-            None => driver.advance(cx, additional)?,
+        let additional = if recovery.checkpoint.is_some() { 24 }
+            else if partitioned { 13 } else { input.attempts };
+        let additional = additional.min(recovery.pause_after.map_or(usize::MAX,
+            |n| n.saturating_sub(driver.search_evaluations() - start_attempts)));
+        let attempted: Result<_> = match &pool {
+            Some(pool) => driver.advance_parallel(cx, pool, &lease, additional, 24).map_err(Into::into),
+            None => driver.advance(cx, additional).map_err(Into::into),
         };
+        let report = match attempted {
+            Ok(report) => report,
+            Err(error) => {
+                if recovery.checkpoint.is_some() {
+                    // Workers are drained; a fresh context may capture completed
+                    // siblings even when the simulation context is cancelled.
+                    if let Err(save_error) = with_cx(|_, fresh| {
+                        recovery.save(&driver.checkpoint_bytes(fresh, model, MAX_BYTES)?)
+                    }) { eprintln!("checkpoint after failure: {save_error}"); }
+                }
+                return Err(error);
+            }
+        };
+        if recovery.checkpoint.is_some() {
+            recovery.save(&driver.checkpoint_bytes(cx, model, MAX_BYTES)?)?;
+        }
         if report.physical_budget_exhausted() || report.search.stop != DifferentialEvolutionStop::Paused { break; }
+        if recovery.pause_after.is_some_and(|n| driver.search_evaluations() - start_attempts >= n) {
+            return Ok(FitResult::Paused { search_attempts:driver.search_evaluations(),
+                physical_evaluations:driver.physical_evaluations() });
+        }
     }
-    let replay = driver.replay_best(cx)?;
-    if replay.physical_evaluations != replay.search_evaluations + 1 {
-        return Err("physical work differs from search attempts plus one replay".into());
+    let replay = match driver.replay_best(cx) {
+        Ok(replay) => replay,
+        Err(error) => {
+            if recovery.checkpoint.is_some() {
+                if let Err(save_error) = with_cx(|_, fresh| {
+                    recovery.save(&driver.checkpoint_bytes(fresh, model, MAX_BYTES)?)
+                }) { eprintln!("checkpoint after failed replay: {save_error}"); }
+            }
+            return Err(error.into());
+        }
+    };
+    if recovery.checkpoint.is_some() {
+        recovery.save(&driver.checkpoint_bytes(cx, model, MAX_BYTES)?)?;
+    }
+    // Cancellation may occur after a callback starts but before its physical
+    // reservation. Restored accounts must stay separate, not be equated.
+    if replay.search_evaluations > input.attempts
+        || replay.physical_evaluations > input.attempts + 1
+    {
+        return Err("restored search or physical work exceeds its lifetime allowance".into());
     }
     if replay.sources[0].absorbed_power_values(3)?[2].to_bits() != 0.0_f64.to_bits() {
         return Err("source export changed the fixed shutdown".into());
     }
-    Ok(replay)
+    Ok(FitResult::Finished(replay))
 }
 
 fn with_cx<T>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> Result<T>) -> Result<T> {
@@ -161,8 +227,15 @@ fn with_cx<T>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> Result<T>) -> Result<T> {
         StreamKey { seed:92, kernel_id:51, tile:0, iteration:0 }, Budget::INFINITE, ExecMode::Deterministic)))
 }
 fn main() -> Result<()> {
-    let input = options(&std::env::args().skip(1).collect::<Vec<_>>())?;
-    let result = with_cx(|_,cx| fit(cx, input, true))?;
+    let (args, recovery) = Recovery::parse(std::env::args().skip(1).collect())?;
+    let input = options(&args)?;
+    let result = match with_cx(|_,cx| fit_with_recovery(cx, input, true, &recovery))? {
+        FitResult::Finished(result) => result,
+        FitResult::Paused { search_attempts, physical_evaluations } => {
+            println!("# checkpoint_saved; paused=true; search_attempts={search_attempts}; physical_evaluations={physical_evaluations}; no recovery claim");
+            return Ok(());
+        }
+    };
     println!("# synthetic P1 specimen; feasibility-first DE; no optimality certificate");
     println!("# evaluation_mode={}; requested_workers={}; maximum_wave=24",
         if input.workers.is_some() { "parallel" } else { "serial" }, input.workers.unwrap_or(1));
@@ -187,6 +260,104 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct SavedRun(std::path::PathBuf);
+    impl SavedRun {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!("fs-constrained-restart-{}-{}-{}",
+                std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> std::path::PathBuf { self.0.join("search.checkpoint") }
+    }
+    impl Drop for SavedRun {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn g5_saved_thermal_search_reconstructs_model_and_both_work_accounts() {
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let expected = with_cx(|_,cx| fit(cx, input, false)).unwrap();
+        let saved = SavedRun::new();
+        let paused = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            checkpoint:Some(saved.path()), pause_after:Some(7), ..Default::default()
+        })).unwrap();
+        assert!(matches!(paused, FitResult::Paused { search_attempts:7, physical_evaluations:7 }));
+        let bytes = std::fs::read(saved.path()).unwrap();
+        assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 7);
+        let restored = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            resume:Some(saved.path()), ..Default::default()
+        })).unwrap();
+        let FitResult::Finished(actual) = restored else { panic!("unexpected restored pause") };
+        assert_eq!(actual.coordinates, expected.coordinates);
+        assert_eq!(actual.score, expected.score);
+        assert_eq!(actual.constraints, expected.constraints);
+        assert_eq!(actual.physical.physical.predictions, expected.physical.physical.predictions);
+        assert_eq!(actual.search_evaluations, 80);
+        assert_eq!(actual.physical_evaluations, 81);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn g5_checkpoint_resume_may_change_worker_count_without_changing_fixed_work_physics() {
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:Some(4) };
+        let expected = with_cx(|_,cx| fit(cx, input, false)).unwrap();
+        let saved = SavedRun::new();
+        let paused = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            checkpoint:Some(saved.path()), pause_after:Some(29), ..Default::default()
+        })).unwrap();
+        assert!(matches!(paused, FitResult::Paused { search_attempts:29, physical_evaluations:29 }));
+        let restored = with_cx(|_,cx| fit_with_recovery(cx, Options { workers:Some(1), ..input }, false,
+            &Recovery { resume:Some(saved.path()), ..Default::default() })).unwrap();
+        let FitResult::Finished(actual) = restored else { panic!("unexpected restored pause") };
+        assert_eq!(actual.coordinates, expected.coordinates);
+        assert_eq!(actual.score, expected.score);
+        assert_eq!(actual.constraints, expected.constraints);
+        assert_eq!(actual.search_evaluations, expected.search_evaluations);
+        assert_eq!(actual.physical_evaluations, expected.physical_evaluations);
+    }
+
+    #[test]
+    fn g0_recovery_rejects_changed_physics_changed_work_caps_and_corrupt_files() {
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:80, workers:None };
+        let saved = SavedRun::new();
+        with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            checkpoint:Some(saved.path()), pause_after:Some(7), ..Default::default()
+        })).unwrap();
+        let load = Recovery { resume:Some(saved.path()), ..Default::default() };
+        for changed in [Options { energy_j:46., ..input }, Options { peak_fraction:0.6, ..input },
+            Options { attempts:81, ..input }] {
+            assert!(with_cx(|_,cx| fit_with_recovery(cx, changed, false, &load)).is_err());
+        }
+        let mut bytes = std::fs::read(saved.path()).unwrap();
+        bytes[40] ^= 1;
+        std::fs::write(saved.path(), bytes).unwrap();
+        assert!(with_cx(|_,cx| fit_with_recovery(cx, input, false, &load)).is_err());
+        for args in [vec!["--pause-after", "0"], vec!["--pause-after", "7"],
+            vec!["--checkpoint"], vec!["--resume"], vec!["--resume", "a", "--resume", "b"]] {
+            assert!(Recovery::parse(args.into_iter().map(str::to_string).collect()).is_err());
+        }
+    }
+
+    #[test]
+    fn g4_completed_checkpoint_does_not_refund_the_final_physical_replay() {
+        let input = Options { energy_j:45., peak_fraction:0.5, attempts:32, workers:None };
+        let saved = SavedRun::new();
+        let done = with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            checkpoint:Some(saved.path()), ..Default::default()
+        })).unwrap();
+        let FitResult::Finished(result) = done else { panic!("unexpected pause") };
+        assert_eq!(result.physical_evaluations, 33);
+        let bytes = std::fs::read(saved.path()).unwrap();
+        assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 33);
+        // Loading may succeed, but no new physical replay is affordable. The
+        // loader must not silently turn the terminal counter back into zero.
+        assert!(with_cx(|_,cx| fit_with_recovery(cx, input, false, &Recovery {
+            resume:Some(saved.path()), ..Default::default()
+        })).is_err());
+    }
     #[test]
     fn g1_cold_start_reaches_targets_without_violating_physical_limits() {
         let result = with_cx(|_,cx| fit(cx, options(&[])?, true)).unwrap();

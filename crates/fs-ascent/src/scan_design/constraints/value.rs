@@ -143,6 +143,21 @@ impl<F, O: ScanObservationSpec> ValueConstrainedScanStudy<F, O> {
         self.study.extend_evaluation_budget(total)
     }
 
+    /// Import spent work when rebuilding a fresh study from an application
+    /// checkpoint. The caller must first bind the original model and limits.
+    /// This charges work only: it cannot reset an evaluated study, increase an
+    /// allowance or undo failed/replayed evaluations. It runs no physics.
+    pub fn restore_evaluation_count(&mut self, cx: &Cx<'_>, spent: usize)
+        -> Result<(), ScanSensitivityError>
+    {
+        poll(cx)?;
+        if self.study.evaluations != 0 || spent > self.study.evaluation_limit {
+            return Err(invalid("restore spent physical work only into an unevaluated study within its original allowance"));
+        }
+        self.study.evaluations = spent;
+        Ok(())
+    }
+
     /// Admit bounded shared evaluation without cloning factories or constraints.
     /// Drop after draining workers restores only unused reservation slots;
     /// started failed/cancelled work remains charged to this same study.
