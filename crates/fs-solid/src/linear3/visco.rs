@@ -117,6 +117,17 @@ pub enum ViscoElementError {
         /// Zero-based ascending mode index.
         mode: usize,
     },
+    /// The algebraic eigensolve cannot resolve the requested root accuracy.
+    EigenResolution {
+        /// Zero-based ascending mode index.
+        mode: usize,
+        /// Frequency at which the eigen residual exceeded the budget [rad/s].
+        omega_rad_s: f64,
+        /// Certified eigenvalue radius divided by omega².
+        relative_radius: f64,
+        /// Maximum admitted relative eigenvalue radius.
+        maximum: f64,
+    },
 }
 
 impl core::fmt::Display for ViscoElementError {
@@ -191,6 +202,13 @@ pub struct ViscoMode {
     pub phi: Vec<f64>,
     /// φᵀK″(ω)φ / φᵀK′(ω)φ; no diagonal-damping adequacy claim.
     pub loss_factor: f64,
+    /// Storage-pencil Ritz value at the returned frequency [s⁻²].
+    pub storage_eigenvalue_per_s2: f64,
+    /// M⁻¹-norm eigen residual from fs-modal [s⁻²], separate from root error.
+    pub eigen_residual_per_s2: f64,
+    /// Certified eigenvalue radius [s⁻²]: quadratic (Kato–Temple) where the
+    /// complete spectrum certifies the gap, else the residual.
+    pub eigen_radius_per_s2: f64,
     /// Relative residual of λ(K′(ω),M) = ω² at the returned frequency.
     pub relative_frequency_residual: f64,
 }
@@ -242,17 +260,25 @@ impl ViscoElements {
             result
         };
         let mass = dense(&self.equilibrium.mass);
-        let evaluate =
-            |omega| -> Result<(ComplexStiffness, Vec<fs_modal::ModePair>), ViscoElementError> {
-                checkpoint(cx)?;
-                let k = self.complex_stiffness(omega, cx)?;
-                let pairs = fs_modal::eigh_gen_dense(&dense(&k.real), &mass, n)
+        // A dense f64 eigenvector of a stiff mesh keeps an M⁻¹ residual near
+        // eps*lambda_max however it is solved, so the residual is no measure
+        // of the eigenvalue. Recentre each value on its own Rayleigh quotient
+        // and certify it with the quadratic radius of the complete spectrum.
+        type Spectrum = (ComplexStiffness, Vec<fs_modal::ModePair>, Vec<f64>);
+        let evaluate = |omega| -> Result<Spectrum, ViscoElementError> {
+            checkpoint(cx)?;
+            let k = self.complex_stiffness(omega, cx)?;
+            let pairs = fs_modal::eigh_gen_dense(&dense(&k.real), &mass, n)
+                .map_err(ViscoElementError::Modal)?;
+            checkpoint(cx)?;
+            let (pairs, radii) =
+                fs_modal::recentred_dense_radii(&pairs, &k.real, &self.equilibrium.mass)
                     .map_err(ViscoElementError::Modal)?;
-                checkpoint(cx)?;
-                Ok((k, pairs))
-            };
-        let (_, at_low) = evaluate(low)?;
-        let (_, at_high) = evaluate(high)?;
+            checkpoint(cx)?;
+            Ok((k, pairs, radii))
+        };
+        let (_, at_low, _) = evaluate(low)?;
+        let (_, at_high, _) = evaluate(high)?;
         let mut result = Vec::with_capacity(budget.modes);
         for mode in 0..budget.modes {
             if !(at_low[mode].interval.0 > low * low && at_high[mode].interval.1 < high * high) {
@@ -265,24 +291,39 @@ impl ViscoElements {
                 if omega == lo || omega == hi {
                     break;
                 }
-                let (k, pairs) = evaluate(omega)?;
+                let (k, pairs, radii) = evaluate(omega)?;
                 let pair = &pairs[mode];
+                let radius = radii[mode];
                 let relative = (pair.lambda / (omega * omega) - 1.0).abs();
-                if !pair.lambda.is_finite()
-                    || !pair.residual.is_finite()
-                    || pair.lambda <= 0.0
-                    || pair.residual / (omega * omega) > budget.relative_frequency_tolerance / 16.0
-                {
+                if !pair.lambda.is_finite() || !radius.is_finite() || pair.lambda <= 0.0 {
                     return Err(ViscoElementError::ModalConvergence { mode });
                 }
-                if (hi - lo) / (2.0 * omega) <= budget.relative_frequency_tolerance
-                    && relative <= 4.0 * budget.relative_frequency_tolerance
-                {
+                let relative_radius = radius / (omega * omega);
+                let maximum = budget.relative_frequency_tolerance / 16.0;
+                let frequency_converged = (hi - lo) / (2.0 * omega)
+                    <= budget.relative_frequency_tolerance
+                    && relative <= 4.0 * budget.relative_frequency_tolerance;
+                // A trial far from the root needs a reliable sign, not the
+                // final eigen accuracy. Charge that accuracy when returning
+                // a mode or when the eigen interval cannot decide the sign.
+                let sign_unresolved = (pair.lambda - omega * omega).abs() <= radius;
+                if relative_radius > maximum && (frequency_converged || sign_unresolved) {
+                    return Err(ViscoElementError::EigenResolution {
+                        mode,
+                        omega_rad_s: omega,
+                        relative_radius,
+                        maximum,
+                    });
+                }
+                if frequency_converged {
                     solved = Some(ViscoMode {
                         omega_rad_s: omega,
                         frequency_bracket_rad_s: (lo, hi),
                         phi: pair.phi.clone(),
                         loss_factor: modal_loss_energy_quotient(&k, &pair.phi)?,
+                        storage_eigenvalue_per_s2: pair.lambda,
+                        eigen_residual_per_s2: pair.residual,
+                        eigen_radius_per_s2: radius,
                         relative_frequency_residual: relative,
                     });
                     break;

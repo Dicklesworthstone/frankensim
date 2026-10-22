@@ -1328,6 +1328,114 @@ pub fn quadratic_radii(report: &SliceReport, k: &Csr, m: &Csr) -> Vec<f64> {
     radii
 }
 
+/// Rayleigh-recentred, quadratically certified eigenvalues of a COMPLETE
+/// dense solve, such as [`eigh_gen_dense`].
+///
+/// `pairs` must hold every mode of the `n×n` pencil `(K, M)`. Each λ is
+/// replaced by the Rayleigh quotient of its own mass-normalized vector in the
+/// original pencil, which for that vector minimizes the residual, and its
+/// `M⁻¹` residual and interval are recomputed. The second item is the
+/// per-mode [`quadratic_radii`]. With all `n` modes present the eigenvalue
+/// count is exact by dimension, so the whole real line is the certified
+/// window.
+///
+/// Why: an f64 eigenvector of an ill-conditioned pencil keeps a linear
+/// residual near `ε·λ_max·‖φ‖` however it is computed, because rounding φ
+/// alone excites the stiffest modes. The quadratic radius bounds the
+/// eigenvalue error itself. [`eigh_gen_dense`]'s own output is unchanged.
+///
+/// # Errors
+/// [`ModalError::DimensionMismatch`], or a refusal of the mass
+/// factorization ([`ModalError::Factor`], [`ModalError::MassNotSpd`]).
+///
+/// # Panics
+/// If `pairs` does not hold one mode per row, or a mode's length disagrees
+/// with `k` (programmer error).
+pub fn recentred_dense_radii(
+    pairs: &[ModePair],
+    k: &Csr,
+    m: &Csr,
+) -> Result<(Vec<ModePair>, Vec<f64>), ModalError> {
+    check_shapes(k, m)?;
+    let n = k.nrows();
+    assert_eq!(
+        pairs.len(),
+        n,
+        "a complete dense solve has one mode per row"
+    );
+    let opts = SliceOptions::default();
+    let m_fact = SymbolicLdlt::analyze_with_coordinates(m, opts.ordering, None)
+        .and_then(|symbolic| symbolic.factor(m, &opts.ldlt))
+        .map_err(|source| ModalError::Factor {
+            shift: f64::NAN,
+            source,
+        })?;
+    if m_fact.inertia().negative > 0 {
+        return Err(ModalError::MassNotSpd {
+            negative: m_fact.inertia().negative,
+        });
+    }
+    let (mut stiff_phi, mut mass_phi) = (vec![0.0; n], vec![0.0; n]);
+    let mut modes = Vec::with_capacity(n);
+    for pair in pairs {
+        assert_eq!(pair.phi.len(), n, "mode/pencil size mismatch");
+        let mut phi = pair.phi.clone();
+        m.spmv(&phi, &mut mass_phi);
+        let norm = phi
+            .iter()
+            .zip(&mass_phi)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .max(f64::MIN_POSITIVE)
+            .sqrt();
+        for slot in &mut phi {
+            *slot /= norm;
+        }
+        k.spmv(&phi, &mut stiff_phi);
+        m.spmv(&phi, &mut mass_phi);
+        let lambda = phi.iter().zip(&stiff_phi).map(|(a, b)| a * b).sum::<f64>()
+            / phi.iter().zip(&mass_phi).map(|(a, b)| a * b).sum::<f64>();
+        let r: Vec<f64> = stiff_phi
+            .iter()
+            .zip(&mass_phi)
+            .map(|(kk, mm)| lambda.mul_add(-mm, *kk))
+            .collect();
+        let minv_r = m_fact.solve(&r);
+        let bound = r
+            .iter()
+            .zip(&minv_r)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .max(0.0)
+            .sqrt();
+        modes.push(ModePair {
+            lambda,
+            phi,
+            residual: bound,
+            interval: (lambda - bound, lambda + bound),
+        });
+    }
+    modes.sort_by(|a, b| a.lambda.total_cmp(&b.lambda));
+    let report = SliceReport {
+        window: (f64::NEG_INFINITY, f64::INFINITY),
+        below_low: 0,
+        below_high: n,
+        expected: n,
+        modes,
+        stats: SliceStats {
+            shift: f64::NAN,
+            factorizations: 1,
+            lanczos_iters: 0,
+            restarts: 0,
+            factor_nnz_l: 0,
+            factor_peak_bytes: 0,
+            pivots_delayed: 0,
+        },
+    };
+    let radii = quadratic_radii(&report, k, m);
+    Ok((report.modes, radii))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
