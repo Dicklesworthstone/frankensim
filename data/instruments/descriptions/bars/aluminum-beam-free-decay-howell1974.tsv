@@ -1,0 +1,20 @@
+frankensim.description-source.v1
+observation	howell-1974-strain-gage-clean-beams	Clean 2024-T4 aluminium beams of specimen aluminum-beams-howell1974, free-free on cotton threads at the fundamental nodes, impulse-excited free decay of the fundamental flexural mode read from a strain-gage half bridge	W. E. Howell, NASA TM X-2852 (1974), Table III (p. 11), strain-gage tests, ablator thickness 0.0. Each frequency and logarithmic decrement is an average of about three test values (table footnote a); 1 atm = 100 kPa (footnote b). Rows are named beam-<specimen>-<pressure>, pressure in atm. No uncertainty is printed
+scalar	beam-40-frequency-1atm	howell-1974-strain-gage-clean-beams	frequency_hz	369	Hz	constant
+scalar	beam-40-log-decrement-1atm	howell-1974-strain-gage-clean-beams	log_decrement	2.72e-3	1	constant
+scalar	beam-40-frequency-3.0e-4atm	howell-1974-strain-gage-clean-beams	frequency_hz	369	Hz	constant
+scalar	beam-40-log-decrement-3.0e-4atm	howell-1974-strain-gage-clean-beams	log_decrement	2.40e-3	1	constant
+scalar	beam-45-frequency-1atm	howell-1974-strain-gage-clean-beams	frequency_hz	713	Hz	constant
+scalar	beam-45-log-decrement-1atm	howell-1974-strain-gage-clean-beams	log_decrement	7.98e-4	1	constant
+scalar	beam-45-frequency-5.6e-4atm	howell-1974-strain-gage-clean-beams	frequency_hz	719	Hz	constant
+scalar	beam-45-log-decrement-5.6e-4atm	howell-1974-strain-gage-clean-beams	log_decrement	6.71e-4	1	constant
+scalar	beam-46-frequency-1atm	howell-1974-strain-gage-clean-beams	frequency_hz	719	Hz	constant
+scalar	beam-46-log-decrement-1atm	howell-1974-strain-gage-clean-beams	log_decrement	7.73e-4	1	constant
+scalar	beam-46-frequency-5.3e-4atm	howell-1974-strain-gage-clean-beams	frequency_hz	719	Hz	constant
+scalar	beam-46-log-decrement-5.3e-4atm	howell-1974-strain-gage-clean-beams	log_decrement	6.96e-4	1	constant
+scalar	beam-55-frequency-1atm	howell-1974-strain-gage-clean-beams	frequency_hz	1063	Hz	constant
+scalar	beam-55-log-decrement-1atm	howell-1974-strain-gage-clean-beams	log_decrement	2.96e-4	1	constant
+scalar	beam-56-frequency-1atm	howell-1974-strain-gage-clean-beams	frequency_hz	1063	Hz	constant
+scalar	beam-56-log-decrement-1atm	howell-1974-strain-gage-clean-beams	log_decrement	3.19e-4	1	constant
+scalar	beam-56-frequency-5.6e-4atm	howell-1974-strain-gage-clean-beams	frequency_hz	1063	Hz	constant
+scalar	beam-56-log-decrement-5.6e-4atm	howell-1974-strain-gage-clean-beams	log_decrement	2.62e-4	1	constant

@@ -1,0 +1,8 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-elastic-constants	Young modulus, Poisson ratio and density of these 2024-T4 beams are not stated; a consumer that takes the 2024-T3 matdb set declares that temper substitution	unbounded	material	any absolute frequency claim beyond the declared substitution	a temper-matched aluminium property source, or specimen-measured constants
+u-length-width	length and width are Table I nominal values; only thickness is listed per specimen	unbounded	geometry	absolute frequency claims at better than the nominal tolerance	the report gives none
+u-mass-assignment	Table I lists one mass per nominal thickness class, not per specimen	unbounded	geometry	using the mass as a per-specimen density measurement	the report gives none
+u-gage-and-threads	strain-gage pair, leads and cotton support threads add mass, stiffness and loss in both the air and vacuum rows	unbounded	support	attributing the vacuum decrement to the alloy alone	a non-contact repeat of the measurement
+u-air-state	air temperature, humidity and composition at 1 atm are unstated	unbounded	medium	medium-property-level comparisons	the report gives none
+u-air-loss-split	the air-minus-vacuum decrement contains acoustic radiation and viscous or drag loss together	one-sided: radiation share at most the whole difference	medium	any claim that the difference IS radiation damping	a separate viscous-loss measurement or model

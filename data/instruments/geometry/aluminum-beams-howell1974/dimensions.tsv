@@ -1,0 +1,22 @@
+frankensim.specimen-dimensions.v1
+part	feature	quantity	value_si	unit	sigma_si	route	source_id	note
+beam-40	prism	length	0.1524	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal length 15.24 cm, the same for every beam
+beam-40	prism	width	0.0254	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal width 2.54 cm, the same for every beam
+beam-40	prism	thickness	0.00162	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table III (p. 11): aluminum thickness 0.162 cm of strain-gage specimen 40 (Table I nominal class 0.159 cm)
+beam-40	prism	mass	0.0175	kg	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): 17.5 g for the 0.159 cm class; the report does not tie the mass to one specimen
+beam-45	prism	length	0.1524	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal length 15.24 cm
+beam-45	prism	width	0.0254	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal width 2.54 cm
+beam-45	prism	thickness	0.00314	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table III (p. 11): aluminum thickness 0.314 cm of strain-gage specimens 45 and 46 (Table I nominal class 0.318 cm)
+beam-45	prism	mass	0.0346	kg	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): 34.6 g for the 0.318 cm class
+beam-46	prism	length	0.1524	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal length 15.24 cm
+beam-46	prism	width	0.0254	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal width 2.54 cm
+beam-46	prism	thickness	0.00314	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table III (p. 11): aluminum thickness 0.314 cm of strain-gage specimens 45 and 46
+beam-46	prism	mass	0.0346	kg	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): 34.6 g for the 0.318 cm class
+beam-55	prism	length	0.1524	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal length 15.24 cm
+beam-55	prism	width	0.0254	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal width 2.54 cm
+beam-55	prism	thickness	0.0047	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table III (p. 11): aluminum thickness 0.470 cm of strain-gage specimens 55 and 56 (Table I nominal class 0.476 cm)
+beam-55	prism	mass	0.0513	kg	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): 51.3 g for the 0.476 cm class
+beam-56	prism	length	0.1524	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal length 15.24 cm
+beam-56	prism	width	0.0254	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): nominal width 2.54 cm
+beam-56	prism	thickness	0.0047	m	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table III (p. 11): aluminum thickness 0.470 cm of strain-gage specimens 55 and 56
+beam-56	prism	mass	0.0513	kg	unstated	published-measured	nasa-howell-1974-aluminum-beams	Table I (p. 9): 51.3 g for the 0.476 cm class

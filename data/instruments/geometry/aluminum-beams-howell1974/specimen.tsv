@@ -1,0 +1,14 @@
+frankensim.specimen.v1
+key	value
+specimen_id	aluminum-beams-howell1974
+maker	NASA Langley Research Center test specimens (W. E. Howell); fabricator not stated
+model	clean rectangular beams of aluminium alloy 2024-T4 (report p. 2 and Table I), tested free-free before any ablator was bonded
+serial	strain-gage specimens 40, 45, 46, 55 and 56 of Table III (clean beams, ablator thickness 0.0)
+year	1974 (NASA TM X-2852, April 1974; tests before December 1973)
+system	free-free prismatic metal beam, fundamental flexural mode
+holder	supported at the fundamental nodal points by cotton thread; a semiconductor strain-gage half bridge bonded at the centre of one face; excited by a solenoid-driven striker near the centre (report pp. 3-4, figs. 3-4)
+reference_state	unloaded
+environment	strain-gage tests at 1 atm (100 kPa) and at 1e-3 to 1e-4 atm (100 to 10 Pa), per row of Table III; temperature, humidity and gas composition unstated
+source_ids	nasa-howell-1974-aluminum-beams;nasa-howell-1974-aluminum-beam-decay
+target_relation	ONE published set of real free aluminium bars for the .105 G3 loaded-mode fixture. The bars are not instrument bars; their measured air-minus-vacuum decay bounds radiation plus viscous air loss, never radiation alone
+report	W. E. Howell, An experimental investigation of the damping contribution of an elastomeric ablator on aluminum beams, NASA TM X-2852 (L-8713), Langley Research Center, 1974; https://ntrs.nasa.gov/citations/19740011085

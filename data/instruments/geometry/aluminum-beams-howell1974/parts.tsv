@@ -1,0 +1,7 @@
+frankensim.specimen-parts.v1
+part	material	state	joins	note
+beam-40	aluminum alloy 2024-T4 (report p. 2); no elastic constants stated in the report	unloaded	-	clean beam, strain-gage specimen 40; the bonded strain-gage pair and its leads add unstated mass and loss
+beam-45	aluminum alloy 2024-T4 (report p. 2); no elastic constants stated in the report	unloaded	-	clean beam, strain-gage specimen 45
+beam-46	aluminum alloy 2024-T4 (report p. 2); no elastic constants stated in the report	unloaded	-	clean beam, strain-gage specimen 46
+beam-55	aluminum alloy 2024-T4 (report p. 2); no elastic constants stated in the report	unloaded	-	clean beam, strain-gage specimen 55
+beam-56	aluminum alloy 2024-T4 (report p. 2); no elastic constants stated in the report	unloaded	-	clean beam, strain-gage specimen 56

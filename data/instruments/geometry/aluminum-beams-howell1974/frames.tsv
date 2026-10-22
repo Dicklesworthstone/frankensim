@@ -1,0 +1,7 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+beam-40	one end corner of the rectangular beam	+x along the length	+y across the width	+z through the thickness	axes follow Table I's length, width and thickness; the report draws no frame
+beam-45	one end corner of the rectangular beam	+x along the length	+y across the width	+z through the thickness	axes follow Table I's length, width and thickness; the report draws no frame
+beam-46	one end corner of the rectangular beam	+x along the length	+y across the width	+z through the thickness	axes follow Table I's length, width and thickness; the report draws no frame
+beam-55	one end corner of the rectangular beam	+x along the length	+y across the width	+z through the thickness	axes follow Table I's length, width and thickness; the report draws no frame
+beam-56	one end corner of the rectangular beam	+x along the length	+y across the width	+z through the thickness	axes follow Table I's length, width and thickness; the report draws no frame
