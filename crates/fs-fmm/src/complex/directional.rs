@@ -1074,46 +1074,12 @@ impl DirectionalPlan {
             .iter()
             .map(|&r| (r, vec![C64::ZERO; p3 * nt]))
             .collect();
-        for (&(a, b, c), key) in self.pairs.iter().zip(&self.coupling_keys) {
-            let m = &multipoles[&(b, c)];
-            let local = locals.get_mut(&(a, c)).expect("admitted target expansion");
-            match &self.couplings[key] {
-                Coupling::TensorGrid => {
-                    let u = direction(c, self.bins[a.0 as usize]);
-                    let ca = center(op, a);
-                    let cb = center(op, b);
-                    let ga = op.grid(a);
-                    let gb = op.grid(b);
-                    for (i, &x) in ga.iter().enumerate() {
-                        for (j, &y) in gb.iter().enumerate() {
-                            let block = op.operator.block(x, y);
-                            if block[..ns * nt].iter().any(|&z| !finite(z)) {
-                                return Err(FmmError::NonFiniteOutput { index: i });
-                            }
-                            let phase = wave(-self.k, u, sub(sub(x, ca), sub(y, cb)));
-                            for ta in 0..nt {
-                                for sa in 0..ns {
-                                    local[nt * i + ta] = local[nt * i + ta]
-                                        + modulate(block[ns * ta + sa], phase) * m[ns * j + sa];
-                                }
-                            }
-                        }
-                    }
-                }
-                Coupling::Compressed(channels) => {
-                    for (channel, factor) in channels.iter().enumerate() {
-                        let (ta, sa) = (channel / ns, channel % ns);
-                        for (u, v) in factor.u.iter().zip(&factor.v) {
-                            let mut value = C64::ZERO;
-                            for (j, &vj) in v.iter().enumerate() {
-                                value = value + vj * m[ns * j + sa];
-                            }
-                            for (i, &ui) in u.iter().enumerate() {
-                                local[nt * i + ta] = local[nt * i + ta] + ui * value;
-                            }
-                        }
-                    }
-                }
+        if op.workers > 1 {
+            self.translate_on_workers(op, &multipoles, &mut locals)?;
+        } else {
+            for (index, &(a, _, c)) in self.pairs.iter().enumerate() {
+                let local = locals.get_mut(&(a, c)).expect("admitted target expansion");
+                self.translate(op, index, &multipoles, local)?;
             }
         }
         let mut out = vec![C64::ZERO; charges.len()];
@@ -1172,6 +1138,130 @@ impl DirectionalPlan {
             }
         }
         validate_output(out)
+    }
+
+    /// One M2L pair: add pair `index`'s translated source expansion to its
+    /// target local, in the fixed channel, rank and coefficient order.
+    fn translate(
+        &self,
+        op: &FmmC64<'_>,
+        index: usize,
+        multipoles: &BTreeMap<Expansion, Vec<C64>>,
+        local: &mut [C64],
+    ) -> Result<(), FmmError> {
+        let (ns, nt) = op.operator.dimensions();
+        let (a, b, c) = self.pairs[index];
+        let m = &multipoles[&(b, c)];
+        match &self.couplings[&self.coupling_keys[index]] {
+            Coupling::TensorGrid => {
+                let u = direction(c, self.bins[a.0 as usize]);
+                let ca = center(op, a);
+                let cb = center(op, b);
+                let ga = op.grid(a);
+                let gb = op.grid(b);
+                for (i, &x) in ga.iter().enumerate() {
+                    for (j, &y) in gb.iter().enumerate() {
+                        let block = op.operator.block(x, y);
+                        if block[..ns * nt].iter().any(|&z| !finite(z)) {
+                            return Err(FmmError::NonFiniteOutput { index: i });
+                        }
+                        let phase = wave(-self.k, u, sub(sub(x, ca), sub(y, cb)));
+                        for ta in 0..nt {
+                            for sa in 0..ns {
+                                local[nt * i + ta] = local[nt * i + ta]
+                                    + modulate(block[ns * ta + sa], phase) * m[ns * j + sa];
+                            }
+                        }
+                    }
+                }
+            }
+            Coupling::Compressed(channels) => {
+                for (channel, factor) in channels.iter().enumerate() {
+                    let (ta, sa) = (channel / ns, channel % ns);
+                    for (u, v) in factor.u.iter().zip(&factor.v) {
+                        let mut value = C64::ZERO;
+                        for (j, &vj) in v.iter().enumerate() {
+                            value = value + vj * m[ns * j + sa];
+                        }
+                        for (i, &ui) in u.iter().enumerate() {
+                            local[nt * i + ta] = local[nt * i + ta] + ui * value;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The M2L stage on the operator's declared workers. Workers own whole
+    /// target expansions and apply their pairs in pair order, so every local
+    /// keeps its serial bits. A refusal is the lowest-index failing pair's,
+    /// which is the error the serial loop meets first.
+    fn translate_on_workers(
+        &self,
+        op: &FmmC64<'_>,
+        multipoles: &BTreeMap<Expansion, Vec<C64>>,
+        locals: &mut BTreeMap<Expansion, Vec<C64>>,
+    ) -> Result<(), FmmError> {
+        let mut groups: BTreeMap<Expansion, Vec<usize>> = BTreeMap::new();
+        for (index, &(a, _, c)) in self.pairs.iter().enumerate() {
+            groups.entry((a, c)).or_default().push(index);
+        }
+        let groups: Vec<(Expansion, Vec<usize>)> = groups.into_iter().collect();
+        let total = self.pairs.len().max(1);
+        let workers = op.workers.min(groups.len()).max(1);
+        let mut bounds = vec![0];
+        let mut running = 0;
+        for (g, (_, indices)) in groups.iter().enumerate() {
+            running += indices.len();
+            if bounds.len() < workers && running * workers >= bounds.len() * total {
+                bounds.push(g + 1);
+            }
+        }
+        bounds.push(groups.len());
+        let len = locals.values().next().map_or(0, Vec::len);
+        type Part = (Vec<(Expansion, Vec<C64>)>, Option<(usize, FmmError)>);
+        let parts: Vec<Part> = std::thread::scope(|scope| {
+            let handles: Vec<_> = bounds
+                .windows(2)
+                .map(|range| {
+                    let groups = &groups[range[0]..range[1]];
+                    scope.spawn(move || {
+                        let mut done = Vec::with_capacity(groups.len());
+                        let mut first: Option<(usize, FmmError)> = None;
+                        for (target, indices) in groups {
+                            let mut local = vec![C64::ZERO; len];
+                            for &index in indices {
+                                if let Err(e) = self.translate(op, index, multipoles, &mut local) {
+                                    if first.as_ref().is_none_or(|(at, _)| index < *at) {
+                                        first = Some((index, e));
+                                    }
+                                    break;
+                                }
+                            }
+                            done.push((*target, local));
+                        }
+                        (done, first)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("directional M2L worker panicked"))
+                .collect()
+        });
+        let mut first: Option<(usize, FmmError)> = None;
+        for (done, error) in parts {
+            if let Some((at, e)) = error {
+                if first.as_ref().is_none_or(|(least, _)| at < *least) {
+                    first = Some((at, e));
+                }
+            }
+            for (target, local) in done {
+                locals.insert(target, local);
+            }
+        }
+        first.map_or(Ok(()), |(_, e)| Err(e))
     }
 
     /// The direct near pass on the operator's declared workers. Each worker
