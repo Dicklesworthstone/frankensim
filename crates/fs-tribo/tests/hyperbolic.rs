@@ -48,7 +48,7 @@ fn g1_implicit_sliding_matches_independent_quadratic_and_actual_work() {
                 let distance = 1.3*compliance*normal*0.8 + dt*0.1;
                 // Eliminate velocity from F=N*(mu_d+K/(v+v0)) and
                 // dt*v=distance-compliance*F. Select the smaller quadratic root.
-                let b = distance + dt*0.04 + compliance*normal*0.3;
+                let b: f64 = distance + dt*0.04 + compliance*normal*0.3;
                 let c = normal*(0.3*distance + 0.8*dt*0.04);
                 let reference = 2.0*c/(b + (b*b-4.0*compliance*c).sqrt());
                 for sign in [-1.0, 1.0] {
