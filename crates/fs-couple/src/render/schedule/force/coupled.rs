@@ -7,7 +7,8 @@
 //! with its existing held effort times displacement work. Static preload keeps
 //! the existing small Schur solve. Dense preparation has explicit work/capacity
 //! refusals; no modes are truncated. Pressure transfers retain their original
-//! narrow-band, read-only scope; radiation loading is not added.
+//! narrow-band, read-only scope. An explicit passive radiation load may share
+//! this same complete operator; its acoustic states are not mechanical modes.
 
 use fs_exec::CancelGate;
 use fs_la::factor::{Cholesky, cholesky};
@@ -18,6 +19,7 @@ use crate::modal_acoustic_time::{
 
 mod exact;
 mod relaxation;
+pub mod radiation;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
@@ -161,6 +163,8 @@ pub struct CoupledModalFrame {
     pub connection_energy_j: f64,
     /// Genuine Maxwell internal-strain storage, separate from modal springs [J].
     pub material_energy_j: f64,
+    /// Independent acoustic storage of the attached exterior load [J].
+    pub radiation_energy_j: f64,
     /// Work of the externally held generalized forces only [J].
     pub external_work_j: f64,
     /// Independent time integral of all original component viscous losses [J].
@@ -169,6 +173,8 @@ pub struct CoupledModalFrame {
     pub connection_dissipation_j: f64,
     /// Independently integrated material-relaxation loss [J].
     pub material_dissipation_j: f64,
+    /// Independently integrated exterior-load resistance [J].
+    pub radiation_dissipation_j: f64,
     /// Combined storage change + dissipation - external work [J].
     pub energy_residual_j: f64,
     /// Actual absolute + relative energy tolerance used by the gate [J].
@@ -185,12 +191,13 @@ impl CoupledModalFrame {
     /// Complete retained linear storage, including constitutive memory [J].
     #[must_use]
     pub fn total_energy_j(&self) -> f64 {
-        self.modal_energy_j + self.connection_energy_j + self.material_energy_j
+        self.modal_energy_j + self.connection_energy_j + self.material_energy_j + self.radiation_energy_j
     }
     /// Independently integrated modal, connection and material loss [J].
     #[must_use]
     pub fn total_dissipation_j(&self) -> f64 {
         self.component_dissipation_j + self.connection_dissipation_j + self.material_dissipation_j
+            + self.radiation_dissipation_j
     }
 }
 
@@ -206,6 +213,9 @@ pub struct CoupledModalSystem {
     relaxation_branches: Vec<fs_phs::RelaxationBranch>,
     material_memory: Vec<f64>,
     candidate_material_memory: Vec<f64>,
+    radiation: Option<radiation::Binding>,
+    radiation_state: Vec<f64>,
+    candidate_radiation_state: Vec<f64>,
     offsets: Vec<usize>,
     connections: Vec<ConnectionLaw>,
     columns: Vec<Vec<f64>>,
@@ -369,9 +379,9 @@ impl CoupledModalSystem {
         let candidates = models.clone();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
-            material_energy_j: 0.0,
+            material_energy_j: 0.0, radiation_energy_j: 0.0,
             external_work_j: 0.0, component_dissipation_j: 0.0, connection_dissipation_j: 0.0,
-            material_dissipation_j: 0.0,
+            material_dissipation_j: 0.0, radiation_dissipation_j: 0.0,
             energy_residual_j: 0.0, energy_tolerance_j: 0.0, solve_relative_residual: 0.0,
             connection_forces_n: vec![0.0; links],
         };
@@ -397,6 +407,7 @@ impl CoupledModalSystem {
             models, candidates, exact, prepared_budget: prepared, offsets, connections, columns,
             relaxation_branches: Vec::new(), material_memory: Vec::new(),
             candidate_material_memory: Vec::new(),
+            radiation: None, radiation_state: Vec::new(), candidate_radiation_state: Vec::new(),
             config, dt, linear_frequency_upper_bound_rad_s,
             old_q: vec![0.0; count], free_delta: vec![0.0; count],
             forces: vec![0.0; count],
@@ -421,8 +432,8 @@ impl CoupledModalSystem {
         if self.samples_rendered() != 0 || self.prepared_budget.is_some() {
             return Err(invalid("prepared exact propagation requires one cold budget binding"));
         }
-        if !self.relaxation_branches.is_empty() {
-            return Err(invalid("prepared mechanical propagation cannot discard material memory"));
+        if !self.relaxation_branches.is_empty() || self.radiation.is_some() {
+            return Err(invalid("prepared mechanical propagation cannot discard material or acoustic memory"));
         }
         self.exact = Some(exact::ExactNetwork::new_prepared(
             &self.models, &self.columns, &self.connections, self.mode_count(),
@@ -469,7 +480,7 @@ impl CoupledModalSystem {
             let x = extension(&self.models, column, link.rest_extension_m)?;
             energy = finite(energy + 0.5 * link.stiffness_n_m * x * x)?;
         }
-        finite(energy + self.material_energy_j()?)
+        finite(energy + self.material_energy_j()? + self.radiation_energy_j()?)
     }
 
     /// Advance one held external-force sample. All components and the energy
@@ -505,6 +516,7 @@ impl CoupledModalSystem {
     fn publish_staged(&mut self) {
         std::mem::swap(&mut self.models, &mut self.candidates);
         std::mem::swap(&mut self.material_memory, &mut self.candidate_material_memory);
+        std::mem::swap(&mut self.radiation_state, &mut self.candidate_radiation_state);
         std::mem::swap(&mut self.frame, &mut self.staged_frame);
         std::mem::swap(&mut self.ports, &mut self.staged_ports);
     }
@@ -525,7 +537,8 @@ impl CoupledModalSystem {
             // check of this free prediction; the samples between keep every finiteness check of the propagation only.
             // The accepted trajectory is checked on every sample by `stage`'s own advance.
             let verify = self.frame.sample % PREDICTION_SENTINEL_PERIOD == 0;
-            let (end, x) = exact.predict(&self.models, &self.material_memory, external, self.dt, verify)?;
+            let (end, x) = exact.predict(&self.models, &self.material_memory, &self.radiation_state,
+                external, self.dt, verify)?;
             for k in 0..self.mode_count() {
                 self.old_q[k] = x[2 * k];
                 self.free_delta[k] = finite(end[2 * k] - x[2 * k])?;

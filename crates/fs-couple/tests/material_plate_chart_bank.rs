@@ -272,3 +272,6 @@ mod multiple;
 
 #[path = "material_plate_chart_bank/relaxation.rs"]
 mod relaxation;
+
+#[path = "material_plate_chart_bank/radiation.rs"]
+mod radiation;

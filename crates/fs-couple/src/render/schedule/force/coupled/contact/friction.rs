@@ -219,6 +219,29 @@ impl FrictionModalSystem {
     pub fn material_energy_j(&self) -> Result<f64, ModalCouplingError> {
         self.network.material_energy_j()
     }
+    /// Attach the SAME passive exterior load to the original held-force network
+    /// and refresh the bow compliance including all acoustic reactions. Existing
+    /// nonlinear potentials, source interfaces and pressure maps are retained.
+    pub fn with_radiation_load(mut self,
+        model: &crate::render::plate::impact::radiation::Model,
+        source_modes: &[usize], maximum_poles: usize, gate: &CancelGate,
+    ) -> Result<Self, ModalFrictionError> {
+        self.network = self.network.with_radiation_load(model, source_modes, maximum_poles, gate)?;
+        self.compliance = effective_compliance(&self.network, &self.column, gate)?;
+        poll(Some(gate))?;
+        Ok(self)
+    }
+    /// Acoustic history participates in the same accepted sample transaction.
+    #[must_use]
+    pub fn radiation_state(&self) -> &[f64] { self.network.radiation_state() }
+    /// Complete retained exterior impedance in the original physical port basis.
+    #[must_use]
+    pub fn radiation_model(&self) -> Option<&crate::render::plate::impact::radiation::Model> {
+        self.network.radiation_model()
+    }
+    pub fn radiation_energy_j(&self) -> Result<f64, ModalCouplingError> {
+        self.network.radiation_energy_j()
+    }
     /// Last accepted linear-network account, with independent constitutive loss.
     #[must_use]
     pub fn coupled_frame(&self) -> Option<&super::super::CoupledModalFrame> {

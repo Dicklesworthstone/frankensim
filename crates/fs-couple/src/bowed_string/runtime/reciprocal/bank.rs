@@ -11,8 +11,9 @@
 //! Sources remain frozen-state linear bending models; concentric layers mean
 //! perfect bonding, not helical winding/slip. Optional sourced torsion shares
 //! the surface friction solve. Source-derived geometric stretching or retained
-//! longitudinal waves can join that same network through the nonlinear module; broadband radiation
-//! back-loading is absent. Explicit interior rotational connections can also
+//! longitudinal waves can join that same network through the nonlinear module.
+//! Explicit passive exterior radiation reacts through that same physical body.
+//! Interior rotational connections can also
 //! transfer material-string torque to the shared body. Multiple fixed bow contacts
 //! use the existing simultaneous-friction owner through `multiple`.
 
@@ -134,6 +135,7 @@ pub struct MaterialStringBankSource {
     material_shell_assembly: Option<shell::SharedMaterialShellAssemblyBody>,
     material_shell_assembly_image: Option<crate::shear_shell::assembly::MaterialShellAssemblyImage>,
     material_cavity: Option<super::plate::MaterialBodyCavity>,
+    body_radiation: Option<radiation::MaterialBodyRadiation>,
 }
 impl MaterialStringBankSource {
     /// Original string order, material/loss receipts and physical connections.
@@ -273,7 +275,7 @@ impl ReciprocalStringBank {
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None };
+        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None };
         let system = source.restore_material_memory(system, &cards, None, gate)?;
         Ok(Self { source, cards, system })
     }
@@ -544,6 +546,8 @@ pub mod plate;
 pub mod chart;
 /// Curved shear-deformable material body in the shared reciprocal mechanics.
 pub mod shell;
+/// The shared material body's exterior impedance in the original joint solve.
+pub mod radiation;
 
 /// Original material-interface laws at actual string/body bridge footprints.
 pub mod interfaces;

@@ -67,19 +67,11 @@ impl CoupledModalSystem {
             .ok_or_else(|| invalid("material base-state extent overflow"))?;
         let count = self.relaxation_branches.len().checked_add(branches.len())
             .ok_or_else(|| invalid("material branch count overflow"))?;
-        let state = base.checked_add(count)
-            .ok_or_else(|| invalid("material augmented-state extent overflow"))?;
         // Bound assembly independently of the per-island hard exponential
         // capacity. No caller's old setup budget silently grows with memory.
-        let links = self.connections.len() + 1;
-        let terms = self.mode_count().checked_mul(links).and_then(|n| n.checked_mul(links))
-            .and_then(|n| n.checked_add(state.checked_mul(state)?))
-            .and_then(|n| n.checked_add(base.checked_mul(count)?))
-            .ok_or_else(|| invalid("material augmented setup overflow"))?;
-        if terms > self.config.max_setup_terms {
-            return Err(invalid("material augmented setup exceeds max_setup_terms"));
-        }
-        let mut upper_squared = self.linear_frequency_upper_bound_rad_s.powi(2);
+        self.admit_augmented_setup(count, self.radiation_state.len())?;
+        let mut upper_squared = self.radiation.as_ref().map_or(
+            self.linear_frequency_upper_bound_rad_s, |r| r.mechanical_bound).powi(2);
         for branch in &branches {
             poll(Some(gate))?;
             if branch.projection.len() != base
@@ -103,7 +95,9 @@ impl CoupledModalSystem {
             }
             upper_squared = finite(upper_squared + norm)?;
         }
-        let bound = det::sqrt(upper_squared);
+        let mechanical_bound = det::sqrt(upper_squared);
+        let bound = self.radiation.as_ref().map_or(Ok(mechanical_bound), |r|
+            r.frequency_bound(mechanical_bound))?;
         if bound > core::f64::consts::PI / self.dt * self.config.nyquist_guard_fraction {
             return Err(invalid("material instantaneous stiffness exceeds the Nyquist guard"));
         }
@@ -126,8 +120,9 @@ impl CoupledModalSystem {
         all_branches.extend(branches);
         let mut all_memory = self.material_memory.clone();
         all_memory.extend(memory);
-        let exact = exact::ExactNetwork::new_with_relaxation(
-            &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches, gate,
+        let exact = exact::ExactNetwork::new_with_extensions(
+            &self.models, &self.columns, &self.connections, self.mode_count(), &all_branches,
+            self.radiation.as_ref(), gate,
         )?;
         poll(Some(gate))?;
         self.exact = Some(exact);
@@ -135,6 +130,7 @@ impl CoupledModalSystem {
         self.candidate_material_memory = all_memory.clone();
         self.material_memory = all_memory;
         self.linear_frequency_upper_bound_rad_s = bound;
+        if let Some(r) = &mut self.radiation { r.mechanical_bound = mechanical_bound; }
         Ok(self)
     }
 
@@ -157,10 +153,11 @@ impl CoupledModalSystem {
     // `forces` then serves the existing acceleration-pressure observation.
     pub(super) fn stage_material_state(&mut self, endpoint: &[f64]) -> Result<f64, ModalCouplingError> {
         let base = 2 * self.mode_count();
-        if endpoint.len() != base + self.relaxation_branches.len() {
+        let end = base + self.relaxation_branches.len();
+        if endpoint.len() != end + self.radiation_state.len() {
             return Err(invalid("complete material endpoint dimension"));
         }
-        self.candidate_material_memory.copy_from_slice(&endpoint[base..]);
+        self.candidate_material_memory.copy_from_slice(&endpoint[base..end]);
         let mut energy = 0.0;
         for (branch, &z) in self.relaxation_branches.iter().zip(&self.candidate_material_memory) {
             let root = det::sqrt(branch.stiffness);

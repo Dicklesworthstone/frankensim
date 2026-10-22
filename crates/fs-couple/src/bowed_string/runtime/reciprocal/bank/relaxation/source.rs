@@ -138,7 +138,7 @@ impl MaterialStringBankSource {
             if memory.as_ref().is_some_and(|z| !z.is_empty()) {
                 return Err(invalid("material history has no original source binding"));
             }
-            return Ok(system);
+            return self.restore_body_radiation(system, gate);
         }
         let mut branches = self.source_memory_branches(cards, &system, gate)?;
         branches.extend(self.body_memory_branches(&system, gate)?);
@@ -150,6 +150,6 @@ impl MaterialStringBankSource {
         self.validate_body_memory_frequencies(&system, gate)?;
         self.validate_material_bridge_frequencies(&system, gate)?;
         poll(gate)?;
-        Ok(system)
+        self.restore_body_radiation(system, gate)
     }
 }

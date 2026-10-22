@@ -351,6 +351,11 @@ impl FrictionModalSystem {
             for branch in &mut branches { branch.projection.resize(2 * count, 0.0); }
             network.with_material_relaxation(branches, Some(self.network.material_memory.clone()), gate)?
         };
+        let network = if let Some(air) = &self.network.radiation {
+            // Cold appended mechanical coordinates leave every original body
+            // velocity address intact; the same acoustic history remains at rest.
+            network.with_radiation_load(&air.model, &air.source_modes, air.maximum_poles, gate)?
+        } else { network };
         let mut next = Self::new(network, self.port, self.config, gate)?;
         if let Some(mut weights) = self.acceleration_pressure {
             weights.resize(count, 0.0);

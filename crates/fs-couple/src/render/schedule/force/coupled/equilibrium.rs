@@ -62,6 +62,7 @@ impl CoupledModalSystem {
         if self.samples_rendered() != 0 || external.len() != self.mode_count()
             || external.iter().any(|x| !x.is_finite())
             || self.material_memory.iter().any(|z| *z != 0.0)
+            || self.radiation_state.iter().any(|z| *z != 0.0)
             || self.models.iter().flat_map(|m| m.states()).any(|s|
                 s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
             return Err(invalid("coupled preload requires zero initial vibration/material history, sample zero and finite complete forces"));
