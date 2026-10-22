@@ -41,6 +41,13 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   the matrix-free core (caller brings the shifted inverse): returns
   mass-normalized Ritz pairs nearest σ WITHOUT certified intervals or count
   certification (no M-solve, no factorization — recorded no-claim).
+- `recentred_dense_radii(pairs, k, m) -> (Vec<ModePair>, Vec<f64>)` —
+  for a COMPLETE dense solve (every mode present), recentre each λ on its
+  own vector's Rayleigh quotient in the original pencil, then return the
+  [`quadratic_radii`] with the window certified by dimension. An f64
+  eigenvector of an ill-conditioned pencil keeps a linear residual near
+  `ε·λ_max`; the quadratic radius bounds the eigenvalue itself.
+  `eigh_gen_dense` is unchanged.
 - `quadratic_radii(report, k, m) -> Vec<f64>` — per-mode Kato–Temple radii
   `‖R‖²/δ` for a certified slice. The radii are additive: the report's
   linear `interval`s and every digest over them are unchanged. The gap `δ`

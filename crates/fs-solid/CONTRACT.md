@@ -62,7 +62,11 @@ reference dimension cap (at most 256 free DOFs). For positive equilibrium and
 PSD Prony branches, `K'(omega)/omega^2` decreases in Loewner order, so ordered
 positive-mode roots can be bisected without assuming fixed-point contraction.
 Endpoints must bracket the selected mode inside the common material band;
-missing roots, unresolved eigen residuals, and exhausted iterations refuse.
+missing roots, exhausted iterations, and an eigenvalue whose certified
+quadratic (Kato–Temple) radius exceeds the budget refuse. The radius comes
+from `fs_modal::recentred_dense_radii`, because a dense eigenvector's linear
+residual stays near `ε·λ_max` on a stiff mesh and is no measure of the
+eigenvalue; the linear residual is still reported.
 The output retains the mass-normalized shape, full loss-energy quotient,
 numerical frequency interval and nonlinear residual. Numerical bisection is
 not an outward-rounded modal certificate, and the loss quotient does not
