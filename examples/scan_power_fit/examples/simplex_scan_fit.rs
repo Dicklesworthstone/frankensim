@@ -20,6 +20,7 @@ use fs_conduction::{ConductionMesh, ConductivityModel, ScalarField, ThermalBc,
 use fs_dfo::neldermead::state::{NelderMeadConfig, NelderMeadReport, NelderMeadState, NelderMeadStop};
 use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionReport,
     DifferentialEvolutionState, DifferentialEvolutionStop};
+use fs_dfo::direct::{DirectConfig, DirectReport, DirectState, DirectStop};
 use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey, TilePool};
 use fs_alloc::OperationMemoryLease;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,22 +35,24 @@ use recovery::Recovery;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const TARGET: f64 = 1e-12;
-const USAGE: &str = "simplex_scan_fit [--population [--workers 1..128]] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]] [--checkpoint-dir DIR [--checkpoint-every N] [--pause-after N]] [--resume FILE]";
+const USAGE: &str = "simplex_scan_fit [--direct | --population [--workers 1..128]] [--initial-enthalpy J/kg] [--seed u64] [first_fraction second_fraction [maximum_W total_evaluations]] [--checkpoint-dir DIR [--checkpoint-every N] [--pause-after N]] [--resume FILE]";
 
 #[derive(Clone, Copy)]
 struct Options {
     targets: [f64;2], maximum_w: f64, evaluations: usize,
-    population: bool, initial_h: f64, seed: u64, workers: Option<usize>,
+    population: bool, direct: bool, initial_h: f64, seed: u64, workers: Option<usize>,
 }
 fn options(args: &[String]) -> Result<Options> {
     let mut values=Vec::new();
     let (mut population,mut initial_h,mut seed)=(false,100.0_f64,17_u64);
     let mut workers=None;
-    let mut seen=[false;4];
+    let mut direct=false;
+    let mut seen=[false;5];
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
             "--population" if !seen[0] => { population=true;seen[0]=true; },
+            "--direct" if !seen[4] => { direct=true;seen[4]=true; },
             "--initial-enthalpy" if !seen[1] => {
                 i+=1;initial_h=args.get(i).ok_or(USAGE)?.parse()?;seen[1]=true;
             },
@@ -64,19 +67,19 @@ fn options(args: &[String]) -> Result<Options> {
         }
         i+=1;
     }
-    if !matches!(values.len(),0|2|4) || ((seen[2] || seen[3]) && !population)
+    if !matches!(values.len(),0|2|4) || ((seen[2] || seen[3]) && !population) || (population && direct)
         || workers.is_some_and(|n| !(1..=128).contains(&n))
     { return Err(USAGE.into()); }
     let targets: [f64;2]=if values.is_empty() {[0.1,0.3]} else {[values[0].parse()?,values[1].parse()?]};
     let (maximum_w,evaluations): (f64,usize)=if values.len()==4 {
         (values[2].parse()?,values[3].parse()?)
-    } else { (50.0,if population {3000} else {400}) };
+    } else { (50.0,if population || direct {3000} else {400}) };
     if targets.iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
         || !maximum_w.is_finite() || maximum_w <= 0.0 || maximum_w > 100.0
         || !(10..=10_000).contains(&evaluations)
         || !initial_h.is_finite() || !(-100.0..=200.0).contains(&initial_h)
     { return Err("fractions in [0,1], watts in (0,100], evaluations in [10,10000], initial enthalpy in [-100,200] J/kg required".into()); }
-    Ok(Options { targets,maximum_w,evaluations,population,initial_h,seed,workers })
+    Ok(Options { targets,maximum_w,evaluations,population,direct,initial_h,seed,workers })
 }
 
 fn source() -> Result<MovingHeatSource> {
@@ -91,19 +94,20 @@ fn source() -> Result<MovingHeatSource> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum SearchReport { Simplex(NelderMeadReport), Population(DifferentialEvolutionReport) }
+enum SearchReport { Simplex(NelderMeadReport), Population(DifferentialEvolutionReport), Direct(DirectReport) }
 impl SearchReport {
     fn best(&self) -> Result<(&[f64],f64)> {
         match self {
             Self::Simplex(r) => r.best.as_ref().map(|p|(p.coordinates.as_slice(),p.value)),
             Self::Population(r) => r.best.as_ref().map(|p|(p.coordinates.as_slice(),p.value)),
+            Self::Direct(r) => r.best.as_ref().map(|p|(p.coordinates.as_slice(),p.value)),
         }.ok_or_else(||"search returned no evaluated design".into())
     }
     fn evaluations(&self) -> usize {
-        match self { Self::Simplex(r)=>r.evaluations,Self::Population(r)=>r.evaluations }
+        match self { Self::Simplex(r)=>r.evaluations,Self::Population(r)=>r.evaluations,Self::Direct(r)=>r.evaluations }
     }
     fn method(&self) -> &'static str {
-        match self { Self::Simplex(_)=>"Nelder-Mead",Self::Population(_)=>"DE/rand/1/bin" }
+        match self { Self::Simplex(_)=>"Nelder-Mead",Self::Population(_)=>"DE/rand/1/bin",Self::Direct(_)=>"DIRECT" }
     }
     fn stop(&self) -> &'static str {
         match self {
@@ -115,6 +119,11 @@ impl SearchReport {
                 DifferentialEvolutionStop::TargetReached=>"TargetReached",
                 DifferentialEvolutionStop::EvaluationLimit=>"EvaluationLimit",
                 DifferentialEvolutionStop::Paused=>"Paused",
+            },
+            Self::Direct(r) => match r.stop {
+                DirectStop::TargetReached=>"TargetReached",DirectStop::EvaluationLimit=>"EvaluationLimit",
+                DirectStop::Paused=>"Paused",DirectStop::RectangleLimit=>"RectangleLimit",
+                DirectStop::SelectionLimit=>"SelectionLimit",DirectStop::ResolutionLimit=>"ResolutionLimit",
             },
         }
     }
@@ -237,6 +246,25 @@ fn fit_with_recovery(cx: &Cx<'_>, input: Options, pause: bool, recovery: &mut Re
             return Err("callback attempts disagree with retained plus new physical work".into());
         }
         SearchReport::Population(report)
+    } else if input.direct {
+        // Original deterministic box partition, not a local-simplex restart or
+        // population heuristic. The physical model and observed loss are shared.
+        let rectangles=input.evaluations.checked_add(4).ok_or("DIRECT rectangle cap overflow")?;
+        let mut solver=DirectState::new(cx,&[[0.,input.maximum_w];2],DirectConfig {
+            max_evaluations:initial_cap,max_rectangles:rectangles,
+            max_rectangle_entries:rectangles.checked_mul(2).ok_or("DIRECT shape cap overflow")?,
+            max_selection_comparisons:rectangles.checked_mul(rectangles).ok_or("DIRECT pair cap overflow")?,
+            epsilon:1e-4,target:Some(TARGET),
+        })?;
+        let mut report=solver.advance(cx,usize::MAX,&mut |point|
+            study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+        if pause && report.stop==DirectStop::EvaluationLimit {
+            study.extend_evaluation_budget(input.evaluations)?;
+            solver.extend_evaluation_budget(input.evaluations-1)?;
+            report=solver.advance(cx,usize::MAX,&mut |point|
+                study.evaluate_value(cx,point).map(|value|value.physical.value))?;
+        }
+        SearchReport::Direct(report)
     } else {
         let mut solver=NelderMeadState::new(study.initial_coordinates(),
             &[input.maximum_w.min(1.);2],NelderMeadConfig {
@@ -253,7 +281,7 @@ fn fit_with_recovery(cx: &Cx<'_>, input: Options, pause: bool, recovery: &mut Re
         }
         SearchReport::Simplex(report)
     };
-    // Both search methods reserve the same final physical replay and keep
+    // All search methods reserve the same final physical replay and keep
     // original callbacks charged when their lifetime allowance is extended.
     let (best_coordinates,best_value)=search.best()?;
     let before_export=study.evaluations();
@@ -291,7 +319,12 @@ fn main() -> Result<()> {
         },
     };
     println!("# synthetic specimen; search={}; no global-optimality guarantee; initial_h_j_kg={}; seed={}; requested_workers={}",
-        outcome.search.method(),input.initial_h,input.seed,input.workers.unwrap_or(1));
+        outcome.search.method(),input.initial_h,
+        if input.direct {"not-used".to_string()} else {input.seed.to_string()},input.workers.unwrap_or(1));
+    if let SearchReport::Direct(report)=&outcome.search {
+        println!("# rectangles={}; completed_partition_rounds={}; pending_samples={}; no certified global lower bound",
+            report.rectangles,report.iterations,report.pending_samples);
+    }
     println!("# stop={}; objective={:.17e}; callback_attempts={}; total_physical_evaluations={}",
         outcome.search.stop(),outcome.replay.physical.value,outcome.search.evaluations(),outcome.spent);
     println!("start_s,end_s,absorbed_power_w,mean_fraction_at_end,target_fraction_at_end");
@@ -309,6 +342,43 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn g1_direct_fits_cold_start_original_physics_and_replays_without_an_adjoint() {
+        let input=options(&["--direct","--initial-enthalpy","80"].map(str::to_string)).unwrap();
+        let outcome=with_cx(|_,cx|fit(cx,input,true)).unwrap();
+        assert!(outcome.target_met());
+        assert!(matches!(&outcome.search,SearchReport::Direct(r) if r.stop==DirectStop::TargetReached));
+        for (&power,expected) in outcome.replay.powers_w.iter().zip([30.,20.]) {
+            assert!((power-expected).abs()<1e-3);
+        }
+        assert_eq!(outcome.sources[0].absorbed_power_values(3).unwrap()[2],0.);
+        assert_eq!(outcome.spent,outcome.search.evaluations()+1);
+        assert!(outcome.spent<=input.evaluations);
+    }
+    #[test]
+    fn g5_direct_pause_matches_uninterrupted_and_invalid_modes_never_start_physics() {
+        let input=options(&["--direct","--initial-enthalpy","80","0.1","0.3","1","65"]
+            .map(str::to_string)).unwrap();
+        with_cx(|_,cx| {
+            let paused=fit(cx,input,true)?;
+            let whole=fit(cx,input,false)?;
+            assert_eq!(paused.search,whole.search);
+            assert_eq!(paused.sources,whole.sources);
+            assert_eq!(paused.replay.physical.predictions,whole.replay.physical.predictions);
+            assert!(!paused.target_met());
+            assert_eq!(paused.spent,65);
+            assert!(matches!(&paused.search,SearchReport::Direct(r) if r.stop==DirectStop::EvaluationLimit));
+            Ok(())
+        }).unwrap();
+        for args in [vec!["--direct","--direct"],vec!["--direct","--population"],
+            vec!["--direct","--seed","17"],vec!["--direct","--workers","4"]] {
+            assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
+        }
+        let (_,mut recovery)=Recovery::parse(&["--checkpoint-dir","direct-is-not-durable"]
+            .map(str::to_string)).unwrap();
+        with_cx(|_,cx| {assert!(recovery.bind(cx,input).is_err());Ok(())}).unwrap();
+        with_cx(|gate,cx| {gate.request();assert!(fit(cx,input,true).is_err());Ok(())}).unwrap();
+    }
     #[test]
     fn g5_parallel_physical_trials_preserve_worker_and_budget_partition_results() {
         let input=options(&["--population","--workers","1","--initial-enthalpy","80",
