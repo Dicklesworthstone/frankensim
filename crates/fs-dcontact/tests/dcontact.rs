@@ -912,13 +912,17 @@ fn iteration_budget_held_across_velocity_sweep_and_stall_is_typed() {
         "{{\"suite\":\"fs-dcontact\",\"case\":\"iteration-budget\",\"max_iters\":{max_iters},\"histogram\":{histogram:?},\"verdict\":\"pass\"}}"
     );
     // The stall path is TYPED: absurd stiffness with a huge step
-    // refuses by name instead of looping or lying.
+    // refuses by name instead of looping or lying. Since .166 the
+    // Gonzalez step certifies its candidate, so the refusal carries a
+    // Step certificate whose residual sits above its admitted ceiling.
     let (sys_stiff, _, _) = fret_system(4, 1.0e-6, 1.0e18);
     let x = pluck(4, 5.0e-2);
     let out = step(&sys_stiff, &x, &[], 1.0e-2);
     assert!(
-        matches!(out, Err(fs_phs::PhsError::NewtonStalled { .. })),
-        "expected NewtonStalled, got {out:?}"
+        matches!(out, Err(fs_phs::PhsError::NewtonRefused { certificate })
+            if certificate.site == fs_phs::NewtonSite::Step
+                && certificate.residual > certificate.effective_budget),
+        "expected a Step NewtonRefused above its ceiling, got {out:?}"
     );
 }
 
