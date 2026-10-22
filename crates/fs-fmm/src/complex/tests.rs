@@ -452,23 +452,46 @@ fn declared_workers_leave_potentials_bitwise_g0() {
         .unwrap()
     };
     for shape in 0..5 {
-        for cached in [false, true] {
+        let serial = bits(build(shape).potentials(&q).unwrap());
+        for (near, rows) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut engine = build(shape);
-            if cached {
+            if near {
                 engine.cache_near_field(usize::MAX).unwrap();
             }
+            if rows {
+                // The rows are filled on the declared workers.
+                engine.set_workers(4).unwrap();
+                engine.cache_m2l_rows(usize::MAX).unwrap();
+                engine.set_workers(1).unwrap();
+            }
             assert!(engine.geometry.cells.keys().map(|k| k.0).max() >= Some(3));
-            let serial = bits(engine.potentials(&q).unwrap());
+            assert_eq!(bits(engine.potentials(&q).unwrap()), serial);
             for workers in [2, 3, 7, 300] {
                 engine.set_workers(workers).unwrap();
                 assert_eq!(
                     bits(engine.potentials(&q).unwrap()),
                     serial,
-                    "shape {shape}, cached {cached}, workers {workers}"
+                    "shape {shape}, near {near}, rows {rows}, workers {workers}"
                 );
             }
         }
     }
+    // The row cache's byte cap is inclusive; one byte less refuses.
+    let mut cached = build(4);
+    let bytes = cached.cache_m2l_rows(usize::MAX).unwrap();
+    assert!(
+        bytes > 0
+            && cached
+                .stats()
+                .contains(&format!("\"m2l_cache_bytes\":{bytes}"))
+    );
+    assert_eq!(build(4).cache_m2l_rows(bytes).unwrap(), bytes);
+    let mut short = build(4);
+    assert!(matches!(
+        short.cache_m2l_rows(bytes - 1),
+        Err(FmmError::WorkEnvelopeExceeded { requested, max, .. }) if requested == bytes && max == bytes - 1
+    ));
+    assert!(short.m2l_rows.is_none());
     // Each extra worker's M2L row is charged to the slot envelope.
     let mut engine = build(4);
     let base = engine.coefficient_slots;
@@ -493,4 +516,7 @@ fn declared_workers_leave_potentials_bitwise_g0() {
     let serial = broken.potentials(&q).unwrap_err();
     broken.set_workers(4).unwrap();
     assert_eq!(broken.potentials(&q).unwrap_err(), serial);
+    // Its row cache refuses with the same error and stays uncached.
+    assert_eq!(broken.cache_m2l_rows(usize::MAX).unwrap_err(), serial);
+    assert!(broken.m2l_rows.is_none());
 }

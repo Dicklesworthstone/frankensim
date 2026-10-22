@@ -437,6 +437,7 @@ impl<'k> FmmC64<'k> {
             coefficient_slots: 0,
             directional: None,
             workers: 1,
+            m2l_rows: None,
         };
         let plan = DirectionalPlan::build(&op, options, k)?;
         op.coefficient_slots = plan.stats.coefficient_slots;

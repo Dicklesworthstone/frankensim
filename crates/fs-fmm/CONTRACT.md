@@ -229,8 +229,19 @@ passes; one worker (the default) runs the serial pass unchanged.
 - The directional route stays serial.
 - `Kernel` and `ComplexKernel` are `Sync` so that workers can share the
   engine.
-- `declared_workers_leave_potentials_bitwise_g0` covers five operator shapes,
-  with and without the cache, at 2, 3, 7 and 300 workers.
+- `declared_workers_leave_potentials_bitwise_g0` covers five operator shapes
+  with no cache, the near cache, the row cache and both, at 1, 2, 3, 7 and
+  300 workers.
+
+`FmmC64::cache_m2l_rows(max_bytes)` evaluates each translation group's M2L
+kernel rows once, on the declared workers, and both passes reuse them.
+- They are the same `block` evaluations, so potentials are bit-identical.
+- A cache over `max_bytes` (an inclusive cap) or one that cannot be reserved
+  refuses with `WorkEnvelopeExceeded`.
+- A non-finite row refuses with the passes' own first error.
+- The directional route refuses.
+- On every refusal the engine stays uncached.
+- `stats()` reports `m2l_cache_bytes`.
 
 `tests/battery.rs` includes `battery/helmholtz.rs` in the existing test target.
 It emits fs-obs JSONL rows for the single/double order ladders, adjoint/gradient/

@@ -67,6 +67,12 @@ pub struct IterativeOptions {
     /// ([`FmmC64::set_workers`]). Potentials are bit-identical for every
     /// count; the directional route stays serial. Defaults to one.
     pub workers: usize,
+    /// Byte budget for caching the double and mixed operators' M2L kernel
+    /// rows (half each), which are otherwise re-evaluated by every pass and
+    /// by every declared worker. The cache changes no bits. An operator whose
+    /// cache exceeds its half, and the directional route, stay uncached.
+    /// Zero (the default) disables it.
+    pub m2l_cache_bytes: usize,
 }
 
 impl Default for IterativeOptions {
@@ -85,6 +91,7 @@ impl Default for IterativeOptions {
             near_field_cache_bytes: 1 << 29,
             max_translation_work: MAX_TRANSLATION_WORK,
             workers: 1,
+            m2l_cache_bytes: 0,
         }
     }
 }
@@ -403,6 +410,15 @@ impl<'a> IterativeRadiation<'a> {
                 match op.cache_near_field(options.near_field_cache_bytes / 2) {
                     Ok(bytes) => near_cache_bytes += bytes,
                     Err(FmmError::WorkEnvelopeExceeded { .. }) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        if options.directional.is_none() && options.m2l_cache_bytes > 0 {
+            for op in [&mut double, &mut mixed] {
+                poll(gate)?;
+                match op.cache_m2l_rows(options.m2l_cache_bytes / 2) {
+                    Ok(_) | Err(FmmError::WorkEnvelopeExceeded { .. }) => {}
                     Err(e) => return Err(e.into()),
                 }
             }

@@ -157,6 +157,9 @@ pub struct FmmC64<'k> {
     /// Declared worker threads for the non-directional passes; see
     /// [`Self::set_workers`].
     workers: usize,
+    /// Optional per-group M2L kernel rows in `potentials` layout; see
+    /// [`Self::cache_m2l_rows`].
+    m2l_rows: Option<Vec<Vec<C64>>>,
 }
 
 impl<'k> FmmC64<'k> {
@@ -432,6 +435,7 @@ impl<'k> FmmC64<'k> {
             coefficient_slots,
             directional: None,
             workers: 1,
+            m2l_rows: None,
         })
     }
 
@@ -589,21 +593,26 @@ impl<'k> FmmC64<'k> {
         // per target channel in the multipole layout, so each application is
         // one contiguous dot product.
         let span = np * ns;
-        let mut row = vec![C64::ZERO; nt * span];
-        for group in &self.translations {
+        let mut buffer = vec![C64::ZERO; nt * span];
+        for (g, group) in self.translations.iter().enumerate() {
             let (a0, b0) = self.interactions[group[0]];
             let (ga, gb) = (self.grid(a0), self.grid(b0));
             for (i, &x) in ga.iter().enumerate() {
-                for (j, &y) in gb.iter().enumerate() {
-                    let block = self.operator.block(x, y);
-                    if block[..ns * nt].iter().any(|&z| !finite(z)) {
-                        return Err(FmmError::NonFiniteOutput { index: i });
+                let row: &[C64] = if let Some(rows) = &self.m2l_rows {
+                    &rows[g][i * nt * span..(i + 1) * nt * span]
+                } else {
+                    for (j, &y) in gb.iter().enumerate() {
+                        let block = self.operator.block(x, y);
+                        if block[..ns * nt].iter().any(|&z| !finite(z)) {
+                            return Err(FmmError::NonFiniteOutput { index: i });
+                        }
+                        for ta in 0..nt {
+                            buffer[ta * span + ns * j..ta * span + ns * (j + 1)]
+                                .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
+                        }
                     }
-                    for ta in 0..nt {
-                        row[ta * span + ns * j..ta * span + ns * (j + 1)]
-                            .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
-                    }
-                }
+                    &buffer
+                };
                 for &index in group {
                     let (a, b) = self.interactions[index];
                     let m = &multipoles[&b];
@@ -781,7 +790,7 @@ impl<'k> FmmC64<'k> {
         let mut locals: Vec<Vec<C64>> = vec![vec![C64::ZERO; np * nt]; keys.len()];
         let multipoles = &multipoles;
         let m2l = |range: (usize, usize), owned: &mut [Vec<C64>]| -> Result<(), (usize, usize)> {
-            let mut row = vec![C64::ZERO; nt * span];
+            let mut buffer = vec![C64::ZERO; nt * span];
             for (g, group) in self.translations.iter().enumerate() {
                 let targets: Vec<(usize, usize)> = group
                     .iter()
@@ -797,16 +806,21 @@ impl<'k> FmmC64<'k> {
                 let (a0, b0) = self.interactions[group[0]];
                 let (ga, gb) = (self.grid(a0), self.grid(b0));
                 for (i, &x) in ga.iter().enumerate() {
-                    for (j, &y) in gb.iter().enumerate() {
-                        let block = self.operator.block(x, y);
-                        if block[..ns * nt].iter().any(|&z| !finite(z)) {
-                            return Err((g, i));
+                    let row: &[C64] = if let Some(rows) = &self.m2l_rows {
+                        &rows[g][i * nt * span..(i + 1) * nt * span]
+                    } else {
+                        for (j, &y) in gb.iter().enumerate() {
+                            let block = self.operator.block(x, y);
+                            if block[..ns * nt].iter().any(|&z| !finite(z)) {
+                                return Err((g, i));
+                            }
+                            for ta in 0..nt {
+                                buffer[ta * span + ns * j..ta * span + ns * (j + 1)]
+                                    .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
+                            }
                         }
-                        for ta in 0..nt {
-                            row[ta * span + ns * j..ta * span + ns * (j + 1)]
-                                .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
-                        }
-                    }
+                        &buffer
+                    };
                     for &(ta_cell, b_cell) in &targets {
                         let m = &multipoles[b_cell];
                         let local = &mut owned[ta_cell - range.0];
@@ -942,6 +956,78 @@ impl<'k> FmmC64<'k> {
         })
     }
 
+    /// Evaluate every translation group's M2L kernel rows once, on the
+    /// declared workers, and reuse them on every later pass. They are the
+    /// same `block` evaluations the passes make, so potentials are
+    /// bit-identical with and without the cache. Returns its size in bytes.
+    ///
+    /// # Errors
+    /// The engine stays uncached on every error:
+    /// - `WorkEnvelopeExceeded` when the cache would exceed `max_bytes` (an
+    ///   inclusive cap) or cannot be reserved;
+    /// - `NonFiniteOutput`, the passes' own first error, for a non-finite
+    ///   kernel row;
+    /// - `ComplexRequest` on the directional route.
+    pub fn cache_m2l_rows(&mut self, max_bytes: usize) -> Result<usize, FmmError> {
+        if self.directional.is_some() {
+            return Err(FmmError::ComplexRequest {
+                reason: "the M2L row cache applies only to the non-directional route",
+            });
+        }
+        let (ns, nt) = self.operator.dimensions();
+        let np = self.nodes.len().pow(3);
+        let span = np * ns;
+        let per_group = np.saturating_mul(nt).saturating_mul(span);
+        let bytes = self
+            .translations
+            .len()
+            .saturating_mul(per_group)
+            .saturating_mul(core::mem::size_of::<C64>());
+        let refused = FmmError::WorkEnvelopeExceeded {
+            operation: "complex M2L row cache bytes",
+            requested: bytes,
+            max: max_bytes,
+        };
+        if bytes > max_bytes {
+            return Err(refused);
+        }
+        let mut slots: Vec<(Vec<C64>, Option<usize>)> = Vec::new();
+        slots
+            .try_reserve_exact(self.translations.len())
+            .map_err(|_| refused.clone())?;
+        for _ in 0..self.translations.len() {
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(per_group)
+                .map_err(|_| refused.clone())?;
+            rows.resize(per_group, C64::ZERO);
+            slots.push((rows, None));
+        }
+        let fill = |g: usize, slot: &mut (Vec<C64>, Option<usize>)| {
+            let (a0, b0) = self.interactions[self.translations[g][0]];
+            let (ga, gb) = (self.grid(a0), self.grid(b0));
+            for (i, &x) in ga.iter().enumerate() {
+                let row = &mut slot.0[i * nt * span..(i + 1) * nt * span];
+                for (j, &y) in gb.iter().enumerate() {
+                    let block = self.operator.block(x, y);
+                    if block[..ns * nt].iter().any(|&z| !finite(z)) {
+                        slot.1 = Some(i);
+                        return;
+                    }
+                    for ta in 0..nt {
+                        row[ta * span + ns * j..ta * span + ns * (j + 1)]
+                            .copy_from_slice(&block[ns * ta..ns * (ta + 1)]);
+                    }
+                }
+            }
+        };
+        split_run(&mut slots, 0, self.workers, &fill);
+        if let Some(index) = slots.iter().find_map(|slot| slot.1) {
+            return Err(FmmError::NonFiniteOutput { index });
+        }
+        self.m2l_rows = Some(slots.into_iter().map(|slot| slot.0).collect());
+        Ok(bytes)
+    }
+
     /// Evaluate every adjacent-leaf pair once, in the exact order
     /// `potentials` consumes them, and reuse the values on every later pass.
     /// They are the same `pair` evaluations, so potentials are bit-identical
@@ -1057,14 +1143,17 @@ impl<'k> FmmC64<'k> {
             return plan.stats.to_json();
         }
         format!(
-            "{{\"tree\":{},\"m2l_pairs\":{},\"m2l_kernel_blocks\":{},\"complex_coefficient_slots\":{},\"near_cache_bytes\":{}}}",
+            "{{\"tree\":{},\"m2l_pairs\":{},\"m2l_kernel_blocks\":{},\"complex_coefficient_slots\":{},\"near_cache_bytes\":{},\"m2l_cache_bytes\":{}}}",
             self.geometry.stats(),
             self.interactions.len(),
             self.translations.len(),
             self.coefficient_slots,
             self.near
                 .as_ref()
-                .map_or(0, |v| v.len() * core::mem::size_of::<C64>())
+                .map_or(0, |v| v.len() * core::mem::size_of::<C64>()),
+            self.m2l_rows.as_ref().map_or(0, |rows| {
+                rows.iter().map(Vec::len).sum::<usize>() * core::mem::size_of::<C64>()
+            })
         )
     }
 }

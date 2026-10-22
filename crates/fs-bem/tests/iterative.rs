@@ -845,18 +845,20 @@ fn bem_directional_matches_dense_above_w5a_regime() {
     );
 }
 
-/// G0: declared W5a workers change no bit of an iterative solve. Pressures,
-/// GMRES iterations and the residual claim equal those of one worker.
+/// G0: declared W5a workers and the M2L row cache change no bit of an
+/// iterative solve. Pressures, GMRES iterations and the residual claim equal
+/// those of one uncached worker.
 #[test]
 fn declared_fmm_workers_leave_the_iterative_solve_bitwise() {
     let surface = SpherePanels::icosphere(1.0, 3).unwrap();
     let v = velocity(&surface);
     let gate = CancelGate::new_clock_free();
-    let solve = |workers: usize| {
+    let solve = |workers: usize, m2l_cache_bytes: usize| {
         let o = IterativeOptions {
             tol: 1e-8,
             leaf_capacity: 16,
             workers,
+            m2l_cache_bytes,
             ..opts()
         };
         solve_radiation_iterative(
@@ -870,19 +872,17 @@ fn declared_fmm_workers_leave_the_iterative_solve_bitwise() {
         )
         .unwrap()
     };
-    let (serial, serial_report, _) = solve(1);
-    for workers in [3, 8] {
-        let (actual, report, _) = solve(workers);
-        assert_eq!(
-            bits(&actual.pressure),
-            bits(&serial.pressure),
-            "workers {workers}"
-        );
-        assert_eq!(report.iters, serial_report.iters, "workers {workers}");
+    let (serial, serial_report, _) = solve(1, 0);
+    // A row cache shared by the workers is the same block evaluations.
+    for (workers, rows) in [(3, 0), (8, 0), (1, usize::MAX), (8, usize::MAX)] {
+        let (actual, report, _) = solve(workers, rows);
+        let at = format!("workers {workers}, rows {rows}");
+        assert_eq!(bits(&actual.pressure), bits(&serial.pressure), "{at}");
+        assert_eq!(report.iters, serial_report.iters, "{at}");
         assert_eq!(
             report.rel_residual.to_bits(),
             serial_report.rel_residual.to_bits(),
-            "workers {workers}"
+            "{at}"
         );
     }
 }

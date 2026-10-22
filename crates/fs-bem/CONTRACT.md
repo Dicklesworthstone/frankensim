@@ -300,6 +300,16 @@ budget each. The default is 512 MiB.
 - `bem_near_field_cache_is_bitwise` checks the default against a zero budget
   and a too-small one.
 
+`IterativeOptions::workers` (default 1) is set on every W5a engine the owner
+builds (`FmmC64::set_workers`). `IterativeOptions::m2l_cache_bytes` (default
+0, off) caches the double and mixed operators' M2L kernel rows, half the
+budget each, like the near-field cache.
+- Neither changes a bit.
+- `declared_fmm_workers_leave_the_iterative_solve_bitwise` pins the pressures,
+  the iteration count and the residual claim across workers and the row cache.
+- On ts1, a 5120-panel solve takes 173.4 s on one uncached worker and 15.7 s
+  on 16 workers with the row cache.
+
 Checkpoints clone the `GmresState` only at completed restart boundaries.
 Cancellation is polled before each matvec and between its two synchronous FMM
 passes. The current FMM pass drains before cancellation returns; no mid-pass
