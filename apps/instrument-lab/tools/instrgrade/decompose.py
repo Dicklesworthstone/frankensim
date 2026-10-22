@@ -169,9 +169,16 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
 
 
 def render_floor(y, f0_hz=None):
-    """A render has no acoustic noise floor: its quietest 20 ms if it has quiet frames, else 50 dB under its peak."""
+    """A render's noise floor is that of its pre-roll: the 20 ms frames before the note first reaches STEADY_DROP_DB under its own
+    steady level, less 5 ms. A render that begins at its own onset has no pre-roll but the silence align() puts in front of it,
+    so its floor is digital silence (floor_of's -120 dB) and the onset is criterion B's. The quietest 20 ms of the whole render is
+    not a floor: on a decaying note they lie inside the note's own decay (a 2 s C6 piano render, steady level -41.9 dB, was refused
+    as IRPDECOMP_NO_SIGNAL against a floor of -60.8 dB taken there)."""
     e, _ = env_rms_db(y, win=env_window(f0_hz))
-    return min(floor_of(y), float(e.max()) - 50.0)
+    if not len(e):
+        return -120.0
+    first = int(np.flatnonzero(e > steady_level_db(e) - STEADY_DROP_DB)[0])
+    return floor_of(y[: max(0, first * 48 - int(0.005 * SR))])  # env_rms_db's frame i starts at sample 48 i
 
 
 def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):

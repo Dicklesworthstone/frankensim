@@ -371,6 +371,45 @@ class FloorTests(unittest.TestCase):
         self.assertLess(abs(whole - blocks), 2.0, f"{whole} vs {blocks}")
         self.assertLess(t_blocks, t_whole * 1.5)  # small files are not a speed test; the point is it never costs more
 
+    @staticmethod
+    def struck(f0=1046.5, dur=2.0, lead=0.0, dust_db=None, seed=5):
+        """A struck note that starts at its first sample (a render) or after `lead` s of dust, with a piano's two-stage decay: 60 dB/s
+        for 0.5 s (the prompt sound), then 6 dB/s. Most of its frames sit 30-40 dB under its peak, and its quietest 20 ms are its own
+        decay, about 40 dB down: the shape of the 2 s C6 render (peak envelope -10.8 dB, steady -41.9 dB, quietest -53.3 dB)."""
+        n = int((lead + dur) * SR)
+        t = np.arange(n) / SR
+        tt = np.maximum(t - lead, 0.0)
+        level_db = np.where(tt < 0.5, -60.0 * tt, -30.0 - 6.0 * (tt - 0.5))
+        x = sum(np.sin(2 * np.pi * k * f0 * tt) / k for k in range(1, 8)) * 10 ** (level_db / 20) * np.clip(tt / 0.002, 0, 1)
+        x = np.where(t >= lead, 0.3 * x / np.abs(x).max(), 0.0)
+        if dust_db is not None:
+            x = x + np.random.default_rng(seed).standard_normal(n) * 10 ** (dust_db / 20)
+        return x
+
+    def test_a_decaying_render_takes_its_floor_from_its_pre_roll_not_from_its_own_decay(self):
+        f0 = 1046.5  # C6, 2 s: the shape of the C6 piano render refused as IRPDECOMP_NO_SIGNAL in the 2026-10-21 reality check
+        x = self.struck(f0)
+        y = dc.highpass(x, f0)
+        e, _ = dc.env_rms_db(y, win=dc.env_window(f0))
+        steady, quietest = dc.steady_level_db(e), dc.floor_of(y)
+        old = min(quietest, float(e.max()) - 50.0)
+        print(f"\n  C6-like render: steady {steady:.1f} dB, quietest 20 ms {quietest:.1f} dB, old floor {old:.1f} dB, "
+              f"new floor {dc.render_floor(y, f0):.1f} dB")
+        self.assertLess(steady, old + 20.0, "the old rule refuses this render: the test discriminates")
+        self.assertEqual(dc.render_floor(y, f0), -120.0)  # it begins at its own onset: its pre-roll is the silence align() adds
+        cut, info = dc.align(x, f0, dc.render_floor(y, f0))
+        self.assertAlmostEqual(info["onset_s"], 0.0, delta=0.002)
+        self.assertAlmostEqual(info["cut_onset_s"], dc.preroll_s(f0), delta=0.0015)
+
+    def test_a_render_with_a_pre_roll_takes_that_pre_roll_as_its_floor(self):
+        f0 = 1046.5
+        x = self.struck(f0, lead=0.5, dust_db=-90.0)  # 0.5 s of numerical dust at -90 dB before the strike
+        fl = dc.render_floor(dc.highpass(x, f0), f0)
+        print(f"\n  render with 0.5 s of -90 dB dust: floor {fl:.1f} dB")
+        self.assertAlmostEqual(fl, -90.0, delta=3.0)  # the dust's level (high-passed white noise loses a little), not the decay's
+        _, info = dc.align(x, f0, fl)
+        self.assertAlmostEqual(info["onset_s"], 0.5, delta=0.002)
+
 
 class PartialGateTests(unittest.TestCase):
     def test_noise_peaks_far_below_the_real_partials_do_not_make_inharmonicity_or_frequency_gaps(self):
