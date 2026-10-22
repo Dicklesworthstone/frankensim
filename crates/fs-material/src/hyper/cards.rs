@@ -12,8 +12,7 @@ use crate::graph::{
     NodeOutput, NodeRole, Port, TimeParity,
 };
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, QueryPoint};
-use fs_qty::semantic::{QuantityKind, ValueForm};
-use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_qty::Dims;
 use std::collections::BTreeSet;
 
 const ONE: Dims = Dims([0, 0, 0, 0, 0, 0]);
@@ -77,26 +76,11 @@ impl ResolvedHyperelastic {
             ));
         }
         for axis in card.validity.bounds().keys() {
-            let quantity = context.axis_quantities().get(axis).copied();
-            let semantic = quantity.and_then(QuantitySpec::semantic_type);
-            let static_external = semantic.is_some_and(|ty| {
-                ty.form() == ValueForm::Static
-                    && matches!(
-                        ty.kind(),
-                        QuantityKind::AbsoluteTemperature
-                            | QuantityKind::Pressure
-                            | QuantityKind::Composition(_)
-                            | QuantityKind::Moisture(_)
-                            | QuantityKind::MassConcentration
-                            | QuantityKind::AmountConcentration
-                    )
-            });
-            let legacy_temperature = axis == "T"
-                && semantic.is_none()
-                && (quantity.is_none()
-                    || quantity == Some(QuantitySpec::dimensional(Temperature::DIMS)))
-                && context.axes().get(axis).is_some_and(|value| *value > 0.0);
-            if !static_external && !legacy_temperature {
+            if !crate::state_point::is_fixed_external_coordinate(
+                axis,
+                context.axis_quantities().get(axis).copied(),
+                context.axes().get(axis).copied(),
+            ) {
                 return Err(refusal(format!(
                     "hyperelastic source axis {axis} is not a supported fixed external condition; evolving mechanical coordinates require an explicit owner"
                 )));

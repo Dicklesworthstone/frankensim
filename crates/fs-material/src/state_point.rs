@@ -332,6 +332,39 @@ pub struct ResolvedScalarProperty {
     source_axes: Vec<(String, Dims)>,
 }
 
+/// Shared source-domain policy for mechanical laws held at fixed external
+/// conditions. Evolving strain, stress, rates and field coordinates need their
+/// own physical owner; matching dimensions alone never freezes those roles.
+pub(crate) fn is_fixed_external_coordinate(
+    axis: &str,
+    quantity: Option<QuantitySpec>,
+    value: Option<f64>,
+) -> bool {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return false;
+    };
+    let semantic = quantity.and_then(QuantitySpec::semantic_type);
+    let static_external = semantic.is_some_and(|ty| {
+        ty.form() == ValueForm::Static
+            && matches!(
+                ty.kind(),
+                QuantityKind::AbsoluteTemperature
+                    | QuantityKind::Pressure
+                    | QuantityKind::Composition(_)
+                    | QuantityKind::Moisture(_)
+                    | QuantityKind::MassConcentration
+                    | QuantityKind::AmountConcentration
+            )
+            && (ty.kind() != QuantityKind::AbsoluteTemperature || value > 0.0)
+    });
+    let legacy_temperature = axis == "T"
+        && semantic.is_none()
+        && (quantity.is_none()
+            || quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)))
+        && value > 0.0;
+    static_external || legacy_temperature
+}
+
 impl ResolvedScalarProperty {
     /// Requirement that this answer satisfied.
     #[must_use]
@@ -357,6 +390,86 @@ impl ResolvedScalarProperty {
     #[must_use]
     pub fn source_axes(&self) -> &[(String, Dims)] {
         &self.source_axes
+    }
+
+    /// Internal admission shared by source-bound mechanical and thermal owners.
+    /// The optional temperature owner excludes any second temperature axis.
+    /// Frequency may describe applicability only when explicitly requested;
+    /// the caller must still check its static/relaxed frequency coverage.
+    pub(crate) fn has_only_fixed_external_conditions(
+        &self,
+        temperature_axis: Option<&str>,
+        allow_frequency_applicability: bool,
+    ) -> bool {
+        if self.source_axes.is_empty()
+            && self.answer.receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
+        {
+            return false;
+        }
+        let receipt = &self.answer.receipt;
+        let supported = |axis: &str, dims: Option<Dims>| {
+            let quantity = receipt.axis_quantities.get(axis).copied();
+            let value = receipt
+                .query_point
+                .iter()
+                .find(|(name, _)| name == axis)
+                .map(|(_, value)| *value);
+            if let Some(owner) = temperature_axis {
+                if axis == owner {
+                    let absolute = QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::AbsoluteTemperature,
+                        ValueForm::Static,
+                    ));
+                    return value.is_some_and(|v| v.is_finite() && v > 0.0)
+                        && dims.is_none_or(|d| d == fs_qty::Temperature::DIMS)
+                        && quantity.is_none_or(|q| {
+                            q == absolute
+                                || q == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+                        });
+                }
+                if dims == Some(fs_qty::Temperature::DIMS)
+                    || quantity.is_some_and(|q| q.dims() == fs_qty::Temperature::DIMS)
+                    || axis == "T" && quantity.is_none()
+                {
+                    return false;
+                }
+            }
+            is_fixed_external_coordinate(axis, quantity, value)
+                && dims.is_none_or(|d| {
+                    quantity.map_or(axis == "T" && d == fs_qty::Temperature::DIMS, |q| {
+                        q.dims() == d
+                    })
+                })
+        };
+        if !self
+            .source_axes
+            .iter()
+            .all(|(axis, dims)| supported(axis, Some(*dims)))
+        {
+            return false;
+        }
+        self.answer
+            .evidence
+            .model
+            .validity
+            .bounds()
+            .keys()
+            .all(|axis| {
+                if supported(axis, None) {
+                    return true;
+                }
+                let quantity = receipt.axis_quantities.get(axis).copied();
+                let semantic = quantity.and_then(QuantitySpec::semantic_type);
+                let static_frequency = semantic.is_some_and(|ty| {
+                    ty.form() == ValueForm::Static
+                        && matches!(ty.kind(), QuantityKind::Frequency(_))
+                }) || axis == "omega"
+                    && quantity
+                        .is_none_or(|q| q == QuantitySpec::dimensional(fs_qty::Frequency::DIMS));
+                allow_frequency_applicability
+                    && static_frequency
+                    && !self.source_axes.iter().any(|(source, _)| source == axis)
+            })
     }
 
     /// Whether this source supplies a constant coefficient when temperature is
@@ -390,15 +503,21 @@ impl ResolvedScalarProperty {
         let receipt = &self.answer.receipt;
         let temperature_axis = match receipt.axis_quantities.get(axis) {
             Some(quantity) => {
-                *quantity == QuantitySpec::semantic(SemanticType::new(
-                    QuantityKind::AbsoluteTemperature, ValueForm::Static,
-                )) || axis == "T" && *quantity == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+                *quantity
+                    == QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::AbsoluteTemperature,
+                        ValueForm::Static,
+                    ))
+                    || axis == "T"
+                        && *quantity == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
             }
             None => axis == "T",
         };
-        temperature_axis && receipt.query_point.iter().any(|(name, value)| {
-            name == axis && value.is_finite() && *value > 0.0
-        })
+        temperature_axis
+            && receipt
+                .query_point
+                .iter()
+                .any(|(name, value)| name == axis && value.is_finite() && *value > 0.0)
     }
 
     /// Frequency applicability of the selected claim, expressed in rad/s.
@@ -3186,8 +3305,22 @@ mod tests {
         ));
         for (axis, dims, quantity, lo, at, expected) in [
             ("T", temperature, Some(absolute), 300.0, 325.0, true),
-            ("temperature", temperature, Some(absolute), 300.0, 325.0, true),
-            ("temperature", temperature, Some(QuantitySpec::dimensional(temperature)), 300.0, 325.0, false),
+            (
+                "temperature",
+                temperature,
+                Some(absolute),
+                300.0,
+                325.0,
+                true,
+            ),
+            (
+                "temperature",
+                temperature,
+                Some(QuantitySpec::dimensional(temperature)),
+                300.0,
+                325.0,
+                false,
+            ),
             ("T", temperature, Some(absolute), 300.0, 300.0, true),
             ("T", temperature, None, 300.0, 325.0, true),
             (
@@ -3578,7 +3711,8 @@ mod tests {
             .unwrap();
             assert!(bulk.property("hardness").is_none());
             assert!(surface.property("hardness").is_none());
-            let refreshed = bulk.at_query_point(&material, &bulk.query().with("T", 500.0).unwrap())
+            let refreshed = bulk
+                .at_query_point(&material, &bulk.query().with("T", 500.0).unwrap())
                 .unwrap();
             assert!(refreshed.property("hardness").is_none());
             for (required_key, expected) in [(&key, 210.0), (&other_key, 310.0)] {

@@ -41,11 +41,22 @@ fn temperature(t: f64) -> QueryPoint {
         .unwrap()
 }
 fn sources(cp: f64, density: f64, branch: bool, thermal_shift: bool) -> Sources {
+    sources_at_pressure(cp, density, branch, thermal_shift, None)
+}
+fn sources_at_pressure(
+    cp: f64,
+    density: f64,
+    branch: bool,
+    thermal_shift: bool,
+    pressure_pa: Option<f64>,
+) -> Sources {
     let mut claims = ClaimSet::new();
     let quantity = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
     ));
+    let pressure_quantity =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
     for (name, dims, values) in [
         ("E_inf", Pressure::DIMS, [1e6; 4]),
         ("E0", Pressure::DIMS, [3e6; 4]),
@@ -65,20 +76,42 @@ fn sources(cp: f64, density: f64, branch: bool, thermal_shift: bool) -> Sources 
         ("cp", SPECIFIC_HEAT_CAPACITY_DIMS, [cp; 4]),
         ("conductivity", THERMAL_CONDUCTIVITY_DIMS, [10.0; 4]),
     ] {
+        let mut validity =
+            ValidityDomain::unconstrained().with_quantity("T", quantity, 280.0, 340.0);
+        let value = if pressure_pa.is_some() && name == "shift" {
+            validity = validity.with_quantity("p", pressure_quantity, 1e5, 3e5);
+            PropertyValue::Surface2D {
+                axes: ["T".into(), "p".into()],
+                axis_dims: [Temperature::DIMS, Pressure::DIMS],
+                samples: [280.0, 300.0, 320.0, 340.0]
+                    .into_iter()
+                    .zip(values)
+                    .flat_map(|(t, value)| [([t, 1e5], value), ([t, 3e5], 0.1 * value)])
+                    .collect(),
+                triangles: (0_u32..3)
+                    .flat_map(|index| {
+                        let left = 2 * index;
+                        [[left, left + 2, left + 1], [left + 2, left + 3, left + 1]]
+                    })
+                    .collect(),
+                dims,
+            }
+        } else {
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: [280.0, 300.0, 320.0, 340.0]
+                    .into_iter()
+                    .zip(values)
+                    .collect(),
+                dims,
+            }
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Curve {
-                    abscissa: "T".into(),
-                    abscissa_dims: Temperature::DIMS,
-                    knots: [280.0, 300.0, 320.0, 340.0]
-                        .into_iter()
-                        .zip(values)
-                        .collect(),
-                    dims,
-                },
-                validity: ValidityDomain::unconstrained()
-                    .with_quantity("T", quantity, 280.0, 340.0),
+                value,
+                validity,
                 interpolation: InterpolationPolicy::LinearInside,
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
@@ -101,7 +134,13 @@ fn sources(cp: f64, density: f64, branch: bool, thermal_shift: bool) -> Sources 
         vec![],
     )
     .unwrap();
-    let (low, high) = (temperature(280.0), temperature(340.0));
+    let at = |t| match pressure_pa {
+        Some(pressure) => temperature(t)
+            .with_quantity("p", pressure_quantity, pressure)
+            .unwrap(),
+        None => temperature(t),
+    };
+    let (low, high) = (at(280.0), at(340.0));
     let branches = if branch {
         vec![(
             PropertyKey::new("E0", Pressure::DIMS),
@@ -403,6 +442,125 @@ fn g3_caloric_data_changes_actual_vibration_through_the_existing_thermal_owner()
                     * (state.point().caloric_state().specific_enthalpy_j_kg()
                         - initial_enthalpies[i]);
             close(energy + numerical[i], initial_energy, 1e-8);
+            assert_eq!(
+                state.point().mechanical().temperature_k(),
+                state.point().caloric_state().temperature_k()
+            );
+        }
+    });
+}
+
+#[test]
+fn g3_pressure_surface_changes_motion_and_physical_heat_through_the_existing_owners() {
+    let sources = [
+        sources_at_pressure(0.02, 1000.0, true, true, Some(1.5e5)),
+        sources_at_pressure(0.02, 1000.0, true, true, Some(2.5e5)),
+    ];
+    assert_eq!(
+        sources[0].mechanical.samples()[0].card_identity(),
+        sources[1].mechanical.samples()[0].card_identity(),
+        "only the fixed pressure query changes"
+    );
+    assert_ne!(sources[0].mechanical.law(), sources[1].mechanical.law());
+    // Each source-cell crossing, including the one inside the active 300–320 K
+    // interval, must survive lowering into the actual hereditary law.
+    for (source, crossed_temperature) in sources.iter().zip([315.0, 305.0]) {
+        assert!(source.mechanical.samples().iter().any(|sample| {
+            sample
+                .query_point()
+                .contains(&("T".into(), crossed_temperature))
+        }));
+    }
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0,
+                kernel_id: 0x544d50,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let environments = sources.each_ref().map(|source| LumpedThermalEnvironment {
+            temperature_k: 300.0,
+            radiation_temperature_k: 300.0,
+            convection_w_per_m2_k: 0.0,
+            transport: source.transport.clone(),
+            enthalpy_tolerance_j_kg: 1e-12,
+            maximum_thermal_residual_j: 1e-11,
+        });
+        let mut states = sources.each_ref().map(|source| {
+            Oscillator::try_new(
+                &source.mechanical,
+                &source.caloric,
+                geometry(0.0),
+                300.0,
+                0.0,
+                0.5,
+            )
+            .unwrap()
+        });
+        let initial_energy = states[0].kinetic_energy_j();
+        let initial_enthalpies = states
+            .each_ref()
+            .map(|state| state.point().caloric_state().specific_enthalpy_j_kg());
+        let mut numerical = [0.0; 2];
+        let mut heat = [0.0; 2];
+        let mut max_velocity_difference = 0.0_f64;
+        let mut max_temperature_difference = 0.0_f64;
+        for _ in 0..200 {
+            for index in 0..2 {
+                let old = &states[index];
+                let step = old
+                    .step(
+                        0.0,
+                        0.00005,
+                        config(),
+                        |input| environments[index].advance(&cx, input),
+                        &gate,
+                    )
+                    .unwrap();
+                let expected = old
+                    .point()
+                    .mechanical()
+                    .advance(
+                        step.next.point().caloric_state().temperature_k(),
+                        step.next.point().mechanical().total_strain(),
+                        0.00005,
+                        config().feedback.energy_tolerance_j / old.point().volume_m3(),
+                    )
+                    .unwrap();
+                assert_eq!(step.next.point().mechanical(), &expected.point);
+                assert!(step.material_heat_j >= 0.0);
+                assert!(step.combined_residual_j.abs() <= config().energy_tolerance_j);
+                heat[index] += step.material_heat_j;
+                numerical[index] += step.numerical_loss_j;
+                states[index] = step.next;
+            }
+            max_velocity_difference = max_velocity_difference
+                .max((states[0].velocity_m_s() - states[1].velocity_m_s()).abs());
+            max_temperature_difference = max_temperature_difference.max(
+                (states[0].point().caloric_state().temperature_k()
+                    - states[1].point().caloric_state().temperature_k())
+                .abs(),
+            );
+        }
+        assert!(max_velocity_difference > 1e-4);
+        assert!(max_temperature_difference > 1e-4);
+        for (index, state) in states.iter().enumerate() {
+            let caloric_gain = state.point().mass_kg()
+                * (state.point().caloric_state().specific_enthalpy_j_kg()
+                    - initial_enthalpies[index]);
+            close(caloric_gain, heat[index], 1e-9);
+            let energy = state.kinetic_energy_j()
+                + state.point().volume_m3() * state.point().mechanical().stored_energy_j_m3()
+                + caloric_gain;
+            close(energy + numerical[index], initial_energy, 1e-8);
             assert_eq!(
                 state.point().mechanical().temperature_k(),
                 state.point().caloric_state().temperature_k()

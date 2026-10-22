@@ -1769,3 +1769,21 @@ solid locking. Equal constant phase densities are separately admitted for
 fixed-volume consumers. Separate constituent velocities, elastic skeleton
 response, pressure/composition evolution and moving boundaries remain outside
 this closure.
+
+### Source surfaces in hereditary thermal materials
+
+`thermovisco::source::ResolvedThermoMaxwell` lowers the canonical typed
+temperature line from scalar, curve and sampled-surface claims. Every crossed
+source-cell edge, original role key, selected claim and fixed material context
+is retained. Reference spring and relaxation coefficients must remain exactly
+constant across the complete line; the declared modulus/time/free-strain laws
+provide the supported temperature response. Source gaps and discrete-only
+intervals refuse rather than supplying interpolated coverage.
+
+Hyperelastic and hereditary source bindings share a single
+fixed-external-coordinate policy. Typed pressure, composition, moisture and
+concentration may describe fixed external conditions. Evolving mechanical
+coordinates and a second temperature coordinate cannot be frozen into a thermal
+law. Frequency-dependent values refuse; thermovisco frequency applicability
+alone must retain its static/relaxed endpoint. The original caloric restrictions
+on spring energy, free strain, density and phase remain unchanged.
