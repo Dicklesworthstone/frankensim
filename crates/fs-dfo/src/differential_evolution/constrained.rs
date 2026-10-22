@@ -11,6 +11,9 @@
 //! Row scaling matters and must remain fixed throughout the search. Feasibility
 //! concerns only the supplied rows; it is not a continuum/error certificate.
 
+/// Save and restore drained searches, retaining their feasibility policy.
+pub mod snapshot;
+
 use super::{DifferentialEvolutionConfig, DifferentialEvolutionError as Error,
     DifferentialEvolutionPoint, DifferentialEvolutionReport, DifferentialEvolutionRunError,
     DifferentialEvolutionScore, RankedDifferentialEvolutionState, finite, invalid};
@@ -74,8 +77,8 @@ pub type ConstrainedDifferentialEvolutionPoint = DifferentialEvolutionPoint<Feas
 /// construction. Caller-owned model/row semantics must also remain unchanged.
 /// An objective target is reached ONLY by a feasible candidate. Budget
 /// exhaustion proves neither optimality nor absence of a feasible design.
-/// This state supports in-process continuation; scalar DE checkpoint bytes
-/// cannot encode this different score type and are intentionally not exposed.
+/// Checkpoints retain the original feasibility policy and completed callbacks.
+/// Their distinct format refuses scalar DE snapshots and changed requirements.
 #[derive(Debug)]
 pub struct ConstrainedDifferentialEvolutionState {
     state: RankedDifferentialEvolutionState<FeasibilityScore>,
