@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from instrgrade import SR, THIRD_OCT, load, segment_scale, write_wav  # noqa: E402
 
 CHAIN_VERSION = "chain-1"
-FS_REC = 44100  # the graded files' sample rate (references.json chain formats)
+FS_REC = 44100  # the usual rate of the graded files; each session's own rate is probed (the 2011 guitar .mono files are 96 kHz)
 
 # GAP_RULE, declared before any grading and never tuned against graded notes. A gap is a stretch of a graded file that no
 # sounding span covers: neither a library note nor any span instrgrade.segment_scale finds in the file (a note the library did
@@ -74,7 +74,7 @@ class ChainError(ValueError):
 class Stretch:
     file: str  # path within the reference dir, as references.json names it
     sha256: str
-    start: int  # samples at FS_REC
+    start: int  # samples at the session's rate
     end: int
     source: str  # "ambient" or "gap"
 
@@ -87,6 +87,7 @@ class Chain:
     stretches: list[Stretch]
     flags: list[dict]
     bits: int  # the graded files' bits per sample, as probed
+    fs: int = FS_REC  # their sample rate, as probed (after convert_refs.py's sample-rate-header repair)
     sources: list[dict] = field(default_factory=list)  # every file read: path, sha256, role
     _audio: dict = field(default_factory=dict, repr=False)
 
@@ -102,17 +103,17 @@ class Chain:
         rec = next(c for c in m["chains"] if c["id"] == prec["chain"])
         files = {f["id"]: f for f in m["files"]}
         flags = chain_flags(rec, prec)
-        audio, sources, stretches, bits = {}, [], [], set()
+        audio, sources, stretches, fmt = {}, [], [], set()
         amb = prec.get("ambient")
         if amb and amb != "absent-on-page":
             f = files.get(amb)
             if f is None:
                 raise ChainError(f"IRPCHAIN_AMBIENT_MISSING: {page} names ambient {amb}, which references.json does not list")
-            x, b = read_pcm(refdir, f)
-            bits.add(b)
+            x, bits, rate = read_pcm(refdir, f)
+            fmt.add((bits, rate))
             audio[f["path"]] = x
             sources.append(dict(path=f["path"], sha256=f["sha256"], role="ambient"))
-            stretches += [Stretch(f["path"], f["sha256"], a, b, "ambient") for a, b in [(0, len(x))]]
+            stretches.append(Stretch(f["path"], f["sha256"], 0, len(x), "ambient"))
         by_stem = {Path(f["path"]).stem.replace(" ", ""): f for f in m["files"] if f["page"] == page and f["kind"] == "chromatic-scale" and f["gradable"]}
         spans = {}
         for e in library:
@@ -121,31 +122,35 @@ class Chain:
                 spans.setdefault(stem, []).append((e["start"], e["end"]))
         for stem in sorted(spans):
             f = by_stem[stem]
-            x, b = read_pcm(refdir, f)
-            bits.add(b)
+            x, bits, rate = read_pcm(refdir, f)
+            fmt.add((bits, rate))
             audio[f["path"]] = x
             sources.append(dict(path=f["path"], sha256=f["sha256"], role="gaps"))
-            sounding = [(a / FS_REC, b / FS_REC) for a, b in segment_scale(x)]  # every sounding span, verified as a note or not
-            stretches += [Stretch(f["path"], f["sha256"], a, b, "gap") for a, b in gaps(len(x), spans[stem] + sounding)]
+            sounding = [(a / rate, b / rate) for a, b in segment_scale(x)]  # every sounding span, verified as a note or not
+            stretches += [Stretch(f["path"], f["sha256"], a, b, "gap") for a, b in gaps(len(x), spans[stem] + sounding, fs=rate)]
         if not stretches:
             raise ChainError(f"IRPCHAIN_NO_FLOOR: {page} has no ambient file and no graded file with library notes to take gaps from")
-        clean = exclude_events(stretches, audio)
-        if not any(s.end - s.start >= int((BLOCK_S + XFADE_S) * FS_REC) for s in clean):
+        if len(fmt) != 1:
+            raise ChainError(f"IRPCHAIN_FORMAT: {page}'s files disagree on (bits, rate): {sorted(fmt)}")
+        bits, fs = fmt.pop()
+        clean = exclude_events(stretches, audio, fs=fs)
+        if not any(s.end - s.start >= int((BLOCK_S + XFADE_S) * fs) for s in clean):
             raise ChainError(f"IRPCHAIN_FLOOR_TOO_SHORT: no clean floor stretch of {BLOCK_S + XFADE_S:.2f} s in {page}")
         if not amb or amb == "absent-on-page":
             flags.append(dict(flag="ambient_absent_on_page", note="the floor comes from inter-note gaps only"))
         if any(s.source == "gap" for s in clean):
             flags.append(dict(flag="gap_floor_unvalidated", note="on the one session with an ambient file the gap floor does not match it "
                               "(+3..+11 dB at 1-5 kHz, -2..-4 dB below 130 Hz; pexfp.117)"))
-        if len(bits) != 1:
-            raise ChainError(f"IRPCHAIN_FORMAT: {page}'s files disagree on their bits per sample: {sorted(bits)}")
-        return cls(id=f'{rec["id"]}@{page}', page=page, record=rec, stretches=clean, flags=flags, bits=bits.pop(), sources=sources,
+        if fs != FS_REC:
+            flags.append(dict(flag="rate_differs_from_record", note=f"the graded files are {bits}-bit at {fs} Hz; the chain record says "
+                              f"{rec.get('format')}"))
+        return cls(id=f'{rec["id"]}@{page}', page=page, record=rec, stretches=clean, flags=flags, bits=bits, fs=fs, sources=sources,
                    _audio=audio)
 
     # ------------------------------------------------------------------ floor
     def floor(self, n: int, description: str) -> tuple[np.ndarray, list[dict]]:
-        """`n` samples at FS_REC of recorded floor for `description`: blocks drawn by the counter stream, crossfaded."""
-        blk, xf = int(BLOCK_S * FS_REC), int(XFADE_S * FS_REC)
+        """`n` samples at the session's rate of recorded floor for `description`: blocks drawn by the counter stream, crossfaded."""
+        blk, xf = int(BLOCK_S * self.fs), int(XFADE_S * self.fs)
         usable = [(s, s.end - s.start - blk - xf) for s in self.stretches if s.end - s.start - blk - xf >= 0]
         total = sum(u + 1 for _, u in usable)
         nb = max(1, int(math.ceil(n / blk)))
@@ -170,13 +175,13 @@ class Chain:
     def apply(self, y48: np.ndarray, description: str) -> tuple[np.ndarray, dict]:
         """A level-matched render at the grader's 48 kHz, as the session would have recorded it: on the 44.1 kHz grid, plus the
         session's floor, quantized to its files' bit depth, and back to 48 kHz by convert_refs.py's resampler. Returns (signal, receipt)."""
-        x = resample(np.asarray(y48, dtype=np.float64), SR, FS_REC)
+        x = resample(np.asarray(y48, dtype=np.float64), SR, self.fs)
         fl, picks = self.floor(len(x), description)
         q, clips = quantize(x + fl, self.bits)
         if clips:
             raise ChainError(f"IRPCHAIN_CLIPS: {clips} samples exceed 16-bit full scale after the floor is added: the render is "
                              "louder than the session could record at its reference's level")
-        y = resample_pcm(q, self.bits, FS_REC, SR)
+        y = resample_pcm(q, self.bits, self.fs, SR)
         return y, self.receipt(description, fl, picks)
 
     def receipt(self, description, fl, picks):
@@ -184,8 +189,8 @@ class Chain:
                     ambient_sha256=[s["sha256"] for s in self.sources if s["role"] == "ambient"],
                     gap_sources=[dict(path=s["path"], sha256=s["sha256"]) for s in self.sources if s["role"] == "gaps"],
                     gap_rule=GAP_RULE, block_s=BLOCK_S, xfade_s=XFADE_S, blocks=picks,
-                    floor_db_per_band=[round(v, 2) for v in third_octave_db(fl, FS_REC)], bands_hz=[round(f, 1) for f in THIRD_OCT],
-                    bits=self.bits, fs_hz=FS_REC, quantize="round half to even, no dither", resampler=resampler_id(), flags=self.flags,
+                    floor_db_per_band=[round(v, 2) for v in third_octave_db(fl, self.fs)], bands_hz=[round(f, 1) for f in THIRD_OCT],
+                    bits=self.bits, fs_hz=self.fs, quantize="round half to even, no dither", resampler=resampler_id(), flags=self.flags,
                     low_flag_hz=LOW_FLAG_HZ)
 
 
@@ -204,10 +209,10 @@ def chain_flags(rec: dict, page: dict) -> list[dict]:
     return flags
 
 
-def read_pcm(refdir: Path, f: dict) -> tuple[np.ndarray, int]:
-    """(samples at FS_REC as floats on the file's integer grid, the file's bits per sample) of a references.json file, after
-    checking its sha256. Channel 0 and the sample-rate-header repair exactly as convert_refs.py does. Refuses a missing or altered
-    file, and one whose rate is not FS_REC without a documented defect."""
+def read_pcm(refdir: Path, f: dict) -> tuple[np.ndarray, int, int]:
+    """(samples as floats on the file's integer grid, its bits per sample, its sample rate) of a references.json file, after
+    checking its sha256: its own rate, never resampled, with channel 0 and the sample-rate-header repair exactly as convert_refs.py
+    does. Refuses a missing or altered file, and one that is not 16- or 24-bit PCM."""
     p = Path(refdir).joinpath(*f["path"].split("/"))
     if not p.is_file():
         raise ChainError(f"IRPCHAIN_AMBIENT_MISSING: {p} is not there (fetch it with data/instruments/fetch-references.sh)")
@@ -219,20 +224,22 @@ def read_pcm(refdir: Path, f: dict) -> tuple[np.ndarray, int]:
     st = json.loads(r.stdout or "{}").get("streams") or [{}]
     rate, bits = int(st[0].get("sample_rate", 0)), int(st[0].get("bits_per_sample", 0))
     defect = any(d["kind"] == "sample-rate-header" for d in f.get("defects", []))
-    if bits not in (16, 24) or (rate != FS_REC and not defect):
-        raise ChainError(f"IRPCHAIN_FORMAT: {p} is {bits}-bit at {rate} Hz; the chain knows 16/24-bit files at {FS_REC} Hz")
-    filters = (["pan=mono|c0=c0"] if f.get("channels") == "stereo" else []) + (["asetrate=96000"] if defect else []) + [f"aresample={FS_REC}"]
-    r = subprocess.run(FFMPEG + ["-i", str(p), "-af", ",".join(filters), "-ac", "1", "-f", "f64le", "pipe:1"], capture_output=True)
+    if bits not in (16, 24) or rate <= 0:
+        raise ChainError(f"IRPCHAIN_FORMAT: {p} is {bits}-bit at {rate} Hz; the chain knows 16- and 24-bit PCM")
+    true_rate = 96000 if defect else rate  # convert_refs.py: 96 kHz samples under a 44.1 kHz header
+    filters = (["pan=mono|c0=c0"] if f.get("channels") == "stereo" else []) + ([f"asetrate={true_rate}"] if defect else [])
+    r = subprocess.run(FFMPEG + ["-i", str(p)] + (["-af", ",".join(filters)] if filters else []) + ["-ac", "1", "-f", "f64le", "pipe:1"],
+                       capture_output=True)
     if r.returncode:
         raise ChainError(f"IRPCHAIN_DECODE: {p}: {r.stderr.decode()[:200]}")
-    return np.frombuffer(r.stdout, "<f8").astype(np.float64), bits
+    return np.frombuffer(r.stdout, "<f8").astype(np.float64), bits, true_rate
 
 
-def gaps(n: int, spans: list[tuple[float, float]], rule=GAP_RULE) -> list[tuple[int, int]]:
-    """Sample ranges of a file of `n` samples at FS_REC that no note covers, each note given LEAD_S before and TAIL_S after."""
+def gaps(n: int, spans: list[tuple[float, float]], rule=GAP_RULE, fs: int = FS_REC) -> list[tuple[int, int]]:
+    """Sample ranges of a file of `n` samples at `fs` that no note covers, each note given LEAD_S before and TAIL_S after."""
     taken = np.zeros(n, bool)
     for a, b in spans:
-        taken[max(0, int((a - rule["lead_s"]) * FS_REC)):min(n, int((b + rule["tail_s"]) * FS_REC))] = True
+        taken[max(0, int((a - rule["lead_s"]) * fs)):min(n, int((b + rule["tail_s"]) * fs))] = True
     edges = np.flatnonzero(np.diff(np.concatenate([[1], taken.astype(np.int8), [1]])))
     return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b > a]
 
@@ -242,9 +249,9 @@ def frame_levels(x: np.ndarray, frame: int) -> np.ndarray:
     return 10 * np.log10(np.mean(x[: k * frame].reshape(k, frame) ** 2, axis=1) + 1e-30)
 
 
-def exclude_events(stretches: list[Stretch], audio: dict, rule=GAP_RULE) -> list[Stretch]:
+def exclude_events(stretches: list[Stretch], audio: dict, rule=GAP_RULE, fs: int = FS_REC) -> list[Stretch]:
     """GAP_RULE's event exclusion over all stretches of a session together: what is left in runs of MIN_RUN_S or longer."""
-    fr = int(rule["frame_s"] * FS_REC)
+    fr = int(rule["frame_s"] * fs)
     levels = [frame_levels(audio[s.file][s.start:s.end], fr) for s in stretches]
     allv = np.concatenate([v for v in levels if len(v)]) if any(len(v) for v in levels) else np.zeros(0)
     if not len(allv):
@@ -263,7 +270,7 @@ def exclude_events(stretches: list[Stretch], audio: dict, rule=GAP_RULE) -> list
             if not b:
                 run += 1
                 continue
-            if run * fr >= rule["min_run_s"] * FS_REC:
+            if run * fr >= rule["min_run_s"] * fs:
                 out.append(Stretch(s.file, s.sha256, s.start + (i - run) * fr, s.start + i * fr, s.source))
             run = 0
     return out
@@ -347,9 +354,9 @@ def main(argv=None):
     lib = json.loads(Path(a.lib).read_text())
     if a.cmd == "floor":
         ch = Chain.from_references(Path(a.manifest), a.args[0], Path(a.refdir), lib)
-        fl, picks = ch.floor(int(a.seconds * FS_REC), a.description)
+        fl, picks = ch.floor(int(a.seconds * ch.fs), a.description)
         if a.out:
-            write_wav(Path(a.out), resample_pcm(quantize(fl, ch.bits)[0], ch.bits, FS_REC, SR))
+            write_wav(Path(a.out), resample_pcm(quantize(fl, ch.bits)[0], ch.bits, ch.fs, SR))
         print(json.dumps(ch.receipt(a.description, fl, picks)))
         return
     src, dst, page = a.args

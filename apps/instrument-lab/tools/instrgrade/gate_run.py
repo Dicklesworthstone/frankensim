@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import json
 import multiprocessing
 import sys
@@ -81,6 +82,27 @@ def member_job(args):
         return ekey(e, band), None, f"{type(err).__name__}: {err}"
 
 
+_CHAINS, _MANIFESTS = {}, {}
+
+
+def chain_for(c):
+    """(the recording chain of the session c's reference comes from, None) or (None, why), built once per worker and session."""
+    import chain as chn
+
+    manifest = Path(LIBS[c["which"]]["refs"])
+    m = _MANIFESTS.setdefault(str(manifest), json.loads(manifest.read_text()))
+    stem = Path(c["ref_entry"]["file"]).stem
+    f = next((f for f in m.get("files", []) if Path(f["path"]).stem.replace(" ", "") == stem), None)
+    if f is None or "pages" not in m:
+        return None, f"IRPCHAIN_UNKNOWN_SESSION: {manifest.name} has no session record for {stem}"
+    if f["page"] not in _CHAINS:
+        try:
+            _CHAINS[f["page"]] = (chn.Chain.from_references(manifest, f["page"], Path(c["chain_refdir"]), _R[c["which"]].lib), None)
+        except chn.ChainError as err:
+            _CHAINS[f["page"]] = (None, str(err))
+    return _CHAINS[f["page"]]
+
+
 def as_candidate(raw, f0, kind, inh, label):
     hp = dc.highpass(raw, f0)
     if not inh:
@@ -115,7 +137,19 @@ def cand_job(c):
         if c.get("band_hz"):
             raw = dc.lowpass(raw, c["band_hz"])
         out["sha256"] = hashlib.sha256(Path(c["wav"]).read_bytes()).hexdigest()
-        out["features"] = idn.features(as_candidate(raw, f0, c["kind"], inh, c["label"]))
+        note = as_candidate(raw, f0, c["kind"], inh, c["label"])
+        if c.get("chain_refdir") and c["source"] == "render":
+            ch, why = chain_for(c)
+            if ch is None:
+                out["chain"] = dict(refused=why)
+            else:
+                refs = _R[c["which"]]
+                refs.band_hz = c.get("band_hz")
+                gain = 10 ** ((refs.note(c["ref_entry"]).level_db - note.level_db) / 20)  # decompose's level match, on the raw render
+                y, rc = ch.apply(raw * gain, f'{c["label"]} {out["sha256"][:12]}')
+                out["chain"] = dict(rc, level_match_db=20 * math.log10(gain))
+                note = as_candidate(y, f0, c["kind"], inh, c["label"] + " through its session's chain")
+        out["features"] = idn.features(note)
         if c["source"] in ("real", "piano"):
             try:
                 out["shifted"] = idn.features(as_candidate(identity_eval.shift(raw, identity_eval.SHIFT_CENTS), f0, c["kind"], inh, c["label"] + " +20c"))
@@ -186,6 +220,9 @@ def main():
     ap.add_argument("--certify-analysis", default="/data/tmp/wa-inst/p2/certify/analysis", help="P2's graded certify pairs (for Q3)")
     ap.add_argument("--jobs", type=int, default=12)
     ap.add_argument("--rows", help="an earlier run's gate.json: rebuild the table from its rows (and --eval) without recomputing")
+    ap.add_argument("--chain-refdir", help="put every render through its reference session's recording chain (chain.py), reading the "
+                                           "session's files from this FRANKENSIM_REFERENCE_DIR; there is no default chain")
+    ap.add_argument("--sources", default="real,piano,render,null", help="which candidates to grade (comma-separated)")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -201,6 +238,9 @@ def main():
     t_start = time.time()
     lib = {w: json.loads(Path(s["lib"]).read_text()) for w, s in LIBS.items()}
     cands, nulls = build_candidates(a, lib)
+    keep = set(a.sources.split(","))
+    cands = [dict(c, chain_refdir=a.chain_refdir) for c in cands if c["source"] in keep]
+    nulls = nulls if "null" in keep else []
     want = OrderedDict()  # every reference and every other-instrument note some candidate needs
     for c in cands + nulls:
         if c["ref_entry"] is not None:
@@ -224,6 +264,7 @@ def main():
         r = {k: v for k, v in c.items() if k not in ("ref_entry", "features", "shifted", "nulls")}
         ref = feats.get(f"{c['which']}:{ekey(c['ref_entry'], c.get('band_hz'))}") if c.get("ref_entry") else None
         r["reference"] = ekey(c["ref_entry"]) if c.get("ref_entry") else None
+        r["mean_flux_db"] = (c.get("features") or {}).get("mean_flux_db")
         others = [(ekey(e), feats[k]) for e in others_of(c, lib) if (k := f"iowa:{ekey(e, c.get('band_hz'))}") in feats]
         if ref is None and "refused" not in r:
             r["refused"] = "the reference recording has no features (refused or missing)"
@@ -292,12 +333,12 @@ def report(rows, q3s, ev):
         mg = (r.get("q2") or {}).get("margin_db")
         txt = (f"{got} ({mg:+.1f} dB)" if mg is not None else str(r.get("refused", got)))[:24]
         L.append(f'{"piano render " + r["slot"]:44s} {txt:>24s}   {"pass" if req else "reported":20s} {("PASS" if got else "FAIL") if req else ""}')
-    ok_null = True
+    ok_null = any(r["source"] == "null" for r in rows)  # nulls not graded in this run: not a pass
     for name in freeze.NULLS:
         vs = [r["nulls"][name].get("recognisable") for r in rows if r["source"] == "null" and name in r.get("nulls", {})]
         k, n, none = rate(vs)
         ok_null &= k == 0
-        L.append(f'{"null " + name:44s} {fmt((k, n, none)):>24s}   {"none":20s} {"PASS" if k == 0 else "FAIL"}')
+        L.append(f'{"null " + name:44s} {fmt((k, n, none)):>24s}   {"none":20s} {("PASS" if k == 0 else "FAIL") if n else "not graded"}')
     sh = [r["shift"]["margin_change_db"] for r in rows if r.get("shift")]
     flips = sum(1 for r in rows if r.get("shift") and r["shift"]["q2"]["recognisable"] != r["q2"]["recognisable"])
     ok_shift = bool(sh) and max(sh) < 1.0
@@ -310,6 +351,14 @@ def report(rows, q3s, ev):
         realf = [passes(x) for x in real if x["family"] == f]
         L.append(f'{"renders " + f:44s} {fmt(rate([passes(r) for r in rend if r["family"] == f])):>24s}   reported'
                  + (f"  (real controls {fmt(rate(realf)).strip()})" if realf else "") + q3txt)
+    ch = [r for r in rows if r.get("chain")]
+    if ch:
+        through = [r for r in ch if "refused" not in r["chain"]]
+        why = sorted({r["chain"]["refused"].split(":")[0] + " (" + r["family"] + ")" for r in ch if "refused" in r["chain"]})
+        flags = sorted({f["flag"] for r in through for f in r["chain"]["flags"]})
+        L.append(f"chain: {len(through)} renders graded through their reference session's recording chain, {len(ch) - len(through)} "
+                 f"without one {why}; flags {flags}")
+    ok_piano &= any(r["source"] == "piano" for r in rows)
     L += ["", f'GATE {"VALID" if (ok_real and ok_piano and ok_null and ok_shift) else "NOT VALID"}: real controls {ok_real}, piano {ok_piano}, '
                f"nulls {ok_null}, pitch shift {ok_shift}"]
     if ev:

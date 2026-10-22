@@ -141,11 +141,11 @@ class ResampleTests(unittest.TestCase):
         self.assertLess(worst, 0.1)
 
 
-def aiff_bytes(x):
-    """`x` as a 16-bit/44.1 kHz mono AIFF, written by ffmpeg to a file (a pipe leaves the header's sizes unset)."""
+def aiff_bytes(x, rate=FS_REC):
+    """`x` as a 16-bit mono AIFF at `rate`, written by ffmpeg to a file (a pipe leaves the header's sizes unset)."""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "x.aiff"
-        chain._ffmpeg(["-f", "f64le", "-ar", str(FS_REC), "-ac", "1", "-i", "pipe:0", "-c:a", "pcm_s16be", "-y", str(p)],
+        chain._ffmpeg(["-f", "f64le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0", "-c:a", "pcm_s16be", "-y", str(p)],
                       np.asarray(x, dtype="<f8").tobytes())
         return p.read_bytes()
 
@@ -201,6 +201,24 @@ class RefusalTests(unittest.TestCase):
                 Chain.from_references(p, "P.html", Path(d), [])
             print(f"  0.4 s of ambient: {e.exception}")
             self.assertIn("IRPCHAIN_FLOOR_TOO_SHORT", str(e.exception))
+
+    def test_a_session_recorded_at_96_khz_keeps_its_own_rate(self):
+        """The 2011 guitar .mono files are 96 kHz although their chain record says 44.1: the probed rate is used and flagged."""
+        with tempfile.TemporaryDirectory() as d:
+            p = self.manifest(d, ambient_bytes=aiff_bytes(floor_noise(3.0, -75.0, 8), rate=96000))
+            ch = Chain.from_references(p, "P.html", Path(d), [])
+            sig = 0.3 * np.sin(2 * np.pi * 440 * np.arange(2 * SR) / SR)
+            y, r = ch.apply(sig, "a 440 Hz tone at 96 kHz")
+            n = min(len(sig), len(y))
+            added = level_db(y[1000:n - 1000] - sig[1000:n - 1000])
+            # a white floor at 96 kHz spans 0-48 kHz; the grader's 48 kHz keeps the half below 24 kHz
+            expect = -75.0 - 10 * math.log10(96000 / SR)
+            print(f"\n  chain {ch.id}: {ch.bits} bit at {ch.fs} Hz, flags {sorted(f['flag'] for f in ch.flags)}; floor -75 dB over 0-48 kHz, "
+                  f"{expect:.2f} dB below 24 kHz; added {added:.2f} dB")
+            self.assertEqual(ch.fs, 96000)
+            self.assertEqual(r["fs_hz"], 96000)
+            self.assertIn("rate_differs_from_record", [f["flag"] for f in ch.flags])
+            self.assertLess(abs(added - expect), 0.5)
 
     def test_a_render_too_loud_for_the_session_is_refused(self):
         ch = synthetic_chain()
