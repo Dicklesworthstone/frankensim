@@ -29,6 +29,7 @@ pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
     pub bending_loss: BendingLoss,
+    pub torsion_memory: Option<Vec<torsion_memory::LayerProperties>>,
     /// With fixed extension, L0 is stress-free at this explicit reference T.
     /// Bonded layers share that reference but retain their own expansion curves.
     /// None preserves the original same-temperature mechanical prescription.
@@ -175,7 +176,7 @@ impl Spec {
                 (0.0, 0.0)
             } else { (row.scalar()?, row.scalar()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
-                bending_loss: BendingLoss::KelvinVoigt,
+                bending_loss: BendingLoss::KelvinVoigt, torsion_memory: None,
                 thermal_reference_kelvin: None,
                 polarizations: None, bending_modes, twist_modes,
                 bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
@@ -209,6 +210,24 @@ impl Spec {
                 };
                 row.end()?;
                 wire.bending_loss.validate()?;
+            }
+            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("torsion-memory") {
+                let mut row = r.row("torsion-memory")?;
+                let count = row.count(MAX_LAYERS)?; row.end()?;
+                let mut layers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row = r.row("torsion-layer")?;
+                    let equilibrium_modulus = row.word()?.to_string();
+                    let count = row.count(8)?;
+                    let mut branches = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        branches.push((row.word()?.to_string(), row.word()?.to_string()));
+                    }
+                    row.end()?;
+                    layers.push(torsion_memory::LayerProperties { equilibrium_modulus, branches });
+                }
+                wire.torsion_memory = Some(layers);
+                wire.torsion_memory_states()?;
             }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0
@@ -599,6 +618,14 @@ impl Spec {
                 if states > 256 {
                     return Err("complete declared string memory exceeds the original exact-state ceiling".into());
                 }
+            }
+            if wire.torsion_memory.is_some() && self.prepared_linear.is_some() {
+                return Err("torsional material memory requires the exact owner; prepared-linear has no internal-strain states".into());
+            }
+            states = states.checked_add(wire.torsion_memory_states()?)
+                .ok_or("complete string memory-state count overflow")?;
+            if states > 256 {
+                return Err("complete declared string memory exceeds the original exact-state ceiling".into());
             }
         }
         Ok(states)

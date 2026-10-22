@@ -14,6 +14,8 @@ mod bow_interfaces;
 mod bridge_interfaces;
 #[path = "material_strings/bending_memory.rs"]
 mod bending_memory;
+#[path = "material_strings/torsion_memory.rs"]
+mod torsion_memory;
 // Native entry points share one bounded source loader and phase policy.
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
@@ -123,6 +125,11 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     if !body && let Some(memory)=&spec.bending_memory {
         memory.add_requirements(name,&spec.strings,&mut requirements)?;
+    }
+    if !body {
+        for wire in &spec.strings {
+            wire.add_torsion_memory_requirements(name,&mut requirements)?;
+        }
     }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }

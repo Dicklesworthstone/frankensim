@@ -182,3 +182,6 @@ mod thermal_support;
 
 #[path = "tests/relaxation.rs"]
 mod relaxation;
+
+#[path = "tests/torsion_memory.rs"]
+mod torsion_memory;

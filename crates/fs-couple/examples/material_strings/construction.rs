@@ -111,6 +111,9 @@ impl input::Wire {
         // Torsion resolves from these SAME original layer states, not a second
         // query at averaged conditions or a mass copied from the nominal core.
         if twist { source = source.with_torsion(SHEAR, SHEAR_ETA, self.twist_modes)?; }
+        if let Some(layers) = &self.torsion_memory {
+            source = source.with_torsional_relaxation(layers)?;
+        }
         if let Some(directions) = self.polarizations {
             source = source.with_transverse_polarizations(directions)?;
         }

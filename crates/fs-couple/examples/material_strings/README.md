@@ -101,9 +101,56 @@ initializes relaxed histories, and neighboring-string motion uses the same
 reciprocal mechanics. The exclusive per-string selection requires homogeneous
 strings on the exact solver; bonded sections use the existing additional-memory
 interface and `prepared-linear` refuses constitutive histories. These models
-supply bending relaxation; axial or torsional relaxation, interlayer slip and
-measured wound-string behavior remain outside their scope. All supplied values
+supply bending relaxation; the torsional selection below supplies independent
+shear histories. Axial relaxation, interlayer slip and measured wound-string
+behavior remain outside their scope. All supplied values
 are synthetic integration data, not measured instrument properties.
+
+### Material shear memory on torsional strings
+
+Torsional modes can select their own source-backed relaxation spectrum for each
+physical layer. Put this record after the optional `bending-loss` row (or in its
+place when bending loss is omitted), after the string's complete section and
+polarization declaration:
+
+```text
+torsion-memory 2
+torsion-layer shear_modulus 0
+torsion-layer shear_modulus 2 coating_delta_1 coating_tau_1 coating_delta_2 coating_tau_2
+```
+
+The count must equal the number of physical layers: the core first, then sleeves
+from inside to outside. A homogeneous string supplies one layer. Each layer names
+its positive equilibrium shear modulus and 0–8 pairs of excess shear modulus in
+Pa and positive relaxation time in seconds. The equilibrium value must equal
+that layer's original `shear_modulus` exactly. The example above leaves the core
+elastic and gives the coating two independent arms; the core pack needs none of
+the coating's properties. Each layer may use different names, times and arm
+counts. Zero-arm layers still admit the equilibrium property's frequency band.
+
+The material section owner weights every arm by that layer's actual polar second
+moment. Its original solid rotary inertia, torsional mode shapes and parallel
+shear viscosity remain attached. The existing reciprocal solver carries one
+angular history per positive arm and retained torsional mode; adding a second
+transverse polarization does not duplicate these histories. They coexist with
+bending and body memory, gas loading, longitudinal coordinates, bow contact and
+the shared body/cavity pressure output.
+
+A performance change can therefore consist only of replacing a core or sleeve
+pack, or changing its property selectors. The pack resolver asks only the
+corresponding layers for those claims, and the existing performer and PCM writer
+receive the resulting mechanics. Omission preserves the existing torsional law;
+an explicit zero-arm selection preserves its arithmetic without dummy material
+properties. Missing data, conflicting dimensions, repeated source pairs,
+unsupported source bands and nonpositive times refuse instead of substituting
+an elastic response.
+
+Torsional modes must be present. All declared bending, torsional and body
+histories share the original 256-state and setup-work limits, reserved before
+material loading. Torsional memory requires the exact history owner;
+`prepared-linear` refuses it. This is small-strain torsion of perfectly bonded
+concentric sections with explicit linear shear relaxation. It does not model
+winding slip, finite-strain axial relaxation or measured instrument fidelity.
 
 ### Material-derived string/body joints
 
