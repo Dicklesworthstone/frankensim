@@ -26,8 +26,9 @@ impl RegionalDuct {
     /// original regional/uniform operation order. The older from_gas_field
     /// constructor remains the explicitly piecewise-constant midpoint rung.
     ///
-    /// This freezes the field during rendering. Nonuniform tone holes and wall
-    /// pins need separate resolved physics and refuse instead of being dropped.
+    /// This freezes the field during rendering. Supplied wall pins use the
+    /// shared local wall law at the actual gas/geometry quadrature points.
+    /// Nonuniform tone holes still require a spatial chimney/mutual-hole law.
     pub fn from_continuous_gas_field(
         duct: &Duct,
         field: &AxialGasField,

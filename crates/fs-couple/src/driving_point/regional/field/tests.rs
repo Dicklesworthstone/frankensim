@@ -410,4 +410,50 @@ fn continuous_field_rejects_unmodeled_side_holes() {
     ).is_err());
 }
 
+#[test]
+fn material_wall_with_continuous_gas_reaches_feedback_and_outlet_pressure() {
+    let source = field(270.0);
+    let regional = RegionalDuct::from_continuous_gas_field(
+        &cylinder(), &source, fs_duct::RiccatiSteps(32),
+    ).unwrap();
+    let wall = fs_phs::WallPin {
+        surface_density: 0.01, stiffness_per_area: 1e8, resistance: 300.0,
+    };
+    let owner = regional.continuous_gas_field().unwrap();
+    let actual = regional.response(TAU * 430.0, LossModel::Bessel,
+        Termination::FlangedOpen, Some(&wall)).unwrap();
+    let direct = owner.response_wall(TAU * 430.0, LossModel::Bessel,
+        Termination::FlangedOpen, None, Some(&wall)).unwrap();
+    assert_eq!(actual.impedance, direct.impedance);
+    assert_eq!(actual.p_mouth_over_u_in, direct.p_mouth_over_u_in);
+
+    let mut compliant = regional.characteristic_line(Termination::FlangedOpen,
+        8000, 4801, Some(&wall), Some(512)).unwrap();
+    let mut rigid = regional.characteristic_line(Termination::FlangedOpen,
+        8000, 4801, None, Some(512)).unwrap();
+    let receiver = crate::pcm_wav::baffled::CircularOutletReceiver {
+        position_m: [0.0, 0.0, 1.0], radial_rings: 2, angular_points: 8,
+        maximum_frequency_hz: 3000.0,
+    };
+    let mut compliant_mic = regional.baffled_outlet(8000, 512, receiver, Some(&wall)).unwrap();
+    let mut rigid_mic = regional.baffled_outlet(8000, 512, receiver, None).unwrap();
+    let first = compliant_mic.info().axial_delay_samples
+        + compliant_mic.info().exterior_delay_samples.0;
+    let (mut feedback_change, mut pressure_change, mut pressure_energy) = (0.0, 0.0, 0.0);
+    for n in 0..1024 {
+        let input = if n == 0 { 100.0 } else { 0.0 };
+        let a = compliant.push(input).unwrap();
+        let b = rigid.push(input).unwrap();
+        let pa = compliant_mic.step(input).unwrap();
+        let pb = rigid_mic.step(input).unwrap();
+        assert!([a, b, pa, pb].iter().all(|x| x.is_finite()));
+        if n < first { assert_eq!(pa, 0.0); }
+        feedback_change += (a - b) * (a - b);
+        pressure_change += (pa - pb) * (pa - pb);
+        pressure_energy += pa * pa;
+    }
+    assert!(feedback_change > 1e-5);
+    assert!(pressure_energy > 1e-12 && pressure_change > 1e-4 * pressure_energy);
+}
+
 mod steady;

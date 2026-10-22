@@ -16,6 +16,7 @@ use fs_material::MaterialError;
 use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
 use fs_math::{c64::C64, det};
+use fs_phs::WallPin;
 
 /// Original source or propagation refusal, without a fallback material law.
 #[derive(Debug)]
@@ -57,12 +58,16 @@ struct QuadratureStep {
     /// Negative because the physical ABCD map propagates outlet to inlet.
     h: f64,
     radii: [f64; 2],
+    /// Physical wall area per axial area at the same two geometry samples.
+    slants: [f64; 2],
     gases: [GasState; 2],
 }
 
 /// Acoustic binding of existing geometry to the one shared material field.
 ///
-/// This is a frozen, rigid-wall, no-mean-flow plane-wave operator. Temperature
+/// This is a frozen, no-mean-flow plane-wave operator. An explicit wall pin
+/// adds the shared locally reacting material law at each quadrature point.
+/// Temperature
 /// and species transport, condensation and transverse acoustic modes remain
 /// with their respective owners. A uniform field delegates the original duct
 /// verbatim, including its existing profile/cone axes and operation order.
@@ -187,6 +192,21 @@ impl GasFieldDuct {
                     Segment::ToneHole { .. } => unreachable!("axial geometry admitted"),
                 }
             };
+            let slant = |x: f64| -> Result<f64, DuctError> {
+                let slope = match segment {
+                    Segment::Cylinder { .. } => 0.0,
+                    Segment::Cone { inlet_radius, outlet_radius, .. } => {
+                        (outlet_radius - inlet_radius) / length
+                    }
+                    Segment::Profile { profile, .. } => profile.slope(x)?,
+                    Segment::ToneHole { .. } => unreachable!("axial geometry admitted"),
+                };
+                let value = det::sqrt(1.0 + slope * slope);
+                if !positive(value) {
+                    return Err(bad("gas-field wall surface slope is not representable"));
+                }
+                Ok(value)
+            };
             for span in boundaries.windows(2) {
                 for index in 0..steps_per_span.0 {
                     if cancelled() {
@@ -216,8 +236,9 @@ impl GasFieldDuct {
                         *field.state_at(offset + positions[1])?.state(),
                     ];
                     let radii = [radius(positions[0])?, radius(positions[1])?];
+                    let slants = [slant(positions[0])?, slant(positions[1])?];
                     travel += -0.5 * h * (1.0 / gases[0].sound_speed + 1.0 / gases[1].sound_speed);
-                    result.quadrature.push(QuadratureStep { h, radii, gases });
+                    result.quadrature.push(QuadratureStep { h, radii, slants, gases });
                 }
             }
             offset = end;
@@ -269,13 +290,27 @@ impl GasFieldDuct {
         loss: LossModel,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
+        self.chain_wall_controlled(omega, loss, None, cancelled)
+    }
+
+    /// The same stable local two-ports with an explicit per-area wall law.
+    /// Geometry, gas and wall admittance are evaluated together; gas-field
+    /// changes do not discard the material wall or change its constitutive law.
+    /// None retains the rigid-wall operation order.
+    pub fn chain_wall_controlled(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        wall: Option<&WallPin>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedChain, DuctError> {
         if self.field.uniform_state().is_some() {
             return duct_chain(
                 &self.duct,
                 &self.inlet,
                 omega,
                 loss,
-                None,
+                wall,
                 ComposeOptions::default(),
                 true,
                 cancelled,
@@ -299,10 +334,12 @@ impl GasFieldDuct {
                     completed_steps: index,
                 });
             }
-            let (a, shear_a) =
-                local_generator(&step.gases[0], step.radii[0], omega, loss, reference)?;
-            let (b, shear_b) =
-                local_generator(&step.gases[1], step.radii[1], omega, loss, reference)?;
+            let (a, shear_a) = local_generator(
+                &step.gases[0], step.radii[0], omega, loss, reference, wall, step.slants[0],
+            )?;
+            let (b, shear_b) = local_generator(
+                &step.gases[1], step.radii[1], omega, loss, reference, wall, step.slants[1],
+            )?;
             let mut matrix = magnus_step(a, b, step.h, root3)?;
             matrix[1] = matrix[1].scale(reference);
             matrix[2] = matrix[2].scale(1.0 / reference);
@@ -336,6 +373,20 @@ impl GasFieldDuct {
         termination: Termination,
         exterior: Option<&GasState>,
     ) -> Result<DuctResponse, DuctError> {
+        self.response_wall(omega, loss, termination, exterior, None)
+    }
+
+    /// Input and outlet response including the existing compliant-wall law.
+    /// The wall state is independent of the gas mixture; changing either data
+    /// source recomputes their coupled local acoustic generator.
+    pub fn response_wall(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+        wall: Option<&WallPin>,
+    ) -> Result<DuctResponse, DuctError> {
         let exterior = self.exterior(exterior)?;
         let radius = self
             .duct
@@ -347,15 +398,15 @@ impl GasFieldDuct {
             if *exterior == self.inlet
                 || matches!(termination, Termination::Closed | Termination::IdealOpen)
             {
-                return crate::input_impedance(&self.duct, &self.inlet, omega, loss, termination);
+                return crate::input_impedance_wall(&self.duct, &self.inlet, omega, loss, termination, wall);
             }
             let load = crate::compact_radiation_impedance(termination, exterior, radius, omega)?;
             let mut response =
-                crate::input_impedance_load(&self.duct, &self.inlet, omega, loss, load, None)?;
+                crate::input_impedance_load(&self.duct, &self.inlet, omega, loss, load, wall)?;
             response.mouth_ka = omega / exterior.sound_speed * radius;
             return Ok(response);
         }
-        let chain = self.chain_controlled(omega, loss, &mut || false)?;
+        let chain = self.chain_wall_controlled(omega, loss, wall, &mut || false)?;
         let (load, mouth_ka) = crate::termination_impedance(termination, exterior, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
         Ok(DuctResponse {
@@ -383,8 +434,21 @@ impl GasFieldDuct {
         termination: Termination,
         exterior: Option<&GasState>,
     ) -> Result<InputReflection, DuctError> {
+        self.reflection_wall(omega, loss, termination, exterior, None)
+    }
+
+    /// Wall-aware direct reflection, avoiding an intermediate input-impedance
+    /// pole just as the rigid-wall path does.
+    pub fn reflection_wall(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+        wall: Option<&WallPin>,
+    ) -> Result<InputReflection, DuctError> {
         let exterior = self.exterior(exterior)?;
-        let chain = self.chain_controlled(omega, loss, &mut || false)?;
+        let chain = self.chain_wall_controlled(omega, loss, wall, &mut || false)?;
         let radius = self
             .duct
             .segments

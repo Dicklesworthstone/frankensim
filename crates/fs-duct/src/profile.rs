@@ -6,6 +6,7 @@
 use crate::{DuctError, LossModel, mul2, segment_wave};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
+use fs_phs::WallPin;
 
 /// Continuous primitive gas fields on the same plane-wave propagation owner.
 pub mod gas_field;
@@ -341,8 +342,13 @@ fn local_generator(
     omega: f64,
     loss: LossModel,
     zref: f64,
+    wall: Option<&WallPin>,
+    slant: f64,
 ) -> Result<((C64, C64), f64), DuctError> {
-    let wave = segment_wave(state, radius, omega, loss)?;
+    let mut wave = segment_wave(state, radius, omega, loss)?;
+    if let Some(wall) = wall {
+        wave = crate::apply_wall_to_wave(wave, radius, omega, wall, slant)?;
+    }
     let ik = C64::new(0.0, 1.0) * wave.wavenumber;
     Ok((
         (
@@ -384,9 +390,37 @@ pub fn profile_matrix_controlled<F: FnMut() -> bool>(
     steps: RiccatiSteps,
     cancel: &mut F,
 ) -> Result<ProfileTransfer, DuctError> {
+    profile_matrix_wall_controlled(profile, state, omega, loss, steps, None, cancel)
+}
+
+/// Smooth-profile propagation with the existing locally reacting wall law.
+/// The supplied per-area mass, stiffness and resistance remain constant; the
+/// actual radius and surface slope set its acoustic shunt at every quadrature
+/// point. This is the same wall model as cylinder/cone chains, not a shell solve.
+pub fn profile_matrix_wall(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    steps: RiccatiSteps,
+    wall: Option<&WallPin>,
+) -> Result<ProfileTransfer, DuctError> {
+    profile_matrix_wall_controlled(profile, state, omega, loss, steps, wall, &mut || false)
+}
+
+/// Wall-aware propagation with the same cancellation and publication contract.
+pub fn profile_matrix_wall_controlled<F: FnMut() -> bool>(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    steps: RiccatiSteps,
+    wall: Option<&WallPin>,
+    cancel: &mut F,
+) -> Result<ProfileTransfer, DuctError> {
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let (min_shear, zref) =
-        for_each_profile_step(profile, state, omega, loss, steps, cancel, |e, _| {
+        for_each_profile_step(profile, state, omega, loss, steps, wall, cancel, |e, _| {
             m = mul2(e, m);
             if m.iter().any(|&v| !finite(v)) {
                 Err(DuctError::Singular)
@@ -414,12 +448,13 @@ pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
     omega: f64,
     loss: LossModel,
     steps: RiccatiSteps,
+    wall: Option<&WallPin>,
     cancel: &mut F,
 ) -> Result<(Vec<[C64; 4]>, f64), DuctError> {
     steps.validate()?;
     let mut blocks = Vec::with_capacity(steps.0);
     let (rv, _) =
-        for_each_profile_step(profile, state, omega, loss, steps, cancel, |mut e, zref| {
+        for_each_profile_step(profile, state, omega, loss, steps, wall, cancel, |mut e, zref| {
             e[1] = e[1].scale(zref);
             e[2] = e[2].scale(1.0 / zref);
             if e.iter().any(|&v| !finite(v)) {
@@ -432,12 +467,14 @@ pub(crate) fn profile_blocks_controlled<F: FnMut() -> bool>(
     Ok((blocks, rv))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn for_each_profile_step<F: FnMut() -> bool>(
     profile: &RadiusProfile,
     state: &GasState,
     omega: f64,
     loss: LossModel,
     steps: RiccatiSteps,
+    wall: Option<&WallPin>,
     cancel: &mut F,
     mut visit: impl FnMut([C64; 4], f64) -> Result<(), DuctError>,
 ) -> Result<(f64, f64), DuctError> {
@@ -455,7 +492,13 @@ fn for_each_profile_step<F: FnMut() -> bool>(
     let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
     let mut min_shear = f64::INFINITY;
     let mut local = |x: f64| -> Result<(C64, C64), DuctError> {
-        let (generator, shear) = local_generator(state, profile.radius(x)?, omega, loss, zref)?;
+        let slant = if wall.is_some() {
+            let slope = profile.slope(x)?;
+            det::sqrt(1.0 + slope * slope)
+        } else { 1.0 };
+        let (generator, shear) = local_generator(
+            state, profile.radius(x)?, omega, loss, zref, wall, slant,
+        )?;
         min_shear = min_shear.min(shear);
         Ok(generator)
     };

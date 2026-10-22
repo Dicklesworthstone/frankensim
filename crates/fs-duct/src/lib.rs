@@ -1268,10 +1268,7 @@ fn input_impedance_legacy(
     let mut hole_i = 0usize;
     for segment in &duct.segments {
         let s = if let Segment::Profile { ref profile,steps } = *segment {
-            if wall.is_some() {
-                return Err(DuctError::BadParameter {what:"smooth profile wall pins require a resolved wall image"});
-            }
-            let t=profile::profile_matrix(profile,state,omega,loss,steps)?;
+            let t=profile::profile_matrix_wall(profile,state,omega,loss,steps,wall)?;
             min_rv=min_rv.min(t.min_shear_number);
             t.matrix
         } else if let Segment::ToneHole {

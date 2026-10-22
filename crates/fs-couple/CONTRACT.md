@@ -1231,6 +1231,18 @@ identity, exact source density and the gradient's nonzero audio effect. These
 are numerical tests of prescribed fields, not measured instrument qualification;
 native results are recorded separately.
 
+`RegionalDuct::from_continuous_gas_field` uses the existing fourth-order
+Magnus operator for simultaneous smooth geometry and primitive gas fields.
+Its optional `WallPin` now reaches the same local wall-admittance owner as
+uniform cylinder/cone ducts at every gas/geometry quadrature point. Responses,
+characteristic-line feedback and baffled outlet pressure retain that common
+wall binding. The wall's explicitly supplied per-area mass/stiffness/resistance
+remain constant; actual radius and slope set the surface coupling. This is a
+locally reacting wall, not an axial shell, evolving wall temperature or a
+nonlocal wall-radiation model. Nonuniform side-hole laws still refuse.
+A focused impulse regression covers the combined wall/field changes to
+both incoming feedback and causal external microphone pressure.
+
 ### `acoustic_realize` / `pcm_wav`
 
 `realize_assembly_with_gas_and_absorption` accepts a caller-resolved gas and

@@ -64,6 +64,66 @@ fn order(case: &str, ns: &[usize], errors: Vec<f64>, p: f64) {
 }
 
 #[test]
+fn material_wall_profile_matches_independent_elastic_cylinder() {
+    // G1: independent pressure/compliance derivation, not the wall-wave helper.
+    // C' = S/(rho*c^2) + circumference/(K-omega^2*sigma).
+    let gas = air();
+    let radius = 0.008;
+    let length = 0.4;
+    let profile = RadiusProfile::exponential(radius, 0.0, length).unwrap();
+    let wall = WallPin { surface_density: 0.2, stiffness_per_area: 4e7, resistance: 0.0 };
+    let area = core::f64::consts::PI * radius * radius;
+    let zref = gas.characteristic_impedance / area;
+    for hz in [30.0, 100.0, 300.0, 700.0] {
+        let omega = TAU * hz;
+        let compliance = area / (gas.density * gas.sound_speed * gas.sound_speed)
+            + TAU * radius / (wall.stiffness_per_area - omega * omega * wall.surface_density);
+        let inertance = gas.density / area;
+        let k = omega * det::sqrt(inertance * compliance);
+        let z = det::sqrt(inertance / compliance);
+        let sine = det::sin(k * length);
+        let cosine = C64::from_re(det::cos(k * length));
+        let exact = [cosine, C64::new(0.0, -z * sine), C64::new(0.0, -sine / z), cosine];
+        let actual = profile_matrix_wall(&profile, &gas, omega, LossModel::Lossless,
+            RiccatiSteps(32), Some(&wall)).unwrap();
+        assert!(matrix_error(actual.matrix, exact, zref) < 2e-12, "{hz} Hz");
+        let geometry = crate::Duct { segments: vec![Segment::Profile {
+            profile: std::sync::Arc::new(profile.clone()), steps: RiccatiSteps(32),
+        }] };
+        let response = crate::input_impedance_wall(&geometry, &gas, omega,
+            LossModel::Lossless, crate::Termination::IdealOpen, Some(&wall)).unwrap();
+        assert!(relative(response.impedance, exact[1] / exact[3]) < 2e-12);
+    }
+}
+
+#[test]
+fn material_wall_profile_and_spherical_slices_share_the_taper_limit() {
+    // G1: distinct spherical-slice and continuous Magnus discretizations.
+    // A deliberate taper exercises physical wall slant, not just perimeter.
+    let gas = air();
+    let (r0, r1, length) = (0.006, 0.05, 0.2);
+    let profile = RadiusProfile::power(r0, length * r0 / (r1 - r0), 1.0, length).unwrap();
+    let wall = WallPin { surface_density: 0.2, stiffness_per_area: 1e7, resistance: 500.0 };
+    let omega = TAU * 180.0;
+    let zref = gas.characteristic_impedance / (core::f64::consts::PI * r0 * r0);
+    let reference = profile_matrix_wall(&profile, &gas, omega, LossModel::Bessel,
+        RiccatiSteps(1024), Some(&wall)).unwrap().matrix;
+    let errors = [128, 256, 512, 1024].map(|n| {
+        let (matrix, _) = crate::cone_lossy_matrix_axis(r0, r1, length, &gas, omega,
+            LossModel::Bessel, Some(&wall), ConeSlices::Fixed(n)).unwrap();
+        matrix_error(matrix, reference, zref)
+    });
+    for pair in errors.windows(2) {
+        let observed = det::ln(pair[0] / pair[1]) / det::ln(2.0);
+        assert!((observed - 2.0).abs() < 0.2, "{errors:?}, order={observed}");
+    }
+    assert!(errors[3] < 2e-5, "{errors:?}");
+    let invalid = WallPin { resistance: -1.0, ..wall };
+    assert!(profile_matrix_wall(&profile, &gas, omega, LossModel::Bessel,
+        RiccatiSteps(8), Some(&invalid)).is_err());
+}
+
+#[test]
 fn riccati_exponential_horn_matches_closed_form() {
     let start = std::time::Instant::now();
     let gas = air();

@@ -162,10 +162,7 @@ impl RegionalDuct {
             return Err(invalid("frequency must be positive and finite"));
         }
         if let Some(field) = &self.continuous {
-            if wall.is_some() {
-                return Err(invalid("continuous gas-field wall loading needs a resolved wall image"));
-            }
-            return field.response(omega, loss, termination, Some(self.exterior_gas()));
+            return field.response_wall(omega, loss, termination, Some(self.exterior_gas()), wall);
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
@@ -209,11 +206,6 @@ impl RegionalDuct {
         -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
         // Delegate the uniform case verbatim, including the order of travel-time
         // arithmetic at the FFT-size thresholds.
-        if self.continuous.is_some() && wall.is_some() {
-            return Err(DrivingPointError::Duct(invalid(
-                "continuous gas-field wall loading needs a resolved wall image",
-            )));
-        }
         if self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
             || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
             let r = &self.regions[0];
@@ -256,8 +248,8 @@ impl RegionalDuct {
             pole_states,
             |omega| {
                 if let Some(field) = &self.continuous {
-                    return field.reflection(omega, LossModel::Bessel, termination,
-                        Some(self.exterior_gas()))?.referenced_to(zc);
+                    return field.reflection_wall(omega, LossModel::Bessel, termination,
+                        Some(self.exterior_gas()), wall)?.referenced_to(zc);
                 }
                 self.response(omega, LossModel::Bessel, termination, wall)
                     .map(|response| impedance_reflectance(&response, zc))

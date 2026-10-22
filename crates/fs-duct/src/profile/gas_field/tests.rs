@@ -217,6 +217,65 @@ fn matrix_error(a: [C64; 4], b: [C64; 4], zref: f64) -> f64 {
     numerator / denominator
 }
 
+#[test]
+fn material_wall_uniform_field_retains_original_chain_exactly() {
+    let source = field([300.0, 300.0], [0.8, 0.8], 101325.0);
+    let wall = WallPin { surface_density: 0.2, stiffness_per_area: 4e7, resistance: 300.0 };
+    for geometry in [cylinder(), profile()] {
+        let field = GasFieldDuct::new(&geometry, &source, RiccatiSteps(16)).unwrap();
+        for loss in [LossModel::Lossless, LossModel::Bessel] {
+            let got = field.response_wall(TAU * 300.0, loss,
+                Termination::FlangedOpen, None, Some(&wall)).unwrap();
+            let exact = crate::input_impedance_wall(&geometry, field.inlet_gas(), TAU * 300.0,
+                loss, Termination::FlangedOpen, Some(&wall)).unwrap();
+            assert_eq!(got.impedance, exact.impedance);
+            assert_eq!(got.u_mouth_over_u_in, exact.u_mouth_over_u_in);
+            assert_eq!(got.p_mouth_over_u_in, exact.p_mouth_over_u_in);
+        }
+    }
+}
+
+#[test]
+fn material_wall_and_composition_field_share_fourth_order_propagation() {
+    let source = field([290.0, 390.0], [0.99, 0.45], 101325.0);
+    let wall = WallPin { surface_density: 0.2, stiffness_per_area: 4e7, resistance: 300.0 };
+    let geometry = profile();
+    let omega = TAU * 430.0;
+    let bind = |n| GasFieldDuct::new(&geometry, &source, RiccatiSteps(n)).unwrap();
+    let solve = |field: &GasFieldDuct, wall| field.response_wall(
+        omega, LossModel::Bessel, Termination::FlangedOpen, None, wall).unwrap();
+    let fine = bind(512);
+    let reference = solve(&fine, Some(&wall));
+    let errors = [8, 16, 32, 64].map(|n| relative(solve(&bind(n), Some(&wall)).impedance,
+        reference.impedance));
+    for pair in errors.windows(2) {
+        let observed = det::ln(pair[0] / pair[1]) / det::ln(2.0);
+        assert!((observed - 4.0).abs() < 0.2, "{errors:?}, order={observed}");
+    }
+    assert!(errors[3] < 2e-7, "{errors:?}");
+    let rigid = solve(&fine, None);
+    let stiff = solve(&fine, Some(&WallPin { stiffness_per_area: 2.0 * wall.stiffness_per_area, ..wall }));
+    assert!(relative(rigid.impedance, reference.impedance) > 1e-3);
+    assert!(relative(stiff.impedance, reference.impedance) > 1e-3);
+    assert!(reference.impedance.re > 0.0);
+    let reflection = fine.reflection_wall(omega, LossModel::Bessel,
+        Termination::FlangedOpen, None, Some(&wall)).unwrap()
+        .referenced_to(fine.inlet_impedance()).unwrap();
+    assert!(reflection.abs() <= 1.0 + 1e-12);
+    let expected = (reference.impedance - C64::from_re(fine.inlet_impedance()))
+        / (reference.impedance + C64::from_re(fine.inlet_impedance()));
+    assert!((reflection - expected).abs() < 1e-12);
+    let different = field([290.0, 390.0], [0.99, 0.9], 101325.0);
+    let alternate = GasFieldDuct::new(&geometry, &different, RiccatiSteps(64)).unwrap();
+    assert!(relative(solve(&alternate, Some(&wall)).impedance, reference.impedance) > 1e-3);
+    let invalid = WallPin { resistance: f64::NAN, ..wall };
+    assert!(fine.response_wall(omega, LossModel::Bessel,
+        Termination::FlangedOpen, None, Some(&invalid)).is_err());
+    let mut polls = 0;
+    assert!(matches!(fine.chain_wall_controlled(omega, LossModel::Bessel, Some(&wall),
+        &mut || { polls += 1; polls > 3 }), Err(DuctError::Cancelled { completed_steps: 3 })));
+}
+
 // Independent analytic Frobenius solution of the lossless linear-T cylinder:
 // (1+epsilon*s) p'' + epsilon*p' + (k0*L)^2 p = 0, s=x/L.
 // a[n+2] = -(epsilon*(n+1)^2*a[n+1] + (k0*L)^2*a[n])/((n+1)*(n+2)).

@@ -45,8 +45,13 @@ the old minimum-two, relative-radius rule whenever it was <=12, removes its
 upper clamp and refuses above the named cap. `cone_matrix` returns the actual
 slice count. Existing 12-slice narrow-cone comparison now requests Fixed(12)
 explicitly; Auto is a different, live axis. Cylinder/tone-hole golden arithmetic
-is unchanged. Profile wall pins and the multimodal profile image refuse by
-name: this module converges to Webster's plane-wave equation, not to 3-D.
+is unchanged. `profile_matrix_wall` and ordinary `input_impedance_wall` chains
+apply the existing locally reacting `WallPin` at both quadrature points, with
+the actual local radius and `sqrt(1+(dr/dx)^2)` surface-area factor. Per-area
+mass/stiffness/resistance are explicitly supplied and constant over this wall
+image; no material or shell parameters are inferred from the gas or profile.
+The multimodal profile image remains separate: this module converges to
+Webster's plane-wave equation, not to 3-D.
 
 Determinism is fixed-order sequential det:: arithmetic. `profile_matrix_controlled`
 polls a caller cancellation closure before each step and returns
@@ -113,8 +118,13 @@ piecewise-constant comparison rung. Scheduled `ReedPerformance` selects
 `from_bytes_with_field_resolution`; its existing schedule, massive reed,
 terminal loading and baffled microphone share that binding. The existing
 midpoint constructor and input records retain their behavior.
-Nonuniform fields with tone holes or
-deformable-wall pins refuse: no spatial chimney/mutual-hole/wall law is inferred.
+Nonuniform fields with tone holes still refuse: no spatial chimney/mutual-hole
+law is inferred. `chain_wall_controlled`, `response_wall` and `reflection_wall`
+apply the SAME local wall-admittance owner at each retained gas/geometry
+quadrature point. Regional responses, characteristic feedback and baffled
+outlet observations all pass through this wall-aware path. Uniform fields
+delegate the original wall-aware chain exactly. Missing or invalid wall data
+refuses; it does not select rigid walls or air defaults.
 
 Verification covers exact uniform bits, independent analytic linear-temperature
 cylinder transfer and closed/open impedance (a convergent Frobenius form of
@@ -122,8 +132,14 @@ the J0/Y0 solution), fourth-order joint temperature/composition/radius
 refinement with Bessel losses, local primitive-state evaluation, pressure and
 mixture changes reaching physical transfer, and real rendered-pressure changes
 above their step-refinement discrepancy. Source coefficients in these tests
-are declared analytic fixtures, not experimental material validation. The
-operator remains a frozen, rigid-wall, no-mean-flow, plane-wave model; it does
+are declared analytic fixtures, not experimental material validation.
+Additional G1/G3 tests check an independent elastic-cylinder compliance
+solution, a tapered wall against spherical-slice refinement, fourth-order
+joint material-field/wall convergence, passive reflection, and actual feedback
+and observer-pressure changes. These prove numerical model composition, not
+experimental wall validation. The wall is a locally reacting supplied law;
+axial shell modes, thermal evolution and nonlocal wall radiation are absent.
+The operator remains a frozen, no-mean-flow, plane-wave model; it does
 not generate breath fields, advect species, evolve wall temperature, model
 condensation or qualify a complete instrument.
 

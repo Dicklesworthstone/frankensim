@@ -829,17 +829,13 @@ pub fn duct_chain(
                 if steps.0 > options.maximum_blocks - blocks.len() {
                     return Err(bad("composition block work cap exceeded"));
                 }
-                if wall.is_some() {
-                    return Err(bad(
-                        "smooth profile wall pins require a resolved wall image",
-                    ));
-                }
                 let (local, rv) = crate::profile::profile_blocks_controlled(
                     profile,
                     state,
                     omega,
                     loss,
                     steps,
+                    wall,
                     &mut cancelled,
                 )?;
                 min_shear = min_shear.min(rv);
