@@ -19,6 +19,7 @@ pub mod experimental_design;
 pub mod kl;
 pub mod mlmc;
 pub mod pce;
+pub mod product_batch;
 pub mod product_checkpoint;
 pub mod product_compliance;
 pub mod product_control_variate;
@@ -42,6 +43,7 @@ pub mod product_shapley;
 pub mod seismic;
 
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
+pub use product_batch::{UqBatchExecution, UqBatchInput, UqBatchReport};
 pub use product_checkpoint::UqCheckpointError;
 pub use product_compliance::UqComplianceError;
 pub use product_control_variate::{LinearControlEstimate, LinearControlVariate, UqControlError};
