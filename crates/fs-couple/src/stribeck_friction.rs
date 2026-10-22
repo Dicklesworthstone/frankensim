@@ -257,6 +257,11 @@ pub struct SetValuedFrictionStep {
 ///   folds away, the contact falls to the low root, or else sticks.
 ///
 /// So the only retained memory is a high-branch slide and its direction.
+///
+/// The same line admits the fs-tribo hyperbolic law
+/// `mu(v) = mu_k + (mu_s - mu_k)/(1 + v/v0)`. Its residual is convex, with
+/// `g'(v) = 1 - m N (mu_s - mu_k) v0/(v + v0)^2`, so there is no low branch:
+/// the critical slips are `0` and `sqrt(m N (mu_s - mu_k) v0) - v0`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StribeckLoadLine {
     law: fs_tribo::FrictionLaw,
@@ -281,14 +286,12 @@ impl StribeckLoadLine {
         normal_n: f64,
         mobility_m_per_n_s: f64,
     ) -> Result<Self, SetValuedError> {
-        let fs_tribo::FrictionLaw::Stribeck {
-            static_mu,
-            kinetic_mu,
-            characteristic_speed,
-            viscous_per_speed,
-        } = *law
-        else {
-            return Err(ImplicitFrictionError::InvalidInput("set-valued contact requires a Stribeck law"));
+        let (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, hyperbolic) = match *law {
+            fs_tribo::FrictionLaw::Stribeck { static_mu, kinetic_mu, characteristic_speed, viscous_per_speed } =>
+                (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, false),
+            fs_tribo::FrictionLaw::Hyperbolic { static_mu, kinetic_mu, characteristic_speed } =>
+                (static_mu, kinetic_mu, characteristic_speed, 0.0, true),
+            _ => return Err(ImplicitFrictionError::InvalidInput("set-valued contact requires a Stribeck or hyperbolic law")),
         };
         // Validates the law through its owner before any root work.
         law.kinetic_coefficient(characteristic_speed)
@@ -309,7 +312,14 @@ impl StribeckLoadLine {
         let b = 1.0 + mobility_m_per_n_s * normal_n * viscous_per_speed;
         let shape = |x: f64| x * fs_math::det::exp(-(x * x));
         let peak = core::f64::consts::FRAC_1_SQRT_2;
-        let (local_max_m_s, local_min_m_s) = if a > 0.0 && a.is_finite() && b.is_finite() {
+        let (local_max_m_s, local_min_m_s) = if hyperbolic {
+            // (v + v0)^2 = m N (mu_s - mu_k) v0 at the one minimum.
+            let bottom = fs_math::det::sqrt(a * characteristic_speed) - characteristic_speed;
+            if !bottom.is_finite() {
+                return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
+            }
+            if bottom > 0.0 { (0.0, bottom) } else { (f64::INFINITY, f64::INFINITY) }
+        } else if a > 0.0 && a.is_finite() && b.is_finite() {
             let target = b * characteristic_speed / (2.0 * a);
             if !(target > 0.0 && target.is_finite()) {
                 return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
@@ -362,6 +372,23 @@ impl StribeckLoadLine {
         free_relative_velocity_m_s: f64,
         previous: ContactBranch,
     ) -> Result<SetValuedFrictionStep, SetValuedError> {
+        self.step_within(free_relative_velocity_m_s, previous, usize::MAX).map(|(step, _)| step)
+    }
+
+    /// The same step under a caller's bisection budget. Returns the step and
+    /// the bisections its roots took; every root is resolved to adjacent
+    /// floats, so a budget too small for that refuses.
+    ///
+    /// # Errors
+    /// As [`Self::step`], and [`ImplicitFrictionError::NoConvergence`] when the
+    /// roots need more than `max_bisections`.
+    pub fn step_within(
+        &self,
+        free_relative_velocity_m_s: f64,
+        previous: ContactBranch,
+        max_bisections: usize,
+    ) -> Result<(SetValuedFrictionStep, usize), SetValuedError> {
+        let bisections = core::cell::Cell::new(0_usize);
         if !free_relative_velocity_m_s.is_finite() {
             return Err(ImplicitFrictionError::InvalidInput("free_relative_velocity"));
         }
@@ -383,11 +410,14 @@ impl StribeckLoadLine {
         };
         let root_on = |lo: f64, hi: f64| -> Result<f64, SetValuedError> {
             let mut failure = None;
-            let root = bisect_crossing(lo, hi, |v| match residual(v) {
-                Ok(r) => r < 0.0,
-                Err(e) => {
-                    failure.get_or_insert(e);
-                    false
+            let root = bisect_crossing(lo, hi, |v| {
+                bisections.set(bisections.get() + 1);
+                match residual(v) {
+                    Ok(r) => r < 0.0,
+                    Err(e) => {
+                        failure.get_or_insert(e);
+                        false
+                    }
                 }
             });
             failure.map_or(Ok(root), Err)
@@ -437,7 +467,8 @@ impl StribeckLoadLine {
         // (the same existence tests the branch selection uses).
         let a = self.local_max_m_s.min(speed);
         let b = self.local_min_m_s.min(speed);
-        let g_a = if a > 0.0 { residual(a)? } else { 0.0 };
+        // An empty rising piece (hyperbolic law) ends at g(0+) = m N mu_s - |v_free|.
+        let g_a = if a > 0.0 { residual(a)? } else { mobility * self.static_capacity_n - speed };
         let g_b = if b < speed { residual(b)? } else { 1.0 };
         let has_low = !stick_admissible && g_a > 0.0;
         let has_middle = b < speed && g_a > 0.0 && g_b < 0.0;
@@ -446,14 +477,18 @@ impl StribeckLoadLine {
             + u8::from(has_low)
             + u8::from(has_middle)
             + u8::from(has_high);
+        let used = bisections.get();
+        if used > max_bisections {
+            return Err(ImplicitFrictionError::NoConvergence);
+        }
         let Some((slip, on_high)) = choice else {
-            return Ok(SetValuedFrictionStep {
+            return Ok((SetValuedFrictionStep {
                 traction_n: pin,
                 relative_velocity_m_s: 0.0,
                 branch: ContactBranch::Stuck,
                 roots: counted,
                 selected: 0,
-            });
+            }, used));
         };
         // The high root is the last intersection. Otherwise this is the first
         // sliding root: the low one, or the fold fallback above.
@@ -470,7 +505,7 @@ impl StribeckLoadLine {
         if !endpoint.is_finite() || endpoint * sign < 0.0 || (endpoint - sign * slip).abs() > tolerance {
             return Err(ImplicitFrictionError::NoConvergence);
         }
-        Ok(SetValuedFrictionStep {
+        Ok((SetValuedFrictionStep {
             traction_n: traction,
             relative_velocity_m_s: endpoint,
             branch: if on_high {
@@ -480,7 +515,7 @@ impl StribeckLoadLine {
             },
             roots,
             selected,
-        })
+        }, used))
     }
 }
 

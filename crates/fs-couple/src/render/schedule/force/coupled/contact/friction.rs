@@ -11,14 +11,18 @@
 //!
 //! This is step-averaged sticking, not an exact endpoint velocity constraint.
 //! One tangential coordinate and a prescribed nonnegative normal load are
-//! supported. No normal collision, finite contact patch, thermal/wear evolution,
-//! unique Stribeck branch, experimental validation or hard-real-time claim is
-//! implied. Input law coefficients retain caller authority. A nonzero drive
+//! supported. Where a Stribeck or hyperbolic law meets the load line more than
+//! once, the contact keeps the branch it occupies (McIntyre, Schumacher &
+//! Woodhouse 1983, through `stribeck_friction::StribeckLoadLine`), and every
+//! frame discloses the root count and the committed root. Other laws keep the
+//! scalar bisection. No normal collision, finite contact patch, thermal/wear
+//! evolution, experimental validation or hard-real-time claim is implied. Input law coefficients retain caller authority. A nonzero drive
 //! speed is an explicit work source; zero drive gives a passive internal brake.
 
 use fs_exec::CancelGate;
 use fs_tribo::{FrictionLaw, TriboError};
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
+use crate::stribeck_friction::{ContactBranch, ImplicitFrictionError, StribeckLoadLine};
 use super::effective_compliance;
 use super::super::{CoupledModalSystem, ModalAttachment, ModalCouplingError,
     dot, finite, invalid, limit, poll};
@@ -131,7 +135,23 @@ pub struct FrictionModalFrame {
     /// Resolved branch for this step.
     pub regime: ModalFrictionRegime,
     /// Bisection refinements used; zero for a closed-form branch or endpoint.
+    /// The branch-continuation owner bisects each root to adjacent floats and
+    /// refuses when that exceeds `max_iterations`.
     pub iterations: usize,
+    /// Root disclosure of a Stribeck or hyperbolic step; `None` for laws
+    /// without a disclosed root rule and for a released contact.
+    pub roots: Option<FrictionRoots>,
+}
+
+/// Intersections of the step's load line with the friction graph (the static
+/// cone included) and the zero-based index of the committed one, ordered by
+/// slip speed with the cone first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrictionRoots {
+    /// Intersections found, 1..=3.
+    pub found: u8,
+    /// Index of the committed intersection.
+    pub selected: u8,
 }
 
 /// Retained physical network with one implicitly solved tangential port.
@@ -148,6 +168,11 @@ pub struct FrictionModalSystem {
     acceleration_pressure: Option<Vec<f64>>,
     interface: Option<interface::DryFrictionBinding>,
     nonlinear: Option<nonlinear::NonlinearFrictionState>,
+    // McIntyre-Schumacher-Woodhouse branch memory: committed, and staged by
+    // the trial that may still be refused or repeated.
+    branch: ContactBranch,
+    staged_branch: ContactBranch,
+    load_line: Option<StribeckLoadLine>,
 }
 
 impl FrictionModalSystem {
@@ -161,7 +186,8 @@ impl FrictionModalSystem {
         let compliance = effective_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None, acceleration_pressure: None, interface: None, nonlinear: None })
+            config, column, compliance, last: None, acceleration_pressure: None, interface: None, nonlinear: None,
+            branch: ContactBranch::Fresh, staged_branch: ContactBranch::Fresh, load_line: None })
     }
 
     /// Explicitly prepare the SAME full linear operator before playback.
@@ -319,6 +345,7 @@ impl FrictionModalSystem {
         poll(gate)?;
         self.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.network.publish_staged();
+        self.branch = self.staged_branch;
         if let (Some(state), Some(frame)) = (&mut self.nonlinear, nonlinear_frame) {
             state.publish(frame);
         }
@@ -340,7 +367,7 @@ impl FrictionModalSystem {
         let free_increment=dot(&self.column,&self.network.free_delta)?;
         let drive_distance = finite(drive.speed_m_s*self.network.dt)?;
         let free_slip = finite(drive_distance-free_increment)?;
-        let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, drive.normal_force_n, gate)?;
+        let (traction, regime, iterations, roots) = self.solve_contact(free_slip, drive.normal_force_n, gate)?;
         self.forces.copy_from_slice(external);
         if traction != 0.0 {
             for (force, b) in self.forces.iter_mut().zip(&self.column) { *force = finite(*force+b*traction)?; }
@@ -370,19 +397,53 @@ impl FrictionModalSystem {
             network_energy_j: after, external_work_j: external_work, drive_work_j: drive_work,
             network_dissipation_j: network_loss, friction_dissipation_j: loss,
             energy_residual_j: residual, energy_tolerance_j: tolerance, traction_n: traction,
-            slip_distance_m: slip, constitutive_residual_n, regime, iterations,
+            slip_distance_m: slip, constitutive_residual_n, regime, iterations, roots,
         };
         poll(gate)?;
         Ok(accepted)
     }
 
-
+    // Stribeck and hyperbolic laws take the branch-continuation owner on the
+    // same held-force load line, v = v_free - (c/dt) F with v_free = free_slip/dt,
+    // starting from the branch the contact occupies. Every other law, and a
+    // released contact, keeps the scalar bisection unchanged.
+    fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
+        -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
+    {
+        let continued = matches!(self.port.law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
+        if !continued || normal == 0.0 {
+            self.staged_branch = ContactBranch::Fresh;
+            let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, normal, gate)?;
+            return Ok((traction, regime, iterations, None));
+        }
+        poll(gate)?;
+        let mobility = finite(self.compliance/self.network.dt)?;
+        let refusal = |error: ImplicitFrictionError<TriboError>| -> ModalFrictionError { match error {
+            ImplicitFrictionError::Constitutive(cause) => cause.into(),
+            ImplicitFrictionError::InvalidInput(what) => invalid(what).into(),
+            ImplicitFrictionError::NonDissipative => invalid("set-valued friction would drive relative slip").into(),
+            ImplicitFrictionError::NoConvergence => invalid("set-valued friction root did not resolve within max_iterations").into(),
+        }};
+        if !self.load_line.as_ref().is_some_and(|line| line.matches(normal, mobility)) {
+            self.load_line = Some(StribeckLoadLine::new(&self.port.law, normal, mobility).map_err(refusal)?);
+        }
+        let line = self.load_line.as_ref().ok_or_else(|| invalid("missing set-valued load line"))?;
+        let (step, iterations) = line.step_within(finite(free_slip/self.network.dt)?, self.branch,
+            self.config.max_iterations).map_err(refusal)?;
+        limit("friction traction", step.traction_n.abs(), self.config.maximum_force_n)?;
+        self.staged_branch = step.branch;
+        let regime = if step.branch == ContactBranch::Stuck { ModalFrictionRegime::Sticking } else { ModalFrictionRegime::Sliding };
+        Ok((step.traction_n, regime, iterations, Some(FrictionRoots { found: step.roots, selected: step.selected })))
+    }
 }
 
 // Optional physical acceleration readout; it does not replace mechanical evolution.
 mod observation;
 
 mod scalar;
+
+#[cfg(test)]
+mod continuation_tests;
 
 /// Several driven friction ports on the same retained mechanical network.
 pub mod multiple;
