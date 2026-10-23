@@ -144,7 +144,10 @@ fn full_snare_carrier_and_cavity_precede_no_hidden_direct_shaft_pressure() {
     let carrier=TranslatingSupport{mass_kg:0.02,stiffness_n_m:12.0,damping_n_s_m:0.02,
         initial_position_m:0.0,initial_velocity_m_s:0.0,maximum_travel_m:0.01,maximum_slope:0.2};
     let wires=snare::SnareSet{carrier:Some(carrier),..source};
-    let e=drum_build(&selection(),true,Some(wires),true,true);
+    // drum_build's arguments on an exact 600 kHz clock, which resolves the full wire set's rates
+    // (one-cent band, .168): 21640 rad/s needs dt of at most 0.04 / 21640 = 1.85e-6 s.
+    let e=drum_with_shafts(256,1.0/600_000.0,true,false,Some(wires),true,first(),true,None,Some(drum()),Some(second()),
+        &[],25.0,None,false,None,&mallets::Selection::default(),&selection()).unwrap();
     let p=e.flexible_sticks[0].as_ref().unwrap();let q=e.flexible_sticks[1].as_ref().unwrap();
     let start=e.second_stick.unwrap().coordinate+1;
     assert_eq!(p.elastic_start(),start+wires.mode_count().unwrap());
@@ -160,7 +163,9 @@ fn full_snare_carrier_and_cavity_precede_no_hidden_direct_shaft_pressure() {
 #[test]
 fn linear_snare_with_flexible_sticks_retains_both_execution_images_and_all_wires() {
     let shafts=selection();let full_wires=snare::SnareSet::reference(false);
-    let build=|wires,linear,audio| drum_with_shafts(256,2e-6,audio,linear,Some(wires),false,
+    // The exact 600 kHz clock that resolves the full wire set's rates (one-cent band, .168;
+    // see above); the prepared image needs an integer-Hz clock.
+    let build=|wires,linear,audio| drum_with_shafts(256,1.0/600_000.0,audio,linear,Some(wires),false,
         first(),true,None,Some(drum()),Some(second()),&[],25.0,None,false,None,
         &mallets::Selection::default(),&shafts).unwrap();
     let full=build(full_wires,true,true);

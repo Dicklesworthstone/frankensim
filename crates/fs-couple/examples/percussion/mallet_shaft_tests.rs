@@ -99,7 +99,9 @@ fn both_loaded_heads_compose_with_real_drum_snare_cavity_and_shell_sources() {
     let drum=crate::drum_spec::Spec{radial_intervals:2,azimuths:8,..crate::drum_spec::Spec::reference()};
     let wire=crate::snare::SnareSet{strands:2,modes_per_strand:2,contact_cells:4,
         ..crate::snare::SnareSet::reference(false)};
-    let d=crate::drum_with_shafts(32,2e-6,true,false,Some(wire),true,stroke(),true,None,
+    // An exact 600 kHz clock resolves the retained snare-wire rates (one-cent band, .168):
+    // 20880 rad/s needs dt of at most 0.04 / 20880 = 1.92e-6 s.
+    let d=crate::drum_with_shafts(32,1.0/600_000.0,true,false,Some(wire),true,stroke(),true,None,
         Some(drum),second,&[],20.,None,false,None,&tips,&shafts).unwrap();
     let mut shell=crate::specimen::Specimen::reference();shell.azimuths=8;
     let c=crate::splash_with_shafts(32,2e-6,true,stroke(),Some(shell),&[],second,None,&tips,&shafts).unwrap();
