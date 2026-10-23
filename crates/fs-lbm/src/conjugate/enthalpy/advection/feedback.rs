@@ -17,7 +17,7 @@ use fs_conduction::transient::deposition::{
 use fs_exec::CancelGate;
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
-use fs_material::phase::mushy::MushyPhaseLaw;
+use fs_material::phase::mushy::{MushyPhaseLaw, PhaseMobility};
 
 use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
 use crate::conjugate::{
@@ -36,6 +36,11 @@ use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
 mod phase_conduction;
 use phase_conduction::PhaseConduction;
+
+/// Exact stationary solid constraints on the same material/enthalpy owner.
+pub mod phase;
+pub use phase::{FlowTransportSnapshot, PhaseFlowTransport};
+use phase::{fluid_snapshot, immobile_flow, immobile_power};
 
 /// A coupled refusal retains the originating material, flow or history error.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,20 +79,20 @@ impl<E: std::error::Error + 'static> std::error::Error for MaterialFlowError<E> 
 
 /// One concrete source result and the exact local query/transport snapshot.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowMaterialSample<F> {
+pub struct FlowMaterialSample<F, T = FluidTransportState> {
     pub voxel: usize,
     pub cell: CellId,
     pub specific_enthalpy_j_kg: f64,
     pub temperature_k: f64,
     pub material: F,
-    pub transport: FluidTransportState,
+    pub transport: T,
 }
 
 /// The source epoch that produced the LAST applied face-flux field.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MaterialFlowEpoch<F> {
+pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub time_s: f64,
-    pub samples: Vec<FlowMaterialSample<F>>,
+    pub samples: Vec<FlowMaterialSample<F, T>>,
     pub flow: FvFlow,
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
     /// None on the original fixed-density path; never an additional heat input.
@@ -134,13 +139,18 @@ pub struct MaterialFlowEpoch<F> {
 /// closed creeping-flow box; `Self::with_body_force_heating` additionally admits
 /// explicit actuator work. The ordinary entry adds no viscous heat.
 #[derive(Clone)]
-pub struct MaterialFlowFeedback<'a, F, R, O> {
+pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     domain: &'a VoxelDomain,
     input: FlowEnthalpyInput<'a>,
     config: &'a SimpleConfig,
     gate: &'a CancelGate,
     resolve: R,
-    reference: FluidTransportState,
+    // The original liquid entry retains its initial reference exactly. A phase
+    // entry has only the chart's fixed density until a mobile source exists.
+    reference: Option<FluidTransportState>,
+    density_kg_m3: f64,
+    snapshot: fn(&F, Option<PhaseMobility>) -> Result<T, MaterialError>,
+    exact_phase: bool,
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
@@ -148,8 +158,8 @@ pub struct MaterialFlowFeedback<'a, F, R, O> {
     viscous_heating: Option<ViscousHeating>,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
-    applied: Option<MaterialFlowEpoch<F>>,
-    endpoint: Vec<FlowMaterialSample<F>>,
+    applied: Option<MaterialFlowEpoch<F, T>>,
+    endpoint: Vec<FlowMaterialSample<F, T>>,
     audit: AdvectionAudit,
     solves: usize,
     max_solves: usize,
@@ -181,7 +191,9 @@ where
             )
             .into());
         }
-        let endpoint = sample(thermal, domain, input, gate, &mut resolve, &mut || Ok(()))?;
+        let endpoint = sample(
+            thermal, domain, input, gate, &mut resolve, None, fluid_snapshot::<F>, &mut || Ok(()),
+        )?;
         let reference = endpoint
             .first()
             .ok_or(invalid("live material flow needs an active fluid cell"))?
@@ -201,7 +213,10 @@ where
             config,
             gate,
             resolve,
-            reference,
+            reference: Some(reference),
+            density_kg_m3: reference.density_kg_m3(),
+            snapshot: fluid_snapshot::<F>,
+            exact_phase: false,
             buoyancy: None,
             external_force_n_m3: None,
             mushy: None,
@@ -272,6 +287,13 @@ where
         Ok(coupled)
     }
 
+}
+
+impl<'a, F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
+    MaterialFlowFeedback<'a, F, R, O, T>
+where
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+{
     /// Attach declared h-dependent stationary mixture mobility to this owner.
     ///
     /// The exact registered caloric chart supplies both T(h) and phase mass
@@ -294,10 +316,13 @@ where
         mut self,
         law: &'a MushyPhaseLaw<'a>,
     ) -> Result<Self, MaterialFlowError<O::Error>> {
+        if self.exact_phase {
+            return Err(invalid("exact phase mobility is bound by try_new_phase").into());
+        }
         let rho = law.fixed_density_kg_m3().ok_or(invalid(
             "fixed-volume mushy flow requires equal constant phase densities",
         ))?;
-        if rho.to_bits() != self.reference.density_kg_m3().to_bits()
+        if rho.to_bits() != self.density_kg_m3.to_bits()
             || !core::ptr::addr_eq(
                 self.input.caloric as *const dyn fs_conduction::transient::deposition::ThermalLaw,
                 law.curve() as *const fs_material::phase::EquilibriumEnthalpyPhaseCurve,
@@ -320,7 +345,7 @@ where
 
     fn mushy_drag(
         &self,
-        samples: &[FlowMaterialSample<F>],
+        samples: &[FlowMaterialSample<F, T>],
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Option<Vec<f64>>, MaterialFlowError<O::Error>> {
         let Some(law) = self.mushy else {
@@ -329,20 +354,34 @@ where
         let mut drag = vec![0.0; self.domain.cell_count()];
         for sample in samples {
             check_gate(self.gate, check)?;
-            let state = law
-                .at_specific_enthalpy(sample.specific_enthalpy_j_kg)
-                .map_err(|source| MaterialFlowError::Material {
-                    cell: sample.cell,
-                    source,
-                })?;
+            let state = match sample.transport.phase_mobility() {
+                Some(PhaseMobility::ImmobileSolid { phase, .. }) => {
+                    if phase.temperature_k().to_bits() != sample.temperature_k.to_bits() {
+                        return Err(invalid(
+                            "solid constraint temperature differs from the original caloric owner",
+                        ).into());
+                    }
+                    continue;
+                }
+                Some(PhaseMobility::Mobile(state)) => *state,
+                None => law
+                    .at_specific_enthalpy(sample.specific_enthalpy_j_kg)
+                    .map_err(|source| MaterialFlowError::Material {
+                        cell: sample.cell,
+                        source,
+                    })?,
+            };
             if state.phase.temperature_k().to_bits() != sample.temperature_k.to_bits() {
                 return Err(invalid(
                     "mushy mobility temperature differs from the original caloric owner",
                 )
                 .into());
             }
+            let transport = sample.transport.mobile_transport().ok_or(invalid(
+                "mobile mushy state has no material transport",
+            ))?;
             let value =
-                sample.transport.dynamic_viscosity_pa_s() * state.inverse_permeability_per_m2;
+                transport.dynamic_viscosity_pa_s() * state.inverse_permeability_per_m2;
             if !value.is_finite() || (state.inverse_permeability_per_m2 > 0.0 && value <= 0.0) {
                 return Err(invalid("mushy Darcy resistance is not representable").into());
             }
@@ -355,8 +394,8 @@ where
     ///
     /// This opt-in explicitly removes momentum convection from each native
     /// solve. Only tangential moving/stationary walls and symmetry are admitted;
-    /// openings, solid voxels, buoyancy, fans, turbulence and configured
-    /// resistances refuse. An attached `Self::with_mushy_mobility` supplies the
+    /// fixed no-slip solid voxels are supported. Openings, buoyancy, fans,
+    /// turbulence and configured resistances refuse. An attached `Self::with_mushy_mobility` supplies the
     /// only optional drag: its actual mu/K(phi(h)) becomes heat in the ORIGINAL
     /// equilibrium mixture cell. The fixed skeleton performs zero reaction work;
     /// its heat and latent energy belong to that same fixed-reference-mass h.
@@ -398,7 +437,8 @@ where
     /// refresh at every actual thermal substep. Signed actuator supply and heat
     /// are accepted together, including negative work by an opposing actuator.
     ///
-    /// Closed all-fluid creeping-flow restrictions remain. Buoyancy is excluded:
+    /// Closed creeping-flow restrictions and exact stationary solids remain.
+    /// Buoyancy is excluded:
     /// no gravitational potential, finite electrical reservoir or kinetic store
     /// is debited by this prescribed actuator. Change a force only between
     /// accepted advances and account for its reported work in the enclosing
@@ -420,6 +460,8 @@ where
         }
         let mut coupled = self.with_viscous_heating(controls)?;
         coupled.external_force_n_m3 = Some(force_density_n_m3);
+        let domain = coupled.momentum_domain(&coupled.endpoint, &mut || Ok(()))?;
+        coupled.check_phase_drives(domain.as_ref().unwrap_or(coupled.domain), &mut || Ok(()))?;
         Ok(coupled)
     }
 
@@ -436,7 +478,9 @@ where
     /// must match the native voxels. Parallel links on an owned face and an
     /// inner observer claiming the same conductance refuse. This models bulk
     /// isotropic conduction with no additional interface resistance; do not
-    /// assign solid contacts, partial faces or material contact-resistance laws.
+    /// assign authored solid contacts, partial faces or contact-resistance laws.
+    /// With `MaterialFlowFeedback::try_new_phase`, the original mapped material faces retain
+    /// their sourced conductivity even when either cell becomes immobile.
     pub fn with_fluid_conduction(
         mut self,
         thermal: &DepositionSimulation<'_>,
@@ -549,11 +593,11 @@ where
     }
 
     /// Source-backed inputs and actual MAC result for the last applied step.
-    pub const fn applied(&self) -> Option<&MaterialFlowEpoch<F>> {
+    pub const fn applied(&self) -> Option<&MaterialFlowEpoch<F, T>> {
         self.applied.as_ref()
     }
     /// Material evaluations at the accepted thermal endpoint, including h.
-    pub fn endpoint(&self) -> &[FlowMaterialSample<F>] {
+    pub fn endpoint(&self) -> &[FlowMaterialSample<F, T>] {
         &self.endpoint
     }
     /// Summed original advection accounting over the last successful advance.
@@ -587,7 +631,7 @@ where
         admit_map(
             thermal,
             self.domain,
-            self.reference.density_kg_m3(),
+            self.density_kg_m3,
             self.input,
             check,
         )?;
@@ -596,8 +640,8 @@ where
     }
 }
 
-impl<F: FluidTransport + Clone, R, O: DepositionObserver> DepositionObserver
-    for MaterialFlowFeedback<'_, F, R, O>
+impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot> DepositionObserver
+    for MaterialFlowFeedback<'_, F, R, O, T>
 where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
@@ -623,37 +667,53 @@ where
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.check_map(thermal, check)?;
-        if self.solves >= self.max_solves {
-            return Err(DepositionError::Budget("live material momentum solves").into());
-        }
         let samples = sample(
             thermal,
             self.domain,
             self.input,
             self.gate,
             &mut self.resolve,
+            self.exact_phase.then_some(self.mushy).flatten(),
+            self.snapshot,
             check,
         )?;
-        admit_density(&samples, self.reference.density_kg_m3())?;
+        admit_density(&samples, self.density_kg_m3)?;
         self.check_phase_conduction(&samples, check)?;
-        let mut viscosities =
-            vec![self.reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
-        for value in &samples {
-            viscosities[value.voxel] = value.transport.dynamic_viscosity_pa_s();
+        let active_domain = self.momentum_domain(&samples, check)?;
+        let domain = active_domain.as_ref().unwrap_or(self.domain);
+        self.check_phase_drives(domain, check)?;
+        let native_solve = domain.fluid_count() != 0;
+        if native_solve && self.solves >= self.max_solves {
+            return Err(DepositionError::Budget("live material momentum solves").into());
         }
-        // All caloric evolution remains in the thermal law. These other
-        // fields satisfy the original flow owner's parameter admission only.
-        let fluid = FluidProperties {
-            density_kg_m3: self.reference.density_kg_m3(),
-            specific_heat_j_kg_k: self.reference.specific_heat_j_kg_k(),
-            conductivity_w_m_k: self.reference.thermal_conductivity_w_m_k(),
-            kinematic_viscosity_m2_s: self.reference.kinematic_viscosity_m2_s(),
+        // No liquid reference is invented at an all-solid epoch. Once mobile,
+        // use an actual retained mobile source for scalar parameter admission.
+        let reference = self.reference.or_else(|| samples.iter()
+            .find_map(|sample| sample.transport.mobile_transport()));
+        let mut viscosities = Vec::new();
+        let fluid = if let Some(reference) = reference {
+            viscosities = vec![reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
+            for value in &samples {
+                if let Some(transport) = value.transport.mobile_transport() {
+                    viscosities[value.voxel] = transport.dynamic_viscosity_pa_s();
+                }
+            }
+            // Caloric evolution remains in the original thermal law. Unused
+            // solid slots satisfy native array admission only, never solid μ.
+            Some(FluidProperties {
+                density_kg_m3: self.density_kg_m3,
+                specific_heat_j_kg_k: reference.specific_heat_j_kg_k(),
+                conductivity_w_m_k: reference.thermal_conductivity_w_m_k(),
+                kinematic_viscosity_m2_s: reference.kinematic_viscosity_m2_s(),
+            })
+        } else {
+            None
         };
         let buoyancy_force_n_m3 = if let Some((gravity, density)) = self.buoyancy {
             let mut forces = vec![[0.0; 3]; self.domain.cell_count()];
             for sample in &samples {
                 check_gate(self.gate, check)?;
-                let contrast = density(&sample.material) - self.reference.density_kg_m3();
+                let contrast = density(&sample.material) - self.density_kg_m3;
                 forces[sample.voxel] = gravity.map(|g| contrast * g);
             }
             Some(forces)
@@ -661,81 +721,90 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let (flow, viscous_power) = if let Some(owner) = &self.viscous_heating {
-            let (flow, power) = if let Some(force) = &self.external_force_n_m3 {
-                creeping_flow_with_body_force_heat(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    force,
-                    mushy_drag_pa_s_m2.as_deref(),
-                    self.config,
-                    owner.controls,
-                    self.gate,
-                )?
-            } else if let Some(drag) = &mushy_drag_pa_s_m2 {
-                creeping_flow_with_darcy_heat(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    drag,
-                    self.config,
-                    owner.controls,
-                    self.gate,
-                )?
-            } else {
-                creeping_flow_with_viscous_heat(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    self.config,
-                    owner.controls,
-                    self.gate,
-                )?
-            };
-            (flow, Some(power))
-        } else if let Some(drag) = &mushy_drag_pa_s_m2 {
-            (
-                simple_flow_with_material_resistance(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    drag,
-                    buoyancy_force_n_m3.as_deref(),
-                    self.config,
-                    self.gate,
-                )?,
-                None,
-            )
-        } else if let Some(forces) = &buoyancy_force_n_m3 {
-            (
-                simple_flow_with_viscosity_and_force(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    forces,
-                    self.config,
-                    self.gate,
-                )?,
-                None,
-            )
+        let (flow, viscous_power) = if !native_solve {
+            // All constraints have zero velocity and every admitted drive does
+            // zero work. This is an exact empty momentum system, not a solve.
+            (immobile_flow(domain), self.viscous_heating.as_ref().map(|_| {
+                immobile_power(domain, mushy_drag_pa_s_m2.is_some(), self.external_force_n_m3.is_some())
+            }))
         } else {
-            (
-                simple_flow_with_viscosity(
-                    self.domain,
-                    &fluid,
-                    &viscosities,
-                    self.config,
-                    self.gate,
-                )?,
-                None,
-            )
+            let fluid = fluid.as_ref().ok_or(invalid("mobile cells lack a transport source"))?;
+            if let Some(owner) = &self.viscous_heating {
+                let (flow, power) = if let Some(force) = &self.external_force_n_m3 {
+                    creeping_flow_with_body_force_heat(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        force,
+                        mushy_drag_pa_s_m2.as_deref(),
+                        self.config,
+                        owner.controls,
+                        self.gate,
+                    )?
+                } else if let Some(drag) = &mushy_drag_pa_s_m2 {
+                    creeping_flow_with_darcy_heat(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        drag,
+                        self.config,
+                        owner.controls,
+                        self.gate,
+                    )?
+                } else {
+                    creeping_flow_with_viscous_heat(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        self.config,
+                        owner.controls,
+                        self.gate,
+                    )?
+                };
+                (flow, Some(power))
+            } else if let Some(drag) = &mushy_drag_pa_s_m2 {
+                (
+                    simple_flow_with_material_resistance(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        drag,
+                        buoyancy_force_n_m3.as_deref(),
+                        self.config,
+                        self.gate,
+                    )?,
+                    None,
+                )
+            } else if let Some(forces) = &buoyancy_force_n_m3 {
+                (
+                    simple_flow_with_viscosity_and_force(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        forces,
+                        self.config,
+                        self.gate,
+                    )?,
+                    None,
+                )
+            } else {
+                (
+                    simple_flow_with_viscosity(
+                        domain,
+                        fluid,
+                        &viscosities,
+                        self.config,
+                        self.gate,
+                    )?,
+                    None,
+                )
+            }
         };
         check_gate(self.gate, check)?;
         let (flows, boundaries) = mass_graph(
-            self.domain,
+            domain,
             &flow.field,
-            self.reference.density_kg_m3(),
+            self.density_kg_m3,
             self.input,
             check,
         )?;
@@ -773,7 +842,7 @@ where
             mushy_drag_pa_s_m2,
             viscous_power,
         });
-        self.solves += 1;
+        self.solves += usize::from(native_solve);
         Ok(sources)
     }
 
@@ -877,10 +946,14 @@ where
             self.input,
             self.gate,
             &mut self.resolve,
+            self.exact_phase.then_some(self.mushy).flatten(),
+            self.snapshot,
             &mut || Ok(()),
         )?;
-        admit_density(&self.endpoint, self.reference.density_kg_m3())?;
+        admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
+        let domain = self.momentum_domain(&self.endpoint, &mut || Ok(()))?;
+        self.check_phase_drives(domain.as_ref().unwrap_or(self.domain), &mut || Ok(()))?;
         self.check_phase_conduction(&self.endpoint, &mut || Ok(()))?;
         self.advected
             .as_mut()
@@ -904,10 +977,14 @@ where
             self.input,
             self.gate,
             &mut self.resolve,
+            self.exact_phase.then_some(self.mushy).flatten(),
+            self.snapshot,
             check,
         )?;
-        admit_density(&self.endpoint, self.reference.density_kg_m3())?;
+        admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, check)?;
+        let domain = self.momentum_domain(&self.endpoint, check)?;
+        self.check_phase_drives(domain.as_ref().unwrap_or(self.domain), check)?;
         self.check_phase_conduction(&self.endpoint, check)?;
         let advected = self
             .advected
@@ -971,14 +1048,17 @@ fn check_gate(
     }
 }
 
-fn sample<F: FluidTransport, R, E>(
+#[allow(clippy::too_many_arguments)]
+fn sample<F, R, E, T: FlowTransportSnapshot>(
     thermal: &DepositionSimulation<'_>,
     domain: &VoxelDomain,
     input: FlowEnthalpyInput<'_>,
     gate: &CancelGate,
     resolve: &mut R,
+    phase_law: Option<&MushyPhaseLaw<'_>>,
+    snapshot: fn(&F, Option<PhaseMobility>) -> Result<T, MaterialError>,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
-) -> Result<Vec<FlowMaterialSample<F>>, MaterialFlowError<E>>
+) -> Result<Vec<FlowMaterialSample<F, T>>, MaterialFlowError<E>>
 where
     R: FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
@@ -999,18 +1079,22 @@ where
             .and_then(|id| thermal.cells().get(&id))
             .ok_or(invalid("every flowing voxel needs an active enthalpy cell"))?;
         let temperature_k = thermal.temperature_k(cell.id)?;
+        // Classify the original h before requesting any liquid transport.
+        // An unsupported phase therefore cannot trigger a source extrapolation.
+        let mobility = phase_law
+            .map(|law| law.classify_at_specific_enthalpy(cell.specific_h_j_kg))
+            .transpose()
+            .map_err(|source| MaterialFlowError::Material { cell: cell.id, source })?;
         let material =
             resolve(voxel, cell, temperature_k).map_err(|source| MaterialFlowError::Material {
                 cell: cell.id,
                 source,
             })?;
         let transport =
-            material
-                .transport_state()
-                .map_err(|source| MaterialFlowError::Material {
-                    cell: cell.id,
-                    source,
-                })?;
+            snapshot(&material, mobility).map_err(|source| MaterialFlowError::Material {
+                cell: cell.id,
+                source,
+            })?;
         samples.push(FlowMaterialSample {
             voxel,
             cell: cell.id,
@@ -1024,10 +1108,11 @@ where
     Ok(samples)
 }
 
-fn admit_density<F>(samples: &[FlowMaterialSample<F>], rho: f64) -> Result<(), DepositionError> {
+fn admit_density<F, T: FlowTransportSnapshot>(samples: &[FlowMaterialSample<F, T>], rho: f64) -> Result<(), DepositionError> {
     if samples
         .iter()
-        .any(|value| value.transport.density_kg_m3().to_bits() != rho.to_bits())
+        .any(|value| value.transport.mobile_transport()
+            .is_some_and(|transport| transport.density_kg_m3().to_bits() != rho.to_bits()))
     {
         Err(invalid(
             "live flow density changes require compatible mass/volume and momentum evolution",

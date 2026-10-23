@@ -1,6 +1,6 @@
 //! The exact live-flow material epoch supplies current and irreversible heat.
 //!
-//! Momentum, advection and fluid-face conduction remain in MaterialFlowFeedback.
+//! Momentum, advection and material-face conduction remain in MaterialFlowFeedback.
 //! The original Ohmic Account owns current, contact deposition and electrical
 //! work. No second material evaluation or thermal stepping loop is introduced.
 
@@ -35,23 +35,23 @@ impl<E: core::fmt::Display> core::fmt::Display for MaterialFlowElectricalError<E
 }
 impl<E: std::error::Error + 'static> std::error::Error for MaterialFlowElectricalError<E> {}
 
-type ElectricalResponse<'a, F> =
-    dyn Fn(&FlowMaterialSample<F>) -> Result<Option<f64>, ChtError> + 'a;
+type ElectricalResponse<'a, F, T> =
+    dyn Fn(&FlowMaterialSample<F, T>) -> Result<Option<f64>, ChtError> + 'a;
 
 #[derive(Clone)]
-struct CurrentFlow<'a, 'f, F, R, O> {
-    flow: MaterialFlowFeedback<'f, F, R, O>,
+struct CurrentFlow<'a, 'f, F, R, O, T> {
+    flow: MaterialFlowFeedback<'f, F, R, O, T>,
     account: Account<'a>,
-    response: &'a ElectricalResponse<'a, F>,
+    response: &'a ElectricalResponse<'a, F, T>,
 }
 
 // Require the complete actual epoch, including ideal electrode voxels. The
 // getter below reads a retained material object; it never re-resolves its T/h.
-fn evaluate<F>(
+fn evaluate<F, T>(
     account: &mut Account<'_>,
     thermal: &DepositionSimulation<'_>,
-    samples: &[FlowMaterialSample<F>],
-    response: &ElectricalResponse<'_, F>,
+    samples: &[FlowMaterialSample<F, T>],
+    response: &ElectricalResponse<'_, F, T>,
 ) -> Result<EnthalpyCurrentState, JouleEnthalpyError> {
     admit_electrical_map(thermal, account.input, account.gate)?;
     if samples.len() != account.input.cell_ids.len() {
@@ -71,8 +71,8 @@ fn evaluate<F>(
     account.evaluate(thermal, &|voxel, _, _| response(&samples[voxel]))
 }
 
-impl<F: FluidTransport + Clone, R, O: DepositionObserver> DepositionObserver
-    for CurrentFlow<'_, '_, F, R, O>
+impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot> DepositionObserver
+    for CurrentFlow<'_, '_, F, R, O, T>
 where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
@@ -154,8 +154,10 @@ where
 /// Advance current, local material flow and total enthalpy from ONE material epoch.
 ///
 /// Each native thermal substep first resolves the flow's actual h/T/material
-/// objects. Their viscosity and any declared buoyancy/mushy mobility drive the
-/// original momentum solve; its face mass fluxes advect the original total h.
+/// objects. Mobile cells' viscosity and declared buoyancy/mushy mobility drive
+/// the original momentum solve; its face mass fluxes advect the original total h.
+/// Phase-locked cells retain their complete material/electrical state even though
+/// they have no liquid transport tuple and contribute exactly zero mass flux.
 /// `resistivity` reads those SAME immutable samples for the original current
 /// solve. It must return a retained response, not query another material or
 /// mutate external physical history. `None` declares insulation; missing source
@@ -168,10 +170,13 @@ where
 /// steps. Do not wrap an independent owner that deposits this same Joule loss.
 /// Fixed electrical contact laws retain their original area and heat partition.
 ///
-/// The current and flow domains must be the SAME borrowed object and every
-/// voxel must be a mapped fluid cell, including ideal electrical electrodes.
-/// A potential constraint does not turn that cell into a solid obstacle. The
-/// original caloric object, fixed masses and control volumes remain owners.
+/// The current and flow domains must be the SAME borrowed object. Every voxel
+/// in that original potential-flow domain must remain mapped, including ideal
+/// electrical electrodes and any currently phase-locked cells. The separate
+/// phase occupancy mask controls momentum only: freezing never opens an
+/// electrical circuit or removes a receiving thermal cell. A potential
+/// constraint alone does not determine phase mobility. The original caloric
+/// object, fixed masses and control volumes remain owners.
 /// The full flow epoch is checked against the actual receiving cells before
 /// each current solve. Endpoint current uses the flow's already resolved
 /// endpoint, without another material query or an unreported momentum solve.
@@ -189,16 +194,17 @@ where
 /// No magnetic field/motional EMF, induction, charge convection, density-change
 /// volume source, free surface or total kinetic/thermal energy claim is added.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn advance_joule_enthalpy_with_material_flow<'t, 'f, F, R, O>(
+pub fn advance_joule_enthalpy_with_material_flow<'t, 'f, F, R, O, T>(
     thermal: &DepositionSimulation<'t>, target_s: f64, config: StepConfig,
-    input: JouleEnthalpyInput<'_>, flow: &MaterialFlowFeedback<'f, F, R, O>,
-    resistivity: impl Fn(&FlowMaterialSample<F>) -> Result<Option<f64>, ChtError>,
+    input: JouleEnthalpyInput<'_>, flow: &MaterialFlowFeedback<'f, F, R, O, T>,
+    resistivity: impl Fn(&FlowMaterialSample<F, T>) -> Result<Option<f64>, ChtError>,
 ) -> Result<
-    (DepositionSimulation<'t>, MaterialFlowFeedback<'f, F, R, O>, JouleEnthalpyReport),
+    (DepositionSimulation<'t>, MaterialFlowFeedback<'f, F, R, O, T>, JouleEnthalpyReport),
     MaterialFlowElectricalError<O::Error>,
 >
 where
-    F: FluidTransport + Clone,
+    F: Clone,
+    T: FlowTransportSnapshot,
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
     O: DepositionObserver,
 {
@@ -213,7 +219,7 @@ where
             .any(|(&electric, &fluid)| fluid != Some(electric))
     {
         return Err(JouleEnthalpyError::Invalid(
-            "current and live flow need the same all-fluid domain and exact cell map",
+            "current and live flow need the same complete original domain and exact cell map",
         ).into());
     }
     let source = CurrentFlow {

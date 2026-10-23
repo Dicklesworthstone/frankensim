@@ -11,7 +11,8 @@ pub(super) struct PhaseConduction<'a> {
     law: LiquidMassFractionConductivity,
 }
 
-impl<'a, F: FluidTransport + Clone, R, O: DepositionObserver> MaterialFlowFeedback<'a, F, R, O>
+impl<'a, F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
+    MaterialFlowFeedback<'a, F, R, O, T>
 where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
 {
@@ -48,7 +49,7 @@ where
         }
         for knot in curve.knots() {
             check_gate(self.gate, &mut || Ok(()))?;
-            if knot.bulk_density_kg_m3.to_bits() != self.reference.density_kg_m3().to_bits() {
+            if knot.bulk_density_kg_m3.to_bits() != self.density_kg_m3.to_bits() {
                 return Err(invalid(
                     "phase conduction requires the existing fixed reference density",
                 )
@@ -68,7 +69,7 @@ where
 
     pub(super) fn effective_conductivity(
         &self,
-        sample: &FlowMaterialSample<F>,
+        sample: &FlowMaterialSample<F, T>,
     ) -> Result<f64, MaterialFlowError<O::Error>> {
         let base = sample.transport.thermal_conductivity_w_m_k();
         let Some(binding) = self.phase_conduction else {
@@ -101,7 +102,7 @@ where
 
     pub(super) fn check_phase_conduction(
         &self,
-        samples: &[FlowMaterialSample<F>],
+        samples: &[FlowMaterialSample<F, T>],
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), MaterialFlowError<O::Error>> {
         if self.phase_conduction.is_some() {

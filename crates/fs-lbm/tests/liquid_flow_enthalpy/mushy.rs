@@ -14,6 +14,12 @@ mod conduction;
 #[path = "mushy/electrical.rs"]
 mod electrical;
 
+#[path = "mushy/continuity.rs"]
+mod continuity;
+
+#[path = "mushy/occupancy.rs"]
+mod occupancy;
+
 fn phase_curve(card: &MaterialCard, rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
         card.content_hash(),
