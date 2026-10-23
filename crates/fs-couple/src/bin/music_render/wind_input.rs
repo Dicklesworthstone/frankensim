@@ -638,7 +638,7 @@ fn load_with_all_sources(
         if policy == ObservationPolicy::Acceptance {
             return Err("--acceptance selects the explicit ReedPerformance flanged-development path; plate-valve files require explicit matched-load builder admission".into());
         }
-        let p=PlateValvePerformance::from_bytes_with_gas_sources(bytes,block,&CancelGate::new(),sources).map_err(|e|e.to_string())?;
+        let p=PlateValvePerformance::from_bytes_with_all_sources(bytes,block,&CancelGate::new(),sources,load_material).map_err(|e|e.to_string())?;
         let i=p.info();let a=p.renderer().system().aperture();
         let plate=a.plate_reduction().expect("plate file retains its specimen");
         let observation=match p.renderer().observation() {
@@ -666,7 +666,9 @@ fn load_with_all_sources(
             else if p.viscothermal_losses().is_empty() {"lossless propagating sections with explicit local loads"}
             else {"gas-derived viscothermal series/thermal memory distributed along selected sections"};
         let gas_json=super::thermochemical::provenance(p.gas_records());
-        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",
+        // Each section's pack, hash, state and query point, or its fixture label (pexfp.32).
+        let section_sources=p.section_provenance().iter().map(|s|format!("\"{s}\"")).collect::<Vec<_>>().join(",");
+        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"section_sources\":[{section_sources}],\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,

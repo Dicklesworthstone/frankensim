@@ -61,6 +61,8 @@ pub mod iqn_ils;
 pub mod material_assembly;
 /// Material-resolved branch heat and finite charge/flux storage on Kirchhoff circuits.
 pub mod material_circuit;
+/// Pack-backed material records and fixture labels for file-driven render inputs.
+pub mod material_source;
 pub mod mm_line;
 /// Time-domain modal realization. The exact zero-order-hold core is owned by `fs_modal::time` (IRP M1.1-W1a, owner decision OD10) and
 /// every former name of this path still resolves. The opt-in broadband observer stays here: it needs `fs-vfit`, `fs-phs` and the

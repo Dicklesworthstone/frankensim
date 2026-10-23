@@ -13,6 +13,17 @@
 //! An optional `slit_length LENGTH_M` record immediately after `aperture`
 //! selects spatial viscous channel flow. Its viscosity comes from the actual
 //! inlet gas, including regional composition and temperature declarations.
+//!
+//! A material section is either pack-backed,
+//! `section material isotropic THICK PACK STATE [AXIS=VALUE ...]` or
+//! `section material orthotropic12|orthotropic21 THICK ANGLE PACK STATE [AXIS=VALUE ...]`,
+//! resolved through `crate::material_source` from a caller-supplied
+//! material-card pack compiled at the named STATE; or bare numbers ending in
+//! an explicit `fixture LABEL` (`section isotropic THICK RHO E NU fixture
+//! LABEL`, `section orthotropic THICK RHO E1 E2 NU12 G12 ANGLE fixture
+//! LABEL`). Bare numbers without a label refuse (bead pexfp.32). Each
+//! section's pack, hash, state and query point, or its fixture label, is kept
+//! in `section_provenance` for the render sidecar.
 mod force;
 /// Material-card multimode valves coupled to both ducts and one physical receiver.
 pub mod material_modal;
@@ -28,6 +39,9 @@ use crate::bernoulli_aperture::network::{ApertureNetwork, NetworkNode, TubeNetwo
 use crate::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use crate::bernoulli_aperture::viscous::ViscousSlit;
 use crate::render::schedule::GestureCompileError;
+use crate::material_source::{MaterialRecord, fixture_label, plate_section};
+use crate::thin_plate::PlateMaterialModel;
+use fs_matdb::NormalizedMaterialCardPack;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_blake3::{ContentHash, hash_domain};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSection;
@@ -165,6 +179,7 @@ pub struct PlateValvePerformance {
     ambient_gas: GasState,
     exterior_gas: Option<GasState>,
     gas_records: Vec<GasRecord>,
+    section_provenance: Vec<String>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate and selected blade symmetry,
@@ -201,8 +216,26 @@ impl PlateValvePerformance {
         gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>,
     ) -> Result<Self, PlateValveInputError> {
+        Self::from_bytes_with_all_sources(bytes, max_block, gate, sources,
+            |_| Err("a pack-backed material section needs an explicit material-card loader".into()))
+    }
+
+    /// As [`Self::from_bytes_with_gas_sources`], with `load_material` supplying
+    /// each material-card pack a `section material` record names (by its path
+    /// relative to the input). Each pack is loaded once.
+    ///
+    /// # Errors
+    /// Those of [`Self::from_bytes`], a loader refusal, a card compiled at a
+    /// state other than the record's, and a missing section property, by name.
+    pub fn from_bytes_with_all_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, PlateValveInputError> {
         checkpoint(gate)?;
-        let parsed = Parsed::read_with_gas_sources(bytes, max_block, gate, sources)?;
+        let parsed = Parsed::read_with_gas_sources(bytes, max_block, gate, sources, &mut load_material)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // One exterior declaration drives radiation; all internal media and
         // constitutive loads still come from their original regional states.
@@ -274,8 +307,14 @@ impl PlateValvePerformance {
             ambient_gas: parsed.air,
             exterior_gas: parsed.exterior,
             gas_records: parsed.gas_records,
+            section_provenance: parsed.section_provenance,
         })
     }
+    /// Each material section's source, in section order: `pack PATH HASH state
+    /// STATE at AXIS=VALUE,...` for a pack-backed section, `fixture LABEL` for
+    /// labelled bare numbers.
+    #[must_use]
+    pub fn section_provenance(&self) -> &[String] {&self.section_provenance}
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
     pub const fn info(&self) -> PlateValvePerformanceInfo {self.info}
@@ -330,6 +369,7 @@ struct Parsed {
     nodes: usize,
     triangles: usize,
     sections: usize,
+    section_provenance: Vec<String>,
 }
 impl Parsed {
     fn read(
@@ -337,13 +377,15 @@ impl Parsed {
         max_block: usize,
         gate: &CancelGate,
     ) -> Result<Self, PlateValveInputError> {
-        Self::read_with_gas_sources(bytes, max_block, gate, None)
+        Self::read_with_gas_sources(bytes, max_block, gate, None,
+            &mut |_| Err("a pack-backed material section needs an explicit material-card loader".into()))
     }
     fn read_with_gas_sources(
         bytes: &[u8],
         max_block: usize,
         gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>,
+        load_material: &mut dyn FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlateValveInputError> {
         if bytes.len()>MAX_PLATE_VALVE_PERFORMANCE_BYTES || !(1..=65536).contains(&max_block) {
             return Err(bad(0,"input exceeds 4 MiB or callback capacity is outside 1..=65536"));
@@ -433,15 +475,45 @@ impl Parsed {
         let section_count=r.count("sections",MAX_SECTIONS)?;
         if section_count==0 {return Err(bad(r.line,"at least one material section is required"));}
         let mut sections=Vec::with_capacity(section_count);
+        let mut section_provenance=Vec::with_capacity(section_count);
+        let mut packs:Vec<(String,NormalizedMaterialCardPack)>=Vec::new();
         for _ in 0..section_count {
-            let mut row=r.row("section")?;let kind=row.word()?;
-            let thickness=row.scalar()?;let density=row.scalar()?;
-            let section=match kind {
-                "isotropic"=>PlateSection::isotropic(row.scalar()?,row.scalar()?,thickness,density),
-                "orthotropic"=>PlateSection::orthotropic_plane_stress_at_angle(row.scalar()?,row.scalar()?,
-                    row.scalar()?,row.scalar()?,thickness,density,row.scalar()?),
-                _=>return Err(bad(r.line,"section must be explicitly isotropic or orthotropic")),
-            }.map_err(PlateValveInputError::Geometry)?;row.finish()?;sections.push(section);
+            checkpoint(gate)?;
+            let mut row=r.row("section")?;let kind=row.word()?;let line=row.line;
+            let ingress=|e:crate::material_source::MaterialIngressError|PlateValveInputError::MaterialSource{line,source:e.0};
+            let (section,origin)=match kind {
+                "isotropic"|"orthotropic"=>{
+                    let thickness=row.scalar()?;let density=row.scalar()?;
+                    let section=if kind=="isotropic" {PlateSection::isotropic(row.scalar()?,row.scalar()?,thickness,density)}
+                        else {PlateSection::orthotropic_plane_stress_at_angle(row.scalar()?,row.scalar()?,
+                            row.scalar()?,row.scalar()?,thickness,density,row.scalar()?)}.map_err(PlateValveInputError::Geometry)?;
+                    let label=fixture_label(&row.rest()).map_err(ingress)?;
+                    (section,format!("fixture {label}"))
+                }
+                "material"=>{
+                    let model=match row.word()? {
+                        "isotropic"=>PlateMaterialModel::Isotropic,
+                        "orthotropic12"=>PlateMaterialModel::Orthotropic12,
+                        "orthotropic21"=>PlateMaterialModel::Orthotropic21,
+                        _=>return Err(bad(line,"a material section needs isotropic, orthotropic12 or orthotropic21")),
+                    };
+                    let thickness=row.scalar()?;
+                    let angle=if model==PlateMaterialModel::Isotropic {0.0} else {row.scalar()?};
+                    let record=MaterialRecord::parse(&row.rest()).map_err(ingress)?;
+                    if !packs.iter().any(|(path,_)|*path==record.pack) {
+                        if packs.len()>=MAX_SECTIONS {return Err(bad(line,"too many material packs"));}
+                        let pack=load_material(&record.pack).map_err(|source|PlateValveInputError::MaterialSource{line,source})?;
+                        packs.push((record.pack.clone(),pack));
+                    }
+                    let pack=&packs.iter().find(|(path,_)|*path==record.pack).expect("loaded above").1;
+                    let card=record.card(pack).map_err(ingress)?;
+                    let point=record.query_point(card).map_err(ingress)?;
+                    let (section,_)=plate_section(card,&point,model,thickness,angle).map_err(ingress)?;
+                    (section,record.provenance(pack))
+                }
+                _=>return Err(bad(line,"section must be isotropic, orthotropic or a pack-backed material section")),
+            };
+            sections.push(section);section_provenance.push(origin);
         }
         let node_count=r.count("nodes",MAX_NODES)?;
         if node_count<3 {return Err(bad(r.line,"at least three original mesh nodes are required"));}
@@ -527,7 +599,7 @@ impl Parsed {
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
         Ok(Self{gas_records,config,full_scale_pa,air,duct,exterior,observation,chart,plate,symmetry,slit_length_m,initial,closure,relaxation,forces,max_angular_step,
-            schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
+            schedule,nodes:node_count,triangles:triangle_count,sections:section_count,section_provenance})
     }
 }
 fn read_receiver(row:&mut Row<'_>)->Result<CircularOutletReceiver,PlateValveInputError> {
@@ -585,6 +657,8 @@ impl<'a> Row<'a> {
     fn finish(mut self)->Result<(),PlateValveInputError> {
         if self.fields.next().is_some() {return Err(bad(self.line,"unexpected extra field"));}Ok(())
     }
+    /// Every remaining field, consuming the row.
+    fn rest(&mut self)->Vec<&'a str> {self.fields.by_ref().collect()}
 }
 
 #[cfg(test)]

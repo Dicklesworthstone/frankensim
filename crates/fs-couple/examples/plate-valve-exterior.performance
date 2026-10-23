@@ -17,7 +17,7 @@ initial 0.0002 0
 contact 1000000000000 2 0.5 0.0002
 source illustrative-not-measured
 sections 1
-section isotropic 0.0003 900 4000000000 0.3
+section isotropic 0.0003 900 4000000000 0.3 fixture authored-illustrative-blade-not-measured
 nodes 21
 node 0.0 0.0 1e-05 1
 node 0.004166666666666667 0.0 1e-05 0

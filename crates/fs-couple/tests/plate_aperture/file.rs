@@ -56,8 +56,13 @@ fn actual_regional_thickness_and_supplied_history_change_pressure_not_only_metad
     let c=render(&initial);let d=render(&initial.replace("memory_initial relaxed","memory_initial unrelaxed"));
     assert!(a.iter().zip(&b).any(|(x,y)|(x-y).abs()>1e-6));
     assert!(c.iter().zip(&d).any(|(x,y)|(x-y).abs()>1e-6));
-    let mut regional=INPUT.replace("sections 1\nsection isotropic 0.0003 900 4000000000 0.3",
-        "sections 2\nsection isotropic 0.0003 900 4000000000 0.3\nsection isotropic 0.0002 900 4000000000 0.3")
+    // Both rows keep the example's fixture label; the target must occur once, so
+    // an edit of the example cannot turn this rewrite into a silent no-op.
+    let one_section="sections 1\nsection isotropic 0.0003 900 4000000000 0.3 fixture authored-illustrative-blade-not-measured";
+    assert_eq!(INPUT.matches(one_section).count(),1);
+    let mut regional=INPUT.replace(one_section,
+        "sections 2\nsection isotropic 0.0003 900 4000000000 0.3 fixture authored-illustrative-blade-not-measured\n\
+         section isotropic 0.0002 900 4000000000 0.3 fixture authored-illustrative-blade-not-measured")
         .replace("relaxation 1","relaxation 2")
         .replace("compile_limits", "region 1 4000000000 0.3 0 10000 1\nbranch 1000000000 0.004\ncompile_limits");
     regional=regional.lines().map(|line| {

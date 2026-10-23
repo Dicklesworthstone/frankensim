@@ -39,8 +39,10 @@ initial OPENING_COORDINATE_M VELOCITY_M_PER_S
 contact K_PA_PER_M_ALPHA ALPHA CHI_S_PER_M MAX_PENETRATION_M
 source SINGLE_TOKEN_SOURCE_LABEL
 sections COUNT
-section isotropic THICKNESS_M DENSITY_KG_PER_M3 YOUNG_PA POISSON_RATIO
-# Alternatively: section orthotropic THICKNESS_M DENSITY_KG_PER_M3 E1_PA E2_PA NU12 G12_PA ANGLE_RAD
+section isotropic THICKNESS_M DENSITY_KG_PER_M3 YOUNG_PA POISSON_RATIO fixture LABEL
+# Alternatively: section orthotropic THICKNESS_M DENSITY_KG_PER_M3 E1_PA E2_PA NU12 G12_PA ANGLE_RAD fixture LABEL
+# Or pack-backed: section material isotropic THICKNESS_M PACK STATE [AXIS=VALUE ...]
+#             or: section material orthotropic12|orthotropic21 THICKNESS_M ANGLE_RAD PACK STATE [AXIS=VALUE ...]
 nodes COUNT
 node X_M Y_M REST_GAP_M SUPPORT_FLAG
 triangles COUNT
@@ -67,6 +69,19 @@ opening coordinate is the retained structural coordinate, not necessarily the
 physical mean clearance of an asymmetric slit. Contact provenance retains the
 source label as supplied numeric data; it does not mint material-identification
 or measured-data authority.
+
+Every section names where its material comes from (bead pexfp.32). Bare numbers
+must end in an explicit `fixture LABEL`; without one the file refuses. The
+committed examples' blade (E 4 GPa, rho 900 kg/m^3, nu 0.3) is labelled
+`fixture authored-illustrative-blade-not-measured`: authored, not cane. A
+`section material` record instead names a compiled material-card pack, relative to
+this file, the state its card was compiled at (`MaterialStateId` process: a cane
+reed must say `water-soaked` or `dry`), and the query point in the card's own
+normalized units. Its density, Young's modulus and Poisson ratio (or
+`young_modulus_1`, `young_modulus_2`, `shear_modulus_12` and `poisson_ratio_12`)
+resolve through `fs_material::state_point`. A card compiled at another state, or a
+missing property, refuses by name. The render sidecar's `section_sources` lists
+each section's pack, hash, state and point, or its fixture label.
 
 To include viscous flow through the reed channel, insert `slit_length 0.001`
 immediately after the `aperture` record, replacing that illustrative one-millimetre
