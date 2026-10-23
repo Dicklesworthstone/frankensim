@@ -79,3 +79,36 @@ fn the_radiated_pressure_scales_with_density_and_arrives_with_the_sound_speed() 
     std::fs::write(&bad, "293.15 101325\n").unwrap();
     assert!(ambient::Ambient::selected(bad.to_str()).is_err());
 }
+
+#[test]
+fn a_thermochemical_record_resolves_only_through_its_supplied_source_packs() {
+    // Synthetic packs (the music_render CLI's own fixture), not a real gas.
+    let directory = std::env::temp_dir().join(format!("fs-piano-thermochemical-{}-{}",
+        std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&directory).unwrap();
+    let packs = thermochemical_support::packs("specimen-gas", 0.028, 3.5, 200.0);
+    let [species, nasa9, transport] = ["species", "nasa9", "transport"].map(|name| directory.join(format!("{name}.pack")));
+    std::fs::write(&species, packs.species.to_bytes()).unwrap();
+    std::fs::write(&nasa9, packs.nasa9.to_bytes()).unwrap();
+    std::fs::write(&transport, packs.transport.claims_pack().to_bytes()).unwrap();
+    let record = directory.join("specimen.gas");
+    std::fs::write(&record, "thermochemical 293.15 101325 mole 1 specimen-gas 1\n").unwrap();
+    let args = |extra: &[&str]| -> Vec<String> {
+        ["--gas-record", record.to_str().unwrap()].iter().chain(extra).map(|s| s.to_string()).collect()
+    };
+    // Without its source packs the record refuses by name; nothing is defaulted.
+    let bare = Options::parse(&args(&[])).unwrap();
+    let refused = selected_air(&bare).unwrap_err();
+    assert!(refused.contains("explicit source registry"), "{refused}");
+    // With them it is that gas: ideal-gas density p M / (R T) of the pack's species.
+    let supplied = Options::parse(&args(&["--gas-component", species.to_str().unwrap(), nasa9.to_str().unwrap(),
+        transport.to_str().unwrap(), "--gas-water", "none", "--gas-phase", "frozen"])).unwrap();
+    let air = selected_air(&supplied).unwrap();
+    assert_eq!(air.source, ambient::Source::CommandLine);
+    let density = 101_325.0 * 0.028 / (fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * 293.15);
+    assert!((air.gas.density / density - 1.0).abs() < 1e-12, "{} vs {density}", air.gas.density);
+    assert!(air.receipt().contains("--gas-record"));
+    // The packs without a water identity or phase refuse at the front door.
+    assert!(Options::parse(&args(&["--gas-component", species.to_str().unwrap(), nasa9.to_str().unwrap(),
+        transport.to_str().unwrap()])).is_err());
+}

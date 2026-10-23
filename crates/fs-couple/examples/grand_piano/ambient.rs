@@ -5,10 +5,12 @@
 //! fraction follows from the gas owner's Buck-1996 saturation law) through the
 //! gas owner. The Model D soundboard reads the SAME record for its wood's
 //! moisture content (`steinway_d::BoardEnvironment`). `--gas-record FILE`
-//! overrides it. Every report names which of the two supplied the air.
+//! overrides it; a `thermochemical ...` record resolves only through supplied
+//! `--gas-component` source packs. Every report names which of the two
+//! supplied the air.
 use fs_bem::helmholtz::Medium;
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::read_gas_record;
+use fs_material::gas_species::input::{ThermochemicalSources, read_gas_record};
 use std::io::Read;
 
 /// The committed reference record shared by every built-in instrument.
@@ -40,19 +42,26 @@ impl Ambient {
     }
 
     /// `--gas-record FILE`: exactly one shared gas declaration.
-    pub fn load(path: &str) -> Result<Self, String> {
+    pub fn load(path: &str) -> Result<Self, String> { Self::load_with(path, None) }
+
+    /// `--gas-record FILE`, resolving a thermochemical record through `sources`.
+    pub fn load_with(path: &str, sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, String> {
         let mut text = String::new();
         std::fs::File::open(path).map_err(|e| format!("--gas-record {path}: {e}"))?
             .take(MAX_RECORD_BYTES + 1).read_to_string(&mut text)
             .map_err(|e| format!("--gas-record {path}: {e}"))?;
         if text.len() as u64 > MAX_RECORD_BYTES { return Err("--gas-record exceeds 8 KiB".into()); }
-        let gas = parse(&text).map_err(|e| format!("--gas-record {path}: {e}"))?;
+        let gas = parse_with(&text, sources).map_err(|e| format!("--gas-record {path}: {e}"))?;
         Ok(Self { gas, source: Source::CommandLine })
     }
 
     /// `--gas-record FILE` when given, otherwise the reference record.
-    pub fn selected(path: Option<&str>) -> Result<Self, String> {
-        path.map_or_else(|| Ok(Self::reference()), Self::load)
+    pub fn selected(path: Option<&str>) -> Result<Self, String> { Self::selected_with(path, None) }
+
+    /// As `selected`, resolving a thermochemical record through `sources`.
+    pub fn selected_with(path: Option<&str>, sources: Option<&ThermochemicalSources<'_>>)
+        -> Result<Self, String> {
+        path.map_or_else(|| Ok(Self::reference()), |path| Self::load_with(path, sources))
     }
 
     /// Exterior medium: this gas's density and sound speed.
@@ -73,9 +82,12 @@ impl Ambient {
 }
 
 /// Exactly one shared gas declaration and nothing else; never defaults to air.
-pub fn parse(record: &str) -> Result<GasState, String> {
+pub fn parse(record: &str) -> Result<GasState, String> { parse_with(record, None) }
+
+/// As `parse`; a thermochemical record resolves only through `sources`.
+pub fn parse_with(record: &str, sources: Option<&ThermochemicalSources<'_>>) -> Result<GasState, String> {
     let mut words = record.split_ascii_whitespace();
-    let gas = read_gas_record(&mut words, None, None).map_err(|e| format!("ambient gas refused: {e}"))?;
+    let gas = read_gas_record(&mut words, None, sources).map_err(|e| format!("ambient gas refused: {e}"))?;
     if words.next().is_some() { return Err("ambient gas record has trailing fields".into()); }
     Ok(*gas.state())
 }

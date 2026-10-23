@@ -24,6 +24,17 @@ mod hammer_materials;
 mod string_sections;
 mod string_polarization;
 mod cavity;
+#[path = "../../src/bin/music_render/json.rs"]
+mod json;
+use json::json_string;
+// The shared native gas-source loader: --gas-component/--gas-water/--gas-phase.
+#[allow(dead_code)]
+#[path = "../../src/bin/music_render/thermochemical.rs"]
+mod thermochemical;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
+mod thermochemical_support;
 mod rayleigh_loading;
 mod ambient;
 
@@ -39,6 +50,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--dampers estimated | point | pads.fspd] [--fast-dampers] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
     [--cavity enclosure.fspc] [--gas-record air.gas]
+    [--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack ... --gas-water none|ID --gas-phase frozen|liquid-water]
     [--rayleigh-loading sides,min_hz,max_hz,samples]
     [--radiation-ports 1..128]
     [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
@@ -84,6 +96,9 @@ crush and Prony terms) choose another card instead.
 board's fs-matdb packs (default: the built-in FPL Sitka spruce, sugar pine and
 hard maple); the cut-off bar takes the rib pack. The board's wood moisture
 follows the selected air (--gas-record or the committed humid record).
+A `thermochemical ...` --gas-record (Ne, SF6, He or any packed species)
+resolves only through the --gas-component source packs it names, with explicit
+--gas-water and --gas-phase; without them it refuses. Nothing is defaulted.
 --rt0425-string-damping uses the published per-key R_u and eta_u for the
 preset scale's intrinsic string losses instead of the estimated common law.
 --equilibrate-board-mass solves a flat geometric board in mass-diagonal
@@ -310,6 +325,7 @@ struct Options {
     hammers: Option<String>, string_sections: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
     gas_record: Option<String>,
+    gas_sources: thermochemical::Options,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
     rt0425_bridge_contacts: bool, estimated_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
@@ -341,6 +357,7 @@ impl Default for Options {
             rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             string_stretching: None, string_polarization: None, cavity: None, gas_record: None,
+            gas_sources: thermochemical::Options::default(),
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -357,6 +374,10 @@ impl Default for Options {
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self::default();
+        // The shared loader takes --gas-record and its source packs first.
+        let (args, gas_sources) = thermochemical::Options::extract(args)?;
+        options.gas_record = gas_sources.record.as_ref().map(|path| path.display().to_string());
+        options.gas_sources = gas_sources;
         let mut seen = std::collections::BTreeSet::new();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
@@ -391,7 +412,6 @@ impl Options {
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--cavity" => options.cavity = Some(value.clone()),
-                "--gas-record" => options.gas_record = Some(value.clone()),
                 "--felt-pack" => options.felt_pack = Some(value.clone()),
                 "--board-panel-pack" => options.board_panel_pack = Some(value.clone()),
                 "--board-rib-pack" => options.board_rib_pack = Some(value.clone()),
@@ -1020,6 +1040,13 @@ fn render_with_board_damping(path: &str, scale: Vec<geometry::Course>, modes: &[
     -> Result<(), String> {
     render_with_cavity(path, scale, modes, surface, options, stretching, polarization, physical_damping, None)
 }
+/// The selected air: the committed reference, or --gas-record resolved with
+/// the --gas-component packs supplied (a thermochemical record needs them).
+fn selected_air(options: &Options) -> Result<ambient::Ambient, String> {
+    let loaded = options.gas_sources.load()?;
+    let bindings = loaded.bindings();
+    ambient::Ambient::selected_with(options.gas_record.as_deref(), loaded.registry(&bindings).as_ref())
+}
 #[allow(clippy::too_many_arguments)]
 fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
@@ -1064,7 +1091,7 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         println!("{}", cavity.report());
     }
     // The exterior air is data: the committed reference record or --gas-record.
-    let ambient = ambient::Ambient::selected(options.gas_record.as_deref())?;
+    let ambient = selected_air(options)?;
     println!("{}", ambient.receipt());
     if let Some(load_options) = &options.rayleigh_loading {
         let load = rayleigh_loading::prepare(
@@ -1276,7 +1303,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
     let polarization = options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path, &scale)).transpose()?;
     // A `gas,ambient` cavity holds the same selected air as the exterior.
-    let air = ambient::Ambient::selected(options.gas_record.as_deref())?;
+    let air = selected_air(&options)?;
     let cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?
         .map(|cavity| cavity.in_air(&air.gas));
     let scale_source = options.string_sections.as_deref().or(options.scale.as_deref()).unwrap_or(if options.preset.is_some() {
@@ -1284,7 +1311,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_report();
     let preset = options.uses_preset_board().then(|| {
-        let materials = preset_board_materials(&options, &ambient::Ambient::selected(options.gas_record.as_deref())?)?;
+        let materials = preset_board_materials(&options, &air)?;
         steinway_d::build_with_materials(options.mesh_divisions, !options.estimated_bridge_contacts, &materials)
     }).transpose()?;
     if let Some(preset) = &preset {
