@@ -452,6 +452,9 @@ fn selected_reed_material_loss_refuses_authored_damping_and_out_of_band_modes() 
     assert!(PlateApertureReduction::from_material_chart(narrow, one_mode_options(&options), &gate).is_err());
 }
 
+#[path = "material/spatial.rs"]
 mod spatial;
+#[path = "material/pressure.rs"]
 mod pressure;
+#[path = "material/wetted.rs"]
 mod wetted;
