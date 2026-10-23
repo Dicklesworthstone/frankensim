@@ -1,8 +1,8 @@
 frankensim-drum-spec-v1
 # Illustrative ten-lug-like installed stress, NOT measured lug torque/force data.
 geometry,0.1703,0.1651,0.1778
-head,batter,0.000254,4000000000,0.38,1390,3000,0.001
-head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
+head,batter,0.000254,4000000000,0.38,1390,3000,stated-unknown
+head,resonant,0.0000762,4000000000,0.38,1390,1500,stated-unknown
 # order, cosine N/m, sine N/m. Phase is deliberately arbitrary.
 tension_harmonic,batter,10,120,-35
 tension_harmonic,resonant,10,60,20

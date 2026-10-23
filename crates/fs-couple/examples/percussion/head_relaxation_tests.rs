@@ -20,6 +20,11 @@ fn energy(system:&Mechanics)->f64 {
 fn complete_material_inputs_refuse_duplicates_missing_data_and_double_counted_loss() {
     let valid=text();let material=Spec::read(&valid).unwrap();material.admit(&specimen()).unwrap();
     assert!(material.admit(&drum_spec::Spec::reference()).is_err());
+    // A file's heads reach the law only by declaring loss relaxation.
+    let relaxing=include_str!("estimated-relaxing-drum.fsd");
+    material.admit(&drum_spec::Spec::read(relaxing).unwrap()).unwrap();
+    let unknown=drum_spec::Spec::read(&relaxing.replace(",relaxation",",stated-unknown")).unwrap();
+    assert!(material.admit(&unknown).is_err());
     for bad in [valid.replace("head,batter,4000000000\n",""),valid.replace("initial,relaxed\n",""),
         valid.replace("band_hz,20,2000","band_hz,2000,20"),valid.replace("0.001","NaN"),
         valid.replace("1000000000","-1"),format!("{valid}head,resonant,4000000000\n"),

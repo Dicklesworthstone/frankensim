@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Stroke, drum_with_air, drum_with_spec, mechanics::Mechanics};
+use crate::{Stroke, drum_with_spec, mechanics::Mechanics};
 use fs_exec::CancelGate;
 
 /// The shipped default instrument environment (ruling 6205), which the
@@ -9,18 +9,22 @@ const AMBIENT: &str = "293.15 101325 0.65";
 fn text(s: Spec) -> String {
     let mut out=format!("{HEADER}\ngeometry,{:.17e},{:.17e},{:.17e}\n",
         s.radius_m,s.depth_m,s.outer_radius_m);
-    for (name,h) in ["batter","resonant"].into_iter().zip(s.heads) {
-        out.push_str(&format!("head,{name},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}\n",
-            h.thickness_m,h.young_pa,h.poisson,h.density_kg_m3,h.tension_n_m,h.damping_ratio));
+    for ((name,h),loss) in ["batter","resonant"].into_iter().zip(s.heads).zip(s.head_loss) {
+        let loss=if loss==HeadLoss::Relaxation {RELAXATION_HEAD_LOSS} else {STATED_UNKNOWN_HEAD_LOSS};
+        out.push_str(&format!("head,{name},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{loss}\n",
+            h.thickness_m,h.young_pa,h.poisson,h.density_kg_m3,h.tension_n_m));
     }
     out.push_str(&format!("mesh,{},{}\nband_hz,{:.17e},{:.17e}\n",
         s.radial_intervals,s.azimuths,s.band_hz[0],s.band_hz[1]));
     out.push_str(&format!("ambient,{AMBIENT}\n"));
     out
 }
-/// What `text` declares: the spec with its air read from the ambient row.
+/// What `text` declares: the spec with its air read from the ambient row, and
+/// each head's loss as its file token. A file cannot carry a fixture's ratio.
 fn declared(s: Spec) -> Spec {
-    Spec {ambient:crate::ambient::Ambient::described(AMBIENT).unwrap(),..s}
+    let file_loss=|loss| if loss==HeadLoss::Relaxation {loss} else {HeadLoss::StatedUnknown};
+    Spec {ambient:crate::ambient::Ambient::described(AMBIENT).unwrap(),
+        heads:s.heads.map(|h| Head {damping_ratio:0.0,..h}),head_loss:s.head_loss.map(file_loss),..s}
 }
 fn small() -> Spec { Spec {radial_intervals:2,azimuths:16,..Spec::reference()} }
 fn stroke() -> Stroke {Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])}}
@@ -76,6 +80,41 @@ fn incomplete_duplicate_nonfinite_and_nonphysical_inputs_refuse() {
 }
 
 #[test]
+fn a_head_states_where_its_loss_comes_from_and_an_authored_ratio_refuses() {
+    let valid=text(small());
+    let spec=Spec::read(&valid).unwrap();
+    assert_eq!(spec.head_loss,[HeadLoss::StatedUnknown;2]);
+    assert_eq!(spec.heads.map(|h|h.damping_ratio),[0.0;2]);
+    assert!(spec.admit_head_loss(false).is_ok());
+    // Every number refuses, zero included: zero drag is stated, not authored.
+    for ratio in ["0.001","0","1e-3"] {
+        let bad=valid.replacen(",stated-unknown",&format!(",{ratio}"),1);
+        let refusal=Spec::read(&bad).unwrap_err().to_string();
+        assert!(refusal.contains("has no source"),"{ratio}: {refusal}");
+    }
+    // No file reaches the library fixture: neither its name nor its ratio is a token.
+    for token in ["fitted","fixture","Fixture","0.001"] {
+        assert!(Spec::read(&valid.replacen(",stated-unknown",&format!(",{token}"),1)).is_err(),"{token}");
+    }
+    let relaxing=Spec::read(&valid.replace(",stated-unknown",",relaxation")).unwrap();
+    assert_eq!(relaxing.head_loss,[HeadLoss::Relaxation;2]);
+    assert!(relaxing.admit_head_loss(false).is_err());
+    assert!(relaxing.admit_head_loss(true).is_ok());
+    // Only the library fixture carries a ratio.
+    let mut s=small();s.head_loss[0]=HeadLoss::StatedUnknown;assert!(s.validate().is_err());
+    s.heads[0].damping_ratio=0.0;assert!(s.validate().is_ok());
+    assert_eq!(HeadLoss::StatedUnknown.receipt("batter",0.0),
+        "head batter film and edge loss: STATED UNKNOWN, entered as 0; its decays are upper bounds");
+    // The shipped specimens state their losses.
+    for (file,loss) in [(include_str!("estimated_drum.fsd"),HeadLoss::StatedUnknown),
+        (include_str!("estimated-varied-tension.fsd"),HeadLoss::StatedUnknown),
+        (include_str!("illustrative-ten-lug.fsd"),HeadLoss::StatedUnknown),
+        (include_str!("estimated-relaxing-drum.fsd"),HeadLoss::Relaxation)] {
+        assert_eq!(Spec::read(file).unwrap().head_loss,[loss;2]);
+    }
+}
+
+#[test]
 fn option_composes_with_playing_and_existing_physical_images() {
     let mut args:Vec<_>=["drum-stretch-mic","128","--drum-spec","instrument.fsd",
         "--cavity-modes","--prepared-nonlinear","--strike-speed-m-s","4"]
@@ -109,10 +148,14 @@ fn clocks_acoustic_band_and_fixed_snare_geometry_are_not_silently_changed() {
     assert!(Spec {radius_m:0.08,outer_radius_m:0.09,..spec}.admit_snare(wires).is_err());
 }
 
+/// A file cannot carry the library fixture's 0.001 ratio, so the original here
+/// is the library reference with the loss its file declares (stated unknown).
 #[test]
 fn supplied_reference_keeps_the_original_contact_air_and_accepted_trajectory() {
     let supplied=Spec::read(&text(Spec::reference())).unwrap();
-    let mut original=drum_with_air(64,2e-6,false,false,None,false,stroke(),false,None).unwrap();
+    assert_eq!(supplied,declared(Spec::reference()));
+    let mut original=drum_with_spec(64,2e-6,false,false,None,false,stroke(),false,None,
+        Some(declared(Spec::reference()))).unwrap();
     let mut imported=drum_with_spec(64,2e-6,false,false,None,false,stroke(),false,None,Some(supplied)).unwrap();
     assert_eq!(original.observer_a,imported.observer_a);
     assert_eq!(original.observer_b,imported.observer_b);
