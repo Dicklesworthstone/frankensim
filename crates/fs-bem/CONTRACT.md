@@ -1000,6 +1000,53 @@ open owner polls cancellation through preparation, assembly, LU rows, RHS and
 residuals; arbitrary caller-supplied nonlocal applications remain indivisible.
 There is no repair of negative resistance, clipping or tolerance promotion.
 
+`OpenOptions.workers` runs four steps on declared threads: the static and
+dynamic facet-pair moments, the outgoing Gram form, and the LU (through
+`fs_la::eigen_complex::with_lu_workers`).
+- The results are bitwise those of one worker. Pair values are computed in
+  row blocks and scattered in the serial order. Each Gram entry takes its
+  directions in the serial order.
+- One worker keeps the serial loops and their per-pair poll points. More
+  workers poll once per block of `4 * workers` facet rows.
+- Zero workers refuse. `open_screen_workers_are_bitwise` checks 2, 3 and 7
+  workers at a real and a damped frequency.
+
+`reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
+end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
+geometry.
+- The pipe is a zero-thickness "cup": a cylinder closed by a hemisphere, so
+  its only free edge is the mouth rim. The rim is quadratically graded.
+- Two axial monopoles with strengths 1 and `-exp(-i k delta)` cancel their
+  backward plane waves, so the forward amplitude cannot vanish. The screen
+  is rigid.
+- Everything behind the stations changes only the incident amplitude, never
+  `R = B/A`.
+- The total pressure is read on the node ring `r = 0.6276 a` of the first
+  radial mode, one station per receiver request. It is fitted to a standing
+  wave referred to the rim plane.
+- Each row carries `R`, `l/a` from the fit and from the interior zero
+  crossing, the fit residual and condition, `k * span` and the station
+  pressures.
+
+`tests/pipe_end.rs` measures; it has no accuracy gate, which .100's owner
+declares. The dense cap binds on facets (8192), so the rungs are 36, 46 and
+58 vertices per ring (3114, 5060 and 8062 facets, ratio about 1.27; the
+order estimate is weak at that ratio).
+- Against `fs_duct::levine_schwinger` at the finest rung, for ka 0.05 to 3.5:
+  `|R - R_LS|` is 2.4e-4 to 9.8e-4 and `|l/a - LS|` is 1.1e-4 to 7.7e-4. The
+  observed order is about 2.3.
+- ka 3.8 does not converge: `|R - R_LS|` is 3.6-3.7e-2 on every rung.
+  Suspected cause: the axial sources excite the first radial mode. It is
+  barely evanescent there (`exp(-0.49 z/a)`), reaches the mouth and converts.
+- The interior zero crossing is biased: 1.3e-2 at ka 0.05, and meaningless
+  for `k * span >= 0.45`.
+- Planted negatives:
+  - the conjugate-convention fit flips `l/a` exactly and misses `R` by 1.1-1.9;
+  - receivers on the axis at ka 3.6 raise the fit residual 260x (0.25
+    against 9.6e-4).
+- Cup lengths 4.6 a and 5.6 a move `R` by 1.3e-3 at ka 1 and 9.6e-5 at
+  ka 3, within the rung's own discretization error.
+
 `tests/open_and_impedance.rs` authors strict 1e-3 thin-disc mass/complex
 impedance/scattering and Robin-sphere pulsating/plane-wave gates, plus G0
 passivity/topology/cap tests, G1 edge ladder, G3 fictitious-frequency condition

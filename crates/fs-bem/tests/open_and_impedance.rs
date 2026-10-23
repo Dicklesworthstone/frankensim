@@ -57,6 +57,7 @@ fn options(level: u32) -> OpenOptions {
         maximum_unknowns: 8192,
         maximum_cache_bytes: 1_000_000_000,
         maximum_work: u64::MAX,
+        workers: 1,
     }
 }
 /// Actual mesh data, not a production disc-shaped solver. r=sin(pi*t/2)
@@ -1895,6 +1896,86 @@ fn open_and_impedance_bitwise_repeat() {
         "same-ISA deterministic arithmetic",
         "repeat",
         1,
+        C64::ZERO,
+        C64::ZERO,
+        0.0,
+        0.0,
+        start,
+        "",
+    );
+}
+
+#[test]
+fn open_screen_workers_are_bitwise() {
+    // Declared workers assemble the pair moments, the outgoing Gram form and
+    // the LU on threads; every bit must match the serial owner. Both real
+    // and damped frequencies, and a row count that is not a block multiple.
+    let start = Instant::now();
+    let surface = disc(5, 24);
+    let medium = Medium::air();
+    let v: Vec<C64> = surface
+        .vertices()
+        .iter()
+        .map(|x| C64::new(1.0 + x[0], 0.5 * x[1]))
+        .collect();
+    let bc = SurfaceBc {
+        drive_velocity: &v,
+        admittance: Admittance::Rigid,
+    };
+    let serial = PreparedScreen::new(&surface, 2.0, options(0), || false).unwrap();
+    let a = serial.solve(2.0, medium, bc, || false).unwrap();
+    let ad = serial
+        .solve_laplace(
+            C64::new(30.0, -1.5 * medium.sound_speed),
+            medium,
+            bc,
+            || false,
+        )
+        .unwrap();
+    for workers in [2, 3, 7] {
+        let parallel = PreparedScreen::new(
+            &surface,
+            2.0,
+            OpenOptions {
+                workers,
+                ..options(0)
+            },
+            || false,
+        )
+        .unwrap();
+        let b = parallel.solve(2.0, medium, bc, || false).unwrap();
+        bits(a.pressure_jump_pa(), b.pressure_jump_pa());
+        assert_eq!(
+            a.radiated_power_w().unwrap().to_bits(),
+            b.radiated_power_w().unwrap().to_bits()
+        );
+        let bd = parallel
+            .solve_laplace(
+                C64::new(30.0, -1.5 * medium.sound_speed),
+                medium,
+                bc,
+                || false,
+            )
+            .unwrap();
+        bits(ad.pressure_jump_pa(), bd.pressure_jump_pa());
+    }
+    assert!(matches!(
+        PreparedScreen::new(
+            &surface,
+            2.0,
+            OpenOptions {
+                workers: 0,
+                ..options(0)
+            },
+            || false
+        ),
+        Err(HelmholtzError::BadParameter { .. })
+    ));
+    record(
+        "open-screen-workers",
+        "serial and declared-worker assembly, Gram and LU; bitwise",
+        "workers",
+        3,
         C64::ZERO,
         C64::ZERO,
         0.0,

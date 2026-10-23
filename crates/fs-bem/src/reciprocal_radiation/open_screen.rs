@@ -163,6 +163,47 @@ pub struct OpenOptions {
     pub maximum_unknowns: usize,
     pub maximum_cache_bytes: usize,
     pub maximum_work: u64,
+    /// Workers for the pair assembly, the outgoing Gram form and the LU
+    /// factor. Results are bitwise identical at every count. One worker keeps
+    /// the serial loops and their per-pair poll points; more poll per block.
+    pub workers: usize,
+}
+
+/// Facet rows per worker in one parallel block; a block's pair values are
+/// held until they are scattered in the serial order.
+const ROWS_PER_WORKER: usize = 4;
+
+/// `work(row)` for every row of `rows` on `workers` threads (row `start + t`
+/// goes to thread `t mod workers`), returned in row order. Scattering the
+/// values in that order reproduces the serial loop's bits.
+fn rows_on_workers<T: Send>(
+    rows: core::ops::Range<usize>,
+    workers: usize,
+    work: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let (start, count) = (rows.start, rows.len());
+    let mut out: Vec<Option<T>> = (0..count).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let work = &work;
+        let handles: Vec<_> = (0..workers.min(count))
+            .map(|t| {
+                scope.spawn(move || {
+                    (t..count)
+                        .step_by(workers)
+                        .map(|r| (r, work(start + r)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (r, value) in handle.join().expect("open screen worker panicked") {
+                out[r] = Some(value);
+            }
+        }
+    });
+    out.into_iter()
+        .map(|v| v.expect("every row is computed"))
+        .collect()
 }
 /// Dense open P1 owner. Over-cap open P1 needs a P1 hypersingular iterative
 /// route; the closed P0 .109 route is not mislabeled as that implementation.
@@ -199,6 +240,7 @@ impl<'a> PreparedScreen<'a> {
             || ![4, 8].contains(&options.triangle_order)
             || options.angular_refinement > 2
             || options.maximum_work == 0
+            || options.workers == 0
         {
             return Err(bad(
                 "invalid open screen frequency or quadrature/work declaration",
@@ -280,37 +322,62 @@ impl<'a> PreparedScreen<'a> {
             bytes,
         };
         out.admit_work()?;
-        for i in 0..nf {
-            for j in i..nf {
+        let both = |out: &Self, i: usize, j: usize| {
+            let forward = out.static_pair(i, j);
+            let back = if i == j {
+                forward
+            } else {
+                out.static_pair(j, i)
+            };
+            (forward, back)
+        };
+        if options.workers <= 1 {
+            for i in 0..nf {
+                for j in i..nf {
+                    poll(&mut cancelled)?;
+                    let (forward, back) = both(&out, i, j);
+                    out.add_static(i, j, forward, back);
+                }
+            }
+        } else {
+            let block = ROWS_PER_WORKER * options.workers;
+            for first in (0..nf).step_by(block) {
                 poll(&mut cancelled)?;
-                let forward = out.static_pair(i, j);
-                let back = if i == j {
-                    forward
-                } else {
-                    out.static_pair(j, i)
-                };
-                let single = 0.5 * (forward.single + back.single);
-                for a in 0..3 {
-                    for b in 0..3 {
-                        let moment = 0.5 * (forward.shape[a][b] + back.shape[b][a]);
-                        let curl = -dot(out.facets[i].curl[a], out.facets[j].curl[b]) * single;
-                        let normal = dot(out.facets[i].normal, out.facets[j].normal) * moment;
-                        if let (Some(u), Some(v)) =
-                            (out.dof[out.facets[i].ids[a]], out.dof[out.facets[j].ids[b]])
-                        {
-                            out.static_curl[u * n + v] += curl;
-                            out.static_normal[u * n + v] += normal;
-                            if i != j {
-                                out.static_curl[v * n + u] += curl;
-                                out.static_normal[v * n + u] += normal;
-                            }
-                        }
+                let rows = first..nf.min(first + block);
+                let pairs = rows_on_workers(rows.clone(), options.workers, |i| {
+                    (i..nf).map(|j| both(&out, i, j)).collect::<Vec<_>>()
+                });
+                for (i, row) in rows.zip(pairs) {
+                    for (j, (forward, back)) in (i..nf).zip(row) {
+                        out.add_static(i, j, forward, back);
                     }
                 }
             }
         }
         poll(&mut cancelled)?;
         Ok(out)
+    }
+    fn add_static(&mut self, i: usize, j: usize, forward: Pair, back: Pair) {
+        let n = self.n;
+        let single = 0.5 * (forward.single + back.single);
+        for a in 0..3 {
+            for b in 0..3 {
+                let moment = 0.5 * (forward.shape[a][b] + back.shape[b][a]);
+                let curl = -dot(self.facets[i].curl[a], self.facets[j].curl[b]) * single;
+                let normal = dot(self.facets[i].normal, self.facets[j].normal) * moment;
+                if let (Some(u), Some(v)) = (
+                    self.dof[self.facets[i].ids[a]],
+                    self.dof[self.facets[j].ids[b]],
+                ) {
+                    self.static_curl[u * n + v] += curl;
+                    self.static_normal[u * n + v] += normal;
+                    if i != j {
+                        self.static_curl[v * n + u] += curl;
+                        self.static_normal[v * n + u] += normal;
+                    }
+                }
+            }
+        }
     }
     pub fn unknowns(&self) -> usize {
         self.n
@@ -344,6 +411,60 @@ impl<'a> PreparedScreen<'a> {
         }
         pair
     }
+    /// The dynamic remainder's single-layer and shape moments of a facet pair.
+    fn dynamic_pair<K: WaveNumber>(
+        &self,
+        wave: K,
+        real_frequency: bool,
+        i: usize,
+        j: usize,
+    ) -> (C64, [[C64; 3]; 3]) {
+        let mut single = C64::ZERO;
+        let mut shape = [[C64::ZERO; 3]; 3];
+        for x in &self.samples[i] {
+            for y in &self.samples[j] {
+                let mut g =
+                    green_remainder(wave, norm(sub(x.point, y.point))).scale(x.weight * y.weight);
+                if real_frequency {
+                    g.im = 0.0;
+                }
+                single = single + g;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        shape[a][b] = shape[a][b] + g.scale(x.shape[a] * y.shape[b]);
+                    }
+                }
+            }
+        }
+        (single, shape)
+    }
+    fn add_dynamic(
+        &self,
+        h: &mut [C64],
+        k2: C64,
+        i: usize,
+        j: usize,
+        single: C64,
+        shape: [[C64; 3]; 3],
+    ) {
+        let n = self.n;
+        for a in 0..3 {
+            for b in 0..3 {
+                if let (Some(u), Some(v)) = (
+                    self.dof[self.facets[i].ids[a]],
+                    self.dof[self.facets[j].ids[b]],
+                ) {
+                    let value = k2
+                        * shape[a][b].scale(dot(self.facets[i].normal, self.facets[j].normal))
+                        - single.scale(dot(self.facets[i].curl[a], self.facets[j].curl[b]));
+                    h[u * n + v] = h[u * n + v] + value;
+                    if i != j {
+                        h[v * n + u] = h[v * n + u] + value;
+                    }
+                }
+            }
+        }
+    }
     fn coefficients(&self, k: f64, direction: Point) -> Vec<C64> {
         let mut out = vec![C64::ZERO; self.n];
         for (f, samples) in self.facets.iter().zip(&self.samples) {
@@ -373,41 +494,29 @@ impl<'a> PreparedScreen<'a> {
         for i in 0..n * n {
             h[i] = C64::from_re(self.static_curl[i]) + k2.scale(self.static_normal[i]);
         }
-        for i in 0..self.facets.len() {
-            for j in i..self.facets.len() {
-                poll(cancelled)?;
-                let mut single = C64::ZERO;
-                let mut shape = [[C64::ZERO; 3]; 3];
-                for x in &self.samples[i] {
-                    for y in &self.samples[j] {
-                        let mut g = green_remainder(wave, norm(sub(x.point, y.point)))
-                            .scale(x.weight * y.weight);
-                        if real_frequency {
-                            g.im = 0.0;
-                        }
-                        single = single + g;
-                        for a in 0..3 {
-                            for b in 0..3 {
-                                shape[a][b] = shape[a][b] + g.scale(x.shape[a] * y.shape[b]);
-                            }
-                        }
-                    }
+        let nf = self.facets.len();
+        let workers = self.options.workers;
+        if workers <= 1 {
+            for i in 0..nf {
+                for j in i..nf {
+                    poll(cancelled)?;
+                    let (single, shape) = self.dynamic_pair(wave, real_frequency, i, j);
+                    self.add_dynamic(&mut h, k2, i, j, single, shape);
                 }
-                for a in 0..3 {
-                    for b in 0..3 {
-                        if let (Some(u), Some(v)) = (
-                            self.dof[self.facets[i].ids[a]],
-                            self.dof[self.facets[j].ids[b]],
-                        ) {
-                            let value = k2
-                                * shape[a][b]
-                                    .scale(dot(self.facets[i].normal, self.facets[j].normal))
-                                - single.scale(dot(self.facets[i].curl[a], self.facets[j].curl[b]));
-                            h[u * n + v] = h[u * n + v] + value;
-                            if i != j {
-                                h[v * n + u] = h[v * n + u] + value;
-                            }
-                        }
+            }
+        } else {
+            let block = ROWS_PER_WORKER * workers;
+            for first in (0..nf).step_by(block) {
+                poll(cancelled)?;
+                let rows = first..nf.min(first + block);
+                let pairs = rows_on_workers(rows.clone(), workers, |i| {
+                    (i..nf)
+                        .map(|j| self.dynamic_pair(wave, real_frequency, i, j))
+                        .collect::<Vec<_>>()
+                });
+                for (i, row) in rows.zip(pairs) {
+                    for (j, (single, shape)) in (i..nf).zip(row) {
+                        self.add_dynamic(&mut h, k2, i, j, single, shape);
                     }
                 }
             }
@@ -415,15 +524,49 @@ impl<'a> PreparedScreen<'a> {
         if real_frequency {
             // Im N is the exact plane-wave identity discretized as a Gram
             // form. No clipping of a resistance or of an eigenvalue occurs.
-            for (direction, weight) in directions(self.options.angular_refinement) {
-                poll(cancelled)?;
-                let c = self.coefficients(k.re, direction);
-                let scale = k.re * weight / (8.0 * PI * PI);
-                for i in 0..n {
-                    for j in 0..n {
-                        h[i * n + j].im += scale * (c[i].conj() * c[j]).re;
+            if workers <= 1 {
+                for (direction, weight) in directions(self.options.angular_refinement) {
+                    poll(cancelled)?;
+                    let c = self.coefficients(k.re, direction);
+                    let scale = k.re * weight / (8.0 * PI * PI);
+                    for i in 0..n {
+                        for j in 0..n {
+                            h[i * n + j].im += scale * (c[i].conj() * c[j]).re;
+                        }
                     }
                 }
+            } else {
+                // Each entry still takes its directions in the serial order.
+                poll(cancelled)?;
+                let terms: Vec<(f64, Vec<C64>)> = directions(self.options.angular_refinement)
+                    .into_iter()
+                    .map(|(direction, weight)| {
+                        (
+                            k.re * weight / (8.0 * PI * PI),
+                            self.coefficients(k.re, direction),
+                        )
+                    })
+                    .collect();
+                let mut rows: Vec<Vec<(usize, &mut [C64])>> =
+                    (0..workers).map(|_| Vec::new()).collect();
+                for (i, row) in h.chunks_mut(n).enumerate() {
+                    rows[i % workers].push((i, row));
+                }
+                std::thread::scope(|scope| {
+                    for share in rows {
+                        let terms = &terms;
+                        scope.spawn(move || {
+                            for (i, row) in share {
+                                for (scale, c) in terms {
+                                    for j in 0..n {
+                                        row[j].im += scale * (c[i].conj() * c[j]).re;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+                poll(cancelled)?;
             }
         }
         if h.iter().any(|v| !finite(*v)) {
@@ -571,7 +714,10 @@ impl<'a> PreparedScreen<'a> {
         for i in 0..n {
             rhs[i] = ik.scale(medium.density * medium.sound_speed) * drive_work[i];
         }
-        let lu = lu_complex_with_cancel(&h, n, &mut *cancelled).map_err(lu_error)?;
+        let lu = fs_la::eigen_complex::with_lu_workers(self.options.workers, || {
+            lu_complex_with_cancel(&h, n, &mut *cancelled)
+        })
+        .map_err(lu_error)?;
         let mut x = rhs.clone();
         lu.solve_with_cancel(&mut x, &mut *cancelled)
             .map_err(lu_error)?;

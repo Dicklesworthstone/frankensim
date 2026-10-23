@@ -33,6 +33,8 @@ mod geometry;
 use geometry::*;
 /// Open P1 pressure-jump screens using the same singular triangle moments.
 pub mod open_screen;
+/// Reflection at the open end of a thin unflanged pipe, on the open screen.
+pub mod pipe_end;
 mod field;
 pub use field::Solution;
 mod ports;
