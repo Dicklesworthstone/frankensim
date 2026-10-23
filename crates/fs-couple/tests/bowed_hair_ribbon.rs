@@ -664,3 +664,33 @@ fn g1_compute_wall_blocks_the_mode_scaled_ladder() {
         assert!(reachable >= 1, "no rung was reachable: the runtime did not run at all");
     });
 }
+
+/// o7qbp fix: the 5-cell narrow compliant ribbon must now step through the first
+/// stick<->slip transition (step 106) instead of refusing, because the active-set
+/// rescue resolves the joint partition the Gauss-Seidel sweep cannot converge.
+/// RED before the fix (refuses at 106); GREEN after (converges, and the rescue
+/// fires at least once).
+#[test]
+fn narrow_ribbon_converges_through_the_first_transition_via_active_set() {
+    with_cx(|cx, gate| {
+        let mut bank = tuned_base(cx, gate, 20)
+            .unwrap()
+            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .unwrap();
+        bank.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        let zero = vec![0.0; bank.system().mode_count()];
+        let drives = ribbon_drives(5, BOW_SPEED_M_S, BOW_FORCE_N);
+        let mut total_rescues = 0usize;
+        for s in 0..300 {
+            let f = bank
+                .step(&zero, &drives)
+                .unwrap_or_else(|e| panic!("narrow refused at step {s}: {e:?}"));
+            total_rescues += f.active_set_rescues;
+        }
+        println!("{{\"test\":\"narrow_active_set\",\"steps\":300,\"total_rescues\":{total_rescues}}}");
+        assert!(
+            total_rescues > 0,
+            "active-set rescue never fired; the GS sweep converged alone (did the o7qbp repro regress?)"
+        );
+    });
+}

@@ -34,6 +34,9 @@ mod stretching;
 /// prescribed surface and the contact (Pitteroff & Woodhouse bow hair, M4.4).
 pub mod compliant_drive;
 
+/// Active-set rescue for a joint solve the Gauss-Seidel sweep cannot converge.
+mod active_set;
+
 /// Stateful material shear in the same mechanical and acoustic transaction.
 pub mod layer;
 
@@ -113,6 +116,9 @@ pub struct MultiFrictionFrame {
     pub energy_tolerance_j: f64,
     /// Joint sweeps used; one for the exact original single-port path.
     pub sweeps: usize,
+    /// Times the active-set rescue resolved a step the Gauss-Seidel sweep could
+    /// not converge (frankensim-o7qbp). Zero on every step the sweep converges.
+    pub active_set_rescues: usize,
     /// Jointly accepted nonlinear storage and reaction convergence, when bound.
     /// Refused trials leave this report and every port report unchanged.
     pub nonlinear: Option<super::nonlinear::NonlinearFrictionDiagnostics>,
@@ -490,6 +496,51 @@ impl MultiFrictionModalSystem {
         Ok((step.traction_n, regime, iterations, Some(FrictionRoots { found: step.roots, selected: step.selected })))
     }
 
+    /// Active-set rescue for a step the Gauss-Seidel sweep cannot converge
+    /// (frankensim-o7qbp). Builds the effective load line (bare compliance plus
+    /// each port's series/hair compliance on the diagonal; free slip plus each
+    /// port's stored-stretch shift), solves the unique consistent stick/slip
+    /// partition directly, and on success overwrites the held tractions and
+    /// regimes with it. Returns whether a consistent partition was adopted.
+    ///
+    /// Restricted to the plain friction case: when any port carries a unilateral
+    /// obstacle or a material shear layer the rescue declines (Ok(false)) and the
+    /// caller refuses exactly as before, so no existing path changes behaviour.
+    fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>,
+        budget: usize) -> Result<bool, ModalFrictionError>
+    {
+        let p = self.points.len();
+        if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some) {
+            return Ok(false);
+        }
+        let dt = self.sample_period_s();
+        let mut a = self.compliance.clone();
+        let mut f = vec![0.0; p];
+        let mut normal = vec![0.0; p];
+        for i in 0..p {
+            if let Some(series) = self.series_drives[i] {
+                a[i*p+i] = finite(a[i*p+i] + series.series_compliance_m_n(dt))?;
+                f[i] = finite(self.free_slip[i] + series.free_slip_shift_m(dt))?;
+            } else {
+                f[i] = self.free_slip[i];
+            }
+            normal[i] = self.contact_loaded_drive(i, drives[i])?.normal_force_n;
+        }
+        let laws: Vec<FrictionLaw> = (0..p).map(|i| self.points[i].port.law.clone()).collect();
+        let lawrefs: Vec<&FrictionLaw> = laws.iter().collect();
+        let seed = self.regimes.clone();
+        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, budget)? {
+            Some((tractions, regimes)) => {
+                poll(gate)?;
+                self.tractions.copy_from_slice(&tractions);
+                self.regimes.copy_from_slice(&regimes);
+                for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     // Original simultaneous friction/obstacle solve with held modal forces.
     // Only candidates and scratch change. Nonlinear storage can repeat this
     // solve until every bow and the shared constitutive reaction agree.
@@ -518,6 +569,7 @@ impl MultiFrictionModalSystem {
         self.tractions.fill(0.0); self.iterations.fill(0);
         for r in &mut self.port_roots { *r = None; }
         let mut sweeps = 0;
+        let mut rescues = 0usize;
         for sweep in 1..=self.config.max_sweeps {
             if let Some(obstacles) = &mut self.obstacles {
                 obstacles.sweep(&self.tractions, self.core.network.dt, gate)?;
@@ -560,7 +612,19 @@ impl MultiFrictionModalSystem {
             }
             match failure {
                 None => { sweeps = sweep; break; },
-                Some(error) if sweep == self.config.max_sweeps => return Err(error),
+                Some(error) if sweep == self.config.max_sweeps => {
+                    // The Gauss-Seidel sweep could not converge this step
+                    // (frankensim-o7qbp). For a well-posed step the consistent
+                    // stick/slip partition is unique; solve it directly with the
+                    // active-set rescue. If it finds and verifies that partition,
+                    // adopt it and accept; otherwise refuse on budget as before.
+                    if self.active_set_rescue(drives, gate, 4 * p + 16)? {
+                        rescues = 1;
+                        sweeps = sweep;
+                        break;
+                    }
+                    return Err(error);
+                },
                 _ => {},
             }
         }
@@ -656,6 +720,7 @@ impl MultiFrictionModalSystem {
             friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy, energy_residual_j: residual,
             obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
             obstacle_work_j: obstacle_work, energy_tolerance_j: tolerance, sweeps,
+            active_set_rescues: rescues,
             nonlinear: None, ports: Vec::new(),
         })
     }
