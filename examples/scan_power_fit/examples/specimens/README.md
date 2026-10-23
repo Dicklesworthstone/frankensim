@@ -74,7 +74,7 @@ at accepted endpoints, not at the initial state.
 
 ## What is fitted and what is retained
 
-Exactly two nonnegative, held, domain-absorbed powers are fitted. Their positions
+Without `--heaters`, exactly two nonnegative, held, domain-absorbed powers are fitted. Their positions
 are the two supplied centres, their widths are the supplied half widths, and
 the final power at `end_time_s` remains exactly zero. These are not incident
 optical or electrical powers. Position/power jumps remain explicit held signals;
@@ -91,15 +91,94 @@ mesh counts, reference mass, source times, predictions and raw residuals.
 
 This is a bounded standalone example input format, not a replacement for native
 FrankenScript. This rung is homogeneous, fixed-geometry and fixed-density, with
-one heater and a uniform adiabatic/Robin exterior. It does not add heterogeneous
+the declared heaters and a uniform adiabatic/Robin exterior. It does not add heterogeneous
 material regions, interfaces, radiation, deformation, material inference,
-general multi-heater scheduling, identifiability or experimental validation.
+identifiability or experimental validation.
 A converged fit is not a guarantee that its supplied physical model is correct.
+
+## Multiple heaters and arbitrary selected power stages
+
+`--heaters FILE` replaces the legacy heater with a bounded program of native
+sources. Each source has its own held or linear position/power table and fixed
+footprint. Any nonterminal power knot can be selected for fitting, including an
+initial zero. Other powers remain bit-for-bit fixed. A completely fixed heater
+still contributes to every physical solve; it is not dropped from the model.
+
+Run the three-source manufactured fixture from the repository root:
+
+```sh
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example spatial_measurement_fit -- \
+  examples/scan_power_fit/examples/specimens/multiple_measurements.csv \
+  --specimen examples/scan_power_fit/examples/specimens/rectangular.scan \
+  --heaters examples/scan_power_fit/examples/specimens/multiple.heaters --substeps 4
+```
+
+The file starts with `FS_SCAN_HEATERS_V1`, followed by these records:
+
+```text
+heater ID hold|linear HALF_WIDTH_X_M HALF_WIDTH_Y_M HALF_WIDTH_Z_M
+knot ID TIME_S X_M Y_M Z_M POWER_W fixed
+knot ID TIME_S X_M Y_M Z_M INITIAL_POWER_W fit REFERENCE_W
+```
+
+Heater IDs are contiguous from zero in declaration order. Knots may interleave
+different sources but must be strictly time-ordered within each source. Every
+heater starts at time zero, has at least two knots, and ends with an explicitly
+fixed zero-power value no later than the specimen's `end_time_s`. Thereafter its
+clamped power is zero. A heater that starts later must explicitly declare zero
+before starting; pre-first-knot behavior is never inferred. `hold` and `linear`
+apply to both positions and powers. Widths/positions use the specimen's world
+metre frame. Powers are absorbed in the domain, not incident optical watts.
+
+`REFERENCE_W` is a positive optimizer-coordinate scale: `power = reference*x`,
+with `x >= 0`. It is not a maximum power. Fixed knots have no reference scale.
+Selected controls are ordered by heater ID and then knot index, independently
+of the order in which source records interleave. The two positional starting
+powers cannot be combined with `--heaters`; the file supplies all starting
+values. Invalid or duplicate options refuse rather than silently taking priority.
+
+The V1 specimen's legacy `switch_time_s`, centre and width fields are still
+required and validated by that format, but are unused with `--heaters`. Its
+`end_time_s` is now the observation horizon and may be later than every heater's
+shutdown, retaining a cooling-only tail. All declared heater event times and
+measurement/window boundaries enter the physical grid before refinement. Close
+events are never merged by a tolerance; unrepresentable substeps refuse.
+
+The executable admits 16 heaters, 512 total knots, 32 selected powers, 4,096
+authored position/power/width values and 128 KiB of heater input. It derives the
+source-storage and dense SQP dimension allowances from the full program. The
+existing maximum 127 fitting evaluations plus one final replay is unchanged.
+Failure to converge is an unsuccessful exit, not a reason to omit a heater.
+
+Output with `--heaters` lists every source, knot, interpolation, time, fitted
+power and selection flag, including fixed background heaters and shutdowns.
+Export checks the original clocks, positions, widths and unselected powers;
+there is no clipping or snapping to zero. Legacy commands keep their previous
+two-column power output. Spatial, exposure and sensor-lag measurements and
+Huber/quadratic scoring use their original operators and adjoints.
+
+For the supplied 4 kg insulated specimen, heater 0 fits 8 W over 0..1 s and
+16 W over 1..2 s, heater 1 fits a triangular pulse peaking at 24 W at 3 s, and
+heater 2 supplies a fixed 2 W until 4 s. Energy balance gives the declared means
+152.5, 157 and 164 J/kg at 1, 2 and 4 s. Falsely omitting the fixed heater still
+fits these measurements, but with 10, 18 and 28 W: fitting quality alone cannot
+establish model correctness. These are analytical fixture values, not reported
+native Rust results. Colocated heaters with indistinguishable temporal inputs
+can be unidentifiable; this workflow does not assert uniqueness.
+
+Paths, clocks, interpolation and footprints remain fixed design inputs. This
+flag does not add speed, slew, thermal-state or energy-cap declarations to the
+CSV executable; those remain separate existing library interfaces. In
+particular, a held path is allowed to jump and carries no finite-speed claim.
+Linear ramps still use the original time-discrete thermal solver; fitting on a
+coarse grid is not a continuum-accuracy guarantee.
 
 ## Focused checks
 
 ```sh
 cargo test --manifest-path examples/scan_power_fit/Cargo.toml --lib specimen
+cargo test --manifest-path examples/scan_power_fit/Cargo.toml --lib heaters
 cargo test --manifest-path examples/scan_power_fit/Cargo.toml --example spatial_measurement_fit
 ```
 
@@ -108,3 +187,9 @@ increment. They cover input admission, exact shutdown, different geometry/counts
 mass/clock recovery, Robin-loss recovery, temporal readouts and legacy defaults.
 Native compilation/execution was unavailable in the authoring environment; no
 native test pass or measured performance is claimed.
+
+The multi-heater extension adds four loader tests and three executable tests
+for asynchronous clocks, fixed/background power, full exports, input caps,
+three-control inverse fitting, event/window alignment and option admission.
+These tests were authored but could not be compiled or executed in the
+authoring environment; DSR, RCH, Cargo and rustc were unavailable.

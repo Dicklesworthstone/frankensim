@@ -1,0 +1,17 @@
+FS_SCAN_HEATERS_V1
+# Same metre frame as rectangular.scan. Three independent native sources.
+# Two fitted held stages; this heater turns off at t=2, before observations end.
+heater 0 hold 3 2 2
+knot 0 0 1 0.5 0.5 0 fit 1
+knot 0 1 1 0.5 0.5 0 fit 1
+knot 0 2 1 0.5 0.5 0 fixed
+# A separately clocked, fitted triangular pulse after t=2.
+heater 1 linear 3 2 2
+knot 1 0 1 0.5 0.5 0 fixed
+knot 1 2 1 0.5 0.5 0 fixed
+knot 1 3 1 0.5 0.5 0 fit 1
+knot 1 4 1 0.5 0.5 0 fixed
+# Known background heating must remain in every trial, although never fitted.
+heater 2 hold 3 2 2
+knot 2 0 1 0.5 0.5 2 fixed
+knot 2 4 1 0.5 0.5 0 fixed

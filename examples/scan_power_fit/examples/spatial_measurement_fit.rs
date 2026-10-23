@@ -3,7 +3,8 @@
 //! parsing never infers physical conditions from the measurement values.
 use std::io::Read;
 use scan_power_fit::specimen::{ScanSpecimen, SpecimenBudget};
-use fs_ascent::scan_design::{ScanPowerControl, ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
+use scan_power_fit::heaters::{HeatingProgramBudget, HeatingSchedule, ScanHeatingProgram};
+use fs_ascent::scan_design::{ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
 use fs_ascent::scan_design::constraints::ConstrainedScanStudy;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
@@ -31,8 +32,12 @@ const MAX_SAMPLES: usize = 65_536;
 const SPECIMEN_BUDGET: SpecimenBudget = SpecimenBudget {
     max_bytes: 2 << 20, max_vertices: 4096, max_elements: 16_384, max_phase_knots: 256,
 };
+const HEATER_BUDGET: HeatingProgramBudget = HeatingProgramBudget {
+    max_bytes: 128 << 10, max_sources: 16, max_knots: 512,
+    max_fitted_powers: 32, max_authored_controls: 4096,
+};
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W | --heaters FILE] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
 
 struct Options {
     path: String,
@@ -40,9 +45,11 @@ struct Options {
     loss: ScanResidualLoss,
     substeps: usize,
     specimen: Option<String>,
+    heaters: Option<String>,
 }
 fn options(args: &[String]) -> Result<Options> {
     let mut positional=Vec::new();let mut threshold=None;let mut substeps=None;let mut specimen=None;
+    let mut heaters=None;
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
@@ -57,19 +64,27 @@ fn options(args: &[String]) -> Result<Options> {
                 let path=args.get(i).filter(|p| !p.is_empty() && !p.starts_with("--")).ok_or(USAGE)?;
                 specimen=Some(path.clone());
             }
+            "--heaters" if heaters.is_none() => {
+                i+=1;
+                let path=args.get(i).filter(|p| !p.is_empty() && !p.starts_with("--")).ok_or(USAGE)?;
+                heaters=Some(path.clone());
+            }
             value if !value.starts_with("--") => positional.push(value),
             _ => return Err(USAGE.into()),
         }
         i+=1;
     }
     if !matches!(positional.len(),1|3) {return Err(USAGE.into());}
+    if heaters.is_some() && positional.len()!=1 {
+        return Err("--heaters supplies its own selected starting powers; positional initial watts cannot also be supplied".into());
+    }
     let loss=threshold.map_or(ScanResidualLoss::Quadratic,|threshold|ScanResidualLoss::Huber {threshold});
     loss.validate()?;
     let initial=if positional.len()==3 {[finite(positional[1])?,finite(positional[2])?]} else {[1.,1.]};
     if initial.iter().any(|p|*p<0.) {return Err("initial watts must be nonnegative".into());}
     let substeps=substeps.unwrap_or(1);
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
-    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen})
+    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen,heaters})
 }
 
 struct Measurements<'m> {
@@ -139,11 +154,26 @@ fn readout<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, kind: &str, selection: &st
 fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize) -> Result<Measurements<'m>> {
     parse_for_clock(cx, mesh, text, substeps, [1.0, 2.0])
 }
+#[cfg(test)]
 fn parse_for_clock<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
     substeps: usize, source_times: [f64; 2]) -> Result<Measurements<'m>> {
     if source_times.iter().any(|t| !t.is_finite()) || source_times[0] <= 0.0
         || source_times[1] <= source_times[0] {
         return Err("source clock requires finite 0 < switch < shutdown".into());
+    }
+    parse_for_events(cx,mesh,text,substeps,source_times[1],&source_times)
+}
+fn parse_for_events<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
+    substeps: usize, end_time_s: f64, source_events: &[f64]) -> Result<Measurements<'m>> {
+    if !end_time_s.is_finite() || end_time_s<=0.0 || source_events.len()>MAX_STEPS {
+        return Err("heater clock needs a finite positive observation horizon and bounded events".into());
+    }
+    let mut previous=0.0;
+    for &time in source_events {
+        if !time.is_finite() || time<=previous || time>end_time_s {
+            return Err("heater events must increase strictly from zero through the observation horizon".into());
+        }
+        previous=time;
     }
     if text.len()>MAX_BYTES { return Err("measurement file exceeds 128 KiB".into()); }
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
@@ -161,9 +191,9 @@ fn parse_for_clock<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
                 return Err("each unquoted numeric measurement needs exactly six fields".into());
             }
             let (start,time,sensor_lag)=measurement_time(fields[0])?;
-            if time<=0. || time>source_times[1] { return Err("measurements require 0 < time_s <= the specimen shutdown".into()); }
+            if time<=0. || time>end_time_s { return Err("measurements require 0 < time_s <= the specimen observation horizon".into()); }
             if start.is_some_and(|start|start<=0. || start>=time) {
-                return Err("temporal readout needs 0 < start < end <= shutdown; initial-state windows are unsupported".into());
+                return Err("temporal readout needs 0 < start < end <= observation horizon; initial-state windows are unsupported".into());
             }
             let observable=match fields[1] {
                 "temperature_k" => ScanObservable::Temperature,
@@ -189,7 +219,8 @@ fn parse_for_clock<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
     // measurements cannot make the grid step over the declared power change.
     let mut endpoints=Vec::new();
     for &(start,end,_) in &times {endpoints.extend(start);endpoints.push(end);}
-    endpoints.extend(source_times);
+    endpoints.extend_from_slice(source_events);
+    endpoints.push(end_time_s);
     endpoints.sort_by(f64::total_cmp); endpoints.dedup();
     let count=endpoints.len().checked_mul(substeps).filter(|&n|n<=MAX_STEPS)
         .ok_or("measurement time grid exceeds 4096 physical endpoints")?;
@@ -224,8 +255,11 @@ fn parse_for_clock<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
 }
 
 struct Fit {
+    #[cfg(test)]
     powers: Vec<f64>,
-    source_times_s: [f64; 3],
+    #[cfg(test)]
+    source_times_s: Vec<f64>,
+    schedules: Vec<HeatingSchedule>,
     mesh_vertices: usize,
     mesh_elements: usize,
     reference_mass_kg: f64,
@@ -244,18 +278,30 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, subste
 }
 fn fit_on_specimen(cx: &Cx<'_>, model: &ScanSpecimen, text: &str,
     initial: [f64;2], loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
+    let program=ScanHeatingProgram::from_specimen(cx,model,initial)?;
+    fit_on_program(cx,model,&program,text,loss,substeps)
+}
+fn fit_on_program(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgram,
+    text: &str, loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
     loss.validate()?;
-    if initial.iter().any(|p|!p.is_finite() || *p<0.) { return Err("initial watts must be finite and nonnegative".into()); }
+    let source_count=program.sources().len();
+    let dimension=program.controls().len();
+    let authored_controls=program.authored_control_count();
+    if source_count==0 || source_count>HEATER_BUDGET.max_sources
+        || dimension==0 || dimension>HEATER_BUDGET.max_fitted_powers
+        || authored_controls>HEATER_BUDGET.max_authored_controls
+        || program.end_time_s().to_bits()!=model.end_time_s.to_bits() {
+        return Err("heater program must fit the executable allowances and specimen horizon".into());
+    }
     let mesh=&model.mesh;
     let vertices=mesh.vertex_count(); let elements=mesh.element_count();
     if vertices>SPECIMEN_BUDGET.max_vertices || elements>SPECIMEN_BUDGET.max_elements {
         return Err("physical specimen exceeds the executable mesh allowance".into());
     }
-    let data=parse_for_clock(cx,mesh,text,substeps,[model.switch_time_s,model.end_time_s])?;
+    let data=parse_for_events(cx,mesh,text,substeps,program.end_time_s(),program.event_times_s())?;
     let n=data.endpoints.len();
     let boundary=ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(mesh)
         .remainder("surface",model.exterior.clone())?,&Environment::earth_lab(),vec![],0.)?;
-    let source=model.source(initial)?;
     let initial_h=vec![model.initial_specific_enthalpy_j_kg; vertices];
     let element_materials=vec![0; elements];
     let reference_mass_kg=(0..elements).map(|i| mesh.element_volume(i)*model.reference_density_kg_m3).sum::<f64>();
@@ -269,7 +315,7 @@ fn fit_on_specimen(cx: &Cx<'_>, model: &ScanSpecimen, text: &str,
             EnthalpyHistoryMaterials {table:&[ReferenceEnthalpyMaterial {curve:&model.curve,reference_density_kg_m3:model.reference_density_kg_m3}],
                 of_element:&element_materials,phase_conductivity:None},&initial_h,
             EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:vertices,max_elements:elements},max_steps:n})?;
-        Ok(ScanningEnthalpyRun::new(cx,base,sources,1,None)?)
+        Ok(ScanningEnthalpyRun::new(cx,base,sources,source_count,None)?)
     };
     let segment=n.min(8);
     let observations=data.rows.iter().cloned().zip(&data.starts).zip(&data.sensor_lags).map(|((row,&start),&lag)| {
@@ -291,19 +337,18 @@ fn fit_on_specimen(cx: &Cx<'_>, model: &ScanSpecimen, text: &str,
             max_newton_iterations:64,energy_tolerance_j:1e-8},
         transpose:LinearConfig {tolerance:1e-10,max_iterations:1000,restart:vertices.clamp(8,64)},
         budget:ScanObjectiveBudget {max_steps:n,max_observations:data.contributions,max_retained_vertices:vertices*segment,
-            max_retained_source_vertices:vertices*segment,max_schedule_controls:16,max_retained_radiation_entries:0},
+            max_retained_source_vertices:vertices*segment*source_count,
+            max_schedule_controls:authored_controls,max_retained_radiation_entries:0},
         source_reference_time_s:0.};
-    let controls=vec![ScanPowerControl {source:0,value:0,reference_w:1.},ScanPowerControl {source:0,value:1,reference_w:1.}];
-    let mut study=ScanPowerStudy::new_joint_with_power_coordinates(cx,vec![source],controls,vec![],
+    let mut study=ScanPowerStudy::new_joint_with_power_coordinates(cx,program.sources().to_vec(),program.controls().to_vec(),vec![],
         ScanPowerCoordinates::NonnegativeLinear,objective,factory,127)?;
     study.set_checkpointing(cx,ScanCheckpointBudget {segment_steps:segment,
         max_checkpoint_vertices:vertices*(n.div_ceil(segment)+1),max_forward_solves:2*n})?;
-    let mut study=ConstrainedScanStudy::new(cx,study,vec![],vec![],8)?;
+    let mut study=ConstrainedScanStudy::new(cx,study,vec![],vec![],(2*dimension).max(8))?;
     let report=study.advance_optimizer(cx,1e-8,100)?;
     let spent=study.evaluations(); let exported=study.sources(cx)?;
     if study.evaluations()!=spent { return Err("source export spent a physical evaluation".into()); }
-    let powers=exported[0].absorbed_power_values(3)?;
-    if powers[2]!=0. { return Err("fitting changed the declared shutdown".into()); }
+    let schedules=program.export(cx,&exported)?;
     study.extend_evaluation_budget(128)?;
     let (replay,limits)=study.replay_with_constraints(cx)?;
     if (report.solution.f-replay.physical.value).abs()>1e-10*(1.+report.solution.f.abs()) {
@@ -313,7 +358,10 @@ fn fit_on_specimen(cx: &Cx<'_>, model: &ScanSpecimen, text: &str,
         .zip(&replay.physical.standardized_residuals).map(|((row,&prediction),&residual)|
             (data.endpoints[row.endpoint],row.observable,row.target,prediction,residual)).collect();
     let exposure_starts_s=data.starts.iter().map(|start|start.map(|i|data.endpoints[i])).collect();
-    Ok(Fit {powers,source_times_s:[0.0,model.switch_time_s,model.end_time_s],
+    Ok(Fit {
+        #[cfg(test)] powers:schedules[0].powers_w.clone(),
+        #[cfg(test)] source_times_s:schedules[0].times_s.clone(),
+        schedules,
         mesh_vertices:vertices,mesh_elements:elements,reference_mass_kg,
         measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
         objective:replay.physical.value,evaluations:study.evaluations(),
@@ -330,6 +378,12 @@ fn main() -> Result<()> {
         if contents.len()>SPECIMEN_BUDGET.max_bytes {return Err("specimen exceeds 2 MiB".into());}
         Ok(contents)
     }).transpose()?;
+    let heater_text=options.heaters.as_deref().map(|path| -> Result<String> {
+        let mut contents=String::new();
+        std::fs::File::open(path)?.take(HEATER_BUDGET.max_bytes as u64+1).read_to_string(&mut contents)?;
+        if contents.len()>HEATER_BUDGET.max_bytes {return Err("heater program exceeds 128 KiB".into());}
+        Ok(contents)
+    }).transpose()?;
     let gate=CancelGate::new(); let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let result=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},
@@ -338,7 +392,13 @@ fn main() -> Result<()> {
             Some(input)=>ScanSpecimen::from_text(&cx,input,SPECIMEN_BUDGET)?,
             None=>ScanSpecimen::synthetic_reference(&cx)?,
         };
-        fit_on_specimen(&cx,&model,&text,options.initial,options.loss,options.substeps)
+        match heater_text.as_deref() {
+            Some(input)=>{
+                let program=ScanHeatingProgram::from_text(&cx,&model.mesh,model.end_time_s,input,HEATER_BUDGET)?;
+                fit_on_program(&cx,&model,&program,&text,options.loss,options.substeps)
+            }
+            None=>fit_on_specimen(&cx,&model,&text,options.initial,options.loss,options.substeps),
+        }
     })?;
     println!("# specimen_mode={}; user declarations are not experimental validation",
         if options.specimen.is_some() {"explicit_file"} else {"synthetic_reference"});
@@ -348,8 +408,20 @@ fn main() -> Result<()> {
     println!("# substeps_per_event_interval={}; time means use normalized trapezoidal readouts",options.substeps);
     println!("# objective={:.17e} converged={} max_scaled_violation={:.17e} evaluations={}",
         result.objective,result.converged,result.violation,result.evaluations);
-    println!("time_s,absorbed_power_w");
-    for (time,power) in result.source_times_s.into_iter().zip(&result.powers) {println!("{time:.17e},{power:.17e}");}
+    if options.heaters.is_none() {
+        println!("time_s,absorbed_power_w");
+        for (&time,&power) in result.schedules[0].times_s.iter().zip(&result.schedules[0].powers_w) {
+            println!("{time:.17e},{power:.17e}");
+        }
+    } else {
+        println!("# heater_mode=explicit_program; source_count={}; clocks and paths fixed; no actuator-limit claim",result.schedules.len());
+        println!("source,knot,interpolation,time_s,absorbed_power_w,selected_for_fit");
+        for source in &result.schedules {
+            for (knot,((&time,&power),&selected)) in source.times_s.iter().zip(&source.powers_w).zip(&source.fitted).enumerate() {
+                println!("{},{knot},{:?},{time:.17e},{power:.17e},{selected}",source.source,source.interpolation);
+            }
+        }
+    }
     for (i,(time,quantity,target,prediction,residual)) in result.measurements.iter().enumerate() {
         let (term,slope)=options.loss.value_derivative(*residual)?;
         if let Some(start)=result.exposure_starts_s[i] {
@@ -593,3 +665,7 @@ mod sensor_tests {
 #[cfg(test)]
 #[path = "spatial_measurement_fit/specimen_tests.rs"]
 mod specimen_tests;
+
+#[cfg(test)]
+#[path = "spatial_measurement_fit/heater_tests.rs"]
+mod heater_tests;
