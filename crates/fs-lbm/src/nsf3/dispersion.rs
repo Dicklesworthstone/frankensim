@@ -11,6 +11,9 @@
 //! five modes of the bead. Convention: `e^{s t}` growth rates; `-Re s` is a decay rate and `Im s / k` a phase speed.
 //!
 //! No tuning: every coefficient is a gas receipt or a declared input; `GasPoint` carries SI numbers only.
+//! For a temperature-dependent NASA9 medium these are LOCAL small-perturbation
+//! modes about one uniform state. They do not replace the nonlinear caloric
+//! owner or claim constant gamma across a heated/inhomogeneous flow.
 
 use super::{NsfError, NsfLaw, THETA0};
 
@@ -55,10 +58,17 @@ impl GasPoint {
     }
     /// The point of a running grid: reference density and temperature, the receipt transport coefficients at the reference
     /// temperature converted from lattice units, and the declared bulk-to-shear ratio.
+    ///
+    /// For a source-driven grid this uses the exact resolved reference coefficients,
+    /// rather than interpolating the diagnostic transport table. The result is
+    /// only the local linearization at that uniform reference state.
     #[must_use]
     pub fn from_law(law: &NsfLaw) -> GasPoint {
         let unit = law.rho_ref_kg_m3 * law.dx_m * law.dx_m / law.dt_s;
-        let mu = law.mu_lattice(THETA0) * unit;
+        let [mu_lattice, kappa_lattice] = law
+            .source_reference_transport
+            .unwrap_or_else(|| [law.mu_lattice(THETA0), law.kappa_lattice(THETA0)]);
+        let mu = mu_lattice * unit;
         GasPoint {
             rho0: law.rho_ref_kg_m3,
             t0: law.temperature_ref_k,
@@ -66,7 +76,7 @@ impl GasPoint {
             gamma: law.gamma,
             mu,
             mu_bulk: law.bulk_to_shear_ratio * mu,
-            kappa: law.kappa_lattice(THETA0) * law.gas_constant * unit,
+            kappa: kappa_lattice * law.gas_constant * unit,
         }
     }
 }

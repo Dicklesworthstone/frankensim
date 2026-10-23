@@ -17,6 +17,18 @@
 //! Time coupling: the trapezoid rule on the flux divergences of the two time levels with a fixed number of
 //! predictor-corrector passes (`COUPLING_PASSES`).
 //!
+//! MATERIAL-OWNED GAS. NsfSpec also accepts ThermochemicalNsfGas. The same
+//! collision, pressure force, conservative face flux and fixed coupling passes
+//! then use source-owned NASA9 u(T), cv(T), gamma(T), viscosity and conductivity
+//! at each actual density-derived pressure. Temperature is recovered by the
+//! original bounded material energy solve, not by a constant-cv division.
+//! The conserved internal energy uses one fixed sensible offset, disclosed by
+//! ThermochemicalNsfGas::energy_reference_j_kg, so an arbitrary formation-energy
+//! datum cannot drive this hybrid mass/energy discretization. Composition is
+//! frozen; no reaction, species diffusion or phase conversion is implied.
+//! The original GasSpec arithmetic and qualification remain separate from
+//! physical validation of this source-driven extension.
+//!
 //! WHY NOT THE TEMPERATURE-CORRECTED EQUILIBRIUM. The first formulation put `theta - theta0` into the
 //! equilibrium (Hermite expansion through third order). Its Bloch-linearised one-step matrix has a real
 //! eigenvalue of 1.4 to 2.0 at oblique wavevectors near the Nyquist limit at air viscosity (eigenvector: the rest
@@ -38,7 +50,11 @@
 
 use crate::lattice3::Lattice3;
 use core::fmt;
-use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas::GasSpec;
+use material::NsfCellMaterial;
+
+mod material;
+pub use material::{NsfGasMedium, ThermochemicalNsfGas};
 
 /// Exact linearized Navier-Stokes-Fourier modes (test support of the qualification, shipped for reuse).
 pub mod dispersion;
@@ -113,12 +129,12 @@ pub enum NsfError {
     },
     /// Lattice viscosity above the verified stable envelope for this dx (refine fewer cells per metre, i.e. enlarge dx).
     Viscosity {
-        /// Largest `mu / rho0` of the transport tables.
+        /// Largest reference-table viscosity or actual source local kinematic viscosity.
         observed: f64,
         /// `MAX_VERIFIED_LATTICE_VISCOSITY`.
         maximum: f64,
     },
-    /// A non-finite or non-positive density or energy.
+    /// A non-finite state or non-positive density/absolute temperature.
     NonFinite {
         /// Offending cell index.
         cell: usize,
@@ -143,19 +159,19 @@ pub enum WallThermal {
 
 /// Everything the grid needs, in physical units. Nothing is defaulted.
 #[derive(Clone, Debug)]
-pub struct NsfSpec {
+pub struct NsfSpec<G = GasSpec> {
     /// Cell counts per axis.
     pub dims: [usize; 3],
     /// Periodic axes; a non-periodic face is a halfway bounce-back wall.
     pub periodic: [bool; 3],
-    /// Gas law (receipt source of `gamma`, `R`, `mu(T)`, `kappa(T)`).
-    pub gas: GasSpec,
+    /// Gas law: legacy GasSpec or source-owned ThermochemicalNsfGas.
+    pub gas: G,
     /// Reference temperature [K] and pressure [Pa] (lattice density 1, `theta0 = 1/3`).
     pub temperature_k: f64,
     pub pressure_pa: f64,
     /// Cell size [m]; the time step follows from `theta0` and the reference gas constant.
     pub dx_m: f64,
-    /// Declared temperature window of the run [K]; transport is tabulated across it from the gas receipt.
+    /// Declared temperature window [K]; source caloric inversion uses this exact bracket.
     pub temperature_window_k: [f64; 2],
     /// Local Mach bound `|u| / sqrt(gamma theta)`.
     pub maximum_mach: f64,
@@ -176,10 +192,32 @@ pub struct NsfSpec {
     pub transport_points: usize,
 }
 
+impl<G> NsfSpec<G> {
+    fn map_gas<H>(self, map: impl FnOnce(G) -> H) -> NsfSpec<H> {
+        NsfSpec {
+            dims: self.dims,
+            periodic: self.periodic,
+            gas: map(self.gas),
+            temperature_k: self.temperature_k,
+            pressure_pa: self.pressure_pa,
+            dx_m: self.dx_m,
+            temperature_window_k: self.temperature_window_k,
+            maximum_mach: self.maximum_mach,
+            maximum_temperature_ratio: self.maximum_temperature_ratio,
+            bulk_to_shear_ratio: self.bulk_to_shear_ratio,
+            bulk_ratio_source: self.bulk_ratio_source,
+            maximum_cells: self.maximum_cells,
+            wall: self.wall,
+            workers: self.workers,
+            transport_points: self.transport_points,
+        }
+    }
+}
+
 /// Physical <-> lattice scaling and the receipt-derived transport laws.
 #[derive(Clone, Debug)]
 pub struct NsfLaw {
-    /// Heat-capacity ratio of the reference state.
+    /// Heat-capacity ratio of the reference state; source-driven evolution uses local gamma(T).
     pub gamma: f64,
     /// Specific gas constant [J/(kg K)].
     pub gas_constant: f64,
@@ -197,6 +235,8 @@ pub struct NsfLaw {
     t_high: f64,
     mu: Vec<f64>,
     kappa: Vec<f64>,
+    /// Exact source reference coefficients for uniform-state linearization.
+    source_reference_transport: Option<[f64; 2]>,
 }
 
 impl NsfLaw {
@@ -223,12 +263,14 @@ impl NsfLaw {
         let w = x - i as f64;
         (1.0 - w) * tab[i] + w * tab[i + 1]
     }
-    /// Lattice dynamic viscosity at lattice temperature `theta`, from the gas receipt.
+    /// Reference-pressure lattice dynamic viscosity table at lattice temperature.
+    /// Source-driven evolution uses direct local material queries instead of this diagnostic table.
     #[must_use]
     pub fn mu_lattice(&self, theta: f64) -> f64 {
         self.table(&self.mu, theta)
     }
-    /// Lattice thermal conductivity at lattice temperature `theta`, from the gas receipt.
+    /// Reference-pressure lattice conductivity table at lattice temperature.
+    /// Source-driven evolution uses direct local material queries instead of this diagnostic table.
     #[must_use]
     pub fn kappa_lattice(&self, theta: f64) -> f64 {
         self.table(&self.kappa, theta)
@@ -238,7 +280,7 @@ impl NsfLaw {
 /// Energy ledger in joules for one step and cumulative. `residual_rel` closes the total-energy budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnergyLedger {
-    /// Internal energy after the step [J].
+    /// Internal energy after the step [J], in the medium's fixed sensible-energy chart.
     pub internal_j: f64,
     /// Kinetic energy after the step [J].
     pub kinetic_j: f64,
@@ -415,12 +457,16 @@ fn par_fill<T: Send>(out: &mut [T], workers: usize, f: &(impl Fn(usize) -> T + S
 /// `dE / dt + div((E + p) u - sigma . u - kappa grad theta) = S_E`. The mass source is applied at the half step (added to the
 /// populations with the lattice weights, half before and half after the stream, so it carries no momentum), the momentum source joins the force at both time levels and
 /// the energy source enters the trapezoid with the flux divergence. A grid without sources is bitwise unchanged.
+/// For ThermochemicalNsfGas, E and S_E use its fixed sensible chart. Converting an absolute NASA9 source requires
+/// subtracting energy_reference_j_kg * S_rho / specific_energy_unit_j_kg from S_E; composition remains frozen.
 pub type SourceFn = Box<dyn Fn([usize; 3], f64) -> (f64, [f64; 3], f64) + Send + Sync>;
 
 /// The hybrid grid. See the module documentation for the formulation and its conservation class.
 pub struct NsfGrid3<L: Lattice3<27>> {
-    spec: NsfSpec,
+    spec: NsfSpec<NsfGasMedium>,
     law: NsfLaw,
+    /// Local source response only; empty for the bit-preserving GasSpec route.
+    material: Vec<Option<NsfCellMaterial>>,
     n: usize,
     solid: Vec<bool>,
     /// Pre-collision populations (first moment `sum c f = rho u - F/2`).
@@ -447,8 +493,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// # Errors
     /// [`NsfError`] for any refused input or state.
-    pub fn new(
-        spec: NsfSpec,
+    pub fn new<G: Into<NsfGasMedium>>(
+        spec: NsfSpec<G>,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
     ) -> Result<Self, NsfError> {
@@ -460,12 +506,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// # Errors
     /// [`NsfError`] for any refused input or state.
-    pub fn new_with_sources(
-        spec: NsfSpec,
+    pub fn new_with_sources<G: Into<NsfGasMedium>>(
+        spec: NsfSpec<G>,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
         sources: Option<SourceFn>,
     ) -> Result<Self, NsfError> {
+        let spec = spec.map_gas(Into::into);
         let n = spec
             .dims
             .iter()
@@ -513,8 +560,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 ));
             }
         }
-        let state = GasState::try_new(&spec.gas, spec.temperature_k, spec.pressure_pa)
-            .map_err(|e| NsfError::Gas(e.to_string()))?;
+        let state = spec.gas.reference(&spec)?;
         let r = state.specific_gas_constant;
         let dt_s = spec.dx_m / (3.0 * r * state.temperature).sqrt();
         let sc = dt_s / (state.density * spec.dx_m * spec.dx_m);
@@ -524,8 +570,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let t = spec.temperature_window_k[0]
                 + (spec.temperature_window_k[1] - spec.temperature_window_k[0]) * i as f64
                     / (spec.transport_points - 1) as f64;
-            let g = GasState::try_new(&spec.gas, t, spec.pressure_pa)
-                .map_err(|e| NsfError::Gas(e.to_string()))?;
+            let g = spec.gas.at(t, spec.pressure_pa)?;
             mu.push(g.dynamic_viscosity * sc);
             kappa.push(g.thermal_conductivity * sc / r);
         }
@@ -548,6 +593,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             t_high: spec.temperature_window_k[1],
             mu,
             kappa,
+            source_reference_transport: match &spec.gas {
+                NsfGasMedium::CaloricallyPerfect(_) => None,
+                NsfGasMedium::Thermochemical(_) => Some([
+                    state.dynamic_viscosity * sc,
+                    state.thermal_conductivity * sc / r,
+                ]),
+            },
         };
         let cv = 1.0 / (law.gamma - 1.0);
         let at = |i: usize| {
@@ -562,6 +614,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut theta = vec![THETA0; n];
         let mut solid_v = vec![false; n];
         let mut e = vec![cv * THETA0; n];
+        let mut material = match &spec.gas {
+            NsfGasMedium::CaloricallyPerfect(_) => Vec::new(),
+            NsfGasMedium::Thermochemical(_) => vec![None; n],
+        };
         for i in 0..n {
             let x = at(i);
             if solid(x) {
@@ -581,15 +637,24 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 });
             }
             let th = law.theta_of_kelvin(t_k);
-            check_state(&spec, &law, i, r0, u, th)?;
+            let local = spec.gas.resolve(&law, r0, th)?;
+            let gamma = local.as_ref().map_or(law.gamma, |m| m.state.gamma);
+            check_state(&spec, gamma, i, r0, u, th)?;
             rho[i] = r0;
             vel[i] = u;
             theta[i] = th;
-            e[i] = r0 * (cv * th + 0.5 * (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]));
+            let internal = local
+                .as_ref()
+                .map_or(cv * th, |m| m.sensible_energy_lattice);
+            e[i] = r0 * (internal + 0.5 * (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]));
+            if let Some(slot) = material.get_mut(i) {
+                *slot = local;
+            }
         }
         let mut grid = NsfGrid3 {
             spec,
             law,
+            material,
             n,
             solid: solid_v,
             f: vec![[0.0; Q]; n],
@@ -633,8 +698,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let (rho_g, mom) = grid.macro_fields(&grid.f);
         let u = grid.velocity_field(&rho_g, &mom, &grid.force);
-        let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta);
-        let (div, wall) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig);
+        grid.material = grid.material_field(&rho_g, &grid.theta)?;
+        let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta, &grid.material);
+        let (div, wall) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig)?;
         grid.div = div;
         grid.wall_out = wall;
         Ok(grid)
@@ -713,6 +779,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if speed / (self.law.gamma * THETA0).sqrt() > self.spec.maximum_mach {
             return Err(NsfError::Input("wall speed above the declared Mach bound"));
         }
+        let old_edge_velocity = self.edge_velocity;
+        let old_moving_walls = self.moving_walls;
         self.edge_velocity[axis][usize::from(high)] = velocity;
         self.moving_walls = self
             .edge_velocity
@@ -721,8 +789,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .any(|u| u.iter().any(|&v| v != 0.0));
         let (rho, mom) = self.macro_fields(&self.f);
         let u = self.velocity_field(&rho, &mom, &self.force);
-        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta);
-        let (div, wall) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig);
+        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material);
+        let (div, wall) = match self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig) {
+            Ok(history) => history,
+            Err(error) => {
+                self.edge_velocity = old_edge_velocity;
+                self.moving_walls = old_moving_walls;
+                return Err(error);
+            }
+        };
         self.div = div;
         self.wall_out = wall;
         Ok(())
@@ -757,13 +832,44 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         out
     }
 
-    fn rates(&self, rho: f64, theta: f64) -> (f64, f64) {
-        let mu = self.law.mu_lattice(theta);
+    fn rates(&self, rho: f64, theta: f64, material: Option<&NsfCellMaterial>) -> (f64, f64) {
+        let mu = material.map_or_else(|| self.law.mu_lattice(theta), |m| m.mu_lattice);
         let nu = mu / (rho * THETA0);
         (
             1.0 / (nu + 0.5),
             1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu),
         )
+    }
+
+    fn material_field(
+        &self,
+        rho: &[f64],
+        theta: &[f64],
+    ) -> Result<Vec<Option<NsfCellMaterial>>, NsfError> {
+        if matches!(&self.spec.gas, NsfGasMedium::CaloricallyPerfect(_)) {
+            return Ok(Vec::new());
+        }
+        let mut values = vec![Ok(None); self.n];
+        par_fill(&mut values, self.spec.workers, &|i| {
+            if self.solid[i] {
+                return Ok(None);
+            }
+            if !(rho[i].is_finite() && rho[i] > 0.0 && theta[i].is_finite() && theta[i] > 0.0) {
+                return Err(NsfError::NonFinite { cell: i });
+            }
+            let temperature_k = self.law.kelvin_of_theta(theta[i]);
+            let [low_k, high_k] = self.spec.temperature_window_k;
+            if temperature_k < low_k || temperature_k > high_k {
+                return Err(NsfError::Window {
+                    cell: i,
+                    temperature_k,
+                    low_k,
+                    high_k,
+                });
+            }
+            self.spec.gas.resolve(&self.law, rho[i], theta[i])
+        });
+        values.into_iter().collect()
     }
 
     /// `F = -grad p'`, `p' = rho (theta - theta0)`, in conservative face form: fourth-order face values where the four
@@ -815,6 +921,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         force: &[[f64; 3]],
         rho: &[f64],
         theta: &[f64],
+        material: &[Option<NsfCellMaterial>],
     ) -> Vec<[f64; 6]> {
         let mut out = vec![[0.0; 6]; self.n];
         let solid = &self.solid;
@@ -822,7 +929,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if solid[i] {
                 [0.0; 6]
             } else {
-                let (ws, wb) = self.rates(rho[i], theta[i]);
+                let (ws, wb) =
+                    self.rates(rho[i], theta[i], material.get(i).and_then(Option::as_ref));
                 stress::<L>(&f[i], force[i], ws, wb)
             }
         });
@@ -837,7 +945,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         u: &[[f64; 3]],
         theta: &[f64],
         sig: &[[f64; 6]],
-    ) -> (Vec<f64>, f64) {
+    ) -> Result<(Vec<f64>, f64), NsfError> {
         let n = self.n;
         let mut g = vec![[0.0; 3]; n];
         let solid = &self.solid;
@@ -862,15 +970,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             WallThermal::Adiabatic => None,
             WallThermal::Isothermal(t) => Some(self.law.theta_of_kelvin(t)),
         };
-        let face = |i: usize, a: usize| -> Option<f64> {
+        let face = |i: usize, a: usize| -> Result<f64, NsfError> {
             let x = self.at(i);
-            let j = self.fluid_at(x, a, 1)?;
-            let kf = self.law.kappa_lattice(0.5 * (theta[i] + theta[j]));
+            let Some(j) = self.fluid_at(x, a, 1) else {
+                return Ok(0.0);
+            };
+            let kf = self.spec.gas.face_conductivity(
+                &self.law,
+                0.5 * (theta[i] + theta[j]),
+                0.5 * (self.law.pressure_pa(rho[i], theta[i])
+                    + self.law.pressure_pa(rho[j], theta[j])),
+            )?;
             let wide = match (self.fluid_at(x, a, -1), self.fluid_at(self.at(j), a, 1)) {
                 (Some(m), Some(p)) => Some((m, p)),
                 _ => None,
             };
-            Some(match wide {
+            Ok(match wide {
                 Some((m, p)) => {
                     let gf =
                         (7.0 / 12.0) * (g[i][a] + g[j][a]) - (1.0 / 12.0) * (g[m][a] + g[p][a]);
@@ -880,24 +995,27 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 None => 0.5 * (g[i][a] + g[j][a]) - kf * (theta[j] - theta[i]),
             })
         };
-        let mut plus = vec![[0.0; 3]; n];
+        let mut plus: Vec<Result<[f64; 3], NsfError>> = vec![Ok([0.0; 3]); n];
         par_fill(&mut plus, self.spec.workers, &|i| {
             if solid[i] {
-                return [0.0; 3];
+                return Ok([0.0; 3]);
             }
-            [
-                face(i, 0).unwrap_or(0.0),
-                face(i, 1).unwrap_or(0.0),
-                face(i, 2).unwrap_or(0.0),
-            ]
+            Ok([face(i, 0)?, face(i, 1)?, face(i, 2)?])
         });
+        let plus: Vec<[f64; 3]> = plus.into_iter().collect::<Result<_, _>>()?;
         // wall face: flux in the +axis direction. Heat through the half cell; the viscous work `-sigma_{a b} u_{w b}` of a moving
         // edge wall (zero normal velocity, so no convective part; solid cells and still walls do no work).
-        let wall_flux = |i: usize, a: usize, s: i64| -> f64 {
+        let wall_flux = |i: usize, a: usize, s: i64| -> Result<f64, NsfError> {
             let heat = match wall_theta {
                 None => 0.0,
                 Some(tw) => {
-                    let kf = self.law.kappa_lattice(0.5 * (theta[i] + tw));
+                    // Same local pressure as the adjacent cell; only the wall
+                    // temperature changes across its half-cell resistance.
+                    let kf = self.spec.gas.face_conductivity(
+                        &self.law,
+                        0.5 * (theta[i] + tw),
+                        self.law.pressure_pa(rho[i], theta[i]),
+                    )?;
                     if s > 0 {
                         -kf * (tw - theta[i]) / 0.5
                     } else {
@@ -906,7 +1024,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             };
             if !self.moving_walls || self.shifted(self.at(i), a, s).is_some() {
-                return heat;
+                return Ok(heat);
             }
             let uw = self.edge_velocity[a][usize::from(s > 0)];
             let sg = sig[i];
@@ -915,27 +1033,28 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 1 => [sg[3], sg[1], sg[5]],
                 _ => [sg[4], sg[5], sg[2]],
             };
-            heat - (row[0] * uw[0] + row[1] * uw[1] + row[2] * uw[2])
+            Ok(heat - (row[0] * uw[0] + row[1] * uw[1] + row[2] * uw[2]))
         };
-        let mut div = vec![0.0; n];
+        let mut div: Vec<Result<f64, NsfError>> = vec![Ok(0.0); n];
         par_fill(&mut div, self.spec.workers, &|i| {
             if solid[i] {
-                return 0.0;
+                return Ok(0.0);
             }
             let x = self.at(i);
             let mut d = 0.0;
             for a in 0..3 {
                 d += match self.fluid_at(x, a, 1) {
                     Some(_) => plus[i][a],
-                    None => wall_flux(i, a, 1),
+                    None => wall_flux(i, a, 1)?,
                 };
                 d -= match self.fluid_at(x, a, -1) {
                     Some(m) => plus[m][a],
-                    None => wall_flux(i, a, -1),
+                    None => wall_flux(i, a, -1)?,
                 };
             }
-            d
+            Ok(d)
         });
+        let div = div.into_iter().collect::<Result<Vec<_>, _>>()?;
         let mut out = 0.0;
         for i in 0..n {
             if solid[i] {
@@ -944,14 +1063,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let x = self.at(i);
             for a in 0..3 {
                 if self.fluid_at(x, a, 1).is_none() {
-                    out += wall_flux(i, a, 1);
+                    out += wall_flux(i, a, 1)?;
                 }
                 if self.fluid_at(x, a, -1).is_none() {
-                    out -= wall_flux(i, a, -1);
+                    out -= wall_flux(i, a, -1)?;
                 }
             }
         }
-        (div, out)
+        Ok((div, out))
     }
 
     fn stream(&self, post: &[[f64; Q]]) -> Vec<[f64; Q]> {
@@ -1018,7 +1137,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if solid[i] {
                     f[i]
                 } else {
-                    let (ws, wb) = self.rates(rho[i], theta[i]);
+                    let (ws, wb) = self.rates(
+                        rho[i],
+                        theta[i],
+                        self.material.get(i).and_then(Option::as_ref),
+                    );
                     collide::<L>(&f[i], force[i], ws, wb)
                 }
             });
@@ -1067,16 +1190,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
             let u1 = self.velocity_field(&rho1, &mom1, &f1);
+            let trial_material = self.material_field(&rho1, &th1)?;
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| {
+                    let internal = trial_material
+                        .get(i)
+                        .and_then(Option::as_ref)
+                        .map_or(cv * th1[i], |m| m.sensible_energy_lattice);
                     rho1[i]
-                        * (cv * th1[i]
+                        * (internal
                             + 0.5
                                 * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]))
                 })
                 .collect();
-            let sig = self.stress_field(&next, &f1, &rho1, &th1);
-            let (div1, wall1) = self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig);
+            let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material);
+            let (div1, wall1) = self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig)?;
+            let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
             for i in 0..n {
@@ -1090,12 +1219,24 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 let ke = 0.5
                     * rho1[i]
                     * (u1[i][0] * u1[i][0] + u1[i][1] * u1[i][1] + u1[i][2] * u1[i][2]);
-                th_new[i] = (e1[i] - ke) / (rho1[i] * cv);
+                match &self.spec.gas {
+                    NsfGasMedium::CaloricallyPerfect(_) => {
+                        // Preserve the original division/order exactly.
+                        th_new[i] = (e1[i] - ke) / (rho1[i] * cv);
+                    }
+                    NsfGasMedium::Thermochemical(source) => {
+                        let (theta, local) =
+                            source.reconstruct(&self.law, rho1[i], (e1[i] - ke) / rho1[i])?;
+                        th_new[i] = theta;
+                        material_new[i] = Some(local);
+                    }
+                }
             }
             th1 = th_new;
-            result = Some((f1, u1, e1, div1, wall1));
+            result = Some((f1, u1, e1, div1, wall1, material_new));
         }
-        let (force1, u1, e1, div1, wall1) = result.expect("at least one coupling pass");
+        let (force1, u1, e1, div1, wall1, material_new) =
+            result.expect("at least one coupling pass");
         for i in 0..n {
             if self.solid[i] {
                 continue;
@@ -1108,7 +1249,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             {
                 return Err(NsfError::NonFinite { cell: i });
             }
-            check_state(&self.spec, &self.law, i, rho1[i], u1[i], th1[i])?;
+            let gamma = material_new
+                .get(i)
+                .and_then(Option::as_ref)
+                .map_or(self.law.gamma, |m| m.state.gamma);
+            check_state(&self.spec, gamma, i, rho1[i], u1[i], th1[i])?;
             let t_k = self.law.kelvin_of_theta(th1[i]);
             if t_k < self.spec.temperature_window_k[0] || t_k > self.spec.temperature_window_k[1] {
                 return Err(NsfError::Window {
@@ -1155,6 +1300,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         self.f = next;
         self.e = e1;
+        self.material = material_new;
         if have_sources {
             self.src_now = src_next;
         }
@@ -1221,7 +1367,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         s * self.law.energy_unit_j()
     }
-    /// Total energy in joules summed over the fluid cells in fixed cell order.
+    /// Total energy in joules in the medium's fixed sensible chart, summed over
+    /// fluid cells in fixed order. NASA9 absolute formation energy is excluded.
     #[must_use]
     pub fn total_energy_j(&self) -> f64 {
         let mut s = 0.0;
@@ -1243,7 +1390,35 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             self.law.kelvin_of_theta(self.theta[i]),
         )
     }
-    /// The scaling and transport laws in force.
+    /// Retained source owner or original GasSpec.
+    #[must_use]
+    pub fn medium(&self) -> &NsfGasMedium {
+        &self.spec.gas
+    }
+
+    /// Re-evaluate the original source at this accepted cell's actual density
+    /// and temperature. The returned receipt includes the same local EOS,
+    /// heat capacities, sound speed and transport used by the flow.
+    ///
+    /// Returns None for the legacy GasSpec path. Solid/out-of-grid cells refuse.
+    /// No material selection, composition or fixed query coordinate is changed.
+    pub fn thermochemical_state(
+        &self,
+        x: [usize; 3],
+    ) -> Result<Option<fs_material::thermochemical_gas::ResolvedThermochemicalGasState>, NsfError>
+    {
+        if x.iter().zip(self.spec.dims).any(|(&i, n)| i >= n) {
+            return Err(NsfError::Input("material state cell outside the grid"));
+        }
+        let i = self.index(x);
+        if self.solid[i] {
+            return Err(NsfError::Input("solid cell has no gas material state"));
+        }
+        let (rho, _) = raw_moments::<L>(&self.f[i]);
+        self.spec.gas.source_state(&self.law, rho, self.theta[i])
+    }
+
+    /// The scaling and reference-pressure diagnostic transport laws in force.
     #[must_use]
     pub fn law(&self) -> &NsfLaw {
         &self.law
@@ -1274,8 +1449,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 }
 
 fn check_state(
-    spec: &NsfSpec,
-    law: &NsfLaw,
+    spec: &NsfSpec<NsfGasMedium>,
+    gamma: f64,
     cell: usize,
     rho: f64,
     u: [f64; 3],
@@ -1292,7 +1467,7 @@ fn check_state(
             maximum: spec.maximum_temperature_ratio,
         });
     }
-    let mach = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt() / (law.gamma * theta).sqrt();
+    let mach = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt() / (gamma * theta).sqrt();
     if !mach.is_finite() || mach > spec.maximum_mach {
         return Err(NsfError::Mach {
             cell,

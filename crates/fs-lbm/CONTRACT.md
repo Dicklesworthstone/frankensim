@@ -911,6 +911,58 @@ lattice resolves the sound speed `sqrt(gamma theta)` only while it stays below t
 temperature-ratio bounds are refusals, not tuning. The bulk-to-shear ratio is a cited input, not a module result; its
 uncertainty (0.67 to 0.84) is not propagated. No recording, graded or instrument claim.
 
+### Source-owned NASA9 energy and local transport in the NSF grid
+
+`NsfSpec<G = GasSpec>` admits `ThermochemicalNsfGas` through the same
+`NsfGrid3<L>` constructors. Existing GasSpec call sites retain their constant-cv
+branch and arithmetic order. The source owner retains the NASA9 mixture, original
+transport cards/selections, typed reference query and bounded `GasEnergySolve`.
+Only T/p evolve; composition and every other material coordinate stay fixed.
+
+Each fluid-cell predictor resolves pressure as rho*R*T using that mixture's
+constant R and actual conserved density. The resulting source viscosity drives
+the existing collision and stress rates. Shared energy faces resolve source
+conductivity at mean T and mean physical pressure; isothermal wall faces use
+mean fluid/wall T at the adjacent fluid pressure. No source transport is clamped
+or replaced with the reference-pressure diagnostic table. Every source query,
+inversion, local Mach/gamma and kinematic-viscosity check can refuse before
+publication. Accepted cell responses, populations, energy, flux history and
+ledgers publish together. The original fixed predictor-corrector passes remain;
+this is not a new compressible solver.
+
+The conserved internal-energy chart is u_s(T) = u_NASA9(T) - u_offset, with the
+single retained offset u_offset = u_NASA9(T_ref) - cv(T_ref)*T_ref. It matches
+cv*T at the reference state and removes arbitrary formation-energy offsets
+from the separate lattice mass / finite-volume energy fluxes. NASA9 absolute
+energy may be negative. Lattice specific energy converts through (dx/dt)^2.
+The original material owner reconstructs density/energy with its stable
+(u_NASA9 - u_offset) - u_s residual; no new polynomial evaluator or caloric
+integrator participates. `energy_reference_j_kg()` exposes the offset.
+Reported energies and manufactured `SourceFn` energy supplies use this chart;
+an absolute-energy source carrying mass must subtract u_offset times its mass
+supply. Composition-changing/reaction sources are unsupported.
+
+The source reference T/p must equal the grid reference, and its inversion
+bracket must equal the declared run window. Source properties are re-evaluated
+at actual local states, including final energy inversion, so a valid reference
+point does not authorize an unsupported density/temperature trajectory.
+`thermochemical_state(cell)` exposes the original source receipt at the
+accepted physical state; `medium()` retains the source owner.
+`dispersion::GasPoint::from_law` uses the exact reference coefficients for
+a LOCAL uniform-state small-signal linearization. Its gamma is not a global
+nonlinear caloric approximation.
+
+The existing Mach/viscosity bounds remain necessary admission guards; the
+legacy perfect-gas convergence and stability evidence does not establish
+nonlinear NASA9 qualification. No reactions, species transport, molecular
+relaxation, phase change or variable bulk/shear ratio are supplied. Synthetic
+regressions in `tests/nsf3_thermochemical.rs` exercise caloric heating and local
+EOS/transport feedback, formation-energy-offset invariance during density
+changes, data-only conductivity substitution, worker invariance, local-source
+rollback, temperature-dependent Mach admission and legacy ingress equivalence.
+Their presence does not claim native execution or empirical gas validation.
+
+
 ## No-claim boundaries
 
 - D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The
