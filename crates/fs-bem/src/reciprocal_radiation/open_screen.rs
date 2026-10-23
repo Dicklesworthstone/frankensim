@@ -657,18 +657,52 @@ impl<'a> PreparedScreen<'a> {
             &mut cancelled,
         )
     }
-    fn solve_wave<K: WaveNumber>(
+    /// Several real-frequency drives against ONE assembly and LU at `k`: the
+    /// results are bitwise those of `drives.len()` separate [`Self::solve`]
+    /// calls with the same `admittance`. Each drive passes `solve`'s own
+    /// backward-residual and passive-work checks; any failure refuses the whole
+    /// call, with no partial results. At most `max_drives` drives, a declared
+    /// ceiling (each result keeps only its nodal jump; the factor is n^2).
+    pub fn solve_many(
         &self,
-        wave: K,
-        real_frequency: bool,
+        k: f64,
         medium: Medium,
-        bc: SurfaceBc<'_>,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<JumpSolution<'_, 'a>, HelmholtzError> {
-        poll(cancelled)?;
+        admittance: Admittance<'_>,
+        drives: &[&[C64]],
+        max_drives: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<JumpSolution<'_, 'a>>, HelmholtzError> {
+        if !k.is_finite() || k <= 0.0 || k > self.highest_k {
+            return Err(bad("open screen frequency exceeds prepared band"));
+        }
+        if drives.is_empty() || drives.len() > max_drives {
+            return Err(bad("open multi-drive solve needs 1..=max_drives drives"));
+        }
+        poll(&mut cancelled)?;
         self.admit_work()?;
+        for drive in drives {
+            self.validate_drive(
+                medium,
+                SurfaceBc {
+                    drive_velocity: drive,
+                    admittance,
+                },
+            )?;
+        }
+        let (h, lu) = self.factor_wave(k, true, admittance, &mut cancelled)?;
+        let mut out = Vec::with_capacity(drives.len());
+        for drive in drives {
+            poll(&mut cancelled)?;
+            let bc = SurfaceBc {
+                drive_velocity: drive,
+                admittance,
+            };
+            out.push(self.finish_drive(k, true, medium, bc, &h, &lu, &mut cancelled)?);
+        }
+        Ok(out)
+    }
+    fn validate_drive(&self, medium: Medium, bc: SurfaceBc<'_>) -> Result<(), HelmholtzError> {
         let nv = self.surface.vertices.len();
-        let n = self.n;
         bc.admittance.validate(nv)?;
         if bc.drive_velocity.len() != nv
             || bc.drive_velocity.iter().any(|v| !finite(*v))
@@ -681,9 +715,23 @@ impl<'a> PreparedScreen<'a> {
                 "open boundary requires finite nodal drive and positive medium",
             ));
         }
+        Ok(())
+    }
+    /// The assembled operator with its admittance columns, and its LU: the
+    /// drive-independent part of a solve, shared by `solve_wave` and
+    /// `solve_many` so both carry the same bits.
+    fn factor_wave<K: WaveNumber>(
+        &self,
+        wave: K,
+        real_frequency: bool,
+        admittance: Admittance<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, fs_la::eigen_complex::LuComplex), HelmholtzError> {
+        let nv = self.surface.vertices.len();
+        let n = self.n;
         let mut h = self.assemble(wave, real_frequency, cancelled)?;
         let ik = C64::new(0.0, 1.0) * wave.value();
-        if !bc.admittance.is_zero() {
+        if !admittance.is_zero() {
             for j in 0..n {
                 poll(cancelled)?;
                 let mut unit = vec![C64::ZERO; nv];
@@ -692,12 +740,33 @@ impl<'a> PreparedScreen<'a> {
                         unit[v] = C64::ONE;
                     }
                 }
-                let col = self.weak_image(bc.admittance, &unit)?;
+                let col = self.weak_image(admittance, &unit)?;
                 for i in 0..n {
                     h[i * n + j] = h[i * n + j] + ik * col[i];
                 }
             }
         }
+        let lu = fs_la::eigen_complex::with_lu_workers(self.options.workers, || {
+            lu_complex_with_cancel(&h, n, &mut *cancelled)
+        })
+        .map_err(lu_error)?;
+        Ok((h, lu))
+    }
+    /// Back-substitute one drive against a shared factor, with the drive's own
+    /// backward-residual and passive-work checks.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_drive<K: WaveNumber>(
+        &self,
+        wave: K,
+        real_frequency: bool,
+        medium: Medium,
+        bc: SurfaceBc<'_>,
+        h: &[C64],
+        lu: &fs_la::eigen_complex::LuComplex,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<JumpSolution<'_, 'a>, HelmholtzError> {
+        let n = self.n;
+        let ik = C64::new(0.0, 1.0) * wave.value();
         let mut rhs = vec![C64::ZERO; n];
         let mut drive_work = vec![C64::ZERO; n];
         for f in &self.facets {
@@ -714,10 +783,6 @@ impl<'a> PreparedScreen<'a> {
         for i in 0..n {
             rhs[i] = ik.scale(medium.density * medium.sound_speed) * drive_work[i];
         }
-        let lu = fs_la::eigen_complex::with_lu_workers(self.options.workers, || {
-            lu_complex_with_cancel(&h, n, &mut *cancelled)
-        })
-        .map_err(lu_error)?;
         let mut x = rhs.clone();
         lu.solve_with_cancel(&mut x, &mut *cancelled)
             .map_err(lu_error)?;
@@ -770,6 +835,20 @@ impl<'a> PreparedScreen<'a> {
             backward_residual,
             declared_active: bc.admittance.declared_active(),
         })
+    }
+    fn solve_wave<K: WaveNumber>(
+        &self,
+        wave: K,
+        real_frequency: bool,
+        medium: Medium,
+        bc: SurfaceBc<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<JumpSolution<'_, 'a>, HelmholtzError> {
+        poll(cancelled)?;
+        self.admit_work()?;
+        self.validate_drive(medium, bc)?;
+        let (h, lu) = self.factor_wave(wave, real_frequency, bc.admittance, cancelled)?;
+        self.finish_drive(wave, real_frequency, medium, bc, &h, &lu, cancelled)
     }
 }
 
