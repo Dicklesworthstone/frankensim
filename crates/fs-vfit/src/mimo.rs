@@ -30,6 +30,9 @@ use fs_la::eigen_complex::{EigFailure, eig, lu_complex};
 use fs_la::factor::lu;
 use fs_math::{c64::C64, det};
 
+/// Shared bounded admission and original exact ZOH runtime for causal loads.
+pub mod load;
+
 /// A real multiport rational impedance with shared poles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MimoModel {

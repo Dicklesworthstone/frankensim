@@ -19,6 +19,7 @@ use super::paired::BladePropagator;
 use super::tube::TubeDrive;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_duct::dg::{DgState, DgStepOutput};
+use crate::dg_port::DgTerminalFrame;
 
 /// The shared source-bound DG load used by nonlinear acoustic couplers.
 pub use crate::dg_port::DgPortLoad as ApertureDgLoad;
@@ -36,7 +37,10 @@ pub struct DgApertureFrame {
     pub duct: DgStepOutput,
     /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
     pub stored_energy_j: f64,
-    /// Change in the complete storage [J].
+    /// Signed outlet exchange with an optional admitted rational load. This is
+    /// neither terminal heat nor a certificate of its internal stored energy.
+    pub terminal: Option<DgTerminalFrame>,
+    /// Change in the aperture and DG storage [J].
     pub storage_change_j: f64,
     /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
     /// wall/terminal heat integral when `duct.ledger.balance_checked` is false.
@@ -45,7 +49,7 @@ pub struct DgApertureFrame {
     pub upstream_work_j: f64,
     /// Inlet pressure work on independently supplied body flow [J].
     pub body_work_j: f64,
-    /// DG integrated work minus aperture mean pressure times total bore volume
+    /// DG integrated INLET work minus aperture mean pressure times bore volume
     /// [J]. The internal port cancels before either candidate is published.
     pub port_work_residual_j: f64,
 }
@@ -56,6 +60,7 @@ impl DgApertureFrame {
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
         self.storage_change_j + self.inferred_total_dissipation_j
+            + self.terminal.as_ref().map_or(0.0, |frame| frame.port_work_j)
             - self.upstream_work_j
             - self.body_work_j
             - self.aperture.mechanical_work_j
@@ -113,7 +118,8 @@ impl ApertureDg {
         self.load.state()
     }
 
-    /// Complete accepted stored energy [J].
+    /// Accepted aperture and DG stored energy [J]. Rational terminal exchange
+    /// is reported separately; no rational storage function is fabricated.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         self.aperture.stored_energy_j() + self.load.state().stored_energy_j()
@@ -174,13 +180,15 @@ impl ApertureDg {
         let upstream_work_j = drive.upstream_pressure_pa
             * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt);
         let body_work_j = aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt);
-        let port_work_residual_j = duct.ledger.port_work_step_j
+        let port_work_residual_j = acoustic.inlet_work_j()
             - aperture.bore_pressure_pa * (aperture.bore_flow_m3_s * dt);
-        let balance_residual_j = storage_change_j + inferred_total_dissipation_j
+        let terminal = acoustic.terminal_frame().copied();
+        let terminal_work_j = terminal.as_ref().map_or(0.0, |frame| frame.port_work_j);
+        let balance_residual_j = storage_change_j + inferred_total_dissipation_j + terminal_work_j
             - upstream_work_j - body_work_j - aperture.mechanical_work_j;
         if ![
             stored_energy_j, storage_change_j, inferred_total_dissipation_j,
-            upstream_work_j, body_work_j, port_work_residual_j, balance_residual_j,
+            upstream_work_j, body_work_j, terminal_work_j, port_work_residual_j, balance_residual_j,
         ].iter().all(|value| value.is_finite()) {
             return Err(invalid(
                 "DG aperture candidate left the finite energy/work domain",
@@ -189,7 +197,7 @@ impl ApertureDg {
         let duct = acoustic.accept();
         self.aperture.accept_frame(trial);
         Ok(DgApertureFrame {
-            aperture, duct, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+            aperture, duct, terminal, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
             upstream_work_j, body_work_j, port_work_residual_j,
         })
     }

@@ -10,8 +10,8 @@
 //! dissipation or reconstructed into a fictitious stored-energy coordinate.
 
 use super::{NetworkNode, NodeFrame, WaveguideError, WaveguideNetwork};
-use crate::mimo::{MimoModel, MimoPassivityReport, MimoZoh, check_mimo_passivity};
-use crate::model::PoleTerm;
+use crate::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
+use crate::mimo::{MimoModel, MimoPassivityReport, MimoZoh};
 use fs_la::prepared_lu::LuWorkspace;
 
 /// An explicitly ordered, proper rational terminal impedance in SI units.
@@ -67,80 +67,15 @@ fn invalid(what: &'static str) -> WaveguideError {
 impl MimoTerminals {
     fn new(source: MimoTerminalSpec, graph: &WaveguideNetwork) -> Result<Self, WaveguideError> {
         let n = source.model.ports;
-        let terms = source.model.poles.len();
-        if !(1..=128).contains(&n)
-            || source.nodes.len() != n
-            || terms > 256
-            || source.max_states > 256
-            || !(17..=65_537).contains(&source.sampled_passivity_points)
-        {
-            return Err(invalid(
-                "coupled terminals exceed port, pole or sampling limits",
-            ));
-        }
-        let states = source
-            .model
-            .order()
-            .checked_mul(n)
-            .ok_or_else(|| invalid("MIMO state size overflow"))?;
-        let entries = n * n;
-        if states > source.max_states
-            || source.model.d.len() != entries
-            || source.model.e.len() != entries
-            || source.model.residues.len() != terms
-            || source.model.residues.iter().any(|r| {
-                r.len() != entries || r.iter().any(|z| !z.re.is_finite() || !z.im.is_finite())
-            })
-            || source.model.d.iter().any(|v| !v.is_finite())
-            || source.model.e.iter().any(|v| *v != 0.0)
-            || !source.model.is_stable()
-            || source
-                .model
-                .poles
-                .iter()
-                .zip(&source.model.residues)
-                .any(|(p, r)| match p {
-                    PoleTerm::Real { pole, .. } => {
-                        !pole.is_finite() || r.iter().any(|z| z.im != 0.0)
-                    }
-                    PoleTerm::Pair { pole, .. } => {
-                        !pole.re.is_finite() || !pole.im.is_finite() || pole.im <= 0.0
-                    }
-                })
-        {
-            return Err(invalid(
-                "coupled terminals require a finite stable proper MIMO model with exact shapes",
-            ));
-        }
-        let band = source.band_rad_s;
-        if !band.iter().all(|v| v.is_finite())
-            || band[0] <= 0.0
-            || band[1] <= band[0]
-            || band[1] < core::f64::consts::PI / graph.time_step_s
-        {
-            return Err(invalid(
-                "MIMO operator band must cover the physical clock's Nyquist limit",
-            ));
-        }
-        // Overestimate retained matrix/state/record payload before allocating.
-        // Finite dense limits above make this arithmetic representable on wasm32.
-        let required = entries * (64 * terms + 64)
-            + states * 64
-            + n * 256
-            + (source.sampled_passivity_points + 6400 + terms * 128) * 8;
-        if required > source.max_memory_bytes {
-            return Err(invalid(
-                "coupled terminal payload exceeds its separate memory allowance",
-            ));
+        if !(1..=128).contains(&n) || source.nodes.len() != n {
+            return Err(invalid("coupled terminals require one existing node per model port"));
         }
         let mut impedance = Vec::with_capacity(n);
         for (i, &node) in source.nodes.iter().enumerate() {
             if source.nodes[..i].contains(&node)
                 || !matches!(graph.nodes.get(node), Some(NetworkNode::Termination { .. }))
             {
-                return Err(invalid(
-                    "MIMO ports must be distinct existing memoryless terminals",
-                ));
+                return Err(invalid("MIMO ports must be distinct existing memoryless terminals"));
             }
             let range = graph.offsets[node]..graph.offsets[node + 1];
             if range.len() != 1 {
@@ -149,42 +84,27 @@ impl MimoTerminals {
             let port = graph.ports[range.start];
             impedance.push(graph.lines[port / 2].spec.impedance_pa_s_m3);
         }
-        let continuous = check_mimo_passivity(&source.model, (band[0], band[1]))
-            .map_err(|_| invalid("MIMO continuous passivity admission failed"))?;
-        if !continuous.passive {
-            return Err(invalid(
-                "MIMO continuous impedance has a passivity violation",
-            ));
-        }
-        let runtime = source
-            .model
-            .zoh(graph.time_step_s)
-            .map_err(|_| invalid("MIMO exact ZOH realization failed"))?;
-        let sampled = runtime.mean_sampled_passivity(source.sampled_passivity_points);
-        if !sampled.passive {
-            return Err(invalid(
-                "actual sampled MIMO impedance has a passivity violation",
-            ));
-        }
+        let limits = MimoLoadLimits {
+            band_rad_s: source.band_rad_s,
+            sampled_passivity_points: source.sampled_passivity_points,
+            max_states: source.max_states,
+            max_memory_bytes: source.max_memory_bytes,
+        };
+        let (runtime, continuous, sampled) =
+            PreparedMimoLoad::new(&source.model, graph.time_step_s, limits)
+                .map_err(|error| invalid(error.0))?
+                .into_parts();
         let mut system = runtime.mean_direct_term().to_vec();
         for (i, &z) in impedance.iter().enumerate() {
             system[i * n + i] += z;
         }
         let mut factor =
             LuWorkspace::new(n).map_err(|_| invalid("coupled terminal solve allocation failed"))?;
-        factor
-            .factor(&system)
+        factor.factor(&system)
             .map_err(|_| invalid("coupled terminal direct solve is singular or nonfinite"))?;
         Ok(Self {
-            source,
-            runtime,
-            factor,
-            impedance,
-            continuous,
-            sampled,
-            history: vec![0.0; n],
-            rhs: vec![0.0; n],
-            flow: vec![0.0; n],
+            source, runtime, factor, impedance, continuous, sampled,
+            history: vec![0.0; n], rhs: vec![0.0; n], flow: vec![0.0; n],
             candidate: vec![MimoPortFrame::default(); n],
             accepted: vec![MimoPortFrame::default(); n],
         })

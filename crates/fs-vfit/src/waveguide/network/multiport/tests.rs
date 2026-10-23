@@ -1,4 +1,6 @@
 use super::*;
+use crate::mimo::check_mimo_passivity;
+use crate::model::PoleTerm;
 use crate::waveguide::network::NetworkSegment;
 use fs_math::c64::C64;
 
@@ -314,4 +316,37 @@ fn unsupported_physics_and_false_source_shapes_refuse() {
     let mut net = graph();
     net.step(0.0).unwrap();
     assert!(net.install_mimo_terminals(spec(model())).is_err());
+}
+
+#[test]
+fn network_and_field_consumers_share_the_same_load_admission() {
+    let source = spec(model());
+    let limits = MimoLoadLimits {
+        band_rad_s: source.band_rad_s,
+        sampled_passivity_points: source.sampled_passivity_points,
+        max_states: source.max_states,
+        max_memory_bytes: source.max_memory_bytes,
+    };
+    let prepared = PreparedMimoLoad::new(&source.model, DT, limits).unwrap();
+    let network = graph().with_mimo_terminals(source).unwrap();
+    let (continuous, sampled) = network.mimo_passivity().unwrap();
+    assert_eq!(continuous.class, prepared.reports().0.class);
+    assert_eq!(continuous.worst, prepared.reports().0.worst);
+    assert_eq!(sampled.class, prepared.reports().1.class);
+    assert_eq!(sampled.worst, prepared.reports().1.worst);
+    assert_eq!(network.mimo_pole_states().unwrap(), prepared.pole_states());
+    for bad_limits in [
+        MimoLoadLimits { max_memory_bytes: 0, ..limits },
+        MimoLoadLimits { sampled_passivity_points: 16, ..limits },
+        MimoLoadLimits { band_rad_s: [1.0, 0.9 * limits.band_rad_s[1]], ..limits },
+    ] {
+        let mut source = spec(model());
+        source.band_rad_s = bad_limits.band_rad_s;
+        source.sampled_passivity_points = bad_limits.sampled_passivity_points;
+        source.max_states = bad_limits.max_states;
+        source.max_memory_bytes = bad_limits.max_memory_bytes;
+        let direct = PreparedMimoLoad::new(&source.model, DT, bad_limits).unwrap_err();
+        let network = graph().with_mimo_terminals(source).err().unwrap();
+        assert_eq!(network.0, direct.0);
+    }
 }

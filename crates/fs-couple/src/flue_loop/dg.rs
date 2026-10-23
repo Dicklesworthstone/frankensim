@@ -8,12 +8,14 @@
 //!
 //! The retained jet card and authored receptivity remain exploration-only.
 //! This is not the resolved compressible zone/duct interface of M3.3-W1 and
-//! cannot qualify a flute acceptance render. Solid wall motion, exterior
-//! radiation and live bore geometry changes require their own coupled owners.
+//! cannot qualify a flute acceptance render. Optional shared rational outlet
+//! reaction retains its own physical source and reports; inlet pressure remains
+//! an internal observation. Solid wall motion and live bore geometry changes
+//! require their own coupled owners.
 
 use super::network::FlueResonator;
 use super::{FlueError, FlueGeometry, FlueVoice, MouthStep};
-use crate::dg_port::DgPortLoad;
+use crate::dg_port::{DgPortLoad, DgTerminalFrame};
 use crate::wind_line::WindBoundary;
 use fs_aeroac::jetcard::JetCard;
 use fs_duct::dg::DgStepOutput;
@@ -56,14 +58,17 @@ pub struct FlueDgFrame {
     pub inlet_flow_m3_s: f64,
     pub outgoing_pressure_pa: f64,
     pub incoming_pressure_pa: f64,
-    /// Original integrated DG work minus mean inlet pressure * volume [J].
+    /// Signed exchange with the optional original rational outlet. It is not
+    /// inferred terminal heat or a fabricated terminal storage certificate.
+    pub terminal: Option<DgTerminalFrame>,
+    /// Original integrated DG INLET work minus mean pressure * volume [J].
     pub port_work_residual_j: f64,
     /// Original propagator observation and ledger. Dense loss is still inferred
     /// where its balance_checked field is false.
     pub duct: DgStepOutput,
 }
 
-/// The original one-port DG owner retained under the common flue loop.
+/// The original DG owner and optional causal terminal under the common flue loop.
 pub struct FlueDg {
     load: DgPortLoad,
     characteristic_impedance_pa_s_m3: f64,
@@ -138,8 +143,8 @@ impl FlueDg {
             + (relation.impedance_pa_s_m3 * inlet_flow_m3_s).abs()
             + inlet_pressure_pa.abs();
         let work = inlet_pressure_pa * (inlet_flow_m3_s * dt);
-        let port_work_residual_j = output.ledger.port_work_step_j - work;
-        let work_scale = output.ledger.port_work_step_j.abs() + work.abs();
+        let port_work_residual_j = trial.inlet_work_j() - work;
+        let work_scale = trial.inlet_work_j().abs() + work.abs();
         if (expected_pressure - inlet_pressure_pa).abs()
             > 1e-10 * pressure_scale.max(1e-300)
             || (output.port_outputs[0].conjugate_rate - inlet_pressure_pa).abs()
@@ -151,6 +156,7 @@ impl FlueDg {
             return Err(invalid("DG source wave and original mean port work disagree"));
         }
         // All fallible checks precede the common owner's atomic publication.
+        let terminal = trial.terminal_frame().copied();
         let duct = trial.accept();
         self.last = Some(FlueDgFrame {
             inlet_pressure_pa,
@@ -158,6 +164,7 @@ impl FlueDg {
             outgoing_pressure_pa,
             incoming_pressure_pa,
             port_work_residual_j,
+            terminal,
             duct,
         });
         Ok(incoming_pressure_pa)
