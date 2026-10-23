@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	hl-static	High-carbon steel music wire from California Fine Wire Company, 20 to 1100 micrometre diameter, 0.5 m long, untreated	Destructive tensile tests on an Instron machine with self-tightening wedge clamps at a uniform extension rate; Young's modulus from the initial linear force-extension region (mean of 43 untreated wires, printed 2.12 +- 0.01 x 10^11 Pa); breaking stress averaged per diameter in Table 1	Static tensile modulus, used for the string's elastic coefficients; the per-diameter breaking stresses are averages of 1 to 16 samples and include wires that broke in or near the clamps, which the authors found no weaker. The linear limit was on average 85 percent of the breaking stress (not stored). Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
+observation	hl-ringdown	Untreated music wire 465 micrometre diameter, 498 mm long, clamped at one end and hung in vacuum	Electrostatic excitation of transverse resonant modes, ringdown by HeNe laser shadow sensing; the measured loss is fitted with a thermoelastic peak plus a frequency-independent material loss; Table 4 prints that material loss	The 8 to 3000 Hz band is the span of the plotted modes (Figures 6 and 7); measured in vacuum, so it excludes air damping; the fitted thermoelastic peak is not part of this tangent. Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
+observation	hl-density	Music wire density used by the authors	Table 3 lists the literature density the authors say they know to be correct, as an input to their thermal-noise predictions	Not measured on these specimens. Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
+scalar	density	hl-density	density	7800	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
+scalar	young-modulus	hl-static	young_modulus	212000	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	T	293.15	293.15	K
+scalar	loss-tangent-465um	hl-ringdown	bending_loss_tangent	1.4e-4	1	constant
+uncertainty	loss-tangent-465um	unstated	-	-	-	-
+validity	loss-tangent-465um	T	293.15	293.15	K
+validity	loss-tangent-465um	frequency	8	3000	Hz
+scalar	breaking-stress-1100um	hl-static	breaking_stress_1100um_untreated	2.38	GPa	constant
+uncertainty	breaking-stress-1100um	unstated	-	-	-	-
+validity	breaking-stress-1100um	T	293.15	293.15	K
+scalar	breaking-stress-711um	hl-static	breaking_stress_711um_untreated	2.52	GPa	constant
+uncertainty	breaking-stress-711um	unstated	-	-	-	-
+validity	breaking-stress-711um	T	293.15	293.15	K
+scalar	breaking-stress-635um	hl-static	breaking_stress_635um_untreated	2.16	GPa	constant
+uncertainty	breaking-stress-635um	unstated	-	-	-	-
+validity	breaking-stress-635um	T	293.15	293.15	K
+scalar	breaking-stress-609um	hl-static	breaking_stress_609um_untreated	2.13	GPa	constant
+uncertainty	breaking-stress-609um	unstated	-	-	-	-
+validity	breaking-stress-609um	T	293.15	293.15	K
+scalar	breaking-stress-457um	hl-static	breaking_stress_457um_untreated	2.58	GPa	constant
+uncertainty	breaking-stress-457um	unstated	-	-	-	-
+validity	breaking-stress-457um	T	293.15	293.15	K
+scalar	breaking-stress-450um	hl-static	breaking_stress_450um_untreated	2.82	GPa	constant
+uncertainty	breaking-stress-450um	unstated	-	-	-	-
+validity	breaking-stress-450um	T	293.15	293.15	K
+scalar	breaking-stress-355um	hl-static	breaking_stress_355um_untreated	2.60	GPa	constant
+uncertainty	breaking-stress-355um	unstated	-	-	-	-
+validity	breaking-stress-355um	T	293.15	293.15	K
+scalar	breaking-stress-340um	hl-static	breaking_stress_340um_untreated	2.36	GPa	constant
+uncertainty	breaking-stress-340um	unstated	-	-	-	-
+validity	breaking-stress-340um	T	293.15	293.15	K
+scalar	breaking-stress-269um	hl-static	breaking_stress_269um_untreated	2.07	GPa	constant
+uncertainty	breaking-stress-269um	unstated	-	-	-	-
+validity	breaking-stress-269um	T	293.15	293.15	K
+scalar	breaking-stress-248um	hl-static	breaking_stress_248um_untreated	2.13	GPa	constant
+uncertainty	breaking-stress-248um	unstated	-	-	-	-
+validity	breaking-stress-248um	T	293.15	293.15	K
+scalar	breaking-stress-243um	hl-static	breaking_stress_243um_untreated	2.17	GPa	constant
+uncertainty	breaking-stress-243um	unstated	-	-	-	-
+validity	breaking-stress-243um	T	293.15	293.15	K
+scalar	breaking-stress-203um	hl-static	breaking_stress_203um_untreated	2.23	GPa	constant
+uncertainty	breaking-stress-203um	unstated	-	-	-	-
+validity	breaking-stress-203um	T	293.15	293.15	K
+scalar	breaking-stress-197um	hl-static	breaking_stress_197um_untreated	2.01	GPa	constant
+uncertainty	breaking-stress-197um	unstated	-	-	-	-
+validity	breaking-stress-197um	T	293.15	293.15	K

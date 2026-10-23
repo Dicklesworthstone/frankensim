@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	steel-music-wire-string-heptonstall-ligo-p1400229
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Heptonstall A., Waller M., Robertson N.A., Investigation of mechanical properties of cryogenically treated music wire, LIGO document P1400229 / arXiv:1506.03778 (California Institute of Technology and University of Glasgow); Section III.A (Young's modulus) and Table 1 (average breaking stress per diameter), Table 3 (density used) and Table 4 (material loss); the string-section form of steel-music-wire-heptonstall-ligo-p1400229 with canonical property names and typed axes
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature
+axis	frequency	frequency	cyclic-frequency
