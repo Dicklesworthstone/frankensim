@@ -1937,3 +1937,13 @@ scales a separately admitted base k(T); it does not infer a volume-mixture rule,
 solid/liquid material measurements, or additional source authority. The original
 fs-conduction facade and live material-flow thermal coupling consume this same
 law. The immutable equilibrium h chart remains the phase-state owner.
+
+### Shared linear magnetic permeability admission
+
+`field_storage::linear_magnetic_permeability` exposes the existing absolute
+scalar permeability admission used by `ResolvedInductor`. The linear planar
+`fs-em` field owner calls this same function, so circuit storage and spatial
+fields share dimensions, source support and linear lossless model restrictions.
+Fixed-temperature source snapshots are allowed; field/frequency dependence and
+operating-field bounds still require a richer owner and refuse here.
+This adds no independent constitutive formula or magnetic heating law.

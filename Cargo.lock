@@ -1457,6 +1457,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-em"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-feec",
+ "fs-lbm",
+ "fs-matdb",
+ "fs-material",
+ "fs-qty",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-epi-e2e"
 version = "0.0.1"
 dependencies = [

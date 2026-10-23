@@ -138,6 +138,21 @@ fn coefficient(
     )
 }
 
+/// Absolute scalar permeability for a linear isotropic lossless field owner.
+/// Shares the exact source/model admission used by the circuit inductance:
+/// temperature may be fixed at the resolved state, while frequency/field
+/// dependence and operating-field restrictions require a different model.
+/// The original material bundle remains owned by the caller.
+pub fn linear_magnetic_permeability(
+    material: &ResolvedMaterialStatePoint,
+) -> Result<f64, FieldStorageError> {
+    coefficient(
+        material,
+        MAGNETIC_PERMEABILITY_PROPERTY,
+        MAGNETIC_PERMEABILITY_DIMS,
+    )
+}
+
 fn resolve(
     card: &MaterialCard,
     point: &QueryPoint,
@@ -276,11 +291,7 @@ impl ResolvedInductor {
         if turns == 0 {
             return Err(FieldStorageError::Invalid("winding needs positive turns"));
         }
-        let mu = coefficient(
-            &material,
-            MAGNETIC_PERMEABILITY_PROPERTY,
-            MAGNETIC_PERMEABILITY_DIMS,
-        )?;
+        let mu = linear_magnetic_permeability(&material)?;
         let n = f64::from(turns);
         let inductance_h = positive(
             mu * (area_m2 / path_length_m) * n * n,

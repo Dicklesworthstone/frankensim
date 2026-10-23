@@ -1,0 +1,16 @@
+//! Material-resolved electromagnetic field problems on the shared numerical owners.
+//!
+//! The first rung is linear, isotropic, fixed-state planar magnetostatics:
+//! -div(mu^-1 grad(A_z)) = J_z, B = (d_y A_z, -d_x A_z), H = B/mu.
+//! The mesh, weighted Hodge, sparse assembly and checked Krylov recurrence remain
+//! owned by fs-rep-mesh, fs-feec, fs-sparse and fs-solver. Material admission is
+//! shared with the existing source-derived circuit inductance.
+//!
+//! Explicit geometry/frame correspondence transfers the computed field into
+//! existing moving-conductor/current/heat/flow owners. That coupling is one-way
+//! in the low-induction regime: their induced currents do not update this field.
+//! There is no nonlinear ferromagnetism, permanent magnet, hysteresis, field
+//! loss, induction, magnetization-force or thermodynamic temperature-work claim.
+
+pub mod planar;
+pub mod transfer;
