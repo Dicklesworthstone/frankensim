@@ -542,6 +542,11 @@ pub struct ModalAirLoad {
     /// `trace(B U' M^-1 U)`, an upper bound on the damping's largest
     /// `M^-1 C` eigenvalue for the explicit-step admission.
     pub(crate) rate_bound: f64,
+    /// With a held film loss, `damping` is radiation plus film and this is the
+    /// film part alone, so `radiated` can say how much of a step was film.
+    film_damping: Option<Vec<f64>>,
+    film_step_j: f64,
+    film_dissipated_j: f64,
     /// Woodbury data for the implicit air mass at the step it was prepared for.
     pub(crate) prepared: Option<Prepared>,
     /// Per-step buffers: nodal right-hand side and correction, projections.
@@ -587,6 +592,12 @@ struct Retained {
     iterations: usize,
     /// MAC against the family's Rayleigh-Ritz estimate of the FD mode.
     mac: f64,
+    /// `phi' K_bend phi / phi' K phi`: the share of the mode's stiffness
+    /// energy held in bending, from the body's own operators.
+    bending_share: f64,
+    /// Held film loss as a modal damping coefficient,
+    /// `tan delta * phi' K_bend phi / omega` at the loaded frequency.
+    film_resistance: f64,
 }
 
 fn cholesky(a: &mut [f64], n: usize) -> Result<(), String> {
@@ -787,6 +798,48 @@ impl ModalAirLoad {
         gas: &GasState,
         compact_volume_resistance: Option<f64>,
     ) -> Result<ModalAirLoad, String> {
+        Self::new_with_film(
+            table,
+            radius,
+            h,
+            xy,
+            mass,
+            stiffness,
+            gas,
+            compact_volume_resistance,
+            None,
+        )
+    }
+
+    /// As `new`, with an optional held film loss `(tan delta, K_bend)`.
+    ///
+    /// Each retained mode gets the hysteretic loss of its bending energy,
+    /// `c = tan delta * phi' K_bend phi / omega` at its own loaded frequency
+    /// (`eta = tan delta * phi' K_bend phi / phi' K phi`), applied through the
+    /// same modal damping as the radiation. No fit: each retained mode's loss
+    /// is exact for its shape. The volume (m = 0) shapes and every shape the
+    /// table lacks or the grid cannot resolve carry no film loss; the receipt
+    /// names the covered band. `K_bend` is the body's bending operator alone,
+    /// without the tension: tension energy is pre-stress work, not strain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_film(
+        table: &RadiationTable,
+        radius: f64,
+        h: f64,
+        xy: &[[f64; 2]],
+        mass: &[f64],
+        stiffness: &dyn Fn(&[f64]) -> Vec<f64>,
+        gas: &GasState,
+        compact_volume_resistance: Option<f64>,
+        film: Option<(f64, &dyn Fn(&[f64]) -> Vec<f64>)>,
+    ) -> Result<ModalAirLoad, String> {
+        if let Some((tan_delta, _)) = film
+            && !(tan_delta.is_finite() && tan_delta > 0.0 && tan_delta < 1.0)
+        {
+            return Err(format!(
+                "head film loss: tan delta {tan_delta} must be finite and in (0, 1)"
+            ));
+        }
         if !(radius > 0.0 && h > 0.0 && radius.is_finite() && h.is_finite())
             || xy.len() != mass.len()
         {
@@ -928,6 +981,18 @@ impl ModalAirLoad {
                     }
                     None => (0.0, Some(scale * z.resistance_bound)),
                 };
+                let (bending_share, film_resistance) = match film {
+                    Some((tan_delta, bending)) => {
+                        let bend: f64 = phi.iter().zip(&bending(&phi)).map(|(a, b)| a * b).sum();
+                        if !(bend >= 0.0 && bend <= stiff * (1.0 + 1e-9)) {
+                            return Err(format!(
+                                "head film loss: mode {label} has bending energy {bend:e} outside [0, {stiff:e}]"
+                            ));
+                        }
+                        (bend / stiff, tan_delta * bend / omega)
+                    }
+                    None => (0.0, 0.0),
+                };
                 retained.push(Retained {
                     shape: index,
                     sine,
@@ -940,6 +1005,8 @@ impl ModalAirLoad {
                     air_mass,
                     iterations,
                     mac: 1.0,
+                    bending_share,
+                    film_resistance,
                 });
                 phis.push(phi);
                 kphis.push(k_phi);
@@ -1003,7 +1070,8 @@ impl ModalAirLoad {
             }
             out
         };
-        let damping = sandwich(&|r| retained[r].resistance);
+        let film_damping = film.map(|_| sandwich(&|r| retained[r].film_resistance));
+        let damping = sandwich(&|r| retained[r].resistance + retained[r].film_resistance);
         let mass_matrix = sandwich(&|r| retained[r].air_mass);
         let mut inverse_mass_gram = vec![0.0; n * n];
         for i in 0..n {
@@ -1091,8 +1159,17 @@ impl ModalAirLoad {
             } else {
                 ""
             };
+            let film_note = match film {
+                Some((tan_delta, _)) => format!(
+                    "; film: bending share {:.3e}, eta {:.3e}, film T60 {:.4} s",
+                    r.bending_share,
+                    tan_delta * r.bending_share,
+                    t60(r.film_resistance)
+                ),
+                None => String::new(),
+            };
             receipt.push(format!(
-                "({},{}) {}: in vacuo {:.1} Hz, loaded {:.1} Hz (ka {:.4}, {} iterations), air mass {:.3e} kg on {:.3e} kg, {loss}; MAC {:.4}{caveat}; ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass",
+                "({},{}) {}: in vacuo {:.1} Hz, loaded {:.1} Hz (ka {:.4}, {} iterations), air mass {:.3e} kg on {:.3e} kg, {loss}; MAC {:.4}{caveat}; ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass{film_note}",
                 shape.m, shape.n, if r.sine { "sin" } else { "cos" },
                 (r.stiffness / r.mass).sqrt() / (2.0 * std::f64::consts::PI),
                 r.omega / (2.0 * std::f64::consts::PI), r.ka, r.iterations, r.air_mass, r.mass, r.mac,
@@ -1124,6 +1201,17 @@ impl ModalAirLoad {
             dropped.len()
         );
         receipt.push(summary);
+        if let Some((tan_delta, _)) = film {
+            let hz = |r: &Retained| r.omega / (2.0 * std::f64::consts::PI);
+            let (low, high) = retained
+                .iter()
+                .fold((f64::INFINITY, 0.0_f64), |(lo, hi), r| {
+                    (lo.min(hz(r)), hi.max(hz(r)))
+                });
+            receipt.push(format!(
+                "head film loss: tan delta {tan_delta} held per mode on the {n} retained m >= 1 shapes, loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share at each mode's own frequency); the volume (m = 0) shapes and every dropped or refused shape carry NO film loss, so their decays stay upper bounds"
+            ));
+        }
         receipt.push(format!(
             "head radiation retention: a shape needs {NODES_PER_WAVELENGTH} grid spacings per radial and per azimuthal wavelength, j_mn <= 2 pi a / ({NODES_PER_WAVELENGTH} h) = {limit:.3} and m <= {limit:.3}"
         ));
@@ -1138,6 +1226,9 @@ impl ModalAirLoad {
             damping,
             mass: mass_matrix,
             rate_bound,
+            film_damping,
+            film_step_j: 0.0,
+            film_dissipated_j: 0.0,
             prepared: None,
             rhs: vec![0.0; nodes],
             corr: vec![0.0; nodes],
@@ -1188,15 +1279,31 @@ impl ModalAirLoad {
         }
     }
 
-    /// Energy the radiation resistance removes over one step at centred
-    /// velocity `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`.
+    /// Energy the modal damping removes over one step at centred velocity
+    /// `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`. With a held film
+    /// loss this is radiation plus film; `film_step_j` is the film part.
     pub(crate) fn radiated(&mut self, wn: &[f64], k: f64) -> f64 {
         let n = self.cols.len();
         for r in 0..n {
             self.y[r] = crate::dot(&self.cols[r], wn) - self.p_wp[r];
         }
+        if let Some(film) = &self.film_damping {
+            ModalAirLoad::apply(film, &self.y[..n], &mut self.zb);
+            self.film_step_j = crate::dot(&self.y[..n], &self.zb) / (4.0 * k);
+            self.film_dissipated_j += self.film_step_j;
+        }
         ModalAirLoad::apply(&self.damping, &self.y[..n], &mut self.zb);
         crate::dot(&self.y[..n], &self.zb) / (4.0 * k)
+    }
+
+    /// The film share of the last `radiated` step [J]; 0 without a film loss.
+    pub fn film_step_j(&self) -> f64 {
+        self.film_step_j
+    }
+
+    /// Energy the held film loss has removed so far [J].
+    pub fn film_dissipated_j(&self) -> f64 {
+        self.film_dissipated_j
     }
 
     /// Prepare the Woodbury factor for step `k`, nodal compliances `ia`
