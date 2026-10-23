@@ -159,5 +159,9 @@ pub mod contact_load;
 /// Finite-width prescribed ribbons resolved by the original joint contact solver.
 pub mod ribbon;
 
+/// Compliant bow-hair ribbon: per-cell spring-dashpot hair compliance derived
+/// from hair data (Pitteroff & Woodhouse 1998); differential slip emerges.
+pub mod compliant_ribbon;
+
 /// Resolved receiving-body motion and opposite tangential contact reactions.
 pub mod surfaces;
