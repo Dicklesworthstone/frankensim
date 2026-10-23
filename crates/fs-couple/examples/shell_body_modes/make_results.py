@@ -36,9 +36,13 @@ NOTES = {
     "c4-bridge-n5": "correction 4 alone: base-n5 with the bridge grain from its feet to its top (y) instead of across it (x), as in the generator of 18a7dc86b with cavity_volume=facet; the 367 Hz mode of base-n5, 99 percent of its kinetic energy in the bridge, leaves the window; binary of 1d082484b",
     "c123-n6": "corrections 1 to 3 together (maple 626, Norway spruce as in c2-norway-n5, exact cavity 2.0610 L; bridge grain still across), 6 shell modes, binary of 5f400b8fd",
     "corrected-n6": "the corrected body: corrections 1 to 4 together, the committed table of 18a7dc86b (exact cavity, bridge grain along y) with the Norway spruce pack of 18a7dc86b and the maple pack of 4f9abefe1, 6 shell modes, binary of 54aa5b8c1; rank 6 (695.65 Hz) has 88 percent of its kinetic energy in the bridge",
+    "c5-maple-shear-n6": "correction 5 alone: corrected-n6 with the maple pack's G_LR at the audio-band 1580 MPa of Laemmlein's violin-back plates instead of the "
+                         "ultrasonic 1680 (1bcca75cd): the body of record; example of e4b27a28e (kinetic energy share block), binary of 0a8e14846",
+    "alt-laemmlein-n6": "declared alternative, not the record: corrected-n6 with the maple density, E_L, E_R and G_LR all from Laemmlein's violin-back plates "
+                        "(gen_violin_maple_pack.py inplane=laemmlein of 1bcca75cd: 665.1 kg/m3, 12.5, 1.55, 1.58 GPa), binary of 1fd3b6cca with the share block",
 }
-# the runs above made with the maple pack of 4f9abefe1 (626 kg/m3); every other run used the earlier pack (MAPLE)
-MAPLE626 = {"c1-maple626-n5", "c123-n6", "corrected-n6"}
+# the runs above made with the maple pack of 4f9abefe1 or later (626 kg/m3, or Laemmlein's 665.1); every other run used the earlier pack (MAPLE)
+MAPLE626 = {"c1-maple626-n5", "c123-n6", "corrected-n6", "c5-maple-shear-n6", "alt-laemmlein-n6"}
 
 
 def coupled(path):

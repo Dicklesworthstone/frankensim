@@ -1,5 +1,13 @@
 frankensim.specimen-body-mode-outcome.v1
 run	id	band_lo_hz	band_hi_hz	registered_rule_outcome	candidate_rank	candidate_f_hz	signed_offset_hz	note
+c5-maple-shear-n6	a0	270	290	found, MISS	1	243.17	-26.8	rank 1 at 243.17 Hz (neck share 0.951)
+c5-maple-shear-n6	cbr	380	420	found, MISS	2	473.61	53.6	rank 2 at 473.61 Hz (odd 0.99, waist share 0.59)
+c5-maple-shear-n6	b1-	430	480	not found	none	none	none	not found; rank 6 (691.26 Hz) has the B1- rule's shape and 0.883 of its kinetic energy in the bridge: left out of the corpus chain as a bridge mode (e4b27a28e); the classifier before that commit names it B1- (MISS, +211.3 Hz)
+c5-maple-shear-n6	b1+	510	580	not found	none	none	none	not found
+alt-laemmlein-n6	a0	270	290	found, MISS	1	244.90	-25.1	rank 1 at 244.90 Hz (neck share 0.956)
+alt-laemmlein-n6	cbr	380	420	found, MISS	2	483.79	63.8	rank 2 at 483.79 Hz (odd 0.99, waist share 0.58)
+alt-laemmlein-n6	b1-	430	480	not found	none	none	none	not found; rank 6 (700.12 Hz) has the B1- rule's shape and 0.787 of its kinetic energy in the bridge: left out of the corpus chain as a bridge mode (e4b27a28e); the classifier before that commit would have named it B1-
+alt-laemmlein-n6	b1+	510	580	not found	none	none	none	not found
 corrected-n6	a0	270	290	found, MISS	1	243.23	-26.8	rank 1 at 243.23 Hz (neck share 0.951)
 corrected-n6	cbr	380	420	found, MISS	2	476.67	56.7	rank 2 at 476.67 Hz (odd 0.99, waist share 0.59)
 corrected-n6	b1-	430	480	found, MISS	6	695.65	215.6	rank 6 at 695.65 Hz (odd 0.06, dV 7.37e-03 against a0 1.65e-01); the mode the registered rule finds carries 88 percent of its kinetic energy in the bridge (lumped nodal masses from the --node-shapes output): a bridge mode, not a corpus mode; the rule reads plate displacement only; the registered outcome stands, information only

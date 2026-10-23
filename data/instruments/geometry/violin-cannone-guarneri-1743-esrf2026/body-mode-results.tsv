@@ -1,5 +1,19 @@
 frankensim.specimen-body-mode-results.v1
 run	rank	f_hz	neck_share	net_cavity_dv	top_mean_w	back_mean_w	q_solid_kv_not_a_result	q_rad	note
+c5-maple-shear-n6	1	243.17	0.951	1.645e-1	-3.165e-1	-1.663e-1	359.3	43.3	correction 5 alone: corrected-n6 with the maple pack's G_LR at the audio-band 1580 MPa of Laemmlein's violin-back plates instead of the ultrasonic 1680 (1bcca75cd): the body of record; example of e4b27a28e (kinetic energy share block), binary of 0a8e14846
+c5-maple-shear-n6	2	473.61	0.000	4.473e-3	-8.334e-3	4.134e-2	73.2	30087.5	same run
+c5-maple-shear-n6	3	529.81	0.047	1.728e-1	1.241e0	7.282e-1	89.6	18.0	same run
+c5-maple-shear-n6	4	608.37	0.001	2.971e-2	3.145e-1	1.187e-1	71.0	530.9	same run
+c5-maple-shear-n6	5	635.72	0.001	-3.731e-2	-5.156e-1	6.597e-2	69.3	322.1	same run
+c5-maple-shear-n6	6	691.26	0.000	-7.960e-3	-7.270e-2	1.027e-2	70.8	6507.5	same run
+c5-maple-shear-n6	7	737.75	0.001	-4.436e-2	-5.205e-1	-1.236e-1	73.7	196.3	same run
+alt-laemmlein-n6	1	244.90	0.956	1.673e-1	-2.996e-1	-1.494e-1	389.4	41.6	declared alternative, not the record: corrected-n6 with the maple density, E_L, E_R and G_LR all from Laemmlein's violin-back plates (gen_violin_maple_pack.py inplane=laemmlein of 1bcca75cd: 665.1 kg/m3, 12.5, 1.55, 1.58 GPa), binary of 1fd3b6cca with the share block
+alt-laemmlein-n6	2	483.79	0.000	-5.531e-3	4.034e-3	-4.853e-2	72.9	19258.9	same run
+alt-laemmlein-n6	3	535.93	0.042	-1.674e-1	-1.237e0	-6.902e-1	88.0	19.0	same run
+alt-laemmlein-n6	4	631.01	0.001	2.728e-2	2.733e-1	1.298e-1	71.5	607.2	same run
+alt-laemmlein-n6	5	663.36	0.001	4.274e-2	5.662e-1	-2.272e-2	69.2	235.2	same run
+alt-laemmlein-n6	6	700.12	0.000	1.592e-2	1.768e-1	-1.180e-2	70.5	1607.0	same run
+alt-laemmlein-n6	7	747.74	0.001	3.963e-2	4.951e-1	9.503e-2	73.7	242.7	same run
 corrected-n6	1	243.23	0.951	1.646e-1	-3.156e-1	-1.662e-1	360.8	43.3	the corrected body: corrections 1 to 4 together, the committed table of 18a7dc86b (exact cavity, bridge grain along y) with the Norway spruce pack of 18a7dc86b and the maple pack of 4f9abefe1, 6 shell modes, binary of 54aa5b8c1; rank 6 (695.65 Hz) has 88 percent of its kinetic energy in the bridge
 corrected-n6	2	476.67	0.000	4.831e-3	-5.869e-3	4.290e-2	73.2	25625.5	same run
 corrected-n6	3	530.72	0.046	-1.727e-1	-1.241e0	-7.296e-1	89.5	18.0	same run
