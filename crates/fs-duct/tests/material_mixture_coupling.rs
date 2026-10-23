@@ -26,6 +26,34 @@ fn close(a: f64, b: f64, rel: f64) {
     assert!((a - b).abs() <= rel * a.abs().max(b.abs()), "{a} != {b}");
 }
 
+/// The first |Z_in| peak of the closed tube, SOLVED from the duct's own wide-tube
+/// input impedance by golden-section search on (0.8, 1.2) c/2L.
+fn solved_resonance(gas: &GasState) -> f64 {
+    let model = duct();
+    let magnitude = |f: f64| input_impedance(&model, gas, TAU * f, LossModel::WideTube,
+        Termination::Closed).unwrap().impedance.abs();
+    let half_wave = gas.sound_speed / (2.0 * 0.45);
+    let (mut a, mut b) = (0.8 * half_wave, 1.2 * half_wave);
+    let ratio = (5.0_f64.sqrt() - 1.0) / 2.0;
+    while b - a > 1e-11 * half_wave {
+        let (c, d) = (b - ratio * (b - a), a + ratio * (b - a));
+        if magnitude(c) > magnitude(d) { b = d } else { a = c }
+    }
+    0.5 * (a + b)
+}
+
+/// Independent prediction from the record's state alone (Kirchhoff's wide-tube
+/// dispersion): the phase constant is (omega/c)(1 + s), with
+/// s = (1 + (gamma-1)/sqrt(Pr)) / (sqrt(2) r sqrt(rho omega/mu)), and the peak
+/// sits where it times L is pi. Returns (f, s) at that frequency.
+fn predicted_resonance(gas: &GasState) -> (f64, f64) {
+    let dispersion = |f: f64| (1.0 + (gas.gamma - 1.0) / gas.prandtl.sqrt())
+        / (2.0_f64.sqrt() * 0.008 * (gas.density * TAU * f / gas.dynamic_viscosity).sqrt());
+    let mut f = gas.sound_speed / (2.0 * 0.45);
+    for _ in 0..64 { f = gas.sound_speed / (2.0 * 0.45 * (1.0 + dispersion(f))); }
+    (f, dispersion(f))
+}
+
 #[test]
 fn composition_enters_physical_pitch_and_impedance_without_dedicated_solver_code() {
     let air_rich = medium(0.1, 101325.0);
@@ -34,10 +62,23 @@ fn composition_enters_physical_pitch_and_impedance_without_dedicated_solver_code
     assert!(helium_rich.sound_speed > air_rich.sound_speed);
     assert!(helium_rich.density < air_rich.density);
 
-    // Quarter-wave resonance of the SAME geometry tracks the changed gas.
-    let f_air = air_rich.sound_speed / (4.0 * 0.45);
-    let f_helium = helium_rich.sound_speed / (4.0 * 0.45);
+    // The half-wave |Z_in| peak of the SAME geometry, solved, tracks the changed
+    // gas. The prediction is first order in s. Damping that grows as sqrt(f)
+    // moves the |Z| peak below the phase condition by s^2/2 (from |cot kL| with
+    // alpha L = pi s), so each gas's solved peak must lie within s^2 of it.
+    let mut solved = Vec::new();
+    for gas in [&air_rich, &helium_rich] {
+        let (f_solved, (f_predicted, s)) = (solved_resonance(gas), predicted_resonance(gas));
+        let error = (f_solved / f_predicted - 1.0).abs();
+        println!("{{\"suite\":\"fs-duct\",\"case\":\"mixture-solved-resonance\",\"c\":{},\"f_solved\":{f_solved:.6},\"f_predicted\":{f_predicted:.6},\"s\":{s:.4e},\"error\":{error:.3e},\"bound_s2\":{:.3e}}}",
+            gas.sound_speed, s * s);
+        assert!(error <= s * s, "solved {f_solved} Hz against predicted {f_predicted} Hz: {error:e} > s^2 {:e}", s * s);
+        solved.push((f_solved, f_predicted, s));
+    }
+    let [(f_air, p_air, s_air), (f_helium, p_helium, s_helium)] = [solved[0], solved[1]];
+    // Direction and amount: the helium-rich peak is higher, by the predicted ratio.
     assert!(f_helium > f_air);
+    assert!(((f_helium / f_air) / (p_helium / p_air) - 1.0).abs() <= s_air * s_air + s_helium * s_helium);
     // Evaluate the same dimensionless acoustic frequency kL=pi/3:
     // lossless impedance is Z0 times a geometry-only function, so the
     // ratio must equal the material-derived characteristic impedances.
