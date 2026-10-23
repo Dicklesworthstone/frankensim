@@ -8,6 +8,9 @@ mod board_geometry;
 mod crowned_board;
 mod steinway_d;
 mod steinway_scale;
+// Felt-pack hammers. The offline engine's default felt cards remain the steinway_scale ones.
+#[allow(dead_code)]
+mod hammer_felt;
 mod stretch_tuning;
 mod performance;
 use performance::midi;

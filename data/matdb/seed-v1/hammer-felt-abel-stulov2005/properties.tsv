@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	stulov-abel-set	Stulov's full set of 88 new, unvoiced Abel grand piano hammers, hammer number n = 1 (A0) to 88 (C8); piano model, felt density and head geometry not stated in the open reprints	Hammer strikes against a rigid surface in the piano hammer testing device (Stulov and Magi 2000), force and compression histories at several striking velocities; the four-parameter hereditary model F = F0 [u^p - (gamma/tau0) int_0^t u^p(xi) exp((xi - t)/tau0) dxi], u in mm, fitted to each hammer, then a best match over the set approximated by the printed per-key regressions (Stulov 2005, as reprinted)	Coefficients are transcribed exactly as printed: F0 = 15500 exp(0.059 n) N/mm^p (Acta Mech. eq (7), printed range 16,440-2,787,300), p = 3.7 + 0.015 n (eq (4)), gamma = 0.9894 + 0.000088 n (eq (5), printed range 0.9895-0.9972), tau0 = 2.72 - 0.02 n + 0.00009 n^2 microseconds (eq (6), printed range 1.65-2.70), and hammer mass m = 11.074 - 0.074 n + 1e-4 n^2 g (thesis eq (1.9); printed m(1) = 11.0 g, m(88) = 5.3 g). F0 is in N/mm^p with u in mm, so the force at 1 mm compression is F0 newtons: the prefactor is recorded as that force. Linear coefficients printed with a minus sign are recorded as magnitudes. Not transcribed, because the printed fits contradict themselves: the three-parameter retarded time alpha(n) of thesis eq (1.8) (printed in ms, yet 629.8 at n = 85 against the printed example 0.5312 ms) and SK2009 eq (9) epsilon(n) = 0.9894 + 8.8e-5 n^2 (above 1 from n = 11; the model needs 0 < epsilon < 1). The static Q0(n) = 183 exp(0.045 n) of thesis eq (1.6) is self-consistent but disagrees with F0 (1 - gamma) of this set by -5 to +21 percent, although SK2009 eq (4) states Q0 = F0 (1 - epsilon); it is not part of this pack. The printed upper bound 4.98 of p in Acta Mech. eq (4) disagrees with the formula (5.02 at n = 88); the formula, which four publications print identically, is transcribed. These are whole-hammer force-compression laws against a rigid surface, including the head geometry; they are not felt-coupon stress-strain data.
+scalar	f0-prefactor	stulov-abel-set	hammer_instantaneous_force_at_1mm_regression_prefactor	15500	N	constant
+uncertainty	f0-prefactor	unstated	-	-	-	-
+validity	f0-prefactor	hammer_number	1	88	1
+scalar	f0-rate	stulov-abel-set	hammer_instantaneous_force_regression_exponential_rate	0.059	1	constant
+uncertainty	f0-rate	unstated	-	-	-	-
+validity	f0-rate	hammer_number	1	88	1
+scalar	p-constant	stulov-abel-set	hammer_compression_exponent_regression_constant	3.7	1	constant
+uncertainty	p-constant	unstated	-	-	-	-
+validity	p-constant	hammer_number	1	88	1
+scalar	p-linear	stulov-abel-set	hammer_compression_exponent_regression_linear_coefficient	0.015	1	constant
+uncertainty	p-linear	unstated	-	-	-	-
+validity	p-linear	hammer_number	1	88	1
+scalar	gamma-constant	stulov-abel-set	hammer_hereditary_amplitude_regression_constant	0.9894	1	constant
+uncertainty	gamma-constant	unstated	-	-	-	-
+validity	gamma-constant	hammer_number	1	88	1
+scalar	gamma-linear	stulov-abel-set	hammer_hereditary_amplitude_regression_linear_coefficient	0.000088	1	constant
+uncertainty	gamma-linear	unstated	-	-	-	-
+validity	gamma-linear	hammer_number	1	88	1
+scalar	tau-constant	stulov-abel-set	hammer_relaxation_time_regression_constant	2.72	µs	constant
+uncertainty	tau-constant	unstated	-	-	-	-
+validity	tau-constant	hammer_number	1	88	1
+scalar	tau-linear	stulov-abel-set	hammer_relaxation_time_regression_linear_coefficient_magnitude_negative	0.02	µs	constant
+uncertainty	tau-linear	unstated	-	-	-	-
+validity	tau-linear	hammer_number	1	88	1
+scalar	tau-quadratic	stulov-abel-set	hammer_relaxation_time_regression_quadratic_coefficient	0.00009	µs	constant
+uncertainty	tau-quadratic	unstated	-	-	-	-
+validity	tau-quadratic	hammer_number	1	88	1
+scalar	mass-constant	stulov-abel-set	hammer_mass_regression_constant	11.074	g	constant
+uncertainty	mass-constant	unstated	-	-	-	-
+validity	mass-constant	hammer_number	1	88	1
+scalar	mass-linear	stulov-abel-set	hammer_mass_regression_linear_coefficient_magnitude_negative	0.074	g	constant
+uncertainty	mass-linear	unstated	-	-	-	-
+validity	mass-linear	hammer_number	1	88	1
+scalar	mass-quadratic	stulov-abel-set	hammer_mass_regression_quadratic_coefficient	0.0001	g	constant
+uncertainty	mass-quadratic	unstated	-	-	-	-
+validity	mass-quadratic	hammer_number	1	88	1

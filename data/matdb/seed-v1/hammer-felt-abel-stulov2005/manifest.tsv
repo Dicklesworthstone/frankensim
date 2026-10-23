@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	hammer-felt-abel-stulov2005
+redistribution	permitted	Numerical regression coefficients retained as scientific facts with attribution; no article text, figure or table is reproduced
+citation	Stulov A. (2005), Experimental and computational studies of piano hammers, Acta Acustica united with Acustica 91, 1086-1097 (the measured set of 88 new, unvoiced Abel grand hammers; not read, closed); per-key regressions of that set as printed in Kartofelev D., Stulov A. (2014), Propagation of deformation waves in wool felt, Acta Mechanica 225, 3103-3113, doi:10.1007/s00707-014-1109-1, eqs (4)-(7), and in Kartofelev D. (2014), Nonlinear Sound Generation Mechanisms in Musical Acoustics, PhD thesis, Tallinn University of Technology, ISBN 978-9949-23-661-9 (PDF), eq (1.9) p.16 (Stulov and Kartofelev 2014, Applied Acoustics 76, 223-229, doi:10.1016/j.apacoust.2013.08.010, eq (9)); https://digikogu.taltech.ee/en/Download/4b12b551-ccf9-4ac9-b66d-236f45b853f3
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
