@@ -32,7 +32,7 @@ source,estimated,Explicit acoustic idealization; replace with actual attribution
 obj-scale-m,1
 obj-origin,0,0,0
 max-skin-offset-m,0.015
-medium,1.204,343
+ambient,293.15 101325 0.65
 band-hz,40,800,41
 board-band-hz,400
 fit-order,8
@@ -47,7 +47,8 @@ rigid,lid
 The exterior medium is exactly one of two rows. `ambient,<gas record>` is the
 shared gas declaration, resolved through the gas owner. `medium,RHO,C` is a bare
 medium with no thermochemistry, and every report marks it "bare medium, not a
-gas record". The grand_piano microphone, Rayleigh loading and imported-board
+gas record". The shipped model-d-*.fspe specs declare the default environment
+record `ambient,293.15 101325 0.65`. The grand_piano microphone, Rayleigh loading and imported-board
 renders use the committed reference record `examples/moist-air-20c-65rh.gas`
 (20 C, 101325 Pa, 65 % RH) unless `--gas-record FILE` overrides it. The Model D
 soundboard reads the same record for its wood's equilibrium moisture content.

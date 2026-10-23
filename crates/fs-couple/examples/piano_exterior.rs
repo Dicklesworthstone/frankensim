@@ -291,6 +291,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let source_ports=controls.source_ports(&courses)?;
     let board=prepare_board_motion_with_source_ports(board_text,&keys,spec.board_band_hz,
         options,source_ports.as_deref())?;
+    let controls=controls.in_air(spec.gas.as_ref())?;
     let (mut piano,cavity_report)=controls.instrument_with_cavity_report(courses,&board.modes,board.motion.as_ref(),options)?;
     if let Some(report)=cavity_report {spec.source.push_str(&format!("; {report}"));}
     if let Some(c)=board.physical_damping.as_deref() {piano.configure_bare_board_damping(c)?;}

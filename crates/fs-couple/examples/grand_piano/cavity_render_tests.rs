@@ -55,7 +55,7 @@ fn supplied_cavity_changes_rendered_stereo_pressure_for_full_p1_and_reduced_cubi
     let course = geometry::demonstration_scale().unwrap()[48];
     let scale_text = geometry::write_scale(&[course]);
     let scale_path = input(&scale_text, "csv");
-    let cavity_path = input("frankensim-piano-cavity-si-v1\nsource,estimated,authored sealed box\ninterface-origin-m,0,0,0\ndimensions-m,1,1,0.1\nmodes,2\ndamping-ratio,0.02\ngas,dry-air-ussa1976,293.15,101325\n", "fspc");
+    let cavity_path = input("frankensim-piano-cavity-si-v1\nsource,estimated,authored sealed box\ninterface-origin-m,0,0,0\ndimensions-m,1,1,0.1\nmodes,2\ndamping-ratio,0.02\ngas,record,293.15 101325 0\n", "fspc");
     for reduced_cubic in [false, true] {
         let loaded_wav = fresh_path("wav");
         let bare_wav = fresh_path("wav");
@@ -107,6 +107,35 @@ fn supplied_cavity_changes_rendered_stereo_pressure_for_full_p1_and_reduced_cubi
             assert_eq!(wav.len(), 44 + frames * 4);
         }
     }
+}
+
+#[test]
+fn a_supplied_gas_record_that_no_part_of_the_render_hears_refuses() {
+    let board_text = panel();
+    let board_path = input(&board_text, "fsb");
+    let course = geometry::demonstration_scale().unwrap()[48];
+    let scale_text = geometry::write_scale(&[course]);
+    let scale_path = input(&scale_text, "csv");
+    let record = input("293.15 70927.5 0\n", "gas");
+    let wav = fresh_path("wav");
+    let args: Vec<String> = ["--scale", scale_path.to_str().unwrap(),
+        "--board-geometry", board_path.to_str().unwrap(), "--render", wav.to_str().unwrap(),
+        "--note", "69", "--velocity", "0.5", "--duration", "0.025", "--modes", "8",
+        "--board-band-hz", "100", "--gas-record", record.to_str().unwrap()]
+        .iter().map(|s| s.to_string()).collect();
+    let options = Options::parse(&args).unwrap();
+    let scale = selected_scale(Some(&scale_text), &options).unwrap();
+    let board = prepare_geometric_board_with_reduction(&board_text, &[69], options.board_band_hz,
+        true, false, false, 0, true, None).unwrap();
+    // The diagnostic volume observer (no surface) hears no gas: refused, no file.
+    let error = render_with_cavity(wav.to_str().unwrap(), scale.clone(), &board.modes, None,
+        &options, None, None, None, None).unwrap_err();
+    assert!(error.contains("--gas-record has no consumer"), "{error}");
+    assert!(!wav.exists());
+    // The physical microphone hears it.
+    render_with_cavity(wav.to_str().unwrap(), scale, &board.modes, Some(&board.surface),
+        &options, None, None, None, None).unwrap();
+    assert!(wav.exists());
 }
 
 #[test]

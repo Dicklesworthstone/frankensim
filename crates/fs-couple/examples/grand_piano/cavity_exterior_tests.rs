@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn card() -> &'static str {
-    "frankensim-piano-cavity-si-v1\nsource,estimated,authored sealed acoustic integration fixture\ninterface-origin-m,0,0,0\ndimensions-m,0.1,0.1,0.03\nmodes,3\ndamping-ratio,0.03\ngas,dry-air-ussa1976,293.15,101325\n"
+    "frankensim-piano-cavity-si-v1\nsource,estimated,authored sealed acoustic integration fixture\ninterface-origin-m,0,0,0\ndimensions-m,0.1,0.1,0.03\nmodes,3\ndamping-ratio,0.03\ngas,record,293.15 101325 0\n"
 }
 
 pub(super) fn inputs()->(String,Vec<geometry::Course>,String,Specification) {

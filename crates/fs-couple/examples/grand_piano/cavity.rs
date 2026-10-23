@@ -2,11 +2,13 @@
 //! Positive board z is away from the gas. The supplied upper-face origin and
 //! dimensions declare rigid walls outside the actual structural patch; no
 //! closed piano enclosure, geometry, gas state or damping is inferred.
+//! The gas is `gas,ambient` (the instrument's selected air, bound by the
+//! caller) or an explicit `gas,record,<record>`; there is no private air.
 //! The existing pressure-mode and physical-motion owners provide the basis.
 use std::io::Read;
 use fs_couple::{render::plate::impact::cavity::CavityCoupling,
     vibroacoustic::{AcousticMedium, CavityModes, rectangular_cavity_modes}};
-use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas::GasState;
 use super::{board_geometry::{PreparedBoard, motion::{MotionSurface, SourceBridgePort,
     EDGE_CUBIC_QUADRATURE}}, linear::{Bank, BoardMode, MAX_BOARD_MODES}};
 
@@ -30,6 +32,11 @@ pub struct Specification {
     medium: AcousticMedium,
     temperature_k: f64,
     pressure_pa: f64,
+    /// The declaration the medium came from, for the report.
+    gas_label: String,
+    /// `gas,ambient`: the medium is the instrument's air, bound by `in_air`.
+    from_ambient: bool,
+    bound: bool,
 }
 
 #[derive(Debug)]
@@ -41,6 +48,7 @@ pub struct Projected {
     overlaps: Vec<f64>, // row-major structural-by-acoustic, bare board basis
     damping_per_s: Vec<f64>,
     description: String,
+    reads_ambient: bool,
 }
 
 fn finite(text: &str) -> Result<f64, String> {
@@ -69,7 +77,9 @@ impl Specification {
             .filter(|row| !row.is_empty());
         if rows.next() != Some(HEADER) { return Err(format!("expected {HEADER}")); }
         let mut source = None; let mut origin = None; let mut dimensions = None;
-        let mut count = None; let mut damping = None; let mut gas = None;
+        let mut count = None; let mut damping = None;
+        // None inside: `gas,ambient`, bound later to the instrument's air.
+        let mut gas: Option<Option<(AcousticMedium, f64, f64, String)>> = None;
         for row in rows {
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
             match fields.as_slice() {
@@ -88,19 +98,15 @@ impl Specification {
                     once(&mut count, n.parse::<usize>().map_err(|_| "invalid cavity mode count")?, "modes")?;
                 }
                 ["damping-ratio", zeta] => { once(&mut damping, finite(zeta)?, "damping-ratio")?; }
-                // The shared gas declaration: `gas,record,T P RH`, `gas,record,mixture ...`.
+                // The instrument's selected air, or an explicitly different sealed
+                // gas: `gas,record,T P RH`, `gas,record,mixture ...`.
+                ["gas", "ambient"] => { once(&mut gas, None, "gas")?; }
                 ["gas", "record", record] => {
                     let state = super::ambient::parse(record).map_err(|e| format!("cavity gas: {e}"))?;
-                    once(&mut gas, (AcousticMedium { rho0: state.density, c0: state.sound_speed },
-                        state.temperature, state.pressure), "gas")?;
+                    once(&mut gas, Some((AcousticMedium { rho0: state.density, c0: state.sound_speed },
+                        state.temperature, state.pressure, format!("gas record {record}"))), "gas")?;
                 }
-                ["gas", "dry-air-ussa1976", temperature, pressure] => {
-                    let temperature = finite(temperature)?; let pressure = finite(pressure)?;
-                    let state = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure)
-                        .map_err(|e| format!("cavity gas: {e}"))?;
-                    once(&mut gas, (AcousticMedium { rho0: state.density, c0: state.sound_speed },
-                        temperature, pressure), "gas")?;
-                }
+                ["gas", "dry-air-ussa1976", ..] => return Err("cavity gas,dry-air-ussa1976 is retired: declare gas,ambient for the instrument's air, or gas,record,T P 0 for the same dry air".into()),
                 _ => return Err(format!("unknown cavity row or wrong field count: {row}")),
             }
         }
@@ -108,7 +114,10 @@ impl Specification {
         let dimensions_m = dimensions.ok_or("missing cavity dimensions-m row")?;
         let count = count.ok_or("missing cavity modes row")?;
         let damping_ratio = damping.ok_or("missing cavity damping-ratio row")?;
-        let (medium, temperature_k, pressure_pa) = gas.ok_or("missing cavity gas row")?;
+        let gas = gas.ok_or("missing cavity gas row")?;
+        let from_ambient = gas.is_none();
+        let (medium, temperature_k, pressure_pa, gas_label) = gas.unwrap_or_else(||
+            (AcousticMedium { rho0: 0., c0: 0. }, 0., 0., "the instrument's selected air".into()));
         if origin_m.iter().any(|v| v.abs() > 100.)
             || dimensions_m.iter().any(|v| !(1e-4..=20.).contains(v))
             || !(1..=MAX_CAVITY_MODES).contains(&count)
@@ -116,7 +125,21 @@ impl Specification {
             return Err("cavity requires origin within 100 m, dimensions in [0.0001,20] m, 1..=8 pressure modes and damping ratio in [0,1)".into());
         }
         Ok(Self { source: source.ok_or("missing cavity source attribution")?, origin_m,
-            dimensions_m, count, damping_ratio, medium, temperature_k, pressure_pa })
+            dimensions_m, count, damping_ratio, medium, temperature_k, pressure_pa, gas_label,
+            from_ambient, bound: !from_ambient })
+    }
+
+    /// Whether the card declared `gas,ambient`.
+    pub fn reads_ambient(&self) -> bool { self.from_ambient }
+
+    /// Bind `gas,ambient` to the instrument's selected air; an explicit record
+    /// is the author's sealed gas and stays as declared.
+    pub fn in_air(mut self, air: &GasState) -> Self {
+        if self.from_ambient {
+            self.medium = AcousticMedium { rho0: air.density, c0: air.sound_speed };
+            (self.temperature_k, self.pressure_pa, self.bound) = (air.temperature, air.pressure, true);
+        }
+        self
     }
 
     pub fn project(&self, board: &PreparedBoard) -> Result<Projected, String> {
@@ -126,6 +149,9 @@ impl Specification {
 
     pub fn project_motion(&self, modes: &[BoardMode], motion: &MotionSurface)
         -> Result<Projected, String> {
+        if !self.bound {
+            return Err("cavity gas,ambient was never bound to the instrument's selected air".into());
+        }
         if !(1..=MAX_BOARD_MODES).contains(&modes.len()) || motion.shapes.len() != modes.len()
             || motion.mesh.nodes.is_empty() || motion.mesh.tris.is_empty()
             || motion.mesh.nodes.len() > 20_000 || motion.mesh.tris.len() > 40_000
@@ -168,11 +194,12 @@ impl Specification {
                     .map(|((a,b),(scale,old_scale))| (a-b).abs()
                         / scale.max(*old_scale).max(f64::MIN_POSITIVE)).fold(0.0_f64, f64::max);
                 if relative <= MAX_RELATIVE_CHANGE {
-                    let description = format!("explicit sealed rectangular cavity beneath planar board: source {}; upper-face origin {:?} m, dimensions {:?} m, {} pressure modes including uniform compression; dry-air-ussa1976 at {} K and {} Pa, rho={} kg/m3, c={} m/s; viscous acoustic damping ratio {}; {} interface samples at refinement {}, relative overlap-change estimate {:.3e} (not an integration or modal-truncation certificate); rigid remaining walls, no inferred grand-piano enclosure",
-                        self.source, self.origin_m, self.dimensions_m, self.count, self.temperature_k,
+                    let description = format!("explicit sealed rectangular cavity beneath planar board: source {}; upper-face origin {:?} m, dimensions {:?} m, {} pressure modes including uniform compression; {} at {} K and {} Pa, rho={} kg/m3, c={} m/s; viscous acoustic damping ratio {}; {} interface samples at refinement {}, relative overlap-change estimate {:.3e} (not an integration or modal-truncation certificate); rigid remaining walls, no inferred grand-piano enclosure",
+                        self.source, self.origin_m, self.dimensions_m, self.count, self.gas_label, self.temperature_k,
                         self.pressure_pa, self.medium.rho0, self.medium.c0, self.damping_ratio,
                         samples, level, relative);
-                    return Ok(Projected { cavity, structural: modes.len(), overlaps, damping_per_s, description });
+                    return Ok(Projected { cavity, structural: modes.len(), overlaps, damping_per_s, description,
+                        reads_ambient: self.from_ambient });
                 }
             }
             previous = Some((overlaps, scales));
@@ -247,13 +274,15 @@ impl Projected {
             &self.damping_per_s, MAX_BOARD_MODES + MAX_CAVITY_MODES).map_err(|e| e.to_string())
     }
     pub fn report(&self) -> String { self.description.clone() }
+    /// Whether this cavity holds the instrument's selected air (`gas,ambient`).
+    pub fn reads_ambient(&self) -> bool { self.reads_ambient }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn card(dimensions: &str, count: usize) -> String {
-        format!("{HEADER}\nsource,estimated,authored sealed-box coupon\ninterface-origin-m,0,0,0\ndimensions-m,{dimensions}\nmodes,{count}\ndamping-ratio,0.02\ngas,dry-air-ussa1976,293.15,101325\n")
+        format!("{HEADER}\nsource,estimated,authored sealed-box coupon\ninterface-origin-m,0,0,0\ndimensions-m,{dimensions}\nmodes,{count}\ndamping-ratio,0.02\ngas,record,293.15 101325 0\n")
     }
     fn modes() -> Vec<BoardMode> {
         vec![BoardMode { frequency_hz: 150., damping_ratio: 0.01, bridge: [1.;88], volume: 0.4 },
@@ -323,7 +352,8 @@ mod tests {
         for invalid in [good.replace("modes,3", "modes,0"), good.replace("modes,3", "modes,9"),
             good.replace("dimensions-m,1,0.4,0.2", "dimensions-m,1,0.4,0"),
             good.replace("damping-ratio,0.02", "damping-ratio,1"),
-            good.replace("dry-air-ussa1976", "unknown-gas"), good.replace("293.15", "NaN"),
+            good.replace("gas,record,293.15 101325 0", "gas,unknown-gas,293.15,101325"), good.replace("293.15", "NaN"),
+            good.replace("gas,record,293.15 101325 0", "gas,dry-air-ussa1976,293.15,101325"),
             good.replace("source,estimated,authored sealed-box coupon\n", ""),
             format!("{good}modes,3\n")] {
             assert!(Specification::read(&invalid).is_err());
@@ -334,5 +364,31 @@ mod tests {
         let mut outside = piston(); outside.mesh.nodes[1][0] = 1.01;
         assert!(spec.project_motion(&modes(), &outside).unwrap_err().contains("inside its rectangle"));
         assert!(spec.project_motion(&modes()[..1], &piston()).is_err());
+    }
+
+    #[test]
+    fn the_cavity_reads_the_instruments_air_or_an_explicit_record_and_no_private_air() {
+        let ambient = card("1,0.4,0.2", 3).replace("gas,record,293.15 101325 0", "gas,ambient");
+        let unbound = Specification::read(&ambient).unwrap();
+        assert!(unbound.reads_ambient());
+        assert!(unbound.project_motion(&modes(), &piston()).unwrap_err().contains("never bound"));
+        // Bound to the instrument's air: that gas, bit for bit, and named so.
+        let air = super::super::ambient::Ambient::reference().gas;
+        let bound = unbound.in_air(&air);
+        assert_eq!((bound.medium.rho0.to_bits(), bound.medium.c0.to_bits()),
+            (air.density.to_bits(), air.sound_speed.to_bits()));
+        let humid = bound.project_motion(&modes(), &piston()).unwrap();
+        assert!(humid.report().contains("the instrument's selected air at 293.15 K"), "{}", humid.report());
+        assert!((humid.cavity.omegas[1] - air.sound_speed*std::f64::consts::PI).abs() < 1e-10);
+        // An explicit record is the author's sealed gas: binding leaves it.
+        let declared = Specification::read(&card("1,0.4,0.2", 3)).unwrap();
+        assert!(!declared.reads_ambient());
+        let kept = declared.clone().in_air(&air);
+        assert_eq!(kept.medium.c0.to_bits(), declared.medium.c0.to_bits());
+        assert!(kept.project_motion(&modes(), &piston()).unwrap().report().contains("gas record 293.15 101325 0 at"));
+        // The retired private dry-air row names its replacements.
+        let retired = card("1,0.4,0.2", 3).replace("gas,record,293.15 101325 0", "gas,dry-air-ussa1976,293.15,101325");
+        let message = Specification::read(&retired).unwrap_err();
+        assert!(message.contains("gas,ambient") && message.contains("gas,record,T P 0"), "{message}");
     }
 }

@@ -1113,6 +1113,12 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         None=>audio::AudioStream::new(piano,score,surface,left,
             ambient.medium(),options.observer_gain)?,
     };
+    // A supplied record must reach the sound: the microphone's medium,
+    // Rayleigh loading, a gas,ambient cavity or the preset board's wood.
+    if options.gas_record.is_some() && stream.microphone().is_none() && options.rayleigh_loading.is_none()
+        && !cavity.is_some_and(cavity::Projected::reads_ambient) && !options.uses_preset_board() {
+        return Err("--gas-record has no consumer: the diagnostic volume observer hears no gas, and no Rayleigh loading, gas,ambient cavity or preset board reads it".into());
+    }
     // the bridge trace reads the instrument after every frame
     if bridge_row.is_some() { stream.disable_accelerator(); }
     if let Some(mic) = stream.microphone() {
@@ -1269,7 +1275,10 @@ fn run_with(args: &[String]) -> Result<(), String> {
     let stretching = load_string_stretching(&scale, &options)?;
     let polarization = options.string_polarization.as_deref().map(|path|
         string_polarization::Specification::load(path, &scale)).transpose()?;
-    let cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?;
+    // A `gas,ambient` cavity holds the same selected air as the exterior.
+    let air = ambient::Ambient::selected(options.gas_record.as_deref())?;
+    let cavity = options.cavity.as_deref().map(cavity::Specification::load).transpose()?
+        .map(|cavity| cavity.in_air(&air.gas));
     let scale_source = options.string_sections.as_deref().or(options.scale.as_deref()).unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });

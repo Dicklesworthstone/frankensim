@@ -465,6 +465,17 @@ pub(crate) mod tests {
         MotionSurface::new(mesh,vec![vec![[0.,0.,1.,0.,0.,0.];4]]).unwrap()
     }
     #[test]
+    fn shipped_model_d_specs_declare_the_default_environment_record() {
+        let reference=super::super::ambient::Ambient::reference().gas;
+        for text in [include_str!("model-d-cardioid-mics.fspe"),include_str!("model-d-close-mics.fspe"),
+            include_str!("model-d-section-skin.fspe")] {
+            let spec=Specification::read(text).unwrap();
+            assert_eq!(spec.gas,Some(reference));
+            assert_eq!((spec.medium.density.to_bits(),spec.medium.sound_speed.to_bits()),
+                (reference.density.to_bits(),reference.sound_speed.to_bits()));
+        }
+    }
+    #[test]
     fn both_faces_keep_opposite_normal_motion_and_rigid_lid_is_not_another_source() {
         let obj=box_obj("skin",[0.,0.,-0.01],[0.1,0.1,0.02]);
         let spec=Specification::read(&specification()).unwrap();

@@ -24,14 +24,17 @@ interface-origin-m,0,0,0
 dimensions-m,1,1,0.3
 modes,4
 damping-ratio,0.02
-gas,dry-air-ussa1976,293.15,101325
+gas,ambient
 ```
 
-The enclosed gas is either the explicit dry-air row above or the shared gas
-declaration `gas,record,<record>` (for example `gas,record,mixture 293.15 101325
-mole 2 N2 0.79 O2 0.21`). Either resolves through the gas owner; a record that
-does not resolve refuses. The cavity's gas is its own declaration, separate
-from the exterior air (`--gas-record`).
+`gas,ambient` fills the cavity with the instrument's selected air: the
+committed default environment record, or `--gas-record` (for `piano_exterior`,
+the exterior's `ambient,<gas record>` row; a bare `medium,RHO,C` exterior has
+no gas, so it refuses). A deliberately different sealed gas is the explicit
+record `gas,record,<record>` (for example `gas,record,mixture 293.15 101325
+mole 2 N2 0.79 O2 0.21`), resolved through the gas owner; a record that does
+not resolve refuses. The former private row `gas,dry-air-ussa1976,T,P` refuses
+and names its replacement, `gas,record,T P 0`. Reports name the declaration.
 
 The source row requires an authority label (`estimated`, `mixed`, `published`
 or `measured`) and an attribution. Importing a label does not independently

@@ -354,6 +354,18 @@ impl Controls {
         self.polarization.as_ref().map(|spec| spec.source_ports(courses)).transpose()
     }
     pub fn has_cavity(&self) -> bool { self.cavity.is_some() }
+    /// Bind a `gas,ambient` cavity to the exterior's gas record. A bare
+    /// `medium,RHO,C` exterior carries no gas, so such a cavity refuses.
+    pub fn in_air(mut self, air: Option<&fs_material::gas::GasState>) -> Result<Self, String> {
+        if let Some(cavity) = self.cavity.take() {
+            self.cavity = Some(match air {
+                Some(air) => cavity.in_air(air),
+                None if cavity.reads_ambient() => return Err("cavity gas,ambient needs an ambient,<gas record> exterior; a bare medium row has no gas".into()),
+                None => cavity,
+            });
+        }
+        Ok(self)
+    }
     /// Reuse the source shank and original nonlinear felt/bridge engine. Larger
     /// mode budgets never relax its output-frequency ceiling; changing substeps
     /// changes its clock, not its retained acoustic/structural frequency band.
