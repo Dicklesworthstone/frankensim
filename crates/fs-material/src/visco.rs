@@ -40,6 +40,8 @@ use fs_math::det;
 
 /// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
 pub mod tensor;
+/// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
+pub mod circular_ted;
 pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
@@ -1074,7 +1076,7 @@ fn solve4(a: &[f64; 16], b: &[f64; 4]) -> [f64; 4] {
 /// beam/plate: `η(ω) = Δ·ωτ/(1 + (ωτ)²)` with relaxation strength
 /// `Δ = Eα²T₀/(ρc_p)` and thermal time `τ = h²ρc_p/(π²κ)`. Dominant in
 /// vibraphone-bar metals at low modes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThermoelasticZener {
     /// Young's modulus E [Pa].
     pub e: f64,

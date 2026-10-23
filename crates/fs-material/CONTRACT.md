@@ -59,7 +59,18 @@ homogenization, the P2 milestone.
   modal consumer uses the equal-energy-per-cycle rate `H k^4/(mu omega)` at
   each actual mode, inside the intersected source band. Missing, negative,
   wrong-quantity, state-varying and band-less claims refuse; explicit zero is
-  lossless. Thermoelastic relaxation from thermal data is not computed.
+  lossless. Thermoelastic relaxation from thermal data is in `section::ted`.
+- `section::ted::ConcentricThermoelasticBending` computes Zener thermoelastic
+  bending loss of a homogeneous solid circular member from its one material
+  state: `Delta = E alpha^2 T/(rho c_p)` with T from the state's single typed
+  absolute-temperature axis, and `visco::circular_ted`'s exact series over the
+  m = 1 Neumann thermal modes, `tau_n = rho c_p R^2/(k xi_n^2)` with
+  `J1'(xi_n) = 0` and weights `8/(xi_n^2 (xi_n^2 - 1))` (32 modes; omitted
+  weight below 2e-6). `xi_n` comes from a periodic-trapezoid `J1'` and is
+  checked against fs-math's certified J1; the weights against independent
+  projection integrals. Layered, hollow, untyped-temperature and incomplete
+  inputs refuse. It is a lower bound on bending loss: intrinsic anelastic
+  excess is the consumer's measured addend or a reported unknown.
 
 - `section::relaxation::ConcentricPronySection` and
   `section::torsion::ConcentricPronyTorsionalSection` compose independent

@@ -22,6 +22,8 @@ pub mod loss_angle;
 pub mod relaxation;
 /// Axial tensile capacity from per-layer sourced strength limits.
 pub mod strength;
+/// Computed Zener thermoelastic bending loss of homogeneous solid members.
+pub mod ted;
 pub mod thermal;
 pub mod transport;
 /// Close-coiled, sliding round-wire winding over an independently sourced core.
