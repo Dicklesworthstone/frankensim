@@ -1852,7 +1852,7 @@ boundary heat and backward-Euler numerical loss remain distinct. Every thermal
 proposal starts from the same accepted mechanical/caloric history; the actual
 returned temperature re-evaluates the native J2 increment before separate heat
 and combined-work gates accept the candidate. A rejected or cancelled proposal
-changes neither history nor time. Optional sourced constant isotropic thermal
+changes neither history nor time. Optional sourced isotropic thermal
 expansion is supported as described below. The model excludes temperature-varying
 elastic coefficients, phase change and finite-deformation volume work;
 source receipts and residual gates do not establish empirical accuracy.
@@ -1861,25 +1861,44 @@ source receipts and residual gates do not establish empirical accuracy.
 
 `SourceQuery::thermal_expansion` explicitly selects either zero eigenstrain or
 the canonical instantaneous linear expansion coefficient on the same card.
-The selected claim must be finite and constant along the complete canonical
-temperature line at the fixed external conditions. Scalar, curve and sampled
-surface sources must continuously support that line and retain the same value
-on every segment. A missing or temperature-varying expansion source refuses.
-`ThermalJ2` passes `eps-alpha(T-T_ref)I` to the original native J2 stress,
-consistent tangent and history update. The reference temperature is fixed at
-specimen birth, including across accepted thermal/mechanical continuation.
+The selected finite scalar, curve or fixed-context surface supplies its complete
+pinned temperature line, including every source knot and crossed surface cell.
+Negative coefficients and zero crossings are admitted. The existing shared
+piecewise-linear primitive computes `f(T)=integral(alpha dT)` without resampling;
+`ThermalJ2` passes `eps-f(T)I` to the original J2 stress, consistent tangent and
+history update. The reference temperature stays fixed at specimen birth.
+Renamed temperature coordinates retain their explicit absolute-temperature
+semantics and the original fixed nonthermal conditions.
 
-The energy model retains `psi=e:C:e/2+H p²/2` and the reversible internal-energy
-term `T alpha tr(sigma)`. Backward-Euler caloric exchange is
-`sigma_y delta_p - T_old alpha delta(tr(sigma))`; physical plastic heat,
-signed reversible exchange and numerical loss remain separate. Source Cp and
-the actual piecewise-linear caloric chart must both have positive isochoric
-capacity `Cp-9K alpha² T/rho` throughout the admitted span. Reference geometry
-and mass remain fixed in this small-strain model; this does not establish finite
-volume work or temperature-dependent-alpha thermodynamics. Focused synthetic
-G1/G3 regressions cover adiabatic elastic cooling/unloading, native free versus
-constrained heating, continuation and thermally driven yielding; source refusal
-is exercised by G4 cases. These fixtures are not measured material validation.
+With fixed elastic tensor C and energetic hardening H, the free energy remains
+`psi=e:C:e/2+H p²/2`; mechanical entropy is `s=alpha(T) tr(sigma)` and the
+additional internal energy is `T s`. Reversible caloric transfer is
+`tr(sigma_new) integral_Told^Tnew(alpha dT)-delta(T s)`, evaluated using the
+direct step integral and actual pinned endpoint coefficients. Constant alpha
+retains the original `-T_old alpha delta(tr(sigma))` arithmetic. Physical
+plastic heat is still `sigma_y delta_p`; numerical loss is a separate account.
+This closes the endpoint work balance and does not replace time refinement.
+
+Source Cp and the actual caloric segment slopes must stay positive after
+thermomechanical coupling. For variable alpha the sufficient full-span gate is
+`rho c_min > T_max [9K max|alpha|² + 3sqrt(3)K strain_limit max|alpha'|]`.
+The native energy owner bounds the actual elastic tensor by the tensor-Voigt
+norm (diagonal squares plus twice shear squares), so
+`|tr(sigma)|=3K|tr(e)| <= 3sqrt(3)K strain_limit`. This bounds the potentially
+negative term in
+`c_eff=rho c_caloric+T alpha' tr(sigma)-9KT alpha²`, including both sides of
+piecewise-linear source knots. The constant-alpha path retains its sharper
+existing capacity check. Failed admission publishes no material or thermal
+candidate. Reference mass, geometry, C and H remain fixed; phase change,
+variable elastic/hardening free energy and finite volume work remain outside
+this model.
+
+Focused synthetic tests cover source-knot integration and cooling, signed and
+zero expansion, a surface with an explicitly named temperature axis, reciprocal
+energy, material swaps through native 3D stress/shape/heat and thermally driven
+plasticity, and atomic capacity refusal. These fixtures are not measured
+material validation; native execution of the new curve regressions remains
+pending in the configured build environment.
 
 ### Structural source bindings for thermal transport
 

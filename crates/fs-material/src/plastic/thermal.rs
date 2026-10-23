@@ -2,8 +2,8 @@
 //!
 //! The declared reduction has energetic linear isotropic hardening, fixed
 //! reference geometry/density, temperature-independent elastic/hardening coefficients,
-//! optional constant sourced isotropic expansion, and a strictly increasing single-solid caloric
-//! chart. Yield stress and Cp may depend on temperature. Under these fixed
+//! optional sourced isotropic expansion, and a strictly increasing single-solid caloric
+//! chart. Yield stress, Cp and the expansion coefficient may depend on temperature. Under these fixed
 //! reference-density assumptions, the stress-free caloric enthalpy is the caloric
 //! internal-energy chart. Expansion includes reversible stress/temperature energy.
 //! Variable elastic free energy, phase/volume work and finite
@@ -58,7 +58,8 @@ pub struct SourceQuery<'a> {
     pub hardening_basis: HardeningPropertyBasis,
     /// None explicitly selects the zero-expansion reduction. Some selects the
     /// canonical instantaneous linear expansion coefficient from this same card.
-    /// It must be a constant over the complete caloric span; no missing-data fallback.
+    /// Its complete temperature path is integrated exactly; scalar, piecewise-linear
+    /// and fixed-context surface claims are admitted. No missing-data fallback.
     pub thermal_expansion: Option<MaterialPropertySelection>,
     /// Positive tensor strain-norm ceiling, at most 0.05.
     pub strain_limit: f64,
@@ -130,8 +131,9 @@ impl<E: std::error::Error + 'static> std::error::Error for FeedbackError<E> {}
 /// Source admission shared by material points and spatial solid elements.
 /// This owns no mechanical history, thermal inventory, geometry or integrator.
 /// The complete caloric interval has the same constant elastic/hardening energy
-/// and density assumptions as [`CaloricPoint`]. Only yield stress and Cp vary;
-/// optional constant expansion contributes reversible thermoelastic energy.
+/// and density assumptions as [`CaloricPoint`]. Yield stress, Cp and the optional
+/// expansion coefficient may vary. Integrated expansion contributes both its
+/// reversible caloric transfer and the corresponding internal-energy storage.
 #[derive(Clone, Debug)]
 pub struct ThermoplasticSource<'a> {
     card: &'a MaterialCard,
@@ -143,6 +145,10 @@ pub struct ThermoplasticSource<'a> {
     source: ResolvedJ2Plasticity,
     density_kg_m3: f64,
     expansion_per_k: f64,
+    // Empty for a constant/absent coefficient, preserving its original arithmetic.
+    // Otherwise the source owner's complete fixed-context line, including cell cuts.
+    expansion_knots: Vec<(f64, f64)>,
+    minimum_source_heat_capacity_j_kg_k: f64,
     reference_temperature_k: f64,
 }
 
@@ -201,9 +207,10 @@ impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
     /// The six source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
-    /// E, nu, H (or Et), density and expansion must be constant over every
-    /// canonical source-line segment at the fixed external conditions. Every
-    /// crossed surface cell edge is checked; equal endpoints alone do not suffice.
+    /// E, nu, H (or Et) and density must be constant over every canonical
+    /// source-line segment at the fixed external conditions. Expansion is
+    /// integrated along its complete pinned source path. Every crossed surface
+    /// cell edge is checked; equal endpoints alone do not suffice.
     pub fn try_new(
         query: SourceQuery<'a>,
         specific_enthalpy_j_kg: f64,
@@ -377,6 +384,8 @@ impl<'a> ThermoplasticSource<'a> {
             &query.temperature_axis,
             knots[knots.len() - 1].temperature_k,
         )?;
+        let mut expansion_knots = Vec::new();
+        let mut minimum_source_heat_capacity_j_kg_k = f64::INFINITY;
         for property in bundle.properties() {
             let receipt = &property.answer().receipt;
             let name = property.requirement().name();
@@ -388,11 +397,12 @@ impl<'a> ThermoplasticSource<'a> {
                     .ok_or(FeedbackError::Invalid(
                         "selected coefficient claim is absent",
                     ))?;
+            let expansion =
+                name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
             let fixed = name == YOUNG_MODULUS_PROPERTY
                 || name == POISSON_RATIO_PROPERTY
                 || name == query.hardening_basis.property_name()
-                || name == density_name
-                || name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
+                || name == density_name;
             // Mechanics, caloric data and linked transport use the same
             // rate-independent source admission.
             admit_rate_independent_property(property, &query.temperature_axis)?;
@@ -410,14 +420,26 @@ impl<'a> ThermoplasticSource<'a> {
                     property: name.to_owned(),
                     reason: e.to_string(),
                 })?;
-            for (_, sample) in support.knots {
+            for (temperature, sample) in support.knots {
                 let value = sample.evidence.value.value;
+                if expansion {
+                    if !value.is_finite() {
+                        return Err(FeedbackError::Invalid(
+                            "expansion must be finite over the complete source path",
+                        ));
+                    }
+                    expansion_knots.push((temperature, value));
+                }
+                if name == receipts[0].property {
+                    minimum_source_heat_capacity_j_kg_k =
+                        minimum_source_heat_capacity_j_kg_k.min(value);
+                }
                 if fixed && value != property.value_si() {
                     return Err(FeedbackError::Invalid(
-                        "elasticity, hardening, density and expansion must be constant on every source-line segment",
+                        "elasticity, hardening and density must be constant on every source-line segment",
                     ));
                 }
-                if !fixed && !positive(value) {
+                if !fixed && !expansion && !positive(value) {
                     return Err(FeedbackError::Invalid(
                         "yield and Cp must be positive at every source-line breakpoint",
                     ));
@@ -434,6 +456,9 @@ impl<'a> ThermoplasticSource<'a> {
             .material()
             .property(crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
             .map_or(0.0, |p| p.value_si());
+        if expansion_knots.iter().all(|(_, alpha)| *alpha == expansion_per_k) {
+            expansion_knots.clear();
+        }
         let result = Self {
             card: query.card,
             caloric: query.caloric,
@@ -444,6 +469,8 @@ impl<'a> ThermoplasticSource<'a> {
             source,
             density_kg_m3: density,
             expansion_per_k,
+            expansion_knots,
+            minimum_source_heat_capacity_j_kg_k,
             reference_temperature_k: state.temperature_k(),
         };
         result.admit_thermoelastic_capacity()?;

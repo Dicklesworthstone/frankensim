@@ -8,7 +8,7 @@
 //! observer states. Only a converged, balanced pair is returned.
 //!
 //! This uses the energetic-hardening reduction of ThermoplasticSource: constant
-//! E, nu, H and reference density, optional sourced constant isotropic expansion,
+//! E, nu, H and reference density, optional source-integrated isotropic expansion,
 //! fully solid caloric charts, small strain AND rotation. Hardening storage and backward-Euler loss
 //! are not heat. Spatial conduction, boundary exchange and existing observers
 //! remain in DepositionSimulation. Refine both physical load intervals and

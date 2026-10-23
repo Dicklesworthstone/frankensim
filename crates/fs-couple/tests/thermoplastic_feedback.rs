@@ -1,4 +1,7 @@
 //! Synthetic source data, native J2 work, and actual lumped conduction feedback.
+#[path = "thermoplastic_feedback/expansion_curve.rs"]
+mod expansion_curve;
+
 use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -233,7 +236,7 @@ fn g1_sourced_expansion_gives_adiabatic_elastic_cooling_and_history_consistent_u
 }
 
 #[test]
-fn g4_expansion_requires_a_constant_supported_source_and_positive_isochoric_capacity() {
+fn g4_expansion_requires_a_supported_source_and_positive_isochoric_capacity() {
     for alpha in [1e-3, -1e-3] {
         let fixture = expansion_fixture(500.0, alpha);
         let mut query = fixture.query();
@@ -257,7 +260,9 @@ fn g4_expansion_requires_a_constant_supported_source_and_positive_isochoric_capa
     );
     let mut query = fixture.query();
     query.thermal_expansion = Some(MaterialPropertySelection::SingleClaimOnly);
-    assert!(CaloricPoint::try_new(query, 0.0, VOLUME, SURFACE).is_err());
+    // A variable coefficient is now admitted with its exact primitive and
+    // reversible caloric terms; the source/capacity refusals remain.
+    assert!(CaloricPoint::try_new(query, 0.0, VOLUME, SURFACE).is_ok());
     let missing = Fixture::new(500.0, false);
     let mut query = missing.query();
     query.thermal_expansion = Some(MaterialPropertySelection::SingleClaimOnly);

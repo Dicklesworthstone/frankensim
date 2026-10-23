@@ -2,6 +2,8 @@
 //! history preservation, G4 late refusal. All material numbers are synthetic.
 #[path = "solid_plastic_enthalpy/contact.rs"]
 mod contact;
+#[path = "solid_plastic_enthalpy/expansion_curve.rs"]
+mod expansion_curve;
 
 use std::collections::BTreeMap;
 
@@ -75,6 +77,19 @@ impl Fixture {
         Self::with_expansion(cp, None)
     }
     fn with_expansion(cp: f64, alpha: Option<f64>) -> Self {
+        Self::with_expansion_claim(
+            cp,
+            alpha.map(|alpha| {
+                scalar(
+                    fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                    fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
+                    alpha,
+                )
+            }),
+        )
+    }
+    fn with_expansion_claim(cp: f64, expansion: Option<PropertyClaim>) -> Self {
+        let has_expansion = expansion.is_some();
         let mut claims = ClaimSet::new();
         for p in [
             scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -85,14 +100,8 @@ impl Fixture {
         ] {
             claims.insert_claim(p).unwrap();
         }
-        if let Some(alpha) = alpha {
-            claims
-                .insert_claim(scalar(
-                    fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
-                    fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
-                    alpha,
-                ))
-                .unwrap();
+        if let Some(expansion) = expansion {
+            claims.insert_claim(expansion).unwrap();
         }
         let mut yield_claim = scalar(YIELD_STRESS_PROPERTY, Pressure::DIMS, YIELD);
         yield_claim.value = PropertyValue::Curve {
@@ -135,7 +144,7 @@ impl Fixture {
         Self {
             card,
             caloric,
-            expansion: alpha.is_some(),
+            expansion: has_expansion,
         }
     }
     fn query(&self) -> SourceQuery<'_> {
