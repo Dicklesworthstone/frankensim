@@ -527,6 +527,475 @@ impl ModalPlateViscosity {
             stiffness_n_m:0.0,damping_n_s_m:self.resistance,rest_extension_m:0.0,
         }).collect()
     }
+
+    /// Factor a symmetric positive-semidefinite (PSD) modal damping matrix $C_{\text{modal}}$ (`n × n`,
+    /// row-major [1/s]) into passive dashpot channels at reference resistance `resistance` [$\text{N}\cdot\text{s/m}$].
+    ///
+    /// Unlike bulk bending viscosity (where every retained elastic mode has strictly positive diagonal
+    /// damping), localized interface/glue damping may be rank-deficient or vanish on rigid-body modes.
+    /// Complete pivoted Cholesky extracts one passive channel per active rank direction and verifies
+    /// that $\sum_k (\sqrt{R}\,\mathbf{b}_k)(\sqrt{R}\,\mathbf{b}_k)^T$ reconstructs $C_{\text{modal}}$ within $10^{-10}$.
+    pub fn from_psd_modal_matrix(
+        matrix: Vec<f64>,
+        n: usize,
+        resistance: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(gate)?;
+        if n == 0
+            || matrix.len() != n * n
+            || !resistance.is_finite()
+            || resistance <= 0.0
+            || matrix.iter().any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "PSD modal damping requires finite n*n matrix and positive resistance scale",
+            ));
+        }
+        let mut max_diag = 0.0_f64;
+        for i in 0..n {
+            let d_ii = matrix[i * n + i];
+            if d_ii < -1e-12 {
+                return Err(invalid("PSD modal damping has a negative diagonal entry"));
+            }
+            max_diag = max_diag.max(d_ii.max(0.0));
+        }
+        if max_diag == 0.0 {
+            return Ok(Self {
+                matrix: vec![0.0; n * n],
+                columns: Vec::new(),
+                resistance,
+                modes: n,
+                diagonal_zeta: None,
+            });
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if (matrix[i * n + j] - matrix[j * n + i]).abs() > 1e-10 * max_diag {
+                    return Err(invalid("PSD modal damping matrix is not symmetric"));
+                }
+            }
+        }
+
+        // Complete diagonal-pivoted Cholesky on the symmetric PSD matrix.
+        let mut rem = matrix.clone();
+        for i in 0..n {
+            if rem[i * n + i] < 0.0 && rem[i * n + i] >= -1e-12 * max_diag {
+                rem[i * n + i] = 0.0;
+            }
+        }
+        let r_sqrt = resistance.sqrt();
+        // Pivots below this factor's own PSD, symmetry and reconstruction
+        // tolerance (1e-10 of the largest diagonal) are roundoff in the modal
+        // projection, not damping channels. Rigid-mode rows of a glue box
+        // measured 4e-13 and -7e-14 relative, and at 1e-13 one became a
+        // spurious seventh channel.
+        let pivot_tol = 1e-10 * max_diag;
+        let mut columns: Vec<Vec<f64>> = Vec::new();
+        let mut used = vec![false; n];
+
+        for _step in 0..n {
+            poll(gate)?;
+            let mut best_p = None;
+            let mut best_diag = pivot_tol;
+            for i in 0..n {
+                if !used[i] {
+                    let d_i = rem[i * n + i];
+                    if d_i < -1e-10 * max_diag {
+                        return Err(invalid(
+                            "modal damping matrix is not positive semidefinite (negative Cholesky pivot)",
+                        ));
+                    }
+                    if d_i > best_diag {
+                        best_diag = d_i;
+                        best_p = Some(i);
+                    }
+                }
+            }
+            let Some(p) = best_p else {
+                break;
+            };
+            used[p] = true;
+            let root_p = best_diag.sqrt();
+            let mut col = vec![0.0; n];
+            col[p] = root_p / r_sqrt;
+            for i in 0..n {
+                if !used[i] {
+                    col[i] = (rem[i * n + p] / root_p) / r_sqrt;
+                }
+            }
+            for i in 0..n {
+                if !used[i] {
+                    let l_ip = col[i] * r_sqrt;
+                    for j in i..n {
+                        if !used[j] {
+                            let l_jp = col[j] * r_sqrt;
+                            rem[i * n + j] -= l_ip * l_jp;
+                            rem[j * n + i] = rem[i * n + j];
+                        }
+                    }
+                }
+            }
+            rem[p * n + p] = 0.0;
+            columns.push(col);
+        }
+
+        // Verify remaining diagonal entries are non-negative within tolerance and full matrix reconstructs.
+        for i in 0..n {
+            if !used[i] && rem[i * n + i] < -1e-10 * max_diag {
+                return Err(invalid(
+                    "modal damping matrix is not positive semidefinite (negative residual diagonal)",
+                ));
+            }
+        }
+        let allowance = 1e-10 * max_diag;
+        for i in 0..n {
+            for j in 0..n {
+                let actual: f64 = columns
+                    .iter()
+                    .map(|b| (b[i] * r_sqrt) * (b[j] * r_sqrt))
+                    .sum();
+                if !actual.is_finite() || (actual - matrix[i * n + j]).abs() > allowance {
+                    return Err(invalid(
+                        "PSD modal damping factorization does not reconstruct the full modal tensor",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            matrix,
+            columns,
+            resistance,
+            modes: n,
+            diagonal_zeta: None,
+        })
+    }
+
+    /// Project the Kelvin–Voigt glue damping operator $C_{\text{glue}}$ of a [`fs_plate::shell::junction::TiedShellModel`]
+    /// onto mass-normalized reduced mode shapes `modes` through this single modal viscous owner (`M0.2-W3` / `M1.2-W2b`).
+    pub fn from_tied_shell_glue(
+        tied: &fs_plate::shell::junction::TiedShellModel,
+        modes: &[Vec<f64>],
+        resistance: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(gate)?;
+        let modal_c = tied.project_glue_damping(modes).map_err(owner)?;
+        Self::from_psd_modal_matrix(modal_c, modes.len(), resistance, gate)
+    }
+}
+
+/// Canonical `fs-matdb` claim key for area-specific normal glue stiffness [$\text{N/m}^3$].
+pub const GLUE_NORMAL_STIFFNESS_PROPERTY: &str = "glue-normal-stiffness";
+/// Canonical `fs-matdb` claim key for area-specific seam-tangent shear glue stiffness [$\text{N/m}^3$].
+pub const GLUE_SHEAR_STIFFNESS_1_PROPERTY: &str = "glue-shear-stiffness-1";
+/// Canonical `fs-matdb` claim key for area-specific transverse shear glue stiffness [$\text{N/m}^3$].
+pub const GLUE_SHEAR_STIFFNESS_2_PROPERTY: &str = "glue-shear-stiffness-2";
+/// Canonical `fs-matdb` claim key for area-specific normal glue viscosity [$\text{N}\cdot\text{s/m}^3$].
+pub const GLUE_NORMAL_VISCOSITY_PROPERTY: &str = "glue-normal-viscosity";
+/// Canonical `fs-matdb` claim key for area-specific seam-tangent shear glue viscosity [$\text{N}\cdot\text{s/m}^3$].
+pub const GLUE_SHEAR_VISCOSITY_1_PROPERTY: &str = "glue-shear-viscosity-1";
+/// Canonical `fs-matdb` claim key for area-specific transverse shear glue viscosity [$\text{N}\cdot\text{s/m}^3$].
+pub const GLUE_SHEAR_VISCOSITY_2_PROPERTY: &str = "glue-shear-viscosity-2";
+
+/// Evidence-bearing resolution of an ordered [`fs_matdb::InterfaceSystemCard`] into an
+/// [`fs_plate::shell::junction::GlueLine`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedGlueLine {
+    /// Physical Kelvin–Voigt glue line parameters consumed by `fs-plate::shell::junction`.
+    pub glue_line: fs_plate::shell::junction::GlueLine,
+    /// Canonical content hash of the source [`fs_matdb::InterfaceSystemCard`].
+    pub card_identity: ContentHash,
+    /// Ordered surface A descriptor.
+    pub surface_a: fs_matdb::SurfaceSpec,
+    /// Ordered surface B descriptor.
+    pub surface_b: fs_matdb::SurfaceSpec,
+    /// Third-body adhesive identifier from `SystemContext.third_body`.
+    pub adhesive_third_body: String,
+    /// Named history state from `SystemContext.history`.
+    pub history: String,
+    /// Usage receipts for `[normal_n_m3, shear_n_m3[0], shear_n_m3[1]]`.
+    pub stiffness_receipts: [fs_matdb::PropertyUsageReceipt; 3],
+    /// Source uncertainty models for `[normal_n_m3, shear_n_m3[0], shear_n_m3[1]]`.
+    pub stiffness_uncertainties: [fs_matdb::UncertaintyModel; 3],
+    /// Optional usage receipts for `[viscosity_n_s_m3[0..3]]`.
+    pub viscosity_receipts: Option<[fs_matdb::PropertyUsageReceipt; 3]>,
+    /// Optional source uncertainty models for `[viscosity_n_s_m3[0..3]]`.
+    pub viscosity_uncertainties: Option<[fs_matdb::UncertaintyModel; 3]>,
+}
+
+impl ResolvedGlueLine {
+    /// Resolve an ordered [`fs_matdb::InterfaceSystemCard`] into a [`fs_plate::shell::junction::GlueLine`]
+    /// with full query receipts, unit checks (`N/m^3` and `N*s/m^3` via `fs-qty`), and third-body/history validation.
+    ///
+    /// - `expected_surfaces`: ordered `(surface_a_material, surface_b_material)` pair; a swapped pair refuses.
+    /// - `require_viscosity`: if `true`, resolves the three Kelvin–Voigt viscosity claims; if `false`, resolves
+    ///   stiffness-only (`viscosity_n_s_m3 = None`).
+    /// - `width_m`: physical glue-line width [m] (must be finite and $> 0$).
+    pub fn from_card(
+        card: &fs_matdb::InterfaceSystemCard,
+        expected_surfaces: (&fs_matdb::MaterialStateId, &fs_matdb::MaterialStateId),
+        point: &fs_matdb::QueryPoint,
+        policy: fs_matdb::SelectionPolicy,
+        width_m: f64,
+        require_viscosity: bool,
+    ) -> Result<Self, AcousticRealizeError> {
+        if &card.surface_a().material != expected_surfaces.0
+            || &card.surface_b().material != expected_surfaces.1
+        {
+            return Err(AcousticRealizeError::Nonlinear(format!(
+                "ordered glue card surface mismatch: expected ({:?}, {:?}), found ({:?}, {:?})",
+                expected_surfaces.0,
+                expected_surfaces.1,
+                card.surface_a().material,
+                card.surface_b().material
+            )));
+        }
+        let Some(adhesive) = card.third_body() else {
+            return Err(AcousticRealizeError::Nonlinear(
+                "glue interface card requires SystemContext.third_body naming the adhesive".to_string(),
+            ));
+        };
+        if adhesive.trim().is_empty() || card.history().trim().is_empty() {
+            return Err(AcousticRealizeError::Nonlinear(
+                "glue interface card requires non-empty adhesive third_body and named history".to_string(),
+            ));
+        }
+        if !width_m.is_finite() || width_m <= 0.0 {
+            return Err(AcousticRealizeError::Nonlinear(
+                "glue line width_m must be finite and strictly positive".to_string(),
+            ));
+        }
+
+        let k_dims = crate::shear_shell::connections::stiffness_per_area_dims();
+        let c_dims = crate::shear_shell::connections::viscosity_per_area_dims();
+
+        let query_claim = |prop_name: &str,
+                           expected_dims: fs_qty::Dims,
+                           allow_zero: bool|
+         -> Result<
+            (
+                f64,
+                fs_matdb::PropertyUsageReceipt,
+                fs_matdb::UncertaintyModel,
+            ),
+            AcousticRealizeError,
+        > {
+            let ans = card.claims().query(prop_name, point, policy).map_err(|e| {
+                AcousticRealizeError::Nonlinear(format!(
+                    "missing or invalid glue property {prop_name:?}: {e}"
+                ))
+            })?;
+            let sample = &ans.evidence.value;
+            if sample.dims != expected_dims {
+                return Err(AcousticRealizeError::Nonlinear(format!(
+                    "unit mismatch for glue property {prop_name:?}: expected dims {:?}, found {:?}",
+                    expected_dims.0, sample.dims.0
+                )));
+            }
+            let val = sample.value;
+            let ok = if allow_zero {
+                val.is_finite() && val >= 0.0
+            } else {
+                val.is_finite() && val > 0.0
+            };
+            if !ok {
+                return Err(AcousticRealizeError::Nonlinear(format!(
+                    "glue property {prop_name:?} value {val} is out of admissible range"
+                )));
+            }
+            Ok((val, ans.receipt, sample.uncertainty.clone()))
+        };
+
+        let (kn, rk_n, uk_n) = query_claim(GLUE_NORMAL_STIFFNESS_PROPERTY, k_dims, false)?;
+        let (ks1, rk_s1, uk_s1) = query_claim(GLUE_SHEAR_STIFFNESS_1_PROPERTY, k_dims, false)?;
+        let (ks2, rk_s2, uk_s2) = query_claim(GLUE_SHEAR_STIFFNESS_2_PROPERTY, k_dims, false)?;
+
+        let (visc_vals, visc_receipts, visc_uncert) = if require_viscosity {
+            let (vn, rv_n, uv_n) = query_claim(GLUE_NORMAL_VISCOSITY_PROPERTY, c_dims, true)?;
+            let (vs1, rv_s1, uv_s1) = query_claim(GLUE_SHEAR_VISCOSITY_1_PROPERTY, c_dims, true)?;
+            let (vs2, rv_s2, uv_s2) = query_claim(GLUE_SHEAR_VISCOSITY_2_PROPERTY, c_dims, true)?;
+            (
+                Some([vn, vs1, vs2]),
+                Some([rv_n, rv_s1, rv_s2]),
+                Some([uv_n, uv_s1, uv_s2]),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        let glue_line = fs_plate::shell::junction::GlueLine {
+            normal_n_m3: kn,
+            shear_n_m3: [ks1, ks2],
+            viscosity_n_s_m3: visc_vals,
+            width_m,
+        };
+        glue_line.validate().map_err(owner)?;
+
+        Ok(Self {
+            glue_line,
+            card_identity: card.content_hash(),
+            surface_a: card.surface_a().clone(),
+            surface_b: card.surface_b().clone(),
+            adhesive_third_body: adhesive.to_string(),
+            history: card.history().to_string(),
+            stiffness_receipts: [rk_n, rk_s1, rk_s2],
+            stiffness_uncertainties: [uk_n, uk_s1, uk_s2],
+            viscosity_receipts: visc_receipts,
+            viscosity_uncertainties: visc_uncert,
+        })
+    }
+}
+
+#[cfg(test)]
+mod glue_card_tests {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
+        PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
+        SystemContext, UncertaintyModel,
+    };
+
+    fn fixture_surfaces() -> (MaterialStateId, MaterialStateId) {
+        (
+            MaterialStateId {
+                chemistry: "Picea-abies-spruce".to_string(),
+                phase: "cellular-orthotropic-wood".to_string(),
+                process: "quarter-sawn-air-dried-12pct-mc".to_string(),
+                revision: 1,
+            },
+            MaterialStateId {
+                chemistry: "Acer-pseudoplatanus-maple".to_string(),
+                phase: "cellular-orthotropic-wood".to_string(),
+                process: "quarter-sawn-rib-bent-12pct-mc".to_string(),
+                revision: 1,
+            },
+        )
+    }
+
+    fn make_claim(name: &str, value: f64, dims: fs_qty::Dims) -> PropertyClaim {
+        PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained().with("temperature", 270.0, 330.0),
+            uncertainty: UncertaintyModel::RelativeHalfWidth {
+                fraction: 0.1,
+                confidence: 0.95,
+            },
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "authored-fixture:hide-glue-spruce-maple-v1".to_string(),
+                license: "CC0-1.0".to_string(),
+                artifact: None,
+            },
+        }
+    }
+
+    fn assemble_fixture_card(omit_key: Option<&str>, bad_dims_key: Option<&str>) -> InterfaceSystemCard {
+        let (mat_a, mat_b) = fixture_surfaces();
+        let k_dims = crate::shear_shell::connections::stiffness_per_area_dims();
+        let c_dims = crate::shear_shell::connections::viscosity_per_area_dims();
+        let wrong_dims = fs_qty::Pressure::DIMS; // Pa = N/m^2 instead of N/m^3
+
+        let mut claims = ClaimSet::new();
+        let entries = [
+            (GLUE_NORMAL_STIFFNESS_PROPERTY, 2.0e11, k_dims),
+            (GLUE_SHEAR_STIFFNESS_1_PROPERTY, 1.0e11, k_dims),
+            (GLUE_SHEAR_STIFFNESS_2_PROPERTY, 1.0e11, k_dims),
+            (GLUE_NORMAL_VISCOSITY_PROPERTY, 4.0e5, c_dims),
+            (GLUE_SHEAR_VISCOSITY_1_PROPERTY, 2.0e5, c_dims),
+            (GLUE_SHEAR_VISCOSITY_2_PROPERTY, 2.0e5, c_dims),
+        ];
+        for (key, val, dims) in entries {
+            if omit_key == Some(key) {
+                continue;
+            }
+            let d = if bad_dims_key == Some(key) {
+                wrong_dims
+            } else {
+                dims
+            };
+            claims.insert_claim(make_claim(key, val, d)).unwrap();
+        }
+        InterfaceSystemCard::assemble(
+            SurfaceSpec {
+                material: mat_a,
+                texture_frame: "planed-toothed-0.1mm-L".to_string(),
+            },
+            SurfaceSpec {
+                material: mat_b,
+                texture_frame: "scraped-rib-edge-L".to_string(),
+            },
+            SystemContext {
+                medium: "cured-bondline-0.08mm".to_string(),
+                third_body: Some("authored-fixture:hot-hide-glue-192g-bloom".to_string()),
+                environment: "air-293K-50pctRH".to_string(),
+                history: "cured-72h-293K-virgin".to_string(),
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g0_glue_card_missing_property_refuses_by_name() {
+        let (mat_a, mat_b) = fixture_surfaces();
+        let point = QueryPoint::new().with("temperature", 293.15).unwrap();
+        for missing in [
+            GLUE_NORMAL_STIFFNESS_PROPERTY,
+            GLUE_SHEAR_STIFFNESS_1_PROPERTY,
+            GLUE_SHEAR_STIFFNESS_2_PROPERTY,
+            GLUE_NORMAL_VISCOSITY_PROPERTY,
+            GLUE_SHEAR_VISCOSITY_1_PROPERTY,
+            GLUE_SHEAR_VISCOSITY_2_PROPERTY,
+        ] {
+            let card = assemble_fixture_card(Some(missing), None);
+            let err = ResolvedGlueLine::from_card(
+                &card,
+                (&mat_a, &mat_b),
+                &point,
+                SelectionPolicy::SingleClaimOnly,
+                0.003,
+                true,
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(missing),
+                "expected refusal message to name missing property {missing:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_glue_card_units_checked() {
+        let (mat_a, mat_b) = fixture_surfaces();
+        let point = QueryPoint::new().with("temperature", 293.15).unwrap();
+        for bad_key in [
+            GLUE_NORMAL_STIFFNESS_PROPERTY,
+            GLUE_SHEAR_STIFFNESS_1_PROPERTY,
+            GLUE_NORMAL_VISCOSITY_PROPERTY,
+        ] {
+            let card = assemble_fixture_card(None, Some(bad_key));
+            let err = ResolvedGlueLine::from_card(
+                &card,
+                (&mat_a, &mat_b),
+                &point,
+                SelectionPolicy::SingleClaimOnly,
+                0.003,
+                true,
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unit mismatch") && msg.contains(bad_key),
+                "expected unit mismatch naming {bad_key:?}, got: {msg}"
+            );
+        }
+    }
 }
 
 /// One eigensolve's physical radiators and full damping, with original sources.
