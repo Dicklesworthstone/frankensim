@@ -37,7 +37,8 @@ fn options(level: u32) -> OpenOptions {
 }
 
 /// The declared cup: the sources and the window sit 1.5 radii from the
-/// sources, the cap and the mouth, for every ka.
+/// sources, the cap and the mouth, for every ka. The source rings sit on the
+/// node ring, eight points each.
 fn spec(length: f64, rung: (usize, usize), ring: f64) -> PipeEndSpec {
     PipeEndSpec {
         radius: 1.0,
@@ -46,6 +47,8 @@ fn spec(length: f64, rung: (usize, usize), ring: f64) -> PipeEndSpec {
         axial: rung.1,
         source: 0.3,
         source_spacing: 0.4,
+        source_radius: NODE_RING,
+        source_points: 8,
         window: (2.2, length - 1.5),
         stations: 16,
         ring_radius: ring,
@@ -168,9 +171,15 @@ fn open_pipe_end_planted_negatives() {
     }
     // (b) Receivers on the axis instead of the node ring: the first radial
     // mode is barely evanescent at ka >= 3.5 and must show in the residual.
+    // Axial sources, which excite that mode, make the check physical.
     let ka = [3.6];
-    let (node, _) = solve(&spec(4.6, RUNGS[0], NODE_RING), &ka, 0);
-    let (axis, _) = solve(&spec(4.6, RUNGS[0], 0.0), &ka, 0);
+    let axial = |ring: f64| PipeEndSpec {
+        source_radius: 0.0,
+        source_points: 1,
+        ..spec(4.6, RUNGS[0], ring)
+    };
+    let (node, _) = solve(&axial(NODE_RING), &ka, 0);
+    let (axis, _) = solve(&axial(0.0), &ka, 0);
     print("pipe-end-node-ring", 0, &node[0], 0.0);
     print("pipe-end-axis", 0, &axis[0], 0.0);
     assert!(
@@ -178,5 +187,34 @@ fn open_pipe_end_planted_negatives() {
         "the axis residual {:e} does not rise over the node ring's {:e}",
         axis[0].fit_residual,
         node[0].fit_residual
+    );
+}
+
+#[test]
+fn open_pipe_end_node_ring_sources_at_the_radial_cut_on() {
+    // Prediction, declared before the run: at ka 3.8 the axial sources feed
+    // the barely evanescent first radial mode to the mouth, where it converts
+    // into the reflected plane wave (R missed LS by 3.6-3.7e-2 on every rung).
+    // Node-ring sources do not excite it, so they must cut the miss at least
+    // threefold on the same rung.
+    let ka = [3.5, 3.8];
+    let ring_spec = spec(4.6, RUNGS[1], NODE_RING);
+    let axial_spec = PipeEndSpec {
+        source_radius: 0.0,
+        source_points: 1,
+        ..ring_spec
+    };
+    let (ring, seconds) = solve(&ring_spec, &ka, 1);
+    let (axial, _) = solve(&axial_spec, &ka, 1);
+    for (r, a) in ring.iter().zip(&axial) {
+        print("pipe-end-ring-sources", 1, r, seconds);
+        print("pipe-end-axial-sources", 1, a, 0.0);
+    }
+    let miss = |row: &PipeEndRow| (row.reflection - ls(row.ka).reflection()).abs();
+    assert!(
+        miss(&ring[1]) < miss(&axial[1]) / 3.0,
+        "node-ring sources miss LS by {:e} at ka 3.8, axial ones by {:e}",
+        miss(&ring[1]),
+        miss(&axial[1])
     );
 }

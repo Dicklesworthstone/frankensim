@@ -1016,9 +1016,10 @@ end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.
 - The pipe is a zero-thickness "cup": a cylinder closed by a hemisphere, so
   its only free edge is the mouth rim. The rim is quadratically graded.
-- Two axial monopoles with strengths 1 and `-exp(-i k delta)` cancel their
-  backward plane waves, so the forward amplitude cannot vanish. The screen
-  is rigid.
+- Two source rings (declared radius and points; the tests use eight points
+  on the node ring) with strengths 1 and `-exp(-i k delta)` cancel their
+  backward plane waves, so the forward amplitude cannot vanish. On the node
+  ring they do not excite the first radial mode. The screen is rigid.
 - Everything behind the stations changes only the incident amplitude, never
   `R = B/A`.
 - The total pressure is read on the node ring `r = 0.6276 a` of the first
@@ -1032,12 +1033,17 @@ geometry.
 declares. The dense cap binds on facets (8192), so the rungs are 36, 46 and
 58 vertices per ring (3114, 5060 and 8062 facets, ratio about 1.27; the
 order estimate is weak at that ratio).
-- Against `fs_duct::levine_schwinger` at the finest rung, for ka 0.05 to 3.5:
-  `|R - R_LS|` is 2.4e-4 to 9.8e-4 and `|l/a - LS|` is 1.1e-4 to 7.7e-4. The
-  observed order is about 2.3.
-- ka 3.8 does not converge: `|R - R_LS|` is 3.6-3.7e-2 on every rung.
-  Suspected cause: the axial sources excite the first radial mode. It is
-  barely evanescent there (`exp(-0.49 z/a)`), reaches the mouth and converts.
+- Against `fs_duct::levine_schwinger` at the finest rung, with node-ring
+  sources, for ka 0.05 to 3.8: `|R - R_LS|` is 5.9e-5 to 8.6e-4 and
+  `|l/a - LS|` is 3.3e-5 to 5.1e-4. The observed order is about 2.3.
+- Axial sources (`source_radius` 0) excite the first radial mode. It is
+  barely evanescent at ka 3.8 (`exp(-0.49 z/a)`), reaches the mouth and
+  converts, so `R` misses by 3.6-3.7e-2 on every rung. The node-ring source
+  takes the miss to 1.0e-3 on the same rung: the prediction was 3x, the
+  measurement 36x (`open_pipe_end_node_ring_sources_at_the_radial_cut_on`).
+- The cup's finite outer wall leaves a length dependence at ka 1-3 that is
+  not yet resolved (.100's gate, ruling 6396). That is why the 1e-3 claim is
+  not gated here.
 - The interior zero crossing is biased: 1.3e-2 at ka 0.05, and meaningless
   for `k * span >= 0.45`.
 - Planted negatives:

@@ -8,12 +8,19 @@
 //! The cylinder's rings sit at `z_k = L sin(pi k / 2K)`, which grades the
 //! distance to the rim quadratically, as the disc test data does at its rim.
 //!
-//! Source: two axial monopoles, at `z_s` and `z_s + delta`, with strengths 1
-//! and `-exp(-i k delta)`. Their backward plane waves cancel, so the forward
-//! plane-wave amplitude never vanishes. A single monopole's would vanish
-//! wherever the cap's reflection cancels its direct wave. The screen is
-//! rigid: its drive velocity is minus the incident normal velocity, taken
-//! with the smooth surface's normal at each vertex.
+//! Source: two rings of `N` monopoles, of radius `r_s`, at `z_s` and
+//! `z_s + delta`, with ring strengths 1 and `-exp(-i k delta)`.
+//! - Their backward plane waves cancel, so the forward plane-wave amplitude
+//!   never vanishes. A single source's would vanish wherever the cap's
+//!   reflection cancels its direct wave.
+//! - A ring couples to radial mode `n` as `J0(j'_{0,n} r_s / a)`. On the node
+//!   ring that is zero for the first radial mode. That mode is barely
+//!   evanescent near ka 3.8, so axial sources (`r_s = 0`, `N = 1`) feed it
+//!   to the mouth, where it converts into the reflected plane wave.
+//! - `N` points excite azimuthal orders that are multiples of `N`.
+//!
+//! The screen is rigid: its drive velocity is minus the incident normal
+//! velocity, taken with the smooth surface's normal at each vertex.
 //!
 //! Nothing radiates outside except through the mouth. So everything behind
 //! the stations (cap, sources and their discretization) changes only the
@@ -56,10 +63,15 @@ pub struct PipeEndSpec {
     pub circumferential: usize,
     /// Cylinder ring intervals `K`.
     pub axial: usize,
-    /// `z` of the first monopole, on the axis inside the cylinder.
+    /// `z` of the first source ring, inside the cylinder.
     pub source: f64,
-    /// Spacing `delta` of the second monopole above the first.
+    /// Spacing `delta` of the second source ring above the first.
     pub source_spacing: f64,
+    /// Source ring radius `r_s`; `NODE_RING * radius` does not excite the
+    /// first radial mode, and 0 puts one monopole on the axis.
+    pub source_radius: f64,
+    /// Monopoles per source ring, equally spaced (exactly 1 on the axis).
+    pub source_points: usize,
     /// Station window `[z0, z1]`, above the sources and below the mouth.
     pub window: (f64, f64),
     /// Stations, equally spaced over the window inclusive (at least 3).
@@ -214,6 +226,7 @@ fn validate(spec: &PipeEndSpec) -> Result<(), HelmholtzError> {
         spec.window.0,
         spec.window.1,
         spec.ring_radius,
+        spec.source_radius,
     ];
     if lengths.iter().any(|v| !v.is_finite())
         || !(a > 0.0)
@@ -227,10 +240,14 @@ fn validate(spec: &PipeEndSpec) -> Result<(), HelmholtzError> {
         || !(spec.window.0 < spec.window.1)
         || !(spec.window.1 < spec.length)
         || !(spec.ring_radius >= 0.0 && spec.ring_radius < a)
+        || !(spec.source_radius >= 0.0 && spec.source_radius < a)
+        || spec.source_points == 0
+        || (spec.source_radius == 0.0 && spec.source_points != 1)
     {
         return Err(bad(
             "pipe end needs a > 0, an even circumferential count >= 8, axial >= 2, three stations, \
-             0 < source < source + spacing < window < length, and a ring inside the tube",
+             0 < source < source + spacing < window < length, receiver and source rings inside \
+             the tube, and one source point on the axis",
         ));
     }
     Ok(())
@@ -322,26 +339,35 @@ fn cup_normal(x: [f64; 3]) -> [f64; 3] {
     r.map(|v| v / length)
 }
 
-/// The source pair's pressure and gradient at `x`.
+/// The source rings' pressure and gradient at `x`.
 fn incident(k: f64, spec: &PipeEndSpec, x: [f64; 3]) -> (C64, [C64; 3]) {
-    let sources = [
+    let rings = [
         (spec.source, C64::ONE),
         (
             spec.source + spec.source_spacing,
             -cis(-k * spec.source_spacing),
         ),
     ];
+    let count = spec.source_points;
     let mut p = C64::ZERO;
     let mut g = [C64::ZERO; 3];
-    for (zs, strength) in sources {
-        let d = [x[0], x[1], x[2] - zs];
-        let r = norm(d);
-        let green = strength * cis(k * r).scale(1.0 / (4.0 * PI * r));
-        p = p + green;
-        // grad(e^{ikr}/(4 pi r)) = G (ik - 1/r) r_hat.
-        let radial = green * C64::new(-1.0 / r, k);
-        for (gc, dc) in g.iter_mut().zip(d) {
-            *gc = *gc + radial.scale(dc / r);
+    for (zs, ring) in rings {
+        let strength = ring.scale(1.0 / count as f64);
+        for m in 0..count {
+            let theta = TAU * m as f64 / count as f64;
+            let d = [
+                x[0] - spec.source_radius * det::cos(theta),
+                x[1] - spec.source_radius * det::sin(theta),
+                x[2] - zs,
+            ];
+            let r = norm(d);
+            let green = strength * cis(k * r).scale(1.0 / (4.0 * PI * r));
+            p = p + green;
+            // grad(e^{ikr}/(4 pi r)) = G (ik - 1/r) r_hat.
+            let radial = green * C64::new(-1.0 / r, k);
+            for (gc, dc) in g.iter_mut().zip(d) {
+                *gc = *gc + radial.scale(dc / r);
+            }
         }
     }
     (p, g)
@@ -506,6 +532,8 @@ mod tests {
             axial: 12,
             source: 0.3,
             source_spacing: 0.4,
+            source_radius: NODE_RING,
+            source_points: 8,
             window: (2.0, 3.1),
             stations: 8,
             ring_radius: NODE_RING,
@@ -539,6 +567,17 @@ mod tests {
         bad_spec = s;
         bad_spec.window = (0.5, 3.1);
         assert!(pipe_cup(&bad_spec).is_err(), "window over the sources");
+        bad_spec = s;
+        bad_spec.source_radius = 0.0;
+        assert!(pipe_cup(&bad_spec).is_err(), "eight points on the axis");
+        bad_spec.source_points = 1;
+        assert!(pipe_cup(&bad_spec).is_ok(), "one axial point");
+        bad_spec = s;
+        bad_spec.source_points = 0;
+        assert!(pipe_cup(&bad_spec).is_err());
+        bad_spec = s;
+        bad_spec.source_radius = 1.0;
+        assert!(pipe_cup(&bad_spec).is_err(), "source ring on the wall");
     }
 
     #[test]
