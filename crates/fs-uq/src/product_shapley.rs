@@ -10,6 +10,10 @@
 
 mod checkpoint;
 
+/// Concurrent conditional-pair evaluations with original-ordinal recovery.
+pub mod batch;
+pub use batch::{ShapleyBatchExecution, ShapleyBatchReport};
+
 use core::fmt::Display;
 use fs_evidence::Color;
 
@@ -279,7 +283,7 @@ impl ShapleyExecution {
                 self.status = UqStatus::Cancelled;
                 return self.report();
             }
-            let parameters = match self.next_parameters() {
+            let parameters = match self.parameters_at(self.values.len()) {
                 Ok(parameters) => parameters,
                 Err(reason) => return self.fail(reason.into()),
             };
@@ -317,15 +321,15 @@ impl ShapleyExecution {
         self.report()
     }
 
-    fn next_parameters(&mut self) -> Result<&[f64], &'static str> {
-        let row = self.values.len() / self.width;
+    fn parameters_at(&mut self, ordinal: usize) -> Result<&[f64], &'static str> {
+        let row = ordinal / self.width;
         if self.cached_row != Some(row) {
             // 2*row+1 < original budget <=1_000_000, within u32 tile addressing.
             self.a = sample_parameters(&self.germ_plan, None, 2 * row)?;
             self.b = sample_parameters(&self.germ_plan, None, 2 * row + 1)?;
             self.cached_row = Some(row);
         }
-        let slot = self.values.len() % self.width;
+        let slot = ordinal % self.width;
         let coalition = &self.coalitions[slot / 2];
         let second = slot % 2 == 1;
         let germ = |j: usize| {
