@@ -10,7 +10,7 @@ use fs_material::gas_field::AxialGasField;
 use super::{Duct, DuctError, MAX_REGIONAL_SEGMENTS, RegionalDuct, Segment, invalid};
 
 /// Midpoint subdivision limits are independent of the authored segment cap.
-const MAX_CELLS_PER_SEGMENT: usize = 64;
+pub(crate) const MAX_CELLS_PER_SEGMENT: usize = 64;
 const MAX_GAS_FIELD_CELLS: usize = 64;
 
 /// Shared material/propagation refusal from the continuous duct owner.

@@ -81,8 +81,10 @@ fn read_resolution(row: &mut Row<'_>) -> Result<GasFieldResolution, ReedPerforma
             if mode == Some("midpoint") {
                 row.word()?;
             }
+            // The midpoint cell budget, not the authored segment cap: the
+            // two were split when the segment cap rose to 256 (54c22966a).
             GasFieldResolution::Midpoint(
-                row.count(crate::driving_point::regional::MAX_REGIONAL_SEGMENTS)?,
+                row.count(crate::driving_point::regional::field::MAX_CELLS_PER_SEGMENT)?,
             )
         }
     };
