@@ -42,6 +42,7 @@ fn the_radiated_pressure_scales_with_density_and_arrives_with_the_sound_speed() 
     let air = pressure(None, &directory, "reference");
     let thin = pressure(Some("293.15 70927.5 0\n"), &directory, "thin");
     let co2 = pressure(Some("mixture 293.15 101325 mole 1 CO2 1\n"), &directory, "co2");
+    let heliox = pressure(Some("mixture 293.15 101325 mole 2 He 0.8 O2 0.2\n"), &directory, "heliox");
     let reference = ambient::Ambient::reference().gas;
     let dense = ambient::parse("mixture 293.15 101325 mole 1 CO2 1").unwrap();
     let ratio = ambient::parse("293.15 70927.5 0").unwrap().density / reference.density;
@@ -59,6 +60,13 @@ fn the_radiated_pressure_scales_with_density_and_arrives_with_the_sound_speed() 
     let far = (0.65_f64.powi(2) + 0.1_f64.powi(2) + 0.8_f64.powi(2)).sqrt();
     assert!(lag >= near * per_metre - 1.0 && lag <= far * per_metre + 1.0,
         "lag {lag} outside [{}, {}]", near * per_metre, far * per_metre);
+    // 80/20 He-O2 is faster: the air trace now lags the heliox one.
+    let light = ambient::parse("mixture 293.15 101325 mole 2 He 0.8 O2 0.2").unwrap();
+    let ahead = (1.0 / reference.sound_speed - 1.0 / light.sound_speed) * 48_000.0;
+    let correlation = |lag: usize| heliox.iter().zip(&air[lag..]).map(|(h, a)| h * a).sum::<f64>();
+    let lead = (0..200).max_by(|a, b| correlation(*a).total_cmp(&correlation(*b))).unwrap() as f64;
+    assert!(lead >= near * ahead - 1.0 && lead <= far * ahead + 1.0,
+        "heliox lead {lead} outside [{}, {}]", near * ahead, far * ahead);
     // A record that does not resolve refuses before any output is written.
     let bad = directory.join("bad.gas");
     std::fs::write(&bad, "293.15 101325\n").unwrap();

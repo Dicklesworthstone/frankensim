@@ -5,6 +5,7 @@ use ambient::Ambient;
 const AIR: &str = "293.15 101325 0";
 const THIN: &str = "293.15 70927.5 0";
 const CO2: &str = "mixture 293.15 101325 mole 1 CO2 1";
+const HELIOX: &str = "mixture 293.15 101325 mole 2 He 0.8 O2 0.2";
 
 fn described(record: &str) -> Ambient { Ambient::described(record).unwrap() }
 
@@ -12,7 +13,7 @@ fn described(record: &str) -> Ambient { Ambient::described(record).unwrap() }
 fn the_drum_compresses_exactly_its_declared_air() {
     let reference = drum_with_spec(4,2e-6,false,false,None,false,Stroke::default(),false,None,None).unwrap();
     assert_eq!(reference.ambient, Ambient::reference());
-    for record in [AIR, THIN, CO2] {
+    for record in [AIR, THIN, CO2, HELIOX] {
         let declared = described(record);
         let spec = drum_spec::Spec {ambient: declared, ..drum_spec::Spec::reference()};
         let e = drum_with_spec(4,2e-6,false,false,None,false,Stroke::default(),false,None,Some(spec)).unwrap();
@@ -45,6 +46,7 @@ fn the_cymbal_radiates_with_its_declared_density_and_sound_speed() {
     let air = splash_pcm(AIR, frames);
     let thin = splash_pcm(THIN, frames);
     let co2 = splash_pcm(CO2, frames);
+    let heliox = splash_pcm(HELIOX, frames);
     let peak = air.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 100 && peak < i16::MAX.unsigned_abs(), "unclipped audible reference peak {peak} LSB");
     let ratio = described(THIN).gas.density / described(AIR).gas.density;
@@ -63,6 +65,14 @@ fn the_cymbal_radiates_with_its_declared_density_and_sound_speed() {
     let lag = (0..400).max_by(|a, b| correlation(*a).total_cmp(&correlation(*b))).unwrap() as f64;
     let (low, high) = ((range - radius) * per_metre, (range + radius) * per_metre);
     assert!(low > 50.0 && lag >= low - 2.0 && lag <= high + 2.0, "lag {lag} outside [{low}, {high}]");
+    // 80/20 He-O2 is faster: air now lags the heliox wavefront.
+    let c_heliox = described(HELIOX).gas.sound_speed;
+    let ahead = (1.0 / c_air - 1.0 / c_heliox) * f64::from(acoustics::OUTPUT_RATE);
+    let correlation = |lag: usize| heliox.iter().zip(&air[lag..])
+        .map(|(h, a)| f64::from(*h) * f64::from(*a)).sum::<f64>();
+    let lag = (0..400).max_by(|a, b| correlation(*a).total_cmp(&correlation(*b))).unwrap() as f64;
+    let (low, high) = ((range - radius) * ahead, (range + radius) * ahead);
+    assert!(low > 50.0 && lag >= low - 2.0 && lag <= high + 2.0, "heliox lead {lag} outside [{low}, {high}]");
 }
 
 #[test]
