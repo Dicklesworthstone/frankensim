@@ -7,6 +7,8 @@ use fs_lbm::conjugate::{
 
 #[path = "viscous/forcing.rs"]
 mod forcing;
+#[path = "viscous/unsteady.rs"]
+mod unsteady;
 #[path = "viscous/obstacles.rs"]
 mod obstacles;
 

@@ -104,13 +104,15 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// None on the original fixed-density path; never an additional heat input.
     pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Explicit externally powered force density at this epoch, separate from
-    /// buoyancy. Its signed work is in viscous_power, not added as heat again.
+    /// buoyancy. Its signed work is in viscous_power for quasisteady heating
+    /// or unsteady_mechanical_step for transient heating, never added as heat again.
     pub external_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.
     pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
     /// Molecular heat and independent actuator work at this same source epoch.
-    /// Present only after explicit closed creeping-flow admission.
+    /// Present only after explicit quasisteady closed creeping-flow admission.
+    /// Transient heat has a separate endpoint unsteady_mechanical_step receipt.
     pub viscous_power: Option<ViscousPower>,
 }
 
@@ -142,7 +144,9 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
 /// its explicit starting epoch; transient endpoint momentum has a separate
 /// receipt. Quasisteady mode requires rapid viscous equilibration relative to
 /// thermal evolution. Both modes need timestep refinement and omit pressure-work
-/// heat and free-surface motion. Transient kinetic energy is diagnostic only.
+/// heat and free-surface motion. The optional unsteady Stokes heating mode
+/// separately closes native kinetic storage, physical dissipation and actuator
+/// work; ordinary retained momentum exposes only diagnostic kinetic energy.
 /// Explicit
 /// `Self::with_viscous_heating` admits wall-supplied molecular/Darcy heat in a
 /// closed creeping-flow box; `Self::with_body_force_heating` additionally admits
@@ -677,8 +681,44 @@ where
         if let Some(owner) = &mut self.viscous_heating {
             owner.begin();
         }
+        if let Some(owner) = &mut self.unsteady {
+            owner.begin_advance()?;
+        }
         self.solves = 0;
         Ok(())
+    }
+
+    fn requires_step_interval(&self) -> bool {
+        self.unsteady.as_ref().is_some_and(MaterialMomentum::has_heating)
+            || self.advected.as_ref().is_some_and(|inner| inner.requires_step_interval())
+    }
+
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        check_gate(self.gate, check)?;
+        // Always forward duration-dependent inner sources, including when
+        // this observer has no physical momentum-heating attachment.
+        let mut sources = self.advected.as_mut()
+            .ok_or(invalid("missing material-flow source epoch"))?
+            .step_sources(thermal, start_s, dt_s, end_s, check)
+            .map_err(MaterialFlowError::Inner)?;
+        let heat = self.prepare_unsteady_heat(thermal, start_s, dt_s, end_s, check)?;
+        for (cell, watts) in heat {
+            check_gate(self.gate, check)?;
+            let value = sources.entry(cell).or_insert(0.0);
+            *value += watts;
+            if !value.is_finite() {
+                return Err(DepositionError::Arithmetic.into());
+            }
+        }
+        check_gate(self.gate, check)?;
+        Ok(sources)
     }
 
     fn sources(
@@ -744,7 +784,8 @@ where
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
             // Thermal CFL and advection use the accepted old momentum. Its
-            // native update waits for step(), which receives the actual dt.
+            // native update waits for the accepted-duration hook when heating
+            // is enabled, otherwise for step(). Both use the actual thermal dt.
             // Exact phase locking is refused before retained momentum starts.
             (owner.flow.clone(), None)
         } else if !native_solve {

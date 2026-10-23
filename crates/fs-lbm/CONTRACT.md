@@ -2269,9 +2269,10 @@ momentum and its existing native convergence/kinetic-energy diagnostics.
 
 Admission requires closed laminar wall/symmetry boundaries, no fans, fixed
 reference mass/density and fixed geometry. Initial nonzero flow is not inferred.
-The diagnostic kinetic energy is not a closed mechanical-plus-thermal work
-account; pressure, molecular and Darcy power are not deposited as heat. Steady
-viscous/body-force heating therefore refuses in either attachment order.
+Without the explicit unsteady Stokes heating attachment below, the diagnostic
+kinetic energy is not a closed mechanical-plus-thermal work account; pressure,
+molecular and Darcy power are not deposited as heat. Steady viscous/body-force
+heating refuses in either attachment order.
 Existing phase-support, equal-density mushy and no-free-surface limits remain.
 Retained momentum currently requires fixed native momentum occupancy;
 `try_new_phase` with exact solid locking refuses this mode. A changing solid
@@ -2280,3 +2281,16 @@ quasisteady exact-phase owner continues to handle freezing and remelting.
 Regressions exercise heated and isothermal latent-plateau transients, retained
 history, the native steady limit, actual CFL durations and atomic refusals.
 Their addition does not establish an executed native test pass.
+
+
+### Source-material unsteady Stokes heat and mechanical storage
+
+`MaterialFlowFeedback::with_unsteady_viscous_heating` selects the existing native backward-Euler momentum owner with convection explicitly omitted under `ViscousHeatControls` (Reynolds ceiling at most 0.1). `with_unsteady_body_force_heating` additionally admits prescribed signed actuator work and permits force updates only between accepted advances without restarting momentum. Source-start viscosity and mobile mushy Darcy coefficients remain those already used by the material/enthalpy owner. Current sourced viscosity must admit both retained starting and computed endpoint speeds.
+
+The shared thermal owner chooses the actual combined conductive/advective CFL and event-clipped interval first. Its `step_sources` hook then prepares exactly one native momentum solve and the existing stress/Darcy quadratures supply endpoint physical heat over that duration. Accepted old flow still advects total h; material coefficients are frozen at the source start, and all endpoint material checks see the generated heat. This first-order split requires time and space refinement. `applied().flow` remains the old advection field; `unsteady_mechanical_step` separately exposes the endpoint power and exact native face-mass kinetic account.
+
+The discrete account is `W_wall + W_body + W_pressure = Q_molecular + Q_Darcy + (K_end-K_start) + N_BE`, where `K=sum(M_face*u_face^2)/2` uses exactly the inertia row's staggered half-cell volumes, and `N_BE=sum(M_face*(u_end-u_start)^2)/2`. The nonnegative backward-Euler numerical loss is reported, never turned into heat. Pressure-constraint work must independently remain negligible; it is not heat or a residual correction. Only physical molecular/Darcy watts enter the original caloric kernel, once. `UnsteadyHeatingAudit` accumulates that physical heat, signed supplies, native kinetic change, numerical loss and residual over the accepted advance; generated heat is already inside the original thermal audit. The older cell-centred kinetic diagnostic is not substituted for native mechanical storage.
+
+Admission is closed fixed geometry, laminar Newtonian source transport, constant reference mass/density and the original fixed-pressure caloric chart. A stationary Darcy frame must share the bulk enthalpy at local thermal equilibrium. Exact-solid topology changes, Boussinesq/gravitational storage, openings, fans, configured extra resistance, moving skeletons and compressible pressure work refuse or remain outside this mode. Prescribed actuator work does not debit an unspecified finite electrical/mechanical reservoir. Duration-dependent histories refuse instantaneous `power_balance_observed` queries.
+
+All state, source snapshots, prepared momentum, heat and accounts remain inside the original thermal deep-clone transaction. A pending interval can be prepared and accepted only once; solver, caloric, endpoint, history, cancellation or budget refusal publishes none of it. Focused G1/G3/G4 regressions cover the independently reduced 2x2 MAC startup/work identity, negative actuator work, drive-off kinetic decay without numerical heating, material feedback, CFL clipping, latent Darcy heating and late rollback.

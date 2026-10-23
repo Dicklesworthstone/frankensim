@@ -100,6 +100,37 @@ fn admit_conductances(
 impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for CoupledObservers<A, B> {
     type Error = ObserverCouplingError<A::Error, B::Error>;
 
+    fn requires_step_interval(&self) -> bool {
+        self.first.requires_step_interval() || self.second.requires_step_interval()
+    }
+
+    fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        check()?;
+        let mut result = self.first.step_sources(thermal_start, start_s, dt_s, end_s, check)
+            .map_err(ObserverCouplingError::First)?;
+        admit_sources(&result, thermal_start, check)?;
+        check()?;
+        let other = self.second.step_sources(thermal_start, start_s, dt_s, end_s, check)
+            .map_err(ObserverCouplingError::Second)?;
+        admit_sources(&other, thermal_start, check)?;
+        for (index, (id, watts)) in other.into_iter().enumerate() {
+            if index % 256 == 0 { check()?; }
+            match result.get_mut(&id) {
+                Some(total) if watts != 0.0 => {
+                    *total += watts;
+                    if !total.is_finite() { return Err(DepositionError::Arithmetic.into()); }
+                }
+                Some(_) => {},
+                None => { result.insert(id, watts); },
+            }
+        }
+        check()?;
+        Ok(result)
+    }
+
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.first.begin().map_err(ObserverCouplingError::First)?;
         self.second.begin().map_err(ObserverCouplingError::Second)

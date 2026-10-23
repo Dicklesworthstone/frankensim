@@ -5,7 +5,9 @@ use super::{
     FlowTransportSnapshot, FluidProperties, MaterialError, MaterialFlowError, MaterialFlowFeedback,
     MaterialMomentum, check_gate, invalid,
 };
-use crate::conjugate::{FlowStepRecord, FvFlow};
+use crate::conjugate::{
+    FlowStepRecord, FvFlow, UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls,
+};
 use fs_conduction::transient::deposition::CellId;
 use std::collections::BTreeMap;
 
@@ -32,9 +34,11 @@ where
     ///
     /// Only stationary-normal walls/symmetry and no fans are admitted. Moving
     /// tangential walls and source buoyancy can supply mechanical work, but this
-    /// mode does not claim a closed thermal-plus-kinetic energy account. Molecular,
-    /// Darcy and pressure work are not deposited as heat. The steady creeping
-    /// heat APIs therefore refuse in either attachment order. Fixed mass/density,
+    /// mode alone does not close thermal-plus-kinetic energy. Its molecular and
+    /// Darcy losses are not deposited as heat; select
+    /// Self::with_unsteady_viscous_heating for the explicit unsteady Stokes
+    /// energy closure. Steady heat APIs still refuse in either attachment order.
+    /// Fixed mass/density,
     /// phase mobility and free-surface restrictions of this owner still apply.
     /// Exact-solid continuation from `try_new_phase` refuses: changing native
     /// occupancy needs a solid momentum/kinetic-energy handoff. The original
@@ -66,6 +70,99 @@ where
             self.gate,
         )?);
         Ok(self)
+    }
+
+    /// Evolve native inertia and deposit only physical molecular/Darcy heat.
+    ///
+    /// This explicitly selects unsteady Stokes: native backward-Euler inertia,
+    /// full source-resolved stress and stationary mushy Darcy drag remain, but
+    /// momentum convection is omitted under the declared Reynolds ceiling.
+    /// Old accepted velocity still advects h. Once its combined CFL/event step
+    /// is known, ONE native momentum solve supplies endpoint physical heat for
+    /// that exact interval. No guessed dt or second thermal integrator is used.
+    ///
+    /// The native face mass norm stores kinetic energy. Backward-Euler loss
+    /// has its own nonnegative numerical account and never heats material.
+    /// Wall/body work and negligible pressure-constraint work close against
+    /// kinetic change, physical heat and that numerical loss to the declared
+    /// power allowance. Refine time and space for accuracy.
+    ///
+    /// Exact phase locking, openings, fans, configured resistance, turbulence
+    /// and Boussinesq forcing refuse. A stationary Darcy skeleton must share
+    /// the mapped bulk enthalpy at local thermal equilibrium. This mode does
+    /// not debit a finite actuator reservoir, nor model gravitational energy,
+    /// pressure compressibility, moving solid work or phase-density changes.
+    ///
+    /// Attach before the first momentum advance. Reattaching controls to an
+    /// already enabled history at an accepted endpoint retains all momentum;
+    /// it never restarts the fluid. Existing steady heating remains separate.
+    pub fn with_unsteady_viscous_heating(
+        mut self,
+        controls: ViscousHeatControls,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if self.buoyancy.is_some() || self.viscous_heating.is_some() {
+            return Err(invalid(
+                "unsteady mechanical heating requires explicit actuator work, without Boussinesq or steady heating",
+            ).into());
+        }
+        crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
+        if self.unsteady.is_none() {
+            self = self.with_unsteady_momentum()?;
+        }
+        self.unsteady
+            .as_mut()
+            .expect("attached native momentum")
+            .enable_heating(controls)?;
+        Ok(self)
+    }
+
+    /// Supply signed external actuator force to the same unsteady heat owner.
+    ///
+    /// One vector [N/m3] per native voxel; fixed solid entries must be zero.
+    /// Work is evaluated on the SAME endpoint faces as inertia/dissipation;
+    /// negative work is permitted. Only physical losses heat material.
+    /// Updating this drive between accepted advances preserves face momentum,
+    /// so turning it off permits actual kinetic decay rather than a restart.
+    pub fn with_unsteady_body_force_heating(
+        self,
+        force_density_n_m3: Vec<[f64; 3]>,
+        controls: ViscousHeatControls,
+    ) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if force_density_n_m3.len() != self.domain.cell_count() {
+            return Err(invalid("unsteady heating needs one body-force vector per voxel").into());
+        }
+        for (c, force) in force_density_n_m3.iter().enumerate() {
+            check_gate(self.gate, &mut || Ok(()))?;
+            if force
+                .iter()
+                .any(|f| !f.is_finite() || (!self.domain.is_fluid(c) && *f != 0.0))
+            {
+                return Err(invalid(
+                    "unsteady body forces must be finite and zero on fixed solids",
+                )
+                .into());
+            }
+        }
+        let mut coupled = self.with_unsteady_viscous_heating(controls)?;
+        coupled.external_force_n_m3 = Some(force_density_n_m3);
+        Ok(coupled)
+    }
+
+    /// Latest accepted exact-interval native kinetic/work/physical-loss receipt.
+    pub fn unsteady_mechanical_step(&self) -> Option<&UnsteadyMechanicalStep> {
+        self.unsteady
+            .as_ref()
+            .and_then(|owner| owner.mechanical_step.as_ref())
+    }
+
+    /// This accepted advance's supply, stored kinetic energy and physical heat.
+    /// Generated heat is already counted by the original thermal EnergyAudit.
+    pub fn unsteady_heating_audit(&self) -> Option<UnsteadyHeatingAudit> {
+        self.unsteady
+            .as_ref()
+            .and_then(MaterialMomentum::heating_audit)
     }
 
     /// Accepted endpoint momentum, distinct from applied().flow used by heat
@@ -132,9 +229,81 @@ where
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), MaterialFlowError<O::Error>> {
-        if self.unsteady.is_none() {
+        let Some(owner) = &mut self.unsteady else {
             return Ok(());
+        };
+        if owner.has_heating() {
+            // Prepared before thermal integration with the accepted interval.
+            // Do not integrate momentum a second time at the thermal endpoint.
+            owner.accept_heating_step(start_s, dt_s, thermal.time_s())?;
+            return check_gate(self.gate, check).map_err(Into::into);
         }
+        self.advance_native_momentum(start_s, dt_s, thermal.time_s(), old, check)
+    }
+
+    pub(super) fn prepare_unsteady_heat(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, MaterialFlowError<O::Error>> {
+        if !self
+            .unsteady
+            .as_ref()
+            .is_some_and(MaterialMomentum::has_heating)
+        {
+            return Ok(BTreeMap::new());
+        }
+        self.check_unsteady_start(thermal, check)?;
+        if thermal.time_s().to_bits() != start_s.to_bits() {
+            return Err(
+                invalid("transient heat must prepare from the actual thermal start").into(),
+            );
+        }
+        let applied = self.applied.as_ref().ok_or(invalid(
+            "transient heat lacks its source-start material epoch",
+        ))?;
+        let mut old = BTreeMap::new();
+        for sample in &applied.samples {
+            check_gate(self.gate, check)?;
+            let cell = thermal
+                .cells()
+                .get(&sample.cell)
+                .ok_or(invalid("transient heat source cell is inactive"))?;
+            if cell.specific_h_j_kg.to_bits() != sample.specific_enthalpy_j_kg.to_bits() {
+                return Err(invalid(
+                    "transient heat must retain its source-start enthalpy samples",
+                )
+                .into());
+            }
+            old.insert(sample.cell, thermal.temperature_k(sample.cell)?);
+        }
+        self.advance_native_momentum(start_s, dt_s, end_s, &old, check)?;
+        let step = self
+            .unsteady_mechanical_step()
+            .ok_or(invalid("native momentum did not supply physical heat"))?;
+        let applied = self.applied.as_ref().expect("checked source epoch");
+        let mut sources = BTreeMap::new();
+        for sample in &applied.samples {
+            check_gate(self.gate, check)?;
+            let power = step.power.cell_heat_w[sample.voxel];
+            if power != 0.0 {
+                sources.insert(sample.cell, power);
+            }
+        }
+        Ok(sources)
+    }
+
+    fn advance_native_momentum(
+        &mut self,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        old: &BTreeMap<CellId, f64>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), MaterialFlowError<O::Error>> {
         check_gate(self.gate, check)?;
         let fluid = self.reference_fluid()?;
         let applied = self.applied.as_ref().ok_or(invalid(
@@ -170,11 +339,14 @@ where
                 &fluid,
                 self.config,
                 &viscosity,
-                applied.buoyancy_force_n_m3.as_deref(),
+                applied
+                    .external_force_n_m3
+                    .as_deref()
+                    .or(applied.buoyancy_force_n_m3.as_deref()),
                 applied.mushy_drag_pa_s_m2.as_deref(),
                 start_s,
                 dt_s,
-                thermal.time_s(),
+                end_s,
                 self.gate,
             )?;
         check_gate(self.gate, check)?;

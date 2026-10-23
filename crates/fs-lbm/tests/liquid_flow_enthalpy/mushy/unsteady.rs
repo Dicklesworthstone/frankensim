@@ -215,3 +215,102 @@ fn exact_solid_phase_occupancy_refuses_retained_momentum_without_breaking_quasis
     near(audit.external_heat_j, 0.0);
     near(next.mass_kg(), old.mass_kg());
 }
+
+#[test]
+fn native_darcy_loss_heats_latent_h_and_changes_the_next_retained_mobility() {
+    use fs_lbm::conjugate::ViscousHeatControls;
+    let card = card(claims(1.0, 100.0, false));
+    let liquid = liquid(&card);
+    let curve = phase_curve(&card, [1.0; 2]);
+    let law = MushyPhaseLaw::try_new(&curve, 1.0, 1.0, 1.0, 0.1).unwrap();
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let mut flow_config = cavity();
+    flow_config.faces[3] = FvBoundary::wall();
+    let gate = CancelGate::new();
+    let ids: Vec<_> = (0..4).map(|c| Some(CellId(c))).collect();
+    let old = initial(&domain, &curve, 0.0);
+    let observer = MaterialFlowFeedback::try_new(
+        &old,
+        &domain,
+        input(&ids, &curve),
+        &flow_config,
+        (),
+        &gate,
+        10,
+        |_, _: &DepositedCell, t| {
+            liquid.at_temperature(Temperature::new(t)).map_err(|error| {
+                fs_material::MaterialError::State {
+                    what: error.to_string(),
+                }
+            })
+        },
+    )
+    .unwrap()
+    .with_mushy_mobility(&law)
+    .unwrap()
+    .with_unsteady_body_force_heating(
+        vec![
+            [-100.0, 100.0, 0.0],
+            [-100.0, -100.0, 0.0],
+            [100.0, 100.0, 0.0],
+            [100.0, -100.0, 0.0],
+        ],
+        ViscousHeatControls {
+            maximum_reynolds: 0.1,
+            power_tolerance_w: 1e-6,
+        },
+    )
+    .unwrap();
+    let dt = 0.01;
+    let (warm, first, first_thermal) = old
+        .advance_observed(&observer, dt, config(), || Ok(()))
+        .unwrap();
+    // Four identical native half-cell Darcy partitions. Latent storage owns
+    // the generated joules: no separate apparent-Cp or latent source is added.
+    let beta0 = 200.0;
+    let a0 = 400.0 / (4.0 / dt + 2400.0 + 4.0 * beta0);
+    let first_heat = dt * (2400.0 + 4.0 * beta0) * a0 * a0;
+    near(first.unsteady_flow().unwrap().field.flux_x(1, 1, 0), a0);
+    near(
+        first.unsteady_mechanical_step().unwrap().power.darcy_heat_w,
+        4.0 * beta0 * a0 * a0,
+    );
+    near(warm.energy_j() - old.energy_j(), first_heat);
+    near(first_thermal.external_heat_j, first_heat);
+    let h1 = 50.0 + first_heat / 4.0;
+    let phi = h1 / 100.0;
+    let beta1 = 100.0 * (1.0 - phi).powi(2) / phi.powi(3);
+    assert!(beta1 < beta0);
+    let (next, second, thermal) = warm
+        .advance_observed(&first, 2.0 * dt, config(), || Ok(()))
+        .unwrap();
+    let a1 = (4.0 * a0 / dt + 400.0) / (4.0 / dt + 2400.0 + 4.0 * beta1);
+    near(second.unsteady_flow().unwrap().field.flux_x(1, 1, 0), a1);
+    for sample in second.endpoint() {
+        assert_eq!(sample.temperature_k, 500.0);
+    }
+    for &drag in second
+        .applied()
+        .unwrap()
+        .mushy_drag_pa_s_m2
+        .as_ref()
+        .unwrap()
+    {
+        near(drag, beta1);
+    }
+    let mechanical = second.unsteady_heating_audit().unwrap();
+    near(mechanical.darcy_heat_j, dt * 4.0 * beta1 * a1 * a1);
+    near(mechanical.molecular_heat_j, dt * 2400.0 * a1 * a1);
+    near(thermal.external_heat_j, mechanical.generated_heat_j);
+    near(
+        next.energy_j() - warm.energy_j(),
+        mechanical.generated_heat_j,
+    );
+    near(
+        mechanical.supplied_body_work_j,
+        mechanical.generated_heat_j + mechanical.final_kinetic_energy_j
+            - mechanical.initial_kinetic_energy_j
+            + mechanical.backward_euler_loss_j,
+    );
+    near(next.mass_kg(), old.mass_kg());
+}

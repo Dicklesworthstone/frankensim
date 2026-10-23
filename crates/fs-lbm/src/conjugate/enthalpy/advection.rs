@@ -150,6 +150,15 @@ impl<F: FluidTransport + ?Sized, O: DepositionObserver> DepositionObserver
 {
     type Error = O::Error;
 
+    fn requires_step_interval(&self) -> bool { self.advected.requires_step_interval() }
+
+    fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.advected.step_sources(thermal_start, start_s, dt_s, end_s, check)
+    }
+
     fn begin(&mut self) -> Result<(), Self::Error> { self.advected.begin() }
 
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,

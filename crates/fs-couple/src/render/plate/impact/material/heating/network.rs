@@ -229,6 +229,17 @@ impl<E: core::fmt::Display> core::fmt::Display for NetworkError<E> {
 }
 impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
     type Error = NetworkError<O::Error>;
+
+    fn requires_step_interval(&self) -> bool { self.observer.requires_step_interval() }
+
+    fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
+        start_s: f64, dt_s: f64, end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.observer.step_sources(thermal_start, start_s, dt_s, end_s, checkpoint)
+            .map_err(NetworkError::Observer)
+    }
+
     fn begin(&mut self) -> Result<(),Self::Error> {
         self.observer.begin().map_err(NetworkError::Observer)
     }

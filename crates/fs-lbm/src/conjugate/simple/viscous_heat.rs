@@ -21,6 +21,11 @@
 
 use super::*;
 
+#[cfg(feature = "enthalpy-coupling")]
+mod unsteady;
+#[cfg(feature = "enthalpy-coupling")]
+pub use unsteady::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
+
 /// The checked value itself: the shared `finite` gate returns only the verdict.
 fn finite_value(field: &'static str, value: f64) -> Result<f64, ChtError> {
     finite(field, value)?;
@@ -62,6 +67,8 @@ pub struct ViscousPower {
     /// Discrete sum p div(u) V [W]; independently required to be negligible.
     pub pressure_constraint_power_w: f64,
     /// Wall plus body-force supply plus pressure constraint minus heat [W].
+    /// Steady flow requires this to vanish. In a transient mechanical receipt
+    /// it is inertial power, checked against the native kinetic/time account.
     pub residual_w: f64,
     pub reynolds: f64,
 }
@@ -274,9 +281,63 @@ fn creeping_material_heat(
 }
 
 impl Solver<'_> {
+    // One source-based Reynolds bound for old and new native face fields.
+    fn source_reynolds(&self, velocities: &[Vec<f64>; 3]) -> Result<f64, ChtError> {
+        let domain = self.domain;
+        let mut speed = velocities
+            .iter()
+            .flatten()
+            .map(|u| u.abs())
+            .fold(0.0, f64::max)
+            * 3.0_f64.sqrt();
+        for face in self.faces {
+            if let FvBoundary::Wall { velocity } = face {
+                speed = speed.max(velocity.iter().map(|u| u * u).sum::<f64>().sqrt());
+            }
+        }
+        let length = (0..3)
+            .map(|a| domain.face_coord(a, self.n[a]) - domain.face_coord(a, 0))
+            .fold(0.0, f64::max);
+        let minimum_mu = self
+            .molecular_viscosity
+            .iter()
+            .enumerate()
+            .filter(|(c, _)| domain.is_fluid(*c))
+            .map(|(_, mu)| *mu)
+            .fold(f64::INFINITY, f64::min);
+        finite_value(
+            "viscous_heat.reynolds",
+            self.rho * speed * length / minimum_mu,
+        )
+    }
+
     fn viscous_power(
         &self,
         flow: &FvFlow,
+        controls: ViscousHeatControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousPower, ChtError> {
+        let power = self.sample_viscous_power(
+            &flow.field, &flow.pressure_pa, controls, gate,
+        )?;
+        if power.residual_w.abs() > controls.power_tolerance_w
+            || (power.supplied_wall_power_w + power.supplied_body_power_w - power.heat_w).abs()
+                > controls.power_tolerance_w
+        {
+            return Err(invalid_power(
+                "independent steady wall/body work and physical heat do not close",
+            ));
+        }
+        Ok(power)
+    }
+
+    // The stress/drag quadratures are shared by steady and inertial Stokes.
+    // Only the caller owns the storage/time balance; no steady power equality
+    // is imposed on an accelerating field.
+    fn sample_viscous_power(
+        &self,
+        field: &FlowField,
+        pressure_pa: &[f64],
         controls: ViscousHeatControls,
         gate: &CancelGate,
     ) -> Result<ViscousPower, ChtError> {
@@ -537,42 +598,17 @@ impl Solver<'_> {
             if !domain.is_fluid(c) {
                 continue;
             }
-            let outward: f64 = (0..6).map(|face| flow.field.outward(domain, c, face)).sum();
+            let outward: f64 = (0..6).map(|face| field.outward(domain, c, face)).sum();
             add(
                 &mut pressure_constraint_power_w,
-                flow.pressure_pa[c] * outward,
+                pressure_pa[c] * outward,
             )?;
         }
         let residual_w = finite_value(
             "viscous_heat.residual",
             supplied_wall_power_w + supplied_body_power_w + pressure_constraint_power_w - heat_w,
         )?;
-        let mut speed = self
-            .vel
-            .iter()
-            .flatten()
-            .map(|u| u.abs())
-            .fold(0.0, f64::max)
-            * 3.0_f64.sqrt();
-        for face in self.faces {
-            if let FvBoundary::Wall { velocity } = face {
-                speed = speed.max(velocity.iter().map(|u| u * u).sum::<f64>().sqrt());
-            }
-        }
-        let length = (0..3)
-            .map(|a| domain.face_coord(a, self.n[a]) - domain.face_coord(a, 0))
-            .fold(0.0, f64::max);
-        let minimum_mu = self
-            .molecular_viscosity
-            .iter()
-            .enumerate()
-            .filter(|(c, _)| domain.is_fluid(*c))
-            .map(|(_, mu)| *mu)
-            .fold(f64::INFINITY, f64::min);
-        let reynolds = finite_value(
-            "viscous_heat.reynolds",
-            self.rho * speed * length / minimum_mu,
-        )?;
+        let reynolds = self.source_reynolds(&self.vel)?;
         if reynolds > controls.maximum_reynolds {
             return Err(invalid_power(
                 "source viscosity and actual wall/flow speed exceed the declared creeping-flow bound",
@@ -581,12 +617,9 @@ impl Solver<'_> {
         if (heat_w - quadrature_w).abs() > controls.power_tolerance_w
             || (heat_w - molecular_heat_w - darcy_heat_w).abs() > controls.power_tolerance_w
             || pressure_constraint_power_w.abs() > controls.power_tolerance_w
-            || residual_w.abs() > controls.power_tolerance_w
-            || (supplied_wall_power_w + supplied_body_power_w - heat_w).abs()
-                > controls.power_tolerance_w
         {
             return Err(invalid_power(
-                "independent wall/body work, constraint, molecular and Darcy power accounts do not close",
+                "independent constraint, molecular and Darcy power partitions do not close",
             ));
         }
         poll(gate)?;

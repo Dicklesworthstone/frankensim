@@ -20,6 +20,8 @@ pub struct PowerBalance {
 /// after each CFL-limited step BEFORE any events at its ending time. An optional
 /// source hook and then a conductance hook run before that step, after all
 /// events at its starting time. Both see the unchanged start-state history.
+/// After all timestep restrictions and event clipping, `step_sources` may
+/// prepare duration-dependent energy exchange on that same candidate.
 pub trait DepositionObserver: Clone {
     type Error: From<DepositionError>;
     /// Start one candidate advance; useful for resetting a per-call work counter.
@@ -64,7 +66,7 @@ pub trait DepositionObserver: Clone {
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<Vec<HeatTransfer>, Self::Error> { Ok(Vec::new()) }
     /// Tighten the conductive/source step bound; return finite 0 < dt <= proposed.
-    /// Called after all rate hooks. This sees step-local source/conductance
+    /// Called after the start-state rate hooks. This sees step-local source/conductance
     /// overrides but unchanged enthalpy. Compose coupled decay rates, not just
     /// independent CFL minima. This hook does not itself prove stability.
     ///
@@ -74,6 +76,34 @@ pub trait DepositionObserver: Clone {
     fn limit_timestep_s(&mut self, _thermal: &DepositionSimulation<'_>, proposed_s: f64,
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<f64, Self::Error> { Ok(proposed_s) }
+    /// Whether this observer needs an accepted interval to report all its heat.
+    /// Interval-dependent owners must return true, and wrappers must propagate
+    /// it. An instantaneous power balance refuses such an owner instead of
+    /// silently omitting its duration-dependent contribution.
+    fn requires_step_interval(&self) -> bool { false }
+    /// Additional signed average heat rates [W] for the FINAL accepted interval.
+    /// Called exactly once after all CFL restrictions and event/end clipping,
+    /// before changing enthalpy. `start_s` is the current thermal time; `end_s`
+    /// is the exact endpoint that `step` will see (including event-time rounding).
+    /// `dt_s` is the duration used for every energy integral in this step.
+    ///
+    /// Use this for an owned transient solve whose physical loss depends on dt.
+    /// Retain its tentative history in the cloned observer and accept it in
+    /// `step`. Refusal or cancellation discards that history and the thermal
+    /// candidate together. The unchanged thermal state still exposes start-state
+    /// source/conductance overrides, but these rates are added directly to the
+    /// already prepared heat balance and never persisted as boundary data.
+    /// All returned heat is counted once in `external_heat_j`.
+    ///
+    /// This hook cannot alter the chosen timestep, topology, material law or
+    /// conductances. Any needed stability bound belongs in `limit_timestep_s`;
+    /// a new nonlinear heat source still requires time refinement. Owners that
+    /// need this interval must also override `requires_step_interval`. Generic
+    /// observer wrappers must forward both hooks.
+    fn step_sources(&mut self, _thermal_start: &DepositionSimulation<'_>,
+        _start_s: f64, _dt_s: f64, _end_s: f64,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> { Ok(BTreeMap::new()) }
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>)
         -> Result<(), Self::Error>;
     /// Old temperatures and new enthalpy-backed temperatures on the same step.
@@ -143,6 +173,32 @@ impl<'a> DepositionSimulation<'a> {
         Ok(authored)
     }
 
+    // Duration-dependent losses enter the SAME rate field and external-energy
+    // audit after dt is fixed. Never evaluate boundaries/conduction a second time.
+    fn add_interval_sources(&self, rates: &mut HeatRates, sources: &BTreeMap<CellId, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<(), DepositionError> {
+        if sources.is_empty() { return Ok(()); }
+        if sources.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("too many interval heat sources"));
+        }
+        for (index, (&id, &watts)) in sources.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if !self.cells.contains_key(&id) {
+                return Err(DepositionError::InvalidInput("inactive interval-source cell"));
+            }
+            finite(watts)?;
+        }
+        for (index, (&id, &watts)) in sources.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if watts == 0.0 { continue; }
+            let total = rates.watts.get_mut(&id).expect("validated interval-source cell");
+            *total = finite(*total + watts)?;
+            rates.external_w = finite(rates.external_w + watts)?;
+        }
+        checkpoint()
+    }
+
     fn add_step_transfers(&self, rates: &mut HeatRates, transfers: &[HeatTransfer],
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<(), DepositionError> {
@@ -174,6 +230,8 @@ impl<'a> DepositionSimulation<'a> {
     /// owner as advance_observed. All mutable preparation is confined to clones.
     /// This is a residual for steady solving, not a finite-difference estimate
     /// from two advances or a second implementation of the transport equations.
+    /// An observer requiring accepted-interval heat refuses: there is no duration
+    /// here, so returning its other rates would silently report an incomplete balance.
     pub fn power_balance_observed<O: DepositionObserver>(
         &self, observer: &O,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -182,6 +240,11 @@ impl<'a> DepositionSimulation<'a> {
         let mut candidate = self.clone();
         let mut observer = observer.clone();
         observer.begin()?;
+        if observer.requires_step_interval() {
+            return Err(DepositionError::InvalidInput(
+                "instantaneous power balance cannot evaluate interval-dependent heat",
+            ).into());
+        }
         let sources = observer.sources(&candidate, &mut checkpoint)?;
         let conductances = observer.conductances(&candidate, &mut checkpoint)?;
         let transfers = observer.heat_transfers(&candidate, &mut checkpoint)?;
@@ -262,7 +325,15 @@ impl<'a> DepositionSimulation<'a> {
                     return Err(DepositionError::InvalidInput("invalid observer timestep bound").into());
                 }
                 rates.explicit_dt_s = dt.min(stop-start_s);
-                next.thermal_step(rates, &mut audit, &mut checkpoint).map_err(Into::into)
+                let time = finite(start_s + rates.explicit_dt_s)?;
+                if time <= start_s { return Err(DepositionError::Arithmetic.into()); }
+                let end_s = if rates.explicit_dt_s == stop-start_s { stop } else { time };
+                let interval_sources = observer.step_sources(
+                    &next, start_s, rates.explicit_dt_s, end_s, &mut checkpoint,
+                )?;
+                next.add_interval_sources(&mut rates, &interval_sources, &mut checkpoint)?;
+                let (dt, old_temperatures) = next.thermal_step(rates, &mut audit, &mut checkpoint)?;
+                Ok((dt, end_s, old_temperatures))
             })();
             // Restore even on thermal refusal. Observations/events see authored
             // boundaries, never a generated source masquerading as a new input.
@@ -272,10 +343,8 @@ impl<'a> DepositionSimulation<'a> {
             for (id, g) in original_links {
                 next.links.get_mut(&id).expect("validated active link").conductance_w_k = g;
             }
-            let (dt, old_temperatures) = step?;
-            let time = finite(start_s+dt)?;
-            if time <= start_s { return Err(DepositionError::Arithmetic.into()); }
-            next.time_s = if dt == stop-start_s { stop } else { time };
+            let (dt, end_s, old_temperatures) = step?;
+            next.time_s = end_s;
             audit.substeps += 1;
             observer.step(start_s, dt, &old_temperatures, &next, &mut checkpoint)?;
             checkpoint()?;

@@ -128,6 +128,8 @@ pub use radiation::{
     ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, SurfaceExchange,
     escape_factors, radiated_power, radiative_sinks, solve_energy_radiating,
 };
+#[cfg(feature = "enthalpy-coupling")]
+pub use simple::viscous_heat::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
 pub use simple::viscous_heat::{
     ViscousHeatControls, ViscousPower, creeping_flow_with_body_force_heat,
     creeping_flow_with_darcy_heat, creeping_flow_with_viscous_heat,
