@@ -34,8 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id=|s:&str|StableId::new(s).unwrap();
     let schema=PortKind::FluidPressureFlux.scalar_seed_schema(id("synthetic-radiating-graph"),
         CoordinateBinding::new(id("pressure-volume-flow"),id("inlet-plane"),PortOrientation::OutwardFromOwner),
-        PortTimestamp::new(id("frequency-sweep"),0))?;
-    let driver=NetworkDrivingPoint::new_with_coupled_ports(graph,"inlet".into(),vec![],
+        PortTimestamp::new(id("frequency-sweep"),0))
+        .map_err(|e|format!("port schema refused: {e:?}"))?;
+    let driver=NetworkDrivingPoint::new_coupled(graph,"inlet".into(),vec![],
         patches.iter().map(|p|p.port.clone()).collect(),schema)?;
     let mut hash=DomainHasher::new("fs-couple:network-exterior-example:v1");
     hash.update(b"synthetic equal-area cap/cylinder junction; no measured specimen equivalence");

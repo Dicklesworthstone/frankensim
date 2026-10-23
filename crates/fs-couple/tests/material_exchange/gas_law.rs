@@ -6,6 +6,7 @@ use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::NetworkError;
 use fs_couple::cavity_phs::piston::thermal::ThermalPistonError;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::{ChamberDrive, MaterialExchangeState};
+use fs_couple::PortedModule;
 use std::collections::BTreeMap;
 
 fn surfaces(patches: &[MaterialContact]) -> Vec<GasSurface> {
@@ -195,7 +196,8 @@ fn live_state_preview_and_advance_publish_the_typed_heat_law_once() {
             assert_eq!(accepted.last_window_duration_s(),Some(0.00005));
             assert_eq!(accepted.last_window_transfers(),preview.chambers()[&chamber.id].last_window_transfers());
             for surface in &chamber.surfaces {
-                assert_eq!(&surface.source.1,&chamber.boundary.piston.midpoint);
+                // source = (contact, (material sample, gas the callback saw)).
+                assert_eq!(&surface.source.1.1,&chamber.boundary.piston.midpoint);
             }
         }
     }));

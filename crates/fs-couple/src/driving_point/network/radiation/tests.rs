@@ -17,7 +17,7 @@ fn exterior()->(SpherePanels,Vec<OpeningPatch>) {
 }
 fn model(gas:GasState,points:Vec<[f64;3]>)->RadiatingNetwork {
     let (surface,patches)=exterior();
-    let driver=NetworkDrivingPoint::new_with_coupled_ports(graph(),"inlet".into(),vec![],
+    let driver=NetworkDrivingPoint::new_coupled(graph(),"inlet".into(),vec![],
         patches.iter().map(|p|p.port.clone()).collect(),schema()).unwrap();
     RadiatingNetwork::new(driver,surface,patches,gas,points,0.001,ContentHash([7;32]),budget(),
         &CancelGate::new_clock_free()).unwrap()
@@ -30,7 +30,7 @@ fn same_exterior_solution_supplies_mutual_load_and_coherent_microphone() {
     let m=model(gas(),receivers()); let gate=CancelGate::new_clock_free();
     let omega=core::f64::consts::TAU*1200.0; let flow=C64::new(1e-6,-2e-6);
     let sample=m.solve(omega,LossModel::Lossless,flow,&gate).unwrap();
-    assert_eq!(sample.boundary.labels,m.driving_point().coupled_ports());
+    assert_eq!(sample.boundary.labels,m.driving_point().coupled_labels());
     assert!(sample.boundary.z[1].abs()>0.0);
     assert_eq!(sample.inlet.outward_volume_flow,-flow);
     assert!(sample.receiver_fields.iter().any(|f|f.pressure_pa.abs()>1e-12));
@@ -112,7 +112,7 @@ fn ambiguous_geometry_incoherent_gas_and_budget_overflow_refuse() {
             5=>points=vec![[0.0;3]],
             _=>source=ContentHash([0;32]),
         }
-        let driver=NetworkDrivingPoint::new_with_coupled_ports(graph(),"inlet".into(),vec![],
+        let driver=NetworkDrivingPoint::new_coupled(graph(),"inlet".into(),vec![],
             vec!["right".into(),"left".into()],schema()).unwrap();
         assert!(RadiatingNetwork::new(driver,surface,patches,gas,points,0.001,source,limit,&gate).is_err(),"accepted case {case}");
     }

@@ -3318,7 +3318,7 @@ mod tests {
         let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
         let mut results =
             run_registry(&mut registry, 0, 1, &axes).expect("bounded exploratory registry run");
-        let mut finalized = finalize_registry_tuning(&mut registry, &axes, &axes, policy, &results)
+        let mut finalized = crate::finalize_registry_tuning(&mut registry, &axes, &axes, policy, &results)
             .expect("finalize exploratory run");
         crate::record_run(
             &production.ledger,

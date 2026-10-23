@@ -118,9 +118,9 @@ impl RadiatingNetwork {
         gas.validate_coherence().map_err(|_| bad("a coherent common gas state is required"))?;
         let n=surface.areas().len(); let p=patches.len(); let r=receivers.len();
         if n==0 || n>budget.max_panels || n>helmholtz::MAX_DENSE_PANELS
-            || p==0 || p!=driving.coupled_ports().len() || p>fs_duct::network::MAX_NETWORK_PORTS
+            || p==0 || p!=driving.coupled_labels().len() || p>fs_duct::network::MAX_NETWORK_PORTS
             || r==0 || r>fs_bem::near_field::MAX_RECEIVERS || source==ContentHash([0;32])
-            || patches.iter().zip(driving.coupled_ports()).any(|(a,b)| &a.port!=b) {
+            || patches.iter().zip(driving.coupled_labels()).any(|(a,b)| &a.port!=b) {
             return Err(bad("nonempty bounded exterior, exact opening order, receivers and source are required"));
         }
         let entries=p.checked_mul(n).and_then(|v|v.checked_mul(3))
@@ -214,7 +214,7 @@ impl RadiatingNetwork {
                 z[row*p+column]=pressure;
             }
         }
-        let boundary=CoupledTermination{omega,labels:self.driving.coupled_ports().to_vec(),z,
+        let boundary=CoupledTermination{omega,labels:self.driving.coupled_labels().to_vec(),z,
             source_id:format!("fs-bem:network-openings:{}",self.boundary_hash)};
         // Complete Hermitian passivity is checked by the original duct owner.
         // A coarse active BEM matrix refuses; it is not repaired or diagonalized.

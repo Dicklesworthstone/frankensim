@@ -198,7 +198,7 @@ fn g3_full_nodal_objective_reverses_all_controls_through_multiple_native_steps()
                             0.
                         };
                 }
-                let load_at = |step| {
+                let load_at = |step: usize| {
                     let force: Vec<_> = free
                         .iter()
                         .enumerate()

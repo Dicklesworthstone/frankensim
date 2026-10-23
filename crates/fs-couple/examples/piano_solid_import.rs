@@ -16,6 +16,7 @@
 #[path = "grand_piano/hammer_materials.rs"] mod hammer_materials;
 #[path = "grand_piano/mesh_import.rs"] mod mesh_import;
 #[path = "grand_piano/mesh_render.rs"] mod mesh_render;
+#[path = "grand_piano/ambient.rs"] mod ambient;
 use std::io::{Read, Write};
 
 const USAGE: &str = "piano_solid_import INPUT.obj MATERIALS.fspi SKINS.fsps OUTPUT.fss

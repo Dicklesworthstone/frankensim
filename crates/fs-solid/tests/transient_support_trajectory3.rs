@@ -261,7 +261,7 @@ fn ramp(amplitude: f64) -> VectorPayload {
                 ],
             ],
             TableInterpolation::Linear,
-            OutsideDomainPolicy::Reject,
+            OutsideDomainPolicy::Refuse,
         )
         .unwrap(),
     )

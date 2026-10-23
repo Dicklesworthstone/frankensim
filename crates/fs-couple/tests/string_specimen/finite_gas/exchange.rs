@@ -265,10 +265,13 @@ fn g3_finite_gas_conduction_uses_endpoint_sources_and_actual_geometry() {
             close(frame.source.property_by_key(&key).unwrap().value_si(), kb);
             assert_eq!(frame.source.card_identity(), card.content_hash());
             assert_eq!(
-                frame.source.query_point().get("T"),
+                frame.source.query_point().iter().find(|(axis, _)| axis == "T").map(|(_, value)| value),
                 Some(&live.thermal().temperature_k())
             );
-            assert_eq!(frame.source.query_point().get("omega"), Some(&1.0));
+            assert_eq!(
+                frame.source.query_point().iter().find(|(axis, _)| axis == "omega").map(|(_, value)| value),
+                Some(&1.0)
+            );
             assert_eq!(live.mechanical().ambient(), next_gas.state().state());
             assert!(
                 live.mechanical().modes()[0].damping_ratio

@@ -404,7 +404,7 @@ impl ThermalBoundary {
     /// adiabatic remainder with uniform outward-flux rows.  Radiation uses
     /// this as one frozen outer-fixed-point iterate. Existing physical rows
     /// are never overwritten: overlap is a typed refusal.
-    pub(crate) fn with_uniform_outward_flux_overlays(
+    pub fn with_uniform_outward_flux_overlays(
         &self,
         mesh: &ConductionMesh,
         rows: &[(String, Vec<usize>, f64)],

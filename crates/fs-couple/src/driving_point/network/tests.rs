@@ -27,7 +27,7 @@ fn boundary(w: f64, diagonal: C64, mutual: C64) -> CoupledTermination {
         z: vec![diagonal, mutual, mutual, diagonal], source_id: "synthetic full boundary".into() }
 }
 fn coupled() -> NetworkDrivingPoint {
-    NetworkDrivingPoint::new_with_coupled_ports(graph(), "inlet".into(), vec![],
+    NetworkDrivingPoint::new_coupled(graph(), "inlet".into(), vec![],
         vec!["right".into(), "left".into()], schema()).unwrap()
 }
 #[test]
@@ -57,7 +57,7 @@ fn coupled_even_mode_changes_inlet_and_retains_the_original_owner() {
 #[test]
 fn coupling_partition_is_complete_and_cannot_silently_fall_back() {
     for labels in [vec![],vec!["left"],vec!["left","left"],vec!["inlet","right"],vec!["left","absent"]] {
-        assert!(NetworkDrivingPoint::new_with_coupled_ports(graph(),"inlet".into(),vec![],
+        assert!(NetworkDrivingPoint::new_coupled(graph(),"inlet".into(),vec![],
             labels.into_iter().map(String::from).collect(),schema()).is_err());
     }
     let model = coupled(); let gas=gas(); let w=2000.0;
@@ -73,7 +73,7 @@ fn coupling_partition_is_complete_and_cannot_silently_fall_back() {
 #[test]
 fn mixed_scalar_and_coupled_boundaries_keep_original_units_and_signs() {
     let other=vec![PortTermination{ label:"right".into(),load:NetworkLoad::Closed }];
-    let model=NetworkDrivingPoint::new_with_coupled_ports(graph(),"inlet".into(),other.clone(),vec!["left".into()],schema()).unwrap();
+    let model=NetworkDrivingPoint::new_coupled(graph(),"inlet".into(),other.clone(),vec!["left".into()],schema()).unwrap();
     let gas=gas(); let w=2000.0; let z=C64::new(1e5,-2e5);
     let load=CoupledTermination{omega:w,labels:vec!["left".into()],z:vec![z],source_id:"synthetic one-port".into()};
     let a=model.response_coupled(&gas,w,LossModel::Bessel,&load).unwrap();

@@ -2,8 +2,9 @@ use fs_cheb::Cheb1;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{
     BcKind, BcValue, BoundaryCondition, ChebProfile, Combination, Compat, Environment, Interp,
-    LoadCase, Physics, Scenario, TimeSignal, ValidationBudget, ValidationError, parse_ir, write_ir,
+    LoadCase, Physics, Scenario, TimeSignal, ValidationBudget, ValidationError,
 };
+use fs_scenario::ir::{parse_ir, write_ir};
 
 const MASS: Dims = Dims([0, 1, -1, 0, 0, 0]);
 
@@ -228,7 +229,7 @@ fn unmatched_domains_and_interior_relative_imbalance_stay_refused() {
 #[test]
 fn rounded_coefficient_cancellation_cannot_erase_an_interior_flux() {
     let scale = 2.0f64.powi(100);
-    let smooth = |sign| {
+    let smooth = |sign: f64| {
         TimeSignal::Chebfun(ChebProfile {
             cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![-sign * (5.0 / 256.0) * scale, sign * scale]),
             dims: MASS,

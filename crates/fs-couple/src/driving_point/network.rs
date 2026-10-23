@@ -320,4 +320,48 @@ impl NetworkDrivingPoint {
             outward_volume_flow: -injected_volume_flow,
         })
     }
+
+    /// Declared coupled ports in the order a producer builds the matrix of
+    /// their [`CoupledTermination`]; permutation is never guessed from size.
+    #[must_use]
+    pub fn coupled_labels(&self) -> &[String] {
+        &self.coupled_labels
+    }
+
+    /// [`Self::harmonic_port`] with the declared coupled ports terminated
+    /// through `coupled`: the same coupled solution at the dimensioned
+    /// active-port seam, with no independent-port load substituted.
+    pub fn harmonic_port_coupled(
+        &self,
+        gas: &GasState,
+        omega: f64,
+        loss: LossModel,
+        coupled: &CoupledTermination,
+        injected_volume_flow: C64,
+    ) -> Result<HarmonicNetworkPort, DuctError> {
+        if !injected_volume_flow.re.is_finite() || !injected_volume_flow.im.is_finite() {
+            return Err(DuctError::BadParameter {
+                what: "network driving flow phasor must be finite",
+            });
+        }
+        let pressure =
+            self.response_coupled(gas, omega, loss, coupled)?.impedance * injected_volume_flow;
+        if !pressure.re.is_finite() || !pressure.im.is_finite() {
+            return Err(DuctError::BadParameter {
+                what: "network harmonic pressure overflowed",
+            });
+        }
+        Ok(HarmonicNetworkPort {
+            omega,
+            schema: self.schema.clone(),
+            pressure,
+            outward_volume_flow: -injected_volume_flow,
+        })
+    }
 }
+
+#[cfg(test)]
+mod tests;
+
+/// Complete exterior opening feedback and coherent microphone fields.
+pub mod radiation;

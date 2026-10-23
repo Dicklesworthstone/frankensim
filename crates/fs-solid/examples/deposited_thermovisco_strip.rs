@@ -7,14 +7,14 @@
 //! from thermal subcycling and section subdivision. Existing geometry does not
 //! feed back into thermal contact. The bed release is prescribed, not predicted.
 //!
-//! This development example compiles the ORIGINAL std-only conduction producer
-//! by path, avoiding a new production fs-solid -> fs-conduction dependency. Normal
-//! applications can import the same producer from fs_conduction::transient.
+//! This development example uses the ORIGINAL std-only deposition producer, now
+//! owned by fs-thermal (a dev-dependency with no dependencies of its own), so it
+//! still avoids a production fs-solid -> fs-conduction dependency. Applications can
+//! import the same types from fs_conduction::transient::deposition, which re-exports them.
 //! Run: cargo run -p fs-solid --example deposited_thermovisco_strip -- 0.25
 //! Test: cargo test -p fs-solid --example deposited_thermovisco_strip
 
-#[path = "../../fs-conduction/src/transient/deposition.rs"]
-mod thermal;
+use fs_thermal::enthalpy as thermal;
 
 use std::collections::BTreeMap;
 use std::error::Error;
