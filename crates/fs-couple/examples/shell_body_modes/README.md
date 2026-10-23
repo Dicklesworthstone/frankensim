@@ -16,6 +16,9 @@ cargo run --release -p fs-couple --example shell_body_modes -- \
   --modes 24 --fmin 20 --fmax 700 --shapes shapes.tsv
 ```
 
+`--shapes` writes the displacement of the top and back nodes along their directors; `--node-shapes PATH` writes the three
+global displacement components of every node of every part (m/sqrt(kg), mass-normalized) for the first 36 air-coupled modes.
+
 `PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`):
 
 ```bash

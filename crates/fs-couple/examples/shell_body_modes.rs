@@ -8,8 +8,10 @@
 //! is edited here. `drive` records name the node nearest a point on a part and the global direction of a unit force there.
 //!
 //!   shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]
+//!                    [--node-shapes PATH]
 //!
-//! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table.
+//! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table. `--shapes` writes the displacement of the top and back
+//! nodes along their directors; `--node-shapes` writes the three displacement components of every node of every part.
 use std::{collections::BTreeMap, error::Error, fs, io::Write, path::Path};
 
 use fs_couple::cavity_modal::{CavityNeckLoss, HelmholtzModalCavity};
@@ -368,7 +370,7 @@ fn jacobi(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]".into());
+        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH] [--node-shapes PATH]".into());
     }
     let (mut n_modes, mut fmin, mut fmax, mut omega) = (
         10usize,
@@ -377,6 +379,7 @@ fn main() -> Result<()> {
         2.0 * std::f64::consts::PI * 200.0,
     );
     let mut shapes: Option<String> = None;
+    let mut node_shapes: Option<String> = None;
     let mut drilling_alpha = DRILLING_ALPHA;
     let mut it = args[3..].iter();
     while let Some(flag) = it.next() {
@@ -388,6 +391,7 @@ fn main() -> Result<()> {
             "--omega" => omega = value.parse()?,
             "--drilling-alpha" => drilling_alpha = value.parse()?,
             "--shapes" => shapes = Some(value.clone()),
+            "--node-shapes" => node_shapes = Some(value.clone()),
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
@@ -741,6 +745,36 @@ fn main() -> Result<()> {
             }
         }
         println!("wrote director displacement of the top and back nodes to {path}");
+    }
+    if let Some(path) = node_shapes {
+        // The three global displacement components of every node of every part [m/sqrt(kg): the shell modes are mass-normalized]
+        // for the first 36 air-coupled modes, in the order of the open-sound-hole list.
+        let mut out = fs::File::create(&path)?;
+        let wanted: Vec<usize> = order.iter().copied().take(36).collect();
+        write!(out, "part\tnode\tx_m\ty_m\tz_m")?;
+        for rank in 0..wanted.len() {
+            write!(out, "\tmode{0}_ux\tmode{0}_uy\tmode{0}_uz", rank + 1)?;
+        }
+        writeln!(out)?;
+        for (p, part) in table.parts.iter().enumerate() {
+            for (node, pos) in part.nodes.iter().enumerate() {
+                write!(
+                    out,
+                    "{}\t{node}\t{:.6}\t{:.6}\t{:.6}",
+                    part.name, pos[0], pos[1], pos[2]
+                )?;
+                for &idx in &wanted {
+                    for k in 0..3 {
+                        let value: f64 = (0..n)
+                            .map(|r| image.physical_modes()[p][r][6 * node + k] * vectors[r][idx])
+                            .sum();
+                        write!(out, "\t{value:.6e}")?;
+                    }
+                }
+                writeln!(out)?;
+            }
+        }
+        println!("wrote the displacement of every node to {path}");
     }
     Ok(())
 }
