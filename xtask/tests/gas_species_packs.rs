@@ -1,21 +1,24 @@
-//! Helium, neon and sulfur hexafluoride arrive as source data (IRP L9
-//! dispatch: the gas half of pexfp.362).
+//! Helium, neon and sulfur hexafluoride arrive as source data, and changing only
+//! a wind performance's ambient gas moves its oscillation threshold the way
+//! Bernoulli flow predicts (IRP L9 dispatch: the gas half of pexfp.362).
 //!
 //! Sources: NASA/TP-2002-211556 (McBride, Zehe and Gordon 2002; a U.S.
 //! Government work) Appendix B rows and Appendix D coefficients; Hurly and
 //! Mehl 2007, J. Res. NIST 112:75, Table 5 (helium zero-density viscosity and
-//! thermal conductivity, facts with attribution); Quinones-Cisneros, Huber and
-//! Deiters 2012 and Assael et al. 2012 (SF6 dilute-gas correlations, facts with
-//! attribution). Oracles here are test-only; production resolves the compiled
-//! packs.
+//! thermal conductivity, facts with attribution). Oracles here are test-only;
+//! production resolves the compiled packs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fs_couple::pcm_wav::observation::PressureRenderer;
+use fs_couple::render::schedule::reed::ReedPerformance;
+use fs_duct::{Duct, HoleState, LossModel, Segment, Termination, input_impedance};
 use fs_matdb::{
     MaterialStateId, NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack,
     NormalizedSpeciesPack, PropertyValue, QueryPoint,
 };
+use fs_material::gas::GasState;
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
@@ -429,5 +432,225 @@ fn sf6_transport_pack_is_the_printed_correlations_sampled() {
     let eta = sf6_viscosity(298.15);
     println!(
         "{{\"suite\":\"gas-species-packs\",\"species\":\"SF6\",\"viscosity_298_15\":{eta:e}}}"
+    );
+}
+
+const D3: &str = "data/instruments/descriptions/clarinet/performances/BbClar.mf.D3.performance";
+/// The performance's own bore, read with the same grammar the reed loader uses.
+fn bore(text: &str) -> (Duct, Termination) {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let termination = loop {
+        let line = lines.next().expect("termination row");
+        if let Some(kind) = line.strip_prefix("termination ") {
+            break match kind {
+                "flanged" => Termination::FlangedOpen,
+                "unflanged" => Termination::UnflangedOpen,
+                "closed" => Termination::Closed,
+                "ideal-open" => Termination::IdealOpen,
+                other => panic!("termination {other}"),
+            };
+        }
+    };
+    let count: usize = lines
+        .next()
+        .unwrap()
+        .strip_prefix("segments ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let segments = (0..count)
+        .map(|_| {
+            let words: Vec<&str> = lines.next().unwrap().split_ascii_whitespace().collect();
+            let v = |i: usize| words[i].parse::<f64>().unwrap();
+            match words[0] {
+                "cylinder" => Segment::Cylinder {
+                    radius: v(1),
+                    length: v(2),
+                },
+                "cone" => Segment::Cone {
+                    inlet_radius: v(1),
+                    outlet_radius: v(2),
+                    length: v(3),
+                },
+                "hole" => Segment::ToneHole {
+                    hole_radius: v(1),
+                    chimney_height: v(2),
+                    bore_radius: v(3),
+                    state: match v(4) {
+                        s if s == 0.0 => HoleState::Closed,
+                        s if s == 1.0 => HoleState::Open,
+                        s => HoleState::Vent(s),
+                    },
+                },
+                other => panic!("segment {other}"),
+            }
+        })
+        .collect();
+    (Duct { segments }, termination)
+}
+
+/// The lowest input-impedance maximum of the bore in this gas, located on a
+/// 0.25 Hz scan and refined by golden-section search to 1e-6 Hz.
+fn first_impedance_peak(duct: &Duct, termination: Termination, gas: &GasState) -> f64 {
+    let z = |f: f64| {
+        input_impedance(
+            duct,
+            gas,
+            core::f64::consts::TAU * f,
+            LossModel::Bessel,
+            termination,
+        )
+        .unwrap()
+        .impedance
+        .abs()
+    };
+    let scan: Vec<(f64, f64)> = (0..4000)
+        .map(|i| 50.0 + 0.25 * f64::from(i))
+        .map(|f| (f, z(f)))
+        .collect();
+    let global = scan.iter().map(|p| p.1).fold(0.0, f64::max);
+    let i = (1..scan.len() - 1)
+        .find(|&i| {
+            scan[i].1 > scan[i - 1].1 && scan[i].1 >= scan[i + 1].1 && scan[i].1 >= 0.3 * global
+        })
+        .expect("an input-impedance maximum");
+    let (mut a, mut b) = (scan[i - 1].0, scan[i + 1].0);
+    let g = 0.5 * (5.0_f64.sqrt() - 1.0);
+    while b - a > 1e-6 {
+        let (c, d) = (b - g * (b - a), a + g * (b - a));
+        if z(c) > z(d) { b = d } else { a = c }
+    }
+    0.5 * (a + b)
+}
+
+/// Whether a held mouth pressure sustains oscillation. The attack leaves an
+/// oscillation that either decays exponentially or grows to a limit cycle,
+/// which can saturate before the early window. So it is called decaying when
+/// the late RMS of the radiated pressure (2.0..2.4 s) falls below 0.95 of the
+/// early RMS (0.6..1.0 s), a growth rate below ln(0.95)/1.4 s = -0.037/s.
+/// The growth rate's measured slope near the sea-level threshold, about
+/// 0.025 /s per Pa (-0.48/s at 3085 Pa, +1.42/s at 3162 Pa), puts that
+/// ambiguous band within about 1.5 Pa.
+fn held_pressure_sustains(original: &str, ambient: &str, pressure_pa: f64) -> (bool, f64, f64) {
+    let event = "event\t1.5e-1\t2e-2\tpressure-pa\t4.045e3";
+    assert_eq!(original.matches(event).count(), 1);
+    let text = original
+        .replace("\nambient 293.15 101325 0\n", &format!("\n{ambient}\n"))
+        .replace(
+            event,
+            &format!("event\t1.5e-1\t2e-2\tpressure-pa\t{pressure_pa:e}"),
+        );
+    let block = 113;
+    let mut performance = ReedPerformance::from_bytes(text.as_bytes(), block).unwrap();
+    let rate = f64::from(performance.info().sample_rate_hz);
+    let mut pressure = vec![0.0; performance.info().samples as usize];
+    for chunk in pressure.chunks_mut(block) {
+        performance.block(chunk).unwrap();
+    }
+    let rms = |a: f64, b: f64| {
+        let x = &pressure[(a * rate) as usize..(b * rate) as usize];
+        (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt()
+    };
+    let (early, late) = (rms(0.6, 1.0), rms(2.0, 2.4));
+    (late >= 0.95 * early, early, late)
+}
+
+/// Quasi-static Bernoulli threshold of a beating reed on a bore: the reed's
+/// negative flow conductance -dU/dp, with U = w H0 (1 - p/P_M) sqrt(2 p/rho),
+/// equals the bore's input admittance 1/Z_peak at its first resonance. With
+/// gamma = p/P_M and A = Z_peak w H0 sqrt(2/(rho P_M)) this is
+/// (3 gamma - 1)/(2 sqrt gamma) = 1/A, so sqrt(gamma) = (2/A + sqrt(4/A^2 + 12))/6.
+fn bernoulli_threshold_pa(text: &str, gas: &GasState) -> (f64, f64) {
+    let reed: Vec<f64> = text
+        .lines()
+        .find_map(|line| line.strip_prefix("reed "))
+        .expect("reed row")
+        .split_ascii_whitespace()
+        .map(|w| w.parse().unwrap())
+        .collect();
+    let (rest_opening, width, closing) = (reed[0], reed[1], reed[2]);
+    let (duct, termination) = bore(text);
+    let f1 = first_impedance_peak(&duct, termination, gas);
+    let z_peak = input_impedance(
+        &duct,
+        gas,
+        core::f64::consts::TAU * f1,
+        LossModel::Bessel,
+        termination,
+    )
+    .unwrap()
+    .impedance
+    .abs();
+    let a = z_peak * width * rest_opening * (2.0 / (gas.density * closing)).sqrt();
+    let s = (2.0 / a + (4.0 / (a * a) + 12.0).sqrt()) / 6.0;
+    (s * s * closing, z_peak)
+}
+
+/// Altitude, by data alone: 0.7 atm at the same temperature (legacy dry-air
+/// record) against 1 atm. The sound speed is unchanged, but density falls and
+/// viscothermal loss rises, so Bernoulli flow and the bore's resonance height
+/// both change. The oscillation threshold of the D3 performance is bisected in
+/// each gas from held mouth pressures (eight steps, about 0.4 % resolution),
+/// changing only the ambient record and the held pressure. The prediction is
+/// the quasi-static Bernoulli threshold from the reed row and fs-duct's
+/// resonance height in each gas. The band, 2 % on the threshold ratio, was
+/// declared before measuring: reed inertia, swept flow and tone-hole details
+/// shift the absolute threshold but do not depend on density, so they largely
+/// cancel in the ratio.
+#[test]
+fn altitude_raises_the_oscillation_threshold_as_bernoulli_predicts() {
+    let original = std::fs::read_to_string(workspace_path(D3)).unwrap();
+    let mut results = Vec::new();
+    for (label, ambient) in [
+        ("sea-level", "ambient 293.15 101325 0"),
+        ("0.7-atm", "ambient 293.15 70927.5 0"),
+    ] {
+        let text = original.replace("\nambient 293.15 101325 0\n", &format!("\n{ambient}\n"));
+        let gas = *ReedPerformance::from_bytes(text.as_bytes(), 113)
+            .unwrap()
+            .ambient_gas();
+        let (predicted, z_peak) = bernoulli_threshold_pa(&text, &gas);
+        let closing = 7076.1822222222;
+        let (mut lo, mut hi) = (0.25 * closing, 0.6 * closing);
+        for (bound, expected) in [(lo, false), (hi, true)] {
+            let (sustains, early, late) = held_pressure_sustains(&original, ambient, bound);
+            println!(
+                "{{\"suite\":\"gas-species-packs\",\"test\":\"altitude_threshold\",\"gas\":\"{label}\",\"held_pa\":{bound},\"early_rms_pa\":{early:e},\"late_rms_pa\":{late:e},\"sustains\":{sustains}}}"
+            );
+            assert_eq!(sustains, expected, "{label}: bracket end {bound} Pa");
+        }
+        for _ in 0..8 {
+            let mid = 0.5 * (lo + hi);
+            let (sustains, early, late) = held_pressure_sustains(&original, ambient, mid);
+            println!(
+                "{{\"suite\":\"gas-species-packs\",\"test\":\"altitude_threshold\",\"gas\":\"{label}\",\"held_pa\":{mid},\"early_rms_pa\":{early:e},\"late_rms_pa\":{late:e},\"sustains\":{sustains}}}"
+            );
+            if sustains { hi = mid } else { lo = mid }
+        }
+        let measured = 0.5 * (lo + hi);
+        println!(
+            "{{\"suite\":\"gas-species-packs\",\"test\":\"altitude_threshold\",\"gas\":\"{label}\",\"rho\":{},\"c\":{},\"z_peak\":{z_peak:e},\"bernoulli_threshold_pa\":{predicted},\"measured_threshold_pa\":{measured},\"bracket_pa\":{}}}",
+            gas.density,
+            gas.sound_speed,
+            hi - lo
+        );
+        results.push((predicted, measured));
+    }
+    let predicted = results[1].0 / results[0].0;
+    let measured = results[1].1 / results[0].1;
+    let deviation = measured / predicted - 1.0;
+    println!(
+        "{{\"suite\":\"gas-species-packs\",\"test\":\"altitude_threshold\",\"predicted_ratio\":{predicted},\"measured_ratio\":{measured},\"deviation\":{deviation:e},\"band\":0.02}}"
+    );
+    assert!(
+        measured > 1.0,
+        "thinner air must raise the threshold: ratio {measured}"
+    );
+    assert!(
+        deviation.abs() <= 0.02,
+        "threshold ratio {measured} vs Bernoulli {predicted}"
     );
 }
