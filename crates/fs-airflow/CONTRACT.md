@@ -27,6 +27,43 @@ Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
 quantities, as a Re/Pr handoff to the existing convection rung, and as the
 CHT ladder's correlation-rung transfer.
 
+### Shared thermochemical medium in hydraulic and heat paths
+
+`graph::thermal::medium::FrozenFlowMedium::ThermochemicalGas` retains the
+original `ResolvedThermochemicalGasState`, including species, caloric, EOS and
+transport sources. Its single transport snapshot supplies hydraulic density,
+Re/Pr, convection, Robin boundaries and the series path's conserved heat-capacity
+rate. Source pressure or composition changes therefore reach the actual operating
+point and heat march without rebuilding a legacy gas specification. These paths
+remain frozen-property, constant-density sensible-heat approximations; they do
+not advance chemistry, gas energy or phase, and they retain correlation-domain
+refusals. `tests/material_medium.rs` checks solved pressure-driven flow, serial
+heat balance, data-only pressure/composition changes and source-object retention.
+
+`medium::steady_gas::solve_material_gas_transport` closes the native
+`SteadyAxialGas` stationary-species/NASA9 enthalpy solve against convection
+evaluated from each retained local source state. The same downstream mixed-cell
+state supplies velocity, Re/Pr, heat transfer and accepted hydraulic loss;
+composition injections retain their native mass and enthalpy transport. The
+returned `AxialGasField` remains usable by existing gas-field consumers.
+
+Acceptance bounds the native power residual plus the actual wall-law defect,
+with bounded feedback iterations and a total native-substep cap. Hydraulic
+Reynolds and pressure-drop admission use the converged thermal state, so a
+nonphysical zero-wall initial guess cannot reject an admitted final flow.
+Cancellation and any refusal publish no partial field and do not mutate the
+input. `tests/steady_material_gas.rs` checks independent heat/pressure balances,
+temperature-dependent transport, species injection, pressure changes,
+final-state hydraulic admission and transactional failure/cancellation.
+
+This is a first-order steady reduced model with prescribed positive mass flow,
+supplied wall temperatures, downstream mixed-cell bulk properties and a common
+static EOS pressure. Total pressure loss must fit the explicit small-drop
+limit. It does not solve fan mass flow or axial pressure, advance reactions or
+phase, resolve boundary layers, or claim experimental accuracy. Hydraulic
+`dp*Q` is reported separately and neglected in the thermal equation; it is not
+silently added to wall heat or enthalpy.
+
 ### Coupled total-enthalpy endpoint adjoints
 
 `graph::thermal::coupled_transport::sensitivity::enthalpy` binds the concrete

@@ -9,6 +9,7 @@
 
 pub mod convection;
 pub mod series;
+pub mod steady_gas;
 pub use series::{FlowHeatSection, MaterialFlowPath, MaterialHeatExchange, MAX_MATERIAL_FLOW_SECTIONS};
 
 use fs_convection::{
@@ -22,6 +23,7 @@ use fs_material::gas::{GasState, ResolvedGasState};
 use fs_material::gas_mixture::ResolvedGasMixtureState;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::moist_air::ResolvedMoistAirState;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_qty::{Area, Density, Length, Temperature, VolumetricFlowRate};
 
 use crate::conjugate::{AirPath, AirSegment};
@@ -46,6 +48,10 @@ pub enum FrozenFlowMedium<'a> {
     GasMixture(&'a ResolvedGasMixtureState),
     /// The source-resolved humid-air specialization.
     MoistAir(&'a ResolvedMoistAirState),
+    /// Shared species thermodynamics and transport at one frozen composition.
+    /// The original species, caloric, EOS and transport receipts remain bound
+    /// to the hydraulic and thermal consumers; no gas-spec reconstruction.
+    ThermochemicalGas(&'a ResolvedThermochemicalGasState),
     /// Explicitly authored gas coefficients; not promoted to sourced data.
     DeclaredGas(&'a GasState),
 }
@@ -57,6 +63,7 @@ impl FluidTransport for FrozenFlowMedium<'_> {
             Self::Gas(value) => value.transport_state(),
             Self::GasMixture(value) => value.transport_state(),
             Self::MoistAir(value) => value.transport_state(),
+            Self::ThermochemicalGas(value) => value.transport_state(),
             Self::DeclaredGas(value) => value.transport_state(),
         }
     }

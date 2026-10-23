@@ -1,4 +1,8 @@
 //! Model-level regressions: synthetic coolant cards, not material measurements.
+#[path = "finite_gas_convection/source.rs"]
+#[allow(dead_code)]
+mod gas_source;
+
 use fs_airflow::graph::thermal::medium::{FlowHeatGeometry, FrozenFlowMedium, MediumFlowError};
 use fs_airflow::LossNetwork;
 use fs_convection::{CorrelationId, ThermalDirection};
@@ -140,4 +144,105 @@ fn invalid_geometry_flow_and_material_refuse_without_a_partial_channel() {
         ThermalDirection::HeatingFluid).is_err());
     gas.thermal_conductivity = f64::NAN;
     assert!(FrozenFlowMedium::DeclaredGas(&gas).transport_air().is_err());
+}
+
+#[test]
+fn thermochemical_pack_changes_reach_solved_flow_and_series_heat_with_original_sources() {
+    use fs_airflow::graph::thermal::medium::FlowHeatSection;
+    use fs_airflow::{EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint,
+        LeakageElement, SourceProvenance, ToleranceBasis, SHARP_EDGED_ORIFICE_CD,
+        solve_operating_point};
+    use fs_material::fluid_transport::FluidTransport;
+    use fs_qty::Pressure;
+
+    // An authored regulated pressure source, not a measured fan rescaled to
+    // another atmosphere. Its unchanged boundary law supplies 2000 Pa.
+    let drive = FanBank::new(FanCurve::new("controlled pressure fixture", vec![
+        FanPoint::new(VolumetricFlowRate::new(0.0), Pressure::new(2000.0)),
+        FanPoint::new(VolumetricFlowRate::new(0.05), Pressure::new(2000.0)),
+    ], SourceProvenance::new("manufactured regulated source", "constant-pressure-v1"),
+        0.0, ToleranceBasis::Analytic, VolumetricFlowRate::new(0.0), (1.0, 1.0))
+        .unwrap(), 1, FanArrangement::Series, 1.0).unwrap();
+    let patch = FlowHeatGeometry { flow_area: Area::new(0.01),
+        characteristic_length: Length::new(0.2), heated_length: Length::new(0.4),
+        wetted_area: Area::new(0.02), aspect_ratio: None };
+    let sections = ["upstream", "downstream"].map(|region| FlowHeatSection {
+        region, geometry: patch, correlation: CorrelationId::FlatPlateLaminarAverage,
+        direction: ThermalDirection::HeatingFluid,
+    });
+    let run = |fraction, pressure| {
+        let model = gas_source::model(fraction);
+        let state = model.evaluate(&gas_source::point(400.0, pressure)).unwrap();
+        let medium = FrozenFlowMedium::ThermochemicalGas(&state);
+        let transport = state.transport_state().unwrap();
+        assert_eq!(medium.transport_state().unwrap(), transport);
+        let primary = medium.orifice_loss("primary", Area::new(4e-4)).unwrap();
+        let leakage = medium.orifice_loss("leakage", Area::new(4e-4)).unwrap();
+        assert_eq!(primary.medium(), medium);
+        let network = EnclosureNetwork::new(LossNetwork::Element(primary.element().clone()),
+            LeakageElement::new(leakage.element().clone()));
+        let solved = solve_operating_point(&drive, &network).unwrap();
+        let branch = solved.branches.iter().find(|b| b.path == "primary").unwrap();
+        let q = branch.flow.value.value();
+        let expected_q = SHARP_EDGED_ORIFICE_CD * 4e-4
+            * (2.0 * 2000.0 / state.state().density).sqrt();
+        assert!((q / expected_q - 1.0).abs() < 1e-8);
+        let series = medium.channel_series(branch.flow.value, Temperature::new(400.0),
+            &sections).unwrap();
+        assert_eq!(series.medium(), medium);
+        let retained = match series.medium() {
+            FrozenFlowMedium::ThermochemicalGas(original) => original,
+            _ => panic!("lost thermochemical source identity"),
+        };
+        assert!(core::ptr::eq(retained, &state));
+        assert_eq!(retained.source_packs(), model.source_packs());
+        assert_eq!(retained.source_packs().len(), 2);
+        let capacity = state.state().density * q * state.state().specific_heat_cp;
+        near(series.path().capacity_rate_w_per_k(), capacity);
+        let mut expected_outlet = 400.0;
+        for (exchange, wall) in series.exchanges().iter().zip([420.0, 430.0]) {
+            assert_eq!(exchange.medium(), medium);
+            assert_eq!(*exchange.transport_state(), transport);
+            let h = exchange.coefficient().value.value();
+            // Independent constant-wall-temperature segment solution.
+            expected_outlet = wall + (expected_outlet - wall)
+                * (-h * patch.wetted_area.value() / capacity).exp();
+            let robin = exchange.robin_boundary(Temperature::new(expected_outlet)).unwrap();
+            near(robin.coefficient().value.value(), h);
+        }
+        let result = series.path().march(&[420.0, 430.0]).unwrap();
+        near(result.outlet_temperature_k, expected_outlet);
+        near(result.total_heat_rate_w, capacity * (expected_outlet - 400.0));
+        (q, capacity, result.outlet_temperature_k, result.total_heat_rate_w,
+            series.exchanges()[0].coefficient().value.value())
+    };
+    let reference = run(0.75, 100000.0);
+    let pressurized = run(0.75, 200000.0);
+    let substituted = run(0.25, 100000.0);
+    assert!((pressurized.0 / reference.0 - 1.0 / 2.0_f64.sqrt()).abs() < 1e-8);
+    assert!((pressurized.1 / reference.1 - 2.0_f64.sqrt()).abs() < 1e-8);
+    assert_ne!(reference.2, pressurized.2);
+    assert_ne!(reference.0, substituted.0);
+    assert_ne!(reference.1, substituted.1);
+    assert_ne!(reference.3, substituted.3);
+    assert_ne!(reference.4, substituted.4);
+}
+
+#[test]
+fn thermochemical_channel_retains_correlation_refusal_without_replacing_the_medium() {
+    let model = gas_source::model(0.75);
+    let state = model.evaluate(&gas_source::point(400.0, 100000.0)).unwrap();
+    let saved = state.clone();
+    let medium = FrozenFlowMedium::ThermochemicalGas(&state);
+    assert!(matches!(medium.channel("wall", VolumetricFlowRate::new(1.0),
+        Temperature::new(400.0), geometry(), CorrelationId::CircularDuctLaminarCwt,
+        ThermalDirection::HeatingFluid), Err(MediumFlowError::Correlation(_))));
+    assert_eq!(state, saved);
+    // A supported state remains usable after refusal; no fallback gas or
+    // retained failed channel changes its transport or source authority.
+    let channel = medium.channel("wall", VolumetricFlowRate::new(1e-4),
+        Temperature::new(400.0), geometry(), CorrelationId::CircularDuctLaminarCwt,
+        ThermalDirection::HeatingFluid).unwrap();
+    assert_eq!(channel.medium(), medium);
+    assert_eq!(state, saved);
 }

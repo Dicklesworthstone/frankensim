@@ -27,7 +27,7 @@ impl Packs {
             transport: Some((&self.transport, MaterialPropertySelection::SingleClaimOnly)) }
     }
 }
-fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64) -> Packs {
+fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64, variable_transport: bool) -> Packs {
     let artifact = hash(name);
     let provenance = Provenance { source: format!("synthetic {name}; not measured"),
         license: "CC0-1.0".into(), artifact: Some(artifact) };
@@ -71,11 +71,17 @@ fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64) -> Packs {
     for (name, dims, value) in [("dynamic_viscosity", DynViscosity::DIMS, mu),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, k)] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
-            value: PropertyValue::Scalar { value, dims },
+            value: if variable_transport {
+                PropertyValue::Curve { abscissa: "temperature".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(200.0, 0.5 * value), (1000.0, 2.5 * value)], dims }
+            } else { PropertyValue::Scalar { value, dims } },
             validity: ValidityDomain::unconstrained()
                 .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), 200.0, 1000.0)
                 .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1e7),
-            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: if variable_transport { InterpolationPolicy::LinearInside }
+                else { InterpolationPolicy::ConstantWithinValidity },
             observations: vec![observation.clone()], provenance: provenance.clone() }).unwrap();
     }
     let pack = NormalizedPack::new(name, "synthetic-convection-v1", artifact, "CC0-1.0",
@@ -85,8 +91,11 @@ fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64) -> Packs {
     Packs { species, nasa9, transport }
 }
 pub fn model(fraction: f64) -> ThermochemicalGasModel {
-    let a = packs("A", 0.028, 3.5, 1.8e-5, 0.026);
-    let b = packs("B", 0.004, 2.5, 2.0e-5, 0.08);
+    model_transport(fraction, false)
+}
+pub fn model_transport(fraction: f64, variable_transport: bool) -> ThermochemicalGasModel {
+    let a = packs("A", 0.028, 3.5, 1.8e-5, 0.026, variable_transport);
+    let b = packs("B", 0.004, 2.5, 2.0e-5, 0.08, variable_transport);
     from_packs(&[a.binding(), b.binding()], Composition::new(
         CompositionBasis::MoleFraction, vec![fraction, 1.0-fraction]).unwrap(), None).unwrap()
 }
