@@ -15,12 +15,15 @@ validity	young-modulus	T	293.15	293.15	K
 scalar	proportional-limit-annealed-rod	c447-3641-annealed-rod	proportional_limit_annealed_rod	19.9948	MPa	constant
 uncertainty	proportional-limit-annealed-rod	unstated	-	-	-	-
 validity	proportional-limit-annealed-rod	T	293.15	293.15	K
+validity	proportional-limit-annealed-rod	wire_diameter	20.32	20.32	mm
 scalar	yield-0p01-annealed-rod	c447-3641-annealed-rod	yield_strength_0p01pct_offset_annealed_rod	55.8475	MPa	constant
 uncertainty	yield-0p01-annealed-rod	unstated	-	-	-	-
 validity	yield-0p01-annealed-rod	T	293.15	293.15	K
+validity	yield-0p01-annealed-rod	wire_diameter	20.32	20.32	mm
 scalar	uts-annealed-rod	c447-3641-annealed-rod	ultimate_tensile_strength_annealed_rod	123.4162	MPa	constant
 uncertainty	uts-annealed-rod	unstated	-	-	-	-
 validity	uts-annealed-rod	T	293.15	293.15	K
+validity	uts-annealed-rod	wire_diameter	20.32	20.32	mm
 scalar	shear-modulus-range-low	c447-3642-gold	shear_modulus_printed_range_low	28268.5	MPa	constant
 uncertainty	shear-modulus-range-low	unstated	-	-	-	-
 validity	shear-modulus-range-low	T	293.15	293.15	K
@@ -33,9 +36,11 @@ validity	poisson-ratio	T	293.15	293.15	K
 scalar	uts-cast-rod	c447-3643-cast-rod	ultimate_tensile_strength_cast_rod	113.7635	MPa	constant
 uncertainty	uts-cast-rod	unstated	-	-	-	-
 validity	uts-cast-rod	T	293.15	293.15	K
+validity	uts-cast-rod	wire_diameter	3.175	3.175	mm
 scalar	uts-cold-rolled-wire	c447-3644-cold-rolled-wire	ultimate_tensile_strength_cold_rolled_wire	216.4954	MPa	constant
 uncertainty	uts-cold-rolled-wire	unstated	-	-	-	-
 validity	uts-cold-rolled-wire	T	293.15	293.15	K
+validity	uts-cold-rolled-wire	wire_diameter	1.27	1.27	mm
 scalar	uts-annealed-sheet	c447-3645-annealed-sheet	ultimate_tensile_strength_annealed_sheet	122.0372	MPa	constant
 uncertainty	uts-annealed-sheet	unstated	-	-	-	-
 validity	uts-annealed-sheet	T	293.15	293.15	K

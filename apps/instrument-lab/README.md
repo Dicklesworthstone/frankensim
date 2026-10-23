@@ -271,8 +271,16 @@ the stress `4 L^2 f^2 rho` does not depend on the wire diameter, so a dense, wea
 concert scale: if any string exceeds its sourced limit, construction refuses with every overstressed key,
 its required stress, its limit and the highest pitch its section reaches at that length (`fMaxHz`).
 Appending `,non-physical-override` to the `strength` line lets such strings play and labels them so; real
-strings would break. Every core pack must supply the declared limit claim, or construction refuses as
-missing data; the older `frankensim-piano-materials-v1` format names no limit and refuses for that reason.
+strings would break. Drawing work-hardens wire, so a limit claim holds at the wire diameters it states
+(a typed `wire_diameter` axis): each core's limit is the claim evaluated at the core's own outer
+diameter, from the core's packs or from the one pack named by `,pack=<index>`. A core outside the stated
+diameters refuses as missing data unless the line declares `,extrapolate-diameter`, which takes the
+nearest stated diameter's value; a claim that states no diameter refuses unless the line declares
+`,diameter-free`, and such a limit cannot set `yield-fraction` tension. Each core's receipt prints the
+resolved limit, the claim rows it came from and, when the limit is not the claim's value at that
+diameter, what it is instead. Every core (or the named strength pack) must supply the declared limit
+claim, or construction refuses as missing data; the older `frankensim-piano-materials-v1` format names no
+limit and refuses for that reason.
 
 Every course of the selected scale needs exactly one complete section; missing or extra keys refuse.
 Names never imply a radius, an alloy or a source coefficient. Up to 128 nonempty packs are admitted,

@@ -3,9 +3,12 @@
 # A solid gold core cannot hold a concert scale; at half the 0.05 in. cold-rolled wire's strength each
 # string plays at the pitch its tension gives. Loss: computed thermoelastic loss; gold's anelastic excess
 # is unknown (no source), so its decay is a lower bound.
+# The only gold wire strength (NBS C447 serial 3644) was measured on 0.05 in. (1.27 mm) wire; every core here
+# has another diameter, so the construction declares extrapolate-diameter and each receipt records that the
+# 1.27 mm value was taken.
 frankensim-piano-materials-v2
 tension,yield-fraction,0.5
-strength,ultimate_tensile_strength_cold_rolled_wire
+strength,ultimate_tensile_strength_cold_rolled_wire,extrapolate-diameter
 loss,thermoelastic
 key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
 21,core,7.311148360566774e-4,,,0

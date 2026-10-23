@@ -1,13 +1,13 @@
 //! Tensile capacity and helical-wrap inertia of string sections. Synthetic
 //! coefficients test the section physics; no measured alloy is implied.
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+use fs_matdb::{ClaimSet, EvaluationDecision, InterpolationPolicy, MaterialCard, MaterialStateId,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
 use fs_material::section::wound::{HelicalWrap, HelicalWrapping, MAX_HELICAL_WRAPS, close_wound_pitch_m};
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
-use fs_qty::{Density, Dims, Pressure};
+    ResolvedScalarProperty, ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
+use fs_qty::{Density, Dims, Length, Pressure, QuantitySpec};
 use std::f64::consts::PI;
 
 const LIMIT: &str = "tensile_limit";
@@ -42,8 +42,73 @@ fn rod(layers: &[(f64, ResolvedMaterialStatePoint)]) -> ConcentricElasticSection
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance * b.abs(), "{a:e} != {b:e} (relative {tolerance:e})");
 }
+/// A synthetic limit that falls linearly from 400 MPa at 0.8 mm to 300 MPa at
+/// 1.2 mm wire diameter, resolved at `diameter_m`: an answer no layer's fixed
+/// state bundle can hold.
+fn limit_by_diameter(diameter_m: f64) -> ResolvedScalarProperty {
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim { key: PropertyKey::new(LIMIT, Pressure::DIMS),
+        value: PropertyValue::Curve { abscissa: "wire_diameter".into(), abscissa_dims: Length::DIMS,
+            knots: vec![(0.8e-3, 4.0e8), (1.2e-3, 3.0e8)], dims: Pressure::DIMS },
+        validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0)
+            .with_quantity("wire_diameter", QuantitySpec::dimensional(Length::DIMS), 0.8e-3, 1.2e-3),
+        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![], provenance: Provenance { source: "synthetic strength by diameter".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "test".into(), phase: "solid".into(),
+        process: "drawn".into(), revision: 0 }, claims, vec![]).unwrap();
+    let point = QueryPoint::new().with("T", 293.15).unwrap()
+        .with_quantity("wire_diameter", QuantitySpec::dimensional(Length::DIMS), diameter_m).unwrap();
+    let requirement = ScalarPropertyRequirement::try_new(LIMIT, Pressure::DIMS,
+        ScalarAdmissibility::StrictlyPositive).unwrap();
+    resolve_material_state_point(&card, &point, &[requirement], MaterialPropertySelection::SingleClaimOnly)
+        .unwrap().property(LIMIT).unwrap().clone()
+}
 fn wrap(d: f64, pitch: f64, rho: f64) -> HelicalWrap {
     HelicalWrap { wire_diameter_m: d, pitch_m: pitch, material: solid(rho, 1.2e11, 2e8) }
+}
+
+// G0: a limit resolved at another state point (a strength claim over wire
+// diameter, evaluated at 1.0 mm) enters the capacity only as its complete
+// fs-matdb answer, and the capacity keeps that answer with its claim and its
+// interpolation bracket. The claim path keeps each layer's own answer the same
+// way. A count other than the layer count, an answer for another property and
+// a nonpositive limit refuse.
+#[test]
+fn g0_resolved_limits_keep_their_answers_and_match_the_claim_path() {
+    let section = rod(&[(0.0004, solid(7850.0, 2.0e11, 2.0e9)), (0.0005, solid(19300.0, 8.0e10, 2.0e8))]);
+    let claimed = section.axial_tensile_capacity(LIMIT).unwrap();
+    let own: Vec<ResolvedScalarProperty> = section.layers().iter()
+        .map(|layer| layer.material.property(LIMIT).unwrap().clone()).collect();
+    assert_eq!(claimed.layer_limit_sources(), own.as_slice());
+    assert_eq!(section.axial_tensile_capacity_from_resolved(LIMIT, &own).unwrap(), claimed);
+
+    let by_diameter = limit_by_diameter(1.0e-3);
+    let decision = &by_diameter.answer().receipt.decision;
+    assert!(matches!(decision, EvaluationDecision::LinearInside { x_lo, x_hi }
+        if *x_lo == 0.8e-3 && *x_hi == 1.2e-3), "{decision:?}");
+    let mixed = section.axial_tensile_capacity_from_resolved(LIMIT, &[own[0].clone(), by_diameter.clone()])
+        .unwrap();
+    near(mixed.layer_limits_pa()[1], 3.5e8, 1e-12);
+    assert_eq!(mixed.layer_limit_sources()[1], by_diameter);
+    // limit/E: 2e9/2e11 = 1e-2 for the core, 3.5e8/8e10 = 4.4e-3 for the coat, which governs.
+    assert_eq!(mixed.governing_layer(), 1);
+    near(mixed.capacity_n(), mixed.layer_limits_pa()[1] * section.axial_stiffness_n() / 8.0e10, 2e-15);
+    // A layer whose own bundle has no limit claim takes a resolved limit.
+    let unrated = material(&[("density", Density::DIMS, 7850.0), ("young_modulus", Pressure::DIMS, 2e11)]);
+    let bare = rod(&[(0.0005, unrated)]);
+    let capacity = bare.axial_tensile_capacity_from_resolved(LIMIT, std::slice::from_ref(&by_diameter)).unwrap();
+    near(capacity.capacity_n(), capacity.layer_limits_pa()[0] * PI * 0.0005 * 0.0005, 2e-15);
+
+    assert!(section.axial_tensile_capacity_from_resolved(LIMIT, &own[..1]).is_err());
+    assert!(section.axial_tensile_capacity_from_resolved(LIMIT, &[own[0].clone(), own[1].clone(), own[1].clone()])
+        .is_err());
+    let modulus = section.layers()[0].material.property("young_modulus").unwrap().clone();
+    assert!(section.axial_tensile_capacity_from_resolved(LIMIT, &[own[0].clone(), modulus]).is_err());
+    assert!(section.axial_tensile_capacity_from_resolved("another_limit", &own).is_err());
+    let zero = material(&[(LIMIT, Pressure::DIMS, 0.0)]).property(LIMIT).unwrap().clone();
+    assert!(section.axial_tensile_capacity_from_resolved(LIMIT, &[own[0].clone(), zero]).is_err());
 }
 
 // G0: one material: capacity = limit * area, and at a fixed pitch the stress

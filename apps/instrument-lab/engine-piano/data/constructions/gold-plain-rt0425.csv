@@ -4,9 +4,12 @@
 # transcribed in crates/fs-couple/examples/grand_piano/steinway_scale.rs; MIDI 108 is that file's
 # explicit 0.734 mm extension estimate. Wound bass courses are absent: no published Model D core and
 # wrap diameters were found. Tension is re-solved for each installed fundamental.
+# The only gold wire strength (NBS C447 serial 3644) was measured on 0.05 in. (1.27 mm) wire; every core here
+# has another diameter, so the construction declares extrapolate-diameter and each receipt records that the
+# 1.27 mm value was taken.
 frankensim-piano-materials-v2
 tension,target-pitch
-strength,ultimate_tensile_strength_cold_rolled_wire
+strength,ultimate_tensile_strength_cold_rolled_wire,extrapolate-diameter
 loss,loss-angle
 key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
 41,core,0.0005585,,,0

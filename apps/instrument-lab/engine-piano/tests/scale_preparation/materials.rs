@@ -4,7 +4,7 @@ use super::*;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_live_piano::{
-    preparation::materials::{COLUMNS, StringMaterials, TensionPolicy, operating_point},
+    preparation::materials::{COLUMNS, StringMaterials, TensionPolicy, WIRE_DIAMETER_AXIS, operating_point},
     refmods::{bank_string_losses, linear::Bank},
 };
 use fs_matdb::{
@@ -19,7 +19,7 @@ use fs_material::{
         THERMAL_CONDUCTIVITY_PROPERTY, YOUNG_MODULUS_PROPERTY},
 };
 use fs_qty::{
-    Density, Dims, DynViscosity, Frequency, Pressure, QuantitySpec,
+    Density, Dims, DynViscosity, Frequency, Length, Pressure, QuantitySpec,
     semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 use std::{
@@ -31,6 +31,8 @@ const ETA: &str = "declared_bending_viscosity";
 const LIMIT: &str = "declared_tensile_limit";
 // Manufactured limit above every fixture stress unless a test replaces it.
 const LIMIT_PA: f64 = 5e9;
+// The wire diameters [m] the manufactured limit claim states: every fixture core lies inside.
+const LIMIT_DIAMETERS: (f64, f64) = (0.1e-3, 3e-3);
 const INNER: f64 = 0.00035;
 const OUTER: f64 = 0.0005;
 const CORE: [f64; 3] = [8000.0, 2e11, 1e8];
@@ -102,7 +104,12 @@ fn pack_with_extra(
         let mut claim = PropertyClaim {
             key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },
-            validity: validity(0.0, MAX_HZ),
+            validity: if name == LIMIT {
+                validity(0.0, MAX_HZ).with_quantity(WIRE_DIAMETER_AXIS, QuantitySpec::dimensional(Length::DIMS),
+                    LIMIT_DIAMETERS.0, LIMIT_DIAMETERS.1)
+            } else {
+                validity(0.0, MAX_HZ)
+            },
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![observation],
@@ -610,6 +617,11 @@ fn unsupported_source_geometry_framing_and_actual_mode_band_refuse() {
     // every source coefficient's frequency band, including cyclic-Hz conversion.
     let narrow = pack_with(CORE, |claim| {
         claim.validity = validity(999.0, 1001.0);
+        // The limit keeps the wire diameters every limit claim states.
+        if claim.key.name() == LIMIT {
+            claim.validity = claim.validity.clone().with_quantity(WIRE_DIAMETER_AXIS,
+                QuantitySpec::dimensional(Length::DIMS), LIMIT_DIAMETERS.0, LIMIT_DIAMETERS.1);
+        }
     });
     let source = load(&desc.courses, &narrow, &pack(COATING));
     let mut prepared = small_description();
@@ -987,6 +999,171 @@ fn g0_overstress_refuses_before_missing_loss_data() {
     assert!(StringMaterials::from_packs(&[&limited(WEAK, WEAK_LIMIT_PA).to_bytes()],
         &construction("yield-fraction,0.5", LIMIT, &single_cores(&desc.courses)), &point(), ETA)
         .unwrap().apply(&desc.courses).is_ok());
+}
+
+// ---- pexfp.369: a tensile limit holds at the wire diameters its claim states ----
+
+/// A strength-only manufactured pack: the limit falls linearly from 4 GPa at 0.8 mm to 3 GPa at
+/// 1.2 mm drawn diameter, as drawing work-hardens thinner wire. No alloy is implied.
+fn strength_by_diameter() -> NormalizedMaterialCardPack {
+    let artifact = hash_bytes(b"manufactured strength by wire diameter");
+    let provenance = Provenance { source: "authored strength fixture".into(),
+        license: "test fixture; no measured evidence".into(), artifact: Some(artifact) };
+    let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset { specimen: "manufactured drawn wire".into(),
+        method: "analytic test data".into(), artifact, caveats: "not an alloy calibration".into(),
+        provenance: provenance.clone() }).unwrap();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(LIMIT, Pressure::DIMS),
+        value: PropertyValue::Curve { abscissa: WIRE_DIAMETER_AXIS.into(), abscissa_dims: Length::DIMS,
+            knots: vec![(0.8e-3, 4e9), (1.2e-3, 3e9)], dims: Pressure::DIMS },
+        validity: validity(0.0, MAX_HZ).with_quantity(WIRE_DIAMETER_AXIS, QuantitySpec::dimensional(Length::DIMS),
+            0.8e-3, 1.2e-3),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![observation],
+        provenance,
+    }).unwrap();
+    let claims = NormalizedPack::new("manufactured-strength-by-diameter", "test-v1", artifact,
+        "test redistribution", claims, vec![], vec![]).unwrap();
+    NormalizedMaterialCardPack::new(MaterialStateId { chemistry: "manufactured".into(), phase: "solid".into(),
+        process: "drawn".into(), revision: 0 }, claims).unwrap()
+}
+fn limit_at(diameter_m: f64) -> f64 { 4e9 + (3e9 - 4e9) * (diameter_m - 0.8e-3) / 0.4e-3 }
+/// A core pack that holds no limit claim at all, so only a named strength pack can bound it.
+fn core_without_limit() -> Vec<u8> {
+    pack_with(CORE, |claim| {
+        if claim.key.name() == LIMIT { claim.key = PropertyKey::new("unused_strength", Pressure::DIMS); }
+    }).to_bytes()
+}
+
+// G1: each core's limit is its strength claim evaluated at that core's own drawn diameter, by the
+// claim's declared linear rule, from the pack the construction names; a tabulated row is hit exactly,
+// and every receipt says where its limit came from.
+#[test]
+fn g1_each_core_limit_is_its_claim_at_its_own_drawn_diameter() {
+    let courses = small_description().courses;
+    let radii = [0.0004, 0.0005, 0.00055]; // drawn diameters 0.8, 1.0, 1.1 mm
+    let rows = courses.iter().zip(radii).map(|(c, r)| format!("{},core,{r},,,0\n", c.midi)).collect::<String>();
+    let materials = StringMaterials::from_packs(&[&core_without_limit(), &strength_by_diameter().to_bytes()],
+        &construction("installed-tension", &format!("{LIMIT},pack=1"), &rows), &point(), ETA).unwrap();
+    assert_eq!(materials.strength_pack(), Some(1));
+    for (c, r) in courses.iter().zip(radii) {
+        let receipt = &materials.limit_receipts()[&c.midi][0];
+        assert_eq!(receipt.pack, 1);
+        assert_eq!(receipt.diameter_m, 2.0 * r);
+        assert_eq!(receipt.evaluated_at_m, Some(2.0 * r));
+        assert_eq!(receipt.domain_m, Some((0.8e-3, 1.2e-3)));
+        assert!(!receipt.extrapolated && receipt.caveat.is_none());
+        let capacity = &materials.capacities()[&c.midi];
+        near(capacity.layer_limits_pa()[0], limit_at(2.0 * r));
+        near(capacity.capacity_n(), limit_at(2.0 * r) * PI * r * r);
+        // The capacity keeps the answer the receipt describes.
+        assert_eq!(receipt.limit_pa, capacity.layer_limits_pa()[0]);
+        assert_eq!(capacity.layer_limit_sources()[0].value_si(), receipt.limit_pa);
+    }
+    // 0.8 mm hits the first row; 1.0 and 1.1 mm interpolate between both rows.
+    let receipts = |i: usize| &materials.limit_receipts()[&courses[i].midi][0];
+    assert!(receipts(0).decision.starts_with("tabulated wire_diameter row"), "{}", receipts(0).decision);
+    assert_eq!(receipts(0).rows, vec![(0.8e-3, 4e9)]);
+    for i in [1, 2] {
+        assert!(receipts(i).decision.starts_with("linear in wire_diameter between rows"), "{}", receipts(i).decision);
+        assert_eq!(receipts(i).rows, vec![(0.8e-3, 4e9), (1.2e-3, 3e9)]);
+    }
+    let report = materials.strength_report(&materials.apply(&courses).unwrap()).unwrap();
+    for (key, r) in report.keys.iter().zip(radii) {
+        assert_eq!(key.limit_evaluated_at_m, Some(2.0 * r));
+        assert!(!key.limit_extrapolated);
+    }
+    assert!(report.limit_caveats.is_empty());
+    let json = materials.json();
+    assert!(json.contains("\"strengthPack\":1") && json.contains("\"extrapolateDiameter\":false")
+        && json.contains("\"diameterFree\":false"), "{json}");
+    assert!(json.contains("\"limitReceipts\":[{\"pack\":1,") && json.contains("\"rows\":[[0.0008,4000000000]]")
+        && json.contains("\"caveat\":null"), "{json}");
+}
+
+// Planted negative (DONE-WHEN): a core whose drawn diameter lies outside its strength claim refuses
+// with numbers. Only a declared extrapolation plays it, at the nearest stated diameter, and says so.
+#[test]
+fn g0_core_outside_its_strength_claim_refuses_with_numbers_unless_extrapolation_is_declared() {
+    let courses = small_description().courses;
+    let rows = courses.iter().map(|c| format!("{},core,0.0007,,,0\n", c.midi)).collect::<String>(); // 1.4 mm
+    let packs = [core_without_limit(), strength_by_diameter().to_bytes()];
+    let error = StringMaterials::from_packs(&[&packs[0], &packs[1]],
+        &construction("installed-tension", &format!("{LIMIT},pack=1"), &rows), &point(), ETA).unwrap_err();
+    assert!(error.contains("1.4000 mm core lies outside the 0.8000-1.2000 mm wire diameters")
+        && error.contains("missing data") && error.contains(LIMIT), "{error}");
+    let materials = StringMaterials::from_packs(&[&packs[0], &packs[1]],
+        &construction("installed-tension", &format!("{LIMIT},pack=1,extrapolate-diameter"), &rows), &point(), ETA)
+        .unwrap();
+    assert!(materials.extrapolate_diameter());
+    let caveat = format!("strength extrapolated; '{LIMIT}' from manufactured-strength-by-diameter holds for \
+        0.8000-1.2000 mm wire; a core outside takes the nearest stated diameter's value");
+    for c in &courses {
+        let receipt = &materials.limit_receipts()[&c.midi][0];
+        assert!(receipt.extrapolated);
+        assert_eq!(receipt.evaluated_at_m, Some(1.2e-3));
+        assert_eq!(receipt.rows, vec![(1.2e-3, 3e9)]);
+        assert_eq!(receipt.caveat.as_deref(), Some(caveat.as_str()));
+        near(materials.capacities()[&c.midi].layer_limits_pa()[0], 3e9);
+    }
+    let report = materials.strength_report(&materials.apply(&courses).unwrap()).unwrap();
+    assert!(report.keys.iter().all(|k| k.limit_extrapolated && k.limit_evaluated_at_m == Some(1.2e-3)));
+    assert_eq!(report.limit_caveats, vec![caveat.clone()]);
+    assert!(report.refusal_json().contains("\"overstressed\":[]"));
+    assert!(report.refusal_json().contains(&format!("\"limitCaveats\":[\"{caveat}\"]")), "{}", report.refusal_json());
+    let json = materials.json();
+    assert!(json.contains("\"extrapolateDiameter\":true") && json.contains("\"extrapolated\":true"), "{json}");
+    // The other flag does not stand in for this one.
+    assert!(StringMaterials::from_packs(&[&packs[0], &packs[1]],
+        &construction("installed-tension", &format!("{LIMIT},pack=1,diameter-free"), &rows), &point(), ETA).is_err());
+}
+
+// G0 (ruling 6326): a strength claim that states no wire diameter is the strength of no particular
+// core. It refuses as missing data and applies only under its own `diameter-free` flag, whose receipt
+// says the strength is not diameter-resolved; it bounds the check but cannot set a playing tension, so
+// yield-fraction refuses by name. The strength flags are checked.
+#[test]
+fn g0_a_strength_claim_without_a_diameter_applies_only_under_diameter_free() {
+    let courses = small_description().courses;
+    let undated = pack_with(CORE, |claim| {
+        if claim.key.name() == LIMIT { claim.validity = validity(0.0, MAX_HZ); }
+    }).to_bytes();
+    let rows = single_cores(&courses);
+    let error = StringMaterials::from_packs(&[&undated], &construction("target-pitch", LIMIT, &rows), &point(), ETA)
+        .unwrap_err();
+    assert!(error.contains("state no wire diameter") && error.contains("missing data")
+        && error.contains("diameter-free"), "{error}");
+    assert!(StringMaterials::from_packs(&[&undated],
+        &construction("target-pitch", &format!("{LIMIT},extrapolate-diameter"), &rows), &point(), ETA).is_err());
+    let materials = StringMaterials::from_packs(&[&undated],
+        &construction("target-pitch", &format!("{LIMIT},diameter-free"), &rows), &point(), ETA).unwrap();
+    assert!(materials.diameter_free() && !materials.extrapolate_diameter());
+    let pack_id = materials.packs()[0].pack_id().to_string();
+    let caveat = format!("strength not diameter-resolved; '{LIMIT}' from {pack_id} states no wire diameter, \
+        diameter effect unbounded");
+    for c in &courses {
+        let receipt = &materials.limit_receipts()[&c.midi][0];
+        assert!(receipt.extrapolated && receipt.evaluated_at_m.is_none() && receipt.domain_m.is_none());
+        assert_eq!(receipt.pack, 0);
+        assert_eq!(receipt.caveat.as_deref(), Some(caveat.as_str()));
+        assert!(receipt.rows.is_empty());
+        near(materials.capacities()[&c.midi].layer_limits_pa()[0], LIMIT_PA);
+    }
+    let report = materials.strength_report(&materials.apply(&courses).unwrap()).unwrap();
+    assert_eq!(report.limit_caveats, vec![caveat]);
+    assert!(materials.json().contains("\"diameterFree\":true"));
+    let error = StringMaterials::from_packs(&[&undated],
+        &construction("yield-fraction,0.5", &format!("{LIMIT},diameter-free"), &rows), &point(), ETA).unwrap_err();
+    assert!(error.contains("yield-fraction") && error.contains(&pack_id) && error.contains("not diameter-resolved")
+        && error.contains("nothing back-solves a yield"), "{error}");
+    for bad in [format!("{LIMIT},pack=7"), format!("{LIMIT},pack=x"), format!("{LIMIT},pack=0,pack=0"),
+        format!("{LIMIT},extrapolate-diameter,extrapolate-diameter"), format!("{LIMIT},diameter-free,diameter-free"),
+        format!("{LIMIT},bogus")] {
+        assert!(StringMaterials::from_packs(&[&undated], &construction("target-pitch", &bad, &rows), &point(), ETA)
+            .is_err(), "{bad}");
+    }
 }
 
 // ---- U2: computed thermoelastic loss plus a measured excess ----

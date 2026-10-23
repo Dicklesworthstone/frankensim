@@ -1,4 +1,6 @@
-# Steel strings: steel-music-wire-string-heptonstall-ligo-p1400229 (strength: 1100 um average breaking stress).
+# Steel strings: pack 0 = steel-music-wire-string-heptonstall-ligo-p1400229 (density, modulus, loss), pack 1 =
+# steel-music-wire-min-strength-qq-w-470b (the minimum tensile strength of music wire by diameter, QQ-W-470B
+# Table II), evaluated at each core's own diameter.
 # Plain music-wire courses MIDI 41-108 of the embedded Model D scale. Core radius = half the wire
 # diameter tabulated by Chabassier & Duruflé, INRIA RT-0425 (2012) Appendix A for MIDI 41-107, as
 # transcribed in crates/fs-couple/examples/grand_piano/steinway_scale.rs; MIDI 108 is that file's
@@ -6,7 +8,7 @@
 # wrap diameters were found. Tension is re-solved for each installed fundamental.
 frankensim-piano-materials-v2
 tension,target-pitch
-strength,breaking_stress_1100um_untreated
+strength,minimum_tensile_strength,pack=1
 loss,loss-angle
 key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
 41,core,0.0005585,,,0

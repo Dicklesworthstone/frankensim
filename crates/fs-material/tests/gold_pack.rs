@@ -30,12 +30,14 @@ fn gold_pack_passes_physicality_gates() {
     assert!(manifest.contains("\nlicense\tWork-of-the-US-Government-Public-Use-Permitted\n"));
     assert!(manifest.contains("nbscircular447.pdf"));
     assert!(manifest.contains("\naxis\tT\tT\tabsolute-temperature\n"));
+    assert!(manifest.contains("\naxis\twire_diameter\twire_diameter\tdimensional\n"));
     let text =
         std::fs::read_to_string(root.join(format!("data/matdb/seed-v1/{dir}/properties.tsv")))
             .expect("properties");
     assert!(text.starts_with("frankensim.matdb-source.v1"));
     let mut s: BTreeMap<String, f64> = BTreeMap::new();
     let (mut ids, mut unc, mut val) = (Vec::new(), Vec::new(), Vec::new());
+    let mut diameters: BTreeMap<String, String> = BTreeMap::new();
     for line in text.lines().skip(1) {
         let c: Vec<&str> = line.split('\t').collect();
         match c[0] {
@@ -51,6 +53,11 @@ fn gold_pack_passes_physicality_gates() {
                 ids.push(c[1].to_string());
             }
             "uncertainty" => unc.push(c[1].to_string()),
+            "validity" if c[2] == "wire_diameter" => {
+                assert_eq!(c[3], c[4], "{}: one specimen diameter", c[1]);
+                assert_eq!(c[5], "mm", "{}", c[1]);
+                assert!(diameters.insert(c[1].to_string(), c[3].to_string()).is_none(), "{}", c[1]);
+            }
             "validity" => {
                 assert_eq!(&c[2..], ["T", "293.15", "293.15", "K"], "{}: one admitted temperature", c[1]);
                 val.push(c[1].to_string());
@@ -61,6 +68,16 @@ fn gold_pack_passes_physicality_gates() {
     }
     for id in &ids {
         assert!(unc.contains(id) && val.contains(id), "{id}: uncertainty and validity rows");
+    }
+    // A strength holds at the specimen diameter its observation prints (0.8 in. rod, 1/8 in. cast rod,
+    // 0.05 in. wire, at 25.4 mm per inch); the sheet's thickness is no wire diameter.
+    let expected: BTreeMap<String, String> = [
+        ("proportional-limit-annealed-rod", "20.32"), ("yield-0p01-annealed-rod", "20.32"),
+        ("uts-annealed-rod", "20.32"), ("uts-cast-rod", "3.175"), ("uts-cold-rolled-wire", "1.27"),
+    ].into_iter().map(|(id, mm)| (id.to_string(), mm.to_string())).collect();
+    assert_eq!(diameters, expected);
+    for (inch, mm) in [(0.8, "20.32"), (0.125, "3.175"), (0.05, "1.27")] {
+        assert!((inch * 25.4 - mm.parse::<f64>().unwrap()).abs() < 1e-12, "{inch} in");
     }
     // The printed values, recovered from the SI rows at the stated factors.
     let printed = |name: &str| s[name] / 1e6 / MPA_PER_KSI;

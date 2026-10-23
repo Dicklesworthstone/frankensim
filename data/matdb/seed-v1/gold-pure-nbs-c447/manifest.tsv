@@ -5,3 +5,4 @@ citation	Everhart, J. L., Lindlief, W. E., Kanegis, J., Weissler, P. G., and Sie
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1
 axis	T	T	absolute-temperature
+axis	wire_diameter	wire_diameter	dimensional

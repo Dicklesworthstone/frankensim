@@ -6,7 +6,15 @@
 //! mass: the core carries the tension, EA, EI and loss.
 //!
 //! The construction also declares how tension is set and which sourced tensile
-//! limit it is checked against. At a fixed pitch the stress `4 L^2 f^2 rho`
+//! limit it is checked against. Drawing work-hardens wire, so a strength claim
+//! holds at the wire diameters it states: each core's limit is evaluated at the
+//! core's own drawn (outer) diameter, from its layer packs or from one named
+//! strength pack. A core outside the stated diameters refuses as missing data
+//! unless the construction declares `extrapolate-diameter` (the nearest stated
+//! diameter's value is taken); a claim that states no diameter at all refuses
+//! unless it declares `diameter-free`, and then it cannot set a playing tension
+//! (`yield-fraction` refuses). Each receipt prints the resolved limit, the rows
+//! it came from and what it is not. At a fixed pitch the stress `4 L^2 f^2 rho`
 //! does not depend on the wire diameter, so a dense, weak metal cannot reach a
 //! concert scale: every overstressed key refuses together, naming its required
 //! stress, its limit and the highest pitch its section can reach at that
@@ -24,15 +32,18 @@ use fs_material::{section::{ConcentricElasticSection, ConcentricKelvinVoigtSecti
     state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, MaterialPropertySelection,
     INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
     SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
-    MaterialStatePointError, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    MaterialStatePointError, ResolvedMaterialStatePoint, ResolvedScalarProperty, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point}};
-use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use fs_matdb::{EvaluationDecision, PropertyValue};
+use fs_qty::{Density, Dims, DynViscosity, Length, Pressure, QuantitySpec};
 use crate::refmods::geometry::{CoreLoss, Course};
 
 pub const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PACKS: usize = 128;
 pub const HEADER: &str = "frankensim-piano-materials-v2";
 pub const COLUMNS: &str = "key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index";
+/// Query axis of a strength claim's wire diameter [m] (dimensional length).
+pub const WIRE_DIAMETER_AXIS: &str = "wire_diameter";
 /// The superseded bonded-only format. It names no tensile limit, so the
 /// mandatory yield check cannot run and it refuses as missing data.
 pub const HEADER_V1: &str = "frankensim-piano-materials-v1";
@@ -124,13 +135,20 @@ pub struct KeyStress {
     /// course's speaking length, at the capacity tension. For one material
     /// and negligible EI it is `sqrt(limit / rho) / (2 L)`.
     pub f_max_hz: f64,
+    /// Wire diameter [m] at which the governing limit was evaluated; `None`
+    /// when its claim states no diameter (applied only under `diameter-free`).
+    pub limit_evaluated_at_m: Option<f64>,
+    /// The governing limit was extrapolated beyond its stated diameters.
+    pub limit_extrapolated: bool,
 }
 impl KeyStress {
     fn json(&self) -> String {
+        let at = self.limit_evaluated_at_m.map_or_else(|| "null".to_string(), |d| d.to_string());
         format!(concat!("{{\"key\":{},\"governingLayer\":{},\"maxMemberTensionN\":{},",
             "\"requiredStressPa\":{},\"limitPa\":{},\"utilization\":{},\"capacityN\":{},",
-            "\"fMaxHz\":{}}}"), self.key, self.governing_layer, self.max_member_tension_n,
-            self.required_stress_pa, self.limit_pa, self.utilization, self.capacity_n, self.f_max_hz)
+            "\"fMaxHz\":{},\"limitAtDiameterM\":{},\"limitExtrapolated\":{}}}"), self.key, self.governing_layer,
+            self.max_member_tension_n, self.required_stress_pa, self.limit_pa, self.utilization, self.capacity_n,
+            self.f_max_hz, at, self.limit_extrapolated)
     }
 }
 
@@ -142,6 +160,9 @@ pub struct StrengthReport {
     /// play instead of refusing. Real strings at these stresses would break.
     pub non_physical_override: bool,
     pub keys: Vec<KeyStress>,
+    /// What the limits are not (extrapolated, or not diameter-resolved), once
+    /// per claim, in key order.
+    pub limit_caveats: Vec<String>,
 }
 impl StrengthReport {
     pub fn overstressed(&self) -> impl Iterator<Item = &KeyStress> {
@@ -151,9 +172,126 @@ impl StrengthReport {
     /// The structured refusal: every overstressed key, with its numbers.
     pub fn refusal_json(&self) -> String {
         let keys = self.overstressed().map(KeyStress::json).collect::<Vec<_>>();
-        format!("{{\"refusal\":\"overstressed-strings\",\"limitProperty\":\"{}\",\"keys\":{},\"overstressed\":[{}]}}",
-            escape(&self.limit_property), self.keys.len(), keys.join(","))
+        let caveats = self.limit_caveats.iter().map(|c| format!("\"{}\"", escape(c))).collect::<Vec<_>>();
+        format!(concat!("{{\"refusal\":\"overstressed-strings\",\"limitProperty\":\"{}\",\"limitCaveats\":[{}],",
+            "\"keys\":{},\"overstressed\":[{}]}}"),
+            escape(&self.limit_property), caveats.join(","), self.keys.len(), keys.join(","))
     }
+}
+
+/// Where one core layer's tensile limit came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitReceipt {
+    /// Pack whose claim supplied the limit.
+    pub pack: usize,
+    /// The drawn wire's diameter [m]: the core's outer diameter.
+    pub diameter_m: f64,
+    /// Diameter [m] at which the claim was evaluated: the core's own unless
+    /// extrapolated to the nearest stated diameter; `None` when the claims
+    /// state no diameter.
+    pub evaluated_at_m: Option<f64>,
+    /// The claims' stated wire-diameter range [m], if any.
+    pub domain_m: Option<(f64, f64)>,
+    /// The resolved limit [Pa].
+    pub limit_pa: f64,
+    /// How the claim was evaluated (tabulated row, linear rule, constant).
+    pub decision: String,
+    /// The selected claim's rows the limit came from, as (abscissa SI, limit
+    /// Pa): both bracketing rows of a linear rule, the one row hit exactly,
+    /// none for a scalar.
+    pub rows: Vec<(f64, f64)>,
+    /// The core lies outside the stated diameters or none is stated: the
+    /// limit is not the claim's value at this core's diameter.
+    pub extrapolated: bool,
+    /// What the limit is not, when `extrapolated`.
+    pub caveat: Option<String>,
+}
+impl LimitReceipt {
+    fn json(&self) -> String {
+        let opt = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
+        let domain = self.domain_m.map_or_else(|| "null".to_string(), |(lo, hi)| format!("[{lo},{hi}]"));
+        let rows = self.rows.iter().map(|(x, y)| format!("[{x},{y}]")).collect::<Vec<_>>().join(",");
+        let caveat = self.caveat.as_ref().map_or_else(|| "null".to_string(), |c| format!("\"{}\"", escape(c)));
+        format!(concat!("{{\"pack\":{},\"diameterM\":{},\"evaluatedAtM\":{},\"domainM\":{},\"limitPa\":{},",
+            "\"decision\":\"{}\",\"rows\":[{}],\"extrapolated\":{},\"caveat\":{}}}"),
+            self.pack, self.diameter_m, opt(self.evaluated_at_m), domain, self.limit_pa, escape(&self.decision),
+            rows, self.extrapolated, caveat)
+    }
+}
+
+/// The two strength flags a construction may declare for claims that do not
+/// state this core's diameter.
+#[derive(Clone, Copy)]
+struct DiameterFlags { extrapolate: bool, diameter_free: bool }
+
+/// Evaluate a tensile-limit claim of `pack` at a core's drawn diameter.
+fn resolve_limit(pack: &NormalizedMaterialCardPack, point: &QueryPoint, limit: &str, index: usize, key: u8,
+    diameter_m: f64, flags: DiameterFlags) -> Result<(ResolvedScalarProperty, LimitReceipt), String> {
+    let claims = pack.card().claims().claims_for(limit);
+    if claims.is_empty() {
+        return Err(format!("string material pack {index} has no usable '{limit}' claim at this state: the \
+            mandatory yield check needs a sourced tensile limit (missing data)"));
+    }
+    let domain = claims.iter().filter_map(|(_, claim)| claim.validity.bounds().get(WIRE_DIAMETER_AXIS).copied())
+        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+    let mm = |m: f64| m * 1e3;
+    let query_at = match domain {
+        None if !flags.diameter_free => return Err(format!("string material key {key}: pack {index}'s '{limit}' \
+            claims state no wire diameter, so none is a strength of this {:.4} mm core (missing data); declare \
+            strength,{limit},diameter-free to apply them at every diameter, printed in the receipt", mm(diameter_m))),
+        None => None,
+        Some((lo, hi)) if (lo..=hi).contains(&diameter_m) => Some(diameter_m),
+        Some((lo, hi)) if !flags.extrapolate => return Err(format!("string material key {key}: its {:.4} mm core lies \
+            outside the {:.4}-{:.4} mm wire diameters of pack {index}'s '{limit}' claims, so its strength is \
+            unknown (missing data); declare strength,{limit},extrapolate-diameter to take the nearest stated \
+            diameter's value, printed in the receipt", mm(diameter_m), mm(lo), mm(hi))),
+        Some((lo, hi)) => Some(diameter_m.clamp(lo, hi)),
+    };
+    let at = match query_at {
+        Some(d) => point.clone().with_quantity(WIRE_DIAMETER_AXIS, QuantitySpec::dimensional(Length::DIMS), d)
+            .map_err(|e| format!("string material key {key}: {e}"))?,
+        None => point.clone(),
+    };
+    let requirement = ScalarPropertyRequirement::try_new(limit, Pressure::DIMS, ScalarAdmissibility::StrictlyPositive)
+        .map_err(|e| e.to_string())?;
+    let state = resolve_material_state_point(pack.card(), &at, &[requirement], MaterialPropertySelection::SingleClaimOnly)
+        .map_err(|e| match query_at {
+            Some(d) => format!("string material key {key}: pack {index}'s '{limit}' claims give no strength at \
+                {:.4} mm (missing data): {e}", mm(d)),
+            None => format!("string material pack {index}: {e}"),
+        })?;
+    let property = state.property(limit).ok_or("tensile limit resolution lost its property")?;
+    let receipt = &property.answer().receipt;
+    // The selected claim's own rows: the bracket a linear rule interpolated, or the row it hit.
+    let curve = match pack.card().claims().claim(receipt.selected).map(|claim| &claim.value) {
+        Some(PropertyValue::Curve { abscissa, knots, .. }) => Some((abscissa.as_str(), knots.as_slice())),
+        _ => None,
+    };
+    let row = |x: f64| curve.and_then(|(_, knots)| knots.iter().find(|knot| knot.0 == x).copied())
+        .ok_or_else(|| format!("string material key {key}: the '{limit}' answer lost its tabulated row at {x}"));
+    let axis = curve.map_or("", |(abscissa, _)| abscissa);
+    let (decision, rows) = match &receipt.decision {
+        EvaluationDecision::ExactTabulated { at } => (format!("tabulated {axis} row at {at}"), vec![row(*at)?]),
+        EvaluationDecision::LinearInside { x_lo, x_hi } =>
+            (format!("linear in {axis} between rows at {x_lo} and {x_hi}"), vec![row(*x_lo)?, row(*x_hi)?]),
+        EvaluationDecision::ConstantWithinValidity => ("constant over its validity".to_string(), vec![]),
+        EvaluationDecision::ExactScalar => ("single tabulated value".to_string(), vec![]),
+        other => (format!("{other:?}"), vec![]),
+    };
+    let caveat = match (domain, query_at) {
+        (None, _) => Some(format!("strength not diameter-resolved; '{limit}' from {} states no wire diameter, \
+            diameter effect unbounded", pack.pack_id())),
+        (Some((lo, hi)), Some(at)) if at != diameter_m => Some(if lo == hi {
+            format!("strength extrapolated; '{limit}' from {} holds only for {:.4} mm wire and is taken at every \
+                core diameter, diameter effect unbounded", pack.pack_id(), mm(lo))
+        } else {
+            format!("strength extrapolated; '{limit}' from {} holds for {:.4}-{:.4} mm wire; a core outside takes \
+                the nearest stated diameter's value", pack.pack_id(), mm(lo), mm(hi))
+        }),
+        _ => None,
+    };
+    Ok((property.clone(), LimitReceipt { pack: index, diameter_m, evaluated_at_m: query_at, domain_m: domain,
+        limit_pa: property.value_si(), decision, rows, extrapolated: query_at != Some(diameter_m), caveat }))
 }
 
 /// Admitted source owners and their actual section integrals. Cloning a live
@@ -172,20 +310,28 @@ pub struct StringMaterials {
     loss: BendingLossLaw,
     wrappings: BTreeMap<u8, HelicalWrapping>,
     capacities: BTreeMap<u8, AxialTensileCapacity>,
+    /// Per key, where each core layer's limit came from (spatial layer order).
+    limit_receipts: BTreeMap<u8, Vec<LimitReceipt>>,
     tension: TensionPolicy,
     limit_property: String,
     non_physical_override: bool,
+    extrapolate_diameter: bool,
+    diameter_free: bool,
+    strength_pack: Option<usize>,
     packs: Vec<Arc<NormalizedMaterialCardPack>>,
 }
 
 #[derive(Clone, Copy)]
-enum Role { Core, Wrap }
+enum Role { Core, Wrap, Strength }
 
 struct Declaration {
     tension: TensionPolicy,
     loss: BendingLossLaw,
     limit_property: String,
     non_physical_override: bool,
+    extrapolate_diameter: bool,
+    diameter_free: bool,
+    strength_pack: Option<usize>,
     // Per key: core layers (outer radius, pack) then wraps (diameter, pitch or close, pack).
     cores: BTreeMap<u8, Vec<(f64, usize)>>,
     wraps: BTreeMap<u8, Vec<(f64, Option<f64>, usize)>>,
@@ -221,12 +367,28 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
         }
         _ => return Err("second line must be tension,target-pitch | installed-tension | yield-fraction,<x>".into()),
     };
-    let (limit_property, non_physical_override) =
-        match lines.next().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).as_deref() {
-            Some(["strength", name]) => (property_name(name, "tensile-limit")?, false),
-            Some(["strength", name, "non-physical-override"]) => (property_name(name, "tensile-limit")?, true),
-            _ => return Err("third line must be strength,<tensile-limit property>[,non-physical-override]".into()),
-        };
+    let strength = lines.next().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>());
+    let Some(["strength", name, flags @ ..]) = strength.as_deref() else {
+        return Err("third line must be strength,<tensile-limit property>[,non-physical-override]\
+            [,extrapolate-diameter][,diameter-free][,pack=<index>]".into());
+    };
+    let limit_property = property_name(name, "tensile-limit")?;
+    let (mut non_physical_override, mut extrapolate_diameter, mut strength_pack) = (false, false, None);
+    let mut diameter_free = false;
+    for &flag in flags {
+        match flag {
+            "non-physical-override" if !non_physical_override => non_physical_override = true,
+            "extrapolate-diameter" if !extrapolate_diameter => extrapolate_diameter = true,
+            "diameter-free" if !diameter_free => diameter_free = true,
+            _ if flag.starts_with("pack=") && strength_pack.is_none() => {
+                let index = flag["pack=".len()..].parse::<usize>().map_err(|_| "invalid strength pack index")?;
+                if index >= packs { return Err("strength pack index is out of range".into()); }
+                strength_pack = Some(index);
+            }
+            _ => return Err(format!("unknown or repeated strength flag '{}': flags are non-physical-override, \
+                extrapolate-diameter, diameter-free and pack=<index>", escape(flag))),
+        }
+    }
     let mut lines = lines.peekable();
     let loss = match lines.peek().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).as_deref() {
         Some(["loss", "kelvin-voigt"]) => { lines.next(); BendingLossLaw::KelvinVoigt }
@@ -276,7 +438,9 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
         }
     }
     if cores.is_empty() { return Err("string material geometry has no sections".into()); }
-    Ok(Declaration { tension, loss, limit_property, non_physical_override, cores, wraps })
+    Ok(Declaration { tension, loss, limit_property, non_physical_override, extrapolate_diameter, diameter_free,
+        strength_pack,
+        cores, wraps })
 }
 
 impl StringMaterials {
@@ -319,6 +483,7 @@ impl StringMaterials {
         for layers in declaration.wraps.values() {
             for &(_, _, index) in layers { roles[index].push(Role::Wrap); }
         }
+        if let Some(index) = declaration.strength_pack { roles[index].push(Role::Strength); }
         let mut packs = Vec::with_capacity(bytes.len());
         let mut states = Vec::with_capacity(bytes.len());
         let mut loss_rated = Vec::with_capacity(bytes.len());
@@ -328,6 +493,15 @@ impl StringMaterials {
                 .map_err(|e| e.to_string())?);
             let core = roles.iter().any(|role| matches!(role, Role::Core));
             if roles.is_empty() { return Err(format!("string material pack {index} is not used by any layer")); }
+            // A pack used only for strength holds no section state: its limit is
+            // evaluated per core diameter in `from_states`.
+            if roles.iter().all(|role| matches!(role, Role::Strength)) {
+                packs.push(pack);
+                states.push(None);
+                loss_rated.push(true);
+                excess_measured.push(true);
+                continue;
+            }
             let mut requirements = vec![ScalarPropertyRequirement::try_new(DENSITY_PROPERTY, Density::DIMS,
                 ScalarAdmissibility::StrictlyPositive)];
             if core {
@@ -338,8 +512,6 @@ impl StringMaterials {
                         BendingLossLaw::KelvinVoigt => DynViscosity::DIMS,
                         BendingLossLaw::LossAngle | BendingLossLaw::Thermoelastic => Dims::NONE,
                     }, ScalarAdmissibility::Finite),
-                    ScalarPropertyRequirement::try_new(limit, Pressure::DIMS,
-                        ScalarAdmissibility::StrictlyPositive),
                 ]);
                 if declaration.loss == BendingLossLaw::Thermoelastic {
                     requirements.extend([
@@ -354,12 +526,7 @@ impl StringMaterials {
             }
             let mut requirements = requirements.into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
-            let refuse = |e: MaterialStatePointError| match e {
-                MaterialStatePointError::Query { ref property, .. } if property == limit => format!(
-                    "string material pack {index} has no usable '{limit}' claim at this state: the \
-                    mandatory yield check needs a sourced tensile limit (missing data): {e}"),
-                e => format!("string material pack {index}: {e}"),
-            };
+            let refuse = |e: MaterialStatePointError| format!("string material pack {index}: {e}");
             // Without loss data the core still has mass, stiffness and strength:
             // missing loss claims are dropped here and refuse only after the
             // tensile check. Under the thermoelastic law an absent excess claim
@@ -384,16 +551,23 @@ impl StringMaterials {
                 _ => dropped.is_empty(),
             };
             packs.push(pack);
-            states.push(state);
+            states.push(Some(state));
             loss_rated.push(rated);
             excess_measured.push(!dropped.iter().any(|property| property == viscosity_property));
         }
-        Self::from_states(declaration, &states, &loss_rated, &excess_measured, viscosity_property, packs)
+        Self::from_states(declaration, &states, &loss_rated, &excess_measured, viscosity_property, packs, point)
     }
 
-    fn from_states(declaration: Declaration, states: &[ResolvedMaterialStatePoint], loss_rated: &[bool],
-        excess_measured: &[bool], viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>) -> Result<Self, String> {
-        let Declaration { tension, loss, limit_property, non_physical_override, cores, mut wraps } = declaration;
+    #[allow(clippy::too_many_arguments)]
+    fn from_states(declaration: Declaration, states: &[Option<ResolvedMaterialStatePoint>], loss_rated: &[bool],
+        excess_measured: &[bool], viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>,
+        point: &QueryPoint) -> Result<Self, String> {
+        let Declaration { tension, loss, limit_property, non_physical_override, extrapolate_diameter, diameter_free,
+            strength_pack, cores, mut wraps } = declaration;
+        let flags = DiameterFlags { extrapolate: extrapolate_diameter, diameter_free };
+        let state = |index: usize| states[index].clone()
+            .ok_or_else(|| format!("string material pack {index} is a strength source only and holds no section"));
+        let mut limit_receipts = BTreeMap::new();
         let mut sections = BTreeMap::new();
         let mut loss_angle_sections = BTreeMap::new();
         let mut thermoelastic_sections = BTreeMap::new();
@@ -404,10 +578,27 @@ impl StringMaterials {
             let failed = |e: MaterialStatePointError| format!("string material key {key}: {e}");
             let rated = layers.iter().all(|&(_, index)| loss_rated[index]);
             let measured = layers.iter().all(|&(_, index)| excess_measured[index]);
+            let sources = layers.iter().map(|&(_, index)| strength_pack.unwrap_or(index)).collect::<Vec<_>>();
             let layers = layers.into_iter().map(|(outer_radius_m, index)|
-                ConcentricMaterialLayer { outer_radius_m, material: states[index].clone() }).collect();
+                Ok(ConcentricMaterialLayer { outer_radius_m, material: state(index)? }))
+                .collect::<Result<Vec<_>, String>>()?;
             let elastic = ConcentricElasticSection::try_new(0.0, layers).map_err(failed)?;
-            capacities.insert(key, elastic.axial_tensile_capacity(&limit_property).map_err(failed)?);
+            // The drawn wire's diameter: every layer's claim is evaluated there.
+            let diameter_m = 2.0 * elastic.outer_radius_m();
+            let (limits, receipts): (Vec<ResolvedScalarProperty>, Vec<LimitReceipt>) = sources.iter()
+                .map(|&source| resolve_limit(&packs[source], point, &limit_property, source, key, diameter_m, flags))
+                .collect::<Result<Vec<_>, String>>()?.into_iter().unzip();
+            // A limit that states no diameter bounds a check but cannot set a playing tension.
+            if let (TensionPolicy::YieldFraction(_), Some(free)) =
+                (tension, receipts.iter().find(|receipt| receipt.domain_m.is_none())) {
+                return Err(format!("string material key {key}: tension,yield-fraction sets the playing tension \
+                    from the limit, but '{limit_property}' from {} states no wire diameter (strength not \
+                    diameter-resolved) and no sourced yield stress is declared; nothing back-solves a yield \
+                    (missing data)", packs[free.pack].pack_id()));
+            }
+            capacities.insert(key, elastic.axial_tensile_capacity_from_resolved(&limit_property, &limits)
+                .map_err(failed)?);
+            limit_receipts.insert(key, receipts);
             if let Some(rows) = wraps.remove(&key) {
                 let mut under = 2.0 * elastic.outer_radius_m();
                 let mut helical = Vec::with_capacity(rows.len());
@@ -416,7 +607,7 @@ impl StringMaterials {
                         Some(pitch) => pitch,
                         None => close_wound_pitch_m(under, wire_diameter_m).map_err(failed)?,
                     };
-                    helical.push(HelicalWrap { wire_diameter_m, pitch_m, material: states[index].clone() });
+                    helical.push(HelicalWrap { wire_diameter_m, pitch_m, material: state(index)? });
                     under += 2.0 * wire_diameter_m;
                 }
                 wrappings.insert(key, HelicalWrapping::try_new(&elastic, helical).map_err(failed)?);
@@ -452,7 +643,8 @@ impl StringMaterials {
                 claims at this state, so the cores of keys [{keys}] have no sourced bending loss (missing data)")
         });
         Ok(Self { sections, loss_angle_sections, thermoelastic_sections, unrated, missing_loss, loss, wrappings,
-            capacities, tension, limit_property, non_physical_override, packs })
+            capacities, limit_receipts, tension, limit_property, non_physical_override, extrapolate_diameter,
+            diameter_free, strength_pack, packs })
     }
 
     /// Bounded WASM framing of the unchanged canonical bytes; this is not an
@@ -492,6 +684,14 @@ impl StringMaterials {
     pub fn tension_policy(&self) -> TensionPolicy { self.tension }
     pub fn limit_property(&self) -> &str { &self.limit_property }
     pub fn non_physical_override(&self) -> bool { self.non_physical_override }
+    /// The construction declared `extrapolate-diameter`.
+    pub fn extrapolate_diameter(&self) -> bool { self.extrapolate_diameter }
+    /// The construction declared `diameter-free`.
+    pub fn diameter_free(&self) -> bool { self.diameter_free }
+    /// The pack named by `pack=<index>` as every core's strength source.
+    pub fn strength_pack(&self) -> Option<usize> { self.strength_pack }
+    /// Per key, where each core layer's tensile limit came from.
+    pub fn limit_receipts(&self) -> &BTreeMap<u8, Vec<LimitReceipt>> { &self.limit_receipts }
     pub fn packs(&self) -> &[Arc<NormalizedMaterialCardPack>] { &self.packs }
 
     /// The deferred refusal when some cores have no sourced bending loss.
@@ -597,16 +797,23 @@ impl StringMaterials {
             let fail = |e: MaterialStatePointError| format!("string material key {}: {e}", course.midi);
             let f_max_hz = course.partial_hz(1, capacity.capacity_n());
             if !f_max_hz.is_finite() { return Err(format!("key {}: unrepresentable highest pitch", course.midi)); }
+            let receipt = &self.limit_receipts[&course.midi][layer];
             keys.push(KeyStress {
                 key: course.midi, governing_layer: layer, max_member_tension_n: tension,
                 required_stress_pa: capacity.layer_stress_pa(layer, tension).map_err(fail)?,
                 limit_pa: capacity.layer_limits_pa()[layer],
                 utilization: capacity.utilization(tension).map_err(fail)?,
                 capacity_n: capacity.capacity_n(), f_max_hz,
+                limit_evaluated_at_m: receipt.evaluated_at_m, limit_extrapolated: receipt.extrapolated,
             });
         }
+        let mut limit_caveats: Vec<String> = Vec::new();
+        for caveat in courses.iter().flat_map(|course| &self.limit_receipts[&course.midi])
+            .filter_map(|receipt| receipt.caveat.as_ref()) {
+            if !limit_caveats.contains(caveat) { limit_caveats.push(caveat.clone()); }
+        }
         Ok(StrengthReport { limit_property: self.limit_property.clone(),
-            non_physical_override: self.non_physical_override, keys })
+            non_physical_override: self.non_physical_override, keys, limit_caveats })
     }
 
     fn check_strength(&self, courses: &[Course]) -> Result<(), String> {
@@ -667,16 +874,18 @@ impl StringMaterials {
                     .collect::<Vec<_>>();
                 format!("[{}]", rows.join(","))
             });
+            let limits = self.limit_receipts[key].iter().map(LimitReceipt::json).collect::<Vec<_>>().join(",");
             format!(concat!("{{\"key\":{},\"stateIdentities\":[{}],\"outerRadiiM\":{:?},",
                 "\"lineDensityKgM\":{},\"axialRigidityN\":{},\"flexuralRigidityNm2\":{},",
                 "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":{},\"thermoelastic\":{},\"wraps\":{},",
-                "\"outerRadiusM\":{},\"tensileCapacityN\":{},\"governingLayer\":{},\"layerLimitsPa\":{:?}}}"),
+                "\"outerRadiusM\":{},\"tensileCapacityN\":{},\"governingLayer\":{},\"layerLimitsPa\":{:?},",
+                "\"limitReceipts\":[{}]}}"),
                 key, identities, radii, elastic.line_density_kg_m()
                     + self.wrappings.get(key).map_or(0.0, HelicalWrapping::line_density_kg_m),
                 elastic.axial_stiffness_n(), elastic.bending_stiffness_n_m2(),
                 viscous, hysteretic, band, thermoelastic, wraps,
                 self.outer_radius_m(*key).unwrap_or(0.0), capacity.capacity_n(),
-                capacity.governing_layer(), capacity.layer_limits_pa())
+                capacity.governing_layer(), capacity.layer_limits_pa(), limits)
         }).collect::<Vec<_>>().join(",");
         let receipt = match self.loss {
             BendingLossLaw::Thermoelastic => "thermoelastic loss is computed at every mode; a measured anelastic \
@@ -686,8 +895,11 @@ impl StringMaterials {
         };
         format!(concat!("{{\"model\":\"bonded-core-kelvin-voigt-helical-wraps\",\"importedPacks\":{},",
             "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"lossReceipt\":\"{}\",\"missingLossData\":{},",
-            "\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
+            "\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"extrapolateDiameter\":{},\"diameterFree\":{},",
+            "\"strengthPack\":{},",
+            "\"sections\":[{}]}}"),
             self.packs.len(), self.tension.json(), self.loss.name(), receipt, self.missing_loss.is_some(),
-            escape(&self.limit_property), self.non_physical_override, sections)
+            escape(&self.limit_property), self.non_physical_override, self.extrapolate_diameter, self.diameter_free,
+            self.strength_pack.map_or_else(|| "null".to_string(), |index| index.to_string()), sections)
     }
 }
