@@ -18,6 +18,8 @@ cargo run --release -p fs-couple --example shell_body_modes -- \
 
 `--shapes` writes the displacement of the top and back nodes along their directors; `--node-shapes PATH` writes the three
 global displacement components of every node of every part (m/sqrt(kg), mass-normalized) for the first 36 air-coupled modes.
+After the coupled lists the example prints, for every open-sound-hole mode, the share of the shell kinetic energy carried by each group of
+parts, using lumped nodal masses: a third of each triangle's area times its thickness and its pack's density.
 
 `PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`). The violin top, bass bar and
 soundpost are Norway spruce (Viala et al. 2020 violin quarters); the runs before 2026-10-23 used the guitar Sitka pack
@@ -44,6 +46,11 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   facets whose normals differ by more than 0.9 in cosine.
 - `classify_violin_modes.py TABLE OUTPUT.txt SHAPES.tsv` applies the identification rules of `body-mode-preregistration.tsv`
   to a run and prints each named mode against its band.
+  - A mode whose bridge kinetic share exceeds one half is a bridge mode. It stays in the printed table with its share and is
+    left out of the corpus-mode chain (orchestrator ruling, mail 6065).
+  - An output without the share block excludes nothing, and the classifier says so.
+  - `test_classify_violin_modes.py` pins the threshold. Run it with
+    `uv run --python 3.12 --with numpy python -m unittest discover -s crates/fs-couple/examples/shell_body_modes -p 'test_classify_violin_modes.py'`.
 - `make_results.py OUT.tsv UNUSED RUN=OUTPUT.txt ...` and `make_outcome.py OUT.tsv RUN=CLASSIFY_OUTPUT.txt ...` write
   `body-mode-results.tsv` (the air-coupled mode list of each run) and `body-mode-outcome.tsv` (the registered rules per run);
   a run whose name starts with `cracked` is labelled superseded.

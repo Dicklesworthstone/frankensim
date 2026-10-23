@@ -412,6 +412,7 @@ fn main() -> Result<()> {
         .with("omega", omega)?;
     let mut cards: BTreeMap<String, (NormalizedPack, MaterialCard)> = BTreeMap::new();
     let mut parts = Vec::with_capacity(table.parts.len());
+    let mut densities = Vec::with_capacity(table.parts.len());
     for part in &table.parts {
         if !cards.contains_key(&part.pack) {
             cards.insert(part.pack.clone(), load_pack(dir, &part.pack)?);
@@ -427,6 +428,12 @@ fn main() -> Result<()> {
             part.thickness_m * 1e3,
             part.nodes.len(),
             part.tris.len()
+        );
+        densities.push(
+            material
+                .property("density")
+                .ok_or("pack without a unique density")?
+                .value_si(),
         );
         parts.push(component(part, &material, drilling_alpha, &gate)?);
     }
@@ -630,6 +637,7 @@ fn main() -> Result<()> {
     let back_w: Vec<f64> = (0..n).map(|m| group_w("back", m)).collect();
     let mut open_order: Vec<usize> = Vec::new();
     let mut open_vectors: Vec<Vec<f64>> = Vec::new();
+    let mut open_values: Vec<f64> = Vec::new();
     for sealed in [false, true] {
         let neck = if sealed { None } else { Some(a_neck) };
         let dim = n + usize::from(neck.is_some());
@@ -707,9 +715,80 @@ fn main() -> Result<()> {
         if !sealed {
             open_order = order;
             open_vectors = vectors;
+            open_values = values;
         }
     }
     let (order, vectors) = (open_order, open_vectors);
+    // Share of the shell kinetic energy that each group of parts carries in every open-sound-hole mode, with lumped nodal masses
+    // (a third of each triangle's area x thickness x density): a mode carried by one small part, such as the bridge, shows here.
+    let lumped: Vec<Vec<f64>> = table
+        .parts
+        .iter()
+        .zip(&densities)
+        .map(|(part, &rho)| {
+            let mut m = vec![0.0; part.nodes.len()];
+            for tri in &part.tris {
+                let [a, b, c] = tri.map(|i| part.nodes[i]);
+                let (e1, e2) = (
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                let cross = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let area = 0.5 * cross.iter().map(|v| v * v).sum::<f64>().sqrt();
+                for &i in tri {
+                    m[i] += area * part.thickness_m * rho / 3.0;
+                }
+            }
+            m
+        })
+        .collect();
+    let mut groups: Vec<String> = table.parts.iter().map(|p| group_of(&p.name)).collect();
+    groups.sort();
+    groups.dedup();
+    println!(
+        "kinetic energy share of the shell parts by group, open sound hole (lumped nodal mass):"
+    );
+    println!(
+        "  mode   f_Hz{}",
+        groups
+            .iter()
+            .map(|g| format!(" {g:>10}"))
+            .collect::<String>()
+    );
+    for (rank, &idx) in order.iter().enumerate() {
+        let mut energy = vec![0.0; groups.len()];
+        for (p, part) in table.parts.iter().enumerate() {
+            let g = groups
+                .iter()
+                .position(|g| *g == group_of(&part.name))
+                .ok_or("part group missing")?;
+            for node in 0..part.nodes.len() {
+                let u2: f64 = (0..3)
+                    .map(|k| {
+                        let u: f64 = (0..n)
+                            .map(|r| image.physical_modes()[p][r][6 * node + k] * vectors[r][idx])
+                            .sum();
+                        u * u
+                    })
+                    .sum();
+                energy[g] += lumped[p][node] * u2;
+            }
+        }
+        let total: f64 = energy.iter().sum();
+        println!(
+            "  {:>4} {:>8.2}{}",
+            rank + 1,
+            open_values[idx].max(0.0).sqrt() / two_pi,
+            energy
+                .iter()
+                .map(|e| format!(" {:>10.3}", e / total))
+                .collect::<String>()
+        );
+    }
     if let Some(path) = shapes {
         // Displacement along the nodal director of the top and back plate nodes for the first 36 air-coupled modes.
         let mut out = fs::File::create(&path)?;
