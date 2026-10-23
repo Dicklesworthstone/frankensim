@@ -148,12 +148,18 @@ fn identity(n: usize) -> Vec<f64> {
 
 fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n * n];
+    accumulate(&mut out, a, b, n);
+    out
+}
+
+/// out += a b. Every entry adds its k = 0, 1, ... terms after what it holds,
+/// in the order of the textbook i-k-j loop, so a product started from zero is
+/// the same bit for bit. Four rows share each row of b while it is in cache,
+/// and the slice update vectorizes over j.
+fn accumulate(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
     if n == 0 {
-        return out;
+        return;
     }
-    // Every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, so the
-    // result is the same bit for bit. Four rows share each row of b while it
-    // is in cache, and the slice update vectorizes over j.
     for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
         for (k, b_row) in b.chunks_exact(n).enumerate() {
             for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
@@ -164,7 +170,6 @@ fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
             }
         }
     }
-    out
 }
 
 fn quadratic(a: &[f64], x: &[f64]) -> f64 {
@@ -225,15 +230,7 @@ pub fn exponential_with_budget(
     n: usize,
     budget: DenseExponentialBudget,
 ) -> Result<Vec<f64>, PhsError> {
-    let extent = n.checked_mul(n).ok_or_else(|| refuse("exponential extent overflow"))?;
-    let bytes = extent.checked_mul(5).and_then(|x| x.checked_mul(core::mem::size_of::<f64>()))
-        .ok_or_else(|| refuse("exponential workspace overflow"))?;
-    let terms = (n as u64).checked_pow(3).and_then(|x| x.checked_mul(80))
-        .ok_or_else(|| refuse("exponential work overflow"))?;
-    if budget.max_dimension == 0 || budget.max_dimension > MAX_PREPARED_EXPONENTIAL_DIM
-        || bytes > budget.max_dense_bytes || terms > budget.max_multiply_terms {
-        return Err(refuse("exponential dense byte/work admission"));
-    }
+    admit_exponential(n, budget)?;
     if n == 0
         || n > budget.max_dimension
         || n.checked_mul(n) != Some(a.len())
@@ -281,6 +278,135 @@ pub fn exponential_with_budget(
         result = product(&result, &result, n);
     }
     if !finite(&result) {
+        return Err(refuse("exponential is unrepresentable"));
+    }
+    Ok(result)
+}
+
+/// The dense work and byte admission of an n x n exponential, before any
+/// operator is read or matrix allocated.
+fn admit_exponential(n: usize, budget: DenseExponentialBudget) -> Result<(), PhsError> {
+    let extent = n.checked_mul(n).ok_or_else(|| refuse("exponential extent overflow"))?;
+    let bytes = extent.checked_mul(5).and_then(|x| x.checked_mul(core::mem::size_of::<f64>()))
+        .ok_or_else(|| refuse("exponential workspace overflow"))?;
+    let terms = (n as u64).checked_pow(3).and_then(|x| x.checked_mul(80))
+        .ok_or_else(|| refuse("exponential work overflow"))?;
+    if budget.max_dimension == 0 || budget.max_dimension > MAX_PREPARED_EXPONENTIAL_DIM
+        || bytes > budget.max_dense_bytes || terms > budget.max_multiply_terms {
+        return Err(refuse("exponential dense byte/work admission"));
+    }
+    Ok(())
+}
+
+/// The three blocks of a block upper-triangular 2d x 2d operator or of its
+/// exponential, `[[first, cross], [0, last]]`, each d x d and row-major.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpperBlocks {
+    /// Upper-left block.
+    pub first: Vec<f64>,
+    /// Upper-right block.
+    pub cross: Vec<f64>,
+    /// Lower-right block.
+    pub last: Vec<f64>,
+}
+
+impl UpperBlocks {
+    fn entries(&self) -> impl Iterator<Item = &f64> {
+        self.first.iter().chain(&self.cross).chain(&self.last)
+    }
+
+    /// self x right. Each entry of the 2d x 2d product adds its k terms in the
+    /// textbook order; the terms that meet the zero block are exact zeros and
+    /// add nothing, so they are not formed: four d x d products instead of
+    /// eight.
+    fn product(&self, right: &Self, d: usize) -> Self {
+        let mut cross = vec![0.0; d * d];
+        accumulate(&mut cross, &self.first, &right.cross, d);
+        accumulate(&mut cross, &self.cross, &right.last, d);
+        Self { first: product(&self.first, &right.first, d), cross, last: product(&self.last, &right.last, d) }
+    }
+}
+
+/// [`exponential_with_budget`] of the block upper-triangular operator
+/// `[[first, cross], [0, last]]` (each block d x d), returned as the three
+/// blocks of the exponential. Its lower-left block is exactly zero.
+///
+/// It is the same computation bit for bit, with the same admission of the
+/// 2d x 2d operator and the same refusals. The norm, scaling, Taylor series
+/// and squarings are identical; only the products are formed by blocks. That
+/// is exact: every product of block upper-triangular matrices keeps the zero
+/// block (its entries are sums of exact zeros, which stay +0), and a term
+/// that meets it adds an exact zero to a sum that never holds -0. Van Loan's
+/// integral operator `[[-A^T h, R h], [0, A h]]` has this form.
+///
+/// # Errors
+/// The refusals of [`exponential_with_budget`] for the assembled operator.
+pub fn upper_block_exponential_with_budget(
+    operator: &UpperBlocks,
+    d: usize,
+    budget: DenseExponentialBudget,
+) -> Result<UpperBlocks, PhsError> {
+    let n = d.checked_mul(2).ok_or_else(|| refuse("exponential extent overflow"))?;
+    admit_exponential(n, budget)?;
+    if n == 0
+        || n > budget.max_dimension
+        || [&operator.first, &operator.cross, &operator.last].iter().any(|b| d.checked_mul(d) != Some(b.len()))
+        || operator.entries().any(|x| !x.is_finite())
+    {
+        return Err(refuse("invalid or oversized exponential operator"));
+    }
+    // The row sums of the assembled operator, each in its own column order.
+    let mut norm = 0.0_f64;
+    for (first, cross) in operator.first.chunks_exact(d).zip(operator.cross.chunks_exact(d)) {
+        norm = norm.max(first.iter().chain(cross).map(|v| v.abs()).sum());
+    }
+    for last in operator.last.chunks_exact(d) {
+        norm = norm.max(core::iter::repeat(&0.0).take(d).chain(last).map(|v: &f64| v.abs()).sum());
+    }
+    if !norm.is_finite() {
+        return Err(refuse("nonfinite exponential operator"));
+    }
+    let mut scale = 1.0;
+    let mut squarings = 0;
+    while norm * scale > 0.5 {
+        if squarings == 48 {
+            return Err(refuse("exponential scaling exceeds 48 squarings"));
+        }
+        scale *= 0.5;
+        squarings += 1;
+    }
+    let scale_block = |block: &[f64]| -> Vec<f64> { block.iter().map(|x| x * scale).collect() };
+    let scaled = UpperBlocks {
+        first: scale_block(&operator.first), cross: scale_block(&operator.cross), last: scale_block(&operator.last),
+    };
+    let mut result = UpperBlocks { first: identity(d), cross: vec![0.0; d * d], last: identity(d) };
+    let mut term = result.clone();
+    let mut converged = false;
+    for order in 1..=32 {
+        term = term.product(&scaled, d);
+        // Entry by entry, as the assembled loop; the largest term is the same
+        // maximum, since the zero block's terms are zero.
+        let mut largest = 0.0_f64;
+        for (sum, value) in [&mut result.first, &mut result.cross, &mut result.last].into_iter()
+            .zip([&mut term.first, &mut term.cross, &mut term.last])
+            .flat_map(|(sums, values)| sums.iter_mut().zip(values.iter_mut()))
+        {
+            *value /= f64::from(order);
+            *sum += *value;
+            largest = largest.max(value.abs());
+        }
+        if largest <= 0.25 * f64::EPSILON {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(refuse("exponential series did not converge"));
+    }
+    for _ in 0..squarings {
+        result = result.product(&result, d);
+    }
+    if result.entries().any(|x| !x.is_finite()) {
         return Err(refuse("exponential is unrepresentable"));
     }
     Ok(result)
@@ -1551,5 +1677,65 @@ mod tests {
             let blocked = product(&a, &b, n);
             assert!(blocked.iter().zip(&textbook).all(|(x, y)| x.to_bits() == y.to_bits()), "n = {n}");
         }
+    }
+
+    #[test]
+    fn upper_block_exponential_equals_the_assembled_exponential_bit_for_bit() {
+        let budget = DenseExponentialBudget {
+            max_dimension: 64, max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX,
+        };
+        let mut seed = 0x6a09_e667_f3bc_c909_u64;
+        let mut entries = |count: usize, size: f64| -> Vec<f64> {
+            (0..count).map(|i| {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                if i % 7 == 3 { 0.0 } else { ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * size }
+            }).collect()
+        };
+        let assemble = |blocks: &UpperBlocks, d: usize| -> Vec<f64> {
+            let n = 2 * d;
+            let mut a = vec![0.0; n * n];
+            for i in 0..d {
+                for j in 0..d {
+                    a[i * n + j] = blocks.first[i * d + j];
+                    a[i * n + d + j] = blocks.cross[i * d + j];
+                    a[(d + i) * n + d + j] = blocks.last[i * d + j];
+                }
+            }
+            a
+        };
+        // Norms from inside the series radius (no squaring) to dozens of squarings.
+        for d in [1, 2, 3, 5, 8, 13] {
+            for size in [0.05, 1.0, 40.0, 3.0e5] {
+                let operator = UpperBlocks {
+                    first: entries(d * d, size), cross: entries(d * d, size), last: entries(d * d, size),
+                };
+                let full = exponential_with_budget(&assemble(&operator, d), 2 * d, budget);
+                let blocks = upper_block_exponential_with_budget(&operator, d, budget);
+                match (full, blocks) {
+                    (Ok(full), Ok(blocks)) => {
+                        let n = 2 * d;
+                        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(bits(&assemble(&blocks, d)), bits(&full), "d = {d}, size = {size}");
+                        // The assembled exponential's lower-left block is exactly +0.
+                        assert!((0..d * d).all(|k| full[(d + k / d) * n + k % d].to_bits() == 0), "d = {d}");
+                    },
+                    (Err(full), Err(blocks)) => assert_eq!(full.to_string(), blocks.to_string(), "d = {d}, size = {size}"),
+                    (full, blocks) => panic!("d = {d}, size = {size}: {full:?} vs {blocks:?}"),
+                }
+            }
+        }
+        // The same refusals: a nonfinite entry, a malformed block, and the 2d admission.
+        let mut bad = UpperBlocks { first: vec![1.0; 4], cross: vec![1.0; 4], last: vec![1.0; 4] };
+        bad.cross[3] = f64::NAN;
+        let mut assembled = assemble(&bad, 2);
+        assembled[7] = f64::NAN;
+        assert_eq!(upper_block_exponential_with_budget(&bad, 2, budget).unwrap_err().to_string(),
+            exponential_with_budget(&assembled, 4, budget).unwrap_err().to_string());
+        bad.cross = vec![1.0; 3];
+        assert!(upper_block_exponential_with_budget(&bad, 2, budget).is_err());
+        let small = DenseExponentialBudget { max_dimension: 3, ..budget };
+        let ok = UpperBlocks { first: vec![0.1; 4], cross: vec![0.1; 4], last: vec![0.1; 4] };
+        assert_eq!(upper_block_exponential_with_budget(&ok, 2, small).unwrap_err().to_string(),
+            exponential_with_budget(&assemble(&ok, 2), 4, small).unwrap_err().to_string());
     }
 }

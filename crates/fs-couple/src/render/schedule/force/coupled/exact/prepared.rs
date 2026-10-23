@@ -13,7 +13,7 @@
 //! real-time timing promise.
 
 use super::*;
-use fs_phs::linear_exact::{DenseExponentialBudget, exponential_with_budget};
+use fs_phs::linear_exact::{DenseExponentialBudget, UpperBlocks, exponential_with_budget, upper_block_exponential_with_budget};
 use crate::port_adoption::{DeferredTransfers, PortTransfer};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -616,19 +616,19 @@ fn gramian(
     d: usize, budget: DenseExponentialBudget, gate: &CancelGate,
 ) -> Result<Vec<f64>, ModalCouplingError> {
     poll(Some(gate))?;
-    let block = 2 * d;
-    let mut van_loan = vec![0.0; block * block];
+    // Van Loan's [[-A^T h, R h], [0, A h]] is block upper-triangular: its exponential is formed by blocks, the same bits as
+    // the assembled 2d x 2d exponential at half its products.
+    let mut van_loan = UpperBlocks { first: vec![0.0; d * d], cross: vec![0.0; d * d], last: vec![0.0; d * d] };
     for i in 0..d {
         for j in 0..d {
-            van_loan[i * block + j] = finite(-generator[j * d + i] * h)?;
-            van_loan[(d + i) * block + d + j] = finite(generator[i * d + j] * h)?;
-            van_loan[i * block + d + j] = finite(resistance[i * d + j] * h)?;
+            van_loan.first[i * d + j] = finite(-generator[j * d + i] * h)?;
+            van_loan.last[i * d + j] = finite(generator[i * d + j] * h)?;
+            van_loan.cross[i * d + j] = finite(resistance[i * d + j] * h)?;
         }
     }
-    let exponential = exponential_with_budget(&van_loan, block, budget).map_err(ModalCouplingError::Propagation)?;
-    let e: Vec<_> = (0..d * d).map(|i| exponential[(d + i / d) * block + d + i % d]).collect();
+    let UpperBlocks { cross, last: e, .. } = upper_block_exponential_with_budget(&van_loan, d, budget)
+        .map_err(ModalCouplingError::Propagation)?;
     matrix_agrees(&e, &levels[0], d, "prepared loss/transition short-interval disagreement")?;
-    let cross: Vec<_> = (0..d * d).map(|i| exponential[(i / d) * block + d + i % d]).collect();
     let transpose: Vec<_> = (0..d * d).map(|i| e[(i % d) * d + i / d]).collect();
     let mut w = product(&transpose, &cross, d, gate)?;
     for level in levels.iter().take(levels.len() - 1) {
