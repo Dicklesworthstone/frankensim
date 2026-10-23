@@ -478,6 +478,25 @@ impl ResolvedScalarProperty {
             })
     }
 
+    /// Whether this source is a static scalar at the complete resolved context.
+    ///
+    /// Every declared value axis and applicability bound must describe fixed
+    /// absolute temperature, pressure, composition, moisture, mass concentration
+    /// or amount concentration. External roles require explicit static quantity
+    /// semantics, except the legacy absolute-temperature coordinate `T`.
+    /// Field, frequency, strain, stress and rate dependence or restrictions refuse,
+    /// including applicability-only restrictions on a constant scalar.
+    ///
+    /// This classifies one source snapshot; it neither proves support between
+    /// queries nor evolves a physical coordinate. Consumers must hold this
+    /// context fixed or explicitly account for the work, entropy and history
+    /// associated with changing a coefficient. Original source axes and receipts
+    /// are retained; no new constitutive claim is inferred.
+    #[must_use]
+    pub fn is_static_at_fixed_external_conditions(&self) -> bool {
+        self.has_only_fixed_external_conditions(None, false)
+    }
+
     /// Whether this source supplies a constant coefficient when temperature is
     /// held at the resolved state. Accepts validity-wide scalar constants or
     /// positive absolute-temperature curves. A semantic AbsoluteTemperature/Static

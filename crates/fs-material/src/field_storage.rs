@@ -8,8 +8,11 @@
 //!
 //! The model is isotropic, linear, nondispersive and lossless. Fringing, leakage,
 //! saturation, hysteresis, dielectric loss and geometry evolution require other
-//! laws. Temperature-only source curves may be resolved at a fixed temperature;
-//! frequency/field-dependent curves cannot be frozen into linear storage.
+//! laws. Source curves and surfaces may be resolved at fixed temperature,
+//! pressure, composition, moisture and concentration, with typed external roles.
+//! Frequency, field, strain or stress dependence cannot be frozen into linear
+//! storage. These are snapshots; evolving a coefficient requires its parameter
+//! work and, where relevant, thermal entropy to be accounted by the caller.
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
@@ -65,72 +68,17 @@ fn coefficient(
     let property = material.property(name).ok_or(FieldStorageError::Invalid(
         "missing or ambiguous linear field-storage property",
     ))?;
+    // Reuse the material-wide source-domain policy: every value axis AND every
+    // applicability bound must describe a fixed physical context. In particular,
+    // pressure is not solid stress and composition/moisture are not strain just
+    // because their dimensions happen to agree. Frequency applicability is not
+    // admitted for this nondispersive time-domain storage law, even for a scalar.
     if property.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !property.is_constant_at_fixed_temperature()
+        || !property.is_static_at_fixed_external_conditions()
     {
         return Err(FieldStorageError::Invalid(
-            "linear field storage needs an absolute SI scalar constant or temperature-only coefficient",
+            "linear field storage requires an absolute SI scalar at fixed external conditions, without frequency, field, strain or stress dependence or bounds",
         ));
-    }
-    // A time-domain RLC reduction has no frequency-domain admission or field
-    // amplitude tracker. Even a constant value with such a restricted support
-    // must not turn a point measurement into an unrestricted storage law.
-    if property.angular_frequency_band_rad_s()?.is_some() {
-        return Err(FieldStorageError::Invalid(
-            "frequency-bounded field storage needs a dispersion-aware circuit model",
-        ));
-    }
-    for (axis, _) in &property.answer().receipt.query_point {
-        let quantity = property.answer().receipt.axis_quantities.get(axis);
-        if property
-            .answer()
-            .evidence
-            .model
-            .validity
-            .bound(axis)
-            .is_some()
-            && axis != "T"
-            && quantity.is_none()
-        {
-            return Err(FieldStorageError::Invalid(
-                "bounded non-temperature storage coordinates need explicit quantity descriptors",
-            ));
-        }
-        if quantity.is_some_and(|q| q.dims() == fs_qty::Frequency::DIMS)
-            && property
-                .answer()
-                .evidence
-                .model
-                .validity
-                .bound(axis)
-                .is_some()
-        {
-            return Err(FieldStorageError::Invalid(
-                "rate-bounded field storage needs an operating-frequency model",
-            ));
-        }
-        let field_axis = quantity.is_some_and(|q| {
-            [
-                Dims([1, 1, -3, 0, -1, 0]), // electric field [V/m]
-                Dims([-2, 0, 1, 0, 1, 0]),  // electric displacement [C/m2]
-                Dims([0, 1, -2, 0, -1, 0]), // magnetic flux density [T]
-                Dims([-1, 0, 0, 0, 1, 0]),  // magnetic field strength [A/m]
-            ]
-            .contains(&q.dims())
-        }) || quantity.is_none() && ["E", "D", "B", "H"].contains(&axis.as_str());
-        if field_axis
-            && property
-                .answer()
-                .evidence
-                .model
-                .validity
-                .bound(axis)
-                .is_some()
-        {
-            return Err(FieldStorageError::Invalid(
-                "field-bounded source needs an operating-field admission model",
-            ));
-        }
     }
     positive(
         property.value_si(),
@@ -140,9 +88,10 @@ fn coefficient(
 
 /// Absolute scalar permeability for a linear isotropic lossless field owner.
 /// Shares the exact source/model admission used by the circuit inductance:
-/// temperature may be fixed at the resolved state, while frequency/field
-/// dependence and operating-field restrictions require a different model.
-/// The original material bundle remains owned by the caller.
+/// temperature and typed pressure/composition/moisture/concentration may be
+/// fixed at the resolved state. Frequency, field, strain and stress dependence
+/// or bounds require a different model. The original bundle remains owned by
+/// the caller; changing its coefficient is not a zero-work storage update.
 pub fn linear_magnetic_permeability(
     material: &ResolvedMaterialStatePoint,
 ) -> Result<f64, FieldStorageError> {
