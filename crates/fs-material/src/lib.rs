@@ -51,6 +51,8 @@ pub mod plane_stress_viscosity;
 pub mod plastic;
 pub mod porous;
 pub mod section;
+/// Laminate (layered) plate/shell sections (IRP M1.2-W7).
+pub mod laminate;
 /// Temperature refresh of complete source-bound layered mechanical sections.
 pub mod section_temperature;
 /// Source-bound effective sheet mass, membrane and independent bending response.
