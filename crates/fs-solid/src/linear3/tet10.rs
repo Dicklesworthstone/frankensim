@@ -163,7 +163,7 @@ pub fn tet10_point(
 }
 
 impl QuadraticTetProblem<'_> {
-    fn validate(&self, cx: &Cx<'_>) -> Result<(), TetElasticError> {
+    fn validate(&self, require_free_dofs: bool, cx: &Cx<'_>) -> Result<(), TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         self.quadrature.validate()?;
         if self.nodes_m.is_empty() || self.elements.is_empty() {
@@ -214,7 +214,7 @@ impl QuadraticTetProblem<'_> {
                 maximum: self.budget.maximum_free_dofs,
             });
         }
-        if requested == 0 {
+        if require_free_dofs && requested == 0 {
             return Err(TetElasticError::NoFreeDofs);
         }
         for (node, p) in self.nodes_m.iter().enumerate() {
@@ -265,7 +265,7 @@ impl QuadraticTetProblem<'_> {
     /// Assemble into the same `(K,M)` type as P1. Each element and each
     /// quadrature point is a cancellation boundary. No partial result escapes.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
-        self.validate(cx)?;
+        self.validate(true, cx)?;
         let kq = duffy_quadrature(self.quadrature.stiffness_points_per_dir);
         let mq = duffy_quadrature(self.quadrature.mass_points_per_dir);
         super::isoparametric::assemble::<10, 30, _>(
@@ -303,7 +303,8 @@ impl QuadraticTetProblem<'_> {
     ///
     /// The result is directly usable with the existing stiffness and solver
     /// owners: `K u = f_external + reduced_force_n`. Full force rows retain
-    /// constrained contributions. Neither geometry nor material history changes,
+    /// constrained contributions, including when every degree of freedom is fixed.
+    /// Neither geometry nor material history changes,
     /// and a refusal/cancellation publishes no partial load. Quadratic thermal
     /// stress recovery and geometric prestress remain separate capabilities.
     pub fn assemble_thermal_load(
@@ -311,7 +312,7 @@ impl QuadraticTetProblem<'_> {
         thermal_strains: TetThermalStrainField<'_>,
         cx: &Cx<'_>,
     ) -> Result<TetThermalLoad, TetElasticError> {
-        self.validate(cx)?;
+        self.validate(false, cx)?;
         super::isoparametric::thermal_load::<10, 30, _>(
             self.nodes_m,
             self.elements,

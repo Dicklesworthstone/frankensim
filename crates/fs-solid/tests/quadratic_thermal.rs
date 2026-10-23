@@ -237,6 +237,10 @@ fn g0_source_mismatch_shape_budget_and_constrained_loads_are_preserved() {
                 .unwrap();
             assert!(load.reduced_force_n.is_empty());
             assert!(load.free_dofs.is_empty());
+            assert!(matches!(
+                problem.assemble(cx),
+                Err(TetElasticError::NoFreeDofs)
+            ));
             // Fully restrained expansion has sigma_xx=-E*epsilon/(1-2 nu).
             let face_force: f64 = mesh
                 .nodes_m
@@ -276,6 +280,28 @@ fn g0_source_mismatch_shape_budget_and_constrained_loads_are_preserved() {
         assert!(matches!(
             problem.assemble_thermal_load(TetThermalStrainField::PerElement(&[]), cx),
             Err(TetElasticError::ThermalStrainCountMismatch { .. })
+        ));
+        let fixed: Vec<_> = (0..3 * nodes.len()).collect();
+        let restrained = QuadraticTetProblem {
+            fixed_dofs: &fixed,
+            ..problem
+        };
+        let load = restrained
+            .assemble_thermal_load(TetThermalStrainField::Uniform(&state), cx)
+            .unwrap();
+        assert_eq!(load.full_equivalent_force_n.len(), 3 * nodes.len());
+        assert!(load.reduced_force_n.is_empty());
+        assert!(load.free_dofs.is_empty());
+        let face_force: f64 = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p[0] == 1.0)
+            .map(|(i, _)| load.full_equivalent_force_n[3 * i])
+            .sum();
+        assert!((face_force - 4000.0).abs() < 1e-9);
+        assert!(matches!(
+            restrained.assemble(cx),
+            Err(TetElasticError::NoFreeDofs)
         ));
     });
 }

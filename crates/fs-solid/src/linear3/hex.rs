@@ -219,6 +219,7 @@ impl HexElasticProblem<'_> {
     fn validate<const N: usize>(
         &self,
         elements: &[[usize; N]],
+        require_free_dofs: bool,
         cx: &Cx<'_>,
     ) -> Result<(), TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
@@ -272,7 +273,7 @@ impl HexElasticProblem<'_> {
                 maximum: self.budget.maximum_free_dofs,
             });
         }
-        if requested == 0 {
+        if require_free_dofs && requested == 0 {
             return Err(TetElasticError::NoFreeDofs);
         }
         for (node, p) in self.nodes_m.iter().enumerate() {
@@ -352,7 +353,7 @@ impl HexElasticProblem<'_> {
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
         match self.elements {
             HexConnectivity::Hex20(elements) => {
-                self.validate(elements, cx)?;
+                self.validate(elements, true, cx)?;
                 let q = self.quadrature.points()?;
                 super::isoparametric::assemble::<20, 60, _>(
                     self.nodes_m,
@@ -375,7 +376,7 @@ impl HexElasticProblem<'_> {
                 )
             }
             HexConnectivity::Hex27(elements) => {
-                self.validate(elements, cx)?;
+                self.validate(elements, true, cx)?;
                 let q = self.quadrature.points()?;
                 super::isoparametric::assemble::<27, 81, _>(
                     self.nodes_m,
@@ -406,7 +407,8 @@ impl HexElasticProblem<'_> {
     /// eigenstrain must refer to that element's exact elastic material state.
     ///
     /// The shared load carrier supplies `K u = f_external + f_thermal` to the
-    /// existing solver and retains full rows at supports. This does not update
+    /// existing solver and retains full rows at supports, including fully fixed
+    /// meshes with an empty reduced force vector. This does not update
     /// geometry, introduce thermal stress recovery, or imply an error bound on
     /// curved-element quadrature. Cancellation never publishes partial forces.
     pub fn assemble_thermal_load(
@@ -416,7 +418,7 @@ impl HexElasticProblem<'_> {
     ) -> Result<TetThermalLoad, TetElasticError> {
         match self.elements {
             HexConnectivity::Hex20(elements) => {
-                self.validate(elements, cx)?;
+                self.validate(elements, false, cx)?;
                 let q = self.quadrature.points()?;
                 super::isoparametric::thermal_load::<20, 60, _>(
                     self.nodes_m,
@@ -440,7 +442,7 @@ impl HexElasticProblem<'_> {
                 )
             }
             HexConnectivity::Hex27(elements) => {
-                self.validate(elements, cx)?;
+                self.validate(elements, false, cx)?;
                 let q = self.quadrature.points()?;
                 super::isoparametric::thermal_load::<27, 81, _>(
                     self.nodes_m,
