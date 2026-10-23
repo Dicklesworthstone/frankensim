@@ -2,7 +2,9 @@
 //!
 //! Geometry, installed tension, supports, rim friction and snare-wire laws
 //! remain independent declarations. Source-bound bending viscosity explicitly
-//! replaces T60 loss when selected. A material swap never retunes pitch,
+//! replaces T60 loss when selected. Drum heads built from imported cards need
+//! that, or a declared stated-unknown film loss; they never fall back to the
+//! preset T60. A material swap never retunes pitch,
 //! rescales geometry to preserve mass, or claims a new measured decay time.
 
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -14,13 +16,28 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_isotropic_elastic_state_point, resolve_material_state_point,
 };
 use fs_qty::{
-    DynViscosity, QuantitySpec,
+    DynViscosity, Pressure, QuantitySpec,
     semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 use std::sync::Arc;
 
 /// Aggregate import budget; the canonical material-pack decoder owns the wire format.
 pub const MAX_MATERIAL_PACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// A drum built from imported head-film cards that make no loss claim and
+/// declare none refuses with this; the recording-fitted T60 is not a fallback.
+pub const FILM_LOSS_REFUSAL: &str = "head film loss: the imported head-film cards make no loss claim; select a sourced bending loss, or declare the film loss a STATED UNKNOWN entered as 0 (KitMaterials::with_stated_unknown_film_loss); the recording-fitted head T60 is not a fallback";
+
+/// Carried by every drum built under that declaration, in its notes and
+/// `info_json`. No edge or hoop loss law exists either; it is entered as 0 too.
+pub const FILM_LOSS_STATED_UNKNOWN_RECEIPT: &str = "head film and edge loss: STATED UNKNOWN, entered as 0; omits the measured high-mode excess loss; T60s above the first two modes are upper bounds";
+
+/// Directional in-plane moduli a film card may carry beside its isotropic
+/// one; the isotropic head's error is their spread, stated in the receipt.
+pub const IN_PLANE_MODULI: [&str; 2] = [
+    "young_modulus_machine_direction",
+    "young_modulus_transverse_direction",
+];
 
 /// The primary and secondary vibrating surfaces and one spherical impactor.
 /// The complete resolved bundles retain material/card identities, query points,
@@ -35,6 +52,10 @@ pub struct KitMaterials {
     impact_loss_s_m: f64,
     packs: Vec<Arc<NormalizedMaterialCardPack>>,
     bending_loss: Option<[(PlaneStressViscosity, f64); 2]>,
+    film_loss_stated_unknown: bool,
+    /// Machine- and transverse-direction moduli [Pa] of each surface's card
+    /// at the same state point, when the card carries both.
+    in_plane_moduli: [Option<(f64, f64)>; 2],
 }
 
 impl KitMaterials {
@@ -74,6 +95,8 @@ impl KitMaterials {
             impact_loss_s_m,
             packs: Vec::new(),
             bending_loss: None,
+            film_loss_stated_unknown: false,
+            in_plane_moduli: [None, None],
         };
         // Refuse a nonrepresentable contact before building any operators.
         let crate::Law::Power { k, .. } = result.impact_law();
@@ -93,6 +116,11 @@ impl KitMaterials {
         secondary: PlaneStressViscosity,
         angles_rad: [f64; 2],
     ) -> Result<Self, String> {
+        if self.film_loss_stated_unknown {
+            return Err(
+                "a sourced bending loss and a stated-unknown film loss are exclusive".into(),
+            );
+        }
         for (elastic, viscous) in [(&self.primary, &primary), (&self.secondary, &secondary)] {
             let (a, b) = (elastic.resolved(), viscous.source());
             let same_point = a.query_point().len() == b.query_point().len()
@@ -206,6 +234,23 @@ impl KitMaterials {
         self.bending_loss.as_ref().map(|v| (&v[1].0, v[1].1))
     }
 
+    /// Declare that the head films' loss is unknown and enter it as zero; the
+    /// drum then carries [`FILM_LOSS_STATED_UNKNOWN_RECEIPT`]. Without this or
+    /// a sourced bending loss, a drum built from these cards refuses with
+    /// [`FILM_LOSS_REFUSAL`]. Cymbal and hi-hat losses are not affected.
+    pub fn with_stated_unknown_film_loss(mut self) -> Result<Self, String> {
+        if self.bending_loss.is_some() {
+            return Err(
+                "a sourced bending loss and a stated-unknown film loss are exclusive".into(),
+            );
+        }
+        self.film_loss_stated_unknown = true;
+        Ok(self)
+    }
+    pub const fn film_loss_is_stated_unknown(&self) -> bool {
+        self.film_loss_stated_unknown
+    }
+
     /// Broadband time stepping cannot use a source characterized only at its
     /// query frequency. Require both selected surfaces' coefficient domains to
     /// cover DC through the selected INTERNAL Nyquist frequency, including
@@ -286,8 +331,54 @@ impl KitMaterials {
             striker_tip_radius_m,
             impact_loss_s_m,
         )?;
+        // Optional: a card without both directional claims states none.
+        let directional = |pack: &NormalizedMaterialCardPack| -> Option<(f64, f64)> {
+            let requirements = IN_PLANE_MODULI
+                .iter()
+                .map(|name| {
+                    ScalarPropertyRequirement::try_new(
+                        *name,
+                        Pressure::DIMS,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let resolved = resolve_material_state_point(
+                pack.card(),
+                point,
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .ok()?;
+            Some((
+                resolved.property(IN_PLANE_MODULI[0])?.value_si(),
+                resolved.property(IN_PLANE_MODULI[1])?.value_si(),
+            ))
+        };
+        result.in_plane_moduli = [directional(&primary), directional(&secondary)];
         result.packs = vec![primary, secondary, striker];
         Ok(result)
+    }
+
+    /// One line per surface whose card carries directional moduli: the
+    /// isotropic head's reduction and its spread, the size of its error.
+    pub fn isotropic_reduction_notes(&self) -> Vec<String> {
+        [("batter", &self.primary, self.in_plane_moduli[0]), ("resonant", &self.secondary, self.in_plane_moduli[1])]
+            .into_iter()
+            .filter_map(|(label, surface, moduli)| {
+                let (md, td) = moduli?;
+                let (e, mean) = (surface.young_modulus_pa(), 0.5 * (md + td));
+                let rule = if (e - mean).abs() <= 1e-9 * mean { "mean(MD, TD)" } else { "the card's isotropic claim" };
+                Some(format!(
+                    "isotropic {label} head: E = {rule} = {:.1} MPa; MD/TD = {:.1} / {:.1} MPa (+/- {:.1} %)",
+                    e * 1e-6,
+                    md * 1e-6,
+                    td * 1e-6,
+                    50.0 * (md - td).abs() / mean
+                ))
+            })
+            .collect()
     }
 
     /// Browser import at a declared absolute material temperature. The axis
@@ -370,8 +461,14 @@ impl KitMaterials {
             };
             format!("{{\"model\":\"kelvin-voigt-plane-stress\",\"primary\":{},\"secondary\":{}}}", info(&loss[0]), info(&loss[1]))
         });
+        // The receipt is a fixed ASCII constant without quotes or backslashes.
+        let film = if self.film_loss_stated_unknown {
+            format!("\"{FILM_LOSS_STATED_UNKNOWN_RECEIPT}\"")
+        } else {
+            "null".into()
+        };
         format!(
-            "{{\"primary\":{},\"secondary\":{},\"striker\":{},\"strikerVolumeM3\":{},\"strikerMassKg\":{},\"strikerTipRadiusM\":{},\"impactLossSM\":{},\"importedPacks\":{},\"bendingLoss\":{}}}",
+            "{{\"primary\":{},\"secondary\":{},\"striker\":{},\"strikerVolumeM3\":{},\"strikerMassKg\":{},\"strikerTipRadiusM\":{},\"impactLossSM\":{},\"importedPacks\":{},\"bendingLoss\":{},\"filmLossStatedUnknown\":{}}}",
             surface(&self.primary),
             surface(&self.secondary),
             surface(&self.striker),
@@ -380,7 +477,8 @@ impl KitMaterials {
             self.striker_tip_radius_m,
             self.impact_loss_s_m,
             self.packs.len(),
-            loss
+            loss,
+            film
         )
     }
 }

@@ -51,7 +51,9 @@ mod wasm {
         }
         /// Canonical material-card packs for both surfaces and a spherical
         /// impactor. Mass, elasticity and Hertz stiffness follow the resolved
-        /// data; preset T60/support/rim/wire laws remain independent estimates.
+        /// data; preset support/rim/wire laws remain independent estimates, and
+        /// cymbals keep their preset T60. Drum heads refuse here: their film
+        /// loss needs a sourced or stated-unknown route below.
         #[wasm_bindgen(js_name = withMaterials)]
         pub fn with_materials(piece: &str, grid_scale: f64, gas_record: &str,
             surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
@@ -77,6 +79,38 @@ mod wasm {
                 frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
                 .map_err(|e| JsError::new(&e))?;
             Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// Material cards whose head films make no loss claim, with that loss
+        /// declared a stated unknown entered as 0 (`materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT`
+        /// rides in `info`). Without this or a sourced bending loss, drums refuse.
+        #[wasm_bindgen(js_name = withMaterialsStatedUnknownFilmLoss)]
+        pub fn with_materials_stated_unknown_film_loss(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_at_temperature(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)
+                .and_then(KitMaterials::with_stated_unknown_film_loss)
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// The same declaration with an independently sourced atmosphere.
+        #[wasm_bindgen(js_name = withMaterialsStatedUnknownFilmLossAndGasSources)]
+        pub fn with_materials_stated_unknown_film_loss_and_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64,
+            gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            let materials = KitMaterials::from_packs_at_temperature(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)
+                .and_then(KitMaterials::with_stated_unknown_film_loss)
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, gas_bytes, gas_lengths,
+                water_species, phase, Some(materials))
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }

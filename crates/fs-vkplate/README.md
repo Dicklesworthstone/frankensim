@@ -106,8 +106,27 @@ Missing, conflicting or out-of-domain properties refuse; imported files are
 bounded to 16 MiB in aggregate. These are new trajectories from rest, not an
 energy-conserving replacement of a ringing specimen.
 
-Loss and contact scope remains explicit. Without a selected material bending-loss
-law, installed T60 decay points remain the declared surface-loss prescription.
+Loss and contact scope remains explicit. Drum heads built from imported cards
+never keep the preset's T60 decay points, which were fitted to recordings. They
+need a selected material bending-loss law, or the declaration
+`KitMaterials::with_stated_unknown_film_loss`, which enters head film and edge
+loss as 0. Without either, `drum_with_materials` and every live drum refuse with
+`materials::FILM_LOSS_REFUSAL`. A declared drum carries
+`materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT` in its notes and in `info_json`
+(`filmLossStatedUnknown`): it omits the measured high-mode excess loss, so T60s
+above the first two modes are upper bounds. Declared muffle dashpots remain. In
+the browser, these are the `filmLoss: 'stated-unknown'` material option and
+`KitPiece.withMaterialsStatedUnknownFilmLoss`. Cymbals and hi-hats without a
+selected bending law still use their installed T60 decay points.
+
+`packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk` is a sourced head-film
+card, compiled with `xtask matdb-pack` from
+`data/matdb/seed-v1/head-film-pet-mylar-dupont-matsuzawa1959`. It holds density
+1390 kg/m³, Young's modulus 4.90 GPa (the mean of the datasheet's machine and
+transverse directions) and Poisson ratio 0.38 for biaxially oriented PET, admitted
+from 293.15 to 296.15 K, with material state
+`polyethylene-terephthalate solid biaxially-oriented-film 0`. It makes no loss
+claim: no citable audio-band loss of this film was found.
 Supports, snare-wire material/contact and hi-hat rim/friction laws remain separately
 declared presets. The striker's Hunt-Crossley loss is an independent input, not
 inferred from elastic modulus. The head radiation-resistance estimate retains
@@ -185,6 +204,56 @@ losses are independently declared and are excluded from this counter. The
 negative staggered correction is numerical stored energy; it is never reported
 as heat. This route does not yet update temperature, add nonlinear membrane
 viscosity, or implement a hereditary viscoelastic model.
+
+### Head radiation
+
+A drum whose film loss is a declared stated unknown takes its heads' exterior
+loss and air mass from `data/head-radiation-planar-baffled.tsv`, not from a
+fitted decay. The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)`: the exterior
+loading of clamped-membrane shapes `J_m(j_mn r/a) cos(m theta)` (with
+`j_mn <= 20`) on a disk in an infinite rigid baffle. `fs_bem::modal_loading`
+bakes it on the power-consistent Rayleigh route
+(`crates/fs-bem/examples/membrane_head_radiation.rs`):
+
+- A head of radius `a` in the instrument's gas sees
+  `Z = rho c a^2 zhat(omega a / c)`. Density and sound speed follow the current
+  gas record, live and offline.
+- The ka grid is log-spaced from 0.02 to 1, then has uniform steps of 0.2 up
+  to 12. A shape whose ka falls outside it, or in a supersonic span whose
+  reactance is not mass-like, is refused for that shape alone. It is never
+  clamped or extrapolated. The shape gets no exterior load, and the receipt
+  names it as an upper bound.
+- Only the `m >= 1` families load a head. Volume motion keeps the compact
+  monopole, the piston air mass and the cavity. The baked `m = 0` family only
+  prints `R_compact / R_baffled` per volume shape in the receipt.
+- Each grid-resolved shape, in both parities, gets a narrowband load at its own
+  loaded frequency. That frequency is a fixed point of
+  `omega^2 (M + Ma(omega)) = K` with the head's Rayleigh-quotient `K` and `M`.
+  The fixed point is refused beyond 100 iterations.
+  - Resistance `Re Z_rr` acts as an explicit backward-velocity force.
+  - Air mass `-Im Z_rr / omega` acts implicitly, through a Woodbury correction
+    shared with the Berger and piston-mass columns.
+- The in-family coupling is dropped. Its first-order back-reaction is printed
+  per shape, and its largest value per head.
+- Each shape's MAC against its family's Rayleigh-Ritz FD mode is printed. A
+  shape below 0.9 is flagged.
+- Shapes the grid cannot resolve (fewer than 6 spacings per wavelength) get no
+  exterior load. They are named and counted as upper bounds.
+- The table states its own checks:
+  - probe values of every shape (a mismatch refuses);
+  - midpoint samples, against which fs-vkplate measures its interpolation
+    error per interval and shape, and prints each shape's own error;
+  - the change between the two finest rungs of a 24/33/45-ring ladder;
+  - per-family resolution of the small-ka resistance. Below it no resistance
+    is applied, and the receipt prints the T60 bound.
+
+Scope, also printed in the receipt:
+- each head sits in its own infinite rigid baffle;
+- no shell diffraction;
+- no exterior coupling between the batter and resonant heads' `m >= 1` motion;
+- no cavity loading of `m >= 1` modes.
+
+The GPU and CUDA planners refuse a head with this load. Render it natively.
 
 ## Numerics
 

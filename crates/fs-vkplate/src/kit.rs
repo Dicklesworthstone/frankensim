@@ -96,7 +96,17 @@ fn instrument(rate: f64, gas: GasState, materials: Option<&KitMaterials>) -> Res
     }
 }
 
-fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
+/// Where a drum head's own loss comes from: the preset's recording-fitted T60
+/// (no imported materials), a sourced bending viscosity, or a stated unknown
+/// entered as zero.
+#[derive(Clone, Copy)]
+enum FilmLoss<'a> {
+    FittedT60,
+    Sourced(&'a PlaneStressViscosity, f64),
+    StatedUnknown,
+}
+
+fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64), loss: FilmLoss) -> Result<Body, String> {
     let t = hd.thickness;
     let th = move |_r: f64| t;
     let z = |_r: f64| 0.0;
@@ -105,9 +115,10 @@ fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, 
         young: elastic.0, poisson: elastic.1, density: elastic.2, tension: hd.tension, bending: true,
         nonlinear: Nonlinear::Berger, t60: hd.t60, support: None, muffle,
     };
-    match viscosity {
-        Some((law, angle)) => Body::plate_with_viscosity(name, &spec, law, angle),
-        None => Body::plate(name, &spec),
+    match loss {
+        FilmLoss::FittedT60 => Body::plate(name, &spec),
+        FilmLoss::Sourced(law, angle) => Body::plate_with_viscosity(name, &spec, law, angle),
+        FilmLoss::StatedUnknown => Body::plate_without_surface_loss(name, &spec),
     }
 }
 
@@ -126,29 +137,59 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
 }
 
 /// Fixed geometry and installed tension, with both head materials and a
-/// spherical striker resolved from source data. Selected material bending loss
-/// replaces surface T60; support/wire laws stay as declared in `s`. The supplied
-/// impactor replaces `s.striker` completely.
+/// spherical striker resolved from source data. The head loss is the selected
+/// material bending loss, or a declared stated unknown entered as zero (its
+/// receipt joins the notes); with neither the build refuses with
+/// `materials::FILM_LOSS_REFUSAL` instead of keeping the preset's fitted T60.
+/// Support/wire laws stay as declared in `s`. The supplied impactor replaces
+/// `s.striker` completely.
 pub fn drum_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
     build_drum(s, hits, gas, Some(materials))
 }
 
 fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
+    let (batter_loss, reso_loss) = match materials {
+        None => (FilmLoss::FittedT60, FilmLoss::FittedT60),
+        Some(m) => match (m.primary_bending_loss(), m.secondary_bending_loss()) {
+            (Some((a, angle_a)), Some((b, angle_b))) => (FilmLoss::Sourced(a, angle_a), FilmLoss::Sourced(b, angle_b)),
+            _ if m.film_loss_is_stated_unknown() => (FilmLoss::StatedUnknown, FilmLoss::StatedUnknown),
+            _ => return Err(crate::materials::FILM_LOSS_REFUSAL.into()),
+        },
+    };
     let rate = OUT_RATE * s.oversample as f64;
     let mut ins = instrument(rate, gas, materials)?;
     let primary = materials.map_or(MYLAR, |m| elastic_values(m.primary()));
     let secondary = materials.map_or(MYLAR, |m| elastic_values(m.secondary()));
     let mut notes = vec![];
-    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary, materials.and_then(KitMaterials::primary_bending_loss))?;
+    if let FilmLoss::StatedUnknown = batter_loss {
+        notes.push(crate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT.into());
+    }
+    if let Some(m) = materials {
+        notes.extend(m.isotropic_reduction_notes());
+    }
+    let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary, batter_loss)?;
     batter.origin = [0.0, 0.0, 0.0];
     batter.facing = 1.0;
-    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle, secondary, materials.and_then(KitMaterials::secondary_bending_loss))?;
+    let mut reso = head_body(&format!("{} resonant", s.name), s.radius, s.grid, s.reso, s.muffle, secondary, reso_loss)?;
     reso.origin = [0.0, 0.0, -s.depth];
     reso.facing = -1.0;
     notes.push(format!("heads: {} nodes each at {:.1} mm; (0,1) in vacuo {:.0} / {:.0} Hz", batter.n, s.grid * 1e3, f01(s.radius, s.batter, primary.2), f01(s.radius, s.reso, secondary.2)));
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
     batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
+    // With no film loss to hide behind, the non-volume shapes take their
+    // exterior resistance and air mass from the baked table, in this gas.
+    if let FilmLoss::StatedUnknown = batter_loss {
+        let table = crate::radiation::RadiationTable::shipped()?;
+        // The volume shapes stay on the compact monopole below; the receipt
+        // states its error against the baked baffled self-resistance.
+        let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance;
+        for (head, label) in [(&mut batter, "batter"), (&mut reso, "resonant")] {
+            for line in head.attach_head_radiation(&table, s.radius, &gas, Some(compact))? {
+                notes.push(format!("{label} {line}"));
+            }
+        }
+    }
     let bi = ins.add(batter);
     let ri = ins.add(reso);
     let port = s.port.map(|pr| {
@@ -215,6 +256,7 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         pick_oversample(&mut ins, 0.6)?
     } else { s.oversample };
     ins.validate_bending_loss_clock()?;
+    ins.validate_head_radiation()?;
     Ok(Piece { instrument: ins, oversample, settle, notes })
 }
 

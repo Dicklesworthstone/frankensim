@@ -40,6 +40,9 @@ pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 /// Immutable source-bound elastic data and physical striker geometry for kit builders.
 pub mod materials;
 
+/// Baked exterior modal loading of drum heads' non-volume motion.
+pub mod radiation;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -52,6 +55,9 @@ mod material_gas_tests;
 
 #[cfg(test)]
 mod material_tests;
+
+#[cfg(test)]
+mod radiation_tests;
 
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
@@ -444,6 +450,9 @@ pub struct Body {
     pub area: f64,
     /// Air mass loading the volume motion (one side: 8 rho a^3 / 3 for a baffled piston) [kg].
     pub air_mass: f64,
+    /// Exterior radiation resistance and air mass of non-volume head shapes.
+    head_radiation: Option<Box<radiation::ModalAirLoad>>,
+    radiated_j: f64,
 }
 
 /// C = G'G is the assembled curvature-rate damping matrix. Retaining G lets
@@ -473,7 +482,14 @@ fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
 
 impl Body {
     pub fn plate(name: &str, s: &PlateSpec) -> Result<Body, String> {
-        Self::plate_impl(name, s, None)
+        Self::plate_impl(name, s, None, true)
+    }
+
+    /// Same operators with no surface loss at all: `s.t60` is ignored, and
+    /// support and muffle dashpots remain. For a surface whose loss the caller
+    /// declares a stated unknown entered as zero.
+    pub fn plate_without_surface_loss(name: &str, s: &PlateSpec) -> Result<Body, String> {
+        Self::plate_impl(name, s, None, false)
     }
 
     /// Same elastic/geometry operators with a sourced reduced plane-stress
@@ -483,11 +499,11 @@ impl Body {
     pub fn plate_with_viscosity(name: &str, s: &PlateSpec,
         source: &PlaneStressViscosity, angle_rad: f64) -> Result<Body, String> {
         if !s.bending { return Err("bending viscosity requires the plate bending operator".into()); }
-        Self::plate_impl(name, s, Some((source, angle_rad)))
+        Self::plate_impl(name, s, Some((source, angle_rad)), false)
     }
 
     fn plate_impl(name: &str, s: &PlateSpec,
-        viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
+        viscosity: Option<(&PlaneStressViscosity, f64)>, t60_loss: bool) -> Result<Body, String> {
         let h = s.grid;
         let m = (s.radius / h).ceil() as i64 + 3;
         let inside = |i: i64, j: i64| {
@@ -669,7 +685,7 @@ impl Body {
             let om2 = (2.0 * PI * f).powi(2);
             if ddc > 0.0 { (-tt + (tt * tt + 4.0 * ddc * om2).sqrt()) / (2.0 * ddc) } else { om2 / tt }
         };
-        let (s0, s1) = if viscosity.is_some() { (0.0, 0.0) } else { sigmas(s.t60, &beta2) };
+        let (s0, s1) = if t60_loss { sigmas(s.t60, &beta2) } else { (0.0, 0.0) };
         let s0v: Vec<f64> = (0..n).map(|k| s0 + s0_extra[k]).collect();
         let area = PI * (s.radius * s.radius - s.hole * s.hole);
         let t_mean = thick.iter().sum::<f64>() / n as f64;
@@ -739,7 +755,7 @@ impl Body {
         Ok(Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
-            origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0,
+            origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
         })
     }
 
@@ -759,7 +775,7 @@ impl Body {
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
-            origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
+            origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
         }
     }
 
@@ -770,8 +786,41 @@ impl Body {
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None,
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
-            origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0,
+            origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
         }
+    }
+
+    /// Attach the exterior load of a clamped full circular head of `radius`
+    /// (its nodes centred on the rim's centre) from `table` in `gas`. Mass
+    /// and stiffness are this body's own; returns the receipt lines. The
+    /// optional compact net-volume resistance [Pa s/m^3] is only compared
+    /// with the baked volume shapes in the receipt.
+    pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
+        compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
+        if self.viscosity.is_some() || self.vk.is_some() || self.n < 2 {
+            return Err(format!("{}: head radiation applies to tensioned heads without a viscous bending law", self.name));
+        }
+        let (stiff, lap, tension) = (&self.stiff, &self.lap, self.tension);
+        let stiffness = |v: &[f64]| {
+            let mut out = vec![0.0; v.len()];
+            stiff.mul_add(v, 1.0, &mut out);
+            lap.mul_add(v, tension, &mut out);
+            out
+        };
+        let load = radiation::ModalAirLoad::new(table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance)?;
+        let receipt = load.receipt.clone();
+        self.head_radiation = Some(Box::new(load));
+        self.kc = 0.0; // the implicit air mass is prepared with the update coefficients
+        Ok(receipt)
+    }
+
+    pub fn head_radiation(&self) -> Option<&radiation::ModalAirLoad> {
+        self.head_radiation.as_deref()
+    }
+
+    /// Energy the head-radiation resistance removed, at centred velocity [J].
+    pub fn head_radiated_j(&self) -> f64 {
+        self.radiated_j
     }
 
     pub fn node_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -939,6 +988,21 @@ impl Body {
             })
             .collect();
         self.kc = k;
+        if let Err(e) = self.prepare_head_radiation(k) {
+            // Instrument::validate_head_radiation refuses this at build time
+            // for the instrument's own clock; another clock cannot reach here.
+            panic!("{e}");
+        }
+    }
+
+    /// Factor the implicit air-mass system at step `k` (with the volume
+    /// column when the piston air mass is present).
+    fn prepare_head_radiation(&mut self, k: f64) -> Result<(), String> {
+        let Some(load) = self.head_radiation.as_deref_mut() else { return Ok(()) };
+        let mu = if self.air_mass > 0.0 { self.air_mass / (self.area * self.area * k * k) } else { 0.0 };
+        let ia: Vec<f64> = (0..self.n).map(|i| k * k / (self.mass[i] * (1.0 + self.s0[i] * k))).collect();
+        let volume = (mu > 0.0).then_some((self.h * self.h, mu));
+        load.prepare(k, &ia, volume).map_err(|e| format!("{}: {e}", self.name))
     }
 
     fn predict(&mut self, k: f64) {
@@ -997,13 +1061,20 @@ impl Body {
         let mu = if self.air_mass > 0.0 { self.air_mass / (self.area * self.area * k2) } else { 0.0 };
         let vol_prev = if mu > 0.0 { self.w.iter().zip(&self.wp).map(|(a, b)| 2.0 * a - b).sum::<f64>() * h2 } else { 0.0 };
         let extra = if mu > 0.0 { mu * h2 * vol_prev } else { 0.0 };
+        if let Some(load) = self.head_radiation.as_deref_mut() {
+            load.load_rhs(&self.w[..n], &self.wp[..n], k);
+        }
         let (mut gy, mut gzg, mut uy, mut uzu, mut gzu) = (0.0, 0.0, 0.0, 0.0, 0.0);
         let (cf, w, wp, f, g) = (&self.cf[..n], &self.w[..n], &self.wp[..n], &self.f[..n], &self.g[..n]);
         let (wn, tmp) = (&mut self.wn[..n], &mut self.tmp[..n]);
         let s1 = self.s1 > 0.0;
+        let modal: &[f64] = self.head_radiation.as_deref().map_or(&[], |load| &load.rhs);
         for i in 0..n {
             let [ia, cw, cwp, cs1] = cf[i];
             let mut rhs = cw * w[i] - cwp * wp[i] + f[i] + extra;
+            if !modal.is_empty() {
+                rhs += modal[i];
+            }
             if s1 {
                 rhs += cs1 * tmp[i];
             }
@@ -1023,6 +1094,47 @@ impl Body {
                 uy += h2 * x;
                 uzu += h2 * h2 * ia;
             }
+        }
+        if let Some(load) = self.head_radiation.as_deref_mut() {
+            // Woodbury with U = [g, V], V = [u?, modal shapes], C = diag(1/4, C_V):
+            // with Q = C_V^-1 + V'D^-1V factored, b = V'D^-1 g and y = V'D^-1 r,
+            // c_g = (g'D^-1 r - b'Q^-1 y) / (4 + g'D^-1 g - b'Q^-1 b), c_V = Q^-1 (y - b c_g).
+            let prepared = load.prepared.as_ref().filter(|p| p.k == k)
+                .expect("prepared for this step with the update coefficients");
+            let off = usize::from(prepared.with_volume);
+            let size = off + load.cols.len();
+            if off == 1 {
+                (load.y[0], load.b[0]) = (uy, gzu);
+            }
+            for (r, col) in load.cols.iter().enumerate() {
+                load.y[off + r] = dot(col, wn);
+                load.b[off + r] = if scale > 0.0 { dot(col, tmp) } else { 0.0 };
+            }
+            radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
+            let cg = if scale > 0.0 {
+                load.w2[..size].copy_from_slice(&load.b[..size]);
+                radiation::cholesky_solve(&prepared.chol, size, &mut load.w2[..size]);
+                let cg = (gy - dot(&load.b[..size], &load.y[..size])) / (4.0 + gzg - dot(&load.b[..size], &load.w2[..size]));
+                for (y, w2) in load.y[..size].iter_mut().zip(&load.w2[..size]) {
+                    *y -= w2 * cg;
+                }
+                cg
+            } else {
+                0.0
+            };
+            load.corr.fill(if off == 1 { h2 * load.y[0] } else { 0.0 });
+            for (r, col) in load.cols.iter().enumerate() {
+                let c = load.y[off + r];
+                for (out, u) in load.corr.iter_mut().zip(col) {
+                    *out += c * u;
+                }
+            }
+            for i in 0..n {
+                let zg = if scale > 0.0 { tmp[i] } else { 0.0 };
+                wn[i] -= zg * cg + load.corr[i] * cf[i][0];
+            }
+            self.sav = scale > 0.0;
+            return;
         }
         // Woodbury with U = [g, u], C = diag(1/4, mu): solve (C^-1 + U' D^-1 U) c = U' D^-1 r
         let (cg, cu) = match (scale > 0.0, mu > 0.0) {
@@ -1058,6 +1170,11 @@ impl Body {
             bending_loss = dot(&viscous.scratch, &viscous.scratch) / (4.0 * k);
             viscous.last_j = bending_loss;
             viscous.dissipated_j += bending_loss;
+        }
+        if let Some(load) = self.head_radiation.as_deref_mut() {
+            let radiated = load.radiated(&self.wn, k);
+            self.radiated_j += radiated;
+            bending_loss += radiated;
         }
         if self.sav && self.vk.is_some() {
             // energy the loss terms removed over this step (the budget for raising psi next step):
@@ -1196,7 +1313,16 @@ impl Body {
         self.lap.mul_add(&self.w, self.tension, &mut kw);
         let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
         let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0);
-        kinetic + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
+        // Head radiation: the shapes' air kinetic energy, less the same
+        // backward-velocity damping correction as the viscous law.
+        let air = self.head_radiation.as_deref().map_or(0.0, |load| {
+            let p: Vec<f64> = load.cols.iter().map(|c| dot(c, &velocity)).collect();
+            let (mut a, mut b) = (vec![0.0; p.len()], vec![0.0; p.len()]);
+            radiation::ModalAirLoad::apply(&load.mass, &p, &mut a);
+            radiation::ModalAirLoad::apply(&load.damping, &p, &mut b);
+            0.5 * dot(&p, &a) - k * dot(&p, &b) / 4.0
+        });
+        kinetic + air + 0.5 * dot(&self.wp, &kw) + 0.5 * self.psi * self.psi - correction
     }
 
     /// Kinetic + linear potential + auxiliary (nonlinear) energy at the half step (diagnostics).
@@ -1962,7 +2088,23 @@ impl Instrument {
             worst.0 += viscous_rate2;
             worst.1.push_str(" + material bending viscosity");
         }
+        let radiation_rate2 = 2.0 * self.rate * self.bodies.iter().filter_map(|b| b.head_radiation.as_deref())
+            .map(|load| load.rate_bound).fold(0.0_f64, f64::max);
+        if radiation_rate2 > 0.0 {
+            worst.0 += radiation_rate2;
+            worst.1.push_str(" + head radiation");
+        }
         worst
+    }
+
+    /// Factor every head-radiation air-mass system at this instrument's own
+    /// step, refusing at build time what stepping could not use.
+    pub fn validate_head_radiation(&mut self) -> Result<(), String> {
+        let k = self.k();
+        for body in &mut self.bodies {
+            body.prepare_head_radiation(k)?;
+        }
+        Ok(())
     }
 
     fn viscosity_admission_rate2(&self, rate: f64) -> f64 {

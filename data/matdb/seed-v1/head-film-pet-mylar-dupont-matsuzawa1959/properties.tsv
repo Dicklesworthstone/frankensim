@@ -1,0 +1,24 @@
+frankensim.matdb-source.v1
+observation	dupont-92a	Mylar polyester film, gauge and type 92A (about 23 micrometres), DuPont Teijin Films typical values	Table 1 of H-37232-3: tensile modulus by ASTM D 882, machine direction 490 kg/mm^2 and transverse direction 510 kg/mm^2 (4805.2585 and 5001.3915 MPa with 1 kgf = 9.80665 N); density 1.390 g/cm^3 by ASTM D 1505; page 2: Poisson's ratio is typically 0.38 before yield	Typical performance data, which the bulletin says are not intended to be used as design data. Table 1 states no test temperature; the rows are admitted for 20 to 23 C (ASTM D 882's standard laboratory atmosphere is 23 C), where Matsuzawa's resonance moduli, which fall by about 4 percent from 15 to 30 C (his Fig. 5), bound the unknown test temperature's effect to about 1 percent. Drum heads are 7.5 to 10 mil (0.19 to 0.25 mm) films, thicker than this gauge, and the modulus is carried to them without thickness data. isotropic head: E = mean(MD, TD); MD/TD = 4805.2585 / 5001.3915 MPa (+/- 2.0 %), the isotropic young_modulus being the pack author's reduction (500 kg/mm^2 = 4903.325 MPa), not a datasheet value; the spread is the size of the error an isotropic head makes; the film's 4 percent in-plane anisotropy is not represented by it. This is a quasi-static tensile modulus: Matsuzawa 1959 found the Young's modulus of Mylar film independent of frequency within measurement error from about 100 to 4000 Hz at every temperature from 15 to 90 C, the basis for using it in vibration; no frequency axis is claimed. The pack makes NO loss claim: no frequency-dependent loss of biaxially oriented PET film in the audio band was found in a citable source
+observation	matsuzawa-1959	Mylar C polyester film, gauge 100 (nominal 1 mil; measured mean thickness 24.8 micrometres with nominal density 1.38 g/cm^3), strips cut at several angles to an arbitrary reference direction	Resonance of a cantilevered strip driven through a magnetic speaker armature, observed with a travelling microscope, from about 100 to 4000 c/s, in a constant-temperature box from room temperature to 90 C; a longitudinal method at 251 c/s for the effect of static tension	The abstract and sections 3.1 and 3.3: the frequency dependence of the Young's modulus is almost inappreciable; 5.2 x 10^10 dyne/cm^2 at 15 C in the maximum direction and 4.2 x 10^10 dyne/cm^2 in the minimum direction, falling to 3.3 and 2.8 x 10^10 at 90 C; sample-to-sample scatter of a few percent; the effect of static tension at 15 C and 251 c/s is very small. The paper measured no loss (its longitudinal method could have; the author stopped at the modulus)
+scalar	density	dupont-92a	density	1390	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	296.15	K
+scalar	young-modulus	dupont-92a	young_modulus	4903.325	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	T	293.15	296.15	K
+scalar	poisson-ratio	dupont-92a	poisson_ratio	0.38	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	T	293.15	296.15	K
+scalar	young-modulus-md	dupont-92a	young_modulus_machine_direction	4805.2585	MPa	constant
+uncertainty	young-modulus-md	unstated	-	-	-	-
+validity	young-modulus-md	T	293.15	296.15	K
+scalar	young-modulus-td	dupont-92a	young_modulus_transverse_direction	5001.3915	MPa	constant
+uncertainty	young-modulus-td	unstated	-	-	-	-
+validity	young-modulus-td	T	293.15	296.15	K
+scalar	resonance-modulus-max-15c	matsuzawa-1959	young_modulus_resonance_maximum_direction	5.2	GPa	constant
+uncertainty	resonance-modulus-max-15c	unstated	-	-	-	-
+validity	resonance-modulus-max-15c	T	288.15	288.15	K
+scalar	resonance-modulus-min-15c	matsuzawa-1959	young_modulus_resonance_minimum_direction	4.2	GPa	constant
+uncertainty	resonance-modulus-min-15c	unstated	-	-	-	-
+validity	resonance-modulus-min-15c	T	288.15	288.15	K

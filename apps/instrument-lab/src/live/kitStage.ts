@@ -256,8 +256,9 @@ export function mountLiveKit(root: HTMLElement): void {
   const strikerVolume = numberInput(9.054, 1e-6, 1e6);
   const tipRadius = numberInput(6, 1e-6, 1000);
   const impactLoss = numberInput(0.05, 0, 1000);
-  const lossMode = el("select", {}, el("option", { value: "preset" }, "Preset decay times"),
-    el("option", { value: "material" }, "Surface material viscosity"));
+  const lossMode = el("select", {}, el("option", { value: "preset" }, "Preset decay times (drum heads refuse)"),
+    el("option", { value: "material" }, "Surface material viscosity"),
+    el("option", { value: "stated-unknown" }, "Head film loss: stated unknown, entered as 0"));
   const lossFrequencyAxis = el("input", { type: "text", value: "f", required: "" });
   const lossFrequency = numberInput(1000, 1e-9, 1e9);
   const primaryLossAngle = numberInput(0, -180, 180);
@@ -278,7 +279,8 @@ export function mountLiveKit(root: HTMLElement): void {
       labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss),
       labelled("Structural decay", lossMode)), lossFields,
     el("p", { class: "small muted" }, "Import FrankenSim material-card pack files. Cards must supply density, Young's modulus and Poisson ratio at the declared solid temperature, with a typed absolute-temperature coordinate in kelvin when that coordinate is constrained. Primary applies to batter heads and upper cymbals; secondary applies to resonant heads and lower hi-hats, and defaults to primary."),
-    el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Structural decay uses the selection above. Supports, muffling, wire contacts and hi-hat rim friction retain their separate assumptions."));
+    el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Structural decay uses the selection above. Supports, muffling, wire contacts and hi-hat rim friction retain their separate assumptions."),
+    el("p", { class: "small muted" }, "Drum heads built from imported cards never fall back to the preset decay times, which were fitted to recordings. Without a sourced viscosity they refuse, unless you declare the head film loss a stated unknown: it is then entered as 0, edge loss too, and the result omits the measured high-mode excess loss, so decay times above the first two modes are upper bounds. Cymbals and the hi-hat keep their preset decay in every mode."));
   const materialStatus = el("p", { class: "small muted", role: "status" },
     "Material changes rebuild the kit from rest. Geometry and tuning remain the declared presets.");
   const materialForm = el("form", {}, labelled("Solid materials", materialMode), materialFields,
@@ -316,12 +318,13 @@ export function mountLiveKit(root: HTMLElement): void {
       || ![bendingLoss.frequencyHz, bendingLoss.primaryAngleRad, bendingLoss.secondaryAngleRad].every(Number.isFinite))) {
       throw new Error("Material loss needs a named frequency coordinate, positive finite frequency and finite orientations.");
     }
-    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K · ${bendingLoss ? "sourced bending loss" : "preset decay"}`,
+    const statedUnknown = lossMode.value === "stated-unknown";
+    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K · ${bendingLoss ? "sourced bending loss" : statedUnknown ? "head film loss stated unknown (0)" : "preset decay"}`,
       load: async () => {
         const [surfacePack, secondaryPack, strikerPack] = await Promise.all([
           primary.arrayBuffer(), secondary?.arrayBuffer(), striker.arrayBuffer(),
         ]);
-        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), surfacePack: new Uint8Array(surfacePack),
+        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), ...(statedUnknown ? { filmLoss: "stated-unknown" as const } : {}), surfacePack: new Uint8Array(surfacePack),
           ...(secondaryPack ? { secondaryPack: new Uint8Array(secondaryPack) } : {}), strikerPack: new Uint8Array(strikerPack) };
       } };
   }
@@ -628,6 +631,9 @@ export function mountLiveKit(root: HTMLElement): void {
         if (materials?.bendingLoss && r.info.materials?.bendingLoss?.model !== materials.bendingLoss.model) {
           throw new Error("The kit engine did not retain the selected material bending loss. Rebuild the live kit before applying it.");
         }
+        if (materials?.filmLoss && !r.info.materials?.filmLossStatedUnknown) {
+          throw new Error("The kit engine did not retain the stated-unknown film-loss declaration. Rebuild the live kit before applying it.");
+        }
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid
         const m2 = 2 * Math.ceil(r.radius / r.h) + 3;
@@ -650,7 +656,7 @@ export function mountLiveKit(root: HTMLElement): void {
         ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All eight pieces use this atmosphere.`;
       const solid = lives.get("kick")?.ready?.info.materials;
       materialStatus.textContent = solid
-        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All eight pieces use these material cards.`
+        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All eight pieces use these material cards.${solid.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : ""}`
         : "Standard kit materials are active.";
       overlay.hidden = true;
       kickDraw();

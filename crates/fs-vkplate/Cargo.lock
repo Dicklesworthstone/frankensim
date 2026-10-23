@@ -657,6 +657,7 @@ dependencies = [
  "fs-evidence",
  "fs-matdb",
  "fs-material",
+ "fs-math",
  "fs-qty",
 ]
 

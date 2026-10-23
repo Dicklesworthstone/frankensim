@@ -189,6 +189,9 @@ export interface KitMaterialOptions {
     primaryAngleRad: number;
     secondaryAngleRad: number;
   };
+  /** Without a sourced bending loss, drum heads refuse unless their film loss
+   *  is declared a stated unknown entered as 0 (exclusive with bendingLoss). */
+  filmLoss?: 'stated-unknown';
 }
 export interface KitMaterialInfo {
   primary: { stateIdentity: string; cardIdentity: string; densityKgM3: number; youngPa: number; poisson: number };
@@ -204,6 +207,8 @@ export interface KitMaterialInfo {
     primary: { stateIdentity: string; matrixPaS: number[]; omegaBandRadS: [number, number]; angleRad: number };
     secondary: { stateIdentity: string; matrixPaS: number[]; omegaBandRadS: [number, number]; angleRad: number };
   };
+  /** The stated-unknown receipt, or null when no such declaration was made. */
+  filmLossStatedUnknown?: string | null;
 }
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];

@@ -2,7 +2,7 @@
 //! Manufactured coefficients establish causal wiring, not a measured instrument.
 
 use super::*;
-use crate::materials::KitMaterials;
+use crate::materials::{FILM_LOSS_REFUSAL, FILM_LOSS_STATED_UNKNOWN_RECEIPT, KitMaterials};
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -146,6 +146,8 @@ fn pack_with_viscosity(
     .unwrap()
 }
 
+/// These manufactured cards make no loss claim, so the binding declares the
+/// head film loss a stated unknown; without that a drum refuses to build.
 fn binding(
     primary: &NormalizedMaterialCardPack,
     secondary: &NormalizedMaterialCardPack,
@@ -161,6 +163,7 @@ fn binding(
         0.005,
         0.05,
     )
+    .and_then(KitMaterials::with_stated_unknown_film_loss)
     .unwrap()
 }
 
@@ -665,4 +668,202 @@ fn g0_source_viscosity_participates_in_the_real_kit_clock_admission() {
         matches!(result, Err(error) if error.contains("material bending viscosity")
         && error.contains("8x oversampling"))
     );
+}
+
+#[test]
+fn g0_imported_head_films_without_a_loss_claim_refuse_by_name_instead_of_keeping_the_fitted_t60() {
+    let film = pack("film card without loss", 1390.0, 4e9, Some(0.38)).to_bytes();
+    let stick = pack("striker card", 800.0, 12e9, Some(0.3)).to_bytes();
+    let undeclared =
+        KitMaterials::from_packs_at_temperature(&film, &[], &stick, "T", 293.15, 9e-6, 0.005, 0.05)
+            .unwrap();
+    assert!(!undeclared.film_loss_is_stated_unknown());
+    assert!(
+        undeclared
+            .info_json()
+            .contains("\"filmLossStatedUnknown\":null")
+    );
+    let mut spec = kit::kick();
+    spec.grid *= 6.0;
+    assert_eq!(
+        kit::drum_with_materials(&spec, &[], standard_gas(), &undeclared)
+            .err()
+            .as_deref(),
+        Some(FILM_LOSS_REFUSAL)
+    );
+    for piece in ["kick", "snare", "snare-off", "tom-12", "tom-14"] {
+        let live =
+            live::Live::with_materials_record(piece, 8.0, "293.15 101325 0", undeclared.clone());
+        assert_eq!(live.err().as_deref(), Some(FILM_LOSS_REFUSAL), "{piece}");
+    }
+    // Cymbal and hi-hat loss is a separate bead: the same binding still builds them.
+    assert!(live::Live::with_materials_record("crash", 8.0, "293.15 101325 0", undeclared).is_ok());
+
+    // A sourced bending law and the declaration exclude each other in either order.
+    let source = pack_with_viscosity(
+        "film card with loss",
+        1390.0,
+        4e9,
+        Some(0.38),
+        Some(([1e4, 1e4, 4e3, 2e3, 0.0, 0.0], (0.0, 1e7), false)),
+    );
+    let viscous = viscous_binding(&source, 0.0);
+    assert!(viscous.clone().with_stated_unknown_film_loss().is_err());
+    let (law, angle) = viscous.primary_bending_loss().unwrap();
+    let declared = KitMaterials::from_packs_at_temperature(
+        &source.to_bytes(),
+        &[],
+        &stick,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+    )
+    .and_then(KitMaterials::with_stated_unknown_film_loss)
+    .unwrap();
+    assert!(matches!(
+        declared.with_bending_viscosity(law.clone(), law.clone(), [angle; 2]),
+        Err(error) if error.contains("exclusive")
+    ));
+}
+
+#[test]
+fn g1_a_stated_unknown_film_loss_is_zero_surface_loss_with_its_receipt_and_the_declared_muffle() {
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let declared = binding(&film, &film, &stick);
+    assert!(declared.film_loss_is_stated_unknown());
+    assert!(declared.info_json().contains(&format!(
+        "\"filmLossStatedUnknown\":\"{FILM_LOSS_STATED_UNKNOWN_RECEIPT}\""
+    )));
+    // The kick declares a muffle on both heads; its dashpot is not film loss.
+    let mut spec = kit::kick();
+    spec.grid *= 6.0;
+    let piece = kit::drum_with_materials(&spec, &[], standard_gas(), &declared).unwrap();
+    assert!(
+        piece
+            .notes
+            .iter()
+            .any(|note| note == FILM_LOSS_STATED_UNKNOWN_RECEIPT)
+    );
+    // The preset's Mylar has this card's density and elasticity, so the two
+    // builds differ only in the recording-fitted loss the declaration withholds.
+    let preset = kit::drum_with_gas(&spec, &[], standard_gas()).unwrap();
+    assert!(
+        preset
+            .notes
+            .iter()
+            .all(|note| note != FILM_LOSS_STATED_UNKNOWN_RECEIPT)
+    );
+    for head in 0..2 {
+        let (body, fitted) = (
+            &piece.instrument.bodies[head],
+            &preset.instrument.bodies[head],
+        );
+        assert_eq!(body.mass, fitted.mass);
+        assert_eq!(body.stiff.val, fitted.stiff.val);
+        assert_eq!(body.loss(), (0.0, 0.0));
+        assert_ne!(fitted.loss(), (0.0, 0.0));
+        let floor = fitted.loss().0;
+        for (s, f) in body.s0.iter().zip(&fitted.s0) {
+            assert!(
+                (s - (f - floor)).abs() <= 1e-12 * f,
+                "{s} against {f} - {floor}"
+            );
+        }
+        assert!(
+            body.s0.iter().any(|&s| s > 0.0),
+            "the muffle dashpot remains"
+        );
+        // The withheld fit is replaced by the baked exterior load, not by nothing.
+        assert!(body.head_radiation().is_some());
+        assert!(fitted.head_radiation().is_none());
+    }
+    for label in ["batter head radiation:", "resonant head radiation:"] {
+        assert!(
+            piece.notes.iter().any(|note| note.starts_with(label)),
+            "{label}"
+        );
+    }
+    let mut live =
+        live::Live::with_materials_record("tom-12", 8.0, "293.15 101325 0", declared).unwrap();
+    live.strike(0.03, 0.01, 1.0);
+    let mut out = [0.0f32; 1024];
+    live.render(&mut out, 1.0);
+    assert!(out.iter().all(|x| x.is_finite()) && out.iter().any(|x| x.abs() > 1e-9));
+}
+
+/// The head-film card compiled from data/matdb/seed-v1/head-film-pet-mylar-dupont-matsuzawa1959.
+const HEAD_FILM: &[u8] =
+    include_bytes!("../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk");
+
+#[test]
+fn g1_the_sourced_head_film_card_supplies_density_and_modulus_and_claims_no_loss() {
+    let stick = pack("film-card striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    let at = |temperature| {
+        KitMaterials::from_packs_at_temperature(
+            HEAD_FILM,
+            &[],
+            &stick,
+            "T",
+            temperature,
+            9e-6,
+            0.005,
+            0.05,
+        )
+    };
+    let film = at(293.15).unwrap();
+    near(film.primary().density_kg_m3(), 1390.0);
+    near(film.primary().young_modulus_pa(), 4903.325e6);
+    // The isotropic reduction and its directional spread are stated.
+    assert_eq!(
+        film.isotropic_reduction_notes(),
+        ["batter", "resonant"].map(|label| format!(
+            "isotropic {label} head: E = mean(MD, TD) = 4903.3 MPa; MD/TD = 4805.3 / 5001.4 MPa (+/- 2.0 %)"
+        ))
+    );
+    near(film.primary().poisson_ratio(), 0.38);
+    // The datasheet states no test temperature; the card admits 20 to 23 C only.
+    assert!(at(296.15).is_ok());
+    for temperature in [293.0, 296.2, 288.15] {
+        assert!(at(temperature).is_err(), "{temperature} K");
+    }
+    let loss = KitMaterials::from_packs_with_bending_loss(
+        HEAD_FILM,
+        &[],
+        &stick,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+        "frequency",
+        1000.0,
+        [0.0; 2],
+    );
+    assert!(loss.is_err(), "the card makes no loss claim");
+    let mut spec = kit::tom(12.0);
+    spec.grid *= 6.0;
+    assert_eq!(
+        kit::drum_with_materials(&spec, &[], standard_gas(), &film)
+            .err()
+            .as_deref(),
+        Some(FILM_LOSS_REFUSAL)
+    );
+    let declared = film.with_stated_unknown_film_loss().unwrap();
+    let piece = kit::drum_with_materials(&spec, &[], standard_gas(), &declared).unwrap();
+    assert!(
+        piece
+            .notes
+            .iter()
+            .any(|note| note == FILM_LOSS_STATED_UNKNOWN_RECEIPT)
+    );
+    assert!(
+        piece
+            .notes
+            .iter()
+            .any(|note| note.starts_with("isotropic batter head: E = mean(MD, TD)"))
+    );
+    assert_eq!(piece.instrument.bodies[0].loss(), (0.0, 0.0));
 }

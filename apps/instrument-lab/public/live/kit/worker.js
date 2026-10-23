@@ -13,6 +13,8 @@
 //       materials    canonical primary/secondary/striker card-pack bytes and
 //                    declared temperature + spherical-impactor geometry/loss
 //                    (KitMaterialOptions in mix.ts); no browser material laws.
+//                    Drum heads need its bendingLoss, or filmLoss 'stated-unknown'
+//                    (entered as 0, with a receipt); otherwise they refuse.
 //       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
@@ -135,6 +137,16 @@ function makePiece(name, scale, gasRecord, materials, gasSources) {
     }
     const inputs = [name, scale, gasRecord ?? '293.15 101325 0', surfacePack, secondaryPack,
       strikerPack, temperatureAxis, temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM];
+    if (materials.filmLoss !== undefined) {
+      if (materials.filmLoss !== 'stated-unknown' || materials.bendingLoss !== undefined) {
+        throw new Error("Head film loss is either a sourced bending loss or the declaration 'stated-unknown', not both.");
+      }
+      const constructor = gasSources ? 'withMaterialsStatedUnknownFilmLossAndGasSources' : 'withMaterialsStatedUnknownFilmLoss';
+      if (typeof KitPiece[constructor] !== 'function') {
+        throw new Error('This kit engine needs rebuilding with the stated-unknown film-loss route; the declaration was not applied.');
+      }
+      return KitPiece[constructor](...inputs, ...(gasSources ?? []));
+    }
     if (materials.bendingLoss !== undefined) {
       const loss = materials.bendingLoss;
       if (!loss || loss.model !== 'kelvin-voigt-plane-stress'

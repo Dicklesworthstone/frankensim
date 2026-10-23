@@ -45,15 +45,51 @@ fn shared_plan_refuses_a_batch_member_with_another_atmosphere() {
 }
 
 fn viscous_material(name: &str) -> fs_vkplate::materials::KitMaterials {
+    let pack = material_pack(name, true);
+    fs_vkplate::materials::KitMaterials::from_packs_with_bending_loss(
+        &pack,
+        &[],
+        &pack,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+        "frequency",
+        1000.0,
+        [0.3, -0.4],
+    )
+    .unwrap()
+}
+
+/// A manufactured film card; with `viscous`, also its six viscosity claims
+/// over a frequency coordinate (then every claim is bounded in frequency).
+fn material_pack(name: &str, viscous: bool) -> Vec<u8> {
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
-        PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
     };
     use fs_qty::{
         Density, Dims, DynViscosity, Pressure, QuantitySpec,
         semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
     };
     let mut claims = ClaimSet::new();
+    // A compiled pack retains at least one raw observation; this one is the
+    // manufactured fixture itself, not a measurement.
+    let artifact = fs_blake3::hash_domain("gpu-host-test", name.as_bytes());
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: name.into(),
+            method: "manufactured SI coefficients supplied by this test".into(),
+            artifact,
+            caveats: format!("manufactured GPU host fixture {name}, viscous {viscous}"),
+            provenance: Provenance {
+                source: format!("manufactured GPU host {name}"),
+                license: "CC0-1.0".into(),
+                artifact: Some(artifact),
+            },
+        })
+        .unwrap();
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -72,21 +108,28 @@ fn viscous_material(name: &str) -> fs_vkplate::materials::KitMaterials {
         ("plane_stress_viscosity_12", 2e4, DynViscosity::DIMS),
         ("plane_stress_viscosity_16", 0.0, DynViscosity::DIMS),
         ("plane_stress_viscosity_26", 0.0, DynViscosity::DIMS),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(key, ..)| viscous || !key.starts_with("plane_stress"))
+    {
+        let validity = fs_evidence::ValidityDomain::unconstrained()
+            .with_quantity("T", temperature, 273.15, 323.15);
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(key, dims),
                 value: PropertyValue::Scalar { value, dims },
-                validity: fs_evidence::ValidityDomain::unconstrained()
-                    .with_quantity("T", temperature, 273.15, 323.15)
-                    .with_quantity("frequency", frequency, 0.0, 64000.0),
+                validity: if viscous {
+                    validity.with_quantity("frequency", frequency, 0.0, 64000.0)
+                } else {
+                    validity
+                },
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 uncertainty: UncertaintyModel::Unstated,
-                observations: vec![],
+                observations: vec![observation],
                 provenance: Provenance {
                     source: format!("manufactured GPU host {name}/{key}"),
                     license: "CC0-1.0".into(),
-                    artifact: None,
+                    artifact: Some(artifact),
                 },
             })
             .unwrap();
@@ -94,14 +137,14 @@ fn viscous_material(name: &str) -> fs_vkplate::materials::KitMaterials {
     let normalized = NormalizedPack::new(
         name,
         "manufactured-gpu-host",
-        fs_blake3::hash_domain("gpu-host-test", name.as_bytes()),
+        artifact,
         "CC0-1.0 manufactured test",
         claims,
         vec![],
         vec![],
     )
     .unwrap();
-    let pack = NormalizedMaterialCardPack::new(
+    NormalizedMaterialCardPack::new(
         MaterialStateId {
             chemistry: name.into(),
             phase: "solid".into(),
@@ -111,21 +154,28 @@ fn viscous_material(name: &str) -> fs_vkplate::materials::KitMaterials {
         normalized,
     )
     .unwrap()
-    .to_bytes();
-    fs_vkplate::materials::KitMaterials::from_packs_with_bending_loss(
-        &pack,
-        &[],
-        &pack,
-        "T",
-        293.15,
-        9e-6,
-        0.005,
-        0.05,
-        "frequency",
-        1000.0,
-        [0.3, -0.4],
-    )
-    .unwrap()
+    .to_bytes()
+}
+
+#[test]
+fn gpu_plan_refuses_a_head_carrying_the_native_radiation_load() {
+    use fs_vkplate::materials::KitMaterials;
+    let pack = material_pack("stated-unknown film", false);
+    let materials =
+        KitMaterials::from_packs_at_temperature(&pack, &[], &pack, "T", 293.15, 9e-6, 0.005, 0.05)
+            .and_then(KitMaterials::with_stated_unknown_film_loss)
+            .unwrap();
+    let mut spec = kit::kick();
+    spec.grid *= 8.0;
+    let mut ins = kit::drum_with_materials(&spec, &[], standard_gas(), &materials)
+        .unwrap()
+        .instrument;
+    assert!(ins.bodies[0].head_radiation().is_some());
+    let image = ins.image();
+    assert!(matches!(
+        plan::Plan::new(&image, &ins, 1, 64, true),
+        Err(error) if error.contains("no head-radiation load")
+    ));
 }
 
 #[test]

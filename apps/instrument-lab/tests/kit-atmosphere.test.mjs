@@ -14,7 +14,7 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   missingWithGas = false, refuseGas = false, scales = [3, 5], materials,
   missingWithMaterials = false, refuseMaterials = false,
   missingWithBendingLoss = false, refuseBendingLoss = false, gasSources,
-  missingWithGasSources = false, refuseGasSources = false } = {}) {
+  missingWithGasSources = false, refuseGasSources = false, missingWithStatedUnknown = false } = {}) {
   const calls = [], messages = [], kept = [];
   let id = 0, active = 0, clock = 0, attached = 0, correctionCalls = 0;
   function piece(name, scale, record, materials) {
@@ -51,6 +51,17 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
       if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
       return piece(name, scale, record, { importedPacks: 3, bendingLoss: { model: 'kelvin-voigt-plane-stress' } });
     }
+    static withMaterialsStatedUnknownFilmLoss(name, scale, record, ...inputs) {
+      calls.push(['stated-unknown', name, scale, record, ...inputs]);
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3, filmLossStatedUnknown: 'receipt' });
+    }
+    static withMaterialsStatedUnknownFilmLossAndGasSources(name, scale, record, ...inputs) {
+      calls.push(['source-stated-unknown', name, scale, record, ...inputs]);
+      if (refuseGasSources) throw new Error('canonical gas source domain refused');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3, filmLossStatedUnknown: 'receipt' });
+    }
     static withGasSources(name, scale, record, ...inputs) {
       calls.push(['source-gas', name, scale, record, ...inputs]);
       if (refuseGasSources) throw new Error('canonical gas source domain refused');
@@ -73,6 +84,10 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   if (missingWithGas) KitPiece.withGas = undefined;
   if (missingWithMaterials) KitPiece.withMaterials = undefined;
   if (missingWithBendingLoss) KitPiece.withMaterialBendingLoss = undefined;
+  if (missingWithStatedUnknown) {
+    KitPiece.withMaterialsStatedUnknownFilmLoss = undefined;
+    KitPiece.withMaterialsStatedUnknownFilmLossAndGasSources = undefined;
+  }
   if (missingWithGasSources) {
     KitPiece.withGasSources = undefined;
     KitPiece.withMaterialsAndGasSources = undefined;
@@ -193,6 +208,46 @@ test('selected source loss cannot silently use old WASM, authored loss, or an un
   for (const loss of [null, {}, { ...bendingLoss, model: 'infer-from-density' },
     { ...bendingLoss, frequencyHz: NaN }, { ...bendingLoss, secondaryAngleRad: Infinity }]) {
     const result = await run(undefined, { materials: { ...materialInput, bendingLoss: loss } });
+    assert.equal(result.attached, 0);
+    assert.equal(result.calls.length, 0);
+    assert.equal(result.messages.at(-1).type, 'error');
+  }
+});
+
+test('a stated-unknown head film loss reaches only its own constructors, with or without source gas', async () => {
+  const materials = { ...materialInput, filmLoss: 'stated-unknown' };
+  for (const [record, gas, expected] of [[undefined, undefined, 'stated-unknown'],
+    [sourceRecord, true, 'source-stated-unknown']]) {
+    for (const options of [{}, { copies: false, slowFirst: true }, { refuseFine: true, scales: [2, 3] },
+      { missingWithMaterials: true }]) {
+      const result = await run(record, { ...options, materials, gasSources: gas && sourceInput() });
+      assert.equal(result.messages.at(-1).type, 'ready');
+      assert.ok(result.calls.length >= 2);
+      for (const call of result.calls) {
+        assert.equal(call[0], expected);
+        assert.deepEqual(call.slice(4, 12), [materialInput.surfacePack, materialInput.secondaryPack,
+          materialInput.strikerPack, 'T', 293.15, 9e-6, 0.005, 0.05]);
+      }
+      assert.equal(result.messages.at(-1).info.materials.filmLossStatedUnknown, 'receipt');
+    }
+  }
+});
+
+test('a film-loss declaration never reaches a preset-decay constructor or an older WASM', async () => {
+  const declared = { ...materialInput, filmLoss: 'stated-unknown' };
+  for (const gasSources of [undefined, sourceInput()]) {
+    const result = await run(gasSources ? sourceRecord : undefined,
+      { missingWithStatedUnknown: true, materials: declared, gasSources });
+    assert.equal(result.attached, 0);
+    assert.equal(result.messages.at(-1).type, 'error');
+    assert.match(result.messages.at(-1).message, /stated-unknown film-loss route/);
+    assert.equal(result.calls.length, 0);
+  }
+  const bendingLoss = { model: 'kelvin-voigt-plane-stress', frequencyAxis: 'frequency',
+    frequencyHz: 1000, primaryAngleRad: 0, secondaryAngleRad: 0 };
+  for (const materials of [{ ...materialInput, filmLoss: 'zero' }, { ...materialInput, filmLoss: null },
+    { ...declared, bendingLoss }]) {
+    const result = await run(undefined, { materials });
     assert.equal(result.attached, 0);
     assert.equal(result.calls.length, 0);
     assert.equal(result.messages.at(-1).type, 'error');
