@@ -1697,15 +1697,17 @@ impl LivePiano {
         self.string_materials.as_deref()
     }
 
-    /// Build with the historical declared room-air convenience medium.
+    /// Build in the built-in instruments' committed environment record
+    /// (`steinway_d::ENVIRONMENT_RECORD`, 20 C, 101325 Pa, 65 % RH): the same
+    /// gas the embedded board's wood moisture was prepared in.
     pub fn new(desc: &Description, cfg: Config) -> Result<Self, String> {
-        let gas = fs_material::gas::GasState::try_new(
-            &fs_material::gas::GasSpec::dry_air_ussa1976(),
-            293.15,
-            101_325.0,
-        )
-        .map_err(|e| e.to_string())?;
-        Self::new_with_gas(desc, cfg, gas)
+        let mut words = steinway_d::ENVIRONMENT_RECORD.split_ascii_whitespace();
+        let gas = fs_material::gas_species::input::read_gas_record(&mut words, None, None)
+            .map_err(|e| format!("environment record: {e}"))?;
+        if words.next().is_some() {
+            return Err("environment record has trailing fields".into());
+        }
+        Self::new_with_gas(desc, cfg, *gas.state())
     }
 
     /// Build the identical mechanical piano with an explicitly supplied gas.

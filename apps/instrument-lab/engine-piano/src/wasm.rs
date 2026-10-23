@@ -193,7 +193,8 @@ impl PianoEngine {
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
         substeps: usize, scale_csv: &str, tuning: &[f64]) -> Result<PianoEngine, JsError> {
         Self::with_atmosphere(sample_rate, board, board_coordinates, course_mode_budget,
-            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, "293.15 101325 0")
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning,
+            crate::refmods::steinway_d::ENVIRONMENT_RECORD.trim())
     }
 
     /// The same physical preparation in an explicit material atmosphere.
