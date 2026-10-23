@@ -227,6 +227,18 @@ fn original_curved_material_modes_receive_reciprocal_air_reaction() {
             loaded.source().body_radiation().unwrap().basis_identity()
         );
         assert_eq!(&report.gas, loaded.source().body_radiation().unwrap().gas());
+        let binding = loaded.source().body_radiation().unwrap();
+        let retained = binding.material_shell_bem().unwrap();
+        assert_eq!(retained.loading_identity, report.loading_identity);
+        assert_eq!(retained.basis_identity, report.basis_identity);
+        assert_eq!(retained.gas, report.gas);
+        assert_eq!(retained.options, report.options);
+        // Even the same numerical model, supplied through the raw API, does not
+        // establish that this source's closed-shell producer attached the load.
+        let raw = closed_bank(cx, gate, 700.0, 101_325.0)
+            .with_body_radiation_load(binding.model().clone(), 64, gate)
+            .unwrap();
+        assert!(raw.source().body_radiation().unwrap().material_shell_bem().is_none());
         assert_eq!(
             loaded.system().components()[1].modes(),
             bare.system().components()[1].modes()

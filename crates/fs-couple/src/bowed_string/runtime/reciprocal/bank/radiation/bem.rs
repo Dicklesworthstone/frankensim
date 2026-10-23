@@ -139,9 +139,15 @@ impl ReciprocalStringBank {
         gate: &CancelGate,
     ) -> Result<(Self, ShellBemReport), ShellBemError> {
         let (model, report) = self.prepare_material_shell_bem(options, gate)?;
-        let bank = self
+        let mut bank = self
             .with_body_radiation_load(model, options.maximum_poles, gate)
             .map_err(ShellBemError::Bank)?;
+        // Only this combined source-derived path can bind the preparation report
+        // to the load that is now present in the original mechanical owner.
+        let binding = bank.source.body_radiation.as_mut().ok_or(
+            ShellBemError::Invalid("computed shell load lost its source binding"),
+        )?;
+        binding.shell_bem = Some(report.clone());
         poll(gate)?;
         Ok((bank, report))
     }
@@ -194,51 +200,11 @@ impl ReciprocalStringBank {
                 "shell radiation must cover every original body mode within the shared passive port capacity",
             ));
         }
-        let mut parts = Vec::new();
-        if let Some(image) = &self.source.material_shell_image {
-            parts.push((image.source(), image.physical_modes()));
-        } else if let Some(image) = &self.source.material_shell_assembly_image {
-            for (part, rows) in image.source().components.iter().zip(image.physical_modes()) {
-                parts.push((&part.specimen, rows.as_slice()));
-            }
-        } else {
-            return Err(ShellBemError::Invalid(
-                "computed closed-body radiation requires an original material shell basis",
-            ));
-        }
-        let panels = parts
-            .iter()
-            .try_fold(0usize, |count, (shell, _)| {
-                count.checked_add(
-                    shell
-                        .pressure_surfaces()
-                        .map_or(shell.mesh().tris.len(), |s| s.exterior.len()),
-                )
-            })
-            .ok_or(ShellBemError::Invalid(
-                "shell exterior panel extent overflow",
-            ))?;
-        let p = panels as u64;
-        let n = modes.len() as u64;
-        let work = p
-            .checked_mul(p)
-            .and_then(|p2| p.checked_add(n).and_then(|sum| p2.checked_mul(sum)))
-            .and_then(|v| {
-                n.checked_mul(n)
-                    .and_then(|n2| p.checked_mul(n2))
-                    .and_then(|w| v.checked_add(w))
-            })
-            .and_then(|v| v.checked_mul(options.frequency_samples as u64))
-            .ok_or(ShellBemError::Invalid("complete BEM sweep extent overflow"))?;
-        if panels < 4
-            || panels > options.maximum_surface_panels
-            || work > options.maximum_sweep_terms
-        {
-            return Err(ShellBemError::Invalid(
-                "complete shell exterior exceeds its panel or sweep-work allowance",
-            ));
-        }
-        let (surface, fields) = surface_trace(&parts, modes.len(), gate)?;
+        let (surface, fields, work) = self.source.shell_surface_traces(
+            modes.len(), options.maximum_surface_panels, options.maximum_sweep_terms,
+            options.frequency_samples, gate,
+        )?;
+        let panels = surface.areas().len();
         let gas = self.source.gas;
         gas.validate_coherence()
             .map_err(|_| ShellBemError::Invalid("incoherent shell exterior gas"))?;
@@ -306,6 +272,71 @@ impl ReciprocalStringBank {
             resistance_rms_error: fitted.resistance_rms_error,
         };
         Ok((fitted.model, report))
+    }
+}
+
+impl super::super::MaterialStringBankSource {
+    /// One original geometry/normal-trace extraction shared by the air reaction
+    /// and its exterior observation. The complete source basis is retained.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn shell_surface_traces(
+        &self,
+        modes: usize,
+        maximum_surface_panels: usize,
+        maximum_sweep_terms: u64,
+        frequency_samples: usize,
+        gate: &CancelGate,
+    ) -> Result<(SpherePanels, Vec<Vec<f64>>, u64), ShellBemError> {
+        if modes == 0 || modes > crate::render::plate::impact::radiation::MAX_PORTS
+            || frequency_samples == 0 || !(4..=2048).contains(&maximum_surface_panels)
+        {
+            return Err(ShellBemError::Invalid("invalid complete shell trace/work dimensions"));
+        }
+        let mut parts = Vec::new();
+        if let Some(image) = &self.material_shell_image {
+            parts.push((image.source(), image.physical_modes()));
+        } else if let Some(image) = &self.material_shell_assembly_image {
+            for (part, rows) in image.source().components.iter().zip(image.physical_modes()) {
+                parts.push((&part.specimen, rows.as_slice()));
+            }
+        } else {
+            return Err(ShellBemError::Invalid(
+                "computed closed-body radiation requires an original material shell basis",
+            ));
+        }
+        let panels = parts
+            .iter()
+            .try_fold(0usize, |count, (shell, _)| {
+                count.checked_add(
+                    shell
+                        .pressure_surfaces()
+                        .map_or(shell.mesh().tris.len(), |s| s.exterior.len()),
+                )
+            })
+            .ok_or(ShellBemError::Invalid(
+                "shell exterior panel extent overflow",
+            ))?;
+        let p = panels as u64;
+        let n = modes as u64;
+        let work = p
+            .checked_mul(p)
+            .and_then(|p2| p.checked_add(n).and_then(|sum| p2.checked_mul(sum)))
+            .and_then(|v| {
+                n.checked_mul(n)
+                    .and_then(|n2| p.checked_mul(n2))
+                    .and_then(|w| v.checked_add(w))
+            })
+            .and_then(|v| v.checked_mul(frequency_samples as u64))
+            .ok_or(ShellBemError::Invalid("complete BEM sweep extent overflow"))?;
+        if panels < 4
+            || panels > maximum_surface_panels
+            || work > maximum_sweep_terms
+        {
+            return Err(ShellBemError::Invalid(
+                "complete shell exterior exceeds its panel or sweep-work allowance",
+            ));
+        }
+        let (surface, fields) = surface_trace(&parts, modes, gate)?;
+        Ok((surface, fields, work))
     }
 }
 

@@ -8,6 +8,7 @@ use crate::{
     helmholtz::{self, HelmholtzError, Medium, laplace},
     near_field::Geometry,
     panel3d::SpherePanels,
+    radiation_policy::GeometryPolicy,
 };
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_fft::{C64 as FftComplex, Fft};
@@ -574,6 +575,8 @@ pub struct BemObservation<'a> {
     clearances_s: Vec<f64>,
     sources: Vec<SourceId>,
     receivers: Vec<ReceiverSpec>,
+    policy: Option<GeometryPolicy<'a>>,
+    panel_rule: helmholtz::PanelRule,
 }
 impl<'a> BemObservation<'a> {
     /// Bind all physical traces to admitted exterior receivers. Unit aperture
@@ -585,6 +588,20 @@ impl<'a> BemObservation<'a> {
         traces: &[Vec<f64>],
         receivers: &[ReceiverSpec],
         minimum_clearance_m: f64,
+    ) -> Result<Self, TransferError> {
+        Self::new_admitted(
+            surface, medium, sources, traces, receivers, minimum_clearance_m, false,
+        )
+    }
+
+    fn new_admitted(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        allow_zero_structural_trace: bool,
     ) -> Result<Self, TransferError> {
         if sources.is_empty()
             || sources.len() != traces.len()
@@ -605,7 +622,9 @@ impl<'a> BemObservation<'a> {
             if source.name().is_empty()
                 || trace.len() != surface.areas().len()
                 || trace.iter().any(|v| !v.is_finite())
-                || trace.iter().all(|&v| v == 0.0)
+                || (trace.iter().all(|&v| v == 0.0)
+                    && !(allow_zero_structural_trace
+                        && matches!(source, SourceId::StructuralMode(_))))
             {
                 return Err(TransferError::Invalid("missing/nonfinite source trace"));
             }
@@ -639,7 +658,44 @@ impl<'a> BemObservation<'a> {
             clearances_s,
             sources: sources.to_vec(),
             receivers: receivers.to_vec(),
+            policy: None,
+            panel_rule: helmholtz::PanelRule::Centroid,
         })
+    }
+    /// Bind the existing geometry-selected boundary owner and an explicit panel
+    /// rule. This is the same route used by closed-body modal loading: triangle
+    /// CBIE below the geometric exclusion bound, then ruled Burton--Miller.
+    /// Receiver pressure/gradient retain the existing centroid Green rows.
+    /// Their spatial uncertainty is not removed by boundary quadrature. A
+    /// structural mode with an identically zero normal trace is retained as a
+    /// zero observation column; aperture flow must still integrate to one.
+    ///
+    /// The legacy constructor, its operator hash and CQ behavior are unchanged.
+    /// This real-frequency route has no matching Laplace continuation; CQ is
+    /// refused instead of silently substituting the legacy boundary operator.
+    pub fn new_routed(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        panel_rule: helmholtz::PanelRule,
+    ) -> Result<Self, TransferError> {
+        if matches!(
+            panel_rule,
+            helmholtz::PanelRule::TriangleNear { max_pairs: 0 }
+                | helmholtz::PanelRule::Triangle { max_pairs: 0 }
+        ) {
+            return Err(TransferError::Invalid("empty observation boundary quadrature allowance"));
+        }
+        let policy = GeometryPolicy::new(surface)?;
+        let mut owner = Self::new_admitted(
+            surface, medium, sources, traces, receivers, minimum_clearance_m, true,
+        )?;
+        owner.policy = Some(policy);
+        owner.panel_rule = panel_rule;
+        Ok(owner)
     }
     /// Bake this bound BEM owner. A cross-wired source, receiver, geometric
     /// delay or operator hash is refused before any frequency solve.
@@ -672,7 +728,11 @@ impl<'a> BemObservation<'a> {
     /// Hash physical geometry, medium and every signed source trace. Compose
     /// this with the caller's material/source provenance in the declaration.
     pub fn operator_hash(&self) -> ContentHash {
-        let mut h = DomainHasher::new("fs-bem:observation-boundary:v1");
+        let mut h = DomainHasher::new(if self.policy.is_some() {
+            "fs-bem:observation-boundary:routed:v1"
+        } else {
+            "fs-bem:observation-boundary:v1"
+        });
         h.update(&(self.surface.areas().len() as u64).to_le_bytes());
         h.update(&(self.fields.len() as u64).to_le_bytes());
         for value in [
@@ -693,6 +753,15 @@ impl<'a> BemObservation<'a> {
                 h.update(&value.to_bits().to_le_bytes());
             }
         }
+        if self.policy.is_some() {
+            let (tag, pairs) = match self.panel_rule {
+                helmholtz::PanelRule::Centroid => (0_u64, 0),
+                helmholtz::PanelRule::TriangleNear { max_pairs } => (1, max_pairs),
+                helmholtz::PanelRule::Triangle { max_pairs } => (2, max_pairs),
+            };
+            h.update(&tag.to_le_bytes());
+            h.update(&(pairs as u64).to_le_bytes());
+        }
         h.finalize()
     }
     fn flatten(fields: Vec<laplace::PointField>, output: &mut Vec<C64>) {
@@ -711,18 +780,24 @@ impl<'a> BemObservation<'a> {
         if omega == 0.0 {
             return Ok(vec![C64::ZERO; 4 * self.points.len() * self.fields.len()]);
         }
+        let k = omega / self.medium.sound_speed;
+        let formulation = match &self.policy {
+            Some(policy) => policy.formulation(k)?,
+            None => helmholtz::Formulation::BurtonMiller,
+        };
         let mut out = Vec::new();
         for batch in self
             .fields
             .chunks(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH)
         {
             let fields: Vec<_> = batch.iter().map(Vec::as_slice).collect();
-            for solution in helmholtz::solve_radiation_batch(
+            for solution in helmholtz::solve_radiation_batch_with_rule(
                 self.surface,
-                omega / self.medium.sound_speed,
+                k,
                 self.medium,
                 &fields,
-                helmholtz::Formulation::BurtonMiller,
+                formulation,
+                self.panel_rule,
             )? {
                 Self::flatten(
                     laplace::observe_frequency(
@@ -740,6 +815,11 @@ impl<'a> BemObservation<'a> {
     /// CQ reference samples, with the same full source basis and receiver rows.
     /// A per-receiver advance may extract a known propagation prefix exactly.
     pub fn laplace_sample(&self, s: C64, advances_s: &[f64]) -> Result<Vec<C64>, HelmholtzError> {
+        if self.policy.is_some() {
+            return Err(HelmholtzError::BadParameter {
+                what: "geometry-routed observation has no matching Laplace boundary operator",
+            });
+        }
         let mut out = Vec::new();
         for batch in self
             .fields

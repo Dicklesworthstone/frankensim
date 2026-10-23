@@ -18,11 +18,20 @@ pub struct MaterialBodyRadiation {
     gas: GasState,
     basis_identity: ContentHash,
     maximum_poles: usize,
+    // Present only when the original material-shell producer attached this load.
+    shell_bem: Option<bem::ShellBemReport>,
 }
 impl MaterialBodyRadiation {
     pub const fn model(&self) -> &Model { &self.model }
     pub const fn gas(&self) -> &GasState { &self.gas }
     pub const fn basis_identity(&self) -> ContentHash { self.basis_identity }
+
+    /// Preparation report of the source-derived closed-shell load actually
+    /// attached to this body. Raw and planar loads do not carry this binding.
+    /// It survives cold bank rebuilds with the original basis and gas checks.
+    pub const fn material_shell_bem(&self) -> Option<&bem::ShellBemReport> {
+        self.shell_bem.as_ref()
+    }
 }
 
 impl MaterialStringBankSource {
@@ -112,7 +121,7 @@ impl ReciprocalStringBank {
         self.source.validate_body_memory_frequencies(&self.system, gate)?;
         self.source.validate_material_bridge_frequencies(&self.system, gate)?;
         self.source.body_radiation = Some(MaterialBodyRadiation { model, gas: self.source.gas,
-            basis_identity, maximum_poles });
+            basis_identity, maximum_poles, shell_bem: None });
         poll(gate)?;
         Ok(self)
     }

@@ -739,3 +739,82 @@ fn damped_boundary_and_receiver_match_the_original_real_frequency_owner() {
         .is_err()
     );
 }
+
+#[test]
+fn routed_observation_matches_both_loading_formulations_and_keeps_legacy_cq_separate() {
+    use fs_bem::helmholtz::{Formulation, PanelRule};
+    use fs_bem::radiation_policy::GeometryPolicy;
+    let surface = SpherePanels::icosphere(0.1, 1).unwrap();
+    let n = surface.areas().len();
+    let source = vec![
+        SourceId::StructuralMode("signed dipole".into()),
+        SourceId::StructuralMode("tangential mode with zero normal trace".into()),
+    ];
+    let traces = vec![
+        surface.normals().iter().map(|normal| normal[2]).collect::<Vec<_>>(),
+        vec![0.0; n],
+    ];
+    let receiver = vec![ReceiverSpec {
+        id: "finite receiver".into(),
+        position_m: [0.3, -0.2, 0.7],
+    }];
+    let rule = PanelRule::Triangle { max_pairs: n * n };
+    let owner = BemObservation::new_routed(
+        &surface, medium(), &source, &traces, &receiver, 0.001, rule,
+    ).unwrap();
+    let policy = GeometryPolicy::new(&surface).unwrap();
+    for (factor, expected) in [(0.5, Formulation::PlainCbie), (1.05, Formulation::BurtonMiller)] {
+        let k = factor * policy.plain_cbie_limit();
+        let omega = k * C;
+        let k = omega / C;
+        assert_eq!(policy.formulation(k).unwrap(), expected);
+        let fields: Vec<Vec<_>> = traces.iter()
+            .map(|row| row.iter().copied().map(C64::from_re).collect()).collect();
+        let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
+        let solved = helmholtz::solve_radiation_batch_with_rule(
+            &surface, k, medium(), &refs, expected, rule,
+        ).unwrap();
+        let mut direct = Vec::new();
+        for solution in &solved {
+            for field in laplace::observe_frequency(
+                &surface, solution, &[receiver[0].position_m], 0.001,
+            ).unwrap() {
+                direct.push(field.pressure_pa);
+                direct.extend(field.gradient_pa_per_m);
+            }
+        }
+        let actual = owner.frequency_sample(omega).unwrap();
+        assert_eq!(actual, direct);
+        assert!(actual[..4].iter().any(|z| z.abs() > 0.0));
+        assert!(actual[4..].iter().all(|z| z.abs() == 0.0));
+    }
+    assert!(owner.laplace_sample(C64::new(1.0, 2.0), &[0.0]).is_err());
+    // A routed zero normal trace remains a column, without changing legacy admission.
+    assert!(BemObservation::new(
+        &surface, medium(), &source, &traces, &receiver, 0.001,
+    ).is_err());
+    let legacy = BemObservation::new(
+        &surface, medium(), &source[..1], &traces[..1], &receiver, 0.001,
+    ).unwrap();
+    let routed = BemObservation::new_routed(
+        &surface, medium(), &source[..1], &traces[..1], &receiver, 0.001, rule,
+    ).unwrap();
+    let centroid = BemObservation::new_routed(
+        &surface, medium(), &source[..1], &traces[..1], &receiver, 0.001, PanelRule::Centroid,
+    ).unwrap();
+    assert_ne!(legacy.operator_hash(), routed.operator_hash());
+    assert_ne!(centroid.operator_hash(), routed.operator_hash());
+    assert_ne!(legacy.operator_hash(), centroid.operator_hash());
+    let w = 100.0;
+    let velocity: Vec<_> = traces[0].iter().copied().map(C64::from_re).collect();
+    let solution = helmholtz::solve_radiation(
+        &surface, w / C, medium(), &velocity, Formulation::BurtonMiller,
+    ).unwrap();
+    let direct = laplace::observe_frequency(
+        &surface, &solution, &[receiver[0].position_m], 0.001,
+    ).unwrap();
+    let expected = vec![direct[0].pressure_pa, direct[0].gradient_pa_per_m[0],
+        direct[0].gradient_pa_per_m[1], direct[0].gradient_pa_per_m[2]];
+    assert_eq!(legacy.frequency_sample(w).unwrap(), expected);
+    assert!(legacy.laplace_sample(C64::new(1.0, 2.0), &[0.0]).is_ok());
+}
