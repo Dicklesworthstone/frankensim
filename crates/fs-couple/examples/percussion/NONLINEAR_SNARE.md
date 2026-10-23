@@ -10,13 +10,13 @@ linear-head prepared modal/contact image.
 
 ```sh
 # Nonlinear-head mechanical onset with all wires and spatial enclosed air.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --head-stretching --analytic-newton --impact-substeps 8 511 \
   --cavity-modes --strike-speed-m-s 2 --strike-position-m 0.06 0.01 \
   > stretching-snare.csv)
 
 # The same mechanical selection with two existing finite-point receivers.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 0.08 0.05 0.35 --head-stretching --analytic-newton \
   --impact-substeps 8 511 --cavity-modes --cavity-drag-per-s 25 \
   --microphone-right -0.12,0.05,0.4 > stretching-snare.wav)

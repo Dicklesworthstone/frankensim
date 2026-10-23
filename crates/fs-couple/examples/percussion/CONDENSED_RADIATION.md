@@ -13,7 +13,7 @@ extra command-line flag or alternate physical model is required.
 
 ```sh
 # Same physically loaded command; a smaller Newton factorization, not fewer poles.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 4800 20 --cavity-modes \
   --radiation-feedback --analytic-newton --impact-substeps 8 511 \
   --microphone-right -0.08,0.05,0.35 > loaded-drum.wav)

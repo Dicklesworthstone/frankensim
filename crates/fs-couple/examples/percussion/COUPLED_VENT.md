@@ -24,7 +24,7 @@ From the workspace root, this selects both stretching heads and a bounded
 40..500 Hz acoustic demonstration:
 
 ```sh
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 192 20 --cavity-modes --coupled-vent-radiation \
   --cavity-neck-internal 0.003 0.008 1000 0.35 0.08 \
   --radiation-spec crates/fs-couple/examples/percussion/coupled-vent.radiation \

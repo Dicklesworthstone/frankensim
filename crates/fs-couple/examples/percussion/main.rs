@@ -362,8 +362,8 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
     if let Some(port)=&wall_strike {
         eprintln!("barrel strike: outer_skin_position_m={:?}; first-stick displacement, velocity and force are positive along the inward facet normal; second stick retains its batter-head station",port.position_m);
     }
-    // Keep the original nearest-node strike for the no-file reference. A new
-    // geometry instead gets an interior relative location unless explicitly set.
+    // Library fixtures that pass no specification keep the original nearest-node strike; the program always
+    // supplies one (run_args refuses otherwise), which gets an interior relative location unless explicitly set.
     let position=stroke.position_m.or_else(||imported.then_some([0.35*radius,0.0]));
     eprintln!("drum input={}; clear_radius_m={radius}, depth_m={depth}, outer_radius_m={}, head_window_hz={:?}, radial_intervals={}, azimuths={}, strike_xy_m={position:?}; barrel={}, rigid hoops, declared gas and estimated stick/contact; no specimen certification",
         if imported {"supplied SI specification"}else{"estimated 14x6.5in reference"},
@@ -641,6 +641,16 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let supplied_shell=specimen::load_selection(shell_path.as_deref(),shell_mesh_path.as_deref())?;
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
+    // A render names the instrument it plays: the program assumes no built-in shell, head geometry, tension or loss.
+    // The shipped estimates are files like any other (estimated-splash.profile, estimated_drum.fsd).
+    let undescribed=match args[0].as_str() {
+        "splash"|"splash-wav"|"splash-mic" if supplied_shell.is_none() =>
+            Some("splash commands need --shell-profile FILE or --shell-mesh FILE: there is no built-in shell (the shipped estimate is examples/percussion/estimated-splash.profile)"),
+        command if (command.starts_with("drum") || command.starts_with("snare")) && supplied_drum.is_none() =>
+            Some("drum and snare commands need --drum-spec FILE: there are no built-in head geometry, tensions or losses (the shipped estimate is examples/percussion/estimated_drum.fsd)"),
+        _ => None,
+    };
+    if let Some(refusal)=undescribed {return Err(refusal.into());}
     let chamber=chamber_path.as_deref().map(chamber::Spec::load).transpose()?;
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let experiment=match args[0].as_str(){
@@ -814,6 +824,20 @@ mod tests {
         assert!((cavity_pressure(&v,&[0.,0.,0.2,0.,0.,0.])-30.0).abs()<1e-13);
         assert!((cavity_pressure(&v,&[0.,0.,0.,0.,0.2,0.])+30.0).abs()<1e-13);
         assert_eq!(cavity_pressure(&v,&[0.,0.,0.2,0.,0.2,0.]),0.0);
+    }
+    #[test]
+    fn the_program_refuses_to_render_an_instrument_it_was_not_given() {
+        for command in ["drum","drum-wav","drum-modal-mic","drum-stretch","snare","snare-off-wav"] {
+            let error=run_args(vec![command.into(),"16".into()]).unwrap_err().to_string();
+            assert!(error.contains("need --drum-spec FILE"),"{command}: {error}");
+        }
+        for command in ["splash","splash-wav","splash-mic"] {
+            let error=run_args(vec![command.into(),"16".into()]).unwrap_err().to_string();
+            assert!(error.contains("need --shell-profile FILE or --shell-mesh FILE"),"{command}: {error}");
+        }
+        // The shipped estimate is an ordinary input: named, the same command renders.
+        let spec=concat!(env!("CARGO_MANIFEST_DIR"),"/examples/percussion/estimated_drum.fsd");
+        run_args(vec!["drum".into(),"1".into(),"--drum-spec".into(),spec.into()]).unwrap();
     }
 }
 

@@ -54,7 +54,7 @@ mute and flexible shafts; source, force and observer addresses are preserved.
 Zildjian hardware or an identified stand. From the workspace root:
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --impact-substeps 8 511 \
   --cymbal-rocking 0.03 \
   --mount-spec crates/fs-couple/examples/percussion/estimated-rocking-mount.fsmount

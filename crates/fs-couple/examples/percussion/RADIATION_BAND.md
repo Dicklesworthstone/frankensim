@@ -9,7 +9,7 @@ history, or change the mechanical and PCM clocks. CSV commands reject it.
 ```sh
 # Requested 40..6000 Hz observation of the same nonlinear cymbal trajectory.
 # This is an offline preparation request, not a claimed completed render.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton --impact-substeps 8 511 \
   --radiation-spec crates/fs-couple/examples/percussion/radiation-6khz.fra \
   --microphone-right -0.08,0.05,0.35 > wider-band-cymbal.wav)

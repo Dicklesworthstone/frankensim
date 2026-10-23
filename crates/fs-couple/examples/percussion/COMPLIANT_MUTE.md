@@ -10,34 +10,34 @@ contact-force pulse, or instantaneous release command. This differs from
 
 ```sh
 # Opposed jaws on one nonlinear cymbal; retain the original stick and stand felts.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --impact-substeps 8 511 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-cymbal-mute.fsm \
   > squeezed-cymbal.csv
 
 # The same physical contact before both BEM microphone observers, not stereo panning.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton --impact-substeps 8 511 \
   --microphone-right -0.08,0.05,0.35 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-cymbal-mute.fsm \
   > squeezed-cymbal.wav
 
 # Exterior moving pad on a stretching head, retaining distributed cavity loss.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --analytic-newton --impact-substeps 8 511 \
   --cavity-modes --cavity-drag-per-s 20 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-drum-mute.fsm \
   > played-mute.csv
 
 # A batter-head pad on the complete snare; head stretching is independently optional.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --analytic-newton --impact-substeps 8 511 \
   --cavity-modes --cavity-drag-per-s 20 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-drum-mute.fsm \
   > muted-snare.csv
 
 # Touch/retract the resonant head outside the complete wire bank.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --analytic-newton --impact-substeps 8 511 \
   --cavity-modes --cavity-drag-per-s 20 \
   --compliant-mute crates/fs-couple/examples/percussion/estimated-resonant-mute.fsm \

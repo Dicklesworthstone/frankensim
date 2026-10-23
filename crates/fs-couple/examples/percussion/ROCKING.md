@@ -7,7 +7,7 @@ at most **0.1 radian**. It is an explicit model restriction, not a certified
 finite-rotation error bound. The original vertical-only image remains the default.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --impact-substeps 8 511 \
   --cymbal-rocking 0.03 --strike-position-m 0.068 0.01
 ```

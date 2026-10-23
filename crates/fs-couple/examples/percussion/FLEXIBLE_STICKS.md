@@ -99,7 +99,7 @@ The format and beam/contact limitations above are unchanged.
 ```sh
 # Two independently flexible sticks on the same stretching drumheads.
 # Change the authored shaft card rather than choosing a synthetic timbre.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 256 \
   --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0.6 \
@@ -107,7 +107,7 @@ cargo run --release -p fs-couple --example percussion -- \
   --analytic-newton --impact-substeps 8 511
 
 # The actual curved shell, same stand histories and unchanged acoustic source.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 \
   --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
   --analytic-newton --impact-substeps 8 511 > flexible-splash.wav

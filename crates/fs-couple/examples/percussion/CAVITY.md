@@ -7,10 +7,10 @@ Prepared `drum-modal` and `snare`/`snare-off` support the same cavity as describ
 in `SNARE_CAVITY.md`, including explicit momentum drag and vented mechanics.
 
 ```sh
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --cavity-modes --prepared-nonlinear \
   --strike-speed-m-s 4 --strike-position-m 0.06 0.01 > drum-cavity.csv)
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 48000 20 0.08 0.05 0.35 --cavity-modes \
   --prepared-nonlinear --strike-speed-m-s 4 > drum-cavity.wav)
 ```
@@ -76,7 +76,7 @@ parameter is required; there is no hidden vent preset or fitted loss constant.
 
 ```sh
 # Illustrative declared opening, NOT a measured or calibrated hardware card.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --cavity-modes --prepared-nonlinear \
   --cavity-neck 0.005 0.012 1000 0.4 0.08 \
   --strike-speed-m-s 4 --strike-position-m 0.06 0.01 > drum-vent.csv)

@@ -7,7 +7,7 @@ applies to sealed prepared cavities. Commands without the option are unchanged.
 
 ```sh
 # Mechanical onset: 20 distinct strands, two heads, spatial enclosed air.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --cavity-modes --strike-speed-m-s 4 \
   --strike-position-m 0.06 0.01 > snare-cavity.csv)
 
@@ -78,14 +78,14 @@ use it: the existing BEM observer receives the resulting changed head motion.
 
 ```sh
 # Illustrative inputs, not measured vent geometry or identified acoustic loss.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 20000 --cavity-modes --cavity-drag-per-s 50 \
   --cavity-neck 0.005 0.012 5000 0.4 0.08 \
   --strike-speed-m-s 2 --second-stick-position-m -0.05 0.02 \
   --second-stick-speed-m-s 1.6 --muffler batter 0.07 0.01 0.1 > vented-snare.csv)
 
 # Sealed audio with acoustic momentum loss; no vent is requested.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 48000 20 --cavity-modes --cavity-drag-per-s 50 > lossy-snare.wav)
 ```
 

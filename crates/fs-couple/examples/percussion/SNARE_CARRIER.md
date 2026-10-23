@@ -15,13 +15,13 @@ Omitting the carrier keeps the original fixed-end bank and numerical image.
 
 ```sh
 # Illustrative moving carrier; no hardware calibration is claimed.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 10000 --snare-carrier crates/fs-couple/examples/percussion/estimated-snare-carrier.fsc \
   --analytic-newton --impact-substeps 8 511 --strike-speed-m-s 0 \
   > carrier.csv)
 
 # The SAME ongoing mechanics through two existing spatial pressure receivers.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 0.08 0.05 0.35 \
   --snare-carrier crates/fs-couple/examples/percussion/estimated-snare-carrier.fsc \
   --head-stretching --analytic-newton --impact-substeps 8 511 --cavity-modes \

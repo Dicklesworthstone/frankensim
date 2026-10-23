@@ -18,7 +18,7 @@ own WoolFelt conditioning and optional series Kelvin recovery state.
 
 # Same mechanics, observed through the existing physical microphone/BEM path.
 # Acoustic fitting, passivity and mechanical admission still may refuse.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 48000 20 --analytic-newton --impact-substeps 8 511 \
   --cymbal-rocking 0.03 --strike-position-m 0.068 0.01 \
   --mount-spec crates/fs-couple/examples/percussion/estimated-splash-mount.fsmount \

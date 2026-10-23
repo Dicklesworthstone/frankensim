@@ -33,7 +33,7 @@ its onsets; its tail ends at 0.887 seconds. Supplied examples use exactly these
 right/left schedules and can be passed directly to the existing drum host:
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-mic 48000 20 --strike-speed-m-s 0 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0 \
   --stick-force-file crates/fs-couple/examples/percussion/alternating-right.score \

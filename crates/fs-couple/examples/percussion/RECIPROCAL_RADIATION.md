@@ -6,13 +6,13 @@ Selection happens before acoustic preparation, never after a power/fit failure.
 
 ```sh
 # Same nonlinear splash and stand/mallet mechanics; alternate exterior image.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton \
   --radiation-spec crates/fs-couple/examples/percussion/reciprocal-shell.radiation \
   > reciprocal-splash.wav)
 
 # Attach the exterior reaction as well as observing the same pressure field.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton --radiation-feedback \
   --radiation-spec crates/fs-couple/examples/percussion/reciprocal-shell.radiation \
   > reciprocal-loaded-splash.wav)

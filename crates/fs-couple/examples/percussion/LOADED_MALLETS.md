@@ -8,7 +8,7 @@ loaded basis. There is no second free head mass, parallel Hertz contact,
 extra oscillator, recorded attack, or output EQ.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 512 --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
   --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
   --mallet-spec crates/fs-couple/examples/percussion/estimated-loaded-mallet.fsmallet \

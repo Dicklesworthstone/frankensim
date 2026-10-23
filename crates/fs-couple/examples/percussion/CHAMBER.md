@@ -7,7 +7,7 @@ time solver are unchanged. It works on drum/snare CSV, WAV and microphone
 commands, including the existing reciprocal radiation-feedback route.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum 128 --analytic-newton --strike-speed-m-s 4 \
   --chamber-profile crates/fs-couple/examples/percussion/estimated-waisted-chamber.fscp
 ```

@@ -75,8 +75,8 @@ jobs:
         # The air is data: only --gas-record changes, and the sound must change with it.
         run: |
           set -o pipefail
-          cargo run --release -q -p fs-couple --example percussion -- drum-wav 2400 2.0 > drum-reference-air.wav 2> percussion-gas-air.log
-          cargo run --release -q -p fs-couple --example percussion -- --gas-record crates/fs-couple/examples/co2-20c.gas drum-wav 2400 2.0 > drum-co2.wav 2> percussion-gas-co2.log
+          cargo run --release -q -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum-wav 2400 2.0 > drum-reference-air.wav 2> percussion-gas-air.log
+          cargo run --release -q -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd --gas-record crates/fs-couple/examples/co2-20c.gas drum-wav 2400 2.0 > drum-co2.wav 2> percussion-gas-co2.log
           grep -q "ambient: --gas-record" percussion-gas-co2.log
           ! cmp -s drum-reference-air.wav drum-co2.wav
       - uses: actions/upload-artifact@v4

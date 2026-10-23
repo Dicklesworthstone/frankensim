@@ -68,7 +68,7 @@ reference acoustic scene, even when the mechanical source is nonlinear.
 ## Use with the existing physical performance
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-mic 4800 20 --analytic-newton \
   --microphone-spec crates/fs-couple/examples/percussion/close-drum.frm
 ```

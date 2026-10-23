@@ -26,7 +26,7 @@ The tracked card is an **illustrative isotropic declaration**, with estimated
 material and loss. Its wider structural window is intended for mechanics CSV:
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum 4096 --analytic-newton --impact-substeps 8 511 \
   --elastic-barrel crates/fs-couple/examples/percussion/illustrative-barrel.fsb \
   --cavity-modes --cavity-drag-per-s 20 \
@@ -57,7 +57,7 @@ refused with this selection. An optional second stick or second mallet still
 plays its separately supplied batter-head position.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum 4096 --analytic-newton --impact-substeps 8 511 \
   --elastic-barrel crates/fs-couple/examples/percussion/illustrative-barrel.fsb \
   --barrel-strike 0.3 0.08 --strike-speed-m-s 1.2 \
@@ -144,7 +144,7 @@ The tracked `illustrative-orthotropic-barrel.fsb` is a synthetic research
 declaration, not measured wood data. For example:
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum 4096 --analytic-newton --impact-substeps 8 511 \
   --elastic-barrel crates/fs-couple/examples/percussion/illustrative-orthotropic-barrel.fsb \
   --barrel-strike 0.3 0.08 --strike-speed-m-s 1.2 \

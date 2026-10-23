@@ -9,8 +9,8 @@ contact. All reactions see the same candidate body states in one joint solve.
 No wire is driven by a prescribed force, sampled buzz, noise source or EQ.
 
 ```
-cargo run --release -p fs-couple --example percussion -- snare 4096 > snare.csv
-cargo run --release -p fs-couple --example percussion -- snare-off 4096 > snare-off.csv
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd snare 4096 > snare.csv
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd snare-off 4096 > snare-off.csv
 ```
 
 The microphone uses the existing finite-point BEM evaluation and causal filter
@@ -19,9 +19,9 @@ its radiated pressure. Direct radiation from the thin wires is **omitted**, not
 assigned an arbitrary gain. No radiation force is fed back into the mechanics.
 
 ```
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 48000 20 0.08 0.05 0.35 > snare-mic.wav)
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-off-mic 48000 20 0.08 0.05 0.35 > snare-off-mic.wav)
 ```
 

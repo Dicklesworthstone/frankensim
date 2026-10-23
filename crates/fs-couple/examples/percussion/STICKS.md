@@ -7,11 +7,11 @@ that location on the **same batter head or curved cymbal shell**.
 unchanged.
 
 ```bash
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal 192 --strike-speed-m-s 4 --strike-position-m 0.06 0.01 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 2.5 > two.csv
 
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 48000 20 --cavity-modes --strike-speed-m-s 2 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 1.6 > two.wav
 ```
@@ -41,7 +41,7 @@ Stand-felt and muffler rows have exact zeros at the second stick coordinate.
 
 ```bash
 # Two separate impacts on one nonlinear cymbal, with bounded hard-impact recovery.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --impact-substeps 8 511 \
   --strike-position-m 0.06 0.01 --strike-speed-m-s 0.8 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0.8 \
@@ -65,7 +65,7 @@ Both files use the bounded headerless `time_s,force_n` format in `DRIVE.md`.
 Each begins and ends at zero force, with zero force outside its own interval.
 
 ```bash
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-mic 48000 20 --strike-speed-m-s 0 \
   --strike-position-m 0.06 0.01 --second-stick-position-m -0.05 0.02 \
   --stick-force-file left.csv --second-stick-force-file right.csv > played.wav

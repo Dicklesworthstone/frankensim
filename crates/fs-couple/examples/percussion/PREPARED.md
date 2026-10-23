@@ -9,11 +9,11 @@ The flag changes neither geometry nor material parameters, modal bandwidth,
 strike position/velocity, felt conditioning, cavity volume or sample clocks.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --prepared-nonlinear > splash-prepared.csv
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --prepared-nonlinear --strike-speed-m-s 4 > drum-stretch-prepared.csv
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 48000 20 0.08 0.05 0.35 --prepared-nonlinear \
   --strike-speed-m-s 4 --strike-position-m 0.06 0.01 > drum-stretch-prepared.wav)
 ```
@@ -44,10 +44,10 @@ solve for this already-linear body model. `drum` remains the Gonzalez reference;
 `splash` stays nonlinear, with its original shell and felt history.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- drum-modal 4096 > drum-modal.csv
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum-modal 4096 > drum-modal.csv
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-mic 48000 20 0.08 0.05 0.35 > drum-modal-mic.wav)
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-wav 48000 20 > drum-modal-far.wav)
 ```
 

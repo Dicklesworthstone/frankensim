@@ -28,10 +28,10 @@ toward the head; negative force pulls the stick away. For example:
 ```
 
 ```bash
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal 20000 --strike-speed-m-s 0 --stick-force-file player.csv > motion.csv
 
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-mic 48000 20 --strike-speed-m-s 0 \
   --stick-force-file player.csv > pressure.wav
 ```

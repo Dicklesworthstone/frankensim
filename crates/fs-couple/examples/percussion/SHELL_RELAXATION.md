@@ -7,7 +7,7 @@ owner produce its restoring force and dissipation. This changes physical shell
 motion, not a microphone gain or an output decay envelope.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --strike-position-m 0.06 0.01 --strike-speed-m-s 0.8 \
   --shell-relaxation crates/fs-couple/examples/percussion/illustrative-shell-relaxation.fssr \
   --analytic-newton --impact-substeps 8 511

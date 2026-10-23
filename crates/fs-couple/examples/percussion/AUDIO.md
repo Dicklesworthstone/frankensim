@@ -17,16 +17,16 @@ From the workspace root, on the repository's supported Rust toolchain:
 
 ```sh
 # One second of 48 kHz mono pressure, 1 Pa mapped to digital full-scale.
-cargo run --release -p fs-couple --example percussion -- splash-wav 48000 1.0 > splash.wav
-cargo run --release -p fs-couple --example percussion -- drum-wav 48000 1.0 > drum.wav
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile splash-wav 48000 1.0 > splash.wav
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum-wav 48000 1.0 > drum.wav
 
 # Finite-distance microphone: actual point pressure, not a far-field shortcut.
-cargo run --release -p fs-couple --example percussion -- splash-mic 48000 1.0 > splash-mic.wav
-cargo run --release -p fs-couple --example percussion -- drum-mic 48000 1.0 0.08 0.05 0.35 > drum-mic.wav
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile splash-mic 48000 1.0 > splash-mic.wav
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum-mic 48000 1.0 0.08 0.05 0.35 > drum-mic.wav
 
 # The original mechanical CSV paths remain available at their original 2 us step.
-cargo run -p fs-couple --example percussion -- splash 4096 > splash.csv
-cargo run -p fs-couple --example percussion -- drum 4096 > drum.csv
+cargo run -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile splash 4096 > splash.csv
+cargo run -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum 4096 > drum.csv
 
 # Added skin and acoustic-composition regressions.
 cargo test -p fs-plate shell::reduction::radiation
@@ -242,7 +242,7 @@ The focused native checks still required for the current quadrature repair are:
 ```sh
 cargo test --release -p fs-bem --lib helmholtz
 cargo test --release -p fs-couple --example percussion
-cargo run --release -p fs-couple --example percussion -- splash-wav 480 20 > splash-smoke.wav
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile splash-wav 480 20 > splash-smoke.wav
 ```
 
 The short splash request retains the full default source basis and 40–1640 Hz

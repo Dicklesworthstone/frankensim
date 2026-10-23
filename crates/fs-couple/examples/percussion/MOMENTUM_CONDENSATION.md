@@ -7,12 +7,12 @@ No new geometry, material preset, contact law or time integrator is introduced.
 The ordinary finite-difference path is unchanged.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --head-stretching --cavity-modes --analytic-newton \
   --impact-substeps 8 511
 
 # Same loaded instrument, NOT a reduced pole bank or an output-only filter.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 4800 20 --cavity-modes --radiation-feedback \
   --analytic-newton --impact-substeps 8 511 > loaded-drum.wav)
 ```

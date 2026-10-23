@@ -8,19 +8,19 @@ fixed-step realization unchanged.
 
 ```sh
 # Curved shell, stand felt and a hard physical stick launch.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --impact-substeps 8 511 \
   --strike-speed-m-s 4 > hard-splash.csv
 
 # Both stretching heads, cavity inertia, independent sticks and a spatial pad.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --analytic-newton --impact-substeps 8 511 --cavity-modes \
   --strike-speed-m-s 4 --strike-position-m 0.06 0.01 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 2.5 \
   --muffler batter 0.08 0.01 0.4 > hard-drum.csv
 
 # The existing BEM receiver still consumes exactly the original 768 kHz clock.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton --impact-substeps 8 511 \
   --strike-speed-m-s 4 > hard-splash.wav
 ```

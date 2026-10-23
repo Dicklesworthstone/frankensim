@@ -7,7 +7,7 @@ Output is one frame-interleaved left/right PCM16 WAV at 48 kHz per channel.
 Omitting the option preserves mono; it does not change CSV or far-field WAV.
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 48000 20 0.08 0.05 0.35 \
   --microphone-right -0.12,0.05,0.4 --cavity-modes \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 1.6 \

@@ -11,7 +11,7 @@ selects linear wires. It is not a manufacturer specification or calibration.
 
 ```sh
 # Supplied reference-equivalent bank, original linear-head modal mechanics.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --snare-spec crates/fs-couple/examples/percussion/estimated-snare.fsn \
   --strike-speed-m-s 2 > supplied-snare.csv)
 ```
@@ -97,12 +97,12 @@ silently drops a supplied quartic channel.
 
 ```sh
 # Here wires.fsn explicitly includes a stretching,E*A,slope row.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare 4096 --snare-spec wires.fsn --analytic-newton --impact-substeps 8 511 \
   --head-stretching --cavity-modes --strike-speed-m-s 2 > stretching-wires.csv)
 
 # The same supplied bank in the existing sealed stereo microphone path.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 0.08 0.05 0.35 --snare-spec wires.fsn \
   --analytic-newton --impact-substeps 8 511 --head-stretching --cavity-modes \
   --microphone-right -0.12,0.05,0.4 > stretching-wires.wav)

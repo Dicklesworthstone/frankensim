@@ -14,14 +14,14 @@ sample, output envelope or microphone gain adjustment.
 
 ```sh
 # Existing drum mechanics and supplied felt excitation; explicit position.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum 4096 --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
   --mallet-spec crates/fs-couple/examples/percussion/estimated-felt-mallet.fsmallet \
   --analytic-newton --impact-substeps 8 511 > felt-strike.csv
 
 # Two different physical tip cards can be supplied here. This example uses the
 # same illustrative card, independently, at two different positions and speeds.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 0.08 0.05 0.35 \
   --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
   --mallet-spec crates/fs-couple/examples/percussion/estimated-felt-mallet.fsmallet \
@@ -158,7 +158,7 @@ profiles and explicit 3D meshes feed the unchanged nonlinear shell reduction.
 ```sh
 # Two independent estimated felt mallets on the SAME curved shell.
 # An offline preparation request, not a claimed completed/calibrated recording.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
   --mallet-spec crates/fs-couple/examples/percussion/estimated-felt-mallet.fsmallet \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0.3 \

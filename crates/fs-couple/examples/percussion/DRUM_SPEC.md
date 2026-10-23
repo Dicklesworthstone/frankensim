@@ -8,9 +8,13 @@ The same dimensions feed the enclosed-air volume/modal cavity and the closed
 exterior acoustic mesh. The same head modes feed contact, snare coupling, air
 work and radiation. No new solver or material law is introduced.
 
-Without the option the original estimated 14 x 6.5 inch reference remains the
-input, including its original damping and nearest-node default strike. The
-published dimensional anchors and estimates are described in `README.md`.
+The option is required: drum and snare commands refuse without it, because the
+program assumes no built-in head geometry, tension or loss. The tracked
+`estimated_drum.fsd` carries the values of the former built-in 14 x 6.5 inch
+estimate. A supplied specification strikes at 0.35 of the clear radius unless
+`--strike-position-m` is given, where the former no-file input used the node
+nearest (0.06, 0). The published dimensional anchors and estimates are
+described in `README.md`.
 
 ## Use
 

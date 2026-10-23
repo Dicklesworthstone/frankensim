@@ -20,10 +20,10 @@ for the existing spatially resolved, statically condensed strain model.
 ## Use
 
 ```sh
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --strike-speed-m-s 2.0 > drum-stretch.csv
 
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 48000 20 0.08 0.05 0.35 \
   --strike-speed-m-s 2.0 --strike-position-m 0.06 0.01 > drum-stretch.wav)
 ```

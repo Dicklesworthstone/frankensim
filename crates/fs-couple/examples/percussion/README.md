@@ -3,8 +3,8 @@
 Run from the workspace root:
 
 ```sh
-cargo run -p fs-couple --example percussion -- splash 4096 > splash.csv
-cargo run -p fs-couple --example percussion -- drum 4096 > drum.csv
+cargo run -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile splash 4096 > splash.csv
+cargo run -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd drum 4096 > drum.csv
 ```
 
 The commands above are **mechanical reference experiments**. The additional
@@ -147,8 +147,10 @@ command still supplies the same **estimated stand, stick and Hertz-contact model
 Its pad centres are at 12 mm radius and are located on the supplied surface, never
 snapped across the hole. Geometry that does not support those pads refuses.
 Without an explicit strike position, supplied profiles use the point two-thirds
-of the way from inner to outer radius on positive x. The no-file reference retains
-its original contact/pad sampling. Thus identical profile geometry alone does not
+of the way from inner to outer radius on positive x. Splash commands refuse without
+`--shell-profile` or `--shell-mesh`; `estimated-splash.profile` rebuilds the former
+built-in shell. Only library fixtures that pass no profile keep the former nearest-node
+contact/pad sampling. Thus identical profile geometry alone does not
 assert bit-identical trajectories between the two hardware sampling choices.
 A differently suspended gong still needs its own support model; this importer
 does not silently make the stand appropriate for every shell.

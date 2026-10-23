@@ -7,18 +7,18 @@ is unchanged. `--prepared-nonlinear` alone retains finite-difference Newton.
 
 ```sh
 # Actual curved shell, hysteretic stand felt and physical stick impact.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --analytic-newton --strike-speed-m-s 3 > splash-analytic.csv
 
 # Both stretching heads, reciprocal distributed air, two sticks and a muffler.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch 4096 --analytic-newton --cavity-modes \
   --strike-speed-m-s 4 --strike-position-m 0.06 0.01 \
   --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 2.5 \
   --muffler batter 0.08 0.01 0.4 > drum-analytic.csv
 
 # The unchanged BEM microphone path consumes the same physical trajectories.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash-mic 4800 20 --analytic-newton > splash-analytic.wav
 ```
 

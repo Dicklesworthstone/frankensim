@@ -9,7 +9,7 @@ pressure render labelled as a load.
 ```sh
 # Nonlinear drum with sealed cavity and actual exterior reaction.
 # These are preparation requests, not claims of completed/calibrated renders.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-stretch-mic 4800 20 --cavity-modes \
   --radiation-feedback --analytic-newton --impact-substeps 8 511 \
   --microphone-right -0.08,0.05,0.35 > loaded-drum.wav)
@@ -34,7 +34,7 @@ neck end corrections from exterior loading to avoid double-counted inertance.
 
 ```sh
 # Linear head and wire potentials, complete snare contacts, reciprocal air load.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 --cavity-modes --radiation-feedback \
   --analytic-newton --impact-substeps 8 511 > loaded-linear-snare.wav
 ```

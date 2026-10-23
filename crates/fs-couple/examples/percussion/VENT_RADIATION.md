@@ -10,7 +10,7 @@ approximation. The flag is not accepted on mechanics CSV or cymbals.
 
 ```sh
 # Illustrative SI inputs, not a measured opening or loss calibration.
-(set -C; cargo run --release -p fs-couple --example percussion -- \
+(set -C; cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   snare-mic 4800 20 0.08 0.05 0.35 --cavity-modes \
   --cavity-neck 0.003 0.008 1000 0.4 0.08 \
   --prescribed-vent-radiation --microphone-right -0.12,0.05,0.4 \

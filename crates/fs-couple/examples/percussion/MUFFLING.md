@@ -10,16 +10,16 @@ are illustrative inputs, **not measured finger, gel or tape material data**.
 
 ```sh
 # Muffle both heads of the prepared drum, retaining its contact/air mechanics.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal 4096 --strike-speed-m-s 4 --strike-position-m 0.06 0.01 \
   --muffler batter 0.12 0.01 0.8 --muffler resonant -0.10 0.02 0.4 > muffled.csv
 
 # Same controls work before BEM pressure rendering, never as a PCM envelope.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --drum-spec crates/fs-couple/examples/percussion/estimated_drum.fsd \
   drum-modal-mic 4800 20 --muffler batter 0.12 0.01 0.8 > muffled.wav
 
 # Hold a viscous attachment on the nonlinear curved shell, preserving stand felt.
-cargo run --release -p fs-couple --example percussion -- \
+cargo run --release -p fs-couple --example percussion -- --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
   splash 4096 --prepared-nonlinear --muffler shell 0.075 0 0.5 > held-shell.csv
 ```
 
