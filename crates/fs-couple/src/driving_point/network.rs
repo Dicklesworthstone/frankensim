@@ -140,14 +140,12 @@ impl NetworkDrivingPoint {
         loss: LossModel,
         coupled: &CoupledTermination,
     ) -> Result<NetworkDriveResponse, DuctError> {
-        if coupled.labels.len() != self.coupled_labels.len()
-            || coupled
-                .labels
-                .iter()
-                .any(|l| !self.coupled_labels.contains(l))
-        {
+        // The producer builds the matrix in the declared order
+        // (`coupled_labels`); a permuted or empty label list is refused, never
+        // reinterpreted, as in 937d0c442.
+        if self.coupled_labels.is_empty() || coupled.labels != self.coupled_labels {
             return Err(DuctError::BadParameter {
-                what: "coupled termination labels differ from the declared coupled ports",
+                what: "coupled boundary must use the declared nonempty port order",
             });
         }
         network_port_impedance(&self.network, gas, omega, loss)?.drive_coupled(
