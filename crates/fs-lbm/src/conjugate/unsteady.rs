@@ -37,6 +37,11 @@
 
 use fs_exec::CancelGate;
 
+#[cfg(feature = "enthalpy-coupling")]
+mod material;
+#[cfg(feature = "enthalpy-coupling")]
+pub(super) use material::MaterialMomentum;
+
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, ThermalSetup};
 use super::flow::FlowField;

@@ -4,6 +4,9 @@ use fs_lbm::conjugate::FlowResistance;
 use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
 use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 
+#[path = "feedback/unsteady.rs"]
+mod unsteady;
+
 fn feedback_card(scale: f64) -> MaterialCard {
     feedback_card_with_conductivity(
         scale,

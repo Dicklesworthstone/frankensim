@@ -189,7 +189,8 @@ where
 /// refusal leaves both inputs untouched. Mutable data captured by callbacks
 /// remains caller-owned and must obey the original observer cloning contract.
 ///
-/// This is explicit quasisteady fixed-volume Ohmic/enthalpy coupling. Thermal
+/// Ohmic response is quasisteady; flow retains its selected momentum mode.
+/// This is explicit fixed-volume coupling. Thermal
 /// refinement and rapid momentum equilibration still require justification.
 /// No magnetic field/motional EMF, induction, charge convection, density-change
 /// volume source, free surface or total kinetic/thermal energy claim is added.

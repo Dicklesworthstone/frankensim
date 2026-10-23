@@ -1,11 +1,12 @@
 //! Local material feedback on the original conservative enthalpy timeline.
 //!
 //! Each actual thermal substep resolves material transport at its cells' own
-//! enthalpy-derived temperatures, solves the original steady MAC momentum
-//! system with that viscosity field, and advects h with those exact face fluxes.
-//! This is quasisteady incompressible flow: momentum equilibrates between
-//! thermal substeps. Optional material-density Boussinesq buoyancy retains
-//! reference mass and inertia. Neither entry advances stored momentum.
+//! enthalpy-derived temperatures. The default quasisteady mode solves native
+//! MAC momentum before advecting h. Explicit retained-momentum mode instead
+//! advects h with the accepted old velocity and advances the same native
+//! backward-Euler momentum owner over the actual accepted thermal interval.
+//! Material viscosity, Boussinesq force and declared mushy drag share one
+//! starting source epoch; reference mass and geometry remain fixed.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +37,8 @@ use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
 mod phase_conduction;
 use phase_conduction::PhaseConduction;
+mod unsteady;
+use crate::conjugate::unsteady::MaterialMomentum;
 
 /// Exact stationary solid constraints on the same material/enthalpy owner.
 pub mod phase;
@@ -88,7 +91,10 @@ pub struct FlowMaterialSample<F, T = FluidTransportState> {
     pub transport: T,
 }
 
-/// The source epoch that produced the LAST applied face-flux field.
+/// Source samples and the face field used by the last thermal substep.
+/// Quasisteady mode solves this field from these samples. Retained-momentum
+/// mode uses its accepted old field; these samples then drive the endpoint
+/// momentum update exposed separately by MaterialFlowFeedback::unsteady_flow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub time_s: f64,
@@ -127,14 +133,17 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
 /// A solid/liquid fraction supplies mobility only through an explicitly
 /// attached `Self::with_mushy_mobility` closure; it is never inferred from T.
 ///
-/// Each source epoch performs one laminar, quasisteady full-stress momentum
-/// solve. The shared `Advected` owner contributes its actual face mass rates,
+/// By default each source epoch performs one laminar, quasisteady full-stress
+/// momentum solve. `Self::with_unsteady_momentum` retains native face momentum
+/// and explicitly selects a first-order transient split instead. The shared
+/// `Advected` owner contributes its actual face mass rates,
 /// boundary h flux, internal transfers and combined conductive/advective CFL.
-/// Endpoint source checks run before publication. The last flow's time is its
-/// explicit starting epoch, not a claimed momentum solve at the returned T.
-/// Refine the thermal step and establish rapid viscous equilibration relative
-/// to thermal evolution before using this approximation. There is no kinetic
-/// energy storage, pressure-work heat or free-surface motion. Explicit
+/// Endpoint source checks run before publication. The applied field belongs to
+/// its explicit starting epoch; transient endpoint momentum has a separate
+/// receipt. Quasisteady mode requires rapid viscous equilibration relative to
+/// thermal evolution. Both modes need timestep refinement and omit pressure-work
+/// heat and free-surface motion. Transient kinetic energy is diagnostic only.
+/// Explicit
 /// `Self::with_viscous_heating` admits wall-supplied molecular/Darcy heat in a
 /// closed creeping-flow box; `Self::with_body_force_heating` additionally admits
 /// explicit actuator work. The ordinary entry adds no viscous heat.
@@ -156,6 +165,8 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     mushy: Option<&'a MushyPhaseLaw<'a>>,
     phase_conduction: Option<PhaseConduction<'a>>,
     viscous_heating: Option<ViscousHeating>,
+    unsteady: Option<MaterialMomentum>,
+    bound_time_s: f64,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
     applied: Option<MaterialFlowEpoch<F, T>>,
@@ -171,7 +182,7 @@ where
 {
     /// Bind one existing timeline/domain and bound momentum solves per advance.
     /// The map and reservoirs use the same admission as frozen solved flow.
-    /// Each thermal substep costs one steady solve; `max_solves` is separate
+    /// Each thermal substep costs one native solve; `max_solves` is separate
     /// from the original SIMPLEC iterations and thermal substep budgets.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -222,6 +233,8 @@ where
             mushy: None,
             phase_conduction: None,
             viscous_heating: None,
+            unsteady: None,
+            bound_time_s: thermal.time_s(),
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
             applied: None,
@@ -247,8 +260,8 @@ where
     /// this incompressible approximation. In particular this entry does not
     /// make latent-heat cells mobile or infer a melt permeability. Source
     /// departures are checked again at thermal endpoints before publication.
-    /// The caller must justify the small-density approximation and quasisteady
-    /// flow. Gravity/pressure/viscous work is not added to the thermal audit;
+    /// The caller must justify the small-density approximation and the selected
+    /// quasisteady or first-order transient momentum approximation. Gravity/pressure/viscous work is not added to the thermal audit;
     /// this is not a closed total mechanical-plus-thermal energy model.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn try_new_boussinesq(
@@ -423,6 +436,11 @@ where
         if self.buoyancy.is_some() {
             return Err(invalid("viscous heating excludes unaccounted buoyancy work").into());
         }
+        if self.unsteady.is_some() {
+            return Err(invalid(
+                "steady viscous heating cannot account for retained kinetic energy; use a transient mechanical-energy owner",
+            ).into());
+        }
         crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
         self.viscous_heating = Some(ViscousHeating::new(controls));
         Ok(self)
@@ -592,7 +610,9 @@ where
         Ok(())
     }
 
-    /// Source-backed inputs and actual MAC result for the last applied step.
+    /// Source-backed inputs and the actual field used for the last heat-advection
+    /// step. In transient mode this is the starting field, not the new endpoint
+    /// momentum; see `Self::unsteady_flow` and `Self::unsteady_step`.
     pub const fn applied(&self) -> Option<&MaterialFlowEpoch<F, T>> {
         self.applied.as_ref()
     }
@@ -667,6 +687,7 @@ where
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.check_map(thermal, check)?;
+        self.check_unsteady_start(thermal, check)?;
         let samples = sample(
             thermal,
             self.domain,
@@ -721,7 +742,12 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let (flow, viscous_power) = if !native_solve {
+        let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
+            // Thermal CFL and advection use the accepted old momentum. Its
+            // native update waits for step(), which receives the actual dt.
+            // Exact phase locking is refused before retained momentum starts.
+            (owner.flow.clone(), None)
+        } else if !native_solve {
             // All constraints have zero velocity and every admitted drive does
             // zero work. This is an exact empty momentum system, not a solve.
             (immobile_flow(domain), self.viscous_heating.as_ref().map(|_| {
@@ -940,6 +966,7 @@ where
         thermal: &DepositionSimulation<'_>,
     ) -> Result<(), Self::Error> {
         self.check_map(thermal, &mut || Ok(()))?;
+        self.check_unsteady_start(thermal, &mut || Ok(()))?;
         self.endpoint = sample(
             thermal,
             self.domain,
@@ -994,6 +1021,7 @@ where
             .step(start_s, dt, old, thermal, check)
             .map_err(MaterialFlowError::Inner)?;
         add_audit(&mut self.audit, advected.audit())?;
+        self.advance_unsteady(start_s, dt, old, thermal, check)?;
         if let Some(owner) = &mut self.viscous_heating {
             let applied = self
                 .applied

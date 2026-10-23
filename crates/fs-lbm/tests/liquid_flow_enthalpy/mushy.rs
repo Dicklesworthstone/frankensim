@@ -20,6 +20,9 @@ mod continuity;
 #[path = "mushy/occupancy.rs"]
 mod occupancy;
 
+#[path = "mushy/unsteady.rs"]
+mod unsteady;
+
 fn phase_curve(card: &MaterialCard, rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
         card.content_hash(),

@@ -561,6 +561,15 @@ pub(super) struct Solver<'a> {
     time: Option<TimeLevels>,
 }
 
+/// Exact physical state of the native staggered momentum owner. Iteration
+/// caches are rebuilt when source transport changes; face momentum is retained.
+#[cfg(feature = "enthalpy-coupling")]
+#[derive(Debug, Clone)]
+pub(super) struct MomentumState {
+    velocity: [Vec<f64>; 3],
+    pressure: Vec<f64>,
+}
+
 #[derive(Debug, Clone)]
 struct TimeLevels {
     dt: f64,
@@ -1159,6 +1168,31 @@ impl<'a> Solver<'a> {
         self.update_fan(mass, steady);
         let fan = self.fan.as_ref().map_or(0.0, |fan| fan.residual);
         Ok((mass, steady.max(fan)))
+    }
+
+    /// Checkpoint native faces directly, without a cell-centred reconstruction.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn momentum_state(&self) -> MomentumState {
+        MomentumState {
+            velocity: self.vel.clone(),
+            pressure: self.pressure.clone(),
+        }
+    }
+
+    /// Restore a physical state into this same domain's material operator.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn restore_momentum(&mut self, state: &MomentumState) -> Result<(), ChtError> {
+        if self.pressure.len() != state.pressure.len()
+            || self.vel.iter().zip(&state.velocity).any(|(a, b)| a.len() != b.len())
+        {
+            return Err(ChtError::InvalidInput {
+                field: "simple.momentum_state",
+                reason: "retained momentum must match the native staggered domain".into(),
+            });
+        }
+        self.vel.clone_from(&state.velocity);
+        self.pressure.clone_from(&state.pressure);
+        self.guard_finite()
     }
 
     /// Enter unsteady mode at the current velocities (time level 0).
@@ -1876,6 +1910,17 @@ impl Solver<'_> {
         // bounded by the converged imbalance, so the flow is unchanged to
         // tolerance).
         self.correct(1e-8, gate)?;
+        Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual)))
+    }
+
+    /// Report an already projected field, keeping a checkpoint and its receipt
+    /// on exactly the same native face/pressure state.
+    pub(super) fn finish_projected(
+        mut self,
+        fluid: &FluidProperties,
+        iterations: usize,
+        (mass_residual, momentum_residual): (f64, f64),
+    ) -> FvFlow {
         let domain = self.domain;
         let field = self.field();
         let mut velocity_m_s = vec![[0.0f64; 3]; domain.cell_count()];
@@ -1953,14 +1998,14 @@ impl Solver<'_> {
         };
         let eddy_viscosity_m2_s = self.eddy_viscosity();
         let heat_eddy_viscosity_m2_s = self.heat_eddy_viscosity();
-        Ok(FvFlow {
+        FvFlow {
             field,
             velocity_m_s,
             pressure_pa: self.pressure,
             eddy_viscosity_m2_s,
             heat_eddy_viscosity_m2_s,
             report,
-        })
+        }
     }
 }
 
@@ -2086,7 +2131,7 @@ fn material_flow(
     solve_steady(solver, fluid, config, gate)
 }
 
-fn material_solver<'a>(
+pub(super) fn material_solver<'a>(
     domain: &'a VoxelDomain,
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],

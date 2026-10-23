@@ -2212,10 +2212,11 @@ flow/inner history and electrical work/deposition reports publish together; any
 map, material, solver, endpoint, budget or cancellation refusal preserves both
 accepted inputs. Joule energy is already inside the thermal external-heat audit.
 
-This retains the original explicit quasisteady, fixed-mass/fixed-volume domain.
-It adds no magnetic/motional EMF, induction, charge convection, phase-volume
+This retains the selected material-flow momentum mode and fixed-mass/fixed-volume
+domain. It adds no magnetic/motional EMF, induction, charge convection, phase-volume
 source, free surface or kinetic-plus-thermal conservation claim. Thermal timestep
-refinement and momentum-equilibration assumptions remain caller obligations.
+refinement remains required; the default quasisteady mode additionally requires
+rapid momentum equilibration. Retained native momentum has the restrictions below.
 Focused synthetic-card regressions compare independent series-current,
 contact-heat, Darcy, conduction and donor-cell enthalpy balances; exercise
 constant-temperature phase changes, data swaps and zero-current reduction; and
@@ -2245,3 +2246,37 @@ This is a declared mass-fraction scaling law, not an inferred universal mixture
 rule. It does not supply variable-density continuity, distinct phase velocities,
 solid locking, moving geometry or a free surface, and it does not add latent heat
 or replace the original caloric/source/history owners.
+
+### Source-material enthalpy with retained native momentum
+
+`MaterialFlowFeedback` defaults to the quasisteady mode described above.
+`with_unsteady_momentum` instead initializes the existing native MAC momentum
+owner at rest at the supplied thermal time. Each accepted substep first advects
+total h with the accepted old face field, then performs exactly one native
+backward-Euler momentum update over the actual thermal/CFL-limited duration.
+Both stages use the starting source epoch: local viscosity, material Boussinesq
+forces, declared h-dependent mushy drag and owned thermal/phase coefficients.
+Caloric storage, latent heat, conservative advection and current/source histories
+retain their original owners. This is a first-order split requiring refinement.
+
+Native face velocities, pressure and the exact accepted clock survive advances.
+Clock, starting samples and accepted enthalpy must agree before reuse. The
+original thermal clone-and-publish transaction includes this momentum state;
+thermal, source, native-solver or cancellation refusal publishes none of the
+candidate. `applied().flow` remains the field actually used for heat advection;
+`unsteady_flow`, `unsteady_time_s` and `unsteady_step` separately expose endpoint
+momentum and its existing native convergence/kinetic-energy diagnostics.
+
+Admission requires closed laminar wall/symmetry boundaries, no fans, fixed
+reference mass/density and fixed geometry. Initial nonzero flow is not inferred.
+The diagnostic kinetic energy is not a closed mechanical-plus-thermal work
+account; pressure, molecular and Darcy power are not deposited as heat. Steady
+viscous/body-force heating therefore refuses in either attachment order.
+Existing phase-support, equal-density mushy and no-free-surface limits remain.
+Retained momentum currently requires fixed native momentum occupancy;
+`try_new_phase` with exact solid locking refuses this mode. A changing solid
+constraint needs an explicit momentum/kinetic-energy handoff. The existing
+quasisteady exact-phase owner continues to handle freezing and remelting.
+Regressions exercise heated and isothermal latent-plateau transients, retained
+history, the native steady limit, actual CFL durations and atomic refusals.
+Their addition does not establish an executed native test pass.
