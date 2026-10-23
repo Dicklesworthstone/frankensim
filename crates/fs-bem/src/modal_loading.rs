@@ -381,8 +381,12 @@ pub fn modal_radiation_loading(
 }
 
 /// [`modal_radiation_loading`] on the M2.5-W5 route past the dense cap.
-/// - At or below [`helmholtz::MAX_DENSE_PANELS`] it is the dense bake,
-///   bitwise, declaration identity included; `iterative` is unused.
+/// - At or below [`helmholtz::MAX_DENSE_PANELS`] it is the dense bake under
+///   `iterative`'s declared panel rule, and the rest of `iterative` is unused.
+///   Under the centroid rule (or no options) that is the dense bake bitwise,
+///   declaration identity included. Any other rule is
+///   [`helmholtz::solve_radiation_batch_with_rule`]'s bake, and the rule is
+///   bound into the declaration.
 /// - Above it, a closed body's rows go to [`IterativeRadiation`] with
 ///   `iterative`, each in its own formulation: plain CBIE on the dense
 ///   owner's triangle quadrature, Burton-Miller on centroid kernels. Every
@@ -413,6 +417,15 @@ pub fn modal_radiation_loading_routed(
         iterative,
         cancelled,
     )
+}
+
+/// Declaration tag of a panel rule; its pair budget changes no bits.
+const fn rule_tag(rule: PanelRule) -> u64 {
+    match rule {
+        PanelRule::Centroid => 0,
+        PanelRule::TriangleNear { .. } => 1,
+        PanelRule::Triangle { .. } => 2,
+    }
 }
 
 fn iterative_error(e: IterativeError) -> ModalLoadingError {
@@ -460,6 +473,10 @@ fn load(
         maximum_matrix_entries,
         iterative.is_some(),
     )?;
+    // Below the cap only the declared panel rule reaches the dense bake.
+    let dense_rule = iterative
+        .filter(|_| sites <= helmholtz::MAX_DENSE_PANELS)
+        .map_or(PanelRule::Centroid, |o| o.panel_rule);
     let iterative = iterative.filter(|_| sites > helmholtz::MAX_DENSE_PANELS);
     let mut hash = DomainHasher::new("fs-bem/complete-modal-loading/v1");
     hash.update(provenance.as_bytes());
@@ -495,6 +512,11 @@ fn load(
                 LoadingRoute::ClosedBodyGeometryPolicy => 4,
                 _ => 2,
             }]);
+            // The centroid dense bake keeps its original identity.
+            if dense_rule != PanelRule::Centroid {
+                hash.update(&[6]);
+                hash.update(&rule_tag(dense_rule).to_le_bytes());
+            }
             if let Some(o) = iterative {
                 hash.update(&[5]);
                 let precond = match o.precond {
@@ -513,11 +535,7 @@ fn load(
                     o.max_translation_work as u64,
                     u64::from(o.directional.is_some()),
                     // The rule changes the numbers; its pair budget does not.
-                    match o.panel_rule {
-                        PanelRule::Centroid => 0,
-                        PanelRule::TriangleNear { .. } => 1,
-                        PanelRule::Triangle { .. } => 2,
-                    },
+                    rule_tag(o.panel_rule),
                 ] {
                     hash.update(&v.to_le_bytes());
                 }
@@ -650,12 +668,14 @@ fn load(
                             .map(|r| r.iter().map(|v| C64::from_re(*v)).collect())
                             .collect();
                         let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
-                        let solved = helmholtz::solve_radiation_batch(
+                        // The centroid rule is solve_radiation_batch, bit for bit.
+                        let solved = helmholtz::solve_radiation_batch_with_rule(
                             surface,
                             k,
                             medium,
                             &refs,
                             formulation,
+                            dense_rule,
                         )?;
                         for (column, solution) in range.zip(solved) {
                             project(column, &solution.pressure);

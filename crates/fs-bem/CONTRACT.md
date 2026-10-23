@@ -536,8 +536,11 @@ these numerical and composition gates. No piano example or panel-bits golden
 was changed.
 
 `modal_radiation_loading_routed` is the M2.5-W5 route past the dense cap.
-- At or below `MAX_DENSE_PANELS` it is the dense bake, bitwise, declaration
-  identity included.
+- At or below `MAX_DENSE_PANELS` it is the dense bake under the options'
+  declared panel rule; the other options are unused. Under the centroid rule
+  (or no options) that is the dense bake bitwise, declaration identity
+  included. A triangle rule is `solve_radiation_batch_with_rule`'s bake, with
+  the rule bound into the declaration. Plain-CBIE rows ignore every rule.
 - Above it, a closed body's rows go to `IterativeRadiation` with the declared
   options, each in its own formulation (the route's or `GeometryPolicy`'s).
   Every field must converge to the GMRES tolerance or the bake refuses with

@@ -623,7 +623,8 @@ fn sphere_modal_loading_closed_forms() {
 }
 
 /// G5/G0: a routed bake at or below the dense cap is the dense bake, bitwise,
-/// declaration identity included, in both policy formulations. Above the cap
+/// declaration identity included, in both policy formulations. A declared
+/// triangle rule reaches that bake and its declaration. Above the cap
 /// the unrouted owner names M2.5-W5c, while the routed one solves.
 /// - A one-mode (pulsating) bake is reciprocal by construction: it is
 ///   admitted, worker-bitwise, and binds its numerical options (not its
@@ -677,6 +678,43 @@ fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
         let routed = bake(&below, ka, Some(&options)).unwrap();
         assert_eq!(bits(&routed), bits(&dense));
         assert_eq!(routed.declaration_hash(), dense.declaration_hash());
+    }
+    // Below the cap the declared panel rule reaches the dense bake. A
+    // Burton-Miller row (ka 3) is solve_radiation_batch_with_rule's, bitwise,
+    // under its own declaration; a plain-CBIE row (ka 0.05) ignores the rule.
+    for rule in [
+        helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 20 },
+        helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 },
+    ] {
+        let ruled = IterativeOptions {
+            panel_rule: rule,
+            ..options.clone()
+        };
+        let centroid = bake_modes(&below, 1, 3.0, None).unwrap();
+        let bm = bake_modes(&below, 1, 3.0, Some(&ruled)).unwrap();
+        let field: Vec<C64> = vec![C64::ONE; below.areas().len()];
+        let k = 3.0 * medium.sound_speed / medium.sound_speed;
+        let solved = helmholtz::solve_radiation_batch_with_rule(
+            &below,
+            k,
+            medium,
+            &[&field],
+            Formulation::BurtonMiller,
+            rule,
+        )
+        .unwrap();
+        let mut force = C64::ZERO;
+        for (&p, &area) in solved[0].pressure.iter().zip(below.areas()) {
+            force = force + p.scale(area);
+        }
+        assert_eq!(bits(&bm), vec![(force.re.to_bits(), force.im.to_bits())]);
+        assert_ne!(bits(&bm), bits(&centroid));
+        assert_ne!(bm.declaration_hash(), centroid.declaration_hash());
+        let cbie = bake_modes(&below, 1, 0.05, Some(&ruled)).unwrap();
+        assert_eq!(
+            bits(&cbie),
+            bits(&bake_modes(&below, 1, 0.05, None).unwrap())
+        );
     }
     let above = SpherePanels::icosphere(1.0, 5).unwrap();
     assert!(above.areas().len() > helmholtz::MAX_DENSE_PANELS);
