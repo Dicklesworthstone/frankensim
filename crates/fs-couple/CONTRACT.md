@@ -4649,3 +4649,57 @@ accuracy. Mesh, pressure-order, modal-window and time convergence remain
 necessary. Focused source tests cover body/string reaction, exact uniform
 compression, material and atmosphere changes, physical refusals and both
 orders of cavity/unsteady-string-air attachment.
+
+## Distributed winding material, circuit and enthalpy coupling
+
+`circuit_enthalpy::winding::WindingThermalNetwork` connects the existing
+`fs-em::winding::ohmic::OhmicWindingCircuit` to the same finite enthalpy
+Newton/backward-Euler owner used by material resistor and field-motion circuits.
+It reuses `MaterialCell`, `ConductionLink` and `PreparedMaterialNetwork`;
+there is no second material evaluator, circuit integrator or thermal solver.
+
+Every original magnetic triangle explicitly names an existing thermal cell or
+a `MagneticRegion::Fixed` prepared isothermal state. A current-carrying triangle
+must name a real receiving cell. Mapped triangle volumes cover each whole cell,
+including the original extrusion thickness; the source density and cell mass
+must agree with that fixed volume within the declared absolute allowance.
+Mapped magnetic cells retain the actual borrowed caloric law and its material
+card, and admit fully solid, constant-density charts. Thermal cells outside the
+magnetic geometry retain the existing latent storage, source and boundary
+behavior. This is an authored geometric correspondence, not an inferred remap.
+
+Conductor resistivity or conductivity, caloric temperature and source thermal
+conductivity come from the same immutable cards and actual proposed endpoint.
+Electrical claim identities persist with the accepted circuit; thermal
+transport selections stay pinned through each interval's nonlinear trials.
+Canonical complete state bundles are refreshed through their existing
+`at_query_point` owner. All nonthermal coordinates remain fixed. Thermally
+mapped nonconducting cores also refresh their original magnetic sources.
+Changed permeability or a temperature-dependent magnetic source whose
+temperature moves refuses, even when endpoint values coincide. Explicit
+Fixed regions retain their prepared full sources. All magnetic source
+snapshots remain available in the accepted report.
+
+Each nonlinear trial starts from identical accepted flux/charge/time. The
+native descriptor midpoint supplies the mutually coupled winding currents and
+all spatial and graph-resistor losses. Every original numeric graph resistor
+requires its own explicit heat destination; its authored resistance remains
+unchanged. The private thermal-driver routing boundary deposits both kinds of
+loss exactly once into the existing local residual. Source-derived link
+conduction and authored boundary heat enter that same backward-Euler solve.
+Cell residuals, complete deposited Joule heat, native electrical work and
+combined thermal/capacitor/magnetic energy undergo fresh final admission.
+Budget, source, topology or cancellation failure publishes neither endpoint.
+
+This is generally first-order coupled accuracy: endpoint material coefficients
+with electrical midpoint currents and thermal backward Euler. Source and
+topology events require interval cuts; target events remain pending. Geometry,
+inductance and externally fixed magnetic regions remain fixed. No moving
+winding, thermal expansion, melting conductor, magnetic parameter work,
+hysteresis, skin/proximity loss or unrepresented winding-end resistance is
+inferred. Regressions cover actual data-only conductor swaps, nonlinear
+temperature feedback and continuation, mutual current evolution, source
+conduction, all graph/coil heat, caloric/geometry identity, complete passive-core
+mapping and fixed-state/source refusals, native budgets/events and late
+cancellation. Independent numerical energy checks supplement source review;
+native build/regression execution remains a separate requirement.
