@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	bronze-bell-eijsbouts-vacuum-loss-vanhouten1997
+redistribution	permitted	Numerical measurement values printed in the text retained as scientific facts with attribution; no article text, figure or scanned page is reproduced
+citation	van Houten M.H., Schoofs A.J.G., van Campen D.H., Damping of bells using experimental and numerical methods, Fifth International Congress on Sound and Vibration (ICSV5), Adelaide, 15-18 December 1997 (Eindhoven University of Technology); scanned proceedings PDF https://www.acoustics.asn.au/conference_proceedings/ICSVS-1997/pdf/scan/sv970230.pdf (sha256 c3cd5d0145b77403672f84668ed2fc769ed1d06ab176745e7c1694e371ce2954), pages 4-7, read by OCR of the page images
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
