@@ -28,7 +28,7 @@ POST_ON = opts.get("post", "1") == "1"
 BRIDGE_ON = opts.get("bridge", "1") == "1"
 EDGE = float(opts.get("edge", "0.45"))  # spacing of the outline and attachment-ring vertices in units of H: a fine ring keeps the ring band narrow
 UNIFORM_T = float(opts.get("uniform_t_mm", "0"))  # diagnostic: every plate zone gets this thickness, so that splitting a plate into zones must not change any frequency (a test of the welds)
-CAVITY_EXACT = opts.get("cavity_volume", "facet") == "exact"  # "exact": the air volume enclosed by the inner skins (the divergence sum over open midsurfaces is origin dependent, P13 mail 5583); default keeps the old facet sum
+CAVITY_EXACT = opts.get("cavity_volume", "exact") == "exact"  # "exact" (default): the air volume enclosed by the inner skins; "facet" reproduces the tables before 2026-10-23, whose divergence sum over open midsurfaces is origin dependent (P13 mail 5583)
 ONLY = opts.get("only", "")  # diagnostic: "top" or "back" builds that plate alone (with bar=0 post=0 bridge=0), free in space, to read its modes without the box
 FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a vertex with several fans in one component (needed by some of the scaled sensitivity meshes; the base table does not need them)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
@@ -1088,7 +1088,7 @@ def main():
             ids_node[i] = br.add(p3 if p3 is not None else (x, y, bridge["zc"] if SC == 1.0 else CENTRE[1] + (bridge["zc"] - CENTRE[1]) * SC), (0.0, 0.0, 1.0))
         for (i, j, k) in Tb:
             br.tris.append((ids_node[int(i)], ids_node[int(j)], ids_node[int(k)], 0))
-        br.regions = [(1.0, 0.0, 0.0)]
+        br.regions = [(0.0, 1.0, 0.0)]  # grain from the feet to the top of the bridge (the bridge height is along y in the scan frame)
         orient_tris(br)
         components.append(br)
         for (cf, ids, pos) in foot_nodes:
@@ -1099,7 +1099,7 @@ def main():
                 assert found, "foot node missing from the bridge mesh"
                 slave.append(ids_node[found[0]])
             ties.append((cf.name, "bridge", +1, [meshes["top"]["local"][cf.name][v] for v in ids], slave))
-        meta("bridge_mesh", "%d vertices, %d triangles in the (x, y) plane; the feet nodes sit exactly on the outer skin of the top band zone at the foot chains" % (len(Vb), len(Tb)))
+        meta("bridge_mesh", "%d vertices, %d triangles in the (x, y) plane, grain along y (from the feet to the top); the feet nodes sit exactly on the outer skin of the top band zone at the foot chains" % (len(Vb), len(Tb)))
 
     # --- cavity: volume enclosed by the midsurfaces of the cavity components (divergence theorem), the two f-holes closed by planar patches, minus half the wall thickness
     vol_mid, area_by = 0.0, {}

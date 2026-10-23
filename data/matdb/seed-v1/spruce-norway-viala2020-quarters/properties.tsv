@@ -1,0 +1,29 @@
+frankensim.matdb-source.v1
+observation	viala2020-quarters	Norway spruce (Picea abies) violin-top tonewood: 10 split quarters (wedges about 426 x 131 x 28 mm) from one seller, grades 1.A, 1.B and 2nd, logged 1996 to 2013	Finite element model updating of the modes measured by a 3-D scanning laser vibrometer under loudspeaker excitation (100-5000 Hz), PolyMAX modal analysis; conditioned at 50 percent RH and 21 C, tested at 23 C and 45 percent RH, moisture content 9-11 percent from sorption isotherms; the authors state an identification error close to 5 percent for quarters	Averages over the 10 quarters as printed in the text of section 3.2.2: mean density 0.46 g/cm3; Young's moduli E_L 13.8 and E_R 1.2 GPa; shear moduli G_LR 0.8 GPa, G_RT 47 MPa and G_TL 0.85 GPa; loss factors from the Table 4 average row: eta_L 0.75, eta_R 1.75 and eta_LR 1.35 percent. The moduli are the means of the per-quarter products (the Table 4 average specific moduli times the mean density give 13.5, 1.29 and 0.83 GPa). nu_LR is not identified by the source. The quarters are not the il Cannone top; per-quarter values are in Table 4. Axis convention: L longitudinal (grain), R radial, T tangential, per instrument-axis-convention.tsv
+scalar	density	viala2020-quarters	density	460	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content	9	11	%
+scalar	young-modulus-longitudinal	viala2020-quarters	young_modulus_longitudinal	13800	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content	9	11	%
+scalar	young-modulus-radial	viala2020-quarters	young_modulus_radial	1200	MPa	constant
+uncertainty	young-modulus-radial	unstated	-	-	-	-
+validity	young-modulus-radial	moisture_content	9	11	%
+scalar	shear-modulus-lr	viala2020-quarters	shear_modulus_lr	800	MPa	constant
+uncertainty	shear-modulus-lr	unstated	-	-	-	-
+validity	shear-modulus-lr	moisture_content	9	11	%
+scalar	shear-modulus-rt	viala2020-quarters	shear_modulus_rt	47	MPa	constant
+uncertainty	shear-modulus-rt	unstated	-	-	-	-
+validity	shear-modulus-rt	moisture_content	9	11	%
+scalar	shear-modulus-tl	viala2020-quarters	shear_modulus_tl	850	MPa	constant
+uncertainty	shear-modulus-tl	unstated	-	-	-	-
+validity	shear-modulus-tl	moisture_content	9	11	%
+scalar	loss-factor-longitudinal	viala2020-quarters	loss_factor_longitudinal	0.0075	1	constant
+uncertainty	loss-factor-longitudinal	unstated	-	-	-	-
+validity	loss-factor-longitudinal	moisture_content	9	11	%
+scalar	loss-factor-radial	viala2020-quarters	loss_factor_radial	0.0175	1	constant
+uncertainty	loss-factor-radial	unstated	-	-	-	-
+validity	loss-factor-radial	moisture_content	9	11	%
+scalar	loss-factor-shear-lr	viala2020-quarters	loss_factor_shear_lr	0.0135	1	constant
+uncertainty	loss-factor-shear-lr	unstated	-	-	-	-
+validity	loss-factor-shear-lr	moisture_content	9	11	%

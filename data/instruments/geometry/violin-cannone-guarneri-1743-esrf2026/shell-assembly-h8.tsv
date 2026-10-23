@@ -19,10 +19,12 @@ meta	ribs	one closed strip along the attachment ring (272 vertices), 5 layers, t
 meta	bass_bar_wall	wall on the lower skin of the top band zone top-band1 (3.320 mm), 39 chain vertices, 2 layers
 meta	soundpost_tube	length 51.0 mm between the inner skins, 7 layers, 16 nodes per ring
 meta	bridge_holes	2 cut-outs of the silhouette larger than 3 mm2 (areas 25.9, 25.2 mm2)
-meta	bridge_mesh	200 vertices, 293 triangles in the (x, y) plane; the feet nodes sit exactly on the outer skin of the top band zone at the foot chains
+meta	bridge_mesh	200 vertices, 293 triangles in the (x, y) plane, grain along y (from the feet to the top); the feet nodes sit exactly on the outer skin of the top band zone at the foot chains
+meta	cavity_volume_facet_sum_L	1.9653 (the divergence-theorem sum minus half thicknesses; open surfaces make it origin dependent, so it is NOT the cavity record when cavity_volume=exact)
+meta	cavity_volume_exact	inner-skin planform integral 2.0680 L (planform = the rib ring moved in by half the rib thickness 0.750 mm, 205923 grid cells of 0.5 mm, height from the inner skins of back and top) minus the shells of the bass bar and soundpost 0.0070 L
 meta	cavity_volume_midsurface_L	2.1915
-meta	cavity_volume_L	1.9653 (midsurface facets oriented outward, the f-holes closed by planar patches at their mean height, minus half the thickness of every wall)
-meta	neck	one circular neck of the conductance of the two f-holes: per hole the equivalent ellipse (semi-axes 41.6 x 3.1 and 36.8 x 2.7 mm) has thin-plate conductance K0 32.7 and 28.8 mm, in series with t/A at the top thickness 3.05 mm gives 26.2 and 22.4 mm; total 48.68 mm; the neck radius that gives it with the flanged end correction 0.8216 r at both ends is 27.19 mm (area 2323 mm2 against the hole area 711 mm2), length = the top thickness; rigid-wall Helmholtz frequency of this neck and cavity 272 Hz (c = 343 m/s); the equivalent-ellipse conductance of a curved f-hole is an approximation (UNKNOWN size of the error; named in the pre-registered scope)
+meta	cavity_volume_L	2.0610 (the exact inner-skin volume minus the bass bar and soundpost shells, see cavity_volume_exact)
+meta	neck	one circular neck of the conductance of the two f-holes: per hole the equivalent ellipse (semi-axes 41.6 x 3.1 and 36.8 x 2.7 mm) has thin-plate conductance K0 32.7 and 28.8 mm, in series with t/A at the top thickness 3.05 mm gives 26.2 and 22.4 mm; total 48.68 mm; the neck radius that gives it with the flanged end correction 0.8216 r at both ends is 27.19 mm (area 2323 mm2 against the hole area 711 mm2), length = the top thickness; rigid-wall Helmholtz frequency of this neck and cavity 265 Hz (c = 343 m/s); the equivalent-ellipse conductance of a curved f-hole is an approximation (UNKNOWN size of the error; named in the pre-registered scope)
 meta	scale_and_shift	plan-view scale 1.0000 (declared sensitivity u-inplane-scale), thickness shift 0.000 mm (declared sensitivity u-segmentation-error)
 meta	packs	back=maple, bar=spruce, bridge=maple, post=spruce, rib=maple, top=spruce
 meta	omitted	neck and upper block, tail block, tailpiece, strings, chinrest, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)
@@ -16878,7 +16880,7 @@ tri	118	119	127	0
 tri	126	127	6	0
 tri	6	127	7	0
 component	bridge	maple	0.002812576	1	200	293	0	0
-region	1.000000000	0.000000000	0.000000000
+region	0.000000000	1.000000000	0.000000000
 node	-0.006510000	-0.054375000	-0.106262937	0.000000000000	0.000000000000	1.000000000000
 node	-0.005760000	-0.053875000	-0.106262937	0.000000000000	0.000000000000	1.000000000000
 node	-0.005260000	-0.053875000	-0.106262937	0.000000000000	0.000000000000	1.000000000000
@@ -17729,7 +17731,7 @@ slave	60 59 58 57
 tie	top-band2	bridge	1	3	3
 master	0 1 2
 slave	40 39 38
-cavity	0.001965321	0.027194321	0.003045029
+cavity	0.002060956	0.027194321	0.003045029
 drive	bass string (G) at the bridge, along x	bridge	-0.017340	-0.051640	-0.106000	1	0	0
 drive	treble string (E) at the bridge, along x	bridge	0.017280	-0.048870	-0.106100	1	0	0
 drive	bridge centre, along y (into the top)	bridge	0.000000	-0.052000	-0.106000	0	1	0

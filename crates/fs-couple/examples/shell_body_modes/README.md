@@ -19,10 +19,12 @@ cargo run --release -p fs-couple --example shell_body_modes -- \
 `--shapes` writes the displacement of the top and back nodes along their directors; `--node-shapes PATH` writes the three
 global displacement components of every node of every part (m/sqrt(kg), mass-normalized) for the first 36 air-coupled modes.
 
-`PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`):
+`PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`). The violin top, bass bar and
+soundpost are Norway spruce (Viala et al. 2020 violin quarters); the runs before 2026-10-23 used the guitar Sitka pack
+`guitar-spruce-sitka-fpl-gtr282-shell` for them:
 
 ```bash
-cargo run -p xtask -- matdb-pack --manifest ABS/data/matdb/seed-v1/guitar-spruce-sitka-fpl-gtr282-shell/manifest.tsv --out ABS/PACK_DIR/spruce.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest ABS/data/matdb/seed-v1/violin-spruce-norway-viala2020-shell/manifest.tsv --out ABS/PACK_DIR/spruce.fsmatpk
 cargo run -p xtask -- matdb-pack --manifest ABS/data/matdb/seed-v1/violin-maple-sycamore-sonderegger2013-shell/manifest.tsv --out ABS/PACK_DIR/maple.fsmatpk
 ```
 
@@ -31,10 +33,11 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
 - `gen_violin_shell_assembly.py SPECIMEN_DIR OUT.tsv H_MM [key=value ...]` writes the table from the specimen
   tables (options: `scale_xz`, `thickness_shift_mm` as declared sensitivities; `bar`, `post`, `bridge` = 0 or 1;
   `zone_step_top_mm`, `zone_step_back_mm`, `min_patch`, `edge`; `fanfix=1` repairs the vertices where a component meets itself,
-  which some scaled meshes need and the base table does not; `cavity_volume=exact` records the air volume enclosed by the
-  inner skins, 2.0610 L for the base table, instead of the default facet sum, 1.9653 L, which is origin dependent for open surfaces;
-  `uniform_t_mm` gives every plate zone one thickness, a weld diagnostic). With every option at its default the output is
-  byte-identical to the committed `shell-assembly-h8.tsv`. Every choice that is not a table number is a `meta` row of the output.
+  which some scaled meshes need and the base table does not; `cavity_volume=exact`, the default since 2026-10-23, records the
+  air volume enclosed by the inner skins, 2.0610 L for the base table, and `cavity_volume=facet` the facet sum of the earlier
+  tables, 1.9653 L, which is origin dependent for open surfaces; `uniform_t_mm` gives every plate zone one thickness, a weld
+  diagnostic). With every option at its default the output is byte-identical to the committed `shell-assembly-h8.tsv`. Every
+  choice that is not a table number is a `meta` row of the output.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
   triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and
   refuses (as the owner's code does) a component that is not edge-connected, a vertex with several fans, or neighbouring
@@ -47,10 +50,14 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
 - `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=fpl]` writes the shell-ready maple pack from the committed
   Sonderegger 2013 and Laemmlein 2020 packs; `shear=fpl` writes the declared shear sensitivity pack (Wood Handbook
   sugar maple G_LR and G_LT ratios times E_L) under the name `...-fplshear-shell`.
+- `gen_violin_spruce_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready Norway spruce pack from the committed Viala 2020
+  violin-quarter pack, with the Sitka nu_LR of the Wood Handbook pack as a declared surrogate.
 
 Modelled: top plate with its two f-holes, back plate, one rib strip, bass bar (wall shell on the top), soundpost
-(tube shell between the inner skins), bridge (shell on the outer skin at its two feet), enclosed air with the two
-f-holes as one neck of their conductance. Not modelled: neck and upper block, tail block, tailpiece, strings,
+(tube shell between the inner skins), bridge (shell on the outer skin at its two feet, grain from the feet to the top;
+the tables before 2026-10-23 had the grain across the bridge, which put a bridge mode at 367 Hz, 99 percent of its
+kinetic energy in the bridge, among the body modes),
+enclosed air with the two f-holes as one neck of their conductance. Not modelled: neck and upper block, tail block, tailpiece, strings,
 chinrest, linings and corner blocks, purfling, varnish, glue compliance (named in the table's `omitted` row and
 in `body-mode-preregistration.tsv`).
 

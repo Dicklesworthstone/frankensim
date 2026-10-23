@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	violin-spruce-norway-viala2020-shell
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs spruce-norway-viala2020-quarters and spruce-sitka-fpl-gtr282 (whose own terms apply)
+citation	Viala R., Placet V., Cogan S. (2020), J. Cult. Herit. 42:108-116, doi:10.1016/j.culher.2019.09.004; USDA Forest Products Laboratory (2021), Wood Handbook, FPL-GTR-282, Table 5-2 (nu_LR); derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

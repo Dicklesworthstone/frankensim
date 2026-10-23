@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	viala-shell	Norway spruce (Picea abies) violin-top tonewood, 10 split quarters from one seller, 9-11 percent moisture	Viala et al. (2020) J. Cult. Herit. 42:108-116 as committed in the pack spruce-norway-viala2020-quarters (audio-band finite element model updating, 100-5000 Hz): density 460 kg/m3, E_L 13800 MPa, E_R 1200 MPa, G_LR 800 MPa, G_LT (the source's G_TL) 850 MPa, G_RT 47 MPa; nu_LR 0.372 from the committed pack spruce-sitka-fpl-gtr282	nu_LR is a SURROGATE (Sitka, Wood Handbook): the source does not identify it. The quarters are violin tonewood, not the il Cannone top, whose species the ESRF record does not state. Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). The validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.
+observation	viala-shell-loss	the same quarters	Viala et al. (2020) Table 4 average row as committed in spruce-norway-viala2020-quarters: eta_L 0.0075, eta_R 0.0175, eta_LR 0.0135; eta_LT and eta_RT are UNKNOWN and set equal to eta_LR	SURROGATE for two of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the example recovers a constant loss factor per mode by omega_ref / omega. They do not enter any frequency.
+scalar	density	viala-shell	density	460	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	12566.37	rad/s
+scalar	young_modulus_1	viala-shell	young_modulus_1	1.38e+10	Pa	constant
+uncertainty	young_modulus_1	unstated	-	-	-	-
+validity	young_modulus_1	T	280	320	K
+validity	young_modulus_1	omega	0	12566.37	rad/s
+scalar	young_modulus_2	viala-shell	young_modulus_2	1.2e+09	Pa	constant
+uncertainty	young_modulus_2	unstated	-	-	-	-
+validity	young_modulus_2	T	280	320	K
+validity	young_modulus_2	omega	0	12566.37	rad/s
+scalar	poisson_ratio_12	viala-shell	poisson_ratio_12	0.372	1	constant
+uncertainty	poisson_ratio_12	unstated	-	-	-	-
+validity	poisson_ratio_12	T	280	320	K
+validity	poisson_ratio_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_12	viala-shell	shear_modulus_12	800000000	Pa	constant
+uncertainty	shear_modulus_12	unstated	-	-	-	-
+validity	shear_modulus_12	T	280	320	K
+validity	shear_modulus_12	omega	0	12566.37	rad/s
+scalar	shear_modulus_13	viala-shell	shear_modulus_13	850000000	Pa	constant
+uncertainty	shear_modulus_13	unstated	-	-	-	-
+validity	shear_modulus_13	T	280	320	K
+validity	shear_modulus_13	omega	0	12566.37	rad/s
+scalar	shear_modulus_23	viala-shell	shear_modulus_23	47000000	Pa	constant
+uncertainty	shear_modulus_23	unstated	-	-	-	-
+validity	shear_modulus_23	T	280	320	K
+validity	shear_modulus_23	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_11	viala-shell-loss	plane_stress_viscosity_11	83365.857	Pa*s	constant
+uncertainty	plane_stress_viscosity_11	unstated	-	-	-	-
+validity	plane_stress_viscosity_11	T	280	320	K
+validity	plane_stress_viscosity_11	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_22	viala-shell-loss	plane_stress_viscosity_22	16914.8116	Pa*s	constant
+uncertainty	plane_stress_viscosity_22	unstated	-	-	-	-
+validity	plane_stress_viscosity_22	T	280	320	K
+validity	plane_stress_viscosity_22	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_66	viala-shell-loss	plane_stress_viscosity_66	8594.36693	Pa*s	constant
+uncertainty	plane_stress_viscosity_66	unstated	-	-	-	-
+validity	plane_stress_viscosity_66	T	280	320	K
+validity	plane_stress_viscosity_66	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_12	viala-shell-loss	plane_stress_viscosity_12	4119.28378	Pa*s	constant
+uncertainty	plane_stress_viscosity_12	unstated	-	-	-	-
+validity	plane_stress_viscosity_12	T	280	320	K
+validity	plane_stress_viscosity_12	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_16	viala-shell-loss	plane_stress_viscosity_16	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_16	unstated	-	-	-	-
+validity	plane_stress_viscosity_16	T	280	320	K
+validity	plane_stress_viscosity_16	omega	0	12566.37	rad/s
+scalar	plane_stress_viscosity_26	viala-shell-loss	plane_stress_viscosity_26	0	Pa*s	constant
+uncertainty	plane_stress_viscosity_26	unstated	-	-	-	-
+validity	plane_stress_viscosity_26	T	280	320	K
+validity	plane_stress_viscosity_26	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13	viala-shell-loss	transverse_shear_viscosity_13	9131.51486	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13	T	280	320	K
+validity	transverse_shear_viscosity_13	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_23	viala-shell-loss	transverse_shear_viscosity_23	504.919057	Pa*s	constant
+uncertainty	transverse_shear_viscosity_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_23	T	280	320	K
+validity	transverse_shear_viscosity_23	omega	0	12566.37	rad/s
+scalar	transverse_shear_viscosity_13_23	viala-shell-loss	transverse_shear_viscosity_13_23	0	Pa*s	constant
+uncertainty	transverse_shear_viscosity_13_23	unstated	-	-	-	-
+validity	transverse_shear_viscosity_13_23	T	280	320	K
+validity	transverse_shear_viscosity_13_23	omega	0	12566.37	rad/s
