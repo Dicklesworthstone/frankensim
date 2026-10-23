@@ -49,7 +49,8 @@ fn exact_dg_valve_reaches_wind_and_ensemble_pcm_through_the_existing_renderer() 
             "\"pressure_point\":\"inlet\"",
             "\"memory_branches\":2",
             "not an exterior microphone",
-            "wall/terminal loss inferred",
+            // faba3eb39 renamed the disclaimer from "wall/terminal loss" to "loss ledger".
+            "loss ledger inferred, not an independent heat integral",
         ] {
             assert!(metadata.contains(token), "{token}: {metadata}");
         }

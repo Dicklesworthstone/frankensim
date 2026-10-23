@@ -85,7 +85,8 @@ fn five_species_regional_outlet_retains_its_own_material_in_cli_sound_and_sideca
 #[test]
 fn invalid_composition_and_pressure_refuse_before_cli_creates_artifacts() {
     let dir = directory(); let input = dir.join("invalid.performance");
-    for (i, text) in [BASE.replace("N2 0.7", "He 0.7"), BASE.replace("O2 0.3", "O2 0.2"),
+    // He became a supported species in ad216794e; Xe is still unsupported (as in exterior.rs).
+    for (i, text) in [BASE.replace("N2 0.7", "Xe 0.7"), BASE.replace("O2 0.3", "O2 0.2"),
         BASE.replace("N2 0.7 O2 0.3", "N2 1 O2 0"), BASE.replace("293.15 100000", "400 100000"),
         BASE.replace("mole 2 N2 0.7 O2 0.3", "mole 2 N2 0.9 H2O 0.1"),
         BASE.replace("0.002 viscothermal", "0.002 gas mixture 300 90000 mole 1 N2 1 viscothermal")]
