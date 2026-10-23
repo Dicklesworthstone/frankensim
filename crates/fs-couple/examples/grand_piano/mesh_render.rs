@@ -36,9 +36,10 @@ pub struct Rendered {
     pub peak_pa:f64,
     pub report:String,
 }
-fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize) -> Result<Rendered,String> {
+fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize,
+    ambient:super::ambient::Ambient) -> Result<Rendered,String> {
     let mut stream=AudioStream::new(piano,score,Some(&board.surface),MICROPHONE_M,
-        fs_bem::helmholtz::Medium::air(),1.0)?;
+        ambient.medium(),1.0)?;
     let mut pressure=vec![0.0;count];
     for block in pressure.chunks_mut(256) { stream.render_block(block).map_err(|e|e.to_string())?; }
     let peak_pa=pressure.iter().fold(0.0_f64,|p,&x|p.max(x.abs()));
@@ -50,11 +51,11 @@ fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize
         Strings: {} retained coordinates through 21.6 kHz, {} segments limited by the 512-partial ceiling; estimated finite-width viscous dampers.\n\
         Input {:.12e} J; stored {:.12e} J; component loss {:.12e} J; closure {:.12e} J.\n\
         Structure: {}. Source/estimated materials, raw source string tensions; no measured digital-twin claim.\n\
-        Receiver {:?} m, infinite-baffle Rayleigh pressure; crown uses projected signed normal volume velocity; no room, lid scattering or radiation backreaction.",
+        Receiver {:?} m, infinite-baffle Rayleigh pressure; crown uses projected signed normal volume velocity; no room, lid scattering or radiation backreaction.\n{}",
         count,RATE,peak_pa,clips,board.area_m2,board.mass_kg,board.modes.len(),BOARD_BAND_HZ,
         piano.bank.modes.len(),piano.bank.capped_string_segments,
         piano.accounting.input_work_j,piano.energy_j(),losses,
-        piano.accounting.input_work_j-piano.energy_j()-losses,board.provenance,MICROPHONE_M);
+        piano.accounting.input_work_j-piano.energy_j()-losses,board.provenance,MICROPHONE_M,ambient.receipt());
     Ok(Rendered{wav,peak_pa,report})
 }
 
@@ -63,7 +64,8 @@ fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize
 /// Default MIDI mapping: channel 1, velocity 127 -> 4.5 m/s, switch sustain.
 /// Native header selects the flat plate or actual crowned-shell structural
 /// model. Both share the SAME reciprocal string bank, felt, shank and PCM path.
-pub fn render(text:&str, count:usize, midi:Option<&str>) -> Result<Rendered,String> {
+/// `ambient` is the exterior air (the reference record or `--gas-record`).
+pub fn render(text:&str, count:usize, midi:Option<&str>, ambient:super::ambient::Ambient) -> Result<Rendered,String> {
     if !(2_400..=2_880_000).contains(&count) { return Err("render frame budget exceeded".into()); }
     let scale=steinway_scale::courses()?;
     let keys:Vec<_> = scale.iter().map(|c|c.midi).collect();
@@ -79,7 +81,7 @@ pub fn render(text:&str, count:usize, midi:Option<&str>) -> Result<Rendered,Stri
         None=>Performance::demonstration(&keys,RATE,count as u64,Some(69),Some(2.0))?,
     };
     let (piano,board)=prepare(text,scale)?;
-    encode(piano,&board,score,count)
+    encode(piano,&board,score,count,ambient)
 }
 
 #[cfg(test)]
@@ -100,7 +102,7 @@ mod tests {
     fn duration_bounds_precede_files_and_allocations() {
         for seconds in ["NaN","inf","-1","0","0.049","61","nonsense"] { assert!(frames(seconds).is_err()); }
         assert_eq!(frames("0.05").unwrap(),2400); assert_eq!(frames("60").unwrap(),2_880_000);
-        assert!(render("not a board",1,None).is_err());
+        assert!(render("not a board",1,None,super::super::ambient::Ambient::reference()).is_err());
     }
     #[test]
     fn imported_panel_drives_source_felt_shanks_and_physical_pressure_deterministically() {
@@ -115,7 +117,7 @@ mod tests {
             assert_eq!(piano.bank.capped_string_segments,0);
             assert!(piano.damper_resolution().is_some());
             let score=Performance::read("sample,event,key,value\n0,note_on,69,2\n1024,note_off,69,0\n",&[69],2400).unwrap();
-            encode(piano,&board,score,2400).unwrap()
+            encode(piano,&board,score,2400,super::super::ambient::Ambient::reference()).unwrap()
         };
         let a=run(); let b=run();
         assert!(a.peak_pa.is_finite() && a.peak_pa>0.0);
@@ -130,7 +132,7 @@ mod tests {
             let mut scale=steinway_scale::courses().unwrap();scale.retain(|c|c.midi==69);
             let (piano,prepared)=prepare(&board,scale).unwrap();
             let score=Performance::read("sample,event,key,value\n0,note_on,69,2\n1024,note_off,69,0\n",&[69],2400).unwrap();
-            encode(piano,&prepared,score,2400).unwrap()
+            encode(piano,&prepared,score,2400,super::super::ambient::Ambient::reference()).unwrap()
         };
         let flat=run(0.);let curved=run(0.015);let repeated=run(0.015);
         assert!(curved.peak_pa.is_finite() && curved.peak_pa>0.);

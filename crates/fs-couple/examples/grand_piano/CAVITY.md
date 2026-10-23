@@ -27,6 +27,12 @@ damping-ratio,0.02
 gas,dry-air-ussa1976,293.15,101325
 ```
 
+The enclosed gas is either the explicit dry-air row above or the shared gas
+declaration `gas,record,<record>` (for example `gas,record,mixture 293.15 101325
+mole 2 N2 0.79 O2 0.21`). Either resolves through the gas owner; a record that
+does not resolve refuses. The cavity's gas is its own declaration, separate
+from the exterior air (`--gas-record`).
+
 The source row requires an authority label (`estimated`, `mixed`, `published`
 or `measured`) and an attribution. Importing a label does not independently
 verify that attribution. The interface origin is the top face's lower x/y corner. The cavity occupies

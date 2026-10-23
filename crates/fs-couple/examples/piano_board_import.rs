@@ -21,6 +21,7 @@
 #[path = "grand_piano/hammer_materials.rs"] mod hammer_materials;
 #[path = "grand_piano/mesh_import.rs"] mod mesh_import;
 #[path = "grand_piano/mesh_render.rs"] mod mesh_render;
+#[path = "grand_piano/ambient.rs"] mod ambient;
 use std::io::{Read, Write};
 
 const USAGE: &str = "piano_board_import inspect INPUT.obj
@@ -29,7 +30,7 @@ piano_board_import import-crowned INPUT.obj MATERIALS.fspi OUTPUT.fss
 piano_board_import export INPUT.fsb OUTPUT.obj OUTPUT.fspi
 piano_board_import load-strings UNLOADED.fss SCALE.csv BEARINGS.fsbp OUTPUT.fss
 piano_board_import settle-strings UNLOADED.fss SCALE.csv BEARINGS.fsbp OUTPUT.fss
-piano_board_import render-steinway INPUT.fsb|INPUT.fss OUTPUT.wav SECONDS [PERFORMANCE.mid]
+piano_board_import render-steinway INPUT.fsb|INPUT.fss OUTPUT.wav SECONDS [PERFORMANCE.mid] [--gas-record air.gas]
 
 inspect reports the actual object/group/material labels without guessing parts.
 import selects a flat midsurface, maps every triangle to supplied orthotropic
@@ -78,6 +79,18 @@ fn write_output(mut file:std::fs::File, text:&str, path:&str)->Result<(),String>
     file.write_all(text.as_bytes()).and_then(|()|file.sync_all()).map_err(|e|format!("{path}: {e}"))
 }
 fn run(args:&[String])->Result<(),String> {
+    // The exterior air: the committed reference record unless --gas-record overrides it.
+    let (args,gas_record)=match args.iter().position(|a|a=="--gas-record") {
+        Some(i) if args.first().is_some_and(|c|c=="render-steinway") => {
+            let path=args.get(i+1).filter(|p|!p.starts_with("--")).ok_or("--gas-record requires a gas declaration file")?;
+            if args[i+2..].iter().any(|a|a=="--gas-record") { return Err("--gas-record may be supplied only once".into()); }
+            ([&args[..i],&args[i+2..]].concat(),Some(path.clone()))
+        }
+        Some(_) => return Err("--gas-record applies only to render-steinway".into()),
+        None => (args.to_vec(),None),
+    };
+    let args=args.as_slice();
+    let ambient=|| ambient::Ambient::selected(gas_record.as_deref());
     match args {
         [] => { println!("{USAGE}"); Ok(()) }
         [flag] if flag == "--help" || flag == "-h" => { println!("{USAGE}"); Ok(()) }
@@ -142,21 +155,21 @@ fn run(args:&[String])->Result<(),String> {
             Ok(())
         }
         [command,input,output,seconds] if command == "render-steinway" => {
-            render_file(input,output,seconds,None)
+            render_file(input,output,seconds,None,ambient()?)
         }
         [command,input,output,seconds,midi] if command == "render-steinway" => {
-            render_file(input,output,seconds,Some(midi))
+            render_file(input,output,seconds,Some(midi),ambient()?)
         }
         _ => Err(USAGE.into()),
     }
 }
-fn render_file(input:&str, output:&str, seconds:&str, midi:Option<&str>)->Result<(),String> {
+fn render_file(input:&str, output:&str, seconds:&str, midi:Option<&str>, ambient:ambient::Ambient)->Result<(),String> {
     let count=mesh_render::frames(seconds)?;
     if std::path::Path::new(output).exists() {
         return Err(format!("{output}: render output must be a fresh path"));
     }
     let text=read_bounded(input,mesh_import::MAX_SPEC_BYTES)?;
-    let rendered=mesh_render::render(&text,count,midi)?;
+    let rendered=mesh_render::render(&text,count,midi,ambient)?;
     // Race-safe no-clobber creation after successful preparation and rendering.
     let mut file=create_output(output)?;
     file.write_all(&rendered.wav).and_then(|()|file.sync_all()).map_err(|e|format!("{output}: {e}"))?;
@@ -181,6 +194,10 @@ mod cli_tests {
         assert!(run(&["--help".into()]).is_ok());
         assert!(run(&["render-steinway".into(),"missing.fsb".into(),"out.wav".into(),"NaN".into()]).is_err());
         assert!(run(&["export".into(),"x.fsb".into(),"same".into(),"same".into()]).is_err());
+        // A gas record never falls back to air, and belongs only to rendering.
+        assert!(run(&["render-steinway".into(),"b.fsb".into(),"o.wav".into(),"1".into(),"--gas-record".into(),"/nonexistent.gas".into()]).is_err());
+        assert!(run(&["render-steinway".into(),"b.fsb".into(),"o.wav".into(),"1".into(),"--gas-record".into()]).is_err());
+        assert!(run(&["inspect".into(),"x.obj".into(),"--gas-record".into(),"air.gas".into()]).is_err());
     }
     #[test]
     fn source_model_d_geometry_and_string_cards_take_the_load_strings_cli_path() {

@@ -118,6 +118,14 @@ jobs:
       - name: Render a physical-model smoke note
         if: ${{ !cancelled() }}
         run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
+      - name: Render the smoke note in a non-default declared gas
+        if: ${{ !cancelled() }}
+        # The air is data: only --gas-record changes, and the sound must change with it.
+        run: |
+          set -o pipefail
+          cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --gas-record crates/fs-couple/examples/co2-20c.gas --render piano-smoke-co2.wav | tee piano-gas-co2.log
+          grep -q "Ambient air: --gas-record" piano-gas-co2.log
+          ! cmp -s piano-smoke.wav piano-smoke-co2.wav
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:

@@ -20,6 +20,7 @@
 #[path="grand_piano/cavity.rs"] mod cavity;
 #[path="grand_piano/mesh_import.rs"] mod mesh_import;
 #[path="grand_piano/mesh_render.rs"] mod mesh_render;
+#[path="grand_piano/ambient.rs"] mod ambient;
 #[path="grand_piano/exterior_geometry.rs"] mod exterior_geometry;
 #[path="grand_piano/exterior_audio.rs"] mod exterior_audio;
 #[path="grand_piano/bridge_response.rs"] mod bridge_response;
@@ -484,6 +485,7 @@ fn run(args:&[String])->Result<(),String> {
             if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
+            println!("{}",spec.medium_receipt());
             let courses=options.prepare_scale(scale(strings)?)?;
             if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
             let board=read_bounded(board,8*1024*1024)?;
@@ -516,6 +518,7 @@ fn run(args:&[String])->Result<(),String> {
             if frames.is_some() { options.select_preset_dampers(strings=="steinway-d"); }
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
+            println!("{}",spec.medium_receipt());
             if frames.is_some() {spec.require_audio_receivers()?;}
             if command=="render-loaded" && spec.frequencies<33 {
                 return Err("render-loaded requires at least 33 odd-grid frequencies".into());

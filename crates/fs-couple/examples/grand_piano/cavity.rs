@@ -88,6 +88,12 @@ impl Specification {
                     once(&mut count, n.parse::<usize>().map_err(|_| "invalid cavity mode count")?, "modes")?;
                 }
                 ["damping-ratio", zeta] => { once(&mut damping, finite(zeta)?, "damping-ratio")?; }
+                // The shared gas declaration: `gas,record,T P RH`, `gas,record,mixture ...`.
+                ["gas", "record", record] => {
+                    let state = super::ambient::parse(record).map_err(|e| format!("cavity gas: {e}"))?;
+                    once(&mut gas, (AcousticMedium { rho0: state.density, c0: state.sound_speed },
+                        state.temperature, state.pressure), "gas")?;
+                }
                 ["gas", "dry-air-ussa1976", temperature, pressure] => {
                     let temperature = finite(temperature)?; let pressure = finite(pressure)?;
                     let state = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure)

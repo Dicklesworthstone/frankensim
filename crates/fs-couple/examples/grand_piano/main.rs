@@ -22,6 +22,7 @@ mod string_sections;
 mod string_polarization;
 mod cavity;
 mod rayleigh_loading;
+mod ambient;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
@@ -32,7 +33,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--hammer-footprints faces.fshp]
     [--dampers estimated | point | pads.fspd] [--fast-dampers] [--string-stretching axial.fspx]
     [--string-polarization bridge-frames.fspp]
-    [--cavity enclosure.fspc]
+    [--cavity enclosure.fspc] [--gas-record air.gas]
     [--rayleigh-loading sides,min_hz,max_hz,samples]
     [--radiation-ports 1..128]
     [--concert-pitch 430..450 | --stretch-tuning 430..450 | --raw-tensions]
@@ -292,6 +293,7 @@ struct Options {
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     hammers: Option<String>, string_sections: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     string_stretching: Option<String>, string_polarization: Option<String>, cavity: Option<String>,
+    gas_record: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
     rt0425_bridge_contacts: bool, estimated_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
@@ -318,7 +320,7 @@ impl Default for Options {
             rt0425_bridge_contacts: false, estimated_bridge_contacts: false, rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
-            string_stretching: None, string_polarization: None, cavity: None,
+            string_stretching: None, string_polarization: None, cavity: None, gas_record: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -367,6 +369,7 @@ impl Options {
                 "--string-stretching" => options.string_stretching = Some(value.clone()),
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--cavity" => options.cavity = Some(value.clone()),
+                "--gas-record" => options.gas_record = Some(value.clone()),
                 "--rayleigh-loading" => options.rayleigh_loading = Some(rayleigh_loading::Options::parse(value)?),
                 "--radiation-ports" => options.radiation_ports = Some(value.parse().map_err(|_| invalid())?),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
@@ -996,10 +999,13 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
         piano.configure_cavity(&cavity.loaded(&piano.bank)?)?;
         println!("{}", cavity.report());
     }
+    // The exterior air is data: the committed reference record or --gas-record.
+    let ambient = ambient::Ambient::selected(options.gas_record.as_deref())?;
+    println!("{}", ambient.receipt());
     if let Some(load_options) = &options.rayleigh_loading {
         let load = rayleigh_loading::prepare(
             surface.ok_or("Rayleigh loading requires the played geometric surface")?,
-            &piano.bank, load_options, fs_bem::helmholtz::Medium::air(), piano.sample_rate(),
+            &piano.bank, load_options, ambient.medium(), piano.sample_rate(),
             options.radiation_ports)?;
         if let Some(basis) = &load.basis {
             piano.configure_projected_radiation(&load.model, basis)?;
@@ -1039,9 +1045,9 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     let mut stream = match options.microphone_right {
         Some(right)=>audio::AudioStream::new_stereo(piano,score,
             surface.ok_or("stereo pressure requires a geometric soundboard surface")?,
-            [left,right],fs_bem::helmholtz::Medium::air())?,
+            [left,right],ambient.medium())?,
         None=>audio::AudioStream::new(piano,score,surface,left,
-            fs_bem::helmholtz::Medium::air(),options.observer_gain)?,
+            ambient.medium(),options.observer_gain)?,
     };
     // the bridge trace reads the instrument after every frame
     if bridge_row.is_some() { stream.disable_accelerator(); }
@@ -1296,6 +1302,10 @@ mod rayleigh_loading_render_tests;
 #[cfg(test)]
 #[path = "wav_output_render_tests.rs"]
 mod wav_output_render_tests;
+
+#[cfg(test)]
+#[path = "ambient_render_tests.rs"]
+mod ambient_render_tests;
 
 #[cfg(test)]
 #[path = "cavity_render_tests.rs"]

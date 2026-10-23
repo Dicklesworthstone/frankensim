@@ -54,6 +54,9 @@ pub struct Specification {
     /// Missing entries retain the original omnidirectional pressure receiver.
     pub receiver_patterns:BTreeMap<usize,FirstOrder>,
     pub medium:Medium,
+    /// The resolved gas when the medium came from an `ambient,<gas record>` row;
+    /// `None` for a bare `medium,RHO,C` row, which carries no thermochemistry.
+    pub gas:Option<fs_material::gas::GasState>,
     pub band_hz:(f64,f64),
     pub frequencies:usize,
     pub board_band_hz:f64,
@@ -66,6 +69,15 @@ fn number(text:&str)->Result<f64,String> {
     text.parse::<f64>().ok().filter(|x|x.is_finite()).ok_or_else(||"expected finite acoustic scalar".into())
 }
 impl Specification {
+    /// Names what supplied the exterior air, where a reader of the report sees it.
+    pub fn medium_receipt(&self)->String {
+        match &self.gas {
+            Some(g)=>format!("Exterior medium: gas record; T={} K, p={} Pa, rho={} kg/m3, c={} m/s.",
+                g.temperature,g.pressure,g.density,g.sound_speed),
+            None=>format!("Exterior medium: bare medium, not a gas record; rho={} kg/m3, c={} m/s authored.",
+                self.medium.density,self.medium.sound_speed),
+        }
+    }
     pub fn read(text:&str)->Result<Self,String> {
         if text.len()>MAX_SPEC_BYTES {return Err("exterior specification exceeds 64 KiB".into());}
         let mut rows=text.lines().map(str::trim).filter(|l|!l.is_empty()&&!l.starts_with('#'));
@@ -92,7 +104,7 @@ impl Specification {
                     }
                     receivers.push([number(f[1])?,number(f[2])?,number(f[3])?]);
                 }
-                "receiver-evaluation"|"source"|"obj-scale-m"|"obj-origin"|"max-skin-offset-m"|"medium"|
+                "receiver-evaluation"|"source"|"obj-scale-m"|"obj-origin"|"max-skin-offset-m"|"medium"|"ambient"|
                 "band-hz"|"board-band-hz"|"fit-order"|"min-panels-per-wavelength"|"full-scale-pa"=>{
                     if fields.insert(f[0].into(),f[1..].iter().map(|s|(*s).to_owned()).collect()).is_some() {return Err(format!("duplicate acoustic row {}",f[0]));}
                 }
@@ -106,7 +118,19 @@ impl Specification {
         let source=fields.get("source").ok_or("missing acoustic source attribution")?;
         if source.len()<2 || !["estimated","mixed","published","measured"].contains(&source[0].as_str())
             || source[1..].iter().all(String::is_empty) {return Err("source requires authority and attribution".into());}
-        let origin=get("obj-origin",3)?;let gas=get("medium",2)?;let band=get("band-hz",3)?;
+        let origin=get("obj-origin",3)?;let band=get("band-hz",3)?;
+        // Exactly one exterior medium: a shared gas record, or a bare medium.
+        let (medium,gas)=match (fields.contains_key("ambient"),fields.contains_key("medium")) {
+            (true,false)=>{
+                let state=super::ambient::parse(&get("ambient",1)?[0])?;
+                (Medium {density:state.density,sound_speed:state.sound_speed},Some(state))
+            }
+            (false,true)=>{
+                let bare=get("medium",2)?;
+                (Medium {density:number(&bare[0])?,sound_speed:number(&bare[1])?},None)
+            }
+            _=>return Err("declare exactly one exterior medium: ambient,<gas record> or medium,RHO,C".into()),
+        };
         let near_field_receivers=match fields.get("receiver-evaluation").map(Vec::as_slice) {
             None=>false,
             Some([value]) if value=="centroid"=>false,
@@ -116,7 +140,7 @@ impl Specification {
         let mut out=Self {source:source.join(","),scale_m:scalar("obj-scale-m")?,
             origin_obj:[number(&origin[0])?,number(&origin[1])?,number(&origin[2])?],
             offset_m:scalar("max-skin-offset-m")?,receivers,near_field_receivers,receiver_patterns,
-            medium:Medium {density:number(&gas[0])?,sound_speed:number(&gas[1])?},
+            medium,gas,
             band_hz:(number(&band[0])?,number(&band[1])?),frequencies:band[2].parse().map_err(|_|"invalid frequency count")?,
             board_band_hz:scalar("board-band-hz")?,fit_order:get("fit-order",1)?[0].parse().map_err(|_|"invalid fit order")?,
             min_ppw:scalar("min-panels-per-wavelength")?,full_scale_pa:scalar("full-scale-pa")?,rules};
