@@ -8,7 +8,7 @@ mod board_geometry;
 mod crowned_board;
 mod steinway_d;
 mod steinway_scale;
-// Felt-pack hammers. The offline engine's default felt cards remain the steinway_scale ones.
+// --felt-pack-hammers. The default felt cards remain the steinway_scale ones.
 #[allow(dead_code)]
 mod hammer_felt;
 mod stretch_tuning;
@@ -30,7 +30,7 @@ mod ambient;
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
     [--rt0425-bridge-contacts | --estimated-bridge-contacts] [--rt0425-hammer-stiffness]
-    [--rt0425-hammer-dissipation] [--rt0425-string-damping]
+    [--rt0425-hammer-dissipation] [--felt-pack-hammers] [--rt0425-string-damping]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--string-sections bonded.fsss]
     [--hammer-footprints faces.fshp]
@@ -71,6 +71,9 @@ reverses the bass order, so it only reproduces earlier renders.
 --rt0425-hammer-stiffness applies the source K_H to each unison string.
 --rt0425-hammer-dissipation requires that stiffness and uses the published
 per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
+--felt-pack-hammers plays the felt pack's hammers instead: Stulov's 88 measured
+Abel hammers, each the whole hammer's K u^p + R d(u^p)/dt shared by its unison,
+with the pack's hammer mass. It excludes the RT-0425 hammer flags and --hammers.
 --rt0425-string-damping uses the published per-key R_u and eta_u for the
 preset scale's intrinsic string losses instead of the estimated common law.
 --equilibrate-board-mass solves a flat geometric board in mass-diagonal
@@ -300,7 +303,7 @@ struct Options {
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
     rt0425_bridge_contacts: bool, estimated_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
-    rt0425_hammer_dissipation: bool, rt0425_string_damping: bool,
+    rt0425_hammer_dissipation: bool, felt_pack_hammers: bool, rt0425_string_damping: bool,
     equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
@@ -321,7 +324,7 @@ impl Default for Options {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false, fast_dampers: false,
             rt0425_bridge_contacts: false, estimated_bridge_contacts: false, rt0425_hammer_stiffness: false,
-            rt0425_hammer_dissipation: false, rt0425_string_damping: false,
+            rt0425_hammer_dissipation: false, felt_pack_hammers: false, rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             string_stretching: None, string_polarization: None, cavity: None, gas_record: None,
             midi: None, midi_mapping: midi::Mapping::default(),
@@ -352,6 +355,7 @@ impl Options {
             if flag == "--estimated-bridge-contacts" { options.estimated_bridge_contacts = true; continue; }
             if flag == "--rt0425-hammer-stiffness" { options.rt0425_hammer_stiffness = true; continue; }
             if flag == "--rt0425-hammer-dissipation" { options.rt0425_hammer_dissipation = true; continue; }
+            if flag == "--felt-pack-hammers" { options.felt_pack_hammers = true; continue; }
             if flag == "--rt0425-string-damping" { options.rt0425_string_damping = true; continue; }
             if flag == "--equilibrate-board-mass" { options.equilibrate_board_mass = true; continue; }
             if flag == "--consistent-board-mass" { options.consistent_board_mass = true; continue; }
@@ -447,6 +451,10 @@ impl Options {
                 || options.hammers.is_some() || options.render.is_none()))
             || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
             return Err("bridge-contact choices need the preset board and exclude each other; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
+        }
+        if options.felt_pack_hammers && (options.preset.is_none() || options.hammers.is_some()
+            || options.render.is_none() || options.rt0425_hammer_stiffness || options.rt0425_hammer_dissipation) {
+            return Err("felt-pack hammers need a preset render without --hammers or the RT-0425 hammer flags".into());
         }
         if options.rt0425_string_damping && (options.preset.is_none()
             || options.scale.is_some() || options.string_sections.is_some() || options.render.is_none()) {
@@ -735,21 +743,37 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
         return Err("supplied string polarization was not projected from the played board; no one-plane fallback".into());
     }
     let secondary = polarization.map(string_polarization::Prepared::secondary);
+    let pack_hammers = options.felt_pack_hammers.then(|| {
+        let card = hammer_felt::stulov_abel()?;
+        scale.iter().map(|c| card.hammer(c.midi)).collect::<Result<Vec<_>, String>>()
+    }).transpose()?;
+    let scale: Vec<geometry::Course> = match &pack_hammers {
+        Some(hammers) => scale.into_iter().zip(hammers)
+            .map(|(mut c, h)| { c.hammer_mass_kg = h.mass_kg; c }).collect(),
+        None => scale,
+    };
     let imported = text.map(|text| hammer_materials::read(text,
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
     let footprints=options.hammer_footprints.as_deref().map(|path|
         linear::hammer_footprint::Specification::load(path,&scale)).transpose()?;
-    let source_rates=options.rt0425_hammer_dissipation.then(||
-        scale.iter().map(|c|steinway_scale::hammer_relaxation_rt0425(c.midi))
-            .collect::<Result<Vec<_>,_>>()).transpose()?;
+    let source_rates=match &pack_hammers {
+        Some(hammers)=>Some(scale.iter().zip(hammers).map(|(c,h)|h.rate_per_string(c)).collect::<Vec<_>>()),
+        None=>options.rt0425_hammer_dissipation.then(||
+            scale.iter().map(|c|steinway_scale::hammer_relaxation_rt0425(c.midi))
+                .collect::<Result<Vec<_>,_>>()).transpose()?,
+    };
     let mut piano = if options.preset.is_some() {
         let materials = match imported {
             Some(materials) => materials,
-            None => scale.iter().map(if options.rt0425_hammer_dissipation {
-                steinway_scale::hammer_material_rt0425_damped
-            } else if options.rt0425_hammer_stiffness {
-                steinway_scale::hammer_material_rt0425
-            } else { steinway_scale::hammer_material }).collect::<Result<Vec<_>,_>>()?,
+            None => match &pack_hammers {
+                Some(hammers) => scale.iter().zip(hammers).map(|(c, h)| h.material(c))
+                    .collect::<Result<Vec<_>,_>>()?,
+                None => scale.iter().map(if options.rt0425_hammer_dissipation {
+                    steinway_scale::hammer_material_rt0425_damped
+                } else if options.rt0425_hammer_stiffness {
+                    steinway_scale::hammer_material_rt0425
+                } else { steinway_scale::hammer_material }).collect::<Result<Vec<_>,_>>()?,
+            },
         };
         engine::Instrument::new_with_string_damping(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, Some(engine::ShankGeometry::published()),
@@ -1254,6 +1278,10 @@ fn run_with(args: &[String]) -> Result<(), String> {
     println!("Soundboard: {board_source}.");
     if let Some(path) = &options.hammers {
         println!("Hammer materials supplied by {path}; no automatic coupon-fit or calibration claim. Scale mass/patch geometry unchanged.");
+    } else if options.felt_pack_hammers {
+        let card = hammer_felt::stulov_abel()?;
+        println!("Hammers from felt pack {} {}: Stulov's 88 measured Abel hammers, K u^p + R d(u^p)/dt per hammer with its mass.",
+            card.pack_id(), card.content_hash());
     } else if options.preset.is_some() {
         println!("Per-key source-derived hammer loading envelopes{}; {}.",
             if options.rt0425_hammer_stiffness { " with RT-0425 stiffness per unison string" } else { " with legacy stiffness divided across the unison" },
@@ -1622,6 +1650,35 @@ mod render_tests {
         assert!(source.rt0425_hammer_dissipation);
         assert!(options(&["--preset", "steinway-d", "--render", "piano.wav",
             "--rt0425-hammer-dissipation"]).is_err());
+    }
+    #[test]
+    fn felt_pack_hammers_are_an_explicit_preset_input_that_closes_its_work() {
+        let o = options(&["--preset", "steinway-d", "--render", "piano.wav", "--felt-pack-hammers"]).unwrap();
+        assert!(o.felt_pack_hammers);
+        for args in [
+            vec!["--felt-pack-hammers"],
+            vec!["--preset", "steinway-d", "--felt-pack-hammers"],
+            vec!["--preset", "steinway-d", "--render", "piano.wav", "--hammers", "felt.fsh", "--felt-pack-hammers"],
+            vec!["--preset", "steinway-d", "--render", "piano.wav", "--rt0425-hammer-stiffness", "--felt-pack-hammers"],
+            vec!["--preset", "steinway-d", "--render", "piano.wav", "--rt0425-hammer-stiffness",
+                "--rt0425-hammer-dissipation", "--felt-pack-hammers"],
+        ] { assert!(options(&args).is_err(), "accepted {args:?}"); }
+        let source = options(&["--preset", "steinway-d", "--render", "piano.wav",
+            "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation"]).unwrap();
+        let course = steinway_scale::courses().unwrap()[48];
+        let modes = board::demonstration();
+        let mut pack = prepare_instrument_with_hammers(vec![course], &modes, &o, None).unwrap();
+        let mut rt0425 = prepare_instrument_with_hammers(vec![course], &modes, &source, None).unwrap();
+        pack.note_on(69, 2.0).unwrap();
+        rt0425.note_on(69, 2.0).unwrap();
+        let mut changed = false;
+        for _ in 0..2400 {
+            changed |= pack.step().unwrap() != rt0425.step().unwrap();
+        }
+        assert!(changed, "the felt pack changed nothing");
+        assert!(pack.accounting.felt_relaxation_loss_j > 0.0);
+        let balance = pack.accounting.input_work_j - pack.energy_j() - pack.accounting.dissipated_j();
+        assert!(balance.abs() < 1e-7, "{balance:e}");
     }
     #[test]
     fn stereo_receiver_is_explicit_physical_input_and_preserves_existing_controls() {

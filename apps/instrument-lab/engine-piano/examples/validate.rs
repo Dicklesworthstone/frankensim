@@ -7,26 +7,32 @@
 //!
 //! usage: validate [board_band_hz] [partials] [seconds] [reduction_spec]
 //!        [--rt0425-string-damping] [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
-//!        [--string-waves]
+//!        [--felt-pack-hammers] [--string-waves]
 //! With a reduction spec the board is the reference's bridge-informed
 //! reduction of the (0, band] slice and both models use its full damping matrix.
-//! The flags select the published laws in both models (the browser plays all three).
+//! The flags select the published laws in both models. `--felt-pack-hammers` plays the felt
+//! pack's hammers (mass, felt card and rate) in both; the browser plays it with the string damping.
 //! `--string-waves` stretches plain steel keys with longitudinal waves in both
 //! (`stretch::plain_steel_waves_spec`, 10 kHz axial band): the reference iterates its
 //! implicit discrete gradient, the live kernel kicks once per step, so the two then
 //! agree to the time discretization, not to roundoff.
-use fs_live_piano::refmods::{engine, geometry, steinway_scale};
+use fs_live_piano::refmods::{engine, geometry, hammer_felt, steinway_scale};
 use fs_live_piano::{Config, Description, LivePiano};
 
 fn main() {
     let all: Vec<String> = std::env::args().collect();
-    const LAWS: [&str; 4] = ["--rt0425-string-damping", "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation", "--string-waves"];
+    const LAWS: [&str; 5] = ["--rt0425-string-damping", "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation", "--string-waves", "--felt-pack-hammers"];
     // A mistyped flag would otherwise validate the default law and report it as the published one.
     if let Some(bad) = all.iter().skip(1).find(|a| a.starts_with("--") && !LAWS.contains(&a.as_str())) {
         eprintln!("unknown option {bad}");
         std::process::exit(2);
     }
-    let [string_damping, hammer_stiffness, hammer_dissipation, string_waves] = LAWS.map(|f| all.iter().any(|a| a == f));
+    let [string_damping, hammer_stiffness, hammer_dissipation, string_waves, felt_pack] = LAWS.map(|f| all.iter().any(|a| a == f));
+    if felt_pack && (hammer_stiffness || hammer_dissipation) {
+        eprintln!("--felt-pack-hammers excludes the RT-0425 hammer flags");
+        std::process::exit(2);
+    }
+    let felt_card = felt_pack.then(|| hammer_felt::stulov_abel().expect("felt pack"));
     let args: Vec<String> = all.into_iter().filter(|a| !a.starts_with("--")).collect();
     let band: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800.0);
     let partials: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
@@ -46,18 +52,25 @@ fn main() {
     let steps = (seconds * f64::from(rate)) as usize;
     for &midi in &[24u8, 33, 45, 60, 72, 84, 96, 108] {
         for &velocity in &[0.5, 2.5, 4.5] {
-            let course = scale[usize::from(midi - 21)];
+            let mut course = scale[usize::from(midi - 21)];
+            let pack_hammer = felt_card.as_ref().map(|card| card.hammer(midi).expect("pack hammer"));
+            if let Some(h) = &pack_hammer {
+                course.hammer_mass_kg = h.mass_kg;
+            }
             let desc = match &reduction {
                 Some(spec) => Description::with_reduction(vec![course], band, spec),
                 None => Description::with_courses(vec![course], band),
             }.expect("board");
-            let material = if hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(&course) }
+            let material = if let Some(h) = &pack_hammer { h.material(&course) }
+                else if hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(&course) }
                 else if hammer_stiffness { steinway_scale::hammer_material_rt0425(&course) }
                 else { steinway_scale::hammer_material(&course) }.expect("felt card");
             let mut reference = engine::Instrument::new_with_string_damping(vec![course], &desc.board, rate, 1,
                 partials, true, vec![material], Some(engine::ShankGeometry::published()), None, None, string_damping)
                 .expect("reference engine");
-            if hammer_dissipation {
+            if let Some(h) = &pack_hammer {
+                reference.configure_source_hammer_dissipation(&[h.rate_per_string(&course)]).expect("reference R");
+            } else if hammer_dissipation {
                 let r_h = steinway_scale::hammer_relaxation_rt0425(midi).expect("R_H");
                 reference.configure_source_hammer_dissipation(&[r_h]).expect("reference R_H");
             }
@@ -81,6 +94,7 @@ fn main() {
             cfg.rt0425_string_damping = string_damping;
             cfg.rt0425_hammer_stiffness = hammer_stiffness;
             cfg.rt0425_hammer_dissipation = hammer_dissipation;
+            cfg.felt_pack_hammers = felt_pack;
             let mut live = LivePiano::new(&desc, cfg).expect("live kernel");
             let rest_energy = reference.energy_j();
             reference.note_on(midi, velocity).expect("reference strike");
