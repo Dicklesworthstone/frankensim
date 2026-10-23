@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	neon-transport-kestin1984
+redistribution	permitted	Numerical correlation coefficients and computed values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Kestin, Knierim, Mason, Najafi, Ro and Waldman (1984), JPCRD 13:229, Eqs B7b/B7c/C3/C8/C10/C12/C13 and Tables A1/A2/A3/A6, doi:10.1063/1.555703; https://srd.nist.gov/jpcrdreprint/1.555703.pdf
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure

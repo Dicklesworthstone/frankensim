@@ -5,7 +5,8 @@
 //! Sources: NASA/TP-2002-211556 (McBride, Zehe and Gordon 2002; a U.S.
 //! Government work) Appendix B rows and Appendix D coefficients; Hurly and
 //! Mehl 2007, J. Res. NIST 112:75, Table 5 (helium zero-density viscosity and
-//! thermal conductivity, facts with attribution). Oracles here are test-only;
+//! thermal conductivity, facts with attribution); Kestin et al. 1984 (neon
+//! dilute-gas correlation, facts with attribution). Oracles here are test-only;
 //! production resolves the compiled packs.
 
 use std::path::{Path, PathBuf};
@@ -433,6 +434,117 @@ fn sf6_transport_pack_is_the_printed_correlations_sampled() {
     println!(
         "{{\"suite\":\"gas-species-packs\",\"species\":\"SF6\",\"viscosity_298_15\":{eta:e}}}"
     );
+}
+
+/// Neon zero-density viscosity and thermal conductivity, as Kestin et al. 1984
+/// (JPCRD 13:229) program them. Every value below was read on the NIST page
+/// images, because the text layer is a poor OCR:
+/// - Table A1: k, N_A and R;
+/// - Table A2: M = 20.179 g/mol;
+/// - Table A3: sigma = 0.2755 nm, eps/k = 42.00 K;
+/// - Table A6: rho* = 0.0784, V0* = 11.09e5;
+/// - Eq. B7b for 1.2 <= T* <= 10, and Eq. B7c above;
+/// - Eqs. C3, C8, C10, C12 and C13.
+///
+/// The source's tables are "not designed for linear interpolation", so the
+/// correlation itself is the reference.
+fn kestin_neon(t: f64) -> [f64; 2] {
+    const K_B: f64 = 1.380662e-23;
+    const N_A: f64 = 6.022045e23;
+    const R: f64 = 8.31441;
+    let (molar_mass, sigma, eps_k, rho, v0) = (20.179e-3, 0.2755e-9, 42.00, 0.0784, 11.09e5);
+    let ts = t / eps_k;
+    let x = ts.ln();
+    let (ln_omega, slope) = if ts <= 10.0 {
+        let c = [0.46641, -0.56991, 0.19591, -0.03879, 0.00259];
+        (
+            c[0] + c[1] * x + c[2] * x.powi(2) + c[3] * x.powi(3) + c[4] * x.powi(4),
+            c[1] + 2.0 * c[2] * x + 3.0 * c[3] * x.powi(2) + 4.0 * c[4] * x.powi(3),
+        )
+    } else {
+        let a10 = (v0 / 10.0_f64).ln();
+        let q = (a10 * rho).powi(-2);
+        let a2 = -33.0838 + q * (20.0862 + 72.1059 / a10 + (8.27648 / a10).powi(2));
+        let a3 = 101.571 - q * (56.4472 + 286.393 / a10 + (17.7610 / a10).powi(2));
+        let a4 = -87.7036 + q * (46.3130 + 277.146 / a10 + (19.0573 / a10).powi(2));
+        let alpha = v0.ln() - x;
+        let bracket = 1.04 + a2 * x.powi(-2) + a3 * x.powi(-3) + a4 * x.powi(-4);
+        let dbracket = -2.0 * a2 * x.powi(-3) - 3.0 * a3 * x.powi(-4) - 4.0 * a4 * x.powi(-5);
+        (
+            2.0 * rho.ln() + 2.0 * alpha.ln() + bracket.ln(),
+            -2.0 / alpha + dbracket / bracket,
+        )
+    };
+    let e_star = 1.0 + 0.25 * slope;
+    let f_eta = 1.0 + 3.0 / 196.0 * (8.0 * e_star - 7.0).powi(2);
+    let f_lambda = 1.0 + 1.0 / 42.0 * (8.0 * e_star - 7.0).powi(2);
+    let mass = molar_mass / N_A;
+    let eta = 5.0 / 16.0 * (mass * K_B * t / core::f64::consts::PI).sqrt() * f_eta
+        / (sigma * sigma * ln_omega.exp());
+    [eta, 15.0 / 4.0 * eta * R / molar_mass * f_lambda / f_eta]
+}
+
+/// The neon transport pack is Kestin's correlation, sampled.
+///
+/// The programmed correlation is checked against the printed Table 2 (p. 238)
+/// at every row inside 200..1000 K:
+/// - viscosity to half the last printed digit (0.005 uPa s);
+/// - conductivity within the source's stated +-0.7 %. It reproduces the table
+///   only to about 3e-4 relative, a systematic and unresolved offset, logged
+///   rather than hidden.
+///
+/// The stored curves represent the correlation (see `representation_ladder`).
+#[test]
+fn neon_transport_pack_is_the_kestin_correlation_sampled() {
+    const TABLE2: [(f64, f64, f64); 19] = [
+        (200.0, 24.29, 37.63),
+        (250.0, 28.36, 43.96),
+        (300.0, 32.10, 49.77),
+        (273.15, 30.13, 46.71),
+        (293.15, 31.60, 49.00),
+        (313.15, 33.04, 51.22),
+        (333.15, 34.43, 53.39),
+        (353.15, 35.80, 55.51),
+        (373.15, 37.13, 57.58),
+        (423.15, 40.35, 62.57),
+        (473.15, 43.42, 67.34),
+        (523.15, 46.38, 71.93),
+        (573.15, 49.25, 76.38),
+        (623.15, 52.03, 80.69),
+        (673.15, 54.74, 84.90),
+        (723.15, 57.39, 89.00),
+        (773.15, 59.99, 93.02),
+        (873.15, 65.02, 100.83),
+        (973.15, 69.89, 108.36),
+    ];
+    let mut worst = (0.0_f64, 0.0_f64);
+    for (t, eta, lambda) in TABLE2 {
+        let [e, l] = kestin_neon(t);
+        let (de, dl) = ((e * 1e6 - eta).abs(), (l * 1e3 / lambda - 1.0).abs());
+        assert!(
+            de <= 0.005 + 1e-9,
+            "Ne viscosity at {t} K: {} vs printed {eta}",
+            e * 1e6
+        );
+        assert!(
+            dl <= 0.007,
+            "Ne conductivity at {t} K: {} vs printed {lambda}",
+            l * 1e3
+        );
+        worst = (worst.0.max(de), worst.1.max(dl));
+    }
+    println!(
+        "{{\"suite\":\"gas-species-packs\",\"species\":\"Ne\",\"table2_rows\":19,\"worst_viscosity_abs_uPa_s\":{},\"worst_conductivity_rel\":{:e},\"bands\":[0.005,0.007]}}",
+        worst.0, worst.1
+    );
+    let ne = source("neon", Some("neon-transport-kestin1984"));
+    let card = ne.transport.as_ref().unwrap();
+    representation_ladder(card, "Ne", "dynamic_viscosity", 200.0, &|t| {
+        kestin_neon(t)[0]
+    });
+    representation_ladder(card, "Ne", "thermal_conductivity", 200.0, &|t| {
+        kestin_neon(t)[1]
+    });
 }
 
 const D3: &str = "data/instruments/descriptions/clarinet/performances/BbClar.mf.D3.performance";
