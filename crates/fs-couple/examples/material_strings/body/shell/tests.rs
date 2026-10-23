@@ -372,6 +372,132 @@ fn the_half_second_ceiling_render_reports_its_cost_and_pressure_bits() {
     });
 }
 
+/// The four strings of the violin-sized rung, G3 D4 A4 E5: pitch [Hz] and radius [m] of plain strings in the synthetic steel
+/// of these tests (7800 kg/m^3, E 200 GPa, G 80 GPa), NOT violin strings (their packs are bead .192; a wound string here
+/// would refuse torsion). The tension that puts each speaking length on its pitch is derived below, not chosen: 36.5, 56.8,
+/// 81.7 and 77.5 N, 252 N in all.
+const VIOLIN_STRINGS: [(f64, f64); 4] = [(196.0, 0.000_3), (293.66, 0.000_25), (440.0, 0.000_2), (659.26, 0.000_13)];
+
+/// Every string keeps every bending and twist mode of its full span below this frequency [Hz].
+const VIOLIN_STRING_BAND_HZ: f64 = 10_000.0;
+
+/// The violin-sized cost rung of bead .358, on synthetic data throughout (NOT a measured violin; the il Cannone body is
+/// .65/.153). It uses the clamped 15 x 11 plate with 128 retained modes and one bridge node per string, a Helmholtz cavity
+/// (2 L; the two f-holes as one 18.7 mm neck through 3 mm), and the four strings above. Each string has a 0.328 m speaking
+/// length from the nut to its bridge foot and a 55 mm afterlength to the tailpiece (both ends fixed), two planes and its
+/// twist, and every mode of that full span below `VIOLIN_STRING_BAND_HZ`. String 0 (G3) is bowed at 0.2 m/s and 0.5 N, a
+/// tenth of the speaking length from the bridge. There is no cylinder gas loading: its memory (bending modes x planes x
+/// intervals) would exceed the 512-coordinate prepared ceiling.
+fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
+    use std::f64::consts::PI;
+    let (nx, ny) = (15, 11);
+    let centre = (ny / 2) * nx + nx / 2;
+    let feet: String = [centre - 2, centre - 1, centre + 1, centre + 2].iter()
+        .map(|node| format!("bridge {node} 0 0 1\n")).collect();
+    let text = clamped_plate_body(nx, ny, "window 1 4000000000", 2_000_000_000)
+        .replace(&format!("bridges 1\nbridge {centre} 0 0 1\n"), &format!("bridges 4\n{feet}"));
+    let profile = Profile::parse(text.as_bytes()).unwrap();
+    let (speaking, span) = (0.328_f64, 0.383_f64);
+    let bridge = speaking / span;
+    let (density, young, shear) = (7800.0, 200e9, 80e9);
+    let mut strings = String::new();
+    for &(pitch, radius) in &VIOLIN_STRINGS {
+        // The bridge foot is the speaking length's end: f0 = sqrt(T / mu) / (2 L_speaking), mu = rho pi r^2 (bonded steel
+        // core and steel sleeve).
+        let tension = density * PI * radius * radius * (2.0 * speaking * pitch).powi(2);
+        // The material string's modes are those of its full span: f_n = n c / (2 L) sqrt(1 + B n^2) with c = 2 L_speaking f0
+        // and B = pi^2 E I / (T L^2); torsion f_m = m sqrt(G / rho) / (2 L).
+        let fundamental = 2.0 * speaking * pitch / (2.0 * span);
+        let inharmonicity = PI * PI * young * PI * radius.powi(4) / 4.0 / (tension * span * span);
+        let bending = (1..=input::MAX_MODES)
+            .take_while(|&n| n as f64 * fundamental * (1.0 + inharmonicity * (n * n) as f64).sqrt() < VIOLIN_STRING_BAND_HZ)
+            .count();
+        let twist = (VIOLIN_STRING_BAND_HZ * 2.0 * span / (shear / density).sqrt()) as usize;
+        strings.push_str(&format!("string wire.fsmatpk {span} {radius} tension {tension} {bending} {twist} {bridge} 3000 0.1\n\
+            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two 0.6 0.8 1 0\n", radius * 2.0 / 3.0));
+    }
+    let bow = bridge * 0.9;
+    let performance = format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
+        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\nbody body.fsmatpk 0.4 0.3 0.001 128 1\nstrings 4\n{strings}\
+        prepared-linear 512 4294967296 1000000000000000\ncavity neck 0.002 0.0187 0.003 100 1\n\
+        friction stribeck 0.8 0.4 0.1 0\nforces retain 0 0\nschedule\nfrankensim-gesture-schedule-v1\n\
+        control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n");
+    (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+}
+
+/// The violin-sized G3 rung (above) for a quarter second: the wall time per audio second with what it was measured on, the
+/// time of each stage (construction: shell modes, projection and the prepared network; render), and the pressure bits.
+#[test]
+#[ignore = "violin-sized cost rung of bead .358: run with --ignored --nocapture"]
+fn the_violin_sized_g3_rung_reports_its_wall_time_per_audio_second() {
+    let (profile, spec) = violin_inputs(12_000);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
+            pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("violin G3 rung: {}", cost_context(&r.spec));
+        let source = r.performance.bank().source().bank();
+        assert_eq!(source.material_shell_image().unwrap().physical_modes().len(), 128);
+        assert_eq!(source.strings().len(), 4);
+        assert!(source.material_cavity().is_some());
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 12_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        assert!(samples.iter().any(|p| p.abs() > 1e-14), "the bowed body radiated nothing");
+        let audio_s = samples.len() as f64 / 48_000.0;
+        let per_second = rendered.as_secs_f64() / audio_s;
+        eprintln!("violin G3 rung: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({per_second:.1} s render per audio second; a 2 s note with its construction takes {:.1} s per audio second)",
+            samples.len(), (built.as_secs_f64() + 2.0 * per_second) / 2.0);
+        eprintln!("violin G3 rung: {}", cost_context(&r.spec));
+        eprintln!("violin G3 rung: pressure bits fnv1a {:#018x}, peak {:.3e} Pa", pressure_bits(&samples),
+            samples.iter().fold(0.0_f64, |m, p| m.max(p.abs())));
+    });
+}
+
+/// The violin-sized G3 rung bowed for 2 s, for listening, P2 grading and P8's blind A/B (bead .358). It is synthetic
+/// throughout; see `violin_inputs`. FRANKENSIM_VIOLIN_RUNG_OUT names an existing directory, which receives:
+/// - `violin-g3-rung-2s.f64le`: every pressure sample [Pa], exact;
+/// - `violin-g3-rung-2s.wav`: PCM16 whose full scale is the smallest power of two in pascals above the peak. The full scale
+///   is printed. There is no normalization or mastering, and the WAV has no clip.
+#[test]
+#[ignore = "two-second violin-sized render for listening: set FRANKENSIM_VIOLIN_RUNG_OUT, run with --ignored --nocapture"]
+fn the_violin_sized_g3_rung_renders_two_seconds_for_listening() {
+    let out = std::path::PathBuf::from(std::env::var_os("FRANKENSIM_VIOLIN_RUNG_OUT")
+        .expect("FRANKENSIM_VIOLIN_RUNG_OUT names the output directory"));
+    let (profile, spec) = violin_inputs(96_000);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
+            pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+        let built = constructing.elapsed();
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 96_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        let peak = samples.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        assert!(peak > 0.0, "the bowed body radiated nothing");
+        let full_scale = 2f64.powi(peak.log2().floor() as i32 + 1);
+        let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&samples, 48_000, full_scale).unwrap();
+        assert_eq!(clips, 0);
+        std::fs::write(out.join("violin-g3-rung-2s.wav"), wav).unwrap();
+        std::fs::write(out.join("violin-g3-rung-2s.f64le"),
+            samples.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        eprintln!("violin G3 2 s: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({:.1} s per audio second with construction)", samples.len(),
+            (built + rendered).as_secs_f64() / (samples.len() as f64 / 48_000.0));
+        eprintln!("violin G3 2 s: {}", cost_context(&r.spec));
+        // A longer horizon must not change earlier samples: the first quarter second is compared against the bits the cost
+        // rung prints for its own quarter-second render.
+        eprintln!("violin G3 2 s: peak {peak:.4e} Pa, WAV full scale {full_scale:e} Pa, pressure bits fnv1a {:#018x} \
+            (first 12000 samples {:#018x})", pressure_bits(&samples), pressure_bits(&samples[..12_000]));
+    });
+}
+
 /// Cost probe, not a correctness check (`-- --ignored --nocapture`): prints how the prepared route's construction time and time
 /// per sample grow with the retained body modes of the same plate, so the growth is measured rather than assumed.
 #[test]
