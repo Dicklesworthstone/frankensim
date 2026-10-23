@@ -1,0 +1,257 @@
+//! Branch continuation and root disclosure in the simultaneous friction owner
+//! (IRP pexfp.152).
+//!
+//! Two light attachments, each a single mode driven at constant speed into
+//! stick-slip, are bowed jointly. Before every accepted step the test rebuilds
+//! each port's load line from the network's own prediction, including the
+//! cross-port reaction committed in the same step, and checks that the frame's
+//! disclosed root count and committed index match an independent dense scan of
+//! that line. Three-root steps must be taken stuck while sticking and on the
+//! high branch while sliding, for both Stribeck and hyperbolic laws.
+
+use super::*;
+use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget};
+use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalCouplingConfig};
+use fs_math::c64::C64;
+
+fn budgets() -> ModalCouplingConfig {
+    ModalCouplingConfig {
+        max_modes: 8,
+        max_connections: 4,
+        max_setup_terms: 4096,
+        nyquist_guard_fraction: 0.9,
+        maximum_total_energy_j: 100.0,
+        maximum_abs_pressure_pa: 1e6,
+        maximum_abs_connection_force_n: 1e6,
+        solve_relative_tolerance: 1e-11,
+        energy_absolute_tolerance_j: 1e-12,
+        energy_relative_tolerance: 1e-8,
+    }
+}
+fn config() -> ModalFrictionConfig {
+    ModalFrictionConfig {
+        max_iterations: 96,
+        maximum_force_n: 50.0,
+        maximum_slip_speed_m_s: 100.0,
+        force_absolute_tolerance_n: 1e-12,
+        force_relative_tolerance: 1e-10,
+        sticking_tolerance_m: 1e-12,
+    }
+}
+fn model(hz: f64) -> ModalAcousticTimeModel {
+    ModalAcousticTimeModel::try_new(
+        48_000,
+        vec![ModalAcousticMode {
+            angular_frequency_rad_s: core::f64::consts::TAU * hz,
+            damping_ratio: 0.01,
+            pressure_per_modal_velocity: C64::ZERO,
+        }],
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap()
+}
+fn attach(component: usize) -> ModalAttachment {
+    // A light mode (1/sqrt(1e-4 kg)): a large per-step mobility, so a 1 N load
+    // opens a three-root window.
+    ModalAttachment {
+        component,
+        shapes: vec![100.0],
+    }
+}
+fn system(law: FrictionLaw) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let network =
+        CoupledModalSystem::new(vec![model(180.0), model(260.0)], vec![], budgets(), &gate)
+            .unwrap();
+    let core = FrictionModalSystem::new(
+        network,
+        ModalFrictionPort {
+            left: attach(0),
+            right: None,
+            law: law.clone(),
+        },
+        config(),
+        &gate,
+    )
+    .unwrap();
+    core.with_additional_ports(
+        vec![(
+            ModalFrictionPort {
+                left: attach(1),
+                right: None,
+                law,
+            },
+            config(),
+        )],
+        MultiFrictionConfig {
+            max_ports: 4,
+            max_sweeps: 128,
+            max_setup_terms: 1_000_000,
+        },
+        &gate,
+    )
+    .unwrap()
+}
+
+/// Sliding roots of g on (0, s] by a dense scan, each refined by bisection.
+fn scan_roots(s: f64, m: f64, normal: f64, law: &FrictionLaw) -> Vec<f64> {
+    let g = |v: f64| {
+        let mu = if v == 0.0 {
+            law.zero_speed_kinetic_coefficient().unwrap()
+        } else {
+            law.kinetic_coefficient(v).unwrap()
+        };
+        v - s + m * normal * mu
+    };
+    let cells = 50_000_u32;
+    let mut roots = Vec::new();
+    let mut prev = (0.0, g(0.0));
+    for i in 1..=cells {
+        let v = s * f64::from(i) / f64::from(cells);
+        let cur = g(v);
+        if (prev.1 < 0.0) != (cur < 0.0) {
+            let (mut lo, mut hi, below) = (prev.0, v, prev.1 < 0.0);
+            loop {
+                let mid = lo + 0.5 * (hi - lo);
+                if mid <= lo || mid >= hi {
+                    break;
+                }
+                if (g(mid) < 0.0) == below {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+            roots.push(hi);
+        }
+        prev = (v, cur);
+    }
+    roots
+}
+
+fn exercise(law: FrictionLaw) -> [usize; 2] {
+    let mut system = system(law.clone());
+    let drives = [
+        FrictionDrive {
+            speed_m_s: 0.2,
+            normal_force_n: 1.0,
+        },
+        FrictionDrive {
+            speed_m_s: -0.15,
+            normal_force_n: 1.0,
+        },
+    ];
+    let static_mu = law.static_coefficient().unwrap();
+    let mut three_root = [0_usize; 2];
+    for _ in 0..4_000 {
+        // Recompute each port's held-force load line from the prediction plus
+        // the cross-port reaction committed in this same step.
+        system
+            .core
+            .network
+            .prepare_prediction(&[0.0, 0.0], None)
+            .unwrap();
+        let mut free = [0.0_f64; 2];
+        for i in 0..2 {
+            free[i] = drives[i].speed_m_s * system.sample_period_s()
+                - dot(&system.points[i].column, &system.core.network.free_delta).unwrap();
+        }
+        let frame = system.step(&[0.0, 0.0], &drives).unwrap().clone();
+        let p = 2;
+        for i in 0..2 {
+            let m = system.compliance[i * p + i] / system.sample_period_s();
+            // The same step's cross-port reaction shifts this port's free slip.
+            let v_free = (free[i] - system.compliance[i * p + (1 - i)] * system.tractions[1 - i])
+                / system.sample_period_s();
+            let port = &frame.ports[i];
+            let roots = port
+                .roots
+                .expect("a loaded Stribeck/hyperbolic port discloses roots");
+            let cone = v_free.abs() / m <= static_mu * drives[i].normal_force_n;
+            let sliding = scan_roots(v_free.abs(), m, drives[i].normal_force_n, &law);
+            assert_eq!(
+                usize::from(roots.found),
+                usize::from(cone) + sliding.len(),
+                "port {i} intersections at v_free {v_free}"
+            );
+            assert!(roots.selected < roots.found);
+            if port.regime == ModalFrictionRegime::Sticking {
+                assert!(
+                    cone && roots.selected == 0,
+                    "port {i} stuck outside the cone"
+                );
+            } else {
+                // The committed slide names a real sliding intersection (cone
+                // first, then the sliding roots by speed). When three sliding
+                // roots exist, sliding[1] is the unstable middle and is never
+                // selected.
+                let index = usize::from(roots.selected) - usize::from(cone);
+                if sliding.len() == 3 {
+                    assert_ne!(index, 1, "port {i} slide took the unstable middle root");
+                }
+                let expected = v_free.signum()
+                    * law.kinetic_coefficient(sliding[index]).unwrap()
+                    * drives[i].normal_force_n;
+                assert!(
+                    (port.traction_n - expected).abs() <= 1e-10 * expected.abs().max(1.0),
+                    "port {i} traction {} vs selected root {expected}",
+                    port.traction_n
+                );
+            }
+            if roots.found == 3 {
+                three_root[i] += 1;
+            }
+        }
+    }
+    three_root
+}
+
+#[test]
+fn g1_multi_owner_discloses_roots_for_stribeck_and_hyperbolic() {
+    for law in [
+        FrictionLaw::Stribeck {
+            static_mu: 1.2,
+            kinetic_mu: 0.35,
+            characteristic_speed: 0.05,
+            viscous_per_speed: 0.0,
+        },
+        FrictionLaw::Hyperbolic {
+            static_mu: 1.2,
+            kinetic_mu: 0.35,
+            characteristic_speed: 0.02,
+        },
+    ] {
+        let three = exercise(law.clone());
+        println!(
+            "{{\"test\":\"multi_branch_continuation\",\"law\":\"{law:?}\",\"three_root_steps_per_port\":{three:?}}}"
+        );
+        assert!(
+            three[0] > 0 && three[1] > 0,
+            "both ports must visit a three-root window: {three:?}"
+        );
+    }
+}
+
+#[test]
+fn g0_coulomb_multi_port_discloses_nothing() {
+    let mut system = system(FrictionLaw::Coulomb {
+        static_mu: 0.8,
+        kinetic_mu: 0.4,
+    });
+    let frame = system
+        .step(
+            &[0.0, 0.0],
+            &[
+                FrictionDrive {
+                    speed_m_s: 0.2,
+                    normal_force_n: 1.0,
+                },
+                FrictionDrive {
+                    speed_m_s: 0.2,
+                    normal_force_n: 0.0,
+                },
+            ],
+        )
+        .unwrap();
+    assert!(frame.ports.iter().all(|p| p.roots.is_none()));
+}

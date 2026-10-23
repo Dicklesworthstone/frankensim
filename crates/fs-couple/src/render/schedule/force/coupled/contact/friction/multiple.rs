@@ -59,11 +59,15 @@ pub struct FrictionPortFrame {
     pub constitutive_residual_n: f64,
     /// Resolved branch of the original scalar law.
     pub regime: ModalFrictionRegime,
+    /// Root disclosure for a Stribeck or hyperbolic port; `None` for laws
+    /// without a disclosed rule and for a released contact.
+    pub roots: Option<FrictionRoots>,
 }
 impl Default for FrictionPortFrame {
     fn default() -> Self {
         Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
-            dissipation_j: 0.0, constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released }
+            dissipation_j: 0.0, constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
+            roots: None }
     }
 }
 
@@ -123,6 +127,12 @@ pub struct MultiFrictionModalSystem {
     tractions: Vec<f64>,
     regimes: Vec<ModalFrictionRegime>,
     iterations: Vec<usize>,
+    // McIntyre-Schumacher-Woodhouse branch per port: committed, staged by a
+    // trial, and the per-port load line and disclosed roots scratch.
+    branches: Vec<ContactBranch>,
+    staged_branches: Vec<ContactBranch>,
+    load_lines: Vec<Option<StribeckLoadLine>>,
+    port_roots: Vec<Option<FrictionRoots>>,
     staged_ports: Vec<FrictionPortFrame>,
     frame: MultiFrictionFrame,
     accepted: bool,
@@ -184,6 +194,8 @@ impl MultiFrictionModalSystem {
         Ok(Self { core, points, config, compliance, free_delta: vec![0.0; n],
             free_slip: vec![0.0; p], tractions: vec![0.0; p],
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
+            branches: vec![ContactBranch::Fresh; p], staged_branches: vec![ContactBranch::Fresh; p],
+            load_lines: vec![None; p], port_roots: vec![None; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
             accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p] })
@@ -289,7 +301,7 @@ impl MultiFrictionModalSystem {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
-                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime };
+                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots };
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
             self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
             self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
@@ -307,6 +319,7 @@ impl MultiFrictionModalSystem {
         poll(gate)?;
         self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.core.network.publish_staged();
+        self.branches.copy_from_slice(&self.staged_branches);
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         // Reuse the accepted port allocation through repeated constitutive
         // trials. No fallible work follows mechanical publication.
@@ -315,6 +328,47 @@ impl MultiFrictionModalSystem {
         self.frame = accepted;
         self.accepted = true;
         Ok(&self.frame)
+    }
+
+    // Stribeck and hyperbolic ports take the branch-continuation owner on
+    // their own held-force load line, keeping the branch each occupies across
+    // the joint sweep; the branch commits only when the step publishes. Every
+    // other law, and a released port, keeps the scalar bisection unchanged.
+    fn solve_point(&mut self, i: usize, free: f64, normal: f64, gate: Option<&CancelGate>)
+        -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
+    {
+        let p = self.points.len();
+        let law = self.points[i].port.law.clone();
+        let config = self.points[i].config;
+        let dt = self.sample_period_s();
+        let compliance = self.compliance[i*p+i];
+        let continued = matches!(law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
+        if !continued || normal == 0.0 {
+            self.staged_branches[i] = ContactBranch::Fresh;
+            let (force, regime, iterations) = scalar::solve(&law, config, compliance, dt, free, normal, gate)?;
+            return Ok((force, regime, iterations, None));
+        }
+        poll(gate)?;
+        let mobility = finite(compliance/dt)?;
+        let refusal = |error: ImplicitFrictionError<TriboError>| -> ModalFrictionError { match error {
+            ImplicitFrictionError::Constitutive(cause) => cause.into(),
+            ImplicitFrictionError::InvalidInput(what) => invalid(what).into(),
+            ImplicitFrictionError::NonDissipative => invalid("set-valued friction would drive relative slip").into(),
+            ImplicitFrictionError::NoConvergence => invalid("set-valued friction root did not resolve within max_iterations").into(),
+        }};
+        if !self.load_lines[i].as_ref().is_some_and(|line| line.matches(normal, mobility)) {
+            self.load_lines[i] = Some(StribeckLoadLine::new(&law, normal, mobility).map_err(refusal)?);
+        }
+        let line = self.load_lines[i].as_ref().ok_or_else(|| invalid("missing set-valued load line"))?;
+        let (step, iterations) = line.step_within(finite(free/dt)?, self.branches[i], config.max_iterations)
+            .map_err(refusal)?;
+        self.staged_branches[i] = step.branch;
+        let regime = if step.branch == ContactBranch::Stuck {
+            ModalFrictionRegime::Sticking
+        } else {
+            ModalFrictionRegime::Sliding
+        };
+        Ok((step.traction_n, regime, iterations, Some(FrictionRoots { found: step.roots, selected: step.selected })))
     }
 
     // Original simultaneous friction/obstacle solve with held modal forces.
@@ -343,6 +397,7 @@ impl MultiFrictionModalSystem {
                 - dot(&self.points[i].column, &self.free_delta)?)?;
         }
         self.tractions.fill(0.0); self.iterations.fill(0);
+        for r in &mut self.port_roots { *r = None; }
         let mut sweeps = 0;
         for sweep in 1..=self.config.max_sweeps {
             if let Some(obstacles) = &mut self.obstacles {
@@ -354,11 +409,9 @@ impl MultiFrictionModalSystem {
                 for j in 0..p { if j != i { free = finite(free - self.compliance[i*p+j]*self.tractions[j])?; } }
                 if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i)?)?; }
                 let drive = self.contact_loaded_drive(i, drives[i])?;
-                let point = &self.points[i];
-                let (force, regime, iterations) = scalar::solve(&point.port.law, point.config,
-                    self.compliance[i*p+i], self.sample_period_s(), free, drive.normal_force_n, gate)?;
+                let (force, regime, iterations, roots) = self.solve_point(i, free, drive.normal_force_n, gate)?;
                 self.tractions[i] = force; self.regimes[i] = regime;
-                self.iterations[i] += iterations;
+                self.iterations[i] += iterations; self.port_roots[i] = roots;
             }
             // Joint convergence, not just small force updates or each coordinate's
             // last local root. Temporary physical-limit failures cannot publish.
@@ -416,7 +469,8 @@ impl MultiFrictionModalSystem {
             absolute_work = finite(absolute_work+supply.abs())?;
             self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
                 traction_n: self.tractions[i], slip_distance_m: slip,
-                drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual, regime: self.regimes[i] };
+                drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual,
+                regime: self.regimes[i], roots: self.port_roots[i] };
         }
         let mut pressure = self.core.staged_observer_pressure(gate)?;
         if let (Some(obstacles), Some(weights)) = (&self.obstacles, self.core.acceleration_pressure_weights()) {
@@ -482,3 +536,6 @@ impl MultiFrictionModalSystem {
         else { self.interfaces.get(index-1).and_then(Option::as_ref) }
     }
 }
+
+#[cfg(test)]
+mod continuation_tests;
