@@ -58,6 +58,10 @@ CERTIFY = ["/data/tmp/wa-inst/p2/certify/cands-tinysol-mf.json", "/data/tmp/wa-i
            "/data/tmp/wa-inst/p2/certify/cands-voice-m6.json"]
 OTHERS_SEMITONES = 2
 REQUIRED_REAL = 0.80
+# Sustained families whose real recordings fail Q2 Alive: the family's realism claim is NOT valid yet, so its renders are not graded
+# (treated like struck/plucked). clarinet: its steady reed tone has genuinely low post-attack flux, near the frozen null; whether that
+# is a reference-set gap or a real limit of post-attack flux is pexfp.360 / the clarinet-calibration follow-up (verifier, 2026-10-22).
+BLOCKED_FAMILIES = {"clarinet"}
 REFUSALS = dc.REFUSALS + (FloatingPointError, ZeroDivisionError)
 
 
@@ -358,12 +362,19 @@ def report(rows, q3s, ev):
     L.append(f'{"group":44s} {"Q2 Alive passes":>24s}   {"required":20s} {"verdict":8s} {"identity (beside)":>22s} {"retired bead_q2":>22s}')
     real = [r for r in rows if r["source"] == "real"]
     k, n, none = rate([passes(r) for r in real])
-    ok_real = n > 0 and k / n >= REQUIRED_REAL and none == 0
-    L.append(f'{"real recordings, another library (all)":44s} {fmt((k, n, none)):>24s}   {">= 80 %, all graded":20s} {"PASS" if ok_real else "FAIL":8s} '
+    ok_real = n > 0 and k / n >= REQUIRED_REAL  # refusals ("could not grade") are not failures: n is the graded count, refusals enumerated below (pexfp.357, option a)
+    L.append(f'{"real recordings, another library (all)":44s} {fmt((k, n, none)):>24s}   {">= 80 % of graded":20s} {"PASS" if ok_real else "FAIL":8s} '
              f"{ident(real):>22s} {retired(real):>22s}")
     for f in sorted({r["family"] for r in real}):
         rf = [r for r in real if r["family"] == f]
-        L.append(f'{"  " + f:44s} {fmt(rate([passes(r) for r in rf])):>24s}   {"":20s} {"":8s} {ident(rf):>22s} {retired(rf):>22s}')
+        blocked = "   BLOCKED: family Q2 Alive not valid" if f in BLOCKED_FAMILIES else ""
+        L.append(f'{"  " + f:44s} {fmt(rate([passes(r) for r in rf])):>24s}   {"":20s} {"":8s} {ident(rf):>22s} {retired(rf):>22s}{blocked}')
+    refusals = [r for r in real if passes(r) is None]
+    if refusals:
+        L.append(f'refusals (could not grade; not failures, excluded from the {n} graded above): {len(refusals)}')
+        for r in sorted(refusals, key=lambda r: r.get("label", "")):
+            why = r.get("refused") or (r.get("q2") or {}).get("reason") or "no claim"
+            L.append(f'  {r.get("label") or r.get("note") or "?":40s} {why}')
     nl = [r for r in rows if r["source"] == "null"]
     ok_null = bool(nl)  # nulls not graded in this run: not a pass
     for name in freeze.NULLS:
@@ -385,7 +396,12 @@ def report(rows, q3s, ev):
         q = q3s.get(f, {})
         q3txt = "  Q3 inside: " + ", ".join(f"{k} {q[k][0]}/{q[k][1]} ({100 * q[k][0] / q[k][1]:.0f} %)" for k in ("renders", "real") if q[k][1]) if q else ""
         realf = [passes(x) for x in real if x["family"] == f]
-        verdict = fmt(rate([passes(r) for r in rr])) if any(r["kind"] == "sustained" for r in rr) else "no claim (struck/plucked)"
+        if f in BLOCKED_FAMILIES:
+            verdict = "no claim (family not valid)"
+        elif any(r["kind"] == "sustained" for r in rr):
+            verdict = fmt(rate([passes(r) for r in rr]))
+        else:
+            verdict = "no claim (struck/plucked)"
         L.append(f'{"renders " + f:44s} {verdict:>24s}   {"reported":20s} {"":8s} {ident(rr):>22s} {retired(rr):>22s}'
                  + (f"  real controls {fmt(rate(realf)).strip()}" if realf else "") + q3txt)
     conf = [x for r in real for x in (r.get("confusion") or {}).values()]
@@ -397,8 +413,11 @@ def report(rows, q3s, ev):
         flags = sorted({f["flag"] for r in through for f in r["chain"]["flags"]})
         L.append(f"chain: {len(through)} renders graded through their reference session's recording chain, {len(ch) - len(through)} "
                  f"without one {why}; flags {flags}")
-    L += ["", f'GATE {"VALID" if (ok_real and ok_null and ok_shift) else "NOT VALID"}: real controls {ok_real}, nulls {ok_null}, '
-               f"pitch shift {ok_shift} (the piano and every struck or plucked family: no claim, owner 2026-10-22)"]
+    blocked = ", ".join(sorted(BLOCKED_FAMILIES))
+    L += ["", f'GATE {"VALID" if (ok_real and ok_null and ok_shift) else "NOT VALID"}: real controls {ok_real} (>= 80 % of graded; '
+               f"refusals enumerated, not failures), nulls {ok_null}, pitch shift {ok_shift}",
+          f"  no claim / renders not graded: the piano and every struck or plucked family (owner 2026-10-22)"
+          + (f"; and sustained families whose real recordings fail Q2 Alive: {blocked} (not valid yet; pexfp.360 / clarinet calibration)" if blocked else "")]
     if ev:
         L += ["", "The candidates Q2 Alive was chosen from, library recordings only (identity_eval.py):", identity_eval.report(ev)]
     return "\n".join(L)
