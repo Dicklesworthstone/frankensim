@@ -12,6 +12,15 @@ physical-model demonstration, not a validated violin/cello/bass recording.
 
 ## Run without editing Rust
 
+`material_strings` is also an installable executable. Its binary target and the
+example below compile the same frontend and use the same material, contact,
+body and atmosphere owners:
+
+```bash
+cargo install --locked --path crates/fs-couple --bin material_strings
+material_strings PERFORMANCE NEW_OUTPUT.wav --body-profile PROFILE
+```
+
 From the repository root, with its existing Rust toolchain and dependencies:
 
 ```bash
@@ -1073,6 +1082,26 @@ panel and pole counts, mesh resolution and conditioning diagnostics, and
 sampled fit errors. `MAX_PANELS` is an admission bound on the source mesh,
 not permission to decimate it. The frequency count and passivity/error gates
 above also apply to BEM.
+
+`closed-shell-pluck.material-strings` and `closed-shell.body` supply a complete
+data-only route through this same shell/BEM owner. After the initial copy and
+wire-pack commands above:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/closed-shell-manifest.tsv" --out "$demo/closed-shell.fsmatpk"
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/closed-shell-pluck.material-strings" "$demo/closed-shell-pluck.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/closed-shell.body
+```
+
+The profile is a manufactured 42-node, 80-triangle closed shell with one
+retained free coordinate. Its soft isotropic material and supports keep the
+complete coupled fixture within a small spectral envelope. It is an integration
+example, not a violin shape or measured wood. Its material pack, physical shape,
+string pack, tension and gas mixture remain ordinary input data. The CLI admits
+the shell parser's complete 1 MiB profile budget; flat profiles retain their
+existing 64 KiB limit.
 
 Open shells, uncapped sound holes, inconsistent face orientations and
 multiply shared edges are refused. Coincident assembly boundary nodes are welded

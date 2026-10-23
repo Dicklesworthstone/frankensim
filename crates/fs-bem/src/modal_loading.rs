@@ -8,7 +8,7 @@
 use crate::helmholtz::rayleigh_modal::{self, AreaSample, PreparedSurface};
 use crate::helmholtz::{
     self, Formulation, HelmholtzError, IterativeError, IterativeOptions, IterativeRadiation,
-    Medium, PanelRule,
+    Medium, PanelRule, RadiationSolution,
 };
 use crate::panel3d::SpherePanels;
 use crate::radiation_policy::GeometryPolicy;
@@ -199,6 +199,19 @@ pub fn source_batches(modes: usize) -> impl Iterator<Item = Range<usize>> {
         })
 }
 
+/// Original closed-body solve diagnostics over every source field in one row.
+/// These are resolution and conditioning warnings, not error enclosures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModalLoadingBemDiagnostics {
+    /// Formulation actually selected at this row's frequency.
+    pub formulation: Formulation,
+    /// Smallest original panels-per-wavelength diagnostic over all source batches.
+    pub minimum_panels_per_wavelength: f64,
+    /// Largest original probe-based condition lower bound over all source batches.
+    /// The iterative owner supplies the universal lower bound 1, without probes.
+    pub maximum_condition_lower_bound: f64,
+}
+
 /// Sampled work impedance [generalized force / generalized velocity]. For a
 /// length coordinate Z is kg/s, resistance is Re Z, and added mass is -Im Z/w.
 /// This is a frequency sample, not a fitted causal realization.
@@ -209,6 +222,7 @@ pub struct ModalLoadingRow {
     minimum_resistance_eigenvalue: f64,
     eigen_residual: f64,
     reciprocity_relative_defect: f64,
+    bem_diagnostics: Option<ModalLoadingBemDiagnostics>,
 }
 impl ModalLoadingRow {
     pub const fn omega(&self) -> f64 {
@@ -226,6 +240,11 @@ impl ModalLoadingRow {
     }
     pub const fn reciprocity_relative_defect(&self) -> f64 {
         self.reciprocity_relative_defect
+    }
+    /// Diagnostics retained from the same closed-body solves that supplied Z.
+    /// Rayleigh rows have no BEM solve and return `None`.
+    pub const fn bem_diagnostics(&self) -> Option<ModalLoadingBemDiagnostics> {
+        self.bem_diagnostics
     }
 }
 
@@ -306,6 +325,7 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
             minimum_resistance_eigenvalue: 0.0,
             eigen_residual: 0.0,
             reciprocity_relative_defect: 0.0,
+            bem_diagnostics: None,
         });
     }
     for value in &mut resistance {
@@ -352,6 +372,7 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
         minimum_resistance_eigenvalue: minimum * norm,
         eigen_residual: residual * norm,
         reciprocity_relative_defect: defect / norm,
+        bem_diagnostics: None,
     })
 }
 
@@ -614,6 +635,7 @@ fn load(
     let mut rows = reserved(omegas.len())?;
     for &omega in omegas {
         poll(&mut cancelled)?;
+        let mut bem_diagnostics = None;
         let z = match traces {
             SurfaceModeTraces::PlanarBaffled { .. } => planar
                 .as_ref()
@@ -629,10 +651,23 @@ fn load(
                 };
                 let mut z = reserved(modes * modes)?;
                 z.resize(modes * modes, C64::ZERO);
-                let mut project = |column: usize, pressure: &[C64]| {
+                let mut diagnostics = ModalLoadingBemDiagnostics {
+                    formulation,
+                    minimum_panels_per_wavelength: f64::INFINITY,
+                    maximum_condition_lower_bound: 0.0,
+                };
+                let mut project = |column: usize, solution: &RadiationSolution| {
+                    diagnostics.minimum_panels_per_wavelength = diagnostics
+                        .minimum_panels_per_wavelength
+                        .min(solution.panels_per_wavelength);
+                    diagnostics.maximum_condition_lower_bound = diagnostics
+                        .maximum_condition_lower_bound
+                        .max(solution.condition_lower_bound);
                     for (row, shape) in shapes.iter().enumerate() {
                         let mut force = C64::ZERO;
-                        for ((&phi, &p), &area) in shape.iter().zip(pressure).zip(surface.areas()) {
+                        for ((&phi, &p), &area) in
+                            shape.iter().zip(&solution.pressure).zip(surface.areas())
+                        {
                             force = force + p.scale(phi * area);
                         }
                         z[row * modes + column] = force;
@@ -658,7 +693,7 @@ fn load(
                             .advance(&mut state, options.max_iters.saturating_add(1), &gate)
                             .map_err(iterative_error)?;
                         let (solution, _, _) = operator.finish(&state).map_err(iterative_error)?;
-                        project(column, &solution.pressure);
+                        project(column, &solution);
                     }
                 } else {
                     for range in source_batches(modes) {
@@ -678,14 +713,17 @@ fn load(
                             dense_rule,
                         )?;
                         for (column, solution) in range.zip(solved) {
-                            project(column, &solution.pressure);
+                            project(column, &solution);
                         }
                     }
                 }
+                bem_diagnostics = Some(diagnostics);
                 z
             }
         };
-        rows.push(assess(omega, z, modes)?);
+        let mut row = assess(omega, z, modes)?;
+        row.bem_diagnostics = bem_diagnostics;
+        rows.push(row);
     }
     poll(&mut cancelled)?;
     Ok(ModalLoadingBake {

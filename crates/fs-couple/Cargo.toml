@@ -7,10 +7,18 @@ repository.workspace = true
 authors.workspace = true
 description = "Multiphysics composition through typed port-thermodynamic relations (fs-couple): lossless Dirac interconnections, explicit storage/dissipation/source boundaries, measured energy audits, and Aitken interface acceleration without false whole-system passivity claims."
 
+# Installation and the research example use the same material/geometry frontend.
+[[bin]]
+name = "material_strings"
+path = "examples/material_strings.rs"
+test = false
+bench = false
+
 [package.metadata.frankensim]
 layer = "L3"
 
 [dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-aeroac = { path = "../fs-aeroac" }
 fs-bem = { path = "../fs-bem" }
 fs-blake3 = { path = "../fs-blake3" }
@@ -47,7 +55,6 @@ fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-mbd = { path = "../fs-mbd" }
 fs-ga = { path = "../fs-ga" }
-fs-alloc = { path = "../fs-alloc" }
 fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
 fs-orbit = { path = "../fs-orbit" }

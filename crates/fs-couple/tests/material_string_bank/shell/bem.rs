@@ -172,7 +172,12 @@ fn closed_bank(cx: &Cx<'_>, gate: &CancelGate, rho: f64, pressure: f64) -> Recip
     closed_bank_in_gas(cx, gate, rho, gas(pressure))
 }
 
-fn closed_bank_in_gas(cx: &Cx<'_>, gate: &CancelGate, rho: f64, atmosphere: GasState) -> ReciprocalStringBank {
+fn closed_bank_in_gas(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    rho: f64,
+    atmosphere: GasState,
+) -> ReciprocalStringBank {
     let mut settings = options(0);
     settings.network.max_setup_terms = 131_072;
     ReciprocalStringBank::from_material_shear_shell(
@@ -210,6 +215,11 @@ fn original_curved_material_modes_receive_reciprocal_air_reaction() {
         assert_eq!(report.body_modes, 1);
         assert!(report.acoustic_poles > 0 && report.acoustic_poles <= 64);
         assert!(report.minimum_panels_per_wavelength >= 6.0);
+        assert!(
+            report.maximum_condition_lower_bound.is_finite()
+                && report.maximum_condition_lower_bound >= 1.0
+        );
+        assert!(report.reciprocity_relative_residual <= 1e-12);
         assert!(report.peak_error <= 0.05 && report.rms_error <= 0.02);
         assert!(report.resistance_peak_error <= 0.10 && report.resistance_rms_error <= 0.05);
         assert_eq!(
@@ -267,26 +277,38 @@ fn atmosphere_pressure_and_solid_density_propagate_without_reauthored_acoustics(
         // transport together; no acoustic coefficient is supplied separately.
         use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
         use fs_qty::semantic::{Composition, CompositionBasis};
-        let composition = Composition::new(CompositionBasis::MoleFraction, vec![0.4, 0.1, 0.5]).unwrap();
+        let composition =
+            Composition::new(CompositionBasis::MoleFraction, vec![0.4, 0.1, 0.5]).unwrap();
         let mixture = resolve_gas_mixture(
-            &[GasSpecies::Nitrogen, GasSpecies::Oxygen, GasSpecies::CarbonDioxide],
-            &composition, 293.15, 101_325.0,
-        ).unwrap();
+            &[
+                GasSpecies::Nitrogen,
+                GasSpecies::Oxygen,
+                GasSpecies::CarbonDioxide,
+            ],
+            &composition,
+            293.15,
+            101_325.0,
+        )
+        .unwrap();
         let (mixed, m) = closed_bank_in_gas(cx, gate, 700.0, mixture)
-            .prepare_material_shell_bem(resolution(), gate).unwrap();
+            .prepare_material_shell_bem(resolution(), gate)
+            .unwrap();
         assert_eq!(a.basis_identity, m.basis_identity);
+        assert_ne!(a.loading_identity, m.loading_identity);
         assert_eq!(m.gas, mixture);
         assert_ne!(a.gas.sound_speed, m.gas.sound_speed);
         assert_ne!(a.gas.density, m.gas.density);
         assert_eq!(a.basis_identity, b.basis_identity);
         assert_ne!(a.basis_identity, d.basis_identity);
+        assert_ne!(a.loading_identity, b.loading_identity);
+        assert_ne!(a.loading_identity, d.loading_identity);
         assert_eq!(a.gas.sound_speed, b.gas.sound_speed);
         assert_eq!(b.gas.density, 2.0 * a.gas.density);
         for hz in [75.0, 250.0, 750.0] {
             let w = core::f64::consts::TAU * hz;
             let z = ordinary.impedance(w).unwrap()[0];
             let changed = mixed.impedance(w).unwrap()[0];
-            assert!((changed-z).abs() > 1e-3*z.abs());
+            assert!((changed - z).abs() > 1e-3 * z.abs());
             let p = pressurized.impedance(w).unwrap()[0];
             let h = dense.impedance(w).unwrap()[0];
             assert!((p - z.scale(2.0)).abs() < 1e-7 * z.abs());
@@ -301,7 +323,7 @@ fn open_skin_incomplete_bands_work_limits_and_cancellation_refuse() {
         let open = build_shell(cx, gate, 700.0, 0.02, 0.17);
         assert!(matches!(
             open.prepare_material_shell_bem(resolution(), gate),
-            Err(ShellBemError::Invalid(_))
+            Err(ShellBemError::Solve(_))
         ));
         let closed = closed_bank(cx, gate, 700.0, 101_325.0);
         for case in 0..4 {

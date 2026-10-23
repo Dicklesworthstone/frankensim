@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-closed-shell
+redistribution	permitted	Synthetic integration coefficients; not measured instrument data
+citation	Manufactured closed material shell fixture
+license	CC0-1.0
+source	fixture	closed-shell.tsv	material-tsv-v1

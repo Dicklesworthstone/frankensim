@@ -419,7 +419,7 @@ fn main()->Result<()> {
         return Err("material-string gas records belong in the performance file".into());
     }
     let (body_path,stop_path)=stops::profile_paths(&args[3..])?;
-    let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_BYTES)?)).transpose()?;
+    let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let gas_sources=gas_options.load()?;

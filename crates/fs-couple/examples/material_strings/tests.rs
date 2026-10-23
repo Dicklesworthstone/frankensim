@@ -8,6 +8,9 @@ use fs_scenario::gesture::{GestureTrack,GestureEvent};
 #[path = "tests/fibers.rs"]
 mod fibers;
 
+#[path = "tests/shell_radiation.rs"]
+mod shell_radiation;
+
 fn pack(name:&str,rho:f64,band:f64,omit:Option<&str>)->NormalizedPack {
     let mut claims=ClaimSet::new();
     let provenance=Provenance {source:"synthetic executable test".into(),license:"CC0-1.0".into(),artifact:Some(fs_blake3::ContentHash([7;32]))};

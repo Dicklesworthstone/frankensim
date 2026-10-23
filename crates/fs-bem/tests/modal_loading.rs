@@ -44,6 +44,62 @@ fn load_planar(cells: &[AreaSample], omega: &[f64]) -> Result<ModalLoadingBake, 
     )
 }
 
+/// G0: diagnostics belong to the original selected solve, including the
+/// low-frequency CBIE route and the resonance-safe Burton--Miller route.
+#[test]
+fn bem_diagnostics_retain_the_selected_original_solve() {
+    let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+    let medium = air();
+    let shapes = vec![vec![1.0; surface.areas().len()]];
+    let field = vec![C64::ONE; surface.areas().len()];
+    let options = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::Triangle {
+            max_pairs: surface.areas().len().pow(2),
+        },
+        ..IterativeOptions::default()
+    };
+    let omegas = [0.05 * medium.sound_speed, 2.5 * medium.sound_speed];
+    let bake = modal_radiation_loading_routed(
+        SurfaceModeTraces::ClosedBody {
+            surface: &surface,
+            shapes: &shapes,
+        },
+        LoadingRoute::ClosedBodyGeometryPolicy,
+        &omegas,
+        medium,
+        source(),
+        2,
+        Some(&options),
+        || false,
+    )
+    .unwrap();
+    for (row, formulation) in bake
+        .rows()
+        .iter()
+        .zip([Formulation::PlainCbie, Formulation::BurtonMiller])
+    {
+        let solution = helmholtz::solve_radiation_batch_with_rule(
+            &surface,
+            row.omega() / medium.sound_speed,
+            medium,
+            &[&field],
+            formulation,
+            options.panel_rule,
+        )
+        .unwrap();
+        let diagnostics = row.bem_diagnostics().unwrap();
+        assert_eq!(diagnostics.formulation, formulation);
+        assert_eq!(
+            diagnostics.minimum_panels_per_wavelength.to_bits(),
+            solution[0].panels_per_wavelength.to_bits()
+        );
+        assert_eq!(
+            diagnostics.maximum_condition_lower_bound.to_bits(),
+            solution[0].condition_lower_bound.to_bits()
+        );
+    }
+}
+
 #[test]
 fn modal_loading_caps() {
     let bem = LoadingRoute::ClosedBodyBem(Formulation::BurtonMiller);
@@ -136,6 +192,7 @@ fn modal_loading_passivity() {
     let cells = planar(12, 4);
     let bake = load_planar(&cells, &[50.0, 500.0, 2500.0]).unwrap();
     for row in bake.rows() {
+        assert!(row.bem_diagnostics().is_none());
         let norm = row
             .impedance()
             .iter()
@@ -734,6 +791,10 @@ fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
         Err(ModalLoadingError::Helmholtz(_))
     ));
     let routed = bake_modes(&above, 1, 0.05, Some(&options)).unwrap();
+    let diagnostics = routed.rows()[0].bem_diagnostics().unwrap();
+    assert_eq!(diagnostics.formulation, Formulation::PlainCbie);
+    assert_eq!(diagnostics.maximum_condition_lower_bound, 1.0);
+    assert!(diagnostics.minimum_panels_per_wavelength >= 6.0);
     let serial = IterativeOptions {
         workers: 3,
         m2l_cache_bytes: 0,

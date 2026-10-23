@@ -8,7 +8,10 @@
 //! no equivalent piston, copied damping ratio or fitted timbre is introduced.
 //!
 //! Scope: a closed, oriented midsurface and piecewise-constant acoustic panels,
-//! with the existing near-triangle and seven-point far Burton--Miller quadrature.
+//! with the shared triangle quadrature and geometry-bound formulation policy.
+//! CBIE is used below the closed components' interior-resonance exclusion bound;
+//! Burton--Miller is used above it. The shared modal-loading owner admits the
+//! unchanged matrix's reciprocity and resistance before causal fitting.
 //! This is a cold finite-band passive approximation of a BEM calculation, not a
 //! continuum certificate or measured-instrument claim. The existing compact
 //! microphone still observes loaded acceleration; this module does not turn it
@@ -18,14 +21,16 @@
 use super::super::{ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
 use crate::shear_shell::ResolvedShearShell;
-use fs_bem::helmholtz::{self, Formulation, HelmholtzError, Medium, PanelRule};
+use fs_bem::helmholtz::{HelmholtzError, IterativeOptions, Medium, PanelRule};
+use fs_bem::modal_loading::{
+    LoadingRoute, ModalLoadingBake, ModalLoadingError, SurfaceModeTraces,
+    modal_radiation_loading_routed,
+};
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
-use fs_math::c64::C64;
 use fs_plate::shell::pressure::ShellFace;
-use std::collections::BTreeMap;
 
 /// Independent geometry, frequency, work and causal-realization limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +77,8 @@ impl ShellBemOptions {
 pub struct ShellBemReport {
     /// Same signed material/geometry/modal basis pinned by the loaded bank.
     pub basis_identity: ContentHash,
+    /// Shared loading declaration binding surface, traces, gas, grid and panel rule.
+    pub loading_identity: ContentHash,
     /// Complete atmosphere shared by strings, body, cavity and pressure output.
     pub gas: GasState,
     pub options: ShellBemOptions,
@@ -83,6 +90,8 @@ pub struct ShellBemReport {
     pub minimum_panels_per_wavelength: f64,
     /// Largest original BEM probe-based condition LOWER bound, not an enclosure.
     pub maximum_condition_lower_bound: f64,
+    /// Largest relative reciprocity defect admitted by the shared loading owner.
+    pub reciprocity_relative_residual: f64,
     /// Withheld whole-matrix complex fit error under the existing fitter's gate.
     pub peak_error: f64,
     pub rms_error: f64,
@@ -96,6 +105,8 @@ pub enum ShellBemError {
     Invalid(&'static str),
     Geometry(fs_bem::BemError),
     Solve(HelmholtzError),
+    /// Shared full-matrix admission refused the sampled loading.
+    Loading(ModalLoadingError),
     Fit(String),
     Bank(ReciprocalStringError),
     Cancelled,
@@ -144,7 +155,7 @@ impl ReciprocalStringBank {
     /// identical coordinates; no tolerance-based welding or hole filling occurs.
     /// Exact edge closure is checked, not self-intersection or manifold quality.
     /// BEM is synchronous within one bounded frequency solve; cancellation is
-    /// polled between frequencies, material parts and projection rows.
+    /// polled between frequencies, material parts and complete source batches.
     pub fn prepare_material_shell_bem(
         &self,
         options: ShellBemOptions,
@@ -242,15 +253,20 @@ impl ReciprocalStringBank {
             .collect();
         omega[0] = low;
         omega[options.frequency_samples - 1] = high;
+        let loading = surface_loading(&surface, &fields, &omega, medium, basis_identity, gate)?;
         let mut impedance = Vec::with_capacity(omega.len());
         let mut ppw = f64::INFINITY;
         let mut condition = 0.0_f64;
-        for &w in &omega {
+        let mut reciprocity = 0.0_f64;
+        for row in loading.rows() {
             poll(gate)?;
-            let (row, resolution, bound) = modal_impedance(&surface, &fields, w, medium, gate)?;
-            impedance.push(row);
-            ppw = ppw.min(resolution);
-            condition = condition.max(bound);
+            let diagnostics = row.bem_diagnostics().ok_or(ShellBemError::Invalid(
+                "closed-body loading omitted its original BEM diagnostics",
+            ))?;
+            impedance.push(row.impedance().to_vec());
+            ppw = ppw.min(diagnostics.minimum_panels_per_wavelength);
+            condition = condition.max(diagnostics.maximum_condition_lower_bound);
+            reciprocity = reciprocity.max(row.reciprocity_relative_defect());
         }
         let mut extent = 0.0_f64;
         for a in surface.centroids() {
@@ -274,6 +290,7 @@ impl ReciprocalStringBank {
         }
         let report = ShellBemReport {
             basis_identity,
+            loading_identity: loading.declaration_hash(),
             gas,
             options,
             body_modes: modes.len(),
@@ -282,6 +299,7 @@ impl ReciprocalStringBank {
             sweep_terms: work,
             minimum_panels_per_wavelength: ppw,
             maximum_condition_lower_bound: condition,
+            reciprocity_relative_residual: reciprocity,
             peak_error: fitted.peak_error,
             rms_error: fitted.rms_error,
             resistance_peak_error: fitted.resistance_peak_error,
@@ -297,13 +315,17 @@ fn surface_trace(
     parts: &[(&ResolvedShearShell, &[Vec<f64>])],
     modes: usize,
     gate: &CancelGate,
-) -> Result<(SpherePanels, Vec<Vec<C64>>), ShellBemError> {
+) -> Result<(SpherePanels, Vec<Vec<f64>>), ShellBemError> {
     let mut triangles = Vec::new();
     let mut node_rows = Vec::new();
     for &(shell, rows) in parts {
         poll(gate)?;
         let mesh = shell.mesh();
-        if rows.len() != modes || rows.iter().any(|r| r.len() != 6 * mesh.nodes.len()) {
+        if rows.len() != modes
+            || rows
+                .iter()
+                .any(|r| r.len() != 6 * mesh.nodes.len() || r.iter().any(|v| !v.is_finite()))
+        {
             return Err(ShellBemError::Invalid(
                 "exterior trace must retain the complete original shell basis",
             ));
@@ -333,7 +355,6 @@ fn surface_trace(
             node_rows.push(velocities);
         }
     }
-    closed_outward(&triangles)?;
     let surface = SpherePanels::from_triangles(triangles).map_err(ShellBemError::Geometry)?;
     let mut fields = vec![Vec::with_capacity(surface.areas().len()); modes];
     for (normal, velocities) in surface.normals().iter().zip(node_rows) {
@@ -345,130 +366,64 @@ fn surface_trace(
                     "nonfinite material shell normal trace",
                 ));
             }
-            field.push(C64::new(value, 0.0));
+            field.push(value);
         }
     }
     Ok((surface, fields))
 }
 
-fn modal_impedance(
+// Retain the instrument's physical trace and work ceiling while delegating
+// geometry admission, formulation, projection and matrix assessment together.
+fn surface_loading(
     surface: &SpherePanels,
-    fields: &[Vec<C64>],
-    omega: f64,
+    fields: &[Vec<f64>],
+    omega: &[f64],
     medium: Medium,
+    basis_identity: ContentHash,
     gate: &CancelGate,
-) -> Result<(Vec<C64>, f64, f64), ShellBemError> {
-    let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
-    let solutions = helmholtz::solve_radiation_batch_with_rule(
-        surface,
-        omega / medium.sound_speed,
-        medium,
-        &refs,
-        Formulation::BurtonMiller,
-        PanelRule::Triangle {
+) -> Result<ModalLoadingBake, ShellBemError> {
+    let entries = fields
+        .len()
+        .checked_mul(fields.len())
+        .and_then(|n| n.checked_mul(omega.len()))
+        .ok_or(ShellBemError::Invalid("shell modal matrix extent overflow"))?;
+    // The existing 2048-panel ceiling stays below the shared dense cap. Only
+    // this panel rule reaches the dense owner; there is no iterative fallback.
+    let numerical = IterativeOptions {
+        panel_rule: PanelRule::Triangle {
             max_pairs: surface.areas().len().saturating_pow(2),
         },
+        ..IterativeOptions::default()
+    };
+    modal_radiation_loading_routed(
+        SurfaceModeTraces::ClosedBody {
+            surface,
+            shapes: fields,
+        },
+        LoadingRoute::ClosedBodyGeometryPolicy,
+        omega,
+        medium,
+        basis_identity,
+        entries,
+        Some(&numerical),
+        || gate.is_requested(),
     )
-    .map_err(ShellBemError::Solve)?;
-    let n = fields.len();
-    let mut matrix = vec![C64::ZERO; n * n];
-    let mut ppw = f64::INFINITY;
-    let mut condition = 0.0_f64;
-    for (j, solution) in solutions.iter().enumerate() {
-        poll(gate)?;
-        ppw = ppw.min(solution.panels_per_wavelength);
-        condition = condition.max(solution.condition_lower_bound);
-        for (i, field) in fields.iter().enumerate() {
-            let mut value = C64::ZERO;
-            for ((shape, &area), &pressure) in
-                field.iter().zip(surface.areas()).zip(&solution.pressure)
-            {
-                value = value + pressure.scale(shape.re * area);
-            }
-            matrix[i * n + j] = value;
-        }
-    }
-    // Keep the computed matrix untouched. The shared positive-real fit checks
-    // against these same complex and resistance samples; it may refuse them.
-    Ok((matrix, ppw, condition))
-}
-
-// Exact oriented edge closure, independently for each connected skin. This is
-// deliberately stricter than mortar mechanics: an acoustic hole is not sealed
-// merely because two mechanical nodes are constrained to move together.
-fn closed_outward(triangles: &[[[f64; 3]; 3]]) -> Result<(), ShellBemError> {
-    if triangles.len() < 4 {
-        return Err(ShellBemError::Invalid(
-            "closed exterior requires at least four triangles",
-        ));
-    }
-    let mut vertices = BTreeMap::new();
-    let mut edges = BTreeMap::<(usize, usize), Vec<(usize, bool)>>::new();
-    let mut neighbors = vec![Vec::new(); triangles.len()];
-    for (face, triangle) in triangles.iter().enumerate() {
-        let mut ids = [0; 3];
-        for (i, point) in triangle.iter().enumerate() {
-            if point.iter().any(|x| !x.is_finite()) {
-                return Err(ShellBemError::Invalid("nonfinite exterior vertex"));
-            }
-            let key = point.map(|x| if x == 0.0 { 0 } else { x.to_bits() });
-            let next = vertices.len();
-            ids[i] = *vertices.entry(key).or_insert(next);
-        }
-        for i in 0..3 {
-            let a = ids[i];
-            let b = ids[(i + 1) % 3];
-            if a == b {
-                return Err(ShellBemError::Invalid("degenerate exterior edge"));
-            }
-            edges
-                .entry((a.min(b), a.max(b)))
-                .or_default()
-                .push((face, a < b));
-        }
-    }
-    for sides in edges.values() {
-        if sides.len() != 2 || sides[0].1 == sides[1].1 {
-            return Err(ShellBemError::Invalid(
-                "BEM exterior requires a closed consistently oriented skin; open holes or mismatched seams need an explicit acoustic boundary",
-            ));
-        }
-        neighbors[sides[0].0].push(sides[1].0);
-        neighbors[sides[1].0].push(sides[0].0);
-    }
-    let mut seen = vec![false; triangles.len()];
-    for first in 0..triangles.len() {
-        if seen[first] {
-            continue;
-        }
-        let origin = triangles[first][0];
-        let mut stack = vec![first];
-        let mut volume6 = 0.0;
-        while let Some(face) = stack.pop() {
-            if seen[face] {
-                continue;
-            }
-            seen[face] = true;
-            let [a, b, c] =
-                triangles[face].map(|p| core::array::from_fn::<_, 3, _>(|i| p[i] - origin[i]));
-            volume6 += a[0] * (b[1] * c[2] - b[2] * c[1])
-                + a[1] * (b[2] * c[0] - b[0] * c[2])
-                + a[2] * (b[0] * c[1] - b[1] * c[0]);
-            stack.extend(neighbors[face].iter().copied());
-        }
-        if !volume6.is_finite() || volume6 <= 0.0 {
-            return Err(ShellBemError::Invalid(
-                "every closed exterior skin must enclose positive outward-oriented volume",
-            ));
-        }
-    }
-    Ok(())
+    .map_err(|error| match error {
+        ModalLoadingError::Helmholtz(HelmholtzError::Cancelled) => ShellBemError::Cancelled,
+        ModalLoadingError::Helmholtz(error) => ShellBemError::Solve(error),
+        other => ShellBemError::Loading(other),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_bem::helmholtz::Formulation;
     use fs_material::gas::GasSpec;
+
+    fn source() -> ContentHash {
+        fs_blake3::hash_domain("material-shell-bem-test", b"signed physical surface modes")
+    }
 
     #[test]
     fn signed_zero_volume_fields_keep_mutual_air_reaction_and_the_selected_medium() {
@@ -476,52 +431,56 @@ mod tests {
         let surface = SpherePanels::icosphere(0.1, 1).unwrap();
         // A translating sphere is a dipole: zero total displaced volume does
         // not mean zero exterior pressure, inertia, or radiation resistance.
-        let field: Vec<_> = surface
-            .normals()
-            .iter()
-            .map(|n| C64::from_re(n[0]))
-            .collect();
-        let volume: f64 = field
-            .iter()
-            .zip(surface.areas())
-            .map(|(v, a)| v.re * a)
-            .sum();
+        let field: Vec<_> = surface.normals().iter().map(|n| n[0]).collect();
+        let volume: f64 = field.iter().zip(surface.areas()).map(|(v, a)| v * a).sum();
         assert!(volume.abs() < 1e-15);
-        let opposite: Vec<_> = field.iter().map(|v| v.scale(-1.0)).collect();
+        let opposite: Vec<_> = field.iter().map(|v| -v).collect();
         let fields = vec![field, opposite];
         let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
         let medium = Medium::from(&gas);
         let omega = medium.sound_speed / 0.1;
-        let (z, _, _) = modal_impedance(&surface, &fields, omega, medium, &gate).unwrap();
+        let loading =
+            surface_loading(&surface, &fields, &[omega], medium, source(), &gate).unwrap();
+        let row = &loading.rows()[0];
+        let diagnostics = row.bem_diagnostics().unwrap();
+        assert_eq!(diagnostics.formulation, Formulation::PlainCbie);
+        assert!(diagnostics.minimum_panels_per_wavelength >= 6.0);
+        assert!(diagnostics.maximum_condition_lower_bound >= 1.0);
+        assert!(row.reciprocity_relative_defect() <= 1e-12);
+        let z = row.impedance();
         assert!(z[0].re > 0.0 && z[0].abs() > 1e-6);
         for (a, b) in [(z[0], z[3]), (z[0], z[1].scale(-1.0)), (z[1], z[2])] {
             assert!((a - b).abs() < 1e-12 * z[0].abs());
         }
-        let (denser, _, _) = modal_impedance(
+        let denser = surface_loading(
             &surface,
             &fields,
-            omega,
+            &[omega],
             Medium {
                 density: 2.0 * medium.density,
                 ..medium
             },
+            source(),
             &gate,
         )
         .unwrap();
-        for (a, b) in z.iter().zip(&denser) {
+        assert_ne!(loading.declaration_hash(), denser.declaration_hash());
+        for (a, b) in z.iter().zip(denser.rows()[0].impedance()) {
             assert!((*b - a.scale(2.0)).abs() < 1e-12 * a.abs());
         }
-        let (faster, _, _) = modal_impedance(
+        let faster = surface_loading(
             &surface,
             &fields,
-            omega,
+            &[omega],
             Medium {
                 sound_speed: 2.0 * medium.sound_speed,
                 ..medium
             },
+            source(),
             &gate,
         )
         .unwrap();
+        let faster = faster.rows()[0].impedance();
         assert!((faster[0] - z[0]).abs() > 0.01 * z[0].abs());
         // This is a phase/impedance change, not a scalar gain adjustment.
         assert!((faster[0].re / faster[0].im - z[0].re / z[0].im).abs() > 0.01);
@@ -529,21 +488,36 @@ mod tests {
 
     #[test]
     fn every_surface_edge_and_outward_component_is_required() {
+        let gate = CancelGate::new_clock_free();
+        let medium = Medium::air();
+        let admit = |triangles: Vec<[[f64; 3]; 3]>| -> Result<ModalLoadingBake, ShellBemError> {
+            let surface =
+                SpherePanels::from_triangles(triangles).map_err(ShellBemError::Geometry)?;
+            let fields = vec![vec![1.0; surface.areas().len()]];
+            surface_loading(
+                &surface,
+                &fields,
+                &[medium.sound_speed / 0.1],
+                medium,
+                source(),
+                &gate,
+            )
+        };
         let surface = SpherePanels::icosphere(0.1, 0).unwrap();
         let triangles = surface.triangles().unwrap();
-        closed_outward(triangles).unwrap();
-        assert!(closed_outward(&triangles[1..]).is_err());
+        admit(triangles.to_vec()).unwrap();
+        assert!(admit(triangles[1..].to_vec()).is_err());
         let mut inside_out = triangles.to_vec();
         for tri in &mut inside_out {
             tri.swap(1, 2);
         }
-        assert!(closed_outward(&inside_out).is_err());
+        assert!(admit(inside_out).is_err());
         let mut bad_seam = triangles.to_vec();
         bad_seam[0][0][0] += 1e-12;
-        assert!(closed_outward(&bad_seam).is_err());
+        assert!(admit(bad_seam).is_err());
         let mut duplicate = triangles.to_vec();
         duplicate.push(triangles[0]);
-        assert!(closed_outward(&duplicate).is_err());
-        assert!(closed_outward(&[]).is_err());
+        assert!(admit(duplicate).is_err());
+        assert!(admit(vec![]).is_err());
     }
 }
