@@ -12,6 +12,11 @@
 //! Arguments: --table FILE VELOCITY PAYLOAD_KG DURATION STEPS FILM_COEFFICIENT
 //! or: --pack FILE BRANCH_COUNT VELOCITY PAYLOAD_KG DURATION STEPS FILM_COEFFICIENT.
 //! Output is the accepted displacement, velocity, temperature and energy history.
+//! Add --finite-gas VOLUME_M3 TMIN_K TMAX_K MAX_EXCHANGE_J with the shared
+//! --gas-record/--gas-component/--gas-water/--gas-phase source options to evolve
+//! a finite gas reservoir. See self_heating_vibration/README.md for a complete run.
+#[path = "self_heating_vibration/finite_gas.rs"]
+mod finite_gas;
 #[path = "self_heating_creep/source.rs"]
 mod source;
 
@@ -29,6 +34,7 @@ fn surface_area() -> f64 {
 }
 
 fn run(args: &[String]) -> Result<()> {
+    let (args, finite) = finite_gas::Options::extract(args)?;
     let mode = args.first().map(String::as_str).unwrap_or("");
     let offset = match (mode, args.len()) {
         ("--table", 7) => 0, ("--pack", 8) => 1,
@@ -50,6 +56,25 @@ fn run(args: &[String]) -> Result<()> {
         || film < 0.0
     {
         return Err("finite velocity, nonnegative payload/film, duration in (0,1000] s and 1..100000 steps required".into());
+    }
+    if let Some(options) = finite {
+        return finite_gas::run(
+            mode,
+            &args[1],
+            if offset == 1 {
+                Some(args[2].parse()?)
+            } else {
+                None
+            },
+            finite_gas::Motion {
+                velocity,
+                payload,
+                duration,
+                count,
+                film,
+            },
+            options,
+        );
     }
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
