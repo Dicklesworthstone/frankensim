@@ -1081,6 +1081,7 @@ dependencies = [
  "fs-plate",
  "fs-qty",
  "fs-solver",
+ "fs-thermochem",
  "fs-vfit",
  "metal",
 ]
