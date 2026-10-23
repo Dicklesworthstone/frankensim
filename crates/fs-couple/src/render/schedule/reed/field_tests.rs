@@ -84,7 +84,8 @@ fn scheduled_field_keeps_original_compact_voice_at_every_sample() {
         let mut a = [0.0]; let mut b = [0.0];
         p.block(&mut a).unwrap();
         direct.step_block(&mut b).unwrap();
-        assert_eq!(a[0].to_bits(), observer.process(b[0]).to_bits());
+        let parts = direct.last_observer_parts();
+        assert_eq!(a[0].to_bits(), (parts.internal_pa + observer.process(parts.radiated_pa)).to_bits());
         assert_eq!(voice(&p).reed_y.to_bits(), direct.reed_y.to_bits());
         assert_eq!(voice(&p).reed_v.to_bits(), direct.reed_v.to_bits());
     }

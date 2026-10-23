@@ -57,7 +57,8 @@ fn regional_input_matches_direct_material_and_voice_construction_at_every_sample
             direct.set_blowing_pressure(schedule.sample("blow", n*700/48000).unwrap());
             let mut a = [0.0]; let mut b = [0.0];
             actual.block(&mut a).unwrap(); direct.step_block(&mut b).unwrap();
-            assert_eq!(a[0].to_bits(), observer.process(b[0]).to_bits());
+            let parts = direct.last_observer_parts();
+            assert_eq!(a[0].to_bits(), (parts.internal_pa + observer.process(parts.radiated_pa)).to_bits());
             assert_eq!(motion(voice(&actual)), motion(&direct));
         }
         assert_eq!(render(&text, 37), render(&text, 113));
@@ -83,7 +84,8 @@ fn uniform_explicit_regions_preserve_the_original_reed_initialization_and_runtim
             original.set_blowing_pressure(schedule.sample("blow", n*700/48000).unwrap());
             let mut a = [0.0]; let mut b = [0.0];
             actual.block(&mut a).unwrap(); original.step_block(&mut b).unwrap();
-            assert_eq!(a[0].to_bits(), observer.process(b[0]).to_bits());
+            let parts = original.last_observer_parts();
+            assert_eq!(a[0].to_bits(), (parts.internal_pa + observer.process(parts.radiated_pa)).to_bits());
             assert_eq!(motion(voice(&actual)), motion(&original));
         }
     }

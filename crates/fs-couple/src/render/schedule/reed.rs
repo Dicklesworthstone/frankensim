@@ -22,6 +22,8 @@
 //! `observer_law none|iso9613|stokes-kirchhoff|relaxation
 //! iso9613-terrestrial-air` record after the observation declares the law
 //! instead. `none` is a receipted lossless choice for analytic oracles.
+//! The law acts on radiated pressure only. The proxy's bore pressure is an
+//! internal observation that travels no distance, so it passes unfiltered.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{ObserverFilter, ObserverFilterReceipt};
@@ -144,12 +146,18 @@ pub struct ReedObserverReceipt {
     pub range_spread_m: Option<f64>,
     /// The legacy proxy applies no propagation delay, so its filter's
     /// low-frequency delay (dispersion plus `filter.latency_s`) is
-    /// uncompensated. A consumer placing the proxy at its range must delay its
-    /// output by this much [s]: `filter.receiver_delay_s`, exactly what the
-    /// baffled receiver applies, so both total `r / c_0`. Negative when the
-    /// filter's delay exceeds the propagation delay at this range. `None` for
-    /// the baffled receiver, which applies it itself.
+    /// uncompensated. A consumer placing the proxy's radiated part at its
+    /// range must delay it by this much [s]: `filter.receiver_delay_s`, exactly
+    /// what the baffled receiver applies, so both total `r / c_0`. Negative
+    /// when the filter's delay exceeds the propagation delay at this range.
+    /// `None` for the baffled receiver, which applies it itself.
     pub consumer_delay_s: Option<f64>,
+    /// The proxy's sample is bore pressure plus radiation (plates and jet at
+    /// `listener_m`). The law and its latency act on the radiation only; the
+    /// bore pressure has no range and passes unfiltered and undelayed, so no
+    /// single delay of the summed stream places both parts. `true` for the
+    /// proxy, `false` for the baffled receiver, whose output is all radiated.
+    pub internal_part_unpropagated: bool,
 }
 
 /// The medium between instrument and listener: the baffled receiver's
@@ -913,6 +921,7 @@ impl ReedPerformance {
                 None => Some(filter.receiver_delay_s),
                 Some(_) => None,
             },
+            internal_part_unpropagated: self.observer_range_spread_m.is_none(),
         }
     }
     /// Read-only access to sample-addressed controls and retained state clocks.

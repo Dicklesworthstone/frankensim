@@ -54,7 +54,8 @@ fn complete_reed_input_matches_direct_physics_for_legacy_air_and_all_five_specie
             let schedule = GestureSchedule::from_canonical_bytes(text.split_once("\nschedule\n").unwrap().1.as_bytes()).unwrap();
             // The default observer law: ISO 9613-1 for the legacy (T, p, RH)
             // records, Stokes-Kirchhoff for the supplied mixture. The direct
-            // reference receives the same law, rebuilt from the receipt.
+            // reference's radiated part receives the same law, rebuilt from
+            // the receipt; its bore pressure travels no distance.
             let law = loaded.observer().filter.absorption.law;
             assert_eq!(matches!(law, crate::air_path::GasAbsorptionModel::Iso9613Air { .. }),
                 !declaration.starts_with("mixture"), "{declaration}");
@@ -64,7 +65,11 @@ fn complete_reed_input_matches_direct_physics_for_legacy_air_and_all_five_specie
                 voice.set_blowing_pressure(schedule.sample("blow", n as u64*700/48000).unwrap());
                 let mut expected = [0.0];
                 voice.step_block(&mut expected).unwrap();
-                assert_eq!(pressure.to_bits(), observer.process(expected[0]).to_bits(), "{declaration} mass={mass} sample={n}");
+                let parts = voice.last_observer_parts();
+                let scale = expected[0].abs().max(parts.internal_pa.abs()).max(parts.radiated_pa.abs());
+                assert!((parts.internal_pa + parts.radiated_pa - expected[0]).abs() <= 4.0 * f64::EPSILON * scale);
+                assert_eq!(pressure.to_bits(), (parts.internal_pa + observer.process(parts.radiated_pa)).to_bits(),
+                    "{declaration} mass={mass} sample={n}");
             }
         }
     }

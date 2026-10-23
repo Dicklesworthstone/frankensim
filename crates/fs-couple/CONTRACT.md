@@ -2001,7 +2001,13 @@ clarinet is one filling of those objects.
   centre; `range_spread_m` bounds the difference over the Rayleigh elements.
   The proxy has no propagation delay, so its filter delay is uncompensated.
   `ReedObserverReceipt::consumer_delay_s` is the delay a consumer must apply
-  to place the proxy as the baffled path is placed: both total `r / c_0`.
+  to place the proxy's radiated part as the baffled path is placed: both
+  total `r / c_0`. The proxy's sample is bore pressure plus radiation (plates
+  and jet at `listener_m`). The law acts on the radiation only
+  (`ReedBoreVoice::last_observer_parts`); the bore pressure travels no
+  distance and passes unfiltered and undelayed
+  (`internal_part_unpropagated`). Under `observer_law none` the proxy is the
+  voice's own sum, bit for bit.
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a

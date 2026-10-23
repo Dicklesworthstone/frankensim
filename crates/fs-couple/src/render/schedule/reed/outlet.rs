@@ -173,9 +173,22 @@ impl ReedPerformance {
         // The observer law acts on emitted pressure only, after the receiver:
         // the mechanics and feedback never see it.
         let Some(terminal) = &mut self.terminal else {
-            self.renderer.block(output).map_err(ReedPerformanceError::Render)?;
+            // The proxy's bore pressure travels no distance: the law acts on
+            // its radiated part only. A lossless law has nothing to act on and
+            // passes the voice's own sum, bit for bit.
+            let lossless = self.observer.taps() == [1.0];
             for slot in output.iter_mut() {
-                *slot = self.observer.process(*slot);
+                let mut proxy = [0.0];
+                self.renderer.block(&mut proxy).map_err(ReedPerformanceError::Render)?;
+                let RenderVoice::ReedBore(voice) = &self.renderer.context().voices[0] else {
+                    unreachable!("reed performance owns exactly one reed voice")
+                };
+                let parts = voice.last_observer_parts();
+                *slot = if lossless {
+                    self.observer.process(proxy[0])
+                } else {
+                    parts.internal_pa + self.observer.process(parts.radiated_pa)
+                };
             }
             return Ok(());
         };

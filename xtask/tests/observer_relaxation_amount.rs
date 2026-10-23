@@ -569,15 +569,18 @@ fn composition_changes_the_band_level_at_100_m_as_the_relaxation_law_predicts() 
     assert!((measured - predicted).abs() + sensitivity <= OXYGEN_ARM_BAND_DB);
 }
 
-/// The wind observer (ruling 6283): the D3 clarinet heard through its
+/// The wind observer (rulings 6283, 6498): the D3 clarinet heard through its
 /// legacy proxy at 30 m, in thermochemical terrestrial air at RH 20 % and
-/// 80 %, under every observer law the file can declare. The law acts after
-/// the mechanics, so each lossy law's band level against the `none` render
-/// of the SAME performance is exactly its own transfer: it must match the
-/// law's per-bin prediction (ISO 9613-1's formula, Stokes-Kirchhoff, or the
-/// relaxation law's causal wavenumber) within the declared band. Wetter air
-/// must raise the ISO band level. The proxy has no propagation delay, so the
-/// laws' different delay references cannot enter.
+/// 80 %, under every observer law the file can declare. The proxy's sample is
+/// bore pressure plus radiation; the law acts on the radiation only, after the
+/// mechanics, and the bore pressure passes unfiltered. So the radiated part
+/// (the proxy minus the voice's own bore pressure) of each lossy law's render,
+/// against that of the `none` render of the SAME performance, is exactly the
+/// law's own transfer: it must match the law's per-bin prediction (ISO 9613-1's
+/// formula, Stokes-Kirchhoff, or the relaxation law's causal wavenumber)
+/// within the declared band. Wetter air must raise the ISO band level. The
+/// proxy has no propagation delay, so the laws' different delay references
+/// cannot enter.
 #[test]
 fn reed_observer_laws_change_the_band_level_as_each_law_predicts() {
     let sources = [
@@ -643,11 +646,18 @@ fn reed_observer_laws_change_the_band_level_as_each_law_predicts() {
                 receipt.range_spread_m, None,
                 "the proxy has no Rayleigh elements"
             );
-            let mut pressure = vec![0.0; performance.info().samples as usize];
-            for chunk in pressure.chunks_mut(4800) {
-                performance.block(chunk).unwrap();
+            // One sample per callback, so the voice's own bore pressure can be
+            // read beside each emitted sample and removed: what remains is the
+            // radiated part as the law left it.
+            let mut pressure = Vec::with_capacity(performance.info().samples as usize);
+            for _ in 0..performance.info().samples {
+                let mut sample = [0.0];
+                performance.block(&mut sample).unwrap();
+                let voice = performance.renderer().context().reed_voice(0).unwrap();
+                pressure.push(sample[0] - voice.last_observer_parts().internal_pa);
             }
             assert!(pressure.iter().all(|p| p.is_finite()));
+            assert!(receipt.internal_part_unpropagated);
             println!(
                 "{{\"bead\":\"pexfp.18\",\"test\":\"reed_observer_laws\",\"rh\":{rh},\"law\":\"{law}\",\"taps\":{},\"latency_s\":{:e},\"truncated_energy\":{:e},\"omitted\":{}}}",
                 receipt.filter.taps,
