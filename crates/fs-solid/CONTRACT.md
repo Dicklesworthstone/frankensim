@@ -24,6 +24,24 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+TET10 and HEX20/HEX27 expose `assemble_thermal_load` using the same
+isoparametric geometry, Mandel strain operator, elastic tensors, constraints
+and fully integrated stiffness rule as their mechanical assembly. Existing
+`TetThermalStrainField` values supply total eigenstrain, uniform or constant per
+element, bound to the exact elastic material state. The sign is
+`K u = f_external + integral B^T C epsilon_free dV`. The existing `TetThermalLoad`
+carrier retains both full support rows and the canonical reduced free-DOF order,
+so the existing solver can compute compatible thermal displacement. Load identity
+binds geometry, connectivity, source states, actual elastic coefficients,
+quadrature and supports. Both stiffness and mass quadrature locations retain the
+original geometry-admission checks. Cancellation and numerical/material refusal
+publish no partial load. This does not add a thermal transport solver, within-cell
+temperature interpolation, quadratic stress recovery, geometric prestress, or
+an accuracy certificate for curved-map quadrature. `tests/quadratic_thermal.rs`
+checks uniform anisotropic eigenstrain including Mandel shear, resultant/moment
+balance, thermal work, actual free-expansion solves on all three element families,
+source/state mismatch and constrained loads against analytic references.
+
 `linear3::visco` (IRP M1.3-W2a, in progress) prepares P1 or TET10 elements
 with caller-supplied, mesh-frame `fs-material::TensorProny` laws and density.
 It reuses the existing elastic mesh admission, equilibrium stiffness and

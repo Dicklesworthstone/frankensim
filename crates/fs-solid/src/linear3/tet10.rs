@@ -4,8 +4,8 @@
 //! Geometry is isoparametric; curved elements require a separate quadrature
 //! ladder. Positive sampled Jacobians are admission checks, not a certificate
 //! of injectivity between samples. Consistent mass is retained: row-sum lumping
-//! would give negative corner masses. P1 assembly and thermal operators stay
-//! separate and unchanged.
+//! would give negative corner masses. Thermal eigenstrain uses the shared
+//! isoparametric load kernel; P1 arithmetic remains unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,8 +13,9 @@ use fs_exec::Cx;
 use fs_feec::highorder::simplex::duffy_quadrature;
 
 use super::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, determinant3,
-    inverse3, maximum_edge_length, signed_tet_determinant, validate_connectivity,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalLoad,
+    TetThermalStrainField, determinant3, inverse3, maximum_edge_length, signed_tet_determinant,
+    validate_connectivity,
 };
 
 /// `v0..v3`, then `(0,1),(1,2),(0,2),(0,3),(1,3),(2,3)`.
@@ -275,6 +276,51 @@ impl QuadraticTetProblem<'_> {
             self.budget,
             &kq,
             &mq,
+            |nodes, lambda, element, point| {
+                let p = tet10_point(
+                    nodes,
+                    lambda,
+                    self.budget.minimum_scaled_jacobian,
+                    element,
+                    point,
+                )?;
+                let h = maximum_edge_length([nodes[0], nodes[1], nodes[2], nodes[3]]);
+                Ok(super::isoparametric::Point {
+                    shapes: p.shapes,
+                    gradients: p.gradients,
+                    determinant: p.determinant_m3,
+                    scaled_jacobian: p.determinant_m3 / (h * h * h),
+                })
+            },
+            cx,
+        )
+    }
+
+    /// Integrate `B^T C epsilon_free` on the same quadratic geometry and
+    /// stiffness quadrature as [`Self::assemble`]. Eigenstrain is an already
+    /// integrated, source-bound thermal state, constant per element; no
+    /// temperature interpolation or expansion coefficient is inferred.
+    ///
+    /// The result is directly usable with the existing stiffness and solver
+    /// owners: `K u = f_external + reduced_force_n`. Full force rows retain
+    /// constrained contributions. Neither geometry nor material history changes,
+    /// and a refusal/cancellation publishes no partial load. Quadratic thermal
+    /// stress recovery and geometric prestress remain separate capabilities.
+    pub fn assemble_thermal_load(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalLoad, TetElasticError> {
+        self.validate(cx)?;
+        super::isoparametric::thermal_load::<10, 30, _>(
+            self.nodes_m,
+            self.elements,
+            self.materials,
+            thermal_strains,
+            self.fixed_dofs,
+            self.budget,
+            &duffy_quadrature(self.quadrature.stiffness_points_per_dir),
+            &duffy_quadrature(self.quadrature.mass_points_per_dir),
             |nodes, lambda, element, point| {
                 let p = tet10_point(
                     nodes,

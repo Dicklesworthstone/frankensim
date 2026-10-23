@@ -2,8 +2,10 @@
 //! Local upper triangles, Mandel arithmetic and COO insertion retain the
 //! original TET10 operation order. Geometry and reference rules are inputs.
 use super::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, free_dof_map,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalLoad,
+    TetThermalStrainField, free_dof_map, hash_usize,
 };
+use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 use fs_sparse::Coo;
 
@@ -153,6 +155,136 @@ pub(super) fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N])
         b[5][c + 2] = s * g[0];
     }
     b
+}
+
+/// The same reference geometry and Mandel weak form as elastic assembly:
+/// `f_th = integral B^T C epsilon_free dV`, hence `K u = f_ext + f_th`.
+/// Material and integrated eigenstrain are constant per element. Full rows
+/// include constrained DOFs so downstream support reactions are not discarded.
+pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
+    nodes_m: &[[f64; 3]],
+    elements: &[[usize; N]],
+    materials: TetMaterialField<'_>,
+    thermal_strains: TetThermalStrainField<'_>,
+    fixed_dofs: &[usize],
+    budget: TetAssemblyBudget,
+    stiffness_rule: &[(R, f64)],
+    mass_rule: &[(R, f64)],
+    evaluate: impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
+    cx: &Cx<'_>,
+) -> Result<TetThermalLoad, TetElasticError> {
+    debug_assert_eq!(D, 3 * N);
+    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+    thermal_strains.validate(elements.len())?;
+    let (free_dofs, _) = free_dof_map(nodes_m.len(), fixed_dofs, budget.maximum_free_dofs)?;
+    let full_dofs = nodes_m
+        .len()
+        .checked_mul(3)
+        .ok_or(TetElasticError::SizeOverflow)?;
+    let mut full_equivalent_force_n = vec![0.0; full_dofs];
+    let mut identity = DomainHasher::new("org.frankensim.fs-solid.isoparametric-thermal-load.v1");
+    for count in [
+        N,
+        nodes_m.len(),
+        elements.len(),
+        free_dofs.len(),
+        stiffness_rule.len(),
+        mass_rule.len(),
+    ] {
+        hash_usize(&mut identity, count)?;
+    }
+    for (index, coordinates) in nodes_m.iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        }
+        for coordinate in coordinates {
+            identity.update(&coordinate.to_bits().to_le_bytes());
+        }
+    }
+    for (index, &dof) in free_dofs.iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        }
+        hash_usize(&mut identity, dof)?;
+    }
+    for (element, connectivity) in elements.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        let material = materials.at(element);
+        let thermal = thermal_strains.at(element);
+        if thermal.elastic_material_state_identity != material.material_state_identity {
+            return Err(TetElasticError::ThermalElasticStateMismatch { element });
+        }
+        for &node in connectivity {
+            hash_usize(&mut identity, node)?;
+        }
+        identity.update(&material.material_state_identity);
+        identity.update(thermal.identity.as_bytes());
+        for coefficient in material.stiffness_mandel_pa.iter().flatten() {
+            identity.update(&coefficient.to_bits().to_le_bytes());
+        }
+        let mut free_stress = [0.0; 6];
+        for (row, stress) in free_stress.iter_mut().enumerate() {
+            for column in 0..6 {
+                *stress +=
+                    material.stiffness_mandel_pa[row][column] * thermal.free_strain_mandel[column];
+            }
+        }
+        if free_stress.iter().any(|value| !value.is_finite()) {
+            return Err(TetElasticError::NonFiniteThermalLoad {
+                element,
+                local_dof: None,
+            });
+        }
+        let nodes = connectivity.map(|node| nodes_m[node]);
+        let mut local_force = [0.0; D];
+        for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            let p = evaluate(nodes, reference, element, point)?;
+            let b = mandel_b::<N, D>(p.gradients);
+            let dv = weight * p.determinant;
+            identity.update(&weight.to_bits().to_le_bytes());
+            identity.update(&p.determinant.to_bits().to_le_bytes());
+            for gradient in p.gradients.iter().flatten() {
+                identity.update(&gradient.to_bits().to_le_bytes());
+            }
+            for (dof, force) in local_force.iter_mut().enumerate() {
+                let density: f64 = (0..6)
+                    .map(|component| b[component][dof] * free_stress[component])
+                    .sum();
+                *force += dv * density;
+            }
+        }
+        // Preserve the elastic owner's geometry-admission domain even where
+        // its mass rule samples points absent from the stiffness/load rule.
+        for (point, &(reference, _)) in mass_rule.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            evaluate(nodes, reference, element, stiffness_rule.len() + point)?;
+        }
+        for (local_dof, &force) in local_force.iter().enumerate() {
+            let full_dof = 3 * connectivity[local_dof / 3] + local_dof % 3;
+            full_equivalent_force_n[full_dof] += force;
+            if !force.is_finite() || !full_equivalent_force_n[full_dof].is_finite() {
+                return Err(TetElasticError::NonFiniteThermalLoad {
+                    element,
+                    local_dof: Some(local_dof),
+                });
+            }
+        }
+    }
+    let mut reduced_force_n = Vec::with_capacity(free_dofs.len());
+    for (index, &dof) in free_dofs.iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        }
+        reduced_force_n.push(full_equivalent_force_n[dof]);
+    }
+    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+    Ok(TetThermalLoad {
+        full_equivalent_force_n,
+        reduced_force_n,
+        free_dofs,
+        identity: identity.finalize(),
+    })
 }
 
 // Public P1 support-motion methods reuse the private linear3 assembly/solve owners.

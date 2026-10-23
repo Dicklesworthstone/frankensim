@@ -3,8 +3,8 @@
 //! assembly path in isoparametric.rs. Positive sampled Jacobians do not prove
 //! global injectivity. Materials are constant per element; mass is consistent.
 use super::{
-    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, determinant3,
-    inverse3,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, TetThermalLoad,
+    TetThermalStrainField, determinant3, inverse3,
 };
 use fs_exec::Cx;
 use fs_feec::highorder::quad1d::gauss_legendre;
@@ -381,6 +381,72 @@ impl HexElasticProblem<'_> {
                     self.nodes_m,
                     elements,
                     self.materials,
+                    self.fixed_dofs,
+                    self.budget,
+                    &q,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex27_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    cx,
+                )
+            }
+        }
+    }
+
+    /// Thermal eigenstrain load on the existing HEX20/HEX27 geometry. Uses
+    /// the same material tensor, fully integrated rule, constraints and quality
+    /// admission as [`Self::assemble`]. Each element's integrated symmetric
+    /// eigenstrain must refer to that element's exact elastic material state.
+    ///
+    /// The shared load carrier supplies `K u = f_external + f_thermal` to the
+    /// existing solver and retains full rows at supports. This does not update
+    /// geometry, introduce thermal stress recovery, or imply an error bound on
+    /// curved-element quadrature. Cancellation never publishes partial forces.
+    pub fn assemble_thermal_load(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalLoad, TetElasticError> {
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                self.validate(elements, cx)?;
+                let q = self.quadrature.points()?;
+                super::isoparametric::thermal_load::<20, 60, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
+                    self.fixed_dofs,
+                    self.budget,
+                    &q,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex20_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    cx,
+                )
+            }
+            HexConnectivity::Hex27(elements) => {
+                self.validate(elements, cx)?;
+                let q = self.quadrature.points()?;
+                super::isoparametric::thermal_load::<27, 81, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
                     self.fixed_dofs,
                     self.budget,
                     &q,

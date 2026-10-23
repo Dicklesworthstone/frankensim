@@ -24,9 +24,10 @@
 //! different constitutive/kinematic rung rather than silently passing through
 //! this operator.
 //!
-//! [`tet10`] provides the distinct quadratic isoparametric path. Its sampled
-//! Jacobian and explicit quadrature contracts do not extend the P1 thermal or
-//! stress-recovery APIs to quadratic meshes.
+//! [`tet10`] and [`hex`] provide quadratic isoparametric elasticity and thermal
+//! eigenstrain loads through their own sampled-Jacobian and explicit-quadrature
+//! contracts. P1 stress recovery and geometric prestress do not extend to those
+//! quadratic meshes.
 
 use std::collections::BTreeSet;
 
