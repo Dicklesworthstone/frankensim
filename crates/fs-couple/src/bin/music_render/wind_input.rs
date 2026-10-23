@@ -204,6 +204,28 @@ fn moving_boundary_provenance(records: &str) -> String {
     format!(",\"moving_boundaries\":[{records}],\"boundary_model_scope\":\"one material plate opening mode with contact, swept volume and retained chimney state; prescribed exterior pressure; not a circular pad or resolved key linkage\"")
 }
 
+fn modal_wetted_provenance(
+    valve: &fs_couple::bernoulli_aperture::modal::ModalAperture,
+) -> String {
+    use fs_plate::shell::pressure::ShellFace;
+    let surfaces = valve.material_plates().iter().enumerate().filter_map(|(blade, plate)| {
+        let port = plate.wetted_surface()?;
+        let surface = port.surface();
+        let facets = surface.upstream_facets().iter().map(|facet| {
+            let side = match facet.side {
+                ShellFace::Positive => "positive",
+                ShellFace::Negative => "negative",
+            };
+            format!("{{\"triangle\":{},\"upstream_face\":\"{side}\"}}", facet.triangle)
+        }).collect::<Vec<_>>().join(",");
+        let areas = port.modal_area_m2().iter().map(|area| format!("{area:e}"))
+            .collect::<Vec<_>>().join(",");
+        Some(format!("{{\"blade\":{blade},\"specimen_identity\":\"{}\",\"source\":{},\"area_m2\":{:e},\"upstream_facets\":[{facets}],\"modal_pressure_areas_m2\":[{areas}]}}",
+            surface.specimen_identity().to_hex(), json_string(surface.provenance()), port.area_m2()))
+    }).collect::<Vec<_>>().join(",");
+    format!(",\"wetted_surfaces\":[{surfaces}],\"wetted_surface_scope\":\"explicit original triangle faces share one signed projection for pressure traction and swept volume; omitted blades retain the complete pressure surface\"")
+}
+
 fn modal_boundary_provenance(
     p: &fs_couple::bernoulli_aperture::performance::file::material_modal::MaterialModalValvePerformance,
 ) -> String {
@@ -418,6 +440,7 @@ fn load_with_all_sources(
             + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
             + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
         let boundary_json = modal_boundary_provenance(&p);
+        let wetted_json = modal_wetted_provenance(valve);
         let opening_loss_json = opening_loss_provenance(
             [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
              fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream]
@@ -450,7 +473,7 @@ fn load_with_all_sources(
         let closure_scope = if valve.plate_closure().is_some() {
             "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
         } else { "effective uniform slit/contact" };
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}}}",
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}{wetted_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);

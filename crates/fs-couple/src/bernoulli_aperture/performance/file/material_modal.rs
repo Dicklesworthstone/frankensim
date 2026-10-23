@@ -32,6 +32,12 @@
 //! requires a local passive impedance terminal; memoryless, moving-boundary
 //! and mutually coupled radiation ports refuse. It is not a vortex model or
 //! a measured tone-hole coefficient; the source token must state its basis.
+//!
+//! After the blades, optional `wetted_surfaces COUNT` records select original
+//! upstream-facing triangle sides. Their same geometric projection drives both
+//! acoustic traction and swept volume, including full material-loss histories.
+//! Omission retains whole positive-side exposure; an explicit empty selection
+//! shelters a blade from this acoustic pressure port without removing mechanics.
 mod plate;
 mod boundaries;
 mod radiation;
@@ -39,6 +45,7 @@ mod wall;
 mod forces;
 mod closure;
 mod pressure;
+mod wetted;
 
 use super::{PlateValveInputError, Reader, bad, checkpoint, gas,
     read_receiver, MAX_PLATE_VALVE_PERFORMANCE_BYTES, MAX_CONTROLS};
@@ -326,6 +333,7 @@ impl MaterialModalValvePerformance {
             plates.push((source, options));
         }
         let modes = states.len();
+        let wetted_surfaces = wetted::read(&mut rows, blades, gate)?;
         let pressure_shapes = pressure::shapes(&mut rows, blades, gate)?;
         let closure = closure::read(&mut rows, gate)?;
         let boundaries = boundaries::Inputs::read(&mut rows)?;
@@ -342,31 +350,30 @@ impl MaterialModalValvePerformance {
             return Err(bad(rows.line + 1, "unexpected trailing material-modal record"));
         }
         let schedule = boundaries.decode_schedule(gestures)?;
-        let mut valve = match loss {
-            LossSelection::Elastic => ModalAperture::from_material_plates_with_propagator(
-                plates, rest_opening, inlet, impedance, dt, mechanical_samples,
-                limits, states, contact, propagator, gate),
-            LossSelection::Tensor { properties, limits: projection } => {
-                let mut viscous = Vec::with_capacity(plates.len());
-                for (source, options) in plates {
-                    let law = crate::plate_viscosity::PlateViscosity::from_chart(
-                        &source, properties.each_ref().map(String::as_str), gate)
-                        .map_err(PlateValveInputError::Physics)?;
-                    viscous.push((source, options, law, projection));
-                }
-                ModalAperture::from_viscous_material_plates_with_propagator(
-                    viscous, rest_opening, inlet, impedance, dt, mechanical_samples,
-                    limits, states, contact, propagator, gate)
-            }
-            LossSelection::Maxwell { properties, initial, regional } => {
-                ModalAperture::from_material_plates_with_propagator(
-                    plates, rest_opening, inlet, impedance, dt, mechanical_samples,
-                    limits, states, contact, propagator, gate)
-                    .and_then(|valve| if regional {
-                        valve.with_regional_material_relaxation(&properties, initial, gate)
-                    } else { valve.with_material_relaxation(&properties, initial, gate) })
-            }
-        }.map_err(PlateValveInputError::Physics)?;
+        let mut prepared_plates = Vec::with_capacity(plates.len());
+        for (source, options) in plates {
+            let tensor = if let LossSelection::Tensor { properties, limits: projection } = &loss {
+                let law = crate::plate_viscosity::PlateViscosity::from_chart(
+                    &source, properties.each_ref().map(String::as_str), gate)
+                    .map_err(PlateValveInputError::Physics)?;
+                Some((law, *projection))
+            } else { None };
+            prepared_plates.push((source, options, tensor));
+        }
+        // Actual exposed geometry must enter A before the first acoustic-clock
+        // admission. Building a whole-face valve and changing A afterward could
+        // reject valid sheltered/partial-face descriptions on an obsolete load.
+        let mut valve = ModalAperture::from_material_images_with_wetted(
+            prepared_plates, wetted_surfaces, rest_opening, inlet, impedance, dt,
+            mechanical_samples, limits, states, contact, propagator, gate)
+            .map_err(PlateValveInputError::Physics)?;
+        if let LossSelection::Maxwell { properties, initial, regional } = loss {
+            valve = if regional {
+                valve.with_regional_material_relaxation(&properties, initial, gate)
+            } else {
+                valve.with_material_relaxation(&properties, initial, gate)
+            }.map_err(PlateValveInputError::Physics)?;
+        }
         for pressure in pressure_shapes {
             valve = pressure.bind(valve, gate)?;
         }

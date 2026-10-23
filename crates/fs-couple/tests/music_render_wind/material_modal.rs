@@ -150,3 +150,5 @@ fn native_material_mimo_cli_matches_original_performer_and_preserves_source_auth
 
 #[path = "material_modal/spatial.rs"]
 mod spatial;
+#[path = "material_modal/wetted.rs"]
+mod wetted;

@@ -29,6 +29,8 @@ mod spatial;
 pub mod material;
 /// Prescribed spatial pressure loads on the original material modal basis.
 pub mod pressure;
+/// Original wetted face geometry in the coupled acoustic force/volume port.
+pub mod wetted;
 /// Source-bound proportional Maxwell memory in the original modal basis.
 pub mod relaxation;
 mod viscosity;

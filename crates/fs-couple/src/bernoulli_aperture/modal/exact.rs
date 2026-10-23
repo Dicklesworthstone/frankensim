@@ -156,6 +156,22 @@ impl ExactModes {
     pub(super) fn pressure_response(&self) -> &[f64] {
         &self.pressure
     }
+
+    /// Change only the work-conjugate acoustic geometry. The original complete
+    /// mechanical propagator, viscosity, Maxwell arms and force map survive.
+    pub(super) fn rebind_pressure(&mut self, spec: &ModalApertureSpec)
+        -> Result<(), AcousticRealizeError>
+    {
+        let n = spec.modes.len();
+        let pressure: Vec<f64> = self.force_response.chunks_exact(n).map(|row| {
+            row.iter().zip(&spec.modes).map(|(b, mode)| b * mode.pressure_area_m2).sum()
+        }).collect();
+        if pressure.len() != n || pressure.iter().any(|p| !p.is_finite()) {
+            return Err(invalid("wetted geometry gives an unrepresentable exact pressure response"));
+        }
+        self.pressure = pressure;
+        Ok(())
+    }
     pub(super) fn contact_response(&self) -> &[f64] {
         &self.contact
     }

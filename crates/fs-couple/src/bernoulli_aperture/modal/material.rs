@@ -50,6 +50,7 @@ pub struct MaterialModalPlate {
     viscosity_matrix: Option<Vec<f64>>,
     basis: RetainedPlateBasis,
     coordinate_scale: Vec<f64>,
+    wetted_surface: Option<super::wetted::MaterialWettedPort>,
 }
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() {
@@ -118,6 +119,21 @@ impl MaterialModalPlate {
     /// Original length-integrated slit width [m]. It is not multiplied by modes.
     pub const fn width_m(&self) -> f64 {
         self.width_m
+    }
+
+    /// Explicit original faces driving acoustic traction and swept volume.
+    /// `None` retains the historical complete positive-side pressure surface.
+    /// An attached empty selection deliberately shelters this blade from that
+    /// pressure port, while retaining its mechanics, gap and contact motion.
+    pub const fn wetted_surface(&self) -> Option<&super::wetted::MaterialWettedPort> {
+        self.wetted_surface.as_ref()
+    }
+
+    pub(super) fn bind_wetted_surface(&mut self, port: super::wetted::MaterialWettedPort) {
+        for (mode, area) in self.modes.iter_mut().zip(port.modal_area_m2()) {
+            mode.pressure_area_m2 = *area;
+        }
+        self.wetted_surface = Some(port);
     }
 
     /// Original regional tensor selection; absent on the diagonal-loss image.
@@ -296,6 +312,7 @@ impl MaterialModalPlate {
             viscosity_matrix,
             basis,
             coordinate_scale,
+            wetted_surface: None,
         })
     }
 
@@ -525,6 +542,28 @@ impl ModalAperture {
         propagator: BladePropagator,
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::from_material_images_with_wetted(plates, Vec::new(), rest_opening_m, gas,
+            impedance_pa_s_m3, time_step_s, max_steps, limits, state, contact, propagator, gate)
+    }
+
+    /// Atomic source construction: actual pressure geometry enters the original
+    /// acoustic clock and cached responses before any valve is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_material_images_with_wetted(
+        plates: Vec<(ResolvedPlateChart, ModalPlateOptions,
+            Option<(PlateViscosity, PlateViscosityLimits)>)>,
+        wetted: Vec<super::wetted::MaterialWettedInput>,
+        rest_opening_m: f64,
+        gas: GasState,
+        impedance_pa_s_m3: f64,
+        time_step_s: f64,
+        max_steps: u64,
+        limits: PairedApertureLimits,
+        state: Vec<BladeState>,
+        contact: Obstacle,
+        propagator: BladePropagator,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
         poll(gate)?;
         gas.validate_coherence().map_err(super::nonlinear)?;
         if !(1..=2).contains(&plates.len()) {
@@ -540,21 +579,25 @@ impl ModalAperture {
             ));
         }
         let mut retained = Vec::with_capacity(plates.len());
-        let mut modes = Vec::with_capacity(count);
+        let mut first = 0;
         for (blade, (source, options, tensor)) in plates.into_iter().enumerate() {
             let plate = MaterialModalPlate::reduce(
                 source,
                 options,
-                modes.len(),
+                first,
                 blade,
                 time_step_s,
                 gate,
                 tensor,
                 propagator,
             )?;
-            modes.extend_from_slice(&plate.modes);
+            first += plate.modes.len();
             retained.push(plate);
         }
+        for surface in wetted {
+            surface.bind(&mut retained, gate)?;
+        }
+        let modes = retained.iter().flat_map(|plate| plate.modes.iter().copied()).collect();
         let width = retained[0].width_m;
         if retained
             .iter()

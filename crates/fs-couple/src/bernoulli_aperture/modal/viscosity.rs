@@ -125,6 +125,19 @@ impl ApertureViscosity {
     pub(super) fn pressure_response(&self) -> &[f64] {
         &self.pressure
     }
+
+    /// Reuse the same full-C mechanical factor for changed acoustic faces.
+    /// This updates traction and its condensed swept-flow feedback together.
+    pub(super) fn rebind_pressure(&mut self, spec: &ModalApertureSpec)
+        -> Result<(), AcousticRealizeError>
+    {
+        if !self.is_active() { return Ok(()); }
+        let h = 0.5 * spec.time_step_s;
+        let mut pressure: Vec<_> = spec.modes.iter().map(|m| h * m.pressure_area_m2).collect();
+        self.solve_free(&mut pressure)?;
+        self.pressure = pressure;
+        Ok(())
+    }
     pub(super) fn contact_response(&self) -> &[f64] {
         &self.contact
     }

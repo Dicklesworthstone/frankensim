@@ -79,6 +79,16 @@ force/velocity overlaps on the new specimen and changes actual exterior sound.
 Both fields retain separate signed work accounts; uniform blowing pressure and
 the existing physical blade swept flow remain coupled exactly once.
 
+`paired-wetted.performance` exposes only the tip half of the first material
+blade to the coupled upstream/downstream pressure port. Original triangle
+addresses select the physical upstream face. Its entire material mass,
+stiffness, viscosity, force footprint and contact mechanics remain present;
+the selected geometry changes pressure traction and reciprocal swept flow
+together. This manufactured fixture uses the same `blade.matpack` and ordinary
+renderer command. Change a facet's `positive` side to `negative` to move the
+upstream fluid to the opposite physical side, or replace the material pack to
+rebuild all retained modal properties and geometric pressure overlaps.
+
 `paired-mutual.performance` selects an externally supplied two-port operator
 in `mutual.radiation`. Run it through the same command with a new output path.
 It adds a second explicitly declared downstream branch and uses the shared
@@ -144,6 +154,7 @@ contact EFFECTIVE_STIFFNESS_N_PER_M_ALPHA EXPONENT INTERNAL_LOSS_S_PER_M
 loss tensor V11 V22 V66 V12 V16 V26 REFERENCE_RESISTANCE_N_S_M PROJECTION_TERMS
 blades COUNT
 BLADE_RECORDS
+OPTIONAL_WETTED_SURFACE_RECORDS
 OPTIONAL_PRESSURE_SHAPE_RECORDS
 OPTIONAL_SPATIAL_CLOSURE_RECORDS
 upstream_boundaries
@@ -160,7 +171,44 @@ schedule
 CANONICAL_GESTURE_BYTES
 ```
 
-Optional additional pressure traces follow all blade records, before spatial
+Optional physical wetted surfaces follow all blade records, before prescribed
+pressure traces, spatial closure or boundary declarations:
+
+```text
+wetted_surfaces COUNT
+wetted_surface BLADE_INDEX PROJECTION_TERMS SOURCE_LABEL
+wetted_facets COUNT
+wetted_facet ORIGINAL_TRIANGLE_INDEX positive|negative
+```
+
+Repeat the facet row for each exposed original triangle and the surface block
+for each selected blade. `positive` and `negative` identify which physical side
+of the triangle's original winding faces **upstream**. The opposite side faces
+downstream. No signed effective pressure area is supplied. The shared oriented
+surface owner integrates each retained displacement mode over the actual
+selected faces. Those same geometric overlaps drive both pressure traction
+and swept-volume feedback in the existing nonlinear acoustic solve. Swapping
+the upstream face changes pressure forcing relative to opening motion; selecting
+only the exposed part of a blade changes its loading without removing any mass,
+stiffness, material loss, contact or physical force footprint.
+
+At most one surface can be attached to each blade. Original specimen identity,
+triangle addresses, source label and projection budget are retained. Repeated
+or unknown triangles, foreign specimen bindings and late attachment refuse.
+Omission keeps the previous complete positive-side pressure surface and its
+arithmetic. A `wetted_surfaces 0` block also makes no change. A selected blade
+with `wetted_facets 0` is explicitly sheltered from this coupled pressure port;
+it can still move under external force/contact and change the flow opening.
+
+The same attachment works with full tensor viscosity, exact structural
+propagation, proportional or regional Maxwell memory, spatial contact and
+independent prescribed-pressure ports. Only the cached acoustic response is
+rebound; the material operators and initial internal strains are retained.
+The approximation remains a fixed P1 normal trace of flat DKT modes. It does
+not model moving wetting boundaries, local channel-pressure recovery, a curved
+shell blade or a measured oscillation threshold.
+
+Optional additional pressure traces follow the blade and wetted-surface records, before spatial
 closure or boundary declarations:
 
 ```text
