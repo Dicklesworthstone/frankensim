@@ -6,7 +6,7 @@
 //! pressure, temperature, surface finish, or heat-partition model.
 
 use fs_matdb::{InterfaceSystemCard, MaterialStateId, QueryPoint, SurfaceSpec};
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec};
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedInterfaceStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
@@ -27,6 +27,50 @@ pub struct ResolvedElectricalInterface {
 }
 
 impl ResolvedElectricalInterface {
+    /// Adopt an already resolved multiphysics interface bundle without querying
+    /// or choosing a source again. Other interface properties and their receipts
+    /// remain in the same bundle; the Ohmic law consumes only its own coefficient.
+    pub fn try_from_resolved(
+        card: &InterfaceSystemCard,
+        resolved: ResolvedInterfaceStatePoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        if resolved.card_identity() != card.content_hash() {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "electrical interface requires its original ordered surface card",
+            });
+        }
+        let resistance = resolved.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
+            .ok_or_else(|| MaterialStatePointError::InvalidRequirement {
+                property: ELECTRICAL_CONTACT_RESISTANCE_PROPERTY.into(),
+                reason: "missing or ambiguous electrical interface resistance",
+            })?;
+        let resistance_ohm_m2 = resistance.value_si();
+        if resistance.requirement().quantity()
+            != QuantitySpec::dimensional(ELECTRICAL_CONTACT_RESISTANCE_DIMS)
+            || !resistance_ohm_m2.is_finite() || resistance_ohm_m2 < 0.0
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "electrical interface requires finite nonnegative specific resistance in ohm m2",
+            });
+        }
+        Ok(Self {
+            resolved,
+            surfaces: [card.surface_a().clone(), card.surface_b().clone()],
+            resistance_ohm_m2,
+        })
+    }
+
+    /// Refresh the complete original interface bundle, then rebuild the Ohmic
+    /// response from its pinned source. No earlier resistance survives a state
+    /// change, and failure leaves this interface unchanged.
+    pub fn at_query_point(
+        &self,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::try_from_resolved(card, self.resolved.at_query_point(card, point)?)
+    }
+
     /// Complete source resolution, including pressure/history/temperature axes.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedInterfaceStatePoint { &self.resolved }
@@ -79,10 +123,5 @@ pub fn resolve_electrical_interface_state(
         ScalarAdmissibility::NonNegative,
     )?;
     let resolved = resolve_interface_state_point(card, point, &[requirement], selection)?;
-    let resistance_ohm_m2 = resolved.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
-        .expect("the required electrical interface property was resolved").value_si();
-    Ok(ResolvedElectricalInterface {
-        resolved, surfaces: [card.surface_a().clone(), card.surface_b().clone()],
-        resistance_ohm_m2,
-    })
+    ResolvedElectricalInterface::try_from_resolved(card, resolved)
 }

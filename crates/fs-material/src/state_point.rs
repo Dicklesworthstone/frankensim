@@ -642,6 +642,35 @@ impl ResolvedInterfaceStatePoint {
         &self.properties[0].answer.receipt.axis_quantities
     }
 
+    /// Reconstruct the complete interface query with its original axis meanings.
+    #[must_use]
+    pub fn query(&self) -> QueryPoint {
+        resolved_query(&self.query_point, self.axis_quantities())
+    }
+
+    /// Refresh every interface property together from the SAME ordered surface
+    /// card and exact selected claims. Temperature, pressure, gap and other
+    /// declared coordinates may change together; their names and quantity
+    /// conventions cannot change. Missing support in any property refuses the
+    /// entire candidate, without switching sources or mutating the old state.
+    ///
+    /// This evaluates a physical endpoint, not wear/history evolution, a source
+    /// substitution, or support along the path between the two points.
+    pub fn at_query_point(
+        &self,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        if card.content_hash() != self.card_identity {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "interface refresh requires the original ordered surface card",
+            });
+        }
+        require_refresh_coordinates(&self.query_point, self.axis_quantities(), point)?;
+        let (requirements, selection) = refresh_requirements(&self.properties);
+        resolve_interface_state_point(card, point, &requirements, selection)
+    }
+
     /// Look up one state coordinate by exact axis name.
     #[must_use]
     pub fn state_coordinate(&self, axis: &str) -> Option<f64> {
@@ -709,15 +738,7 @@ impl ResolvedMaterialStatePoint {
     /// result to [`Self::at_query_point`] without rebuilding property requirements.
     #[must_use]
     pub fn query(&self) -> QueryPoint {
-        let mut point = QueryPoint::new();
-        for (axis, value) in &self.query_point {
-            point = match self.axis_quantities().get(axis) {
-                Some(&quantity) => point.with_quantity(axis, quantity, *value),
-                None => point.with(axis, *value),
-            }
-            .expect("resolved material coordinates have already been admitted");
-        }
-        point
+        resolved_query(&self.query_point, self.axis_quantities())
     }
 
     /// Re-evaluate this entire bundle at a new physical state using the SAME
@@ -747,37 +768,9 @@ impl ResolvedMaterialStatePoint {
                 quantity: "material refresh requires the original immutable card",
             });
         }
-        if point.axis_quantities() != self.axis_quantities()
-            || !point
-                .axes()
-                .keys()
-                .eq(self.query_point.iter().map(|(axis, _)| axis))
-        {
-            return Err(MaterialStatePointError::InvalidDerived {
-                quantity: "material refresh must retain every coordinate name and quantity convention",
-            });
-        }
-        let requirements: Vec<_> = self
-            .properties
-            .iter()
-            .map(|property| property.requirement.clone())
-            .collect();
-        let pins = self
-            .properties
-            .iter()
-            .map(|property| {
-                (
-                    property.requirement.name.clone(),
-                    property.answer.receipt.selected,
-                )
-            })
-            .collect();
-        resolve_material_state_point(
-            card,
-            point,
-            &requirements,
-            MaterialPropertySelection::PinnedByProperty(pins),
-        )
+        require_refresh_coordinates(&self.query_point, self.axis_quantities(), point)?;
+        let (requirements, selection) = refresh_requirements(&self.properties);
+        resolve_material_state_point(card, point, &requirements, selection)
     }
 
     /// Canonically ordered resolved properties.
@@ -805,6 +798,46 @@ impl ResolvedMaterialStatePoint {
             .iter()
             .find(|p| p.requirement.matches_key(key))
     }
+}
+
+fn resolved_query(
+    coordinates: &[(String, f64)],
+    quantities: &std::collections::BTreeMap<String, QuantitySpec>,
+) -> QueryPoint {
+    let mut point = QueryPoint::new();
+    for (axis, value) in coordinates {
+        point = match quantities.get(axis) {
+            Some(&quantity) => point.with_quantity(axis, quantity, *value),
+            None => point.with(axis, *value),
+        }
+        .expect("resolved coordinates have already been admitted");
+    }
+    point
+}
+
+fn require_refresh_coordinates(
+    coordinates: &[(String, f64)],
+    quantities: &std::collections::BTreeMap<String, QuantitySpec>,
+    point: &QueryPoint,
+) -> Result<(), MaterialStatePointError> {
+    if point.axis_quantities() != quantities
+        || !point.axes().keys().eq(coordinates.iter().map(|(axis, _)| axis))
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "state refresh must retain every coordinate name and quantity convention",
+        });
+    }
+    Ok(())
+}
+
+fn refresh_requirements(
+    properties: &[ResolvedScalarProperty],
+) -> (Vec<ScalarPropertyRequirement>, MaterialPropertySelection) {
+    let requirements = properties.iter().map(|p| p.requirement.clone()).collect();
+    let pins = properties.iter().map(|p| {
+        (p.requirement.name.clone(), p.answer.receipt.selected)
+    }).collect();
+    (requirements, MaterialPropertySelection::PinnedByProperty(pins))
 }
 
 fn unique_named_property<'a>(

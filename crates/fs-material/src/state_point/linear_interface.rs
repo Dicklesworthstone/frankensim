@@ -2,7 +2,7 @@
 //! Geometry, force/displacement maps and time integration remain with consumers.
 
 use super::{MaterialStatePointError, ResolvedInterfaceStatePoint, ScalarAdmissibility};
-use fs_matdb::MaterialStateId;
+use fs_matdb::{InterfaceSystemCard, MaterialStateId, QueryPoint};
 use fs_qty::{Dims, DynViscosity, Length, Pressure};
 
 /// Dimensions of interface stiffness per area [N/m³], not bulk modulus [Pa].
@@ -110,6 +110,23 @@ impl ResolvedLinearInterface {
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedInterfaceStatePoint {
         &self.resolved
+    }
+
+    /// Rebuild stiffness, damping and supported frequency band at the new
+    /// interface state, retaining geometry, property roles and exact sources.
+    /// Every property in the original bundle refreshes atomically, including
+    /// coefficients consumed by other domains sharing this physical interface.
+    pub fn at_query_point(
+        &self,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::new(
+            self.resolved.at_query_point(card, point)?,
+            &self.stiffness_property,
+            &self.viscosity_property,
+            self.area_m2,
+        )
     }
     /// Original selected stiffness-per-area property name.
     #[must_use]

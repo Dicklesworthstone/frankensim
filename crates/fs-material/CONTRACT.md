@@ -108,6 +108,23 @@ homogenization, the P2 milestone.
   updates, complete-key preservation, typed-coordinate refusals, source pins
   and atomic failure. These are endpoint evaluations, not history integration,
   support along an intervening path, or measured multiaxis validation.
+  `ResolvedInterfaceStatePoint::{query, at_query_point}` uses the same refresh
+  implementation for ordered surface systems. Every property, complete key,
+  selected claim, coordinate convention and consumer domain is retained; any
+  unsupported property refuses the whole candidate. A different surface card,
+  preparation/history identity or axis schema cannot be substituted by refresh.
+  `ResolvedElectricalInterface` and `ResolvedLiquidWettingState` can adopt an
+  already resolved multiphysics interface bundle without querying again. Their
+  electrical-resistance and equilibrium-angle admission remains active even
+  when the generic bundle requested only finite values. Both adapters and
+  `ResolvedLinearInterface` rebuild their derived response through this shared
+  endpoint refresh, retaining all other interface properties and original source
+  receipts. G0/G3 `tests/interface_refresh.rs` exercises simultaneous temperature
+  and pressure changes across electrical, mechanical and wetting projections,
+  physical coefficient reductions, deterministic refresh, source pinning and
+  atomic refusal. This supplies no wear/hysteresis integration, contact geometry
+  update, path-support proof or empirical validation; the caller still owns
+  evolution and the accepted-state transaction.
   The shared `Surface2D` payload evaluates both source coordinates together
   through the original matdb evaluator. `ResolvedScalarProperty::source_axes`
   retains every declared dependence even at an exact vertex; a surface cannot

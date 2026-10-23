@@ -277,6 +277,49 @@ pub struct ResolvedLiquidWettingState {
 }
 
 impl ResolvedLiquidWettingState {
+    /// Adopt the same complete source bundle used by other interface laws.
+    /// The original card, ordered surfaces and equilibrium-angle restrictions
+    /// are checked without selecting another claim or discarding other data.
+    pub fn try_from_resolved(
+        card: &InterfaceSystemCard,
+        resolved: ResolvedInterfaceStatePoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        if resolved.card_identity() != card.content_hash() {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "wetting interface requires its original ordered surface card",
+            });
+        }
+        let angle = resolved.property(EQUILIBRIUM_CONTACT_ANGLE_PROPERTY)
+            .ok_or_else(|| MaterialStatePointError::InvalidRequirement {
+                property: EQUILIBRIUM_CONTACT_ANGLE_PROPERTY.into(),
+                reason: "missing or ambiguous equilibrium contact angle",
+            })?;
+        require_frozen_coefficient(angle, EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, Dims([0; 6]))?;
+        let contact_angle_radians = angle.value_si();
+        if !(contact_angle_radians > 0.0 && contact_angle_radians < core::f64::consts::PI) {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "equilibrium contact angle must lie strictly between zero and pi",
+            });
+        }
+        Ok(Self {
+            resolved,
+            surfaces: [card.surface_a().clone(), card.surface_b().clone()],
+            context: card.context().clone(),
+            contact_angle_radians,
+        })
+    }
+
+    /// Refresh the entire source bundle and rebuild the equilibrium wall law.
+    /// The original phase/process assignments remain fixed; this does not
+    /// evolve wetting hysteresis or a moving contact line.
+    pub fn at_query_point(
+        &self,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::try_from_resolved(card, self.resolved.at_query_point(card, point)?)
+    }
+
     /// The original selected interface claim and its complete usage receipt.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedInterfaceStatePoint {
@@ -349,15 +392,5 @@ pub fn resolve_liquid_wetting_state(
         },
     )?;
     let resolved = resolve_interface_state_point(card, point, &[requirement], selection)?;
-    let angle = resolved
-        .property(EQUILIBRIUM_CONTACT_ANGLE_PROPERTY)
-        .expect("required equilibrium angle was resolved");
-    require_frozen_coefficient(angle, EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, Dims([0; 6]))?;
-    let contact_angle_radians = angle.value_si();
-    Ok(ResolvedLiquidWettingState {
-        resolved,
-        surfaces: [card.surface_a().clone(), card.surface_b().clone()],
-        context: card.context().clone(),
-        contact_angle_radians,
-    })
+    ResolvedLiquidWettingState::try_from_resolved(card, resolved)
 }
