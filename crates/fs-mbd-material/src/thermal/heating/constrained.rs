@@ -13,7 +13,7 @@ use fs_thermal::enthalpy::{CellId, DepositionBudget, DepositionError, Deposition
     DepositionSimulation, EnergyAudit, Event, StepConfig, TimedEvent};
 use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use crate::deformation::TetrahedralMass;
-use crate::deformation::thermoelastic::{ThermalBody, ThermalBodyError, ThermalCell, ThermalSolveConfig};
+use crate::deformation::thermoelastic::{ThermalBody, ThermalBodyError, ThermalCell, ThermalSolveConfig, ThermalStiffnessModel};
 use super::{HeatingError, ThermalRegion, initialize};
 
 /// One original thermal/source description and its current stiffness selection.
@@ -24,8 +24,10 @@ pub struct ConstrainedRegion<'a> {
     /// `fixed_point_m` is NOT a FEM constraint: it applies only to the separate
     /// free-expansion API. Here supports determine compatible displacement.
     pub storage: ThermalRegion<'a>,
-    /// Current E/nu claim selection; density remains the original inventory.
+    /// Current elastic-constant claim selection; density stays reference-bound.
     pub stiffness_selection: MaterialPropertySelection,
+    /// Same material symmetry and axes used in every accepted thermal substep.
+    pub stiffness_model: ThermalStiffnessModel,
 }
 
 /// Original failing owner; no partly updated thermal or geometric state escapes.
@@ -87,7 +89,7 @@ impl<'a> ConstrainedHeatedBody<'a> {
     /// All subsequent cell births refuse. Supports remain prescribed zero DOFs.
     ///
     /// No independent free-expansion geometry is built. Temperature support for
-    /// Cp alone is insufficient: current E/nu and the whole alpha path must also
+    /// Cp alone is insufficient: current elasticity and the whole alpha path must also
     /// support every physical endpoint. Thermal contact geometry stays reference
     /// geometry; mechanical deformation does not silently change heat transfer.
     #[allow(clippy::too_many_arguments)]
@@ -229,6 +231,7 @@ fn configure<'a>(
         }
         cells.push(ThermalCell { key: source.key, card: source.card,
             temperature_k: state.temperature_k(), stiffness_selection: region.stiffness_selection.clone(),
+            stiffness_model: region.stiffness_model,
             expansion_selection: source.expansion_selection.clone() });
     }
     Ok(mesh.solve_thermal_with_nodal_forces(&cells, fixed_dofs, nodal_forces_n, limits, cx)?)

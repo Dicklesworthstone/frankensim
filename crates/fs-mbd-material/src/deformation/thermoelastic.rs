@@ -1,6 +1,6 @@
 //! Material temperatures -> constrained FEM displacement/stress -> conserved mass.
 //!
-//! This composes existing owners. The material database selects E(T), nu(T)
+//! This composes existing owners. The material database selects elastic constants
 //! and the original integrated alpha path. `fs-solid::linear3` solves compatible
 //! displacement and recovers support reactions/stress. The mesh mass adapter
 //! transports the same reference matter through those actual nodes, not free
@@ -8,19 +8,20 @@
 
 mod vibration;
 mod loads;
+mod stiffness;
+
+pub use stiffness::ThermalStiffnessModel;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::state_point::{
-    DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, POISSON_RATIO_PROPERTY,
     IntegratedIsotropicThermalExpansion, MaterialPropertySelection, MaterialStatePointError,
-    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
-    integrate_isotropic_thermal_expansion, resolve_material_state_point,
+    ResolvedMaterialStatePoint, integrate_isotropic_thermal_expansion,
 };
-use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
+use fs_qty::{QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_solid::linear3::{TetAssemblyBudget, TetDeformedMesh, TetElasticError, TetElasticMaterial,
+use fs_solid::linear3::{TetAssemblyBudget, TetDeformedMesh, TetElasticError,
     TetLinearElasticProblem, TetMaterialField, TetStaticSolveConfig,
     TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStrainState, TetThermalStressReport};
 use fs_solid::loads3::LoadError3;
@@ -36,8 +37,10 @@ pub struct ThermalCell<'a> {
     pub card: &'a MaterialCard,
     /// Current positive absolute temperature [K].
     pub temperature_k: f64,
-    /// Selection of E and nu at the current physical state.
+    /// Selection of the chosen model's elastic constants at the current state.
     pub stiffness_selection: MaterialPropertySelection,
+    /// Constitutive symmetry and material axes; never inferred from a name.
+    pub stiffness_model: ThermalStiffnessModel,
     /// Selection of alpha at the original reference state, pinned along its path.
     pub expansion_selection: MaterialPropertySelection,
 }
@@ -91,15 +94,18 @@ impl From<LoadError3> for ThermalBodyError {fn from(e:LoadError3)->Self{Self::Lo
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThermalCellSource {
     stiffness: ResolvedMaterialStatePoint,
+    stiffness_model: ThermalStiffnessModel,
     expansion: IntegratedIsotropicThermalExpansion,
     material_state_identity: ContentHash,
 }
 impl ThermalCellSource {
-    /// Current E/nu data and full query/claim records. No current density was requested.
+    /// Current elastic data and full query/claim records. No current density was requested.
     pub const fn stiffness(&self)->&ResolvedMaterialStatePoint {&self.stiffness}
+    /// Actual constitutive symmetry and material-to-mesh axes used by the FEM.
+    pub const fn stiffness_model(&self)->ThermalStiffnessModel {self.stiffness_model}
     /// Original source-integrated stress-free strain, not a displacement field.
     pub const fn expansion(&self)->&IntegratedIsotropicThermalExpansion {&self.expansion}
-    /// Identity binding current stiffness to the original reference-density source.
+    /// Identity binding current stiffness and axes to the reference-density source.
     pub const fn material_state_identity(&self)->ContentHash {self.material_state_identity}
 }
 
@@ -135,12 +141,15 @@ impl<'a> ThermalBody<'a> {
 }
 
 impl<'a> TetrahedralMass<'a> {
-    /// Solve nonuniform small-strain isotropic thermoelasticity and transport mass.
+    /// Solve nonuniform small-strain thermoelasticity and transport mass.
     ///
     /// Fixed DOFs are the existing solid owner's zero-displacement supports.
     /// Each cell's full reference query is restored; only absolute T changes.
-    /// E and nu are queried at current T and alpha is integrated from its own
-    /// original T. Reference density supplies the Lagrangian FEM mass measure:
+    /// Elastic constants are queried at current T and isotropic alpha is
+    /// integrated from its own original T. Each cell explicitly selects isotropic
+    /// or oriented orthotropic stiffness. Both use the same scalar thermal
+    /// expansion path; anisotropic expansion requires a different source law.
+    /// Reference density supplies the Lagrangian FEM mass measure:
     /// querying rho(current T) on unchanged reference volume would replace matter.
     /// No current density, yield, damping or unrelated material data are required.
     ///
@@ -184,11 +193,6 @@ impl<'a> TetrahedralMass<'a> {
         }
         let mut ordered:Vec<_>=cells.iter().collect();
         ordered.sort_by_key(|cell|cell.key);
-        let requirements=[
-            ScalarPropertyRequirement::try_new(YOUNG_MODULUS_PROPERTY,Pressure::DIMS,ScalarAdmissibility::StrictlyPositive)?,
-            ScalarPropertyRequirement::try_new(POISSON_RATIO_PROPERTY,Dims([0;6]),
-                ScalarAdmissibility::OpenInterval {lower:-1.0,upper:0.5})?,
-        ];
         let mut sources=Vec::with_capacity(cells.len());
         let mut operators=Vec::with_capacity(cells.len());
         for (index,(original,cell)) in self.reference.regions().iter().zip(ordered).enumerate() {
@@ -204,21 +208,19 @@ impl<'a> TetrahedralMass<'a> {
             let current=reference.clone().with("T",cell.temperature_k)
                 .map_err(|_|invalid("current temperature does not match the reference query schema"))?;
             let expansion=integrate_isotropic_thermal_expansion(cell.card,&reference,&current,cell.expansion_selection.clone())?;
-            let stiffness=resolve_material_state_point(cell.card,&current,&requirements,cell.stiffness_selection.clone())?;
+            let stiffness=cell.stiffness_model.resolve(cell.card,&current,cell.stiffness_selection.clone())?;
             let mut hash=DomainHasher::new("org.frankensim.fs-mbd-material.reference-mass-thermal-elastic.v1");
             hash.update(original.material().identity().as_bytes());
             hash.update(stiffness.identity().as_bytes());
-            let material_state_identity=hash.finalize();
-            let value=|key|stiffness.property(key).expect("required stiffness property resolved").value_si();
-            let density=original.material().property(DENSITY_PROPERTY).expect("reference density resolved").value_si();
-            let material=TetElasticMaterial::try_new(density,value(YOUNG_MODULUS_PROPERTY),value(POISSON_RATIO_PROPERTY),
-                *material_state_identity.as_bytes())?;
+            let material=cell.stiffness_model.material(&stiffness,original.material(),hash.finalize(),
+                config.maximum_absolute_mandel_strain)?;
+            let material_state_identity=ContentHash(material.material_state_identity);
             let strain=expansion.free_linear_strain();
             let thermal=TetThermalStrainState::try_new(cell.temperature_k,reference.axes()["T"],
                 [strain,strain,strain,0.0,0.0,0.0],*material_state_identity.as_bytes(),expansion.identity(),
                 config.maximum_absolute_mandel_strain)?;
             operators.push((self.elements[index],material,thermal));
-            sources.push(ThermalCellSource {stiffness,expansion,material_state_identity});
+            sources.push(ThermalCellSource {stiffness,stiffness_model:cell.stiffness_model,expansion,material_state_identity});
         }
         operators.sort_by_key(|row|row.0);
         let materials:Vec<_>=operators.iter().map(|row|row.1.clone()).collect();

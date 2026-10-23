@@ -120,3 +120,23 @@ mechanical work and elastic storage are not silently added to or claimed by it.
 Focused synthetic cases exercise density/weight, loaded softening and modes,
 correct support reactions, heterogeneous element order, heat/cool/restart and
 refusal. Native Rust execution remains a separate verification requirement.
+
+`ThermalCell` and `ConstrainedRegion` select the same explicit
+`ThermalStiffnessModel`: isotropic E/nu or nine oriented orthotropic engineering
+constants. The existing material-law owner admits the orthotropic compliance;
+the existing solid owner rotates it once into the mesh's Mandel coordinates.
+Both consume the original reference density, preserving closed specimen mass
+without demanding a new density claim at the heated temperature. Source data,
+rotation and orientation identity remain attached to the accepted state and
+its prestressed vibration pencil. Missing orthotropic properties or invalid
+axes refuse; there is no isotropic fallback. Every accepted heat substep uses
+that same model, including after restart and cooling.
+
+Both stiffness rungs currently require a separately sourced **isotropic**
+thermal-expansion path. Orthotropic elasticity alone does not establish that
+this expansion approximation applies to a specimen. This adapter does not
+claim anisotropic expansion, full tensor material support, large-strain
+mechanics or experimental qualification. Focused G1/G3 cases in
+`tests/thermoelastic_body/orthotropic.rs` compare the isotropic limit, analytic
+directional compliance, heat/shape/inertia/vibration propagation, restart and
+atomic refusal of an unsupported intermediate temperature.

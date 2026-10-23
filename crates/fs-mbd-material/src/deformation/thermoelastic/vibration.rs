@@ -17,7 +17,7 @@ pub(super) struct Linearization {
 impl ThermalBody<'_> {
     /// Assemble the initial-stress vibration pencil of THIS accepted thermal state.
     ///
-    /// Current source-resolved E/nu, reference density, thermal strains, mesh,
+    /// Current source-resolved stiffness and material axes, reference density, thermal strains, mesh,
     /// supports, mechanical dead forces and actual displacement are retained at
     /// the successful shape solve. No new card lookup, density query, stress multiplier or hand-entered
     /// modal coefficient is needed. The original solid owner rechecks solution

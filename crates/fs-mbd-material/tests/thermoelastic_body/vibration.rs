@@ -136,7 +136,8 @@ fn heated<'a>(reference:&'a ResolvedBody,card:&'a MaterialCard,caloric:&'a Resol
             volume_m3:reference.regions()[0].geometry().volume_m3(),surface_area_m2:2.4},
         initial_specific_enthalpy_j_kg:0.,boundary:boundary(100.),
         expansion_selection:MaterialPropertySelection::SingleClaimOnly,fixed_point_m:Vec3::default()};
-    ConstrainedHeatedBody::new(mesh,vec![ConstrainedRegion {storage,stiffness_selection:MaterialPropertySelection::SingleClaimOnly}],
+    ConstrainedHeatedBody::new(mesh,vec![ConstrainedRegion {storage,stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
+        stiffness_model:ThermalStiffnessModel::Isotropic}],
         AXIAL.to_vec(),config(),vec![TimedEvent {time_s:1.,event:Event::Boundary(CellId(0),boundary(-100.))}],
         DepositionBudget {max_cells:1,max_links:0,max_events:2,max_substeps:100},step(),cx).unwrap()
 }

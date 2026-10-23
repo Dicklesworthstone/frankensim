@@ -43,6 +43,7 @@ fn body<'a>(reference:&'a ResolvedBody,source:&'a Source,watts:f64,off:f64,dt:f6
         expansion_selection:MaterialPropertySelection::SingleClaimOnly,fixed_point_m:Vec3::default()};
     let mesh=TetrahedralMass::bind(reference,&NODES,&TETS,&["specimen"],4,||false)?;
     Ok(ConstrainedHeatedBody::new(mesh,vec![ConstrainedRegion {storage,
+        stiffness_model:fs_mbd_material::deformation::thermoelastic::ThermalStiffnessModel::Isotropic,
         stiffness_selection:MaterialPropertySelection::SingleClaimOnly}],FIXED.to_vec(),
         ThermalSolveConfig {assembly:TetAssemblyBudget {maximum_nodes:4,maximum_tetrahedra:1,
             maximum_free_dofs:12,minimum_scaled_jacobian:1e-10},solve:TetStaticSolveConfig::default(),

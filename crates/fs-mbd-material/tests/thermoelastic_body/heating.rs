@@ -50,7 +50,8 @@ fn make<'a>(reference:&'a ResolvedBody,cards:&'a [MaterialCard],curves:&'a [Reso
             surface_area_m2:1.5+3.0_f64.sqrt()/2.},
         initial_specific_enthalpy_j_kg:0.,boundary:boundary(if i==0 {watts}else{0.}),
         expansion_selection:MaterialPropertySelection::SingleClaimOnly,fixed_point_m:Vec3::default(),
-    },stiffness_selection:MaterialPropertySelection::SingleClaimOnly}).collect();
+    },stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
+        stiffness_model:ThermalStiffnessModel::Isotropic}).collect();
     if contact {events.insert(0,TimedEvent {time_s:0.,event:Event::Contact(ThermalLink {
         id:10,a:CellId(0),b:CellId(1),area_m2:0.5,conductance_w_k:100.,
     })});}

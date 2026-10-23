@@ -11,7 +11,7 @@ use fs_material::state_point::*;
 use fs_mbd::articulated::{ArticulatedModel,BaseState,JointModel,Link,SpatialInertia,forward_dynamics};
 use fs_mbd_material::{RegionBinding,ResolvedBody,VolumeMoments,resolve_body};
 use fs_mbd_material::deformation::TetrahedralMass;
-use fs_mbd_material::deformation::thermoelastic::{ThermalBodyError,ThermalCell,ThermalSolveConfig};
+use fs_mbd_material::deformation::thermoelastic::{ThermalBodyError,ThermalCell,ThermalSolveConfig,ThermalStiffnessModel};
 use fs_qty::{Density,Dims,Pressure,Temperature};
 use fs_solid::linear3::{TetAssemblyBudget,TetElasticError,TetStaticSolveConfig};
 
@@ -61,6 +61,7 @@ fn reference(cards:&[MaterialCard])->ResolvedBody {
 fn inputs<'a>(cards:&'a [MaterialCard],temperatures:&[f64])->Vec<ThermalCell<'a>> {
     cards.iter().zip(temperatures).enumerate().map(|(i,(card,&temperature_k))|ThermalCell {
         key:KEYS[i],card,temperature_k,stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
+        stiffness_model:ThermalStiffnessModel::Isotropic,
         expansion_selection:MaterialPropertySelection::SingleClaimOnly}).collect()
 }
 fn config()->ThermalSolveConfig {
@@ -188,3 +189,6 @@ mod vibration;
 
 #[path = "thermoelastic_body/loads.rs"]
 mod loads;
+
+#[path = "thermoelastic_body/orthotropic.rs"]
+mod orthotropic;
