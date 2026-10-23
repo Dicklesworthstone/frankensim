@@ -72,6 +72,8 @@ use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
 mod viscothermal;
+mod port_response;
+pub use port_response::DgPortResponse;
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;
@@ -1871,6 +1873,13 @@ impl DgState {
     #[must_use]
     pub const fn initial_energy_j(&self) -> f64 {
         self.initial_energy_j
+    }
+
+    /// Original accumulated boundary/wall loss [J]. For the dense kernel this
+    /// is inferred from the energy deficit, as declared by its step ledger.
+    #[must_use]
+    pub const fn cumulative_dissipated_j(&self) -> f64 {
+        self.cumulative_dissipated_j
     }
 
     /// Total steps executed on this state.

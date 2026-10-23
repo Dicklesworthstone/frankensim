@@ -31,6 +31,8 @@ pub mod paired_network;
 pub mod two_sided;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
+/// Exact DG mean-port feedback on the retained nonlinear aperture.
+pub mod dg;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
 pub mod network;
 /// Shared source-card moving-boundary descriptions for jet and reed networks.
