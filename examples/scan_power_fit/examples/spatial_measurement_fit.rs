@@ -3,6 +3,7 @@
 //! parsing never infers physical conditions from the measurement values.
 use std::io::Read;
 use scan_power_fit::specimen::{ScanSpecimen, SpecimenBudget};
+use scan_power_fit::materials::{ScanMaterialBudget, ScanMaterialMap};
 use scan_power_fit::requirements::{ScanRequirements, RequirementBudget};
 use scan_power_fit::heaters::{HeatingProgramBudget, HeatingSchedule, ScanHeatingProgram};
 use fs_ascent::scan_design::{ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
@@ -42,12 +43,15 @@ const REQUIREMENT_BUDGET: RequirementBudget = RequirementBudget {
 const SPECIMEN_BUDGET: SpecimenBudget = SpecimenBudget {
     max_bytes: 2 << 20, max_vertices: 4096, max_elements: 16_384, max_phase_knots: 256,
 };
+const MATERIAL_BUDGET: ScanMaterialBudget = ScanMaterialBudget {
+    max_bytes: 128 << 10, max_materials: 64, max_phase_knots: 4096,
+};
 const HEATER_BUDGET: HeatingProgramBudget = HeatingProgramBudget {
     max_bytes: 128 << 10, max_sources: 16, max_knots: 512,
     max_fitted_powers: 32, max_authored_controls: 4096,
 };
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W | --heaters FILE] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE] [--requirements FILE] [--population MAX_W ATTEMPTS [--seed U64] [--objective-target LOSS]]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W | --heaters FILE] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE] [--materials FILE] [--requirements FILE] [--population MAX_W ATTEMPTS [--seed U64] [--objective-target LOSS]]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
 
 struct Options {
     path: String,
@@ -55,6 +59,7 @@ struct Options {
     loss: ScanResidualLoss,
     substeps: usize,
     specimen: Option<String>,
+    materials: Option<String>,
     heaters: Option<String>,
     requirements: Option<String>,
     method: Method,
@@ -63,7 +68,7 @@ fn options(args: &[String]) -> Result<Options> {
     let (remaining,method)=search::select(args)?;
     let args=&remaining;
     let mut positional=Vec::new();let mut threshold=None;let mut substeps=None;let mut specimen=None;
-    let mut heaters=None;let mut requirements=None;
+    let mut heaters=None;let mut requirements=None;let mut materials=None;
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
@@ -88,6 +93,11 @@ fn options(args: &[String]) -> Result<Options> {
                 let path=args.get(i).filter(|p| !p.is_empty() && !p.starts_with("--")).ok_or(USAGE)?;
                 requirements=Some(path.clone());
             }
+            "--materials" if materials.is_none() => {
+                i+=1;
+                let path=args.get(i).filter(|p| !p.is_empty() && !p.starts_with("--")).ok_or(USAGE)?;
+                materials=Some(path.clone());
+            }
             value if !value.starts_with("--") => positional.push(value),
             _ => return Err(USAGE.into()),
         }
@@ -103,7 +113,7 @@ fn options(args: &[String]) -> Result<Options> {
     if initial.iter().any(|p|*p<0.) {return Err("initial watts must be nonnegative".into());}
     let substeps=substeps.unwrap_or(1);
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
-    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen,heaters,requirements,method})
+    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen,materials,heaters,requirements,method})
 }
 
 struct Measurements<'m> {
@@ -282,6 +292,7 @@ struct Fit {
     mesh_vertices: usize,
     mesh_elements: usize,
     reference_mass_kg: f64,
+    material_count: usize,
     measurements: Vec<(f64, ScanObservable, f64, f64, f64)>,
     exposure_starts_s: Vec<Option<f64>>,
     sensor_lags: Vec<Option<SensorLag>>,
@@ -320,9 +331,16 @@ fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatin
     fit_with_method(cx,model,program,text,loss,substeps,requirement_text,Method::Sqp)
 }
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn fit_with_method(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgram,
     text: &str, loss: ScanResidualLoss, substeps: usize, requirement_text: Option<&str>,
     method: Method) -> Result<Fit> {
+    fit_with_materials(cx,model,program,text,loss,substeps,requirement_text,method,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn fit_with_materials(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgram,
+    text: &str, loss: ScanResidualLoss, substeps: usize, requirement_text: Option<&str>,
+    method: Method, material_text: Option<&str>) -> Result<Fit> {
     loss.validate()?;
     let source_count=program.sources().len();
     let dimension=program.controls().len();
@@ -340,6 +358,8 @@ fn fit_with_method(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgr
     if vertices>SPECIMEN_BUDGET.max_vertices || elements>SPECIMEN_BUDGET.max_elements {
         return Err("physical specimen exceeds the executable mesh allowance".into());
     }
+    let materials=material_text.map(|input|
+        ScanMaterialMap::from_text(cx,mesh,input,MATERIAL_BUDGET)).transpose()?;
     let requirements=match requirement_text {
         Some(text)=>ScanRequirements::from_text(cx,program,mesh,text,REQUIREMENT_BUDGET)?,
         None=>ScanRequirements::none(program,mesh,REQUIREMENT_BUDGET),
@@ -354,17 +374,27 @@ fn fit_with_method(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgr
     let n=data.endpoints.len();
     let boundary=ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(mesh)
         .remainder("surface",model.exterior.clone())?,&Environment::earth_lab(),vec![],0.)?;
-    let initial_h=vec![model.initial_specific_enthalpy_j_kg; vertices];
-    let element_materials=vec![0; elements];
-    let reference_mass_kg=(0..elements).map(|i| mesh.element_volume(i)*model.reference_density_kg_m3).sum::<f64>();
+    let initial_h=materials.as_ref().map_or_else(
+        || vec![model.initial_specific_enthalpy_j_kg; vertices],
+        |map| map.initial_specific_enthalpy_j_kg().to_vec());
+    let element_materials=materials.as_ref().map_or_else(|| vec![0; elements],
+        |map| map.element_material_ids().to_vec());
+    let reference_materials=materials.as_ref().map_or_else(|| vec![ReferenceEnthalpyMaterial {
+        curve:&model.curve,reference_density_kg_m3:model.reference_density_kg_m3,
+    }], ScanMaterialMap::references);
+    let material_count=reference_materials.len();
+    let reference_mass_kg=materials.as_ref().map_or_else(
+        || (0..elements).map(|i| mesh.element_volume(i)*model.reference_density_kg_m3).sum::<f64>(),
+        ScanMaterialMap::reference_mass_kg);
     if !reference_mass_kg.is_finite() || reference_mass_kg<=0.0 {
         return Err("specimen reference mass is not representable".into());
     }
     let factory=|cx: &Cx<'_>,sources: Vec<MovingHeatSource>|
         -> std::result::Result<ScanningEnthalpyRun<'_, '_, '_>,ScanSensitivityError> {
         let base=EnthalpyHistoryRun::new(cx,ThermalHistoryProblem {boundary:&boundary,material:&model.material,
-            element_materials:None,interfaces:None,source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.))},
-            EnthalpyHistoryMaterials {table:&[ReferenceEnthalpyMaterial {curve:&model.curve,reference_density_kg_m3:model.reference_density_kg_m3}],
+            element_materials:materials.as_ref().map(ScanMaterialMap::conductivity),
+            interfaces:None,source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.))},
+            EnthalpyHistoryMaterials {table:&reference_materials,
                 of_element:&element_materials,phase_conductivity:None},&initial_h,
             EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:vertices,max_elements:elements},max_steps:n})?;
         Ok(ScanningEnthalpyRun::new(cx,base,sources,source_count,None)?)
@@ -406,7 +436,7 @@ fn fit_with_method(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgr
         #[cfg(test)] powers:schedules[0].powers_w.clone(),
         #[cfg(test)] source_times_s:schedules[0].times_s.clone(),
         schedules,
-        mesh_vertices:vertices,mesh_elements:elements,reference_mass_kg,
+        mesh_vertices:vertices,mesh_elements:elements,reference_mass_kg,material_count,
         measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
         objective:solved.value,evaluations:solved.evaluations,
         converged:solved.sqp_converged,violation:solved.constraints.max_scaled_violation(),
@@ -429,6 +459,12 @@ fn main() -> Result<()> {
         if contents.len()>HEATER_BUDGET.max_bytes {return Err("heater program exceeds 128 KiB".into());}
         Ok(contents)
     }).transpose()?;
+    let material_text=options.materials.as_deref().map(|path| -> Result<String> {
+        let mut contents=String::new();
+        std::fs::File::open(path)?.take(MATERIAL_BUDGET.max_bytes as u64+1).read_to_string(&mut contents)?;
+        if contents.len()>MATERIAL_BUDGET.max_bytes {return Err("material file exceeds 128 KiB".into());}
+        Ok(contents)
+    }).transpose()?;
     let requirement_text=options.requirements.as_deref().map(|path| -> Result<String> {
         let mut contents=String::new();
         std::fs::File::open(path)?.take(REQUIREMENT_BUDGET.max_bytes as u64+1).read_to_string(&mut contents)?;
@@ -447,13 +483,16 @@ fn main() -> Result<()> {
             Some(input)=>ScanHeatingProgram::from_text(&cx,&model.mesh,model.end_time_s,input,HEATER_BUDGET)?,
             None=>ScanHeatingProgram::from_specimen(&cx,&model,options.initial)?,
         };
-        fit_with_method(&cx,&model,&program,&text,options.loss,options.substeps,
-            requirement_text.as_deref(),options.method)
+        fit_with_materials(&cx,&model,&program,&text,options.loss,options.substeps,
+            requirement_text.as_deref(),options.method,material_text.as_deref())
     })?;
     println!("# specimen_mode={}; user declarations are not experimental validation",
         if options.specimen.is_some() {"explicit_file"} else {"synthetic_reference"});
     println!("# mesh_vertices={}; mesh_elements={}; reference_mass_kg={:.17e}",
         result.mesh_vertices,result.mesh_elements,result.reference_mass_kg);
+    println!("# material_mode={}; material_count={}; properties_are_declared=true",
+        if options.materials.is_some() {"explicit_element_map"} else {"homogeneous_specimen"},
+        result.material_count);
     println!("# residual_loss={:?}; residuals below are raw, not clipped",options.loss);
     println!("# substeps_per_event_interval={}; time means use normalized trapezoidal readouts",options.substeps);
     match &result.population {
@@ -764,3 +803,7 @@ mod requirement_tests;
 #[cfg(test)]
 #[path = "spatial_measurement_fit/population_tests.rs"]
 mod population_tests;
+
+#[cfg(test)]
+#[path = "spatial_measurement_fit/material_tests.rs"]
+mod material_tests;

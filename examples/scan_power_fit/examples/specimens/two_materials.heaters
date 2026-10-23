@@ -1,0 +1,10 @@
+FS_SCAN_HEATERS_V1
+# Each footprint covers exactly one body; four independent selected powers.
+heater 0 hold 1.4 1.4 1.4
+knot 0 0 0.25 0.25 0.25 0 fit 1
+knot 0 1 0.25 0.25 0.25 0 fit 1
+knot 0 2 0.25 0.25 0.25 0 fixed
+heater 1 hold 1.4 1.4 1.4
+knot 1 0 3.25 0.25 0.25 0 fit 1
+knot 1 1 3.25 0.25 0.25 0 fit 1
+knot 1 2 3.25 0.25 0.25 0 fixed

@@ -1,0 +1,16 @@
+FS_SCAN_MATERIALS_V1
+# Declared synthetic properties, not measured/calibrated materials.
+# First body: 1 kg, latent interval 100..200 J/kg at 310 K.
+material 10 2 6 150
+phase_knot 10 -200 280 0
+phase_knot 10 100 310 0
+phase_knot 10 200 310 1
+phase_knot 10 900 380 1
+# Second body: 2 kg, latent interval 100..300 J/kg at 330 K.
+material 20 4 12 200
+phase_knot 20 -200 300 0
+phase_knot 20 100 330 0
+phase_knot 20 300 330 1
+phase_knot 20 900 390 1
+element 0 10
+element 1 20

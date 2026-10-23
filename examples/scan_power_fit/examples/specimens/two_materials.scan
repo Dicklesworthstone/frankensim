@@ -1,0 +1,26 @@
+FS_SCAN_SPECIMEN_V1
+# Two separated tetrahedral bodies; homogeneous fields below are used only
+# without --materials. Geometry, boundary and observation clock always apply.
+conductivity_w_m_k 2
+reference_density_kg_m3 6
+initial_specific_enthalpy_j_kg 150
+switch_time_s 1
+end_time_s 2
+first_center_m 0.25 0.25 0.25
+second_center_m 3.25 0.25 0.25
+half_width_m 1.4 1.4 1.4
+exterior adiabatic
+vertex_m 0 0 0
+vertex_m 1 0 0
+vertex_m 0 1 0
+vertex_m 0 0 1
+vertex_m 3 0 0
+vertex_m 4 0 0
+vertex_m 3 1 0
+vertex_m 3 0 1
+tet 0 1 2 3
+tet 4 5 6 7
+phase_knot -200 280 0
+phase_knot 100 310 0
+phase_knot 200 310 1
+phase_knot 900 380 1
