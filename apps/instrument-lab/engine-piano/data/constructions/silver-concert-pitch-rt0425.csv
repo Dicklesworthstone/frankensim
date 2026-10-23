@@ -1,0 +1,126 @@
+# Silver strings at concert pitch: the geometry of steel-copper-wound-rt0425.csv (cores and wraps inferred
+# from the embedded scale) with every core and wrap silver (pack 0 and pack 1 = silver-pure-nbs-c447, the
+# hard-drawn modulus and density of NBS C447 serial 3801), each tension re-solved for the installed
+# fundamental. Pack 2 = silver-drawn-hard-uts-nbs-c101, the one sourced drawn-silver tensile strength
+# (Bureau of Standards Circular 101): it states no wire diameter, so the construction declares diameter-free
+# and every receipt says the strength is not diameter-resolved. A string at fixed pitch carries
+# 4 L^2 f^2 rho (less bending), far above drawn silver's strength: this construction is expected to refuse at
+# every key, naming its stress, the limit and the highest attainable pitch. No yield of drawn silver is
+# sourced, so a yield-fraction construction on silver refuses.
+# Keys 21-40: no cited per-key Model D core and wrap diameters were found (Steinway's published specifications give
+# the construction only; RT-0425 gives each wound course's line density and EI, not its parts), so these
+# diameters are back-solved, as the geometry line declares and every receipt repeats.
+frankensim-piano-materials-v2
+tension,target-pitch
+strength,ultimate_tensile_strength_drawn_hard,diameter-free,pack=2
+loss,thermoelastic
+geometry,back-solved,21-40
+key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
+21,core,7.311148360566774e-4,,,0
+21,wrap,,1.776321390714492e-3,close,1
+22,core,7.311148360566774e-4,,,0
+22,wrap,,1.6354325254270639e-3,close,1
+23,core,7.311148360566774e-4,,,0
+23,wrap,,1.5023089233732832e-3,close,1
+24,core,7.311148360566774e-4,,,0
+24,wrap,,1.3757459892391275e-3,close,1
+25,core,7.43464748827905e-4,,,0
+25,wrap,,1.2919295608813074e-3,close,1
+26,core,7.439587453387541e-4,,,0
+26,wrap,,1.19686653508862e-3,close,1
+27,core,7.370427941868667e-4,,,0
+27,wrap,,1.0951979199331197e-3,close,1
+28,core,7.212349058396952e-4,,,0
+28,wrap,,9.971292203073928e-4,close,1
+29,core,7.00981048894882e-4,,,0
+29,wrap,,8.998885981637114e-4,close,1
+30,core,6.767752198632757e-4,,,0
+30,wrap,,8.089833972167689e-4,close,1
+31,core,6.50099408277424e-4,,,0
+31,wrap,,7.259572018062867e-4,close,1
+32,core,6.234235966915722e-4,,,0
+32,wrap,,6.493524153670246e-4,close,1
+33,core,5.962537885948714e-4,,,0
+33,wrap,,5.824298183997026e-4,close,1
+34,core,5.67107994454774e-4,,,0
+34,wrap,,5.255128533892229e-4,close,1
+35,core,5.414201758906207e-4,,,0
+35,wrap,,4.7686742749517854e-4,close,1
+36,core,5.191903329024107e-4,,,0
+36,wrap,,4.344354260076914e-4,close,1
+37,core,4.999244689792956e-4,,,0
+37,wrap,,3.984060672884254e-4,close,1
+38,core,4.8510457365382245e-4,,,0
+38,wrap,,3.6816528187785195e-4,close,1
+39,core,4.742366504151421e-4,,,0
+39,wrap,,3.4332605539440166e-4,close,1
+40,core,4.628747306656127e-4,,,0
+40,wrap,,3.268100999602308e-4,close,1
+41,core,0.0005585,,,0
+42,core,0.000554,,,0
+43,core,0.0005455,,,0
+44,core,0.0005475,,,0
+45,core,0.0005355,,,0
+46,core,0.0005335,,,0
+47,core,0.0005325,,,0
+48,core,0.0005315,,,0
+49,core,0.0005305,,,0
+50,core,0.0005295,,,0
+51,core,0.0005285,,,0
+52,core,0.0005265,,,0
+53,core,0.0005245,,,0
+54,core,0.0005225,,,0
+55,core,0.0005195,,,0
+56,core,0.0005165,,,0
+57,core,0.0005135,,,0
+58,core,0.00051,,,0
+59,core,0.0005065,,,0
+60,core,0.000503,,,0
+61,core,0.0004995,,,0
+62,core,0.0004955,,,0
+63,core,0.000492,,,0
+64,core,0.0004885,,,0
+65,core,0.000485,,,0
+66,core,0.000482,,,0
+67,core,0.000479,,,0
+68,core,0.000476,,,0
+69,core,0.0004735,,,0
+70,core,0.0004705,,,0
+71,core,0.0004685,,,0
+72,core,0.000466,,,0
+73,core,0.000464,,,0
+74,core,0.000462,,,0
+75,core,0.0004605,,,0
+76,core,0.0004585,,,0
+77,core,0.000457,,,0
+78,core,0.000455,,,0
+79,core,0.0004535,,,0
+80,core,0.000452,,,0
+81,core,0.0004505,,,0
+82,core,0.000449,,,0
+83,core,0.000447,,,0
+84,core,0.0004455,,,0
+85,core,0.0004435,,,0
+86,core,0.0004415,,,0
+87,core,0.0004395,,,0
+88,core,0.0004375,,,0
+89,core,0.000435,,,0
+90,core,0.000433,,,0
+91,core,0.00043,,,0
+92,core,0.0004275,,,0
+93,core,0.000425,,,0
+94,core,0.000422,,,0
+95,core,0.0004185,,,0
+96,core,0.0004155,,,0
+97,core,0.000412,,,0
+98,core,0.0004085,,,0
+99,core,0.000405,,,0
+100,core,0.000401,,,0
+101,core,0.0003975,,,0
+102,core,0.0003935,,,0
+103,core,0.000389,,,0
+104,core,0.000385,,,0
+105,core,0.0003805,,,0
+106,core,0.000376,,,0
+107,core,0.0003715,,,0
+108,core,0.000367,,,0

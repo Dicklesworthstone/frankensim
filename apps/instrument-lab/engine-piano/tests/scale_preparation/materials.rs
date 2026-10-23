@@ -1166,6 +1166,46 @@ fn g0_a_strength_claim_without_a_diameter_applies_only_under_diameter_free() {
     }
 }
 
+// ---- pexfp.369 gap 3: declared back-solved geometry ----
+
+// G0: a construction declares which keys' core and wrap diameters are back-solved rather than measured
+// or cited; its receipt, every strength report and the refusal repeat the caveat. Malformed ranges and
+// a range naming a key without a section refuse.
+#[test]
+fn g0_back_solved_geometry_is_declared_and_carried_by_every_receipt() {
+    let courses = small_description().courses;
+    let rows = single_cores(&courses);
+    let pack = pack_with(CORE, |_| {}).to_bytes();
+    let declared = |lines: &str| StringMaterials::from_packs(&[&pack],
+        &format!("frankensim-piano-materials-v2\ntension,target-pitch\nstrength,{LIMIT}\n{lines}\n{COLUMNS}\n{rows}"),
+        &point(), ETA);
+    let plain = StringMaterials::from_packs(&[&pack], &construction("target-pitch", LIMIT, &rows), &point(), ETA)
+        .unwrap();
+    assert_eq!(plain.back_solved_keys(), None);
+    assert!(plain.json().contains("\"geometry\":null"));
+    let report = plain.strength_report(&plain.apply(&courses).unwrap()).unwrap();
+    assert!(report.geometry_caveat.is_none() && report.refusal_json().contains("\"geometryCaveat\":null"));
+
+    let materials = declared("geometry,back-solved,57-57").unwrap();
+    assert_eq!(materials.back_solved_keys(), Some((57, 57)));
+    let caveat = "core and wrap diameters of keys 57-57 are back-solved, not measured or cited; every tension, \
+        stress, limit, pitch and loss computed from them inherits that";
+    assert_eq!(materials.geometry_caveat().as_deref(), Some(caveat));
+    let json = materials.json();
+    assert!(json.contains(&format!("\"geometry\":{{\"backSolvedKeys\":[57,57],\"caveat\":\"{caveat}\"}}")), "{json}");
+    let report = materials.strength_report(&materials.apply(&courses).unwrap()).unwrap();
+    assert_eq!(report.geometry_caveat.as_deref(), Some(caveat));
+    assert!(report.refusal_json().contains(&format!("\"geometryCaveat\":\"{caveat}\"")));
+    // The geometry line follows a loss line.
+    let after_loss = declared("loss,kelvin-voigt\ngeometry,back-solved,81-81").unwrap();
+    assert_eq!(after_loss.back_solved_keys(), Some((81, 81)));
+    for bad in ["geometry,back-solved,69-57", "geometry,back-solved,20-57", "geometry,back-solved,81-109",
+        "geometry,back-solved,57", "geometry,back-solved,x-y", "geometry,measured", "geometry,back-solved,57-69",
+        "geometry,back-solved,57-57\nloss,kelvin-voigt"] {
+        assert!(declared(bad).is_err(), "{bad}");
+    }
+}
+
 // ---- U2: computed thermoelastic loss plus a measured excess ----
 
 // Manufactured thermal data of a steel-like wire, not a sourced alloy.

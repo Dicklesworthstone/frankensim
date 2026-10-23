@@ -14,7 +14,9 @@
 //! diameter's value is taken); a claim that states no diameter at all refuses
 //! unless it declares `diameter-free`, and then it cannot set a playing tension
 //! (`yield-fraction` refuses). Each receipt prints the resolved limit, the rows
-//! it came from and what it is not. At a fixed pitch the stress `4 L^2 f^2 rho`
+//! it came from and what it is not. Core and wrap diameters inferred rather than
+//! measured or cited are declared (`geometry,back-solved,<first>-<last>`), and
+//! every receipt and strength report repeats that caveat. At a fixed pitch the stress `4 L^2 f^2 rho`
 //! does not depend on the wire diameter, so a dense, weak metal cannot reach a
 //! concert scale: every overstressed key refuses together, naming its required
 //! stress, its limit and the highest pitch its section can reach at that
@@ -163,6 +165,8 @@ pub struct StrengthReport {
     /// What the limits are not (extrapolated, or not diameter-resolved), once
     /// per claim, in key order.
     pub limit_caveats: Vec<String>,
+    /// The declared back-solved geometry of some of these keys, if any.
+    pub geometry_caveat: Option<String>,
 }
 impl StrengthReport {
     pub fn overstressed(&self) -> impl Iterator<Item = &KeyStress> {
@@ -173,9 +177,10 @@ impl StrengthReport {
     pub fn refusal_json(&self) -> String {
         let keys = self.overstressed().map(KeyStress::json).collect::<Vec<_>>();
         let caveats = self.limit_caveats.iter().map(|c| format!("\"{}\"", escape(c))).collect::<Vec<_>>();
+        let geometry = self.geometry_caveat.as_ref().map_or_else(|| "null".to_string(), |c| format!("\"{}\"", escape(c)));
         format!(concat!("{{\"refusal\":\"overstressed-strings\",\"limitProperty\":\"{}\",\"limitCaveats\":[{}],",
-            "\"keys\":{},\"overstressed\":[{}]}}"),
-            escape(&self.limit_property), caveats.join(","), self.keys.len(), keys.join(","))
+            "\"geometryCaveat\":{},\"keys\":{},\"overstressed\":[{}]}}"),
+            escape(&self.limit_property), caveats.join(","), geometry, self.keys.len(), keys.join(","))
     }
 }
 
@@ -318,6 +323,8 @@ pub struct StringMaterials {
     extrapolate_diameter: bool,
     diameter_free: bool,
     strength_pack: Option<usize>,
+    /// Keys whose core and wrap diameters the construction declares back-solved.
+    back_solved: Option<(u8, u8)>,
     packs: Vec<Arc<NormalizedMaterialCardPack>>,
 }
 
@@ -332,6 +339,7 @@ struct Declaration {
     extrapolate_diameter: bool,
     diameter_free: bool,
     strength_pack: Option<usize>,
+    back_solved: Option<(u8, u8)>,
     // Per key: core layers (outer radius, pack) then wraps (diameter, pitch or close, pack).
     cores: BTreeMap<u8, Vec<(f64, usize)>>,
     wraps: BTreeMap<u8, Vec<(f64, Option<f64>, usize)>>,
@@ -397,7 +405,21 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
         Some(["loss", ..]) => return Err("loss line must be loss,kelvin-voigt, loss,loss-angle or loss,thermoelastic".into()),
         _ => BendingLossLaw::KelvinVoigt,
     };
-    if lines.next() != Some(COLUMNS) { return Err(format!("the line after strength (and loss) must be {COLUMNS}")); }
+    let back_solved = match lines.peek().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).as_deref() {
+        Some(["geometry", "back-solved", keys]) => {
+            let range = keys.split_once('-').and_then(|(lo, hi)| Some((lo.parse::<u8>().ok()?, hi.parse::<u8>().ok()?)));
+            let Some((lo, hi)) = range.filter(|&(lo, hi)| (21..=108).contains(&lo) && (lo..=108).contains(&hi)) else {
+                return Err("geometry,back-solved needs a key range <first>-<last> within 21-108".into());
+            };
+            lines.next();
+            Some((lo, hi))
+        }
+        Some(["geometry", ..]) => return Err("geometry line must be geometry,back-solved,<first>-<last>".into()),
+        _ => None,
+    };
+    if lines.next() != Some(COLUMNS) {
+        return Err(format!("the line after strength (and loss, geometry) must be {COLUMNS}"));
+    }
     let mut cores = BTreeMap::<u8, Vec<(f64, usize)>>::new();
     let mut wraps = BTreeMap::<u8, Vec<(f64, Option<f64>, usize)>>::new();
     for line in lines {
@@ -438,8 +460,12 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
         }
     }
     if cores.is_empty() { return Err("string material geometry has no sections".into()); }
+    if let Some((lo, hi)) = back_solved
+        && let Some(key) = (lo..=hi).find(|key| !cores.contains_key(key)) {
+        return Err(format!("geometry,back-solved names key {key}, which has no section"));
+    }
     Ok(Declaration { tension, loss, limit_property, non_physical_override, extrapolate_diameter, diameter_free,
-        strength_pack,
+        strength_pack, back_solved,
         cores, wraps })
 }
 
@@ -563,7 +589,7 @@ impl StringMaterials {
         excess_measured: &[bool], viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>,
         point: &QueryPoint) -> Result<Self, String> {
         let Declaration { tension, loss, limit_property, non_physical_override, extrapolate_diameter, diameter_free,
-            strength_pack, cores, mut wraps } = declaration;
+            strength_pack, back_solved, cores, mut wraps } = declaration;
         let flags = DiameterFlags { extrapolate: extrapolate_diameter, diameter_free };
         let state = |index: usize| states[index].clone()
             .ok_or_else(|| format!("string material pack {index} is a strength source only and holds no section"));
@@ -644,7 +670,7 @@ impl StringMaterials {
         });
         Ok(Self { sections, loss_angle_sections, thermoelastic_sections, unrated, missing_loss, loss, wrappings,
             capacities, limit_receipts, tension, limit_property, non_physical_override, extrapolate_diameter,
-            diameter_free, strength_pack, packs })
+            diameter_free, strength_pack, back_solved, packs })
     }
 
     /// Bounded WASM framing of the unchanged canonical bytes; this is not an
@@ -688,6 +714,13 @@ impl StringMaterials {
     pub fn extrapolate_diameter(&self) -> bool { self.extrapolate_diameter }
     /// The construction declared `diameter-free`.
     pub fn diameter_free(&self) -> bool { self.diameter_free }
+    /// Keys whose core and wrap diameters the construction declares back-solved.
+    pub fn back_solved_keys(&self) -> Option<(u8, u8)> { self.back_solved }
+    /// What a declared back-solved geometry means for every result derived from it.
+    pub fn geometry_caveat(&self) -> Option<String> {
+        self.back_solved.map(|(lo, hi)| format!("core and wrap diameters of keys {lo}-{hi} are back-solved, not \
+            measured or cited; every tension, stress, limit, pitch and loss computed from them inherits that"))
+    }
     /// The pack named by `pack=<index>` as every core's strength source.
     pub fn strength_pack(&self) -> Option<usize> { self.strength_pack }
     /// Per key, where each core layer's tensile limit came from.
@@ -813,7 +846,8 @@ impl StringMaterials {
             if !limit_caveats.contains(caveat) { limit_caveats.push(caveat.clone()); }
         }
         Ok(StrengthReport { limit_property: self.limit_property.clone(),
-            non_physical_override: self.non_physical_override, keys, limit_caveats })
+            non_physical_override: self.non_physical_override, keys, limit_caveats,
+            geometry_caveat: self.geometry_caveat() })
     }
 
     fn check_strength(&self, courses: &[Course]) -> Result<(), String> {
@@ -896,10 +930,12 @@ impl StringMaterials {
         format!(concat!("{{\"model\":\"bonded-core-kelvin-voigt-helical-wraps\",\"importedPacks\":{},",
             "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"lossReceipt\":\"{}\",\"missingLossData\":{},",
             "\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"extrapolateDiameter\":{},\"diameterFree\":{},",
-            "\"strengthPack\":{},",
+            "\"strengthPack\":{},\"geometry\":{},",
             "\"sections\":[{}]}}"),
             self.packs.len(), self.tension.json(), self.loss.name(), receipt, self.missing_loss.is_some(),
             escape(&self.limit_property), self.non_physical_override, self.extrapolate_diameter, self.diameter_free,
-            self.strength_pack.map_or_else(|| "null".to_string(), |index| index.to_string()), sections)
+            self.strength_pack.map_or_else(|| "null".to_string(), |index| index.to_string()),
+            self.back_solved.zip(self.geometry_caveat()).map_or_else(|| "null".to_string(), |((lo, hi), caveat)|
+                format!("{{\"backSolvedKeys\":[{lo},{hi}],\"caveat\":\"{}\"}}", escape(&caveat))), sections)
     }
 }

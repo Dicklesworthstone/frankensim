@@ -6,10 +6,14 @@
 # The only gold wire strength (NBS C447 serial 3644) was measured on 0.05 in. (1.27 mm) wire; every core here
 # has another diameter, so the construction declares extrapolate-diameter and each receipt records that the
 # 1.27 mm value was taken.
+# Keys 21-40: no cited per-key Model D core and wrap diameters were found (Steinway's published specifications give
+# the construction only; RT-0425 gives each wound course's line density and EI, not its parts), so these
+# diameters are back-solved, as the geometry line declares and every receipt repeats.
 frankensim-piano-materials-v2
 tension,yield-fraction,0.5
 strength,ultimate_tensile_strength_cold_rolled_wire,extrapolate-diameter
 loss,thermoelastic
+geometry,back-solved,21-40
 key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
 21,core,7.311148360566774e-4,,,0
 21,wrap,,1.776321390714492e-3,close,1
