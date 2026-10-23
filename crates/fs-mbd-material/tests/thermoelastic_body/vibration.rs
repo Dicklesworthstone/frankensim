@@ -29,11 +29,11 @@ fn direct(body:&ThermalBody<'_>, mesh:&TetrahedralMass<'_>, fixed:&[usize], cx:&
                 region.material().property(DENSITY_PROPERTY).unwrap().value_si(),
                 property(YOUNG_MODULUS_PROPERTY),property(POISSON_RATIO_PROPERTY),
                 *source.material_state_identity().as_bytes()).unwrap();
-            let a=source.expansion().free_linear_strain();
+            let a=source.expansion().free_principal_strains()[0];
             let point=|source:&ResolvedMaterialStatePoint|source.query_point().iter()
                 .find(|(axis,_)|axis=="T").unwrap().1;
             let thermal=TetThermalStrainState::try_new(point(source.stiffness()),
-                point(source.expansion().reference().resolved()),[a,a,a,0.,0.,0.],
+                point(source.expansion().reference()),[a,a,a,0.,0.,0.],
                 *source.material_state_identity().as_bytes(),source.expansion().identity(),
                 config().maximum_absolute_mandel_strain).unwrap();
             (e,material,thermal)
@@ -137,7 +137,8 @@ fn heated<'a>(reference:&'a ResolvedBody,card:&'a MaterialCard,caloric:&'a Resol
         initial_specific_enthalpy_j_kg:0.,boundary:boundary(100.),
         expansion_selection:MaterialPropertySelection::SingleClaimOnly,fixed_point_m:Vec3::default()};
     ConstrainedHeatedBody::new(mesh,vec![ConstrainedRegion {storage,stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
-        stiffness_model:ThermalStiffnessModel::Isotropic}],
+        stiffness_model:ThermalStiffnessModel::Isotropic,
+        expansion_model:fs_mbd_material::deformation::thermoelastic::ThermalExpansionModel::Isotropic}],
         AXIAL.to_vec(),config(),vec![TimedEvent {time_s:1.,event:Event::Boundary(CellId(0),boundary(-100.))}],
         DepositionBudget {max_cells:1,max_links:0,max_events:2,max_substeps:100},step(),cx).unwrap()
 }

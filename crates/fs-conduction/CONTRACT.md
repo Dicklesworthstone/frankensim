@@ -1718,3 +1718,22 @@ constitutive arithmetic to `fs-material::phase::conductivity`, retaining the
 original constructors, derivatives, `ConductionError` variants and messages.
 `material_law()` and `From` transfer that exact declared law between the FEM and
 flowing consumers; the existing FEM residual/Newton/adjoint paths are unchanged.
+
+### Environmental response of finite-cell thermal contacts
+
+`transient::deposition::contact::apply_material_contacts` evaluates the original
+interface source at both actual endpoint enthalpy states. Scalar, curve and
+sampled-surface contact laws share `ThermalInterfacePoint::is_response_axis`:
+declared temperature/phase coordinates evolve, while explicitly typed static
+pressure, composition, moisture, concentration or external temperature remain
+at their supplied values. Every response axis must be admitted; matching stress
+dimensions, untyped external axes, field/rate/history coordinates and unsupported
+source triangles do not acquire a frozen physical model.
+
+The existing source evaluator and series resistance owner retain their domains,
+claim pins and receipts. Fresh bulk conductance becomes `1/(1/G_bulk + R''/A)`;
+the two body temperatures stay independent and publication remains atomic.
+This fixed-geometry, zero-interface-storage reduction supplies no evolving
+contact pressure or composition transport. The composed current/heat regressions
+in `fs-couple/tests/electrical_contacts/conditions.rs` include actual two-body
+heat exchange and a source-support-hole refusal with unchanged coefficients.

@@ -304,6 +304,18 @@ homogenization, the P2 milestone.
   and pins the complete path to one selected claim. Crossed source-cell
   breakpoints preserve changes in interpolation slope. The complete path and
   signed `integral(alpha(T) dT)` result are identity-bound.
+  `integrate_orthotropic_thermal_expansion` uses that same integration owner
+  for the three explicit `linear_thermal_expansion_coefficient_1/2/3`
+  properties in inverse-kelvin dimensions. Each principal coefficient retains
+  its own reference claim through the complete fixed-context path. The result
+  retains all three source records and signed principal strains; negative
+  coefficients, cooling and fixed-context surface slices use the same rules.
+  Missing directions, ambiguous claims, wrong dimensions and support gaps
+  refuse the whole result. These are additive small strains in one fixed
+  principal frame. The consumer must supply its proper rotation into the mesh;
+  neither a general six-component coefficient law nor changing principal axes
+  are inferred. The focused regression source is
+  `tests/orthotropic_thermal_expansion.rs`.
   `resolve_mean_thermal_expansion_strain` separately resolves source-declared
   interval means as engineering strain `mean_alpha * (T_end - T_reference)`.
   Both positive absolute-temperature coordinates must be typed and constrained

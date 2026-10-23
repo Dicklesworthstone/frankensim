@@ -62,6 +62,7 @@ fn inputs<'a>(cards:&'a [MaterialCard],temperatures:&[f64])->Vec<ThermalCell<'a>
     cards.iter().zip(temperatures).enumerate().map(|(i,(card,&temperature_k))|ThermalCell {
         key:KEYS[i],card,temperature_k,stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
         stiffness_model:ThermalStiffnessModel::Isotropic,
+        expansion_model:fs_mbd_material::deformation::thermoelastic::ThermalExpansionModel::Isotropic,
         expansion_selection:MaterialPropertySelection::SingleClaimOnly}).collect()
 }
 fn config()->ThermalSolveConfig {
@@ -146,7 +147,7 @@ fn input_order_reset_and_original_source_context_are_preserved() {
     let reset=with_cx(|cx|mesh.solve_thermal(&inputs(&cards,&[300.,300.]),&SUPPORT,config(),cx)).unwrap();
     assert_eq!(reset.body().inertia(),original.inertia());
     for (source,original) in hot.sources().iter().zip(original.regions()) {
-        assert_eq!(source.expansion().reference().resolved().query_point(),original.material().query_point());
+        assert_eq!(source.expansion().reference().query_point(),original.material().query_point());
         assert_eq!(source.stiffness().query_point().iter().find(|(a,_)|a=="pressure").unwrap().1,100000.);
     }
 }

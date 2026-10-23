@@ -165,6 +165,7 @@ fn cells<'a>(cards: &'a [MaterialCard], temperatures: &[f64]) -> Vec<ThermalCell
         .enumerate()
         .map(|(i, (card, &temperature_k))| ThermalCell {
             stiffness_model: fs_mbd_material::deformation::thermoelastic::ThermalStiffnessModel::Isotropic,
+            expansion_model:fs_mbd_material::deformation::thermoelastic::ThermalExpansionModel::Isotropic,
             key: KEYS[i],
             card,
             temperature_k,

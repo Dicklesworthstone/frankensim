@@ -10,8 +10,8 @@ use fs_qty::{Dims, Pressure};
 use fs_solid::linear3::TetElasticMaterial;
 
 /// Source-property schema and material axes for the existing solid owner.
-/// Both rungs use the separately sourced isotropic expansion path. Orthotropic
-/// stiffness does not imply, or approximate, an anisotropic expansion law.
+/// Thermal expansion independently selects its own source law and fixed axes.
+/// Orthotropic stiffness does not imply an anisotropic expansion coefficient.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ThermalStiffnessModel {
     /// Scalar E and nu, with the original isotropic tensor construction.

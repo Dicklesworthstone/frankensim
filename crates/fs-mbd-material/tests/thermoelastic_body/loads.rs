@@ -117,7 +117,8 @@ fn heated<'a>(reference:&'a ResolvedBody,card:&'a MaterialCard,curve:&'a Resolve
         expansion_selection:MaterialPropertySelection::SingleClaimOnly,fixed_point_m:Vec3::default()};
     ConstrainedHeatedBody::new_with_nodal_forces(mesh,
         vec![ConstrainedRegion {storage,stiffness_selection:MaterialPropertySelection::SingleClaimOnly,
-            stiffness_model:ThermalStiffnessModel::Isotropic}],
+            stiffness_model:ThermalStiffnessModel::Isotropic,
+            expansion_model:fs_mbd_material::deformation::thermoelastic::ThermalExpansionModel::Isotropic}],
         SUPPORT.to_vec(),vec![(0,2.),(3,1.)],config(),
         vec![TimedEvent {time_s:1.,event:Event::Boundary(CellId(0),boundary(-100.))}],
         DepositionBudget {max_cells:1,max_links:0,max_events:2,max_substeps:100},step(),cx).unwrap()

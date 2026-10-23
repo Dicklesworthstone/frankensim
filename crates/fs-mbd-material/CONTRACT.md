@@ -132,11 +132,29 @@ its prestressed vibration pencil. Missing orthotropic properties or invalid
 axes refuse; there is no isotropic fallback. Every accepted heat substep uses
 that same model, including after restart and cooling.
 
-Both stiffness rungs currently require a separately sourced **isotropic**
-thermal-expansion path. Orthotropic elasticity alone does not establish that
-this expansion approximation applies to a specimen. This adapter does not
-claim anisotropic expansion, full tensor material support, large-strain
-mechanics or experimental qualification. Focused G1/G3 cases in
-`tests/thermoelastic_body/orthotropic.rs` compare the isotropic limit, analytic
-directional compliance, heat/shape/inertia/vibration propagation, restart and
-atomic refusal of an unsupported intermediate temperature.
+Thermal symmetry is now selected independently through `ThermalExpansionModel`
+on both `ThermalCell` and `ConstrainedRegion`: the original isotropic path or
+three source-integrated principal coefficients with explicit fixed axes.
+`ThermalExpansionSource` retains the original integrated source and, for the
+directional model, the existing solid owner's complete frame-transform receipt.
+Its accepted mesh-frame `TetThermalStrainState` is used unchanged by equilibrium,
+stress recovery and the retained initial-stress vibration operator. The scalar
+route preserves the original arithmetic and identities. The two material
+models may have different explicitly authored principal frames.
+
+`ThermalCellSource::expansion()` exposes the selected source variant;
+`thermal_strain()` exposes the exact accepted state. The latter avoids callers
+reconstructing a scalar approximation. Geometry and full inertia follow the
+actual compatible displacement while reference mass remains conserved. Every
+accepted constrained heat substep, restart and cooling endpoint retains the
+same expansion model, axes and source selection. Unsupported expansion paths
+reject the entire proposed advance even when the caloric source remains valid.
+
+Focused cases in `tests/thermoelastic_body/orthotropic.rs` cover the isotropic
+limit, analytic rotated strain and fully restrained stress, compatible free
+deformation and inertia, changed prestressed operators, heat/cool/restart and
+atomic refusal. The constitutive fixtures are synthetic. This is small-strain,
+fixed-principal-frame expansion and one-way quasistatic heat-to-mechanics
+coupling; it supplies no general off-diagonal coefficient law, finite-strain
+evolution, deformation-dependent heat geometry or experimental qualification.
+Native Rust execution remains a separate verification requirement.

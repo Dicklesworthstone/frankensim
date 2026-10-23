@@ -13,7 +13,7 @@ use fs_thermal::enthalpy::{CellId, DepositionBudget, DepositionError, Deposition
     DepositionSimulation, EnergyAudit, Event, StepConfig, TimedEvent};
 use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use crate::deformation::TetrahedralMass;
-use crate::deformation::thermoelastic::{ThermalBody, ThermalBodyError, ThermalCell, ThermalSolveConfig, ThermalStiffnessModel};
+use crate::deformation::thermoelastic::{ThermalBody, ThermalBodyError, ThermalCell, ThermalSolveConfig, ThermalStiffnessModel, ThermalExpansionModel};
 use super::{HeatingError, ThermalRegion, initialize};
 
 /// One original thermal/source description and its current stiffness selection.
@@ -28,6 +28,8 @@ pub struct ConstrainedRegion<'a> {
     pub stiffness_selection: MaterialPropertySelection,
     /// Same material symmetry and axes used in every accepted thermal substep.
     pub stiffness_model: ThermalStiffnessModel,
+    /// Same thermal symmetry and fixed principal axes throughout this history.
+    pub expansion_model: ThermalExpansionModel,
 }
 
 /// Original failing owner; no partly updated thermal or geometric state escapes.
@@ -232,6 +234,7 @@ fn configure<'a>(
         cells.push(ThermalCell { key: source.key, card: source.card,
             temperature_k: state.temperature_k(), stiffness_selection: region.stiffness_selection.clone(),
             stiffness_model: region.stiffness_model,
+            expansion_model: region.expansion_model,
             expansion_selection: source.expansion_selection.clone() });
     }
     Ok(mesh.solve_thermal_with_nodal_forces(&cells, fixed_dofs, nodal_forces_n, limits, cx)?)

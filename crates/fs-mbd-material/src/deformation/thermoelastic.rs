@@ -9,8 +9,10 @@
 mod vibration;
 mod loads;
 mod stiffness;
+mod expansion;
 
 pub use stiffness::ThermalStiffnessModel;
+pub use expansion::{ThermalExpansionModel, ThermalExpansionSource};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -43,6 +45,8 @@ pub struct ThermalCell<'a> {
     pub stiffness_model: ThermalStiffnessModel,
     /// Selection of alpha at the original reference state, pinned along its path.
     pub expansion_selection: MaterialPropertySelection,
+    /// Thermal symmetry and fixed material axes, independent of elastic symmetry.
+    pub expansion_model: ThermalExpansionModel,
 }
 
 /// Explicit geometry, solver and small-strain applicability limits.
@@ -95,7 +99,8 @@ impl From<LoadError3> for ThermalBodyError {fn from(e:LoadError3)->Self{Self::Lo
 pub struct ThermalCellSource {
     stiffness: ResolvedMaterialStatePoint,
     stiffness_model: ThermalStiffnessModel,
-    expansion: IntegratedIsotropicThermalExpansion,
+    expansion: ThermalExpansionSource,
+    expansion_model: ThermalExpansionModel,
     material_state_identity: ContentHash,
 }
 impl ThermalCellSource {
@@ -104,7 +109,11 @@ impl ThermalCellSource {
     /// Actual constitutive symmetry and material-to-mesh axes used by the FEM.
     pub const fn stiffness_model(&self)->ThermalStiffnessModel {self.stiffness_model}
     /// Original source-integrated stress-free strain, not a displacement field.
-    pub const fn expansion(&self)->&IntegratedIsotropicThermalExpansion {&self.expansion}
+    pub const fn expansion(&self)->&ThermalExpansionSource {&self.expansion}
+    /// Thermal source symmetry and fixed axes actually used by this cell.
+    pub const fn expansion_model(&self)->ThermalExpansionModel {self.expansion_model}
+    /// One accepted mesh-frame strain shared by stress and vibration.
+    pub const fn thermal_strain(&self)->&TetThermalStrainState {self.expansion.thermal_strain()}
     /// Identity binding current stiffness and axes to the reference-density source.
     pub const fn material_state_identity(&self)->ContentHash {self.material_state_identity}
 }
@@ -145,10 +154,10 @@ impl<'a> TetrahedralMass<'a> {
     ///
     /// Fixed DOFs are the existing solid owner's zero-displacement supports.
     /// Each cell's full reference query is restored; only absolute T changes.
-    /// Elastic constants are queried at current T and isotropic alpha is
-    /// integrated from its own original T. Each cell explicitly selects isotropic
-    /// or oriented orthotropic stiffness. Both use the same scalar thermal
-    /// expansion path; anisotropic expansion requires a different source law.
+    /// Elastic constants are queried at current T; expansion is integrated from
+    /// its own original T. Each cell independently selects isotropic or oriented
+    /// orthotropic stiffness and expansion. All principal expansion paths remain
+    /// pinned to their original claims and are rotated once into the mesh frame.
     /// Reference density supplies the Lagrangian FEM mass measure:
     /// querying rho(current T) on unchanged reference volume would replace matter.
     /// No current density, yield, damping or unrelated material data are required.
@@ -207,7 +216,6 @@ impl<'a> TetrahedralMass<'a> {
             }
             let current=reference.clone().with("T",cell.temperature_k)
                 .map_err(|_|invalid("current temperature does not match the reference query schema"))?;
-            let expansion=integrate_isotropic_thermal_expansion(cell.card,&reference,&current,cell.expansion_selection.clone())?;
             let stiffness=cell.stiffness_model.resolve(cell.card,&current,cell.stiffness_selection.clone())?;
             let mut hash=DomainHasher::new("org.frankensim.fs-mbd-material.reference-mass-thermal-elastic.v1");
             hash.update(original.material().identity().as_bytes());
@@ -215,12 +223,13 @@ impl<'a> TetrahedralMass<'a> {
             let material=cell.stiffness_model.material(&stiffness,original.material(),hash.finalize(),
                 config.maximum_absolute_mandel_strain)?;
             let material_state_identity=ContentHash(material.material_state_identity);
-            let strain=expansion.free_linear_strain();
-            let thermal=TetThermalStrainState::try_new(cell.temperature_k,reference.axes()["T"],
-                [strain,strain,strain,0.0,0.0,0.0],*material_state_identity.as_bytes(),expansion.identity(),
+            let expansion=cell.expansion_model.resolve(cell.card,&reference,&current,
+                cell.expansion_selection.clone(),&material,config.mesh_frame,
                 config.maximum_absolute_mandel_strain)?;
+            let thermal=*expansion.thermal_strain();
             operators.push((self.elements[index],material,thermal));
-            sources.push(ThermalCellSource {stiffness,stiffness_model:cell.stiffness_model,expansion,material_state_identity});
+            sources.push(ThermalCellSource {stiffness,stiffness_model:cell.stiffness_model,
+                expansion,expansion_model:cell.expansion_model,material_state_identity});
         }
         operators.sort_by_key(|row|row.0);
         let materials:Vec<_>=operators.iter().map(|row|row.1.clone()).collect();

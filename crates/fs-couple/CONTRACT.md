@@ -4370,3 +4370,24 @@ source-dependent drag without a vibration reset, measured combined energy,
 independent endpoint pressure with the new sound-speed coefficient,
 frozen-initial-medium staging, and atomic refusal. Synthetic source data test
 numerical coupling, not experimental gas/material fidelity.
+
+### Shared environmental response of electrical and thermal contacts
+
+`ElectricalContactNetwork` and the existing finite-cell thermal-contact adapter
+use the same `ThermalInterfacePoint` response-axis admission. Original interface
+curves and sampled surfaces may depend on declared evolving endpoint thermal
+coordinates and explicitly typed fixed external pressure/composition conditions.
+Electrical and thermal properties retain their own claims, dimensional meanings
+and source support. Their common ordered interface does not equate the two
+body temperatures or either body's full material query point.
+
+The existing prepared electrical owner pins sources; original circuit and
+enthalpy owners solve current, bulk/contact Joule heat and thermal exchange.
+Pressure-dependent `R(T_A,p)` and `R''(T_B,p)` therefore affect the same trial,
+with each Joule loss deposited once. Geometry, interface storage assumptions
+and explicit heat partitions are unchanged. Focused regressions in
+`tests/electrical_contacts/conditions.rs` compare pressure and composition
+substitutions with analytic midpoint discharge and both body heat budgets,
+exercise both live source surfaces through finite history, and refuse mechanical
+or untyped response axes and surface-support holes without partial publication.
+These synthetic source tests do not establish measured-material validation.
