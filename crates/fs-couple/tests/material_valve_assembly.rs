@@ -345,6 +345,11 @@ fn same_compiled_reed_uses_the_explicit_gas_renderer_without_a_second_loop() {
     with_cx(|cx| {
         let mut input = template();
         input.ambient.temperature_k = -1.0; // invalid, and ignored ONLY by explicit-gas realization
+        // An unflanged 7 mm mouth at 48 kHz has ka = 3.08 at Nyquist, past the
+        // unflanged model's ka <= 1 (MAX_RADIATION_KA), so realization refuses.
+        // This test is about the renderer, not the mouth: the flanged mouth's
+        // Rayleigh piston covers the whole band.
+        input.duct.as_mut().unwrap().termination = WaveguideEnd::FlangedOpen;
         let result = compile_pressure_loaded_reed_assembly(
             &input,
             valve(cx, 1e6),
@@ -390,13 +395,18 @@ fn same_compiled_reed_uses_the_explicit_gas_renderer_without_a_second_loop() {
         // A material-derived valve must retain the caller's numerical request:
         // the underresolved ladder refuses rather than silently becoming the
         // default characteristic line when compiled solid sources are present.
-        assert!(matches!(
-            result.realize_with_options(&RealizeOptions {
-                bore: BoreRealization::lumped_ladder(1),
-                ..options
-            }),
-            Err(AcousticRealizeError::LumpedLadderBand { .. })
-        ));
+        // One cell is refused earlier as an invalid description ("at least 2
+        // cells"). Two cells pass that check, and their 181.8-cent dispersion
+        // is far over the 1-cent ceiling.
+        let ladder = result.realize_with_options(&RealizeOptions {
+            bore: BoreRealization::lumped_ladder(2),
+            ..options
+        });
+        assert!(
+            matches!(ladder, Err(AcousticRealizeError::LumpedLadderBand { .. })),
+            "{:?}",
+            ladder.as_ref().map(|_| "rendered")
+        );
     });
 }
 
