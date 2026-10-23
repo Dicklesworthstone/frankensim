@@ -1,0 +1,10 @@
+FS_SCAN_REQUIREMENTS_V1
+# All native physical constraints participate in SQP and final replay.
+# The desired schedule uses 56 J including 8 J from the fixed background.
+energy 0 4 48 1
+power 0 1 * 40 1
+state 2 0 temperature_k * 311 1
+peak 1 4 liquid_mass_fraction 0.8 1 0.001 all
+# Only source 1 has continuous linear power and position tables.
+slew 1 50 20 1
+speed 1 0.1 1
