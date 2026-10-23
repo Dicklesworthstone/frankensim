@@ -307,7 +307,8 @@ fn interval_initial() -> DepositionSimulation<'static> {
         CellId(1), active.cells()[&CellId(1)].boundary,
     ) });
     DepositionSimulation::new(schedule, &[(MaterialId(1), &A)],
-        DepositionBudget { max_cells: 2, max_links: 1, max_events: 4, max_substeps: 100 }).unwrap()
+        // Two advective transfers (flows 10 and 11) are submitted per step; max_links bounds them.
+        DepositionBudget { max_cells: 2, max_links: 2, max_events: 4, max_substeps: 100 }).unwrap()
 }
 
 #[test]
