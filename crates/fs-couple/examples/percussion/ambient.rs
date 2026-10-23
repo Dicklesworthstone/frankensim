@@ -2,8 +2,9 @@
 //! constant in code:
 //! - an imported description (drum, shell or hi-hat file) declares its own
 //!   `ambient` record and refuses without one;
-//! - a built-in reference instrument loads the committed record
-//!   `examples/dry-air-20c.gas` through the gas owner;
+//! - a built-in reference instrument loads the committed default
+//!   instrument environment `examples/moist-air-20c-65rh.gas` (20 C,
+//!   101325 Pa, 65 % RH; ruling 6205) through the gas owner;
 //! - `--gas-record FILE` overrides either. The command line sets it once per
 //!   process, before any instrument is built; builders call [`effective`].
 //! Every receipt names which of the three supplied the air.
@@ -16,7 +17,7 @@ use fs_material::gas_species::input::read_gas_record;
 use super::Error;
 
 /// The committed reference record shared by every built-in instrument.
-const REFERENCE_RECORD: &str = include_str!("../dry-air-20c.gas");
+const REFERENCE_RECORD: &str = include_str!("../moist-air-20c-65rh.gas");
 const MAX_RECORD_BYTES: u64 = 8192;
 
 /// Which declaration supplied a run's air.
@@ -41,7 +42,7 @@ impl Ambient {
     /// The committed reference record, read through the gas owner.
     pub fn reference() -> Self {
         let gas = parse(REFERENCE_RECORD)
-            .expect("the committed examples/dry-air-20c.gas record resolves");
+            .expect("the committed examples/moist-air-20c-65rh.gas record resolves");
         Self { gas, source: Source::Reference }
     }
 
@@ -69,7 +70,7 @@ impl Ambient {
     pub fn receipt(self) -> String {
         let source = match self.source {
             Source::Description => "description ambient row",
-            Source::Reference => "built-in reference record examples/dry-air-20c.gas",
+            Source::Reference => "built-in reference record examples/moist-air-20c-65rh.gas",
             Source::CommandLine => "--gas-record",
         };
         format!("ambient: {source}; T={} K, p={} Pa, rho={} kg/m3, c={} m/s, water mole fraction {}",
@@ -125,7 +126,8 @@ mod tests {
     #[test]
     fn the_reference_is_the_committed_record_through_the_gas_owner() {
         let reference = Ambient::reference();
-        assert_eq!(reference.gas, GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap());
+        assert_eq!(reference.gas, GasState::try_new_moist_air(293.15, 101_325.0, 0.65).unwrap());
+        assert!(reference.gas.water_mole_fraction > 0.0);
         assert_eq!(reference.source, Source::Reference);
         assert!((reference.bulk_modulus_pa() / (reference.gas.gamma * reference.gas.pressure) - 1.0).abs() < 1e-12);
         assert!(reference.receipt().contains("built-in reference record"));

@@ -8,4 +8,4 @@ mesh,5,32
 band_hz,80,500
 # ambient: the air inside and around the instrument, one shared gas declaration
 # (T_K P_PA RH, or mixture/thermochemical; see examples/GAS_MIXTURES.md).
-ambient,293.15 101325 0
+ambient,293.15 101325 0.65

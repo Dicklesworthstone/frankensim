@@ -3,6 +3,8 @@ use super::*;
 use ambient::Ambient;
 
 const AIR: &str = "293.15 101325 0";
+// The shipped descriptions' declared environment (ruling 6205).
+const HUMID: &str = "293.15 101325 0.65";
 const THIN: &str = "293.15 70927.5 0";
 const CO2: &str = "mixture 293.15 101325 mole 1 CO2 1";
 const HELIOX: &str = "mixture 293.15 101325 mole 2 He 0.8 O2 0.2";
@@ -83,10 +85,10 @@ fn imported_descriptions_must_declare_air_and_bad_records_refuse() {
     let error = drum_spec::Spec::read(&missing).unwrap_err().to_string();
     assert!(error.contains("ambient"), "{error}");
     for bad in ["ambient,293.15 101325", "ambient,mixture 293.15 101325 mole 1 Xe 1", "ambient,293.15 0 0"] {
-        assert!(drum_spec::Spec::read(&text.replace("ambient,293.15 101325 0", bad)).is_err(), "{bad}");
+        assert!(drum_spec::Spec::read(&text.replace("ambient,293.15 101325 0.65", bad)).is_err(), "{bad}");
     }
     let mut shell = specimen::Specimen::parse(include_str!("estimated-splash.profile")).unwrap();
-    assert_eq!(shell.ambient.unwrap().gas, described(AIR).gas);
+    assert_eq!(shell.ambient.unwrap().gas, described(HUMID).gas);
     shell.ambient = None;
     let refused = splash_with_mount(4,2e-6,false,Stroke::default(),Some(shell),&[],None,None,
         &mallets::Selection::default(),&shaft_playing::Selection::default(),None,None,None);

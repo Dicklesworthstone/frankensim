@@ -266,7 +266,7 @@ Native execution confirms that `splash-wav` (`Receiver::FarField`) fits all 30 m
 ## Air
 
 The air is data, never a constant in code. The built-in reference instruments
-load the committed record `examples/dry-air-20c.gas`. An imported description
+load the committed record `examples/moist-air-20c-65rh.gas`. An imported description
 declares its own `ambient,<gas record>` row, and `--gas-record FILE` overrides
 either. The record is the shared declaration (`T_K P_PA RH`, `mixture ...`, or
 `thermochemical ...`). A record that does not resolve refuses; there is no air

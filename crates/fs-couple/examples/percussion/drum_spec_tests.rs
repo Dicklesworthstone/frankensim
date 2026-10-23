@@ -2,6 +2,10 @@ use super::*;
 use crate::{Stroke, drum_with_air, drum_with_spec, mechanics::Mechanics};
 use fs_exec::CancelGate;
 
+/// The shipped default instrument environment (ruling 6205), which the
+/// built-in reference also reads.
+const AMBIENT: &str = "293.15 101325 0.65";
+
 fn text(s: Spec) -> String {
     let mut out=format!("{HEADER}\ngeometry,{:.17e},{:.17e},{:.17e}\n",
         s.radius_m,s.depth_m,s.outer_radius_m);
@@ -11,12 +15,12 @@ fn text(s: Spec) -> String {
     }
     out.push_str(&format!("mesh,{},{}\nband_hz,{:.17e},{:.17e}\n",
         s.radial_intervals,s.azimuths,s.band_hz[0],s.band_hz[1]));
-    out.push_str("ambient,293.15 101325 0\n");
+    out.push_str(&format!("ambient,{AMBIENT}\n"));
     out
 }
 /// What `text` declares: the spec with its air read from the ambient row.
 fn declared(s: Spec) -> Spec {
-    Spec {ambient:crate::ambient::Ambient::described("293.15 101325 0").unwrap(),..s}
+    Spec {ambient:crate::ambient::Ambient::described(AMBIENT).unwrap(),..s}
 }
 fn small() -> Spec { Spec {radial_intervals:2,azimuths:16,..Spec::reference()} }
 fn stroke() -> Stroke {Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])}}
