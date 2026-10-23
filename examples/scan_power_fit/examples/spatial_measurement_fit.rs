@@ -1,10 +1,10 @@
-//! CSV-driven inverse fitting on an explicitly synthetic reference specimen.
-//! The library supports caller-owned meshes/materials; this executable fixes
-//! one model so external measurement parsing never silently chooses physics.
+//! CSV-driven inverse fitting on an explicit caller-supplied or reference specimen.
+//! Numerical material/mesh/solver owners are shared with the library; input
+//! parsing never infers physical conditions from the measurement values.
 use std::io::Read;
+use scan_power_fit::specimen::{ScanSpecimen, SpecimenBudget};
 use fs_ascent::scan_design::{ScanPowerControl, ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
 use fs_ascent::scan_design::constraints::ConstrainedScanStudy;
-use fs_blake3::ContentHash;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
 use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryRun, EnthalpyHistoryMaterials, EnthalpyHistoryBudget};
@@ -15,16 +15,12 @@ use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objectiv
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::loss::{ScanObservationWithLoss, ScanResidualLoss};
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::temporal::ScanTemporalObservation;
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::checkpoint::ScanCheckpointBudget;
-use fs_conduction::bc::history::march::moving::{MovingHeatSource, MovingHeatBudget};
+use fs_conduction::bc::history::march::moving::MovingHeatSource;
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
-use fs_conduction::{ConductionMesh, ConductivityModel, ScalarField, ThermalBc,
-    ThermalBoundaryBuilder, LinearConfig, COMPONENT_POWER_DIMS};
+use fs_conduction::{ConductionMesh, ScalarField, ThermalBoundaryBuilder, LinearConfig};
 use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey};
-use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EnthalpyPhaseKnot};
-use fs_qty::{Dims, QtyAny};
 use fs_scenario::scenario::Environment;
-use fs_scenario::signal::{TimeSignal, Interp};
 use fs_solver::NewtonKrylovConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -32,17 +28,21 @@ const MAX_BYTES: usize = 128 * 1024;
 const MAX_ROWS: usize = 256;
 const MAX_STEPS: usize = 4096;
 const MAX_SAMPLES: usize = 65_536;
+const SPECIMEN_BUDGET: SpecimenBudget = SpecimenBudget {
+    max_bytes: 2 << 20, max_vertices: 4096, max_elements: 16_384, max_phase_knots: 256,
+};
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold] [--substeps 1..128]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
 
 struct Options {
     path: String,
     initial: [f64;2],
     loss: ScanResidualLoss,
     substeps: usize,
+    specimen: Option<String>,
 }
 fn options(args: &[String]) -> Result<Options> {
-    let mut positional=Vec::new();let mut threshold=None;let mut substeps=None;
+    let mut positional=Vec::new();let mut threshold=None;let mut substeps=None;let mut specimen=None;
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
@@ -51,6 +51,11 @@ fn options(args: &[String]) -> Result<Options> {
             }
             "--substeps" if substeps.is_none() => {
                 i+=1;substeps=Some(args.get(i).ok_or(USAGE)?.parse::<usize>()?);
+            }
+            "--specimen" if specimen.is_none() => {
+                i+=1;
+                let path=args.get(i).filter(|p| !p.is_empty() && !p.starts_with("--")).ok_or(USAGE)?;
+                specimen=Some(path.clone());
             }
             value if !value.starts_with("--") => positional.push(value),
             _ => return Err(USAGE.into()),
@@ -64,7 +69,7 @@ fn options(args: &[String]) -> Result<Options> {
     if initial.iter().any(|p|*p<0.) {return Err("initial watts must be nonnegative".into());}
     let substeps=substeps.unwrap_or(1);
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
-    Ok(Options {path:positional[0].to_string(),initial,loss,substeps})
+    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen})
 }
 
 struct Measurements<'m> {
@@ -130,7 +135,16 @@ fn readout<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, kind: &str, selection: &st
         _ => return Err("readout must be vertex, tet, volume or weighted".into()),
     })
 }
+#[cfg(test)]
 fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize) -> Result<Measurements<'m>> {
+    parse_for_clock(cx, mesh, text, substeps, [1.0, 2.0])
+}
+fn parse_for_clock<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str,
+    substeps: usize, source_times: [f64; 2]) -> Result<Measurements<'m>> {
+    if source_times.iter().any(|t| !t.is_finite()) || source_times[0] <= 0.0
+        || source_times[1] <= source_times[0] {
+        return Err("source clock requires finite 0 < switch < shutdown".into());
+    }
     if text.len()>MAX_BYTES { return Err("measurement file exceeds 128 KiB".into()); }
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
     let mut lines=text.lines();
@@ -147,9 +161,9 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
                 return Err("each unquoted numeric measurement needs exactly six fields".into());
             }
             let (start,time,sensor_lag)=measurement_time(fields[0])?;
-            if time<=0. || time>2. { return Err("reference specimen measurements require 0 < time_s <= 2".into()); }
+            if time<=0. || time>source_times[1] { return Err("measurements require 0 < time_s <= the specimen shutdown".into()); }
             if start.is_some_and(|start|start<=0. || start>=time) {
-                return Err("temporal readout needs 0 < start < end <= 2 seconds; initial-state windows are unsupported".into());
+                return Err("temporal readout needs 0 < start < end <= shutdown; initial-state windows are unsupported".into());
             }
             let observable=match fields[1] {
                 "temperature_k" => ScanObservable::Temperature,
@@ -172,10 +186,10 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
     }
     if rows.is_empty() { return Err("at least one measurement is required".into()); }
     // Preserve exact representable times and every source switch. Inserting
-    // measurements cannot make the grid step over the one-second power change.
+    // measurements cannot make the grid step over the declared power change.
     let mut endpoints=Vec::new();
     for &(start,end,_) in &times {endpoints.extend(start);endpoints.push(end);}
-    endpoints.extend([1.0,2.0]);
+    endpoints.extend(source_times);
     endpoints.sort_by(f64::total_cmp); endpoints.dedup();
     let count=endpoints.len().checked_mul(substeps).filter(|&n|n<=MAX_STEPS)
         .ok_or("measurement time grid exceeds 4096 physical endpoints")?;
@@ -211,6 +225,10 @@ fn parse<'m>(cx: &Cx<'_>, mesh: &'m ConductionMesh, text: &str, substeps: usize)
 
 struct Fit {
     powers: Vec<f64>,
+    source_times_s: [f64; 3],
+    mesh_vertices: usize,
+    mesh_elements: usize,
+    reference_mass_kg: f64,
     measurements: Vec<(f64, ScanObservable, f64, f64, f64)>,
     exposure_starts_s: Vec<Option<f64>>,
     sensor_lags: Vec<Option<SensorLag>>,
@@ -219,33 +237,38 @@ struct Fit {
     converged: bool,
     violation: f64,
 }
+#[cfg(test)]
 fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
+    let model=ScanSpecimen::synthetic_reference(cx)?;
+    fit_on_specimen(cx, &model, text, initial, loss, substeps)
+}
+fn fit_on_specimen(cx: &Cx<'_>, model: &ScanSpecimen, text: &str,
+    initial: [f64;2], loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
     loss.validate()?;
     if initial.iter().any(|p|!p.is_finite() || *p<0.) { return Err("initial watts must be finite and nonnegative".into()); }
-    let (complex,positions)=fs_conduction::fixtures::box_grid([1,1,1],[1.;3]);
-    let mesh=ConductionMesh::new(complex,positions)?;
-    let data=parse(cx,&mesh,text,substeps)?; let n=data.endpoints.len();
-    let material=ConductivityModel::isotropic_declared(2.)?;
-    let curve=EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([76;32]),
-        [(-200.,280.,0.),(100.,310.,0.),(200.,310.,1.),(900.,380.,1.)].into_iter()
-            .map(|(h,t,f)|EnthalpyPhaseKnot {specific_enthalpy_j_kg:h,temperature_k:t,
-                liquid_mass_fraction:f,bulk_density_kg_m3:1.}).collect())?;
-    let boundary=ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(&mesh)
-        .remainder("surface",ThermalBc::adiabatic())?,&Environment::earth_lab(),vec![],0.)?;
-    let length=Dims([1,0,0,0,0,0]);
-    let source=MovingHeatSource::new([
-        TimeSignal::Table {times:vec![0.,1.,2.],values:vec![0.25,0.75,0.75],dims:length,interp:Interp::Hold},
-        TimeSignal::Constant(QtyAny::new(0.5,length)),TimeSignal::Constant(QtyAny::new(0.5,length))],
-        [1.4,1.2,1.1],TimeSignal::Table {times:vec![0.,1.,2.],values:vec![initial[0],initial[1],0.],
-            dims:COMPONENT_POWER_DIMS,interp:Interp::Hold},0.,
-        MovingHeatBudget {max_vertices:8,max_elements:6,min_active_vertices:1,power_relative_tolerance:1e-11})?;
+    let mesh=&model.mesh;
+    let vertices=mesh.vertex_count(); let elements=mesh.element_count();
+    if vertices>SPECIMEN_BUDGET.max_vertices || elements>SPECIMEN_BUDGET.max_elements {
+        return Err("physical specimen exceeds the executable mesh allowance".into());
+    }
+    let data=parse_for_clock(cx,mesh,text,substeps,[model.switch_time_s,model.end_time_s])?;
+    let n=data.endpoints.len();
+    let boundary=ThermalBoundaryHistory::new(cx,ThermalBoundaryBuilder::new(mesh)
+        .remainder("surface",model.exterior.clone())?,&Environment::earth_lab(),vec![],0.)?;
+    let source=model.source(initial)?;
+    let initial_h=vec![model.initial_specific_enthalpy_j_kg; vertices];
+    let element_materials=vec![0; elements];
+    let reference_mass_kg=(0..elements).map(|i| mesh.element_volume(i)*model.reference_density_kg_m3).sum::<f64>();
+    if !reference_mass_kg.is_finite() || reference_mass_kg<=0.0 {
+        return Err("specimen reference mass is not representable".into());
+    }
     let factory=|cx: &Cx<'_>,sources: Vec<MovingHeatSource>|
         -> std::result::Result<ScanningEnthalpyRun<'_, '_, '_>,ScanSensitivityError> {
-        let base=EnthalpyHistoryRun::new(cx,ThermalHistoryProblem {boundary:&boundary,material:&material,
+        let base=EnthalpyHistoryRun::new(cx,ThermalHistoryProblem {boundary:&boundary,material:&model.material,
             element_materials:None,interfaces:None,source:HeatSourceHistory::Fixed(ScalarField::Uniform(0.))},
-            EnthalpyHistoryMaterials {table:&[ReferenceEnthalpyMaterial {curve:&curve,reference_density_kg_m3:1.}],
-                of_element:&[0;6],phase_conductivity:None},&[150.;8],
-            EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:8,max_elements:6},max_steps:n})?;
+            EnthalpyHistoryMaterials {table:&[ReferenceEnthalpyMaterial {curve:&model.curve,reference_density_kg_m3:model.reference_density_kg_m3}],
+                of_element:&element_materials,phase_conductivity:None},&initial_h,
+            EnthalpyHistoryBudget {spatial:EnthalpyBudget {max_vertices:vertices,max_elements:elements},max_steps:n})?;
         Ok(ScanningEnthalpyRun::new(cx,base,sources,1,None)?)
     };
     let segment=n.min(8);
@@ -264,17 +287,17 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, subste
     let objective=ScanPowerObjective {endpoints_s:data.endpoints.clone(),observations,
         sampling:ScanObjectiveSampling::EventLeft,
         step:EnthalpyStepConfig {newton:NewtonKrylovConfig {absolute_tolerance:1e-11,relative_tolerance:1e-12,
-            linear_restart:8,max_linear_cycles:16,forcing_minimum:1e-12,forcing_maximum:1e-3,..Default::default()},
+            linear_restart:vertices.clamp(8,64),max_linear_cycles:if vertices<=8 {16} else {32},forcing_minimum:1e-12,forcing_maximum:1e-3,..Default::default()},
             max_newton_iterations:64,energy_tolerance_j:1e-8},
-        transpose:LinearConfig {tolerance:1e-10,max_iterations:1000,restart:8},
-        budget:ScanObjectiveBudget {max_steps:n,max_observations:data.contributions,max_retained_vertices:8*segment,
-            max_retained_source_vertices:8*segment,max_schedule_controls:16,max_retained_radiation_entries:0},
+        transpose:LinearConfig {tolerance:1e-10,max_iterations:1000,restart:vertices.clamp(8,64)},
+        budget:ScanObjectiveBudget {max_steps:n,max_observations:data.contributions,max_retained_vertices:vertices*segment,
+            max_retained_source_vertices:vertices*segment,max_schedule_controls:16,max_retained_radiation_entries:0},
         source_reference_time_s:0.};
     let controls=vec![ScanPowerControl {source:0,value:0,reference_w:1.},ScanPowerControl {source:0,value:1,reference_w:1.}];
     let mut study=ScanPowerStudy::new_joint_with_power_coordinates(cx,vec![source],controls,vec![],
         ScanPowerCoordinates::NonnegativeLinear,objective,factory,127)?;
     study.set_checkpointing(cx,ScanCheckpointBudget {segment_steps:segment,
-        max_checkpoint_vertices:8*(n.div_ceil(segment)+1),max_forward_solves:2*n})?;
+        max_checkpoint_vertices:vertices*(n.div_ceil(segment)+1),max_forward_solves:2*n})?;
     let mut study=ConstrainedScanStudy::new(cx,study,vec![],vec![],8)?;
     let report=study.advance_optimizer(cx,1e-8,100)?;
     let spent=study.evaluations(); let exported=study.sources(cx)?;
@@ -290,7 +313,9 @@ fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, subste
         .zip(&replay.physical.standardized_residuals).map(|((row,&prediction),&residual)|
             (data.endpoints[row.endpoint],row.observable,row.target,prediction,residual)).collect();
     let exposure_starts_s=data.starts.iter().map(|start|start.map(|i|data.endpoints[i])).collect();
-    Ok(Fit {powers,measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
+    Ok(Fit {powers,source_times_s:[0.0,model.switch_time_s,model.end_time_s],
+        mesh_vertices:vertices,mesh_elements:elements,reference_mass_kg,
+        measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
         objective:replay.physical.value,evaluations:study.evaluations(),
         converged:report.solution.converged,violation:limits.max_scaled_violation()})
 }
@@ -299,16 +324,32 @@ fn main() -> Result<()> {
     let options=options(&args)?;
     let mut text=String::new();
     std::fs::File::open(&options.path)?.take(MAX_BYTES as u64+1).read_to_string(&mut text)?;
+    let specimen_text=options.specimen.as_deref().map(|path| -> Result<String> {
+        let mut contents=String::new();
+        std::fs::File::open(path)?.take(SPECIMEN_BUDGET.max_bytes as u64+1).read_to_string(&mut contents)?;
+        if contents.len()>SPECIMEN_BUDGET.max_bytes {return Err("specimen exceeds 2 MiB".into());}
+        Ok(contents)
+    }).transpose()?;
     let gate=CancelGate::new(); let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-    let result=pool.scope(|arena|fit(&Cx::new(&gate,arena,
-        StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic),&text,options.initial,options.loss,options.substeps))?;
-    println!("# Synthetic unit-cube reference model; not automatic experimental calibration.");
+    let result=pool.scope(|arena| {
+        let cx=Cx::new(&gate,arena,StreamKey {seed:76,kernel_id:51,tile:0,iteration:0},
+            Budget::INFINITE,ExecMode::Deterministic);
+        let model=match specimen_text.as_deref() {
+            Some(input)=>ScanSpecimen::from_text(&cx,input,SPECIMEN_BUDGET)?,
+            None=>ScanSpecimen::synthetic_reference(&cx)?,
+        };
+        fit_on_specimen(&cx,&model,&text,options.initial,options.loss,options.substeps)
+    })?;
+    println!("# specimen_mode={}; user declarations are not experimental validation",
+        if options.specimen.is_some() {"explicit_file"} else {"synthetic_reference"});
+    println!("# mesh_vertices={}; mesh_elements={}; reference_mass_kg={:.17e}",
+        result.mesh_vertices,result.mesh_elements,result.reference_mass_kg);
     println!("# residual_loss={:?}; residuals below are raw, not clipped",options.loss);
     println!("# substeps_per_event_interval={}; time means use normalized trapezoidal readouts",options.substeps);
     println!("# objective={:.17e} converged={} max_scaled_violation={:.17e} evaluations={}",
         result.objective,result.converged,result.violation,result.evaluations);
     println!("time_s,absorbed_power_w");
-    for (time,power) in [0.,1.,2.].into_iter().zip(&result.powers) {println!("{time:.17e},{power:.17e}");}
+    for (time,power) in result.source_times_s.into_iter().zip(&result.powers) {println!("{time:.17e},{power:.17e}");}
     for (i,(time,quantity,target,prediction,residual)) in result.measurements.iter().enumerate() {
         let (term,slope)=options.loss.value_derivative(*residual)?;
         if let Some(start)=result.exposure_starts_s[i] {
@@ -548,3 +589,7 @@ mod sensor_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "spatial_measurement_fit/specimen_tests.rs"]
+mod specimen_tests;

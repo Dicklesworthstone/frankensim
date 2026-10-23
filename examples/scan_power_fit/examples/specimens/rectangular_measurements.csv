@@ -1,0 +1,6 @@
+time_s,observable,target,scale,readout,selection
+1.5,specific_enthalpy_j_kg,153,1,volume,0;1;2;3;4;5
+4,specific_enthalpy_j_kg,165.5,1,volume,0;1;2;3;4;5
+1.5..4,specific_enthalpy_j_kg,159.25,1,volume,0;1;2;3;4;5
+lag:1.5:4:0.5:153,specific_enthalpy_j_kg,163.01684486749772,1,volume,0;1;2;3;4;5
+4,liquid_mass_fraction,0.655,0.01,volume,0;1;2;3;4;5
