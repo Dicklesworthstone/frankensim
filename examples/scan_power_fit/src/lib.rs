@@ -6,3 +6,5 @@ pub mod scenarios;
 pub mod specimen;
 /// Explicit multi-heater schedules and selected authored power controls.
 pub mod heaters;
+/// File-declared physical requirements for measured scan programs.
+pub mod requirements;
