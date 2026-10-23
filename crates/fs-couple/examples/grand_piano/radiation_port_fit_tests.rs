@@ -105,7 +105,11 @@ fn held_out_omitted_direction_is_checked_in_the_complete_board_basis() {
 #[test]
 fn zero_surface_is_exact_and_incomplete_or_unbounded_geometry_refuses() {
     let (weights,areas)=exact_rank_two(36);
-    for ports in [0,33,usize::MAX] {assert!(geometry_basis(&weights,&areas,ports).is_err());}
+    // The port ceiling is the shared radiation owner's MAX_PORTS (32 -> 128 in 2ebec9335,
+    // which admitted the complete production board); one past it refuses, the ceiling selects.
+    let cap=fs_couple::render::plate::impact::radiation::MAX_PORTS;
+    for ports in [0,cap+1,usize::MAX] {assert!(geometry_basis(&weights,&areas,ports).is_err());}
+    assert_eq!(geometry_basis(&weights,&areas,cap).unwrap().0.ports(),2);
     assert!(geometry_basis(&[],&areas,2).is_err());
     assert!(geometry_basis(&vec![vec![0.;4];129],&areas,2).is_err());
     assert!(geometry_basis(&weights,&[1.,1.,2.],2).is_err());
