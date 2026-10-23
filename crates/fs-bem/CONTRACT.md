@@ -302,12 +302,28 @@ Routes and measurements:
   for the centroid rows.
 - `PanelRule::Centroid` is the unchanged default, bit for bit.
 
-Known limit: far pairs keep one-point weights, which leave an O(h) remnant
-that alpha = i/k amplifies at low ka. In a dense replica at ka 0.05 the
-dipole radiation resistance stalls at about 2.8x the exact value (centroid
-rule: 11.6x). A degree >= 2 far rule converges it (0.29 / 0.64 / 0.86 of
-exact over rungs 2-4). So the default stays centroid until a multi-point
-far field exists.
+TriangleNear's far pairs keep one-point weights. They leave an O(h) remnant
+that alpha = i/k amplifies at low ka. `PanelRule::Triangle { max_pairs }`
+keeps the same exact near zone and applies Radon's seven-point degree-5
+rule to S, D and N on every other pair. D' keeps its centroid kernel.
+- Dense, ka 0.05 dipole radiation resistance
+  (`impedance_sphere_dipole_resistance_far_rule_ladder`). Relative error
+  over rungs 2-4:
+  - centroid: 33, 20, 10.6 (the resistance at 34x to 11.6x exact);
+  - TriangleNear: 0.32, 2.24, 1.78 (stalls);
+  - Triangle: 0.69, 0.37, 0.15.
+- Dense orders under Triangle, pulsating / scattering: 2.02 / 2.01 at
+  ka 1, and 2.01 / 2.02 at ka 3.
+- Iterative (`BmCloudLayers`): the far field is far-field-only W5a passes
+  over the Radon cloud that plain CBIE also uses. The near rows hold the
+  dense rule's entry minus the node sums the pass covers.
+  `impedance_sphere_triangle_far_cloud_matches_dense` holds it within
+  1.3e-6 of the dense Triangle (tolerance 1e-5) at rungs 2-4, ka 0.05 and
+  pi.
+- Directional options are refused, because there is no far-only
+  directional pass; that regime uses TriangleNear.
+
+Centroid stays the default.
 
 Plain CBIE (`Formulation::PlainCbie`, IRP .105) keeps the dense owner's
 triangle quadrature; it is not replaced by centroid kernels.
