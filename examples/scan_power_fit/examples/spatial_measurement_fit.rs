@@ -7,6 +7,7 @@ use scan_power_fit::requirements::{ScanRequirements, RequirementBudget};
 use scan_power_fit::heaters::{HeatingProgramBudget, HeatingSchedule, ScanHeatingProgram};
 use fs_ascent::scan_design::{ScanPowerCoordinates, ScanPowerObjective, ScanPowerStudy};
 use fs_ascent::scan_design::constraints::{ConstrainedScanStudy, ScanConstraintEvaluation};
+use fs_ascent::scan_design::constraints::value::ScanConstraintValues;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};
 use fs_conduction::bc::history::march::enthalpy::{EnthalpyHistoryRun, EnthalpyHistoryMaterials, EnthalpyHistoryBudget};
@@ -25,6 +26,10 @@ use fs_exec::{Cx, Budget, CancelGate, ExecMode, StreamKey};
 use fs_scenario::scenario::Environment;
 use fs_solver::NewtonKrylovConfig;
 
+#[path = "spatial_measurement_fit/search.rs"]
+mod search;
+use search::{Method, PopulationOptions, PopulationStatus};
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_ROWS: usize = 256;
@@ -42,7 +47,7 @@ const HEATER_BUDGET: HeatingProgramBudget = HeatingProgramBudget {
     max_fitted_powers: 32, max_authored_controls: 4096,
 };
 const HEADER: &str = "time_s,observable,target,scale,readout,selection";
-const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W | --heaters FILE] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE] [--requirements FILE]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
+const USAGE: &str = "spatial_measurement_fit measurements.csv [initial_first_W initial_second_W | --heaters FILE] [--huber positive_threshold] [--substeps 1..128] [--specimen FILE] [--requirements FILE] [--population MAX_W ATTEMPTS [--seed U64] [--objective-target LOSS]]; time_s may be start..end for a mean or lag:start:end:tau:initial for a sensor reading";
 
 struct Options {
     path: String,
@@ -52,8 +57,11 @@ struct Options {
     specimen: Option<String>,
     heaters: Option<String>,
     requirements: Option<String>,
+    method: Method,
 }
 fn options(args: &[String]) -> Result<Options> {
+    let (remaining,method)=search::select(args)?;
+    let args=&remaining;
     let mut positional=Vec::new();let mut threshold=None;let mut substeps=None;let mut specimen=None;
     let mut heaters=None;let mut requirements=None;
     let mut i=0;
@@ -95,7 +103,7 @@ fn options(args: &[String]) -> Result<Options> {
     if initial.iter().any(|p|*p<0.) {return Err("initial watts must be nonnegative".into());}
     let substeps=substeps.unwrap_or(1);
     if !(1..=128).contains(&substeps) {return Err("substeps must be in 1..128".into());}
-    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen,heaters,requirements})
+    Ok(Options {path:positional[0].to_string(),initial,loss,substeps,specimen,heaters,requirements,method})
 }
 
 struct Measurements<'m> {
@@ -281,7 +289,14 @@ struct Fit {
     evaluations: usize,
     converged: bool,
     violation: f64,
-    constraints: ScanConstraintEvaluation,
+    constraints: ScanConstraintValues,
+    population: Option<PopulationStatus>,
+}
+impl Fit {
+    fn accepted(&self) -> bool {
+        self.violation<=search::FEASIBILITY_TOLERANCE
+            && self.population.as_ref().map_or(self.converged,|p|p.target_recovered)
+    }
 }
 #[cfg(test)]
 fn fit(cx: &Cx<'_>, text: &str, initial: [f64;2], loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
@@ -299,8 +314,15 @@ fn fit_on_program(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgra
     text: &str, loss: ScanResidualLoss, substeps: usize) -> Result<Fit> {
     fit_with_requirements(cx,model,program,text,loss,substeps,None)
 }
+#[cfg(test)]
 fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgram,
     text: &str, loss: ScanResidualLoss, substeps: usize, requirement_text: Option<&str>) -> Result<Fit> {
+    fit_with_method(cx,model,program,text,loss,substeps,requirement_text,Method::Sqp)
+}
+#[allow(clippy::too_many_arguments)]
+fn fit_with_method(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatingProgram,
+    text: &str, loss: ScanResidualLoss, substeps: usize, requirement_text: Option<&str>,
+    method: Method) -> Result<Fit> {
     loss.validate()?;
     let source_count=program.sources().len();
     let dimension=program.controls().len();
@@ -311,6 +333,8 @@ fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatin
         || program.end_time_s().to_bits()!=model.end_time_s.to_bits() {
         return Err("heater program must fit the executable allowances and specimen horizon".into());
     }
+    // Fail invalid search declarations before assembling any physical run.
+    if let Method::Population(settings)=method { settings.bounds(cx,program)?; }
     let mesh=&model.mesh;
     let vertices=mesh.vertex_count(); let elements=mesh.element_count();
     if vertices>SPECIMEN_BUDGET.max_vertices || elements>SPECIMEN_BUDGET.max_elements {
@@ -346,6 +370,7 @@ fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatin
         Ok(ScanningEnthalpyRun::new(cx,base,sources,source_count,None)?)
     };
     let segment=n.min(8);
+    let retained=if matches!(method,Method::Sqp) {segment} else {0};
     let observations=data.rows.iter().cloned().zip(&data.starts).zip(&data.sensor_lags).map(|((row,&start),&lag)| {
         let temporal=match start {
             None=>ScanTemporalObservation::instantaneous(row),
@@ -364,33 +389,17 @@ fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatin
             linear_restart:vertices.clamp(8,64),max_linear_cycles:if vertices<=8 {16} else {32},forcing_minimum:1e-12,forcing_maximum:1e-3,..Default::default()},
             max_newton_iterations:64,energy_tolerance_j:1e-8},
         transpose:LinearConfig {tolerance:1e-10,max_iterations:1000,restart:vertices.clamp(8,64)},
-        budget:ScanObjectiveBudget {max_steps:n,max_observations:data.contributions,max_retained_vertices:vertices*segment,
-            max_retained_source_vertices:vertices*segment*source_count,
+        budget:ScanObjectiveBudget {max_steps:n,max_observations:data.contributions,max_retained_vertices:vertices*retained,
+            max_retained_source_vertices:vertices*retained*source_count,
             max_schedule_controls:authored_controls,max_retained_radiation_entries:0},
         source_reference_time_s:0.};
-    let mut study=ScanPowerStudy::new_joint_with_power_coordinates(cx,program.sources().to_vec(),program.controls().to_vec(),vec![],
-        ScanPowerCoordinates::NonnegativeLinear,objective,factory,127)?;
-    study.set_checkpointing(cx,ScanCheckpointBudget {segment_steps:segment,
+    let study=ScanPowerStudy::new_joint_with_power_coordinates(cx,program.sources().to_vec(),program.controls().to_vec(),vec![],
+        ScanPowerCoordinates::NonnegativeLinear,objective,factory,method.evaluation_limit())?;
+    let solved=search::solve(cx,program,study,required,method,ScanCheckpointBudget {segment_steps:segment,
         max_checkpoint_vertices:vertices*(n.div_ceil(segment)+1),max_forward_solves:2*n})?;
-    let mut study=ConstrainedScanStudy::new_with_actuator_bounds(cx,study,
-        required.powers,required.energy,required.states,required.peaks,
-        required.response_budget,required.max_peak_samples,required.actuators,
-        required.kkt_dimension.max(8))?;
-    let report=study.advance_optimizer(cx,1e-8,100)?;
-    let spent=study.evaluations(); let exported=study.sources(cx)?;
-    if study.evaluations()!=spent { return Err("source export spent a physical evaluation".into()); }
-    let schedules=program.export(cx,&exported)?;
-    study.extend_evaluation_budget(128)?;
-    let (replay,limits)=study.replay_with_constraints(cx)?;
-    if (report.solution.f-replay.physical.value).abs()>1e-10*(1.+report.solution.f.abs()) {
-        return Err("replayed sources changed the accepted fitting objective".into());
-    }
-    if limits.residuals.len()!=study.sample().ci.len()
-        || limits.residuals.iter().zip(&study.sample().ci).any(|(a,b)|a.to_bits()!=b.to_bits()) {
-        return Err("physical replay changed the accepted constraint rows".into());
-    }
-    let measurements=data.rows.iter().zip(&replay.physical.predictions)
-        .zip(&replay.physical.standardized_residuals).map(|((row,&prediction),&residual)|
+    let schedules=program.export(cx,&solved.sources)?;
+    let measurements=data.rows.iter().zip(&solved.predictions)
+        .zip(&solved.residuals).map(|((row,&prediction),&residual)|
             (data.endpoints[row.endpoint],row.observable,row.target,prediction,residual)).collect();
     let exposure_starts_s=data.starts.iter().map(|start|start.map(|i|data.endpoints[i])).collect();
     Ok(Fit {
@@ -399,8 +408,9 @@ fn fit_with_requirements(cx: &Cx<'_>, model: &ScanSpecimen, program: &ScanHeatin
         schedules,
         mesh_vertices:vertices,mesh_elements:elements,reference_mass_kg,
         measurements,exposure_starts_s,sensor_lags:data.sensor_lags,
-        objective:replay.physical.value,evaluations:study.evaluations(),
-        converged:report.solution.converged,violation:limits.max_scaled_violation(),constraints:limits})
+        objective:solved.value,evaluations:solved.evaluations,
+        converged:solved.sqp_converged,violation:solved.constraints.max_scaled_violation(),
+        constraints:solved.constraints,population:solved.population})
 }
 fn main() -> Result<()> {
     let args:Vec<_>=std::env::args().skip(1).collect();
@@ -437,7 +447,8 @@ fn main() -> Result<()> {
             Some(input)=>ScanHeatingProgram::from_text(&cx,&model.mesh,model.end_time_s,input,HEATER_BUDGET)?,
             None=>ScanHeatingProgram::from_specimen(&cx,&model,options.initial)?,
         };
-        fit_with_requirements(&cx,&model,&program,&text,options.loss,options.substeps,requirement_text.as_deref())
+        fit_with_method(&cx,&model,&program,&text,options.loss,options.substeps,
+            requirement_text.as_deref(),options.method)
     })?;
     println!("# specimen_mode={}; user declarations are not experimental validation",
         if options.specimen.is_some() {"explicit_file"} else {"synthetic_reference"});
@@ -445,8 +456,11 @@ fn main() -> Result<()> {
         result.mesh_vertices,result.mesh_elements,result.reference_mass_kg);
     println!("# residual_loss={:?}; residuals below are raw, not clipped",options.loss);
     println!("# substeps_per_event_interval={}; time means use normalized trapezoidal readouts",options.substeps);
-    println!("# objective={:.17e} converged={} max_scaled_violation={:.17e} evaluations={}",
-        result.objective,result.converged,result.violation,result.evaluations);
+    match &result.population {
+        Some(status)=>search::print_status(status,result.objective,result.violation,result.evaluations),
+        None=>println!("# objective={:.17e} converged={} max_scaled_violation={:.17e} evaluations={}",
+            result.objective,result.converged,result.violation,result.evaluations),
+    }
     if options.heaters.is_none() {
         println!("time_s,absorbed_power_w");
         for (&time,&power) in result.schedules[0].times_s.iter().zip(&result.schedules[0].powers_w) {
@@ -477,11 +491,15 @@ fn main() -> Result<()> {
         println!("# requirements=explicit; physically_feasible={}; fitting_loss_is_separate=true",result.violation<=1e-8);
         print_constraints(&result.constraints);
     }
-    if !result.converged || result.violation>1e-8 { return Err("fit did not pass convergence and all declared physical constraints".into()); }
+    if !result.accepted() {
+        return Err(if result.population.is_some() {
+            "population search did not attain its declared objective target and all physical constraints"
+        } else {"fit did not pass convergence and all declared physical constraints"}.into());
+    }
     Ok(())
 }
 
-fn print_constraints(values: &ScanConstraintEvaluation) {
+fn print_constraints(values: &ScanConstraintValues) {
     for (i,value) in values.bound_values.iter().enumerate() {
         println!("# power_requirement={i} power_w={value:.17e}");
     }
@@ -742,3 +760,7 @@ mod heater_tests;
 #[cfg(test)]
 #[path = "spatial_measurement_fit/requirement_tests.rs"]
 mod requirement_tests;
+
+#[cfg(test)]
+#[path = "spatial_measurement_fit/population_tests.rs"]
+mod population_tests;
