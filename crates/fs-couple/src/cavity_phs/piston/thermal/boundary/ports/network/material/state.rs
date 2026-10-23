@@ -3,17 +3,18 @@
 /// Conservative nozzle connectivity before the shared reacting/thermal advance.
 pub mod flow;
 
-use super::exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork};
+use super::exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork, gas_law::GasSurface};
 use super::reactive::{ChamberReaction, ChamberReactionStep, ReactiveExchangeError};
 use super::MaterialContact;
 use super::super::{Chamber, Contact, NetworkSolve, NetworkStep};
 use crate::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
-use crate::cavity_phs::piston::thermal::HeatExchangeSolve;
+use crate::cavity_phs::piston::thermal::{ConductanceSample, HeatExchangeSolve};
 use crate::cavity_phs::piston::thermal::boundary::ports::{BoundaryHeatStep, ThermalPortSample};
 use crate::circuit_enthalpy::{CircuitEnthalpyReport, contacts::ContactThermalSample};
 use crate::material_circuit::MaterialCircuit;
 use fs_exec::Cx;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_thermal::enthalpy::DepositionSimulation;
 use std::collections::BTreeMap;
 
@@ -37,23 +38,23 @@ pub struct ChamberDrive {
 
 /// Original chamber account and sources. The actual endpoint has moved into
 /// the assembly, rather than being cloned or left for the caller to install.
-pub struct ExchangeChamberStep {
+pub struct ExchangeChamberStep<I = ResolvedMaterialStatePoint> {
     pub id: u64,
-    pub surfaces: Vec<ThermalPortSample<(Contact, ResolvedMaterialStatePoint)>>,
+    pub surfaces: Vec<ThermalPortSample<(Contact, I)>>,
     /// Post-reaction gas reference, as in the original boundary owner. Whole-
     /// interval reacting-gas energy is retained in the corresponding reaction.
     pub boundary: BoundaryHeatStep,
 }
 /// All source records used to advance the actual assembled state.
-pub struct ExchangeAdvanceSources {
+pub struct ExchangeAdvanceSources<I = ResolvedMaterialStatePoint> {
     pub material: ContactThermalSample<MaterialExchangeSample>,
-    pub chambers: Vec<ExchangeChamberStep>,
+    pub chambers: Vec<ExchangeChamberStep<I>>,
     pub reactions: Vec<ChamberReactionStep>,
     pub transferred_heat_j: f64,
 }
 /// Existing physical accounts for the interval, not a second history or solver.
-pub struct MaterialExchangeAdvance {
-    pub report: CircuitEnthalpyReport<ExchangeAdvanceSources>,
+pub struct MaterialExchangeAdvance<I = ResolvedMaterialStatePoint> {
+    pub report: CircuitEnthalpyReport<ExchangeAdvanceSources<I>>,
     /// Whole-assembly energy, including chemical and radiation roundoff.
     pub step: NetworkStep,
 }
@@ -89,6 +90,45 @@ impl<'m> MaterialExchangeState<'m> {
         (self.thermal, self.circuit, self.chambers)
     }
 
+    /// Preview one interval with a caller-selected gas heat law while retaining
+    /// this live owner's accepted circuit, thermal, gas, momentum and port
+    /// histories. The callback sees each reacted gas energy midpoint and exact
+    /// trial cell-material sample; it must be pure and must not advance state.
+    ///
+    /// This is the persistent-state counterpart of
+    /// `PreparedMaterialExchangeNetwork::reactive_with_gas_law_candidate`.
+    /// It adds no constitutive law, solver or time discretization.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_with_gas_law_candidate<I, E>(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>,
+        cx: &Cx<'_>, target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<(Self, MaterialExchangeAdvance<I>), ReactiveExchangeError<E>> {
+        self.step_with_gas_law_from_chambers(&self.chambers, prepared, cx,
+            target_s, ports, drives, reactions, surfaces, controls, guess_j, resolve)
+    }
+
+    /// Publish one caller-selected gas heat-law interval atomically. No
+    /// fallible work follows the final checkpoint.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_with_gas_law<I, E>(
+        &mut self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>,
+        cx: &Cx<'_>, target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<MaterialExchangeAdvance<I>, ReactiveExchangeError<E>> {
+        let (next, report) = self.step_with_gas_law_candidate(prepared, cx,
+            target_s, ports, drives, reactions, surfaces, controls, guess_j, resolve)?;
+        cx.checkpoint().map_err(|_| ReactiveExchangeError::Cancelled)?;
+        *self = next;
+        Ok(report)
+    }
+
     /// Preview one interval without modifying any accepted state. An empty
     /// reaction list uses the original nonreacting path; an empty chamber map
     /// gives electrical/thermal evolution. Every chamber still needs its own
@@ -103,6 +143,75 @@ impl<'m> MaterialExchangeState<'m> {
     ) -> Result<(Self, MaterialExchangeAdvance), ReactiveExchangeError> {
         self.step_from_chambers(&self.chambers, prepared, cx, target_s, ports, drives,
             reactions, gas_patches, controls, guess_j)
+    }
+
+    // Generic live-state assembly for any admitted gas-side heat law.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn step_with_gas_law_from_chambers<I, E>(
+        &self, chamber_states: &BTreeMap<u64, GasPiston>,
+        prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+        target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<(Self, MaterialExchangeAdvance<I>), ReactiveExchangeError<E>> {
+        use ReactiveExchangeError as Error;
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let dt = target_s - self.time_s();
+        if !dt.is_finite() || dt <= 0.0 || self.chambers.len() > controls.maximum_chambers
+            || drives.len() != self.chambers.len()
+            || !chamber_states.keys().eq(self.chambers.keys()) {
+            return Err(Error::Invalid("one forward assembly clock and one drive per live chamber required"));
+        }
+        let mut ordered = BTreeMap::new();
+        for drive in drives {
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            if !self.chambers.contains_key(&drive.chamber)
+                || ordered.insert(drive.chamber, drive).is_some() {
+                return Err(Error::Invalid("duplicate drive or unknown live chamber"));
+            }
+        }
+        let chambers = ordered.iter().map(|(&id, drive)| Chamber {
+            id, piston: &chamber_states[&id],
+            input: PistonInput { duration_s: dt, heat_j: drive.heat_j,
+                exterior_pressure_pa: drive.exterior_pressure_pa,
+                external_force_n: drive.external_force_n },
+            piston_solve: drive.piston_solve, exchange: drive.exchange,
+        }).collect::<Vec<_>>();
+        let proposal = prepared.reactive_with_gas_law_candidate(cx, &self.thermal,
+            target_s, &self.circuit, ports, &chambers, reactions, surfaces,
+            controls, guess_j, resolve)?;
+        let (thermal, circuit, report, step) = proposal.into_parts();
+        let mut next_chambers = BTreeMap::new();
+        let mut accounts = Vec::with_capacity(report.source.chambers.len());
+        for chamber in report.source.chambers {
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            let id = chamber.id;
+            if !self.chambers.contains_key(&id)
+                || next_chambers.insert(id, chamber.piston).is_some() {
+                return Err(Error::Invalid("candidate chamber identities differ from live assembly"));
+            }
+            accounts.push(ExchangeChamberStep {
+                id, surfaces: chamber.surfaces, boundary: chamber.boundary,
+            });
+        }
+        if next_chambers.len() != self.chambers.len() {
+            return Err(Error::Invalid("candidate omitted a live chamber"));
+        }
+        let source = ExchangeAdvanceSources { material: report.source.material,
+            chambers: accounts, reactions: report.source.reactions,
+            transferred_heat_j: report.source.transferred_heat_j };
+        let report = CircuitEnthalpyReport { source, electrical: report.electrical,
+            thermal: report.thermal, nonlinear: report.nonlinear,
+            maximum_cell_residual_j: report.maximum_cell_residual_j,
+            circuit_trials: report.circuit_trials,
+            deposited_joule_j: report.deposited_joule_j,
+            non_electrical_heat_j: report.non_electrical_heat_j,
+            total_energy_residual_j: report.total_energy_residual_j };
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        Ok((Self { thermal, circuit, chambers: next_chambers },
+            MaterialExchangeAdvance { report, step }))
     }
 
     // Reuse the same state assembly with staged gas inventories, without cloning
