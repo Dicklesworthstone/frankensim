@@ -1,6 +1,7 @@
 frankensim.matdb-source.v1
 observation	wh-shagbark-12pct	Shagbark hickory (Carya ovata), a true hickory, clear straight-grained small specimens at 12% moisture content	FPL-GTR-282 Table 5-3a (metric), true hickories, 12% row: specific gravity 0.72 (footnote b: ovendry weight, volume at 12% moisture content); static bending modulus of elasticity 14,900 MPa from a simply supported, center-loaded beam at span/depth 14 (footnote c: increase by 10% to correct for shear deflection)	Average clear-wood values, not a particular drumstick; drumstick hickory is sold without a species, and the four true hickories at 12% moisture content span specific gravity 0.69 to 0.75 and bending MOE 13,000 to 15,600 MPa (mockernut 0.72 and 15,300, pignut 0.75 and 15,600, shellbark 0.69 and 13,000; stored below). The isotropic young_modulus is the pack author's reduction for a Hertz stick tip: the longitudinal modulus E_L = 1.1 x 14,900 = 16,390 MPa (footnote c). Wood is orthotropic; its transverse moduli are about a tenth of E_L (Table 5-1 hardwood ratios), so a tip treated as isotropic in E_L is stiffer than the real tip. Density at 12% moisture content is specific gravity x 1.12 x 1000 kg/m^3 = 806.4 kg/m^3, the convention of this repository's other FPL-GTR-282 packs. Moisture content is fixed at 12% and is not an axis of this pack. Temperature: Table 5-15 gives MOE parallel to grain at 12% moisture content +17% at -50 C and -7% at +50 C relative to 20 C, approximately linear, so about 0.24% per degree; the rows are admitted from 15 to 25 C, where that effect is within 1.2%
 observation	wh-hardwood-poisson-mean	composition-proxy: mean longitudinal-radial Poisson's ratio of the 16 hardwoods of FPL-GTR-282 Table 5-2 at about 12% moisture content	Arithmetic mean of the tabulated mu_LR of ash white, aspen quaking, balsa, basswood, birch yellow, cherry black, cottonwood eastern, mahogany African, mahogany Honduras, maple sugar, maple red, oak red, oak white, sweetgum, walnut black and yellow-poplar	composition-proxy: hickory is not in Table 5-2, so this is NOT a hickory measurement. The mean is 0.371 (range 0.229 to 0.495; white ash, also a drumstick wood, is 0.371). For the Hertz stick-on-film contact of the kit, the full range changes the effective modulus by about 2%
+observation	wh-hardwood-elastic-ratio-means	composition-proxy: means of the hardwood elastic ratios of FPL-GTR-282 Table 5-1 (15 species) and Poisson's ratios of Table 5-2 (16 species) at about 12% moisture content	E_T/E_L is the mean over ash white, balsa, basswood, birch yellow, cherry black, cottonwood eastern, mahogany African and Honduras, maple sugar and red, oak red and white, sweetgum, walnut black and yellow-poplar (0.05693); G_LT/E_L the same less oak white, which is untabulated (0.06657); nu_LT the Table 5-2 hardwood mean (0.4668); the transverse-plane Poisson ratio is the pack author's transversely isotropic reduction, the mean of the mu_RT (15) and mu_TR (16) hardwood means (0.5180)	composition-proxy: hickory is in neither table, so these are NOT hickory measurements. They let a stick tip loaded along the grain be treated as transversely isotropic about L, with E_P = E_T and G_LP = G_LT, for the Delafargue and Ulm (2004) axial indentation modulus. The sweep over proxies (all 15 hardwoods; without balsa; white ash alone) and transverse-plane Poisson ratio 0.33 to 0.70 gives an indentation modulus of 7.1 to 8.2 GPa against 19.0 GPa for an isotropic E_L tip, E* on the PET film card of 3.17 to 3.37 GPa against 4.40 GPa, and a Hertz contact time 1.11 to 1.14 times the isotropic one
 scalar	density	wh-shagbark-12pct	density	806.4	kg/m^3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	T	288.15	298.15	K
@@ -28,3 +29,15 @@ validity	moe-bending-shellbark	T	288.15	298.15	K
 scalar	poisson-ratio	wh-hardwood-poisson-mean	poisson_ratio	0.371	1	constant
 uncertainty	poisson-ratio	unstated	-	-	-	-
 validity	poisson-ratio	T	288.15	298.15	K
+scalar	et-over-el	wh-hardwood-elastic-ratio-means	et_over_el	0.05693	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	T	288.15	298.15	K
+scalar	glt-over-el	wh-hardwood-elastic-ratio-means	glt_over_el	0.06657	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	T	288.15	298.15	K
+scalar	nu-lt	wh-hardwood-elastic-ratio-means	nu_lt	0.4668	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	T	288.15	298.15	K
+scalar	nu-transverse-plane	wh-hardwood-elastic-ratio-means	poisson_ratio_transverse_plane	0.518	1	constant
+uncertainty	nu-transverse-plane	unstated	-	-	-	-
+validity	nu-transverse-plane	T	288.15	298.15	K

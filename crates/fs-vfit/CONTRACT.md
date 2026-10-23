@@ -247,6 +247,29 @@ identity. `MimoStateSpace::eval` is the independent parity route.
 - With a held input it reproduces the continuous step response at the
   samples (`mimo_zoh_step_response_is_exact_at_the_samples_g1`).
 
+The shared `mimo::load::{MimoLoadLimits,PreparedMimoLoad}` admits proper causal
+loads for both waveguide and field propagators. It retains the source model,
+declared band/limits, original MimoZoh, continuous report and separate actual
+sampled interval-mean report. Both passivity checks must pass; the sampled
+report remains GridOnly. It admits 1..=128 ports, at most 256 pole terms and
+at most 256 real states, exact finite matrix shapes, stable finite poles,
+real residues for real poles, positively oriented conjugate pairs, zero
+improper E, a finite positive clock and a source band reaching Nyquist.
+The original network's conservative retained-payload budget is checked before
+realization. Caller buffers, allocator overhead and cold eigensolver scratch
+are outside that budget.
+
+The mean-history/direct methods expose the same accepted interval-mean map
+for a simultaneous port solve. Checked step_mean_into advances original ZOH
+coordinates without allocation, refusing wrong shapes, nonfinite input,
+output or candidate state before accepted history or caller output changes.
+Cloning the prepared owner supports a larger transaction; the caller still
+owns coupled work validation and whole-step acceptance. The existing
+waveguide terminal uses this admission without changing its port solve or
+rational integrator. Tests cover original-runtime parity, resource/shape/
+passivity refusals, finite-effort state overflow, refusal/retry and abandoned
+candidate history preservation.
+
 `delayed_mimo_vector_fit` fits the entries after removing caller-declared
 delays (`Z_ab = exp(-s tau_ab) Zhat_ab`).
 - A delayed entry never carries the improper `s E` term: under a delay that

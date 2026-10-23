@@ -136,11 +136,24 @@ uses Wood Handbook Table 5-3a for shagbark hickory at 12 % moisture content:
 - Young's modulus 16,390 MPa, the longitudinal modulus: bending MOE 14,900 MPa
   plus the handbook's 10 % shear correction;
 - Poisson ratio 0.371, a declared composition proxy. Hickory is absent from
-  Table 5-2, so this is the mean μLR of its 16 hardwoods.
+  Table 5-2, so this is the mean μLR of its 16 hardwoods;
+- E_T/E_L 0.05693, G_LT/E_L 0.06657, ν_LT 0.4668 and a transverse-plane
+  Poisson ratio 0.518, the hardwood means of Tables 5-1 and 5-2, also
+  composition proxies.
 
 It is admitted from 288.15 to 298.15 K, by Table 5-15. The other true
-hickories' values are kept as the stated spread. The tip is treated as
-isotropic in E_L, which makes it stiffer than real wood.
+hickories' values are kept as the stated spread.
+
+A striker card that carries all four elastic ratios (`TIP_ANISOTROPY`) has a
+tip transversely isotropic about the grain. Its Hertz modulus is then the
+Delafargue-Ulm (2004) axial indentation modulus: 7.245 GPa for this card,
+against 19.006 GPa for an isotropic E_L tip. On the PET film card that gives
+E* 3.200 GPa against 4.403 GPa, and a contact time 1.136 times longer. A card
+with none of the ratios keeps the isotropic E / (1 - ν²); a card with only
+some of them refuses. The drum's notes print both ends of this bracket. They
+also print the contact's own limit: the head side of the Hertz pair is the film
+as an elastic half-space, which a tensioned head film is not, and that error may
+exceed the tip bracket.
 Supports, snare-wire material/contact and hi-hat rim/friction laws remain separately
 declared presets. The striker's Hunt-Crossley loss is an independent input, not
 inferred from elastic modulus. The head radiation-resistance estimate retains

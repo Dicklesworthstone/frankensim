@@ -4582,3 +4582,27 @@ Focused G1/G3/G4 regression definitions in
 finite gas inventory changing actual hereditary vibration, exact insulation
 parity, independent radiation ownership, measured combined energy and
 failed/cancelled proposals preserving both accepted owners.
+
+### Shared DG causal terminal boundary
+
+The source-bound DgPortLoad now also admits a separately prepared proper
+rational outlet through the common fs-vfit MIMO admission. The inlet source
+sees the Schur complement of the original two-port DG mean-pressure matrix
+and the terminal's original mean-output map. This preserves the signed
+cross-port terms and both accepted histories without a delayed feedback
+sample or another bore/filter solver. Existing ideal-open/closed/matched
+loads retain their original propagation path.
+
+Both aperture and flue coupling validate inlet work independently of the
+duct's net all-port work. DgTerminalFrame reports actual outward held flow,
+mean pressure, signed DG/rational work and their compatibility residual.
+Terminal exchange is not labeled as heat or stored energy. The existing
+dense DG inferred-loss limitation and the sampled rational GridOnly report
+remain explicit. Each owner is exact for held inputs; clock refinement of
+the coupled mean solve remains necessary and is not a joint continuous
+exponential certificate. Failed or abandoned trials publish neither owner.
+
+Focused tests compare original DG and rational trajectories/work over
+retained history in both propagator kernels, exercise energy returned by a
+reactive terminal, preserve every history on refusal, and account for
+terminal exchange in the moving-aperture balance.

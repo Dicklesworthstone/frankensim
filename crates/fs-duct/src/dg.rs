@@ -74,7 +74,7 @@ use fs_math::det;
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod port_response;
-pub use port_response::DgPortResponse;
+pub use port_response::{DgMultiportResponse, DgPortResponse};
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;

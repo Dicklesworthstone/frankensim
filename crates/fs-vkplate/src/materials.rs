@@ -7,16 +7,17 @@
 //! preset T60. A material swap never retunes pitch,
 //! rescales geometry to preserve mass, or claims a new measured decay time.
 
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::{MatDbError, NormalizedMaterialCardPack, QueryPoint};
 use fs_material::plane_stress_viscosity::{
     MaterialPlane, PLANE_STRESS_VISCOSITY_PROPERTIES, PlaneStressViscosity,
 };
 use fs_material::state_point::{
-    IsotropicElasticStatePoint, MaterialPropertySelection, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_isotropic_elastic_state_point, resolve_material_state_point,
+    IsotropicElasticStatePoint, MaterialPropertySelection, MaterialStatePointError,
+    ScalarAdmissibility, ScalarPropertyRequirement, resolve_isotropic_elastic_state_point,
+    resolve_material_state_point,
 };
 use fs_qty::{
-    DynViscosity, Pressure, QuantitySpec,
+    Dims, DynViscosity, Pressure, QuantitySpec,
     semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 use std::sync::Arc;
@@ -39,6 +40,55 @@ pub const IN_PLANE_MODULI: [&str; 2] = [
     "young_modulus_transverse_direction",
 ];
 
+/// Claims that make a striker card's tip transversely isotropic about its
+/// grain (axis L, Young's modulus `young_modulus` = E_L): E_T/E_L, G_LT/E_L,
+/// nu_LT and the transverse-plane Poisson ratio. A card carries all or none.
+pub const TIP_ANISOTROPY: [&str; 4] = [
+    "et_over_el",
+    "glt_over_el",
+    "nu_lt",
+    "poisson_ratio_transverse_plane",
+];
+
+/// The stated limitation of the kit's Hertz contact, printed with every tip.
+pub const HERTZ_HALF_SPACE_CAVEAT: &str = "the head side of the Hertz pair is the film as an elastic half-space; a tensioned head film (0.08 to 0.36 mm in this kit) is not one, and that error may exceed the tip bracket";
+
+/// Delafargue and Ulm (2004) indentation modulus of a transversely isotropic
+/// solid indented along its symmetry axis (here the grain):
+/// `M3 = 2 sqrt((C11 C33 - C13^2) / C11 / (1/C44 + 2 / (sqrt(C11 C33) + C13)))`.
+/// It reduces to E / (1 - nu^2) for an isotropic solid.
+pub fn axial_indentation_modulus(
+    e_l: f64,
+    e_p: f64,
+    g_lp: f64,
+    nu_lp: f64,
+    nu_p: f64,
+) -> Result<f64, String> {
+    // Compliances with axis 3 = L; the plane (1, 2) is isotropic.
+    let s = [
+        [1.0 / e_p, -nu_p / e_p, -nu_lp / e_l],
+        [-nu_p / e_p, 1.0 / e_p, -nu_lp / e_l],
+        [-nu_lp / e_l, -nu_lp / e_l, 1.0 / e_l],
+    ];
+    let minor =
+        |r0: usize, r1: usize, c0: usize, c1: usize| s[r0][c0] * s[r1][c1] - s[r0][c1] * s[r1][c0];
+    let det =
+        s[0][0] * minor(1, 2, 1, 2) - s[0][1] * minor(1, 2, 0, 2) + s[0][2] * minor(1, 2, 0, 1);
+    let (c11, c13, c33) = (
+        minor(1, 2, 1, 2) / det,
+        minor(0, 1, 1, 2) / det,
+        minor(0, 1, 0, 1) / det,
+    );
+    let m = 2.0
+        * ((c11 * c33 - c13 * c13) / c11 / (1.0 / g_lp + 2.0 / ((c11 * c33).sqrt() + c13))).sqrt();
+    if !(det > 0.0 && c11 > 0.0 && c33 > 0.0 && g_lp > 0.0 && m.is_finite() && m > 0.0) {
+        return Err(
+            "striker tip: the transversely isotropic constants are not positive definite".into(),
+        );
+    }
+    Ok(m)
+}
+
 /// The primary and secondary vibrating surfaces and one spherical impactor.
 /// The complete resolved bundles retain material/card identities, query points,
 /// selected claims and usage receipts. Imported packs additionally stay alive.
@@ -56,6 +106,8 @@ pub struct KitMaterials {
     /// Machine- and transverse-direction moduli [Pa] of each surface's card
     /// at the same state point, when the card carries both.
     in_plane_moduli: [Option<(f64, f64)>; 2],
+    /// The striker card's TIP_ANISOTROPY values at the same state point.
+    tip_anisotropy: Option<[f64; 4]>,
 }
 
 impl KitMaterials {
@@ -97,6 +149,7 @@ impl KitMaterials {
             bending_loss: None,
             film_loss_stated_unknown: false,
             in_plane_moduli: [None, None],
+            tip_anisotropy: None,
         };
         // Refuse a nonrepresentable contact before building any operators.
         let crate::Law::Power { k, .. } = result.impact_law();
@@ -357,13 +410,70 @@ impl KitMaterials {
             ))
         };
         result.in_plane_moduli = [directional(&primary), directional(&secondary)];
+        // The tip constants change the contact law. A card carries all of them
+        // or none; a partial set, or a claim present but unresolvable here
+        // (out of its validity, say), refuses instead of leaving the tip
+        // silently isotropic.
+        let tip = TIP_ANISOTROPY
+            .iter()
+            .map(|name| {
+                let requirement = ScalarPropertyRequirement::try_new(
+                    *name,
+                    Dims::NONE,
+                    ScalarAdmissibility::Finite,
+                )
+                .map_err(|e| e.to_string())?;
+                match resolve_material_state_point(
+                    striker.card(),
+                    point,
+                    &[requirement],
+                    MaterialPropertySelection::SingleClaimOnly,
+                ) {
+                    Ok(resolved) => resolved
+                        .property(name)
+                        .map(|p| Some(p.value_si()))
+                        .ok_or_else(|| format!("striker tip {name}: not resolved")),
+                    Err(MaterialStatePointError::Query {
+                        source: MatDbError::UnknownProperty { .. },
+                        ..
+                    }) => Ok(None),
+                    Err(e) => Err(format!("striker tip {name}: {e}")),
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        result.tip_anisotropy = match tip[..] {
+            [Some(et), Some(glt), Some(nu_lt), Some(nu_p)] => {
+                axial_indentation_modulus(1.0, et, glt, nu_lt, nu_p)?;
+                Some([et, glt, nu_lt, nu_p])
+            }
+            [None, None, None, None] => None,
+            _ => {
+                return Err(format!(
+                    "striker card carries only part of {TIP_ANISOTROPY:?}"
+                ));
+            }
+        };
         result.packs = vec![primary, secondary, striker];
         Ok(result)
     }
 
+    /// The striker tip's modulus in the Hertz pair: the axial indentation
+    /// modulus when its card carries TIP_ANISOTROPY, else E / (1 - nu^2).
+    pub fn striker_tip_modulus_pa(&self) -> f64 {
+        let (e, nu) = (
+            self.striker.young_modulus_pa(),
+            self.striker.poisson_ratio(),
+        );
+        self.tip_anisotropy
+            .and_then(|[et, glt, nu_lt, nu_p]| {
+                axial_indentation_modulus(e, et * e, glt * e, nu_lt, nu_p).ok()
+            })
+            .unwrap_or(e / (1.0 - nu * nu))
+    }
+
     /// One line per surface whose card carries directional moduli: the
     /// isotropic head's reduction and its spread, the size of its error.
-    pub fn isotropic_reduction_notes(&self) -> Vec<String> {
+    pub fn head_reduction_notes(&self) -> Vec<String> {
         [("batter", &self.primary, self.in_plane_moduli[0]), ("resonant", &self.secondary, self.in_plane_moduli[1])]
             .into_iter()
             .filter_map(|(label, surface, moduli)| {
@@ -379,6 +489,45 @@ impl KitMaterials {
                 ))
             })
             .collect()
+    }
+
+    /// The striker tip's receipt. A tip with TIP_ANISOTROPY prints the
+    /// bracket between its axial indentation modulus and the isotropic-E_L
+    /// end: E* on the batter film and the Hertz contact-time ratio
+    /// (E*_a / E*_i)^(-2/5). Every tip prints HERTZ_HALF_SPACE_CAVEAT.
+    pub fn striker_tip_note(&self) -> String {
+        let film = self.primary.young_modulus_pa() / (1.0 - self.primary.poisson_ratio().powi(2));
+        let e_star = |tip: f64| 1.0 / (1.0 / tip + 1.0 / film);
+        let (e, nu) = (
+            self.striker.young_modulus_pa(),
+            self.striker.poisson_ratio(),
+        );
+        let isotropic = e / (1.0 - nu * nu);
+        if self.tip_anisotropy.is_some() {
+            let m = self.striker_tip_modulus_pa();
+            format!(
+                "striker tip: axial indentation modulus (Delafargue-Ulm 2004, transversely isotropic about the grain from E_L and the card's E_T/E_L, G_LT/E_L, nu_LT, nu_P) {:.3} GPa, E* on the batter film {:.3} GPa; isotropic-E_L end {:.3} GPa, E* {:.3} GPa; contact time {:.3} x the isotropic end; {HERTZ_HALF_SPACE_CAVEAT}",
+                m * 1e-9,
+                e_star(m) * 1e-9,
+                isotropic * 1e-9,
+                e_star(isotropic) * 1e-9,
+                fs_math::det::pow(e_star(m) / e_star(isotropic), -0.4)
+            )
+        } else {
+            format!(
+                "striker tip: isotropic, E / (1 - nu^2) = {:.3} GPa, E* on the batter film {:.3} GPa; {HERTZ_HALF_SPACE_CAVEAT}",
+                isotropic * 1e-9,
+                e_star(isotropic) * 1e-9
+            )
+        }
+    }
+
+    /// The binding's stated reductions, for a drum's notes: the heads', then
+    /// the striker tip's.
+    pub fn isotropic_reduction_notes(&self) -> Vec<String> {
+        let mut notes = self.head_reduction_notes();
+        notes.push(self.striker_tip_note());
+        notes
     }
 
     /// Browser import at a declared absolute material temperature. The axis
@@ -425,13 +574,22 @@ impl KitMaterials {
         self.striker_tip_radius_m
     }
 
+    /// Hertz law of the striker tip on the primary film; see
+    /// HERTZ_HALF_SPACE_CAVEAT. An anisotropic tip enters through its axial
+    /// indentation modulus M, passed as (M, 0) so its compliance is exactly
+    /// 1 / M; an isotropic tip keeps its (E, nu) arithmetic unchanged.
     pub(crate) fn impact_law(&self) -> crate::Law {
-        crate::kit::hertz_pair(
-            self.striker_tip_radius_m,
+        let tip = if self.tip_anisotropy.is_some() {
+            (self.striker_tip_modulus_pa(), 0.0)
+        } else {
             (
                 self.striker.young_modulus_pa(),
                 self.striker.poisson_ratio(),
-            ),
+            )
+        };
+        crate::kit::hertz_pair(
+            self.striker_tip_radius_m,
+            tip,
             (
                 self.primary.young_modulus_pa(),
                 self.primary.poisson_ratio(),

@@ -181,3 +181,58 @@ fn cold_binding_refuses_midpoint_mismatch_and_insufficient_state_budget() {
     let other = self::load(60000.0);
     assert!(ApertureDg::new(aperture(&other, BladePropagator::ExactZoh, 500.0), load).is_err());
 }
+
+#[test]
+fn moving_aperture_retains_causal_terminal_history_and_signed_energy_exchange() {
+    use fs_math::c64::C64;
+    use fs_vfit::mimo::MimoModel;
+    use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
+    use fs_vfit::model::PoleTerm;
+    let dt = 1.0 / 96000.0;
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+    let duct = DgDuct::new(
+        &Duct { segments: vec![Segment::Cylinder { radius: 0.001, length: 0.05 }] },
+        &gas, DgMesh { elements: 1, order: 2 },
+        DgBoundary::Port(PortId(0)), DgBoundary::Port(PortId(1)),
+    ).unwrap().with_viscothermal(8, [50.0, 2000.0], 0.01).unwrap();
+    let terminal = PreparedMimoLoad::new(&MimoModel {
+        ports: 1, poles: vec![PoleTerm::Real { pole: -2000.0, residue: 0.0 }],
+        residues: vec![vec![C64::from_re(2e11)]], d: vec![1e8], e: vec![0.0],
+        reciprocal: true,
+    }, dt, MimoLoadLimits {
+        band_rad_s: [1.0, core::f64::consts::PI / dt],
+        sampled_passivity_points: 257, max_states: 4, max_memory_bytes: 1 << 20,
+    }).unwrap();
+    let load = ApertureDgLoad::new_with_terminal(
+        duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS, terminal,
+    ).unwrap();
+    let mut model = ApertureDg::new(
+        aperture(&load, BladePropagator::ExactZoh, 500.0), load,
+    ).unwrap();
+    let mut transferred = 0.0;
+    for sample in 0..128 {
+        let frame = model.step(TubeDrive {
+            upstream_pressure_pa: if sample < 64 { 30.0 } else { 0.0 },
+            body_flow_m3_s: 0.0,
+        }).unwrap();
+        let terminal = frame.terminal.as_ref().unwrap();
+        let scale = frame.storage_change_j.abs() + frame.inferred_total_dissipation_j.abs()
+            + frame.upstream_work_j.abs() + frame.aperture.mechanical_work_j.abs()
+            + terminal.port_work_j.abs();
+        assert!(frame.balance_residual_j().abs() <= 1e-8 * scale.max(1e-25));
+        assert!(frame.port_work_residual_j.abs() <= 1e-10 * scale.max(1e-25));
+        assert!(terminal.port_work_residual_j.abs() <= 1e-10 * scale.max(1e-25));
+        assert_eq!(model.load().last_terminal_frame(), frame.terminal.as_ref());
+        transferred += terminal.port_work_j;
+    }
+    assert!(transferred > 0.0);
+    let state = model.duct_state().clone();
+    let poles = model.load().terminal().unwrap().pole_states().to_vec();
+    let opening = model.aperture().state();
+    assert!(model.step(TubeDrive {
+        upstream_pressure_pa: f64::NAN, body_flow_m3_s: 0.0,
+    }).is_err());
+    assert_eq!(model.duct_state(), &state);
+    assert_eq!(model.load().terminal().unwrap().pole_states(), poles);
+    assert_eq!(model.aperture().state(), opening);
+}
