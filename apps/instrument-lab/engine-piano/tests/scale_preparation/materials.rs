@@ -14,7 +14,9 @@ use fs_matdb::{
 };
 use fs_material::{
     gas::{GasSpec, GasState},
-    state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY},
+    state_point::{DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+        SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
+        THERMAL_CONDUCTIVITY_PROPERTY, YOUNG_MODULUS_PROPERTY},
 };
 use fs_qty::{
     Density, Dims, DynViscosity, Frequency, Pressure, QuantitySpec,
@@ -61,6 +63,13 @@ fn pack(values: [f64; 3]) -> NormalizedMaterialCardPack {
 }
 fn pack_with(
     values: [f64; 3],
+    edit: impl FnMut(&mut PropertyClaim),
+) -> NormalizedMaterialCardPack {
+    pack_with_extra(values, &[], edit)
+}
+fn pack_with_extra(
+    values: [f64; 3],
+    extra: &[(&str, Dims, f64)],
     mut edit: impl FnMut(&mut PropertyClaim),
 ) -> NormalizedMaterialCardPack {
     let artifact = hash_bytes(format!("manufactured SI coefficients {values:?}").as_bytes());
@@ -88,6 +97,7 @@ fn pack_with(
     ]
     .into_iter()
     .zip(values.into_iter().chain([LIMIT_PA]))
+    .chain(extra.iter().map(|&(name, dims, value)| ((name, dims), value)))
     {
         let mut claim = PropertyClaim {
             key: PropertyKey::new(name, dims),
@@ -977,4 +987,123 @@ fn g0_overstress_refuses_before_missing_loss_data() {
     assert!(StringMaterials::from_packs(&[&limited(WEAK, WEAK_LIMIT_PA).to_bytes()],
         &construction("yield-fraction,0.5", LIMIT, &single_cores(&desc.courses)), &point(), ETA)
         .unwrap().apply(&desc.courses).is_ok());
+}
+
+// ---- U2: computed thermoelastic loss plus a measured excess ----
+
+// Manufactured thermal data of a steel-like wire, not a sourced alloy.
+const THERMAL: [f64; 3] = [1.1e-5, 486.0, 49.0];
+fn thermal_extra(skip_conductivity: bool) -> Vec<(&'static str, Dims, f64)> {
+    let mut extra = vec![(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, INVERSE_TEMPERATURE_DIMS, THERMAL[0]),
+        (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL[1])];
+    if !skip_conductivity { extra.push((THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL[2])); }
+    extra
+}
+// The ETA property becomes a dimensionless excess tangent measured over 8-3000 Hz, or is absent.
+fn thermal_pack(excess: Option<f64>, skip_conductivity: bool) -> NormalizedMaterialCardPack {
+    pack_with_extra(CORE, &thermal_extra(skip_conductivity), |claim| {
+        if claim.key.name() == ETA {
+            match excess {
+                Some(tangent) => {
+                    claim.key = PropertyKey::new(ETA, Dims::NONE);
+                    claim.value = PropertyValue::Scalar { value: tangent, dims: Dims::NONE };
+                    claim.validity = validity(8.0, 3000.0);
+                }
+                None => claim.key = PropertyKey::new("no_measured_excess", DynViscosity::DIMS),
+            }
+        }
+    })
+}
+fn thermoelastic_construction(courses: &[Course]) -> String {
+    format!("frankensim-piano-materials-v2\ntension,target-pitch\nstrength,{LIMIT}\nloss,thermoelastic\n{COLUMNS}\n{}",
+        single_cores(courses))
+}
+
+// G1: every retained mode gets the Zener rate EI Delta S(omega) k^4/(mu omega)
+// from the core's own thermal data at the state's temperature; the measured
+// excess EI tan(delta) k^4/(mu omega) is added only inside its 8-3000 Hz band.
+#[test]
+fn g1_thermoelastic_cores_rate_every_mode_and_add_the_excess_only_in_band() {
+    use fs_material::visco::circular_ted::circular_relaxation_shape;
+    let desc = small_description();
+    let excess = 1.4e-4;
+    let source = StringMaterials::from_packs(&[&thermal_pack(Some(excess), false).to_bytes()],
+        &thermoelastic_construction(&desc.courses), &point(), ETA).unwrap();
+    assert_eq!(source.thermoelastic_sections().len(), 3);
+    let courses = source.apply(&desc.courses).unwrap();
+    let (rho, young) = (CORE[0], CORE[1]);
+    let ei = young * PI * CORE_R.powi(4) / 4.0;
+    let delta = young * THERMAL[0] * THERMAL[0] * 293.15 / (rho * THERMAL[1]);
+    let base = rho * THERMAL[1] * CORE_R * CORE_R / THERMAL[2];
+    let bank = Bank::new_with_string_damping(&courses, &desc.board, 48_000, 6000.0, 12, true, None, false).unwrap();
+    let (losses, _) = bank_string_losses(&bank);
+    let (mut inside, mut outside) = (0, 0);
+    for string in &bank.strings {
+        let course = &courses[string.course];
+        for (n, index) in string.modes.clone().enumerate() {
+            let k = (n + 1) as f64 * PI / course.length_m;
+            let omega = TAU * course.partial_hz(n + 1, course.tension_n);
+            let mu = course.linear_density_kg_m;
+            let in_band = omega <= TAU * 3000.0;
+            let measured = if in_band { inside += 1; ei * excess / (mu * omega) } else { outside += 1; 0.0 };
+            near(losses[index].strain_rate,
+                (measured + ei * delta * circular_relaxation_shape(omega, base) / (mu * omega)) * k.powi(4));
+        }
+    }
+    assert!(inside > 0 && outside > 0, "{inside} {outside}");
+    let json = source.json();
+    assert!(json.contains("\"bendingLoss\":\"thermoelastic\"") && json.contains("lower bound")
+        && json.contains("\"excessLoss\":\"measured-in-band\""), "{json}");
+    let source = Arc::new(source);
+    let mut prepared = small_description();
+    preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
+    let piano = LivePiano::new_with_materials(&prepared, config(), gas(), source.clone()).unwrap();
+    assert!(fs_live_piano::describe(&piano).contains("\"stringDamping\":\"source-thermoelastic\""));
+}
+
+// G1: with no measured excess the computed thermoelastic loss alone damps every
+// mode, the receipt says the excess is unknown, and the string plays.
+#[test]
+fn g1_thermoelastic_without_measured_excess_plays_with_an_unknown_excess_receipt() {
+    use fs_material::visco::circular_ted::circular_relaxation_shape;
+    let desc = small_description();
+    let source = StringMaterials::from_packs(&[&thermal_pack(None, false).to_bytes()],
+        &thermoelastic_construction(&desc.courses), &point(), ETA).unwrap();
+    assert!(source.missing_loss().is_none());
+    assert!(source.json().contains("\"excessLoss\":\"unknown\""));
+    let courses = source.apply(&desc.courses).unwrap();
+    let ei = CORE[1] * PI * CORE_R.powi(4) / 4.0;
+    let delta = CORE[1] * THERMAL[0] * THERMAL[0] * 293.15 / (CORE[0] * THERMAL[1]);
+    let base = CORE[0] * THERMAL[1] * CORE_R * CORE_R / THERMAL[2];
+    let bank = Bank::new_with_string_damping(&courses, &desc.board, 48_000, 6000.0, 12, true, None, false).unwrap();
+    let (losses, _) = bank_string_losses(&bank);
+    for string in &bank.strings {
+        let course = &courses[string.course];
+        for (n, index) in string.modes.clone().enumerate() {
+            let k = (n + 1) as f64 * PI / course.length_m;
+            let omega = TAU * course.partial_hz(n + 1, course.tension_n);
+            near(losses[index].strain_rate,
+                ei * delta * circular_relaxation_shape(omega, base) / (course.linear_density_kg_m * omega) * k.powi(4));
+        }
+    }
+    let source = Arc::new(source);
+    let mut prepared = small_description();
+    preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
+    let mut audio = PianoAudio::new_with_materials(&prepared, config(), 1, gas(), source.clone()).unwrap();
+    audio.note_on(69, 1.0).unwrap();
+    let mut pcm = vec![0.0_f32; 2048];
+    audio.render(&mut pcm).unwrap();
+    assert!(pcm.iter().all(|x| x.is_finite()) && pcm.iter().any(|x| *x != 0.0));
+    assert!(audio.close_ledger().string_loss_j > 0.0);
+}
+
+// Planted negative: without its conductivity the thermoelastic loss cannot be
+// computed; after the tensile check the construction refuses as missing data.
+#[test]
+fn g0_thermoelastic_core_without_conductivity_refuses_as_missing_data() {
+    let desc = small_description();
+    let source = StringMaterials::from_packs(&[&thermal_pack(Some(1.4e-4), true).to_bytes()],
+        &thermoelastic_construction(&desc.courses), &point(), ETA).unwrap();
+    let error = source.apply(&desc.courses).unwrap_err();
+    assert!(error.contains("missing data") && error.contains("conductivity"), "{error}");
 }

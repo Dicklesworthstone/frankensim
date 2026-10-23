@@ -91,6 +91,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             match materials.bending_loss_law() {
                 crate::preparation::materials::BendingLossLaw::KelvinVoigt => "source-kelvin-voigt",
                 crate::preparation::materials::BendingLossLaw::LossAngle => "source-loss-angle",
+                crate::preparation::materials::BendingLossLaw::Thermoelastic => "source-thermoelastic",
             }
         }
             else if c.rt0425_string_damping { "rt0425" } else { "authored" },

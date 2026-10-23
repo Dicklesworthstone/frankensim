@@ -5,6 +5,7 @@ observation	c447-3642-gold	Gold	NBS C447 Table 60 p.412 serial 3642 (reference [
 observation	c447-3643-cast-rod	Gold; rod 1/8 in. diameter, cast	NBS C447 Table 60 p.412 serial 3643 (reference [560]): tensile test	Proportional limit printed as below 1.0 kips/in2 (not transcribed as a value); tensile strength 16.5 kips/in2 converted at 6.894757293168 MPa per kip/in2; admitted at T = 293.15 K
 observation	c447-3644-cold-rolled-wire	Gold; wire 0.05 in. (1.27 mm) diameter, cold-rolled 60 percent reduction	NBS C447 Table 60 p.412 serial 3644 (reference [561]): tensile strength only	Tensile strength 31.4 kips/in2 converted at 6.894757293168 MPa per kip/in2; no modulus, yield or elongation printed for this wire; admitted at T = 293.15 K. This is the only drawn-wire gold strength in the circular
 observation	c447-3645-annealed-sheet	Gold; sheet 0.035 in., annealed 1/2 hr at 500 F, furnace-cooled	NBS C447 Table 60 p.412 serial 3645 (reference [562]): tensile strength, endurance limit at 10^7 cycles	Tensile strength 17.7 and endurance limit 4.6 kips/in2 converted at 6.894757293168 MPa per kip/in2; Brinell hardness 28 and elongation 33 percent (1 in.) not transcribed; admitted at T = 293.15 K
+observation	c447-table67-gold-thermal	Gold (element, Au), NBS C447 Table 67 thermal columns	NBS Circular C447 Table 67 p.459, row Gold: coefficient of linear thermal expansion 14.2 x 10^-6 per deg C, specific heat 0.031 cal/g/deg C and thermal conductivity 2.96 W cm^-1 deg C^-1, each printed at room temperature	Room temperature admitted at T = 293.15 K. Specific heat converted at 4.184 J/cal (the circular does not name its calorie; the 15-degree and international-table calories differ by under 0.1 percent, below the two printed figures), 0.031 cal/g/K = 129.7 J/kg/K; conductivity converted at 100 (W/m/K) per (W/cm/K). Expansion and specific heat are printed to two or three figures; no uncertainty is printed
 scalar	density	c447-table67-gold	density	19300	kg/m^3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	T	293.15	293.15	K
@@ -41,3 +42,12 @@ validity	uts-annealed-sheet	T	293.15	293.15	K
 scalar	endurance-1e7-annealed-sheet	c447-3645-annealed-sheet	endurance_limit_1e7_cycles_annealed_sheet	31.7159	MPa	constant
 uncertainty	endurance-1e7-annealed-sheet	unstated	-	-	-	-
 validity	endurance-1e7-annealed-sheet	T	293.15	293.15	K
+scalar	thermal-expansion	c447-table67-gold-thermal	linear_thermal_expansion_coefficient	14.2e-6	K^-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	T	293.15	293.15	K
+scalar	specific-heat	c447-table67-gold-thermal	specific_heat_capacity	129.704	J/kg/K	constant
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	specific-heat	T	293.15	293.15	K
+scalar	thermal-conductivity	c447-table67-gold-thermal	thermal_conductivity	296	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	T	293.15	293.15	K

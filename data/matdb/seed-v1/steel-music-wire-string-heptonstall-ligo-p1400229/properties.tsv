@@ -2,6 +2,7 @@ frankensim.matdb-source.v1
 observation	hl-static	High-carbon steel music wire from California Fine Wire Company, 20 to 1100 micrometre diameter, 0.5 m long, untreated	Destructive tensile tests on an Instron machine with self-tightening wedge clamps at a uniform extension rate; Young's modulus from the initial linear force-extension region (mean of 43 untreated wires, printed 2.12 +- 0.01 x 10^11 Pa); breaking stress averaged per diameter in Table 1	Static tensile modulus, used for the string's elastic coefficients; the per-diameter breaking stresses are averages of 1 to 16 samples and include wires that broke in or near the clamps, which the authors found no weaker. The linear limit was on average 85 percent of the breaking stress (not stored). Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
 observation	hl-ringdown	Untreated music wire 465 micrometre diameter, 498 mm long, clamped at one end and hung in vacuum	Electrostatic excitation of transverse resonant modes, ringdown by HeNe laser shadow sensing; the measured loss is fitted with a thermoelastic peak plus a frequency-independent material loss; Table 4 prints that material loss	The 8 to 3000 Hz band is the span of the plotted modes (Figures 6 and 7); measured in vacuum, so it excludes air damping; the fitted thermoelastic peak is not part of this tangent. Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
 observation	hl-density	Music wire density used by the authors	Table 3 lists the literature density the authors say they know to be correct, as an input to their thermal-noise predictions	Not measured on these specimens. Laboratory temperature is not stated; the rows are admitted at T = 293.15 K so that density, modulus, loss and strength of one wire state resolve at one query point
+observation	hl-table3-thermal	Music wire thermal parameters used by the authors	Table 3 lists thermal expansion 1.1 x 10^-5 /K, thermal conductivity 49 W/m/K and specific heat capacity 486 J/kg/K with the density and modulus, as inputs to their thermoelastic-loss predictions (their eqs. 4-6)	Literature values for bulk steel, not measured on these specimens; the authors note thin-wire properties may differ from bulk. Admitted at T = 293.15 K (laboratory temperature not stated)
 scalar	density	hl-density	density	7800	kg/m^3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	T	293.15	293.15	K
@@ -51,3 +52,12 @@ validity	breaking-stress-203um	T	293.15	293.15	K
 scalar	breaking-stress-197um	hl-static	breaking_stress_197um_untreated	2.01	GPa	constant
 uncertainty	breaking-stress-197um	unstated	-	-	-	-
 validity	breaking-stress-197um	T	293.15	293.15	K
+scalar	thermal-expansion	hl-table3-thermal	linear_thermal_expansion_coefficient	1.1e-5	K^-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	T	293.15	293.15	K
+scalar	specific-heat	hl-table3-thermal	specific_heat_capacity	486	J/kg/K	constant
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	specific-heat	T	293.15	293.15	K
+scalar	thermal-conductivity	hl-table3-thermal	thermal_conductivity	49	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	T	293.15	293.15	K

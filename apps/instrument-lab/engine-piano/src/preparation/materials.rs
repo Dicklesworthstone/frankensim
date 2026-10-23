@@ -18,9 +18,12 @@ use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::{section::{ConcentricElasticSection, ConcentricKelvinVoigtSection,
     ConcentricMaterialLayer, MAX_CONCENTRIC_LAYERS, loss_angle::ConcentricLossAngleSection,
+    ted::ConcentricThermoelasticBending,
     strength::AxialTensileCapacity,
     wound::{HelicalWrap, HelicalWrapping, MAX_HELICAL_WRAPS, close_wound_pitch_m}},
     state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, MaterialPropertySelection,
+    INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
+    SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
     MaterialStatePointError, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point}};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
@@ -87,10 +90,20 @@ pub enum BendingLossLaw {
     KelvinVoigt,
     /// Dimensionless loss tangent Im(E)/Re(E) (`loss,loss-angle`).
     LossAngle,
+    /// Zener thermoelastic loss computed from each homogeneous core's E,
+    /// density, expansion, heat capacity, conductivity and temperature, plus
+    /// the property as a measured anelastic excess loss tangent inside its
+    /// band (`loss,thermoelastic`). Without an excess claim, or outside its
+    /// band, the excess is unknown and omitted: that decay is a lower bound.
+    Thermoelastic,
 }
 impl BendingLossLaw {
     pub fn name(self) -> &'static str {
-        match self { Self::KelvinVoigt => "kelvin-voigt", Self::LossAngle => "loss-angle" }
+        match self {
+            Self::KelvinVoigt => "kelvin-voigt",
+            Self::LossAngle => "loss-angle",
+            Self::Thermoelastic => "thermoelastic",
+        }
     }
 }
 
@@ -149,6 +162,8 @@ impl StrengthReport {
 pub struct StringMaterials {
     sections: BTreeMap<u8, ConcentricKelvinVoigtSection>,
     loss_angle_sections: BTreeMap<u8, ConcentricLossAngleSection>,
+    /// Thermoelastic cores, with their measured excess when a source has one.
+    thermoelastic_sections: BTreeMap<u8, (ConcentricThermoelasticBending, Option<ConcentricLossAngleSection>)>,
     /// Cores whose packs have no usable bending-loss claim: elastic only.
     unrated: BTreeMap<u8, ConcentricElasticSection>,
     /// The deferred missing-data refusal for `unrated`, raised only after the
@@ -216,7 +231,8 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
     let loss = match lines.peek().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).as_deref() {
         Some(["loss", "kelvin-voigt"]) => { lines.next(); BendingLossLaw::KelvinVoigt }
         Some(["loss", "loss-angle"]) => { lines.next(); BendingLossLaw::LossAngle }
-        Some(["loss", ..]) => return Err("loss line must be loss,kelvin-voigt or loss,loss-angle".into()),
+        Some(["loss", "thermoelastic"]) => { lines.next(); BendingLossLaw::Thermoelastic }
+        Some(["loss", ..]) => return Err("loss line must be loss,kelvin-voigt, loss,loss-angle or loss,thermoelastic".into()),
         _ => BendingLossLaw::KelvinVoigt,
     };
     if lines.next() != Some(COLUMNS) { return Err(format!("the line after strength (and loss) must be {COLUMNS}")); }
@@ -306,6 +322,7 @@ impl StringMaterials {
         let mut packs = Vec::with_capacity(bytes.len());
         let mut states = Vec::with_capacity(bytes.len());
         let mut loss_rated = Vec::with_capacity(bytes.len());
+        let mut excess_measured = Vec::with_capacity(bytes.len());
         for (index, (bytes, roles)) in bytes.iter().zip(&roles).enumerate() {
             let pack = Arc::new(NormalizedMaterialCardPack::from_bytes(bytes)
                 .map_err(|e| e.to_string())?);
@@ -319,11 +336,21 @@ impl StringMaterials {
                         ScalarAdmissibility::StrictlyPositive),
                     ScalarPropertyRequirement::try_new(viscosity_property, match declaration.loss {
                         BendingLossLaw::KelvinVoigt => DynViscosity::DIMS,
-                        BendingLossLaw::LossAngle => Dims::NONE,
+                        BendingLossLaw::LossAngle | BendingLossLaw::Thermoelastic => Dims::NONE,
                     }, ScalarAdmissibility::Finite),
                     ScalarPropertyRequirement::try_new(limit, Pressure::DIMS,
                         ScalarAdmissibility::StrictlyPositive),
                 ]);
+                if declaration.loss == BendingLossLaw::Thermoelastic {
+                    requirements.extend([
+                        ScalarPropertyRequirement::try_new(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                            INVERSE_TEMPERATURE_DIMS, ScalarAdmissibility::Finite),
+                        ScalarPropertyRequirement::try_new(SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                            SPECIFIC_HEAT_CAPACITY_DIMS, ScalarAdmissibility::StrictlyPositive),
+                        ScalarPropertyRequirement::try_new(THERMAL_CONDUCTIVITY_PROPERTY,
+                            THERMAL_CONDUCTIVITY_DIMS, ScalarAdmissibility::StrictlyPositive),
+                    ]);
+                }
             }
             let mut requirements = requirements.into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
@@ -333,37 +360,50 @@ impl StringMaterials {
                     mandatory yield check needs a sourced tensile limit (missing data): {e}"),
                 e => format!("string material pack {index}: {e}"),
             };
-            let mut rated = true;
-            let state = match resolve_material_state_point(pack.card(), point, &requirements,
-                MaterialPropertySelection::SingleClaimOnly) {
-                // Without loss data the core still has mass, stiffness and
-                // strength; its missing loss refuses after the tensile check.
-                Err(MaterialStatePointError::Query { property, .. }) if core && property == viscosity_property => {
-                    rated = false;
-                    requirements.retain(|requirement| requirement.name() != viscosity_property);
-                    resolve_material_state_point(pack.card(), point, &requirements,
-                        MaterialPropertySelection::SingleClaimOnly).map_err(refuse)?
+            // Without loss data the core still has mass, stiffness and strength:
+            // missing loss claims are dropped here and refuse only after the
+            // tensile check. Under the thermoelastic law an absent excess claim
+            // is not missing data: the excess is then unknown.
+            let thermal = [LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                THERMAL_CONDUCTIVITY_PROPERTY];
+            let mut dropped = Vec::new();
+            let state = loop {
+                match resolve_material_state_point(pack.card(), point, &requirements,
+                    MaterialPropertySelection::SingleClaimOnly) {
+                    Err(MaterialStatePointError::Query { property, .. })
+                        if core && (property == viscosity_property || (declaration.loss == BendingLossLaw::Thermoelastic
+                            && thermal.contains(&property.as_str()))) => {
+                        requirements.retain(|requirement| requirement.name() != property);
+                        dropped.push(property);
+                    }
+                    state => break state.map_err(refuse)?,
                 }
-                state => state.map_err(refuse)?,
+            };
+            let rated = match declaration.loss {
+                BendingLossLaw::Thermoelastic => !dropped.iter().any(|property| thermal.contains(&property.as_str())),
+                _ => dropped.is_empty(),
             };
             packs.push(pack);
             states.push(state);
             loss_rated.push(rated);
+            excess_measured.push(!dropped.iter().any(|property| property == viscosity_property));
         }
-        Self::from_states(declaration, &states, &loss_rated, viscosity_property, packs)
+        Self::from_states(declaration, &states, &loss_rated, &excess_measured, viscosity_property, packs)
     }
 
     fn from_states(declaration: Declaration, states: &[ResolvedMaterialStatePoint], loss_rated: &[bool],
-        viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>) -> Result<Self, String> {
+        excess_measured: &[bool], viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>) -> Result<Self, String> {
         let Declaration { tension, loss, limit_property, non_physical_override, cores, mut wraps } = declaration;
         let mut sections = BTreeMap::new();
         let mut loss_angle_sections = BTreeMap::new();
+        let mut thermoelastic_sections = BTreeMap::new();
         let mut unrated = BTreeMap::new();
         let mut wrappings = BTreeMap::new();
         let mut capacities = BTreeMap::new();
         for (key, layers) in cores {
             let failed = |e: MaterialStatePointError| format!("string material key {key}: {e}");
             let rated = layers.iter().all(|&(_, index)| loss_rated[index]);
+            let measured = layers.iter().all(|&(_, index)| excess_measured[index]);
             let layers = layers.into_iter().map(|(outer_radius_m, index)|
                 ConcentricMaterialLayer { outer_radius_m, material: states[index].clone() }).collect();
             let elastic = ConcentricElasticSection::try_new(0.0, layers).map_err(failed)?;
@@ -392,18 +432,27 @@ impl StringMaterials {
                 BendingLossLaw::LossAngle => {
                     loss_angle_sections.insert(key, elastic.with_loss_angle_bending(viscosity_property).map_err(failed)?);
                 }
+                BendingLossLaw::Thermoelastic => {
+                    let excess = if measured {
+                        Some(elastic.clone().with_loss_angle_bending(viscosity_property).map_err(failed)?)
+                    } else { None };
+                    thermoelastic_sections.insert(key, (elastic.with_thermoelastic_bending().map_err(failed)?, excess));
+                }
             }
         }
         let missing_loss = (!unrated.is_empty()).then(|| {
             let keys = unrated.keys().map(u8::to_string).collect::<Vec<_>>().join(",");
             let unrated_packs = loss_rated.iter().enumerate().filter(|(_, rated)| !**rated)
                 .map(|(index, _)| index.to_string()).collect::<Vec<_>>().join(",");
-            format!("string material packs [{unrated_packs}] have no usable '{viscosity_property}' {} \
-                claim at this state, so the cores of keys [{keys}] have no sourced bending loss (missing data)",
-                loss.name())
+            let data = match loss {
+                BendingLossLaw::Thermoelastic => "thermal expansion, heat capacity and conductivity".to_string(),
+                law => format!("'{viscosity_property}' {}", law.name()),
+            };
+            format!("string material packs [{unrated_packs}] have no usable {data} \
+                claims at this state, so the cores of keys [{keys}] have no sourced bending loss (missing data)")
         });
-        Ok(Self { sections, loss_angle_sections, unrated, missing_loss, loss, wrappings, capacities, tension,
-            limit_property, non_physical_override, packs })
+        Ok(Self { sections, loss_angle_sections, thermoelastic_sections, unrated, missing_loss, loss, wrappings,
+            capacities, tension, limit_property, non_physical_override, packs })
     }
 
     /// Bounded WASM framing of the unchanged canonical bytes; this is not an
@@ -430,6 +479,12 @@ impl StringMaterials {
     /// Bonded loss-angle core sections (empty under the Kelvin–Voigt law).
     pub fn loss_angle_sections(&self) -> &BTreeMap<u8, ConcentricLossAngleSection> { &self.loss_angle_sections }
     pub fn bending_loss_law(&self) -> BendingLossLaw { self.loss }
+    /// Thermoelastic cores and their measured excess, if any (empty unless
+    /// the thermoelastic law was declared).
+    pub fn thermoelastic_sections(&self)
+        -> &BTreeMap<u8, (ConcentricThermoelasticBending, Option<ConcentricLossAngleSection>)> {
+        &self.thermoelastic_sections
+    }
     /// Helical wraps of the wound keys; they add only line density.
     pub fn wrappings(&self) -> &BTreeMap<u8, HelicalWrapping> { &self.wrappings }
     /// Each core's axial capacity under the declared tensile limit.
@@ -455,6 +510,8 @@ impl StringMaterials {
     fn core(&self, key: u8) -> Option<CoreLoss<'_>> {
         self.sections.get(&key).map(CoreLoss::KelvinVoigt)
             .or_else(|| self.loss_angle_sections.get(&key).map(CoreLoss::LossAngle))
+            .or_else(|| self.thermoelastic_sections.get(&key)
+                .map(|(section, excess)| CoreLoss::Thermoelastic(section, excess.as_ref())))
     }
 
     fn covers(&self, courses: &[Course]) -> Result<(), String> {
@@ -583,7 +640,18 @@ impl StringMaterials {
                     "0".to_string(), section.omega_band_rad_s()),
                 Some(CoreLoss::LossAngle(section)) => ("0".to_string(),
                     section.hysteretic_stiffness_n_m2().to_string(), section.omega_band_rad_s()),
-                None => ("null".to_string(), "null".to_string(), (f64::NAN, f64::NAN)),
+                Some(CoreLoss::Thermoelastic(_, Some(excess))) => ("0".to_string(),
+                    excess.hysteretic_stiffness_n_m2().to_string(), excess.omega_band_rad_s()),
+                Some(CoreLoss::Thermoelastic(_, None)) | None =>
+                    ("null".to_string(), "null".to_string(), (f64::NAN, f64::NAN)),
+            };
+            // Computed Zener part and whether an anelastic excess was measured.
+            let thermoelastic = match self.core(*key) {
+                Some(CoreLoss::Thermoelastic(section, excess)) => format!(
+                    "{{\"rigidityNm2\":{},\"baseTimeS\":{},\"temperatureK\":{},\"excessLoss\":\"{}\"}}",
+                    section.hysteretic_scale_n_m2(), section.base_time_s(), section.law().t0,
+                    if excess.is_some() { "measured-in-band" } else { "unknown" }),
+                _ => "null".to_string(),
             };
             let band = if band.0.is_nan() { "null".to_string() } else { format!("[{},{}]", band.0, band.1) };
             let identities = elastic.layers().iter().map(|layer|
@@ -601,19 +669,25 @@ impl StringMaterials {
             });
             format!(concat!("{{\"key\":{},\"stateIdentities\":[{}],\"outerRadiiM\":{:?},",
                 "\"lineDensityKgM\":{},\"axialRigidityN\":{},\"flexuralRigidityNm2\":{},",
-                "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":{},\"wraps\":{},",
+                "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":{},\"thermoelastic\":{},\"wraps\":{},",
                 "\"outerRadiusM\":{},\"tensileCapacityN\":{},\"governingLayer\":{},\"layerLimitsPa\":{:?}}}"),
                 key, identities, radii, elastic.line_density_kg_m()
                     + self.wrappings.get(key).map_or(0.0, HelicalWrapping::line_density_kg_m),
                 elastic.axial_stiffness_n(), elastic.bending_stiffness_n_m2(),
-                viscous, hysteretic, band, wraps,
+                viscous, hysteretic, band, thermoelastic, wraps,
                 self.outer_radius_m(*key).unwrap_or(0.0), capacity.capacity_n(),
                 capacity.governing_layer(), capacity.layer_limits_pa())
         }).collect::<Vec<_>>().join(",");
+        let receipt = match self.loss {
+            BendingLossLaw::Thermoelastic => "thermoelastic loss is computed at every mode; a measured anelastic \
+                excess is added only inside its source band; elsewhere intrinsic anelastic loss is omitted, so the \
+                decay there is a lower bound",
+            _ => "measured bending loss only; a mode outside its source band refuses",
+        };
         format!(concat!("{{\"model\":\"bonded-core-kelvin-voigt-helical-wraps\",\"importedPacks\":{},",
-            "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"missingLossData\":{},\"limitProperty\":\"{}\",",
-            "\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
-            self.packs.len(), self.tension.json(), self.loss.name(), self.missing_loss.is_some(),
+            "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"lossReceipt\":\"{}\",\"missingLossData\":{},",
+            "\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
+            self.packs.len(), self.tension.json(), self.loss.name(), receipt, self.missing_loss.is_some(),
             escape(&self.limit_property), self.non_physical_override, sections)
     }
 }

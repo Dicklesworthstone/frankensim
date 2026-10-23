@@ -44,7 +44,7 @@ fn gold_pack_passes_physicality_gates() {
                 assert!(v.is_finite() && v > 0.0, "{} must be positive", c[3]);
                 let si = match c[5] {
                     "MPa" => v * 1e6,
-                    "kg/m^3" | "1" => v,
+                    "kg/m^3" | "1" | "K^-1" | "J/kg/K" | "W/m/K" => v,
                     unit => panic!("{}: unexpected unit {unit}", c[3]),
                 };
                 assert!(s.insert(c[3].to_string(), si).is_none(), "{} is duplicated", c[3]);
@@ -92,4 +92,13 @@ fn gold_pack_passes_physicality_gates() {
     // A heavy fcc metal, denser than silver (10492 kg/m3) and lead (11340 kg/m3).
     assert!((18_000.0..21_000.0).contains(&s["density"]));
     assert!((0.25..0.5).contains(&s["poisson_ratio"]));
+    // Table 67's thermal columns, recovered at the stated factors: 14.2e-6 per deg C,
+    // 0.031 cal/g/deg C at 4.184 J/cal, 2.96 W/cm/deg C.
+    assert_eq!(s["linear_thermal_expansion_coefficient"], 14.2e-6);
+    assert!((s["specific_heat_capacity"] / 4184.0 - 0.031).abs() < 1e-9);
+    assert_eq!(s["thermal_conductivity"], 296.0);
+    // Dulong-Petit: a solid element's heat capacity near room temperature is
+    // close to 3R per mole; with Table 67's atomic weight 197.2, 3R/M = 126.5 J/kg/K.
+    let dulong_petit = 3.0 * 8.314_462_618 / 0.1972;
+    assert!((s["specific_heat_capacity"] / dulong_petit - 1.0).abs() < 0.05);
 }

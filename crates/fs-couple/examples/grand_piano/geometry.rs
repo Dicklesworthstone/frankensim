@@ -89,28 +89,57 @@ impl BondedSection {
 pub struct BondedBendingLoss {
     viscous_rigidity_nm2s: f64,
     hysteretic_rigidity_nm2: f64,
+    /// Zener thermoelastic part of a homogeneous solid core: EI*Delta and the
+    /// circular base time rho c_p R^2 / k. Zero when not bound.
+    thermoelastic_rigidity_nm2: f64,
+    thermoelastic_base_time_s: f64,
+    /// Source support of the measured (viscous or loss-angle) coefficients.
     omega_band_rad_s: (f64, f64),
 }
 impl BondedBendingLoss {
     pub const fn viscous_rigidity_nm2s(self) -> f64 { self.viscous_rigidity_nm2s }
     pub const fn hysteretic_rigidity_nm2(self) -> f64 { self.hysteretic_rigidity_nm2 }
+    pub const fn thermoelastic_rigidity_nm2(self) -> f64 { self.thermoelastic_rigidity_nm2 }
+    pub const fn thermoelastic_base_time_s(self) -> f64 { self.thermoelastic_base_time_s }
     pub const fn omega_band_rad_s(self) -> (f64, f64) { self.omega_band_rad_s }
 
-    /// Rate multiplying relative modal velocity, (C_b + H / omega) k^4 / mu
-    /// [1/s]. For a loss angle this is the viscous rate that dissipates the
-    /// same energy per cycle at the mode's own frequency, so it is evaluated
-    /// per mode. This is bending strain-rate loss; an uncurved moving chord adds none.
+    /// Whether the measured coefficients cover a mode at `omega`. Outside their
+    /// band a thermoelastic binding still supplies its computed loss, but the
+    /// intrinsic anelastic excess is omitted: that decay is a lower bound.
+    pub fn measured_at(self, omega: f64) -> bool {
+        let (lo, hi) = self.omega_band_rad_s;
+        omega >= lo && omega <= hi
+    }
+
+    /// Rate multiplying relative modal velocity,
+    /// `(C_b + H / omega + EI Delta S(omega) / omega) k^4 / mu` [1/s], where S is
+    /// the circular thermoelastic series shape. Loss-angle and thermoelastic
+    /// terms are the viscous rates that dissipate the same energy per cycle at
+    /// the mode's own frequency, so they are evaluated per mode. Measured terms
+    /// apply only inside their band; outside it, a thermoelastic binding keeps
+    /// its computed term alone and anything else refuses. This is bending
+    /// strain-rate loss; an uncurved moving chord adds none.
     pub fn strain_rate(self, omega: f64, k: f64, mu: f64) -> Result<f64, String> {
         let (lo, hi) = self.omega_band_rad_s;
-        if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi {
+        let measured = self.measured_at(omega);
+        if !omega.is_finite() || omega <= 0.0 || (!measured && self.thermoelastic_rigidity_nm2 == 0.0) {
             return Err(format!("string mode {omega} rad/s outside material bending-loss support [{lo}, {hi}]"));
         }
         if !k.is_finite() || k <= 0.0 || !mu.is_finite() || mu <= 0.0 {
             return Err("invalid material bending-loss wavenumber or line density".into());
         }
-        let rate = (self.viscous_rigidity_nm2s / mu + self.hysteretic_rigidity_nm2 / (mu * omega)) * k.powi(4);
+        let mut per_length = if measured {
+            self.viscous_rigidity_nm2s / mu + self.hysteretic_rigidity_nm2 / (mu * omega)
+        } else { 0.0 };
+        if self.thermoelastic_rigidity_nm2 > 0.0 {
+            per_length += self.thermoelastic_rigidity_nm2
+                * fs_material::visco::circular_ted::circular_relaxation_shape(omega, self.thermoelastic_base_time_s)
+                / (mu * omega);
+        }
+        let rate = per_length * k.powi(4);
         if !rate.is_finite() || rate < 0.0
-            || ((self.viscous_rigidity_nm2s > 0.0 || self.hysteretic_rigidity_nm2 > 0.0) && rate == 0.0) {
+            || ((self.viscous_rigidity_nm2s > 0.0 || self.hysteretic_rigidity_nm2 > 0.0
+                || self.thermoelastic_rigidity_nm2 > 0.0) && rate == 0.0) {
             return Err("material bending-loss rate is unrepresentable".into());
         }
         Ok(rate)
@@ -123,24 +152,41 @@ impl BondedBendingLoss {
 pub enum CoreLoss<'a> {
     KelvinVoigt(&'a fs_material::section::ConcentricKelvinVoigtSection),
     LossAngle(&'a fs_material::section::loss_angle::ConcentricLossAngleSection),
+    /// Computed Zener loss of the core plus, when a source measures it, the
+    /// anelastic excess as a loss tangent of the SAME section inside its band.
+    Thermoelastic(&'a fs_material::section::ted::ConcentricThermoelasticBending,
+        Option<&'a fs_material::section::loss_angle::ConcentricLossAngleSection>),
 }
 impl<'a> CoreLoss<'a> {
     pub fn elastic(self) -> &'a fs_material::section::ConcentricElasticSection {
         match self {
             Self::KelvinVoigt(section) => section.elastic(),
             Self::LossAngle(section) => section.elastic(),
+            Self::Thermoelastic(section, _) => section.elastic(),
         }
     }
     fn loss(self) -> BondedBendingLoss {
         match self {
             Self::KelvinVoigt(section) => BondedBendingLoss {
                 viscous_rigidity_nm2s: section.viscous_stiffness_n_m2_s(),
-                hysteretic_rigidity_nm2: 0.0, omega_band_rad_s: section.omega_band_rad_s(),
+                hysteretic_rigidity_nm2: 0.0, thermoelastic_rigidity_nm2: 0.0,
+                thermoelastic_base_time_s: 0.0, omega_band_rad_s: section.omega_band_rad_s(),
             },
             Self::LossAngle(section) => BondedBendingLoss {
                 viscous_rigidity_nm2s: 0.0,
                 hysteretic_rigidity_nm2: section.hysteretic_stiffness_n_m2(),
+                thermoelastic_rigidity_nm2: 0.0, thermoelastic_base_time_s: 0.0,
                 omega_band_rad_s: section.omega_band_rad_s(),
+            },
+            // With no measured excess the measured band is the single point
+            // omega = 0, which no mode has: every mode carries the computed
+            // thermoelastic loss alone.
+            Self::Thermoelastic(section, excess) => BondedBendingLoss {
+                viscous_rigidity_nm2s: 0.0,
+                hysteretic_rigidity_nm2: excess.map_or(0.0, |e| e.hysteretic_stiffness_n_m2()),
+                thermoelastic_rigidity_nm2: section.hysteretic_scale_n_m2(),
+                thermoelastic_base_time_s: section.base_time_s(),
+                omega_band_rad_s: excess.map_or((0.0, 0.0), |e| e.omega_band_rad_s()),
             },
         }
     }
@@ -211,6 +257,11 @@ impl Course {
         wrapping: Option<&fs_material::section::wound::HelicalWrapping>,
     ) -> Result<Self, String> {
         let elastic = core.elastic();
+        if let CoreLoss::Thermoelastic(_, Some(excess)) = core {
+            if excess.elastic() != elastic {
+                return Err("a string's measured excess loss must belong to its own thermoelastic section".into());
+            }
+        }
         let mut changed = self.with_bonded_material_section(elastic)?;
         let section = changed.bonded_section.as_mut().expect("bound elastic section");
         section.bending_loss = Some(core.loss());
@@ -252,6 +303,9 @@ impl Course {
                 let (lo, hi) = loss.omega_band_rad_s;
                 if !loss.viscous_rigidity_nm2s.is_finite() || loss.viscous_rigidity_nm2s < 0.0
                     || !loss.hysteretic_rigidity_nm2.is_finite() || loss.hysteretic_rigidity_nm2 < 0.0
+                    || !loss.thermoelastic_rigidity_nm2.is_finite() || loss.thermoelastic_rigidity_nm2 < 0.0
+                    || !loss.thermoelastic_base_time_s.is_finite() || loss.thermoelastic_base_time_s < 0.0
+                    || (loss.thermoelastic_rigidity_nm2 > 0.0 && loss.thermoelastic_base_time_s == 0.0)
                     || !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
                     return Err("invalid bound material bending-loss integral or frequency support".into());
                 }
