@@ -4325,3 +4325,48 @@ source-card regressions compare graph/continuum impedance, the independent
 elastic-cylinder limit, joint gas/geometry/material refinement, source identity,
 and material-only relaxation changes in feedback and microphone impulse pressure.
 They do not establish measured-material or experimental-wall validation.
+
+## Live strings in a finite source-backed gas
+
+`LinearMaterialStringRuntime::try_new_with_gas` and both runtime `rebind_gas`
+methods admit the shared complete `GasState` through its material-owner
+coherence check. Source-backed gas composition, pressure and transport affect
+actual modal aerodynamic drag and the compact pressure observer. Rebinding
+retains material receipts, modal displacement/momentum, accepted acceleration
+history and sample position; it advances one epoch and transfers no inferred
+solid heat or elastic work. Existing `AmbientGas` entry points use the same path.
+
+`acoustic_realize::finite_gas` composes the existing thermal string and
+`fs_material::thermochemical_gas::energy::IsochoricGasParcel`. One sample evolves
+mechanics at the initial gas/material laws, deposits material viscous loss into
+the solid and aerodynamic loss into the gas exactly once, and reconstructs both
+states with their existing source owners. Final damping and observer
+coefficients use the accepted endpoint gas, with the previous accepted
+acceleration retained for the observer difference. There is one accepted sample
+and epoch. Caller-prescribed solid and gas heats remain separate from the two
+internal dissipation transfers.
+
+The returned combined residual measures actual modal, solid-enthalpy and
+gas-internal-energy changes, applied mechanical work, both external heats,
+authored loss and the explicit damping-partition roundoff term. It does not
+define loss as an energy deficit. Absolute original gas/solid solve allowances
+and arithmetic roundoff bound admission. Gas source-domain, timestep-temperature,
+pressure-observer, stale-epoch and cancellation refusals publish neither owner.
+The initial runtime medium must equal the parcel's complete snapshot; gas mass,
+volume, composition and source receipts remain with the immutable source-backed
+parcel model.
+
+This is first-order partitioned feedback with a well-mixed fixed-volume local
+gas inventory. Its volume does not create acoustic chamber boundaries.
+Convective/conductive solid–gas exchange, gas motion/pressure work, radiation
+loading and propagation of a changing atmosphere are outside this rung. The
+compact pressure observer is diagnostic, not an additional heat debit.
+Temperature-increment limits require temporal-refinement assessment and do not
+certify acoustic or thermodynamic accuracy. Existing thermal-string restrictions
+(constant density/E, fixed tension, solid phase and fixed modal basis) remain in force.
+
+G1/G3/G4 regression definitions in `tests/string_specimen/finite_gas.rs` check
+source-dependent drag without a vibration reset, measured combined energy,
+independent endpoint pressure with the new sound-speed coefficient,
+frozen-initial-medium staging, and atomic refusal. Synthetic source data test
+numerical coupling, not experimental gas/material fidelity.

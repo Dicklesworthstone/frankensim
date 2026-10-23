@@ -5,6 +5,9 @@
 //! TMM bore, optional tone holes, and a regularized bow. There is no
 //! instrument crate.
 
+/// Finite source-backed gas storage coupled to the live material string.
+pub mod finite_gas;
+
 use crate::modal_acoustic_time::{
     MAX_TIME_DOMAIN_ACOUSTIC_MODES, ModalAcousticFrame, ModalAcousticMode, ModalAcousticState,
     ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
@@ -2367,7 +2370,8 @@ struct LinearMember {
 ///
 /// This uses the same exact-ZOH modes, loss admission and compact strip observer
 /// as the assembly realizer. The explicit linearization omits axial stretching
-/// induced by transverse motion. Ambient gas and listener distance stay fixed;
+/// induced by transverse motion. The surrounding gas can be rebound without
+/// resetting vibration; listener distance stays fixed;
 /// no atmospheric path filter, common propagation delay or radiation loading is
 /// included. The observer is a diagnostic, not an additional energy debit.
 ///
@@ -2507,6 +2511,28 @@ impl LinearMaterialStringRuntime {
     ) -> Result<Self, AcousticRealizeError> {
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let gas = gas_state(ambient)?;
+        Self::try_new_with_gas(cx, specimen, pluck, &gas, listener_m, sample_rate_hz)
+    }
+
+    /// Initialize in one complete caller-resolved gas or mixture.
+    ///
+    /// The material owner checks EOS, caloric, transport and acoustic coherence.
+    /// Drag and the compact observer use this SAME snapshot; no air preset or
+    /// atmospheric absorption law is inferred from its numerical coefficients.
+    /// Retain the originating material model/receipts when changing this gas.
+    pub fn try_new_with_gas(
+        cx: &fs_exec::Cx<'_>,
+        specimen: crate::string_specimen::ResolvedStringSpecimen,
+        pluck: Option<Pluck>,
+        gas: &GasState,
+        listener_m: f64,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        validate_external_gas(gas)?;
+        let gas = *gas;
         let string = specimen.string();
         validate_incremental_string(&string)?;
         validate_string(&string, pluck, None)?;
@@ -2515,7 +2541,6 @@ impl LinearMaterialStringRuntime {
                 what: "incremental string listener distance must be finite and positive",
             });
         }
-        let gas = gas_state(ambient)?;
         let member =
             linear_string_member(&string, pluck, None, &gas, listener_m, sample_rate_hz, 1.0)?;
         cx.checkpoint()
@@ -2707,9 +2732,23 @@ impl LinearMaterialStringRuntime {
     ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
-        let gas = gas_state(ambient)?;
+        self.rebind_gas(cx, &gas_state(ambient)?)
+    }
+
+    /// Replace the complete surrounding gas through its shared material owner.
+    /// This has the same state-preserving, prescribed-medium semantics as
+    /// `rebind_ambient`, and admits source-backed gases and mixtures.
+    /// No thermal energy is inferred from this instantaneous parameter update.
+    pub fn rebind_gas(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        gas: &GasState,
+    ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        validate_external_gas(gas)?;
         let mut candidate = self.clone();
-        candidate.gas = gas;
+        candidate.gas = *gas;
         let update = candidate.rebind(cx, self.specimen.clone(), 0.0)?;
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
@@ -3208,6 +3247,26 @@ impl ThermalMaterialStringRuntime {
         }
         self.mechanical
             .rebind_ambient(cx, ambient)
+            .map_err(ThermalStringError::Acoustic)
+    }
+
+    /// Rebind a complete source-resolved gas at the expected accepted epoch.
+    /// Solid enthalpy and modal coordinates survive unchanged. For finite gas
+    /// heating and reciprocal drag-energy storage, use `step_with_isochoric_gas`.
+    pub fn rebind_gas(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        gas: &GasState,
+    ) -> Result<StringMaterialUpdate, ThermalStringError> {
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        self.mechanical
+            .rebind_gas(cx, gas)
             .map_err(ThermalStringError::Acoustic)
     }
 

@@ -5619,3 +5619,6 @@ fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch
     }
     assert_eq!(original, template());
 }
+
+#[path = "string_specimen/finite_gas.rs"]
+mod finite_gas;
