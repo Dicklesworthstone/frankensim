@@ -15,12 +15,15 @@
 //! the beam's own nodes to a shell skin line, with the arm u + theta x d):
 //! - `g1_matching_beam_tie_reproduces_on_node_beam`: beam nodes on the shell nodes (C = I) reproduce the
 //!   bonded eccentric `ShellBeam` model (CST/DKT shell, Euler-Bernoulli beam) to 1e-9;
-//! - the off-node convergence gate `g1_off_node_brace_converges` is NOT in this file yet: the off-node
-//!   minus on-node frequency gap converges, but mode 0 at observed order 2.19 (straight) and 2.21
-//!   (curved) over n = 32, 64, 128, just outside a two-sided 2 +- 0.2; the gate's form is an open question
-//!   on bead .52. MITC3+ (Reissner-Mindlin) with a Timoshenko beam is the consistent pairing for the linear
-//!   transfer; on Kirchhoff CST/DKT shells an off-node Euler-Bernoulli beam converges to a stiffer limit
-//!   (see `tie_beams_to_shells`);
+//! - `g1_off_node_brace_converges`: a straight and a curved Timoshenko brace on an MITC3+ plate, each
+//!   with its own beam nodes off the shell nodes, converge to the on-node tie (beam nodes on the shell
+//!   nodes). One-sided gate of the orchestrator's ruling (mail 6174): the relative frequency gap between
+//!   the two falls strictly at every rung n = 16, 32, 64, 128, and its fitted order over n = 32..128 is at
+//!   least 1.8 (faster than 2 to the same limit is not a defect). A planted negative, the same beam tied
+//!   12.5 mm off its station (one element of the coarsest rung, fixed in space), must fail that gate.
+//!   MITC3+ (Reissner-Mindlin) with a Timoshenko beam is the consistent pairing for the linear transfer;
+//!   on Kirchhoff CST/DKT shells an off-node Euler-Bernoulli beam converges to a stiffer limit (see
+//!   `tie_beams_to_shells`);
 //! - the refusals: a beam path off the surface, a one-node beam, and the tie budgets at cap and cap+1.
 //!
 //! Brace fixture: a cantilevered plate 400 x 200 x 3 mm (clamped along x = 0), isotropic E 10 GPa,
@@ -28,6 +31,7 @@
 //! G 0.8 GPa, 460 kg/m3, shear areas 5/6 A) along the plate's mid line y = W/2 + c sin(pi x / L), with
 //! c = 0 (straight) or 20 mm (curved: the whole mesh follows the same bump, so the brace path is a mesh
 //! line). The off-node beam has 3 nodes per 2 shell edges, so only its ends are shell nodes.
+use fs_mms::{RefinementLadder, fit_order};
 use fs_modal::{SliceOptions, eigh_gen_dense, slice_window};
 use fs_plate::PlateSection;
 use fs_plate::shell::junction::{
@@ -315,6 +319,9 @@ struct Plate {
     mesh: ShellMesh,
     clamped: Vec<usize>,
     line: Vec<usize>,
+    /// The grid line 12.5 mm off the mid line, one element of the coarsest rung: the planted
+    /// negative's wrong station.
+    wrong_line: Vec<usize>,
 }
 
 /// 2n x n structured cells; every grid line j = const follows the bump, so the mid line is a mesh line.
@@ -346,6 +353,7 @@ fn plate(n: usize, bump: f64) -> Plate {
         mesh: ShellMesh::new(nodes, tris).unwrap(),
         clamped: (0..=ny).map(|j| id(0, j)).collect(),
         line: (0..=nx).map(|i| id(i, ny / 2)).collect(),
+        wrong_line: (0..=nx).map(|i| id(i, ny / 2 + ny / 16)).collect(),
     }
 }
 
@@ -430,10 +438,22 @@ fn on_node_shell_beam(p: &Plate) -> (fs_sparse::Csr, fs_sparse::Csr) {
     (model.k, model.m)
 }
 
-/// `base` (the plate without beams) tied to a beam chain through `beam_nodes` (centroids).
+/// `base` (the plate without beams) tied to a beam chain through `beam_nodes` (centroids) along the mid line.
 fn tie_beam(
     p: &Plate,
     base: &ShellModel,
+    beam_nodes: &[[f64; 3]],
+    kind: BeamKind,
+    budget: TieBudget,
+) -> Result<fs_plate::shell::junction::BeamTiedShellModel, fs_plate::PlateError> {
+    tie_beam_on(p, base, &p.line, beam_nodes, kind, budget)
+}
+
+/// The same, with the master polyline given.
+fn tie_beam_on(
+    p: &Plate,
+    base: &ShellModel,
+    master_line: &[usize],
     beam_nodes: &[[f64; 3]],
     kind: BeamKind,
     budget: TieBudget,
@@ -453,7 +473,7 @@ fn tie_beam(
         kind,
         master: TieSide {
             component: 0,
-            nodes: p.line.clone(),
+            nodes: master_line.to_vec(),
         },
         side: 1,
         centroid_height_m: 0.5 * BR_H,
@@ -540,6 +560,129 @@ fn g1_matching_beam_tie_reproduces_on_node_beam() {
                 "matching tie {y} against on-node {x}"
             );
         }
+    }
+}
+
+/// Local orders between consecutive rungs (each rung halves h).
+fn local_orders(gaps: &[f64]) -> Vec<f64> {
+    gaps.windows(2).map(|w| (w[0] / w[1]).log2()).collect()
+}
+
+/// The one-sided gate of the orchestrator's ruling (mail 6174): the gap falls strictly at every rung, and
+/// its fitted order over the three finest rungs is at least 1.8. Returns the fit, or why it fails.
+fn falls_at_order_two(rungs: &[usize], gaps: &[f64]) -> Result<f64, String> {
+    if gaps.windows(2).any(|w| w[1] >= w[0]) {
+        return Err(format!("the gap does not fall at every rung: {gaps:?}"));
+    }
+    let hs = rungs[1..].iter().map(|&n| 1.0 / n as f64).collect();
+    let fit = fit_order(&RefinementLadder::new(hs, gaps[1..].to_vec()).map_err(|e| e.to_string())?);
+    if fit.observed < 1.8 {
+        return Err(format!("fitted order {:.3} < 1.8", fit.observed));
+    }
+    Ok(fit.observed)
+}
+
+#[test]
+fn g1_off_node_brace_converges() {
+    const MODES: usize = 4;
+    let rungs = [16usize, 32, 64, 128];
+    for (name, bump) in [("straight", 0.0), ("curved", 0.02)] {
+        // The window: twice the sixth eigenvalue of the coarse CST/DKT on-node model (a dense solve);
+        // a 3 mm plate has nearly the same low modes in both elements.
+        let (k8, m8) = on_node_shell_beam(&plate(8, bump));
+        let hi = window_from(&k8, &m8);
+        let mut on = Vec::new();
+        let mut off = Vec::new();
+        let mut wrong = Vec::new();
+        for &n in &rungs {
+            let p = plate(n, bump);
+            let base = mitc_plate(&p);
+            let on_tie =
+                tie_beam(&p, &base, &on_line_nodes(&p), brace_timoshenko(), budget()).unwrap();
+            on.push(lowest_hz(&on_tie.model.k, &on_tie.model.m, hi, MODES));
+            // The beam's own nodes: 3 per 2 shell edges, so only the ends coincide with shell nodes.
+            let nodes = beam_nodes(3 * n, bump);
+            let off_tie = tie_beam(&p, &base, &nodes, brace_timoshenko(), budget()).unwrap();
+            off.push(lowest_hz(&off_tie.model.k, &off_tie.model.m, hi, MODES));
+            println!(
+                "{name} n={n}: on-node {:.4?} Hz, off-node {:.4?} Hz, beam gap {:.2e} m",
+                on.last().unwrap(),
+                off.last().unwrap(),
+                off_tie.receipt.max_gap_m
+            );
+            if bump == 0.0 {
+                // Planted negative (ruling 6174): the same beam tied to the wrong station, the grid line one
+                // coarsest-rung element (12.5 mm) off the mid line at every rung. The distance is fixed in
+                // space, so the error does not refine away and the gap should stop falling.
+                let wide = TieBudget {
+                    gap_tolerance_m: 0.02,
+                    ..budget()
+                };
+                let w = tie_beam_on(&p, &base, &p.wrong_line, &nodes, brace_timoshenko(), wide)
+                    .unwrap();
+                wrong.push(lowest_hz(&w.model.k, &w.model.m, hi, MODES));
+            }
+        }
+        // The quantity: the off-node beam's distance to the on-node beam at the same rung. The plate's own
+        // discretization error is common to both and cancels; a constant gap (a wrong limit) would stop
+        // falling. Modes within 1 % of each other on the finest rung are gated as their cluster mean (a near
+        // pair trades character between rungs); a cluster whose gap at the coarsest rung is below 1e-5 carries
+        // almost no brace energy and sits at the eigensolver's accuracy, so it is printed and not gated.
+        let finest = on.last().unwrap();
+        let mut clusters: Vec<Vec<usize>> = Vec::new();
+        for mode in 0..MODES {
+            let joins = clusters
+                .last()
+                .is_some_and(|c| finest[mode] / finest[*c.last().unwrap()] - 1.0 < 0.01);
+            if joins {
+                clusters.last_mut().unwrap().push(mode);
+            } else {
+                clusters.push(vec![mode]);
+            }
+        }
+        let mean = |r: &[f64], c: &[usize]| c.iter().map(|&i| r[i]).sum::<f64>() / c.len() as f64;
+        let gaps_of = |series: &[Vec<f64>], c: &[usize]| -> Vec<f64> {
+            (0..rungs.len())
+                .map(|i| (mean(&series[i], c) / mean(&on[i], c) - 1.0).abs())
+                .collect()
+        };
+        let mut gated = 0;
+        for cluster in &clusters {
+            let gaps = gaps_of(&off, cluster);
+            let text: Vec<String> = gaps.iter().map(|g| format!("{g:.2e}")).collect();
+            let orders: Vec<String> = local_orders(&gaps)
+                .iter()
+                .map(|p| format!("{p:.2}"))
+                .collect();
+            if gaps[0] < 1e-5 {
+                println!(
+                    "{name} modes {cluster:?}: relative gap {text:?}, local orders {orders:?}; {}",
+                    "below 1e-5 at the coarsest rung: no brace energy, not gated"
+                );
+                continue;
+            }
+            let fit = falls_at_order_two(&rungs, &gaps)
+                .unwrap_or_else(|e| panic!("{name} brace modes {cluster:?}: {e}"));
+            println!(
+                "{name} modes {cluster:?}: relative gap {text:?}, local orders {orders:?}, {}",
+                format!("fitted order over n = 32..128 {fit:.3} (>= 1.8)")
+            );
+            gated += 1;
+            if bump == 0.0 {
+                let planted = gaps_of(&wrong, cluster);
+                let planted_text: Vec<String> =
+                    planted.iter().map(|g| format!("{g:.2e}")).collect();
+                let verdict = falls_at_order_two(&rungs, &planted);
+                println!(
+                    "{name} modes {cluster:?}, planted wrong station: relative gap {planted_text:?}, gate {verdict:?}"
+                );
+                assert!(
+                    verdict.is_err(),
+                    "the gate must catch a beam tied 12.5 mm off its station"
+                );
+            }
+        }
+        assert!(gated > 0, "{name}: no brace-carried mode to gate");
     }
 }
 
