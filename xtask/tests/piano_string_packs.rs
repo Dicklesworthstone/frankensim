@@ -3,6 +3,11 @@
 //! strength of QQ-W-470B Table II is answered per wire diameter exactly as declared: a tabulated row
 //! exactly, a diameter between rows by the declared linear rule, and a diameter outside the transcribed
 //! rows not at all. This establishes source transport, not experimental validation.
+//!
+//! The engine-piano string tests load compiled packs committed under
+//! `apps/instrument-lab/engine-piano/tests/fixtures/packs` (that crate has its own workspace and cannot
+//! run this compiler). Each fixture must be byte-for-byte this compiler's output for its committed seed,
+//! so a seed edit without a refreshed fixture fails here.
 
 #![deny(unsafe_code)]
 
@@ -28,14 +33,44 @@ fn workspace() -> PathBuf {
         .to_path_buf()
 }
 
+/// Compiled packs the engine-piano string tests load, by seed directory and material state.
+const PIANO_FIXTURES: [(&str, [&str; 4]); 6] = [
+    ("gold-pure-nbs-c447", ["gold", "solid", "nbs-c447", "0"]),
+    (
+        "steel-music-wire-string-heptonstall-ligo-p1400229",
+        ["steel", "solid", "music-wire-untreated", "0"],
+    ),
+    (
+        "steel-music-wire-min-strength-qq-w-470b",
+        ["steel", "solid", "qq-w-470b-minimum", "0"],
+    ),
+    (
+        "copper-pure-nbs-c447-string-wrap",
+        ["copper", "solid", "nbs-c447", "0"],
+    ),
+    ("silver-pure-nbs-c447", ["silver", "solid", "nbs-c447", "0"]),
+    (
+        "silver-drawn-hard-uts-nbs-c101",
+        ["silver", "solid", "drawn-hard-nbs-c101", "0"],
+    ),
+];
+
 /// Compile one committed seed manifest as a material-state pack, exactly as the piano tools do.
 fn compile(manifest: &str, state: [&str; 4]) -> NormalizedMaterialCardPack {
+    let (_, bytes) = compile_bytes(manifest, state, &state.join("-"));
+    NormalizedMaterialCardPack::from_bytes(&bytes).expect("decode compiled pack")
+}
+
+/// The compiler's bytes for one seed, written to `<temp>/<name>.fsmatpk`, and that path.
+fn compile_bytes(manifest: &str, state: [&str; 4], name: &str) -> (PathBuf, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!(
         "frankensim-piano-string-packs-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("fixture directory");
-    let out = dir.join(format!("{}.fsmatpk", state.join("-")));
+    let out = dir.join(format!("{name}.fsmatpk"));
+    // The compiler refuses to overwrite; a reused process id may have left this temp file.
+    let _ = std::fs::remove_file(&out);
     let run = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("matdb-pack")
         .arg("--manifest")
@@ -52,8 +87,31 @@ fn compile(manifest: &str, state: [&str; 4]) -> NormalizedMaterialCardPack {
         "{manifest}: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    NormalizedMaterialCardPack::from_bytes(&std::fs::read(&out).expect("compiled pack"))
-        .expect("decode compiled pack")
+    let bytes = std::fs::read(&out).expect("compiled pack");
+    (out, bytes)
+}
+
+#[test]
+fn engine_piano_pack_fixtures_are_the_compiled_committed_seeds() {
+    let fixtures = workspace().join("apps/instrument-lab/engine-piano/tests/fixtures/packs");
+    let mut stale = Vec::new();
+    for (seed, state) in PIANO_FIXTURES {
+        let manifest = format!("data/matdb/seed-v1/{seed}/manifest.tsv");
+        let (fresh, bytes) = compile_bytes(&manifest, state, seed);
+        let committed = fixtures.join(format!("{seed}.fsmatpk"));
+        if std::fs::read(&committed).ok().as_deref() != Some(bytes.as_slice()) {
+            stale.push(format!(
+                "{} (fresh: {})",
+                committed.display(),
+                fresh.display()
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale or missing engine-piano pack fixtures; commit the fresh compiler output:\n{}",
+        stale.join("\n")
+    );
 }
 
 /// Room temperature on the typed `T` axis and one wire diameter [m].
