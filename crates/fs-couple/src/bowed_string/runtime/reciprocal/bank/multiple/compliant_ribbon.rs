@@ -70,6 +70,11 @@ pub struct HairRibbonProperties {
     /// the single-hair decay tests (`d = n_H D_hair / b`; P&W violin: 1000).
     /// Zero models an undamped hair.
     pub distributed_damping_kg_s_m: f64,
+    /// Ribbon width `b_ref` [m] at which `distributed_damping_kg_s_m` was stated
+    /// (P&W violin: the 10 mm ribbon). The LUMPED total damping `D = d * b_ref`
+    /// is then width-free, exactly as the lumped spring `S` is; a finite-width
+    /// calculation spreads it over the contact without rescaling the total. Data.
+    pub reference_width_m: f64,
     /// Hair mass density `rho_H` [kg/m^3] (P&W: about 1100). Retained as the
     /// provenance of the longitudinal wave speed cross-check `E_H = c_H^2 rho`.
     pub density_kg_m3: f64,
@@ -84,6 +89,7 @@ impl HairRibbonProperties {
             self.hairs_in_contact,
             self.free_length_m,
             self.density_kg_m3,
+            self.reference_width_m,
         ];
         if positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
             || !self.distributed_damping_kg_s_m.is_finite()
@@ -108,6 +114,16 @@ impl HairRibbonProperties {
             self.hairs_in_contact * core::f64::consts::PI * self.hair_radius_m * self.hair_radius_m;
         cross_section * self.youngs_modulus_pa
             / (self.free_length_m * self.excitation_fraction * (1.0 - self.excitation_fraction))
+    }
+
+    /// Lumped tangential damping `D = d * b_ref` [kg/s], the width-free total
+    /// dashpot of the hairs in contact (the distributed `d` times the ribbon
+    /// width at which it was stated). Independent of the finite-width contact's
+    /// own width, exactly as the lumped spring `S` is (frankensim-o7qbp: the
+    /// earlier `d * contact_width` made the total damping scale with the width).
+    #[must_use]
+    fn lumped_tangential_damping_kg_s(&self) -> f64 {
+        self.distributed_damping_kg_s_m * self.reference_width_m
     }
 }
 
@@ -187,7 +203,7 @@ impl CompliantBowRibbon {
             }
         }
         let lumped_stiffness_n_m = properties.lumped_tangential_stiffness_n_m();
-        let lumped_damping_kg_s = properties.distributed_damping_kg_s_m * width_m;
+        let lumped_damping_kg_s = properties.lumped_tangential_damping_kg_s();
         Ok(Self {
             centre,
             width_m,
@@ -420,6 +436,7 @@ mod tests {
             free_length_m: 0.65,
             excitation_fraction: 0.5,
             distributed_damping_kg_s_m: 1000.0,
+            reference_width_m: 1.0e-2,
             density_kg_m3: 1100.0,
         }
     }
@@ -598,6 +615,31 @@ mod tests {
                     &mut out
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn lumped_spring_and_damping_are_width_invariant() {
+        // frankensim-o7qbp: the lumped hair spring S and the lumped hair damping D
+        // are properties of the hairs in contact, not of how wide the finite-width
+        // contact is laid out. Build the same hair over very different ribbon
+        // widths and require S and D bit-identical; also check the violin lumped D
+        // equals the P&W 10 kg/s (d = 1000 (kg/s)/m times b_ref = 10 mm).
+        let hair = violin_hair();
+        let wide = CompliantBowRibbon::new(centre(), 0.33, 1.0e-2, 5, hair).unwrap();
+        let narrow = CompliantBowRibbon::new(centre(), 0.33, 1.0e-4, 5, hair).unwrap();
+        assert_eq!(
+            wide.lumped_stiffness_n_m, narrow.lumped_stiffness_n_m,
+            "lumped spring moved with the ribbon width"
+        );
+        assert_eq!(
+            wide.lumped_damping_kg_s, narrow.lumped_damping_kg_s,
+            "lumped damping moved with the ribbon width"
+        );
+        assert!(
+            (wide.lumped_damping_kg_s - 10.0).abs() <= 1e-9,
+            "violin lumped D {} != 10 kg/s",
+            wide.lumped_damping_kg_s
         );
     }
 }

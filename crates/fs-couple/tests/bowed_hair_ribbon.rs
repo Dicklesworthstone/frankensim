@@ -202,6 +202,7 @@ fn violin_hair() -> HairRibbonProperties {
         free_length_m: 0.65,
         excitation_fraction: 0.5,
         distributed_damping_kg_s_m: 1000.0,
+        reference_width_m: 1.0e-2,
         density_kg_m3: 1100.0,
     }
 }
