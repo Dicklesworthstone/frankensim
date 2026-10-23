@@ -8,7 +8,9 @@
 //! These are section integrals, not a three-dimensional composite law. The
 //! optional shear/torsion binding adds a uniform-shear rod reduction with an
 //! explicit correction factor; Kelvin-Voigt bindings add sourced bending and
-//! linear axial loss. Slip, winding geometry and damage are not modeled.
+//! linear axial loss. [`winding`] and the mass-only [`wound`] add helical
+//! wraps, and [`strength`] checks axial stress against sourced limits.
+//! Winding slip and damage are not modeled.
 //! The explicit [`thermal`] binding adds per-layer thermal eigenstrain and
 //! axial stress. Source validity applies at retained states, not future states.
 
@@ -16,10 +18,14 @@
 pub mod axial;
 /// Per-layer generalized-Maxwell bending spectra without averaged time constants.
 pub mod relaxation;
+/// Axial tensile capacity from per-layer sourced strength limits.
+pub mod strength;
 pub mod thermal;
 pub mod transport;
 /// Close-coiled, sliding round-wire winding over an independently sourced core.
 pub mod winding;
+/// Helical wraps that add inertia, but no tension or stiffness, to a core.
+pub mod wound;
 /// Rotary inertia and explicitly sourced torsional shear loss.
 pub mod torsion;
 

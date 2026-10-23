@@ -34,6 +34,25 @@ homogenization, the P2 milestone.
   winding friction/loss, torsion, thermal mismatch or resolved contact, and
   does not claim acoustic equivalence to a measured or resolved specimen.
 
+- `section::wound::HelicalWrapping` is the mass-only interim for wraps outside
+  the close-coiled admission domain (thick wire/coil ratios, several wraps, as
+  on piano bass strings). Each wrap lies on the diameter beneath it; its line
+  mass is the wire density times area times the exact helix length per axial
+  length. Neighbouring turns must clear one wire diameter at their exact
+  closest approach (any helix angle); `close_wound_pitch_m` solves the
+  tightest admissible pitch. Wraps resolve at the core's query coordinates.
+  They carry no tension and add no EA, EI, loss, friction or wrap prestress:
+  the core section owns those. G0 tests check the helix integral, the second
+  wrap's radius, brute-force turn clearance and every refusal.
+- `section::strength::AxialTensileCapacity` binds a caller-named tensile-limit
+  claim [Pa] (yield, proof or ultimate strength; never chosen, factored or
+  converted to an allowable here) from every bonded layer. A common axial
+  strain gives layer stress `E_i N / EA`; the capacity is
+  `min_i(limit_i EA / E_i)` and that layer governs. A layer without the claim
+  refuses as missing data, never as unbreakable. Only axial-force stress is
+  checked: residual drawing/winding stress, thermal eigenstrain, vibration
+  bending stress and fatigue are absent.
+
 - `section::relaxation::ConcentricPronySection` and
   `section::torsion::ConcentricPronyTorsionalSection` compose independent
   generalized-Maxwell bending/shear spectra on the existing bonded concentric
