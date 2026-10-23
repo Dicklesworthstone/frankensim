@@ -11,6 +11,8 @@ pub mod resistive_film;
 pub mod rolling_loss;
 /// Deterministic finite-patch filtering of measured surface-height traces.
 pub mod surface_excitation;
+/// Source-neutral elastic-viscoplastic shear of a retained third-body layer.
+pub mod layer_contact;
 /// Stateful, work-conjugate tangential constitutive interface.
 pub mod tangential;
 pub use tangential::{

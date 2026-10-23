@@ -25,6 +25,9 @@ use fs_tribo::FrictionLaw;
 #[path = "material_multi_bow/fiber_ribbon.rs"]
 mod fiber_ribbon;
 
+#[path = "material_multi_bow/shear_layer.rs"]
+mod shear_layer;
+
 fn with_cx<T>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> T) -> T {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

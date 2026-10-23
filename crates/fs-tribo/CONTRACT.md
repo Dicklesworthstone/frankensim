@@ -50,8 +50,19 @@ reactions, and residual embedding.
   state is immutable until the consuming solver publishes it. The card impl
   requires temperature and pressure without defaults, and checks the solved
   speed against its closed applicability interval. Anisotropic body response,
-  thermal transport, compliant storage, layer dynamics and pHS network wrappers
-  belong to their respective downstream owners.
+  thermal transport and pHS network wrappers belong to their respective owners.
+- `layer_contact::ThirdBodyLayerContact` implements the same seam with retained
+  elastic and plastic shear. The midpoint radial return solves the full
+  isotropic body load line in two tangent axes. Reversible energy is
+  `H = k |e|²/2`; physical dissipation is `Y |dp| + c |dp|²/dt`, with no
+  numerical energy deficit relabeled as heat. `Sticking` means no plastic flow;
+  elastic relative displacement may remain nonzero. Every step requires
+  positive compressive load, the original frozen temperature, the caller's
+  explicit elastic-slip bound and force budget. Opening and foreign-law
+  checkpoints refuse without changing state. The numerical law has caller
+  authority; the separate fs-material source owner binds actual layer geometry
+  and the distinct plastic-shear-viscosity claim. Thermal softening, layer
+  transfer/wear, recontact and measured rosin behavior are outside this rung.
 - `HertzSpherePlane` and `HertzCylinderPlane` are G1 elastic closed forms,
   expressed in SI. They use caller-supplied radius/modulus and retain the
   caller ceiling; a mathematical closed form does not validate its inputs.
@@ -118,8 +129,9 @@ material-hysteresis rung would need a disjoint work channel.
 - All public construction and evaluation paths refuse missing identity,
   non-dry medium, negative/non-finite input, and every non-finite derived
   candidate from finite extreme inputs.
-- Tangential traction and scalar resistance oppose their declared relative
-  rates; output dissipated power/work is finite and non-negative.
+- Dry tangential and scalar resistance oppose their declared relative rates.
+  Elastic layers can return stored work; total contact work equals storage
+  change plus finite, non-negative physical dissipation.
 - Heat shares are finite, non-negative, and sum to one. A dissipation step's
   channels are finite, non-negative, and close to its total before a ledger can
   mutate. All ledger channels and wear candidate totals are checked before any
@@ -320,7 +332,7 @@ not admit a law.
 This crate does not mint material admission, calibration, the upstream
 `fs-matdb::InterfaceSystemCard` query receipt, a flash-temperature error bound
 or thermal-port solution, a roughness measurement or statistical roughness
-model, adhesion, plasticity, finite-patch partial
+model, adhesion, general three-dimensional plasticity, finite-patch partial
 slip as a resolved contact field, general lubrication/EHL, contact geometry evolution,
 wear geometry updates, stop time, Euler-disc ranking, one-millimetre optimum,
 sound pressure, loudness, or experimental/video correspondence. The surface

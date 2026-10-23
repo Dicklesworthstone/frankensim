@@ -73,6 +73,12 @@ pub enum ModalFrictionRegime {
     Sticking,
     /// The fs-tribo kinetic law is satisfied at actual step-averaged slip.
     Sliding,
+    /// An explicitly bound material layer carries reversible elastic shear.
+    /// Finite elastic relative motion is permitted even without plastic flow.
+    Shearing {
+        /// Whether this interval produced irreversible plastic slip.
+        plastic_flow: bool,
+    },
 }
 
 /// Network, constitutive and step-averaged sticking failures stay distinct.

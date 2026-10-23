@@ -26,6 +26,9 @@ pub use reference_ratios::*;
 mod linear_interface;
 pub use linear_interface::*;
 
+mod shear_layer;
+pub use shear_layer::*;
+
 mod thermal_expansion;
 pub use thermal_expansion::*;
 

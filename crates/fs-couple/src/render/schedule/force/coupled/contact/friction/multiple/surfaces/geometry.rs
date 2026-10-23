@@ -85,6 +85,9 @@ impl MultiFrictionModalSystem {
             if moving && self.contact_loads[i].is_some() {
                 return Err(invalid("contact-loaded friction cannot migrate without its normal patch").into());
             }
+            if moving && self.shear_layers[i].is_some() {
+                return Err(invalid("material shear cannot migrate without layer-history transport").into());
+            }
             changed |= moving;
         }
         if !changed {

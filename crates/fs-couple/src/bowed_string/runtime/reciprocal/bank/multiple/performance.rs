@@ -135,6 +135,11 @@ impl MultiBowStringBank {
                 && compiled.events.iter().any(|e| e.drive.normal_force_n != 0.0) {
                 return Err(source_invalid("contact-loaded bow tracks must not prescribe an additional normal force"));
             }
+            if self.system.material_shear_layer(port).is_some()
+                && self.system.contact_normal_load(port).is_none()
+                && compiled.events.iter().any(|e| e.drive.normal_force_n <= 0.0) {
+                return Err(source_invalid("retained material shear layers require positive normal load throughout playback"));
+            }
             remaining_work -= compiled.required_work;
             events.try_reserve(compiled.events.len())
                 .map_err(|_| source_invalid("cannot reserve complete bow controls"))?;

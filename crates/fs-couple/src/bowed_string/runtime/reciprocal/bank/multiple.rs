@@ -25,7 +25,8 @@ use crate::render::schedule::force::coupled::contact::friction::multiple::{
 pub struct MaterialBowContact {
     /// Original string index and fixed interior station along its full span.
     pub location: StringBowLocation,
-    /// Unmodified dry-friction law for this prescribed moving surface.
+    /// Original dry-friction construction law. An explicitly bound material
+    /// shear layer replaces its active traction mechanism on that contact.
     pub law: FrictionLaw,
     /// Original per-contact physical and nonlinear-solve limits.
     pub friction: ModalFrictionConfig,
@@ -130,7 +131,8 @@ impl MultiBowStringBank {
     pub const fn system(&self) -> &MultiFrictionModalSystem { &self.system }
     /// One physical sample for ALL strings, bodies and contacts. The drive slice
     /// must match `source().bows()` exactly. A prescribed zero load releases its
-    /// bow; for contact-loaded bows, zero means no additional prescribed load
+    /// bow unless a retained material shear layer is bound (opening then refuses).
+    /// For contact-loaded bows, zero means no additional prescribed load
     /// and separation of the bound normal contact supplies the actual release.
     pub fn step(&mut self, external: &[f64], drives: &[FrictionDrive])
         -> Result<&MultiFrictionFrame, ModalFrictionError> { self.system.step(external, drives) }
@@ -165,3 +167,6 @@ pub mod compliant_ribbon;
 
 /// Resolved receiving-body motion and opposite tangential contact reactions.
 pub mod surfaces;
+
+/// Source-bound isothermal material shear in the original pressure renderer.
+mod shear_layer;
