@@ -7,6 +7,9 @@
 #[path = "product_qmc_checkpoint.rs"]
 mod checkpoint;
 
+mod batch;
+pub use batch::{QmcBatchExecution, QmcBatchReport};
+
 /// Frozen physical-coordinate mean controls on complete independent replicates.
 pub mod mean_control;
 
