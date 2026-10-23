@@ -9,6 +9,9 @@ pub mod diffusion;
 pub mod transport;
 
 use super::*;
+use super::super::exchange::{MaterialExchangeSample, gas_law::GasSurface};
+use crate::cavity_phs::piston::thermal::ConductanceSample;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::{
     self, GasNetworkError, GasNetworkLink, GasNetworkSolve, GasNetworkStep,
 };
@@ -31,6 +34,34 @@ impl core::fmt::Display for MaterialFlowError {
     }
 }
 impl std::error::Error for MaterialFlowError {}
+
+/// A transport refusal when the following assembly uses a caller-selected
+/// gas heat law. Existing nozzle errors remain distinct from typed heat-law
+/// source errors; no string conversion or fallback coefficient is introduced.
+#[derive(Debug)]
+pub enum MaterialGasLawFlowError<E> {
+    Invalid(&'static str),
+    Flow(GasNetworkError),
+    Exchange(ReactiveExchangeError<E>),
+    Gas { chamber: u64, error: fs_material::MaterialError },
+    Cancelled,
+}
+impl<E: core::fmt::Debug> core::fmt::Display for MaterialGasLawFlowError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "material gas-law flow assembly: {self:?}")
+    }
+}
+impl<E: core::fmt::Debug> std::error::Error for MaterialGasLawFlowError<E> {}
+impl<E> From<GasNetworkError> for MaterialGasLawFlowError<E> {
+    fn from(error: GasNetworkError) -> Self {
+        match error { GasNetworkError::Cancelled => Self::Cancelled, other => Self::Flow(other) }
+    }
+}
+impl<E> From<ReactiveExchangeError<E>> for MaterialGasLawFlowError<E> {
+    fn from(error: ReactiveExchangeError<E>) -> Self {
+        match error { ReactiveExchangeError::Cancelled => Self::Cancelled, other => Self::Exchange(other) }
+    }
+}
 impl From<GasNetworkError> for MaterialFlowError {
     fn from(error: GasNetworkError) -> Self {
         match error { GasNetworkError::Cancelled => Self::Cancelled, other => Self::Flow(other) }
@@ -67,11 +98,11 @@ pub struct FlowChamberStep {
 }
 /// Stage reports retain their original reference states. The total balance
 /// below encloses ALL live owners from before flow until after exchange/motion.
-pub struct MaterialFlowAdvance<F = GasNetworkStep> {
+pub struct MaterialFlowAdvance<F = GasNetworkStep, I = ResolvedMaterialStatePoint> {
     /// The actual selected transport owner's report, before reaction/heat/motion.
     pub flow: F,
     /// This unchanged report starts AFTER the selected species-transport stage.
-    pub exchange: MaterialExchangeAdvance,
+    pub exchange: MaterialExchangeAdvance<I>,
     pub chambers: Vec<FlowChamberStep>,
     pub total_mass_residual_kg: f64,
     pub total_energy_residual_j: f64,
@@ -138,6 +169,127 @@ impl<'m> MaterialExchangeState<'m> {
         self.finish_flow_candidate(prepared, cx, target_s, ports, drives, reactions,
             gas_patches, controls, guess_j, FlowStage { parcels, moved, report: flow,
                 mass_tolerance_kg: flow_controls.mass_tolerance_kg })
+    }
+
+    /// Preview conservative nozzle transport followed by reactions and a
+    /// caller-selected gas heat law on the same live assembly. Transport runs
+    /// once from the accepted snapshot; the heat law therefore sees the actual
+    /// transported/reacted gas during every thermal/mechanical trial.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn flow_step_with_gas_law_candidate<I, E>(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+        target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        links: &[GasNetworkLink], flow_controls: GasNetworkSolve,
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<(Self, MaterialFlowAdvance<GasNetworkStep, I>), MaterialGasLawFlowError<E>> {
+        use MaterialGasLawFlowError as Error;
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        if self.chambers.len() > controls.maximum_chambers
+            || self.chambers.len() > flow_controls.maximum_parcels {
+            return Err(Error::Invalid("live chambers exceed flow or coupled work bounds"));
+        }
+        let dt = target_s - self.time_s();
+        let parcels = self.chambers.iter()
+            .map(|(&id, chamber)| (id, chamber.gas().clone())).collect();
+        let (parcels, flow) = network::step_candidate(&parcels, links, dt,
+            flow_controls, || cx.checkpoint().is_err())?.into_parts();
+        let mut moved = BTreeSet::new();
+        for link in &flow.links {
+            if link.transfer.transferred_mass_kg != 0.0 {
+                moved.insert(link.donor); moved.insert(link.receiver);
+            }
+        }
+        let mut chambers = BTreeMap::new();
+        for (id, parcel) in parcels {
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            let mut chamber = self.chambers[&id].clone();
+            chamber.gas = parcel;
+            chambers.insert(id, chamber);
+        }
+        let (mut next, exchange) = self.step_with_gas_law_from_chambers(
+            &chambers, prepared, cx, target_s, ports, drives, reactions,
+            surfaces, controls, guess_j, resolve)?;
+
+        let mut mass = 0.0;
+        let mut total = (exchange.report.electrical.stored_after_j
+            - exchange.report.electrical.stored_before_j)
+            + exchange.report.thermal.stored_energy_change_j
+            - exchange.report.electrical.native.supplied
+            - exchange.step.external_network_heat_j;
+        let mut accounts = Vec::with_capacity(self.chambers.len());
+        for boundary in &exchange.report.source.chambers {
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            let id = boundary.id;
+            let before = &self.chambers[&id];
+            let after = next.chambers.get_mut(&id)
+                .ok_or(Error::Invalid("flow advance omitted a live chamber"))?;
+            let dm = after.gas().mass_kg() - before.gas().mass_kg();
+            let u0 = before.gas().state().specific_internal_energy_j_kg();
+            let du = after.gas().mass_kg()
+                * (after.gas().state().specific_internal_energy_j_kg() - u0) + dm*u0;
+            let s0 = before.gas().state().specific_entropy_j_kg_k()
+                .map_err(|error| Error::Gas { chamber:id, error })?;
+            let s1 = after.gas().state().specific_entropy_j_kg_k()
+                .map_err(|error| Error::Gas { chamber:id, error })?;
+            let ds = after.gas().mass_kg()*(s1-s0) + dm*s0;
+            let mechanical = &boundary.boundary.piston;
+            let dk = (0.5*before.mass_kg()*(after.velocity_m_s()-before.velocity_m_s()))
+                * (after.velocity_m_s()+before.velocity_m_s());
+            let drive = drives.iter().find(|d| d.chamber==id)
+                .ok_or(Error::Invalid("missing accepted drive"))?;
+            mass += dm;
+            total += du + dk + mechanical.exterior_pressure_work_j
+                - mechanical.external_force_work_j - drive.heat_j;
+            if ![dm,du,ds,dk,mass,total].iter().all(|v|v.is_finite()) {
+                return Err(Error::Invalid("whole-interval mass, entropy or energy is unrepresentable"));
+            }
+            if moved.contains(&id) {
+                after.ports = before.ports.clone();
+                after.ports.accept(crate::port_adoption::StepAccount {
+                    tick: before.ports.next_tick(), duration_s: dt,
+                    storage_change_j: Some(du+dk), loss_j: Some(0.0),
+                    included_work_j: 0.0, entropy_change_j_k: ds,
+                    tolerance_j: Some(controls.total_energy_tolerance_j),
+                    unavailable: Some("gas network mass exchange needs stream ports; use the whole-assembly flow balance"),
+                }, [
+                    crate::port_adoption::PortTransfer::work(
+                        mechanical.external_force_work_j-mechanical.exterior_pressure_work_j,true),
+                    crate::port_adoption::PortTransfer::heat(
+                        mechanical.gas.supplied_heat_j,mechanical.midpoint.state().temperature),
+                ]);
+            }
+            accounts.push(FlowChamberStep { chamber:id, mass_change_kg:dm,
+                gas_energy_change_j:du, entropy_change_j_k:ds });
+        }
+        if mass.abs() > flow_controls.mass_tolerance_kg
+            || total.abs() > controls.total_energy_tolerance_j {
+            return Err(Error::Invalid("flow, reactions, gas heat, finite bodies, circuit and motion fail conservation"));
+        }
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        Ok((next, MaterialFlowAdvance { flow, exchange, chambers:accounts,
+            total_mass_residual_kg:mass, total_energy_residual_j:total }))
+    }
+
+    /// Publish the complete transport/reactive/gas-heat assembly together.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_with_flow_and_gas_law<I, E>(
+        &mut self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+        target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], surfaces: &[GasSurface],
+        links: &[GasNetworkLink], flow_controls: GasNetworkSolve,
+        controls: NetworkSolve, guess_j: &[f64],
+        resolve: impl Fn(Contact, &DepositionSimulation<'m>, &MaterialExchangeSample,
+            &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
+    ) -> Result<MaterialFlowAdvance<GasNetworkStep, I>, MaterialGasLawFlowError<E>> {
+        let (next, report) = self.flow_step_with_gas_law_candidate(
+            prepared,cx,target_s,ports,drives,reactions,surfaces,links,
+            flow_controls,controls,guess_j,resolve)?;
+        cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
+        *self = next;
+        Ok(report)
     }
 
     #[allow(clippy::too_many_arguments)]
