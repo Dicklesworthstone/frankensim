@@ -296,6 +296,35 @@ fn g3_imported_cards_reach_live_pressure_clones_and_overlapping_impacts() {
 }
 
 #[test]
+fn g3_hihat_declared_striker_overrides_default_tip_and_survives_overlapping_impacts() {
+    let bronze = pack("hi-hat bronze", 8800.0, 110e9, Some(0.34));
+    let stick = pack("hi-hat striker", 800.0, 12e9, Some(0.3));
+    // The existing binding declares a 5 mm striker, distinct from the 4 mm default.
+    let material = binding(&bronze, &bronze, &stick);
+    let coefficients = |law| {
+        let Law::Power { k, alpha, mu } = law;
+        (k, alpha, mu)
+    };
+    let expected = coefficients(material.impact_law());
+    assert_ne!(expected, coefficients(kit::hertz_stick(0.004, 110e9, 0.34)));
+    for name in ["hihat", "hihat-open", "hihat-closed"] {
+        let mut player = live::Live::with_materials_record(
+            name, 7.0, "293.15 101325 0", material.clone(),
+        ).unwrap();
+        assert_eq!(coefficients(player.ins.contacts.last().unwrap().law), expected, "{name}");
+        let before = player.ins.bodies.len();
+        player.strike(0.85 * player.radius, 0.0, 2.5);
+        player.strike(0.8 * player.radius, 0.0, 1.5);
+        assert_eq!(player.ins.bodies.len(), before + 1, "{name}");
+        assert_eq!(coefficients(player.ins.contacts.last().unwrap().law), expected, "{name}");
+        near(player.ins.bodies.last().unwrap().mass[0], material.striker_mass_kg());
+        let copy = player.clone();
+        assert_eq!(coefficients(copy.ins.contacts.last().unwrap().law), expected, "{name}");
+        assert_eq!(copy.ins.materials(), player.ins.materials());
+    }
+}
+
+#[test]
 fn g0_material_pack_admission_refuses_incomplete_out_of_domain_and_malformed_sources() {
     let film = pack("complete", 1390.0, 4e9, Some(0.38)).to_bytes();
     let missing = pack("no poisson claim", 1390.0, 4e9, None).to_bytes();

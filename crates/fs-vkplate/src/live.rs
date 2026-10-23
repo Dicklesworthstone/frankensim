@@ -229,7 +229,9 @@ impl Live {
             ins.contacts.len() - 1 // a drum's striker contact (inactive until the first stroke)
         } else {
             // hi-hats and cymbals: one stick contact, moved to wherever the next stroke lands
-            let tip = if piece == "ride" { 0.004 } else if piece == "crash" { 0.008 } else { 0.005 };
+            let tip = if matches!(piece, "hihat" | "hihat-open" | "hihat-closed") {
+                kit::HIHAT_STICK_TIP_RADIUS_M
+            } else if piece == "ride" { 0.004 } else if piece == "crash" { 0.008 } else { 0.005 };
             let law = materials.map_or_else(|| kit::hertz_stick(tip, BRONZE.0, BRONZE.1), KitMaterials::impact_law);
             let mut c = Contact::new(vec![(target, 0, 1.0)], vec![(stick, 0, 1.0)], 0.0, law);
             c.active = false;
@@ -378,6 +380,10 @@ impl Live {
         self.asleep
     }
 
+    /// Read-only access to the actual instrument, including its source
+    /// operators and last solved physical state. Does not advance playback.
+    pub fn instrument(&self) -> &Instrument { &self.ins }
+
     /// Output-filter latency, separate from acoustic travel and device/FIFO latency.
     pub fn filter_latency_frames(&self) -> usize { if self.oversample == 1 { 0 } else { 16 } }
 
@@ -493,19 +499,27 @@ mod tests {
         };
         assert_eq!(coefficients(kit::HIHAT_RIM_LAW), (2.0e9, 1.5, 0.08));
         for scale in [4.0, 7.0] {
-            let offline = kit::hihat_scaled(0.002, 0.0, &[], scale).unwrap();
+            let offline = kit::hihat_scaled(0.002, 0.0, &[(0.0, 2.5)], scale).unwrap();
             let expected = (2.0e9 * scale * scale, 1.5, 0.08);
             assert!(!offline.instrument.contacts.is_empty());
-            for contact in &offline.instrument.contacts {
+            let strike = offline.instrument.contacts.len() - 1;
+            let expected_striker = coefficients(offline.instrument.contacts[strike].law);
+            assert_eq!(expected_striker, coefficients(kit::hertz_stick(0.004, BRONZE.0, BRONZE.1)),
+                "the source hi-hat uses a 4 mm tip independently of live/native agreement");
+            let legacy_striker = coefficients(kit::hertz_stick(0.005, BRONZE.0, BRONZE.1));
+            assert_ne!(expected_striker, legacy_striker, "the old generic tip must not satisfy native hi-hat parity");
+            for contact in &offline.instrument.contacts[..strike] {
                 assert_eq!(coefficients(contact.law), expected);
             }
             for name in ["hihat", "hihat-open", "hihat-closed"] {
                 let live = Live::new(name, scale).unwrap();
                 let rims = &live.ins.contacts[..live.strikers[0].1];
-                assert_eq!(rims.len(), offline.instrument.contacts.len(), "{name}@{scale}");
+                assert_eq!(rims.len(), strike, "{name}@{scale}");
                 for contact in rims {
                     assert_eq!(coefficients(contact.law), expected, "{name}@{scale}");
                 }
+                assert_eq!(coefficients(live.ins.contacts[live.strikers[0].1].law), expected_striker,
+                    "native/live striker contact mismatch for {name}@{scale}");
             }
         }
     }

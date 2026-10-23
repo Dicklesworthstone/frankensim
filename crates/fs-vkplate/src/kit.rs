@@ -13,6 +13,10 @@ pub const OUT_RATE: f64 = 48_000.0;
 /// (crates/fs-couple/examples/percussion: contact_effective_mass_kg = 0.00724314).
 pub const STICK_TIP_KG: f64 = 0.00724314;
 
+/// Default hi-hat stick-tip radius used by native and live impacts [m].
+/// A declared KitMaterials striker keeps its own sourced impact law.
+pub const HIHAT_STICK_TIP_RADIUS_M: f64 = 0.004;
+
 /// Polyester (Mylar) film.
 const MYLAR: (f64, f64, f64) = (4.0e9, 0.38, 1390.0);
 /// B20 cymbal bronze.
@@ -671,7 +675,7 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
     for &(t, v) in hits {
         let fp = ins.bodies[ti].footprint(0.85 * ts.radius, 0.0, 0.0);
-        let tip = 0.004;
+        let tip = HIHAT_STICK_TIP_RADIUS_M;
         let law = materials.map_or_else(|| hertz_stick(tip, primary.0, primary.1), KitMaterials::impact_law);
         let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
         con.active = false;
