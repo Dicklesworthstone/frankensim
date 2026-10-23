@@ -129,7 +129,9 @@ impl<'m> MaterialExchangeState<'m> {
     /// not simultaneous flow/chemistry/heat integration. Both sides of every
     /// path are finite gas stores. To model an outside reservoir it must be an
     /// explicit finite owner; no ambient pressure or composition is invented.
-    /// The currently supported stores all have the existing piston dynamics.
+    /// Stores use the existing gas/wall owner with either free motion or fixed
+    /// support. Fixed chambers retain exact volume and report the pressure
+    /// reaction impulse, with zero support work, through the same assembly.
     ///
     /// Transfer occurs only once before nonlinear feedback. Carried enthalpy
     /// and formation energy are never deposited again as heat. Source catalogs

@@ -109,6 +109,9 @@ impl DoubleActingGasPiston {
         opposing: ClosedGasParcel,
         opposing_area_m2: f64,
     ) -> Result<Self, PistonError> {
+        if primary.support() == super::PistonSupport::Fixed {
+            return Err(invalid("double-acting shared motion requires a free primary wall; use independently fixed GasPiston chambers for stationary volumes"));
+        }
         if !positive(opposing_area_m2)
             || !positive(opposing.volume_m3() / opposing_area_m2)
             || !positive(opposing_area_m2 / primary.area_m2())

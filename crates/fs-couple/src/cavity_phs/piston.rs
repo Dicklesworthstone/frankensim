@@ -1,13 +1,15 @@
-//! A moving inertial wall coupled to a source-backed gas cavity.
+//! A free or fixed inertial wall coupled to a source-backed gas cavity.
 //!
 //! The gas owns caloric state, EOS, source support, transport and acoustic
 //! properties. This module owns ONE translational boundary coordinate and its
-//! momentum. Both use the same midpoint pressure: there is no prescribed-motion
+//! momentum or fixed-support reaction. Both use the same midpoint pressure: there is no prescribed-motion
 //! animation, nominal-air load, or independent pressure/work approximation.
 
 /// Two source-resolved gases acting on one inertial wall and one momentum state.
 pub mod double_acting;
 mod impulse;
+mod support;
+pub use support::PistonSupport;
 /// Conservative nozzle exchange with a finite reservoir and the same wall step.
 pub mod exchange;
 
@@ -36,6 +38,7 @@ pub struct GasPiston {
     mass_kg: f64,
     area_m2: f64,
     velocity_m_s: f64,
+    support: PistonSupport,
     ports: crate::port_adoption::ModulePorts,
 }
 
@@ -47,6 +50,7 @@ impl PartialEq for GasPiston {
             && self.mass_kg == other.mass_kg
             && self.area_m2 == other.area_m2
             && self.velocity_m_s == other.velocity_m_s
+            && self.support == other.support
     }
 }
 
@@ -69,6 +73,7 @@ pub struct PistonInput {
 pub struct PistonSolve {
     /// Final-volume bracket [m3], containing current volume. Both endpoints and
     /// all queried states must be supported by the original gas material.
+    /// Fixed support accepts [V, V] and queries only the unchanged volume.
     pub volume_bracket_m3: [f64; 2],
     /// Existing gas temperature, source-energy and iteration controls.
     pub gas: GasEnergySolve,
@@ -126,12 +131,18 @@ pub struct PistonStep {
     pub external_force_work_j: f64,
     /// Work delivered against the external pressure, pe*(V1-V0) [J].
     pub exterior_pressure_work_j: f64,
-    /// M*(v1-v0) - dt*(A*(pm-pe)+F) [N s].
+    /// Signed impulse exerted ON the wall by its fixed support [N s].
+    /// Zero for a freely translating wall; positive towards gas expansion.
+    pub support_impulse_n_s: f64,
+    /// Support impulse times actual midpoint wall velocity [J]. Both available
+    /// modes give exactly zero: free has no support, fixed has no motion.
+    pub support_work_j: f64,
+    /// M*(v1-v0) - dt*(A*(pm-pe)+F) - support impulse [N s].
     pub momentum_residual_n_s: f64,
-    /// Kinetic change minus gas work plus exterior work minus force work [J].
+    /// Kinetic change minus gas work plus exterior work minus force/support work [J].
     pub mechanical_energy_residual_j: f64,
     /// Gas internal plus kinetic change plus exterior work minus force work
-    /// minus prescribed heat [J], independently measured from accepted states.
+    /// minus support work and prescribed heat [J], measured from accepted states.
     pub total_energy_residual_j: f64,
     /// Interior mechanical trials; current-volume/bracket checks are separate.
     pub iterations: usize,
@@ -145,6 +156,7 @@ struct Trial {
     velocity: f64,
     residual: f64,
     tangent: f64,
+    support_impulse: f64,
 }
 fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn invalid(s: &'static str) -> PistonError { PistonError::Invalid(s) }
@@ -180,6 +192,7 @@ impl GasPiston {
             mass_kg,
             area_m2,
             velocity_m_s,
+            support: PistonSupport::Free,
             ports,
         })
     }
@@ -202,6 +215,9 @@ impl GasPiston {
     fn admit_linear_clock(&self, state: &ResolvedThermochemicalGasState, volume_m3: f64,
         duration_s: f64) -> Result<(),PistonError>
     {
+        // A fixed constraint removes this wall-compressibility oscillator.
+        // Gas caloric, reaction and transport owners retain their own controls.
+        if self.support == PistonSupport::Fixed { return Ok(()); }
         let gas=state.state();
         let omega=(gas.density*gas.sound_speed*gas.sound_speed*self.area_m2*self.area_m2
             /(self.mass_kg*volume_m3)).sqrt();
@@ -225,7 +241,7 @@ impl GasPiston {
             || !residual.is_finite() || !positive(tangent) || !positive(volume/self.area_m2)
             || !(0.5*self.mass_kg*velocity*velocity).is_finite()
         { return Err(invalid("piston candidate position, velocity, impulse or tangent is unrepresentable")); }
-        Ok(Trial { gas, displacement, velocity, residual, tangent })
+        Ok(Trial { gas, displacement, velocity, residual, tangent, support_impulse: 0.0 })
     }
 
     fn finish(
@@ -244,11 +260,15 @@ impl GasPiston {
         let kinetic = (0.5*self.mass_kg*(trial.velocity-before))*(trial.velocity+before);
         let exterior = input.exterior_pressure_pa*(trial.gas.endpoint().volume_m3()-self.gas.volume_m3());
         let external = input.external_force_n*trial.displacement;
+        let support_work = trial.support_impulse * f64::midpoint(before, trial.velocity);
+        let force = self.area_m2*(trial.gas.midpoint().state().pressure-input.exterior_pressure_pa)
+            + input.external_force_n;
+        let momentum = self.mass_kg*(trial.velocity-before)-input.duration_s*force-trial.support_impulse;
         let gas_step = trial.gas.step();
-        let mechanical = (kinetic-gas_step.work_by_gas_j)+exterior-external;
-        let total = (gas_step.stored_energy_change_j+kinetic)+exterior-external-input.heat_j;
-        if ![kinetic, exterior, external, mechanical, total].iter().all(|v| v.is_finite())
-            || trial.residual.abs() > controls.momentum_tolerance_n_s
+        let mechanical = (kinetic-gas_step.work_by_gas_j)+exterior-external-support_work;
+        let total = (gas_step.stored_energy_change_j+kinetic)+exterior-external-support_work-input.heat_j;
+        if ![kinetic, exterior, external, support_work, momentum, mechanical, total].iter().all(|v| v.is_finite())
+            || momentum.abs() > controls.momentum_tolerance_n_s
             || total.abs() > controls.energy_tolerance_j
         { return Err(invalid("accepted piston/gas impulse or independently measured total energy did not close")); }
         let midpoint = trial.gas.midpoint().clone();
@@ -256,7 +276,8 @@ impl GasPiston {
         let report = PistonStep { gas: gas_step, midpoint, displacement_m: trial.displacement,
             velocity_m_s: [before, trial.velocity], kinetic_energy_change_j: kinetic,
             external_force_work_j: external, exterior_pressure_work_j: exterior,
-            momentum_residual_n_s: trial.residual, mechanical_energy_residual_j: mechanical,
+            support_impulse_n_s: trial.support_impulse, support_work_j: support_work,
+            momentum_residual_n_s: momentum, mechanical_energy_residual_j: mechanical,
             total_energy_residual_j: total, iterations, material_trials };
         poll(cancelled)?;
         self.ports.accept(
@@ -273,7 +294,7 @@ impl GasPiston {
                 unavailable: None,
             },
             [
-                crate::port_adoption::PortTransfer::work(external - exterior, true),
+                crate::port_adoption::PortTransfer::work(external - exterior + support_work, true),
                 crate::port_adoption::PortTransfer::heat(
                     input.heat_j,
                     report.midpoint.state().temperature,
@@ -292,6 +313,9 @@ impl GasPiston {
     /// The gas computes pm and its exact DISCRETE volume tangent. Every trial
     /// starts from the same accepted gas state; rejected trials never advance it.
     /// Exterior pressure and additional force are constant during this call.
+    /// With fixed support, V and velocity remain exactly unchanged/zero; the
+    /// support supplies the balancing impulse with zero mechanical work. The
+    /// same gas owner still resolves all heat, material and pressure changes.
     ///
     /// Caller cancellation can be bound to the existing runtime CancelGate.
     /// At most maximum_iterations+3 gas proposals are made, each with the gas
@@ -305,11 +329,16 @@ impl GasPiston {
         let [lo, hi] = controls.volume_bracket_m3;
         if !positive(input.duration_s) || !input.heat_j.is_finite()
             || !input.exterior_pressure_pa.is_finite() || input.exterior_pressure_pa < 0.0
-            || !input.external_force_n.is_finite() || !positive(lo) || !positive(hi) || lo >= hi
+            || !input.external_force_n.is_finite() || !positive(lo) || !positive(hi) || lo > hi
+            || (lo == hi && self.support == PistonSupport::Free)
             || self.gas.volume_m3() < lo || self.gas.volume_m3() > hi
             || !positive(controls.momentum_tolerance_n_s) || !positive(controls.energy_tolerance_j)
             || !(1..=128).contains(&controls.maximum_iterations)
         { return Err(invalid("invalid piston drive, volume bracket, residual tolerances or iteration cap")); }
+        if self.support == PistonSupport::Fixed {
+            let trial = self.fixed_trial(input, controls, &mut cancelled)?;
+            return self.finish(trial, input, controls, 0, 1, &mut cancelled);
+        }
         self.admit_linear_clock(self.gas.state(),self.gas.volume_m3(),input.duration_s)?;
         let solved = impulse::solve(self.gas.volume_m3(), controls, |volume| {
             let trial = self.trial(volume, input, controls, &mut cancelled)?;

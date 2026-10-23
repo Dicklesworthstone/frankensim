@@ -130,3 +130,68 @@ fn failure_after_transport_preserves_every_live_owner_and_retry_advances_once() 
         for (&id,g) in state.chambers() {assert_eq!(g.last_window_transfers(),saved[&id].last_window_transfers());}
     }));
 }
+
+#[test]
+fn fixed_chambers_share_flow_reaction_thermal_and_circuit_history_without_motion() {
+    use fs_couple::cavity_phs::piston::PistonSupport;
+    fixture([0.2,0.2],150.0,|assembly,thermal,circuit|with_cx(|cx,_| {
+        let law = reaction(50.0);
+        let product = law.catalog().with_composition(
+            Composition::new(CompositionBasis::MoleFraction,vec![0.0,1.0]).unwrap(),
+        ).unwrap();
+        let prepared = assembly.prepare(cx,&thermal).unwrap();
+        let chambers = BTreeMap::from([
+            (10,piston(&law).with_fixed_support().unwrap()),
+            (20,parcel_piston(product,180000.0).with_fixed_support().unwrap()),
+        ]);
+        let original = chambers.clone();
+        let cells = thermal.cells().clone();
+        let charges = circuit.charges_c().to_vec();
+        let mut state = MaterialExchangeState::from_parts(thermal,circuit,chambers);
+        let mut drives = drives(state.chambers());
+        for drive in &mut drives {
+            drive.piston_solve.volume_bracket_m3 = [state.chambers()[&drive.chamber].gas().volume_m3();2];
+        }
+        let reactions = [ChamberReaction {chamber:10,reaction:&law,controls:chemical()}];
+        // Compare the actual composed reaction with the existing flow/reaction
+        // owners, proving nonlinear wall-heat trials do not burn it repeatedly.
+        let parcels = state.chambers().iter().map(|(&id,g)|(id,g.gas().clone())).collect();
+        let staged = network::step_candidate(&parcels,&links(),0.00005,flow_controls(),||false).unwrap();
+        let expected = law.parcel_candidate(&staged.parcels()[&10],0.00005,chemical(),||false).unwrap();
+        let mut exchanged_heat = 0.0;
+        for interval in 0..4 {
+            let target = state.time_s()+0.00005;
+            let report = state.advance_with_flow(&prepared,cx,target,&[],&drives,
+                &reactions,&gas_fixture::patches(),&links(),flow_controls(),controls(),&[0.0;2]).unwrap();
+            assert!(report.flow.links[0].transfer.transferred_mass_kg > 0.0);
+            assert!(report.total_energy_residual_j.abs() <= controls().total_energy_tolerance_j);
+            assert!(report.total_mass_residual_kg.abs() <= flow_controls().mass_tolerance_kg);
+            if interval == 0 {
+                assert_eq!(report.exchange.report.source.reactions[0].reaction,*expected.step());
+            }
+            for chamber in &report.exchange.report.source.chambers {
+                let wall = &state.chambers()[&chamber.id];
+                let step = &chamber.boundary.piston;
+                assert_eq!(wall.support(),PistonSupport::Fixed);
+                assert_eq!(wall.gas().volume_m3().to_bits(),original[&chamber.id].gas().volume_m3().to_bits());
+                assert_eq!(wall.velocity_m_s(),0.0);
+                assert_eq!(step.displacement_m,0.0);
+                assert_eq!(step.gas.work_by_gas_j,0.0);
+                assert_eq!(step.kinetic_energy_change_j,0.0);
+                assert_eq!(step.support_work_j,0.0);
+                assert_eq!(step.external_force_work_j,0.0);
+                assert_eq!(step.exterior_pressure_work_j,0.0);
+                assert_eq!(step.momentum_residual_n_s,0.0);
+                assert_ne!(step.support_impulse_n_s,0.0);
+                exchanged_heat += chamber.boundary.exchanged_heat_j.abs();
+            }
+        }
+        assert!(exchanged_heat > 0.0);
+        assert_ne!(state.thermal().cells(),&cells);
+        assert_ne!(state.circuit().charges_c(),charges.as_slice());
+        assert_ne!(state.chambers()[&10].gas().state().state().sound_speed,
+            original[&10].gas().state().state().sound_speed);
+        assert!(state.chambers()[&10].gas().mass_kg() > original[&10].gas().mass_kg());
+        assert!(state.chambers()[&20].gas().mass_kg() < original[&20].gas().mass_kg());
+    }));
+}

@@ -567,3 +567,50 @@ fn g4_early_and_late_cancellation_preserve_all_accepted_owners_and_ports() {
         );
     }
 }
+
+#[test]
+fn material_bound_fixed_reactor_changes_sound_and_transport_without_wall_work() {
+    use crate::cavity_phs::piston::PistonSupport;
+    let run = |release, density| {
+        let law = reaction(release, 3.5, 1000.0);
+        let mut wall = MaterialGasPiston::new(
+            gas(&law, [1.0, 0.0, 0.0]), body(density), 0.01, 0.0,
+        ).unwrap().with_fixed_support().unwrap();
+        let original = wall.clone();
+        let controls = PistonSolve {
+            volume_bracket_m3: [wall.gas().volume_m3(); 2], ..mechanical_controls()
+        };
+        for _ in 0..16 {
+            let candidate = wall.reactive_candidate(
+                &law, drive(), chemical_controls(), controls, || false,
+            ).unwrap();
+            let report = candidate.step();
+            assert!(report.reaction.extent_mol > 0.0);
+            assert!(report.total_energy_residual_j.abs() <= controls.energy_tolerance_j);
+            assert!(report.piston.support_impulse_n_s < 0.0);
+            assert_eq!(report.piston.support_work_j, 0.0);
+            assert_eq!(report.piston.gas.supplied_heat_j, 0.0);
+            assert_eq!(report.piston.gas.work_by_gas_j, 0.0);
+            wall = candidate.into_parts().0;
+            assert_eq!(wall.piston().support(), PistonSupport::Fixed);
+            assert_eq!(wall.piston().velocity_m_s(), 0.0);
+            assert_eq!(wall.gas().volume_m3().to_bits(), original.gas().volume_m3().to_bits());
+            assert_eq!(wall.body(), original.body());
+        }
+        assert_eq!(wall.gas().mass_kg(), original.gas().mass_kg());
+        near(wall.gas().mass_kg() * (wall.gas().state().specific_internal_energy_j_kg()
+            - original.gas().state().specific_internal_energy_j_kg()), 0.0,
+            16.0 * controls.energy_tolerance_j);
+        assert!(wall.gas().state().state().temperature > original.gas().state().state().temperature);
+        assert!(wall.gas().state().state().sound_speed > original.gas().state().state().sound_speed);
+        assert_ne!(wall.gas().state().state().dynamic_viscosity, original.gas().state().state().dynamic_viscosity);
+        wall
+    };
+    let base = run(4000.0, 8000.0);
+    let light = run(4000.0, 1000.0);
+    assert_ne!(base.body().inertia().mass(), light.body().inertia().mass());
+    assert_eq!(base.gas(), light.gas());
+    let energetic = run(8000.0, 8000.0);
+    assert!(energetic.gas().state().state().temperature > base.gas().state().state().temperature);
+    assert!(energetic.gas().state().state().sound_speed > base.gas().state().state().sound_speed);
+}

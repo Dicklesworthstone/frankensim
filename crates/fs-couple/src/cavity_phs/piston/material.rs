@@ -60,6 +60,14 @@ impl MaterialGasPiston {
         Ok(Self { body, piston })
     }
 
+    /// Attach an ideal stationary support while retaining the source-resolved
+    /// rigid specimen, its physical mass, exposed area and original gas owner.
+    /// A moving wall refuses; no impulse or kinetic energy is silently removed.
+    pub fn with_fixed_support(mut self) -> Result<Self, PistonError> {
+        self.piston = self.piston.with_fixed_support()?;
+        Ok(self)
+    }
+
     /// Original source-bound specimen, including every density usage receipt.
     /// Immutable access prevents changing mass behind the dynamics owner's back.
     #[must_use]

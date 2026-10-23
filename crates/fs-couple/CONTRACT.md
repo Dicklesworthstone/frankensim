@@ -4393,3 +4393,30 @@ or untyped response axes and surface-support holes without partial publication.
 These synthetic source tests do not establish measured-material validation.
 
 `PlateValvePerformance` also admits explicit `dg_tube` source data through the original exact DG exponential and its gas-derived Bessel memory, coupled to the retained ExactZoh plate/contact/Maxwell aperture by the exact step-mean port law. The same ambient gas drives the column, aperture density and slit viscosity; the existing wind/ensemble renderer observes internal inlet pressure only. Full-state DOF, finite-band Bessel and exponential admissions remain separate from spatial/nonlinear convergence, and inferred duct loss is not an independent heat certificate. See `examples/PLATE_VALVE_PERFORMANCES.md` for the bounded cylinder scope and source grammar.
+
+### Fixed-volume chambers in the shared reacting gas assembly
+
+`GasPiston::with_fixed_support` and `MaterialGasPiston::with_fixed_support`
+attach an ideal stationary support to an existing wall at rest. The same owner
+retains physical wall mass, area, material-backed gas and accepted volume;
+fixed support never approximates a constraint with a large inertial mass.
+The existing gas midpoint heat/volume solve runs at exactly unchanged volume.
+`PistonStep` records the balancing signed support impulse, zero support work,
+and the independently closed momentum and energy residuals. Attaching a support
+to a moving wall refuses, since its stopping impulse and energy need an actual
+accounted mechanism. Double-acting construction requires a free primary wall.
+
+The supported owner is retained by existing reaction, nozzle/species, finite
+heat, radiation/conduction and circuit compositions. Formation energy and
+transport enthalpy still pass through their original owners exactly once.
+Fixed support eliminates the wall-compressibility oscillator and its clock
+restriction, while all gas, reaction, transport and thermal controls remain.
+A fixed chamber accepts an exact `[V,V]` volume bracket. This provides
+stationary reactors and reservoirs through the same assembly as moving walls.
+
+Focused synthetic regressions in `piston/support/tests.rs`, reactive tests and
+`tests/material_exchange/flow.rs` cover changing temperature/pressure/viscosity/
+sound at fixed volume, independence from physical wall mass, formation-inclusive
+reaction energy, a complete flow/reaction/thermal/circuit history, support work,
+cancellation and atomic refusal. Source parsing was checked; native execution
+remains a separate verification requirement.
