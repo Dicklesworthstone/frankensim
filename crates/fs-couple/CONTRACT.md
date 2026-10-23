@@ -4800,3 +4800,34 @@ conduction, all graph/coil heat, caloric/geometry identity, complete passive-cor
 mapping and fixed-state/source refusals, native budgets/events and late
 cancellation. Independent numerical energy checks supplement source review;
 native build/regression execution remains a separate requirement.
+
+## Electrical heating of a live string in finite surrounding gas
+
+`acoustic_realize::finite_gas::electrical` connects the existing source-bound
+Ohmic drive to both finite-gas string steps. The original conductor resolves
+initial resistance, current and Joule work; that work enters prescribed solid
+heat exactly once. The existing owners advance vibration, material loss,
+aerodynamic drag, solid enthalpy, gas energy/EOS, optional reciprocal layer
+conduction and the compact pressure observer. Endpoint resistance and current
+must also resolve before either accepted owner publishes. Late source refusal,
+stale epoch or cancellation preserves both states and acoustic history.
+
+`FiniteGasElectrothermalStringFrame` retains both source-resolved conductors,
+initial and endpoint currents, Joule work and separately prescribed solid heat.
+Its nested combined energy account already includes Joule work; callers must
+not add it again. Material viscous loss heats the solid, aerodynamic drag heats
+the finite gas, and signed interfacial heat cancels between their inventories.
+Numerical loss and diagnostic radiation are not converted to extra heat.
+
+The existing first-order frozen-coefficient split, fixed tension and geometry,
+constant elastic modulus/density, fully solid caloric state, source validity,
+layer geometry and Biot restrictions remain in force. This supplies no circuit
+dynamics, contact/skin effects, Lorentz force, thermoelastic work, gas pressure
+work or radiation loading. Gas volume specifies a thermal inventory, not an
+acoustic chamber geometry.
+
+The three focused `string_specimen::finite_gas::electrical` regressions exercise
+independent current/voltage work and signed-drive parity, source resistance and
+damping feedback into actual pressure, cumulative mechanical/solid/gas storage,
+and late refusal with deterministic retry and cancellation. Their manufactured
+coefficients establish integration behavior, not measured material validation.

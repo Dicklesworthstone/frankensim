@@ -10,6 +10,8 @@
 
 /// Reciprocal source-resolved conduction on the same finite-gas/string step.
 pub mod exchange;
+/// Ideal electrical source work on the same finite-gas/string transaction.
+pub mod electrical;
 
 use super::{
     AcousticRealizeError, ThermalMaterialStringFrame, ThermalMaterialStringRuntime,
