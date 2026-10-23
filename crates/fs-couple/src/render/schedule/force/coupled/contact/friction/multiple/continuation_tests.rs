@@ -255,3 +255,108 @@ fn g0_coulomb_multi_port_discloses_nothing() {
         .unwrap();
     assert!(frame.ports.iter().all(|p| p.roots.is_none()));
 }
+
+// ----- Series compliant drive (bow-hair compliance, M4.4-W2) -----
+
+fn stribeck() -> FrictionLaw {
+    FrictionLaw::Stribeck {
+        static_mu: 1.2,
+        kinetic_mu: 0.35,
+        characteristic_speed: 0.05,
+        viscous_per_speed: 0.0,
+    }
+}
+fn two_drives() -> [FrictionDrive; 2] {
+    [
+        FrictionDrive {
+            speed_m_s: 0.2,
+            normal_force_n: 1.0,
+        },
+        FrictionDrive {
+            speed_m_s: -0.15,
+            normal_force_n: 1.0,
+        },
+    ]
+}
+
+#[test]
+fn g3_soft_series_drive_shifts_the_motion_and_keeps_the_energy_ledger() {
+    // A soft, damped hair changes the motion relative to the rigid drive, yet
+    // every joint step still closes the energy balance: the series spring energy
+    // and the dashpot loss are both in the census, so the residual stays within
+    // the frame's own tolerance (a step that did not balance would refuse).
+    let gate = CancelGate::new_clock_free();
+    let mut soft = system(stribeck())
+        .with_series_compliant_drives(vec![(0, 2.0e4, 8.0), (1, 2.0e4, 8.0)], &gate)
+        .unwrap();
+    let mut rigid = system(stribeck());
+    let drives = two_drives();
+    let mut differed = false;
+    for _ in 0..2_000 {
+        let s = soft.step(&[0.0, 0.0], &drives).unwrap().clone();
+        let r = rigid.step(&[0.0, 0.0], &drives).unwrap().clone();
+        assert!(
+            s.energy_residual_j.abs() <= s.energy_tolerance_j,
+            "soft-drive energy residual {} exceeds tolerance {}",
+            s.energy_residual_j,
+            s.energy_tolerance_j
+        );
+        for i in 0..2 {
+            if (s.ports[i].traction_n - r.ports[i].traction_n).abs()
+                > 1e-4 * r.ports[i].traction_n.abs().max(1.0)
+            {
+                differed = true;
+            }
+        }
+    }
+    assert!(
+        differed,
+        "a soft hair must change the motion vs the rigid drive"
+    );
+}
+
+#[test]
+fn g3b_undamped_soft_series_drive_balances_with_spring_energy_only() {
+    // Undamped hair: no dashpot loss, so the balance rests on the series spring
+    // energy alone being accounted in the ledger.
+    let gate = CancelGate::new_clock_free();
+    let mut soft = system(stribeck())
+        .with_series_compliant_drives(vec![(0, 1.0e4, 0.0), (1, 1.0e4, 0.0)], &gate)
+        .unwrap();
+    let drives = two_drives();
+    for _ in 0..1_500 {
+        let s = soft.step(&[0.0, 0.0], &drives).unwrap().clone();
+        assert!(s.energy_residual_j.abs() <= s.energy_tolerance_j);
+    }
+}
+
+#[test]
+fn g4_series_drive_binding_refusals() {
+    let gate = CancelGate::new_clock_free();
+    // Unknown port.
+    assert!(
+        system(stribeck())
+            .with_series_compliant_drives(vec![(9, 1.0e5, 1.0)], &gate)
+            .is_err()
+    );
+    // Two bindings on one port.
+    assert!(
+        system(stribeck())
+            .with_series_compliant_drives(vec![(0, 1.0e5, 1.0), (0, 1.0e5, 1.0)], &gate)
+            .is_err()
+    );
+    // Non-physical stiffness.
+    assert!(
+        system(stribeck())
+            .with_series_compliant_drives(vec![(0, -1.0, 1.0)], &gate)
+            .is_err()
+    );
+    // After a sample has been rendered.
+    let mut rendered = system(stribeck());
+    rendered.step(&[0.0, 0.0], &two_drives()).unwrap();
+    assert!(
+        rendered
+            .with_series_compliant_drives(vec![(0, 1.0e5, 1.0)], &gate)
+            .is_err()
+    );
+}

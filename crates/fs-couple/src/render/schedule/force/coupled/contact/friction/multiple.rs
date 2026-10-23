@@ -29,6 +29,10 @@ pub mod surfaces;
 
 mod stretching;
 
+/// A declared compliant drive: a massless series spring-dashpot between a
+/// prescribed surface and the contact (Pitteroff & Woodhouse bow hair, M4.4).
+pub mod compliant_drive;
+
 /// Bounded joint setup and nonlinear work, in addition to each port's limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiFrictionConfig {
@@ -139,6 +143,10 @@ pub struct MultiFrictionModalSystem {
     interfaces: Vec<Option<interface::DryFrictionBinding>>,
     obstacles: Option<obstacles::ObstacleSet>,
     contact_loads: Vec<Option<usize>>,
+    // Optional massless series spring-dashpot drive per port (bow-hair
+    // compliance, M4.4) and its staged stretch for the current trial.
+    series_drives: Vec<Option<compliant_drive::SeriesCompliantDrive>>,
+    staged_stretch: Vec<f64>,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -198,7 +206,8 @@ impl MultiFrictionModalSystem {
             load_lines: vec![None; p], port_roots: vec![None; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
-            accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p] })
+            accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p],
+            series_drives: vec![None; p], staged_stretch: vec![0.0; p] })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -228,11 +237,41 @@ impl MultiFrictionModalSystem {
     /// Actual modal, bilateral, nonlinear and optional obstacle stored energy [J].
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
         let network = self.core.total_energy_j()?;
+        let hair: f64 = self.series_drives.iter().flatten()
+            .map(|drive| drive.spring_energy_j(drive.stretch_m())).sum();
         match &self.obstacles {
-            Some(obstacles) => finite(network + obstacles.energy(self.components())?),
-            None => Ok(network),
+            Some(obstacles) => finite(network + obstacles.energy(self.components())? + hair),
+            None => finite(network + hair),
         }
     }
+    /// Attach a massless series spring-dashpot drive to one or more ports: the
+    /// declared compliant drive of M4.4 (bow hair). Each binding is `(port,
+    /// stiffness_n_m, damping_kg_s)`; the drive begins relaxed. Bind the
+    /// complete set once before playback. Other ports keep the rigid prescribed
+    /// drive. The series element enters the same joint load line, free slip and
+    /// energy ledger as every other reaction.
+    ///
+    /// # Errors
+    /// A sample already rendered, a rebind, an unknown port, or non-physical
+    /// stiffness/damping.
+    pub fn with_series_compliant_drives(mut self, drives: Vec<(usize, f64, f64)>, gate: &CancelGate)
+        -> Result<Self, ModalFrictionError>
+    {
+        poll(Some(gate))?;
+        if drives.is_empty() { return Ok(self); }
+        if self.samples_rendered() != 0 || self.series_drives.iter().any(Option::is_some) {
+            return Err(invalid("series compliant drives need one complete binding before playback").into());
+        }
+        for (port, stiffness_n_m, damping_kg_s) in drives {
+            poll(Some(gate))?;
+            if port >= self.series_drives.len() || self.series_drives[port].is_some() {
+                return Err(invalid("one series compliant drive per actual friction port").into());
+            }
+            self.series_drives[port] = Some(compliant_drive::SeriesCompliantDrive::new(stiffness_n_m, damping_kg_s)?);
+        }
+        Ok(self)
+    }
+
     /// Settle the complete network with every driven friction port released.
     /// Independent normal obstacles remain present: their activity and reactions
     /// are solved by the original contact-equilibrium owner, not the dynamic
@@ -297,7 +336,7 @@ impl MultiFrictionModalSystem {
             obstacles.prepare_geometry(&self.core.network, &self.points,
                 &self.contact_loads, obstacle_geometry, gate)?;
         }
-        if p == 1 && self.obstacles.is_none() {
+        if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none) {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
@@ -311,6 +350,9 @@ impl MultiFrictionModalSystem {
             self.frame.sweeps = 1; self.accepted = true;
             return Ok(&self.frame);
         }
+        if self.core.has_nonlinear_potentials() && self.series_drives.iter().any(Option::is_some) {
+            return Err(invalid("series compliant drives are not jointly staged with bound nonlinear storage").into());
+        }
         let mut accepted = if self.core.has_nonlinear_potentials() {
             self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
         } else {
@@ -320,6 +362,9 @@ impl MultiFrictionModalSystem {
         self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.core.network.publish_staged();
         self.branches.copy_from_slice(&self.staged_branches);
+        for (drive, &stretch) in self.series_drives.iter_mut().zip(&self.staged_stretch) {
+            if let Some(drive) = drive { drive.commit(stretch); }
+        }
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         // Reuse the accepted port allocation through repeated constitutive
         // trials. No fallible work follows mechanical publication.
@@ -341,7 +386,10 @@ impl MultiFrictionModalSystem {
         let law = self.points[i].port.law.clone();
         let config = self.points[i].config;
         let dt = self.sample_period_s();
-        let compliance = self.compliance[i*p+i];
+        let mut compliance = self.compliance[i*p+i];
+        if let Some(drive) = self.series_drives[i] {
+            compliance = finite(compliance + drive.series_compliance_m_n(dt))?;
+        }
         let continued = matches!(law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
         if !continued || normal == 0.0 {
             self.staged_branches[i] = ContactBranch::Fresh;
@@ -408,6 +456,7 @@ impl MultiFrictionModalSystem {
                 let mut free = self.free_slip[i];
                 for j in 0..p { if j != i { free = finite(free - self.compliance[i*p+j]*self.tractions[j])?; } }
                 if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i)?)?; }
+                if let Some(series) = self.series_drives[i] { free = finite(free + series.free_slip_shift_m(self.sample_period_s()))?; }
                 let drive = self.contact_loaded_drive(i, drives[i])?;
                 let (force, regime, iterations, roots) = self.solve_point(i, free, drive.normal_force_n, gate)?;
                 self.tractions[i] = force; self.regimes[i] = regime;
@@ -422,6 +471,10 @@ impl MultiFrictionModalSystem {
                 poll(gate)?;
                 let mut slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
                 if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i)?)?; }
+                if let Some(series) = self.series_drives[i] {
+                    let eta = series.staged_stretch_m(self.tractions[i], self.sample_period_s());
+                    slip = finite(slip - (eta - series.stretch_m()))?;
+                }
                 let drive = self.contact_loaded_drive(i, drives[i])?;
                 if let Err(error) = scalar::check(&self.points[i].port.law, self.points[i].config,
                     self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i]) {
@@ -450,7 +503,14 @@ impl MultiFrictionModalSystem {
         for i in 0..p {
             poll(gate)?;
             let distance = finite(drives[i].speed_m_s*self.sample_period_s())?;
-            let slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
+            let mut slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
+            let mut hair_loss = 0.0;
+            if let Some(series) = self.series_drives[i] {
+                let eta = series.staged_stretch_m(self.tractions[i], self.sample_period_s());
+                slip = finite(slip - (eta - series.stretch_m()))?;
+                hair_loss = series.dashpot_loss_j(eta, self.sample_period_s());
+                self.staged_stretch[i] = eta;
+            }
             let drive = self.contact_loaded_drive(i, drives[i])?;
             let (dissipation, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
                 self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
@@ -465,7 +525,7 @@ impl MultiFrictionModalSystem {
             interface::check_endpoint(self.interface(i), &self.points[i].column,
                 &self.core.network.candidates, drive)?;
             let supply = finite(self.tractions[i]*distance)?;
-            loss = finite(loss+dissipation)?; work = finite(work+supply)?;
+            loss = finite(loss+dissipation+hair_loss)?; work = finite(work+supply)?;
             absolute_work = finite(absolute_work+supply.abs())?;
             self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
                 traction_n: self.tractions[i], slip_distance_m: slip,
@@ -477,9 +537,12 @@ impl MultiFrictionModalSystem {
             pressure = obstacles.endpoint_pressure(pressure, weights, gate)?;
             limit("acceleration observer pressure", pressure.abs(), self.core.network.config.maximum_abs_pressure_pa)?;
         }
+        let network_energy = finite(self.core.network.staged_frame.total_energy_j())?;
+        let hair_energy: f64 = (0..p).filter_map(|i|
+            self.series_drives[i].map(|drive| drive.spring_energy_j(self.staged_stretch[i]))).sum();
+        let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy+hair_energy)? }
+            else { finite(network_energy+hair_energy)? };
         let staged = &self.core.network.staged_frame;
-        let network_energy = finite(staged.total_energy_j())?;
-        let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy)? } else { network_energy };
         let network_loss = finite(staged.total_dissipation_j())?;
         let external_work = dot(external, &self.core.network.free_delta)?;
         let residual = if self.obstacles.is_some() {
