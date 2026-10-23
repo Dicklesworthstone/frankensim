@@ -608,6 +608,43 @@ NASA-9 sound speeds but emits NO-DATA and fails until the primary comparison
 and its stated uncertainty can be verified. No secondary transcription is
 used to qualify the requested 5e-4 gate.
 
+`relaxation::RelaxationAbsorption` (M0.1-W2) is the molecular-relaxation law
+for any composition. Each species declares its relaxing internal reservoirs:
+vibrational modes with Planck-Einstein heat capacity, and classical rotation.
+They enter one exact complex `c_v(omega)`, and `k = omega/c(omega) + i alpha_SK`.
+Stokes-Kirchhoff is counted once, there is no separate bulk viscosity, and the
+strengths are not linearized.
+
+Relaxation times are data: Landau-Teller collision-partner rates with a linear
+mole-fraction rule, a partner-independent power law, or ISO 9613-1's `f_rO`
+and `f_rN` (`iso9613_relaxation_frequencies_hz`, bit-identical to the ISO
+formula's). The ISO laws are a declared terrestrial-air variant: dry-basis O2
+and N2 must be within 1 % of 0.209 and 0.781, with CO2 at most 1e-3. Any other
+mixture is refused.
+
+The law also refuses:
+- a present species without data;
+- a present collision partner without a rate;
+- T outside a rate's validity;
+- more than 32 reservoirs;
+- relaxing heat capacity above translation.
+
+G0 results (`tests/relaxation_absorption.rs`):
+- zero reservoirs equal Stokes-Kirchhoff bitwise;
+- the single-process `alpha lambda` peak equals its closed form (2.6e-15);
+- `alpha >= 0` and `c0 <= c(omega) <= c_inf` at 10^4 random states;
+- the Kramers-Kronig transform of `alpha` matches the dispersion (1.6e-9).
+
+Against ISO 9613-1's own vibrational terms, with ISO's theta and rates:
+- dry air differs by 2.0e-3 (253 K) to 1.0e-2 (323 K). This is the standard's
+  small-strength, equilibrium-heat-capacity linearization.
+- humid air additionally differs by about -x_H2O, the O2/N2 dilution that the
+  standard omits.
+
+The 1e-3 G1/G2 gates against ISO are therefore not met and remain open.
+NO-CLAIM: no sourced H2O, CO2 or rotational rate data is bundled, so the law
+refuses those species rather than defaulting them.
+
 The universal ambient-medium primitive of the musical-acoustics
 doctrine: `GasState::try_new(&GasSpec, T, p)` derives the COMPLETE
 tuple (density, sound speed, dynamic viscosity, thermal conductivity,

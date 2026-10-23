@@ -50,6 +50,8 @@ pub mod phase;
 pub mod plane_stress_viscosity;
 pub mod plastic;
 pub mod porous;
+/// Molecular relaxation absorption and dispersion of any gas mixture (M0.1-W2).
+pub mod relaxation;
 pub mod section;
 /// Laminate (layered) plate/shell sections (IRP M1.2-W7).
 pub mod laminate;

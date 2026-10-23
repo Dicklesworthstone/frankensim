@@ -67,16 +67,7 @@ pub fn iso9613_absorption_neper_per_m(
     relative_humidity: f64,
     omega: f64,
 ) -> Result<f64, MaterialError> {
-    if !(200.0..=400.0).contains(&temperature_k) || !temperature_k.is_finite() {
-        return Err(MaterialError::Parameters {
-            what: format!("ISO 9613 temperature {temperature_k} K outside the [200, 400] K band"),
-        });
-    }
-    if !(pressure_pa > 0.0 && pressure_pa <= 2.0e5 && pressure_pa.is_finite()) {
-        return Err(MaterialError::Parameters {
-            what: format!("ISO 9613 pressure {pressure_pa} Pa outside (0, 2e5] Pa"),
-        });
-    }
+    admit_temperature_pressure(temperature_k, pressure_pa)?;
     if !((0.0..=1.0).contains(&relative_humidity) && relative_humidity.is_finite()) {
         return Err(MaterialError::Parameters {
             what: format!(
@@ -103,11 +94,7 @@ pub fn iso9613_absorption_neper_per_m(
     // Molar concentration of water vapour, *percent*.
     let h = 100.0 * relative_humidity * psat_over_p0 * P0_PA / pressure_pa;
 
-    let fr_o = p_over_p0 * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h));
-    let t_ratio_cbrt = det::exp(det::ln(t_over_t0) / 3.0);
-    let fr_n = p_over_p0
-        * det::exp(-0.5 * det::ln(t_over_t0))
-        * (9.0 + 280.0 * h * det::exp(-4.170 * (1.0 / t_ratio_cbrt - 1.0)));
+    let (fr_o, fr_n) = relaxation_frequencies(t_over_t0, p_over_p0, h);
 
     let f2 = freq_hz * freq_hz;
     let x_o = 0.01275 * det::exp(-2239.1 / t) / (fr_o + f2 / fr_o);
@@ -115,6 +102,73 @@ pub fn iso9613_absorption_neper_per_m(
     let classical = 1.84e-11 * det::exp(0.5 * det::ln(t_over_t0)) / p_over_p0;
     let molecular = det::exp(-2.5 * det::ln(t_over_t0)) * (x_o + x_n);
     finite_absorption(f2 * (classical + molecular), "Np/m")
+}
+
+fn admit_temperature_pressure(temperature_k: f64, pressure_pa: f64) -> Result<(), MaterialError> {
+    if !(200.0..=400.0).contains(&temperature_k) || !temperature_k.is_finite() {
+        return Err(MaterialError::Parameters {
+            what: format!("ISO 9613 temperature {temperature_k} K outside the [200, 400] K band"),
+        });
+    }
+    if !(pressure_pa > 0.0 && pressure_pa <= 2.0e5 && pressure_pa.is_finite()) {
+        return Err(MaterialError::Parameters {
+            what: format!("ISO 9613 pressure {pressure_pa} Pa outside (0, 2e5] Pa"),
+        });
+    }
+    Ok(())
+}
+
+// The standard's empirical relaxation-frequency laws, shared bit-for-bit by
+// the ISO absorption formula and the generic relaxation law's ISO rate variant.
+fn relaxation_frequencies(t_over_t0: f64, p_over_p0: f64, h: f64) -> (f64, f64) {
+    let fr_o = p_over_p0 * (24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h));
+    let t_ratio_cbrt = det::exp(det::ln(t_over_t0) / 3.0);
+    let fr_n = p_over_p0
+        * det::exp(-0.5 * det::ln(t_over_t0))
+        * (9.0 + 280.0 * h * det::exp(-4.170 * (1.0 / t_ratio_cbrt - 1.0)));
+    (fr_o, fr_n)
+}
+
+/// ISO 9613-1 relaxation frequencies `(f_rO, f_rN)` [Hz] of oxygen and
+/// nitrogen at `(T, p)` and an explicit molar water concentration `h` in
+/// percent (`h = 100 x_H2O`, not relative humidity):
+///
+/// ```text
+/// f_rO = (p/p0) (24 + 4.04e4 h (0.02 + h) / (0.391 + h))
+/// f_rN = (p/p0) (T/T0)^{-1/2} (9 + 280 h exp(-4.170 ((T/T0)^{-1/3} - 1)))
+/// ```
+///
+/// These are the standard's empirical fits for terrestrial air, in which dry
+/// air's collision partners (N2, O2, Ar, trace CO2) are implicit. They are not
+/// a collision-partner law and say nothing about any other mixture.
+///
+/// # Errors
+/// [`MaterialError::Parameters`] for `T` outside [200, 400] K, `p` outside
+/// (0, 2e5] Pa, or a negative/non-finite water concentration.
+pub fn iso9613_relaxation_frequencies_hz(
+    temperature_k: f64,
+    pressure_pa: f64,
+    water_molar_percent: f64,
+) -> Result<(f64, f64), MaterialError> {
+    admit_temperature_pressure(temperature_k, pressure_pa)?;
+    if !(water_molar_percent.is_finite() && (0.0..=100.0).contains(&water_molar_percent)) {
+        return Err(MaterialError::Parameters {
+            what: format!(
+                "ISO 9613 molar water concentration {water_molar_percent} % must be in [0, 100]"
+            ),
+        });
+    }
+    let (fr_o, fr_n) = relaxation_frequencies(
+        temperature_k / T0_K,
+        pressure_pa / P0_PA,
+        water_molar_percent,
+    );
+    if !(fr_o.is_finite() && fr_o > 0.0 && fr_n.is_finite() && fr_n > 0.0) {
+        return Err(MaterialError::State {
+            what: "ISO 9613 relaxation frequencies are not finite and positive".into(),
+        });
+    }
+    Ok((fr_o, fr_n))
 }
 
 fn finite_absorption(value: f64, unit: &str) -> Result<f64, MaterialError> {
