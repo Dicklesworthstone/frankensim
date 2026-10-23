@@ -213,7 +213,9 @@ export interface KitMaterialInfo {
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];
     gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number; sourceSpecies?: number };
-    materials?: KitMaterialInfo | null };
+    materials?: KitMaterialInfo | null;
+    /** A drum's head-loss receipt: FITTED on the preset heads (ruling 6533), null for cymbals. */
+    headLoss?: string | null };
   /** Exact requested atmosphere, retained through every grid trial and rebuild. */
   gasRecord?: string;
   xy: Float32Array;

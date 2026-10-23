@@ -5,6 +5,24 @@
 pub use fs_vkplate::live::{Live, PIECES};
 pub use fs_vkplate::materials::KitMaterials;
 
+/// Preset drum heads keep their recording-fitted loss in the live kit until a
+/// sourced film or edge loss exists, and say so (ruling 6533).
+pub const FITTED_HEAD_LOSS_RECEIPT: &str = "head loss: FITTED (declared estimate; film and edge loss not yet sourced)";
+
+/// The head-loss receipt of one live piece, for drums only (cymbal and hi-hat
+/// loss is pexfp.372): FITTED on the preset heads, the stated-unknown receipt
+/// on a card route that declared it, and none when the cards source the loss.
+pub fn head_loss_receipt(piece: &str, materials: Option<&KitMaterials>) -> Option<&'static str> {
+    if !matches!(piece, "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") {
+        return None;
+    }
+    match materials {
+        None => Some(FITTED_HEAD_LOSS_RECEIPT),
+        Some(m) if m.film_loss_is_stated_unknown() => Some(fs_vkplate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT),
+        Some(_) => None,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use super::*;
@@ -202,16 +220,20 @@ mod wasm {
         pub fn force(&self) -> f64 {
             self.live.force
         }
-        /// JSON: name, grid scale, surface radius and node count, every body's name and nodes.
+        /// JSON: name, grid scale, surface radius and node count, every body's name and nodes,
+        /// and a drum's head-loss receipt (`headLoss`, null for cymbals and sourced loss).
         pub fn info(&self) -> String {
             let b: Vec<String> = self.live.ins.bodies.iter().map(|b| format!("{{\"name\":\"{}\",\"nodes\":{}}}", b.name, b.n)).collect();
             format!(
-                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{},\"sourceSpecies\":{}}},\"materials\":{},\"bodies\":[{}]}}",
+                "{{\"piece\":\"{}\",\"gridScale\":{},\"radius\":{},\"surfaceNodes\":{},\"h\":{},\"rate\":{},\"gas\":{{\"temperatureK\":{},\"pressurePa\":{},\"densityKgM3\":{},\"soundSpeedMps\":{},\"sourceSpecies\":{}}},\"materials\":{},\"headLoss\":{},\"bodies\":[{}]}}",
                 self.live.name, self.scale, self.live.radius, self.live.surface_xy().len() / 2, self.live.surface_h(), self.live.ins.rate,
                 self.live.ins.gas().temperature, self.live.ins.gas().pressure,
                 self.live.ins.gas().density, self.live.ins.gas().sound_speed,
                 self.live.gas_source_species(),
-                self.live.ins.materials().map_or_else(|| "null".into(), KitMaterials::info_json), b.join(",")
+                self.live.ins.materials().map_or_else(|| "null".into(), KitMaterials::info_json),
+                // Both receipts are fixed ASCII constants without quotes or backslashes.
+                head_loss_receipt(&self.live.name, self.live.ins.materials()).map_or_else(|| "null".into(), |r| format!("\"{r}\"")),
+                b.join(",")
             )
         }
     }
@@ -220,5 +242,30 @@ mod wasm {
     #[wasm_bindgen]
     pub fn pieces() -> String {
         format!("[{}]", PIECES.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(","))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD_FILM: &[u8] =
+        include_bytes!("../../../../crates/fs-vkplate/packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk");
+    const HICKORY: &[u8] = include_bytes!("../../../../crates/fs-vkplate/packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk");
+
+    #[test]
+    fn preset_drums_label_their_fitted_head_loss_and_a_card_route_states_its_own() {
+        for piece in PIECES {
+            let drum = !matches!(piece, "hihat" | "hihat-closed" | "hihat-open" | "crash" | "ride");
+            assert_eq!(head_loss_receipt(piece, None), drum.then_some(FITTED_HEAD_LOSS_RECEIPT), "{piece}");
+        }
+        let cards = KitMaterials::from_packs_at_temperature(HEAD_FILM, &[], HICKORY, "T", 293.15, 9e-6, 0.005, 0.05).unwrap();
+        assert_eq!(head_loss_receipt("tom-12", Some(&cards)), None);
+        let declared = cards.with_stated_unknown_film_loss().unwrap();
+        assert_eq!(
+            head_loss_receipt("tom-12", Some(&declared)),
+            Some(fs_vkplate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT)
+        );
+        assert_eq!(head_loss_receipt("crash", Some(&declared)), None);
     }
 }

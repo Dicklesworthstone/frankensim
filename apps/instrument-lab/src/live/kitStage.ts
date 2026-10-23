@@ -657,7 +657,7 @@ export function mountLiveKit(root: HTMLElement): void {
       const solid = lives.get("kick")?.ready?.info.materials;
       materialStatus.textContent = solid
         ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All eight pieces use these material cards.${solid.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : ""}`
-        : "Standard kit materials are active.";
+        : `Standard kit materials are active. ${lives.get("kick")?.ready?.info.headLoss ?? ""}`.trimEnd();
       overlay.hidden = true;
       kickDraw();
       paintHud();

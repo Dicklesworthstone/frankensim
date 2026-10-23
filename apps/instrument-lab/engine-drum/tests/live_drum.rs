@@ -240,9 +240,12 @@ fn info_json_is_parseable_and_declares_scope() {
     let info = drum.info_json();
     assert!(info.starts_with('{') && info.ends_with('}'));
     for needle in ["\"mechanical_rate_hz\":768000", "\"frequencies_hz\":[204.6", "\"no_claim\":", "\"provenance\":",
-        "\"snapshot_layout\":", "\"coupled_frequencies_hz\":[218.0"] {
+        "\"snapshot_layout\":", "\"coupled_frequencies_hz\":[218.0", fs_live_drum::live::HEAD_LOSS_RECEIPT] {
         assert!(info.contains(needle), "{needle} missing from {info}");
     }
+    // The page shows no_claim, so the fitted head loss is labelled wherever the
+    // offline drum would print its STATED UNKNOWN receipt.
+    assert!(fs_live_drum::live::NO_CLAIM.contains(fs_live_drum::live::HEAD_LOSS_RECEIPT));
     // Balanced braces/brackets outside strings: a cheap structural check.
     let (mut depth, mut in_string, mut escape) = (0i32, false, false);
     for ch in info.chars() {
