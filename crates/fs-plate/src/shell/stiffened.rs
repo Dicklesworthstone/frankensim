@@ -20,6 +20,12 @@ use super::assemble_shell_sections;
 use crate::{PlateError, PlateSection};
 use fs_sparse::{Coo, Csr};
 
+/// Bit-semantics contract of the bonded `ShellBeam` pencil (`assemble_stiffened_shell` and its
+/// materials form), which the piano boards consume. Bump it on ANY change that can move that
+/// pencil's bits (this element, its accumulation, or the shell assembly beneath it); the golden
+/// `fs-plate:legacy-bonded-beam-pencil` (golden-couplings.json) then names what to re-freeze.
+pub const STIFFENED_SHELL_BIT_SEMANTICS_VERSION: u32 = 1;
+
 /// Centroidal section in coherent SI. y/z are the beam's transverse axes.
 #[derive(Debug, Clone, Copy)]
 pub struct BeamSection {

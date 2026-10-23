@@ -15,6 +15,11 @@
 //! the beam's own nodes to a shell skin line, with the arm u + theta x d):
 //! - `g1_matching_beam_tie_reproduces_on_node_beam`: beam nodes on the shell nodes (C = I) reproduce the
 //!   bonded eccentric `ShellBeam` model (CST/DKT shell, Euler-Bernoulli beam) to 1e-9;
+//! - `g3_on_node_beam_tie_matches_legacy_to_rounding`: the same on-node tie agrees with the legacy
+//!   `assemble_stiffened_shell` pencil entry by entry within a derived rounding bound. The plan's "bitwise"
+//!   form of this claim is falsified (see the test);
+//! - `g3_legacy_bonded_beam_pencil_golden`: the bits of the legacy bonded pencil the piano boards consume,
+//!   pinned under docs/GOLDEN_POLICY.md;
 //! - `g1_off_node_brace_converges`: a straight and a curved Timoshenko brace on an MITC3+ plate, each
 //!   with its own beam nodes off the shell nodes, converge to the on-node tie (beam nodes on the shell
 //!   nodes). One-sided gate of the orchestrator's ruling (mail 6174): the relative frequency gap between
@@ -42,7 +47,9 @@ use fs_plate::shell::mitc::{
     assemble_mitc3p,
 };
 use fs_plate::shell::stiffened::BeamSection;
-use fs_plate::shell::stiffened::timoshenko::{BeamKind, ShearAreas, assemble_beam_chain};
+use fs_plate::shell::stiffened::timoshenko::{
+    BeamKind, ShearAreas, assemble_beam_chain, segment_matrices,
+};
 use fs_plate::shell::stiffened::{ShellBeam, assemble_stiffened_shell};
 use fs_plate::shell::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
 
@@ -417,6 +424,12 @@ fn centroid_arm() -> f64 {
 
 /// The bonded eccentric reference on the CST/DKT plate: one `ShellBeam` per shell edge on the mid line.
 fn on_node_shell_beam(p: &Plate) -> (fs_sparse::Csr, fs_sparse::Csr) {
+    let model = on_node_model(p);
+    (model.k, model.m)
+}
+
+/// The same bonded eccentric model, whole.
+fn on_node_model(p: &Plate) -> ShellModel {
     let beams: Vec<ShellBeam> = p
         .line
         .windows(2)
@@ -427,15 +440,14 @@ fn on_node_shell_beam(p: &Plate) -> (fs_sparse::Csr, fs_sparse::Csr) {
             section: brace_section(),
         })
         .collect();
-    let model = assemble_stiffened_shell(
+    assemble_stiffened_shell(
         &p.mesh,
         &dkt_sections(p),
         &p.clamped,
         ShellSupport::Clamped,
         &beams,
     )
-    .unwrap();
-    (model.k, model.m)
+    .unwrap()
 }
 
 /// `base` (the plate without beams) tied to a beam chain through `beam_nodes` (centroids) along the mid line.
@@ -561,6 +573,346 @@ fn g1_matching_beam_tie_reproduces_on_node_beam() {
             );
         }
     }
+}
+
+fn dense_mul(a: &[f64; 144], b: &[f64; 144]) -> [f64; 144] {
+    let mut out = [0.0; 144];
+    for i in 0..12 {
+        for k in 0..12 {
+            for j in 0..12 {
+                out[12 * i + j] += a[12 * i + k] * b[12 * k + j];
+            }
+        }
+    }
+    out
+}
+
+fn dense_transpose(a: &[f64; 144]) -> [f64; 144] {
+    std::array::from_fn(|n| a[12 * (n % 12) + n / 12])
+}
+
+fn unit3(v: [f64; 3]) -> [f64; 3] {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    v.map(|x| x / length)
+}
+
+/// Per-entry magnitude of the summands that both the legacy `ShellBeam` assembly and the on-node tie add,
+/// dense on the legacy free coordinates: S = |P| + sum_e |T_e|^T |A_e| |T_e|. P is the plate pencil; for
+/// each segment e, A_e = R_e A_e^glob R_e^T is its matrix in its chord axes R_e (x along the chord, z the
+/// normal part of the section hint, y = z x x, as the legacy element builds them), and T_e = R_e T_arm maps
+/// the shell DOFs of its two nodes to them, T_arm being the rigid arm (u + theta x d, theta) with d the
+/// centroid offset. Both paths evaluate exactly this sum of terms, each in its own order.
+fn summand_magnitude(
+    p: &Plate,
+    plate: &fs_sparse::Csr,
+    dof_map: &[Option<usize>],
+    mass: bool,
+) -> Vec<f64> {
+    let n = plate.nrows();
+    let mut s: Vec<f64> = plate.to_dense().iter().map(|v| v.abs()).collect();
+    let arm = centroid_arm();
+    for w in p.line.windows(2) {
+        let c: [[f64; 3]; 2] = std::array::from_fn(|i| {
+            let x = p.mesh.nodes[w[i]];
+            [x[0], x[1], x[2] + arm]
+        });
+        let (k, m) = segment_matrices(
+            c[0],
+            c[1],
+            [0.0, 0.0, 1.0],
+            brace_section(),
+            BeamKind::EulerBernoulli,
+        )
+        .unwrap();
+        let global = if mass { m } else { k };
+        let x = unit3(std::array::from_fn(|i| c[1][i] - c[0][i]));
+        let z = unit3(std::array::from_fn(|i| [0.0, 0.0, 1.0][i] - x[2] * x[i]));
+        let y = [
+            z[1] * x[2] - z[2] * x[1],
+            z[2] * x[0] - z[0] * x[2],
+            z[0] * x[1] - z[1] * x[0],
+        ];
+        let axes = [x, y, z];
+        let mut r = [0.0; 144];
+        for block in 0..4 {
+            for a in 0..3 {
+                for j in 0..3 {
+                    r[12 * (3 * block + a) + 3 * block + j] = axes[a][j];
+                }
+            }
+        }
+        let local = dense_mul(&dense_mul(&r, &global), &dense_transpose(&r));
+        // T_arm per node: u + theta x d with d = (0, 0, arm), i.e. u_x += arm theta_y, u_y -= arm theta_x.
+        let mut t = [0.0; 144];
+        for node in 0..2 {
+            let o = 6 * node;
+            for i in 0..6 {
+                t[12 * (o + i) + o + i] = 1.0;
+            }
+            t[12 * o + o + 4] = arm;
+            t[12 * (o + 1) + o + 3] = -arm;
+        }
+        let te = dense_mul(&r, &t).map(f64::abs);
+        let contribution = dense_mul(&dense_mul(&dense_transpose(&te), &local.map(f64::abs)), &te);
+        for i in 0..12 {
+            let Some(row) = dof_map[6 * w[i / 6] + i % 6] else {
+                continue;
+            };
+            for j in 0..12 {
+                let Some(col) = dof_map[6 * w[j / 6] + j % 6] else {
+                    continue;
+                };
+                s[n * row + col] += contribution[12 * i + j];
+            }
+        }
+    }
+    s
+}
+
+/// The tie's transfer from the reduced shell coordinates to the beam DOFs (rows, global axes), read
+/// column by column through `expand_beam`.
+fn tie_transfer(tied: &fs_plate::shell::junction::BeamTiedShellModel) -> Vec<Vec<f64>> {
+    let n = tied.model.free;
+    let columns: Vec<Vec<f64>> = (0..n)
+        .map(|q| {
+            let mut e = vec![0.0; n];
+            e[q] = 1.0;
+            tied.expand_beam(0, &e).unwrap()
+        })
+        .collect();
+    (0..columns[0].len())
+        .map(|a| columns.iter().map(|c| c[a]).collect())
+        .collect()
+}
+
+/// The legacy element's exact transfer in global axes: beam node k follows shell node `line[k]` rigidly,
+/// u_b = u + theta x d and theta_b = theta, with d = (0, 0, arm).
+fn arm_transfer(p: &Plate, dof_map: &[Option<usize>], n: usize) -> Vec<Vec<f64>> {
+    let arm = centroid_arm();
+    let mut t = vec![vec![0.0; n]; 6 * p.line.len()];
+    for (k, &node) in p.line.iter().enumerate() {
+        for c in 0..6 {
+            if let Some(q) = dof_map[6 * node + c] {
+                t[6 * k + c][q] = 1.0;
+            }
+        }
+        if let Some(q) = dof_map[6 * node + 4] {
+            t[6 * k][q] = arm;
+        }
+        if let Some(q) = dof_map[6 * node + 3] {
+            t[6 * k + 1][q] = -arm;
+        }
+    }
+    t
+}
+
+/// sum_e A_e^T G_e B_e over the beam segments (G_e the segment's global matrix, A_e and B_e the rows of
+/// transfers A and B for its two nodes), dense n x n; with `magnitude`, of the entries' absolute values.
+fn segment_products(
+    p: &Plate,
+    a: &[Vec<f64>],
+    b: &[Vec<f64>],
+    mass: bool,
+    n: usize,
+    magnitude: bool,
+) -> Vec<f64> {
+    let v = |x: f64| if magnitude { x.abs() } else { x };
+    let arm = centroid_arm();
+    let mut out = vec![0.0; n * n];
+    for (e, w) in p.line.windows(2).enumerate() {
+        let c: [[f64; 3]; 2] = std::array::from_fn(|i| {
+            let x = p.mesh.nodes[w[i]];
+            [x[0], x[1], x[2] + arm]
+        });
+        let (k, m) = segment_matrices(
+            c[0],
+            c[1],
+            [0.0, 0.0, 1.0],
+            brace_section(),
+            BeamKind::EulerBernoulli,
+        )
+        .unwrap();
+        let g = if mass { m } else { k };
+        let support = |t: &[Vec<f64>]| -> Vec<usize> {
+            (0..n)
+                .filter(|&q| (0..12).any(|r| t[6 * e + r][q] != 0.0))
+                .collect()
+        };
+        let (rows_a, columns_b) = (support(a), support(b));
+        for &j in &columns_b {
+            let x: [f64; 12] = std::array::from_fn(|r| {
+                (0..12).map(|s| v(g[12 * r + s]) * v(b[6 * e + s][j])).sum()
+            });
+            for &i in &rows_a {
+                out[n * i + j] += (0..12).map(|r| v(a[6 * e + r][i]) * x[r]).sum::<f64>();
+            }
+        }
+    }
+    out
+}
+
+/// The plan's G3 claim, "an on-node beam tie reproduces `assemble_stiffened_shell` K and M bitwise", is
+/// FALSIFIED (measured 2026-10-23; ruling 6285): on this fixture 3212 of the 864^2 K entries differ in their
+/// bits, by at most 9.6e-17 of the largest entry. The legacy path itself is untouched, so the piano boards
+/// are not affected (their pencil is pinned by `g3_legacy_bonded_beam_pencil_golden`). What holds is
+/// agreement to rounding, gated by a DERIVED bound rather than a chosen one. The two paths differ in three
+/// ways, and each is accounted for:
+/// - Arithmetic order. Both evaluate a sum of the plate entry P and each segment's congruence terms. Along a
+///   chain of at most m roundings a computed sum of products is within gamma_m of the sum of its terms'
+///   magnitudes (gamma_m = m u / (1 - m u), u = 2^-53; Higham, Accuracy and Stability of Numerical
+///   Algorithms, 2nd ed., section 3.1). The legacy terms, in the segment's chord axes R_e, have magnitude
+///   S_leg = |P| + sum_e |R_e T_arm|^T |A_e| |R_e T_arm| (`summand_magnitude`); the tie's, in global axes,
+///   S_tie = |P| + sum_e |T|^T |G_e| |T|. m = 64 bounds either chain: the legacy element is at most 41 deep
+///   (7 for its local entry, 6 for the transform, two 12-term inner products, 2 assembly additions) and the
+///   tie at most 29 (8 local, 8 rotation, 11 for the congruence, 2 assembly).
+/// - The transfer. The legacy element uses the exact rigid arm T_arm; the tie uses its dual mortar of matching
+///   nodes, which equals T_arm only up to the rounding of its own quadrature, T = T_arm + dT. That adds
+///   exactly E = T^T G T - T_arm^T G T_arm = dT^T G T + T_arm^T G dT, which reaches entries that the legacy
+///   element leaves exactly zero. The test computes E (signed) and subtracts it; computing it is itself
+///   within gamma_64 (|dT|^T |G| |T| + |T_arm|^T |G| |dT|).
+/// - Symmetry. The tie builds its pencil from the UPPER triangle of each source matrix and mirrors it
+///   (`accumulate_congruence`), so it is symmetric bit for bit; the legacy assembly copies the assembled plate
+///   pencil P, which is symmetric only to rounding (its asymmetry max |P_ij - P_ji| is printed). The entries are
+///   therefore compared on and above the diagonal, where both read the same plate entry, and the tie's own
+///   bit symmetry is asserted.
+///
+/// So for i <= j, |K_tie - K_legacy - E|_ij <= gamma_64 (S_leg + S_tie + |dT|^T |G| |T| + |T_arm|^T |G| |dT|)_ij,
+/// and an entry with no term at all must agree exactly. The same holds for M.
+#[test]
+fn g3_on_node_beam_tie_matches_legacy_to_rounding() {
+    let depth = 64.0;
+    let u = f64::EPSILON / 2.0;
+    let gamma = depth * u / (1.0 - depth * u);
+    for bump in [0.0, 0.02] {
+        let p = plate(8, bump);
+        let legacy = on_node_model(&p);
+        let base = dkt_plate(&p);
+        let tied = tie_beam(
+            &p,
+            &base,
+            &on_line_nodes(&p),
+            BeamKind::EulerBernoulli,
+            budget(),
+        )
+        .unwrap();
+        let n = legacy.free;
+        let t_tie = tie_transfer(&tied);
+        let t_arm = arm_transfer(&p, &legacy.dof_map, n);
+        let delta: Vec<Vec<f64>> = t_tie
+            .iter()
+            .zip(&t_arm)
+            .map(|(a, b)| a.iter().zip(b).map(|(x, y)| x - y).collect())
+            .collect();
+        let delta_max = delta.iter().flatten().fold(0.0_f64, |s, v| s.max(v.abs()));
+        let delta_count = delta.iter().flatten().filter(|v| **v != 0.0).count();
+        for (name, a, b, plate_part, mass) in [
+            ("K", &legacy.k, &tied.model.k, &base.k, false),
+            ("M", &legacy.m, &tied.model.m, &base.m, true),
+        ] {
+            assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()));
+            let s_leg = summand_magnitude(&p, plate_part, &legacy.dof_map, mass);
+            let plate = plate_part.to_dense();
+            let plate_abs: Vec<f64> = plate.iter().map(|v| v.abs()).collect();
+            let s_tie = segment_products(&p, &t_tie, &t_tie, mass, n, true);
+            let d1 = segment_products(&p, &delta, &t_tie, mass, n, true);
+            let d2 = segment_products(&p, &t_arm, &delta, mass, n, true);
+            let e1 = segment_products(&p, &delta, &t_tie, mass, n, false);
+            let e2 = segment_products(&p, &t_arm, &delta, mass, n, false);
+            let (x, y) = (a.to_dense(), b.to_dense());
+            let (mut bits, mut worst, mut transfer_only) = (0usize, 0.0_f64, 0usize);
+            let mut transfer_max = 0.0_f64;
+            let mut asymmetry = 0.0_f64;
+            for index in 0..n * n {
+                let (row, column) = (index / n, index % n);
+                let mirror = n * column + row;
+                assert!(
+                    y[index].to_bits() == y[mirror].to_bits(),
+                    "bump {bump}, {name}: the tied pencil is not symmetric at ({row}, {column})"
+                );
+                asymmetry = asymmetry.max((plate[index] - plate[mirror]).abs());
+                if row > column {
+                    continue;
+                }
+                let (l, t) = (x[index], y[index]);
+                bits += usize::from(l.to_bits() != t.to_bits());
+                let transfer = e1[index] + e2[index];
+                transfer_max = transfer_max.max(transfer.abs());
+                if s_leg[index] == 0.0 && d1[index] + d2[index] > 0.0 {
+                    transfer_only += 1;
+                }
+                let bound = gamma
+                    * (s_leg[index] + plate_abs[index] + s_tie[index] + d1[index] + d2[index]);
+                let residual = t - l - transfer;
+                if bound == 0.0 {
+                    assert!(
+                        residual == 0.0,
+                        "bump {bump}, {name}: entry ({row}, {column}) has no term but differs: legacy {l:e}, tie {t:e}"
+                    );
+                } else {
+                    worst = worst.max(residual.abs() / bound);
+                }
+            }
+            println!(
+                "bump {bump}, {name}: {n} x {n} entries, {bits} on or above the diagonal differ in bits (legacy plate asymmetry {asymmetry:.2e}); the tie's transfer departs from the exact arm in {delta_count} entries, by at most {delta_max:.2e}, and that alone reaches {transfer_only} entries the legacy element leaves zero (|E| up to {transfer_max:.2e}); worst |tie - legacy - E| is {worst:.3e} of the derived bound"
+            );
+            assert!(
+                worst <= 1.0,
+                "bump {bump}, {name}: the on-node tie departs from the legacy pencil beyond its derived bound ({worst:.3e})"
+            );
+        }
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fold(acc: u64, v: u64) -> u64 {
+    v.to_le_bytes()
+        .iter()
+        .fold(acc, |a, &b| (a ^ u64::from(b)).wrapping_mul(FNV_PRIME))
+}
+
+/// A pencil matrix's row structure and value bits.
+fn fold_matrix(mut acc: u64, a: &fs_sparse::Csr) -> u64 {
+    acc = fold(acc, a.nrows() as u64);
+    for r in 0..a.nrows() {
+        let (columns, values) = a.row(r);
+        acc = fold(acc, columns.len() as u64);
+        for (&c, &v) in columns.iter().zip(values) {
+            acc = fold(fold(acc, c as u64), v.to_bits());
+        }
+    }
+    acc
+}
+
+/// Golden (docs/GOLDEN_POLICY.md; `golden-couplings.json` row `fs-plate:legacy-bonded-beam-pencil`, surface
+/// `fs-plate:stiffened-shell-bits`): the bits of the legacy bonded `ShellBeam` pencil of
+/// `assemble_stiffened_shell`, which the piano boards consume (`crowned_board.rs`, `downbearing.rs`). Frozen
+/// on x86_64 Linux in debug and release alike. It is not a cross-ISA claim: the curved fixture's
+/// coordinates use the platform `sin`.
+const LEGACY_BONDED_PENCIL_GOLDEN: u64 = 0x24de_da52_df52_7693;
+
+#[test]
+fn g3_legacy_bonded_beam_pencil_golden() {
+    let mut acc = FNV_OFFSET;
+    for bump in [0.0, 0.02] {
+        let model = on_node_model(&plate(8, bump));
+        acc = fold_matrix(fold_matrix(acc, &model.k), &model.m);
+    }
+    println!(
+        "legacy bonded-beam pencil digest {acc:#018x} ({} build)",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
+    assert_eq!(
+        acc, LEGACY_BONDED_PENCIL_GOLDEN,
+        "the legacy bonded-beam pencil's bits moved: {acc:#018x} vs {LEGACY_BONDED_PENCIL_GOLDEN:#018x}. This is a golden event \
+         (docs/GOLDEN_POLICY.md): name the semantic change, bump STIFFENED_SHELL_BIT_SEMANTICS_VERSION and re-freeze \
+         in debug and release; never re-pin silently. The piano boards consume this pencil."
+    );
 }
 
 /// Local orders between consecutive rungs (each rung halves h).
