@@ -468,7 +468,13 @@ mod tests {
     fn zero_mean_mode_opens_part_of_an_otherwise_closed_slit() {
         let c = fixture();
         let q = [-0.0001, 0.0002, 0.0];
-        assert!(c.mean_gap_m(&q).unwrap().abs() < 1e-20);
+        // Analytically zero. Each nodal gap r + sum_k s_k q_k carries at most
+        // gamma_4 ~ 4u relative rounding of |r| + sum_k |s_k q_k| = 4e-4 at both
+        // edge nodes (u = 2^-53); midpoint, length and width add only relative
+        // error to an exact zero. 1e-20 sat below half an ulp of the 2e-4 gap
+        // (2^-66 = 1.36e-20 is the value the arithmetic actually returns).
+        let roundoff = 4.0 * (f64::EPSILON / 2.0) * (1e-4 + 1e-4 + 2e-4);
+        assert!(c.mean_gap_m(&q).unwrap().abs() <= roundoff);
         assert!((c.open_area_m2(&q).unwrap() - 5e-7).abs() < 1e-20);
         let response = c.response(&q, &q, &[0.0; 3]).unwrap();
         assert!(response.normal_force_n > 0.0);

@@ -112,14 +112,30 @@ fn shared_memory_work_is_storage_plus_escaped_energy_including_release() {
             0.0
         };
         let (direct, history) = load.affine_pressure();
+        let old_flow = load.state.branch_flows_m3_s()[0];
+        let old_energy = load.state.stored_energy_j();
         let (next, frame) = load.candidate(q).unwrap();
         let scale = frame.port.supplied_work_j.abs()
             + frame.port.storage_change_j.abs()
             + frame.port.dissipated_energy_j;
-        assert!(frame.port.balance_residual_j().abs() < 1e-12 * scale.max(1e-30));
+        // The balance is exact in real arithmetic, but storage_change is a
+        // difference of two O(E) energies and the port pressure is 2a - Z*U
+        // after an O(eps*U) flow solve. Neither rounding shrinks with this
+        // step's work, so a converged step is roundoff of E and of the
+        // characteristic-wave power (Z + direct)*U^2*dt; each enters at most
+        // ~7 eps of this floor, and 64 eps matches candidate()'s flow gate.
+        let floor = 64.0
+            * f64::EPSILON
+            * (old_energy
+                + frame.port.stored_energy_j
+                + (load.port_impedance + direct)
+                    * q.abs().max(old_flow.abs()).powi(2)
+                    * load.model.time_step_s);
+        let tolerance = 1e-12 * scale.max(1e-30) + floor;
+        assert!(frame.port.balance_residual_j().abs() <= tolerance);
         assert!(frame.port.dissipated_energy_j >= 0.0);
         let expected_work = (direct * q + history) * q * load.model.time_step_s;
-        assert!((frame.port.supplied_work_j - expected_work).abs() < 1e-12 * scale.max(1e-30));
+        assert!((frame.port.supplied_work_j - expected_work).abs() <= tolerance);
         returned_work |= frame.port.supplied_work_j < 0.0;
         work += frame.port.supplied_work_j;
         escaped += frame.port.dissipated_energy_j;

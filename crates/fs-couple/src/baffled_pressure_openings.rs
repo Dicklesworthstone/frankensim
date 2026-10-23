@@ -51,7 +51,11 @@ mod rectangular_tests {
                 * sinc(0.5*wave_number*size[0]*direction[0])
                 * sinc(0.5*wave_number*size[1]*direction[1]);
             let mut errors = Vec::new();
-            for cells in [8, 16, 32] {
+            // Uniform midpoint cells sum exp(i*beta*x) with the exact relative
+            // error (beta*h/2)/sin(beta*h/2) - 1 per axis. At theta=1, phi=0.2
+            // that is 7.36e-4 at 32 cells, above 5e-4 by construction, and
+            // 1.84e-4 at 64 cells (plus a ~1.3e-5 finite-distance floor).
+            for cells in [8, 16, 32, 64] {
                 let spec = RectangularOutletReceiver { center_m: [0.0; 2],
                     position_m: direction.map(|d| radius*d), cells: [cells; 2],
                     maximum_frequency_hz: frequency };
@@ -59,8 +63,8 @@ mod rectangular_tests {
                     size, 192_000, 192_000, spec, medium).unwrap();
                 errors.push((gain(&receiver, frequency)/exact - 1.0).abs());
             }
-            assert!(errors[1] < errors[0] && errors[2] < errors[1], "{errors:?}");
-            assert!(errors[2] < 5e-4, "{errors:?}");
+            assert!(errors.windows(2).all(|pair| pair[1] < pair[0]), "{errors:?}");
+            assert!(errors[3] < 5e-4, "{errors:?}");
         }
     }
 

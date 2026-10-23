@@ -35,7 +35,8 @@ fn material(t: f64) -> ResolvedMaterialStatePoint {
             chemistry: "same material name".into(),
             phase: "solid".into(),
             process: "fixture".into(),
-            revision: 1,
+            // MaterialCard::assemble starts a lineage at revision 0.
+            revision: 0,
         },
         claims,
         vec![],

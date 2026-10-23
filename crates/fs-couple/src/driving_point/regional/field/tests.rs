@@ -36,6 +36,10 @@ fn provenance() -> Provenance {
 // A calorically perfect NASA-9 fixture gives an independent perturbation
 // oracle. These are declared analytic coefficients, not measured air data.
 fn gas_model() -> ThermochemicalGasModel {
+    gas_model_with_viscosity([1.8e-5, 1.8e-5])
+}
+// Viscosity knots at 200 K and 1000 K; the default above is flat in T.
+fn gas_model_with_viscosity(viscosity_pa_s: [f64; 2]) -> ThermochemicalGasModel {
     let mut coefficients = [0.0; 9];
     coefficients[2] = 3.5;
     let mut parameters = std::collections::BTreeMap::new();
@@ -78,9 +82,9 @@ fn gas_model() -> ThermochemicalGasModel {
     )
     .unwrap();
     let mut claims = ClaimSet::new();
-    for (key, dims, value) in [
-        ("dynamic_viscosity", DynViscosity::DIMS, 1.8e-5),
-        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.026),
+    for (key, dims, [low, high]) in [
+        ("dynamic_viscosity", DynViscosity::DIMS, viscosity_pa_s),
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, [0.026; 2]),
     ] {
         claims
             .insert_claim(PropertyClaim {
@@ -88,7 +92,7 @@ fn gas_model() -> ThermochemicalGasModel {
                 value: PropertyValue::Curve {
                     abscissa: "temperature".into(),
                     abscissa_dims: Temperature::DIMS,
-                    knots: vec![(200.0, value), (1000.0, value)],
+                    knots: vec![(200.0, low), (1000.0, high)],
                     dims,
                 },
                 validity: ValidityDomain::unconstrained()
@@ -133,6 +137,14 @@ fn gas_model() -> ThermochemicalGasModel {
     .unwrap()
 }
 pub(crate) fn field(outlet_temperature: f64) -> AxialGasField {
+    field_with_model(outlet_temperature, gas_model())
+}
+/// The same two-station field with a temperature-dependent viscosity claim.
+pub(crate) fn field_with_viscosity(outlet_temperature: f64, viscosity_pa_s: [f64; 2])
+    -> AxialGasField {
+    field_with_model(outlet_temperature, gas_model_with_viscosity(viscosity_pa_s))
+}
+fn field_with_model(outlet_temperature: f64, model: ThermochemicalGasModel) -> AxialGasField {
     let state = |temperature_k| PrimitiveGasState {
         temperature_k,
         composition: Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
@@ -141,7 +153,7 @@ pub(crate) fn field(outlet_temperature: f64) -> AxialGasField {
         vec![0.0, LENGTH],
         101325.0,
         vec![state(300.0), state(outlet_temperature)],
-        gas_model(),
+        model,
         QueryPoint::new(),
         ThermochemicalPhase::FrozenGas,
     )
@@ -501,7 +513,8 @@ fn material_wall_with_continuous_gas_reaches_feedback_and_outlet_pressure() {
         8000, 4801, None, Some(512)).unwrap();
     let receiver = crate::pcm_wav::baffled::CircularOutletReceiver {
         position_m: [0.0, 0.0, 1.0], radial_rings: 2, angular_points: 8,
-        maximum_frequency_hz: 3000.0,
+        // The single-rate circular receiver admits up to 0.1 x the rate.
+        maximum_frequency_hz: 800.0,
     };
     let mut compliant_mic = regional.baffled_outlet(8000, 512, receiver, Some(&wall)).unwrap();
     let mut rigid_mic = regional.baffled_outlet(8000, 512, receiver, None).unwrap();

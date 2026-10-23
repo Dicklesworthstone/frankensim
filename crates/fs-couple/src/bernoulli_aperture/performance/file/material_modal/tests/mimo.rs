@@ -149,6 +149,10 @@ fn computed_physical_load_uses_original_side_openings_and_retains_material_valve
     let text = mimo_input()
         .replace("audio 768000 48000 512", "audio 8000 8000 64")
         .replace("control_rate_hz\t48000", "control_rate_hz\t8000")
+        // Exact-zoh admits a per-blade angular cap below pi. Every admitted mode
+        // lies in the declared 0.2..3000 Hz window, so at 8 kHz each needs at
+        // most 2*pi*3000/8000 = 2.36 rad; the 768 kHz cap of 0.04 admits 51 Hz.
+        .replace("blade 3 0.2 3000 0.04", "blade 3 0.2 3000 2.4")
         .replace("duct_section 1 2 0.15 0.007 0.002 gas 303.15 0 viscothermal 80 1000 8 8",
             "duct_section 1 2 0.15 0.002 0.002 gas 303.15 0")
         .replace("duct_section 1 3 0.12 0.007", "duct_section 1 3 0.12 0.0015")

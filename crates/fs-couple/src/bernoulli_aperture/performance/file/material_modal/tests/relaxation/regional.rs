@@ -352,7 +352,8 @@ fn regional_selection_refuses_missing_sources_unresolved_clocks_and_complete_his
             }
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        // lines() drops the final LF that canonical gesture bytes end with.
+        .join("\n") + "\n";
     let error = MaterialModalValvePerformance::from_bytes_with_sources(
         crowded.as_bytes(),
         37,

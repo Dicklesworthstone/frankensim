@@ -90,7 +90,9 @@ fn wetted_faces_coexist_with_distributed_contact_and_independent_pressure_ports(
 
 #[test]
 fn omitted_and_zero_wetted_bindings_preserve_original_playback_bitwise() {
-    let text = input().replace("audio 768000 48000 512 0.005", "audio 768000 48000 128 0.005");
+    // 256 frames: the phrase releases at 4 ms, after the last control tick of a
+    // 128-frame (2.65 ms) window, which compile_schedule refuses.
+    let text = input().replace("audio 768000 48000 512 0.005", "audio 768000 48000 256 0.005");
     let (a, _) = render(build(&text, 37));
     let (b, _) = render(build(&text.replacen("compile_limits", "wetted_surfaces 0\ncompile_limits", 1), 37));
     assert_eq!(a, b);

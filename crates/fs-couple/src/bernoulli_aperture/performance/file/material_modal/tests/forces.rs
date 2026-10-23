@@ -152,6 +152,16 @@ fn g0_force_addresses_conflicts_and_combined_control_budgets_refuse() {
         text.replace("source_forces 6", "source_forces 262145"),
         text.replace("source_forces 6", "source_forces 7"),
     ] { assert!(load(&invalid).is_err()); }
+    // compile_schedule first reserves one stored assignment per control tick
+    // (performance.rs:446-450): 256 ticks here, above the ~100 assignments the
+    // 48 kHz ramp phrase and both key programs emit, so that reservation and
+    // not the combined budget would bind. A 1 Hz constant phrase has one tick
+    // and one assignment, leaving the combined budget as the binding limit.
+    let phrase = GestureSchedule::try_new(1, vec![GestureTrack { id: "mouth".into(),
+        target: GestureTarget::BlowingPressure, initial: GestureValue::PressurePa(5.0),
+        events: vec![] }]).unwrap();
+    let text = format!("{}\nschedule\n{}", text.split_once("\nschedule\n").unwrap().0,
+        String::from_utf8(phrase.to_canonical_bytes()).unwrap());
     let ordinary = without_forces(&text);
     let baseline = load(&ordinary).unwrap();
     let r = baseline.renderer();

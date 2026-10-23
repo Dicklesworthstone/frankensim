@@ -57,8 +57,11 @@ fn regional_inlet_supplies_channel_viscosity_instead_of_default_or_exterior_air(
 
 #[test]
 fn axial_field_channel_uses_the_exact_inlet_instead_of_its_first_midpoint_cell() {
-    use crate::driving_point::regional::field::tests::field;
-    let field = field(280.0);
+    use crate::driving_point::regional::field::tests::field_with_viscosity;
+    // The shared fixture's viscosity claim is flat in temperature, so it can
+    // never tell the inlet from the first cell by viscosity. Give it an
+    // air-like slope; the slit law consumes exactly this property.
+    let field = field_with_viscosity(280.0, [1.33e-5, 4.15e-5]);
     let inlet = *field.state_at(0.0).unwrap().state();
     let source = source(true)
         .replace("ambient 293.15 101325 0", "ambient 300 101325 0")
@@ -66,6 +69,7 @@ fn axial_field_channel_uses_the_exact_inlet_instead_of_its_first_midpoint_cell()
     let p = ReedPerformance::from_bytes_with_gas_field(source.as_bytes(), 37,
         ObservationPolicy::Diagnostic, None, field, 8).unwrap();
     assert_eq!(p.viscous_slit().unwrap().gas(), Some(&inlet));
+    assert_eq!(p.viscous_slit().unwrap().dynamic_viscosity_pa_s(), inlet.dynamic_viscosity);
     assert_ne!(p.segment_gases()[0].temperature, inlet.temperature);
     assert_ne!(p.segment_gases()[0].dynamic_viscosity, inlet.dynamic_viscosity);
 }

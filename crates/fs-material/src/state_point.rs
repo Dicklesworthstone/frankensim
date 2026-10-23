@@ -3108,15 +3108,9 @@ mod tests {
     fn g0_refresh_refuses_foreign_sources_schema_changes_and_partial_states() {
         let (card, initial) = multiaxis_refresh_fixture();
         let retained = initial.clone();
-        let foreign = MaterialCard::assemble(
-            MaterialStateId {
-                revision: 1,
-                ..card.id().clone()
-            },
-            card.claims().clone(),
-            vec![],
-        )
-        .unwrap();
+        // A later revision of the same state, with the same claims. assemble
+        // starts a lineage at revision 0, so the successor comes from supersede.
+        let foreign = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
         assert!(initial.at_query_point(&foreign, &initial.query()).is_err());
         let altered_temperature = initial
             .query()

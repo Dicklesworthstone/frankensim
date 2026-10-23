@@ -110,6 +110,14 @@ fn full_band_characteristic_and_outlet_lines_match_frequency_domain_at_both_rate
 #[test]
 fn uniform_regional_realization_is_identical_and_load_changes_are_live() {
     let (duct, gas, table, zc) = fixture(48_000);
+    let regional = RegionalDuct::new(&duct, &[gas]).unwrap();
+    // The scalar API takes the caller's port impedance; the regional owner
+    // derives rho*c/((pi*r)*r), while the fixture divides by pi*(r*r). The two
+    // areas differ by at most their own two roundings each (4u), plus one
+    // division each (2u) and this check's quotient (u): 7u < 4 eps.
+    // Bit identity is a claim about the realization, so share the SAME port.
+    let port = regional.inlet_impedance();
+    assert!((port / zc - 1.0).abs() <= 4.0 * f64::EPSILON);
     let uniform = spectrum(
         characteristic_line_dense(
             &duct,
@@ -117,13 +125,12 @@ fn uniform_regional_realization_is_identical_and_load_changes_are_live() {
             MouthLoad::Tabulated(&table),
             48_000,
             8192,
-            zc,
+            port,
             None,
             Some(N),
         )
         .unwrap(),
     );
-    let regional = RegionalDuct::new(&duct, &[gas]).unwrap();
     let same = spectrum(
         regional
             .characteristic_line(MouthLoad::Tabulated(&table), 48_000, 8192, None, Some(N))

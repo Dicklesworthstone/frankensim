@@ -66,7 +66,8 @@ fn wall(time_s: f64) -> LocalMaterialWall {
 }
 fn receiver() -> CircularOutletReceiver {
     CircularOutletReceiver { position_m: [0.0, 0.0, 1.0], radial_rings: 2,
-        angular_points: 8, maximum_frequency_hz: 3000.0 }
+        // The single-rate circular receiver admits up to 0.1 x the 8 kHz rate.
+        angular_points: 8, maximum_frequency_hz: 800.0 }
 }
 fn relative(actual: C64, expected: C64) -> f64 {
     (actual - expected).abs() / expected.abs().max(1e-30)
