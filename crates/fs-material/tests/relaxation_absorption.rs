@@ -9,7 +9,7 @@
 
 use fs_material::MaterialError;
 use fs_material::gas::{ConductivityModel, GasSpec, GasState};
-use fs_material::iso9613::{iso9613_absorption_neper_per_m, iso9613_relaxation_frequencies_hz};
+use fs_material::iso9613::{iso9613_absorption_db_per_km, iso9613_relaxation_frequencies_hz};
 use fs_material::relaxation::{
     InternalReservoir, IsoRelaxingSpecies, MAX_RELAXATION_PROCESSES, PartnerRate,
     RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw, RelaxingMedium, SpeciesRelaxation,
@@ -431,64 +431,152 @@ fn iso_rate_variant_is_the_standards_relaxation_frequency() {
     }
 }
 
-/// The generic law with ISO's rate variant and ISO's characteristic
-/// temperatures against ISO 9613-1's own vibrational terms (classical term
-/// excluded on both sides). Logged per point. The remaining differences are
-/// model-form terms of the standard: its strengths are the small-strength
-/// linearization with `(1 - e^{-theta/T})^2 -> 1`, `c = 343.23 (T/T0)^{1/2}`,
-/// fixed undiluted O2/N2 fractions, and `tau = 1/(2 pi f_r)`. The asserted band
-/// is the standard's own stated accuracy (+-10 % in its domain); it is not the
-/// bead's 1e-3 G1 gate, which stays open and is reported from these numbers.
+/// G1-ISO (orchestrator ruling of 2026-10-23 on the bead): ISO's own
+/// linearized expression with its `f_rO` and `f_rN` reproduces published
+/// evaluations of the standard's formula. The ISO 9613-1 tables are paywalled
+/// and are UNKNOWN here. The public-domain evaluation is Bass, Sutherland,
+/// Zuckerwar, Blackstock and Hester 1995 (JASA 97:680, p. 682; a U.S.
+/// Government work): 1000 Hz at 20 C, 10 % RH and 0.5 atm gives 1.078 dB per
+/// 100 m. Gate: half the last printed digit plus 1e-3 relative.
 #[test]
-fn iso_rate_variant_vibrational_terms_track_iso_formula() {
+fn g1_iso_formula_reproduces_the_published_evaluation() {
+    let db_km =
+        iso9613_absorption_db_per_km(293.15, 0.5 * 101_325.0, 0.10, TAU * 1_000.0).expect("iso");
+    let per_100_m = db_km / 10.0;
+    let printed = 1.078;
+    let band = 0.0005 + 1e-3 * printed;
+    println!(
+        "{{\"bead\":\"M0.1-W2\",\"test\":\"g1_iso_formula\",\"source\":\"Bass1995 p682\",\"observed_dB_100m\":{per_100_m},\"printed\":{printed},\"band\":{band}}}"
+    );
+    assert!(
+        (per_100_m - printed).abs() <= band,
+        "{per_100_m} dB/100 m vs printed {printed}"
+    );
+}
+
+/// ISO's saturation law, `p_sat/p0 = 10^(-6.8346 (273.16/T)^1.261 + 4.6151)`,
+/// turns a relative humidity into the molar water fraction on ISO's own terms.
+fn iso_water_fraction(t: f64, p: f64, rh: f64) -> f64 {
+    let c = -6.8346 * (273.16 / t).powf(1.261) + 4.6151;
+    rh * 10.0_f64.powf(c) * 101_325.0 / p
+}
+
+/// G1-exact (orchestrator ruling of 2026-10-23 on the bead): the exact law's
+/// vibrational absorption minus ISO 9613-1's equals an analytic strength term
+/// plus an analytic dilution term, to within 1e-3 of alpha_ISO. Both terms are
+/// computed here independently of the law. The grid is ISO's domain:
+/// T -20..+50 C, RH 0.1..1 converted by ISO's saturation law, 1 atm and
+/// 50 Hz..10 kHz. The classical term is excluded on both sides: ISO's
+/// 1.84e-11 term includes rotation, which needs sourced rotational rates.
+///
+/// Expansion. Write `u = sum_j C_j D_j / c_vinf` with `D_j = 1/(1 - i w tau_j)`
+/// and `a = R_s / c_pinf`. Then `c^2/c_inf^2 = 1 - a u + a u^2 + O(u^3)`, so
+/// `k = (w/c_inf) [1 + (a/2) u + (3a^2/8 - a/2) u^2 + O(u^3)]`, where
+/// `C_j = x_j R_s E(theta_j/T)` and `c_vinf = c_v - sum C_j`.
+/// ISO's term for process j is the first-order piece under ISO's assumptions:
+/// strength `(4/35) X_j (theta/T)^2 e^{-theta/T}`, `c = 343.23 (T/T0)^{1/2}`
+/// and fixed `X_O2 = 0.209`, `X_N2 = 0.781`.
+/// - Dilution term: `sum_j alpha_ISO,j (x_j/X_j - 1)`.
+/// - Strength term: the second-order series with the actual state, minus
+///   `sum_j alpha_ISO,j x_j/X_j`. It collects the Planck-Einstein factor
+///   `(1 - e^{-theta/T})^{-2}`, the frozen heat capacities, `c_inf` against
+///   ISO's `c`, and the second-order piece. These are logged separately.
+///
+/// The raw difference must also stay inside ISO's stated +-10 %, as a sanity
+/// bound rather than the gate. It is applied only where the molar water
+/// concentration is 0.05..5 %, the water range the bead states for ISO's
+/// +-10 % class. ISO's Section 7 text is paywalled and was not read, so that
+/// range is UNKNOWN to this test beyond the bead's statement. Saturated 40 C
+/// and 50 C air (5.1..12.2 % water) lies above it; its dilution alone is
+/// -5..-12 %. The decomposition gate covers every grid point.
+#[test]
+fn g1_exact_minus_iso_is_strength_plus_dilution() {
     let law = iso_air_law();
-    let mut worst_dry = 0.0_f64;
-    let mut worst_humid = 0.0_f64;
+    let (p, theta) = (101_325.0, [2239.1, 3352.0]);
+    let (iso_x, iso_a) = ([0.209, 0.781], [0.01275, 0.1068]);
+    let mut worst_residual = 0.0_f64;
+    let mut worst_raw = 0.0_f64;
     for t in [253.15, 273.15, 293.15, 313.15, 323.15] {
-        for x_w in [0.0, 0.005, 0.01, 0.02] {
-            let p = 101_325.0;
-            let gas = test_gas(1.4, t, p);
+        for rh in [0.1, 0.3, 0.5, 0.7, 1.0] {
+            let x_w = iso_water_fraction(t, p, rh);
             let dry = 1.0 - x_w;
-            let state = law
-                .evaluate(&medium(
-                    gas,
-                    &[
-                        ("N2", 0.781 * dry),
-                        ("O2", 0.209 * dry),
-                        ("Ar", 0.010 * dry),
-                        ("H2O", x_w),
-                    ],
-                ))
-                .expect("state");
+            let gas = test_gas(1.4, t, p);
+            let parts = [
+                ("N2", 0.781 * dry),
+                ("O2", 0.209 * dry),
+                ("Ar", 0.010 * dry),
+                ("H2O", x_w),
+            ];
+            let state = law.evaluate(&medium(gas, &parts)).expect("state");
             let (fr_o, fr_n) = iso9613_relaxation_frequencies_hz(t, p, 100.0 * x_w).expect("fr");
+            let fr = [fr_o, fr_n];
+            let x = [0.209 * dry, 0.781 * dry];
+            // Independent strengths and frozen capacities of the test gas.
+            let r_s = gas.specific_gas_constant;
+            let cv = r_s / (gas.gamma - 1.0);
+            let c_j: Vec<f64> = theta
+                .iter()
+                .zip(x)
+                .map(|(&th, xj)| {
+                    let u = th / t;
+                    xj * r_s * u * u * u.exp() / (u.exp() - 1.0).powi(2)
+                })
+                .collect();
+            let cvi = cv - c_j.iter().sum::<f64>();
+            let cpi = cvi + r_s;
+            let c_inf = (r_s * t * cpi / cvi).sqrt();
+            let a = r_s / cpi;
             for i in 0..13 {
-                let f = 50.0 * 200.0_f64.powf(i as f64 / 12.0);
-                let f2 = f * f;
-                let iso = f2
-                    * (t / 293.15).powf(-2.5)
-                    * (0.01275 * (-2239.1 / t).exp() / (fr_o + f2 / fr_o)
-                        + 0.1068 * (-3352.0 / t).exp() / (fr_n + f2 / fr_n));
-                let generic = state.relaxing_wavenumber(TAU * f).expect("k").im;
-                let rel = (generic - iso) / iso;
-                if x_w == 0.0 {
-                    worst_dry = worst_dry.max(rel.abs());
-                } else {
-                    worst_humid = worst_humid.max(rel.abs());
+                let f = 50.0 * 200.0_f64.powf(f64::from(i) / 12.0);
+                let (w, f2) = (TAU * f, f * f);
+                let iso_j: Vec<f64> = (0..2)
+                    .map(|j| {
+                        f2 * (t / 293.15).powf(-2.5) * iso_a[j] * (-theta[j] / t).exp()
+                            / (fr[j] + f2 / fr[j])
+                    })
+                    .collect();
+                let iso: f64 = iso_j.iter().sum();
+                // u = sum_j C_j D_j / c_vinf with D = (1 + i w tau)/(1 + (w tau)^2).
+                let (mut u_re, mut u_im) = (0.0, 0.0);
+                for j in 0..2 {
+                    let wt = f / fr[j];
+                    u_re += c_j[j] / cvi / (1.0 + wt * wt);
+                    u_im += c_j[j] / cvi * wt / (1.0 + wt * wt);
+                }
+                let first = w / c_inf * (a / 2.0) * u_im;
+                let second = w / c_inf * (3.0 * a * a / 8.0 - a / 2.0) * (2.0 * u_re * u_im);
+                let series = first + second;
+                let undiluted: f64 = (0..2).map(|j| iso_j[j] * x[j] / iso_x[j]).sum();
+                let dilution: f64 = (0..2).map(|j| iso_j[j] * (x[j] / iso_x[j] - 1.0)).sum();
+                let strength = series - undiluted;
+                let exact = state.relaxing_wavenumber(w).expect("k").im;
+                let residual = (exact - (iso + strength + dilution)) / iso;
+                let raw = (exact - iso) / iso;
+                worst_residual = worst_residual.max(residual.abs());
+                if (0.05..=5.0).contains(&(100.0 * x_w)) {
+                    worst_raw = worst_raw.max(raw.abs());
                 }
                 println!(
-                    "{{\"bead\":\"M0.1-W2\",\"test\":\"iso_vibrational_terms\",\"T_K\":{t},\"x_H2O\":{x_w},\"f_Hz\":{f:.2},\"generic_Np_m\":{generic:e},\"iso_Np_m\":{iso:e},\"relative\":{rel:e}}}"
+                    "{{\"bead\":\"M0.1-W2\",\"test\":\"g1_exact_decomposition\",\"T_K\":{t},\"RH\":{rh},\"x_H2O\":{x_w:e},\"f_Hz\":{f:.2},\"alpha_iso\":{iso:e},\"raw\":{raw:e},\"strength_first_order\":{:e},\"strength_second_order\":{:e},\"dilution\":{:e},\"residual\":{residual:e}}}",
+                    (first - undiluted) / iso,
+                    second / iso,
+                    dilution / iso
                 );
                 assert!(
-                    rel.abs() <= 0.10,
-                    "outside ISO's stated accuracy at T={t} x_w={x_w} f={f}: {rel:e}"
+                    residual.abs() <= 1e-3,
+                    "decomposition residual {residual:e} at T={t} RH={rh} f={f}"
                 );
+                if (0.05..=5.0).contains(&(100.0 * x_w)) {
+                    assert!(
+                        raw.abs() <= 0.10,
+                        "raw difference {raw:e} outside ISO's +-10 % at T={t} RH={rh} f={f}"
+                    );
+                }
             }
         }
     }
-    // Context row: the full ISO formula (classical included) at 20 C, 50 % RH, 1 kHz.
-    let full = iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.5, TAU * 1_000.0).expect("iso");
     println!(
-        "{{\"bead\":\"M0.1-W2\",\"test\":\"iso_vibrational_terms\",\"worst_dry\":{worst_dry:e},\"worst_humid\":{worst_humid:e},\"iso_full_20C_50RH_1kHz_Np_m\":{full:e},\"band\":0.10}}"
+        "{{\"bead\":\"M0.1-W2\",\"test\":\"g1_exact_decomposition\",\"worst_residual\":{worst_residual:e},\"worst_raw_in_domain\":{worst_raw:e},\"tolerance\":1e-3,\"sanity_band\":0.10}}"
     );
 }
 
