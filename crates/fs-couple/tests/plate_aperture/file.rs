@@ -116,3 +116,6 @@ mod forcing;
 
 #[path = "file_viscous.rs"]
 mod viscous;
+
+#[path = "file_dg.rs"]
+mod dg;

@@ -172,8 +172,11 @@ impl PlateValvePerformance {
     /// pressure phrase. Nothing steps during admission. Existing owners keep
     /// their physical/solver thresholds. Omitting the aperture symmetry token
     /// preserves the original single-blade construction without a conversion.
-    /// Propagating intervals are lossless; an explicit viscothermal selection
+    /// Legacy propagating intervals are lossless; an explicit viscothermal selection
     /// places gas-derived series/thermal memories along each selected section.
+    /// `dg_tube` instead binds gas-derived Bessel memories inside the original DG
+    /// exponential and solves its exact mean inlet relation with this same valve.
+    /// That bounded one-port cylinder currently supports inlet observation only.
     /// Other graph loads retain explicit impedances, enclosed cavities, compliant walls
     /// and geometry-derived compact baffled radiation.
     /// A selected radiation load replaces, never supplements, that reflection.
@@ -240,6 +243,7 @@ impl PlateValvePerformance {
         let memory_branches=valve.relaxation().map_or(0,|r|r.branches().len());
         let system=duct.bind(valve)?;
         let (duct_nodes,duct_sections,represented)=match &system {
+            CoupledAperture::Dg(d)=>(2,1,d.load().duct().total_length()),
             CoupledAperture::Tube(t)=>(2,1,t.represented_length_m()),
             CoupledAperture::Network(n)=>(n.spec().nodes.len(),n.spec().sections.len(),
                 n.represented_sections().iter().map(|s|s.represented_length_m).sum()),

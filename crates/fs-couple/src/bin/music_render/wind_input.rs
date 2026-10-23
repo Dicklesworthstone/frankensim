@@ -620,10 +620,12 @@ fn load_with_all_sources(
             else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
         let requested=match p.renderer().system() {
+            CoupledAperture::Dg(d)=>d.load().duct().total_length(),
             CoupledAperture::Tube(t)=>t.spec().length_m,
             CoupledAperture::Network(n)=>n.spec().sections.iter().map(|s|s.length_m).sum(),
         };
-        let propagation=if p.viscothermal_losses().is_empty() {"lossless propagating sections with explicit local loads"}
+        let propagation=if matches!(p.renderer().system(),CoupledAperture::Dg(_)) {"gas-derived exact-Bessel viscous/thermal memory in the original DG exponential"}
+            else if p.viscothermal_losses().is_empty() {"lossless propagating sections with explicit local loads"}
             else {"gas-derived viscothermal series/thermal memory distributed along selected sections"};
         let gas_json=super::thermochemical::provenance(p.gas_records());
         let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; {propagation}; {scope}\"{receiver_json}{gas_json}}}",

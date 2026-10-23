@@ -14,6 +14,7 @@ pub mod force;
 pub mod boundaries;
 
 use super::dynamic::DynamicAperture;
+use super::dg::ApertureDg;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use super::network::ApertureNetwork;
@@ -34,12 +35,15 @@ pub enum CoupledAperture {
     Tube(ApertureTube),
     /// Explicit connected sections, junctions and any already-attached loads.
     Network(ApertureNetwork),
+    /// Exact DG acoustic/wall memory coupled through the original mean-flow valve.
+    Dg(ApertureDg),
 }
 impl CoupledAperture {
     /// Immutable access to the actual valve, including plate/contact/material data.
     #[must_use]
     pub fn aperture(&self) -> &DynamicAperture {
-        match self { Self::Tube(m) => m.aperture(), Self::Network(m) => m.aperture() }
+        match self { Self::Tube(m) => m.aperture(), Self::Network(m) => m.aperture(),
+            Self::Dg(m) => m.aperture() }
     }
 }
 
@@ -349,6 +353,12 @@ impl AperturePerformance {
         let drive = TubeDrive { upstream_pressure_pa: pressure_pa, body_flow_m3_s: 0.0 };
         let boundary_drives = self.boundaries.as_ref().map_or(&[][..], |b| b.candidate());
         match &mut self.system {
+            CoupledAperture::Dg(m) => {
+                let frame = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
+                // Admission permits the actual mean inlet pressure only. DG
+                // terminal radiation has not been substituted by a one-way gain.
+                Ok((frame.aperture.bore_pressure_pa, frame.aperture.mechanical_work_j, None))
+            }
             CoupledAperture::Tube(m) => {
                 let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
                 let pressure = match self.observation {

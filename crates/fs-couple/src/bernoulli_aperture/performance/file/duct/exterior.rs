@@ -20,6 +20,7 @@ impl DuctInput {
         // The legacy radiation tube already lowers to this same network. Only
         // the typed regional binding is made explicit; the gas is INTERNAL air.
         let (mut source, observation) = match self {
+            Self::Dg(_) => return Err(bad(0, "dg_tube has no bound exterior radiation operator; its inlet pressure cannot be an exterior receiver")),
             Self::Tube { spec, radiation_band: Some(band), loss } => {
                 let observation = match observation {
                     ApertureObservation::Inlet => observation,

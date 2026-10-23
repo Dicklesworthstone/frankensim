@@ -72,6 +72,25 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
         format!(",\"slit_flow\":{{\"model\":\"spatial-laminar-bernoulli-v1\",\"length_m\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"viscosity_source\":\"inlet-gas\",\"scope\":\"quasi-steady Newtonian slit with separated outflow; not resolved channel flow or pressure recovery\"}}",
             law.length_m(), law.dynamic_viscosity_pa_s()));
     let force_json = format!(",\"ambient_gas\":{}{exterior}{slit}{}", gas_state(p.ambient_gas()), force_provenance(p));
+    if let CoupledAperture::Dg(runtime) = p.renderer().system() {
+        let load = runtime.load();
+        let duct = load.duct();
+        let mesh = duct.mesh();
+        let stepper = load.propagator();
+        let wall = duct.viscothermal_model().expect("dg_tube selects admitted Bessel memory");
+        let band = wall.band_rad_s().map(|w| w / core::f64::consts::TAU);
+        let terminal = match duct.outlet() {
+            fs_duct::dg::DgBoundary::Closed => "closed",
+            fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
+            fs_duct::dg::DgBoundary::Matched => "matched",
+            fs_duct::dg::DgBoundary::Port(_) => unreachable!("one inlet load admission"),
+        };
+        return format!("{force_json},\"dg_duct\":{{\"model\":\"exact-zoh-bessel-dg-v1\",\"operator_identity\":\"{}\",\"length_m\":{:e},\"elements\":{},\"order\":{},\"total_dofs\":{},\"outlet\":\"{terminal}\",\"series_poles\":{},\"thermal_poles\":{},\"band_hz\":[{:e},{:e}],\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e},\"exponential_tolerance\":{:e},\"exponential_certificate_residual\":{:e},\"mean_port_impedance_pa_s_m3\":{:e},\"scope\":\"uniform circular gas column; original DG exponential and original ExactZoh plate/Maxwell aperture; implicit same-step mean pressure and total flow; internal inlet observation; finite-band Bessel pole approximation; spatial and nonlinear time convergence separate; wall/terminal loss inferred, not an independent heat integral; authored solid sections and spectra, not measured-material qualification\"}}",
+            duct.operator_identity().to_hex(), duct.total_length(), mesh.elements, mesh.order,
+            duct.total_dofs(), wall.series_terms().len(), wall.shunt_terms().len(), band[0], band[1],
+            wall.max_complex_error(), wall.max_real_loss_error(), stepper.tolerance(),
+            stepper.certificate_residual(), load.impedance_pa_s_m3());
+    }
     let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
     // Name the node even in a one-section graph: node zero need not be the inlet.

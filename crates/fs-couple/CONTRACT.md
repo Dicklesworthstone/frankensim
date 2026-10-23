@@ -4391,3 +4391,5 @@ substitutions with analytic midpoint discharge and both body heat budgets,
 exercise both live source surfaces through finite history, and refuse mechanical
 or untyped response axes and surface-support holes without partial publication.
 These synthetic source tests do not establish measured-material validation.
+
+`PlateValvePerformance` also admits explicit `dg_tube` source data through the original exact DG exponential and its gas-derived Bessel memory, coupled to the retained ExactZoh plate/contact/Maxwell aperture by the exact step-mean port law. The same ambient gas drives the column, aperture density and slit viscosity; the existing wind/ensemble renderer observes internal inlet pressure only. Full-state DOF, finite-band Bessel and exponential admissions remain separate from spatial/nonlinear convergence, and inferred duct loss is not an independent heat certificate. See `examples/PLATE_VALVE_PERFORMANCES.md` for the bounded cylinder scope and source grammar.

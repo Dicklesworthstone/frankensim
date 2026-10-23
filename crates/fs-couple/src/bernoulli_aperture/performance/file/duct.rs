@@ -2,6 +2,9 @@
 //! no branch is replaced with a second independent voice or a fitted reflection.
 use super::*;
 mod exterior;
+mod dg;
+use dg::DgInput;
+use crate::bernoulli_aperture::dg::{ApertureDg, ApertureDgLoad};
 use crate::bernoulli_aperture::cavity::HelmholtzLoadSpec;
 use crate::bernoulli_aperture::wall::{WallPatch, WallPin};
 use fs_vfit::impedance::SeriesImpedanceSpec;
@@ -18,6 +21,7 @@ pub(super) enum DuctInput {
     // Keep the original source's arithmetic and runtime when no graph is named.
     Tube { spec: UniformTubeSpec, radiation_band: Option<f64>, loss: Option<ViscothermalSectionSpec> },
     Graph { nodes: Vec<NodeInput>, sections: Vec<TubeSection>, max_bytes: usize, losses: Vec<Option<ViscothermalSectionSpec>>, gases: Option<Vec<GasState>> },
+    Dg(DgInput),
 }
 
 pub(super) enum NodeInput {
@@ -30,6 +34,7 @@ pub(super) enum NodeInput {
 pub(super) struct PreparedDuct {
     tube: Option<UniformTubeSpec>,
     graph: Option<TubeNetworkSpec>,
+    dg: Option<ApertureDgLoad>,
     gases: Option<Vec<GasState>>,
     pub observation: ApertureObservation,
     pub radiation: Vec<(usize, BaffledRadiationLoad)>,
@@ -46,6 +51,7 @@ impl DuctInput {
         let assignments = match &mut self {
             Self::Tube { loss, .. } => vec![loss.take()],
             Self::Graph { losses, .. } => core::mem::take(losses),
+            Self::Dg(_) => return Err(bad(0, "dg_tube is a one-port exact aperture path; a two-sided DG binding is not implemented")),
         };
         let prepared = self.prepare(air, dt, ApertureObservation::Inlet, gate)?;
         if !prepared.radiation.is_empty() {
@@ -101,6 +107,14 @@ impl DuctInput {
     ) -> Result<Self, PlateValveInputError> {
         let mut row = r.next()?;
         match row.word()? {
+            "dg_tube" => {
+                if allow_driven {
+                    return Err(bad(r.line, "dg_tube cannot replace either side of the material-modal two-sided network"));
+                }
+                let input = DgInput::read(&mut row)?;
+                row.finish()?;
+                Ok(Self::Dg(input))
+            }
             "tube" => {
                 let length_m = row.scalar()?;
                 let radius_m = row.scalar()?;
@@ -198,7 +212,7 @@ impl DuctInput {
                 }
                 Ok(Self::Graph { nodes, sections, max_bytes, losses, gases:regional.then_some(gases) })
             }
-            _ => Err(bad(r.line, "expected an explicit tube or network after ambient")),
+            _ => Err(bad(r.line, "expected an explicit tube, dg_tube or network after ambient")),
         }
     }
 
@@ -207,13 +221,20 @@ impl DuctInput {
     {
         let physics = PlateValveInputError::Physics;
         match self {
+            Self::Dg(source) => {
+                if observation != ApertureObservation::Inlet {
+                    return Err(bad(0, "dg_tube currently observes exact mean inlet pressure; terminal and exterior receivers are not bound"));
+                }
+                Ok(PreparedDuct { tube:None, graph:None, dg:Some(source.prepare(air, dt, gate)?),
+                    gases:None, observation, radiation:vec![], losses:vec![] })
+            }
             Self::Tube { spec, radiation_band, loss } => {
                 if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeTerminal
                     | ApertureObservation::TubeBaffled(_)) {
                     return Err(bad(0, "a tube observation must name inlet, terminal or baffled-outlet"));
                 }
                 if radiation_band.is_none() && loss.is_none() {
-                    return Ok(PreparedDuct { tube: Some(spec), graph: None, gases:None, observation, radiation: vec![], losses: vec![] });
+                    return Ok(PreparedDuct { tube: Some(spec), graph: None, dg:None, gases:None, observation, radiation: vec![], losses: vec![] });
                 }
                 let mut radiation = Vec::new();
                 let terminal = if let Some(band) = radiation_band {
@@ -236,7 +257,7 @@ impl DuctInput {
                     sections: vec![TubeSection { nodes: [0, 1], length_m: spec.length_m,
                         radius_m: spec.radius_m, max_length_error_m: spec.max_length_error_m }],
                     sound_speed_m_s: air.sound_speed, max_wave_memory_bytes: spec.max_wave_memory_bytes,
-                }), gases:None, observation, radiation, losses: vec![] };
+                }), dg:None, gases:None, observation, radiation, losses: vec![] };
                 prepared.install_losses(air, dt, &[loss], gate)?;
                 Ok(prepared)
             }
@@ -285,7 +306,7 @@ impl DuctInput {
                 // Full graph topology and storage stay owned by ApertureNetwork.
                 if let Some(gases) = &gases { graph.inlet_impedance_with_gases(gases).map_err(physics)?; }
                 else { graph.inlet_impedance(air.density).map_err(physics)?; }
-                let mut prepared = PreparedDuct { tube: None, graph: Some(graph), gases, observation, radiation, losses: vec![] };
+                let mut prepared = PreparedDuct { tube: None, graph: Some(graph), dg:None, gases, observation, radiation, losses: vec![] };
                 prepared.install_losses(air, dt, &losses, gate)?;
                 Ok(prepared)
             }
@@ -331,6 +352,7 @@ impl PreparedDuct {
     }
 
     pub fn inlet_impedance(&self, density: f64) -> Result<f64, PlateValveInputError> {
+        if let Some(dg) = &self.dg { return Ok(dg.impedance_pa_s_m3()); }
         match (&self.tube, &self.graph) {
             (Some(tube), None) => tube.characteristic_impedance(density),
             (None, Some(graph)) => match &self.gases {
@@ -350,9 +372,10 @@ impl PreparedDuct {
     }
 
     pub fn bind(self, valve: DynamicAperture) -> Result<CoupledAperture, PlateValveInputError> {
-        match (self.tube, self.graph) {
-            (Some(tube), None) => ApertureTube::new(valve, tube).map(CoupledAperture::Tube),
-            (None, Some(graph)) => match self.gases {
+        match (self.tube, self.graph, self.dg) {
+            (None, None, Some(load)) => ApertureDg::new(valve, load).map(CoupledAperture::Dg),
+            (Some(tube), None, None) => ApertureTube::new(valve, tube).map(CoupledAperture::Tube),
+            (None, Some(graph), None) => match self.gases {
                 Some(gases) => ApertureNetwork::with_section_gases(valve, graph, gases),
                 None => ApertureNetwork::new(valve, graph),
             }.map(CoupledAperture::Network),

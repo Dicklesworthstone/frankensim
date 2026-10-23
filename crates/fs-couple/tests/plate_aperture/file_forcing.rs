@@ -28,6 +28,8 @@ fn direct(source: &AperturePerformance) -> CoupledAperture {
         spec.time_step_s,spec.max_steps,a.state(),a.blade_propagator()).unwrap();
     valve=valve.with_plate_relaxation(a.relaxation().unwrap().spec().clone(),InitialApertureMemory::Relaxed).unwrap();
     match source.system() {
+        CoupledAperture::Dg(d)=>CoupledAperture::Dg(
+            fs_couple::bernoulli_aperture::dg::ApertureDg::new(valve,d.load().clone()).unwrap()),
         CoupledAperture::Tube(t)=>CoupledAperture::Tube(ApertureTube::new(valve,*t.spec()).unwrap()),
         CoupledAperture::Network(n)=>CoupledAperture::Network(if let Some(gas)=n.section_gases() {
             ApertureNetwork::with_section_gases(valve,n.spec().clone(),gas.to_vec()).unwrap()
@@ -55,6 +57,8 @@ fn scheduled_physical_forces_match_direct_pressure_contact_memory_and_regional_n
             let force=ports.iter().zip(held).fold(0.0,|sum,(p,f)|sum+p.generalized_force_n(f).unwrap());
             let drive=TubeDrive {upstream_pressure_pa:gesture.sample("mouth",n*700/96000).unwrap(),body_flow_m3_s:0.0};
             let (a,residual,total)=match &mut system {
+                CoupledAperture::Dg(d)=>{let f=d.step_with_force(drive,force).unwrap();
+                    (f.aperture,f.balance_residual_j(),f.stored_energy_j+f.inferred_total_dissipation_j+f.upstream_work_j.abs())},
                 CoupledAperture::Tube(t)=>{let f=t.step_with_force(drive,force).unwrap();
                     (f.aperture,f.balance_residual_j(),f.stored_energy_j+f.dissipated_energy_j+f.upstream_work_j.abs())},
                 CoupledAperture::Network(t)=>{let f=t.step_with_force(drive,force).unwrap();

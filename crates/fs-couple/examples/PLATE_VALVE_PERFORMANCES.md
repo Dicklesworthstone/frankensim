@@ -122,7 +122,7 @@ contact, material and propagation owners can still refuse within these caps.
 ## Observation, mixing and retained state
 
 The file's gas state determines fluid density, sound speed and tube impedance;
-it does not change the separately supplied solid material constants. The tube
+it does not change the separately supplied solid material constants. The legacy `tube`
 interior is lossless characteristic propagation with a supplied passive
 memoryless terminal. Its integer transit must satisfy the explicit length-error
 allowance; requested and represented lengths are recorded in the WAV sidecar.
@@ -148,8 +148,8 @@ internal valve pressure and a plate microphone**. The caller must establish a
 compatible observation and common time origin. All parts need equal physical
 duration. Source PCM scales are recorded but never become per-part gains.
 
-Library consumers can construct `AperturePerformance` directly around either an
-`ApertureTube` or `ApertureNetwork`, including already-attached passive loads and
+Library consumers can construct `AperturePerformance` directly around an
+`ApertureTube`, `ApertureNetwork` or `ApertureDg`, including already-attached passive loads and
 material-bound specimens. The observation explicitly selects inlet, tube terminal
 or a network node. `PlateValvePerformance::into_renderer()` returns this complete
 finite object, suitable for the existing `DecimatedRenderer`, `PressureEnsemble`
@@ -163,3 +163,58 @@ This remains one linear structural mode with uniform face pressure, a fixed lay
 and quasisteady gap flow. Supplied constitutive data is not wet-cane
 identification, mesh conformity is the caller's responsibility, and there is no
 new continuum-convergence, calibrated-microphone or real-time-throughput claim.
+
+## Exact DG bore with causal viscothermal memory
+
+`plate-valve-dg.performance` selects the original `fs-duct::DgDuct` propagation
+owner inside this same file-driven valve and renderer. After `ambient`, replace
+the legacy tube/network record with:
+
+```text
+dg_tube LENGTH_M RADIUS_M OUTLET ELEMENTS ORDER POLES F_MIN_HZ F_MAX_HZ MAX_REL_ERROR EXP_TOL MAX_DOFS
+observation inlet
+```
+
+`OUTLET` is `open`, `closed` or `matched`. These are ideal acoustic boundary
+conditions; none implies an exterior radiation model. Geometry is one uniform
+circular cylinder in the declared ambient gas. Mesh order, element count, pole
+count, checked frequency band, relative Bessel error, exponential tolerance and
+complete state budget are explicit source data. The state budget includes both
+acoustic fields and every retained viscous/thermal memory coordinate, and is
+checked before constructing the dense exponential.
+
+The gas record is resolved once through the existing material owner. Its
+density, sound speed, viscosity, thermal conductivity and heat capacity drive
+the DG column and its Bessel-derived memories. The same inlet gas binds the
+original aperture density and optional slit viscosity. Pressure or composition
+changes therefore reach propagation and the nonlinear valve through data.
+The original authored plate, spatial contact, Maxwell material history,
+pressure gestures and physical force events stay in the existing runtime.
+
+At each step the actual DG exponential supplies its mean-pressure relation.
+The retained strict aperture solver resolves the corresponding total bore
+flow, including swept volume, and both candidate states are accepted together.
+No fitted reflection, midpoint relaxation update or second nonlinear pressure
+solver is introduced. These files require the existing ExactZoh blade path.
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- \
+  wind crates/fs-couple/examples/plate-valve-dg.performance \
+  /tmp/plate-valve-dg.wav --decimate --block 37
+```
+
+The same input is accepted by `ensemble --valve`. Its output is **internal
+step-mean inlet pressure**, not a radiated microphone. Terminal/exterior
+observation, independent exterior gas and two-sided material-modal network
+conversion refuse rather than silently substituting another model. The WAV
+sidecar reports the actual operator, mesh, complete DOFs, pole counts, band,
+checked Bessel errors and exact mean impedance.
+
+The example is illustrative source data, not a measured reed or instrument.
+Finite-band Bessel admission does not establish DG spatial convergence or
+nonlinear time convergence; those refinements remain separate. The dense DG
+ledger infers wall/terminal loss from the energy deficit and does not provide
+an independent heat integral. This bounded offline route is a single-mode
+plate/reed cylinder, not a tapered woodwind, a paired modal valve, a flute jet
+or an exterior radiation implementation. Its solid sections and Maxwell
+spectra remain authored numeric data, not identified source material packs.
