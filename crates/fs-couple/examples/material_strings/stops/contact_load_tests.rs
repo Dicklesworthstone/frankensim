@@ -67,7 +67,7 @@ fn normal_binding_and_material_data_change_actual_sound_not_the_observer_gain() 
 #[test]
 fn conflicting_or_unmatched_bow_contacts_refuse_before_pack_io() {
     let text=profile_text();
-    for replacement in ["bow-contact 0 missing", "bow-contact 16 bow_surface",
+    for replacement in ["bow-contact 0 missing", "bow-contact 63 bow_surface",
         "bow-contact 0 bow_surface\nbow-contact 0 bow_surface"] {
         assert!(Profile::parse(text.replace("bow-contact 0 bow_surface",replacement).as_bytes()).is_err());
     }

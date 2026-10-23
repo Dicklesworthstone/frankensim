@@ -1,0 +1,7 @@
+frankensim-string-stops-v1
+stop centre 0 ribbon:0 normal 0 -1 fiber:0 -0.000001 5000 1 0 10 0.001
+stop left 0 ribbon:1 normal 0 -1 fiber:1 -0.000001 5000 1 0 10 0.001
+stop right 0 ribbon:2 normal 0 -1 fiber:2 -0.000001 5000 1 0 10 0.001
+bow-contact 0 centre
+bow-contact 1 left
+bow-contact 2 right

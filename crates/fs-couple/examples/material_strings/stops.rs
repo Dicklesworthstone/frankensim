@@ -7,6 +7,7 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
     MultiBowStringBank, stops::{MaterialStringStop, StringStopSide},
     surfaces::BowBodySurface,
+    ribbon::UniformBowRibbon,
 };
 use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
@@ -25,16 +26,42 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::s
     StopStationProgram, StopStationKnot, StopStationMotionLimits,
 };
 
+/// A cell reference follows the original ribbon's exact geometry projection.
+#[derive(Clone, Copy, Debug)]
+enum Station {
+    Fraction(f64),
+    RibbonCell(usize),
+}
+#[derive(Clone, Copy, Debug)]
+enum Receiver {
+    Fixed,
+    Bridge(usize),
+    Fiber(usize),
+}
 #[derive(Clone, Debug)]
 struct Entry {
     name: String,
-    location: StringBowLocation,
+    string: usize,
+    station: Station,
     side: StringStopSide,
-    // None is an explicitly immovable support. Some selects the original body
-    // footprint of a named string's sole bridge, NOT that string's displacement.
-    receiver_bridge: Option<usize>,
+    receiver: Receiver,
     law: Obstacle,
     limits: ModalContactConfig,
+}
+impl Entry {
+    fn location(&self, ribbon: Option<&UniformBowRibbon>) -> Result<StringBowLocation> {
+        let station_fraction = match self.station {
+            Station::Fraction(value) => value,
+            Station::RibbonCell(cell) => {
+                let ribbon = ribbon.ok_or("ribbon:CELL requires a finite-width bow")?;
+                if ribbon.centre().string != self.string {
+                    return Err("ribbon cell and stop must name the same material string".into());
+                }
+                *ribbon.stations().get(cell).ok_or("stop names an absent ribbon cell")?
+            },
+        };
+        Ok(StringBowLocation { string: self.string, station_fraction })
+    }
 }
 #[derive(Clone, Debug)]
 struct BowSurface {
@@ -110,7 +137,7 @@ impl Profile {
                 let bow: usize = fields[1].parse()?;
                 let stop = entries.iter().position(|e| e.name == fields[2])
                     .ok_or("bow-contact must name a preceding stop declaration")?;
-                if bow >= 16 || bow_contacts.iter().any(|b| b.bow == bow || b.stop == stop) {
+                if bow >= 63 || bow_contacts.iter().any(|b| b.bow == bow || b.stop == stop) {
                     return Err("bow contacts require distinct actual bows and distinct normal contacts".into());
                 }
                 bow_contacts.push(BowContactLoad { bow, stop });
@@ -125,7 +152,12 @@ impl Profile {
                 || entries.iter().any(|e| e.name == name) {
                 return Err("stop identities must be unique short ASCII tokens".into());
             }
-            let location = StringBowLocation { string: fields[2].parse()?, station_fraction: scalar(fields[3])? };
+            let string = fields[2].parse()?;
+            let station = if let Some(cell) = fields[3].strip_prefix("ribbon:") {
+                Station::RibbonCell(cell.parse()?)
+            } else {
+                Station::Fraction(scalar(fields[3])?)
+            };
             let (side, values) = match fields[4] {
                 "positive" if fields.len() == 12 => (StringStopSide::Positive, &fields[5..]),
                 "negative" if fields.len() == 12 => (StringStopSide::Negative, &fields[5..]),
@@ -133,16 +165,23 @@ impl Profile {
                     TransverseDirection::try_new([scalar(fields[5])?, scalar(fields[6])?])?), &fields[7..]),
                 _ => return Err("stop side must be positive, negative or normal NX NY with a complete record".into()),
             };
-            let receiver_bridge = if values[0] == "fixed" { None } else {
-                Some(values[0].strip_prefix("bridge:").ok_or("receiver must be fixed or bridge:STRING")?.parse::<usize>()?)
-            };
+            let receiver = if values[0] == "fixed" { Receiver::Fixed }
+                else if let Some(index) = values[0].strip_prefix("bridge:") {
+                    Receiver::Bridge(index.parse()?)
+                } else if let Some(index) = values[0].strip_prefix("fiber:") {
+                    Receiver::Fiber(index.parse()?)
+                } else {
+                    return Err("receiver must be fixed, bridge:STRING or fiber:CELL".into());
+                };
             let gap = scalar(values[1])?;
             let stiffness = scalar(values[2])?;
             let alpha = scalar(values[3])?;
             let loss = scalar(values[4])?;
             let max_force = scalar(values[5])?;
             let max_penetration = scalar(values[6])?;
-            if !(0.0 < location.station_fraction && location.station_fraction < 1.0)
+            if matches!(station, Station::Fraction(value) if !(0.0 < value && value < 1.0))
+                || matches!(station, Station::RibbonCell(cell) if cell >= 63)
+                || matches!(receiver, Receiver::Fiber(cell) if cell >= 63)
                 || stiffness <= 0.0 || alpha < 1.0 || loss < 0.0 || max_force <= 0.0 || max_penetration <= 0.0 {
                 return Err("stop geometry, law and physical limits are invalid".into());
             }
@@ -151,7 +190,7 @@ impl Profile {
             let law = Obstacle::new(vec![-1.0], 1, 1, vec![gap], vec![1.0], stiffness, alpha,
                 format!("authored string-stop profile v1: {name}; not measured contact data"))?
                 .with_internal_loss(loss)?;
-            entries.push(Entry { name: name.into(), location, side, receiver_bridge, law,
+            entries.push(Entry { name: name.into(), string, station, side, receiver, law,
                 limits: ModalContactConfig { max_iterations: 96, maximum_force_n: max_force,
                     maximum_penetration_m: max_penetration, force_absolute_tolerance_n: 1e-11,
                     force_relative_tolerance: 1e-9 } });
@@ -164,8 +203,8 @@ impl Profile {
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
     pub fn validate_members(&self, strings: usize) -> Result<()> {
-        if self.entries.iter().any(|e| e.location.string >= strings
-            || e.receiver_bridge.is_some_and(|i| i >= strings))
+        if self.entries.iter().any(|e| e.string >= strings
+            || matches!(e.receiver, Receiver::Bridge(i) if i >= strings))
             || self.bow_surfaces.iter().any(|surface| surface.receiver_bridge >= strings) {
             return Err("stop or receiver footprint names an absent material string".into());
         }
@@ -176,8 +215,47 @@ impl Profile {
     pub fn validate_performance(&self, spec: &input::Spec, gate: &CancelGate) -> Result<()> {
         poll(gate)?;
         self.validate_members(spec.strings.len())?;
-        if spec.bow_ribbon.is_some() && (!self.bow_contacts.is_empty() || !self.bow_surfaces.is_empty()) {
-            return Err("uniform bow ribbon does not declare individual normal or tangential receiver footprints".into());
+        if spec.bow_ribbon.is_some() && !self.bow_surfaces.is_empty() {
+            return Err("ribbon tangential surfaces are supplied by bow_fibers, not bridge footprints".into());
+        }
+        // The runtime's original projection owns both the centre-first cell
+        // order and every station bit; input files can name cells directly.
+        let ribbon = match spec.bow_ribbon {
+            Some((width, cells)) => {
+                let track = spec.schedule.tracks().first()
+                    .ok_or("ribbon needs an original bow gesture track")?;
+                let string = fs_scenario::gesture::path::legacy_member(&track.target, "bow")
+                    .ok_or("ribbon needs an actual material-string bow")?;
+                let GestureValue::Bow { station, .. } = track.initial else {
+                    return Err("ribbon needs a complete original bow gesture".into());
+                };
+                let member = spec.strings.get(string)
+                    .ok_or("ribbon names an absent material string")?;
+                Some(UniformBowRibbon::try_new(StringBowLocation { string, station_fraction: station },
+                    member.length, width, cells)?)
+            },
+            None => None,
+        };
+        let locations = self.entries.iter().map(|entry| entry.location(ribbon.as_ref()))
+            .collect::<Result<Vec<_>>>()?;
+        let mut fiber_normal = None;
+        for (index, entry) in self.entries.iter().enumerate() {
+            if let Receiver::Fiber(cell) = entry.receiver {
+                let ribbon = ribbon.as_ref().ok_or("fiber receiver requires bow_ribbon")?;
+                if spec.bow_fibers.is_none() || cell >= ribbon.stations().len()
+                    || locations[index].string != ribbon.centre().string
+                    || locations[index].station_fraction.to_bits() != ribbon.stations()[cell].to_bits()
+                    || !self.bow_contacts.iter().any(|binding| binding.bow == cell && binding.stop == index) {
+                    return Err("fiber receiver must match its original ribbon cell and bow-contact binding".into());
+                }
+                let StringStopSide::Along(normal) = entry.side else {
+                    return Err("fiber contact requires an explicit normal in the shared transverse frame".into());
+                };
+                if fiber_normal.is_some_and(|prior| prior != normal) {
+                    return Err("parallel ribbon fibers must share one contact-normal direction".into());
+                }
+                fiber_normal = Some(normal);
+            }
         }
         for surface in &self.bow_surfaces {
             let track = spec.schedule.tracks().get(surface.bow)
@@ -191,25 +269,39 @@ impl Profile {
             surface_sign(tangent, axis)?;
         }
         for binding in &self.bow_contacts {
-            let track = spec.schedule.tracks().get(binding.bow)
+            let stop = locations[binding.stop];
+            let (track_index, station) = if let Some(ribbon) = &ribbon {
+                let cell = ribbon.stations().get(binding.bow)
+                    .ok_or("bow-contact names an absent ribbon cell")?;
+                if stop.station_fraction.to_bits() != cell.to_bits() {
+                    return Err("bow-contact and stop must occupy the same ribbon cell".into());
+                }
+                (0, ribbon.centre().station_fraction)
+            } else { (binding.bow, stop.station_fraction) };
+            let track = spec.schedule.tracks().get(track_index)
                 .ok_or("bow-contact names an absent scheduled bow")?;
-            let stop = &self.entries[binding.stop];
-            if fs_scenario::gesture::path::legacy_member(&track.target, "bow") != Some(stop.location.string) {
+            if fs_scenario::gesture::path::legacy_member(&track.target, "bow") != Some(stop.string) {
                 return Err("bow-contact and stop must address the same material string".into());
             }
             for value in std::iter::once(&track.initial).chain(track.events.iter().map(|e| &e.value)) {
-                if !matches!(value, GestureValue::Bow {normal_force_n, station, ..}
-                    if *normal_force_n == 0.0 && station.to_bits() == stop.location.station_fraction.to_bits()) {
-                    return Err("contact-loaded bow requires the stop station and no separately prescribed normal force".into());
+                if !matches!(value, GestureValue::Bow {normal_force_n, station: value_station, ..}
+                    if *normal_force_n == 0.0 && value_station.to_bits() == station.to_bits()) {
+                    return Err("contact-loaded bow requires its original gesture station and zero prescribed normal force".into());
                 }
             }
         }
         if let Some(motion) = &self.motion {
             motion.validate(self.entries.len(), spec.samples, spec.rate, gate)?;
+            for (index, entry) in self.entries.iter().enumerate() {
+                if matches!(entry.receiver, Receiver::Fiber(_))
+                    && motion.knots.iter().any(|knot| knot.offsets_m[index] != 0.0) {
+                    return Err("moving fiber supports require their frame-acceleration forces; use frozen fiber clearance".into());
+                }
+            }
         }
         if let Some(motion) = &self.station_motion {
-            let initial: Vec<_> = self.entries.iter().map(|e| e.location.station_fraction).collect();
-            let lengths: Vec<_> = self.entries.iter().map(|e| spec.strings[e.location.string].length).collect();
+            let initial: Vec<_> = locations.iter().map(|location| location.station_fraction).collect();
+            let lengths: Vec<_> = locations.iter().map(|location| spec.strings[location.string].length).collect();
             motion.validate(&initial, &lengths, spec.samples, spec.rate, gate)?;
             for binding in &self.bow_contacts {
                 if motion.knots.iter().any(|k| k.station_fractions[binding.stop].to_bits() != initial[binding.stop].to_bits()) {
@@ -268,7 +360,9 @@ impl Profile {
         let mut stops = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             poll(gate)?;
-            let body = entry.receiver_bridge.map(|i| -> Result<_> {
+            let body = match entry.receiver {
+                Receiver::Fixed => None,
+                Receiver::Bridge(i) => {
                 let links = &strings[i].connections;
                 if links.len() != 1 { return Err("receiver bridge must have exactly one actual body footprint".into()); }
                 let mut body = links[0].body.clone();
@@ -289,9 +383,21 @@ impl Profile {
                     }
                     for value in &mut body.shapes { *value *= dot.signum(); }
                 }
-                Ok(body)
-            }).transpose()?;
-            stops.push(MaterialStringStop { location: entry.location, side: entry.side, body,
+                Some(body)
+                },
+                Receiver::Fiber(cell) => {
+                    let fibers = bank.source().fiber_ribbon()
+                        .ok_or("fiber receiver requires retained material-fiber components")?;
+                    let location = entry.location(bank.source().ribbon())?;
+                    let bow = bank.source().bows().get(cell).ok_or("fiber receiver names an absent ribbon cell")?;
+                    if location != bow.location || !matches!(entry.side, StringStopSide::Along(_)) {
+                        return Err("fiber normal contact must occupy its original ribbon cell".into());
+                    }
+                    Some(fibers.normal_stop_receivers().get(cell)
+                        .ok_or("fiber receiver names an absent normal map")?.clone())
+                },
+            };
+            stops.push(MaterialStringStop { location: entry.location(bank.source().ribbon())?, side: entry.side, body,
                 law: entry.law.clone(), limits: entry.limits });
         }
         // This admission precedes scheduled preload; the stops cannot disappear

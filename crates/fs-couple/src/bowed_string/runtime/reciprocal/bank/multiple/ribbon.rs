@@ -59,7 +59,10 @@ pub struct UniformBowRibbon {
 }
 
 impl UniformBowRibbon {
-    fn new(
+    /// Resolve physical width into centre-first midpoint contact stations.
+    /// This same projection is used by source-file contact bindings and runtime
+    /// preparation, so a ribbon cell is never reconstructed from rounded text.
+    pub fn try_new(
         centre: StringBowLocation,
         length_m: f64,
         width_m: f64,
@@ -208,7 +211,7 @@ impl ReciprocalStringBank {
             return Err(invalid("ribbon cells exceed the declared joint contact budget"));
         }
         let centre = self.source.options.bow;
-        let ribbon = UniformBowRibbon::new(centre, self.cards[centre.string].length_m, width_m, cells)?;
+        let ribbon = UniformBowRibbon::try_new(centre, self.cards[centre.string].length_m, width_m, cells)?;
         let law = self.system.port().law.clone();
         let friction = self.source.options.friction;
         let additional = ribbon.stations[1..].iter().map(|&station_fraction| MaterialBowContact {

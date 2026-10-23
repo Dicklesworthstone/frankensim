@@ -62,11 +62,51 @@ axial and transverse wave modes follow the source section and length. Contact
 traction stretches the fibers, and their response changes slip, string motion
 and body pressure in the original joint solver. `FIBER_COUNT` describes the
 modeled interacting bundle; a complete multilayer bow hank does not imply that
-all its hairs touch the string. Normal receiver rows are also available through
-the library for the existing normal-contact solver to determine the load.
+all its hairs touch the string.
 
-This CLI fixture uses prescribed uniform normal load, fixed interior contact
-stations and rigid fiber endpoints in a uniformly translating support frame.
+The executable also admits the fibers' **normal** receiver maps. With the same
+material packs, the second fixture closes contact compliance, fiber deflection,
+the resulting normal force, tangential stick/slip and physical pressure in one
+joint solve:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/fiber-contact.material-strings" "$demo/fiber-contact.wav" \
+  --stop-profile "$demo/fiber-contact.stops"
+```
+
+Its stop profile uses the original ribbon cell identity for both location and
+receiver, for example:
+
+```text
+stop centre 0 ribbon:0 normal 0 -1 fiber:0 -0.000001 5000 1 0 10 0.001
+bow-contact 0 centre
+```
+
+`ribbon:CELL` uses the runtime's exact midpoint geometry; `fiber:CELL` binds
+that same cell's material-derived normal motion. Cell zero is the centre, then
+the remaining cells run from left to right. Each cell needs its own normal law
+and `bow-contact` binding. The string must retain two transverse polarizations;
+the explicit contact normal must be perpendicular to its bow tangent and have
+the correct torsional orientation. The schedule supplies only the common
+tangential speed and **zero normal force**. Each actual normal reaction feeds
+its corresponding friction law directly; it is not divided by the cell count
+again. Separation removes that cell's traction automatically.
+
+The negative gap in this manufactured fixture is an initial elastic
+interference of one micrometre. Its stored contact energy is included from the
+first step; it is not a claimed measured bow force or a settled preload.
+Changing fiber tension changes transverse compliance, solved load and sound.
+Changing the gap to a positive clearance leaves initially stationary separated
+surfaces unforced. Contact stiffness is authored **per cell**, so its physical
+quadrature must also be preserved when refining contact count.
+
+Both fixtures use fixed interior contact stations and rigid fiber endpoints
+in a uniformly translating tangential support frame. Normal offset trajectories
+on fiber receivers refuse: moving the endpoints would also require their
+frame-acceleration forces, which this frozen model does not supply. Ordinary
+fixed/bridge stop motion remains available. The original `fiber-ribbon`
+fixture retains prescribed uniform normal load.
 It refuses speed changes and nonlinear-string options until those combinations
 have the corresponding moving-support/assembly implementation. It does not
 model flexible bow stick, contact migration, inter-hair rubbing or thermal
@@ -478,10 +518,13 @@ ribbon**. Area and normal load are divided by the same cell count, retaining
 the same nominal pressure and original ordered interface card at each cell.
 Runtime applicability uses each cell's actual slip. Numerical setup, control
 storage and compilation work are charged for every cell under the same global
-limits. Independent finger/obstacle stops remain available; a `bow-contact`
-binding that derives normal load from a stop refuses this prescribed uniform
-load profile. This rigid, uniformly loaded limit does not infer compliant bow
-hair or evolving rosin. Refine spatial cells, structural modes and time together.
+limits. Independent finger/obstacle stops remain available. A `bow-contact`
+binding may instead derive a cell's load from a co-located stop; the original
+gesture must then prescribe zero normal force. Its source area is still that
+cell's quadrature share, and applicability uses the actual solved load.
+The rigid limit does not infer compliant bow hair or evolving rosin; use
+`bow_fibers` for retained material-fiber motion. Refine spatial cells,
+structural modes and time together.
 
 The included synthetic `source-bow.material-strings` uses the same string, body,
 gas and gesture as `pluck-and-bow.material-strings`, with its friction carried by

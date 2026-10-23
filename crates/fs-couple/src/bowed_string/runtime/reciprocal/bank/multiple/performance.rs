@@ -77,8 +77,11 @@ impl MultiBowStringBank {
 
     /// Drive a finite ribbon from ONE original centre-station gesture track.
     ///
-    /// Its speed acts at every cell; its total normal force is divided by the
-    /// explicit spatial quadrature. Every cell keeps an independent friction
+    /// Its speed acts at every cell; any prescribed total normal force is divided
+    /// by the explicit spatial quadrature. If cells use solved normal contact,
+    /// the original track must supply zero normal force; each cell then receives
+    /// its own simultaneous normal reaction without quadrature rescaling.
+    /// Every cell keeps an independent friction
     /// regime in the joint solve. The original schedule is retained verbatim,
     /// including release, reversal and interrupted ramps. No per-cell or audio
     /// normalization is applied beyond distributing the declared total load.
@@ -121,9 +124,6 @@ impl MultiBowStringBank {
             }
             let (station_fraction,load_fraction) = if ribbon_projection {
                 let ribbon = self.source.ribbon().ok_or_else(|| source_invalid("missing ribbon source"))?;
-                if self.system.contact_normal_load(port).is_some() {
-                    return Err(source_invalid("uniform ribbon scheduling requires prescribed normal loads at every cell"));
-                }
                 (ribbon.centre().station_fraction,ribbon.load_fraction())
             } else { (bow.location.station_fraction,1.0) };
             let compiled = compile_friction_track_admitted(&schedule, name, FrictionGestureConfig {
