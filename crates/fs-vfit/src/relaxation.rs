@@ -247,8 +247,14 @@ impl RelaxationImpedance {
     /// # Errors
     /// Nonfinite input, history drive, state, reflected wave, storage or work.
     pub fn preview_step(&self, incident: f64) -> Result<RelaxationFrame, WaveguideError> {
+        self.preview_with_loss(incident, None)
+    }
+
+    pub(crate) fn preview_with_loss(&self, incident: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>)
+        -> Result<RelaxationFrame, WaveguideError> {
         if self.spec.count == 0 && self.spec.compliance_count == 0 {
-            return Ok(RelaxationFrame { port: self.base.preview_step(incident)?, ..RelaxationFrame::default() });
+            return Ok(RelaxationFrame { port: self.base.preview_with_loss(incident, loss)?, ..RelaxationFrame::default() });
         }
         let mut effective_incident = incident;
         for i in 0..self.spec.count {
@@ -257,7 +263,7 @@ impl RelaxationImpedance {
         for i in 0..self.spec.compliance_count {
             effective_incident -= (0.5 * self.pressure_retained[i]) * self.pressures[i];
         }
-        let base = self.base.preview_step(effective_incident)?;
+        let base = self.base.preview_with_loss(effective_incident, loss)?;
         let flow = base.flow_m3_s;
         let mut flows = self.flows;
         let mut dissipated = base.dissipated_energy_j;

@@ -33,6 +33,8 @@ pub mod causality;
 pub mod discretize;
 /// Reactive characteristic loads with physical storage and resistive loss.
 pub mod impedance;
+/// Same-sample passive quadratic pressure drops, composed with physical loads.
+pub mod quadratic_loss;
 pub mod loewner;
 /// Multiport impedances with shared poles: fit, realization, passivity.
 pub mod mimo;

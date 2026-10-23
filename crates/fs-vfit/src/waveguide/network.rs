@@ -28,6 +28,8 @@ pub mod fractional;
 pub mod multiport;
 /// Work-conjugate external boundaries sharing the same retained wave state.
 pub mod driven;
+/// Passive amplitude-dependent losses in series with retained terminal loads.
+pub mod quadratic;
 pub use driven::{DrivenBoundary, DrivenWave};
 mod load;
 mod interior;
@@ -92,6 +94,10 @@ pub struct NodeFrame {
     pub stored_energy_j: f64,
     /// Change in load storage [J], independently evaluated from its state.
     pub storage_change_j: f64,
+    /// Signed drop across an explicitly attached quadratic terminal loss [Pa].
+    pub quadratic_pressure_drop_pa: f64,
+    /// Nonnegative quadratic loss [J], already included in absorbed_energy_j.
+    pub quadratic_loss_j: f64,
     /// Second section's pressure at a series node [Pa]; None at other nodes.
     /// Section order, not endpoint orientation, defines first and second.
     pub series_other_pressure_pa: Option<f64>,
@@ -161,6 +167,7 @@ pub struct WaveguideNetwork {
     candidate: Vec<NodeFrame>,
     loads: Vec<Option<TerminalLoad>>,
     load_candidate: Vec<TerminalFrame>,
+    quadratic_losses: Vec<Option<crate::quadratic_loss::QuadraticLossSpec>>,
     inlet_port: usize,
     time_step_s: f64,
     accepted_steps: u64,
@@ -201,7 +208,8 @@ impl WaveguideNetwork {
         for (count, width) in [
             (node_count, size_of::<NetworkNode>() + 2 * size_of::<usize>()
                 + 2 * size_of::<NodeFrame>() + size_of::<Option<TerminalLoad>>()
-                + size_of::<TerminalFrame>()),
+                + size_of::<TerminalFrame>()
+                + size_of::<Option<crate::quadratic_loss::QuadraticLossSpec>>()),
             (segments.len(), size_of::<PassiveWaveguide>() + 2 * size_of::<usize>()
                 + 4 * size_of::<f64>()),
         ] {
@@ -332,6 +340,7 @@ impl WaveguideNetwork {
             departing: buffer(port_count, 0.0)?, observed: buffer(nodes.len(), NodeFrame::default())?,
             candidate: buffer(nodes.len(), NodeFrame::default())?, inlet_port, time_step_s,
             loads, load_candidate: buffer(nodes.len(), TerminalFrame::default())?,
+            quadratic_losses: buffer(nodes.len(), None)?,
             accepted_steps: 0, mimo: None, mimo_arriving: Vec::new(),
         })
     }
@@ -471,7 +480,8 @@ impl WaveguideNetwork {
                 NetworkNode::Inlet | NetworkNode::Driven => prescribed + self.arriving(first),
                 NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
-                    let trial = self.loads[n].as_ref().expect("admitted reactive terminal").preview_step(a)?;
+                    let trial = self.loads[n].as_ref().expect("admitted reactive terminal")
+                        .preview_with_loss(a, self.quadratic_losses[n])?;
                     self.load_candidate[n] = trial;
                     load_stored += trial.port().stored_energy_j;
                     trial.port().pressure_pa
@@ -518,6 +528,11 @@ impl WaveguideNetwork {
                         observation.absorbed_energy_j = trial.dissipated_energy_j;
                         observation.stored_energy_j = trial.stored_energy_j;
                         observation.storage_change_j = trial.storage_change_j;
+                        if let Some(loss) = self.quadratic_losses[n] {
+                            let (drop, power) = loss.at_flow(trial.flow_m3_s)?;
+                            observation.quadratic_pressure_drop_pa = drop;
+                            observation.quadratic_loss_j = power * self.time_step_s;
+                        }
                         terminal_loss += trial.dissipated_energy_j;
                     },
                     NetworkNode::Junction => junction_residual += line.wave_energy(a) - line.wave_energy(b),

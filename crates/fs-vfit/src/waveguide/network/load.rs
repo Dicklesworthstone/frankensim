@@ -64,6 +64,15 @@ impl TerminalLoad {
             Self::Admittance(l) => l.preview_step(wave).map(TerminalFrame::Admittance),
         }
     }
+    pub(super) fn preview_with_loss(&self, wave: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>)
+        -> Result<TerminalFrame, WaveguideError> {
+        match self {
+            Self::Series(l) => l.preview_with_loss(wave, loss).map(TerminalFrame::Series),
+            Self::Relaxation(l) => l.preview_with_loss(wave, loss).map(TerminalFrame::Relaxation),
+            Self::Admittance(_) => Err(WaveguideError("quadratic terminal loss requires a series impedance load")),
+        }
+    }
     pub(super) fn accept_frame(&mut self, frame: TerminalFrame) {
         match (self, frame) {
             (Self::Series(l), TerminalFrame::Series(f)) => l.accept_frame(f),

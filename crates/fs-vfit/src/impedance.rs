@@ -149,11 +149,21 @@ impl SeriesImpedance {
     /// # Errors
     /// A nonfinite incident wave, state, reflected wave, energy or work.
     pub fn preview_step(&self, incident: f64) -> Result<ImpedanceFrame, WaveguideError> {
+        self.preview_with_loss(incident, None)
+    }
+
+    pub(crate) fn preview_with_loss(&self, incident: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>)
+        -> Result<ImpedanceFrame, WaveguideError> {
         let old = self.state;
         // (Z + R + 2L/dt + dt/(2C)) U_mid = 2a + 2L/dt U_0 - p_c0.
-        let flow = 2.0 * (incident * self.inverse_sum)
+        let mut flow = 2.0 * (incident * self.inverse_sum)
             + self.inertia_weight * old.inertive_flow_m3_s
             - old.compliance_pressure_pa * self.inverse_sum;
+        let quadratic_power = if let Some(loss) = loss {
+            flow = loss.solve(flow, self.inverse_sum)?;
+            loss.at_flow(flow)?.1
+        } else { 0.0 };
         let reflected = incident - self.port_impedance * flow;
         let pressure = incident + reflected;
         let state = ImpedanceState {
@@ -168,7 +178,8 @@ impl SeriesImpedance {
         let frame = ImpedanceFrame {
             state, reflected_pressure_pa: reflected, pressure_pa: pressure, flow_m3_s: flow,
             stored_energy_j, storage_change_j: stored_energy_j - self.stored_energy_j(),
-            dissipated_energy_j: (self.spec.resistance_pa_s_m3 * flow) * (flow * self.dt),
+            dissipated_energy_j: (self.spec.resistance_pa_s_m3 * flow) * (flow * self.dt)
+                + quadratic_power * self.dt,
             supplied_work_j: pressure * (flow * self.dt),
         };
         if ![incident, flow, reflected, pressure, state.inertive_flow_m3_s,
