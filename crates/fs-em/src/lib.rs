@@ -6,11 +6,18 @@
 //! owned by fs-rep-mesh, fs-feec, fs-sparse and fs-solver. Material admission is
 //! shared with the existing source-derived circuit inductance.
 //!
+//! Distributed signed unit-current profiles extract reciprocal self/mutual
+//! inductance from the actual field/material geometry. The full magnetic
+//! storage block drives the existing Kirchhoff circuit DAE, with explicit
+//! end/leakage data and circuit-state field reconstruction in the same frame.
+//!
 //! Explicit geometry/frame correspondence transfers the computed field into
 //! existing moving-conductor/current/heat/flow owners. That coupling is one-way
 //! in the low-induction regime: their induced currents do not update this field.
 //! There is no nonlinear ferromagnetism, permanent magnet, hysteresis, field
-//! loss, induction, magnetization-force or thermodynamic temperature-work claim.
+//! loss, spatial eddy-current/flow induction feedback, magnetization-force or
+//! thermodynamic temperature-work claim.
 
 pub mod planar;
 pub mod transfer;
+pub mod winding;

@@ -12,7 +12,9 @@ layer = "L3"
 
 [dependencies]
 fs-feec = { path = "../fs-feec" }
+fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
+fs-phs = { path = "../fs-phs" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }

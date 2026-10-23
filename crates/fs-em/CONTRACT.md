@@ -62,8 +62,52 @@ regression execution remain separate verification requirements.
 This is a discrete P1 estimate on a finite planar domain with fixed linear
 material state. It does not model axisymmetry, open/infinite boundaries,
 permanent magnets, nonlinear or hysteretic ferromagnetism, magnetic loss,
-induction feedback, magnetization forces or thermal field-work coupling.
+spatial eddy-current/flow induction feedback, magnetization forces or thermal
+field-work coupling.
 The existing flow connection treats the solved field as imposed in its
 low-induction regime. Point transfer is not a conservative remap and does not
 certify an arbitrary target grid's discrete magnetic divergence. Numerical
 fixtures are not empirical material or device validation.
+
+## Distributed winding and circuit connection
+
+`winding::PlanarWindingBasis` admits signed trianglewise `J_z / terminal_current`
+profiles [1/m2], including turn count and outgoing/return orientation. Profile
+integrals use cross-sectional area; flux linkage and energy use the mesh's
+actual extruded volume. Each profile must close separately on every connected
+mesh component to the caller's current-balance tolerance. Closure residuals
+remain available. Unit-current fields use homogeneous prescribed potential
+and the existing planar boundary admission and checked solver.
+
+The active-section inductance is the symmetric field-energy Gram matrix
+`L_ij = integral(B_i.B_j/mu dV)`. Every entry must agree with the original P1
+`integral(A_i J_unit,j dV)` pairing within an explicit absolute tolerance.
+Original fields, material snapshots and solver reports remain reachable.
+Callers separately declare nonnegative series end/leakage self-inductances;
+zero explicitly neglects those ends. These entries contribute to total flux
+and stored energy, but not to the represented cross-section field. End mutual
+coupling is unsupported. Singular total inductance refuses; no numerical
+leakage is invented. The existing Cholesky owner constructs the inverse, whose
+measured `L L_inverse - I` row-sum residual must pass the declared threshold.
+
+`winding::circuit::WindingCircuit` binds every original graph inductor exactly
+once through explicit branch indices. Positive winding current follows that
+branch's first-to-second terminal orientation. Total `lambda = L i` replaces
+placeholder branch inductance; the full inverse replaces only the original
+flux storage block. Capacitor charges, algebraic rows, Kirchhoff stamps and
+source ports retain their original correspondence. The existing `CircuitDae`
+owns consistent initialization and audited evolution. Circuit-state currents
+reconstruct the same field through the existing triangle/position/frame
+transfer; resistor branches continue to own dissipation.
+
+Extraction admits at most 16 windings with explicit basis-storage and numerical
+budgets. The dense circuit adapter admits at most 32 nodes, 64 branches,
+16 transformers, 32 source ports and 128 extended states. Cancellation or
+refusal publishes no partial owner. Regressions cover actual mutually coupled
+circuit evolution, an interleaved capacitor and reversed branch mapping,
+source-work/heat/storage accounting, material-only substitution, winding sign
+and turn scaling, extrusion depth, end storage, gauge closure and refusals.
+Native test execution remains a separate verification requirement. This lane
+keeps geometry and material state fixed during evolution; it does not infer
+nonlinear magnetics, motion, skin/proximity losses, changing-material work or
+three-dimensional winding-end fields.
