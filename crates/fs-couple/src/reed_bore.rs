@@ -539,6 +539,44 @@ pub(crate) fn solve_reed_wave_strict(
     guess: f64,
     u_body: f64,
 ) -> Result<f64, AcousticRealizeError> {
+    solve_reed_wave_with_residual(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body,
+        |outgoing| Ok(reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, outgoing, u_body)))
+}
+
+/// The same strict characteristic junction with the shared material slit law.
+/// The actual gap is pressure-dependent on this quasistatic branch; it is not
+/// frozen at the preceding sample or replaced by the reed's rest opening.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_reed_wave_viscous(
+    reed: BeatingReed, rho: f64, zc: f64, r0: f64, p_minus_hist: f64,
+    p_m: f64, guess: f64, u_body: f64,
+    slit: crate::bernoulli_aperture::viscous::ViscousSlit,
+) -> Result<f64, AcousticRealizeError> {
+    solve_reed_wave_with_residual(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body,
+        |outgoing| reed_viscous_flow_mismatch(reed, rho, zc, r0, p_minus_hist,
+            p_m, outgoing, u_body, slit))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reed_viscous_flow_mismatch(
+    reed: BeatingReed, rho: f64, zc: f64, r0: f64, p_minus_hist: f64,
+    p_m: f64, p_plus: f64, u_body: f64,
+    slit: crate::bernoulli_aperture::viscous::ViscousSlit,
+) -> Result<f64, AcousticRealizeError> {
+    let p_minus = p_minus_hist + r0 * p_plus;
+    let dp = p_m - (p_plus + p_minus);
+    let flow = slit.evaluate(reed.width_m, aperture_of(reed).opening_m(dp), rho, dp)?;
+    Ok(flow.flow_m3_s + u_body - (p_plus - p_minus) / zc)
+}
+
+// Keep bracket selection, closure and binary64 refinement in one owner for
+// both constitutive laws. The legacy closure keeps its original arithmetic.
+#[allow(clippy::too_many_arguments)]
+fn solve_reed_wave_with_residual(
+    reed: BeatingReed, rho: f64, zc: f64, r0: f64, p_minus_hist: f64,
+    p_m: f64, guess: f64, u_body: f64,
+    residual: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+) -> Result<f64, AcousticRealizeError> {
     if ![rho, zc, r0, p_minus_hist, p_m, guess, u_body]
         .iter()
         .all(|v| v.is_finite())
@@ -557,8 +595,8 @@ pub(crate) fn solve_reed_wave_strict(
         .max(1.0);
     let mut lo = guess - span;
     let mut hi = guess + span;
-    let mut f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
-    let mut f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
+    let mut f_lo = residual(lo)?;
+    let mut f_hi = residual(hi)?;
     // Preserve the local bracket when it succeeds; otherwise expand a
     // symmetric bracket. Compare signs without multiplying small residuals.
     for _ in 0..32 {
@@ -579,8 +617,8 @@ pub(crate) fn solve_reed_wave_strict(
         lo = -span;
         hi = span;
         span *= 2.0;
-        f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
-        f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
+        f_lo = residual(lo)?;
+        f_hi = residual(hi)?;
     }
     if !f_lo.is_finite()
         || !f_hi.is_finite()
@@ -598,7 +636,7 @@ pub(crate) fn solve_reed_wave_strict(
         if mid == lo || mid == hi || f_lo == 0.0 || f_hi == 0.0 {
             return Ok(if f_lo.abs() <= f_hi.abs() { lo } else { hi });
         }
-        let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid, u_body);
+        let f_mid = residual(mid)?;
         if !f_mid.is_finite() {
             return Err(AcousticRealizeError::Reed {
                 what: "reed bisection flow left the finite set",
@@ -690,6 +728,41 @@ mod fast_mode_tests {
     fn fixture_impedance(gas: &GasState) -> f64 {
         let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
         gas.characteristic_impedance / area
+    }
+
+    // G1: manufacture a physical pressure drop and its algebraic steady flow,
+    // then infer the source pressure from the independent wave equations. This
+    // exercises the actual pressure-dependent opening, signed flow, closure,
+    // and nonzero sub-picopascal flow without the inviscid dead zone.
+    #[test]
+    fn viscous_characteristic_roots_follow_poiseuille_and_closure_limits() {
+        let gas = air20();
+        let law = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&gas, 0.001).unwrap();
+        let source = reed();
+        let zc = 1000.0;
+        for reflection in [-0.7, 0.0, 0.65] {
+            for drop in [-100.0_f64, -1e-13, 0.0, 1e-13, 100.0, 5000.0, 5999.9, 6000.0, 7000.0] {
+                let opening = source.rest_opening_m * (1.0 - drop/source.closing_pressure_pa).clamp(0.0, 1.0);
+                let flow = if opening == 0.0 { 0.0 } else {
+                    let resistance = 12.0 * gas.dynamic_viscosity * 0.001 / opening.powi(2);
+                    let speed = 2.0 * drop / (resistance
+                        + (resistance*resistance + 2.0*gas.density*drop.abs()).sqrt());
+                    source.width_m * opening * speed
+                };
+                let expected = zc * flow / (1.0 - reflection);
+                let mouth = drop + (1.0 + reflection) * expected;
+                let actual = solve_reed_wave_viscous(source, gas.density, zc,
+                    reflection, 0.0, mouth, 0.0, 0.0, law).unwrap();
+                assert!((actual-expected).abs() <= 2e-8*expected.abs().max(f64::MIN_POSITIVE),
+                    "drop={drop} reflection={reflection}: {actual} != {expected}");
+                if drop != 0.0 && opening > 0.0 { assert!(actual != 0.0); }
+                if drop.abs() <= 1e-13 && drop != 0.0 {
+                    let poiseuille = source.width_m * opening.powi(3) * drop
+                        / (12.0 * gas.dynamic_viscosity * 0.001);
+                    assert!((flow / poiseuille - 1.0).abs() < 1e-12);
+                }
+            }
+        }
     }
 
     #[test]

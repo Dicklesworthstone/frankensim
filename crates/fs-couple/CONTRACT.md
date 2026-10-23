@@ -629,6 +629,21 @@ accuracy; it is not the plan's resolved-flow acceptance rung.
 
 ### `music_render` (binary)
 
+`ReedPerformance` accepts optional `slit_length LENGTH_M` immediately after its
+reed record. `ReedBoreVoice::set_viscous_slit_length` binds the shared
+`bernoulli_aperture::viscous::ViscousSlit` to the exact source inlet `GasState`,
+including regional mixtures and axial fields. Both quasistatic and massive
+reed/contact branches solve this constitutive law in the original same-sample
+characteristic junction; no output filter, alternate contact owner or new
+integrator is introduced. Omission retains the inviscid arithmetic. Selection
+after rendering refuses. The massless viscous branch uses strict refinement;
+fast mode counts this fallback and exposes no Newton stopping-tolerance claim.
+G1/G3/G5 regressions in `render::scattering`, `reed_bore::fast_mode_tests` and
+`render::schedule::reed::viscous_tests` cover the signed pressure/flow equation,
+Poiseuille/closure limits, ten beating/reopening cycles with a pressure-work
+account, inlet-material binding, and callback invariance. Quasisteady planar
+flow does not establish unsteady channel, turbulence, or instrument realism.
+
 The music lane's render CLI (bead ib15w): `music_render <reed|string>
 <out.wav> [--seconds S] [--block N] [--full-scale-pa P]`. Pinned fixture
 compositions render through the block API and encode through the ONE

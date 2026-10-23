@@ -59,8 +59,16 @@ fn wall_relaxation_data_reaches_jet_feedback_and_the_existing_cli() {
         std::fs::write(dir.join("wall.fsmcdpk"), material.to_bytes()).unwrap();
         let output = dir.join(format!("wall-memory-{name}.wav"));
         success(run(&input, &output, 37, false));
-        assert_eq!(std::fs::read(output).unwrap(),
+        assert_eq!(std::fs::read(&output).unwrap(),
             encode_pcm16_wav(&expected, 48_000, 1.0).unwrap().0);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        let time = if name == "original" { 0.001 } else { 0.005 };
+        for token in ["\"loss\":\"maxwell\"".to_string(),
+            "\"equilibrium_modulus_pa\":1e6".to_string(),
+            format!("\"maxwell_terms\":[{{\"modulus_pa\":5e5,\"relaxation_time_s\":{time:e}}}]"),
+            material.content_hash().to_hex()] {
+            assert!(metadata.contains(&token), "{token}: {metadata}");
+        }
     }
 }
 

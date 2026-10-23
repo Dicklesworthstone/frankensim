@@ -9,6 +9,8 @@
 //! It does not infer material identity
 //! or turn a pitch into a medium property. Pressure commands replace the fixture
 //! attack envelope; all retained reed and bore state survives release and resume.
+//! Optional `slit_length LENGTH_M` after the reed record selects the shared
+//! quasisteady viscous slit from the exact inlet gas, including axial fields.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects the existing terminal-only Rayleigh observation.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -353,6 +355,13 @@ impl ReedPerformance {
                 ));
             }
         }
+        let slit_length_m = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("slit_length") {
+            let mut row = r.row("slit_length")?;
+            let length = row.positive()?;
+            row.finish()?;
+            Some(length)
+        } else { None };
         let observation =
             outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
         observation.validate_policy(policy)?;
@@ -600,6 +609,9 @@ impl ReedPerformance {
         if let Some(lay) = lay {
             voice.set_lay(lay).map_err(ReedPerformanceError::Model)?;
         }
+        if let Some(length_m) = slit_length_m {
+            voice.set_viscous_slit_length(length_m).map_err(ReedPerformanceError::Model)?;
+        }
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls)
             .map_err(ReedPerformanceError::Render)?;
@@ -635,6 +647,11 @@ impl ReedPerformance {
     #[must_use]
     pub const fn renderer(&self) -> &ScheduledRenderer {
         &self.renderer
+    }
+    /// Actual selected channel, retaining source-gas viscosity and density.
+    /// The field inlet can differ from the first propagation cell's midpoint.
+    pub fn viscous_slit(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
+        self.renderer.context().reed_voice(0).and_then(ReedBoreVoice::viscous_slit)
     }
     /// The immutable default medium. Segments without `gas` inherit this state;
     /// explicit segment records may override it. No air-only absorption is added.
@@ -858,3 +875,6 @@ mod segment_cap_tests;
 
 #[cfg(test)]
 mod lay_tests;
+
+#[cfg(test)]
+mod viscous_tests;

@@ -262,6 +262,8 @@ pub struct ReedBoreVoice {
     plates: PlateBank,
     reed: BeatingReed,
     lay: Option<Obstacle>,
+    inlet_gas: GasState,
+    viscous_slit: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     rho: f64,
     sound_speed: f64,
     zc: f64,
@@ -583,6 +585,8 @@ impl ReedBoreVoice {
             plates,
             reed,
             lay,
+            inlet_gas: *gas,
+            viscous_slit: None,
             rho: gas.density,
             sound_speed: gas.sound_speed,
             zc,
@@ -622,6 +626,32 @@ impl ReedBoreVoice {
     /// stay byte-identical to the pre-render-API code).
     pub const fn plate_bank_mut(&mut self) -> &mut PlateBank {
         &mut self.plates
+    }
+
+    /// Select the shared viscous channel law from physical streamwise length
+    /// [m] and this voice's exact inlet gas. Density and viscosity therefore
+    /// remain bound to the SAME regional or axial material state as the source
+    /// impedance. This law enters every trial contact/flow junction.
+    ///
+    /// Omitting this selection preserves the inviscid source. The selected
+    /// model is fully developed, quasisteady parallel-plate flow plus separated
+    /// jet loss; it does not resolve unsteady channel inertia or turbulence.
+    /// Admission is allowed only before the first rendered sample.
+    pub fn set_viscous_slit_length(&mut self, length_m: f64) -> Result<(), AcousticRealizeError> {
+        if self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "viscous reed channel selection requires an unadvanced voice",
+            });
+        }
+        let slit = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?;
+        self.viscous_slit = Some(slit);
+        Ok(())
+    }
+
+    /// Selected material-gas channel and physical length, if explicitly supplied.
+    #[must_use]
+    pub const fn viscous_slit(&self) -> Option<&crate::bernoulli_aperture::viscous::ViscousSlit> {
+        self.viscous_slit.as_ref()
     }
 
     /// Replace the default slit lay by a measured one ([`ReedLay`]). The voice
@@ -695,6 +725,17 @@ impl ReedBoreVoice {
                 self.reed_y = y;
                 self.reed_v = v;
                 pp
+            } else if let Some(slit) = self.viscous_slit {
+                let outgoing = crate::reed_bore::solve_reed_wave_viscous(
+                    self.reed, self.rho, self.zc, boundary.direct, boundary.history,
+                    p_m, self.p_plus_prev, u_body, slit,
+                )?;
+                if self.solver_mode == ReedSolverMode::FastNewton {
+                    // The old Newton Jacobian describes inviscid flow only.
+                    // Count this explicit handoff to the shared strict solver.
+                    self.fast_stats.fallback_samples += 1;
+                }
+                outgoing
             } else {
                 match self.solver_mode {
                     ReedSolverMode::Strict => solve_reed_wave(
@@ -723,9 +764,16 @@ impl ReedBoreVoice {
             };
             self.p_plus_prev = p_plus;
             if self.reed.mass_kg == 0.0 {
-                let residual = crate::reed_bore::reed_flow_mismatch(
-                    self.reed, self.rho, self.zc, boundary.direct, boundary.history, p_m, p_plus, u_body,
-                ).abs();
+                let residual = match self.viscous_slit {
+                    Some(slit) => crate::reed_bore::reed_viscous_flow_mismatch(
+                        self.reed, self.rho, self.zc, boundary.direct, boundary.history,
+                        p_m, p_plus, u_body, slit,
+                    )?,
+                    None => crate::reed_bore::reed_flow_mismatch(
+                        self.reed, self.rho, self.zc, boundary.direct, boundary.history,
+                        p_m, p_plus, u_body,
+                    ),
+                }.abs();
                 self.junction_residual_max = Some(self.junction_residual_max.unwrap_or(0.0).max(residual));
             }
             let p_minus_now = self

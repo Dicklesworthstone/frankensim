@@ -37,11 +37,28 @@ impl ReedBoreVoice {
                 what: "same-sample reed load is outside the finite positive-impedance domain",
             });
         }
-        let (outgoing, opening, velocity) = crate::reed_bore::step_massive_reed(
-            self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
-            self.reed_y, self.reed_v, self.dt, body_flow_m3_s,
-            self.lay.as_ref(), self.solver_mode, &mut self.fast_stats,
-        )?;
+        let (outgoing, opening, velocity) = if let Some(slit) = self.viscous_slit {
+            let lay = self.lay.as_ref().expect("massive voices retain their physical lay");
+            let result = crate::reed_bore::OpeningPropagator::Midpoint.step_with_junction(
+                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                self.reed_y, self.reed_v, self.dt, body_flow_m3_s, lay,
+                |opening| Ok(opening.max(0.0)), None,
+                |opening, moving| slit.characteristic_pressure(
+                    self.reed.width_m, opening, self.rho, impedance, incoming,
+                    mouth_pressure_pa, moving,
+                ),
+            )?;
+            if self.solver_mode == ReedSolverMode::FastNewton {
+                self.fast_stats.fallback_samples += 1;
+            }
+            result
+        } else {
+            crate::reed_bore::step_massive_reed(
+                self.reed, self.rho, impedance, incoming, mouth_pressure_pa,
+                self.reed_y, self.reed_v, self.dt, body_flow_m3_s,
+                self.lay.as_ref(), self.solver_mode, &mut self.fast_stats,
+            )?
+        };
         // p = a_eff + h_eff = (1+r)*a + h, and h=(1-r)*h_eff,
         // hence a=(a_eff+r*h_eff)/(1+r). The history term adds, not subtracts.
         let outgoing = if r == 0.0 { outgoing }
@@ -137,6 +154,128 @@ mod tests {
                 assert_eq!(a.line.history(),b.line.history());
                 assert_eq!((a.reed_y,a.reed_v),(b.reed_y,b.reed_v));
             }
+        }
+    }
+
+    // G1: independently reconstruct the original affine wave boundary and the
+    // parallel-plate plus separation pressure law. A post-filtered inviscid
+    // result, an old-sample gap or an omitted swept flow cannot satisfy it.
+    #[test]
+    fn viscous_source_closes_the_same_sample_flow_for_both_reed_mechanisms() {
+        for direct in [-0.7, 0.0, 0.65] {
+            for massive in [false, true] {
+                let mut v = voice(direct, massive);
+                v.set_viscous_slit_length(0.001).unwrap();
+                let mu = v.viscous_slit().unwrap().dynamic_viscosity_pa_s();
+                for _ in 0..160 {
+                    let (old_y, old_v) = (v.reed_y, v.reed_v);
+                    v.step_block(&mut [0.0]).unwrap();
+                    let incoming = v.line.incoming();
+                    let pressure = v.p_plus_prev + incoming;
+                    let total = (v.p_plus_prev - incoming) / v.zc;
+                    let dp = v.reed.blowing_pressure_pa - pressure;
+                    let (opening, swept) = if massive {
+                        (f64::midpoint(old_y, v.reed_y).max(0.0),
+                            crate::reed_bore::reed_swept_flow(
+                                crate::reed_bore::reed_pressure_face(v.reed),
+                                f64::midpoint(old_v, v.reed_v)))
+                    } else {
+                        (crate::reed_bore::aperture_of(v.reed).opening_m(dp), 0.0)
+                    };
+                    assert!(opening > 0.0);
+                    let velocity = (total - swept) / (v.reed.width_m * opening);
+                    let viscous = 12.0 * mu * 0.001 * velocity / opening.powi(2);
+                    let separation = 0.5 * v.rho * velocity * velocity.abs();
+                    assert!((viscous + separation - dp).abs()
+                        < 1e-9 * (dp.abs() + viscous.abs() + separation.abs()) + 1e-12,
+                        "r={direct} massive={massive}: {viscous} + {separation} != {dp}");
+                    assert!(viscous * velocity >= 0.0);
+                }
+                if !massive {
+                    assert!(v.junction_residual_max().unwrap() < 1e-16);
+                }
+            }
+        }
+    }
+
+    // G1/G3: actual beating and reopening must keep the contact potential,
+    // mechanical damping and jet/wall heat in one pressure-work balance.
+    #[test]
+    fn viscous_massive_reed_closes_and_reopens_without_losing_pressure_work() {
+        use crate::unilateral_contact::distributed::ApertureContactStep;
+        let mut v = voice(-0.2, true);
+        v.set_viscous_slit_length(0.001).unwrap();
+        let slit = *v.viscous_slit().unwrap();
+        let (stiffness, damping) = crate::reed_bore::reed_structural(v.reed);
+        let face = crate::reed_bore::reed_pressure_face(v.reed);
+        for _ in 0..10 {
+            let mut closed = false;
+            let mut reopened = false;
+            for pressure in [15000.0, 100.0] {
+                v.set_blowing_pressure(pressure);
+                for _ in 0..192 {
+                    let (old_y, old_v) = (v.reed_y, v.reed_v);
+                    v.step_block(&mut [0.0]).unwrap();
+                    let velocity = f64::midpoint(old_v, v.reed_v);
+                    let gap = f64::midpoint(old_y, v.reed_y).max(0.0);
+                    let dp = pressure - (v.p_plus_prev + v.line.incoming());
+                    let flow = (v.p_plus_prev - v.line.incoming()) / v.zc;
+                    let jet = slit.evaluate(v.reed.width_m, gap, v.rho, dp).unwrap();
+                    let lay = v.lay.as_ref().unwrap();
+                    let contact = ApertureContactStep::new(lay, old_y).unwrap()
+                        .response(v.reed_y, velocity).unwrap();
+                    let energy = |y: f64, speed: f64| {
+                        0.5 * v.reed.mass_kg * speed * speed
+                            + 0.5 * stiffness * (y - v.reed.rest_opening_m).powi(2)
+                            + lay.stiffness() / (lay.alpha() + 1.0)
+                                * (-lay.gaps()[0] - y).max(0.0).powf(lay.alpha() + 1.0)
+                    };
+                    let delta = energy(v.reed_y, v.reed_v) - energy(old_y, old_v);
+                    let loss = v.dt * (damping * velocity * velocity
+                        + contact.dissipated_power + jet.dissipated_power_w());
+                    let work = v.dt * dp * flow;
+                    let scale = delta.abs() + loss.abs() + work.abs();
+                    assert!((delta + loss - work).abs() <= 2e-9 * scale + 2e-18,
+                        "work residual {:e} at gap {:e}", delta + loss - work, gap);
+                    let swept = -face * velocity;
+                    assert!((jet.flow_m3_s + swept - flow).abs()
+                        < 1e-10 * (jet.flow_m3_s.abs() + swept.abs() + flow.abs()) + 1e-18);
+                    if pressure > 100.0 { closed |= v.reed_y <= 0.0; }
+                    else { reopened |= v.reed_y > 0.0; }
+                }
+            }
+            assert!(closed && reopened, "fixture must exercise both physical branches");
+        }
+    }
+
+    #[test]
+    fn viscous_selection_preserves_blocks_and_declares_strict_fallback() {
+        for massive in [false, true] {
+            let (mut a, mut b) = (voice(-0.4, massive), voice(-0.4, massive));
+            a.set_viscous_slit_length(0.001).unwrap();
+            b.set_viscous_slit_length(0.001).unwrap();
+            b.set_solver_mode(ReedSolverMode::FastNewton);
+            assert_eq!(b.realized_resolution().step_tolerance, None);
+            assert!(b.set_junction_step_tolerance(1e-8).is_err());
+            for pressure in [100.0, 250.0, 0.0] {
+                a.set_blowing_pressure(pressure);
+                b.set_blowing_pressure(pressure);
+                let (mut x, mut y) = ([0.0; 127], [0.0; 127]);
+                a.step_block(&mut x).unwrap();
+                for chunk in y.chunks_mut(19) { b.step_block(chunk).unwrap(); }
+                assert_eq!(x, y);
+                assert_eq!(a.line.history(), b.line.history());
+                assert_eq!((a.reed_y, a.reed_v), (b.reed_y, b.reed_v));
+            }
+            assert!(b.fast_stats.fallback_samples > 0);
+            let original = *a.viscous_slit().unwrap();
+            assert!(a.set_viscous_slit_length(0.002).is_err());
+            assert_eq!(a.viscous_slit(), Some(&original));
+        }
+        for length in [0.0, -0.001, f64::NAN, f64::INFINITY] {
+            let mut v = voice(0.0, false);
+            assert!(v.set_viscous_slit_length(length).is_err());
+            assert!(v.viscous_slit().is_none());
         }
     }
 

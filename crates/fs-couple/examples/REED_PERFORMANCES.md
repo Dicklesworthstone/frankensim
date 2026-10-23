@@ -48,6 +48,47 @@ quasistatic aperture. Zero stiffness retains the existing derived-stiffness
 convention. These are authored primitive parameters, **not** an identified reed
 species, laminate or temperature-dependent solid material card.
 
+An optional `slit_length LENGTH_M` record immediately after `reed` selects the
+shared material-gas channel law. For example:
+
+```
+reed 0.0004 0.013 6000 0.00001 100 0.35
+slit_length 0.001
+```
+
+The length is the physical streamwise channel length in metres, supplied from
+geometry; the example value is illustrative, not a measured clarinet reed.
+The same `ViscousSlit` owner used by material plate valves then solves
+`dp = 12 mu L U/(w h^3) + rho U|U|/(2 w^2 h^2)` at every trial opening and
+pressure. It includes the moving reed's swept flow and lay contact in the same
+sample. Both massless and massive reeds support this selection. The exact
+regional or axial-field **inlet** gas supplies `mu` and `rho`, so composition,
+temperature and static pressure changes propagate into the excitation as well
+as the bore. The ambient default, first cell midpoint and exterior receiver gas
+are never substituted for that inlet state. The CLI sidecar records the length
+and actual inlet properties. Omitting the record preserves the inviscid path.
+
+This is quasisteady, fully developed parallel-plate resistance plus separated
+jet loss. It regularizes the small-gap flow, including nonzero flow below the
+legacy Bernoulli pressure cutoff, but it does not supply unsteady channel
+inertia, entrance development, turbulence, or measured-instrument validation.
+The optional channel uses the shared strict root solver; fast-Newton mode
+explicitly records a fallback rather than using the inviscid Jacobian.
+
+`reed-viscous-slit.performance` is a complete runnable demonstration with a
+massive reed, the 1 mm illustrative channel and the same pressure phrase as
+`reed-duct.performance`:
+
+```bash
+cargo run -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/reed-viscous-slit.performance reed-viscous-slit.wav
+```
+
+It retains the diagnostic `listener_m` observation and authored mechanics; it
+is not a reconstructed or validated clarinet. Change `ambient`, add regional
+segment gases, or edit `slit_length` to change the physical model through data.
+The WAV and its provenance JSON must name new output paths.
+
 `listener_m` is the distance used by the existing compact-jet observation.
 `termination` is one of `closed`, `ideal-open`, `unflanged`, `flanged`.
 Each of the declared 1..256 segments is one of:

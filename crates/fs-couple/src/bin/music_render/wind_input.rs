@@ -129,10 +129,20 @@ fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
         let loss = match &assignment.loss {
             WallMaterialLoss::Elastic => "elastic",
             WallMaterialLoss::KelvinVoigt => "kelvin-voigt",
-            WallMaterialLoss::Maxwell(_) => unreachable!("file profile selects elastic or Kelvin-Voigt"),
+            WallMaterialLoss::Maxwell(_) => "maxwell",
+        };
+        let relaxation = match &assignment.loss {
+            WallMaterialLoss::Maxwell(spectrum) => {
+                let material = spectrum.material();
+                let terms = material.terms.iter().map(|(modulus, time)| format!(
+                    "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                    .collect::<Vec<_>>().join(",");
+                format!(",\"equilibrium_modulus_pa\":{:e},\"maxwell_terms\":[{terms}]", material.e_inf)
+            }
+            _ => String::new(),
         };
         let patch = wall.patch();
-        format!("{{\"node\":{},\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"source_artifact\":\"{}\",\"material_chemistry\":{},\"material_phase\":{},\"material_process\":{},\"material_revision\":{},\"temperature_k\":{:e},\"angular_frequency_rad_s\":{:e},\"band_hz\":[{:e},{:e}],\"radius_m\":{:e},\"covered_length_m\":{:e},\"area_m2\":{:e},\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}}}",
+        format!("{{\"node\":{},\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"source_artifact\":\"{}\",\"material_chemistry\":{},\"material_phase\":{},\"material_process\":{},\"material_revision\":{},\"temperature_k\":{:e},\"angular_frequency_rad_s\":{:e},\"band_hz\":[{:e},{:e}],\"radius_m\":{:e},\"covered_length_m\":{:e},\"area_m2\":{:e},\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}{relaxation}}}",
             record.node(),json_string(record.path()),record.pack().content_hash().to_hex(),
             material.card_identity().to_hex(),material.identity().to_hex(),record.pack().source_artifact().to_hex(),
             json_string(&state.chemistry),json_string(&state.phase),json_string(&state.process),state.revision,
@@ -602,8 +612,13 @@ fn load_with_all_sources(
         let p=ReedPerformance::from_bytes_with_gas_sources(bytes,block,policy,sources).map_err(|e|e.to_string())?;
         let i=p.info();
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
+        let slit_json = p.viscous_slit().map_or_else(String::new, |slit| {
+            let gas = slit.gas().expect("reed channel retains its actual inlet gas");
+            format!(",\"slit_channel\":{{\"model\":\"quasisteady parallel-plate resistance plus separated jet\",\"length_m\":{:e},\"inlet_temperature_k\":{:e},\"inlet_pressure_pa\":{:e},\"inlet_density_kg_m3\":{:e},\"dynamic_viscosity_pa_s\":{:e}}}",
+                slit.length_m(), gas.temperature, gas.pressure, gas.density, gas.dynamic_viscosity)
+        });
         let policy_name=if policy==ObservationPolicy::Acceptance {"acceptance"} else {"diagnostic"};
-        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}}}",
+        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}{slit_json}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None})

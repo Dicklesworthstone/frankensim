@@ -70,6 +70,7 @@ impl ReedBoreVoice {
             solver_mode: self.solver_mode,
             step_tolerance: match self.solver_mode {
                 ReedSolverMode::Strict => None,
+                ReedSolverMode::FastNewton if self.viscous_slit.is_some() => None,
                 ReedSolverMode::FastNewton => Some(self.junction_step_tolerance),
             },
         }
@@ -78,14 +79,16 @@ impl ReedBoreVoice {
     /// Set an explicit fast-Newton relative pressure-step tolerance, without
     /// changing controls or the default strict mode. Massive reeds currently
     /// refuse: their coupled structural solve has a different stopping rule.
+    /// A viscous slit also refuses because it uses strict bracket refinement.
     pub fn set_junction_step_tolerance(
         &mut self,
         tolerance: f64,
     ) -> Result<(), AcousticRealizeError> {
-        if self.reed.mass_kg > 0.0 || !tolerance.is_finite() || tolerance <= 0.0 || tolerance > 1.0
+        if self.reed.mass_kg > 0.0 || self.viscous_slit.is_some()
+            || !tolerance.is_finite() || tolerance <= 0.0 || tolerance > 1.0
         {
             return Err(AcousticRealizeError::InvalidDescription {
-                what: "massless junction tolerance must be finite and in (0, 1]",
+                what: "inviscid massless junction tolerance must be finite and in (0, 1]",
             });
         }
         self.junction_step_tolerance = tolerance;
