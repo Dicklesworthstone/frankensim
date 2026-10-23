@@ -19,3 +19,5 @@ fs-exec = { path = "../../crates/fs-exec" }
 fs-solver = { path = "../../crates/fs-solver" }
 # In-house derivative-free engine; only this standalone example consumer adds it.
 fs-dfo = { path = "../../crates/fs-dfo" }
+# Native tetrahedral topology for explicit specimen inputs.
+fs-rep-mesh = { path = "../../crates/fs-rep-mesh" }
