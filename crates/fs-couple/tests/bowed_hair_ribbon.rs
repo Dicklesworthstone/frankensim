@@ -127,7 +127,7 @@ fn source(rho: f64) -> MaterialStringSource {
         lin_density_kg_m: 1.0,
         axial_stiffness_n: 1.0,
         width_m: 1.0,
-        n_modes: 8,
+        n_modes: 24,
         damping_ratio: 0.0,
         rayleigh: None,
         bending_stiffness_n_m2: 0.0,
@@ -422,5 +422,24 @@ fn g0_restore_string_states_seeds_the_motion_and_refuses_bad_input() {
         // And a refusal once a sample has been rendered.
         fresh.step(&zero, &released).unwrap();
         assert!(fresh.restore_string_states(0, &states).is_err());
+    });
+}
+
+#[test]
+fn g0_rank_refusal_when_the_string_underresolves_the_quadrature() {
+    // Owner ruling 2026-10-23: a ribbon needs >= 4 string modes per contact
+    // cell, else the finite-width joint solve is rank-deficient. The 24-mode
+    // fixture string carries 5 cells (needs 20) but refuses 9 (needs 36).
+    with_cx(|cx, gate| {
+        assert!(
+            base(cx, gate)
+                .with_compliant_bow_ribbon(0.02, 5, violin_hair(), ribbon_limits(), gate)
+                .is_ok()
+        );
+        assert!(
+            base(cx, gate)
+                .with_compliant_bow_ribbon(0.02, 9, violin_hair(), ribbon_limits(), gate)
+                .is_err()
+        );
     });
 }

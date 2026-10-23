@@ -331,6 +331,16 @@ impl ReciprocalStringBank {
             ));
         }
         let centre = self.source.options.bow;
+        // Rank refusal (owner ruling 2026-10-23): the bowed string must resolve
+        // the contact quadrature. With fewer than four modal degrees of freedom
+        // per cell the joint compliance matrix over the closely spaced cells is
+        // rank-deficient and the differential slip is not trustworthy, so refuse
+        // rather than return an unreliable finite-width solve.
+        if self.cards[centre.string].mode_count < 4 * cells {
+            return Err(invalid(
+                "rank-deficient ribbon: the bowed string needs at least four modes per contact cell",
+            ));
+        }
         let ribbon = CompliantBowRibbon::new(
             centre,
             self.cards[centre.string].length_m,
