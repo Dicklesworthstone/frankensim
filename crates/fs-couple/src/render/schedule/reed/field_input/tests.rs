@@ -4,6 +4,8 @@ use super::super::{
     ObservationPolicy, PressureRenderer, ReedBoreVoice, ReedPerformance, RenderVoice,
 };
 use fs_material::gas_species::input::ThermochemicalPhase;
+use fs_material::thermochemical_gas::packs::{SpeciesPackRef, from_packs};
+use fs_qty::semantic::{Composition, CompositionBasis};
 mod support;
 use support::packs;
 
@@ -251,4 +253,51 @@ fn checked_in_field_example_reaches_the_shared_pressure_owner() {
     assert_eq!(field.model().source_packs().len(),2);
     let (pressure,_) = render(performance,113);
     assert!(pressure.iter().any(|p| *p!=0.0));
+}
+
+
+#[test]
+fn primitive_field_drives_actual_plate_dg_inlet_slit_and_causal_pressure() {
+    use crate::bernoulli_aperture::performance::{CoupledAperture, file::PlateValvePerformance};
+    use fs_exec::CancelGate;
+    let (a, b) = (packs("A", 0.028, 3.5, 200.0), packs("B", 0.044, 4.5, 200.0));
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let example = include_str!("../../../../../examples/plate-valve-dg-bore.performance");
+    let header = example.split_once("\nschedule\n").unwrap().0
+        .replace("audio 96000 9602", "audio 96000 256")
+        .replace("1e-11 160 4", "1e-11 160 4 gas_field 3 mole 2 A B")
+        .replace("observation inlet", "gas_station 0 300 1 0\ngas_station 0.025 320 0.5 0.5\ngas_station 0.05 310 0 1\nobservation inlet");
+    let input = format!("{header}\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tmouth\tblowing-pressure\ninitial\tpressure-pa\t5e0\nevents\t0\n");
+    let render = |text: &str, block| {
+        let source = PlateValvePerformance::from_bytes_with_gas_sources(
+            text.as_bytes(), block, &CancelGate::new_clock_free(), Some(&sources),
+        ).unwrap();
+        let CoupledAperture::Dg(dg) = source.renderer().system() else { panic!("original DG") };
+        let duct = dg.load().duct();
+        let field = duct.gas_field().unwrap();
+        assert_eq!(field.primitive_states()[0].composition.fractions(), &[1.0, 0.0]);
+        assert_eq!(field.primitive_states()[2].composition.fractions(), &[0.0, 1.0]);
+        assert_eq!(duct.inlet_gas().temperature, 300.0);
+        assert_eq!(duct.outlet_gas().temperature, 310.0);
+        assert_ne!(duct.inlet_gas(), source.ambient_gas());
+        assert_eq!(dg.aperture().viscous_slit().unwrap().dynamic_viscosity_pa_s(),
+            duct.inlet_gas().dynamic_viscosity);
+        assert!(duct.spatial_viscothermal_admission().is_some());
+        let mut renderer = source.into_renderer();
+        let mut pressure = vec![0.0; 256];
+        for chunk in pressure.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        pressure
+    };
+    let reference = render(&input, 37);
+    assert_eq!(render(&input, 1), reference);
+    assert!(reference.iter().any(|p| p.abs() > 1e-6));
+    // Inlet, outlet and solid data stay fixed: the interior primitive change
+    // must reach the original acoustic/wall operator and actual coupled trace.
+    let changed = input.replace("gas_station 0.025 320 0.5 0.5",
+        "gas_station 0.025 350 0.9 0.1");
+    assert!(render(&changed, 37).iter().zip(&reference)
+        .any(|(a, b)| (a - b).abs() > 1e-8));
 }

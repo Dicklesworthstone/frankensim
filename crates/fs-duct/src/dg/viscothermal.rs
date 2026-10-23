@@ -156,6 +156,17 @@ impl DgDuct {
         Ok(self)
     }
 
+    /// Admitted angular-frequency band shared by either wall attachment.
+    /// None denotes a lossless duct; it does not omit the spatial wall route.
+    #[must_use]
+    pub fn viscothermal_band_rad_s(&self) -> Option<[f64; 2]> {
+        match &self.viscothermal {
+            Some(ViscothermalMemory::Uniform(model)) => Some(model.band_rad_s()),
+            Some(ViscothermalMemory::Spatial(wall)) => Some(wall.admission.resolution.band_rad_s),
+            None => None,
+        }
+    }
+
     /// Uniform exact-mass pole model and its admitted band/error. A spatial
     /// attachment instead reports spatial_viscothermal_admission; use
     /// has_viscothermal_memory to distinguish either route from lossless.

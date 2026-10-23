@@ -2,7 +2,7 @@ use super::*;
 use crate::bernoulli_aperture::BernoulliAperture;
 use crate::bernoulli_aperture::dynamic::{ApertureState, DynamicApertureSpec};
 use fs_dcontact::Obstacle;
-use fs_duct::dg::{DgMesh, MAX_DG_PROPAGATOR_DOFS};
+use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, MAX_DG_PROPAGATOR_DOFS, PortId};
 use fs_duct::{Duct, Segment};
 use fs_material::gas::{GasSpec, GasState};
 

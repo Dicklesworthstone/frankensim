@@ -8,6 +8,9 @@
 //! solver. The caller retains the measurements and uncertainty of the supplied
 //! stations. Material and thermochemistry source receipts survive every sample.
 
+/// Shared explicit species-column admission for authored primitive fields.
+pub mod input;
+
 /// Conservative stationary heat/species generation using the shared thermal owner.
 pub mod steady;
 

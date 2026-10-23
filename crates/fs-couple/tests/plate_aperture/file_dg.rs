@@ -88,3 +88,26 @@ fn dg_selector_refuses_unbound_observers_budget_and_unresolved_diffusion() {
         );
     }
 }
+
+#[test]
+fn authored_taper_reaches_the_original_plate_contact_and_spatial_memory() {
+    let input = include_str!("../../examples/plate-valve-dg-bore.performance");
+    let header = input.split_once("\nschedule\n").unwrap().0
+        .replace("audio 96000 9602", "audio 96000 512");
+    let input = format!("{header}\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tmouth\tblowing-pressure\ninitial\tpressure-pa\t5e0\nevents\t0\n");
+    let (reference, renderer) = trace(&input, 37);
+    let CoupledAperture::Dg(dg) = renderer.system() else { panic!("original DG") };
+    assert_eq!(dg.aperture().accepted_steps(), 512);
+    assert_eq!(dg.duct_state().step_count(), 512);
+    assert_eq!(dg.aperture().blade_propagator(), BladePropagator::ExactZoh);
+    let duct = dg.load().duct();
+    assert_eq!(duct.spatial_viscothermal_admission().unwrap().memory_dofs, 128);
+    assert_eq!(duct.total_dofs(), 140);
+    assert!(duct.outlet_area_m2() > duct.inlet_area_m2());
+    assert!(reference.iter().any(|p| p.abs() > 1e-6));
+    assert_eq!(trace(&input, 1).0, reference);
+    assert_eq!(trace(&input, 512).0, reference);
+    let changed = input.replace("cone 0.001 0.002", "cone 0.001 0.0015");
+    assert!(trace(&changed, 37).0.iter().zip(&reference)
+        .any(|(a, b)| (a - b).abs() > 1e-8));
+}

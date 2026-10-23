@@ -214,7 +214,65 @@ The example is illustrative source data, not a measured reed or instrument.
 Finite-band Bessel admission does not establish DG spatial convergence or
 nonlinear time convergence; those refinements remain separate. The dense DG
 ledger infers wall/terminal loss from the energy deficit and does not provide
-an independent heat integral. This bounded offline route is a single-mode
-plate/reed cylinder, not a tapered woodwind, a paired modal valve, a flute jet
-or an exterior radiation implementation. Its solid sections and Maxwell
+an independent heat integral. This bounded offline route retains a single structural plate/reed mode.
+A paired modal valve and exterior radiation need their own coupled paths. Its solid sections and Maxwell
 spectra remain authored numeric data, not identified source material packs.
+
+
+### Authored tapered bores and primitive gas fields
+
+`plate-valve-dg-bore.performance` uses the same runtime with an explicit
+cylinder/cone bore. Replace the single `dg_tube` row with:
+
+```text
+dg_bore SEGMENTS OUTLET ELEMENTS ORDER POLES F_MIN_HZ F_MAX_HZ MAX_REL_ERROR EXP_TOL MAX_DOFS WALL_QUADRATURE_POINTS
+dg_segment cylinder RADIUS_M LENGTH_M
+dg_segment cone INLET_RADIUS_M OUTLET_RADIUS_M LENGTH_M
+```
+
+Supply exactly SEGMENTS geometry rows. The original duct partitions at geometry
+boundaries. WALL_QUADRATURE_POINTS must be at least ORDER+1 and at most 64.
+The complete declared state budget is checked before dense construction:
+2 * ELEMENTS * (ORDER+1) acoustic coordinates and
+2 * ELEMENTS * WALL_QUADRATURE_POINTS * POLES wall coordinates. The existing
+owner enforces its own mesh and global state limits.
+
+The spatial viscothermal owner evaluates local radius and material gas at its
+positive quadrature points, projects through the original consistent mass
+matrices and retains all causal diffusion states in the same exponential.
+On a taper this is the **local-cylinder Webster approximation**, not a full
+three-dimensional conical thermoviscous solution. Changing segment data changes
+the same source-bound physical operator; it does not select an instrument preset.
+
+An optional header suffix supplies a frozen primitive gas field:
+
+```text
+dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 160 4 gas_field 3 mole 2 A B
+dg_segment cylinder 0.001 0.025
+dg_segment cone 0.001 0.002 0.025
+gas_station 0     300 1   0
+gas_station 0.025 320 0.5 0.5
+gas_station 0.05  310 0   1
+observation inlet
+```
+
+A and B are explicit IDs in the caller's thermochemical source registry, each
+bound to its normalized species, caloric and transport packs. They are not
+built-in materials. The same species-column reader also serves prescribed and
+thermally generated reed fields. Exact absent-species fractions remain zero.
+The original material owner evaluates temperature/composition between stations;
+derived density, sound speed, viscosity and conductivity are never averaged.
+The ambient record supplies static pressure. Stations must cover the exact bore
+length, and the original mesh must resolve every geometry and field boundary.
+
+The **actual inlet field state** supplies aperture density and slit viscosity.
+The rest of the field drives propagation and viscothermal memory. Thus changing
+primitive gas data affects both the excitation and the resonator without editing
+their equations. The same shared DG source/load also supports other nonlinear
+sources; no second gas law, bore fit or pressure observer is introduced.
+
+The output remains internal step-mean inlet pressure. The sidecar retains the
+actual inlet/outlet gas and area, spatial wall rule, canonical field stations and
+source-pack receipts. Gas-field data is a frozen background: thermal evolution,
+mean-flow acoustic corrections, moving solid walls and an exterior microphone
+are separate physical couplings.

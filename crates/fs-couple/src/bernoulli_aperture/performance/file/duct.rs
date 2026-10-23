@@ -51,7 +51,7 @@ impl DuctInput {
         let assignments = match &mut self {
             Self::Tube { loss, .. } => vec![loss.take()],
             Self::Graph { losses, .. } => core::mem::take(losses),
-            Self::Dg(_) => return Err(bad(0, "dg_tube is a one-port exact aperture path; a two-sided DG binding is not implemented")),
+            Self::Dg(_) => return Err(bad(0, "DG is a one-port exact aperture path; a two-sided DG binding is not implemented")),
         };
         let prepared = self.prepare(air, dt, ApertureObservation::Inlet, gate)?;
         if !prepared.radiation.is_empty() {
@@ -107,11 +107,16 @@ impl DuctInput {
     ) -> Result<Self, PlateValveInputError> {
         let mut row = r.next()?;
         match row.word()? {
-            "dg_tube" => {
+            kind @ ("dg_tube" | "dg_bore") => {
                 if allow_driven {
-                    return Err(bad(r.line, "dg_tube cannot replace either side of the material-modal two-sided network"));
+                    return Err(bad(r.line, "a one-port DG source cannot replace either side of the material-modal two-sided network"));
                 }
-                let input = DgInput::read(&mut row)?;
+                let input = DgInput::read::<PlateValveInputError>(
+                    kind, row.line, &mut row.fields, &mut || {
+                        let next = r.next()?;
+                        Ok((next.line, next.fields))
+                    }, air, sources, records, gate,
+                )?;
                 row.finish()?;
                 Ok(Self::Dg(input))
             }
@@ -212,7 +217,7 @@ impl DuctInput {
                 }
                 Ok(Self::Graph { nodes, sections, max_bytes, losses, gases:regional.then_some(gases) })
             }
-            _ => Err(bad(r.line, "expected an explicit tube, dg_tube or network after ambient")),
+            _ => Err(bad(r.line, "expected an explicit tube, dg_tube, dg_bore or network after ambient")),
         }
     }
 
@@ -223,7 +228,7 @@ impl DuctInput {
         match self {
             Self::Dg(source) => {
                 if observation != ApertureObservation::Inlet {
-                    return Err(bad(0, "dg_tube currently observes exact mean inlet pressure; terminal and exterior receivers are not bound"));
+                    return Err(bad(0, "DG currently observes exact mean inlet pressure; terminal and exterior receivers are not bound"));
                 }
                 Ok(PreparedDuct { tube:None, graph:None, dg:Some(source.prepare(air, dt, gate)?),
                     gases:None, observation, radiation:vec![], losses:vec![] })
@@ -345,6 +350,7 @@ impl PreparedDuct {
     }
 
     pub fn inlet_gas(&self, default: GasState) -> Result<GasState, PlateValveInputError> {
+        if let Some(dg) = &self.dg { return Ok(*dg.duct().inlet_gas()); }
         if let (Some(graph), Some(gases)) = (&self.graph, &self.gases) {
             return Ok(gases[graph.inlet_section_index().map_err(PlateValveInputError::Physics)?]);
         }

@@ -7,16 +7,9 @@ use super::{
     GasFieldResolution, GasRecord, Reader, ReedPerformanceError, Row, ThermochemicalSources, bad,
 };
 use fs_matdb::QueryPoint;
-use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS, PrimitiveGasState};
-use fs_material::gas_species::input::ThermochemicalPhase;
-use fs_material::thermochemical_gas::ThermochemicalGasModel;
-use fs_material::thermochemical_gas::packs::{SpeciesPackRef, from_packs};
-use fs_qty::semantic::{Composition, CompositionBasis};
-
-// Cold input budget, independently rechecked by the existing mixture owner.
-const MAX_FIELD_SPECIES: usize = 128;
-// Bound retained per-station thermochemical receipts, not just raw scalars.
-const MAX_FIELD_STATE_COMPONENTS: usize = 16_384;
+use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS};
+use fs_material::gas_field::input::PrimitiveGasColumns as SourceColumns;
+use fs_material::gas_species::input::GasInputError;
 
 pub(super) mod steady;
 
@@ -40,7 +33,8 @@ pub(super) fn read(
     if stations < 2 {
         return Err(bad(line, "gas_field needs at least two stations"));
     }
-    let columns = SourceColumns::read(&mut row, sources, stations)?;
+    let columns = SourceColumns::read(&mut row.words, sources, stations)
+        .map_err(|error| column_error(row.line, error))?;
     row.finish()?;
     let mut positions = Vec::with_capacity(stations);
     let mut states = Vec::with_capacity(stations);
@@ -49,16 +43,18 @@ pub(super) fn read(
         let mut row = reader.row("gas_station")?;
         station_lines.push(row.line);
         positions.push(row.scalar()?);
-        states.push(columns.read_state(&mut row)?);
+        states.push(columns.read_state(&mut row.words)
+            .map_err(|error| column_error(row.line, error))?);
         row.finish()?;
     }
+    let (model, phase) = columns.into_parts();
     let field = AxialGasField::new(
         positions,
         pressure_pa,
         states,
-        columns.model,
+        model,
         QueryPoint::new(),
-        columns.phase,
+        phase,
     )
     .map_err(|source| ReedPerformanceError::Gas { line, source })?;
 
@@ -99,131 +95,11 @@ fn read_resolution(row: &mut Row<'_>) -> Result<GasFieldResolution, ReedPerforma
     Ok(resolution)
 }
 
-/// One source catalogue and column permutation for every authored field route.
-/// It never evaluates the catalogue seed as a physical mixture.
-struct SourceColumns {
-    order: Vec<usize>,
-    model: ThermochemicalGasModel,
-    phase: ThermochemicalPhase,
-}
-impl SourceColumns {
-    fn read(
-        row: &mut Row<'_>,
-        sources: Option<&ThermochemicalSources<'_>>,
-        states: usize,
-    ) -> Result<Self, ReedPerformanceError> {
-        let line = row.line;
-        if row.word()? != "mole" {
-            return Err(bad(
-                line,
-                "gas_field station compositions require explicit mole fractions",
-            ));
-        }
-        let count = row.count(MAX_FIELD_SPECIES)?;
-        if count == 0 {
-            return Err(bad(
-                line,
-                "gas_field needs at least one explicitly sourced species",
-            ));
-        }
-        if states
-            .checked_mul(count)
-            .is_none_or(|terms| terms > MAX_FIELD_STATE_COMPONENTS)
-        {
-            return Err(bad(
-                line,
-                "gas_field station/species product exceeds the retained source budget",
-            ));
-        }
-        let sources = sources.ok_or_else(|| {
-            bad(
-                line,
-                "gas_field requires an explicit thermochemical source registry",
-            )
-        })?;
-        let mut selected: Vec<(usize, SpeciesPackRef<'_>)> = Vec::with_capacity(count);
-        for column in 0..count {
-            let name = row.word()?;
-            let mut candidates = sources
-                .species
-                .iter()
-                .filter(|source| source.species.association().species().as_str() == name);
-            let source = candidates
-                .next()
-                .ok_or_else(|| bad(line, "gas_field species has no source registry entry"))?;
-            if candidates.next().is_some() {
-                return Err(bad(
-                    line,
-                    "gas_field species has an ambiguous source registry entry",
-                ));
-            }
-            if selected
-                .iter()
-                .any(|(_, entry)| entry.species.association().species().as_str() == name)
-            {
-                return Err(bad(line, "gas_field contains a duplicate species column"));
-            }
-            selected.push((column, (*source).clone()));
-        }
-        selected.sort_by(|(_, a), (_, b)| {
-            a.species
-                .association()
-                .species()
-                .cmp(b.species.association().species())
-        });
-
-        // from_packs binds an active mixture. A positive, exactly summing dyadic
-        // composition retains the full DECLARED species catalogue for later
-        // with_composition calls. This seed is never evaluated at any T, p or x:
-        // every physical sample uses the untouched authored station composition.
-        // Exact zeros, including a species absent everywhere, remain exact zeros.
-        let weight = 1.0 / count.next_power_of_two() as f64;
-        let mut seed = vec![weight; count];
-        seed[0] = 1.0 - weight * (count - 1) as f64;
-        let composition =
-            Composition::new(CompositionBasis::MoleFraction, seed).map_err(|error| {
-                ReedPerformanceError::Gas {
-                    line,
-                    source: fs_material::MaterialError::Parameters {
-                        what: format!("gas_field catalogue composition: {error}"),
-                    },
-                }
-            })?;
-        let order = selected.iter().map(|(column, _)| *column).collect();
-        let selected: Vec<_> = selected.into_iter().map(|(_, source)| source).collect();
-        let water = sources.water_species.filter(|id| {
-            selected
-                .iter()
-                .any(|source| source.species.association().species() == *id)
-        });
-        let model = from_packs(&selected, composition, water)
-            .map_err(|source| ReedPerformanceError::Gas { line, source })?;
-        Ok(Self {
-            order,
-            model,
-            phase: sources.phase,
-        })
-    }
-
-    fn read_state(&self, row: &mut Row<'_>) -> Result<PrimitiveGasState, ReedPerformanceError> {
-        let temperature_k = row.positive()?;
-        let supplied = (0..self.order.len())
-            .map(|_| row.scalar())
-            .collect::<Result<Vec<_>, _>>()?;
-        let fractions = self.order.iter().map(|column| supplied[*column]).collect();
-        let composition =
-            Composition::new(CompositionBasis::MoleFraction, fractions).map_err(|error| {
-                ReedPerformanceError::Gas {
-                    line: row.line,
-                    source: fs_material::MaterialError::Parameters {
-                        what: format!("gas field primitive composition: {error}"),
-                    },
-                }
-            })?;
-        Ok(PrimitiveGasState {
-            temperature_k,
-            composition,
-        })
+// Keep source lines in the performance grammar; material admission is shared.
+fn column_error(line: usize, error: GasInputError) -> ReedPerformanceError {
+    match error {
+        GasInputError::Input(what) => bad(line, what),
+        GasInputError::Material(source) => ReedPerformanceError::Gas { line, source },
     }
 }
 

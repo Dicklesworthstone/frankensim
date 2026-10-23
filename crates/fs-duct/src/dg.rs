@@ -1139,6 +1139,19 @@ impl DgDuct {
         &self.outlet_gas
     }
 
+    /// Physical inlet area from the original boundary geometry [m²].
+    #[must_use]
+    pub fn inlet_area_m2(&self) -> f64 {
+        self.elements[0].areas[0]
+    }
+
+    /// Physical outlet area from the original boundary geometry [m²].
+    #[must_use]
+    pub fn outlet_area_m2(&self) -> f64 {
+        let element = &self.elements[self.elements.len() - 1];
+        element.areas[element.areas.len() - 1]
+    }
+
     /// Original primitive field and material/source receipts, when supplied.
     #[must_use]
     pub const fn gas_field(&self) -> Option<&AxialGasField> {

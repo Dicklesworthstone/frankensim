@@ -3,7 +3,7 @@
 
 use super::{
     GasFieldResolution, GasRecord, Reader, ReedPerformanceError, SourceColumns,
-    ThermochemicalSources, bad, read_resolution,
+    ThermochemicalSources, bad, column_error, read_resolution,
 };
 use fs_duct::Segment;
 use fs_matdb::QueryPoint;
@@ -60,7 +60,8 @@ pub(in super::super) fn read(
     if count == 0 {
         return Err(bad(line, "gas_steady requires at least one axial cell"));
     }
-    let columns = SourceColumns::read(&mut row, sources, count + injection_count + 1)?;
+    let columns = SourceColumns::read(&mut row.words, sources, count + injection_count + 1)
+        .map_err(|error| column_error(row.line, error))?;
     row.finish()?;
     let length = segments.iter().try_fold(0.0, |sum, segment| match segment {
         Segment::Cylinder { length, .. } | Segment::Cone { length, .. } => Ok(sum + length),
@@ -77,7 +78,8 @@ pub(in super::super) fn read(
     }
     let mut row = reader.row("gas_inlet")?;
     let inlet_mass_flow_kg_s = row.positive()?;
-    let inlet = columns.read_state(&mut row)?;
+    let inlet = columns.read_state(&mut row.words)
+        .map_err(|error| column_error(row.line, error))?;
     row.finish()?;
     let mut cells = Vec::with_capacity(count);
     let mut start = 0.0;
@@ -114,7 +116,8 @@ pub(in super::super) fn read(
         let mut row = reader.row("gas_injection")?;
         let cell = row.count(count - 1)?;
         let mass_flow_kg_s = row.positive()?;
-        let state = columns.read_state(&mut row)?;
+        let state = columns.read_state(&mut row.words)
+            .map_err(|error| column_error(row.line, error))?;
         row.finish()?;
         injections.push(GasInjection {
             cell,
@@ -138,11 +141,12 @@ pub(in super::super) fn read(
         maximum_mean_mach: row.positive()?,
     };
     row.finish()?;
+    let (model, phase) = columns.into_parts();
     let problem = SteadyAxialGas {
-        source: columns.model,
+        source: model,
         source_conditions: QueryPoint::new(),
         static_pressure_pa: pressure_pa,
-        phase: columns.phase,
+        phase,
         inlet,
         inlet_mass_flow_kg_s,
         cells,

@@ -77,19 +77,34 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
         let duct = load.duct();
         let mesh = duct.mesh();
         let stepper = load.propagator();
-        let wall = duct.viscothermal_model().expect("dg_tube selects admitted Bessel memory");
-        let band = wall.band_rad_s().map(|w| w / core::f64::consts::TAU);
+        let band = duct.viscothermal_band_rad_s()
+            .expect("authored DG selects admitted Bessel memory")
+            .map(|w| w / core::f64::consts::TAU);
+        let (wall_owner, series_poles, thermal_poles, quadrature, complex_error, loss_error) =
+            if let Some(wall) = duct.viscothermal_model() {
+                ("uniform-consistent-mass", wall.series_terms().len(), wall.shunt_terms().len(),
+                    "null".to_owned(), wall.max_complex_error(), wall.max_real_loss_error())
+            } else {
+                let wall = duct.spatial_viscothermal_admission()
+                    .expect("spatial authored DG retains its admitted wall rule");
+                ("local-cylinder-positive-quadrature", wall.resolution.poles_per_field,
+                    wall.resolution.poles_per_field, wall.resolution.quadrature_points.to_string(),
+                    wall.max_complex_error, wall.max_real_loss_error)
+            };
         let terminal = match duct.outlet() {
             fs_duct::dg::DgBoundary::Closed => "closed",
             fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
             fs_duct::dg::DgBoundary::Matched => "matched",
             fs_duct::dg::DgBoundary::Port(_) => unreachable!("one inlet load admission"),
         };
-        return format!("{force_json},\"dg_duct\":{{\"model\":\"exact-zoh-bessel-dg-v1\",\"operator_identity\":\"{}\",\"length_m\":{:e},\"elements\":{},\"order\":{},\"total_dofs\":{},\"outlet\":\"{terminal}\",\"series_poles\":{},\"thermal_poles\":{},\"band_hz\":[{:e},{:e}],\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e},\"exponential_tolerance\":{:e},\"exponential_certificate_residual\":{:e},\"mean_port_impedance_pa_s_m3\":{:e},\"scope\":\"uniform circular gas column; original DG exponential and original ExactZoh plate/Maxwell aperture; implicit same-step mean pressure and total flow; internal inlet observation; finite-band Bessel pole approximation; spatial and nonlinear time convergence separate; wall/terminal loss inferred, not an independent heat integral; authored solid sections and spectra, not measured-material qualification\"}}",
-            duct.operator_identity().to_hex(), duct.total_length(), mesh.elements, mesh.order,
-            duct.total_dofs(), wall.series_terms().len(), wall.shunt_terms().len(), band[0], band[1],
-            wall.max_complex_error(), wall.max_real_loss_error(), stepper.tolerance(),
-            stepper.certificate_residual(), load.impedance_pa_s_m3());
+        let field = duct.gas_field().map_or_else(String::new, dg_field_provenance);
+        return format!("{force_json},\"dg_duct\":{{\"model\":\"exact-zoh-bessel-dg-v1\",\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_memory_dofs\":{},\"outlet\":\"{terminal}\",\"wall_owner\":\"{wall_owner}\",\"series_poles\":{series_poles},\"thermal_poles\":{thermal_poles},\"wall_quadrature_points\":{quadrature},\"band_hz\":[{:e},{:e}],\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e},\"exponential_tolerance\":{:e},\"exponential_certificate_residual\":{:e},\"mean_port_impedance_pa_s_m3\":{:e}{field},\"scope\":\"original geometry and material-gas DG exponential with ExactZoh plate/Maxwell aperture; implicit same-step mean pressure and total flow; internal inlet observation; finite-band Bessel pole approximation; taper uses a local-cylinder Webster approximation; spatial and nonlinear time convergence separate; loss ledger inferred, not an independent heat integral; authored solid sections and spectra, not measured-material qualification\"}}",
+            duct.operator_identity().to_hex(), duct.total_length(), duct.inlet_area_m2(),
+            duct.outlet_area_m2(), gas_state(duct.inlet_gas()), gas_state(duct.outlet_gas()),
+            mesh.elements, mesh.order, duct.total_dofs(),
+            duct.total_dofs() - 2 * duct.field_dofs(), band[0], band[1], complex_error,
+            loss_error, stepper.tolerance(), stepper.certificate_residual(),
+            load.impedance_pa_s_m3());
     }
     let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
@@ -246,4 +261,20 @@ fn reed_steady_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance
         controls.caloric.energy_tolerance_j_kg, controls.caloric.minimum_temperature_k,
         controls.caloric.maximum_temperature_k, solution.substeps(), controls.maximum_substeps,
         solution.relaxation_time_s(), solution.maximum_mean_mach(), controls.maximum_mean_mach)
+}
+
+// Keep the original field primitives and source receipts with the DG observation.
+fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField) -> String {
+    let species: Vec<_> = field.model().thermodynamics().components().iter()
+        .map(|component| super::json_string(component.species().as_str())).collect();
+    let stations: Vec<_> = field.stations_m().iter().zip(field.primitive_states())
+        .map(|(x, state)| format!(
+            "{{\"x_m\":{x:e},\"temperature_k\":{:e},\"mole_fractions\":{:?}}}",
+            state.temperature_k, state.composition.fractions())).collect();
+    let packs: Vec<_> = field.model().source_packs().iter().map(|receipt| format!(
+        "{{\"species\":{},\"species_pack\":\"{}\",\"nasa9_pack\":\"{}\",\"transport_pack\":\"{}\"}}",
+        super::json_string(receipt.species.as_str()), receipt.species_pack.to_hex(),
+        receipt.nasa9_pack.to_hex(), receipt.transport_pack.to_hex())).collect();
+    format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"frozen primitive temperature/composition; shared EOS and transport at original spatial quadrature; no mean-flow correction\"}}",
+        field.static_pressure_pa(), species.join(","), stations.join(","), packs.join(","))
 }
