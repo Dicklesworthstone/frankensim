@@ -13,6 +13,12 @@
 //! the same plate viscosity: [`DiagonalPlateViscosity`] gives one decay ratio per
 //! mode for scalar regional loss, and [`kelvin_voigt_zeta`] the uniform plate's
 //! viscous term. Both keep the legacy arithmetic, element order and refusals.
+//!
+//! [`hysteretic`] is the same owner's frequency-independent (constant loss
+//! factor) image for sourced wood loss: the plate stiffness split into named
+//! shares, each share's modal strain energy projected once on the complete
+//! source slice, and the diagonal loss a board reduction consumes, with the
+//! neglected off-diagonal coupling measured.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::thin_plate::{CompactBody, ModalBendingLoss, PlateBendingLaw, PlateMaterialModel,
@@ -27,6 +33,8 @@ use fs_qty::Pressure;
 
 /// Source-bound hereditary bending on the same original plate basis.
 pub mod relaxation;
+/// Constant-loss-factor (hysteretic) material loss by modal strain-energy shares.
+pub mod hysteretic;
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
