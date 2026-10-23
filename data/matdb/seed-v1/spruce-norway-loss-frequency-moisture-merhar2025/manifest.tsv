@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	spruce-norway-loss-frequency-moisture-merhar2025
+redistribution	permitted	Forests 2025 article 16 1055 is distributed under Creative Commons Attribution 4.0; retain authors, title, DOI, journal, year and licence; this pack retains factual measurements only and reproduces no article figure
+citation	Merhar, M., and Moutou Pitti, R. (2025), The Influence of Thermal Modification, Moisture Content, Frequency, and Vibration Direction Plane on the Damping of Spruce Wood (Picea abies) as Determined by the Wavelet Transform Method, Forests 16, 1055; Table 1 (equilibrium moisture contents) and Table 2 (damping factors and frequencies), untreated group A; https://mdpi-res.com/d_attachment/forests/forests-16-01055/article_deploy/forests-16-01055.pdf (sha256 96597062c6805f826411301b26b357f796ce2cf4fcab6eef724e1d230b7b347f)
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1
+axis	moisture_content	moisture_content	dimensional
+axis	frequency	frequency	cyclic-frequency

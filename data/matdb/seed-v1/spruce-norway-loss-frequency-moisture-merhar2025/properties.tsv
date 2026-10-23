@@ -1,0 +1,98 @@
+frankensim.matdb-source.v1
+observation	merhar2025-untreated	Norway spruce (Picea abies) bars 200 x 20 x 20 mm along the grain, untreated group A, 10 per relative humidity, cut from one quarter-sawn board	Free-free (supports at 0.22 L and 0.77 L), hammer impulse, microphone at 50 kHz; damping factor of each of the first three bending modes by the Morlet wavelet transform, LR and LT planes	Untreated group A only (the thermally modified groups B-D are not retained). Table 2 prints the mean damping factor zeta (the damping ratio of x(t) = A exp(-zeta omega t) cos(...), Section 2.3; the loss factor is about 2 zeta) and the mean frequency of each of the first three free-free bending modes, in the LR and LT vibration planes, at 22 C and 20, 44, 76 and 88 percent RH; Table 1 gives the corresponding equilibrium moisture contents 7.2, 9.9, 13.3 and 19.1 percent. Coefficients of variation 6-37 percent (Table 2) are not stored. These are modal damping ratios of deep bars (L/h = 10): the higher modes carry shear (LR or LT) deformation and its loss, so a value is not the along-grain Young's-modulus loss factor. Norway spruce, not Sitka. Each claim holds only at its own mode's mean frequency and moisture content
+scalar	damping-ratio-lr-mode1-rh20	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0057	1	constant
+uncertainty	damping-ratio-lr-mode1-rh20	unstated	-	-	-	-
+validity	damping-ratio-lr-mode1-rh20	frequency	2746	2746	Hz
+validity	damping-ratio-lr-mode1-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lr-mode1-rh44	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0050	1	constant
+uncertainty	damping-ratio-lr-mode1-rh44	unstated	-	-	-	-
+validity	damping-ratio-lr-mode1-rh44	frequency	2673	2673	Hz
+validity	damping-ratio-lr-mode1-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lr-mode1-rh76	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0063	1	constant
+uncertainty	damping-ratio-lr-mode1-rh76	unstated	-	-	-	-
+validity	damping-ratio-lr-mode1-rh76	frequency	2686	2686	Hz
+validity	damping-ratio-lr-mode1-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lr-mode1-rh88	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0065	1	constant
+uncertainty	damping-ratio-lr-mode1-rh88	unstated	-	-	-	-
+validity	damping-ratio-lr-mode1-rh88	frequency	2678	2678	Hz
+validity	damping-ratio-lr-mode1-rh88	moisture_content	19.1	19.1	%
+scalar	damping-ratio-lr-mode2-rh20	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0064	1	constant
+uncertainty	damping-ratio-lr-mode2-rh20	unstated	-	-	-	-
+validity	damping-ratio-lr-mode2-rh20	frequency	5838	5838	Hz
+validity	damping-ratio-lr-mode2-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lr-mode2-rh44	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0056	1	constant
+uncertainty	damping-ratio-lr-mode2-rh44	unstated	-	-	-	-
+validity	damping-ratio-lr-mode2-rh44	frequency	5770	5770	Hz
+validity	damping-ratio-lr-mode2-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lr-mode2-rh76	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0078	1	constant
+uncertainty	damping-ratio-lr-mode2-rh76	unstated	-	-	-	-
+validity	damping-ratio-lr-mode2-rh76	frequency	5833	5833	Hz
+validity	damping-ratio-lr-mode2-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lr-mode2-rh88	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0080	1	constant
+uncertainty	damping-ratio-lr-mode2-rh88	unstated	-	-	-	-
+validity	damping-ratio-lr-mode2-rh88	frequency	5566	5566	Hz
+validity	damping-ratio-lr-mode2-rh88	moisture_content	19.1	19.1	%
+scalar	damping-ratio-lr-mode3-rh20	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0070	1	constant
+uncertainty	damping-ratio-lr-mode3-rh20	unstated	-	-	-	-
+validity	damping-ratio-lr-mode3-rh20	frequency	9039	9039	Hz
+validity	damping-ratio-lr-mode3-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lr-mode3-rh44	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0074	1	constant
+uncertainty	damping-ratio-lr-mode3-rh44	unstated	-	-	-	-
+validity	damping-ratio-lr-mode3-rh44	frequency	9041	9041	Hz
+validity	damping-ratio-lr-mode3-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lr-mode3-rh76	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0088	1	constant
+uncertainty	damping-ratio-lr-mode3-rh76	unstated	-	-	-	-
+validity	damping-ratio-lr-mode3-rh76	frequency	9038	9038	Hz
+validity	damping-ratio-lr-mode3-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lr-mode3-rh88	merhar2025-untreated	flexural_damping_ratio_lr_plane	0.0094	1	constant
+uncertainty	damping-ratio-lr-mode3-rh88	unstated	-	-	-	-
+validity	damping-ratio-lr-mode3-rh88	frequency	8495	8495	Hz
+validity	damping-ratio-lr-mode3-rh88	moisture_content	19.1	19.1	%
+scalar	damping-ratio-lt-mode1-rh20	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0048	1	constant
+uncertainty	damping-ratio-lt-mode1-rh20	unstated	-	-	-	-
+validity	damping-ratio-lt-mode1-rh20	frequency	2746	2746	Hz
+validity	damping-ratio-lt-mode1-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lt-mode1-rh44	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0050	1	constant
+uncertainty	damping-ratio-lt-mode1-rh44	unstated	-	-	-	-
+validity	damping-ratio-lt-mode1-rh44	frequency	2698	2698	Hz
+validity	damping-ratio-lt-mode1-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lt-mode1-rh76	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0056	1	constant
+uncertainty	damping-ratio-lt-mode1-rh76	unstated	-	-	-	-
+validity	damping-ratio-lt-mode1-rh76	frequency	2658	2658	Hz
+validity	damping-ratio-lt-mode1-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lt-mode1-rh88	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0060	1	constant
+uncertainty	damping-ratio-lt-mode1-rh88	unstated	-	-	-	-
+validity	damping-ratio-lt-mode1-rh88	frequency	2530	2530	Hz
+validity	damping-ratio-lt-mode1-rh88	moisture_content	19.1	19.1	%
+scalar	damping-ratio-lt-mode2-rh20	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0076	1	constant
+uncertainty	damping-ratio-lt-mode2-rh20	unstated	-	-	-	-
+validity	damping-ratio-lt-mode2-rh20	frequency	5908	5908	Hz
+validity	damping-ratio-lt-mode2-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lt-mode2-rh44	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0070	1	constant
+uncertainty	damping-ratio-lt-mode2-rh44	unstated	-	-	-	-
+validity	damping-ratio-lt-mode2-rh44	frequency	5793	5793	Hz
+validity	damping-ratio-lt-mode2-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lt-mode2-rh76	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0080	1	constant
+uncertainty	damping-ratio-lt-mode2-rh76	unstated	-	-	-	-
+validity	damping-ratio-lt-mode2-rh76	frequency	5618	5618	Hz
+validity	damping-ratio-lt-mode2-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lt-mode2-rh88	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0082	1	constant
+uncertainty	damping-ratio-lt-mode2-rh88	unstated	-	-	-	-
+validity	damping-ratio-lt-mode2-rh88	frequency	5361	5361	Hz
+validity	damping-ratio-lt-mode2-rh88	moisture_content	19.1	19.1	%
+scalar	damping-ratio-lt-mode3-rh20	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0081	1	constant
+uncertainty	damping-ratio-lt-mode3-rh20	unstated	-	-	-	-
+validity	damping-ratio-lt-mode3-rh20	frequency	9275	9275	Hz
+validity	damping-ratio-lt-mode3-rh20	moisture_content	7.2	7.2	%
+scalar	damping-ratio-lt-mode3-rh44	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0080	1	constant
+uncertainty	damping-ratio-lt-mode3-rh44	unstated	-	-	-	-
+validity	damping-ratio-lt-mode3-rh44	frequency	9060	9060	Hz
+validity	damping-ratio-lt-mode3-rh44	moisture_content	9.9	9.9	%
+scalar	damping-ratio-lt-mode3-rh76	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0096	1	constant
+uncertainty	damping-ratio-lt-mode3-rh76	unstated	-	-	-	-
+validity	damping-ratio-lt-mode3-rh76	frequency	8617	8617	Hz
+validity	damping-ratio-lt-mode3-rh76	moisture_content	13.3	13.3	%
+scalar	damping-ratio-lt-mode3-rh88	merhar2025-untreated	flexural_damping_ratio_lt_plane	0.0097	1	constant
+uncertainty	damping-ratio-lt-mode3-rh88	unstated	-	-	-	-
+validity	damping-ratio-lt-mode3-rh88	frequency	8291	8291	Hz
+validity	damping-ratio-lt-mode3-rh88	moisture_content	19.1	19.1	%
