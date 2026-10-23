@@ -2,7 +2,10 @@
 //! Manufactured coefficients establish causal wiring, not a measured instrument.
 
 use super::*;
-use crate::materials::{FILM_LOSS_REFUSAL, FILM_LOSS_STATED_UNKNOWN_RECEIPT, KitMaterials};
+use crate::materials::{
+    FILM_LOSS_REFUSAL, FILM_LOSS_STATED_UNKNOWN_RECEIPT, HERTZ_HALF_SPACE_CAVEAT, KitMaterials,
+    TIP_ANISOTROPY, axial_indentation_modulus,
+};
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -25,6 +28,18 @@ fn pack_with_viscosity(
     poisson: Option<f64>,
     viscosity: Option<([f64; 6], (f64, f64), bool)>,
 ) -> NormalizedMaterialCardPack {
+    manufactured_pack(name, rho, young, poisson, viscosity, &[])
+}
+
+/// `extra` adds dimensionless scalar claims with the same validity.
+fn manufactured_pack(
+    name: &str,
+    rho: f64,
+    young: f64,
+    poisson: Option<f64>,
+    viscosity: Option<([f64; 6], (f64, f64), bool)>,
+    extra: &[(&str, f64)],
+) -> NormalizedMaterialCardPack {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -32,9 +47,12 @@ fn pack_with_viscosity(
     let mut claims = ClaimSet::new();
     // Retain the actual manufactured inputs, including the frequency-curve
     // prescription. These are numerical fixtures, not measured material data.
-    let raw = format!(
+    let mut raw = format!(
         "{name}\ndensity={rho:?}\nyoung_modulus={young:?}\npoisson_ratio={poisson:?}\nviscosity={viscosity:?}\n"
     );
+    if !extra.is_empty() {
+        raw.push_str(&format!("extra={extra:?}\n"));
+    }
     let artifact = hash_domain("frankensim.kit.material-test", raw.as_bytes());
     let observation = claims
         .register_observation(ObservationDataset {
@@ -53,7 +71,13 @@ fn pack_with_viscosity(
         ("density", Some(rho), Density::DIMS),
         ("young_modulus", Some(young), Pressure::DIMS),
         ("poisson_ratio", poisson, Dims::NONE),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        extra
+            .iter()
+            .map(|&(key, value)| (key, Some(value), Dims::NONE)),
+    ) {
         if let Some(value) = value {
             claims
                 .insert_claim(PropertyClaim {
@@ -819,12 +843,20 @@ fn g1_the_sourced_head_film_card_supplies_density_and_modulus_and_claims_no_loss
     let film = at(293.15).unwrap();
     near(film.primary().density_kg_m3(), 1390.0);
     near(film.primary().young_modulus_pa(), 4903.325e6);
-    // The isotropic reduction and its directional spread are stated.
+    // The isotropic reduction and its directional spread are stated, then
+    // the (isotropic) striker tip with the Hertz half-space caveat.
+    let notes = film.isotropic_reduction_notes();
     assert_eq!(
-        film.isotropic_reduction_notes(),
+        notes[..2],
         ["batter", "resonant"].map(|label| format!(
             "isotropic {label} head: E = mean(MD, TD) = 4903.3 MPa; MD/TD = 4805.3 / 5001.4 MPa (+/- 2.0 %)"
         ))
+    );
+    assert_eq!(
+        notes[2..],
+        [format!(
+            "striker tip: isotropic, E / (1 - nu^2) = 13.187 GPa, E* on the batter film 3.995 GPa; {HERTZ_HALF_SPACE_CAVEAT}"
+        )]
     );
     near(film.primary().poisson_ratio(), 0.38);
     // The datasheet states no test temperature; the card admits 20 to 23 C only.
@@ -894,10 +926,25 @@ fn g1_the_hickory_stick_card_sets_the_striker_mass_and_its_hertz_pair_with_the_f
     near(sticks.striker().young_modulus_pa(), 16_390e6);
     near(sticks.striker().poisson_ratio(), 0.371);
     near(sticks.striker_mass_kg(), 806.4 * 9e-6);
-    let e_star =
-        1.0 / ((1.0 - 0.371_f64.powi(2)) / 16_390e6 + (1.0 - 0.38_f64.powi(2)) / 4_903.325e6);
+    // Ruling 6441: the card's composition-proxy elastic ratios (hardwood
+    // means of Tables 5-1 and 5-2) make the tip transversely isotropic about
+    // the grain, and its Hertz modulus is the axial indentation modulus.
+    let e_l = 16_390e6;
+    let tip = closed_form_axial_modulus(e_l, 0.05693 * e_l, 0.06657 * e_l, 0.4668, 0.518);
+    near(sticks.striker_tip_modulus_pa(), tip);
+    let e_star = 1.0 / (1.0 / tip + (1.0 - 0.38_f64.powi(2)) / 4_903.325e6);
     let Law::Power { k, .. } = sticks.impact_law();
     near(k, 4.0 / 3.0 * e_star * 0.005_f64.sqrt());
+    // The receipt prints both ends of the bracket and the half-space caveat.
+    assert_eq!(
+        sticks.isotropic_reduction_notes().last().map(String::as_str),
+        Some(
+            format!(
+                "striker tip: axial indentation modulus (Delafargue-Ulm 2004, transversely isotropic about the grain from E_L and the card's E_T/E_L, G_LT/E_L, nu_LT, nu_P) 7.245 GPa, E* on the batter film 3.200 GPa; isotropic-E_L end 19.006 GPa, E* 4.403 GPa; contact time 1.136 x the isotropic end; {HERTZ_HALF_SPACE_CAVEAT}"
+            )
+            .as_str()
+        )
+    );
     // The stick card alone admits 15 to 25 C (Table 5-15 bounds the MOE change).
     let wide = pack("wide-band film", 1390.0, 4e9, Some(0.38)).to_bytes();
     for temperature in [288.15, 298.15] {
@@ -906,6 +953,85 @@ fn g1_the_hickory_stick_card_sets_the_striker_mass_and_its_hertz_pair_with_the_f
     for temperature in [287.9, 298.4] {
         assert!(at(&wide, temperature).is_err(), "{temperature} K");
     }
+}
+
+/// Delafargue and Ulm's M3 from the closed-form stiffnesses of a solid
+/// transversely isotropic about axis 3: an oracle independent of the
+/// compliance inversion in `axial_indentation_modulus`.
+fn closed_form_axial_modulus(e_l: f64, e_p: f64, g_lp: f64, nu_lp: f64, nu_p: f64) -> f64 {
+    let d = 1.0 - nu_p - 2.0 * nu_lp * nu_lp * e_p / e_l;
+    let c11 = e_p * (1.0 - nu_lp * nu_lp * e_p / e_l) / ((1.0 + nu_p) * d);
+    let (c13, c33) = (e_p * nu_lp / d, e_l * (1.0 - nu_p) / d);
+    2.0 * ((c11 * c33 - c13 * c13) / c11 / (1.0 / g_lp + 2.0 / ((c11 * c33).sqrt() + c13))).sqrt()
+}
+
+#[test]
+fn g1_the_axial_indentation_modulus_reduces_to_e_over_one_minus_nu_squared_when_isotropic() {
+    let e = 12e9;
+    for nu in [0.0, 0.25, 0.371, 0.45] {
+        let m = axial_indentation_modulus(e, e, e / (2.0 * (1.0 + nu)), nu, nu).unwrap();
+        near(m, e / (1.0 - nu * nu));
+    }
+    let e_l = 16_390e6;
+    let hardwood = (0.05693 * e_l, 0.06657 * e_l, 0.4668, 0.518);
+    near(
+        axial_indentation_modulus(e_l, hardwood.0, hardwood.1, hardwood.2, hardwood.3).unwrap(),
+        closed_form_axial_modulus(e_l, hardwood.0, hardwood.1, hardwood.2, hardwood.3),
+    );
+    // Constants that are not positive definite refuse.
+    for (nu_lp, nu_p) in [(hardwood.2, 1.0), (5.0, hardwood.3)] {
+        assert!(axial_indentation_modulus(e_l, hardwood.0, hardwood.1, nu_lp, nu_p).is_err());
+    }
+}
+
+/// A striker card carries all of TIP_ANISOTROPY or none. Its isotropic values
+/// (E_T = E_L, G = E / 2(1 + nu), nu_LT = nu_P = nu) reproduce the isotropic
+/// Hertz pair; a partial set refuses instead of leaving the tip isotropic.
+#[test]
+fn g1_a_striker_tip_takes_all_four_anisotropy_claims_or_none() {
+    let film = pack("tip film", 1390.0, 4.9e9, Some(0.38));
+    let nu = 0.3;
+    let striker = |claims: &[(&str, f64)]| {
+        manufactured_pack("tip striker", 800.0, 12e9, Some(nu), None, claims)
+    };
+    let isotropic = [1.0, 1.0 / (2.0 * (1.0 + nu)), nu, nu];
+    let claims: Vec<_> = TIP_ANISOTROPY.into_iter().zip(isotropic).collect();
+    let plain = binding(&film, &film, &striker(&[]));
+    let limit = binding(&film, &film, &striker(&claims));
+    let Law::Power { k: k_plain, .. } = plain.impact_law();
+    let Law::Power { k: k_limit, .. } = limit.impact_law();
+    near(k_limit, k_plain);
+    near(limit.striker_tip_modulus_pa(), 12e9 / (1.0 - nu * nu));
+    assert!(plain.isotropic_reduction_notes()[0].starts_with("striker tip: isotropic"));
+    assert!(
+        limit.isotropic_reduction_notes()[0].starts_with("striker tip: axial indentation modulus")
+    );
+    let bind = |claims: &[(&str, f64)]| {
+        KitMaterials::from_packs_at_temperature(
+            &film.to_bytes(),
+            &[],
+            &striker(claims).to_bytes(),
+            "T",
+            293.15,
+            9e-6,
+            0.005,
+            0.05,
+        )
+    };
+    for missing in 0..4 {
+        let mut partial = claims.clone();
+        partial.remove(missing);
+        let refused = bind(&partial).err();
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|e| e.contains("only part of")),
+            "{missing}: {refused:?}"
+        );
+    }
+    let mut singular = claims.clone();
+    singular[3].1 = 1.0;
+    assert!(bind(&singular).is_err());
 }
 
 /// .370 DONE-WHEN 4: a data-only film swap (7.5 mil -> 10 mil resonant head of
