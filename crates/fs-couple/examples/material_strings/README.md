@@ -37,6 +37,66 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/pluck-and-bow.material-strings" "$demo/pluck-and-bow.wav"
 ```
 
+### Material shear layers in the original contact solve
+
+`shear-layer-bow.material-strings` selects an isothermal elastic-plastic layer
+through source data and physical geometry:
+
+```text
+friction layers 1
+shear-layer bow manufactured-shear-layer.fsmatpk 0.000001 0.0001 0.05
+bow_ribbon 0.01 3
+```
+
+Each `shear-layer` row contains **track ID, bulk material-pack path, area [m²],
+thickness [m], maximum elastic engineering shear**. Supply exactly one row per
+authored bow track. The area describes the whole ribbon; each cell receives
+one share of area, stiffness, yield force and plastic resistance. Thickness
+and the original material source remain unchanged.
+
+After the wire/body pack commands above:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/manufactured-shear-layer-manifest.tsv" \
+  --out "$demo/manufactured-shear-layer.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/shear-layer-bow.material-strings" "$demo/shear-layer-bow.wav"
+```
+
+The pack must supply `shear_modulus` [Pa], `shear_yield_stress` [Pa] and
+`plastic_shear_viscosity` [Pa·s]. The shared material owner derives
+`k = A G/h`, `Y = A tau_y` and `c = A eta_plastic/h`. Elastic strain stores
+energy; plastic flow dissipates yield work plus viscous work. Elastic
+unloading can return energy to the string/body system. The same simultaneous
+contact solve, optional fiber compliance, body/cavity motion and pressure
+observer carry that response into PCM. Changing the pack or layer geometry
+does not require changing Rust.
+
+The `state` row supplies the frozen temperature and material query. Every
+selected property needs explicit temperature support and applicability from
+static storage through the sample clock's Nyquist frequency. Constants and
+temperature-only curves are supported. Pressure-, rate-, strain- or
+frequency-dependent coefficients require a more general constitutive owner
+and refuse here. Oscillatory viscosity and friction coefficients cannot
+substitute for plastic shear viscosity.
+
+This first layer model requires retained positive compression, fixed layer
+geometry/tangent frame, and an elastic shear limit in `(0, 0.1]`. Prescribed
+bow loads must stay positive; contact-loaded bows instead author zero extra
+load and use the simultaneously solved normal reaction. Opening refuses
+atomically, preserving stored layer energy and accepted history. Layer
+opening/recontact, wear, thermal evolution, migration and nonlinear string
+geometric storage are not yet composed. Prepared-linear propagation is
+supported within its existing independent restrictions.
+
+The supplied layer is **manufactured integration data**. Its constants are
+not measurements of rosin or evidence of realistic violin/cello sound.
+Real rosin needs a supported constitutive source, including the relevant
+temperature and rate behavior. The executable retains the complete pack,
+query receipts, geometry and derived layer coefficients in the same source
+catalog and diagnostics.
+
 ### Material fibers in the same bow/string/body solve
 
 `fiber-ribbon.material-strings` adds an explicitly described fiber bundle to
@@ -460,7 +520,8 @@ is also accepted. These coefficients retain **caller authority**. Bulk material
 data do not certify a rosin/string friction law. The render log labels these
 numeric inputs as a research override.
 
-Alternatively, replace the friction row with source-bound ordered interfaces:
+The material-layer form above selects bulk constitutive properties and layer geometry.
+A separate supported choice replaces the friction row with source-bound ordered interfaces:
 
 ```text
 friction interfaces 2
@@ -511,7 +572,8 @@ This first file profile accepts exactly one original bow track: its speed acts
 at every cell, while its **total normal load** is divided evenly. Each cell uses
 its own material-derived transverse/torsional surface map and solves its own
 slip and traction in the existing simultaneous string/body/cavity mechanics.
-The original schedule, including ramps and release, survives unchanged.
+The original dry-friction schedule, including ramps and release, survives unchanged.
+Material shear layers retain ramps but require positive compression throughout.
 
 With source-bound friction, the declared nominal area belongs to the **whole
 ribbon**. Area and normal load are divided by the same cell count, retaining

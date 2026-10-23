@@ -197,3 +197,6 @@ mod torsion_memory;
 
 #[path = "tests/wound.rs"]
 mod wound;
+
+#[path = "tests/shear_layers.rs"]
+mod shear_layers;

@@ -50,6 +50,7 @@ struct Bound {
 #[derive(Clone)]
 pub struct Inputs {
     research: Option<FrictionLaw>,
+    layers: Option<shear_layers::Inputs>,
     declarations: Vec<Declaration>,
     packs: BTreeMap<String, NormalizedInterfacePack>,
     bound: BTreeMap<String, Bound>,
@@ -67,7 +68,8 @@ impl core::fmt::Debug for Inputs {
             .map(|(track, b)| (track, b.state.identity()))
             .collect();
         f.debug_struct("BowFriction")
-            .field("research_override", &self.research)
+            .field("research_override", &if self.layers.is_none() { self.research.as_ref() } else { None })
+            .field("material_shear_layers", &self.layers)
             .field("declarations", &self.declarations)
             .field("packs", &packs)
             .field("states", &states)
@@ -79,10 +81,22 @@ impl Inputs {
         law.regularized_traction_1d(0.0, 0.0, 1.0)?;
         Ok(Self {
             research: Some(law),
+            layers: None,
             declarations: Vec::new(),
             packs: BTreeMap::new(),
             bound: BTreeMap::new(),
         })
+    }
+    /// The zero dry law constructs port topology only. Every layer declaration
+    /// must resolve and bind before scheduling; no fallback renderer is exposed.
+    pub fn layers(declarations: Vec<shear_layers::Declaration>) -> Result<Self> {
+        let layers = shear_layers::Inputs::new(declarations)?;
+        let mut inputs = Self::research(FrictionLaw::Coulomb { static_mu: 0.0, kinetic_mu: 0.0 })?;
+        inputs.layers = Some(layers);
+        Ok(inputs)
+    }
+    pub fn shear_layers(&self) -> Option<&shear_layers::Inputs> {
+        self.layers.as_ref()
     }
     pub fn interfaces(declarations: Vec<Declaration>) -> Result<Self> {
         for (i, d) in declarations.iter().enumerate() {
@@ -102,12 +116,14 @@ impl Inputs {
         }
         Ok(Self {
             research: None,
+            layers: None,
             declarations,
             packs: BTreeMap::new(),
             bound: BTreeMap::new(),
         })
     }
     pub fn validate_tracks(&self, schedule: &GestureSchedule) -> Result<()> {
+        if let Some(layers) = &self.layers { return layers.validate_tracks(schedule); }
         if self.research.is_some() {
             return Ok(());
         }

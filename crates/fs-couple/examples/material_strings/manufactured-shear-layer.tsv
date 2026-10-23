@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	manufactured	MANUFACTURED isothermal shear-layer material	Analytic elastic-viscoplastic integration fixture	Declared constants only; not measured rosin, horsehair, adhesive or instrument data; plastic shear viscosity is not oscillatory loss viscosity
+scalar	shear_modulus	manufactured	shear_modulus	100000	Pa	constant
+uncertainty	shear_modulus	unstated	-	-	-	-
+validity	shear_modulus	T	280	320	K
+validity	shear_modulus	omega	0	200000	rad/s
+scalar	shear_yield_stress	manufactured	shear_yield_stress	100	Pa	constant
+uncertainty	shear_yield_stress	unstated	-	-	-	-
+validity	shear_yield_stress	T	280	320	K
+validity	shear_yield_stress	omega	0	200000	rad/s
+scalar	plastic_shear_viscosity	manufactured	plastic_shear_viscosity	4	Pa*s	constant
+uncertainty	plastic_shear_viscosity	unstated	-	-	-	-
+validity	plastic_shear_viscosity	T	280	320	K
+validity	plastic_shear_viscosity	omega	0	200000	rad/s

@@ -527,6 +527,21 @@ impl Spec {
                     characteristic_speed:row.positive()? };
                 row.end()?; bow_interfaces::Inputs::research(law)?
             },
+            "layers" => {
+                let count=row.count(16)?; row.end()?;
+                let mut declarations=Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row=r.row("shear-layer")?;
+                    let declaration=shear_layers::Declaration {
+                        track:row.word()?.to_string(), pack:row.path()?,
+                        area_m2:row.positive()?, thickness_m:row.positive()?,
+                        maximum_elastic_shear_strain:row.positive()?,
+                    };
+                    row.end()?;
+                    declarations.push(declaration);
+                }
+                bow_interfaces::Inputs::layers(declarations)?
+            },
             "interfaces" => {
                 let count=row.count(16)?; row.end()?;
                 if count==0 { return Err("source-bound friction requires one interface per bow track".into()); }
@@ -664,6 +679,7 @@ impl Spec {
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
             longitudinal_loss, bending_memory, body_radiation, shell_observer, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
         spec.validate_shell_observer()?;
+        if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
         Ok(spec)
     }

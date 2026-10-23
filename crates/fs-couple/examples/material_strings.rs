@@ -10,6 +10,8 @@ mod body;
 mod stops;
 #[path = "material_strings/bow_interfaces.rs"]
 mod bow_interfaces;
+#[path = "material_strings/shear_layers.rs"]
+mod shear_layers;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
 #[path = "material_strings/bending_memory.rs"]
@@ -189,6 +191,7 @@ impl input::Spec {
             return Err("material-string gas coefficients must retain their original source record".into());
         }
         self.validate_shell_observer()?;
+        if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
@@ -380,6 +383,9 @@ impl input::Spec {
             }
         }
         let bank=match &stop_profile { Some(stops)=>stops.bind(bank,gate)?, None=>bank };
+        let bank=if let Some(layers)=self.friction.shear_layers() {
+            layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
+        } else { bank };
         let performance_config=MultiBowPerformanceConfig { samples:self.samples,max_block:self.block,
             max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS };
         let mut performance=if self.bow_ribbon.is_some() {
@@ -465,6 +471,13 @@ fn main()->Result<()> {
             source.pack.content_hash(),source.pack.source_artifact());
     }
     eprintln!("bow_friction={:?}",ready.spec.friction);
+    for port in 0..ready.spec.bow_contact_count() {
+        if let Some(layer)=ready.performance.bank().bow_shear_layer(port) {
+            eprintln!("bow_shear_layer_port={port}; source={}; area_m2={}; thickness_m={}; frozen_T_K={}; stiffness_N_m={}; yield_N={}; plastic_resistance_N_s_m={}; max_elastic_shear={}",
+                layer.resolved().identity(),layer.area_m2(),layer.thickness_m(),layer.temperature_kelvin(),
+                layer.stiffness_n_m(),layer.yield_force_n(),layer.plastic_resistance_n_s_m(),layer.maximum_elastic_shear_strain());
+        }
+    }
     if !ready.spec.bridge_interfaces.bindings().is_empty() {
         eprintln!("bridge_interfaces={:?}",ready.spec.bridge_interfaces);
     }

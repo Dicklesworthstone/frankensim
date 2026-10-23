@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	manufactured-material-string-shear-layer
+redistribution	permitted	MANUFACTURED integration fixture; not measured rosin, horsehair or adhesive data
+citation	Manufactured pressure-independent isothermal elastic-viscoplastic shear-layer fixture
+license	CC0-1.0
+source	fixture	manufactured-shear-layer.tsv	material-tsv-v1
