@@ -768,6 +768,42 @@ impl TetThermalStrainState {
         thermal_law_identity: ContentHash,
         maximum_absolute_mandel_strain: f64,
     ) -> Result<ThermalStrainTransformReceipt, TetElasticError> {
+        Self::try_from_material_and_oriented_strain(
+            elastic.material(),
+            elastic.target_frame(),
+            temperature_k,
+            reference_temperature_k,
+            source_free_strain,
+            source_basis,
+            source_to_target,
+            thermal_law_identity,
+            maximum_absolute_mandel_strain,
+        )
+    }
+
+    /// Rotate an integrated strain into the declared frame of an admitted material.
+    ///
+    /// The caller asserts that `target_frame` is the coordinate frame of
+    /// `material` and that `source_to_target` maps the supplied strain into it.
+    /// A nonzero frame label records this declaration; it does not prove the
+    /// material's orientation or manufacture an elastic transform receipt.
+    /// The existing second-order rotation, Mandel conversion, strain bound and
+    /// material-state identity are preserved. Equal source and target frames
+    /// require the identity rotation. Temperatures and `thermal_law_identity`
+    /// retain the upstream integrated path; this adapter does not admit its
+    /// source support or integrate expansion coefficients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_material_and_oriented_strain(
+        material: &TetElasticMaterial,
+        target_frame: ContentHash,
+        temperature_k: f64,
+        reference_temperature_k: f64,
+        source_free_strain: [f64; 6],
+        source_basis: StrainTensorBasis,
+        source_to_target: [[f64; 3]; 3],
+        thermal_law_identity: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<ThermalStrainTransformReceipt, TetElasticError> {
         validate_rotation(source_to_target)?;
         let identity_rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         if source_basis.frame == ContentHash([0; 32]) {
@@ -775,7 +811,12 @@ impl TetThermalStrainState {
                 what: "source strain frame identity must be nonzero",
             });
         }
-        if source_basis.frame == elastic.target_frame() && source_to_target != identity_rotation {
+        if target_frame == ContentHash([0; 32]) {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "target strain frame identity must be nonzero",
+            });
+        }
+        if source_basis.frame == target_frame && source_to_target != identity_rotation {
             return Err(TetElasticError::InvalidThermalStrain {
                 what: "a strain frame mapped to itself requires the identity rotation",
             });
@@ -823,7 +864,7 @@ impl TetThermalStrainState {
             temperature_k,
             reference_temperature_k,
             target_mandel,
-            elastic.material().material_state_identity,
+            material.material_state_identity,
             thermal_law_identity,
             maximum_absolute_mandel_strain,
         )?;
@@ -833,7 +874,7 @@ impl TetThermalStrainState {
         // exact elastic state, all target values and the target validity bound.
         identity.update(state.identity().as_bytes());
         identity.update(source_basis.frame.as_bytes());
-        identity.update(elastic.target_frame().as_bytes());
+        identity.update(target_frame.as_bytes());
         identity.update(&[match source_basis.notation {
             StrainTensorNotation::Tensor => 0,
             StrainTensorNotation::Engineering => 1,
@@ -853,7 +894,7 @@ impl TetThermalStrainState {
         Ok(ThermalStrainTransformReceipt {
             source_free_strain,
             source_basis,
-            target_frame: elastic.target_frame(),
+            target_frame,
             source_to_target,
             state,
         })
@@ -4204,6 +4245,21 @@ mod tests {
                     0.05,
                 )
                 .unwrap();
+                assert_eq!(
+                    receipt,
+                    TetThermalStrainState::try_from_material_and_oriented_strain(
+                        elastic.material(),
+                        elastic.target_frame(),
+                        400.0,
+                        293.15,
+                        input,
+                        basis,
+                        q,
+                        ContentHash([0x41; 32]),
+                        0.05,
+                    )
+                    .unwrap()
+                );
                 assert_eq!(receipt.source_free_strain(), &input);
                 assert_eq!(receipt.source_basis(), basis);
                 assert_eq!(receipt.target_frame(), elastic.target_frame());
@@ -4333,6 +4389,22 @@ mod tests {
             )
         };
         let input = [0.01, -0.003, 0.002, -0.001, 0.005, 0.007];
+        assert!(matches!(
+            TetThermalStrainState::try_from_material_and_oriented_strain(
+                elastic.material(),
+                ContentHash([0; 32]),
+                400.0,
+                293.15,
+                input,
+                basis,
+                identity,
+                ContentHash([0x41; 32]),
+                0.05,
+            ),
+            Err(TetElasticError::InvalidThermalStrain {
+                what: "target strain frame identity must be nonzero"
+            })
+        ));
         assert_eq!(
             make(input, basis, identity, 0.01)
                 .unwrap()

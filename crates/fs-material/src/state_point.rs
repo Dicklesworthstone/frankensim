@@ -26,6 +26,9 @@ pub use reference_ratios::*;
 mod linear_interface;
 pub use linear_interface::*;
 
+mod thermal_expansion;
+pub use thermal_expansion::*;
+
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
@@ -1559,6 +1562,41 @@ pub fn integrate_isotropic_thermal_expansion(
             selected_claim,
         )]),
     )?;
+    let free_linear_strain = integrate_selected_thermal_expansion(
+        card,
+        reference_point,
+        current_point,
+        selected_claim,
+        reference_temperature_k,
+        current_temperature_k,
+    )?;
+    let mut identity =
+        DomainHasher::new("org.frankensim.fs-material.integrated-isotropic-thermal-expansion.v1");
+    identity.update(card.content_hash().as_bytes());
+    identity.update(selected_claim.0.as_bytes());
+    identity.update(reference.resolved().identity().as_bytes());
+    identity.update(current.resolved().identity().as_bytes());
+    identity.update(&free_linear_strain.to_bits().to_le_bytes());
+    Ok(IntegratedIsotropicThermalExpansion {
+        reference,
+        current,
+        selected_claim,
+        free_linear_strain,
+        identity: identity.finalize(),
+    })
+}
+
+// Shared exact integration for every admitted principal expansion coefficient.
+// Path admission is always delegated to the source owner, even for constant
+// claims and zero-length paths; supported endpoints cannot bridge a source gap.
+fn integrate_selected_thermal_expansion(
+    card: &MaterialCard,
+    reference_point: &QueryPoint,
+    current_point: &QueryPoint,
+    selected_claim: ClaimId,
+    reference_temperature_k: f64,
+    current_temperature_k: f64,
+) -> Result<f64, MaterialStatePointError> {
     let claim =
         card.claims()
             .claim(selected_claim)
@@ -1591,20 +1629,7 @@ pub fn integrate_isotropic_thermal_expansion(
             quantity: "integrated free linear strain",
         });
     }
-    let mut identity =
-        DomainHasher::new("org.frankensim.fs-material.integrated-isotropic-thermal-expansion.v1");
-    identity.update(card.content_hash().as_bytes());
-    identity.update(selected_claim.0.as_bytes());
-    identity.update(reference.resolved().identity().as_bytes());
-    identity.update(current.resolved().identity().as_bytes());
-    identity.update(&free_linear_strain.to_bits().to_le_bytes());
-    Ok(IntegratedIsotropicThermalExpansion {
-        reference,
-        current,
-        selected_claim,
-        free_linear_strain,
-        identity: identity.finalize(),
-    })
+    Ok(free_linear_strain)
 }
 
 fn matching_temperature_path(
