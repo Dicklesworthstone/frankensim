@@ -47,9 +47,12 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
 - `make_results.py OUT.tsv UNUSED RUN=OUTPUT.txt ...` and `make_outcome.py OUT.tsv RUN=CLASSIFY_OUTPUT.txt ...` write
   `body-mode-results.tsv` (the air-coupled mode list of each run) and `body-mode-outcome.tsv` (the registered rules per run);
   a run whose name starts with `cracked` is labelled superseded.
-- `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=fpl]` writes the shell-ready maple pack from the committed
-  Sonderegger 2013 and Laemmlein 2020 packs; `shear=fpl` writes the declared shear sensitivity pack (Wood Handbook
-  sugar maple G_LR and G_LT ratios times E_L) under the name `...-fplshear-shell`.
+- `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]` writes the shell-ready
+  maple pack from the committed Sonderegger 2013 and Laemmlein 2020 packs: E_L, E_R and nu_LR static (Sonderegger), G_LR
+  in the audio band (Laemmlein's violin-back plates), G_LT and G_RT ultrasonic (no audio-band source found).
+  - `shear=ultrasonic` writes the earlier pack, with G_LR ultrasonic too.
+  - `shear=fpl` writes the Wood Handbook shear sensitivity.
+  - `inplane=laemmlein` writes the alternative with density, E_L, E_R and G_LR all from Laemmlein's plates.
 - `gen_violin_spruce_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready Norway spruce pack from the committed Viala 2020
   violin-quarter pack, with the Sitka nu_LR of the Wood Handbook pack as a declared surrogate.
 

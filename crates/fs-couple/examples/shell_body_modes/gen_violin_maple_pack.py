@@ -1,14 +1,19 @@
 """Write the shell-ready sycamore maple pack of the il Cannone violin body (back, ribs, bridge) from the committed Sonderegger et al. (2013) and Laemmlein et al. (2020) packs.
 
 Stiffness (one tree, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH): E_L = the static bending modulus, E_R = the mean of the static radial tension and compression moduli,
-nu_LR = the mean Poisson ratio, G_LR, G_LT and G_RT = the ULTRASONIC shear moduli (1 MHz: NOT audio band, declared in the pack text).
+nu_LR = the mean Poisson ratio, G_LT and G_RT = the ULTRASONIC shear moduli (1 MHz: NOT audio band; no audio-band source was found, declared in the pack text). G_LR = the AUDIO-BAND in-plane
+shear modulus of Laemmlein's 30 violin-back maple plates (maple-sycamore-lammlein2020-plates; plate modes near 0.7 kHz), replacing the ultrasonic value (orchestrator ruling, mail 6065).
 Loss: eta_L and eta_LR are Laemmlein's violin-back maple plates; eta_R, eta_LT and eta_RT are UNKNOWN for maple and are set equal to eta_LR as a declared surrogate (mail 5280 of the
 orchestrator: T and RT/LT shear loss are unknown in every open source). The nine Kelvin-Voigt viscosities the shell owner consumes are V = D^(1/2) Q D^(1/2) / omega_ref with
 omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. A constant loss factor per mode is recovered by the example as
 C_hyst(omega) = (omega_ref / omega) C_KV, and the packs of the wood-loss lane replace these numbers.
 
-usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=fpl]
-Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020}/properties.tsv and writes OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
+usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]
+Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates}/properties.tsv and writes
+OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
+shear=ultrasonic writes the earlier pack (G_LR ultrasonic as well, the scalars of 4f9abefe1) under the name ...-shell-ultrasonicshear.
+inplane=laemmlein (a declared ALTERNATIVE, not the registered model) takes the density, E_L, E_R and G_LR all from Laemmlein's plates (audio band, one consistent source) with G_LT, G_RT and
+nu_LR as above; the pack is then named ...-shell-laemmlein.
 With shear=fpl (a declared SENSITIVITY, not the registered model) G_LR and G_LT are the Wood Handbook sugar maple ratios times the same E_L (glr_over_el 0.111, glt_over_el 0.063 of the committed pack
 maple-sugar-fpl-gtr282) instead of the ultrasonic values; G_RT stays ultrasonic (the Wood Handbook set has no G_RT ratio); the pack is then named ...-fplshear-shell.
 """
@@ -18,10 +23,13 @@ import sys
 
 REPO, OUT = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
 FPL_SHEAR = "shear=fpl" in sys.argv[3:]
+ULTRASONIC_SHEAR = "shear=ultrasonic" in sys.argv[3:]
+INPLANE_LAEMMLEIN = "inplane=laemmlein" in sys.argv[3:]
 SEED = REPO + "/data/matdb/seed-v1/"
 OMEGA_MAX = 12566.37
 OMEGA_REF = 2.0 * math.pi * 200.0
-PACK = "violin-maple-sycamore-sonderegger2013-shell" + ("-fplshear" if FPL_SHEAR else "")
+PACK = ("violin-maple-sycamore-sonderegger2013-shell" + ("-fplshear" if FPL_SHEAR else "") + ("-ultrasonicshear" if ULTRASONIC_SHEAR else "")
+        + ("-laemmlein" if INPLANE_LAEMMLEIN else ""))
 
 
 def scalars(pack):
@@ -38,19 +46,32 @@ def scalars(pack):
 
 so = scalars("maple-sycamore-sonderegger2013")
 la = scalars("maple-sycamore-loss-lammlein2020")
+lp = scalars("maple-sycamore-lammlein2020-plates")
 E_L = so["young_modulus_longitudinal_bending"] * 1e6
 E_R = 0.5 * (so["young_modulus_radial_tension"] + so["young_modulus_radial_compression"]) * 1e6
+density = so["row:density-normal-climate"]
+stiffness_text = ("E_L = the static bending modulus %.0f MPa; E_R = the mean of the static radial tension %.0f and compression %.0f MPa = %.0f MPa" % (
+    so["young_modulus_longitudinal_bending"], so["young_modulus_radial_tension"], so["young_modulus_radial_compression"], E_R / 1e6))
+if INPLANE_LAEMMLEIN:
+    E_L, E_R, density = lp["young_modulus_longitudinal"] * 1e6, lp["young_modulus_radial"] * 1e6, lp["density"]
+    stiffness_text = ("density %.1f kg/m3, E_L %.0f MPa and E_R %.0f MPa of Laemmlein's violin-back plates (maple-sycamore-lammlein2020-plates, audio band)" % (density, E_L / 1e6, E_R / 1e6))
+g_lr, g_lt, g_rt = so["shear_modulus_lr_ultrasonic"], so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"]  # MPa
+shear_text = "ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)"
 if FPL_SHEAR:
     fpl = scalars("maple-sugar-fpl-gtr282")
-    so["shear_modulus_lr_ultrasonic"] = fpl["glr_over_el"] * E_L / 1e6
-    so["shear_modulus_lt_ultrasonic"] = fpl["glt_over_el"] * E_L / 1e6
-    print("shear=fpl: G_LR = %.3f x E_L = %.0f MPa, G_LT = %.3f x E_L = %.0f MPa (sugar maple ratios, Wood Handbook GTR-282)" % (fpl["glr_over_el"], so["shear_modulus_lr_ultrasonic"], fpl["glt_over_el"], so["shear_modulus_lt_ultrasonic"]))
-vals = dict(density=so["row:density-normal-climate"], young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=so["shear_modulus_lr_ultrasonic"] * 1e6,
-            shear_modulus_13=so["shear_modulus_lt_ultrasonic"] * 1e6, shear_modulus_23=so["shear_modulus_rt_ultrasonic"] * 1e6)
+    g_lr, g_lt = fpl["glr_over_el"] * E_L / 1e6, fpl["glt_over_el"] * E_L / 1e6
+    shear_text = "SENSITIVITY values: G_LR and G_LT from the Wood Handbook sugar maple ratios times E_L, G_RT ultrasonic"
+    print("shear=fpl: G_LR = %.3f x E_L = %.0f MPa, G_LT = %.3f x E_L = %.0f MPa (sugar maple ratios, Wood Handbook GTR-282)" % (fpl["glr_over_el"], g_lr, fpl["glt_over_el"], g_lt))
+elif not ULTRASONIC_SHEAR:
+    g_lr = lp["shear_modulus_lr"]
+    shear_text = ("G_LR from Laemmlein's violin-back plates (AUDIO band, identified from the (1,1) and (2,2) plate modes); G_LT and G_RT are ULTRASONIC values (1 MHz transverse "
+                  "waves, 10 mm cubes; no audio-band source was found)")
+vals = dict(density=density, young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=g_lr * 1e6, shear_modulus_13=g_lt * 1e6,
+            shear_modulus_23=g_rt * 1e6)
 eta = dict(L=la["loss_factor_longitudinal"], LR=la["loss_factor_shear_lr"])
 eta.update(R=eta["LR"], LT=eta["LR"], RT=eta["LR"])
-print("E_L %.4g Pa (static bending), E_R %.4g Pa (mean of radial tension and compression), nu_LR %.3f, G_LR %.4g, G_LT %.4g, G_RT %.4g Pa (ultrasonic)" % (
-    E_L, E_R, vals["poisson_ratio_12"], vals["shear_modulus_12"], vals["shear_modulus_13"], vals["shear_modulus_23"]))
+print("density %.1f kg/m3, E_L %.4g Pa, E_R %.4g Pa, nu_LR %.3f, G_LR %.4g, G_LT %.4g, G_RT %.4g Pa" % (
+    vals["density"], E_L, E_R, vals["poisson_ratio_12"], vals["shear_modulus_12"], vals["shear_modulus_13"], vals["shear_modulus_23"]))
 print("eta", eta)
 
 nu12 = vals["poisson_ratio_12"]
@@ -77,14 +98,14 @@ AXES = ("Axis convention: material axis 1 = L (grain), axis 2 = R (across the gr
         "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L; the source's subscripts were converted to this "
         "order in the committed Sonderegger pack). The validity band omega 0 to 2 pi 2000 rad/s and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.")
 OBS = [
-    ("sond-shell", "Sycamore maple (Acer pseudoplatanus L.), clear wood of ONE tree of Eastern Switzerland, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH",
-     "Sonderegger et al. (2013) Eur J Wood Prod 71:91-99 as committed in the pack maple-sycamore-sonderegger2013: E_L = the static bending modulus %.0f MPa; E_R = the mean of the static radial tension %.0f and "
-     "compression %.0f MPa = %.0f MPa; nu_LR = the mean over tension and compression %.2f; G_LR %.0f, G_LT %.0f and G_RT %.0f MPa are %s" % (
-         so["young_modulus_longitudinal_bending"], so["young_modulus_radial_tension"], so["young_modulus_radial_compression"], E_R / 1e6, so["nu_lr"], so["shear_modulus_lr_ultrasonic"],
-         so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"],
-         "SENSITIVITY values: G_LR and G_LT from the Wood Handbook sugar maple ratios times E_L, G_RT ultrasonic" if FPL_SHEAR else "ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)"),
-     "The shear moduli are not audio-band (ultrasonic moduli exceed static ones) and the single tree is not the violin's wood. A violin-grade (curly, resonance) maple of the committed Spycher pack has "
-     "E_L about 9700 to 10000 MPa and E_R about 1650 to 1700 MPa dynamically: carry that as the sensitivity. " + AXES),
+    ("sond-shell", "Sycamore maple (Acer pseudoplatanus L.): ONE tree of Eastern Switzerland (Sonderegger, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH) and 30 violin-back plates "
+     "(Laemmlein, 665 kg/m3, 20 C / 65 percent RH)",
+     "Sonderegger et al. (2013) Eur J Wood Prod 71:91-99 as committed in the pack maple-sycamore-sonderegger2013 and Laemmlein et al. (2020) Holzforschung 74:765-776 as committed in "
+     "maple-sycamore-lammlein2020-plates: %s; nu_LR = Sonderegger's mean over tension and compression %.2f; G_LR %.0f, G_LT %.0f and G_RT %.0f MPa: %s" % (
+         stiffness_text, so["nu_lr"], g_lr, g_lt, g_rt, shear_text),
+     "Ultrasonic moduli are not audio-band. Laemmlein's audio-band plates give G_LR 1580 MPa against Sonderegger's ultrasonic 1680, and E_L 12500 / E_R 1550 MPa against Sonderegger's static "
+     "10900 / 1175 (inplane=laemmlein). Neither source is the il Cannone's wood. A violin-grade (curly, resonance) maple of the committed Spycher pack has E_L about 9700 to 10000 MPa and "
+     "E_R about 1650 to 1700 MPa dynamically. " + AXES),
     ("laemmlein-maple-loss", "Sycamore maple violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished",
      "Laemmlein et al. (2020) Holzforschung 74:765-776 as committed in the pack maple-sycamore-loss-lammlein2020: loss_factor_longitudinal %.4f and loss_factor_shear_lr %.4f; eta_L = %.4f, eta_LR = %.4f; "
      "eta_R, eta_LT and eta_RT are UNKNOWN for maple and set equal to eta_LR" % (la["loss_factor_longitudinal"], la["loss_factor_shear_lr"], eta["L"], eta["LR"]),
@@ -109,7 +130,7 @@ for k in VISC_ORDER:
         lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
-       "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013 and maple-sycamore-loss-lammlein2020 (whose own terms apply to the loss values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)",
+       "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates and maple-sycamore-loss-lammlein2020 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)",
        "citation\tSonderegger W., Martienssen A., Nitsche C., Ozyhar T., Kaliske M., Niemz P. (2013), Eur J Wood Prod 71:91-99, doi:10.1007/s00107-012-0641-8; Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; derived by the pack author",
        "license\tPublished-Scientific-Facts-Attribution-Retained", "source\tprimary\tproperties.tsv\tmaterial-tsv-v1"]
 open(OUT + "/" + PACK + "/manifest.tsv", "w", encoding="utf-8").write("\n".join(man) + "\n")

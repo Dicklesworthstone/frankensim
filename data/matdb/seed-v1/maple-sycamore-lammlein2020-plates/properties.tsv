@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	laemmlein2020-maple-plates-moduli	Sycamore maple (Acer pseudoplatanus) violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm (L x R x T), unvarnished, at 20 C and 65 percent RH (Table 1: density 665.1, std 6.2, kg/m3; thickness 2.56 mm)	Contact-free loudspeaker sine sweep 150-10000 Hz, PSV-500 scanning laser vibrometer, modal fit; E_L, E_R and G_LR identified from the plate modes (0,2), (2,0), (1,1) and (2,2) by a Rayleigh-Ritz free-plate model and Nelder-Mead minimisation of the weighted eigenfrequency errors (eq. 3), started from the free-beam closed forms (eqs. 4-6); E_L and E_R moved less than 1.4 and 0.2 percent from the closed forms, so G_LR was the optimised parameter; the remaining elastic constants were taken from the Wood Handbook (Kretschmann 2010)	Table 3 means before varnishing (std): E_L 12.5 (0.4) GPa, E_R 1.55 (0.10) GPa, G_LR 1.58 (0.07) GPa. AUDIO-BAND: with these moduli the (1,1) twisting mode of the plate lies near 0.7 kHz (eq. 6). The std is specimen scatter without confidence semantics, so runtime uncertainty stays Unstated. G_LT, G_RT and the Poisson ratios are not identified by the source. Moisture content not printed. Axis convention: L longitudinal (grain), R radial, LR shear in the L-R plane, per instrument-axis-convention.tsv
+scalar	density	laemmlein2020-maple-plates-moduli	density	665.1	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_moisture_condition_known	0	0	1
+scalar	young-modulus-longitudinal	laemmlein2020-maple-plates-moduli	young_modulus_longitudinal	12500	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	omega	942.48	62831.85	rad/s
+scalar	young-modulus-radial	laemmlein2020-maple-plates-moduli	young_modulus_radial	1550	MPa	constant
+uncertainty	young-modulus-radial	unstated	-	-	-	-
+validity	young-modulus-radial	omega	942.48	62831.85	rad/s
+scalar	shear-modulus-lr	laemmlein2020-maple-plates-moduli	shear_modulus_lr	1580	MPa	constant
+uncertainty	shear-modulus-lr	unstated	-	-	-	-
+validity	shear-modulus-lr	omega	942.48	62831.85	rad/s
