@@ -8,3 +8,5 @@ pub mod specimen;
 pub mod heaters;
 /// File-declared physical requirements for measured scan programs.
 pub mod requirements;
+/// Distinct caloric laws, reference masses and initial fields on an exact mesh.
+pub mod materials;
