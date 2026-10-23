@@ -170,6 +170,17 @@ pub enum DuctError {
     /// ISO 9613-1 was asked of a gas not admitted as terrestrial air; the
     /// refusal names the species.
     NonTerrestrialAir(fs_material::iso9613::Iso9613Refusal),
+    /// A DG wall-diffusion law refused at one wall quadrature point. The
+    /// owner's reason travels unchanged with the bore radius and axial
+    /// position it refused at.
+    WallDiffusionUnresolved {
+        /// The fs-phs refusal, unchanged.
+        reason: fs_phs::PhsError,
+        /// Bore radius at the refusing point [m].
+        radius_m: f64,
+        /// Axial position of the refusing point [m].
+        x_m: f64,
+    },
 }
 
 impl core::fmt::Display for DuctError {
@@ -206,6 +217,8 @@ impl core::fmt::Display for DuctError {
             DuctError::EmptyDuct => write!(f, "FS-DUCT-EMPTY: a duct needs at least one segment"),
             DuctError::Singular => write!(f, "FS-DUCT-SINGULAR: basis solve refused"),
             DuctError::NonTerrestrialAir(refusal) => write!(f, "FS-DUCT-NON-TERRESTRIAL-AIR: {refusal}"),
+            DuctError::WallDiffusionUnresolved { reason, radius_m, x_m } => write!(f,
+                "FS-DUCT-WALL-DIFFUSION: at x = {x_m:.6e} m, radius {radius_m:.6e} m: {reason}"),
         }
     }
 }

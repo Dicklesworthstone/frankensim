@@ -53,14 +53,14 @@ fn g3_file_gas_and_callback_choices_reach_the_existing_physical_source() {
 fn g3_authored_taper_and_mixture_reach_the_same_source_and_wall_memory() {
     let data = input().replace(
         "dg_tube 0.05 0.001 open 1 2 8 50 2000 0.01 1e-11 256",
-        "dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 160 4\ndg_segment cylinder 0.001 0.025\ndg_segment cone 0.001 0.002 0.025",
+        "dg_bore 2 open 2 2 12 50 2000 0.01 1e-11 224 4\ndg_segment cylinder 0.001 0.025\ndg_segment cone 0.001 0.002 0.025",
     );
     let render = |text: &str, block| {
         let source = FlueDgFilePerformance::from_bytes(text.as_bytes(), block,
             &CancelGate::new_clock_free()).unwrap();
         let duct = source.renderer().voice().dg().unwrap().load().duct();
         assert!(duct.spatial_viscothermal_admission().is_some());
-        assert_eq!(duct.total_dofs(), 140);
+        assert_eq!(duct.total_dofs(), 204);
         assert_eq!(source.geometry().bore_area_m2, duct.inlet_area_m2());
         assert!(duct.outlet_area_m2() > duct.inlet_area_m2());
         let mut renderer = source.into_renderer();

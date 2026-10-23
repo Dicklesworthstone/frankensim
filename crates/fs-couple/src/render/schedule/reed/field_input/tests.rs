@@ -268,7 +268,7 @@ fn primitive_field_drives_actual_plate_dg_inlet_slit_and_causal_pressure() {
     let example = include_str!("../../../../../examples/plate-valve-dg-bore.performance");
     let header = example.split_once("\nschedule\n").unwrap().0
         .replace("audio 96000 9602", "audio 96000 256")
-        .replace("1e-11 160 4", "1e-11 160 4 gas_field 3 mole 2 A B")
+        .replace("1e-11 224 4", "1e-11 224 4 gas_field 3 mole 2 A B")
         .replace("observation inlet", "gas_station 0 300 1 0\ngas_station 0.025 320 0.5 0.5\ngas_station 0.05 310 0 1\nobservation inlet");
     let input = format!("{header}\nschedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tmouth\tblowing-pressure\ninitial\tpressure-pa\t5e0\nevents\t0\n");
     let render = |text: &str, block| {

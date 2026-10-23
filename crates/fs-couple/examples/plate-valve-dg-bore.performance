@@ -1,7 +1,7 @@
 frankensim-plate-valve-performance-v1
 audio 96000 9602 20
 ambient mixture 293.15 101325 mole 2 N2 0.7 O2 0.3
-dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 160 4
+dg_bore 2 open 2 2 12 50 2000 0.01 1e-11 224 4
 dg_segment cylinder 0.001 0.025
 dg_segment cone 0.001 0.002 0.025
 observation inlet

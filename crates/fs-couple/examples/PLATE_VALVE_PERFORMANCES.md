@@ -247,7 +247,7 @@ the same source-bound physical operator; it does not select an instrument preset
 An optional header suffix supplies a frozen primitive gas field:
 
 ```text
-dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 160 4 gas_field 3 mole 2 A B
+dg_bore 2 open 2 2 12 50 2000 0.01 1e-11 224 4 gas_field 3 mole 2 A B
 dg_segment cylinder 0.001 0.025
 dg_segment cone 0.001 0.002 0.025
 gas_station 0     300 1   0

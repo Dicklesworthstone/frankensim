@@ -168,8 +168,10 @@ impl DgDuct {
                     resolution.band_rad_s,
                     resolution.maximum_relative_error,
                 )
-                .map_err(|_| {
-                    invalid("DG wall diffusion does not resolve the declared material/band")
+                .map_err(|reason| DuctError::WallDiffusionUnresolved {
+                    reason,
+                    radius_m: radius,
+                    x_m: x,
                 })?;
                 admission.max_complex_error =
                     admission.max_complex_error.max(law.max_complex_error());

@@ -101,8 +101,9 @@ fn authored_taper_reaches_the_original_plate_contact_and_spatial_memory() {
     assert_eq!(dg.duct_state().step_count(), 512);
     assert_eq!(dg.aperture().blade_propagator(), BladePropagator::ExactZoh);
     let duct = dg.load().duct();
-    assert_eq!(duct.spatial_viscothermal_admission().unwrap().memory_dofs, 128);
-    assert_eq!(duct.total_dofs(), 140);
+    // 2 elements x 4 wall points x 2 fields x 12 poles, plus 2 x 6 acoustic.
+    assert_eq!(duct.spatial_viscothermal_admission().unwrap().memory_dofs, 192);
+    assert_eq!(duct.total_dofs(), 204);
     assert!(duct.outlet_area_m2() > duct.inlet_area_m2());
     assert!(reference.iter().any(|p| p.abs() > 1e-6));
     assert_eq!(trace(&input, 1).0, reference);
