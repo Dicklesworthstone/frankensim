@@ -4,7 +4,7 @@ use super::*;
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_live_piano::{
-    preparation::materials::{StringMaterials, operating_point},
+    preparation::materials::{COLUMNS, StringMaterials, TensionPolicy, operating_point},
     refmods::{bank_string_losses, linear::Bank},
 };
 use fs_matdb::{
@@ -26,6 +26,9 @@ use std::{
 };
 
 const ETA: &str = "declared_bending_viscosity";
+const LIMIT: &str = "declared_tensile_limit";
+// Manufactured limit above every fixture stress unless a test replaces it.
+const LIMIT_PA: f64 = 5e9;
 const INNER: f64 = 0.00035;
 const OUTER: f64 = 0.0005;
 const CORE: [f64; 3] = [8000.0, 2e11, 1e8];
@@ -81,9 +84,10 @@ fn pack_with(
         (DENSITY_PROPERTY, Density::DIMS),
         (YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
         (ETA, DynViscosity::DIMS),
+        (LIMIT, Pressure::DIMS),
     ]
     .into_iter()
-    .zip(values)
+    .zip(values.into_iter().chain([LIMIT_PA]))
     {
         let mut claim = PropertyClaim {
             key: PropertyKey::new(name, dims),
@@ -145,15 +149,18 @@ fn small_description() -> Description {
     }
     desc
 }
+fn construction(tension: &str, strength: &str, rows: &str) -> String {
+    format!("frankensim-piano-materials-v2\ntension,{tension}\nstrength,{strength}\n{COLUMNS}\n{rows}")
+}
 fn section_geometry(courses: &[Course]) -> String {
-    let mut rows = "frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n".to_owned();
+    let mut rows = String::new();
     for course in courses {
         rows.push_str(&format!(
-            "{},{INNER},0\n{},{OUTER},1\n",
+            "{},core,{INNER},,,0\n{},core,{OUTER},,,1\n",
             course.midi, course.midi
         ));
     }
-    rows
+    construction("installed-tension", LIMIT, &rows)
 }
 fn load(
     courses: &[Course],
@@ -341,7 +348,7 @@ fn canonical_layers_drive_mass_axial_bending_and_original_modal_loss_integrals()
     }
     assert_eq!(source.packs()[0].to_bytes(), core.to_bytes());
     assert_eq!(source.packs()[1].to_bytes(), coating.to_bytes());
-    assert_eq!(source.packs()[0].claims_pack().normalizations().len(), 3);
+    assert_eq!(source.packs()[0].claims_pack().normalizations().len(), 4);
     let bank =
         Bank::new_with_string_damping(&changed, &desc.board, 48_000, 6000.0, 12, true, None, false)
             .unwrap();
@@ -550,13 +557,12 @@ fn unsupported_source_geometry_framing_and_actual_mode_band_refuse() {
         );
     }
     for rows in [
-        "69,0,0",
-        "69,NaN,0",
-        "69,0.0005,0\n69,0.0004,1",
-        "69,0.0005,2",
+        "69,core,0,,,0",
+        "69,core,NaN,,,0",
+        "69,core,0.0005,,,0\n69,core,0.0004,,,1",
+        "69,core,0.0005,,,2",
     ] {
-        let bad =
-            format!("frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n{rows}\n");
+        let bad = construction("installed-tension", LIMIT, &format!("{rows}\n"));
         assert!(StringMaterials::from_packs(&[&core, &coating], &bad, &point(), ETA).is_err());
     }
     let outside = operating_point("bath_kelvin", 500.0, "oscillation_hz", 1000.0).unwrap();
@@ -626,4 +632,211 @@ fn partial_coverage_preset_and_late_tuning_failure_do_not_publish_partial_prepar
     assert!(PianoAudio::new_with_materials(&desc, config(), 2, gas(), other).is_err());
     assert!(PianoAudio::new_with_materials(&desc, config(), 2, gas(), complete).is_ok());
     assert_eq!(desc.board_bytes(), board);
+}
+
+// ---- U2: tension policy, the mandatory tensile check and wound strings ----
+
+const CORE_R: f64 = 0.0005;
+fn limited(values: [f64; 3], limit: f64) -> NormalizedMaterialCardPack {
+    pack_with(values, |claim| {
+        if claim.key.name() == LIMIT {
+            claim.value = PropertyValue::Scalar { value: limit, dims: Pressure::DIMS };
+        }
+    })
+}
+// A dense, compliant, weak manufactured metal; not a claim about any alloy.
+const WEAK: [f64; 3] = [19_300.0, 7.9e10, 1e8];
+const WEAK_LIMIT_PA: f64 = 1.2e8;
+fn single_cores(courses: &[Course]) -> String {
+    courses.iter().map(|c| format!("{},core,{CORE_R},,,0\n", c.midi)).collect()
+}
+fn weak(tension: &str, strength: &str) -> Result<StringMaterials, String> {
+    StringMaterials::from_packs(&[&limited(WEAK, WEAK_LIMIT_PA).to_bytes()],
+        &construction(tension, strength, &single_cores(&small_description().courses)), &point(), ETA)
+}
+
+// Planted negatives: the retired v1 format and a core pack without the
+// declared limit refuse as missing data; a wrap carries no tension and needs none.
+#[test]
+fn g0_v1_constructions_and_unrated_core_packs_refuse_as_missing_data() {
+    let courses = small_description().courses;
+    let v1 = format!("frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n{}",
+        courses.iter().map(|c| format!("{},{CORE_R},0\n", c.midi)).collect::<String>());
+    let core = pack(CORE).to_bytes();
+    let error = StringMaterials::from_packs(&[&core], &v1, &point(), ETA).unwrap_err();
+    assert!(error.contains("missing data"), "{error}");
+    let unrated = pack_with(CORE, |claim| {
+        if claim.key.name() == LIMIT {
+            claim.key = PropertyKey::new("some_other_strength", Pressure::DIMS);
+        }
+    }).to_bytes();
+    let geometry = construction("target-pitch", LIMIT, &single_cores(&courses));
+    let error = StringMaterials::from_packs(&[&unrated], &geometry, &point(), ETA).unwrap_err();
+    assert!(error.contains("missing data") && error.contains(LIMIT), "{error}");
+    // The same unrated pack is admitted as a wrap, whose wire carries no tension.
+    let wound = construction("target-pitch", LIMIT, &courses.iter()
+        .map(|c| format!("{},core,0.0004,,,0\n{},wrap,,0.0003,close,1\n", c.midi, c.midi)).collect::<String>());
+    assert!(StringMaterials::from_packs(&[&core, &unrated], &wound, &point(), ETA).is_ok());
+    for bad in ["tension,target-pitch\nstrength,", "tension,yield-fraction,0\nstrength,x",
+        "tension,yield-fraction,1.5\nstrength,x", "tension,somehow\nstrength,x"] {
+        let text = format!("frankensim-piano-materials-v2\n{bad}\n{COLUMNS}\n{}", single_cores(&courses));
+        assert!(StringMaterials::from_packs(&[&core], &text, &point(), ETA).is_err(), "{bad}");
+    }
+}
+
+// G0: target-pitch re-solves tension to the installed fundamental; the
+// installed-tension policy keeps the tension and lets the pitch move.
+#[test]
+fn g0_target_pitch_keeps_installed_fundamentals_and_installed_tension_keeps_tension() {
+    let desc = small_description();
+    let core = pack(CORE).to_bytes();
+    let target = StringMaterials::from_packs(&[&core],
+        &construction("target-pitch", LIMIT, &single_cores(&desc.courses)), &point(), ETA).unwrap();
+    assert_eq!(target.tension_policy(), TensionPolicy::TargetPitch);
+    let kept = StringMaterials::from_packs(&[&core],
+        &construction("installed-tension", LIMIT, &single_cores(&desc.courses)), &point(), ETA).unwrap();
+    let (a, b) = (target.apply(&desc.courses).unwrap(), kept.apply(&desc.courses).unwrap());
+    for ((old, tuned), held) in desc.courses.iter().zip(&a).zip(&b) {
+        near(tuned.partial_hz(1, tuned.tension_n), old.partial_hz(1, old.tension_n));
+        assert_eq!(held.tension_n, old.tension_n);
+        assert_eq!(Course { tension_n: held.tension_n, ..*tuned }, *held);
+        assert_ne!(held.partial_hz(1, held.tension_n), old.partial_hz(1, old.tension_n));
+    }
+}
+
+// G1: at a fixed pitch the core stress is 4 L^2 f^2 rho less the bending
+// share, whatever the radius. A dense, weak core cannot reach the scale:
+// every key refuses together with its stress, its limit and f_max.
+#[test]
+fn g1_weak_dense_core_refuses_at_pitch_naming_every_key_stress_limit_and_f_max() {
+    let desc = small_description();
+    let error = weak("target-pitch", LIMIT).unwrap().apply(&desc.courses).unwrap_err();
+    assert!(error.contains("\"refusal\":\"overstressed-strings\""), "{error}");
+    for c in &desc.courses { assert!(error.contains(&format!("\"key\":{}", c.midi)), "{error}"); }
+    let labelled = weak("target-pitch", &format!("{LIMIT},non-physical-override")).unwrap();
+    let played = labelled.apply(&desc.courses).unwrap();
+    let report = labelled.strength_report(&played).unwrap();
+    assert!(report.non_physical_override);
+    assert_eq!(report.overstressed().count(), desc.courses.len());
+    let (rho, young, area) = (WEAK[0], WEAK[1], PI * CORE_R * CORE_R);
+    for ((old, c), key) in desc.courses.iter().zip(&played).zip(&report.keys) {
+        let f = old.partial_hz(1, old.tension_n);
+        let k = PI / c.length_m;
+        assert_eq!(key.key, c.midi);
+        near(key.required_stress_pa, rho * (2.0 * c.length_m * f).powi(2) - young * CORE_R * CORE_R * k * k / 4.0);
+        near(key.limit_pa, WEAK_LIMIT_PA);
+        near(key.capacity_n, WEAK_LIMIT_PA * area);
+        assert!(key.utilization > 1.0);
+        // Independent stiff-string pitch at the capacity tension, and the
+        // flexible-string limit sqrt(limit / rho) / (2 L) it approaches.
+        let ei = young * PI * CORE_R.powi(4) / 4.0;
+        near(key.f_max_hz, ((WEAK_LIMIT_PA * area * k * k + ei * k.powi(4)) / (rho * area)).sqrt() / TAU);
+        let flexible = (WEAK_LIMIT_PA / rho).sqrt() / (2.0 * c.length_m);
+        assert!(key.f_max_hz > flexible && key.f_max_hz / flexible - 1.0 < ei * k * k / (WEAK_LIMIT_PA * area));
+        assert!(key.f_max_hz < f);
+    }
+    assert!(labelled.json().contains("\"nonPhysicalOverride\":true"));
+}
+
+// G1: yield-fraction sets tension from the sourced capacity, so the weak
+// core plays physically, lower than the scale, and the engine renders it.
+#[test]
+fn g1_yield_fraction_tension_follows_capacity_and_the_weak_string_plays() {
+    let mut desc = small_description();
+    let source = Arc::new(weak("yield-fraction,0.5", LIMIT).unwrap());
+    let before = desc.courses.clone();
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let report = source.strength_report(&desc.courses).unwrap();
+    for ((old, c), key) in before.iter().zip(&desc.courses).zip(&report.keys) {
+        near(c.tension_n, 0.5 * key.capacity_n);
+        near(key.utilization, 0.5);
+        assert!(c.partial_hz(1, c.tension_n) < old.partial_hz(1, old.tension_n));
+        assert!(c.partial_hz(1, c.tension_n) < key.f_max_hz);
+    }
+    assert_eq!(report.overstressed().count(), 0);
+    let mut audio = PianoAudio::new_with_materials(&desc, config(), 1, gas(), source.clone()).unwrap();
+    audio.note_on(69, 1.0).unwrap();
+    let mut pcm = vec![0.0_f32; 2048];
+    audio.render(&mut pcm).unwrap();
+    assert!(pcm.iter().all(|x| x.is_finite()) && pcm.iter().any(|x| *x != 0.0));
+    assert_eq!(audio.piano().counters.contact_failures, 0);
+    assert!(fs_live_piano::describe_audio(&audio).contains("\"yieldFraction\":0.5"));
+}
+
+// G0: retuning raises tension, so a string tuned up past its limit refuses
+// and the description is not published.
+#[test]
+fn g0_retuning_past_the_limit_refuses_without_publishing() {
+    let mut desc = small_description();
+    let rows = single_cores(&desc.courses);
+    let probe = StringMaterials::from_packs(&[&pack(CORE).to_bytes()],
+        &construction("target-pitch", LIMIT, &rows), &point(), ETA).unwrap();
+    let report = probe.strength_report(&probe.apply(&desc.courses).unwrap()).unwrap();
+    let stress = report.keys.iter().map(|k| k.required_stress_pa).fold(0.0, f64::max);
+    let tight = StringMaterials::from_packs(&[&limited(CORE, 1.001 * stress).to_bytes()],
+        &construction("target-pitch", LIMIT, &rows), &point(), ETA).unwrap();
+    let before = desc.courses.clone();
+    preparation::prepare_with_materials(&mut small_description(), None, None, Some(&tight)).unwrap();
+    let error = preparation::prepare_with_materials(&mut desc, None, Some(tuning()), Some(&tight)).unwrap_err();
+    assert!(error.contains("overstressed-strings"), "{error}");
+    assert_eq!(desc.courses, before);
+}
+
+// G1: a wound course: the core carries tension, EA, EI and loss; the wrap adds
+// its helix mass only and moves the gas drag to the finished radius.
+#[test]
+fn g1_wound_course_core_carries_tension_and_the_wrap_adds_only_mass() {
+    let mut desc = small_description();
+    let (core_r, wire) = (0.0004, 0.0004);
+    let rows = desc.courses.iter()
+        .map(|c| format!("{},core,{core_r},,,0\n{},wrap,,{wire},close,1\n", c.midi, c.midi)).collect::<String>();
+    let wrap_rho = 8960.0;
+    let source = Arc::new(StringMaterials::from_packs(
+        &[&pack(CORE).to_bytes(), &pack([wrap_rho, 1.2e11, 0.0]).to_bytes()],
+        &construction("target-pitch", LIMIT, &rows), &point(), ETA).unwrap());
+    let before = desc.courses.clone();
+    preparation::prepare_with_materials(&mut desc, None, None, Some(&source)).unwrap();
+    let pitch = fs_material::section::wound::close_wound_pitch_m(2.0 * core_r, wire).unwrap();
+    let wrap_mass = wrap_rho * PI * wire * wire / 4.0 * (PI * (2.0 * core_r + wire)).hypot(pitch) / pitch;
+    let (core_mass, ea, ei) = (CORE[0] * PI * core_r * core_r, CORE[1] * PI * core_r * core_r,
+        CORE[1] * PI * core_r.powi(4) / 4.0);
+    let report = source.strength_report(&desc.courses).unwrap();
+    for ((old, c), key) in before.iter().zip(&desc.courses).zip(&report.keys) {
+        near(c.linear_density_kg_m, core_mass + wrap_mass);
+        near(c.flexural_rigidity_nm2, ei);
+        let section = c.bonded_section.unwrap();
+        near(section.axial_rigidity_n(), ea);
+        near(section.wrap_line_density_kg_m(), wrap_mass);
+        near(section.bending_loss().unwrap().viscous_rigidity_nm2s(), CORE[2] * PI * core_r.powi(4) / 4.0);
+        near(c.partial_hz(1, c.tension_n), old.partial_hz(1, old.tension_n));
+        // The whole tension sits in the core.
+        near(key.required_stress_pa, c.tension_n / (PI * core_r * core_r));
+        near(key.capacity_n, LIMIT_PA * PI * core_r * core_r);
+    }
+    // Only the wrap density changed: mass and pitch follow, core coefficients do not.
+    let heavy = StringMaterials::from_packs(
+        &[&pack(CORE).to_bytes(), &pack([2.0 * wrap_rho, 1.2e11, 0.0]).to_bytes()],
+        &construction("installed-tension", LIMIT, &rows), &point(), ETA).unwrap();
+    for (c, h) in desc.courses.iter().zip(heavy.apply(&desc.courses).unwrap()) {
+        near(h.linear_density_kg_m, core_mass + 2.0 * wrap_mass);
+        assert_eq!(h.flexural_rigidity_nm2, c.flexural_rigidity_nm2);
+        assert_eq!(h.tension_n, c.tension_n);
+        assert!(h.partial_hz(1, h.tension_n) < c.partial_hz(1, c.tension_n));
+    }
+    let atmosphere = gas();
+    let piano = LivePiano::new_with_materials(&desc, config(), atmosphere, source.clone()).unwrap();
+    let outer = core_r + wire;
+    assert_eq!(source.outer_radius_m(69), Some(outer));
+    for course in piano.courses() {
+        let frequencies = piano.partials_hz(course.midi);
+        let rates = piano.string_gas_drag_rates_per_s(course.midi).unwrap();
+        for (&frequency, &rate) in frequencies.iter().zip(rates) {
+            let expected = TAU * atmosphere.dynamic_viscosity
+                * (1.0 + outer * (2.0 * atmosphere.density * TAU * frequency
+                    / atmosphere.dynamic_viscosity).sqrt())
+                / course.linear_density_kg_m;
+            near(rate, expected);
+        }
+    }
+    assert!(source.json().contains(&format!("\"outerRadiusM\":{outer}")));
 }

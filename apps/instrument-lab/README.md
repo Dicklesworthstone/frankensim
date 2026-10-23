@@ -243,25 +243,45 @@ query frequency in hertz. The displayed file order defines `material_index`, sta
 inputs are required for this path and are fixed when Start constructs the engine. The keyboard uses
 the embedded 88-key scale, so its geometry must cover every MIDI key from 21 through 108.
 
-The geometry file begins with these two exact lines. Each subsequent row gives a key, the **outer**
-radius of one layer in metres and its pack index. Rows for each key run from the solid core outward,
-with strictly increasing radii; the same pack may be used by several layers or keys. For a separately
-imported scale containing only MIDI key 69, a two-layer section would be:
+The construction file begins with these four exact-form lines: the format, the tension policy, the
+sourced tensile-limit property every core is checked against, and the column names. Each subsequent row
+is one layer of one key. `core` rows give the **outer** radius of a perfectly bonded core layer, from the
+centre outward with strictly increasing radii. `wrap` rows follow a key's core rows and give a helical
+wrap's wire diameter and pitch in metres, innermost first; `close` selects the tightest pitch at which
+neighbouring turns do not interpenetrate. The last field is the pack index. For a separately imported
+scale containing only MIDI keys 33 and 69, a wrapped core for key 33 and a plain two-layer core for 69:
 
 ```csv
-frankensim-piano-materials-v1
-key,outer_radius_m,material_index
-69,0.0004,0
-69,0.0006,1
+frankensim-piano-materials-v2
+tension,target-pitch
+strength,ultimate_tensile_strength
+key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index
+69,core,0.0004,,,0
+69,core,0.0006,,,1
+33,core,0.0008,,,0
+33,wrap,,0.0012,close,2
 ```
+
+The core carries the whole tension, EA, EI and bending loss; a wrap adds only its wire mass (no wrap
+stiffness, slip or wrap loss is modelled) and sets the finished radius for gas drag. `tension` is
+`target-pitch` (re-solve each tension so the new section keeps the installed fundamental),
+`installed-tension` (keep the tension; the pitch follows the material), or `yield-fraction,<x>` with
+`0 < x <= 1` (tension is that fraction of the core's capacity under the declared limit). At a fixed pitch
+the stress `4 L^2 f^2 rho` does not depend on the wire diameter, so a dense, weak metal cannot reach a
+concert scale: if any string exceeds its sourced limit, construction refuses with every overstressed key,
+its required stress, its limit and the highest pitch its section reaches at that length (`fMaxHz`).
+Appending `,non-physical-override` to the `strength` line lets such strings play and labels them so; real
+strings would break. Every core pack must supply the declared limit claim, or construction refuses as
+missing data; the older `frankensim-piano-materials-v1` format names no limit and refuses for that reason.
 
 Every course of the selected scale needs exactly one complete section; missing or extra keys refuse.
 Names never imply a radius, an alloy or a source coefficient. Up to 128 nonempty packs are admitted,
 with 16 MiB combined bytes and 256 KiB of UTF-8 geometry. Axes and the viscosity property must be
 explicit, trimmed names of at most 128 UTF-8 bytes; the two axes must differ, and both numeric query
-values must be finite and positive. The original cards must supply coherent, dimensioned density,
-Young's modulus and nonnegative solid Kelvin–Voigt viscosity at that state, with a source band covering
-the simulated string partials. Missing, ambiguous or out-of-domain source data refuse in Rust.
+values must be finite and positive. Core packs must supply coherent, dimensioned density, Young's
+modulus, nonnegative solid Kelvin–Voigt viscosity and the declared tensile limit at that state, with a
+source band covering the simulated string partials; wrap packs need density. Missing, ambiguous or
+out-of-domain source data refuse in Rust.
 
 For programmatic playback, `LivePianoOptions` and `PianoLane` share `PianoEngineOptions`. This example
 accepts user-selected files and an existing physical scale CSV. It assumes the supplied packs declare
@@ -290,12 +310,13 @@ async function startMaterialPiano(
 }
 ```
 
-This models **perfectly bonded solid/concentric sections at a fixed material state**. Original source
-integrals determine line density, axial rigidity, flexural rigidity and bending viscosity in the live
-strings, silent-string bank, bridge and hammer coupling. The source path replaces the legacy string
-loss law; it adds no unexplained material damping. Length, installed tension, unison and duplex
-geometry remain the chosen scale's data, with optional stretch tuning applied to the material-derived
-partials. Helical winding, interlayer slip and temperature evolution need additional physical owners.
+This models **perfectly bonded solid/concentric cores, optionally under mass-only helical wraps, at a
+fixed material state**. Original source integrals determine line density, axial rigidity, flexural
+rigidity and bending viscosity in the live strings, silent-string bank, bridge and hammer coupling. The
+source path replaces the legacy string loss law; it adds no unexplained material damping. Length, unison
+and duplex geometry remain the chosen scale's data; tension follows the declared policy, and optional
+stretch tuning is applied to the material-derived partials and then checked against the tensile limit
+again. Wrap stiffness, interlayer slip and temperature evolution need additional physical owners.
 The atmosphere controls the Rayleigh receiver's pressure and propagation delay; it does not introduce
 air loading into the mechanical string model. `piano.info.stringMaterials` reports the actual source
 state identities and section coefficients installed in playback.

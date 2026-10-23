@@ -106,8 +106,9 @@ or an empty target band leaves the original Description unchanged.
 
 `PianoAudio::new_with_materials` and the browser's canonical material-pack path
 use the supplied atmosphere for string drag as well as microphone propagation.
-The outermost radius comes from each actual concentric section, including all
-of its declared layers. Its solid line mass remains the material integral.
+The radius is each string's finished radius: its outermost helical wrap, or
+else the outer layer of its bonded core. Its line mass remains the material
+integral, core plus wraps.
 The shared `fs-couple::air_path::oscillating_cylinder_air_resistance_per_length`
 owner evaluates the small-amplitude transverse-cylinder resistance at each
 actual partial frequency. Resistance divided by line mass supplies the gas-only

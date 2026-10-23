@@ -50,17 +50,33 @@ export interface PianoInfo {
   stringDamping?: string;
   /** Actual source-state identities and section integrals installed in every playback clone. */
   stringMaterials?: {
-    model: 'bonded-concentric-kelvin-voigt';
+    model: 'bonded-core-kelvin-voigt-helical-wraps';
     importedPacks: number;
+    /** How tension was set: 'target-pitch', 'installed-tension' or a fraction of tensile capacity. */
+    tensionPolicy: 'target-pitch' | 'installed-tension' | { yieldFraction: number };
+    /** Sourced tensile-limit property every core layer is checked against. */
+    limitProperty: string;
+    /** True only when overstressed strings were explicitly allowed to play (non-physical). */
+    nonPhysicalOverride: boolean;
     sections: Array<{
       key: number;
+      /** Core layers, innermost first. */
       stateIdentities: string[];
       outerRadiiM: number[];
+      /** Core plus wraps [kg/m]. */
       lineDensityKgM: number;
       axialRigidityN: number;
       flexuralRigidityNm2: number;
       viscousRigidityNm2S: number;
       omegaBandRadS: [number, number];
+      /** Helical wraps (mass only), innermost first. */
+      wraps: Array<{ stateIdentity: string; wireDiameterM: number; pitchM: number; lineDensityKgM: number }>;
+      /** Finished radius: outermost wrap, else core [m]. */
+      outerRadiusM: number;
+      /** Axial force at which the governing core layer reaches its limit [N]. */
+      tensileCapacityN: number;
+      governingLayer: number;
+      layerLimitsPa: number[];
     }>;
   } | null;
   /** String partials above this frequency are not retained [Hz]. */
@@ -224,7 +240,7 @@ export interface PianoStretchTuning {
 export interface PianoStringMaterials {
   /** Original NormalizedMaterialCardPack bytes, in geometry material_index order; 1..128, total <=16 MiB. */
   packs: Array<Uint8Array | ArrayBuffer>;
-  /** frankensim-piano-materials-v1 CSV: key,outer_radius_m,material_index; complete selected scale, <=256 KiB. */
+  /** frankensim-piano-materials-v2 CSV: tension and strength lines, then key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index; complete selected scale, <=256 KiB. */
   geometry: string;
   /** Exact typed temperature-axis name in every pack. */
   temperatureAxis: string;

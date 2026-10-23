@@ -1747,9 +1747,9 @@ impl LivePiano {
             string_gas_drag_rates.resize(n_total, 0.0);
             for string in &bank.strings {
                 let course = &courses[string.course];
-                let section = materials.sections().get(&course.midi)
+                // A wound string meets the gas at its outermost wrap.
+                let radius = materials.outer_radius_m(course.midi)
                     .ok_or("string gas loading requires its original material section")?;
-                let radius = section.elastic().outer_radius_m();
                 for k in string.modes.clone() {
                     let resistance = fs_couple::air_path::oscillating_cylinder_air_resistance_per_length(
                         radius, bank.modes[k].omega, &gas).map_err(|e| e.to_string())?;

@@ -70,10 +70,14 @@ pub struct BondedSection {
     flexural_rigidity_nm2: f64,
     axial_rigidity_n: f64,
     bending_loss: Option<BondedBendingLoss>,
+    /// Part of the line density carried by unbonded helical wraps (zero for
+    /// a bonded rod). Wraps add inertia only; EA, EI and loss are the core's.
+    wrap_line_density_kg_m: f64,
 }
 impl BondedSection {
     pub const fn axial_rigidity_n(self) -> f64 { self.axial_rigidity_n }
     pub const fn bending_loss(self) -> Option<BondedBendingLoss> { self.bending_loss }
+    pub const fn wrap_line_density_kg_m(self) -> f64 { self.wrap_line_density_kg_m }
 }
 
 /// Frozen Kelvin-Voigt integral from the SAME bonded section, with the
@@ -137,7 +141,35 @@ impl Course {
             flexural_rigidity_nm2: section.bending_stiffness_n_m2(),
             axial_rigidity_n: section.axial_stiffness_n(),
             bending_loss: None,
+            wrap_line_density_kg_m: 0.0,
         });
+        changed.validate()?;
+        Ok(changed)
+    }
+
+    /// Bind a helically wound string: the solid bonded `core` carries the
+    /// tension, EA, EI and Kelvin-Voigt bending loss, and `wrapping` adds only
+    /// its wire mass. No wrap stiffness, slip friction or wrap loss is
+    /// invented. Tension is retained, as for a bonded rod.
+    ///
+    /// # Errors
+    /// Refuses a hollow core, wraps wound on a different core radius, and any
+    /// unrepresentable derived course; the original course is not mutated.
+    pub fn with_wound_kelvin_voigt_section(
+        &self,
+        core: &fs_material::section::ConcentricKelvinVoigtSection,
+        wrapping: &fs_material::section::wound::HelicalWrapping,
+    ) -> Result<Self, String> {
+        let elastic = core.elastic();
+        if wrapping.core_outer_radius_m() != elastic.outer_radius_m() {
+            return Err("string wraps were wound on a different core radius".into());
+        }
+        let mut changed = self.with_bonded_kelvin_voigt_section(core)?;
+        let line_density = elastic.line_density_kg_m() + wrapping.line_density_kg_m();
+        changed.linear_density_kg_m = line_density;
+        let section = changed.bonded_section.as_mut().expect("bound core section");
+        section.linear_density_kg_m = line_density;
+        section.wrap_line_density_kg_m = wrapping.line_density_kg_m();
         changed.validate()?;
         Ok(changed)
     }
@@ -165,6 +197,10 @@ impl Course {
                 || self.flexural_rigidity_nm2 != section.flexural_rigidity_nm2
                 || !section.axial_rigidity_n.is_finite() || section.axial_rigidity_n <= 0.0 {
                 return Err("bound string mass, EI and EA must come from the same material section".into());
+            }
+            if !section.wrap_line_density_kg_m.is_finite() || section.wrap_line_density_kg_m < 0.0
+                || section.wrap_line_density_kg_m >= section.linear_density_kg_m {
+                return Err("string wrap mass must be a finite nonnegative part of the line density".into());
             }
             if let Some(loss) = section.bending_loss {
                 let (lo, hi) = loss.omega_band_rad_s;

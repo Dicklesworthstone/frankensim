@@ -224,10 +224,11 @@ export class LivePianoSection {
               <div class="field"><label for="${id}-material-packs">Canonical packs · up to 128, 16 MiB total</label>
                 <input id="${id}-material-packs" class="lp-material-packs" type="file" multiple required style="width:100%;min-width:0"></div>
               <p class="small num lp-material-index" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">Material indices will appear here in file selection order.</p>
-              <div class="field"><label for="${id}-material-geometry">Concentric geometry CSV · up to 256 KiB</label>
+              <div class="field"><label for="${id}-material-geometry">String construction CSV · up to 256 KiB</label>
                 <input id="${id}-material-geometry" class="lp-material-geometry" type="file" accept=".csv,text/csv,text/plain" required style="width:100%;min-width:0"></div>
-              <p class="small muted">Start with <code>frankensim-piano-materials-v1</code>, then <code>key,outer_radius_m,material_index</code>.
-                Supply each MIDI key 21–108; list its layers from inner to outer, using the pack indices above.</p>
+              <p class="small muted">Start with <code>frankensim-piano-materials-v2</code>, a <code>tension,…</code> policy line, a
+                <code>strength,&lt;tensile-limit property&gt;</code> line, then <code>key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index</code>.
+                Supply each MIDI key 21–108; list its core layers from inner to outer, then any wraps, using the pack indices above.</p>
               <div class="lp-controls">
                 <div class="field"><label for="${id}-material-t-axis">Temperature axis in the packs</label>
                   <input id="${id}-material-t-axis" class="lp-material-t-axis" type="text" placeholder="e.g. T" maxlength="128" required></div>

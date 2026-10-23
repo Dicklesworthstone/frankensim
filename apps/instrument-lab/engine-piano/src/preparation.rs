@@ -129,6 +129,8 @@ pub fn prepare_with_materials(description: &mut Description, scale_csv: Option<&
     if let Some(materials) = materials { courses = materials.apply(&courses)?; }
     if let Some(t) = tuning {
         report.octaves = stretch_tuning::partials::tune(&mut courses, t.concert_a_hz, t.profile)?;
+        // Retuning changes tension: the material strings face their tensile check again.
+        if let Some(materials) = materials { materials.verify_courses(&courses)?; }
     }
     report.courses = courses.len();
     description.courses = courses;
