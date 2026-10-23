@@ -2550,6 +2550,368 @@ pub fn tie_beams_to_shells(
     })
 }
 
+/// The boundary of a solid body as plain data (no solid-crate type): every node's position, and the
+/// solid pencil's free-coordinate index of the node's x, y and z displacement (`None` where a support
+/// fixes it).
+#[derive(Debug, Clone, Copy)]
+pub struct SolidFaceTrace<'a> {
+    /// Node positions [m].
+    pub positions_m: &'a [[f64; 3]],
+    /// Per node, the free-coordinate index of its x, y and z displacement.
+    pub dof_index: &'a [[Option<usize>; 3]],
+}
+
+/// One patch of a solid's boundary glued to a shell skin (M1.2-W3): the solid's face nodes follow the
+/// shell rigidly through the skin, $\mathbf{u} = \sum_j \lambda_j(\mathbf{u}_{m,j} + \boldsymbol\theta_{m,j}
+/// \times \mathbf{d}_j)$ with $\mathbf{d}_j = \text{side}\,\tfrac12 h_j\,\mathbf{n}_j$, where $\lambda$ are
+/// the barycentric coordinates of the node's closest point on the master skin triangle (the collocation of
+/// the existing [`FaceTie`], here with a solid slave carrying translations only).
+#[derive(Debug, Clone)]
+pub struct SolidFaceTie {
+    /// Boundary faces of the solid as P2 triangles: three corners, then the midsides of edges 01, 12, 20.
+    pub faces: Vec<[usize; 6]>,
+    /// Master shell component.
+    pub master_component: usize,
+    /// Triangles of the master component forming the patch.
+    pub master_tris: Vec<usize>,
+    /// Skin of the master the solid is glued to: `+1` along the component normal, `-1` against it.
+    pub side: i8,
+}
+
+/// A solid body, its pencil on its own free coordinates, glued to shells on one or more patches.
+#[derive(Debug, Clone)]
+pub struct SolidOnShells<'a> {
+    /// The solid's nodes and free-coordinate map.
+    pub trace: SolidFaceTrace<'a>,
+    /// Solid stiffness on its free coordinates.
+    pub k: &'a Csr,
+    /// Solid mass on its free coordinates.
+    pub m: &'a Csr,
+    /// Glued patches. A node may belong to only one patch.
+    pub ties: Vec<SolidFaceTie>,
+}
+
+/// Shells and solids on one pencil, built by [`tie_solids_to_shells`]: the shell coordinates first
+/// (`0..shell_free`), then each solid's untied coordinates in order.
+#[derive(Debug, Clone)]
+pub struct SolidTiedShellModel {
+    /// The combined pencil. `dof_map` is the shells' map; solid coordinates are reached by
+    /// [`SolidTiedShellModel::expand_solid`].
+    pub model: ShellModel,
+    /// Number of shell coordinates, which come first.
+    pub shell_free: usize,
+    /// Gap, projection and eliminated-DOF receipt of the solid ties alone.
+    pub receipt: TieReceipt,
+    /// Per solid, per solid free coordinate: the combined coordinates and weights it follows.
+    solid_rows: Vec<Vec<Vec<(usize, f64)>>>,
+}
+
+impl SolidTiedShellModel {
+    /// The solid's free coordinates (its own numbering) for a combined vector.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] for an unknown solid or a vector of the wrong length.
+    pub fn expand_solid(&self, solid: usize, combined: &[f64]) -> Result<Vec<f64>, PlateError> {
+        let rows = self
+            .solid_rows
+            .get(solid)
+            .ok_or(PlateError::BadConstraint {
+                what: "unknown solid index",
+            })?;
+        if combined.len() != self.model.free {
+            return Err(PlateError::BadConstraint {
+                what: "combined vector length must equal model.free",
+            });
+        }
+        Ok(rows
+            .iter()
+            .map(|row| row.iter().map(|&(r, w)| w * combined[r]).sum())
+            .collect())
+    }
+
+    /// The combined load of a force vector on the solid's free coordinates: $T_s^T \mathbf{f}$, so that
+    /// `project_solid_load(s, f) . q == f . expand_solid(s, q)` for every combined vector `q`.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] for an unknown solid or a force of the wrong length.
+    pub fn project_solid_load(&self, solid: usize, force: &[f64]) -> Result<Vec<f64>, PlateError> {
+        let rows = self
+            .solid_rows
+            .get(solid)
+            .ok_or(PlateError::BadConstraint {
+                what: "unknown solid index",
+            })?;
+        if force.len() != rows.len() {
+            return Err(PlateError::BadConstraint {
+                what: "solid force length must equal the solid's free coordinates",
+            });
+        }
+        let mut out = vec![0.0; self.model.free];
+        for (row, &f) in rows.iter().zip(force) {
+            for &(r, w) in row {
+                out[r] += w * f;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Glue solid bodies to shells (rigid, translations of every tied face node). `shell` is the shell
+/// pencil on the reduced coordinates of `tied` (that of `tied` itself, or of [`tie_beams_to_shells`]
+/// built on it), and `components` the slice `tied` was built from. Tied solid coordinates are eliminated
+/// by congruence onto the shell coordinates; untied ones are appended. The combined pencil is symmetric
+/// and work-conjugate: $\mathbf{q}^T K \mathbf{q}$ is the sum of the shell and solid strain energies.
+///
+/// # Errors
+/// Returns [`PlateError::BadConstraint`] for an invalid gap tolerance, a shell pencil or component slice
+/// that does not match `tied`, a solid whose pencils, trace or faces are inconsistent, a skin side other
+/// than +-1, an invalid master patch, a face node farther from the master skin than
+/// `budget.gap_tolerance_m` (a solid face not covered by the patch), a node in two patches, or a tied
+/// node with a support-fixed displacement; [`PlateError::Budget`] when the node projections exceed
+/// `budget.max_segments` or the eliminated solid coordinates exceed `budget.max_slave_dofs`; and
+/// [`PlateError::Cancelled`].
+pub fn tie_solids_to_shells(
+    shell: &ShellModel,
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    solids: &[SolidOnShells<'_>],
+    budget: TieBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SolidTiedShellModel, PlateError> {
+    if cancelled() {
+        return Err(PlateError::Cancelled);
+    }
+    if !budget.gap_tolerance_m.is_finite() || budget.gap_tolerance_m < 0.0 {
+        return Err(PlateError::BadConstraint {
+            what: "tie budget gap tolerance must be finite and non-negative",
+        });
+    }
+    if shell.free != tied.model.free
+        || shell.k.nrows() != shell.free
+        || shell.m.nrows() != shell.free
+        || components.len() != tied.map.len()
+        || components
+            .iter()
+            .enumerate()
+            .any(|(i, c)| c.id != i || tied.map[i].len() != c.mesh.nodes.len())
+    {
+        return Err(PlateError::BadConstraint {
+            what: "shell pencil and components must match the tied model",
+        });
+    }
+    let eliminated: BTreeMap<(usize, usize, usize), &[(usize, f64)]> = tied
+        .slave_couplings
+        .iter()
+        .map(|s| {
+            (
+                (s.slave_component, s.slave_node, s.slave_dof),
+                s.master_terms.as_slice(),
+            )
+        })
+        .collect();
+    let mut normals: BTreeMap<usize, Vec<[f64; 3]>> = BTreeMap::new();
+    let mut projections = 0usize;
+    let mut slave_dofs = 0usize;
+    let mut max_gap_m = 0.0_f64;
+    // First pass: the tied rows of every solid, in shell coordinates.
+    let mut tied_rows: Vec<Vec<Option<Vec<(usize, f64)>>>> = Vec::with_capacity(solids.len());
+    for solid in solids {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        let n_free = solid.k.nrows();
+        let trace = solid.trace;
+        if solid.k.ncols() != n_free
+            || solid.m.nrows() != n_free
+            || solid.m.ncols() != n_free
+            || trace.positions_m.len() != trace.dof_index.len()
+            || trace.positions_m.iter().flatten().any(|x| !x.is_finite())
+            || trace
+                .dof_index
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|&f| f >= n_free)
+        {
+            return Err(PlateError::BadConstraint {
+                what: "solid pencils and trace must be square, finite and consistent",
+            });
+        }
+        let mut rows: Vec<Option<Vec<(usize, f64)>>> = vec![None; n_free];
+        let mut tied_nodes: BTreeSet<usize> = BTreeSet::new();
+        for tie in &solid.ties {
+            if tie.side != -1 && tie.side != 1 {
+                return Err(PlateError::BadConstraint {
+                    what: "SolidFaceTie side must be -1 or +1",
+                });
+            }
+            let c_m = tie.master_component;
+            let comp = components.get(c_m).ok_or(PlateError::BadConstraint {
+                what: "SolidFaceTie master component out of range",
+            })?;
+            if tie.master_tris.is_empty()
+                || tie.master_tris.iter().any(|&t| t >= comp.mesh.tris.len())
+                || tie.faces.is_empty()
+            {
+                return Err(PlateError::BadConstraint {
+                    what: "SolidFaceTie needs in-range master triangles and at least one face",
+                });
+            }
+            if !normals.contains_key(&c_m) {
+                normals.insert(c_m, compute_component_normals(comp.mesh)?);
+            }
+            let n_m = &normals[&c_m];
+            let sign = f64::from(tie.side);
+            let offset = |n: usize| scale3(n_m[n], sign * 0.5 * comp.nodal_thickness_m[n]);
+            let mut patch_nodes: BTreeSet<usize> = BTreeSet::new();
+            for face in &tie.faces {
+                for &node in face {
+                    if node >= trace.positions_m.len() {
+                        return Err(PlateError::BadConstraint {
+                            what: "SolidFaceTie face node out of range",
+                        });
+                    }
+                    patch_nodes.insert(node);
+                }
+            }
+            for &node in &patch_nodes {
+                if !tied_nodes.insert(node) {
+                    return Err(PlateError::BadConstraint {
+                        what: "a solid node may be glued in one patch only",
+                    });
+                }
+                projections += 1;
+                if projections > budget.max_segments {
+                    return Err(PlateError::Budget {
+                        what: "tie_segments",
+                        requested: projections,
+                        limit: budget.max_segments,
+                    });
+                }
+                let x = trace.positions_m[node];
+                let mut best = (f64::INFINITY, tie.master_tris[0], [1.0, 0.0, 0.0]);
+                for &t in &tie.master_tris {
+                    let [a, b, c] = comp.mesh.tris[t];
+                    let (bary, proj) = closest_barycentric_triangle(
+                        x,
+                        add3(comp.mesh.nodes[a], offset(a)),
+                        add3(comp.mesh.nodes[b], offset(b)),
+                        add3(comp.mesh.nodes[c], offset(c)),
+                    );
+                    let gap = norm3(sub(x, proj));
+                    if gap < best.0 {
+                        best = (gap, t, bary);
+                    }
+                }
+                max_gap_m = max_gap_m.max(best.0);
+                if best.0 > budget.gap_tolerance_m {
+                    return Err(PlateError::BadConstraint {
+                        what: "solid face node is not on the master skin patch within budget.gap_tolerance_m",
+                    });
+                }
+                let tri = comp.mesh.tris[best.1];
+                let offsets: Vec<[f64; 3]> = tri.iter().map(|&n| offset(n)).collect();
+                let mut constraints = BTreeMap::new();
+                record_slave_nodal_couplings_filtered(
+                    c_m,
+                    &tri,
+                    &offsets,
+                    usize::MAX,
+                    &[node],
+                    &[best.2.to_vec()],
+                    &[false],
+                    RotationCoupling::TranslationsOnly,
+                    None,
+                    &mut constraints,
+                );
+                for a in 0..3 {
+                    let free = trace.dof_index[node][a].ok_or(PlateError::BadConstraint {
+                        what: "a glued solid node may not have a support-fixed displacement",
+                    })?;
+                    let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
+                    for &(c, mn, md, w) in &constraints[&(usize::MAX, node, a)] {
+                        if let Some(r) = tied.map[c][mn][md] {
+                            *acc.entry(r).or_insert(0.0) += w;
+                        } else if let Some(terms) = eliminated.get(&(c, mn, md)) {
+                            for &(r, wr) in *terms {
+                                *acc.entry(r).or_insert(0.0) += w * wr;
+                            }
+                        }
+                    }
+                    rows[free] = Some(acc.into_iter().filter(|&(_, w)| w != 0.0).collect());
+                    slave_dofs += 1;
+                    if slave_dofs > budget.max_slave_dofs {
+                        return Err(PlateError::Budget {
+                            what: "tie_slave_dofs",
+                            requested: slave_dofs,
+                            limit: budget.max_slave_dofs,
+                        });
+                    }
+                }
+            }
+        }
+        tied_rows.push(rows);
+    }
+    // Second pass: number the untied solid coordinates after the shell coordinates, then assemble.
+    let mut free = shell.free;
+    let solid_rows: Vec<Vec<Vec<(usize, f64)>>> = tied_rows
+        .into_iter()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    row.unwrap_or_else(|| {
+                        free += 1;
+                        vec![(free - 1, 1.0)]
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let mut k_coo = Coo::new(free, free);
+    let mut m_coo = Coo::new(free, free);
+    for (target, source) in [(&mut k_coo, &shell.k), (&mut m_coo, &shell.m)] {
+        for row in 0..source.nrows() {
+            let (cols, vals) = source.row(row);
+            for (&col, &val) in cols.iter().zip(vals) {
+                target.push(row, col, val);
+            }
+        }
+    }
+    for (solid, rows) in solids.iter().zip(&solid_rows) {
+        accumulate_congruence(solid.k, rows, &mut k_coo, &mut cancelled)?;
+        accumulate_congruence(solid.m, rows, &mut m_coo, &mut cancelled)?;
+    }
+    let k = k_coo.assemble();
+    let m = m_coo.assemble();
+    if (0..free).any(|row| {
+        k.row(row)
+            .1
+            .iter()
+            .chain(m.row(row).1)
+            .any(|x| !x.is_finite())
+    }) {
+        return Err(PlateError::BadConstraint {
+            what: "solid tie accumulation overflow",
+        });
+    }
+    Ok(SolidTiedShellModel {
+        model: ShellModel {
+            k,
+            m,
+            dof_map: shell.dof_map.clone(),
+            free,
+        },
+        shell_free: shell.free,
+        receipt: TieReceipt {
+            max_gap_m,
+            max_angle_rad: 0.0,
+            segments: projections,
+            slave_dofs,
+        },
+        solid_rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
