@@ -175,9 +175,11 @@ fn g1_hertz_sphere_impact_contact_time_matches_johnson() {
         0.4,
     );
     let reference = 2.943 * maximum / incoming;
-    // Retain the original three-rung gate while exposing finer rungs to
-    // distinguish an event error from a pre-asymptotic discretization band.
-    // Native results, not a presumed method order, must adjudicate that claim.
+    // Native runs (bead .145) measured orders 1.08 and 1.68 on the two coarsest
+    // windows and 2.11, 2.04, 2.01 from 128 cells on: the coarse band is
+    // pre-asymptotic, not an O(dt) event error. The order is therefore gated on
+    // each of the three finest windows (ruling 2026-10-23); the coarse windows
+    // stay printed, ungated. A first-order method still fails all three.
     let mut times = [0.0; 7];
     let rungs = [32, 64, 128, 256, 512, 1024, 2048];
     for (i, cells) in rungs.into_iter().enumerate() {
@@ -190,20 +192,24 @@ fn g1_hertz_sphere_impact_contact_time_matches_johnson() {
             (time / reference - 1.0).abs()
         );
     }
+    const FIRST_GATED_WINDOW: usize = 2;
     for (i, window) in times.windows(3).enumerate() {
         let observed = ((window[0] - window[1]).abs() / (window[1] - window[2]).abs()).log2();
+        let gated = i >= FIRST_GATED_WINDOW;
         println!(
-            "{{\"suite\":\"normal-contact\",\"case\":\"hertz-impact-order\",\"coarse_cells\":{},\"middle_cells\":{},\"fine_cells\":{},\"observed_order\":{observed},\"order_gate\":1.8}}",
+            "{{\"suite\":\"normal-contact\",\"case\":\"hertz-impact-order\",\"coarse_cells\":{},\"middle_cells\":{},\"fine_cells\":{},\"observed_order\":{observed},\"order_gate\":1.8,\"gated\":{gated}}}",
+            rungs[i],
+            rungs[i + 1],
+            rungs[i + 2]
+        );
+        assert!(
+            !gated || (observed.is_finite() && observed >= 1.8),
+            "contact time order {observed} on cells {}/{}/{}: {times:?}",
             rungs[i],
             rungs[i + 1],
             rungs[i + 2]
         );
     }
-    let order = ((times[0] - times[1]).abs() / (times[1] - times[2]).abs()).log2();
-    assert!(
-        order.is_finite() && order >= 1.8,
-        "contact time order {order}: {times:?}"
-    );
     assert!((times[2] / reference - 1.0).abs() <= 0.005);
     assert!((times[6] / reference - 1.0).abs() <= 0.005);
 }
