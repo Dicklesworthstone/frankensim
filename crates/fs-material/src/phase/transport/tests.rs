@@ -66,12 +66,23 @@ fn card(rho: f64, liquid: bool, basis: LiquidViscosityBasis) -> MaterialCard {
                 } else {
                     PropertyValue::Scalar { value, dims }
                 },
+                // Validity axes are typed exactly as point() types them (claims and
+                // queries must agree on each axis quantity since 01ac273e9).
                 validity: ValidityDomain::unconstrained()
-                    .with("T", if liquid_only { 500.0 } else { 400.0 }, 600.0)
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::AbsoluteTemperature,
+                            ValueForm::Static,
+                        )),
+                        if liquid_only { 500.0 } else { 400.0 },
+                        600.0,
+                    )
                     // The smallest positive bound excludes exactly solid, without
                     // inventing a finite cutoff for the material source.
-                    .with(
+                    .with_quantity(
                         "liquid",
+                        QuantitySpec::dimensional(Dims([0; 6])),
                         if liquid_only { f64::from_bits(1) } else { 0.0 },
                         1.0,
                     ),

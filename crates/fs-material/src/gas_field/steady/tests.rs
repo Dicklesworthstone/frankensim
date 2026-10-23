@@ -128,13 +128,14 @@ fn supersaturation_is_refused_instead_of_silently_condensing_or_clamping_species
     problem.source = ThermochemicalGasModel::new(original.thermodynamics().clone(),
         original.transport_materials().to_vec(), Some(&SpeciesId::new("B").unwrap())).unwrap();
     problem.phase = ThermochemicalPhase::LiquidWaterLimit;
-    problem.inlet = state(330.0, vec![0.98, 0.02]);
+    // 320 K: inside the Buck-1996 liquid-water window [253.15, 323.15] K.
+    problem.inlet = state(320.0, vec![0.98, 0.02]);
     for cell in &mut problem.cells {
         cell.wall_temperature_k = 280.0;
         cell.initial_temperature_k = 280.0;
         cell.wall_conductance_w_k = 0.1;
     }
-    assert!(problem.source.evaluate_with_liquid_water_limit(&point(330.0, 101325.0)).is_ok());
+    assert!(problem.source.evaluate_with_liquid_water_limit(&point(320.0, 101325.0)).is_ok());
     let error = problem.solve(controls(), || false).unwrap_err();
     assert!(matches!(error, SteadyGasError::Material(_)));
     assert!(error.to_string().contains("supersaturated"));

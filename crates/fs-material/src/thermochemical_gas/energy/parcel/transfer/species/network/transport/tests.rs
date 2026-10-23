@@ -11,7 +11,7 @@ use crate::state_point::MaterialPropertySelection;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
-use fs_qty::Temperature;
+use fs_qty::{Temperature, QuantitySpec, semantic::{QuantityKind, SemanticType, ValueForm}};
 use fs_thermochem::SpeciesId;
 
 fn energy() -> GasEnergySolve {
@@ -42,7 +42,10 @@ fn card() -> MaterialCard {
         key: PropertyKey::new(BINARY_DIFFUSIVITY_PROPERTY,BINARY_DIFFUSIVITY_DIMS),
         value: PropertyValue::Curve { abscissa:"temperature".into(),abscissa_dims:Temperature::DIMS,
             knots:vec![(200.0,2e-5),(1800.0,2e-5)],dims:BINARY_DIFFUSIVITY_DIMS },
-        validity:ValidityDomain::unconstrained(), uncertainty:UncertaintyModel::Unstated,
+        // Typed like the query's temperature axis, as diffusion/tests.rs types the same claim.
+        validity:ValidityDomain::unconstrained()
+            .with_quantity("temperature",QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature,ValueForm::Static)),200.0,1800.0),
+        uncertainty:UncertaintyModel::Unstated,
         interpolation:InterpolationPolicy::LinearInside, observations:vec![],
         provenance:Provenance {source:"synthetic mixed-path diffusivity".into(),license:"CC0-1.0".into(),artifact:None},
     }).unwrap();

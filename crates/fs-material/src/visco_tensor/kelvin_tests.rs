@@ -66,7 +66,10 @@ fn kelvin_consistent_tangent_and_instantaneous_jump_admission() {
     assert_eq!(history,base);
     assert!(history.advance(target,0.04,||true).is_err());
     assert_eq!(history,base);
-    assert!(history.advance(target,f64::MIN_POSITIVE,||false).is_err());
+    // A dt of f64::MIN_POSITIVE stays finite for this law and is admitted, as the
+    // documented positive-duration ramp allows. The smallest subnormal step overflows
+    // the Kelvin rate, and that refusal must publish no partial state.
+    assert!(history.advance(target,f64::from_bits(1),||false).is_err());
     assert_eq!(history,base);
     let empty_jump = history.advance([0.0;6],0.0,||false).unwrap();
     assert_eq!(empty_jump.dissipated,0.0);
