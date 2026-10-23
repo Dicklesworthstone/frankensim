@@ -24,7 +24,10 @@
 //! owner (`fs_couple::plate_viscosity::hysteretic`); the reduction consumes the
 //! diagonal source damping `c_a = eta_a omega_a`, and the receipt prints each
 //! mode's energy split (including the shares whose loss is unknown) and the
-//! measured off-diagonal coupling the diagonal neglects.
+//! measured off-diagonal coupling the diagonal neglects. Where that coupling is
+//! not small, each coupled cluster's exact eigenvalues are solved and every
+//! mode's diagonal loss factor is printed against its exact one, under the
+//! declared [`DIAGONAL_TOLERANCE`] (ruling 6431).
 use fs_couple::plate_viscosity::hysteretic::{self, NeighbourCoupling, OrthotropicBendingParts, StiffnessShare};
 use fs_plate::{PlateMesh, PlateModel, Stiffener};
 use std::collections::BTreeSet;
@@ -36,6 +39,14 @@ pub const PANEL_SHARES: [&str; 4] = ["panel-l", "panel-r", "panel-lr", "panel-12
 pub const MAX_GROUPS: usize = 16;
 /// Upper bound on printed sensitivity laws.
 pub const MAX_SENSITIVITY: usize = 4;
+/// Two modes whose `|H_ab| / |omega_a^2 - omega_b^2|` reaches this join one
+/// cluster for the exact check of the diagonal (ruling 6431).
+pub const CLUSTER_PAIR_RATIO: f64 = 0.03;
+/// The declared bound on `|eta_exact / eta_diagonal - 1|` (ruling 6431): below
+/// every uncertainty the receipt already prints. A mode above it means the full
+/// source loss matrix must enter the reduction before the board is compared
+/// with any reference.
+pub const DIAGONAL_TOLERANCE: f64 = 0.05;
 
 /// One share's declared loss.
 #[derive(Clone, Debug, PartialEq)]
@@ -221,6 +232,21 @@ pub struct ModeLoss {
     pub neighbours: [Option<NeighbourCoupling>; 2],
     /// The loss factor if the extrapolated shares rose as each sensitivity law.
     pub sensitivity: Vec<f64>,
+    /// The exact loss factor of the coupled cluster's eigenvalue matched to
+    /// this mode (`loss_factor` itself for a mode in no cluster).
+    pub exact_loss_factor: f64,
+    /// The mode's coupled cluster, if any, and its eigenvector overlap.
+    pub cluster: Option<usize>,
+    pub overlap: f64,
+    /// Second-order estimate of the relative change the pairs left between
+    /// clusters would make to the exact loss factor.
+    pub neglected: f64,
+}
+
+impl ModeLoss {
+    /// `eta_exact / eta_diagonal - 1`: how far the reduction's diagonal is off.
+    #[must_use]
+    pub fn diagonal_error(&self) -> f64 { self.exact_loss_factor / self.loss_factor - 1.0 }
 }
 
 /// The applied declaration on every source mode.
@@ -229,6 +255,10 @@ pub struct MaterialLossReceipt {
     pub shares: Vec<(String, ShareLoss)>,
     pub sensitivity: Vec<RiseLaw>,
     pub modes: Vec<ModeLoss>,
+    /// The coupled clusters of the exact check, and the largest pair ratio left
+    /// between them.
+    pub clusters: Vec<Vec<usize>>,
+    pub max_outside_ratio: f64,
     pub caveats: Vec<String>,
 }
 
@@ -258,6 +288,16 @@ impl MaterialLossReceipt {
         }).collect()
     }
 
+    /// The modes whose diagonal loss factor is off its cluster-exact one by more
+    /// than [`DIAGONAL_TOLERANCE`], and the largest `|diagonal_error|` with its mode.
+    #[must_use]
+    pub fn diagonal_check(&self) -> (Vec<usize>, f64, usize) {
+        let above = (0..self.modes.len()).filter(|&a| self.modes[a].diagonal_error().abs() > DIAGONAL_TOLERANCE).collect();
+        let (worst, mode) = self.modes.iter().enumerate().map(|(a, m)| (m.diagonal_error().abs(), a))
+            .fold((0.0_f64, 0), |best, x| if x.0 > best.0 { x } else { best });
+        (above, worst, mode)
+    }
+
     /// One line per mode, tab-separated, with a header naming every column.
     #[must_use]
     pub fn tsv(&self) -> String {
@@ -265,7 +305,7 @@ impl MaterialLossReceipt {
         for (name, _) in &self.shares { let _ = write!(out, "\tf_{name}"); }
         out.push_str("\tunknown_fraction\textrapolated\tmax_coupling\tlower_neighbour\tlower_ratio\tupper_neighbour\tupper_ratio");
         for law in &self.sensitivity { let _ = write!(out, "\tloss_factor_if_{}", law.label); }
-        out.push('\n');
+        out.push_str("\texact_loss_factor\tdiagonal_error\tcluster\toverlap\tneglected\n");
         for (a, m) in self.modes.iter().enumerate() {
             let _ = write!(out, "{a}\t{:.6}\t{:.6e}\t{:.6e}", m.frequency_hz, m.loss_factor, m.damping_ratio);
             for f in &m.fractions { let _ = write!(out, "\t{f:.6e}"); }
@@ -278,7 +318,9 @@ impl MaterialLossReceipt {
                 }
             }
             for s in &m.sensitivity { let _ = write!(out, "\t{s:.6e}"); }
-            out.push('\n');
+            let cluster = m.cluster.map_or_else(|| "-".to_string(), |k| k.to_string());
+            let _ = writeln!(out, "\t{:.6e}\t{:+.3e}\t{cluster}\t{:.3}\t{:.1e}", m.exact_loss_factor, m.diagonal_error(),
+                m.overlap, m.neglected);
         }
         out
     }
@@ -349,6 +391,7 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
         }
     }
     let loss = energies.hysteretic(&eta).map_err(|e| format!("board material loss: {e}"))?;
+    let exact = energies.cluster_exact(&eta, CLUSTER_PAIR_RATIO).map_err(|e| format!("board material loss check: {e}"))?;
     let unknown: Vec<usize> = (0..names.len()).filter(|&c| matches!(declaration.loss(&names[c]), ShareLoss::Unknown { .. })).collect();
     let modes = (0..n).map(|a| {
         let hz = omega[a] / std::f64::consts::TAU;
@@ -362,7 +405,8 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
         ModeLoss { frequency_hz: hz, loss_factor: loss.loss_factor[a], damping_ratio: loss.loss_factor[a] / 2.0,
             unknown_fraction: unknown.iter().map(|&c| fractions[c]).sum(), fractions,
             extrapolated: extrapolated[a].clone(), max_coupling: loss.max_coupling[a],
-            neighbours: loss.neighbours[a], sensitivity }
+            neighbours: loss.neighbours[a], sensitivity, exact_loss_factor: exact.loss_factor[a],
+            cluster: exact.cluster_of[a], overlap: exact.overlap[a], neglected: exact.neglected[a] }
     }).collect::<Vec<ModeLoss>>();
     let mut caveats = Vec::new();
     for &c in &unknown {
@@ -381,8 +425,34 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
                 domain_hz.1, outside.len()));
         }
     }
+    // Off-diagonal loss: sqrt(eta_c,a eta_c,b) is exact only where a share's loss is the same at both modes.
+    let varying = (0..names.len()).filter(|&c| eta[c].iter().any(|v| *v != eta[c][0])).count();
+    caveats.push(if varying == 0 {
+        "off-diagonal loss H_ab takes sqrt(eta_c,a eta_c,b) as share c's loss between two modes: exact here, since \
+            every share's loss factor is the same at every mode".to_string()
+    } else {
+        format!("off-diagonal loss H_ab takes sqrt(eta_c,a eta_c,b) as share c's loss between two modes: a stated \
+            choice for the {varying} shares whose loss factor differs between modes")
+    });
     // Shares in projection order, matching every mode's fraction columns.
     let shares = names.iter().map(|name| (name.clone(), declaration.loss(name).clone())).collect();
-    Ok((loss.source_damping, MaterialLossReceipt { shares,
-        sensitivity: declaration.sensitivity.clone(), modes, caveats }))
+    let mut receipt = MaterialLossReceipt { shares, sensitivity: declaration.sensitivity.clone(), modes,
+        clusters: exact.clusters, max_outside_ratio: exact.max_outside_ratio, caveats };
+    let (above, worst, mode) = receipt.diagonal_check();
+    let largest = receipt.clusters.iter().map(Vec::len).max().unwrap_or(0);
+    let left_out = receipt.modes.iter().map(|m| m.neglected).fold(0.0_f64, f64::max);
+    let mut check = format!("diagonal loss factor against the exact eigenvalues of each coupled cluster (modes joined \
+        where |H_ab|/|w_a^2-w_b^2| >= {CLUSTER_PAIR_RATIO}: {} clusters, largest {largest} modes; between clusters the \
+        largest pair ratio is {:.3e} and the largest second-order estimate of what is left out {left_out:.1e}): \
+        largest |change| {:.2}% at mode {mode} ({:.1} Hz); {} modes above the declared {:.0}% tolerance",
+        receipt.clusters.len(), receipt.max_outside_ratio, 100.0 * worst, receipt.modes[mode].frequency_hz, above.len(),
+        100.0 * DIAGONAL_TOLERANCE);
+    if !above.is_empty() {
+        let list = above.iter().map(|&a| format!("{a} ({:.1} Hz, {:+.1}%)", receipt.modes[a].frequency_hz,
+            100.0 * receipt.modes[a].diagonal_error())).collect::<Vec<_>>().join(", ");
+        let _ = write!(check, " ({list}): the full source loss matrix must enter the reduction before this board is \
+            compared with any reference");
+    }
+    receipt.caveats.push(check);
+    Ok((loss.source_damping, receipt))
 }

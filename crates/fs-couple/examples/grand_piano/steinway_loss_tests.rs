@@ -6,7 +6,8 @@
 //! Swapping the panel's along-grain claim moves each mode by its energy
 //! fraction times the change; drier air moves the panel's along-grain loss
 //! along the Sitka moisture curve, and every mode's loss with it.
-use super::super::board_geometry::{BoardGeometry, loss::{MaterialLossReceipt, ShareLoss}, ritz::RitzOptions};
+use super::super::board_geometry::{BoardGeometry, ritz::RitzOptions,
+    loss::{CLUSTER_PAIR_RATIO, DIAGONAL_TOLERANCE, MaterialLossReceipt, ShareLoss}};
 use super::*;
 use fs_matdb::PropertyValue;
 
@@ -192,7 +193,9 @@ fn drier_air_moves_each_mode_as_the_sitka_moisture_curve_predicts() {
 // G1 (DONE-WHEN regression): the shipped resolution and slice. Every source
 // mode of the 2400 Hz slice and every reduced coordinate is printed against
 // the authored 0.015, with the per-band summary and the near-pair coupling the
-// diagonal neglects. The shipped .bin is untouched by this test.
+// diagonal neglects. Ruling 6431: each coupled cluster's exact eigenvalues
+// measure the diagonal's error per mode against the declared 5 %; the result
+// is printed, never tuned. The shipped .bin is untouched by this test.
 #[test]
 fn the_shipped_slice_reports_material_damping_against_the_authored_ratio() {
     let materials = reference_materials().unwrap();
@@ -211,6 +214,26 @@ fn the_shipped_slice_reports_material_damping_against_the_authored_ratio() {
     let worst = receipt.modes.iter().enumerate().flat_map(|(a, m)| m.neighbours.iter().flatten().map(move |c| (a, c.mode, c.ratio)))
         .max_by(|x, y| x.2.total_cmp(&y.2)).unwrap();
     println!("largest near-pair coupling |H_ab|/|w_a^2 - w_b^2|: modes {} and {}: {:.3e}", worst.0, worst.1, worst.2);
+    for (k, cluster) in receipt.clusters.iter().enumerate() {
+        assert!(cluster.len() >= 2 && cluster.iter().all(|&a| receipt.modes[a].cluster == Some(k)), "cluster {k}");
+        for &a in cluster {
+            let m = &receipt.modes[a];
+            println!("cluster {k} mode {a} {:.2} Hz: diagonal eta {:.5}, exact {:.5} ({:+.2}%), overlap {:.3}, \
+                left out {:.1e}", m.frequency_hz, m.loss_factor, m.exact_loss_factor, 100.0 * m.diagonal_error(),
+                m.overlap, m.neglected);
+        }
+    }
+    assert!(receipt.max_outside_ratio < CLUSTER_PAIR_RATIO, "{}", receipt.max_outside_ratio);
+    for (a, m) in receipt.modes.iter().enumerate() {
+        assert!(m.exact_loss_factor > 0.0 && m.exact_loss_factor.is_finite(), "mode {a}");
+        if m.cluster.is_none() { assert_eq!(m.exact_loss_factor, m.loss_factor, "mode {a}"); }
+    }
+    let (above, largest, at) = receipt.diagonal_check();
+    println!("diagonal check: {} clusters, largest |eta_exact/eta_diagonal - 1| {:.3}% at mode {at} ({:.1} Hz); \
+        {} modes above the declared {DIAGONAL_TOLERANCE}: {above:?}", receipt.clusters.len(), 100.0 * largest,
+        receipt.modes[at].frequency_hz, above.len());
+    assert!(receipt.caveats.iter().any(|c| c.starts_with("diagonal loss factor against the exact eigenvalues")));
+    assert!(receipt.caveats.iter().any(|c| c.starts_with("off-diagonal loss H_ab takes sqrt") && c.contains("exact here")));
     for (i, mode) in board.modes.iter().enumerate() {
         println!("coordinate {i:2}: {:9.3} Hz, damping ratio {:.5} = {:.3} x {AUTHORED_RATIO}", mode.frequency_hz,
             mode.damping_ratio, mode.damping_ratio / AUTHORED_RATIO);
