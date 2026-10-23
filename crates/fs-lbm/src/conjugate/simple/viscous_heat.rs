@@ -1,18 +1,22 @@
 //! Viscous power from the SAME source-resolved staggered stress operator.
 //!
-//! This entry solves steady Stokes flow in a closed Cartesian box of flow-active
-//! voxels. Molecular viscosity may vary by cell; walls may move tangentially.
-//! A declared stationary linear Darcy frame may absorb work as local heat.
-//! Inertia, momentum convection, openings, obstacles, nonlinear resistance,
-//! turbulence and fans are excluded. Walls and explicit body-force actuators
-//! supply work; neither pressure-constraint work nor momentum residual is heat.
+//! This entry solves steady Stokes flow in a closed Cartesian box, including
+//! fixed no-slip solid voxels. Molecular viscosity may vary by fluid cell;
+//! exterior walls may move tangentially. A declared stationary linear Darcy
+//! frame may absorb work as local heat. Inertia, momentum convection, openings,
+//! moving solids, nonlinear resistance, turbulence and fans are excluded.
+//! Exterior walls and explicit body-force actuators supply work; neither
+//! pressure-constraint work nor momentum residual is heat.
 //! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
 //!
 //! Normal stress uses `2 mu (du_a/dx_a)^2 V` at each cell. Each reciprocal MAC
 //! shear edge contributes `mu_edge (du_a/dx_d + du_d/dx_a)^2 V_edge` once. The
 //! original harmonic edge viscosity supplies the common stress; its half-cell
-//! resistance fractions partition the heat. At a wall, the original parallel
-//! half-cell conductances supply both traction work and local heat. No residual,
+//! resistance fractions partition the heat. Only four-fluid-cell edges carry
+//! that reciprocal shear. Blocked transverse faces use the original stationary
+//! half-cell no-slip walls, including staircase corners. The same parallel wall
+//! conductances supply traction work and local fluid heat; fixed internal walls
+//! supply zero work. Solid voxels receive no fluid dissipation. No residual,
 //! upwind diffusion or pressure-constraint work is converted into heat.
 
 use super::*;
@@ -74,7 +78,7 @@ pub(crate) fn admit_heating(
     config: &SimpleConfig,
     controls: ViscousHeatControls,
 ) -> Result<(), ChtError> {
-    if domain.fluid_count() != domain.cell_count()
+    if domain.fluid_count() == 0
         || config
             .faces
             .iter()
@@ -85,7 +89,7 @@ pub(crate) fn admit_heating(
         || !config.resistances.is_empty()
     {
         return Err(invalid_power(
-            "viscous heat requires a closed all-fluid box with walls/symmetry, without fans, configured resistances or turbulence",
+            "viscous heat requires a closed box containing fluid with fixed no-slip solids and walls/symmetry, without fans, configured resistances or turbulence",
         ));
     }
     if !controls.maximum_reynolds.is_finite()
@@ -107,6 +111,25 @@ pub(crate) fn admit_heating(
                 return Err(invalid_power(
                     "walls must move tangentially with at least two cells along every driven component",
                 ));
+            }
+            // A solid obstacle can remove every free tangential MAC face of a
+            // driven wall patch even when the full box has several columns.
+            // Refuse an unrepresented actuator instead of returning zero work.
+            for c in 0..domain.cell_count() {
+                if !domain.is_fluid(c) || domain.neighbor(c, side).is_some() {
+                    continue;
+                }
+                for a in 0..3 {
+                    if velocity[a] != 0.0
+                        && !(0..2).any(|s| {
+                            domain.neighbor(c, 2 * a + s).is_some_and(|n| domain.is_fluid(n))
+                        })
+                    {
+                        return Err(invalid_power(
+                            "every moving wall patch needs adjacent fluid cells along its driven component",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -268,6 +291,9 @@ impl Solver<'_> {
         };
         for (c, cell_heat) in heat.iter_mut().enumerate() {
             poll(gate)?;
+            if !domain.is_fluid(c) {
+                continue;
+            }
             let at = domain.coords(c);
             for a in 0..3 {
                 let gradient = (self.vel[a][self.cell_face(a, at, true)]
@@ -295,6 +321,14 @@ impl Solver<'_> {
                     minus_d[d] -= 1;
                     let mut minus_both = minus_a;
                     minus_both[d] -= 1;
+                    let cells = [minus_both, minus_d, minus_a, plus];
+                    // Both reciprocal component pairs are active precisely
+                    // when all four cells are fluid. A missing cell instead
+                    // blocks the neighbouring MAC face: momentum uses its
+                    // no-slip wall coefficient, accounted below.
+                    if cells.iter().any(|&p| !domain.is_fluid(cell_of(self.n, p))) {
+                        continue;
+                    }
                     let la = 0.5 * (domain.width(a, minus_a[a]) + domain.width(a, plus[a]));
                     let ld = 0.5 * (domain.width(d, minus_d[d]) + domain.width(d, plus[d]));
                     let gradient = (self.vel[a][self.comps[a].index(plus)]
@@ -307,7 +341,6 @@ impl Solver<'_> {
                     let power =
                         mu * la * ld * domain.width(third, plus[third]) * gradient * gradient;
                     add(&mut quadrature_w, power)?;
-                    let cells = [minus_both, minus_d, minus_a, plus];
                     let minimum = cells
                         .iter()
                         .map(|&p| self.mu_eff(p))
@@ -327,7 +360,9 @@ impl Solver<'_> {
                 }
             }
         }
-        // Use exactly the parallel half-cell wall coefficient in momentum().
+        // Use exactly the parallel half-cell wall coefficient in momentum(),
+        // on both exterior walls and stationary blocked transverse faces.
+        // No fluid loss is deposited into the immobile obstacle.
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
@@ -341,31 +376,46 @@ impl Solver<'_> {
                         continue;
                     }
                     for side in [0, 1] {
-                        if plus[d] != if side == 0 { 0 } else { self.n[d] - 1 } {
-                            continue;
-                        }
-                        let face = 2 * d + side;
-                        let FvBoundary::Wall { velocity } = self.faces[face] else {
-                            continue;
+                        let outside = plus[d] == if side == 0 { 0 } else { self.n[d] - 1 };
+                        let (boundary, wall_velocity) = if outside {
+                            let face = 2 * d + side;
+                            let FvBoundary::Wall { velocity } = self.faces[face] else {
+                                continue;
+                            };
+                            (Some(face), velocity[a])
+                        } else {
+                            let mut next = plus;
+                            if side == 0 {
+                                next[d] -= 1;
+                            } else {
+                                next[d] += 1;
+                            }
+                            if !matches!(
+                                self.comps[a].kind[self.comps[a].index(next)],
+                                Kind::Fixed(_)
+                            ) {
+                                continue;
+                            }
+                            // A blocked face has exactly zero velocity. The
+                            // native staggered wall closure also applies at
+                            // three-fluid-cell staircase corners.
+                            (None, 0.0)
                         };
                         let wall_mu = self.wall_mu(minus, plus);
-                        let coefficient = 2.0
-                            * wall_mu
-                            * 0.5
-                            * (wm + wp)
-                            * domain.width(3 - a - d, plus[3 - a - d])
-                            / domain.width(d, plus[d]);
-                        let difference = velocity[a] - self.vel[a][index];
+                        let coefficient = 2.0 * self.wall_shear_base_conductance(minus, plus, a, d);
+                        let difference = wall_velocity - self.vel[a][index];
                         let power = coefficient * difference * difference;
                         add(&mut quadrature_w, power)?;
-                        add(
-                            &mut wall_tangential_force_n[face][a],
-                            coefficient * difference,
-                        )?;
-                        add(
-                            &mut wall_power_w[face],
-                            coefficient * difference * velocity[a],
-                        )?;
+                        if let Some(face) = boundary {
+                            add(
+                                &mut wall_tangential_force_n[face][a],
+                                coefficient * difference,
+                            )?;
+                            add(
+                                &mut wall_power_w[face],
+                                coefficient * difference * wall_velocity,
+                            )?;
+                        }
                         for (p, width) in [(minus, wm), (plus, wp)] {
                             add(
                                 &mut heat[cell_of(self.n, p)],
@@ -383,6 +433,9 @@ impl Solver<'_> {
             let mut drag_heat = vec![0.0; domain.cell_count()];
             for (c, cell_heat) in drag_heat.iter_mut().enumerate() {
                 poll(gate)?;
+                if !domain.is_fluid(c) {
+                    continue;
+                }
                 let at = domain.coords(c);
                 for a in 0..3 {
                     let (beta, inertial) = self.porous[c][a];
@@ -438,6 +491,9 @@ impl Solver<'_> {
             let mut body_work = vec![0.0; domain.cell_count()];
             for (c, work) in body_work.iter_mut().enumerate() {
                 poll(gate)?;
+                if !domain.is_fluid(c) {
+                    continue;
+                }
                 let at = domain.coords(c);
                 for a in 0..3 {
                     for plus in [false, true] {
@@ -478,6 +534,9 @@ impl Solver<'_> {
         let mut pressure_constraint_power_w = 0.0;
         for c in 0..domain.cell_count() {
             poll(gate)?;
+            if !domain.is_fluid(c) {
+                continue;
+            }
             let outward: f64 = (0..6).map(|face| flow.field.outward(domain, c, face)).sum();
             add(
                 &mut pressure_constraint_power_w,
@@ -506,7 +565,9 @@ impl Solver<'_> {
         let minimum_mu = self
             .molecular_viscosity
             .iter()
-            .copied()
+            .enumerate()
+            .filter(|(c, _)| domain.is_fluid(*c))
+            .map(|(_, mu)| *mu)
             .fold(f64::INFINITY, f64::min);
         let reynolds = finite_value(
             "viscous_heat.reynolds",

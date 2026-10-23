@@ -7,6 +7,8 @@ use fs_lbm::conjugate::{
 
 #[path = "viscous/forcing.rs"]
 mod forcing;
+#[path = "viscous/obstacles.rs"]
+mod obstacles;
 
 fn driven_box() -> SimpleConfig {
     let mut faces = [FvBoundary::wall(); 6];

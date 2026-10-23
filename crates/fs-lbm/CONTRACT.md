@@ -2126,14 +2126,34 @@ cancellation refusals. Native Cargo execution remains separately required.
 
 ### Prescribed body work, material heat and latent feedback
 
-`conjugate::creeping_flow_with_body_force_heat` uses the original closed,
-all-fluid Stokes solver with one explicit force-density vector per voxel.
+`conjugate::creeping_flow_with_body_force_heat` uses the original closed
+Stokes solver, including fixed no-slip solid voxels, with one explicit
+force-density vector per voxel (zero in solids).
 The original MAC half-cell interpolation supplies both the momentum force and
 its signed work against the returned face velocities. An independent cell
 half-volume partition must agree. Negative body work represents an absorbing
 actuator. Only the original molecular and stationary Darcy dissipation enters
 heat; wall/body supply, pressure-constraint work and numerical residuals are
 separately accounted and never deposited again.
+
+Fixed solid voxels are exact impermeable momentum constraints, not large finite
+Darcy coefficients. Normal viscous heat is sampled only in fluid cells. The
+reciprocal shear quadrature requires four fluid cells at its MAC edge; a blocked
+transverse face instead uses the native stationary half-cell wall coefficient,
+including staircase corners. Momentum and heat share that coefficient. The
+original parallel half-cell conductances partition wall dissipation into the
+adjacent fluid cells; an internal stationary wall supplies zero mechanical work.
+Ignored solid viscosity slots neither receive fluid heat nor set the fluid
+Reynolds bound. A moving exterior-wall patch without an active tangential fluid
+face is refused. Solid heat conduction remains with its existing thermal owner.
+
+The obstacle regressions include a wall-driven cavity above a fixed solid bed
+with an independent scalar Stokes reduction, graded heterogeneous half-cell
+resistances, and the one-loop circulation around a central solid voxel. They
+check zero obstacle flux/heat, exact actuator-work balance, and material-driven
+deposition through the existing enthalpy observer. This is fixed geometry; it
+does not admit moving solids, all-solid flow, phase activation, or stress release
+during melting.
 
 `MaterialFlowFeedback::with_body_force_heating` retains this force field over
 an accepted advance. Every actual thermal substep reuses the same viscosity,

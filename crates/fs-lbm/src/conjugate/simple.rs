@@ -876,6 +876,23 @@ impl<'a> Solver<'a> {
         self.mu * ratio
     }
 
+    /// Original wall conductance over one full row width. The no-slip
+    /// half-cell boundary coefficient is TWICE this value. Momentum and heat
+    /// share both its source viscosity and geometry; the original arithmetic
+    /// order and momentum FMA remain unchanged. `minus` and `plus` border an
+    /// active component-`a` face; `d != a` is the wall-normal direction.
+    fn wall_shear_base_conductance(
+        &self,
+        minus: [usize; 3],
+        plus: [usize; 3],
+        a: usize,
+        d: usize,
+    ) -> f64 {
+        let length = 0.5 * (self.domain.width(a, minus[a]) + self.domain.width(a, plus[a]));
+        let side_area = length * self.domain.width(3 - a - d, plus[3 - a - d]);
+        (side_area / self.domain.width(d, plus[d])) * self.wall_mu(minus, plus)
+    }
+
     /// Mean effective viscosity at the CV edge shared by `minus` and
     /// `plus` across direction `d` (`up`: toward +d): the fluid cells among
     /// the two and their neighbours across the edge.
@@ -1367,11 +1384,11 @@ impl<'a> Solver<'a> {
                         let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
                         s * edge_mu * w3 * (vp - vm)
                     };
-                    let wall_conductance = side_area / row_width;
                     if outside {
                         match self.faces[2 * d + usize::from(plus)] {
                             FvBoundary::Wall { velocity } => {
-                                let wall = wall_conductance * self.wall_mu(minus_cell, plus_cell);
+                                let wall =
+                                    self.wall_shear_base_conductance(minus_cell, plus_cell, a, d);
                                 a_p += 2.0 * wall;
                                 rhs = (2.0 * wall).mul_add(velocity[a], rhs);
                             }
@@ -1417,7 +1434,8 @@ impl<'a> Solver<'a> {
                         // inflow through the edge brings zero momentum.
                         _ => {
                             net_out += edge_flux;
-                            let wall = wall_conductance * self.wall_mu(minus_cell, plus_cell);
+                            let wall =
+                                self.wall_shear_base_conductance(minus_cell, plus_cell, a, d);
                             a_p += 2.0f64.mul_add(wall, (-edge_flux).max(0.0));
                         }
                     }
