@@ -678,6 +678,7 @@ dependencies = [
  "fs-dcontact",
  "fs-duct",
  "fs-exec",
+ "fs-feec",
  "fs-fft",
  "fs-iface",
  "fs-la",
@@ -777,8 +778,10 @@ dependencies = [
 name = "fs-feec"
 version = "0.0.1"
 dependencies = [
+ "fs-ivl",
  "fs-la",
  "fs-math",
+ "fs-modal",
  "fs-qty",
  "fs-rep-mesh",
  "fs-soa",

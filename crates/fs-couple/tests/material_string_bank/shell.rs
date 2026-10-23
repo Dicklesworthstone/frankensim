@@ -175,3 +175,6 @@ mod assembly;
 
 #[path = "shell/bem.rs"]
 mod bem;
+
+#[path = "shell/cavity.rs"]
+mod cavity;

@@ -166,6 +166,7 @@ pub struct HelmholtzFe<'c> {
 }
 
 struct FaceRule {
+    vertices: [u32; 3],
     dofs: Vec<usize>,
     phi: Vec<Vec<f64>>,
     weights: Vec<f64>,
@@ -386,11 +387,98 @@ impl<'c> HelmholtzFe<'c> {
         }
         let weights = quad.iter().map(|(_, w)| w * 2.0 * area).collect();
         Ok(FaceRule {
+            vertices: [tet[local[0]], tet[local[1]], tet[local[2]]],
             dofs,
             phi,
             weights,
             area,
         })
+    }
+
+    /// Number of exterior boundary faces, without allocating a face table.
+    #[must_use]
+    pub fn boundary_face_count(&self) -> usize {
+        self.owners.iter().filter(|owner| owner.2 == 1).count()
+    }
+
+    /// Original straight-sided volume geometry; no boundary remeshing is implied.
+    #[must_use]
+    pub fn positions(&self) -> &[[f64; 3]] { &self.positions }
+
+    /// Original tetrahedra in their supplied vertex order.
+    #[must_use]
+    pub fn tetrahedra(&self) -> &[[u32; 4]] { &self.space.complex.tets }
+
+    /// Original hierarchical polynomial order.
+    #[must_use]
+    pub const fn order(&self) -> usize { self.order }
+
+    /// One boundary triangle in the caller's vertex order and its OUTWARD
+    /// unit normal. The owning tetrahedron determines the sign, independently
+    /// of how a caller ordered the three boundary indices.
+    pub fn boundary_geometry(&self, face: [u32; 3])
+        -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError>
+    {
+        let mut key = face;
+        key.sort_unstable();
+        let fi = self.space.complex.faces.binary_search(&key)
+            .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
+        let (tet, omit, count) = self.owners[fi];
+        if count != 1 { return Err(AcousticFeError::FaceNotOnBoundary { face }); }
+        let vertices = face.map(|v| self.positions[v as usize]);
+        let area_vector = cross3(sub3(vertices[1], vertices[0]), sub3(vertices[2], vertices[0]));
+        let twice_area = fs_math::det::sqrt(dot3(area_vector, area_vector));
+        let opposite = self.positions[self.space.complex.tets[tet as usize][omit as usize] as usize];
+        let sign = if dot3(area_vector, sub3(opposite, vertices[0])) < 0.0 { 1.0 } else { -1.0 };
+        if !twice_area.is_finite() || twice_area <= 0.0 {
+            return Err(AcousticFeError::DegenerateTet { tet: tet as usize });
+        }
+        Ok((vertices, area_vector.map(|v| sign * v / twice_area), 0.5 * twice_area))
+    }
+
+    /// Work-conjugate boundary load b_i = integral(phi_i u_n dS) for
+    /// piecewise-linear normal displacement/velocity, using the SAME pressure
+    /// basis and face quadrature as the original Helmholtz operators.
+    ///
+    /// Each entry contains a boundary face and values at its three vertices in
+    /// THAT order. This integrates the product, not the product of face means:
+    /// nonuniform structural traces therefore couple to nonuniform pressure.
+    /// No normal or sign is inferred here; the structural owner supplies an
+    /// outward-from-gas trace. Repeated faces and nonfinite traces refuse.
+    pub fn boundary_linear_load(&self, traces: &[([u32; 3], [f64; 3])])
+        -> Result<Vec<f64>, AcousticFeError>
+    {
+        let quad = tri_quadrature(self.order + 1);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut load = vec![0.0; self.ndof()];
+        for &(face, values) in traces {
+            let mut key = face;
+            key.sort_unstable();
+            if !seen.insert(key) || values.iter().any(|v| !v.is_finite()) {
+                return Err(AcousticFeError::InvalidInput {
+                    what: "boundary trace requires unique faces and finite nodal values",
+                });
+            }
+            let rule = self.face_rule(face, &quad)?;
+            let mut local_values = [0.0; 3];
+            for (local, vertex) in rule.vertices.iter().enumerate() {
+                let source = face.iter().position(|v| v == vertex)
+                    .ok_or(AcousticFeError::InvalidInput { what: "boundary trace vertex mismatch" })?;
+                local_values[local] = values[source];
+            }
+            for (local, &global) in rule.dofs.iter().enumerate() {
+                let value: f64 = quad.iter().zip(&rule.weights).zip(&rule.phi[local])
+                    .map(|(((barycentric, _), weight), pressure)| {
+                        let normal: f64 = barycentric.iter().zip(local_values).map(|(b,u)| b*u).sum();
+                        weight * pressure * normal
+                    }).sum();
+                load[global] += value;
+            }
+        }
+        if load.iter().any(|v| !v.is_finite()) {
+            return Err(AcousticFeError::InvalidInput { what: "boundary trace projection overflow" });
+        }
+        Ok(load)
     }
 
     /// The boundary mass matrix `C = int_faces phi_i phi_j dS` of the given boundary faces.
@@ -1013,6 +1101,47 @@ mod tests {
             rom.response(-1.0, 0, 1.0, &[[0.0, 0.0]]).err(),
             Some(AcousticFeError::InvalidInput { .. })
         ));
+    }
+
+    #[test]
+    fn linear_boundary_trace_integrates_the_product_and_is_vertex_order_invariant() {
+        let (complex, positions) = scaled_box(1, [1.0, 1.0, 1.0]);
+        for order in 1..=MAX_ORDER {
+            let fe = HelmholtzFe::new(&complex, &positions, order, AIR).unwrap();
+            let face = fe.boundary_faces()[0];
+            let (_, _, area) = fe.boundary_geometry(face).unwrap();
+            let values = [1.0, -2.0, 4.0];
+            let load = fe.boundary_linear_load(&[(face, values)]).unwrap();
+            // The three pressure vertex functions are barycentric coordinates:
+            // int N_i N_j = A/6 on the diagonal and A/12 off diagonal.
+            for i in 0..3 {
+                let expected = area * (values.iter().sum::<f64>() + values[i]) / 12.0;
+                assert!((load[face[i] as usize] - expected).abs() < 2e-13 * area);
+            }
+            let permuted = fe.boundary_linear_load(&[
+                ([face[2], face[0], face[1]], [values[2], values[0], values[1]])
+            ]).unwrap();
+            assert_eq!(load, permuted);
+            let uniform = fe.boundary_linear_load(&[(face, [1.0; 3])]).unwrap();
+            let (original, _) = fe.boundary_load(&[face]).unwrap();
+            for (a,b) in uniform.iter().zip(original) { assert!((a-b).abs() < 2e-13 * area); }
+            assert!(fe.boundary_linear_load(&[(face, values), (face, values)]).is_err());
+            assert!(fe.boundary_linear_load(&[(face, [f64::NAN, 0.0, 0.0])]).is_err());
+        }
+    }
+
+    #[test]
+    fn boundary_geometry_uses_the_owning_volume_for_its_outward_normal() {
+        let (complex, positions) = scaled_box(1, [0.4, 0.3, 0.2]);
+        let fe = HelmholtzFe::new(&complex, &positions, 1, AIR).unwrap();
+        for face in fe.boundary_faces() {
+            let (vertices, normal, area) = fe.boundary_geometry(face).unwrap();
+            let center = [0.2, 0.15, 0.1];
+            assert!(dot3(normal, sub3(vertices[0], center)) > 0.0);
+            let (_, reversed, a) = fe.boundary_geometry([face[2], face[1], face[0]]).unwrap();
+            assert!((area-a).abs() < 1e-14);
+            for (n,r) in normal.iter().zip(reversed) { assert!((n-r).abs() < 1e-14); }
+        }
     }
 
     #[test]

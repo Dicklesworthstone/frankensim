@@ -33,6 +33,10 @@ pub mod prepared;
 pub mod network;
 
 
+/// Bounded distributed pressure basis, separate from the mechanical owner's
+/// total state budget. No producer may silently truncate a larger FE window.
+pub const MAX_CAVITY_PRESSURE_MODES: usize = 256;
+
 /// Cold-compiled acoustic storage. Interface signs are OUTWARD from the gas,
 /// unlike a compression-positive drum pickup. Cavity norms and couplings must
 /// come from the same basis; rescaling one without the other changes physics.
@@ -72,7 +76,7 @@ impl CavityCoupling {
         let count = cavity.omegas.len();
         if maximum_modes == 0
             || maximum_modes > crate::modal_acoustic_time::MAX_TIME_DOMAIN_ACOUSTIC_MODES
-            || structural == 0 || structural > maximum_modes || count == 0 || count > 8
+            || structural == 0 || structural > maximum_modes || count == 0 || count > MAX_CAVITY_PRESSURE_MODES
             || cavity.lambdas.len() != count || cavity.interface.len() != count
             || coupling.len() != structural*count || damping_per_s.len() != count
             || cavity.loss_factor != 0.0
@@ -222,7 +226,7 @@ impl CavityCoupling {
             || state[..2*self.total].iter().any(|v| !v.is_finite()) {
             return Err(invalid("cavity pressure needs the complete finite accepted state"));
         }
-        let mut values = [0.0;8];
+        let mut values = [0.0;MAX_CAVITY_PRESSURE_MODES];
         for (j,spring) in self.springs.iter().enumerate() {
             let volume = spring.areas.iter().enumerate().map(|(r,c)| c*state[2*r]).sum::<f64>();
             values[j] = -(spring.bulk_modulus_pa/spring.volume_m3)*volume;
@@ -238,7 +242,7 @@ impl CavityCoupling {
         if basis_values.len() != self.cavity_modes() || basis_values.iter().any(|v| !v.is_finite()) {
             return Err(invalid("cavity receiver must use the same finite pressure basis"));
         }
-        let mut a = [0.0;8];
+        let mut a = [0.0;MAX_CAVITY_PRESSURE_MODES];
         self.pressures_into(state,&mut a[..self.cavity_modes()])?;
         let pressure = a.iter().zip(basis_values).map(|(a,b)|a*b).sum::<f64>();
         if !pressure.is_finite() { return Err(invalid("cavity receiver pressure overflow")); }

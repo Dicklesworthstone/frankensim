@@ -641,6 +641,7 @@ dependencies = [
  "fs-duct",
  "fs-evidence",
  "fs-exec",
+ "fs-feec",
  "fs-fft",
  "fs-iface",
  "fs-la",

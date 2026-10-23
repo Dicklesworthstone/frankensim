@@ -180,7 +180,9 @@ impl MaterialStringBankSource {
         gate: &CancelGate,
     ) -> Result<(), ReciprocalStringError> {
         validate_frequencies(
-            self.strings.len() + 1 + usize::from(self.material_cavity.is_some()),
+            self.strings.len() + 1 + usize::from(self.material_cavity.is_some())
+                + usize::from(self.spatial_cavity.as_ref().is_some_and(|cavity|
+                    cavity.coupling().total_modes() > cavity.coupling().structural_modes())),
             &self.material_bridge_interfaces,
             system,
             gate,
@@ -269,7 +271,9 @@ impl ReciprocalStringBank {
             }
         }
         validate_frequencies(
-            self.source.strings.len() + 1 + usize::from(self.source.material_cavity.is_some()),
+            self.source.strings.len() + 1 + usize::from(self.source.material_cavity.is_some())
+                + usize::from(self.source.spatial_cavity.as_ref().is_some_and(|cavity|
+                    cavity.coupling().total_modes() > cavity.coupling().structural_modes())),
             &bindings,
             &self.system,
             gate,

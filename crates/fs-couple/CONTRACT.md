@@ -4615,3 +4615,37 @@ Focused tests compare original DG and rational trajectories/work over
 retained history in both propagator kernels, exercise energy returned by a
 reactive terminal, preserve every history on refusal, and account for
 terminal exchange in the moving-aperture balance.
+
+### Distributed material-shell cavity in the reciprocal string bank
+
+ReciprocalStringBank::with_material_shell_cavity attaches the original
+tetrahedral Helmholtz pressure basis to every retained displacement mode of
+a material shell or assembled shell body. Every declared cavity facet must
+exactly match one boundary triangle with outward-from-gas ownership. The
+original FE quadrature integrates the complete linear structural trace and
+pressure shape. No hole filling or fitted body resonances are introduced.
+
+The existing CavityCoupling::modal_network supplies all reciprocal storage
+and connections in the original bank solve. The uniform mode is the exact
+normalized constant and contributes compression stiffness without a
+fictitious inertial coordinate. Every standing-wave mode in the declared
+window must fit the explicit pressure, physical-state and work budgets.
+The shared pressure ceiling is now 256, separate from the total mechanical
+budget and unchanged compact-neck allowance; excess modes refuse.
+
+The source retains geometry, gas, body basis identity, numerical declarations,
+pressure shapes, measured modal report and overlap rows. Material histories,
+body observation, bridge and torque links, unsteady string-air components
+and original exterior body loading survive the cold attachment and existing
+rebuild paths. Distributed air participates in material-interface frequency
+admission. Interior pressure is exposed separately from microphone pressure.
+
+This path covers one connected closed conforming midsurface cavity with
+frozen coherent gas, linear structural kinematics and lossless interior
+acoustics. It refuses open/unmatched geometry, stale gas and duplicated
+lumped air compliance. It does not supply f-hole/exterior exchange or
+thermoviscous cavity wall loss, and does not establish measured instrument
+accuracy. Mesh, pressure-order, modal-window and time convergence remain
+necessary. Focused source tests cover body/string reaction, exact uniform
+compression, material and atmosphere changes, physical refusals and both
+orders of cavity/unsteady-string-air attachment.

@@ -1057,3 +1057,20 @@ fs-feec, a dev-only cycle that cargo allows and the layer check exempts).
 - Not claimed: isoparametric (curved) walls, the closed-cylinder and resonator tests, the p-ladder, viscothermal boundary-layer admittance
   (M2.4-W1b), a radiation solve (the admittance is an input law), multiport extraction, a direct complex solve for cross-checking the
   reduction at large size. The bead stays open.
+
+### Structural boundary traces on the original pressure basis
+
+HelmholtzFe::boundary_linear_load integrates a caller-supplied linear normal
+displacement/velocity trace against every original hierarchical pressure
+basis function on selected boundary faces. It uses the existing face rule
+at order + 1; the product is integrated before reduction. Original vertex
+order is mapped explicitly, repeated faces and nonfinite traces refuse,
+and boundary_geometry determines outward normals from the owning volume
+cell independently of the caller's triangle winding. The original K/M
+operators and modal solver remain unchanged.
+
+The public geometry/order/count accessors allow higher-layer structural
+couplers to verify exact boundary ownership and budget the projection before
+construction. Tests compare linear traces against analytic triangle moments,
+the original uniform boundary load, vertex permutations and volume-oriented
+normals through every admitted pressure order.

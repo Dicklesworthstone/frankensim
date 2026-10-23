@@ -53,7 +53,7 @@ impl MaterialStringBankSource {
         Ok(system)
     }
 
-    fn body_radiation_basis(&self, system: &FrictionModalSystem, gate: &CancelGate)
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn body_radiation_basis(&self, system: &FrictionModalSystem, gate: &CancelGate)
         -> Result<(ContentHash, Vec<usize>), ReciprocalStringError>
     {
         poll(gate)?;
