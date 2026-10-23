@@ -99,3 +99,48 @@ cargo test -p fs-cli --test cooling_shapley
 The tests cover native physical reconstruction, complete-transient observations,
 chunked continuation, changed identities, failed physics and incompatible modes.
 They must run natively before claiming a Rust execution pass or physical accuracy.
+
+## Concurrent correlated sensitivity
+
+Add `--workers N`, with N in 1..64, to evaluate original conditional pairs using
+concurrent cooling children. This is the same physical experiment, not latent
+Sobol sensitivity or a replacement independent-input law. The complete result
+uses the original `shapley.v1` renderer and ordered reductions. Worker identity,
+completion order and wave width do not change the conditional samples.
+
+```sh
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-shapley-hotspot.json --sensitivity shapley \
+  --workers 3 --checkpoint first.shapley-batch --max-new-samples 3
+
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-shapley-hotspot.json --sensitivity shapley \
+  --workers 1 --resume first.shapley-batch --checkpoint complete.shapley-batch
+```
+
+A wave may split pairs or cross coalition and row boundaries. Completed later
+siblings survive interruption of an earlier call, including on disk, and only
+missing ordinals are retried. `shapley.parallel.progress.v1` exposes contiguous
+and out-of-order counts plus the next missing row/subset/half, but no sensitivity
+estimate. A completed checkpoint requires no further physical solves. Actual
+model failures, nonfinite outputs and caught worker panics remain terminal.
+
+`FSSHPB01` embeds the original conditional-prefix checkpoint and bounded pending
+slots. Repeat both selectors on resume, changing only worker count, wall time
+or chunk allowance. Serial `FSSHP001` and batch formats are not interchangeable.
+The existing atomic file transport saves AFTER each drained wave; a crash can
+lose its unsaved wave but not the previous published checkpoint. The worker cap
+is not an aggregate memory/CPU cap: solver resources are still per child. See
+`PARALLEL_UQ.md` for shared resource and draining semantics. No measured speedup,
+confidence guarantee, causal interpretation or model-validation claim is added.
+
+Other schedulers may use `fs_uq::product_shapley::ShapleyBatchExecution` directly.
+Focused native checks, required before claiming a runtime/bit-parity pass:
+
+```sh
+cargo test -p fs-uq --test product_shapley_batch
+cargo test -p fs-cli --bin frankensim uq_command::execute::parallel
+cargo test -p fs-cli --test cooling_shapley_parallel
+```

@@ -83,10 +83,12 @@ Add --qmc-replicates R for parallel randomized QMC with unchanged net layout\n\
 and between-replicate errors. Ordinary Monte Carlo remains the default.\n\
 Add --sensitivity sobol for concurrent A/B/hybrid physical sensitivity with\n\
 the original pairing and indices. Partial rows never yield sensitivity.\n\
+Add --sensitivity shapley for correlated Gaussian physical attribution;\n\
+conditional pairs and original physical units are retained. See SHAPLEY_SENSITIVITY.md.\n\
 Original samples and reductions retain serial order. Recovery preserves later\n\
 successful siblings behind interrupted calls; worker count may change on resume.\n\
 Use --workers 1 to resume a batch checkpoint serially, retaining its QMC or\n\
-Sobol selector. Batch and ordinary serial checkpoint formats differ. Other modes,\n\
+Sobol/Shapley selector. Batch and ordinary serial checkpoint formats differ. Other modes,\n\
 mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,

@@ -1,6 +1,7 @@
 //! Concurrent original cooling children with ordered, recoverable UQ observations.
 mod qmc;
 mod sobol;
+mod shapley;
 
 use super::*;
 use fs_uq::{UqBatchExecution, UqBatchInput};
@@ -8,10 +9,9 @@ use std::io::Read as _;
 
 pub(super) fn validate_options(options: &Options) -> Result<()> {
     if options.workers.is_some() && (options.compliance.is_some() || options.design.is_some()
-        || options.shapley_sensitivity
         || options.adjoint_mean_control || options.polynomial.is_some() || options.importance.is_some())
     {
-        return Err(bad("--workers supports fixed-count Monte Carlo, replicated QMC and Sobol sensitivity; other sampling, control and decision modes are incompatible"));
+        return Err(bad("--workers supports fixed-count Monte Carlo, replicated QMC and Sobol/Shapley sensitivity; other sampling, control and decision modes are incompatible"));
     }
     Ok(())
 }
@@ -23,6 +23,9 @@ fn recovery_error(message: impl Into<String>) -> Failure {
 pub(super) fn execute(
     base_text: &str, base: &J, config: &Config, options: &Options, workers: usize,
 ) -> Result<ExecutionOutput> {
+    if options.shapley_sensitivity {
+        return shapley::execute(base_text, base, config, options, workers);
+    }
     if options.sobol_sensitivity {
         return sobol::execute(base_text, base, config, options, workers);
     }
@@ -153,7 +156,6 @@ mod tests {
             assert!(Options::parse(&args(&["--workers", n])).is_err());
         }
         for extra in [vec!["--workers", "2"],
-            vec!["--sensitivity", "shapley"],
             vec!["--pce", "0,2"], vec!["--pce-mean", "0,2,4"],
             vec!["--importance", "0.2,1"], vec!["--importance-pilot", "1,2,0.2,0.5,1,6"],
             vec!["--mean-control", "adjoint"],
@@ -195,6 +197,27 @@ mod tests {
             vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"]]
         {
             let mut input = args(&["--workers", "3", "--sensitivity", "sobol"]);
+            input.extend(args(&extra));
+            assert!(Options::parse(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn shapley_workers_preserve_correlated_design_and_recovery_options() {
+        for input in [
+            vec!["--workers", "3", "--sensitivity", "shapley"],
+            vec!["--sensitivity", "shapley", "--workers", "3"],
+            vec!["--workers", "1", "--sensitivity", "shapley", "--resume", "old", "--checkpoint", "new", "--max-new-samples", "0"],
+        ] {
+            let parsed = Options::parse(&args(&input)).unwrap();
+            assert!(parsed.shapley_sensitivity && !parsed.sobol_sensitivity);
+            assert!(parsed.workers.is_some());
+        }
+        for extra in [vec!["--sensitivity", "sobol"], vec!["--qmc-replicates", "2"],
+            vec!["--importance", "0.2,1"], vec!["--mean-control", "adjoint"],
+            vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"]]
+        {
+            let mut input = args(&["--workers", "3", "--sensitivity", "shapley"]);
             input.extend(args(&extra));
             assert!(Options::parse(&input).is_err());
         }

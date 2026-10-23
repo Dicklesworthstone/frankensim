@@ -75,7 +75,7 @@ pub(super) fn execute(
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
 }
 
-fn render(base: &J, config: &Config, report: &ShapleyReport) -> Result<String> {
+pub(super) fn render(base: &J, config: &Config, report: &ShapleyReport) -> Result<String> {
     if report.status != UqStatus::Complete {
         return Err(model_failure("only complete fixed-design Shapley reports may be published"));
     }
