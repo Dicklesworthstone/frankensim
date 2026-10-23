@@ -66,12 +66,32 @@ impl ThermalInterfacePoint<'_> {
         Ok(point)
     }
 
-    /// Whether a one-dimensional static source follows a declared evolving
-    /// thermal coordinate. Other conditions remain explicit validity inputs;
-    /// this does not admit frequency-domain or history-dependent response laws.
+    /// Whether a source axis follows a declared evolving thermal coordinate.
+    /// Fixed external response axes are admitted separately by `is_response_axis`.
     pub fn is_thermal_axis(&self, name: &str, dims: Dims) -> bool {
         (dims == Temperature::DIMS && (self.temperature_axes.contains(&name)
             || self.mean_temperature_axis == Some(name)))
             || (dims == Dims::NONE && self.liquid_fraction_axes.contains(&Some(name)))
+    }
+
+    /// Whether a static source response may vary along this coordinate.
+    /// Declared thermal/phase coordinates follow the actual endpoint states.
+    /// Typed external temperature, pressure, composition, moisture and
+    /// concentration coordinates stay at their explicitly supplied values.
+    /// Every axis of a curve or surface must pass this check; the original
+    /// property evaluator still owns interpolation and supported-domain checks.
+    /// Field, frequency, rate, geometry and history response axes require their
+    /// own evolving owners and are not made static by appearing in the context.
+    pub fn is_response_axis(&self, name: &str, dims: Dims) -> bool {
+        if self.is_thermal_axis(name, dims) {
+            return true;
+        }
+        let quantity = self.context.axis_quantities().get(name).copied();
+        quantity.is_some_and(|quantity| quantity.dims() == dims)
+            && crate::state_point::is_fixed_external_coordinate(
+                name,
+                quantity,
+                self.context.axes().get(name).copied(),
+            )
     }
 }

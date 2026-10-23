@@ -8,7 +8,7 @@ use crate::{ConductionError, InterfaceResistance, SeriesThermalResistance,
     ThermalResistanceTerm, ResistanceUncertainty, AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_material::thermal::interface::ThermalInterfacePoint;
-use fs_matdb::{ClaimSelection, PropertyValue};
+use fs_matdb::ClaimSelection;
 use fs_qty::QuantitySpec;
 
 /// Maximum contacts queried during one coefficient evaluation.
@@ -77,6 +77,9 @@ pub struct ContactLinkSample {
 ///
 /// Fixed geometry, uniform cells, negligible contact thermal storage. Supplied
 /// pressure/history/gap conditions remain explicit, not mechanically evolved.
+/// Curves and supported two-coordinate surfaces may respond to the declared
+/// evolving thermal/phase axes and typed fixed external conditions. History,
+/// field and geometry response axes require their own evolving owners.
 /// This is not a contact-area, adhesion, spreading-resistance or phase-mixture
 /// solver. Its nonlinear and temporal accuracy belong to the calling integrator.
 pub fn apply_material_contacts(
@@ -120,11 +123,8 @@ pub fn apply_material_contacts(
         if claim.key.quantity() != QuantitySpec::dimensional(AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS) {
             return Err(invalid("static dimensional contact resistance is required"));
         }
-        match &claim.value {
-            PropertyValue::Scalar { .. } => {},
-            PropertyValue::Curve { abscissa, abscissa_dims, .. }
-                if binding.point.is_thermal_axis(abscissa, *abscissa_dims) => {},
-            _ => return Err(invalid("contact law must follow an explicit static thermal coordinate")),
+        if !claim.value.axes().all(|(axis, dims)| binding.point.is_response_axis(axis, dims)) {
+            return Err(invalid("contact response requires declared thermal/phase or typed fixed external coordinates"));
         }
         let bulk = *bulk_conductances.get(&binding.link).ok_or_else(|| invalid("contact lacks explicit bulk conductance"))?;
         if !bulk.is_finite() || bulk < 0.0 || !link.area_m2.is_finite() || link.area_m2 < 0.0 {

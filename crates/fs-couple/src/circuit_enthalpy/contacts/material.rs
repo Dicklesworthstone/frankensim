@@ -118,10 +118,10 @@ impl ElectricalContactNetwork<'_> {
             if !claim
                 .value
                 .axes()
-                .all(|(axis, dims)| binding.point.is_thermal_axis(axis, dims))
+                .all(|(axis, dims)| binding.point.is_response_axis(axis, dims))
             {
                 return Err(Error::Invalid(
-                    "contact law must be static or use declared thermal/phase coordinates",
+                    "contact response requires declared thermal/phase or typed fixed external coordinates",
                 ));
             }
             if property.angular_frequency_band_rad_s().map_err(|e|Error::State(ThermalMaterialError::Coordinate(format!("{e:?}"))))?

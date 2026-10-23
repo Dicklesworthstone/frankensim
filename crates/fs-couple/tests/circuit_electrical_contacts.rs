@@ -1,6 +1,7 @@
 //! Contact-only data changes through the original circuit and two thermal bodies.
 #[path="circuit_enthalpy/common.rs"] mod common;
 #[path="electrical_contacts/source.rs"] mod source;
+#[path="electrical_contacts/conditions.rs"] mod conditions;
 use common::*;
 use fs_couple::circuit_enthalpy::*;
 use fs_couple::circuit_enthalpy::material::*;
