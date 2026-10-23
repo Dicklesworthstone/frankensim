@@ -46,6 +46,7 @@ cargo run -r -q -p fs-couple --bin bowed_sweep -- \
   --out "$OUT_DIR/sweep.jsonl" || exit $?
 
 cargo run -r -q -p fs-couple --bin bowed_listen -- \
+  --gas-record "$REPO_ROOT/crates/fs-couple/examples/dry-air-20c.gas" \
   --wav "$OUT_DIR/open_string_stroke.wav" \
   --receipt "$OUT_DIR/listening-receipt.jsonl" || exit $?
 

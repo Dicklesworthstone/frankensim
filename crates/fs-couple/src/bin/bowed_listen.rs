@@ -7,9 +7,19 @@
 //! The existing first-order stiction and one-way bridge/body approximation remain;
 //! perceived realism and experimental validity are not asserted by this command.
 //!
+//! The surrounding gas is data: `--gas-record FILE` holds one shared gas
+//! declaration (`T P RH`, `mixture ...`, or `thermochemical ...` with the same
+//! `--gas-component`/`--gas-water`/`--gas-phase` sources as `music_render`).
+//! It is required; a missing or unresolvable record refuses, never air. Its
+//! density scales the body's radiated pressure (recorded as `full_scale_pa`).
+//! The one-way body observer has no reaction load or propagation delay, so the
+//! peak-normalized WAV itself does not change with the gas.
+//!
 //! ```text
-//! bowed_listen --wav out.wav --receipt out.jsonl
-//! bowed_listen --gesture crates/fs-couple/examples/bow-phrases.gesture \
+//! bowed_listen --gas-record crates/fs-couple/examples/dry-air-20c.gas \
+//!   --wav out.wav --receipt out.jsonl
+//! bowed_listen --gas-record crates/fs-couple/examples/dry-air-20c.gas \
+//!   --gesture crates/fs-couple/examples/bow-phrases.gesture \
 //!   --track bow --samples 24000 --block 256 --wav out.wav --receipt out.jsonl
 //! ```
 
@@ -25,11 +35,17 @@ use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::stribeck_friction::StribeckFriction;
 use fs_couple::thin_plate::CompactBody;
 use fs_exec::CancelGate;
-use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas_species::input::GasRecord;
 use fs_scenario::RadiatingPlate;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget, GestureTrack, GestureValue};
 
-const SCHEMA: &str = "frankensim.bowed-listen.v2";
+#[path = "music_render/json.rs"]
+mod json;
+#[path = "music_render/thermochemical.rs"]
+mod thermochemical;
+use json::json_string;
+
+const SCHEMA: &str = "frankensim.bowed-listen.v3";
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const MAX_SAMPLES: usize = 2_880_000; // Explicit 60-second offline render bound.
 const MAX_GESTURE_BYTES: usize = 262_144;
@@ -38,6 +54,7 @@ const MAX_EVENTS: usize = 1_000_000;
 
 #[derive(Debug)]
 struct Options {
+    gas: thermochemical::Options,
     wav: PathBuf,
     receipt: PathBuf,
     gesture: Option<PathBuf>,
@@ -54,7 +71,12 @@ fn positive_limit(value: &str, name: &str, max: usize) -> Result<usize, String> 
     Ok(n)
 }
 
-fn parse_args(mut iter: impl Iterator<Item = String>) -> Result<Options, String> {
+fn parse_args(iter: impl Iterator<Item = String>) -> Result<Options, String> {
+    let (args, gas) = thermochemical::Options::extract(&iter.collect::<Vec<_>>())?;
+    if gas.record.is_none() {
+        return Err("--gas-record FILE is required; the surrounding gas is never defaulted".to_string());
+    }
+    let mut iter = args.into_iter();
     let mut wav = None;
     let mut receipt = None;
     let mut gesture = None;
@@ -75,13 +97,15 @@ fn parse_args(mut iter: impl Iterator<Item = String>) -> Result<Options, String>
     }
     let wav = wav.ok_or("--wav PATH is required")?;
     let receipt = receipt.ok_or("--receipt PATH is required")?;
-    if wav == receipt || gesture.as_ref() == Some(&wav) || gesture.as_ref() == Some(&receipt) {
-        return Err("input gesture, WAV and receipt must use distinct paths".to_string());
+    if wav == receipt || gesture.as_ref() == Some(&wav) || gesture.as_ref() == Some(&receipt)
+        || [&wav, &receipt].into_iter().any(|path| gas.record.as_ref() == Some(path))
+    {
+        return Err("input gesture, gas record, WAV and receipt must use distinct paths".to_string());
     }
     if track.trim().is_empty() {
         return Err("--track must not be empty".to_string());
     }
-    Ok(Options { wav, receipt, gesture, track, samples, block })
+    Ok(Options { gas, wav, receipt, gesture, track, samples, block })
 }
 
 fn decode_schedule(bytes: &[u8]) -> Result<GestureSchedule, String> {
@@ -156,8 +180,13 @@ fn run(options: Options) -> Result<(), String> {
     let body = CompactBody::from_radiator(RadiatingPlate {
         area_m2: 3.0e-3, mass_kg: 0.15, frequency_hz: 280.0, damping_ratio: 0.02,
     }).map_err(|e| format!("body: {e:?}"))?;
-    let ambient = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)
-        .map_err(|e| format!("ambient: {e}"))?;
+    let sources = options.gas.load()?;
+    let bindings = sources.bindings();
+    let registry = sources.registry(&bindings);
+    let record_path = options.gas.record.as_deref().ok_or("--gas-record FILE is required")?;
+    let gas_record: GasRecord = thermochemical::read_record(record_path, registry.as_ref())
+        .map_err(|e| format!("gas record {}: {e}", record_path.display()))?;
+    let ambient = *gas_record.state();
     let cfg = BowedRunConfig {
         card, island: FrictionIsland::Stribeck(rosin), gesture,
         steps: options.samples, subsamples: 16,
@@ -189,11 +218,14 @@ fn run(options: Options) -> Result<(), String> {
             r#""control_rate_hz":{control_rate},"applied_bow_controls":{controls},"#,
             r#""termination":"plate-one-port","frames":{frames},"clipped_samples":{clipped},"#,
             r#""sample_rate_hz":48000,"peak_normalization_factor":0.3,"full_scale_pa":{full_scale_pa},"#,
+            r#""ambient_gas":{{"temperature_k":{t:e},"pressure_pa":{p:e},"density_kg_m3":{rho:e},"sound_speed_m_s":{c:e},"water_mole_fraction":{xw:e}}}{gas_sources},"#,
             r#""wav_blake3":"{hash}","no_claim":"peak-normalized listening aid; first-order stiction and one-way bridge-body fixture, not calibrated or experimentally validated instrument audio"}}"#
         ),
         schema = SCHEMA, source_hash = source_hash, control_rate = schedule.control_rate_hz,
         controls = render.applied_controls().len(), frames = pressure.len(), clipped = clipped,
-        full_scale_pa = full_scale_pa, hash = hash,
+        full_scale_pa = full_scale_pa, hash = hash, t = ambient.temperature, p = ambient.pressure,
+        rho = ambient.density, c = ambient.sound_speed, xw = ambient.water_mole_fraction,
+        gas_sources = thermochemical::provenance(core::slice::from_ref(&gas_record)),
     );
     // No output files are touched until the complete performance and encoding succeed.
     for dir in [options.wav.parent(), options.receipt.parent()].into_iter().flatten() {
@@ -229,17 +261,21 @@ mod tests {
 
     #[test]
     fn legacy_invocation_and_explicit_performance_sizes_are_admitted() {
-        let old = options(&["--wav", "out.wav", "--receipt", "out.jsonl"]).unwrap();
+        let old = options(&["--gas-record", "air.gas", "--wav", "out.wav", "--receipt", "out.jsonl"]).unwrap();
         assert_eq!((old.samples, old.block, old.gesture), (24000, 256, None));
-        let new = options(&["--wav", "out.wav", "--receipt", "out.jsonl",
+        assert_eq!(old.gas.record, Some(PathBuf::from("air.gas")));
+        let new = options(&["--wav", "out.wav", "--receipt", "out.jsonl", "--gas-record", "air.gas",
             "--gesture", "bow.gesture", "--track", "bow", "--samples", "12345", "--block", "37"]).unwrap();
         assert_eq!((new.samples, new.block), (12345, 37));
         for (flag, value) in [("--samples", "0"), ("--samples", "2880001"),
             ("--block", "0"), ("--block", "8193"), ("--samples", "1.5")] {
-            assert!(options(&["--wav", "a", "--receipt", "b", flag, value]).is_err());
+            assert!(options(&["--gas-record", "g", "--wav", "a", "--receipt", "b", flag, value]).is_err());
         }
-        assert!(options(&["--wav", "a", "--receipt", "a"]).is_err());
-        assert!(options(&["--wav", "a", "--receipt", "b", "--gesture", "a"]).is_err());
+        assert!(options(&["--gas-record", "g", "--wav", "a", "--receipt", "a"]).is_err());
+        assert!(options(&["--gas-record", "g", "--wav", "a", "--receipt", "b", "--gesture", "a"]).is_err());
+        assert!(options(&["--gas-record", "a", "--wav", "a", "--receipt", "b"]).is_err());
+        // The surrounding gas is never defaulted to air.
+        assert!(options(&["--wav", "out.wav", "--receipt", "out.jsonl"]).is_err());
     }
 
     #[test]
