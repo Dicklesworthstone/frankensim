@@ -23,6 +23,7 @@ use fs_phs::{
 pub struct WindingCircuit<'a> {
     basis: PlanarWindingBasis<'a>,
     dae: CircuitDae,
+    graph: CircuitGraph,
     branch_indices: Vec<usize>,
     flux_coordinates: Vec<usize>,
 }
@@ -180,6 +181,7 @@ impl<'a> PlanarWindingBasis<'a> {
         Ok(WindingCircuit {
             basis: self,
             dae,
+            graph,
             branch_indices,
             flux_coordinates,
         })
@@ -193,6 +195,12 @@ impl WindingCircuit<'_> {
     /// Existing circuit owner: use its consistency solve and audited step.
     pub fn dae(&self) -> &CircuitDae {
         &self.dae
+    }
+    /// Original graph topology and authored resistor/source/capacitor data.
+    /// Inductor placeholders carry the extracted diagonal; full mutual storage
+    /// remains in the original descriptor.
+    pub fn graph(&self) -> &CircuitGraph {
+        &self.graph
     }
     /// Original graph branch index corresponding to each winding.
     pub fn branch_indices(&self) -> &[usize] {
