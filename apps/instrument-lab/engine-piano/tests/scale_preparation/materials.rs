@@ -517,12 +517,18 @@ fn unsupported_source_geometry_framing_and_actual_mode_band_refuse() {
     let core = pack(CORE).to_bytes();
     let coating = pack(COATING).to_bytes();
     let geometry = section_geometry(&desc.courses);
+    // A missing loss claim is deferred past the tensile check, then refuses
+    // as missing data before anything can play.
+    let missing = pack_with(CORE, |claim| {
+        if claim.key.name() == ETA {
+            claim.key = PropertyKey::new("missing_bending_eta", DynViscosity::DIMS);
+        }
+    });
+    let deferred = StringMaterials::from_packs(&[&missing.to_bytes(), &coating], &geometry, &point(), ETA)
+        .unwrap();
+    let error = deferred.apply(&desc.courses).unwrap_err();
+    assert!(error.contains("missing data") && error.contains(ETA), "{error}");
     let bad_sources = [
-        pack_with(CORE, |claim| {
-            if claim.key.name() == ETA {
-                claim.key = PropertyKey::new("missing_bending_eta", DynViscosity::DIMS);
-            }
-        }),
         pack_with(CORE, |claim| {
             if claim.key.name() == ETA {
                 claim.key = PropertyKey::new(ETA, Pressure::DIMS);
@@ -932,4 +938,43 @@ fn g0_loss_angle_law_refuses_wrong_quantity_unknown_law_and_uncovered_modes() {
     let mut prepared = small_description();
     preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
     assert!(LivePiano::new_with_materials(&prepared, config(), gas(), source).is_err());
+}
+
+// ---- U2: a string that would break is reported before missing loss data ----
+
+// G0: a core pack without any bending-loss claim still resolves its mass,
+// stiffness and strength. Overstressed strings refuse first, as strings
+// that would break; a physically tensioned set then refuses as missing data.
+#[test]
+fn g0_overstress_refuses_before_missing_loss_data() {
+    let desc = small_description();
+    let unrated = |values: [f64; 3], limit: f64| pack_with(values, |claim| {
+        if claim.key.name() == ETA {
+            claim.key = PropertyKey::new("some_other_viscosity", DynViscosity::DIMS);
+        }
+        if claim.key.name() == LIMIT {
+            claim.value = PropertyValue::Scalar { value: limit, dims: Pressure::DIMS };
+        }
+    });
+    let weak = unrated(WEAK, WEAK_LIMIT_PA).to_bytes();
+    let at_pitch = StringMaterials::from_packs(&[&weak],
+        &construction("target-pitch", LIMIT, &single_cores(&desc.courses)), &point(), ETA).unwrap();
+    assert!(at_pitch.missing_loss().unwrap().contains("missing data"));
+    let error = at_pitch.apply(&desc.courses).unwrap_err();
+    assert!(error.contains("overstressed-strings") && !error.contains("missing data"), "{error}");
+    let report = at_pitch.strength_report(&desc.courses.iter().map(|c| Course {
+        linear_density_kg_m: WEAK[0] * PI * CORE_R * CORE_R,
+        flexural_rigidity_nm2: WEAK[1] * PI * CORE_R.powi(4) / 4.0, bonded_section: None, ..*c
+    }).collect::<Vec<_>>()).unwrap();
+    assert_eq!(report.keys.len(), 3);
+    let relaxed = StringMaterials::from_packs(&[&weak],
+        &construction("yield-fraction,0.5", LIMIT, &single_cores(&desc.courses)), &point(), ETA).unwrap();
+    let error = relaxed.apply(&desc.courses).unwrap_err();
+    assert!(error.contains("missing data") && error.contains(ETA) && !error.contains("overstressed"), "{error}");
+    let json = relaxed.json();
+    assert!(json.contains("\"missingLossData\":true") && json.contains("\"viscousRigidityNm2S\":null"), "{json}");
+    // A rated pack in the same position plays: only the loss claim was missing.
+    assert!(StringMaterials::from_packs(&[&limited(WEAK, WEAK_LIMIT_PA).to_bytes()],
+        &construction("yield-fraction,0.5", LIMIT, &single_cores(&desc.courses)), &point(), ETA)
+        .unwrap().apply(&desc.courses).is_ok());
 }

@@ -149,6 +149,11 @@ impl StrengthReport {
 pub struct StringMaterials {
     sections: BTreeMap<u8, ConcentricKelvinVoigtSection>,
     loss_angle_sections: BTreeMap<u8, ConcentricLossAngleSection>,
+    /// Cores whose packs have no usable bending-loss claim: elastic only.
+    unrated: BTreeMap<u8, ConcentricElasticSection>,
+    /// The deferred missing-data refusal for `unrated`, raised only after the
+    /// tensile check: a string that would break is reported first.
+    missing_loss: Option<String>,
     loss: BendingLossLaw,
     wrappings: BTreeMap<u8, HelicalWrapping>,
     capacities: BTreeMap<u8, AxialTensileCapacity>,
@@ -300,6 +305,7 @@ impl StringMaterials {
         }
         let mut packs = Vec::with_capacity(bytes.len());
         let mut states = Vec::with_capacity(bytes.len());
+        let mut loss_rated = Vec::with_capacity(bytes.len());
         for (index, (bytes, roles)) in bytes.iter().zip(&roles).enumerate() {
             let pack = Arc::new(NormalizedMaterialCardPack::from_bytes(bytes)
                 .map_err(|e| e.to_string())?);
@@ -319,30 +325,45 @@ impl StringMaterials {
                         ScalarAdmissibility::StrictlyPositive),
                 ]);
             }
-            let requirements = requirements.into_iter().collect::<Result<Vec<_>, _>>()
+            let mut requirements = requirements.into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
-            let state = resolve_material_state_point(pack.card(), point, &requirements,
-                MaterialPropertySelection::SingleClaimOnly).map_err(|e| match e {
-                    MaterialStatePointError::Query { ref property, .. } if property == limit => format!(
-                        "string material pack {index} has no usable '{limit}' claim at this state: the \
-                        mandatory yield check needs a sourced tensile limit (missing data): {e}"),
-                    e => format!("string material pack {index}: {e}"),
-                })?;
+            let refuse = |e: MaterialStatePointError| match e {
+                MaterialStatePointError::Query { ref property, .. } if property == limit => format!(
+                    "string material pack {index} has no usable '{limit}' claim at this state: the \
+                    mandatory yield check needs a sourced tensile limit (missing data): {e}"),
+                e => format!("string material pack {index}: {e}"),
+            };
+            let mut rated = true;
+            let state = match resolve_material_state_point(pack.card(), point, &requirements,
+                MaterialPropertySelection::SingleClaimOnly) {
+                // Without loss data the core still has mass, stiffness and
+                // strength; its missing loss refuses after the tensile check.
+                Err(MaterialStatePointError::Query { property, .. }) if core && property == viscosity_property => {
+                    rated = false;
+                    requirements.retain(|requirement| requirement.name() != viscosity_property);
+                    resolve_material_state_point(pack.card(), point, &requirements,
+                        MaterialPropertySelection::SingleClaimOnly).map_err(refuse)?
+                }
+                state => state.map_err(refuse)?,
+            };
             packs.push(pack);
             states.push(state);
+            loss_rated.push(rated);
         }
-        Self::from_states(declaration, &states, viscosity_property, packs)
+        Self::from_states(declaration, &states, &loss_rated, viscosity_property, packs)
     }
 
-    fn from_states(declaration: Declaration, states: &[ResolvedMaterialStatePoint],
+    fn from_states(declaration: Declaration, states: &[ResolvedMaterialStatePoint], loss_rated: &[bool],
         viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>) -> Result<Self, String> {
         let Declaration { tension, loss, limit_property, non_physical_override, cores, mut wraps } = declaration;
         let mut sections = BTreeMap::new();
         let mut loss_angle_sections = BTreeMap::new();
+        let mut unrated = BTreeMap::new();
         let mut wrappings = BTreeMap::new();
         let mut capacities = BTreeMap::new();
         for (key, layers) in cores {
             let failed = |e: MaterialStatePointError| format!("string material key {key}: {e}");
+            let rated = layers.iter().all(|&(_, index)| loss_rated[index]);
             let layers = layers.into_iter().map(|(outer_radius_m, index)|
                 ConcentricMaterialLayer { outer_radius_m, material: states[index].clone() }).collect();
             let elastic = ConcentricElasticSection::try_new(0.0, layers).map_err(failed)?;
@@ -360,6 +381,10 @@ impl StringMaterials {
                 }
                 wrappings.insert(key, HelicalWrapping::try_new(&elastic, helical).map_err(failed)?);
             }
+            if !rated {
+                unrated.insert(key, elastic);
+                continue;
+            }
             match loss {
                 BendingLossLaw::KelvinVoigt => {
                     sections.insert(key, elastic.with_kelvin_voigt_bending(viscosity_property).map_err(failed)?);
@@ -369,8 +394,16 @@ impl StringMaterials {
                 }
             }
         }
-        Ok(Self { sections, loss_angle_sections, loss, wrappings, capacities, tension, limit_property,
-            non_physical_override, packs })
+        let missing_loss = (!unrated.is_empty()).then(|| {
+            let keys = unrated.keys().map(u8::to_string).collect::<Vec<_>>().join(",");
+            let unrated_packs = loss_rated.iter().enumerate().filter(|(_, rated)| !**rated)
+                .map(|(index, _)| index.to_string()).collect::<Vec<_>>().join(",");
+            format!("string material packs [{unrated_packs}] have no usable '{viscosity_property}' {} \
+                claim at this state, so the cores of keys [{keys}] have no sourced bending loss (missing data)",
+                loss.name())
+        });
+        Ok(Self { sections, loss_angle_sections, unrated, missing_loss, loss, wrappings, capacities, tension,
+            limit_property, non_physical_override, packs })
     }
 
     /// Bounded WASM framing of the unchanged canonical bytes; this is not an
@@ -406,10 +439,17 @@ impl StringMaterials {
     pub fn non_physical_override(&self) -> bool { self.non_physical_override }
     pub fn packs(&self) -> &[Arc<NormalizedMaterialCardPack>] { &self.packs }
 
+    /// The deferred refusal when some cores have no sourced bending loss.
+    pub fn missing_loss(&self) -> Option<&str> { self.missing_loss.as_deref() }
+
     /// Finished outer radius of a key's string: its outermost wrap, else its core.
     pub fn outer_radius_m(&self, key: u8) -> Option<f64> {
         self.wrappings.get(&key).map(HelicalWrapping::outer_radius_m)
-            .or_else(|| self.core(key).map(|core| core.elastic().outer_radius_m()))
+            .or_else(|| self.elastic(key).map(ConcentricElasticSection::outer_radius_m))
+    }
+
+    fn elastic(&self, key: u8) -> Option<&ConcentricElasticSection> {
+        self.core(key).map(CoreLoss::elastic).or_else(|| self.unrated.get(&key))
     }
 
     fn core(&self, key: u8) -> Option<CoreLoss<'_>> {
@@ -427,7 +467,9 @@ impl StringMaterials {
 
     /// Material coefficients only; the course's own tension is kept.
     fn bind(&self, course: &Course) -> Result<Course, String> {
-        let core = self.core(course.midi).ok_or("string material key has no core section")?;
+        let Some(core) = self.core(course.midi) else {
+            return Err(self.missing_loss.clone().unwrap_or_else(|| "string material key has no core section".into()));
+        };
         course.with_loss_section(core, self.wrappings.get(&course.midi))
             .map_err(|e| format!("string material key {}: {e}", course.midi))
     }
@@ -436,11 +478,35 @@ impl StringMaterials {
     /// policy, then check every string against its sourced tensile limit.
     /// Length, hammer, unison and duplex geometry survive; μ, EA, EI and ηI
     /// use source integrals. Overstressed strings refuse together unless the
-    /// labelled non-physical override was declared.
+    /// labelled non-physical override was declared; only then does missing
+    /// bending-loss data refuse.
     pub fn apply(&self, courses: &[Course]) -> Result<Vec<Course>, String> {
         self.covers(courses)?;
-        let bound = courses.iter().map(|course| {
+        let tensioned = courses.iter().map(|course| self.tensioned(course)).collect::<Result<Vec<_>, String>>()?;
+        self.check_strength(&tensioned)?;
+        if let Some(missing) = &self.missing_loss { return Err(missing.clone()); }
+        courses.iter().zip(&tensioned).map(|(course, tensioned)| {
             let mut changed = self.bind(course)?;
+            changed.tension_n = tensioned.tension_n;
+            changed.validate().map_err(|e| format!("string material key {}: {e}", course.midi))?;
+            Ok(changed)
+        }).collect()
+    }
+
+    /// The course with its section's mass and stiffness and its policy
+    /// tension, before any loss binding. Same arithmetic as the bound course.
+    fn tensioned(&self, course: &Course) -> Result<Course, String> {
+        let elastic = self.elastic(course.midi).ok_or("string material key has no core section")?;
+        let mut changed = Course {
+            linear_density_kg_m: match self.wrappings.get(&course.midi) {
+                Some(wrapping) => elastic.line_density_kg_m() + wrapping.line_density_kg_m(),
+                None => elastic.line_density_kg_m(),
+            },
+            flexural_rigidity_nm2: elastic.bending_stiffness_n_m2(),
+            bonded_section: None,
+            ..*course
+        };
+        {
             changed.tension_n = match self.tension {
                 TensionPolicy::InstalledTension => course.tension_n,
                 TensionPolicy::TargetPitch => {
@@ -453,11 +519,9 @@ impl StringMaterials {
                 }
                 TensionPolicy::YieldFraction(x) => x * self.capacities[&course.midi].capacity_n(),
             };
-            changed.validate().map_err(|e| format!("string material key {}: {e}", course.midi))?;
-            Ok(changed)
-        }).collect::<Result<Vec<_>, String>>()?;
-        self.check_strength(&bound)?;
-        Ok(bound)
+        }
+        changed.validate().map_err(|e| format!("string material key {}: {e}", course.midi))?;
+        Ok(changed)
     }
 
     /// Tensile state of every course at its actual tensions, including the
@@ -512,12 +576,16 @@ impl StringMaterials {
     /// Actual source/state identities and coefficients installed in playback.
     pub fn json(&self) -> String {
         let sections = self.capacities.keys().map(|key| {
-            let core = self.core(*key).expect("every capacity has its core section");
-            let elastic = core.elastic();
-            let (viscous, hysteretic, band) = match core {
-                CoreLoss::KelvinVoigt(section) => (section.viscous_stiffness_n_m2_s(), 0.0, section.omega_band_rad_s()),
-                CoreLoss::LossAngle(section) => (0.0, section.hysteretic_stiffness_n_m2(), section.omega_band_rad_s()),
+            let elastic = self.elastic(*key).expect("every capacity has its core section");
+            // A core without sourced loss data reports null loss, never zero.
+            let (viscous, hysteretic, band) = match self.core(*key) {
+                Some(CoreLoss::KelvinVoigt(section)) => (section.viscous_stiffness_n_m2_s().to_string(),
+                    "0".to_string(), section.omega_band_rad_s()),
+                Some(CoreLoss::LossAngle(section)) => ("0".to_string(),
+                    section.hysteretic_stiffness_n_m2().to_string(), section.omega_band_rad_s()),
+                None => ("null".to_string(), "null".to_string(), (f64::NAN, f64::NAN)),
             };
+            let band = if band.0.is_nan() { "null".to_string() } else { format!("[{},{}]", band.0, band.1) };
             let identities = elastic.layers().iter().map(|layer|
                 format!("\"{}\"", layer.material.identity().to_hex()))
                 .collect::<Vec<_>>().join(",");
@@ -533,18 +601,19 @@ impl StringMaterials {
             });
             format!(concat!("{{\"key\":{},\"stateIdentities\":[{}],\"outerRadiiM\":{:?},",
                 "\"lineDensityKgM\":{},\"axialRigidityN\":{},\"flexuralRigidityNm2\":{},",
-                "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":[{},{}],\"wraps\":{},",
+                "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":{},\"wraps\":{},",
                 "\"outerRadiusM\":{},\"tensileCapacityN\":{},\"governingLayer\":{},\"layerLimitsPa\":{:?}}}"),
                 key, identities, radii, elastic.line_density_kg_m()
                     + self.wrappings.get(key).map_or(0.0, HelicalWrapping::line_density_kg_m),
                 elastic.axial_stiffness_n(), elastic.bending_stiffness_n_m2(),
-                viscous, hysteretic, band.0, band.1, wraps,
+                viscous, hysteretic, band, wraps,
                 self.outer_radius_m(*key).unwrap_or(0.0), capacity.capacity_n(),
                 capacity.governing_layer(), capacity.layer_limits_pa())
         }).collect::<Vec<_>>().join(",");
         format!(concat!("{{\"model\":\"bonded-core-kelvin-voigt-helical-wraps\",\"importedPacks\":{},",
-            "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
-            self.packs.len(), self.tension.json(), self.loss.name(), escape(&self.limit_property),
-            self.non_physical_override, sections)
+            "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"missingLossData\":{},\"limitProperty\":\"{}\",",
+            "\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
+            self.packs.len(), self.tension.json(), self.loss.name(), self.missing_loss.is_some(),
+            escape(&self.limit_property), self.non_physical_override, sections)
     }
 }
