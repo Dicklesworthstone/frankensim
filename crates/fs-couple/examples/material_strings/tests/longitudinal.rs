@@ -1,6 +1,8 @@
 //! The ordinary material-string file selects axial physics through to PCM.
 use super::*;
+#[path = "longitudinal/loss.rs"]
 mod loss;
+#[path = "longitudinal/bending_memory.rs"]
 mod bending_memory;
 const RECORD: &str = "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2";
 fn text() -> String {
