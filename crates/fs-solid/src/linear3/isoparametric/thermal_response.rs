@@ -3,7 +3,8 @@
 //! admission remain in the existing isoparametric owners.
 use super::super::{
     TetAssemblyBudget, TetElasticError, TetMaterialField, TetStaticSolveConfig,
-    TetThermalStrainField, euclidean_norm, hash_usize, validate_rigid_mode_constraints,
+    TetThermalStrainField, add_nodal_forces_to_thermal_load, euclidean_norm, hash_usize,
+    validate_rigid_mode_constraints,
 };
 use super::{Point, assemble, mandel_b, thermal_load};
 use crate::linear::Jacobi;
@@ -55,21 +56,24 @@ impl QuadraticElementThermalResponse {
 
 /// Accepted thermal equilibrium and its physical response, published atomically.
 ///
-/// Fixed displacement components are zero. With no external mechanical forces,
-/// the integrated internal force is the support force ON the solid at fixed
-/// DOFs and the remaining equilibrium residual at free DOFs. Residual entries
-/// are retained, not overwritten with zero. Identity binds the resolved thermal
-/// load, actual material coefficients, solve/strain controls and full result.
+/// Fixed displacement components are zero. Internal force integrates the actual
+/// stress. The nodal force balance subtracts applied dead nodal loads, giving the
+/// support force ON the solid at fixed DOFs and the remaining equilibrium residual
+/// at free DOFs. Residual entries are retained, not overwritten with zero.
+/// Identity binds thermal and mechanical loads, actual material coefficients,
+/// solve/strain controls and the full result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadraticThermalResponse {
     displacement_m: Vec<[f64; 3]>,
     elements: Vec<QuadraticElementThermalResponse>,
     nodal_internal_force_n: Vec<[f64; 3]>,
+    nodal_force_balance_n: Vec<[f64; 3]>,
     elastic_energy_j: f64,
     iterations: usize,
     true_relative_residual: f64,
     mesh_frame: ContentHash,
     thermal_load_identity: ContentHash,
+    load_identity: ContentHash,
     identity: ContentHash,
 }
 
@@ -92,6 +96,14 @@ impl QuadraticThermalResponse {
         &self.nodal_internal_force_n
     }
 
+    /// Internal force minus applied dead nodal force [N]. At fixed DOFs this
+    /// is the support reaction ON the solid; at free DOFs it is the unmodified
+    /// equilibrium residual. Prescribed displacement components remain zero.
+    #[must_use]
+    pub fn nodal_force_balance_n(&self) -> &[[f64; 3]] {
+        &self.nodal_force_balance_n
+    }
+
     /// Total stored elastic energy in the thermal equilibrium [J].
     #[must_use]
     pub const fn elastic_energy_j(&self) -> f64 {
@@ -104,7 +116,8 @@ impl QuadraticThermalResponse {
         self.iterations
     }
 
-    /// Independently recomputed norm(f_thermal - K u) / norm(f_thermal).
+    /// Independently recomputed norm(f_thermal + f_external - K u) divided
+    /// by the norm of the complete reduced load.
     #[must_use]
     pub const fn true_relative_residual(&self) -> f64 {
         self.true_relative_residual
@@ -116,10 +129,17 @@ impl QuadraticThermalResponse {
         self.mesh_frame
     }
 
-    /// Exact resolved load and geometry/support/quadrature identity.
+    /// Original thermal-load and geometry/support/quadrature identity.
+    /// This excludes any separately supplied dead nodal forces.
     #[must_use]
     pub const fn thermal_load_identity(&self) -> ContentHash {
         self.thermal_load_identity
+    }
+
+    /// Complete load identity, including dead nodal forces when supplied.
+    #[must_use]
+    pub const fn load_identity(&self) -> ContentHash {
+        self.load_identity
     }
 
     /// Identity binding the complete admitted response.
@@ -135,6 +155,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
     thermal: TetThermalStrainField<'_>,
+    nodal_forces_n: Option<&[(usize, f64)]>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
     stiffness_rule: &[(R, f64)],
@@ -174,6 +195,11 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         &evaluate,
         cx,
     )?;
+    let thermal_load_identity = load.identity;
+    let load = match nodal_forces_n {
+        Some(forces) => add_nodal_forces_to_thermal_load(load, nodes_m.len(), forces, cx)?,
+        None => load,
+    };
     let (reduced, iterations, true_relative_residual) = if load.free_dofs.is_empty() {
         // A fully restrained thermal body has no linear solve, but still has
         // physical stress, stored energy and nonzero support forces.
@@ -341,6 +367,21 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
             quadrature_volume_m3: volume,
         });
     }
+    let mut nodal_force_balance_n = nodal_internal_force_n.clone();
+    if let Some(forces) = nodal_forces_n {
+        for (index, &(dof, applied)) in forces.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            }
+            let balance = &mut nodal_force_balance_n[dof / 3][dof % 3];
+            *balance -= applied;
+            if !balance.is_finite() {
+                return Err(TetElasticError::InvalidStressObservation {
+                    what: "quadratic support reaction or force residual is nonfinite",
+                });
+            }
+        }
+    }
     for (node, (displacement, force)) in displacement_m
         .iter()
         .zip(&nodal_internal_force_n)
@@ -359,11 +400,13 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         displacement_m,
         elements: response,
         nodal_internal_force_n,
+        nodal_force_balance_n,
         elastic_energy_j,
         iterations,
         true_relative_residual,
         mesh_frame,
-        thermal_load_identity: load.identity,
+        thermal_load_identity,
+        load_identity: load.identity,
         identity: identity.finalize(),
     })
 }

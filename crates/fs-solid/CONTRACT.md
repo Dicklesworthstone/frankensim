@@ -67,6 +67,18 @@ finite-strain behavior, stress extrapolation or quadrature-error certification.
 nonuniform expansion field, clamped stress/energy/support reactions, repeatable
 results and refusals for rigid modes, controls and applicability limits.
 
+Quadratic problems also expose `assemble_thermal_load_with_nodal_forces` and
+`solve_thermal_response_with_nodal_forces`. Their dead nodal forces use the same
+strictly ordered, unique, finite full-DOF validation and combined-load identity
+owner as P1. Thermal and mechanical forces enter one stiffness solve. Actual
+stress still integrates `C(Bu - epsilon_free)`; `nodal_internal_force_n` retains
+that full internal force, while `nodal_force_balance_n` subtracts applied dead
+nodal forces. The latter gives reactions on the solid at fixed DOFs and unchanged
+residuals at free DOFs, including applied loads directly on supports. The result
+retains both the original thermal-load identity and the complete load identity.
+`tests/quadratic_thermal_loads.rs` checks analytic thermal expansion plus end
+traction on all three families, support-load accounting, and malformed loads.
+
 `linear3::visco` (IRP M1.3-W2a, in progress) prepares P1 or TET10 elements
 with caller-supplied, mesh-frame `fs-material::TensorProny` laws and density.
 It reuses the existing elastic mesh admission, equilibrium stiffness and

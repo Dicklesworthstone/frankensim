@@ -342,6 +342,25 @@ impl QuadraticTetProblem<'_> {
             cx,
         )
     }
+
+    /// Assemble thermal eigenstrain and dead nodal forces into one load.
+    ///
+    /// Forces are strictly increasing, unique full node-major xyz DOFs paired
+    /// with newtons. Loads at fixed DOFs are retained for support reactions.
+    pub fn assemble_thermal_load_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalLoad, TetElasticError> {
+        super::add_nodal_forces_to_thermal_load(
+            self.assemble_thermal_load(thermal_strains, cx)?,
+            self.nodes_m.len(),
+            nodal_forces_n,
+            cx,
+        )
+    }
+
     /// Solve the source-bound thermal equilibrium and recover physical stress,
     /// elastic energy and support forces on the same reference mesh.
     ///
@@ -360,12 +379,58 @@ impl QuadraticTetProblem<'_> {
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
+        self.solve_thermal_response_impl(
+            thermal_strains,
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Solve thermal eigenstrain and applied dead nodal forces together.
+    ///
+    /// Forces use strictly increasing, unique full node-major xyz DOFs and
+    /// finite newtons. Fixed-DOF loads change support reactions without creating
+    /// artificial displacement. The response preserves actual internal forces
+    /// and separately reports internal minus applied force: support reactions
+    /// on fixed DOFs and unmodified equilibrium residuals on free DOFs.
+    pub fn solve_thermal_response_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
+        self.solve_thermal_response_impl(
+            thermal_strains,
+            Some(nodal_forces_n),
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    fn solve_thermal_response_impl(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: Option<&[(usize, f64)]>,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
         self.validate(false, cx)?;
         super::isoparametric::thermal_response::solve::<10, 30, _>(
             self.nodes_m,
             self.elements,
             self.materials,
             thermal_strains,
+            nodal_forces_n,
             self.fixed_dofs,
             self.budget,
             &duffy_quadrature(self.quadrature.stiffness_points_per_dir),

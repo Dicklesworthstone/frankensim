@@ -2153,66 +2153,12 @@ impl TetLinearElasticProblem<'_> {
         nodal_forces_n: &[(usize, f64)],
         cx: &Cx<'_>,
     ) -> Result<TetThermalLoad, TetElasticError> {
-        let mut load = self.assemble_thermal_load(thermal_strains, cx)?;
-        let full_dofs = self
-            .nodes_m
-            .len()
-            .checked_mul(3)
-            .ok_or(TetElasticError::SizeOverflow)?;
-        let mut identity =
-            DomainHasher::new("org.frankensim.fs-solid.tet-thermal-plus-nodal-load.v1");
-        identity.update(load.identity.as_bytes());
-        let mut previous = None;
-        for (index, &(dof, force_n)) in nodal_forces_n.iter().enumerate() {
-            if index % 256 == 0 {
-                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            }
-            if dof >= full_dofs {
-                return Err(TetElasticError::InvalidNodalForce {
-                    dof,
-                    full_dofs,
-                    what: "force DOF is outside the mesh",
-                });
-            }
-            if previous.is_some_and(|last| dof <= last) {
-                return Err(TetElasticError::InvalidNodalForce {
-                    dof,
-                    full_dofs,
-                    what: "force DOFs must be strictly increasing and unique",
-                });
-            }
-            if !force_n.is_finite() {
-                return Err(TetElasticError::InvalidNodalForce {
-                    dof,
-                    full_dofs,
-                    what: "force must be finite",
-                });
-            }
-            previous = Some(dof);
-            load.full_equivalent_force_n[dof] += force_n;
-            if !load.full_equivalent_force_n[dof].is_finite() {
-                return Err(TetElasticError::InvalidNodalForce {
-                    dof,
-                    full_dofs,
-                    what: "combined full force is not representable",
-                });
-            }
-            if let Ok(reduced) = load.free_dofs.binary_search(&dof) {
-                load.reduced_force_n[reduced] += force_n;
-                if !load.reduced_force_n[reduced].is_finite() {
-                    return Err(TetElasticError::InvalidNodalForce {
-                        dof,
-                        full_dofs,
-                        what: "combined reduced force is not representable",
-                    });
-                }
-            }
-            hash_usize(&mut identity, dof)?;
-            identity.update(&force_n.to_bits().to_le_bytes());
-        }
-        load.identity = identity.finalize();
-        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        Ok(load)
+        add_nodal_forces_to_thermal_load(
+            self.assemble_thermal_load(thermal_strains, cx)?,
+            self.nodes_m.len(),
+            nodal_forces_n,
+            cx,
+        )
     }
 
     fn solve_thermal_displacement_from_load(
@@ -2618,6 +2564,73 @@ impl TetLinearElasticProblem<'_> {
         }
         Ok(())
     }
+}
+
+/// Add validated dead nodal forces to a canonical thermal load. Shared by
+/// the P1 and quadratic static owners so ordering, overflow and identity
+/// semantics remain identical for every element family.
+fn add_nodal_forces_to_thermal_load(
+    mut load: TetThermalLoad,
+    node_count: usize,
+    nodal_forces_n: &[(usize, f64)],
+    cx: &Cx<'_>,
+) -> Result<TetThermalLoad, TetElasticError> {
+    let full_dofs = node_count
+        .checked_mul(3)
+        .ok_or(TetElasticError::SizeOverflow)?;
+    let mut identity = DomainHasher::new("org.frankensim.fs-solid.tet-thermal-plus-nodal-load.v1");
+    identity.update(load.identity.as_bytes());
+    let mut previous = None;
+    for (index, &(dof, force_n)) in nodal_forces_n.iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        }
+        if dof >= full_dofs {
+            return Err(TetElasticError::InvalidNodalForce {
+                dof,
+                full_dofs,
+                what: "force DOF is outside the mesh",
+            });
+        }
+        if previous.is_some_and(|last| dof <= last) {
+            return Err(TetElasticError::InvalidNodalForce {
+                dof,
+                full_dofs,
+                what: "force DOFs must be strictly increasing and unique",
+            });
+        }
+        if !force_n.is_finite() {
+            return Err(TetElasticError::InvalidNodalForce {
+                dof,
+                full_dofs,
+                what: "force must be finite",
+            });
+        }
+        previous = Some(dof);
+        load.full_equivalent_force_n[dof] += force_n;
+        if !load.full_equivalent_force_n[dof].is_finite() {
+            return Err(TetElasticError::InvalidNodalForce {
+                dof,
+                full_dofs,
+                what: "combined full force is not representable",
+            });
+        }
+        if let Ok(reduced) = load.free_dofs.binary_search(&dof) {
+            load.reduced_force_n[reduced] += force_n;
+            if !load.reduced_force_n[reduced].is_finite() {
+                return Err(TetElasticError::InvalidNodalForce {
+                    dof,
+                    full_dofs,
+                    what: "combined reduced force is not representable",
+                });
+            }
+        }
+        hash_usize(&mut identity, dof)?;
+        identity.update(&force_n.to_bits().to_le_bytes());
+    }
+    load.identity = identity.finalize();
+    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+    Ok(load)
 }
 
 fn free_dof_map(
