@@ -89,6 +89,9 @@ use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
 pub mod network;
 use network::FlueResonator;
 
+/// Original jet/mouth composition with the shared causal DG port owner.
+pub mod dg;
+
 /// Optional geometry/gas-bound separation loss in the same-sample mouth solve.
 pub mod mouth_loss;
 
@@ -173,6 +176,7 @@ impl FlueResonator {
     fn mouth_boundary(&self) -> Result<WindBoundary, FlueError> {
         match self {
             Self::Tmm(line) => line.boundary_response().map_err(FlueError::Line),
+            Self::Dg(duct) => duct.boundary(),
             Self::Network(_) => Ok(WindBoundary {
                 direct_reflection: 0.0, history_pressure_pa: self.incoming(),
             }),
@@ -1226,7 +1230,7 @@ impl FlueVoice {
             // velocity before either the wave or source history can publish.
             let windway_candidate = windway_trial
                 .map(|windway| windway.finish(q / s_m)).transpose()?;
-            let committed = self.line.push(p_plus)?;
+            let committed = self.line.push(mouth)?;
             if matches!(&self.line, FlueResonator::Tmm(_))
                 && committed.to_bits() != mouth.incoming_pa.to_bits() {
                 return Err(FlueError::Invalid { what: "mouth solve and committed reflection disagree" });

@@ -1,0 +1,262 @@
+//! The existing jet/mouth equations on the original causal DG bore.
+//!
+//! The port's exact step-mean law is P = H + Z Q. At the physical inlet
+//! characteristic impedance Zc = rho c / A, this is the SAME sample's
+//! wave relation p- = (Z-Zc)/(Z+Zc) p+ + H Zc/(Z+Zc).
+//! This adapter changes only the bore owner. It adds no jet, propagator,
+//! delayed feedback sample or radiation model.
+//!
+//! The retained jet card and authored receptivity remain exploration-only.
+//! This is not the resolved compressible zone/duct interface of M3.3-W1 and
+//! cannot qualify a flute acceptance render. Solid wall motion, exterior
+//! radiation and live bore geometry changes require their own coupled owners.
+
+use super::network::FlueResonator;
+use super::{FlueError, FlueGeometry, FlueVoice, MouthStep};
+use crate::dg_port::DgPortLoad;
+use crate::wind_line::WindBoundary;
+use fs_aeroac::jetcard::JetCard;
+use fs_duct::dg::DgStepOutput;
+use fs_exec::CancelGate;
+
+fn invalid(what: &'static str) -> FlueError {
+    FlueError::Invalid { what }
+}
+
+fn poll(gate: &CancelGate) -> Result<(), FlueError> {
+    if gate.is_requested() {
+        Err(FlueError::Physics(
+            crate::acoustic_realize::AcousticRealizeError::Cancelled,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Original geometric/material bore and explicit numerical/source limits.
+/// The gas at the actual inlet supplies jet density, viscosity and sound speed.
+#[derive(Clone, Debug)]
+pub struct FlueDgSpec {
+    /// The original bounded cold bore and exact propagator, prepared once.
+    pub load: DgPortLoad,
+    /// Positive jet speed floor for the declared time-history extent [m/s].
+    /// Zero blowing and the existing unsteady windway's release remain allowed.
+    pub minimum_jet_speed_m_s: f64,
+    /// Incompressible source Mach ceiling, in (0, 0.3].
+    pub maximum_jet_mach: f64,
+    /// Maximum retained convection-history samples, including interpolation.
+    pub max_jet_history_samples: usize,
+}
+
+/// One accepted bore step in the same wave coordinates used by the source.
+/// Pressure and flow are means/held values for THIS step, not terminal sound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlueDgFrame {
+    pub inlet_pressure_pa: f64,
+    pub inlet_flow_m3_s: f64,
+    pub outgoing_pressure_pa: f64,
+    pub incoming_pressure_pa: f64,
+    /// Original integrated DG work minus mean inlet pressure * volume [J].
+    pub port_work_residual_j: f64,
+    /// Original propagator observation and ledger. Dense loss is still inferred
+    /// where its balance_checked field is false.
+    pub duct: DgStepOutput,
+}
+
+/// The original one-port DG owner retained under the common flue loop.
+pub struct FlueDg {
+    load: DgPortLoad,
+    characteristic_impedance_pa_s_m3: f64,
+    minimum_jet_speed_m_s: f64,
+    maximum_jet_mach: f64,
+    last: Option<FlueDgFrame>,
+}
+
+impl FlueDg {
+    pub const fn load(&self) -> &DgPortLoad {
+        &self.load
+    }
+
+    pub const fn last_frame(&self) -> Option<&FlueDgFrame> {
+        self.last.as_ref()
+    }
+
+    pub const fn characteristic_impedance_pa_s_m3(&self) -> f64 {
+        self.characteristic_impedance_pa_s_m3
+    }
+
+    pub fn stored_energy_j(&self) -> f64 {
+        self.load.state().stored_energy_j()
+    }
+
+    pub(super) fn boundary(&self) -> Result<WindBoundary, FlueError> {
+        let relation = self.load.port_response().map_err(FlueError::Physics)?;
+        let zc = self.characteristic_impedance_pa_s_m3;
+        let denominator = relation.impedance_pa_s_m3 + zc;
+        if !denominator.is_finite() || denominator <= 0.0 {
+            return Err(invalid("DG characteristic boundary has nonfinite impedance"));
+        }
+        let boundary = WindBoundary {
+            direct_reflection: (relation.impedance_pa_s_m3 - zc) / denominator,
+            history_pressure_pa: relation.history_pressure_pa * (zc / denominator),
+        };
+        if !boundary.direct_reflection.is_finite()
+            || !boundary.history_pressure_pa.is_finite()
+        {
+            return Err(invalid("DG characteristic boundary left the finite domain"));
+        }
+        Ok(boundary)
+    }
+
+    pub(super) fn incoming(&self) -> f64 {
+        self.last.as_ref().map_or(0.0, |frame| frame.incoming_pressure_pa)
+    }
+
+    pub(super) fn push(&mut self, mouth: MouthStep) -> Result<f64, FlueError> {
+        let relation = self.load.port_response().map_err(FlueError::Physics)?;
+        let dt = self.load.propagator().dt();
+        let outgoing_pressure_pa = mouth.outgoing_pa;
+        let inlet_flow_m3_s = mouth.flow_m3_s;
+        let inlet_pressure_pa = mouth.pressure_pa;
+        let incoming_pressure_pa = mouth.incoming_pa;
+        let expected_pressure = relation.history_pressure_pa
+            + relation.impedance_pa_s_m3 * inlet_flow_m3_s;
+        if ![
+            outgoing_pressure_pa,
+            inlet_flow_m3_s,
+            inlet_pressure_pa,
+            incoming_pressure_pa,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        {
+            return Err(invalid("DG source wave implies nonfinite pressure or flow"));
+        }
+        let trial = self.load.preview_step(inlet_flow_m3_s).map_err(FlueError::Physics)?;
+        let output = trial.output();
+        let pressure_scale = relation.history_pressure_pa.abs()
+            + (relation.impedance_pa_s_m3 * inlet_flow_m3_s).abs()
+            + inlet_pressure_pa.abs();
+        let work = inlet_pressure_pa * (inlet_flow_m3_s * dt);
+        let port_work_residual_j = output.ledger.port_work_step_j - work;
+        let work_scale = output.ledger.port_work_step_j.abs() + work.abs();
+        if (expected_pressure - inlet_pressure_pa).abs()
+            > 1e-10 * pressure_scale.max(1e-300)
+            || (output.port_outputs[0].conjugate_rate - inlet_pressure_pa).abs()
+                > 1e-10 * pressure_scale.max(1e-300)
+            || !work.is_finite()
+            || !port_work_residual_j.is_finite()
+            || port_work_residual_j.abs() > 1e-10 * work_scale.max(1e-300)
+        {
+            return Err(invalid("DG source wave and original mean port work disagree"));
+        }
+        // All fallible checks precede the common owner's atomic publication.
+        let duct = trial.accept();
+        self.last = Some(FlueDgFrame {
+            inlet_pressure_pa,
+            inlet_flow_m3_s,
+            outgoing_pressure_pa,
+            incoming_pressure_pa,
+            port_work_residual_j,
+            duct,
+        });
+        Ok(incoming_pressure_pa)
+    }
+
+    pub(super) fn validate_jet_speed(&self, speed: f64, blowing: bool) -> Result<(), FlueError> {
+        if !speed.is_finite()
+            || (blowing && speed < self.minimum_jet_speed_m_s)
+            || speed > self.maximum_jet_mach * self.load.duct().inlet_gas().sound_speed
+        {
+            return Err(invalid("DG flue exceeds its declared low-Mach or convection-history domain"));
+        }
+        Ok(())
+    }
+}
+
+impl FlueVoice {
+    /// Compose the original jet, optional windway and mouth laws with the
+    /// declared material-gas DG bore. The complete causal wall-memory state
+    /// participates in the same-step mouth solve through its exact mean port.
+    ///
+    /// Gas is read from the actual inlet; a conflicting mouth bore area refuses.
+    /// Every original acoustic and diffusion mode remains retained. The shared
+    /// one-port owner checks the total DOF allowance and mechanical Nyquist band.
+    /// step_block keeps its existing launched-wave observation. Inspect
+    /// dg().last_frame() for physical mean inlet pressure, flow and work.
+    ///
+    /// The source is the original estimate-only jet card, not resolved flow.
+    /// No flute acceptance, exterior microphone or solid-wall claim follows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_dg(
+        card: Option<&JetCard>,
+        displacement_gain: f64,
+        seed_amplitude_rel: f64,
+        geometry: FlueGeometry,
+        source: FlueDgSpec,
+        sample_rate_hz: u32,
+        voice_seed: u64,
+        voice_index: u32,
+        gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        poll(gate)?;
+        let card = card.ok_or(FlueError::NoCard)?;
+        let gas = *source.load.duct().inlet_gas();
+        let area = source.load.duct().inlet_area_m2();
+        if sample_rate_hz == 0
+            || source.load.state().step_count() != 0
+            || source.load.propagator().dt().to_bits()
+                != (1.0 / f64::from(sample_rate_hz)).to_bits()
+            || !source.minimum_jet_speed_m_s.is_finite()
+            || source.minimum_jet_speed_m_s <= 0.0
+            || !source.maximum_jet_mach.is_finite()
+            || !(0.0 < source.maximum_jet_mach && source.maximum_jet_mach <= 0.3)
+            || source.minimum_jet_speed_m_s > source.maximum_jet_mach * gas.sound_speed
+            || !(4..=1_048_576).contains(&source.max_jet_history_samples)
+            || !geometry.bore_area_m2.is_finite()
+            || (geometry.bore_area_m2 - area).abs() > 32.0 * f64::EPSILON * area
+        {
+            return Err(invalid("DG flue needs matching inlet area and bounded physical jet controls"));
+        }
+        let minimum = source.minimum_jet_speed_m_s;
+        let maximum_jet_mach = source.maximum_jet_mach;
+        let capacity = source.max_jet_history_samples;
+        let load = source.load;
+        poll(gate)?;
+        let voice = Self::with_resonator(
+            Some(card),
+            displacement_gain,
+            seed_amplitude_rel,
+            geometry,
+            &gas,
+            sample_rate_hz,
+            voice_seed,
+            voice_index,
+            minimum,
+            capacity,
+            |zc| {
+                Ok(FlueResonator::Dg(Box::new(FlueDg {
+                    load,
+                    characteristic_impedance_pa_s_m3: zc,
+                    minimum_jet_speed_m_s: minimum,
+                    maximum_jet_mach,
+                    last: None,
+                })))
+            },
+        )?;
+        poll(gate)?;
+        Ok(voice)
+    }
+
+    /// The accepted DG state and source-bound physical bore; absent on other
+    /// propagation paths. The source and returned load have no mutable escape.
+    pub fn dg(&self) -> Option<&FlueDg> {
+        match &self.line {
+            FlueResonator::Dg(duct) => Some(duct),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

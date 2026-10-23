@@ -108,6 +108,7 @@ pub struct FlueNetwork {
 pub(super) enum FlueResonator {
     Tmm(WindLineBank),
     Network(Box<FlueNetwork>),
+    Dg(Box<super::dg::FlueDg>),
 }
 
 fn invalid(what: &'static str) -> FlueError { FlueError::Invalid { what } }
@@ -265,11 +266,17 @@ impl FlueNetwork {
 
 impl FlueResonator {
     pub(super) fn incoming(&self) -> f64 {
-        match self { Self::Tmm(line) => line.incoming(), Self::Network(n) => n.physics.incoming_pressure_pa() }
+        match self {
+            Self::Tmm(line) => line.incoming(),
+            Self::Network(n) => n.physics.incoming_pressure_pa(),
+            Self::Dg(duct) => duct.incoming(),
+        }
     }
-    pub(super) fn push(&mut self, outgoing: f64) -> Result<f64, FlueError> {
+    pub(super) fn push(&mut self, mouth: super::MouthStep) -> Result<f64, FlueError> {
+        let outgoing = mouth.outgoing_pa;
         match self {
             Self::Tmm(line) => line.push(outgoing).map_err(FlueError::Line),
+            Self::Dg(duct) => duct.push(mouth),
             Self::Network(n) => {
                 let frame = if let Some(boundaries) = &mut n.boundaries {
                     boundaries.step(&mut n.physics, outgoing, &n.boundary_drives)
@@ -283,10 +290,11 @@ impl FlueResonator {
     pub(super) fn switch_fingering(&mut self, index: usize, fade: usize) -> Result<(), FlueError> {
         match self {
             Self::Tmm(line) => line.switch_fingering(index, fade).map_err(FlueError::Line),
-            Self::Network(_) => Err(invalid("a physical flue graph has no TMM fingering bank; use explicit terminal controls")),
+            Self::Network(_) | Self::Dg(_) => Err(invalid("a physical flue bore has no TMM fingering bank")),
         }
     }
     pub(super) fn validate_jet_speed(&self, speed: f64, blowing: bool) -> Result<(), FlueError> {
+        if let Self::Dg(duct) = self { return duct.validate_jet_speed(speed, blowing); }
         if let Self::Network(n) = self {
             let source = &n.source;
             let inlet = source.graph.inlet_section_index().map_err(physical)?;
@@ -521,7 +529,10 @@ impl FlueVoice {
     /// Read the actual regional tube state; absent for the legacy TMM image.
     #[must_use]
     pub fn network(&self) -> Option<&FlueNetwork> {
-        match &self.line { FlueResonator::Network(n) => Some(n), FlueResonator::Tmm(_) => None }
+        match &self.line {
+            FlueResonator::Network(n) => Some(n),
+            FlueResonator::Tmm(_) | FlueResonator::Dg(_) => None,
+        }
     }
     /// Add explicit gas/geometry-derived separation losses at physical outlets.
     /// Original radiation, wall and wave histories share the same solved flow.
@@ -551,7 +562,7 @@ impl FlueVoice {
                 n.graph.nodes[node] = fs_vfit::waveguide::network::NetworkNode::Termination { reflection };
                 Ok(())
             }
-            FlueResonator::Tmm(_) => Err(invalid("terminal controls require the physical graph image")),
+            FlueResonator::Tmm(_) | FlueResonator::Dg(_) => Err(invalid("terminal controls require the physical graph image")),
         }
     }
     /// Validate a held physical pressure before compiling a source schedule.
