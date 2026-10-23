@@ -1,5 +1,5 @@
 //! Close-coiled material windings lowered to the existing string mechanics.
-use fs_material::section::winding::CloseWoundSection;
+use fs_material::section::winding::{CloseWoundSection, WoundCoreSection};
 use fs_scenario::PrestressedString;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::string_specimen::StringPrestress;
@@ -27,11 +27,30 @@ impl ResolvedWoundStringSpecimen {
         let mut string = with_section_coefficients(template, section.line_density_kg_m(),
             section.axial_stiffness_n(), section.core().elastic().bending_stiffness_n_m2(),
             section.outer_radius_m(), prestress)?;
-        string.kelvin_voigt_bending = Some(fs_scenario::acoustic::KelvinVoigtBending {
-            viscous_stiffness_n_m2_s: section.core().viscous_stiffness_n_m2_s(),
-            omega_band_rad_s: section.omega_band_rad_s(),
-            material_state_identity: None,
-        });
+        match section.core() {
+            WoundCoreSection::KelvinVoigt(core) => {
+                string.kelvin_voigt_bending = Some(fs_scenario::acoustic::KelvinVoigtBending {
+                    viscous_stiffness_n_m2_s: core.viscous_stiffness_n_m2_s(),
+                    omega_band_rad_s: section.omega_band_rad_s(),
+                    material_state_identity: None,
+                });
+            }
+            WoundCoreSection::Prony(core) => {
+                string.relaxation_bending = Some(fs_scenario::acoustic::PronyBending {
+                    branches: core.branches().iter().map(|arm| fs_scenario::acoustic::BendingRelaxationBranch {
+                        relaxing_stiffness_n_m2: arm.relaxing_stiffness_n_m2,
+                        relaxation_time_s: arm.relaxation_time_s,
+                    }).collect(),
+                    // The wrap is elastic, but its coefficients still have to
+                    // support the instantaneous frequencies of the whole owner.
+                    omega_band_rad_s: section.omega_band_rad_s(),
+                    // Both original source bundles and per-layer selectors
+                    // remain in section; there is no equivalent material ID.
+                    material_state_identity: None,
+                    source_properties: None,
+                });
+            }
+        }
         Ok(Self { string, section, prestress })
     }
     /// Ordinary generic string coefficients; source data stay on this specimen.

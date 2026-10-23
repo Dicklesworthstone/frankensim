@@ -123,8 +123,13 @@ The wrap resolves only its density and shear modulus. Actual helical wire
 length determines its mass; close-coiled spring mechanics determine its
 axial stiffness. The core and wrap share end displacement, with sliding allowed
 along their interface. A free-ended wrap needs a different axial boundary law.
-The core supplies bending stiffness and sourced bending
-viscosity. Replacing the winding's pack therefore changes mass, tension under
+The core supplies bending stiffness and its explicitly selected Kelvin–Voigt
+viscosity or generalized-Maxwell relaxation spectrum. The latter uses the same
+`bending-loss prony` record as a homogeneous string and requires no viscosity
+claim. Each original core arm remains an internal strain in the joint
+string/body/cavity solver, projected with the **total core-plus-wrap mass**.
+The wrap remains elastic in this approximation; it never inherits the core's
+relaxation or counts as a bonded bending layer. Replacing the winding's pack therefore changes mass, tension under
 fixed extension, frequencies, gas loading and the shared body's physical
 pressure. Explicit fixed tension and fixed extension keep their different
 experimental meanings. The exposed wrap material also supplies the identity
@@ -193,7 +198,7 @@ selected shear modulus and shear viscosity.
 
 The existing `bending-memory` / `string-memory` block before `cavity` remains
 available for additional per-layer memory alongside explicitly selected
-Kelvin–Voigt loss, including perfectly bonded sections. See
+Kelvin–Voigt loss, including perfectly bonded sections and close-wound cores. See
 [the shared string-memory interface](../../../../docs/MATERIAL_STRING_BENDING_MEMORY.md).
 The two selections may coexist on different strings and share body histories,
 gas loading, bow contact and PCM output. Selecting the same string through both
@@ -214,9 +219,12 @@ modulus or time in the TSV, rebuilding its pack and changing only the pack path
 in the performance changes the constitutive history loading the common body.
 Its pressure is what the existing PCM writer receives. Static preload
 initializes relaxed histories, and neighboring-string motion uses the same
-reciprocal mechanics. The exclusive per-string selection requires homogeneous
-strings on the exact solver; bonded sections use the existing additional-memory
-interface and `prepared-linear` refuses constitutive histories. These models
+reciprocal mechanics. The exclusive per-string selection supports homogeneous
+strings and close-wound cores on the exact solver; bonded sections use the
+existing additional-memory interface and `prepared-linear` refuses constitutive
+histories. Core relaxation in a wound string keeps the original helix mass,
+finished gas-loading radius and wrapping material identity. All participating
+source bands must cover the complete instantaneous coupled frequency bound. These models
 supply bending relaxation; the torsional selection below supplies independent
 shear histories. Axial relaxation, interlayer slip and measured wound-string
 behavior remain outside their scope. All supplied values

@@ -17,8 +17,7 @@ impl Input {
         }
         let wire = strings.get(string).ok_or("absent bending-memory string")?;
         let count = match &wire.section {
-            input::WireSection::Homogeneous => 1,
-            input::WireSection::CloseWound { .. } => return Err("wound-string bending memory requires a resolved winding law".into()),
+            input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => 1,
             input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
         };
         Ok(Selection { string, layers: vec![LayerProperties {
@@ -38,8 +37,7 @@ impl Input {
         for (index, selection) in self.selections.iter().enumerate() {
             let wire = strings.get(selection.string).ok_or("absent bending-memory string")?;
             let layers = match &wire.section {
-                input::WireSection::Homogeneous => 1,
-                input::WireSection::CloseWound { .. } => return Err("wound-string bending memory requires a resolved winding law".into()),
+                input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => 1,
                 input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
             };
             if self.selections[..index].iter().any(|s|s.string==selection.string)
@@ -86,8 +84,9 @@ impl Input {
         for selection in &self.selections {
             let wire=strings.get(selection.string).ok_or("absent bending-memory string")?;
             let sleeves = match &wire.section {
-                input::WireSection::Homogeneous => &[][..],
-                input::WireSection::CloseWound { .. } => return Err("wound-string bending memory requires a resolved winding law".into()),
+                // Bending memory belongs to the core. A sliding helical wrap
+                // is not another bonded bending layer and needs no such claims.
+                input::WireSection::Homogeneous | input::WireSection::CloseWound { .. } => &[][..],
                 input::WireSection::Bonded { sleeves, .. } => sleeves.as_slice(),
             };
             let packs = std::iter::once(wire.pack.as_str())

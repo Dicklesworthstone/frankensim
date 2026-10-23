@@ -39,6 +39,24 @@ impl BowedStringCard {
         lower(cx, &specimen.string(), gas, sample_rate_hz)
     }
 
+    // Only the joint bank may lower a core with memory; the public card path
+    // keeps refusing rather than silently dropping the internal strains.
+    pub(crate) fn wound_relaxation_backbone_with_gas(
+        cx: &Cx<'_>, specimen: &crate::material_assembly::wound::ResolvedWoundStringSpecimen,
+        gas: &GasState, sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = specimen.string();
+        if !matches!(specimen.section().core(), fs_material::section::winding::WoundCoreSection::Prony(_))
+            || string.relaxation_bending.is_none() {
+            return Err(invalid("wound bank backbone requires the original core bending spectrum"));
+        }
+        let mut elastic = string.clone();
+        elastic.relaxation_bending = None;
+        validate_incremental_string(&elastic)?;
+        lower_backbone(cx, &string, gas, sample_rate_hz, 0.0)
+    }
+
     // Private to a bank constructor which immediately binds the original
     // source's material histories. Memoryless cards retain their refusal.
     pub(crate) fn material_relaxation_backbone_with_gas(

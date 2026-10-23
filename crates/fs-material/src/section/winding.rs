@@ -8,7 +8,7 @@
 //! <https://doi.org/10.1371/journal.pone.0184803>.
 //!
 //! This is an explicit leading-order sliding-winding reduction: the core
-//! supplies flexure and flexural viscosity; the winding contributes mass and
+//! supplies flexure and its selected constitutive loss; the winding contributes mass and
 //! elastic axial compliance. Core and winding share end displacements while
 //! remaining free to slip along their interface; a free-ended winding requires
 //! a different axial boundary condition. It has no winding/core friction, winding loss,
@@ -17,7 +17,8 @@
 //! Both materials and geometry survive compilation. Small wire/coil ratio,
 //! small helix angle and wavelengths long compared with the pitch are required.
 
-use super::{ConcentricKelvinVoigtSection, invalid, positive};
+use super::{ConcentricElasticSection, ConcentricKelvinVoigtSection, invalid, positive};
+use super::relaxation::ConcentricPronySection;
 use crate::state_point::{DENSITY_PROPERTY, MaterialStatePointError, ResolvedMaterialStatePoint};
 use fs_qty::{Density, Pressure, QuantitySpec};
 
@@ -31,10 +32,37 @@ pub struct RoundWireWinding {
     pub pitch_m: f64,
 }
 
+/// The original core's selected bending law. The winding does not inherit it.
+/// A Prony spectrum retains each layer's independent material history; it is
+/// never converted to a frequency-sampled Kelvin-Voigt viscosity.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WoundCoreSection {
+    KelvinVoigt(ConcentricKelvinVoigtSection),
+    Prony(ConcentricPronySection),
+}
+impl WoundCoreSection {
+    /// Common source geometry and equilibrium section integrals.
+    #[must_use]
+    pub const fn elastic(&self) -> &ConcentricElasticSection {
+        match self { Self::KelvinVoigt(s) => s.elastic(), Self::Prony(s) => s.elastic() }
+    }
+    /// Complete support of the selected core law, before wrapping coefficients.
+    #[must_use]
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) {
+        match self { Self::KelvinVoigt(s) => s.omega_band_rad_s(), Self::Prony(s) => s.omega_band_rad_s() }
+    }
+}
+impl From<ConcentricKelvinVoigtSection> for WoundCoreSection {
+    fn from(section: ConcentricKelvinVoigtSection) -> Self { Self::KelvinVoigt(section) }
+}
+impl From<ConcentricPronySection> for WoundCoreSection {
+    fn from(section: ConcentricPronySection) -> Self { Self::Prony(section) }
+}
+
 /// Source-retaining close-coiled spring winding and core-dominated flexure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CloseWoundSection {
-    core: ConcentricKelvinVoigtSection,
+    core: WoundCoreSection,
     winding: RoundWireWinding,
     material: ResolvedMaterialStatePoint,
     shear_property: String,
@@ -55,11 +83,12 @@ impl CloseWoundSection {
     /// query coordinates. The winding remains lossless in this reduction;
     /// its missing friction is never replaced with the core's viscosity.
     pub fn try_new(
-        core: ConcentricKelvinVoigtSection,
+        core: impl Into<WoundCoreSection>,
         winding: RoundWireWinding,
         material: ResolvedMaterialStatePoint,
         shear_property: &str,
     ) -> Result<Self, MaterialStatePointError> {
+        let core = core.into();
         let a = positive(winding.wire_radius_m, "positive winding wire radius")?;
         let pitch = positive(winding.pitch_m, "positive winding pitch")?;
         let radius = positive(core.elastic().outer_radius_m() + a, "winding centre-line radius")?;
@@ -137,8 +166,8 @@ impl CloseWoundSection {
         Ok(())
     }
 
-    /// Original core, including every material and viscosity receipt.
-    #[must_use] pub const fn core(&self) -> &ConcentricKelvinVoigtSection { &self.core }
+    /// Original core, including every material and selected loss-law receipt.
+    #[must_use] pub const fn core(&self) -> &WoundCoreSection { &self.core }
     /// Actual winding-wire material, also the exposed contact material.
     #[must_use] pub const fn winding_material(&self) -> &ResolvedMaterialStatePoint { &self.material }
     /// Wire and turn geometry of the frozen specimen.

@@ -124,7 +124,11 @@ impl StringBankBendingRelaxation {
                         relaxation_time_s: branch.relaxation_time_s });
                 }}
             }
-            bands.push(section.omega_band_rad_s());
+            let mut band = section.omega_band_rad_s();
+            if let Some(winding_band) = winding_band(&member.source) {
+                band = (band.0.max(winding_band.0), band.1.min(winding_band.1));
+            }
+            bands.push(band);
             sections.push(section.elastic().clone());
             spectra.push(section.spectra().to_vec());
         }
@@ -175,7 +179,17 @@ fn section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, Re
             vec![ConcentricMaterialLayer { outer_radius_m: s.radius_m(), material: s.material().clone() }])
             .map_err(owner),
         MaterialStringSource::Concentric { section, .. } => Ok(section.elastic().clone()),
-        MaterialStringSource::Wound(_) => Err(invalid("winding bending memory needs an explicit core/wrap reduction")),
+        MaterialStringSource::Wound(s) => Ok(s.section().core().elastic().clone()),
+    }
+}
+// Raising instantaneous core stiffness must not escape the wrapping material's
+// support, even though the wrap contributes no bending-memory channel.
+fn winding_band(source: &MaterialStringSource) -> Option<(f64, f64)> {
+    match source {
+        MaterialStringSource::WithPolarizations(p) => winding_band(p.source()),
+        MaterialStringSource::WithTorsion(t) => winding_band(t.bending()),
+        MaterialStringSource::Wound(s) => Some(s.section().omega_band_rad_s()),
+        _ => None,
     }
 }
 fn validate_properties(properties: &[(String,String)]) -> Result<(), ReciprocalStringError> {
@@ -204,7 +218,9 @@ impl MaterialStringBankSource {
     }
 }
 impl ReciprocalStringBank {
-    /// Add source-selected bending memory to homogeneous or bonded strings.
+    /// Add source-selected bending memory to homogeneous, bonded or wound strings.
+    /// For the sliding close-wound reduction only the original core bends; its
+    /// arms use the total core-plus-wrap mass and retain wrapping-band limits.
     /// Every material layer supplies its own modulus increments and time scales;
     /// both transverse planes share those data, not a fitted per-mode Q.
     /// The unchanged exact owner couples this storage to body, bridges and bows.

@@ -287,7 +287,7 @@ impl FractionalZener {
 
 /// Generalized Maxwell (Prony) series:
 /// `E*(ω) = E∞ + Σ_j E_j·(iωτ_j)/(1 + iωτ_j)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GeneralizedMaxwell {
     /// Equilibrium modulus [Pa].
     pub e_inf: f64,

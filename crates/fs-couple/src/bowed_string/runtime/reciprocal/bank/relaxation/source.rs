@@ -20,7 +20,8 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => p.source().bending_relaxation(),
             Self::WithTorsion(t) => t.bending().bending_relaxation(),
             Self::Homogeneous(s) => s.string().relaxation_bending,
-            Self::Wound(_) | Self::Concentric { .. } => None,
+            Self::Wound(s) => s.string().relaxation_bending,
+            Self::Concentric { .. } => None,
         }
     }
 
@@ -33,6 +34,9 @@ impl MaterialStringSource {
             Self::WithTorsion(t) => t.bending().lower_for_bank(cx, gas, rate),
             Self::Homogeneous(s) if s.string().relaxation_bending.is_some() =>
                 BowedStringCard::material_relaxation_backbone_with_gas(cx, s, gas, rate)
+                    .map_err(ReciprocalStringError::Material),
+            Self::Wound(s) if s.string().relaxation_bending.is_some() =>
+                BowedStringCard::wound_relaxation_backbone_with_gas(cx, s, gas, rate)
                     .map_err(ReciprocalStringError::Material),
             _ => self.lower(cx, gas, rate),
         }

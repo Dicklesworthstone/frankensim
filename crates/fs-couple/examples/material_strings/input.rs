@@ -704,8 +704,8 @@ impl Spec {
         for wire in &self.strings {
             wire.bending_loss.validate()?;
             if let BendingLoss::Prony { properties } = &wire.bending_loss {
-                if !matches!(wire.section, WireSection::Homogeneous) {
-                    return Err("string Prony bending currently requires an original homogeneous specimen".into());
+                if matches!(wire.section, WireSection::Bonded { .. }) {
+                    return Err("exclusive string Prony bending requires a homogeneous specimen or close-wound core; bonded strings use layer memory".into());
                 }
                 if self.prepared_linear.is_some() {
                     return Err("string material memory requires the exact owner; prepared-linear has no internal-strain states".into());

@@ -47,20 +47,28 @@ impl input::Wire {
         let core = resolve(&self.pack, catalog, loader, spec, false, twist, &self.bending_loss)?;
         let mut source = match &self.section {
             input::WireSection::CloseWound { core_radius_m, pack, wire_radius_m, pitch_m } => {
-                if thermal.is_some() || twist || !matches!(self.bending_loss, input::BendingLoss::KelvinVoigt)
-                    || spec.longitudinal_waves.is_some() || self.torsion_memory.is_some() {
-                    return Err("close-wound reduction supports frozen core flexure and spring extension; resolved winding thermal/torsional/axial-wave/history laws are unavailable".into());
+                if thermal.is_some() || twist || spec.longitudinal_waves.is_some() || self.torsion_memory.is_some() {
+                    return Err("close-wound reduction supports frozen core flexure and spring extension; resolved winding thermal/torsional/axial-wave laws are unavailable".into());
                 }
                 let elastic = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
                     outer_radius_m: *core_radius_m, material: core,
-                }])?.with_kelvin_voigt_bending(ETA)?;
+                }])?;
+                let core: fs_material::section::winding::WoundCoreSection = match &self.bending_loss {
+                    input::BendingLoss::KelvinVoigt => elastic.with_kelvin_voigt_bending(ETA)?.into(),
+                    input::BendingLoss::Prony { properties } => elastic.with_prony_bending(&[
+                        fs_material::section::relaxation::LayerBendingRelaxationProperties {
+                            equilibrium_modulus: fs_couple::string_specimen::EQUILIBRIUM_YOUNG_MODULUS_PROPERTY.into(),
+                            branches: properties.iter().map(|p| (p.modulus.clone(), p.relaxation_time.clone())).collect(),
+                        },
+                    ])?.into(),
+                };
                 // The wrap's spring law needs density and G, not an invented
                 // flexural viscosity or the core's Young modulus.
                 let wrap = resolve_properties(pack, catalog, loader, spec, &[
                     Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
                     Requirement::try_new(SHEAR, Pressure::DIMS, Admit::StrictlyPositive)?,
                 ])?;
-                let section = fs_material::section::winding::CloseWoundSection::try_new(elastic,
+                let section = fs_material::section::winding::CloseWoundSection::try_new(core,
                     fs_material::section::winding::RoundWireWinding {
                         wire_radius_m: *wire_radius_m, pitch_m: *pitch_m,
                     }, wrap, SHEAR)?;

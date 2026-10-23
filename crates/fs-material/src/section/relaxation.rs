@@ -51,7 +51,7 @@ pub use self::LayerRelaxationBranch as LayerBendingRelaxationBranch;
 pub(super) enum SectionRelaxationAxis { Bending, Torsion }
 
 /// Shared coefficient admission; physical section wrappers keep channel identity.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct SectionPronySpectrum {
     pub(super) properties: Vec<LayerRelaxationProperties>,
     pub(super) branches: Vec<LayerRelaxationBranch>,
@@ -60,7 +60,7 @@ pub(super) struct SectionPronySpectrum {
 }
 
 /// A passive bending spectrum on the same source-bound elastic section.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConcentricPronySection {
     elastic: ConcentricElasticSection,
     spectrum: SectionPronySpectrum,
