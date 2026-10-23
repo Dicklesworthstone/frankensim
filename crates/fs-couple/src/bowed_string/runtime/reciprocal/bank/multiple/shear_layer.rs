@@ -4,6 +4,9 @@
 use super::{MultiBowStringBank, ReciprocalStringError};
 use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedShearLayer;
+use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
+use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
+    multiple::layer::thermal::{LayerThermalCell, LayerThermalSolve, LayerThermalFrame, LayerThermalError}};
 
 impl MultiBowStringBank {
     /// Bind isothermal thin shear layers to selected original bow/contact ports.
@@ -31,6 +34,31 @@ impl MultiBowStringBank {
             .with_material_shear_layers(bindings, gate)
             .map_err(ReciprocalStringError::Friction)?;
         Ok(self)
+    }
+
+    /// Continue the original instrument and its retained-film thermal cells in
+    /// one transaction. Temperature-dependent yield/viscosity change the actual
+    /// source traction, string/body/cavity motion and the SAME pressure observer.
+    ///
+    /// The original source bundle must include constant reference density and
+    /// modulus. Geometry/strain history remain fixed and the film must stay solid
+    /// and compressed. The existing network owns heat capacity and conductive
+    /// partition; this adds neither an authored heat split nor a thermal store.
+    /// See the shared modal adapter for endpoint accuracy and moving-grid limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_layer_thermal_network<'t, S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.system.step_with_layer_thermal_network(thermal, bindings, controls,
+            energy_guess_j, external, drives, gate, resolve)
     }
 
     /// Complete original layer material and geometry, retained through

@@ -362,6 +362,41 @@ impl MultiFrictionModalSystem {
         gate: Option<&CancelGate>)
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
+        self.prepare_step(drives, obstacle_offsets, obstacle_geometry, gate)?;
+        let p = self.points.len();
+        if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)
+            && self.shear_layers.iter().all(Option::is_none) {
+            let f = *self.core.step_inner(external, drives[0], gate)?;
+            self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
+                drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
+                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None };
+            self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
+            self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
+            self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
+            self.frame.friction_dissipation_j = f.friction_dissipation_j;
+            self.frame.energy_residual_j = f.energy_residual_j; self.frame.energy_tolerance_j = f.energy_tolerance_j;
+            self.frame.nonlinear = self.core.nonlinear_frame().copied().map(|f| f.diagnostics());
+            self.frame.sweeps = 1; self.accepted = true;
+            return Ok(&self.frame);
+        }
+        if self.core.has_nonlinear_potentials() && (self.series_drives.iter().any(Option::is_some)
+            || self.shear_layers.iter().any(Option::is_some)) {
+            return Err(invalid("series compliant drives and shear layers are not jointly staged with bound nonlinear storage").into());
+        }
+        let accepted = if self.core.has_nonlinear_potentials() {
+            self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
+        } else {
+            self.stage_multiple(external, drives, obstacle_offsets, gate)?
+        };
+        poll(gate)?;
+        Ok(self.publish_step(accepted))
+    }
+
+    // Shared by the ordinary step and the closed layer/enthalpy transaction.
+    // Preparation changes only scratch, never accepted physical history.
+    fn prepare_step(&mut self, drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
         poll(gate)?;
         if let Some(offsets) = obstacle_offsets {
             let obstacles = self.obstacles.as_ref()
@@ -384,31 +419,11 @@ impl MultiFrictionModalSystem {
             obstacles.prepare_geometry(&self.core.network, &self.points,
                 &self.contact_loads, obstacle_geometry, gate)?;
         }
-        if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)
-            && self.shear_layers.iter().all(Option::is_none) {
-            let f = *self.core.step_inner(external, drives[0], gate)?;
-            self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
-                drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
-                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None };
-            self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
-            self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
-            self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
-            self.frame.friction_dissipation_j = f.friction_dissipation_j;
-            self.frame.energy_residual_j = f.energy_residual_j; self.frame.energy_tolerance_j = f.energy_tolerance_j;
-            self.frame.nonlinear = self.core.nonlinear_frame().copied().map(|f| f.diagnostics());
-            self.frame.sweeps = 1; self.accepted = true;
-            return Ok(&self.frame);
-        }
-        if self.core.has_nonlinear_potentials() && (self.series_drives.iter().any(Option::is_some)
-            || self.shear_layers.iter().any(Option::is_some)) {
-            return Err(invalid("series compliant drives and shear layers are not jointly staged with bound nonlinear storage").into());
-        }
-        let mut accepted = if self.core.has_nonlinear_potentials() {
-            self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
-        } else {
-            self.stage_multiple(external, drives, obstacle_offsets, gate)?
-        };
-        poll(gate)?;
+        Ok(())
+    }
+
+    // No fallible work may follow this common physical publication boundary.
+    fn publish_step(&mut self, mut accepted: MultiFrictionFrame) -> &MultiFrictionFrame {
         self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.core.network.publish_staged();
         self.branches.copy_from_slice(&self.staged_branches);
@@ -423,7 +438,7 @@ impl MultiFrictionModalSystem {
         accepted.ports.copy_from_slice(&self.staged_ports);
         self.frame = accepted;
         self.accepted = true;
-        Ok(&self.frame)
+        &self.frame
     }
 
     // Stribeck and hyperbolic ports take the branch-continuation owner on

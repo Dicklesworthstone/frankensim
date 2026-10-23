@@ -148,3 +148,35 @@ fn g0_refusal_preserves_strain_on_opening_temperature_change_or_limit_exhaustion
     assert!(other.stored_energy_j(&state).is_nan());
     assert!(model.advance(&model.initial_state(), &TangentialStepInput { normal_n: 0.0, ..base }).is_err());
 }
+
+#[test]
+fn thermal_continuation_preserves_strain_and_releases_only_actual_elastic_energy() {
+    let cold = law(0.5);
+    let loaded = cold.advance(&cold.initial_state(), &input([0.01, 0.002], 0.01, 0.0)).unwrap();
+    assert!(loaded.state.elastic_slip_m()[0] > 0.0 && loaded.state.plastic_slip_m()[0] > 0.0);
+    let warm = ThirdBodyLayerContact::new(1000.0, 0.1, 0.8, 310.0, 0.02).unwrap();
+    let continued = warm.continue_state(&loaded.state).unwrap();
+    assert_eq!(continued.elastic_slip_m(), loaded.state.elastic_slip_m());
+    assert_eq!(continued.plastic_slip_m(), loaded.state.plastic_slip_m());
+    assert_eq!(warm.stored_energy_j(&continued), cold.stored_energy_j(&loaded.state));
+    let mut held = input([0.0; 2], 0.01, 0.0);
+    held.contact_temperature_k = Some(310.0);
+    let relaxed = warm.advance(&continued, &held).unwrap();
+    assert!(relaxed.dissipated_j > 0.0 && relaxed.stored_change_j < 0.0);
+    close(relaxed.stored_change_j + relaxed.dissipated_j, 0.0, 0.01);
+    assert!(relaxed.state.plastic_slip_m()[0] > continued.plastic_slip_m()[0]);
+
+    // Temperature is no permission to alter the elastic potential or erase
+    // stored work, and a changed law still cannot consume a foreign history.
+    assert!(warm.advance(&loaded.state, &held).is_err());
+    for altered in [
+        ThirdBodyLayerContact::new(1001.0, 0.1, 0.8, 310.0, 0.02).unwrap(),
+        ThirdBodyLayerContact::new(1000.0, 0.1, 0.8, 310.0, 0.01).unwrap(),
+    ] {
+        assert!(altered.continue_state(&loaded.state).is_err());
+    }
+    let saved = continued.clone();
+    held.normal_n = 0.0;
+    assert!(warm.advance(&continued, &held).is_err());
+    assert_eq!(continued, saved);
+}

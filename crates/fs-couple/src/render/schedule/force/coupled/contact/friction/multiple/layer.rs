@@ -4,8 +4,13 @@
 //! return map. This adapter supplies the actual held-force body compliance,
 //! retains the material claims and publishes history with the original network.
 //! Area, thickness, temperature and tangent frame are fixed. Normal opening,
-//! layer transport, wear, thermal evolution and pressure-dependent yield are
+//! layer transport, wear and pressure-dependent yield are
 //! outside this retained-compressive-contact rung; none is replaced by a reset.
+//! The explicit thermal adapter continues this same state only while the
+//! elastic potential stays unchanged; ordinary stepping remains isothermal.
+
+/// Closed finite-cell heating and source-backed dissipative thermal feedback.
+pub mod thermal;
 
 use super::*;
 use fs_material::state_point::ResolvedShearLayer;

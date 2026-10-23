@@ -8,8 +8,11 @@
 //! introduced. Work splits into delta(k |e|^2/2) + Y |dp| + c |dp|^2/dt.
 //!
 //! The contact must remain compressive. Opening, changes of tangent frame,
-//! geometry or temperature, thermal feedback, wear and layer advection need
+//! geometry, wear and layer advection need
 //! their own state transfer; none may silently erase this stored shear energy.
+//! Thermal owners may use `continue_state` only with an unchanged elastic
+//! potential; endpoint temperature and dissipative coefficients then change
+//! together while all accepted strain remains intact.
 
 use crate::{FrictionRegime, TangentialLaw, TangentialStep, TangentialStepInput, TriboError,
     checked_add, checked_mul, finite, nonnegative_finite, positive_finite};
@@ -65,6 +68,34 @@ impl ThirdBodyLayerContact {
     pub const fn temperature_kelvin(&self) -> f64 { self.temperature_kelvin }
     #[must_use]
     pub const fn maximum_elastic_slip_m(&self) -> f64 { self.maximum_elastic_slip_m }
+
+    /// Continue the SAME retained strain while changing only dissipative
+    /// coefficients and their temperature. The elastic potential and its domain
+    /// must be unchanged: this operation supplies no thermoelastic work.
+    ///
+    /// Material identity, source-claim continuity, geometry and temperature
+    /// evolution belong to the coupled owner. This numerical leaf never selects
+    /// a replacement material. Neither signed plastic slip nor reversible
+    /// elastic slip is reset, including on a failed continuation.
+    pub fn continue_state(&self, previous: &ThirdBodyLayerState)
+        -> Result<ThirdBodyLayerState, TriboError> {
+        if self.stiffness_n_m.to_bits() != previous.owner.stiffness_n_m.to_bits()
+            || self.maximum_elastic_slip_m.to_bits()
+                != previous.owner.maximum_elastic_slip_m.to_bits() {
+            return Err(TriboError::InvalidInput {
+                field: "layer_continuation_requires_unchanged_elastic_potential",
+            });
+        }
+        self.admit_elastic_slip(previous.elastic_slip_m)?;
+        for value in previous.plastic_slip_m {
+            finite(value, "layer_continued_plastic_slip_m")?;
+        }
+        Ok(ThirdBodyLayerState {
+            elastic_slip_m: previous.elastic_slip_m,
+            plastic_slip_m: previous.plastic_slip_m,
+            owner: self.clone(),
+        })
+    }
 
     fn admit_elastic_slip(&self, slip: [f64; 2]) -> Result<(), TriboError> {
         for value in slip { finite(value, "layer_elastic_slip_m")?; }
