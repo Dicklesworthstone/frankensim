@@ -2,7 +2,16 @@ use super::*;
 
 const REACTION: &str = include_str!("../../../../examples/flue-mouth-reaction.performance");
 fn source() -> String {
-    REACTION.replace("output 24000 5", "output 1024 1")
+    // The example's gesture runs to 0.36 s. In a 1024-sample (21 ms) window the control
+    // compiler refuses any event that starts after the window, so keep only the events that
+    // start inside it (the opening pressure ramp and the first jet-angle move).
+    let text = REACTION.replace("output 24000 5", "output 1024 1")
+        .replace("events\t3\nevent\t0e0\t5e-3\tpressure-pa\t3e2\nevent\t1.5e-1\t2e-2\tpressure-pa\t4e2\nevent\t3.5e-1\t1e-2\tpressure-pa\t0e0\n",
+            "events\t1\nevent\t0e0\t5e-3\tpressure-pa\t3e2\n")
+        .replace("events\t3\nevent\t5e-3\t2e-2\tangle-rad\t3e-2\nevent\t1.5e-1\t2e-2\tangle-rad\t-2e-2\nevent\t3.5e-1\t1e-2\tangle-rad\t0e0",
+            "events\t1\nevent\t5e-3\t2e-2\tangle-rad\t3e-2");
+    assert_eq!(text.matches("events\t1\n").count(), 2, "both gesture tracks must be trimmed");
+    text
 }
 fn render(text: &str, block: usize) -> (Vec<f64>, f64) {
     let file =
@@ -110,6 +119,8 @@ fn exterior_gas_data_changes_the_source_motion_and_pcm_not_only_propagation() {
 #[test]
 fn mismatched_or_double_counted_mouth_declarations_refuse_before_output() {
     let text = source();
+    // The unmodified source must load, so each refusal below is its own mismatch.
+    assert!(FlueFilePerformance::from_bytes(text.as_bytes(), 37, &CancelGate::new_clock_free()).is_ok());
     for invalid in [
         text.replace(
             "flue 0.010 0.001 0.004 0 0 0",
