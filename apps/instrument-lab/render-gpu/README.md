@@ -19,7 +19,7 @@ The tool is its own cargo workspace. Nothing in the main workspace builds it or 
 
 ```sh
 cargo build --release              # no CUDA toolkit needed to build; on macOS this is the CPU path only
-render-gpu PIECE HITS.csv OUT.wav SECONDS [--backend auto|cpu|cuda] [--airy f64|f32] [--device N|all]
+render-gpu PIECE HITS.csv OUT.wav SECONDS [--backend auto|cpu|cuda] [--airy f64|f32] [--device N|all] [--preset-heads]
 render-gpu PIECE HITS.csv OUT.wav SECONDS --chunks N [--preroll S]   # N overlapping chunks at once
 render-gpu --batch PIECE SECONDS OUT_PREFIX HITS1.csv HITS2.csv ...  # one simulation per list, in lockstep
 render-gpu --check PIECE SECONDS [--airy f64|f32]                    # CPU vs GPU from the same strokes
@@ -27,6 +27,14 @@ render-gpu --precompile sm_89                                        # fill the 
 ```
 
 `PIECE` and `HITS.csv` are those of fs-vkplate's `perform` example.
+
+**Drums need `--preset-heads`.** Drum pieces (kick, snare, snare-off, tom-12,
+tom-14) refuse by default. Their only card-free heads are the presets, whose T60
+was fitted to recordings, so no default render path reads them (bead .370).
+The sourced heads carry a head-radiation load that this GPU path does not
+model, so render those natively with fs-vkplate's examples. `--preset-heads`
+renders the fitted heads on purpose, and the notes name them as fitted. The
+cymbals and the hi-hat are unchanged.
 
 **Options.**
 

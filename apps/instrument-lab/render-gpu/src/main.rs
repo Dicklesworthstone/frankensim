@@ -4,6 +4,7 @@
 //!   render-gpu --batch PIECE SECONDS OUT_PREFIX HITS1.csv [HITS2.csv ...]   (one simulation per list, in lockstep)
 //!   render-gpu --check PIECE SECONDS [--airy f64|f32]                       (CPU vs GPU, same strokes)
 //!   --exact-friction-order: frictions in the CPU's list order (slow; --check always uses it)
+//!   --preset-heads: render a drum's recording-fitted preset heads; without it, drum pieces refuse (.370)
 //!   render-gpu PIECE HITS.csv OUT.wav SECONDS --chunks N [--preroll S]       (N overlapping chunks at once)
 //!
 //! PIECE and HITS.csv are those of fs-vkplate's `perform` example. The CPU path IS `fs_vkplate::kit::render`;
@@ -17,14 +18,29 @@ mod cuda;
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
-fn piece(name: &str, hits: &[(f64, f64)]) -> Result<Piece, String> {
+/// The default refuses drums: their only card-free heads are the presets, whose T60 was fitted to
+/// recordings (bead .370, DONE-WHEN 1). The sourced heads carry a head-radiation load this GPU path does
+/// not have, so render them natively (fs-vkplate's examples). `--preset-heads` renders the fitted heads
+/// on purpose, and says so in the notes.
+pub const PRESET_HEADS_REFUSAL: &str = "drum heads: the default refuses the card-free preset heads, whose T60 was fitted to recordings (.370); render the sourced heads natively (fs-vkplate examples), or pass --preset-heads to render the fitted heads on purpose";
+pub const PRESET_HEADS_RECEIPT: &str = "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss";
+
+fn piece(name: &str, hits: &[(f64, f64)], preset_heads: bool) -> Result<Piece, String> {
     let cym = |r: f64, tip: f64| hits.iter().map(|&(t, v)| (t, v, r, tip)).collect::<Vec<_>>();
+    let drum = |spec: kit::DrumSpec| {
+        if !preset_heads {
+            return Err(PRESET_HEADS_REFUSAL.to_string());
+        }
+        let mut p = kit::drum(&spec, hits)?;
+        p.notes.push(PRESET_HEADS_RECEIPT.into());
+        Ok(p)
+    };
     match name {
-        "kick" => kit::drum(&kit::kick(), hits),
-        "snare" => kit::drum(&kit::snare(), hits),
-        "snare-off" => kit::drum(&kit::snare_wires_off(), hits),
-        "tom-12" => kit::drum(&kit::tom(12.0), hits),
-        "tom-14" => kit::drum(&kit::tom(14.0), hits),
+        "kick" => drum(kit::kick()),
+        "snare" => drum(kit::snare()),
+        "snare-off" => drum(kit::snare_wires_off()),
+        "tom-12" => drum(kit::tom(12.0)),
+        "tom-14" => drum(kit::tom(14.0)),
         "hihat-closed" => kit::hihat(0.0, 80.0, hits),
         "hihat-open" => kit::hihat(0.002, 0.0, hits),
         "crash" => kit::cymbal(&kit::crash(), &cym(0.95, 0.008)),
@@ -73,6 +89,7 @@ struct Opts {
     chunks: usize,
     preroll: f64,
     exact_friction: bool,
+    preset_heads: bool,
 }
 
 fn threads() -> usize {
@@ -280,7 +297,7 @@ fn render_chunked(name: &str, hits: &[(f64, f64)], secs: f64, o: &Opts) -> Vec<V
     }
     // building an instrument factors its operators: the chunks' builds run side by side
     std::thread::scope(|sc| {
-        let hs: Vec<_> = lists.iter().map(|l| sc.spawn(move || piece(name, l).unwrap_or_else(|e| die(&e)))).collect();
+        let hs: Vec<_> = lists.iter().map(|l| sc.spawn(move || piece(name, l, o.preset_heads).unwrap_or_else(|e| die(&e)))).collect();
         pieces.extend(hs.into_iter().map(|h| h.join().unwrap_or_else(|_| die("a build panicked"))));
     });
     let rate = pieces[0].instrument.rate;
@@ -383,8 +400,8 @@ fn check(name: &str, secs: f64, o: &Opts) {
     // the CPU's own friction order, so any difference is the arithmetic's
     let o = &Opts { exact_friction: true, ..*o };
     let hits = [(0.002, 3.0), (secs * 0.5, 2.0)];
-    let mut cpu = piece(name, &hits).unwrap_or_else(|e| die(&e));
-    let mut gpu = vec![piece(name, &hits).unwrap_or_else(|e| die(&e))];
+    let mut cpu = piece(name, &hits, o.preset_heads).unwrap_or_else(|e| die(&e));
+    let mut gpu = vec![piece(name, &hits, o.preset_heads).unwrap_or_else(|e| die(&e))];
     let rate = cpu.instrument.rate;
     let total = ((secs + cpu.settle) * rate).round() as usize;
     if !use_gpu(o) {
@@ -426,7 +443,7 @@ fn check(name: &str, secs: f64, o: &Opts) {
 
 fn main() {
     let mut pos = vec![];
-    let mut o = Opts { backend: Backend::Auto, airy_f32: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false };
+    let mut o = Opts { backend: Backend::Auto, airy_f32: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false, preset_heads: false };
     let (mut batch, mut chk) = (false, false);
     let mut a = std::env::args().skip(1);
     while let Some(x) = a.next() {
@@ -460,6 +477,7 @@ fn main() {
                 return;
             }
             "--exact-friction-order" => o.exact_friction = true,
+            "--preset-heads" => o.preset_heads = true,
             "--batch" => batch = true,
             "--check" => chk = true,
             _ => pos.push(x),
@@ -483,7 +501,7 @@ fn main() {
         for l in lists.iter_mut() {
             l.resize(most, (secs + 10.0, 1.0)); // same stroke count for every member (see render_chunked)
         }
-        let mut pieces: Vec<Piece> = lists.iter().map(|l| piece(&pos[0], l).unwrap_or_else(|e| die(&e))).collect();
+        let mut pieces: Vec<Piece> = lists.iter().map(|l| piece(&pos[0], l, o.preset_heads).unwrap_or_else(|e| die(&e))).collect();
         let rate = pieces[0].instrument.rate;
         let total = ((secs + pieces[0].settle) * rate).round() as usize;
         let skip = (pieces[0].settle * rate).round() as usize;
@@ -498,7 +516,7 @@ fn main() {
     }
     let hits = read_hits(&pos[1]);
     let secs: f64 = pos[3].parse().unwrap_or_else(|_| die("SECONDS"));
-    let mut p = piece(&pos[0], &hits).unwrap_or_else(|e| die(&e));
+    let mut p = piece(&pos[0], &hits, o.preset_heads).unwrap_or_else(|e| die(&e));
     for n in &p.notes {
         eprintln!("{n}");
     }
