@@ -4,6 +4,7 @@ use fs_airflow::graph::thermal::medium::convection::finite_gas::network::exchang
     self, ExchangeContact, GasHeatLaw, GasHeatSample,
 };
 use fs_couple::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
+use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::{ChamberDrive, MaterialExchangeState};
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::{
     exchange::MaterialExchangeNetwork, reactive::{ChamberReaction, ReactiveExchangeError},
 };
@@ -14,6 +15,10 @@ use fs_thermochem::*;
 use fs_thermochem::equilibrium::*;
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
+use fs_material::thermochemical_gas::energy::GasEnergySolve;
+use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferSolve;
+use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{GasNozzle, GasNozzleStepSolve,
+    network::{GasNetworkLink, GasNetworkSolve}};
 #[path = "../../../fs-couple/tests/material_exchange/gas.rs"]
 #[allow(dead_code)]
 mod chemical_source;
@@ -142,5 +147,73 @@ fn conduction_and_convection_share_area_budget_order_and_failure_atomicity() {
         gate.request();assert!(matches!(exchange::step_candidate(&prepared,cx,&thermal,DT,&circuit,&[],
             &chambers(&gas,DT),&[],&patches,controls(),&[0.0;2]),Err(ReactiveExchangeError::Cancelled)));
         assert_eq!(gas,saved);assert_eq!(thermal.cells(),&cells);assert_eq!(circuit,electrical_before);
+    }));
+}
+
+
+fn live_drives(gas:&BTreeMap<u64,GasPiston>,dt:f64)->Vec<ChamberDrive> {
+    chambers(gas,dt).into_iter().map(|c|ChamberDrive {
+        chamber:c.id,heat_j:c.input.heat_j,exterior_pressure_pa:c.input.exterior_pressure_pa,
+        external_force_n:c.input.external_force_n,piston_solve:c.piston_solve,exchange:c.exchange,
+    }).collect()
+}
+fn transported_gases()->BTreeMap<u64,GasPiston> {
+    let mut gas=gases(0.75);
+    gas.insert(20,GasPiston::new(ClosedGasParcel::new(
+        gas_source::model(0.25),gas_source::point(400.0,180000.0),0.001).unwrap(),
+        1.0,0.01,0.0).unwrap());
+    gas
+}
+fn flow_link(gas:&BTreeMap<u64,GasPiston>)->([GasNetworkLink;1],GasNetworkSolve) {
+    let energy=chambers(gas,DT)[0].piston_solve.gas;
+    ([GasNetworkLink {id:77,parcels:[20,10],
+        nozzle:GasNozzle {area_m2:2e-6,discharge_coefficient:0.8},
+        solve:GasNozzleStepSolve {nozzle:energy,transfer:GasMassTransferSolve {
+            donor:energy,receiver:energy,mass_tolerance_kg:1e-14,energy_tolerance_j:1e-8},
+            maximum_donor_fraction:0.05}}],
+     GasNetworkSolve {maximum_parcels:2,maximum_links:1,maximum_withdrawn_fraction:0.05,
+        mass_tolerance_kg:1e-13,energy_tolerance_j:1e-7})
+}
+
+#[test]
+fn live_transport_changes_the_mixture_seen_by_mixed_heat_before_atomic_publish() {
+    fixture(|binding,thermal,circuit|scoped(|cx,_| {
+        let electrical=ElectricalContactNetwork {bulk:binding,contacts:&[],electrical_bases:&BASES};
+        let assembly=MaterialExchangeNetwork {electrical:&electrical,thermal_contacts:&[],radiation:None};
+        let prepared=assembly.prepare(cx,&thermal).unwrap();
+        let mut state=MaterialExchangeState::from_parts(thermal,circuit,transported_gases());
+        let drives=live_drives(state.chambers(),DT);
+        let patches=mixed(1.0);
+        let (links,flow_controls)=flow_link(state.chambers());
+        let initial_fraction=state.chambers()[&10].gas().model()
+            .thermodynamics().mole_composition().fractions()[0];
+
+        let (preview,report)=exchange::flow_step_candidate(&state,&prepared,cx,DT,&[],
+            &drives,&[],&patches,&links,flow_controls,controls(),&[0.0;2]).unwrap();
+        assert!(report.flow.links[0].transfer.transferred_mass_kg>0.0);
+        let preview_fraction=preview.chambers()[&10].gas().model()
+            .thermodynamics().mole_composition().fractions()[0];
+        assert_ne!(preview_fraction,initial_fraction);
+        assert_eq!(state.time_s(),0.0);
+        for chamber in &report.exchange.report.source.chambers {
+            for surface in &chamber.surfaces {
+                if chamber.id==10 {
+                    match &surface.source.1 {
+                        GasHeatSample::ForcedConvection(sample)=>
+                            assert_eq!(sample.gas,&chamber.boundary.piston.midpoint),
+                        GasHeatSample::Conduction(_) => {}
+                    }
+                }
+            }
+        }
+
+        let accepted=exchange::advance_with_flow(&mut state,&prepared,cx,DT,&[],
+            &drives,&[],&patches,&links,flow_controls,controls(),&[0.0;2]).unwrap();
+        assert_eq!(state.time_s(),DT);
+        assert_eq!(state.chambers(),preview.chambers());
+        assert_eq!(state.thermal().cells(),preview.thermal().cells());
+        assert_eq!(state.circuit(),preview.circuit());
+        assert_eq!(accepted.total_mass_residual_kg,report.total_mass_residual_kg);
+        assert_eq!(accepted.total_energy_residual_j,report.total_energy_residual_j);
     }));
 }
