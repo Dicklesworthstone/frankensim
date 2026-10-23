@@ -1,6 +1,8 @@
 //! Actual cooling child processes, not a substitute numerical callback.
 #[path = "../src/json_read.rs"]
 mod json;
+#[path = "cooling_parallel/qmc.rs"]
+mod qmc;
 use json::JsonValue as J;
 use std::{fs, path::{Path, PathBuf}, process::{Command, Output}, time::{SystemTime, UNIX_EPOCH}};
 
@@ -99,7 +101,7 @@ fn invalid_workers_changed_models_and_existing_files_refuse_before_output() {
     let out = command(&base, &request, Some("2")).arg("--resume").arg(&saved)
         .arg("--checkpoint").arg(&saved).output().unwrap();
     assert!(!out.status.success()); assert_eq!(fs::read(&saved).unwrap(), bytes);
-    let out = command(&missing, &missing, Some("2")).args(["--qmc-replicates", "2"])
+    let out = command(&missing, &missing, Some("2")).args(["--sensitivity", "sobol"])
         .arg("--checkpoint").arg(&unused).output().unwrap();
     assert_eq!(out.status.code(), Some(i32::from(fs_cli::exit::USAGE))); assert!(!unused.exists());
     let help = Command::new(env!("CARGO_BIN_EXE_frankensim")).args(["--json", "cooling-network-uq", "--help"]).output().unwrap();

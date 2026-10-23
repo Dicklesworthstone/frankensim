@@ -79,9 +79,12 @@ policy, partial runs publish progress only.\n\
 See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n\
 \nConcurrent fixed-count physical evaluations:\n\
 --workers N runs at most N simultaneous cooling children, N in 1..64.\n\
+Add --qmc-replicates R for parallel randomized QMC with unchanged net layout\n\
+and between-replicate errors. Ordinary Monte Carlo remains the default.\n\
 Original samples and reductions retain serial order. Recovery preserves later\n\
 successful siblings behind interrupted calls; worker count may change on resume.\n\
-Use --workers 1 to resume a parallel checkpoint serially. Other sampling modes,\n\
+Use --workers 1 to resume a batch checkpoint serially, retaining its QMC selector\n\
+when applicable. Batch and ordinary serial checkpoint formats differ. Other modes,\n\
 mean controls and sequential decisions conflict. See PARALLEL_UQ.md.\n");
         return CommandOutput {
             exit_code: exit::SUCCESS,

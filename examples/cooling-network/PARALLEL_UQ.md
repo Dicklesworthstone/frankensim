@@ -59,7 +59,7 @@ but cannot destroy the previous atomically published checkpoint.
 
 ## Resource and inference scope
 
-This mode currently admits fixed-count Monte Carlo only. QMC, importance, PCE,
+This mode admits fixed-count Monte Carlo and replicated randomized QMC. Importance, PCE,
 sensitivity, mean controls, sequential decisions and candidate selection conflict
 with --workers and refuse before input reads. Existing modes without --workers
 are unchanged. The CLI still admits at most 10,000 physical evaluations.
@@ -74,8 +74,47 @@ Focused native regressions:
 
 ```sh
 cargo test -p fs-uq --test product_batch
+cargo test -p fs-uq --test product_qmc_batch
 cargo test -p fs-cli --bin frankensim uq_command::execute::parallel
 cargo test -p fs-cli --test cooling_parallel
 ```
 
 These tests must run natively before claiming Rust execution or bit-parity passes.
+
+## Parallel randomized QMC
+
+Add `--qmc-replicates R` to retain the original Owen-scrambled Sobol design:
+
+```sh
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-fan-hotspot.json --qmc-replicates 2 --workers 3 \
+  --checkpoint first.qbatch --max-new-samples 3
+
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-fan-hotspot.json --qmc-replicates 2 --workers 1 \
+  --resume first.qbatch --checkpoint complete.qbatch
+```
+
+This example's eight calls remain two four-point scrambles. The first command
+stops inside the first net; the second changes worker count, not the experiment.
+No point is replaced with a Monte Carlo draw. Wave boundaries may cross replicate
+boundaries. Every original input and the final reduction order remain unchanged.
+Only the entire fixed layout produces the original `qmc.v1` result, including
+between-replicate error estimates and actual physical compliance proportions.
+Individual net points are not independent observations for those error estimates.
+
+`FSQMB001` checkpoints embed the existing QMC prefix plus pending ordinal slots.
+Completed later points survive an earlier interruption; the original layout,
+model and sampler stay bound. Repeat both selectors on resume. Ordinary serial
+QMC, Monte Carlo and QMC batch checkpoints are not interchangeable. Partial
+`qmc.parallel.progress.v1` output reports counts and the next missing replicate/
+point, without a selected-worker or shortened-net estimate. An unfinished transient
+retries its complete trajectory, while completed trajectories are not repeated.
+
+The public `fs_uq::product_qmc::QmcBatchExecution` supplies the same bounded waves
+to other schedulers through `UqBatchInput` slots. Drivers must drain all jobs and
+match each result to its original slot. The implementation adds no confidence
+sequence, adaptive stopping or bound on finite-grid, solver or physical-model
+error. Aggregate child-resource and unsaved-wave limitations above still apply.

@@ -88,7 +88,7 @@ pub(super) fn execute(
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
 }
 
-fn render(config: &Config, base: &J, report: &QmcReport) -> Result<String> {
+pub(super) fn render(config: &Config, base: &J, report: &QmcReport) -> Result<String> {
     if report.status != UqStatus::Complete {
         return Err(model_failure("only complete fixed-layout QMC reports may be published"));
     }

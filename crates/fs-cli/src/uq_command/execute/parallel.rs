@@ -1,14 +1,16 @@
-//! Concurrent original cooling children with ordered, recoverable MC observations.
+//! Concurrent original cooling children with ordered, recoverable MC/QMC observations.
+mod qmc;
+
 use super::*;
 use fs_uq::{UqBatchExecution, UqBatchInput};
 use std::io::Read as _;
 
 pub(super) fn validate_options(options: &Options) -> Result<()> {
     if options.workers.is_some() && (options.compliance.is_some() || options.design.is_some()
-        || options.qmc_replicates.is_some() || options.sobol_sensitivity || options.shapley_sensitivity
+        || options.sobol_sensitivity || options.shapley_sensitivity
         || options.adjoint_mean_control || options.polynomial.is_some() || options.importance.is_some())
     {
-        return Err(bad("--workers currently supports fixed-count Monte Carlo only; other sampling, control and decision modes are incompatible"));
+        return Err(bad("--workers supports fixed-count Monte Carlo and replicated QMC; other sampling, control and decision modes are incompatible"));
     }
     Ok(())
 }
@@ -20,6 +22,9 @@ fn recovery_error(message: impl Into<String>) -> Failure {
 pub(super) fn execute(
     base_text: &str, base: &J, config: &Config, options: &Options, workers: usize,
 ) -> Result<ExecutionOutput> {
+    if let Some(replicates) = options.qmc_replicates {
+        return qmc::execute(base_text, base, config, options, workers, replicates);
+    }
     let plan = config.plan();
     let mut run = UqBatchExecution::new(&plan).map_err(bad)?;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
@@ -52,19 +57,7 @@ pub(super) fn execute(
     while report.status != UqStatus::Complete && run.evaluations_attempted() - initial < allowance {
         let width = workers.min(allowance - (run.evaluations_attempted() - initial));
         report = run.advance_batch::<String>(width, || Instant::now() >= deadline, |jobs, slots| {
-            drain_wave(jobs, slots, &|job| {
-                if Instant::now() >= deadline { return Ok(None); }
-                let request = config.sample_request(base, &job.parameters).map_err(|e| e.to_string())?;
-                let result = match config.qoi {
-                    Qoi::Steady => evaluate_sample(&request, deadline),
-                    qoi => evaluate_sample_for(&request, deadline, qoi),
-                };
-                match result {
-                    Ok(value) => Ok(Some(value)),
-                    Err(EvaluationError::Budget) => Ok(None),
-                    Err(EvaluationError::Child(message)) => Err(message),
-                }
-            });
+            drain_wave(jobs, slots, &|job| evaluate_job(base, config, job, deadline));
         }).map_err(bad)?;
         // All workers and child watchdogs have drained here. Genuine failures
         // win over timeout; never save a resumable prefix past a failed sample.
@@ -97,6 +90,22 @@ pub(super) fn execute(
         quote(&path.to_string_lossy()),
     );
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
+}
+
+fn evaluate_job(
+    base: &J, config: &Config, job: &UqBatchInput, deadline: Instant,
+) -> std::result::Result<Option<f64>, String> {
+    if Instant::now() >= deadline { return Ok(None); }
+    let request = config.sample_request(base, &job.parameters).map_err(|e| e.to_string())?;
+    let result = match config.qoi {
+        Qoi::Steady => evaluate_sample(&request, deadline),
+        qoi => evaluate_sample_for(&request, deadline, qoi),
+    };
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(EvaluationError::Budget) => Ok(None),
+        Err(EvaluationError::Child(message)) => Err(message),
+    }
 }
 
 /// Scoped producer threads contain worker panics and join every launched child
@@ -139,7 +148,7 @@ mod tests {
         for n in ["0", "65", "-1", "1.5", "NaN"] {
             assert!(Options::parse(&args(&["--workers", n])).is_err());
         }
-        for extra in [vec!["--workers", "2"], vec!["--qmc-replicates", "2"],
+        for extra in [vec!["--workers", "2"],
             vec!["--sensitivity", "sobol"], vec!["--sensitivity", "shapley"],
             vec!["--pce", "0,2"], vec!["--pce-mean", "0,2,4"],
             vec!["--importance", "0.2,1"], vec!["--importance-pilot", "1,2,0.2,0.5,1,6"],
@@ -150,6 +159,19 @@ mod tests {
             for input in [own.iter().chain(&other).cloned().collect::<Vec<_>>(), other.iter().chain(&own).cloned().collect()] {
                 assert!(Options::parse(&input).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn qmc_workers_preserve_explicit_layout_and_recovery_options() {
+        for input in [
+            vec!["--workers", "3", "--qmc-replicates", "2"],
+            vec!["--qmc-replicates", "2", "--workers", "3"],
+            vec!["--workers", "1", "--qmc-replicates", "2", "--resume", "old", "--checkpoint", "new", "--max-new-samples", "0"],
+        ] {
+            let parsed = Options::parse(&args(&input)).unwrap();
+            assert_eq!(parsed.qmc_replicates, Some(2));
+            assert!(parsed.workers.is_some());
         }
     }
 
