@@ -25,10 +25,8 @@ use fs_material::phase::{
     EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError,
 };
 use fs_material::state_point::{
-    IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint,
-    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
-    MaterialStatePointError, integrate_isotropic_thermal_expansion,
-    resolve_isotropic_elastic_state_point,
+    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
+    ResolvedMaterialStatePoint,
 };
 use fs_material::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
 use fs_solid::linear3::{
@@ -36,6 +34,8 @@ use fs_solid::linear3::{
     TetLinearElasticProblem, TetMaterialField, TetStaticSolveConfig,
     TetThermalStrainField, TetThermalStrainState,
 };
+pub use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSource, ThermalStiffnessModel};
+use fs_solid::linear3::source::SolidMaterialError;
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3, TetLoadSolution3};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation,
@@ -74,6 +74,14 @@ impl From<ThermalMaterialError> for SolidEnthalpyError {
 impl From<TetElasticError> for SolidEnthalpyError {
     fn from(e: TetElasticError) -> Self { Self::Solid(e) }
 }
+impl From<SolidMaterialError> for SolidEnthalpyError {
+    fn from(error: SolidMaterialError) -> Self {
+        match error {
+            SolidMaterialError::Material(error) => Self::Material(error),
+            SolidMaterialError::Solid(error) => Self::Solid(error),
+        }
+    }
+}
 impl From<LoadError3> for SolidEnthalpyError {
     fn from(e: LoadError3) -> Self { Self::Loads(e) }
 }
@@ -92,16 +100,21 @@ pub struct TetCellMaterial<'a> {
     pub cell: CellId,
     pub curve: &'a EquilibriumEnthalpyPhaseCurve,
     pub point: ThermalMaterialPoint<'a>,
-    /// Requires density, Young modulus and Poisson ratio at one common point.
+    /// Reference density and the chosen model's complete elastic schema.
+    /// Current stiffness refreshes the pinned elastic claims without re-querying density.
     pub mechanical_selection: MaterialPropertySelection,
+    /// Elastic symmetry and its fixed principal-to-mesh orientation.
+    pub stiffness_model: ThermalStiffnessModel,
     pub expansion_selection: MaterialPropertySelection,
+    /// Expansion symmetry and fixed material axes, independent of stiffness.
+    pub expansion_model: ThermalExpansionModel,
 }
 
 struct BoundCell<'a> {
     source: TetCellMaterial<'a>,
     reference_cell: DepositedCell,
     reference_point: QueryPoint,
-    reference_elastic: IsotropicElasticStatePoint,
+    reference_elastic: ResolvedMaterialStatePoint,
     reference_volume_m3: f64,
 }
 
@@ -113,6 +126,7 @@ pub struct SolidEnthalpy<'a> {
     geometry: TetLoadGeometry3<'a>,
     cells: Vec<BoundCell<'a>>,
     budget: TetAssemblyBudget,
+    mesh_frame: ContentHash,
     maximum_absolute_mandel_strain: f64,
 }
 
@@ -124,6 +138,8 @@ impl<'a> SolidEnthalpy<'a> {
     ///
     /// The literal T axis is required by the existing integrated-expansion law.
     /// External pressure/composition/processing coordinates remain unchanged.
+    /// The nonzero mesh frame binds every material orientation and must also be
+    /// used by subsequent load/stress/vibration consumers.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         thermal: &DepositionSimulation<'_>,
@@ -132,9 +148,13 @@ impl<'a> SolidEnthalpy<'a> {
         sources: Vec<TetCellMaterial<'a>>,
         budget: TetAssemblyBudget,
         maximum_absolute_mandel_strain: f64,
+        mesh_frame: ContentHash,
         cx: &Cx<'_>,
     ) -> Result<Self, SolidEnthalpyError> {
         poll(cx)?;
+        if mesh_frame == ContentHash([0; 32]) {
+            return Err(SolidEnthalpyError::Invalid("nonzero reference mesh frame required"));
+        }
         if sources.len() != tetrahedra.len()
             || !maximum_absolute_mandel_strain.is_finite()
             || maximum_absolute_mandel_strain <= 0.0
@@ -157,41 +177,47 @@ impl<'a> SolidEnthalpy<'a> {
                 .ok_or(SolidEnthalpyError::Invalid("structural cell is inactive"))?;
             let phase = phase_at(thermal, cell, &source)?;
             let reference_point = source.point.at(phase)?;
-            let elastic = resolve_isotropic_elastic_state_point(
+            let elastic = source.stiffness_model.resolve_reference(
                 source.point.material, &reference_point, source.mechanical_selection.clone())?;
-            for property in elastic.resolved().properties() {
+            for property in elastic.properties() {
                 source.point.admit_static(property)?;
             }
-            let expansion = integrate_isotropic_thermal_expansion(
+            let density = elastic.property(DENSITY_PROPERTY)
+                .ok_or(SolidEnthalpyError::Invalid("reference density required"))?.value_si();
+            let material = source.stiffness_model.material(&elastic, density,
+                elastic.identity(), maximum_absolute_mandel_strain)?;
+            let expansion = source.expansion_model.resolve(
                 source.point.material, &reference_point, &reference_point,
-                source.expansion_selection.clone())?;
-            for property in expansion.current().resolved().properties() {
+                source.expansion_selection.clone(), &material, mesh_frame,
+                maximum_absolute_mandel_strain)?;
+            for property in expansion.current().properties() {
                 source.point.admit_static(property)?;
             }
-            TetThermalStrainState::try_from_isotropic_expansion(
-                &elastic, &expansion, maximum_absolute_mandel_strain)?;
             let volume = geometry.element_volumes_m3()[element];
             if !same_measure(cell.geometry.volume_m3, volume)
-                || !same_measure(cell.mass_kg, elastic.density_kg_m3()*volume) {
+                || !same_measure(cell.mass_kg, density*volume) {
                 return Err(SolidEnthalpyError::Invalid(
                     "thermal inventory must match the tetrahedron reference volume and source density"));
             }
             source.mechanical_selection = MaterialPropertySelection::PinnedByProperty(
-                elastic.resolved().properties().iter().map(|p| (
+                elastic.properties().iter().filter(|p| p.requirement().name() != DENSITY_PROPERTY).map(|p| (
                     p.requirement().name().to_owned(), p.answer().receipt.selected,
                 )).collect());
-            source.expansion_selection = MaterialPropertySelection::PinnedByProperty(vec![(
-                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY.to_owned(), expansion.selected_claim(),
-            )]);
+            source.expansion_selection = MaterialPropertySelection::PinnedByProperty(
+                expansion.reference().properties().iter().map(|p| (
+                    p.requirement().name().to_owned(), p.answer().receipt.selected,
+                )).collect());
             cells.push(BoundCell { source, reference_cell: cell.clone(), reference_point,
                 reference_elastic: elastic, reference_volume_m3: volume });
         }
         poll(cx)?;
-        Ok(Self { nodes_m, tetrahedra, geometry, cells, budget, maximum_absolute_mandel_strain })
+        Ok(Self { nodes_m, tetrahedra, geometry, cells, budget, mesh_frame, maximum_absolute_mandel_strain })
     }
 
     /// Use the retained geometry for native pressure/traction/body load assembly.
     pub const fn geometry(&self) -> &TetLoadGeometry3<'a> { &self.geometry }
+    /// Coordinate frame in which the reference nodes and all admitted tensors live.
+    pub const fn mesh_frame(&self) -> ContentHash { self.mesh_frame }
 
     /// Refresh every local source from the exact current thermal inventory.
     /// Expansion always integrates from the original reference, never from the
@@ -219,41 +245,38 @@ impl<'a> SolidEnthalpy<'a> {
             }
             let phase = phase_at(thermal, cell, source)?;
             let point = source.point.at(phase)?;
-            let elastic = resolve_isotropic_elastic_state_point(
+            let elastic = source.stiffness_model.resolve(
                 source.point.material, &point, source.mechanical_selection.clone())?;
-            for property in elastic.resolved().properties() { source.point.admit_static(property)?; }
-            let expansion = integrate_isotropic_thermal_expansion(
-                source.point.material, &bound.reference_point, &point,
-                source.expansion_selection.clone())?;
-            for property in expansion.current().resolved().properties() {
-                source.point.admit_static(property)?;
-            }
-            let free = TetThermalStrainState::try_from_isotropic_expansion(
-                &elastic, &expansion, self.maximum_absolute_mandel_strain)?;
+            for property in elastic.properties() { source.point.admit_static(property)?; }
 
-            // Inertia and weight use delivered reference mass. Current rho(T)
-            // remains in the source receipt; it must not create/remove matter on
-            // the unchanged reference mesh. Bind this lowering to BOTH states.
+            // Inertia and weight use the exact delivered reference inventory.
+            // No current density is required and no heating step creates matter.
             let reference_density = reference.mass_kg/bound.reference_volume_m3;
-            let mut identity = DomainHasher::new("org.frankensim.fs-couple.solid-enthalpy-material.v1");
-            identity.update(elastic.resolved().identity().as_bytes());
-            identity.update(bound.reference_elastic.resolved().identity().as_bytes());
+            let mut identity = DomainHasher::new("org.frankensim.fs-couple.solid-enthalpy-material.v2");
+            identity.update(elastic.identity().as_bytes());
+            identity.update(bound.reference_elastic.identity().as_bytes());
             identity.update(phase.identity().as_bytes());
             identity.update(&reference.id.0.to_le_bytes());
             identity.update(&reference.mass_kg.to_bits().to_le_bytes());
             identity.update(&bound.reference_volume_m3.to_bits().to_le_bytes());
-            let identity = *identity.finalize().as_bytes();
-            materials.push(TetElasticMaterial::try_new(reference_density,
-                elastic.young_modulus_pa(), elastic.poisson_ratio(), identity)?);
-            strains.push(TetThermalStrainState::try_new(
-                free.temperature_k(), free.reference_temperature_k(), free.free_strain_mandel(),
-                identity, free.thermal_law_identity(), self.maximum_absolute_mandel_strain)?);
+            identity.update(self.mesh_frame.as_bytes());
+            let material = source.stiffness_model.material(&elastic,
+                reference_density, identity.finalize(), self.maximum_absolute_mandel_strain)?;
+            let expansion = source.expansion_model.resolve(
+                source.point.material, &bound.reference_point, &point,
+                source.expansion_selection.clone(), &material, self.mesh_frame,
+                self.maximum_absolute_mandel_strain)?;
+            for property in expansion.current().properties() { source.point.admit_static(property)?; }
+            strains.push(*expansion.thermal_strain());
+            materials.push(material);
             samples.push(TetMaterialSample { cell: source.cell, phase, elastic, expansion,
+                reference_elastic: bound.reference_elastic.clone(),
+                stiffness_model: source.stiffness_model, expansion_model: source.expansion_model,
                 reference_mass_kg: reference.mass_kg, reference_volume_m3: bound.reference_volume_m3 });
         }
         poll(cx)?;
         Ok(SolidEnthalpyState { nodes_m: self.nodes_m, tetrahedra: self.tetrahedra,
-            budget: self.budget, time_s: thermal.time_s(), materials, strains, samples,
+            budget: self.budget, mesh_frame: self.mesh_frame, time_s: thermal.time_s(), materials, strains, samples,
             maximum_absolute_mandel_strain: self.maximum_absolute_mandel_strain })
     }
 
@@ -330,8 +353,13 @@ fn phase_at(
 pub struct TetMaterialSample {
     pub cell: CellId,
     pub phase: EquilibriumPhaseState,
-    pub elastic: IsotropicElasticStatePoint,
-    pub expansion: IntegratedIsotropicThermalExpansion,
+    /// Current elastic constants; density belongs to the original inventory.
+    pub elastic: ResolvedMaterialStatePoint,
+    /// Original density and elastic claims at the stress-free reference state.
+    pub reference_elastic: ResolvedMaterialStatePoint,
+    pub stiffness_model: ThermalStiffnessModel,
+    pub expansion: ThermalExpansionSource,
+    pub expansion_model: ThermalExpansionModel,
     pub reference_mass_kg: f64,
     pub reference_volume_m3: f64,
 }
@@ -343,6 +371,7 @@ pub struct SolidEnthalpyState<'a> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
     budget: TetAssemblyBudget,
+    mesh_frame: ContentHash,
     time_s: f64,
     materials: Vec<TetElasticMaterial>,
     strains: Vec<TetThermalStrainState>,
@@ -351,6 +380,7 @@ pub struct SolidEnthalpyState<'a> {
 }
 impl SolidEnthalpyState<'_> {
     pub const fn time_s(&self) -> f64 { self.time_s }
+    pub const fn mesh_frame(&self) -> ContentHash { self.mesh_frame }
     pub fn samples(&self) -> &[TetMaterialSample] { &self.samples }
     pub fn materials(&self) -> &[TetElasticMaterial] { &self.materials }
     pub fn thermal_strains(&self) -> TetThermalStrainField<'_> {
@@ -368,6 +398,10 @@ impl SolidEnthalpyState<'_> {
         config: SolidEquilibriumConfig, cx: &Cx<'_>,
     ) -> Result<SolidEquilibrium, SolidEnthalpyError> {
         poll(cx)?;
+        if config.mesh_frame != self.mesh_frame {
+            return Err(SolidEnthalpyError::Invalid(
+                "equilibrium frame must match the reference mesh and admitted material tensors"));
+        }
         let problem = self.problem(fixed_dofs);
         let solution = loads.solve(&problem, self.thermal_strains(), config.static_solve,
             config.mesh_frame, self.maximum_absolute_mandel_strain, cx)?;

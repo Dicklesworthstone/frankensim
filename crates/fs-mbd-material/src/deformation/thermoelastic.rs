@@ -18,8 +18,8 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::state_point::{
-    IntegratedIsotropicThermalExpansion, MaterialPropertySelection, MaterialStatePointError,
-    ResolvedMaterialStatePoint, integrate_isotropic_thermal_expansion,
+    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
+    ResolvedMaterialStatePoint,
 };
 use fs_qty::{QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -27,6 +27,7 @@ use fs_solid::linear3::{TetAssemblyBudget, TetDeformedMesh, TetElasticError,
     TetLinearElasticProblem, TetMaterialField, TetStaticSolveConfig,
     TetThermalDisplacementSolution, TetThermalStrainField, TetThermalStrainState, TetThermalStressReport};
 use fs_solid::loads3::LoadError3;
+use fs_solid::linear3::source::SolidMaterialError;
 use super::{DeformedBody, TetrahedralMass};
 use crate::MaterialInertiaError;
 
@@ -92,6 +93,14 @@ impl std::error::Error for ThermalBodyError {
 impl From<MaterialInertiaError> for ThermalBodyError {fn from(e:MaterialInertiaError)->Self{Self::Mass(e)}}
 impl From<MaterialStatePointError> for ThermalBodyError {fn from(e:MaterialStatePointError)->Self{Self::Material(e)}}
 impl From<TetElasticError> for ThermalBodyError {fn from(e:TetElasticError)->Self{Self::Solid(e)}}
+impl From<SolidMaterialError> for ThermalBodyError {
+    fn from(error: SolidMaterialError) -> Self {
+        match error {
+            SolidMaterialError::Material(error) => Self::Material(error),
+            SolidMaterialError::Solid(error) => Self::Solid(error),
+        }
+    }
+}
 impl From<LoadError3> for ThermalBodyError {fn from(e:LoadError3)->Self{Self::Loads(e)}}
 
 /// Actual source records used by one solver cell; retained in reference region order.
@@ -220,7 +229,9 @@ impl<'a> TetrahedralMass<'a> {
             let mut hash=DomainHasher::new("org.frankensim.fs-mbd-material.reference-mass-thermal-elastic.v1");
             hash.update(original.material().identity().as_bytes());
             hash.update(stiffness.identity().as_bytes());
-            let material=cell.stiffness_model.material(&stiffness,original.material(),hash.finalize(),
+            let reference_density=original.material().property(DENSITY_PROPERTY)
+                .ok_or(MaterialStatePointError::InvalidDerived { quantity:"reference_density" })?.value_si();
+            let material=cell.stiffness_model.material(&stiffness,reference_density,hash.finalize(),
                 config.maximum_absolute_mandel_strain)?;
             let material_state_identity=ContentHash(material.material_state_identity);
             let expansion=cell.expansion_model.resolve(cell.card,&reference,&current,

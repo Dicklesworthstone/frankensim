@@ -16,6 +16,9 @@ use fs_solid::linear3::*;
 use fs_solid::loads3::VolumeLoad3;
 use fs_thermal::enthalpy::*;
 
+#[path = "solid_enthalpy/directional.rs"]
+mod directional;
+
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
 const FREE: [usize;6] = [0,1,2,4,5,8];
@@ -78,6 +81,8 @@ fn source<'a>(id:u64,card:&'a MaterialCard,curve:&'a EquilibriumEnthalpyPhaseCur
     TetCellMaterial {cell:CellId(id),curve,point:ThermalMaterialPoint {
         material:card,context,temperature_axis:"T",liquid_fraction_axis:None},
         mechanical_selection:MaterialPropertySelection::SingleClaimOnly,
+        stiffness_model:ThermalStiffnessModel::Isotropic,
+        expansion_model:ThermalExpansionModel::Isotropic,
         expansion_selection:MaterialPropertySelection::SingleClaimOnly}
 }
 fn near(a:f64,b:f64,tol:f64) { assert!((a-b).abs()<=tol,"{a} != {b}, tolerance {tol}"); }
@@ -90,7 +95,7 @@ fn caloric_and_expansion_data_drive_free_motion_and_constrained_stress_without_c
             let thermal=initial(caloric.curve(),&[(30,1000.)],1.);
             let context=point(300.);
             let model=SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-                vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+                vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
             let loads=model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
             let free=model.advance_to(&thermal,1.,thermal_config(),&loads,&FREE,config(),cx).unwrap();
             let rise=1000./cp;
@@ -98,7 +103,8 @@ fn caloric_and_expansion_data_drive_free_motion_and_constrained_stress_without_c
             let modulus=young*(1.-0.002*rise);
             near(free.thermal.temperature_k(CellId(30)).unwrap(),300.+rise,1e-10);
             near(free.thermal_audit.external_heat_j,1000.,1e-8);
-            near(free.state.samples()[0].elastic.density_kg_m3(),6.-0.02*rise,1e-10);
+            near(free.state.samples()[0].reference_elastic.property("density").unwrap().value_si(),6.,1e-10);
+            assert!(free.state.samples()[0].elastic.property("density").is_none());
             near(free.state.materials()[0].density_kg_m3,6.,1e-12);
             near(free.state.problem(&FREE).assemble(cx).unwrap().total_mass_kg,1.,1e-12);
             for (node,p) in NODES.iter().enumerate() { for c in 0..3 {
@@ -111,7 +117,7 @@ fn caloric_and_expansion_data_drive_free_motion_and_constrained_stress_without_c
             let stress=clamped.equilibrium.solution.stress.elements()[0].stress_mandel_pa();
             for &s in &stress[..3] { near(s,-modulus*strain/(1.-2.*0.25),1e-8); }
             assert_eq!(clamped.equilibrium.deformed_mesh.nodes_m(),&NODES);
-            assert_eq!(free.state.samples()[0].elastic.resolved().card_identity(),card.content_hash());
+            assert_eq!(free.state.samples()[0].elastic.card_identity(),card.content_hash());
             assert_eq!(thermal.time_s(),0.);
             assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg,0.);
         }
@@ -128,7 +134,7 @@ fn spatial_heating_and_element_order_produce_compatible_nonuniform_deformation()
         let context=point(300.);
         let model=SolidEnthalpy::try_new(&thermal,&nodes,&tets,vec![
             source(30,&card,caloric.curve(),&context),source(10,&card,caloric.curve(),&context)],
-            TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let loads=model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
         let next=model.advance_to(&thermal,1.,thermal_config(),&loads,&FREE,config(),cx).unwrap();
         let (hot,cold)=(1e-5*150.,1e-5*62.5);
@@ -157,7 +163,7 @@ fn heated_loaded_equilibrium_reaches_the_native_prestress_pencil_with_exact_forc
         let thermal=initial(caloric.curve(),&[(30,1000.)],1.);
         let context=point(300.);
         let model=SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-            vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let force=[(11,0.01)];
         let loads=model.geometry().assemble(&[],VolumeLoad3::None,&force,cx).unwrap();
         let fixed=[0,1,2,3,6,8,9];
@@ -184,9 +190,9 @@ fn selected_elastic_source_cannot_switch_when_heating_crosses_its_support() {
         let thermal=initial(caloric.curve(),&[(30,1000.)],1.);
         let context=point(300.);
         let model=SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-            vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            vec![source(30,&card,caloric.curve(),&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let loads=model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
-        let initial_claim=model.resolve(&thermal,cx).unwrap().samples()[0].elastic.resolved()
+        let initial_claim=model.resolve(&thermal,cx).unwrap().samples()[0].elastic
             .property("young_modulus").unwrap().answer().receipt.selected;
         let independent=resolve_isotropic_elastic_state_point(&card,&point(400.),
             MaterialPropertySelection::SingleClaimOnly).unwrap();
@@ -194,7 +200,7 @@ fn selected_elastic_source_cannot_switch_when_heating_crosses_its_support() {
         assert!(matches!(model.advance_to(&thermal,1.,thermal_config(),&loads,&FREE,config(),cx),
             Err(SolidEnthalpyError::Material(_))));
         let supported=model.advance_to(&thermal,0.25,thermal_config(),&loads,&FREE,config(),cx).unwrap();
-        assert_eq!(initial_claim,supported.state.samples()[0].elastic.resolved()
+        assert_eq!(initial_claim,supported.state.samples()[0].elastic
             .property("young_modulus").unwrap().answer().receipt.selected);
         assert_eq!(thermal.time_s(),0.);
         assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg,0.);
@@ -210,12 +216,12 @@ fn foreign_law_mass_melt_and_geometric_domain_refusals_leave_the_initial_state_u
         let context=point(300.);
         let clone=curve.clone();
         assert!(SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-            vec![source(30,&card,&clone,&context)],TetAssemblyBudget::standard(),0.1,cx).is_err());
+            vec![source(30,&card,&clone,&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).is_err());
         let wrong_mass=initial(curve,&[(30,1000.)],2.);
         assert!(SolidEnthalpy::try_new(&wrong_mass,&NODES,&TETS,
-            vec![source(30,&card,curve,&context)],TetAssemblyBudget::standard(),0.1,cx).is_err());
+            vec![source(30,&card,curve,&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).is_err());
         let model=SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-            vec![source(30,&card,curve,&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            vec![source(30,&card,curve,&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let loads=model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
         let small=SolidEquilibriumConfig {maximum_nodal_displacement_m:1e-5,..config()};
         assert!(model.advance_to(&thermal,1.,thermal_config(),&loads,&FREE,small,cx).is_err());
@@ -226,7 +232,7 @@ fn foreign_law_mass_melt_and_geometric_domain_refusals_leave_the_initial_state_u
         ]).unwrap();
         let molten=initial(&melt,&[(30,1050.)],1.);
         let melt_model=SolidEnthalpy::try_new(&molten,&NODES,&TETS,
-            vec![source(30,&card,&melt,&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            vec![source(30,&card,&melt,&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let loads=melt_model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
         assert!(matches!(melt_model.advance_to(&molten,1.,thermal_config(),&loads,&FREE,config(),cx),
             Err(SolidEnthalpyError::Invalid(_))));
@@ -262,7 +268,7 @@ fn intermediate_melting_cannot_be_hidden_by_a_fully_solid_final_state() {
             .unwrap().is_fully_solid());
         let context=point(300.);
         let model=SolidEnthalpy::try_new(&thermal,&NODES,&TETS,
-            vec![source(30,&card,&curve,&context)],TetAssemblyBudget::standard(),0.1,cx).unwrap();
+            vec![source(30,&card,&curve,&context)],TetAssemblyBudget::standard(),0.1,config().mesh_frame,cx).unwrap();
         let loads=model.geometry().assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
         assert!(matches!(model.advance_to(&thermal,2.,thermal_config(),&loads,&FREE,config(),cx),
             Err(SolidEnthalpyError::Invalid(_))));

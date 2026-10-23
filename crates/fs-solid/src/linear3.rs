@@ -60,6 +60,8 @@ pub use isoparametric::thermal_response::{
 };
 /// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
 pub mod tet10;
+/// Shared source-backed stiffness and expansion for all thermal solid consumers.
+pub mod source;
 /// Passive tensor-Prony element operators and exact strain-ramp histories.
 pub mod visco;
 

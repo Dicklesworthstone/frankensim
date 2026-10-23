@@ -4444,3 +4444,35 @@ sound at fixed volume, independence from physical wall mass, formation-inclusive
 reaction energy, a complete flow/reaction/thermal/circuit history, support work,
 cancellation and atomic refusal. Source parsing was checked; native execution
 remains a separate verification requirement.
+
+### Spatial enthalpy with directional source-backed solids
+
+`solid_enthalpy::TetCellMaterial` selects `ThermalStiffnessModel` and
+`ThermalExpansionModel` independently. These are the same types and
+implementations used by `fs-mbd-material`, owned by
+`fs-solid::linear3::source`. Complete isotropic E/nu or nine orthotropic
+engineering constants lower to the existing solid tensor. Scalar or three-axis
+source expansion integrates from the original stress-free state, then rotates
+once into the declared nonzero reference mesh frame. The constructor now
+requires that frame; an equilibrium solve cannot relabel it.
+
+Reference density and initial stiffness resolve atomically before source pins
+are retained. During heating, only current elastic constants and expansion
+are refreshed. The exact delivered mass divided by reference volume supplies
+inertia and body loads; a density claim at the heated temperature is neither
+required nor substituted. `TetMaterialSample` retains the current elastic
+record, original reference record, both model choices, and the exact integrated
+expansion/transform receipt. The identical accepted material and strain arrays
+feed equilibrium, stress recovery and the existing prestress/vibration pencil.
+
+The original substep/event observer admits every directional source path.
+Heating outside one selected coefficient's support refuses the complete
+candidate even if later cooling would return to a supported endpoint.
+`tests/solid_enthalpy/directional.rs` covers rotated free motion, restrained
+stress, data-only modulus/expansion changes in the native prestress tangent,
+independent elastic and expansion axes, fixed reference mass with density
+supported only at the original temperature, frame mismatch and heat/cool
+rollback. These are synthetic analytic fixtures. The existing sequential
+small-strain, fully-solid, one-way quasistatic approximation remains explicit;
+caloric and elastic energy are reported separately, with no reciprocal
+thermoelastic heat, changing transport geometry or experimental claim.

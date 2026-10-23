@@ -24,6 +24,17 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+The shared `linear3::source` adapter resolves isotropic or oriented
+orthotropic elastic constants and independently selected isotropic or three-axis
+integrated expansion. Both `fs-mbd-material` and spatial
+`fs-couple::solid_enthalpy` use this one lowering into the original Mandel
+tensor and eigenstrain owners. Current stiffness does not require current
+density: the caller supplies conserved reference mass per reference volume.
+Reference resolution can select density and the full elastic schema atomically.
+Every public lowering checks a complete matching property schema before
+accessing engineering constants. Source integration, compliance admission and
+proper-frame transforms remain in their original owners.
+
 TET10 and HEX20/HEX27 expose `assemble_thermal_load` using the same
 isoparametric geometry, Mandel strain operator, elastic tensors, constraints
 and fully integrated stiffness rule as their mechanical assembly. Existing

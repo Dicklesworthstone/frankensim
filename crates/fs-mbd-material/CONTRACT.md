@@ -158,3 +158,11 @@ fixed-principal-frame expansion and one-way quasistatic heat-to-mechanics
 coupling; it supplies no general off-diagonal coefficient law, finite-strain
 evolution, deformation-dependent heat geometry or experimental qualification.
 Native Rust execution remains a separate verification requirement.
+
+The public stiffness/expansion model names remain available through the same
+`thermoelastic` API, but now re-export the common
+`fs-solid::linear3::source` implementations used by spatial enthalpy coupling.
+There is no second source resolver, rotation formula or scalar expansion path.
+The reference density passed to that shared lowering is the same retained
+density as before; existing prescribed-temperature arithmetic and identities
+are unchanged.
