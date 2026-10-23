@@ -1,0 +1,104 @@
+# A pressure pulse through a source-backed gas field
+
+[gas_field_pulse.rs](gas_field_pulse.rs) runs the existing DG time-domain duct
+with the same `AxialGasField` used by the frequency-domain and reed paths.
+The supplied [gas-field-pulse.pulse](gas-field-pulse.pulse) has a 0.57 m cylinder,
+a 1 Pa pressure pulse initially at rest, a closed inlet, and a matched outlet.
+Nitrogen is pure at the inlet; carbon dioxide reaches mole fraction 0.5 at the
+outlet. Temperature is 300 K, 320 K and 310 K at the three stations.
+
+The material owner reevaluates density, sound speed and transport from the
+explicit species, NASA-9 and pure-transport packs. DG uses local density and
+bulk modulus in its mass matrices and the exact outlet gas for the matched
+boundary. This example adds no gas equation or species-name constants.
+
+## Run
+
+From the repository root, build the six nitrogen/carbon-dioxide packs using
+**Build the supplied source packs and render** in
+[reed-axial-gas-field.md](reed-axial-gas-field.md#build-the-supplied-source-packs-and-render).
+The same `target/reed-field-packs` directory serves this example:
+
+```sh
+cargo run -p fs-couple --example gas_field_pulse -- \
+  crates/fs-couple/examples/gas-field-pulse.pulse target/gas-field-pulse.csv \
+  --gas-component target/reed-field-packs/nitrogen.pack \
+    target/reed-field-packs/nitrogen-nasa9-mcbride2002.pack \
+    target/reed-field-packs/nitrogen-transport-lemmon2004.pack \
+  --gas-component target/reed-field-packs/carbon-dioxide.pack \
+    target/reed-field-packs/carbon-dioxide-nasa9-mcbride2002.pack \
+    target/reed-field-packs/carbon-dioxide-transport-laesecke2017-huber2016.pack \
+  --gas-water none --gas-phase frozen
+```
+
+Choose a new output path for each run. Parsing, material evaluation, propagator
+admission and simulation finish before the CSV is created. An existing path is
+never overwritten. Source errors and unresolved propagation fail without
+producing a numerical output file.
+
+## Input
+
+These whitespace-delimited records occur in order; the version is literal.
+Each station supplies one mole fraction per declared species in that order.
+
+```text
+gas_field_pulse_v1
+cylinder RADIUS_M LENGTH_M
+pressure STATIC_PRESSURE_PA
+mesh ELEMENTS POLYNOMIAL_ORDER
+time DT_S STEPS
+pulse AMPLITUDE_PA CENTER_M HALF_WIDTH_M
+species COUNT CANONICAL_ID...
+stations COUNT
+station X_M T_K MOLE_FRACTION...
+```
+
+Initial pressure is the DG projection of
+`AMPLITUDE_PA * (1 - ((x-CENTER_M)/HALF_WIDTH_M)^2)^4` inside the support and
+zero elsewhere. Initial volume flow is zero: the pulse splits in both
+directions, and the left-going part reflects at the closed inlet. Its support
+must lie strictly inside the duct. Choose an acoustic perturbation small
+relative to static pressure, consistent with the linear acoustic equations.
+
+Stations increase strictly from exactly zero to exactly the cylinder length.
+Temperature and mole fractions interpolate; derived coefficients do not.
+Authored fractions must sum to one under the material owner's canonical order
+and are never repaired. Species IDs must match loaded pack associations.
+Reordering IDs together with fraction columns preserves the field. Exact zero
+fractions are retained, including a species absent at the inlet or everywhere.
+
+The example bounds input to 64 KiB, 16 species, 64 stations, 64 elements,
+order 1 through 8, 256 total DG degrees of freedom, 10000 steps and 4 MiB of CSV.
+The mesh must provide at least one element per material span. Source packs
+retain the shared loader's 16 MiB per-pack and 64 MiB aggregate limits.
+Increase element count or polynomial order to refine space. The certified
+exponential advances the frozen operator; the time step sets output sampling.
+
+## Read the CSV
+
+There are `STEPS + 1` rows, including the projected initial state.
+Values use 17 digits after the decimal point:
+
+| Column | Meaning |
+| --- | --- |
+| `time_s` | Time since initialization |
+| `inlet_pressure_pa` | Physical acoustic pressure at the inlet endpoint |
+| `outlet_pressure_pa` | Physical acoustic pressure at the outlet endpoint |
+| `stored_energy_j` | Current acoustic energy in the field-weighted DG state |
+| `inferred_matched_loss_j` | Initial energy minus current energy |
+
+Pressure uses LGL endpoint traces after physical-state reconstruction, with no
+nearest-node choice or normalization. Matched loss is inferred from the energy
+deficit. It is **not an independent conservation check**: the existing ledger's
+`balance_checked` is false for this boundary.
+
+For a uniform comparison, set all stations to 300 K and fractions `1 0`, retaining
+both source IDs and the same mesh and pulse. Compare arrival times, reflections
+and energy against the supplied gradient. At fixed temperature and composition,
+this ideal-gas source model's sound speed does not change with static pressure;
+density, characteristic impedance and the energy of a fixed pressure pulse do.
+
+This is frozen, lossless, no-mean-flow plane-wave propagation. The matched outlet
+absorbs energy; it is not a radiation receiver. Thermal/species evolution,
+wall losses and molecular relaxation are outside this DG example. The source
+manifests linked from the reed example retain references and validity domains.
