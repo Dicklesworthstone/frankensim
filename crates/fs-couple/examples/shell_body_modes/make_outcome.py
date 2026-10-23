@@ -15,6 +15,9 @@ EXTRA[("vex-n5", "a0")] = "the corrected cavity record (2.0610 L instead of the 
 EXTRA[("vex-n5", "cbr")] = "unchanged by the cavity record (it does not couple to the air): 480.73 against 480.75 Hz"
 for _i in ("a0", "cbr", "b1-", "b1+"):
     EXTRA[("npost", _i)] = "the registered rules applied to a configuration that was NOT registered (the body without the soundpost, chosen after the first result because a measured body-only violin exists); information only"
+EXTRA[("corrected-n6", "b1-")] = ("the mode the registered rule finds carries 88 percent of its kinetic energy in the bridge (lumped nodal masses from the --node-shapes "
+                               "output): a bridge mode, not a corpus mode; the rule reads plate displacement only; the registered outcome stands, information only")
+EXTRA[("corrected-n6", "b1+")] = "no mode of the list above the b1- row (rank 6) qualifies; for information only, outside the chain: rank 3 at 530.72 Hz is the breathing mode, inside the band"
 rows = ["frankensim.specimen-body-mode-outcome.v1", "run\tid\tband_lo_hz\tband_hi_hz\tregistered_rule_outcome\tcandidate_rank\tcandidate_f_hz\tsigned_offset_hz\tnote"]
 for a in sys.argv[2:]:
     run, path = a.split("=", 1)

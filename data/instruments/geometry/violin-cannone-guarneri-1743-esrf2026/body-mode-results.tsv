@@ -1,5 +1,43 @@
 frankensim.specimen-body-mode-results.v1
 run	rank	f_hz	neck_share	net_cavity_dv	top_mean_w	back_mean_w	q_solid_kv_not_a_result	q_rad	note
+corrected-n6	1	243.23	0.951	1.646e-1	-3.156e-1	-1.662e-1	360.8	43.3	the corrected body: corrections 1 to 4 together, the committed table of 18a7dc86b (exact cavity, bridge grain along y) with the Norway spruce pack of 18a7dc86b and the maple pack of 4f9abefe1, 6 shell modes, binary of 54aa5b8c1; rank 6 (695.65 Hz) has 88 percent of its kinetic energy in the bridge
+corrected-n6	2	476.67	0.000	4.831e-3	-5.869e-3	4.290e-2	73.2	25625.5	same run
+corrected-n6	3	530.72	0.046	-1.727e-1	-1.241e0	-7.296e-1	89.5	18.0	same run
+corrected-n6	4	610.83	0.001	-2.933e-2	-3.106e-1	-1.184e-1	71.0	542.4	same run
+corrected-n6	5	638.10	0.001	3.778e-2	5.212e-1	-6.425e-2	69.3	312.9	same run
+corrected-n6	6	695.65	0.000	7.371e-3	6.617e-2	-1.151e-2	70.8	7542.4	same run
+corrected-n6	7	740.56	0.001	4.538e-2	5.269e-1	1.311e-1	73.8	186.9	same run
+c1-maple626-n5	1	245.43	0.934	1.584e-1	-3.576e-1	-1.913e-1	192.6	46.3	correction 1 alone: base-n5 with the maple pack at the normal-climate density of its source, 626 kg/m3 (4f9abefe1), binary of fb2dd98af
+c1-maple626-n5	2	348.21	0.000	-5.889e-3	-2.883e-2	-8.490e-3	61.7	23601.6	same run
+c1-maple626-n5	3	466.33	0.000	-5.906e-3	2.564e-3	-4.779e-2	56.1	17524.3	same run
+c1-maple626-n5	4	511.72	0.062	-1.777e-1	-1.219e0	-7.251e-1	55.7	17.6	same run
+c1-maple626-n5	5	602.33	0.001	3.361e-2	3.479e-1	1.235e-1	56.9	419.1	same run
+c1-maple626-n5	6	628.26	0.002	-5.048e-2	-6.209e-1	1.777e-2	54.8	178.1	same run
+c2-norway-n5	1	248.35	0.949	1.634e-1	-3.060e-1	-1.884e-1	348.1	43.0	correction 2 alone: base-n5 with the top, bass bar and soundpost in Norway spruce (a scratch build with the scalars of violin-spruce-norway-viala2020-shell of 18a7dc86b: Viala et al. 2020 violin quarters, nu_LR a Sitka surrogate), binary of 9254fd68e; maple pack as before 4f9abefe1 (density 563 kg/m3, the oven-dry value; the pack carries 626 kg/m3 from then on)
+c2-norway-n5	2	367.79	0.000	-5.148e-3	-2.758e-2	-9.970e-3	62.5	29245.7	same run
+c2-norway-n5	3	491.01	0.000	-1.261e-2	-3.901e-2	-8.011e-2	73.4	3651.4	same run
+c2-norway-n5	4	544.02	0.048	-1.764e-1	-1.199e0	-8.152e-1	90.4	16.8	same run
+c2-norway-n5	5	633.91	0.001	3.006e-2	3.127e-1	1.319e-1	71.3	497.6	same run
+c2-norway-n5	6	662.11	0.002	4.965e-2	6.150e-1	-7.277e-3	69.6	174.7	same run
+c4-bridge-n5	1	245.68	0.940	1.592e-1	-3.399e-1	-2.066e-1	199.3	45.8	correction 4 alone: base-n5 with the bridge grain from its feet to its top (y) instead of across it (x), as in the generator of 18a7dc86b with cavity_volume=facet; the 367 Hz mode of base-n5, 99 percent of its kinetic energy in the bridge, leaves the window; binary of 1d082484b; maple pack as before 4f9abefe1 (density 563 kg/m3, the oven-dry value; the pack carries 626 kg/m3 from then on)
+c4-bridge-n5	2	481.23	0.000	-1.188e-2	-3.013e-2	-7.779e-2	56.0	4194.4	same run
+c4-bridge-n5	3	523.09	0.056	1.761e-1	1.159e0	7.948e-1	54.8	17.6	same run
+c4-bridge-n5	4	619.44	0.001	-2.453e-2	-2.253e-1	-1.374e-1	55.3	764.5	same run
+c4-bridge-n5	5	647.09	0.003	6.016e-2	7.049e-1	4.578e-2	55.0	121.7	same run
+c4-bridge-n5	6	723.51	0.001	-4.072e-2	-4.256e-1	-1.794e-1	54.1	237.6	same run
+c123-n6	1	243.07	0.950	1.643e-1	-3.173e-1	-1.676e-1	357.3	43.4	corrections 1 to 3 together (maple 626, Norway spruce as in c2-norway-n5, exact cavity 2.0610 L; bridge grain still across), 6 shell modes, binary of 5f400b8fd
+c123-n6	2	348.84	0.000	5.004e-3	2.628e-2	7.603e-3	62.5	32632.1	same run
+c123-n6	3	476.21	0.000	-6.565e-3	-5.688e-3	-4.976e-2	73.2	13889.0	same run
+c123-n6	4	529.68	0.047	-1.731e-1	-1.241e0	-7.323e-1	89.5	18.0	same run
+c123-n6	5	612.49	0.001	-2.963e-2	-3.318e-1	-1.026e-1	70.6	530.3	same run
+c123-n6	6	640.74	0.001	3.806e-2	5.159e-1	-6.654e-2	69.4	307.2	same run
+c123-n6	7	739.11	0.001	-4.394e-2	-5.149e-1	-1.292e-1	73.9	199.8	same run
+ts1-base-n5	1	245.75	0.938	1.592e-1	-3.369e-1	-2.065e-1	196.5	45.8	base-n5 rerun on ts1 (binary of ea5652656; table of 9080c6a69, Sitka and maple packs as in base-n5): every printed digit equals base-n5; maple pack as before 4f9abefe1 (density 563 kg/m3, the oven-dry value; the pack carries 626 kg/m3 from then on)
+ts1-base-n5	2	367.11	0.000	5.963e-3	3.153e-2	1.195e-2	61.7	21834.6	same run
+ts1-base-n5	3	480.75	0.001	1.418e-2	4.459e-2	8.750e-2	56.0	2947.1	same run
+ts1-base-n5	4	522.17	0.057	-1.776e-1	-1.171e0	-8.018e-1	54.8	17.3	same run
+ts1-base-n5	5	621.58	0.001	-2.744e-2	-2.691e-1	-1.337e-1	55.5	609.1	same run
+ts1-base-n5	6	648.83	0.003	6.080e-2	7.080e-1	4.454e-2	54.7	118.9	same run
 cracked-base	1	61.53	0.121	3.588e-3	-5.498e-1	-4.838e-1	41.7	359777.6	SUPERSEDED, a run of the cracked model (456 of 1239 zone-interface nodes were not welded; repaired in 9080c6a69, found by audit_welds.py): shell-assembly-h8.tsv of 8a0dc81b3, 28 shell modes between 20 and 700 Hz; maple pack as before 4f9abefe1 (density 563 kg/m3, the oven-dry value; the pack carries 626 kg/m3 from then on)
 cracked-base	2	111.94	0.112	1.143e-2	-6.685e-1	-2.426e-1	64.6	19489.6	same run
 cracked-base	3	167.18	0.070	-2.012e-2	3.409e-1	1.760e-1	39.3	4210.3	same run

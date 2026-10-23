@@ -1,5 +1,29 @@
 frankensim.specimen-body-mode-outcome.v1
 run	id	band_lo_hz	band_hi_hz	registered_rule_outcome	candidate_rank	candidate_f_hz	signed_offset_hz	note
+corrected-n6	a0	270	290	found, MISS	1	243.23	-26.8	rank 1 at 243.23 Hz (neck share 0.951)
+corrected-n6	cbr	380	420	found, MISS	2	476.67	56.7	rank 2 at 476.67 Hz (odd 0.99, waist share 0.59)
+corrected-n6	b1-	430	480	found, MISS	6	695.65	215.6	rank 6 at 695.65 Hz (odd 0.06, dV 7.37e-03 against a0 1.65e-01); the mode the registered rule finds carries 88 percent of its kinetic energy in the bridge (lumped nodal masses from the --node-shapes output): a bridge mode, not a corpus mode; the rule reads plate displacement only; the registered outcome stands, information only
+corrected-n6	b1+	510	580	not found	none	none	none	not found; no mode of the list above the b1- row (rank 6) qualifies; for information only, outside the chain: rank 3 at 530.72 Hz is the breathing mode, inside the band
+c1-maple626-n5	a0	270	290	found, MISS	1	245.43	-24.6	rank 1 at 245.43 Hz (neck share 0.934)
+c1-maple626-n5	cbr	380	420	found, MISS	3	466.33	46.3	rank 3 at 466.33 Hz (odd 0.99, waist share 0.59)
+c1-maple626-n5	b1-	430	480	not found	none	none	none	not found
+c1-maple626-n5	b1+	510	580	not found	none	none	none	not found
+c2-norway-n5	a0	270	290	found, MISS	1	248.35	-21.7	rank 1 at 248.35 Hz (neck share 0.949)
+c2-norway-n5	cbr	380	420	found, MISS	3	491.01	71.0	rank 3 at 491.01 Hz (odd 0.99, waist share 0.59)
+c2-norway-n5	b1-	430	480	not found	none	none	none	not found
+c2-norway-n5	b1+	510	580	not found	none	none	none	not found
+c4-bridge-n5	a0	270	290	found, MISS	1	245.68	-24.3	rank 1 at 245.68 Hz (neck share 0.940)
+c4-bridge-n5	cbr	380	420	found, MISS	2	481.23	61.2	rank 2 at 481.23 Hz (odd 0.99, waist share 0.59)
+c4-bridge-n5	b1-	430	480	not found	none	none	none	not found
+c4-bridge-n5	b1+	510	580	not found	none	none	none	not found
+c123-n6	a0	270	290	found, MISS	1	243.07	-26.9	rank 1 at 243.07 Hz (neck share 0.950)
+c123-n6	cbr	380	420	found, MISS	3	476.21	56.2	rank 3 at 476.21 Hz (odd 0.99, waist share 0.59)
+c123-n6	b1-	430	480	not found	none	none	none	not found
+c123-n6	b1+	510	580	not found	none	none	none	not found
+ts1-base-n5	a0	270	290	found, MISS	1	245.75	-24.2	rank 1 at 245.75 Hz (neck share 0.938)
+ts1-base-n5	cbr	380	420	found, MISS	3	480.75	60.8	rank 3 at 480.75 Hz (odd 0.99, waist share 0.59)
+ts1-base-n5	b1-	430	480	not found	none	none	none	not found
+ts1-base-n5	b1+	510	580	not found	none	none	none	not found
 vex-n5	a0	270	290	found, MISS	1	241.28	-28.7	rank 1 at 241.28 Hz (neck share 0.944); the corrected cavity record (2.0610 L instead of the origin-dependent facet sum 1.9653 L): this A0 supersedes the base-n5 value, the geometry and every other record of the table are the same
 vex-n5	cbr	380	420	found, MISS	3	480.73	60.7	rank 3 at 480.73 Hz (odd 0.99, waist share 0.59); unchanged by the cavity record (it does not couple to the air): 480.73 against 480.75 Hz
 vex-n5	b1-	430	480	not found	none	none	none	not found

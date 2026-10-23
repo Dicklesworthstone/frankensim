@@ -29,7 +29,16 @@ NOTES = {
     "tw004": REP + "declared sensitivity: every plate zone thickness 0.04 mm thinner (the smallest volume-against-mesh difference), 5 shell modes",
     "scw098": REP + "declared sensitivity: plan view scaled by 0.98 about the body centre by scale_table.py (topology, heights, ties unchanged), 5 shell modes",
     "scw102": REP + "declared sensitivity: plan view scaled by 1.02 about the body centre by scale_table.py, 5 shell modes",
+    # GraySpring, bead .366, ts1 lane f, 2026-10-23: one correction at a time from base-n5, then all together (5 or 6 shell modes, 20-900 Hz)
+    "ts1-base-n5": "base-n5 rerun on ts1 (binary of ea5652656; table of 9080c6a69, Sitka and maple packs as in base-n5): every printed digit equals base-n5",
+    "c1-maple626-n5": "correction 1 alone: base-n5 with the maple pack at the normal-climate density of its source, 626 kg/m3 (4f9abefe1), binary of fb2dd98af",
+    "c2-norway-n5": "correction 2 alone: base-n5 with the top, bass bar and soundpost in Norway spruce (a scratch build with the scalars of violin-spruce-norway-viala2020-shell of 18a7dc86b: Viala et al. 2020 violin quarters, nu_LR a Sitka surrogate), binary of 9254fd68e",
+    "c4-bridge-n5": "correction 4 alone: base-n5 with the bridge grain from its feet to its top (y) instead of across it (x), as in the generator of 18a7dc86b with cavity_volume=facet; the 367 Hz mode of base-n5, 99 percent of its kinetic energy in the bridge, leaves the window; binary of 1d082484b",
+    "c123-n6": "corrections 1 to 3 together (maple 626, Norway spruce as in c2-norway-n5, exact cavity 2.0610 L; bridge grain still across), 6 shell modes, binary of 5f400b8fd",
+    "corrected-n6": "the corrected body: corrections 1 to 4 together, the committed table of 18a7dc86b (exact cavity, bridge grain along y) with the Norway spruce pack of 18a7dc86b and the maple pack of 4f9abefe1, 6 shell modes, binary of 54aa5b8c1; rank 6 (695.65 Hz) has 88 percent of its kinetic energy in the bridge",
 }
+# the runs above made with the maple pack of 4f9abefe1 (626 kg/m3); every other run used the earlier pack (MAPLE)
+MAPLE626 = {"c1-maple626-n5", "c123-n6", "corrected-n6"}
 
 
 def coupled(path):
@@ -47,6 +56,6 @@ def coupled(path):
 lines = ["frankensim.specimen-body-mode-results.v1", "run\trank\tf_hz\tneck_share\tnet_cavity_dv\ttop_mean_w\tback_mean_w\tq_solid_kv_not_a_result\tq_rad\tnote"]
 for run, path in runs:
     for i, p in enumerate(coupled(path)):
-        lines.append("\t".join([run, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], NOTES.get(run, "run " + run) + MAPLE if i == 0 else "same run"]))
+        lines.append("\t".join([run, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], NOTES.get(run, "run " + run) + ("" if run in MAPLE626 else MAPLE) if i == 0 else "same run"]))
 open(out_modes, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 print("wrote", out_modes, len(lines) - 2, "rows")
