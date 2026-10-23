@@ -197,7 +197,11 @@ fn log_ratio(a:f64,b:f64)->f64 {
 fn relative_energy(u:f64)->f64 {
     let x=u-1.0;
     if x.abs()<1e-4 {x*x*(0.5+x*(-1.0/6.0+x*(1.0/12.0+x*(-1.0/20.0+x/30.0))))}
-    else {u*u.ln()-u+1.0}
+    // u*ln(u)-u+1 rounds -1+x^2/2 at the ulp of 1, an O(eps) ABSOLUTE error:
+    // times p0*V it is a staircase in H that the Gonzalez quotient divides by
+    // |dx|^2. x=u-1 is exact for u>=0.5 (no cancellation below), so
+    // u*ln1p(x)-x keeps the absolute error O(eps*|x|).
+    else {u*x.ln_1p()-x}
 }
 // L(p_i^2,p_j^2), and its directional derivative. Series remove the removable
 // singularity at equal pressure without perturbing the pressure or mobility.
