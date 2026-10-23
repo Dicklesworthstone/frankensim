@@ -36,7 +36,7 @@ pub fn reduce_valve(
     cx: &Cx<'_>,
 ) -> Result<ValveCard, ReduceError> {
     let identity = field_identity(request.material, request.tetrahedra.len())?;
-    super::reduce_valve_impl(request, request.material, identity, cx, None)
+    super::reduce_valve_impl(request, request.material, identity, cx, None, None)
         .map(|reduced| reduced.card)
 }
 
@@ -56,7 +56,7 @@ pub fn reduce_pressure_loaded_valve(
 ) -> Result<PressureLoadedValve, ReduceError> {
     let identity = field_identity(request.material, request.tetrahedra.len())?;
     super::reduce_pressure_loaded_valve_impl(
-        request, request.material, identity, nodal_load_per_pa_m2, cx,
+        request, request.material, identity, nodal_load_per_pa_m2, cx, None,
     )
 }
 
@@ -70,7 +70,7 @@ fn material_identity(material: &TetElasticMaterial) -> ContentHash {
     hash.finalize()
 }
 
-fn field_identity(
+pub(super) fn field_identity(
     field: TetMaterialField<'_>,
     element_count: usize,
 ) -> Result<ContentHash, ReduceError> {

@@ -36,11 +36,13 @@ use std::fmt::Write as _;
 
 use crate::linear3::tet10::{QuadraticTetProblem, TetQuadrature};
 use crate::linear3::{
-    TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
+    TetAssemblyBudget, TetElasticAssembly, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
 };
 
 /// Anisotropic and spatially varying material fields through the same reducer.
 pub mod material_field;
+/// Thermal equilibrium and prestress through the same pressure-loaded reducer.
+pub mod thermal;
 mod pressure_compliance;
 pub use pressure_compliance::{PressureCompliance, SingleModeValveAdmission};
 
@@ -378,6 +380,7 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
         request.material.resolved().identity(),
         cx,
         None,
+        None,
     )
     .map(|reduced| reduced.card)
 }
@@ -405,6 +408,7 @@ pub fn reduce_pressure_loaded_valve(
         request.material.resolved().identity(),
         nodal_load_per_pa_m2,
         cx,
+        None,
     )
 }
 
@@ -414,6 +418,7 @@ fn reduce_pressure_loaded_valve_impl<M>(
     material_identity: ContentHash,
     nodal_load_per_pa_m2: &[[f64; 3]],
     cx: &Cx<'_>,
+    prepared: Option<PreparedValve<'_>>,
 ) -> Result<PressureLoadedValve, ReduceError> {
     if nodal_load_per_pa_m2.len() != request.nodes_m.len()
         || !nodal_load_per_pa_m2.iter().flatten().all(|v| v.is_finite())
@@ -428,6 +433,7 @@ fn reduce_pressure_loaded_valve_impl<M>(
         material_identity,
         cx,
         Some(nodal_load_per_pa_m2),
+        prepared,
     )?;
     let card = reduced.card;
     let effective_areas_m2 = reduced.effective_areas_m2;
@@ -453,12 +459,38 @@ fn reduce_pressure_loaded_valve_impl<M>(
     })
 }
 
+fn validate_element_topology<M>(request: &ValveCardRequest<'_, M>) -> Result<(), ReduceError> {
+    if let ValveElementOrder::Tet10 { elements, .. } = request.element_order {
+        if elements.len() != request.tetrahedra.len()
+            || elements.iter().zip(request.tetrahedra).any(|(q, p)| {
+                let mut a = [q[0], q[1], q[2], q[3]];
+                let mut b = *p;
+                a.sort_unstable();
+                b.sort_unstable();
+                a != b
+            })
+        {
+            return Err(ReduceError::Invalid {
+                what: "TET10 corners must match the request topology element by element",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn pressure_area(phi: &[f64], free_dofs: &[usize], load: &[[f64; 3]], mean_opening: f64) -> f64 {
     phi.iter()
         .zip(free_dofs)
         .map(|(value, full)| value * load[full / 3][full % 3])
         .sum::<f64>()
         / mean_opening
+}
+
+// Only the thermal owner can supply this internally: its pencil and accepted
+// observation geometry come from the SAME source-bound equilibrium.
+struct PreparedValve<'a> {
+    assembly: &'a TetElasticAssembly,
+    observation_nodes_m: &'a [[f64; 3]],
 }
 
 struct ReducedValve {
@@ -473,6 +505,7 @@ fn reduce_valve_impl<M>(
     material_identity: ContentHash,
     cx: &Cx<'_>,
     pressure_load: Option<&[[f64; 3]]>,
+    prepared: Option<PreparedValve<'_>>,
 ) -> Result<ReducedValve, ReduceError> {
     if request.face_nodes_invalid() {
         return Err(ReduceError::Invalid {
@@ -508,34 +541,23 @@ fn reduce_valve_impl<M>(
         });
     }
 
-    // 1. Assemble the (K, M) pencil with the supplied common material field.
-    let assembly = match request.element_order {
-        ValveElementOrder::Tet4 => TetLinearElasticProblem {
-            nodes_m: request.nodes_m,
-            tetrahedra: request.tetrahedra,
-            materials,
-            fixed_dofs: request.fixed_dofs,
-            budget: TetAssemblyBudget::default(),
-        }
-        .assemble(cx)?,
-        ValveElementOrder::Tet10 {
-            elements,
-            quadrature,
-        } => {
-            if elements.len() != request.tetrahedra.len()
-                || elements.iter().zip(request.tetrahedra).any(|(q, p)| {
-                    let mut a = [q[0], q[1], q[2], q[3]];
-                    let mut b = *p;
-                    a.sort_unstable();
-                    b.sort_unstable();
-                    a != b
-                })
-            {
-                return Err(ReduceError::Invalid {
-                    what: "TET10 corners must match the request topology element by element",
-                });
+    validate_element_topology(request)?;
+    let thermal_tangent = prepared.is_some();
+    let assembled;
+    let (assembly, observation_nodes_m) = if let Some(prepared) = prepared {
+        (prepared.assembly, prepared.observation_nodes_m)
+    } else {
+        // The original unheated path retains its assembly and arithmetic.
+        assembled = match request.element_order {
+            ValveElementOrder::Tet4 => TetLinearElasticProblem {
+                nodes_m: request.nodes_m,
+                tetrahedra: request.tetrahedra,
+                materials,
+                fixed_dofs: request.fixed_dofs,
+                budget: TetAssemblyBudget::default(),
             }
-            QuadraticTetProblem {
+            .assemble(cx)?,
+            ValveElementOrder::Tet10 { elements, quadrature } => QuadraticTetProblem {
                 nodes_m: request.nodes_m,
                 elements,
                 materials,
@@ -543,8 +565,9 @@ fn reduce_valve_impl<M>(
                 budget: TetAssemblyBudget::default(),
                 quadrature,
             }
-            .assemble(cx)?
-        }
+            .assemble(cx)?,
+        };
+        (&assembled, request.nodes_m)
     };
 
     // 2. Certified low modes.
@@ -588,6 +611,15 @@ fn reduce_valve_impl<M>(
     let symbolic =
         fs_sparse::SymbolicLdlt::analyze(&assembly.stiffness, fs_sparse::DirectOrdering::Amd)?;
     let factor = symbolic.factor(&assembly.stiffness, &fs_sparse::LdltOptions::default())?;
+    // A positive modal window cannot hide an unstable direction elsewhere.
+    // Singular tangents already refuse in the existing factorization owner.
+    if thermal_tangent
+        && (factor.inertia().negative != 0 || factor.inertia().positive != n_red)
+    {
+        return Err(ReduceError::Invalid {
+            what: "thermal prestress tangent must be positive definite before valve reduction",
+        });
+    }
     let k_inv_r = factor.solve(&r);
     let static_compliance: f64 = r.iter().zip(&k_inv_r).map(|(a, b)| a * b).sum();
     if !(static_compliance > 0.0 && static_compliance.is_finite()) {
@@ -680,7 +712,7 @@ fn reduce_valve_impl<M>(
         });
     }
 
-    // 6. Orifice geometry MEASURED from the mesh.
+    // 6. Orifice geometry measured from the accepted observation mesh.
     let thickness_axis = [
         axis[1] * width_axis[2] - axis[2] * width_axis[1],
         axis[2] * width_axis[0] - axis[0] * width_axis[2],
@@ -692,7 +724,7 @@ fn reduce_valve_impl<M>(
     let mut t_lo = f64::INFINITY;
     let mut t_hi = f64::NEG_INFINITY;
     for &node in request.orifice.face_nodes {
-        let p = request.nodes_m[node];
+        let p = observation_nodes_m[node];
         let a = p[0] * axis[0] + p[1] * axis[1] + p[2] * axis[2];
         let w = p[0] * width_axis[0] + p[1] * width_axis[1] + p[2] * width_axis[2];
         let t = p[0] * thickness_axis[0] + p[1] * thickness_axis[1] + p[2] * thickness_axis[2];

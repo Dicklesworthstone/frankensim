@@ -234,6 +234,56 @@ identity, not the legacy P1 numerical operator or the rl-001 authored band.
 Reduction remains an explicitly truncated exploratory consumer, not an IRP
 acceptance rendering engine.
 
+### Thermal equilibrium in pressure-loaded valve reduction
+
+`reduce::thermal::reduce_pressure_loaded_valve` carries the original P1 or
+TET10 thermal/dead-load equilibrium into the existing valve/reed consumer.
+The material field, integrated eigenstrain and explicit dead nodal forces
+use the original solid owners. The common reducer receives that equilibrium's
+`K_elastic + K_geometric` pencil; both its modal spectrum and exact opening/
+pressure compliance therefore change with the same actual stress field.
+TET10 retains pointwise quadrature stress, not element-mean stress.
+
+The existing LDLT inertia owner must admit the WHOLE tangent as positive
+definite. Selecting a positive modal window cannot hide an unstable direction
+outside it. A singular/unstable pencil refuses instead of converting negative
+eigenvalues into frequencies. This is numerical admission within the original
+factorization tolerances, not a continuum buckling certificate.
+
+Reference geometry gradients, mass and homogeneous incremental supports remain
+unchanged. The aperture gap, width and thickness are measured from the accepted
+displaced nodes against the original fixed observation axes and opposing plane.
+The original P1 geometry-update owner checks its displacement bound and moved
+cell quality. TET10 uses that declared displacement bound and the existing
+isoparametric point evaluator at both original quadrature rules. Positive sampled
+Jacobians do not establish injectivity between points. Closed apertures, excessive
+strain/displacement and incompatible source states refuse; no contact model is
+selected implicitly.
+
+The pressure-force-per-pascal field remains an explicit FIXED reference load.
+Its work-conjugate modal areas use the same new modes; surface-normal updates,
+follower stiffness, pressure-dependent equilibrium and changed load geometry
+are not inferred. The loss factor remains authored. This is the conservative
+small-displacement initial-stress approximation, not finite-strain dynamics,
+a source loss-spectrum model or live modal-state transfer.
+
+`ThermalPressureLoadedValve` retains the original equilibrium/tangent,
+displaced observation nodes, ordinary pressure-loaded valve and a combined
+identity. The existing `BeatingReedSource` ingress compiles its actual pressure
+port after the original first-mode compliance admission. The ValveCard codec
+is unchanged; its ordinary material/mesh fields keep their original meaning.
+The complete thermal receipt must accompany that card to retain thermal input
+provenance. Every refusal or cancellation returns no partially minted reduction.
+
+G1 definitions in `reduce/tests/thermal.rs` use a six-tet unit cube with one
+free corner displacement. Independent barycentric integrals give closed-form
+P1 and TET10 mass, stiffness, thermal/dead-load displacement, signed geometric
+stiffness and pressure compliance; the same result reaches the playing-reed
+ingress. G3 checks zero-preload parity and an unstable disconnected direction
+outside the selected positive window. G4 covers displacement, closed-aperture,
+source mismatch and cancellation refusals. These are synthetic implementation
+checks, not measured valve/material validation.
+
 The focused `tests/tet10.rs` target specifies G0 shape, quadrature, consistent
 mass, rigid-mode, distorted bending patch, rotated-tensor, refusal and budget
 checks; G1 MMS (L2 order 3 and energy order 2, ±0.2), projected-cylinder geometry

@@ -702,3 +702,6 @@ fn rl_005_tet10_cantilever_card() {
         );
     });
 }
+
+#[path = "tests/thermal.rs"]
+mod thermal;
