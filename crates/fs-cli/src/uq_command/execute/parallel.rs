@@ -1,5 +1,6 @@
-//! Concurrent original cooling children with ordered, recoverable MC/QMC observations.
+//! Concurrent original cooling children with ordered, recoverable UQ observations.
 mod qmc;
+mod sobol;
 
 use super::*;
 use fs_uq::{UqBatchExecution, UqBatchInput};
@@ -7,10 +8,10 @@ use std::io::Read as _;
 
 pub(super) fn validate_options(options: &Options) -> Result<()> {
     if options.workers.is_some() && (options.compliance.is_some() || options.design.is_some()
-        || options.sobol_sensitivity || options.shapley_sensitivity
+        || options.shapley_sensitivity
         || options.adjoint_mean_control || options.polynomial.is_some() || options.importance.is_some())
     {
-        return Err(bad("--workers supports fixed-count Monte Carlo and replicated QMC; other sampling, control and decision modes are incompatible"));
+        return Err(bad("--workers supports fixed-count Monte Carlo, replicated QMC and Sobol sensitivity; other sampling, control and decision modes are incompatible"));
     }
     Ok(())
 }
@@ -22,6 +23,9 @@ fn recovery_error(message: impl Into<String>) -> Failure {
 pub(super) fn execute(
     base_text: &str, base: &J, config: &Config, options: &Options, workers: usize,
 ) -> Result<ExecutionOutput> {
+    if options.sobol_sensitivity {
+        return sobol::execute(base_text, base, config, options, workers);
+    }
     if let Some(replicates) = options.qmc_replicates {
         return qmc::execute(base_text, base, config, options, workers, replicates);
     }
@@ -149,7 +153,7 @@ mod tests {
             assert!(Options::parse(&args(&["--workers", n])).is_err());
         }
         for extra in [vec!["--workers", "2"],
-            vec!["--sensitivity", "sobol"], vec!["--sensitivity", "shapley"],
+            vec!["--sensitivity", "shapley"],
             vec!["--pce", "0,2"], vec!["--pce-mean", "0,2,4"],
             vec!["--importance", "0.2,1"], vec!["--importance-pilot", "1,2,0.2,0.5,1,6"],
             vec!["--mean-control", "adjoint"],
@@ -172,6 +176,27 @@ mod tests {
             let parsed = Options::parse(&args(&input)).unwrap();
             assert_eq!(parsed.qmc_replicates, Some(2));
             assert!(parsed.workers.is_some());
+        }
+    }
+
+    #[test]
+    fn sobol_workers_retain_pairing_recovery_and_conflict_admission() {
+        for input in [
+            vec!["--workers", "3", "--sensitivity", "sobol"],
+            vec!["--sensitivity", "sobol", "--workers", "3"],
+            vec!["--workers", "1", "--sensitivity", "sobol", "--resume", "old", "--checkpoint", "new", "--max-new-samples", "0"],
+        ] {
+            let parsed = Options::parse(&args(&input)).unwrap();
+            assert!(parsed.sobol_sensitivity);
+            assert!(parsed.workers.is_some());
+        }
+        for extra in [vec!["--qmc-replicates", "2"], vec!["--sensitivity", "shapley"],
+            vec!["--mean-control", "adjoint"], vec!["--pce", "1,6"],
+            vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"]]
+        {
+            let mut input = args(&["--workers", "3", "--sensitivity", "sobol"]);
+            input.extend(args(&extra));
+            assert!(Options::parse(&input).is_err());
         }
     }
 

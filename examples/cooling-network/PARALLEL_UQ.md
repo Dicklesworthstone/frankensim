@@ -59,8 +59,9 @@ but cannot destroy the previous atomically published checkpoint.
 
 ## Resource and inference scope
 
-This mode admits fixed-count Monte Carlo and replicated randomized QMC. Importance, PCE,
-sensitivity, mean controls, sequential decisions and candidate selection conflict
+This mode admits fixed-count Monte Carlo, replicated randomized QMC and Sobol
+variance sensitivity. Importance, PCE, Shapley sensitivity, mean controls,
+sequential decisions and candidate selection conflict
 with --workers and refuse before input reads. Existing modes without --workers
 are unchanged. The CLI still admits at most 10,000 physical evaluations.
 
@@ -75,8 +76,10 @@ Focused native regressions:
 ```sh
 cargo test -p fs-uq --test product_batch
 cargo test -p fs-uq --test product_qmc_batch
+cargo test -p fs-uq --test product_sobol_batch
 cargo test -p fs-cli --bin frankensim uq_command::execute::parallel
 cargo test -p fs-cli --test cooling_parallel
+cargo test -p fs-cli --test cooling_parallel_sobol
 ```
 
 These tests must run natively before claiming Rust execution or bit-parity passes.
@@ -118,3 +121,50 @@ to other schedulers through `UqBatchInput` slots. Drivers must drain all jobs an
 match each result to its original slot. The implementation adds no confidence
 sequence, adaptive stopping or bound on finite-grid, solver or physical-model
 error. Aggregate child-resource and unsaved-wave limitations above still apply.
+
+## Parallel physical Sobol sensitivity
+
+Combine `--sensitivity sobol` with `--workers N` to run the original A/B/hybrid
+physical solves concurrently. This estimates variance contributions of independent
+physical parameters; it is distinct from Sobol-sequence randomized QMC above.
+
+```sh
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-sensitivity-hotspot.json \
+  --sensitivity sobol --workers 4 \
+  --checkpoint first.sbatch --max-new-samples 5
+
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-sensitivity-hotspot.json \
+  --sensitivity sobol --workers 1 \
+  --resume first.sbatch --checkpoint complete.sbatch
+```
+
+The existing example still has four independent inputs and 128 rows, costing
+768 physical solves. Five calls stop inside its first six-call row; resumption
+retains all completed base and hybrid responses. A 300-second wall allowance is
+not a completion guarantee. The input tolerances remain illustrative assumptions.
+
+`fs_uq::product_sensitivity::SobolBatchExecution` uses the original cached A/B
+sampler and Jansen reductions. A wave may span rows, but it cannot change the
+pairing or sum in completion order. Only the entire declared design yields the
+original `sensitivity.v1` report. Zero sampled base variance remains an undefined
+normalization diagnostic, not invented zero effects. Correlated and constant
+inputs still refuse; there is no substitution of latent-coordinate indices.
+
+`FSSOBB01` embeds the existing Sobol checkpoint and retains pending ordinal
+slots. Repeat both selectors on resume; ordinary serial Sobol, QMC and MC files
+are different formats. Worker count can change without changing the experiment.
+The `sensitivity.parallel.progress.v1` response identifies the earliest missing
+row/slot and hybrid parameter, while separating contiguous from retained later
+observations. No partial rows or completed-worker subset produce indices.
+Every transient observation remains one completed trajectory's sampled peak.
+
+The original physical evaluator, worker drain, watchdog and atomic writer are
+shared with the other parallel modes. True failures remain terminal; completed
+checkpoints invoke no further physics. Checkpoints must be trusted, and a crash
+can lose the current unsaved wave. The process limit does not bound aggregate
+solver RAM or threads. No speedup, confidence interval, adaptive stopping or
+physical-model accuracy is certified by this capability.

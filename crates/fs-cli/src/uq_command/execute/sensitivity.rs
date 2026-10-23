@@ -80,7 +80,7 @@ pub(super) fn execute(
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
 }
 
-fn render(base: &J, config: &Config, report: &SobolReport) -> Result<String> {
+pub(super) fn render(base: &J, config: &Config, report: &SobolReport) -> Result<String> {
     if report.status != UqStatus::Complete {
         return Err(model_failure("only complete fixed-design Sobol reports may be published"));
     }
