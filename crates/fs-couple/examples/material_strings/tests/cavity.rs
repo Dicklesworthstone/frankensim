@@ -87,6 +87,7 @@ fn physical_neck_gas_and_each_end_condition_reach_shared_load_and_rendered_press
         );
         let original_resistance = neck.neck_resistance_n_s_m();
         let original_mass = neck.neck_mass_kg();
+        let original_omega = neck.isolated_omega_rad_s();
         let expected = pressure(&mut first, 1);
         assert!(expected.iter().any(|p| p.abs() > 1e-12));
         let mut replay = compile(cx, gate, baseline.clone(), 7800.0);
@@ -107,6 +108,16 @@ fn physical_neck_gas_and_each_end_condition_reach_shared_load_and_rendered_press
                 original_resistance,
                 "{to}"
             );
+            // Direction and amount of the gas: with the neck's end geometry
+            // fixed, the isolated Helmholtz frequency is c sqrt(A / (V L_eff)),
+            // so it moves by exactly the sound-speed ratio. The ratio is 1 at
+            // 60 kPa (ideal gas), up at 313 K, and down with CO2.
+            if !from.starts_with("flanged") {
+                close(
+                    new_neck.isolated_omega_rad_s() / original_omega,
+                    changed.gas.sound_speed / baseline.gas.sound_speed,
+                );
+            }
             let mut rendered = compile(cx, gate, changed, 7800.0);
             for name in ["wire.fsmatpk", "body.fsmatpk"] {
                 assert_eq!(
