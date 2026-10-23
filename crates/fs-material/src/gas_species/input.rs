@@ -9,7 +9,8 @@ use crate::MaterialError;
 use crate::gas::GasState;
 use fs_qty::semantic::{Composition, CompositionBasis};
 use crate::thermochemical_gas::{
-    ResolvedThermochemicalGasState,
+    ResolvedThermochemicalGasState, ThermochemicalGasModel,
+    energy::{GasEnergyError, IsochoricGasParcel},
     packs::{SpeciesPackRef, from_packs},
 };
 use fs_thermochem::{SpeciesId, mixture::MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1};
@@ -80,6 +81,69 @@ impl std::error::Error for GasInputError {
     }
 }
 
+/// Original source parsing or conservative parcel initialization refusal.
+/// This keeps the snapshot reader's error type unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParcelInputError {
+    /// The shared grammar, registry, source law or phase policy refused.
+    Input(GasInputError),
+    /// The original finite-volume gas owner refused.
+    Energy(GasEnergyError),
+}
+impl core::fmt::Display for ParcelInputError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Input(error) => write!(f, "finite gas input: {error}"),
+            Self::Energy(error) => write!(f, "finite gas input: {error}"),
+        }
+    }
+}
+impl std::error::Error for ParcelInputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Input(error) => Some(error),
+            Self::Energy(error) => Some(error),
+        }
+    }
+}
+impl From<GasInputError> for ParcelInputError {
+    fn from(error: GasInputError) -> Self { Self::Input(error) }
+}
+impl From<GasEnergyError> for ParcelInputError {
+    fn from(error: GasEnergyError) -> Self { Self::Energy(error) }
+}
+
+/// Admit one finite, closed gas reservoir from the same thermochemical record.
+///
+/// The original model, composition, typed conditions and source packs are
+/// retained by `IsochoricGasParcel`; later heat steps reevaluate those source
+/// laws instead of treating this initial snapshot as a constant-capacity gas.
+/// Volume is explicit [m3], and the original owner derives mass as rho*V.
+///
+/// Only `FrozenGas` is admitted: an initial liquid-water saturation check
+/// cannot guarantee the phase of later heated/cooled states. This path does
+/// not silently weaken a requested liquid-water policy or claim condensation
+/// tracking. The caller must retain a valid frozen-gas domain during evolution.
+///
+/// The iterator is unchanged on every refusal. On success any caller-owned
+/// suffix remains; complete-record consumers must reject unexpected fields.
+pub fn read_isochoric_parcel(
+    fields: &mut SplitAsciiWhitespace<'_>,
+    sources: &ThermochemicalSources<'_>,
+    volume_m3: f64,
+) -> Result<IsochoricGasParcel, ParcelInputError> {
+    if sources.phase != ThermochemicalPhase::FrozenGas {
+        return Err(GasInputError::Input(
+            "finite gas evolution requires an explicit FrozenGas phase policy",
+        ).into());
+    }
+    let mut remaining = fields.clone();
+    let (model, point) = read_thermochemical_model(&mut remaining, sources)?;
+    let parcel = IsochoricGasParcel::new(model, point, volume_m3)?;
+    *fields = remaining;
+    Ok(parcel)
+}
+
 /// Consume exactly one gas declaration, leaving any caller-owned suffix intact.
 ///
 /// Supported records (SI kelvin, pascals, dimensionless fractions):
@@ -125,77 +189,7 @@ pub fn read_gas_record(
         let sources = sources.ok_or(GasInputError::Input(
             "thermochemical gas requires an explicit source registry",
         ))?;
-        word(&mut remaining)?;
-        let temperature = scalar(&mut remaining)?;
-        let pressure = scalar(&mut remaining)?;
-        let basis = match word(&mut remaining)? {
-            "mole" => CompositionBasis::MoleFraction,
-            "mass" => CompositionBasis::MassFraction,
-            _ => {
-                return Err(GasInputError::Input(
-                    "thermochemical basis must be mole or mass",
-                ));
-            }
-        };
-        let count: usize = word(&mut remaining)?
-            .parse()
-            .map_err(|_| GasInputError::Input("invalid thermochemical component count"))?;
-        if count == 0 || count > MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1 {
-            return Err(GasInputError::Input(
-                "thermochemical count exceeds MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1",
-            ));
-        }
-        let mut selected = Vec::with_capacity(count);
-        let mut fractions = Vec::with_capacity(count);
-        for _ in 0..count {
-            let name = word(&mut remaining)?;
-            let mut candidates = sources
-                .species
-                .iter()
-                .filter(|source| source.species.association().species().as_str() == name);
-            let source = candidates.next().ok_or(GasInputError::Input(
-                "thermochemical species has no source registry entry",
-            ))?;
-            if candidates.next().is_some() {
-                return Err(GasInputError::Input(
-                    "ambiguous thermochemical species registry entry",
-                ));
-            }
-            selected.push(source.clone());
-            fractions.push(scalar(&mut remaining)?);
-        }
-        let water = sources.water_species.filter(|id| {
-            selected
-                .iter()
-                .any(|source| source.species.association().species() == *id)
-        });
-        let composition = Composition::new(basis, fractions).map_err(|error| {
-            GasInputError::Material(MaterialError::Parameters {
-                what: format!("thermochemical composition: {error}"),
-            })
-        })?;
-        let model = from_packs(&selected, composition, water).map_err(GasInputError::Material)?;
-        use fs_qty::{
-            QuantitySpec,
-            semantic::{QuantityKind, SemanticType, ValueForm},
-        };
-        let mut point = fs_matdb::QueryPoint::new();
-        for (axis, kind, value) in [
-            (
-                "temperature",
-                QuantityKind::AbsoluteTemperature,
-                temperature,
-            ),
-            ("pressure", QuantityKind::Pressure, pressure),
-        ] {
-            point = point
-                .with_quantity(
-                    axis,
-                    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static)),
-                    value,
-                )
-                .map_err(|_| GasInputError::Input("invalid thermochemical physical coordinate"))?;
-        }
+        let (model, point) = read_thermochemical_model(&mut remaining, sources)?;
         let resolved = match sources.phase {
             ThermochemicalPhase::FrozenGas => model.evaluate(&point),
             // The source explicitly identifies water, and no selected species
@@ -203,7 +197,7 @@ pub fn read_gas_record(
             // Do not add a zero-fraction species or query an irrelevant water
             // saturation window. All selected source domains remain enforced.
             ThermochemicalPhase::LiquidWaterLimit
-                if sources.water_species.is_some() && water.is_none() => model.evaluate(&point),
+                if sources.water_species.is_some() && model.water_species().is_none() => model.evaluate(&point),
             ThermochemicalPhase::LiquidWaterLimit => model.evaluate_with_liquid_water_limit(&point),
         }
         .map_err(GasInputError::Material)?;
@@ -218,6 +212,90 @@ pub fn read_gas_record(
     };
     *fields = remaining;
     Ok(record)
+}
+
+/// Parse the original source model and typed conditions once for both
+/// snapshot evaluation and conservative reservoir initialization.
+fn read_thermochemical_model(
+    fields: &mut SplitAsciiWhitespace<'_>,
+    sources: &ThermochemicalSources<'_>,
+) -> Result<(ThermochemicalGasModel, fs_matdb::QueryPoint), GasInputError> {
+    if word(fields)? != "thermochemical" {
+        return Err(GasInputError::Input(
+            "finite source gas requires the thermochemical grammar",
+        ));
+    }
+    let temperature = scalar(fields)?;
+    let pressure = scalar(fields)?;
+    let basis = match word(fields)? {
+        "mole" => CompositionBasis::MoleFraction,
+        "mass" => CompositionBasis::MassFraction,
+        _ => {
+            return Err(GasInputError::Input(
+                "thermochemical basis must be mole or mass",
+            ));
+        }
+    };
+    let count: usize = word(fields)?
+        .parse()
+        .map_err(|_| GasInputError::Input("invalid thermochemical component count"))?;
+    if count == 0 || count > MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1 {
+        return Err(GasInputError::Input(
+            "thermochemical count exceeds MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1",
+        ));
+    }
+    let mut selected = Vec::with_capacity(count);
+    let mut fractions = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = word(fields)?;
+        let mut candidates = sources
+            .species
+            .iter()
+            .filter(|source| source.species.association().species().as_str() == name);
+        let source = candidates.next().ok_or(GasInputError::Input(
+            "thermochemical species has no source registry entry",
+        ))?;
+        if candidates.next().is_some() {
+            return Err(GasInputError::Input(
+                "ambiguous thermochemical species registry entry",
+            ));
+        }
+        selected.push(source.clone());
+        fractions.push(scalar(fields)?);
+    }
+    let water = sources.water_species.filter(|id| {
+        selected
+            .iter()
+            .any(|source| source.species.association().species() == *id)
+    });
+    let composition = Composition::new(basis, fractions).map_err(|error| {
+        GasInputError::Material(MaterialError::Parameters {
+            what: format!("thermochemical composition: {error}"),
+        })
+    })?;
+    let model = from_packs(&selected, composition, water).map_err(GasInputError::Material)?;
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{QuantityKind, SemanticType, ValueForm},
+    };
+    let mut point = fs_matdb::QueryPoint::new();
+    for (axis, kind, value) in [
+        (
+            "temperature",
+            QuantityKind::AbsoluteTemperature,
+            temperature,
+        ),
+        ("pressure", QuantityKind::Pressure, pressure),
+    ] {
+        point = point
+            .with_quantity(
+                axis,
+                QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static)),
+                value,
+            )
+            .map_err(|_| GasInputError::Input("invalid thermochemical physical coordinate"))?;
+    }
+    Ok((model, point))
 }
 
 fn word<'a>(fields: &mut SplitAsciiWhitespace<'a>) -> Result<&'a str, GasInputError> {

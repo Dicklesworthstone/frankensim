@@ -610,6 +610,27 @@ test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
 
+`gas_species::input::read_isochoric_parcel` retains the same parsed
+thermochemical model, typed conditions and canonical source associations in
+the existing `IsochoricGasParcel` owner. Its mass is rho*V from the declared
+volume and initial state; later signed heat evolves the original NASA-9 energy,
+EOS and transport rather than a frozen initial cp. `input::packs::read_source_parcel`
+uses the same bounded canonical pack loader and complete-record checks as the
+snapshot reader, and the parcel owns its sources after caller bytes are dropped.
+Borrowed prefix input is unchanged on every refusal and retains a caller-owned
+suffix on success; the complete pack reader rejects trailing fields.
+
+Finite-parcel ingress explicitly requires `FrozenGas`: an initial liquid-water
+saturation check cannot certify later cooling, so `LiquidWaterLimit` is refused
+instead of silently weakened. The caller remains responsible for a valid
+frozen-gas phase domain during evolution. No condensation, reaction, spatial
+flow or experimental accuracy is supplied by this input adapter. The existing
+snapshot grammar, source selection and phase checks are shared without changing
+their numerical evaluation. Focused G1/G3/G4 regressions in
+`fs-couple/tests/gas_source_packet.rs` check source retention after input drop,
+nonlinear caloric heating and pressure in both composition bases, exact snapshot
+parity, and transactional source/volume/phase/suffix refusals.
+
 `gas_field::AxialGasField` stores 2..=4096 supplied axial stations with
 temperature and canonical mole composition at one explicit common pressure.
 It interpolates only primitive coordinates; NASA-9 thermodynamics, EOS, Wilke

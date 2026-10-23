@@ -2,7 +2,8 @@
 //! The explicit triple assigns transport to a species; no name selects data.
 //! Numerical evaluation remains in `read_gas_record` and its original owners.
 
-use super::{GasInputError, GasRecord, ThermochemicalPhase, ThermochemicalSources, read_gas_record};
+use super::{GasInputError, GasRecord, ParcelInputError, ThermochemicalPhase, ThermochemicalSources, read_gas_record, read_isochoric_parcel};
+use crate::thermochemical_gas::energy::IsochoricGasParcel;
 use crate::state_point::MaterialPropertySelection;
 use crate::thermochemical_gas::packs::SpeciesPackRef;
 use fs_matdb::{NormalizedMaterialCardPack, NormalizedModelPack, NormalizedSpeciesPack};
@@ -37,26 +38,65 @@ pub fn read_source_packs(
     water_species: Option<&str>,
     phase: ThermochemicalPhase,
 ) -> Result<GasRecord, GasInputError> {
+    with_source_registry(text, sources, water_species, phase, |fields, registry| {
+        read_gas_record(fields, None, Some(registry))
+    })
+}
+
+/// Load one evolving finite gas reservoir from the original canonical packs.
+///
+/// Uses the same bounded loader and thermochemical grammar as the snapshot
+/// path. The original source models, typed conditions, canonical composition,
+/// and pack identities survive after these borrowed bytes are dropped.
+/// `volume_m3` is the fixed physical volume; mass is rho*V from this same gas.
+///
+/// `phase` must explicitly be `FrozenGas`. Checking liquid-water saturation
+/// only at ingress cannot protect later cooling steps, so that policy refuses
+/// rather than being discarded. The caller must keep evolution within a valid
+/// frozen-gas source domain. No condensation/reaction or spatial flow is added.
+pub fn read_source_parcel(
+    text: &str,
+    sources: &[SourcePackBytes<'_>],
+    water_species: Option<&str>,
+    phase: ThermochemicalPhase,
+    volume_m3: f64,
+) -> Result<IsochoricGasParcel, ParcelInputError> {
+    with_source_registry(text, sources, water_species, phase, |fields, registry| {
+        read_isochoric_parcel(fields, registry, volume_m3)
+    })
+}
+
+/// Keep source decoding, count/byte bounds and complete-record admission shared.
+fn with_source_registry<T, E: From<GasInputError>>(
+    text: &str,
+    sources: &[SourcePackBytes<'_>],
+    water_species: Option<&str>,
+    phase: ThermochemicalPhase,
+    read: impl FnOnce(
+        &mut std::str::SplitAsciiWhitespace<'_>,
+        &ThermochemicalSources<'_>,
+    ) -> Result<T, E>,
+) -> Result<T, E> {
     if text.len() > MAX_RECORD_BYTES
         || text.split_ascii_whitespace().next() != Some("thermochemical") {
-        return Err(GasInputError::Input("source packs require a thermochemical record of at most 8 KiB"));
+        return Err(GasInputError::Input("source packs require a thermochemical record of at most 8 KiB").into());
     }
     if sources.is_empty() || sources.len() > MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1 {
-        return Err(GasInputError::Input("gas source registry requires 1..128 explicit pack triples"));
+        return Err(GasInputError::Input("gas source registry requires 1..128 explicit pack triples").into());
     }
     let mut size = 0usize;
     for source in sources {
         for bytes in [source.species, source.nasa9, source.transport] {
             size = size.checked_add(bytes.len()).ok_or(GasInputError::Input("gas source byte overflow"))?;
             if bytes.is_empty() || bytes.len() > MAX_SOURCE_PACK_BYTES || size > MAX_SOURCE_BYTES {
-                return Err(GasInputError::Input("nonempty gas packs must fit 16 MiB each and 64 MiB in total"));
+                return Err(GasInputError::Input("nonempty gas packs must fit 16 MiB each and 64 MiB in total").into());
             }
         }
     }
     let water = water_species.map(|name| SpeciesId::new(name)
         .map_err(|_| GasInputError::Input("invalid explicit water species identity"))).transpose()?;
     if phase == ThermochemicalPhase::LiquidWaterLimit && water.is_none() {
-        return Err(GasInputError::Input("liquid-water admission requires an explicit water identity"));
+        return Err(GasInputError::Input("liquid-water admission requires an explicit water identity").into());
     }
     let mut loaded = Vec::with_capacity(sources.len());
     for source in sources {
@@ -74,9 +114,9 @@ pub fn read_source_packs(
     }).collect::<Vec<_>>();
     let registry = ThermochemicalSources { species: &bindings, water_species: water.as_ref(), phase };
     let mut fields = text.split_ascii_whitespace();
-    let record = read_gas_record(&mut fields, None, Some(&registry))?;
+    let record = read(&mut fields, &registry)?;
     if fields.next().is_some() {
-        return Err(GasInputError::Input("unexpected fields after the gas declaration"));
+        return Err(GasInputError::Input("unexpected fields after the gas declaration").into());
     }
     Ok(record)
 }
