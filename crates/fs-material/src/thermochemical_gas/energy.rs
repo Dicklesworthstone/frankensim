@@ -132,6 +132,39 @@ impl ThermochemicalGasModel {
         self.solve_energy_change(context, density_kg_m3, 0.0, internal_energy_j_kg, controls, &mut cancelled)
     }
 
+    /// Reconstruct from a fixed internal-energy reference and a signed change.
+    ///
+    /// Flow solvers may conserve sensible energy relative to an explicit
+    /// reference for a frozen composition. This evaluates
+    /// `(u(T) - reference_internal_energy_j_kg) - internal_energy_change_j_kg`
+    /// directly instead of first adding a potentially large formation-energy
+    /// offset to the transported energy. The reference must use this model's
+    /// thermochemical convention and remain fixed for that conserved variable.
+    /// Composition changes and reactions require their full species energy
+    /// balance; an arbitrary reference does not remove chemical energy.
+    ///
+    /// All density, source-domain, convergence and cancellation checks are the
+    /// same as `reconstruct_density_energy`. The accepted source state retains
+    /// its original absolute internal energy and complete transport properties.
+    pub fn reconstruct_density_energy_change(
+        &self,
+        context: &QueryPoint,
+        density_kg_m3: f64,
+        reference_internal_energy_j_kg: f64,
+        internal_energy_change_j_kg: f64,
+        controls: GasEnergySolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasEnergySolution, GasEnergyError> {
+        self.solve_energy_change(
+            context,
+            density_kg_m3,
+            reference_internal_energy_j_kg,
+            internal_energy_change_j_kg,
+            controls,
+            &mut cancelled,
+        )
+    }
+
     fn solve_energy_change(
         &self, context: &QueryPoint, density: f64, reference_u: f64, change: f64,
         controls: GasEnergySolve, cancelled: &mut impl FnMut() -> bool,

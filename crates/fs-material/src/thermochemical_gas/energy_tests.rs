@@ -107,3 +107,86 @@ fn zero_heat_is_bitwise_unchanged_and_bad_controls_are_not_ignored() {
         assert_eq!(parcel, saved);
     }
 }
+
+#[test]
+fn sensible_energy_reconstruction_is_invariant_to_a_species_reference_offset() {
+    use super::super::tests::{species_with_energy_reference, transport};
+    use fs_thermochem::{Composition, CompositionBasis};
+    use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+
+    let context = point(300.0, 100000.0).with("material-lot", 12.0).unwrap();
+    let target_temperature = 725.0;
+    let baseline = model(vec![0.75, 0.25], 0.001);
+    let initial = baseline.evaluate(&context).unwrap();
+    let density = initial.state().density;
+    let cv_initial = initial.thermodynamics().properties().mass_specific_cv().value();
+    let sensible_energy = specific_u(target_temperature, 0.75, 0.001)
+        - specific_u(300.0, 0.75, 0.001)
+        + cv_initial * 300.0;
+    let expected = baseline
+        .evaluate(&point(target_temperature, 100000.0 * target_temperature / 300.0))
+        .unwrap();
+
+    for offset in [-2.0e6, 0.0, 8.0e6] {
+        let source = ThermochemicalGasModel::new(
+            FrozenIdealGasMixtureModelV1::new(
+                vec![
+                    species_with_energy_reference("A", 0.028, 3.5, 0.001, offset),
+                    species_with_energy_reference("B", 0.004, 2.5, 0.0, offset),
+                ],
+                Composition::new(CompositionBasis::MoleFraction, vec![0.75, 0.25]).unwrap(),
+            ).unwrap(),
+            vec![transport("B", 2.0e-5, 0.15), transport("A", 1.7e-5, 0.025)],
+            None,
+        ).unwrap();
+        let reference = source.evaluate(&context).unwrap().specific_internal_energy_j_kg()
+            - cv_initial * 300.0;
+        let result = source.reconstruct_density_energy_change(
+            &context, density, reference, sensible_energy, controls(), || false,
+        ).unwrap();
+        let accepted = result.state();
+        close(accepted.state().temperature, target_temperature);
+        close(accepted.state().pressure, expected.state().pressure);
+        close(accepted.state().density, density);
+        close(accepted.state().gamma, expected.state().gamma);
+        close(accepted.state().sound_speed, expected.state().sound_speed);
+        close(accepted.state().thermal_conductivity, expected.state().thermal_conductivity);
+        assert!(result.residual_j_kg().abs() <= controls().energy_tolerance_j_kg);
+        assert_eq!(accepted.components()[0].query().axes().get("material-lot"), Some(&12.0));
+        assert!((accepted.specific_internal_energy_j_kg()
+            - expected.specific_internal_energy_j_kg() - offset).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn relative_energy_closure_keeps_signed_changes_and_refuses_invalid_inputs() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    let context = point(600.0, 200000.0);
+    let initial = source.evaluate(&context).unwrap();
+    let density = initial.state().density;
+    let reference = initial.specific_internal_energy_j_kg();
+    let cooling = specific_u(300.0, 0.75, 0.001) - reference;
+    let result = source.reconstruct_density_energy_change(
+        &context, density, reference, cooling, controls(), || false,
+    ).unwrap();
+    close(result.state().state().temperature, 300.0);
+    close(result.state().state().pressure, 100000.0);
+    assert!(matches!(
+        source.reconstruct_density_energy_change(
+            &context, density, reference, cooling, controls(), || true,
+        ),
+        Err(GasEnergyError::Cancelled)
+    ));
+    for (invalid_reference, invalid_change) in [
+        (f64::NAN, cooling),
+        (reference, f64::INFINITY),
+    ] {
+        assert!(matches!(
+            source.reconstruct_density_energy_change(
+                &context, density, invalid_reference, invalid_change, controls(), || false,
+            ),
+            Err(GasEnergyError::Invalid(_))
+        ));
+    }
+    assert_eq!(source.evaluate(&context).unwrap(), initial);
+}

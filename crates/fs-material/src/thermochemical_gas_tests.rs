@@ -12,9 +12,21 @@ use fs_thermochem::{Composition, CompositionBasis, ElementalReferenceIdV1,
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
 pub(crate) fn species(name: &str, mass: f64, cp_r: f64, slope: f64) -> Nasa9StandardStateModelV1 {
+    species_with_energy_reference(name, mass, cp_r, slope, 0.0)
+}
+
+pub(crate) fn species_with_energy_reference(
+    name: &str,
+    mass: f64,
+    cp_r: f64,
+    slope: f64,
+    energy_reference_j_kg: f64,
+) -> Nasa9StandardStateModelV1 {
     let mut coefficients = [0.0; 9];
     coefficients[2] = cp_r;
     coefficients[3] = slope;
+    // NASA-9's eighth coefficient adds R*a8 to the molar enthalpy.
+    coefficients[7] = mass * energy_reference_j_kg / R;
     let mut parameters = std::collections::BTreeMap::new();
     for ((key, dims), value) in required_nasa9_parameter_dims().into_iter().take(9).zip(coefficients) {
         parameters.insert(key.to_owned(), LawParameter { value, dims });
