@@ -28,6 +28,53 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/pluck-and-bow.material-strings" "$demo/pluck-and-bow.wav"
 ```
 
+### Material fibers in the same bow/string/body solve
+
+`fiber-ribbon.material-strings` adds an explicitly described fiber bundle to
+the original ribbon contact. After the copy, wire-pack and body-pack commands
+above, compile its additional material source and run the same executable:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/fiber-manifest.tsv" --out "$demo/fiber.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/fiber-ribbon.material-strings" "$demo/fiber-ribbon.wav"
+```
+
+The optional record follows `bow_ribbon WIDTH_M CELLS`:
+
+```text
+bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT TOTAL_TENSION_N CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
+```
+
+Each cell receives its quadrature share of the **original fiber count**, mass,
+axial stiffness, bending stiffness, tension and material losses. Independent
+axial and transverse wave modes follow the source section and length. Contact
+traction stretches the fibers, and their response changes slip, string motion
+and body pressure in the original joint solver. `FIBER_COUNT` describes the
+modeled interacting bundle; a complete multilayer bow hank does not imply that
+all its hairs touch the string. Normal receiver rows are also available through
+the library for the existing normal-contact solver to determine the load.
+
+This CLI fixture uses prescribed uniform normal load, fixed interior contact
+stations and rigid fiber endpoints in a uniformly translating support frame.
+It refuses speed changes and nonlinear-string options until those combinations
+have the corresponding moving-support/assembly implementation. It does not
+model flexible bow stick, contact migration, inter-hair rubbing or thermal
+rosin. Axial and normal mode counts, ribbon cells and physical sample rate are
+independent refinement axes. A selected mode outside source validity or the
+clock's Nyquist guard is refused, never discarded.
+
+The source pack must explicitly provide `density`, `young_modulus`,
+`kelvin_voigt_young_viscosity` and `kelvin_voigt_bending_viscosity` with frequency
+support. Zero viscosity must be declared. The included `fiber.tsv` is
+**manufactured validation data**, not horsehair measurements or an asserted
+violin improvement. The primary-source horsehair pack under
+`data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998` contains
+static/dynamic measurements and geometry, but its 10–100 Hz loss range does
+not establish a broadband Kelvin–Voigt law for these modes. It is not silently
+extrapolated or converted into an arbitrary damping preset.
+
 Outputs must not exist. The application completes material, geometry, frequency,
 control and preload admission before creating a WAV. A later physics/I/O failure
 can leave an incomplete output prefix and is reported as failure; it is not a
@@ -42,6 +89,66 @@ torque. Body changes alter the original plate reduction and its reciprocal load.
 Use the same performance geometry/tension to compare materials without hidden
 pitch normalization. The original packs, normalization records, rights and
 physical-source identities remain available throughout rendering.
+
+### A winding has its own wire geometry and material
+
+`wound-pluck.material-strings` uses the explicit record
+
+```text
+section close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS AXIAL_PITCH
+```
+
+The string row's radius is the finished radius: core radius plus two winding
+wire radii. The example uses a 0.2 mm core radius, a 0.05 mm wire radius and
+0.101 mm pitch. Set torsional mode count to zero for this reduction. After the
+usual fixture-pack commands above, build a separate winding pack and render:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/wire-manifest.tsv" --out "$demo/wrap.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/wound-pluck.material-strings" "$demo/wound-pluck.wav"
+```
+
+The wrap resolves only its density and shear modulus. Actual helical wire
+length determines its mass; close-coiled spring mechanics determine its
+axial stiffness. The core and wrap share end displacement, with sliding allowed
+along their interface. A free-ended wrap needs a different axial boundary law.
+The core supplies bending stiffness and sourced bending
+viscosity. Replacing the winding's pack therefore changes mass, tension under
+fixed extension, frequencies, gas loading and the shared body's physical
+pressure. Explicit fixed tension and fixed extension keep their different
+experimental meanings. The exposed wrap material also supplies the identity
+for any selected bow or bridge interface.
+
+This is the **sliding, core-dominated, close-coiled approximation** described by
+[Kemp (2017)](https://doi.org/10.1371/journal.pone.0184803), with exact helix
+mass geometry. It does not treat the winding as a bonded solid sleeve. The
+admission limits are wire/coil radius ≤ 1/4, pitch/circumference ≤ 0.15 and
+maximum modal wavenumber × pitch ≤ 0.2; neighbouring turns must not intersect.
+Those limits are declared scale assumptions, not measured error guarantees.
+Resolved winding friction, wrapping prestress, winding loss, thermal mismatch,
+torsional response and longitudinal winding waves remain unavailable. Requests
+for those extensions refuse instead of borrowing homogeneous-string laws.
+This fixture demonstrates the constitutive path; it does not validate a real
+instrument or establish acoustic equivalence to a resolved wound string.
+
+For a sourced bulk-silver wrapping material, compile the bounded NIST-based pack
+and use the same geometry, core and force program:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/silver-pure-wrap-nist1995/manifest.tsv \
+  --out "$demo/silver-wrap.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/silver-wound-pluck.material-strings" "$demo/silver-wound-pluck.wav"
+```
+
+This example retains the manufactured core and body fixtures. Only the wrap
+changes. The pack combines the NIST review's bulk-silver reference density with
+an explicitly derived isotropic shear modulus at 293.15 K; it supplies no silver
+damping. The winding remains lossless under the declared reduction, and this
+example does not represent a measured silver-wound instrument.
 
 ### Material bending memory on coupled strings
 
@@ -998,7 +1105,7 @@ infer those properties. The body additionally needs `poisson_ratio` [1]. Bending
 and shear loss must have an explicit valid angular-frequency band; all actual
 retained modes, not only the source query frequency, undergo the existing checks.
 
-This executable selects homogeneous or bonded circular strings, fixed tension or
+This executable selects homogeneous, bonded or close-wound circular strings, fixed tension or
 fixed-extension supports and fixed rotational ends. Its shared body is the legacy
 simply supported isotropic flat plate or the explicit material chart described in
 [BODY_PROFILES.md](BODY_PROFILES.md), with an optional uniform-pressure
@@ -1006,7 +1113,7 @@ cavity/circular neck. Bridges are interior transverse connections on the full
 span **including afterlength**, plus explicitly selected scalar rotational
 spring/dashpot joints. It does not model carved wood shells, a full 3D unilateral
 bridge-contact law, f-hole geometry, distributed cavity
-modes, helical winding/slip, solved finger disengagement,
+modes, resolved winding contact/slip, solved finger disengagement,
 bow-hair normal-load distribution, or unbaffled exterior radiation. The optional
 computed planar back-loading is described above. The body
 and neck observations retain the existing compact baffled, zero-retardation

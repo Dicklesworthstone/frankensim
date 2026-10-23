@@ -274,6 +274,7 @@ impl MaterialStringSource {
         match self {
             Self::WithPolarizations(p) => p.source().longitudinal_material(band),
             Self::WithTorsion(t) => t.bending().longitudinal_material(band),
+            Self::Wound(_) => Err(invalid("resolved winding axial waves are outside the quasi-static spring reduction")),
             Self::Homogeneous(s) => {
                 elastic_source(s.material(), band)?;
                 Ok(s.string().lin_density_kg_m)

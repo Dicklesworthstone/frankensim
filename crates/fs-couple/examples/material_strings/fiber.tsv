@@ -1,0 +1,18 @@
+frankensim.matdb-source.v1
+observation	synthetic	Manufactured fiber material	Analytic and coupled integration fixture	Not measured horsehair; declared Kelvin-Voigt losses are test inputs, not extrapolated from a recording or the Pitteroff data
+scalar	density	synthetic	density	1300	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	200000	rad/s
+scalar	young_modulus	synthetic	young_modulus	3000000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	200000	rad/s
+scalar	axial_viscosity	synthetic	kelvin_voigt_young_viscosity	50	Pa*s	constant
+uncertainty	axial_viscosity	unstated	-	-	-	-
+validity	axial_viscosity	T	280	320	K
+validity	axial_viscosity	omega	0	200000	rad/s
+scalar	bending_viscosity	synthetic	kelvin_voigt_bending_viscosity	50	Pa*s	constant
+uncertainty	bending_viscosity	unstated	-	-	-	-
+validity	bending_viscosity	T	280	320	K
+validity	bending_viscosity	omega	0	200000	rad/s

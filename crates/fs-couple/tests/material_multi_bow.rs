@@ -22,6 +22,9 @@ use fs_scenario::{HelmholtzCavity, PrestressedString, ThinPlate,
     gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue}};
 use fs_tribo::FrictionLaw;
 
+#[path = "material_multi_bow/fiber_ribbon.rs"]
+mod fiber_ribbon;
+
 fn with_cx<T>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> T) -> T {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

@@ -287,6 +287,7 @@ fn outer_material(
         MaterialStringSource::WithPolarizations(p) => outer_material(p.source()),
         MaterialStringSource::WithTorsion(t) => outer_material(t.bending()),
         MaterialStringSource::Homogeneous(s) => Ok(s.material()),
+        MaterialStringSource::Wound(s) => Ok(s.section().winding_material()),
         MaterialStringSource::Concentric { section, .. } => section
             .elastic()
             .layers()

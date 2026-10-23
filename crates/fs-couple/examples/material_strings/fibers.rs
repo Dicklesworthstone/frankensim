@@ -1,0 +1,112 @@
+//! Data-only fiber geometry and material selection for the existing renderer.
+use super::*;
+use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
+use fs_material::section::{
+    ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
+};
+
+#[derive(Clone, Debug)]
+pub struct Input {
+    pub pack: String,
+    pub radius_m: f64,
+    pub length_m: f64,
+    pub fiber_count: usize,
+    pub tension_n: f64,
+    pub station_fraction: f64,
+    pub axial_modes: usize,
+    pub transverse_modes: usize,
+}
+impl Input {
+    pub fn mode_count(&self, spec: &input::Spec) -> Result<usize> {
+        let (_, cells) = spec
+            .bow_ribbon
+            .ok_or("bow_fibers requires bow_ribbon width/cells")?;
+        if self.axial_modes == 0
+            || self.transverse_modes == 0
+            || self.fiber_count == 0
+            || !(0.0 < self.station_fraction && self.station_fraction < 1.0)
+        {
+            return Err(
+                "bow_fibers requires positive span modes/fiber count and interior fiber station"
+                    .into(),
+            );
+        }
+        if spec.geometric_stretching.is_some() || spec.longitudinal_waves.is_some() {
+            return Err("fiber components currently bind before nonlinear string storage; this input combination needs a reordered compiler".into());
+        }
+        // The current geometry freezes the contact along a uniformly translating
+        // fiber. Do not silently model an accelerating/reversing bow as one.
+        for track in spec.schedule.tracks() {
+            let GestureValue::Bow {
+                velocity_m_per_s: initial,
+                ..
+            } = track.initial
+            else {
+                return Err("fiber ribbon needs a complete bow drive".into());
+            };
+            for event in &track.events {
+                if !matches!(event.value, GestureValue::Bow { velocity_m_per_s, .. }
+                    if velocity_m_per_s.to_bits() == initial.to_bits())
+                {
+                    return Err("frozen-station fiber ribbon requires constant support speed; load may vary".into());
+                }
+            }
+        }
+        self.axial_modes
+            .checked_add(self.transverse_modes)
+            .and_then(|n| n.checked_mul(cells))
+            .ok_or_else(|| "fiber mode count overflow".into())
+    }
+
+    pub fn compile(
+        &self,
+        spec: &input::Spec,
+        catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        gate: &CancelGate,
+    ) -> Result<TensionedFiberRibbon> {
+        self.mode_count(spec)?;
+        poll(gate)?;
+        let requirements = [
+            Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
+            Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,
+            Requirement::try_new(ETA, DynViscosity::DIMS, Admit::NonNegative)?,
+            Requirement::try_new(
+                YOUNG_VISCOSITY_PROPERTY,
+                DynViscosity::DIMS,
+                Admit::NonNegative,
+            )?,
+        ];
+        let material = resolve_properties(&self.pack, catalog, loader, spec, &requirements)?;
+        let section = ConcentricElasticSection::try_new(
+            0.0,
+            vec![ConcentricMaterialLayer {
+                outer_radius_m: self.radius_m,
+                material,
+            }],
+        )?;
+        let (width_m, cells) = spec
+            .bow_ribbon
+            .ok_or("bow_fibers requires a physical ribbon")?;
+        Ok(TensionedFiberRibbon::try_new(
+            FiberRibbonGeometry {
+                length_m: self.length_m,
+                width_m,
+                fiber_count: self.fiber_count,
+                tension_n: self.tension_n,
+            },
+            FiberRibbonResolution {
+                cells,
+                axial_modes: self.axial_modes,
+                transverse_modes: self.transverse_modes,
+            },
+            section
+                .clone()
+                .with_axial_viscosity(YOUNG_VISCOSITY_PROPERTY)?,
+            section.with_kelvin_voigt_bending(ETA)?,
+            spec.rate,
+            modal_budget(),
+            gate,
+        )?)
+    }
+}

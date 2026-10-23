@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-tensioned-fiber-ribbon
+redistribution	permitted	Manufactured integration fixture; not measured horsehair or rosin
+citation	Manufactured axial/transverse continuum integration fixture
+license	CC0-1.0
+source	fixture	fiber.tsv	material-tsv-v1

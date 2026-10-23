@@ -46,6 +46,30 @@ impl input::Wire {
         let twist = self.twist_modes > 0;
         let core = resolve(&self.pack, catalog, loader, spec, false, twist, &self.bending_loss)?;
         let mut source = match &self.section {
+            input::WireSection::CloseWound { core_radius_m, pack, wire_radius_m, pitch_m } => {
+                if thermal.is_some() || twist || !matches!(self.bending_loss, input::BendingLoss::KelvinVoigt)
+                    || spec.longitudinal_waves.is_some() || self.torsion_memory.is_some() {
+                    return Err("close-wound reduction supports frozen core flexure and spring extension; resolved winding thermal/torsional/axial-wave/history laws are unavailable".into());
+                }
+                let elastic = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
+                    outer_radius_m: *core_radius_m, material: core,
+                }])?.with_kelvin_voigt_bending(ETA)?;
+                // The wrap's spring law needs density and G, not an invented
+                // flexural viscosity or the core's Young modulus.
+                let wrap = resolve_properties(pack, catalog, loader, spec, &[
+                    Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
+                    Requirement::try_new(SHEAR, Pressure::DIMS, Admit::StrictlyPositive)?,
+                ])?;
+                let section = fs_material::section::winding::CloseWoundSection::try_new(elastic,
+                    fs_material::section::winding::RoundWireWinding {
+                        wire_radius_m: *wire_radius_m, pitch_m: *pitch_m,
+                    }, wrap, SHEAR)?;
+                if (section.outer_radius_m() - self.radius).abs() > 8.0 * f64::EPSILON * self.radius {
+                    return Err("winding geometry disagrees with the original finished radius".into());
+                }
+                MaterialStringSource::Wound(fs_couple::material_assembly::wound::ResolvedWoundStringSpecimen::try_new(
+                    template(self), section, self.prestress)?)
+            }
             input::WireSection::Homogeneous => {
                 // V1 and explicit V2 fixed-tension specimens take precisely the
                 // old route. The extension variant binds the original support law.

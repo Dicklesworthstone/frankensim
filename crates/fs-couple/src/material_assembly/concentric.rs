@@ -38,9 +38,19 @@ fn positive(value: f64, what: &'static str) -> Result<f64, AcousticRealizeError>
 /// laws, and target-frequency tuning of moving-end modes. Remaining modal and
 /// excitation checks stay in the ordinary acoustic realizer.
 pub fn with_concentric_section(
-    mut input: PrestressedString,
+    input: PrestressedString,
     section: &ConcentricElasticSection,
     prestress: StringPrestress,
+) -> Result<PrestressedString, AcousticRealizeError> {
+    with_section_coefficients(input, section.line_density_kg_m(), section.axial_stiffness_n(),
+        section.bending_stiffness_n_m2(), section.outer_radius_m(), prestress)
+}
+
+// One mechanical support law for every source-bound circular section. A new
+// constitutive section supplies integrals, never a second tuning prescription.
+pub(super) fn with_section_coefficients(
+    mut input: PrestressedString, mass_per_length: f64, axial: f64,
+    bending: f64, outer_radius: f64, prestress: StringPrestress,
 ) -> Result<PrestressedString, AcousticRealizeError> {
     let length = positive(input.length_m, "section member length must be finite and positive")?;
     if input.damping_ratio != 0.0 || input.rayleigh.is_some()
@@ -48,7 +58,6 @@ pub fn with_concentric_section(
     {
         return Err(invalid("elastic section binding requires explicitly zero internal loss and no inherited loss law"));
     }
-    let axial = section.axial_stiffness_n();
     let tension = match prestress {
         StringPrestress::FixedTension(value) => value,
         StringPrestress::FixedExtension { stress_free_length_m, linear_strain_limit } => {
@@ -70,17 +79,17 @@ pub fn with_concentric_section(
             // omega_1^2 = (T k^2 + EI k^4) / mu, k = pi/L.
             let k = core::f64::consts::PI / length;
             let speed = 2.0 * length * frequency;
-            section.line_density_kg_m() * speed * speed - section.bending_stiffness_n_m2() * k * k
+            mass_per_length * speed * speed - bending * k * k
         }
         StringPrestress::FixedThermalExtension { .. } => {
             return Err(invalid("composite thermal prestress requires per-layer free strains; use with_concentric_thermal_extension"));
         }
     };
     input.tension_n = positive(tension, "section support prescription must produce finite positive tension")?;
-    input.lin_density_kg_m = section.line_density_kg_m();
+    input.lin_density_kg_m = mass_per_length;
     input.axial_stiffness_n = axial;
-    input.bending_stiffness_n_m2 = section.bending_stiffness_n_m2();
-    input.width_m = positive(2.0 * section.outer_radius_m(), "section radiating width must be finite and positive")?;
+    input.bending_stiffness_n_m2 = bending;
+    input.width_m = positive(2.0 * outer_radius, "section radiating width must be finite and positive")?;
     Ok(input)
 }
 

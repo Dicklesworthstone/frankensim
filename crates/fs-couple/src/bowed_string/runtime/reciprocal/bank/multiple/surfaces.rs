@@ -70,6 +70,8 @@ impl MultiBowStringBank {
                 .as_ref()
                 .map_or(0, |l| l.strings().len())
             + usize::from(self.source.bank.material_cavity.is_some());
+        let internal = internal + self.source.fiber_ribbon.as_ref()
+            .map_or(0, |ribbon| ribbon.model().resolution().cells);
         let body_count = self
             .system
             .components()

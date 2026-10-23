@@ -1,5 +1,5 @@
 //! Select linear axial loss without borrowing transverse or fluid damping.
-use super::{ImpactError, MaterialStringSource};
+use super::{ImpactError, MaterialStringSource, invalid};
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::axial::ConcentricAxialViscosity;
 
@@ -28,6 +28,7 @@ impl LongitudinalMaterialLoss {
                     outer_radius_m: s.radius_m(), material: s.material().clone(),
                 }]).map_err(|e| ImpactError::Owner(e.to_string()))?,
             MaterialStringSource::Concentric { section, .. } => section.elastic().clone(),
+            MaterialStringSource::Wound(_) => return Err(invalid("winding axial loss needs its own resolved constitutive model")),
         };
         section.with_axial_viscosity(viscosity_property)
             .map(Some).map_err(|e| ImpactError::Owner(e.to_string()))

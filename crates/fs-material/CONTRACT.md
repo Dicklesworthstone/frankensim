@@ -20,6 +20,20 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `section::winding::CloseWoundSection` retains a sourced circular core and a
+  distinct round-wire winding. Exact helical length gives winding line mass;
+  the close-coiled spring law gives its axial rigidity with core and winding
+  constrained to share end displacement while slipping along the span. Core flexure/viscosity
+  remain separate, with common-state and intersected source-band admission.
+  Geometric closest-turn separation rejects interpenetration. Thin wire,
+  small helix angle and long wavelengths are explicit approximation domains.
+  The consumer propagates these coefficients through the existing string/body
+  mechanics, gas drag and physical pressure. G1 compares mass against resolved
+  helix quadrature and stiffness against spring strain energy; G3 changes only
+  winding material data. This sliding/core-dominated approximation supplies no
+  winding friction/loss, torsion, thermal mismatch or resolved contact, and
+  does not claim acoustic equivalence to a measured or resolved specimen.
+
 - `section::relaxation::ConcentricPronySection` and
   `section::torsion::ConcentricPronyTorsionalSection` compose independent
   generalized-Maxwell bending/shear spectra on the existing bonded concentric

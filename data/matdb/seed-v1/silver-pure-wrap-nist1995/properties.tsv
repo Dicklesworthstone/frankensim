@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	nist95-density	Bulk pure silver	Table 1 density at 20 C	Reference density assumed by the review; no measurement uncertainty stated.
+observation	nist95-isotropic-shear	Bulk pure silver represented by an isotropic elastic reduction at 293.15 K	Table 9: at 275 K, B=104.28 GPa and E=83.202 GPa; at 300 K, B=103.78 GPa and E=82.372 GPa. Interpolate B and E linearly to 293.15 K, then G=3*B*E/(9*B-E).	Derived elastic estimate, not separately measured shear modulus. Table E is a polycrystal calculation attributed to Ledbetter; B follows the tabulated crystal constants. This is not a work-hardened winding specimen. No viscosity, winding loss, friction, uncertainty bound or measured frequency domain is claimed.
+scalar	density	nist95-density	density	10492	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
+scalar	shear-modulus	nist95-isotropic-shear	shear_modulus	30200367873.222324	Pa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	T	293.15	293.15	K

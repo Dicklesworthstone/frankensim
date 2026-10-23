@@ -30,6 +30,15 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 }
 
 impl BowedStringCard {
+    /// Compile the admitted close-coiled material winding through the same
+    /// string dispersion, gas drag, bridge shear and source-band checks.
+    pub fn from_wound_material_specimen(
+        cx: &Cx<'_>, specimen: &crate::material_assembly::wound::ResolvedWoundStringSpecimen,
+        gas: &GasState, sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        lower(cx, &specimen.string(), gas, sample_rate_hz)
+    }
+
     // Private to a bank constructor which immediately binds the original
     // source's material histories. Memoryless cards retain their refusal.
     pub(crate) fn material_relaxation_backbone_with_gas(

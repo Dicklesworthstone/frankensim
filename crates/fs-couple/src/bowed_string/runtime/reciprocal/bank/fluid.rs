@@ -123,6 +123,7 @@ fn geometry_and_band(source: &MaterialStringSource)
     match source {
         MaterialStringSource::WithPolarizations(p) => geometry_and_band(p.source()),
         MaterialStringSource::WithTorsion(t) => geometry_and_band(t.bending()),
+        MaterialStringSource::Wound(s) => Ok((s.section().outer_radius_m(), s.section().omega_band_rad_s())),
         MaterialStringSource::Homogeneous(s) => {
             let string = s.string();
             let band = string.kelvin_voigt_bending.map(|law| law.omega_band_rad_s)

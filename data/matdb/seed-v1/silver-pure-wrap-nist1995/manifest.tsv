@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	silver-pure-wrap-nist1995
+redistribution	permitted	U.S. Government numerical reference data and explicitly identified elastic derivation; retain citation
+citation	Smith D.R., Fickett F.R. (1995), Low-Temperature Properties of Silver, J. Res. NIST 100(2):119-171, https://doi.org/10.6028/jres.100.012 ; Table 1 density and Table 9 bulk and polycrystal Young moduli; https://nvlpubs.nist.gov/nistpubs/jres/100/2/j12smi.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1

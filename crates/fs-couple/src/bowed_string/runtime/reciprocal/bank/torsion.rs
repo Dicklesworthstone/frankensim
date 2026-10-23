@@ -291,6 +291,7 @@ impl MaterialStringSource {
                 outer_radius_m: s.radius_m(), material: s.material().clone(),
             }])?,
             Self::Concentric { section, .. } => section.elastic().clone(),
+            Self::Wound(_) => return Err(invalid("close-coiled winding torsion requires a resolved core/wrap model")),
             Self::WithTorsion(_) => return Err(invalid("nested torsion is not a new physical section")),
             Self::WithPolarizations(_) => return Err(invalid("polarized torsion must retain its original source")),
         };
@@ -329,7 +330,7 @@ impl MaterialStringSource {
                 twist.relaxation = Some(twist.section.clone().with_prony_torsion(properties)?);
                 Ok(Self::WithTorsion(twist))
             }
-            Self::Homogeneous(_) | Self::Concentric { .. } =>
+            Self::Homogeneous(_) | Self::Wound(_) | Self::Concentric { .. } =>
                 Err(MaterialStatePointError::InvalidDerived {
                     quantity: "shear relaxation requires the original torsional source",
                 }),

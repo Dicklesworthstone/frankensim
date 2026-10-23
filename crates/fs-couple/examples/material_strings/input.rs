@@ -67,11 +67,13 @@ impl BendingLoss {
         Ok(())
     }
 }
-/// V2 describes perfectly bonded circular layers, never helical winding/slip.
+/// Section construction is explicit: bonding and a sliding close-coiled helix
+/// have different mass, extension and bending laws.
 #[derive(Clone, Debug)]
 pub enum WireSection {
     Homogeneous,
     Bonded { core_radius_m: f64, sleeves: Vec<WireLayer> },
+    CloseWound { core_radius_m: f64, pack: String, wire_radius_m: f64, pitch_m: f64 },
 }
 #[derive(Clone, Debug)]
 pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
@@ -130,6 +132,7 @@ pub struct Spec {
     pub body_radiation: Option<BodyRadiation>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
+    pub bow_fibers: Option<fibers::Input>,
     pub schedule: GestureSchedule,
 }
 impl Spec {
@@ -524,6 +527,17 @@ impl Spec {
             }
             Some((width, cells))
         } else { None };
+        let bow_fibers = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fibers") {
+            let mut row = r.row("bow_fibers")?;
+            let input = fibers::Input { pack: row.path()?, radius_m: row.positive()?,
+                length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
+                tension_n: row.positive()?, station_fraction: row.scalar()?,
+                axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
+            };
+            row.end()?;
+            Some(input)
+        } else { None };
         let mut row = r.row("forces")?;
         let initialization = match row.word()? {
             "retain" => ForceInitialization::RetainState,
@@ -615,7 +629,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, bending_memory, body_radiation, cavity, friction, bow_ribbon, forces, schedule };
+            longitudinal_loss, bending_memory, body_radiation, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
         spec.network_dimensions(false)?;
         Ok(spec)
     }
@@ -680,6 +694,9 @@ impl Spec {
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .ok_or("complete mode count overflow")?;
+        if let Some(fibers) = &self.bow_fibers {
+            modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;
+        }
         let mut transverse = 0usize;
         for wire in &self.strings {
             let planes = if wire.polarizations.is_some() { 2 } else { 1 };
@@ -748,6 +765,18 @@ impl<'a> Reader<'a> {
         let mut row = self.row("section")?;
         match row.word()? {
             "homogeneous" => { row.end()?; Ok(WireSection::Homogeneous) }
+            "close-wound" => {
+                let core_radius_m = row.positive()?;
+                let pack = row.path()?;
+                let wire_radius_m = row.positive()?;
+                let pitch_m = row.positive()?;
+                row.end()?;
+                if ((core_radius_m + wire_radius_m) + wire_radius_m - outer_radius).abs()
+                    > 8.0 * f64::EPSILON * outer_radius {
+                    return Err("finished wound radius must equal core radius plus two wire radii".into());
+                }
+                Ok(WireSection::CloseWound { core_radius_m, pack, wire_radius_m, pitch_m })
+            }
             "bonded" => {
                 let core_radius_m = row.positive()?;
                 let count = row.count(MAX_LAYERS - 1)?; row.end()?;
@@ -770,7 +799,7 @@ impl<'a> Reader<'a> {
                 }
                 Ok(WireSection::Bonded { core_radius_m, sleeves })
             }
-            _ => Err("section must be homogeneous or bonded CORE_RADIUS SLEEVE_COUNT".into()),
+            _ => Err("section must be homogeneous, bonded CORE_RADIUS SLEEVE_COUNT, or close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS PITCH".into()),
         }
     }
     fn row(&mut self, key: &str) -> Result<Row<'a>> {

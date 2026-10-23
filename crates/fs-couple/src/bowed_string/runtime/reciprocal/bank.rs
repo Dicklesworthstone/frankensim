@@ -46,6 +46,8 @@ pub enum MaterialStringSource {
     WithTorsion(Box<torsion::TorsionalStringSource>),
     /// Homogeneous circular specimen, with its complete material/loss receipts.
     Homogeneous(ResolvedStringSpecimen),
+    /// Sliding close-coiled winding: actual wire mass/spring stiffness and core flexure.
+    Wound(crate::material_assembly::wound::ResolvedWoundStringSpecimen),
     /// Perfectly bonded annuli with per-layer elasticity, density and viscosity.
     Concentric {
         /// Span and modal resolution. Inherited internal damping must be absent.
@@ -61,6 +63,7 @@ impl MaterialStringSource {
         match self { Self::WithPolarizations(p) => p.total_modes(),
             Self::WithTorsion(t) => t.total_modes(),
             Self::Homogeneous(s) => s.string().n_modes,
+            Self::Wound(s) => s.string().n_modes,
             Self::Concentric { template, .. } => template.n_modes }
     }
     fn lower(&self, cx: &Cx<'_>, gas: &GasState, rate: u32)
@@ -73,6 +76,7 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => return p.source().lower(cx, gas, rate),
             Self::WithTorsion(t) => return t.bending().lower(cx, gas, rate),
             Self::Homogeneous(s) => BowedStringCard::from_material_specimen_with_gas(cx, s, gas, rate),
+            Self::Wound(s) => BowedStringCard::from_wound_material_specimen(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
                 BowedStringCard::from_concentric_material_section(cx, template.clone(), section, *prestress, gas, rate),
         }.map_err(ReciprocalStringError::Material)

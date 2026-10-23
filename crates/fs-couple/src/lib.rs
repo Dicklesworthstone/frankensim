@@ -48,6 +48,8 @@ pub mod circuit_enthalpy;
 pub mod thermovisco_dynamics;
 pub mod description;
 pub mod driving_point;
+/// Material-derived axial and transverse continuum of a tensioned fiber ribbon.
+pub mod fiber_ribbon;
 pub mod flue_loop;
 pub mod gesture_path;
 pub mod glottis;

@@ -16,6 +16,8 @@ mod bridge_interfaces;
 mod bending_memory;
 #[path = "material_strings/torsion_memory.rs"]
 mod torsion_memory;
+#[path = "material_strings/fibers.rs"]
+mod fibers;
 // Native entry points share one bounded source loader and phase policy.
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
@@ -350,7 +352,10 @@ impl input::Spec {
         };
         let joint=MultiFrictionConfig { max_ports:self.bow_contact_count(),max_sweeps:128,
             max_setup_terms:1_048_576 };
-        let mut bank=if let Some((width,cells))=self.bow_ribbon {
+        let mut bank=if let Some(fibers)=&self.bow_fibers {
+            let ribbon=fibers.compile(&self,&mut catalog,&mut loader,gate)?;
+            bank.with_tensioned_fiber_ribbon(ribbon,fibers.station_fraction,joint,gate)?
+        } else if let Some((width,cells))=self.bow_ribbon {
             bank.with_uniform_bow_ribbon(width,cells,joint,gate)?
         } else {
             let additional=contacts[1..].iter().enumerate().map(|(index,location)|Ok(MaterialBowContact {
@@ -460,6 +465,10 @@ fn main()->Result<()> {
         eprintln!("bridge_interfaces={:?}",ready.spec.bridge_interfaces);
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
+    if let Some(fibers)=ready.performance.bank().source().fiber_ribbon() {
+        eprintln!("bow_fibers={:?}; resolution={:?}; mass_kg={}; station={}; frozen-station rigid-end model, not thermal rosin",
+            fibers.model().geometry(),fibers.model().resolution(),fibers.model().mass_kg(),fibers.station_fraction());
+    }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",

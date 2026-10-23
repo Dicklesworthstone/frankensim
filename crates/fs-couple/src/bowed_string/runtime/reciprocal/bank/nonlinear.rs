@@ -53,6 +53,7 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => return p.source().axial_rigidity_n(),
             Self::WithTorsion(t) => return t.bending().axial_rigidity_n(),
             Self::Homogeneous(s) => s.string().axial_stiffness_n,
+            Self::Wound(s) => s.string().axial_stiffness_n,
             Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
         };
         if !value.is_finite() || value <= 0.0 {

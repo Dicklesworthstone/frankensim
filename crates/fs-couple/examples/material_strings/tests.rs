@@ -5,6 +5,9 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,ObservationDataset,PropertyClaim,PropertyKey,PropertyValue,Provenance,InterpolationPolicy,UncertaintyModel};
 use fs_scenario::gesture::{GestureTrack,GestureEvent};
 
+#[path = "tests/fibers.rs"]
+mod fibers;
+
 fn pack(name:&str,rho:f64,band:f64,omit:Option<&str>)->NormalizedPack {
     let mut claims=ClaimSet::new();
     let provenance=Provenance {source:"synthetic executable test".into(),license:"CC0-1.0".into(),artifact:Some(fs_blake3::ContentHash([7;32]))};
@@ -185,3 +188,6 @@ mod relaxation;
 
 #[path = "tests/torsion_memory.rs"]
 mod torsion_memory;
+
+#[path = "tests/wound.rs"]
+mod wound;

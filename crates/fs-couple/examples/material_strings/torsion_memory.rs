@@ -9,6 +9,7 @@ impl input::Wire {
         let Some(layers) = &self.torsion_memory else { return Ok(0); };
         let physical_layers = match &self.section {
             input::WireSection::Homogeneous => 1,
+            input::WireSection::CloseWound { .. } => return Err("close-wound torsion requires a resolved winding law".into()),
             input::WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
         };
         if self.twist_modes == 0 || layers.len() != physical_layers {
@@ -52,6 +53,7 @@ impl input::Wire {
         self.torsion_memory_states()?;
         let sleeves = match &self.section {
             input::WireSection::Homogeneous => &[][..],
+            input::WireSection::CloseWound { .. } => return Err("close-wound torsion requires a resolved winding law".into()),
             input::WireSection::Bonded { sleeves, .. } => sleeves.as_slice(),
         };
         let packs = std::iter::once(self.pack.as_str())

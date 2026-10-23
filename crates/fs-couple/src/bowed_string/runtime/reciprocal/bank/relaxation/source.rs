@@ -20,7 +20,7 @@ impl MaterialStringSource {
             Self::WithPolarizations(p) => p.source().bending_relaxation(),
             Self::WithTorsion(t) => t.bending().bending_relaxation(),
             Self::Homogeneous(s) => s.string().relaxation_bending,
-            Self::Concentric { .. } => None,
+            Self::Wound(_) | Self::Concentric { .. } => None,
         }
     }
 

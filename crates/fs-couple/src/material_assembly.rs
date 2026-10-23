@@ -7,6 +7,8 @@
 //! transport thermal history, or promote raw coefficients to sourced authority.
 
 pub mod concentric;
+/// Source-bound close-coiled winding on the same generic string/body solver.
+pub mod wound;
 /// Material-reduced reeds composed with the existing solid/gas assembly.
 pub mod valve;
 

@@ -1,11 +1,12 @@
-//! Spatially resolved friction across a prescribed rigid ribbon.
+//! Spatially resolved friction across a rigid or material-fiber ribbon.
 //!
 //! The width is a physical interval along the string, discretized by midpoint
 //! quadrature. Each cell has its OWN slip and traction in the existing joint
 //! solve; the string velocity is never averaged before applying friction.
 //! Every contact uses the original material-derived transverse/torsional map.
-//! This is the rigid, uniformly loaded limit, not compliant bow hair, a thermal
-//! rosin law or a validated violin. Refine cells, structural modes and time.
+//! `with_uniform_bow_ribbon` supplies the rigid, uniformly loaded limit;
+//! `with_tensioned_fiber_ribbon` retains reciprocal fiber compliance. Neither
+//! supplies thermal rosin or a validated violin. Refine cells, modes and time.
 //! Finite-width and point contacts need not produce the same motion: see
 //! Pitteroff & Woodhouse, Acta Acustica 84 (1998), 744–757.
 
@@ -16,6 +17,37 @@ use crate::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, multiple::MultiFrictionConfig,
 };
 use fs_exec::CancelGate;
+use crate::fiber_ribbon::{FiberDirection, TensionedFiberRibbon};
+use crate::render::schedule::force::coupled::ModalAttachment;
+use crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::FrictionSurfaceAttachment;
+
+/// Material fibers present as mechanical components of the SAME string bank.
+#[derive(Clone, Debug)]
+pub struct MaterialFiberRibbon {
+    model: TensionedFiberRibbon,
+    component_start: usize,
+    string_count: usize,
+    station_fraction: f64,
+    normal_shapes: Vec<f64>,
+}
+impl MaterialFiberRibbon {
+    /// Original geometry, material sources and two independent resolutions.
+    pub const fn model(&self) -> &TensionedFiberRibbon { &self.model }
+    /// First actual fiber component after the original string/body/fluid states.
+    pub const fn component_start(&self) -> usize { self.component_start }
+    /// Contact material-point station along each fiber's supported length.
+    pub const fn station_fraction(&self) -> f64 { self.station_fraction }
+    /// Normal maps for `MaterialStringStop::body`, in its string-relative body
+    /// indexing. Use these with the SAME ribbon cells and contact orientation;
+    /// `with_bow_contact_loads` then consumes the solved normal reactions.
+    /// A normal law, clearance and direction are explicit independent inputs.
+    pub fn normal_stop_receivers(&self) -> Vec<ModalAttachment> {
+        (0..self.model.resolution().cells).map(|cell| ModalAttachment {
+            component: self.component_start + cell - self.string_count,
+            shapes: self.normal_shapes.clone(),
+        }).collect()
+    }
+}
 
 /// Frozen uniform line load and its actual spatial contact quadrature.
 /// Contact zero is the original centre; other cells follow from left to right.
@@ -97,9 +129,62 @@ impl MultiBowStringBankSource {
     /// Finite-width source when this bank was constructed from a uniform ribbon.
     #[must_use]
     pub const fn ribbon(&self) -> Option<&UniformBowRibbon> { self.ribbon.as_ref() }
+    /// Original source of the reciprocally moving fiber surfaces, if present.
+    pub const fn fiber_ribbon(&self) -> Option<&MaterialFiberRibbon> { self.fiber_ribbon.as_ref() }
 }
 
 impl ReciprocalStringBank {
+    /// Replace rigid ribbon surfaces with source-derived fiber motion.
+    ///
+    /// Every width cell receives its own axial and normal continuum, retained
+    /// in the original exact mechanical owner. Opposite tangential reactions
+    /// stretch the fibers and feed back into each string contact in the SAME
+    /// joint solve; their material losses enter the existing energy account.
+    /// No post-filter or independently stepped bow is used. The original body,
+    /// cavity, radiation and material memory remain attached.
+    ///
+    /// Bind cold, before nonlinear storage. Contact station is fixed along the
+    /// fibers: this is a local frozen-station bowing model in a uniformly
+    /// translating support frame, not a complete stroke/moving-frog model.
+    /// `FrictionDrive::speed_m_s` is that frame's prescribed constant speed.
+    /// Nonuniform support acceleration and contact migration are not inferred.
+    /// Normal load is still prescribed unless the returned normal receivers
+    /// are explicitly composed with `with_string_stops` and
+    /// `with_bow_contact_loads`. Dry friction is not a thermal rosin law.
+    pub fn with_tensioned_fiber_ribbon(
+        mut self, ribbon: TensionedFiberRibbon, station_fraction: f64,
+        joint: MultiFrictionConfig, gate: &CancelGate,
+    ) -> Result<MultiBowStringBank, ReciprocalStringError> {
+        poll(gate)?;
+        let cells = ribbon.resolution().cells;
+        let extra_modes = ribbon.cell_model().modes().len().checked_mul(cells)
+            .and_then(|n| n.checked_add(self.system.mode_count()));
+        if extra_modes.is_none_or(|n| n > self.source.options.network.max_modes)
+            || cells > joint.max_ports
+            || ribbon.cell_model().sample_period_s().to_bits() != self.system.sample_period_s().to_bits()
+        {
+            return Err(invalid("material ribbon must fit the original physical clock and network/contact budgets"));
+        }
+        let axial = ribbon.displacement_map(station_fraction, FiberDirection::Axial)
+            .map_err(|_| invalid("invalid axial fiber contact map"))?;
+        let normal_shapes = ribbon.displacement_map(station_fraction, FiberDirection::Normal)
+            .map_err(|_| invalid("invalid normal fiber contact map"))?;
+        let component_start = self.system.components().len();
+        let string_count = self.cards.len();
+        self.system = self.system.with_internal_components(ribbon.cell_models(), gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        let mut bank = self.with_uniform_bow_ribbon(ribbon.geometry().width_m, cells, joint, gate)?;
+        let attachments = (0..cells).map(|port| FrictionSurfaceAttachment { port,
+            surface: ModalAttachment { component: component_start + port, shapes: axial.clone() },
+        }).collect();
+        bank.system = bank.system.with_surface_attachments(attachments, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        bank.source.fiber_ribbon = Some(MaterialFiberRibbon {
+            model: ribbon, component_start, string_count, station_fraction, normal_shapes,
+        });
+        Ok(bank)
+    }
+
     /// Resolve a uniform finite-width ribbon on the existing bow's string.
     ///
     /// The original material/body/cavity state, clock and observer survive.

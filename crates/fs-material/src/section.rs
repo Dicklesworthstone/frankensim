@@ -18,6 +18,8 @@ pub mod axial;
 pub mod relaxation;
 pub mod thermal;
 pub mod transport;
+/// Close-coiled, sliding round-wire winding over an independently sourced core.
+pub mod winding;
 /// Rotary inertia and explicitly sourced torsional shear loss.
 pub mod torsion;
 

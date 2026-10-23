@@ -205,6 +205,7 @@ impl Inputs {
                 .ok_or("bow interface names an absent string")?;
             let outer = match &wire.section {
                 input::WireSection::Homogeneous => &wire.pack,
+                input::WireSection::CloseWound { pack, .. } => pack,
                 input::WireSection::Bonded { sleeves, .. } => {
                     &sleeves.last().ok_or("bonded surface is absent")?.pack
                 }
