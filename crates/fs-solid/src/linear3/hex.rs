@@ -540,6 +540,125 @@ impl HexElasticProblem<'_> {
         )
     }
 
+    /// Solve thermal equilibrium and assemble its initial-stress vibration pencil.
+    ///
+    /// Actual stress is integrated at each original stiffness quadrature point,
+    /// including its within-element variation. Reference mass, geometry and
+    /// homogeneous incremental supports are unchanged. The tangent may be
+    /// indefinite; signed eigenvalues belong to the existing spectral owner.
+    /// This is the conservative initial-stress approximation, not a finite-strain
+    /// tangent, follower-load model, stability certificate or live mode transfer.
+    /// Fully fixed systems refuse because no vibration DOFs remain.
+    pub fn solve_thermal_tangent(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// The same signed tangent about equilibrium with explicit dead nodal forces.
+    ///
+    /// The complete equilibrium is solved from these exact inputs in this call;
+    /// an old response or independently authored stress cannot enter the pencil.
+    /// Fixed-DOF forces retain their reaction semantics and add no follower-load
+    /// stiffness. All material, strain, geometry and solve checks remain active.
+    pub fn solve_thermal_tangent_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            Some(nodal_forces_n),
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    fn solve_thermal_tangent_impl(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: Option<&[(usize, f64)]>,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        let response = self.solve_thermal_response_impl(
+            thermal_strains,
+            nodal_forces_n,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )?;
+        let pencil = self.assemble(cx)?;
+        let q = self.quadrature.points()?;
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                super::isoparametric::thermal_response::prestress::assemble::<20, 60, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
+                    pencil,
+                    response,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex20_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    maximum_absolute_mandel_strain,
+                    cx,
+                )
+            }
+            HexConnectivity::Hex27(elements) => {
+                super::isoparametric::thermal_response::prestress::assemble::<27, 81, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
+                    pencil,
+                    response,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex27_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    maximum_absolute_mandel_strain,
+                    cx,
+                )
+            }
+        }
+    }
+
     fn solve_thermal_response_impl(
         &self,
         thermal_strains: TetThermalStrainField<'_>,

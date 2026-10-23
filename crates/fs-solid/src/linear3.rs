@@ -28,7 +28,8 @@
 //! eigenstrain loads through their own sampled-Jacobian and explicit-quadrature
 //! contracts. Their thermal response solves recover compatible displacement,
 //! averaged stress, stored energy and support forces on the same reference mesh.
-//! P1 geometric prestress does not extend to those quadratic meshes.
+//! Their initial-stress vibration pencils integrate the actual quadrature stress
+//! on that same reference mesh and retain signed stiffness corrections.
 
 use std::collections::BTreeSet;
 
@@ -53,6 +54,7 @@ use fs_sparse::{Coo, Csr};
 /// Fully integrated quadratic hexahedra using the shared quadratic assembler.
 pub mod hex;
 mod isoparametric;
+pub use isoparametric::thermal_response::prestress::QuadraticPrestressedAssembly;
 pub use isoparametric::thermal_response::{
     QuadraticElementThermalResponse, QuadraticThermalResponse,
 };

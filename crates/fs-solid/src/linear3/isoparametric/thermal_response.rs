@@ -285,27 +285,14 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             let p = evaluate(nodes, reference, element, point)?;
             let b = mandel_b::<N, D>(p.gradients);
-            let total: [f64; 6] = core::array::from_fn(|i| {
-                (0..D).fold(0.0, |sum, d| {
-                    b[i][d].mul_add(displacement_m[connectivity[d / 3]][d % 3], sum)
-                })
-            });
-            let elastic: [f64; 6] =
-                core::array::from_fn(|i| total[i] - thermal.at(element).free_strain_mandel[i]);
-            if total
-                .iter()
-                .chain(&elastic)
-                .any(|v| !v.is_finite() || v.abs() > maximum_absolute_mandel_strain)
-            {
-                return Err(TetElasticError::InvalidStressObservation {
-                    what: "quadrature total or elastic strain exceeds the finite small-strain ceiling",
-                });
-            }
-            let stress: [f64; 6] = core::array::from_fn(|i| {
-                (0..6).fold(0.0, |sum, j| {
-                    material.stiffness_mandel_pa[i][j].mul_add(elastic[j], sum)
-                })
-            });
+            let (elastic, stress) = elastic_response_at(
+                &b,
+                connectivity,
+                &displacement_m,
+                &material.stiffness_mandel_pa,
+                &thermal.at(element).free_strain_mandel,
+                maximum_absolute_mandel_strain,
+            )?;
             let dv = weight * p.determinant;
             let point_energy =
                 (0..6).fold(0.0, |sum, i| elastic[i].mul_add(stress[i], sum)) * (0.5 * dv);
@@ -409,4 +396,40 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         load_identity: load.identity,
         identity: identity.finalize(),
     })
+}
+
+// Initial-stress vibration uses the same admitted quadrature response.
+pub(in crate::linear3) mod prestress;
+
+/// Shared kinematics and constitutive contraction for observation and tangent.
+/// Keep the operation order identical to the original response recovery.
+fn elastic_response_at<const N: usize, const D: usize>(
+    b: &[[f64; D]; 6],
+    connectivity: &[usize; N],
+    displacement_m: &[[f64; 3]],
+    stiffness_mandel_pa: &[[f64; 6]; 6],
+    free_strain_mandel: &[f64; 6],
+    maximum_absolute_mandel_strain: f64,
+) -> Result<([f64; 6], [f64; 6]), TetElasticError> {
+    let total: [f64; 6] = core::array::from_fn(|i| {
+        (0..D).fold(0.0, |sum, d| {
+            b[i][d].mul_add(displacement_m[connectivity[d / 3]][d % 3], sum)
+        })
+    });
+    let elastic: [f64; 6] = core::array::from_fn(|i| total[i] - free_strain_mandel[i]);
+    if total
+        .iter()
+        .chain(&elastic)
+        .any(|v| !v.is_finite() || v.abs() > maximum_absolute_mandel_strain)
+    {
+        return Err(TetElasticError::InvalidStressObservation {
+            what: "quadrature total or elastic strain exceeds the finite small-strain ceiling",
+        });
+    }
+    let stress: [f64; 6] = core::array::from_fn(|i| {
+        (0..6).fold(0.0, |sum, j| {
+            stiffness_mandel_pa[i][j].mul_add(elastic[j], sum)
+        })
+    });
+    Ok((elastic, stress))
 }

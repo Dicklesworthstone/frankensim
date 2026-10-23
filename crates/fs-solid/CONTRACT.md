@@ -208,9 +208,8 @@ independent of element order. It canonicalizes element orientation and applies
 an optional caller-supplied source-surface projection only to boundary edges.
 Straight-sided approximation of curved geometry is a separate error axis.
 Positive sampled Jacobians do not prove injectivity between samples; projection
-does not supply source-surface or specimen authority. Finite-strain, mixed
-incompressible formulations and quadratic geometric prestress are outside this
-quadratic operator's current scope. Thermal stress observations are limited to
+does not supply source-surface or specimen authority. Finite-strain and mixed incompressible formulations remain outside this
+quadratic operator's scope. Its explicit initial-stress extension is described below. Thermal stress observations are limited to
 the explicit volume averages returned by `solve_thermal_response`.
 
 Valve reduction requires `ValveCardRequest::element_order`: `Tet4` or explicit
@@ -1361,3 +1360,42 @@ Focused G1/G3 regression sources cover split-path equivalence through reversal
 and reloading, closed-form permanent strain after releasing the driven end,
 elementwise yield reduction at fixed displacement, and retry after a later
 increment refusal without consuming the accepted history.
+
+## Quadratic thermal prestress and vibration
+
+`linear3::QuadraticPrestressedAssembly` extends the reference initial-stress
+approximation to TET10, HEX20 and HEX27. Each problem's
+`solve_thermal_tangent` or `solve_thermal_tangent_with_nodal_forces` first solves
+its source-bound thermal/dead-load equilibrium and returns that immutable response
+with the existing `TetElasticAssembly` vibration pencil. An independently supplied
+stress array or stale solution cannot enter this API.
+
+The correction is
+`K_g[(a,i),(b,j)] = delta_ij integral grad(N_a)^T sigma_0 grad(N_b) dV`.
+The same isoparametric map and stiffness quadrature evaluate the actual
+`sigma_0 = C(Bu - epsilon_free)` at every point, through the shared response
+kernel. Element-average stress is not substituted into this product. The
+original reference consistent mass, geometry, material state and free-DOF order
+remain unchanged. The pencil `(K_e + K_g, M)` feeds the existing modal/spectral
+owner directly; its original elastic and signed geometric matrices remain
+separately inspectable.
+
+Tension stiffens and compression softens the relevant incremental motions.
+Neither negative stiffness nor nonpositive eigenvalues may be clamped,
+absolutized or presented as real vibration frequencies. This symmetric pencil
+does not itself certify stability. It omits finite-strain kinematics, follower
+loads, geometry-dependent boundary loads, live modal state transfer and
+post-buckling. Fully fixed bodies have a valid static thermal response but no
+vibration pencil and return `NoFreeDofs`.
+
+Existing assembly, source-state, rigid-support, residual and pointwise
+small-strain gates precede publication. Element/quadrature and sparse-row
+checkpoints preserve cancellation. Identity binds the admitted equilibrium and
+the complete signed stiffness/mass pencil.
+
+G1/G3/G4 definitions in `tests/quadratic_thermal_tangent.rs` use all three
+families to check zero-stress recovery, signed uniform thermal prestress,
+unchanged mass/support maps, spectral shifts, and a manufactured varying-stress
+quadratic field whose geometric energy differs from an element-average shortcut.
+They also check the fully constrained and cancellation boundaries. These are
+numerical approximation checks, not experimental material validation.
