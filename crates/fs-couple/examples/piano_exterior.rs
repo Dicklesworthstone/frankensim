@@ -732,8 +732,11 @@ mod tests {
             let score=||performance::Performance::read(
                 "sample,event,key,value\n0,note_on,69,2.48\n1200,note_off,69,0\n",
                 &[69],2400).unwrap();
-            let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
-            let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,2.,wav_output::Format::Pcm16).unwrap();
+            // This 10x10x0.3 cm soft panel (E 1e7 Pa, about 13.5 g; not Steinway geometry), struck
+            // at A4 with 2.48 m/s, peaks at 2.78 Pa at its receivers: about 0.5 m/s of mean panel
+            // velocity, which follows from so light and soft a panel. 4 Pa encodes it unclipped.
+            let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,4.,wav_output::Format::Pcm16).unwrap();
+            let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,4.,wav_output::Format::Pcm16).unwrap();
             assert_ne!(source.wav,old.wav);
             assert!(selected.piano.accounting.felt_relaxation_loss_j>0.0);
             assert!(source.peak_pa>0.0);
