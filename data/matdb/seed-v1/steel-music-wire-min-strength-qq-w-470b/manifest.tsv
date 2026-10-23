@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	steel-music-wire-min-strength-qq-w-470b
+redistribution	permitted	Work of the US Government (Federal Specification QQ-W-470B, approved by the Commissioner, Federal Supply Service, General Services Administration, 14 December 1965); public domain; retain specification number, date and table number
+citation	Federal Specification QQ-W-470B, Wire, Steel, Carbon, Spring, Music (14 December 1965; superseded by ASTM A228), Table II Torsion, bend, and tensile strength requirements, minimum tensile strength in thousand p.s.i. by diameter of wire in inches; scan https://everyspec.com/FED_SPECS/Q/download.php?spec=QQ-W-470B.039238.pdf (sha256 6696ea854ad811c5295e9bab33159ba19663c83799ac7e0592a82b0ad2e1c623), pages 2-3
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature
+axis	wire_diameter	wire_diameter	dimensional
