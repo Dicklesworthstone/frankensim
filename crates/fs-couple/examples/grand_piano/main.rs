@@ -30,7 +30,8 @@ mod ambient;
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
     [--rt0425-bridge-contacts | --estimated-bridge-contacts] [--rt0425-hammer-stiffness]
-    [--rt0425-hammer-dissipation] [--felt-pack-hammers] [--rt0425-string-damping]
+    [--rt0425-hammer-dissipation] [--felt-pack-hammers [--felt-pack hammers.fsmatpk]] [--rt0425-string-damping]
+    [--board-panel-pack panel.fsmatpk] [--board-rib-pack ribs.fsmatpk] [--board-bridge-pack bridges.fsmatpk]
     [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--string-sections bonded.fsss]
     [--hammer-footprints faces.fshp]
@@ -74,6 +75,11 @@ per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
 --felt-pack-hammers plays the felt pack's hammers instead: Stulov's 88 measured
 Abel hammers, each the whole hammer's K u^p + R d(u^p)/dt shared by its unison,
 with the pack's hammer mass. It excludes the RT-0425 hammer flags and --hammers.
+--felt-pack FILE supplies that felt pack (default: the built-in Stulov Abel set).
+--board-panel-pack, --board-rib-pack and --board-bridge-pack FILE supply the preset
+board's fs-matdb packs (default: the built-in FPL Sitka spruce, sugar pine and
+hard maple); the cut-off bar takes the rib pack. The board's wood moisture
+follows the selected air (--gas-record or the committed humid record).
 --rt0425-string-damping uses the published per-key R_u and eta_u for the
 preset scale's intrinsic string losses instead of the estimated common law.
 --equilibrate-board-mass solves a flat geometric board in mass-diagonal
@@ -303,7 +309,9 @@ struct Options {
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, stretch_tuning: Option<f64>, raw_tensions: bool, fast_dampers: bool,
     rt0425_bridge_contacts: bool, estimated_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
-    rt0425_hammer_dissipation: bool, felt_pack_hammers: bool, rt0425_string_damping: bool,
+    rt0425_hammer_dissipation: bool, felt_pack_hammers: bool, felt_pack: Option<String>,
+    board_panel_pack: Option<String>, board_rib_pack: Option<String>, board_bridge_pack: Option<String>,
+    rt0425_string_damping: bool,
     equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
@@ -324,7 +332,9 @@ impl Default for Options {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, string_sections: None, hammer_footprints: None, dampers: None, concert_pitch: None, stretch_tuning: None, raw_tensions: false, fast_dampers: false,
             rt0425_bridge_contacts: false, estimated_bridge_contacts: false, rt0425_hammer_stiffness: false,
-            rt0425_hammer_dissipation: false, felt_pack_hammers: false, rt0425_string_damping: false,
+            rt0425_hammer_dissipation: false, felt_pack_hammers: false, felt_pack: None,
+            board_panel_pack: None, board_rib_pack: None, board_bridge_pack: None,
+            rt0425_string_damping: false,
             equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             string_stretching: None, string_polarization: None, cavity: None, gas_record: None,
             midi: None, midi_mapping: midi::Mapping::default(),
@@ -377,6 +387,10 @@ impl Options {
                 "--string-polarization" => options.string_polarization = Some(value.clone()),
                 "--cavity" => options.cavity = Some(value.clone()),
                 "--gas-record" => options.gas_record = Some(value.clone()),
+                "--felt-pack" => options.felt_pack = Some(value.clone()),
+                "--board-panel-pack" => options.board_panel_pack = Some(value.clone()),
+                "--board-rib-pack" => options.board_rib_pack = Some(value.clone()),
+                "--board-bridge-pack" => options.board_bridge_pack = Some(value.clone()),
                 "--rayleigh-loading" => options.rayleigh_loading = Some(rayleigh_loading::Options::parse(value)?),
                 "--radiation-ports" => options.radiation_ports = Some(value.parse().map_err(|_| invalid())?),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
@@ -451,6 +465,13 @@ impl Options {
                 || options.hammers.is_some() || options.render.is_none()))
             || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
             return Err("bridge-contact choices need the preset board and exclude each other; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
+        }
+        if options.felt_pack.is_some() && !options.felt_pack_hammers {
+            return Err("--felt-pack supplies the --felt-pack-hammers card; give both".into());
+        }
+        if (options.board_panel_pack.is_some() || options.board_rib_pack.is_some() || options.board_bridge_pack.is_some())
+            && !options.uses_preset_board() {
+            return Err("board packs build the preset Model D board; they need --preset without --board or --board-geometry".into());
         }
         if options.felt_pack_hammers && (options.preset.is_none() || options.hammers.is_some()
             || options.render.is_none() || options.rt0425_hammer_stiffness || options.rt0425_hammer_dissipation) {
@@ -744,7 +765,7 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
     }
     let secondary = polarization.map(string_polarization::Prepared::secondary);
     let pack_hammers = options.felt_pack_hammers.then(|| {
-        let card = hammer_felt::stulov_abel()?;
+        let card = selected_felt_card(options)?;
         scale.iter().map(|c| card.hammer(c.midi)).collect::<Result<Vec<_>, String>>()
     }).transpose()?;
     let scale: Vec<geometry::Course> = match &pack_hammers {
@@ -1192,6 +1213,33 @@ fn render_with_cavity(path: &str, scale: Vec<geometry::Course>, modes: &[linear:
     Ok(())
 }
 
+/// A pack file as admitted bytes; a missing, truncated or corrupt file refuses.
+fn pack_file(path: &str) -> Result<fs_matdb::NormalizedPack, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    fs_matdb::NormalizedPack::from_bytes(&bytes).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The --felt-pack-hammers card: --felt-pack FILE, or the built-in Stulov set.
+fn selected_felt_card(options: &Options) -> Result<hammer_felt::FeltCard, String> {
+    match &options.felt_pack {
+        Some(path) => hammer_felt::FeltCard::from_pack(&pack_file(path)?),
+        None => hammer_felt::stulov_abel(),
+    }
+}
+
+/// The preset board's materials: the command line's packs (or the built-in
+/// Model D packs), in the wood moisture of the SAME air the piano radiates into.
+fn preset_board_materials(options: &Options, ambient: &ambient::Ambient) -> Result<steinway_d::BoardMaterials, String> {
+    let environment = steinway_d::BoardEnvironment::from_gas(&ambient.gas)?;
+    let pack = |path: &Option<String>, built_in: &[u8]| match path {
+        Some(path) => pack_file(path),
+        None => steinway_d::load_pack(built_in),
+    };
+    steinway_d::model_d_materials_from(&pack(&options.board_panel_pack, steinway_d::SITKA_SPRUCE)?,
+        &pack(&options.board_rib_pack, steinway_d::SUGAR_PINE)?,
+        &pack(&options.board_bridge_pack, steinway_d::HARD_MAPLE)?, &environment)
+}
+
 fn run() -> Result<(), String> { run_with(&std::env::args().skip(1).collect::<Vec<_>>()) }
 fn run_with(args: &[String]) -> Result<(), String> {
     let options = Options::parse(args)?;
@@ -1210,9 +1258,10 @@ fn run_with(args: &[String]) -> Result<(), String> {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_report();
-    let preset = options.uses_preset_board().then(|| if options.estimated_bridge_contacts {
-        steinway_d::build_with_estimated_contacts(options.mesh_divisions)
-    } else { steinway_d::build(options.mesh_divisions) }).transpose()?;
+    let preset = options.uses_preset_board().then(|| {
+        let materials = preset_board_materials(&options, &ambient::Ambient::selected(options.gas_record.as_deref())?)?;
+        steinway_d::build_with_materials(options.mesh_divisions, !options.estimated_bridge_contacts, &materials)
+    }).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { write_fresh_output(path, preset.geometry.as_bytes())?; }
         if let Some(path) = &options.dump_obj { write_fresh_output(path, preset.obj.as_bytes())?; }
@@ -1279,7 +1328,7 @@ fn run_with(args: &[String]) -> Result<(), String> {
     if let Some(path) = &options.hammers {
         println!("Hammer materials supplied by {path}; no automatic coupon-fit or calibration claim. Scale mass/patch geometry unchanged.");
     } else if options.felt_pack_hammers {
-        let card = hammer_felt::stulov_abel()?;
+        let card = selected_felt_card(&options)?;
         println!("Hammers from felt pack {} {}: Stulov's 88 measured Abel hammers, K u^p + R d(u^p)/dt per hammer with its mass.",
             card.pack_id(), card.content_hash());
     } else if options.preset.is_some() {
@@ -1650,6 +1699,50 @@ mod render_tests {
         assert!(source.rt0425_hammer_dissipation);
         assert!(options(&["--preset", "steinway-d", "--render", "piano.wav",
             "--rt0425-hammer-dissipation"]).is_err());
+    }
+    #[test]
+    fn board_and_felt_packs_are_command_line_data_in_the_selected_air() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("frankensim-piano-packs-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = directory.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let engelmann = write("engelmann.fsmatpk", include_bytes!("packs/spruce-engelmann-fpl-gtr282.fsmatpk"));
+        let truncated = write("truncated.fsmatpk", &steinway_d::SITKA_SPRUCE[..100]);
+        let base = ["--preset", "steinway-d", "--render", "piano.wav"];
+        let with = |extra: &[&str]| options(&base.iter().copied().chain(extra.iter().copied()).collect::<Vec<_>>());
+        let reference = ambient::Ambient::reference();
+        // No pack options: the built-in board, bit for bit, in the committed air.
+        let built_in = preset_board_materials(&with(&[]).unwrap(), &reference).unwrap();
+        assert_eq!(built_in, steinway_d::reference_materials().unwrap());
+        // A panel pack on the command line is a data swap.
+        let swapped = preset_board_materials(&with(&["--board-panel-pack", engelmann.as_str()]).unwrap(), &reference).unwrap();
+        assert_eq!(swapped.panel.pack.pack_id, "spruce-engelmann-fpl-gtr282");
+        assert_eq!(swapped.ribs, built_in.ribs);
+        assert_ne!(swapped.panel, built_in.panel);
+        for bad in [truncated.as_str(), "/nonexistent/panel.fsmatpk"] {
+            let error = preset_board_materials(&with(&["--board-panel-pack", bad]).unwrap(), &reference).unwrap_err();
+            assert!(error.contains(bad), "{error}");
+        }
+        // The wood reads the same air the piano radiates into: drier air, drier wood;
+        // dry air is outside the isotherm and refuses rather than inventing a moisture.
+        let drier = ambient::Ambient { gas: ambient::parse("293.15 101325 0.40").unwrap(), source: ambient::Source::CommandLine };
+        let dried = preset_board_materials(&with(&[]).unwrap(), &drier).unwrap();
+        assert!(dried.environment.moisture_content < built_in.environment.moisture_content);
+        assert!(dried.panel.e_l > built_in.panel.e_l && dried.panel.density < built_in.panel.density);
+        let dry = ambient::Ambient { gas: ambient::parse("293.15 101325 0").unwrap(), source: ambient::Source::CommandLine };
+        assert!(preset_board_materials(&with(&[]).unwrap(), &dry).unwrap_err().contains("wood-emc-hailwood-horrobin-fpl-gtr282"));
+        // Board packs need the preset board; --felt-pack needs --felt-pack-hammers.
+        assert!(options(&["--board-panel-pack", engelmann.as_str()]).is_err());
+        assert!(with(&["--felt-pack", engelmann.as_str()]).is_err());
+        let felt = write("felt.fsmatpk", include_bytes!("packs/hammer-felt-abel-stulov2005.fsmatpk"));
+        let card = selected_felt_card(&with(&["--felt-pack-hammers", "--felt-pack", felt.as_str()]).unwrap()).unwrap();
+        assert_eq!(card.pack_id(), "hammer-felt-abel-stulov2005");
+        assert!(selected_felt_card(&with(&["--felt-pack-hammers", "--felt-pack", truncated.as_str()]).unwrap()).is_err());
+        assert!(selected_felt_card(&with(&["--felt-pack-hammers", "--felt-pack", engelmann.as_str()]).unwrap()).unwrap().hammer(69).is_err());
     }
     #[test]
     fn felt_pack_hammers_are_an_explicit_preset_input_that_closes_its_work() {

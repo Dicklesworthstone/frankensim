@@ -242,21 +242,30 @@ impl BeamMaterial {
     }
 }
 
-const SITKA_SPRUCE: &[u8] = include_bytes!("packs/spruce-sitka-fpl-gtr282.fsmatpk");
-const SUGAR_PINE: &[u8] = include_bytes!("packs/pine-sugar-fpl-gtr282.fsmatpk");
-const HARD_MAPLE: &[u8] = include_bytes!("packs/maple-sugar-fpl-gtr282.fsmatpk");
+/// The built-in Model D packs. A caller may supply others (grand_piano
+/// --board-panel-pack / --board-rib-pack / --board-bridge-pack).
+pub const SITKA_SPRUCE: &[u8] = include_bytes!("packs/spruce-sitka-fpl-gtr282.fsmatpk");
+pub const SUGAR_PINE: &[u8] = include_bytes!("packs/pine-sugar-fpl-gtr282.fsmatpk");
+pub const HARD_MAPLE: &[u8] = include_bytes!("packs/maple-sugar-fpl-gtr282.fsmatpk");
 
 /// The source's species, from their packs: Sitka spruce panel, sugar pine
 /// ribs, hard (sugar) maple bridges. The source names no cut-off bar
 /// material; it takes the rib pack, as the former constants did.
 pub fn model_d_materials(environment: &BoardEnvironment) -> Result<BoardMaterials, String> {
-    let ribs = BeamMaterial::from_pack(&load_pack(SUGAR_PINE)?, environment)?;
+    model_d_materials_from(&load_pack(SITKA_SPRUCE)?, &load_pack(SUGAR_PINE)?, &load_pack(HARD_MAPLE)?, environment)
+}
+
+/// The Model D board's materials from supplied panel, rib and bridge packs;
+/// the cut-off bar takes the rib pack.
+pub fn model_d_materials_from(panel: &NormalizedPack, ribs: &NormalizedPack, bridges: &NormalizedPack,
+    environment: &BoardEnvironment) -> Result<BoardMaterials, String> {
+    let ribs = BeamMaterial::from_pack(ribs, environment)?;
     Ok(BoardMaterials {
         environment: *environment,
-        panel: PanelMaterial::from_pack(&load_pack(SITKA_SPRUCE)?, environment)?,
+        panel: PanelMaterial::from_pack(panel, environment)?,
         cutoff_bar: ribs.clone(),
         ribs,
-        bridges: BeamMaterial::from_pack(&load_pack(HARD_MAPLE)?, environment)?,
+        bridges: BeamMaterial::from_pack(bridges, environment)?,
     })
 }
 
