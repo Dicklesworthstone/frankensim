@@ -72,6 +72,7 @@ use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
 mod viscothermal;
+pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod port_response;
 pub use port_response::DgPortResponse;
 
@@ -499,8 +500,10 @@ pub struct DgDuct {
     outlet_gas: GasState,
     gas_field: Option<AxialGasField>,
     /// Exact source geometry eligibility, not inferred from sampled node radii.
+    /// Original geometry retained for material-point wall integration.
+    geometry: Duct,
     uniform_radius_m: Option<f64>,
-    viscothermal: Option<fs_phs::ZkDiffusive>,
+    viscothermal: Option<viscothermal::ViscothermalMemory>,
     memory_dofs: usize,
     inlet: DgBoundary,
     outlet: DgBoundary,
@@ -983,6 +986,7 @@ impl DgDuct {
             gas: *gas,
             outlet_gas,
             gas_field: field.cloned(),
+            geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
             viscothermal: None,
             memory_dofs: 0,

@@ -10,6 +10,15 @@
 
 use super::*;
 
+mod spatial;
+pub use spatial::{DgWallAdmission, DgWallResolution};
+
+#[derive(Debug, Clone)]
+pub(super) enum ViscothermalMemory {
+    Uniform(fs_phs::ZkDiffusive),
+    Spatial(spatial::SpatialViscothermal),
+}
+
 pub(super) fn uniform_radius(duct: &Duct) -> Option<f64> {
     let Some(Segment::Cylinder { radius, .. }) = duct.segments.first() else {
         return None;
@@ -135,7 +144,7 @@ impl DgDuct {
         self.l_tilde = operator;
         self.g_block = None;
         self.memory_dofs = memory_dofs;
-        self.viscothermal = Some(model);
+        self.viscothermal = Some(ViscothermalMemory::Uniform(model));
         self.operator_identity = hash_operator(
             self.mesh,
             self.inlet,
@@ -147,10 +156,15 @@ impl DgDuct {
         Ok(self)
     }
 
-    /// Actual positive pole model and its admitted band/error; `None` is lossless.
+    /// Uniform exact-mass pole model and its admitted band/error. A spatial
+    /// attachment instead reports spatial_viscothermal_admission; use
+    /// has_viscothermal_memory to distinguish either route from lossless.
     #[must_use]
     pub fn viscothermal_model(&self) -> Option<&fs_phs::ZkDiffusive> {
-        self.viscothermal.as_ref()
+        match &self.viscothermal {
+            Some(ViscothermalMemory::Uniform(model)) => Some(model),
+            _ => None,
+        }
     }
 }
 

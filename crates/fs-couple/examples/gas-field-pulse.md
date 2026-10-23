@@ -44,6 +44,7 @@ Each station supplies one mole fraction per declared species in that order.
 ```text
 gas_field_pulse_v1
 cylinder RADIUS_M LENGTH_M
+(or: cone INLET_RADIUS_M OUTLET_RADIUS_M LENGTH_M)
 pressure STATIC_PRESSURE_PA
 mesh ELEMENTS POLYNOMIAL_ORDER
 time DT_S STEPS
@@ -67,8 +68,31 @@ ratio and Prandtl number select the positive wall-memory coefficients. Change
 the static pressure, temperature or mixture at **both** stations to compare
 the resulting attenuation and dispersion. No duct code or loss gain changes.
 
-This attachment currently requires uniform gas and identical circular radii.
-Adding it to the original nonuniform field refuses explicitly. The pole count
+The `viscothermal` record uses the exact-mass uniform-cylinder path. For
+nonuniform temperature/composition or a cone, use the same wall model with
+explicit spatial quadrature:
+
+```text
+spatial_viscothermal POLES MINIMUM_HZ MAXIMUM_HZ MAXIMUM_RELATIVE_ERROR GAUSS_POINTS
+```
+
+[gas-field-pulse-spatial-viscothermal.pulse](gas-field-pulse-spatial-viscothermal.pulse)
+supplies a 0.5-to-0.7 mm radius cone with three different nitrogen/carbon-dioxide
+and temperature stations. It uses the same source packs and command. Gas
+properties are reevaluated at each positive Gauss point; the source radius
+sets the local viscous and thermal diffusion times. Pressure and every wall
+memory advance in the original joint exponential. Changing the station data
+therefore changes actual dissipation, dispersion, stored wall energy and the
+pressure trace. This is a frozen gas field with rigid, isothermal walls and
+the local-cylinder Webster approximation, not a full 3-D cone calculation.
+
+GAUSS_POINTS must be at least ORDER+1 and at most 64. Refine it separately from
+the mesh and pole count; its error is not included in the constitutive band
+check. The example's 256-DOF cap includes every spatial wall state (the supplied
+input has 216). The final diagnostic reports wall stored energy and the physical
+instantaneous dissipation rate separately from the cumulative deficit.
+
+The pole count
 is a resolution axis (1 through 64), with complex wall response and real loss
 checked independently against the exact Bessel owner over the requested band.
 An unresolved count/band refuses. The complete acoustic and memory state uses

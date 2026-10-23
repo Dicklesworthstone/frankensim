@@ -1,0 +1,12 @@
+gas_field_pulse_v1
+cone 0.0005 0.0007 0.05
+pressure 101325
+mesh 4 2
+time 0.0000025 1000
+pulse 1 0.025 0.018
+species 2 N2 CO2
+stations 3
+station 0 300 1 0
+station 0.025 320 0.8 0.2
+station 0.05 310 0.5 0.5
+spatial_viscothermal 8 20 3000 0.001 3

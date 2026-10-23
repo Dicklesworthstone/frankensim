@@ -403,6 +403,22 @@ pipe `Z_in = +i Zc cot(kL)`.
     `total_dofs()` includes every memory state; the same 2048-DOF cap applies.
     The augmented physical operator changes the state identity, so pre-attachment
     states cannot silently enter it. Initialization starts wall memory at zero.
+  - `DgDuct::with_spatial_viscothermal(DgWallResolution)` extends the SAME
+    memory/state/exponential owner to the original cone/profile geometry and
+    primitive gas field. Positive Gauss points reevaluate the source gas and
+    original radius; derived transport is never interpolated or taken from
+    the inlet. Each arm couples through `sqrt(w*C0)*Mp^-1/2*phi` or
+    `sqrt(w*L0)*Mq^-1/2*phi`, preserving the full DG mass maps.
+    Wall quadrature (order+1 through 64), mesh and pole count are independent
+    convergence axes. The reported band errors are sampled constitutive
+    errors at those points, not a spatial or broadband accuracy certificate.
+    A single exclusive memory enum prevents attaching either wall route twice.
+    `wall_stored_energy_j` retains wall energy; `wall_dissipated_power_w`
+    independently evaluates nonnegative physical drag/relaxation squares for
+    BOTH routes. The cumulative ledger still infers loss rather than separately
+    integrating it. Uniform exact-mass and spatial routes are compared against
+    each other, exact-Bessel cylinder impedance, Poiseuille drag and the closed
+    volume isothermal limit. Native execution of the new spatial tests is pending.
   - States carry a reproducible identity of the assembled operator, geometry,
     mass-coordinate transforms, boundaries and typed ports. `step`, fallible
     `sync_nodal`, and fallible `l2_pressure_error` refuse incompatible states
@@ -723,10 +739,11 @@ divergence-theorem closure/orientation pin on the lathe).
 
 ## No-claim boundaries
 
-- Time-domain DG is plane-wave propagation; exact-Bessel-derived wall memory
-  is currently restricted to uniform gas in identical circular cylinders.
-  - Varying-area/variable-gas viscothermal assembly, independent integrated
-    wall dissipation and the full impedance-peak gates of M2.2-W3b remain open.
+- Time-domain DG is frozen, no-mean-flow plane-wave propagation. Spatial wall
+  memory uses the local cylindrical ZK/Webster approximation on a taper;
+  it is not the spherical-cone correction or a full 3-D wall solution.
+  - Finite wall-temperature feedback, independent integrated wall dissipation
+    and the full impedance-peak gates of M2.2-W3b remain open.
     There are no side branches or radiation (W3c), moving geometry (W3d) or
     valve dynamics (W3e). Tone-hole segments refuse.
   - The matched boundary's certificate includes an a-posteriori estimate,

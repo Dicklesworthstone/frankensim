@@ -6,7 +6,7 @@ mod json;
 mod thermochemical;
 use json::json_string;
 
-use fs_duct::dg::{DgBoundary, DgDuct, DgMesh};
+use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, DgWallResolution};
 use fs_duct::{Duct, Segment};
 use fs_matdb::QueryPoint;
 use fs_material::gas_field::{AxialGasField, PrimitiveGasState};
@@ -64,8 +64,16 @@ fn main() -> Result<()> {
     let text = std::str::from_utf8(&bytes)?;
     let mut words = text.split_ascii_whitespace();
     tag(&mut words, "gas_field_pulse_v1")?;
-    tag(&mut words, "cylinder")?;
-    let radius: f64 = number(&mut words, "radius [m]")?;
+    let shape = word(&mut words, "cylinder or cone")?;
+    if !matches!(shape, "cylinder" | "cone") {
+        return Err("pulse geometry must be cylinder or cone".into());
+    }
+    let radius: f64 = number(&mut words, "inlet radius [m]")?;
+    let outlet_radius: f64 = if shape == "cone" {
+        number(&mut words, "outlet radius [m]")?
+    } else {
+        radius
+    };
     let length: f64 = number(&mut words, "length [m]")?;
     tag(&mut words, "pressure")?;
     let pressure: f64 = number(&mut words, "static pressure [Pa]")?;
@@ -79,9 +87,17 @@ fn main() -> Result<()> {
     let amplitude: f64 = number(&mut words, "pressure amplitude [Pa]")?;
     let center: f64 = number(&mut words, "pulse center [m]")?;
     let half_width: f64 = number(&mut words, "pulse half-width [m]")?;
-    if [radius, length, pressure, dt, amplitude, half_width]
-        .iter()
-        .any(|v| !v.is_finite() || *v <= 0.0)
+    if [
+        radius,
+        outlet_radius,
+        length,
+        pressure,
+        dt,
+        amplitude,
+        half_width,
+    ]
+    .iter()
+    .any(|v| !v.is_finite() || *v <= 0.0)
         || !center.is_finite()
         || center <= half_width
         || center + half_width >= length
@@ -136,15 +152,29 @@ fn main() -> Result<()> {
     }
     let viscothermal = match words.next() {
         None => None,
-        Some("viscothermal") => Some((
-            number::<usize>(&mut words, "viscothermal pole count")?,
-            [
+        Some(kind @ ("viscothermal" | "spatial_viscothermal")) => {
+            let poles = number::<usize>(&mut words, "viscothermal pole count")?;
+            let band = [
                 number::<f64>(&mut words, "viscothermal minimum frequency [Hz]")?,
                 number::<f64>(&mut words, "viscothermal maximum frequency [Hz]")?,
-            ],
-            number::<f64>(&mut words, "viscothermal maximum relative operator error")?,
-        )),
-        Some(_) => return Err("expected optional viscothermal record after stations".into()),
+            ];
+            let error = number::<f64>(&mut words, "viscothermal maximum relative operator error")?;
+            let quadrature = if kind == "spatial_viscothermal" {
+                Some(number::<usize>(
+                    &mut words,
+                    "wall Gauss points per element",
+                )?)
+            } else {
+                None
+            };
+            Some((poles, band, error, quadrature))
+        }
+        Some(_) => {
+            return Err(
+                "expected optional viscothermal or spatial_viscothermal record after stations"
+                    .into(),
+            );
+        }
     };
     if words.next().is_some() {
         return Err("pulse input has trailing fields".into());
@@ -188,7 +218,15 @@ fn main() -> Result<()> {
         registry.phase,
     )?;
     let duct = Duct {
-        segments: vec![Segment::Cylinder { radius, length }],
+        segments: vec![if shape == "cone" {
+            Segment::Cone {
+                inlet_radius: radius,
+                outlet_radius,
+                length,
+            }
+        } else {
+            Segment::Cylinder { radius, length }
+        }],
     };
     let dg = DgDuct::new_with_gas_field(
         &duct,
@@ -197,8 +235,17 @@ fn main() -> Result<()> {
         DgBoundary::Closed,
         DgBoundary::Matched,
     )?;
-    let dg = if let Some((poles, band, error)) = viscothermal {
-        dg.with_viscothermal(poles, band, error)?
+    let dg = if let Some((poles, band, error, quadrature)) = viscothermal {
+        if let Some(quadrature_points) = quadrature {
+            dg.with_spatial_viscothermal(DgWallResolution {
+                poles_per_field: poles,
+                quadrature_points,
+                band_rad_s: band.map(|frequency| core::f64::consts::TAU * frequency),
+                maximum_relative_error: error,
+            })?
+        } else {
+            dg.with_viscothermal(poles, band, error)?
+        }
     } else {
         dg
     };
@@ -231,7 +278,7 @@ fn main() -> Result<()> {
     writeln!(
         csv,
         "time_s,inlet_pressure_pa,outlet_pressure_pa,stored_energy_j,{}",
-        if dg.viscothermal_model().is_some() {
+        if dg.has_viscothermal_memory() {
             "inferred_total_loss_j"
         } else {
             "inferred_matched_loss_j"
@@ -265,6 +312,7 @@ fn main() -> Result<()> {
             return Err("CSV exceeds the example's 4 MiB output budget".into());
         }
     }
+    let wall_power_w = dg.wall_dissipated_power_w(&state)?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -276,6 +324,17 @@ fn main() -> Result<()> {
             model.series_terms().len(),
             model.max_complex_error(),
             model.max_real_loss_error()
+        );
+    }
+    if let Some(admission) = dg.spatial_viscothermal_admission() {
+        eprintln!(
+            "spatial Bessel wall poles={}, Gauss points/element={}; sampled complex error={:e}, real loss error={:e}; physical wall energy={:e} J, instantaneous wall loss={:e} W",
+            admission.resolution.poles_per_field,
+            admission.resolution.quadrature_points,
+            admission.max_complex_error,
+            admission.max_real_loss_error,
+            state.wall_stored_energy_j(),
+            wall_power_w
         );
     }
     eprintln!(
