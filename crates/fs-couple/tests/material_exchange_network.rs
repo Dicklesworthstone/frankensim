@@ -19,7 +19,7 @@ use fs_material::electrical_interface::{ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, 
 use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_DIMS};
 use fs_matdb::*;
 use fs_phs::circuit::{Branch, CircuitGraph};
-use fs_qty::Temperature;
+use fs_qty::{QuantitySpec, Temperature};
 use fs_thermal::enthalpy::*;
 
 fn with_cx<R>(run: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
@@ -66,7 +66,8 @@ fn fixture<R>(emissivity: [f64;2], first_h: f64,
     claims.insert_claim(PropertyClaim { key:PropertyKey::new(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY,ELECTRICAL_CONTACT_RESISTANCE_DIMS),
         value:PropertyValue::Curve { abscissa:"T".into(), abscissa_dims:Temperature::DIMS,
             knots:vec![(300.0,0.04),(500.0,0.06)], dims:ELECTRICAL_CONTACT_RESISTANCE_DIMS },
-        validity:ValidityDomain::unconstrained().with("T",300.0,500.0).with("pressure",200000.0,200000.0),
+        validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),300.0,500.0)
+            .with("pressure",200000.0,200000.0),
         uncertainty:UncertaintyModel::Unstated, interpolation:InterpolationPolicy::LinearInside, observations:vec![],
         provenance:Provenance { source:"synthetic common thermal/electrical interface".into(),license:"CC0-1.0".into(),artifact:None } }).unwrap();
     let interface = contact_fixture::interface(&cards,claims);

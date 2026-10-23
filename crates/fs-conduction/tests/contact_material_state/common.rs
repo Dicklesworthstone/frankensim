@@ -28,8 +28,12 @@ pub fn point() -> QueryPoint {
 pub fn claim(axis: &str, dims: Dims, scale: f64) -> PropertyClaim {
     PropertyClaim { key:PropertyKey::new(RP,RD), value:PropertyValue::Curve {
         abscissa:axis.into(), abscissa_dims:dims, knots:vec![(0.0,scale),(1.0,2.0*scale)], dims:RD },
-        validity:ValidityDomain::unconstrained().with("aT",300.0,800.0).with("bT",300.0,800.0)
-            .with("fa",0.0,1.0).with("fb",0.0,1.0).with("pressure",200000.0,200000.0).with("lot",7.0,7.0),
+        validity:ValidityDomain::unconstrained()
+            .with_quantity("aT",QuantitySpec::dimensional(Temperature::DIMS),300.0,800.0)
+            .with_quantity("bT",QuantitySpec::dimensional(Temperature::DIMS),300.0,800.0)
+            .with_quantity("fa",QuantitySpec::dimensional(Dims::NONE),0.0,1.0)
+            .with_quantity("fb",QuantitySpec::dimensional(Dims::NONE),0.0,1.0)
+            .with("pressure",200000.0,200000.0).with("lot",7.0,7.0),
         uncertainty:UncertaintyModel::Unstated, interpolation:InterpolationPolicy::LinearInside,
         observations:vec![], provenance:Provenance { source:"synthetic two-sided contact".into(),
             license:"CC0-1.0".into(), artifact:None } }
