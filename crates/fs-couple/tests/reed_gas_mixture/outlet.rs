@@ -132,7 +132,7 @@ fn separate_exterior_material_reaches_actual_cli_pcm_and_invalid_records_create_
     let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
     assert!(metadata.contains("terminal-only Rayleigh pressure in the bound exterior gas"));
     for (index, record) in ["exterior 300 90000 0",
-        "exterior mixture 300 100000 mole 1 He 1", "exterior 300 100000 0 extra"].iter().enumerate() {
+        "exterior mixture 300 100000 mole 1 Xe 1", "exterior 300 100000 0 extra"].iter().enumerate() {
         std::fs::write(&input, SOURCE.replace(RECEIVER, &format!("{RECEIVER}\n{record}"))).unwrap();
         let output = dir.join(format!("bad-exterior-{index}.wav"));
         assert!(!wind(&input, &output, 37, false).status.success());

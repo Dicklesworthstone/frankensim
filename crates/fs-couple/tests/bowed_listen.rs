@@ -40,7 +40,8 @@ fn only_the_gas_record_changes_the_radiated_pressure_scale() {
     assert_eq!(shipped, air, "the shipped record is the one measured here");
     let mut full_scale = Vec::new();
     for (name, record) in [("air", air), ("thin", "293.15 70927.5 0\n"),
-        ("co2", "mixture 293.15 101325 mole 1 CO2 1\n")] {
+        ("co2", "mixture 293.15 101325 mole 1 CO2 1\n"),
+        ("heliox", "mixture 293.15 101325 mole 2 He 0.8 O2 0.2\n")] {
         let out = listen(&dir, name, record);
         assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
         let receipt = std::fs::read_to_string(dir.join(format!("{name}.jsonl"))).unwrap();
@@ -57,12 +58,13 @@ fn only_the_gas_record_changes_the_radiated_pressure_scale() {
     }
     assert!((full_scale[1].1 / rho_air - 0.7).abs() < 1e-12);
     assert!(full_scale[2].1 > 1.4 * rho_air);
+    assert!(full_scale[3].1 < 0.35 * rho_air);
 }
 
 #[test]
 fn a_missing_or_unresolvable_gas_record_refuses_and_writes_nothing() {
     let dir = scratch();
-    for (name, record) in [("short", "293.15 101325\n"), ("helium", "mixture 293.15 101325 mole 1 He 1\n"),
+    for (name, record) in [("short", "293.15 101325\n"), ("xenon", "mixture 293.15 101325 mole 1 Xe 1\n"),
         ("trailing", "293.15 101325 0 7\n"), ("thermo", "thermochemical 293.15 101325 mole 1 N2 1\n")] {
         let out = listen(&dir, name, record);
         assert!(!out.status.success(), "{name}");

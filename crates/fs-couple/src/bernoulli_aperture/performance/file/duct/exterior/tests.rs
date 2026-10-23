@@ -102,7 +102,7 @@ fn radiation_admission_uses_the_actual_exterior_not_a_false_local_gas_trial() {
 
 #[test]
 fn exterior_records_retain_material_errors_and_refuse_ambiguous_boundaries() {
-    for record in ["mixture 293.15 101325 mole 1 He 1", "mixture 300 101325 mole 1 H2O 1"] {
+    for record in ["mixture 293.15 101325 mole 1 Xe 1", "mixture 300 101325 mole 1 H2O 1"] {
         let result = PlateValvePerformance::from_bytes(with_exterior(SOURCE, record).as_bytes(), 37, &CancelGate::new());
         assert!(matches!(result, Err(PlateValveInputError::Gas { line: 4, .. })));
     }

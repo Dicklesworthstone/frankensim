@@ -41,7 +41,7 @@ fn identical_exterior_is_exact_and_unsupported_interfaces_refuse_with_source_lin
         "{RECEIVER}\nexterior mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4"));
     assert_eq!(raw(SOURCE, 37), raw(&same, 113));
     for record in [
-        "exterior mixture 300 100000 mole 1 He 1",
+        "exterior mixture 300 100000 mole 1 Xe 1",
         "exterior mixture 300 100000 mole 2 N2 70 O2 30",
         "exterior mixture 300 100000 mole 1 H2O 1",
     ] {

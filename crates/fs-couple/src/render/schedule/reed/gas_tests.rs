@@ -95,7 +95,7 @@ fn mass_basis_keeps_material_semantics_in_the_reed_input() {
 
 #[test]
 fn source_line_and_material_failures_are_retained_before_rendering() {
-    for ambient in ["mixture 300 100000 mole 1 He 1",
+    for ambient in ["mixture 300 100000 mole 1 Xe 1",
         "mixture 300 100000 mole 2 N2 0.5 nitrogen 0.5",
         "mixture 300 100000 mole 2 N2 70 O2 30",
         "mixture 300 100000 mole 1 H2O 1", "mixture 400 100000 mole 1 N2 1"] {

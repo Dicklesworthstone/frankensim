@@ -16,6 +16,14 @@
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.cfd/cfd_ug_fluidflow_high_mach.08.46.html>.
 //! Conductivity uses GasSpec's existing Eucken approximation, NOT that source's
 //! separate conductivity fit. H2O reuses the existing water-vapor GasSpec.
+//! Helium is monatomic and calorically perfect: NASA/TP-2002-211556 (p133)
+//! gives cp/R = 5/2 exactly and molecular weight 4.0026020; no seed-v1
+//! species card exists for it. Its viscosity is NASA TM-4647 (Svehla 1995)
+//! Table III He (printed p22, 200-1000 K branch). Sutherland's two parameters
+//! are the unique pair that reproduce that correlation at both ends of the
+//! admitted window; inside it they stay within 6e-4 of it. Its Eucken
+//! conductivity, 15/4 (R/M) mu for a monatomic gas, is 0.3% below Svehla's
+//! separate He conductivity fit there.
 //! No arbitrary mixture is thereby eligible for the air-only ISO 9613 law.
 
 /// Shared bounded gas-record input for every material consumer.
@@ -23,6 +31,7 @@ pub mod input;
 
 use crate::gas::{ConductivityModel, GasSpec, GasState, R_USSA_1976, saturation_pressure_water_pa};
 use crate::MaterialError;
+use fs_math::det;
 use fs_qty::semantic::Composition;
 use std::str::FromStr;
 
@@ -41,19 +50,21 @@ pub enum GasSpecies {
     CarbonDioxide,
     /// Water vapor, H2O; not liquid water or ice.
     WaterVapor,
+    /// Monatomic helium, He.
+    Helium,
 }
 
 impl GasSpecies {
     /// Complete supported set; also bounds cold-path input allocation.
-    pub const ALL: [Self; 5] = [Self::Nitrogen, Self::Oxygen, Self::Argon,
-        Self::CarbonDioxide, Self::WaterVapor];
+    pub const ALL: [Self; 6] = [Self::Nitrogen, Self::Oxygen, Self::Argon,
+        Self::CarbonDioxide, Self::WaterVapor, Self::Helium];
 
     /// Case-sensitive, canonical chemical symbol for configuration round trips.
     #[must_use]
     pub const fn symbol(self) -> &'static str {
         match self {
             Self::Nitrogen => "N2", Self::Oxygen => "O2", Self::Argon => "Ar",
-            Self::CarbonDioxide => "CO2", Self::WaterVapor => "H2O",
+            Self::CarbonDioxide => "CO2", Self::WaterVapor => "H2O", Self::Helium => "He",
         }
     }
 
@@ -67,6 +78,7 @@ impl GasSpecies {
             Self::Argon => (39.948e-3, 5.0 / 3.0, 2.125e-5, 114.0),
             Self::CarbonDioxide => (44.00950e-3, 37.129 / (37.129 - R_USSA_1976), 1.370e-5, 222.0),
             Self::WaterVapor => return GasSpec::water_vapor_nist(),
+            Self::Helium => return helium_spec(),
         };
         let t0: f64 = 273.0;
         GasSpec {
@@ -88,8 +100,38 @@ impl FromStr for GasSpecies {
             "Ar" | "argon" => Ok(Self::Argon),
             "CO2" | "carbon-dioxide" => Ok(Self::CarbonDioxide),
             "H2O" | "water-vapor" => Ok(Self::WaterVapor),
-            _ => Err(invalid("unsupported gas species; expected N2, O2, Ar, CO2 or H2O")),
+            "He" | "helium" => Ok(Self::Helium),
+            _ => Err(invalid("unsupported gas species; expected N2, O2, Ar, CO2, H2O or He")),
         }
+    }
+}
+
+/// NASA TM-4647 Table III He viscosity, 200-1000 K:
+/// ln(mu / micropoise) = A ln T + B / T + C / T^2 + D, as [A, B, C, D].
+const HELIUM_SVEHLA_VISCOSITY: [f64; 4] = [0.75015944, 35.763243, -2212.1291, 0.92126352];
+/// Ends of the named model's admitted temperature window [K].
+const NAMED_WINDOW_K: (f64, f64) = (273.15, 323.15);
+
+fn svehla_viscosity_pa_s([a, b, c, d]: [f64; 4], temperature_k: f64) -> f64 {
+    let t = temperature_k;
+    1.0e-7 * det::exp(a * det::ln(t) + b / t + c / (t * t) + d)
+}
+
+/// Sutherland mu = beta T^(3/2) / (T + S) through the Svehla He viscosity at
+/// both window ends; ideal monatomic gamma 5/3; Eucken conductivity.
+fn helium_spec() -> GasSpec {
+    let (t1, t2) = NAMED_WINDOW_K;
+    let (mu1, mu2) = (svehla_viscosity_pa_s(HELIUM_SVEHLA_VISCOSITY, t1),
+        svehla_viscosity_pa_s(HELIUM_SVEHLA_VISCOSITY, t2));
+    let growth = (t2 / t1) * (t2 / t1).sqrt();
+    let ratio = mu2 / mu1;
+    let sutherland_s = (growth * t1 - ratio * t2) / (ratio - growth);
+    GasSpec {
+        molar_mass: 4.002_602_0e-3,
+        gamma: 5.0 / 3.0,
+        sutherland_s,
+        sutherland_beta: mu1 * (t1 + sutherland_s) / (t1 * t1.sqrt()),
+        conductivity: ConductivityModel::Eucken,
     }
 }
 
@@ -116,14 +158,14 @@ pub fn resolve_gas_mixture(
     species: &[GasSpecies], composition: &Composition, temperature_k: f64, pressure_pa: f64,
 ) -> Result<GasState, MaterialError> {
     if species.is_empty() || species.len() > GasSpecies::ALL.len() {
-        return Err(invalid("named gas mixture requires 1..=5 distinct supported species"));
+        return Err(invalid("named gas mixture requires 1..=6 distinct supported species"));
     }
     for (i, component) in species.iter().enumerate() {
         if species[..i].contains(component) {
             return Err(invalid("duplicate gas species; supply each species exactly once"));
         }
     }
-    if !(273.15..=323.15).contains(&temperature_k) {
+    if !(NAMED_WINDOW_K.0..=NAMED_WINDOW_K.1).contains(&temperature_k) {
         return Err(invalid("named gas model requires temperature in [273.15, 323.15] K"));
     }
     if !(10000.0..=200000.0).contains(&pressure_pa) {
@@ -142,7 +184,7 @@ pub fn resolve_gas_mixture(
 mod tests {
     use super::*;
     use fs_qty::{MolarMass, semantic::CompositionBasis};
-    use super::GasSpecies::{Argon, CarbonDioxide, Nitrogen, Oxygen, WaterVapor};
+    use super::GasSpecies::{Argon, CarbonDioxide, Helium, Nitrogen, Oxygen, WaterVapor};
 
     fn mole(fractions: Vec<f64>) -> Composition {
         Composition::new(CompositionBasis::MoleFraction, fractions).unwrap()
@@ -158,9 +200,37 @@ mod tests {
         }
         assert_eq!("water-vapor".parse::<GasSpecies>().unwrap(), WaterVapor);
         assert_eq!(WaterVapor.spec(), GasSpec::water_vapor_nist());
-        for name in ["air", "He", "N", "o2", "unknown"] {
+        for name in ["air", "Ne", "N", "o2", "he", "unknown"] {
             assert!(name.parse::<GasSpecies>().is_err(), "accepted {name}");
         }
+    }
+
+    #[test]
+    fn helium_follows_its_cited_sources_and_carries_sound_faster() {
+        assert_eq!("He".parse::<GasSpecies>().unwrap(), Helium);
+        assert_eq!("helium".parse::<GasSpecies>().unwrap(), Helium);
+        let spec = Helium.spec();
+        assert_eq!(spec.molar_mass, 4.002_602e-3);
+        assert_eq!(spec.gamma, 5.0 / 3.0);
+        // The Sutherland pair reproduces the Svehla correlation at both window
+        // ends and stays within 6e-4 of it inside; mu(300 K) ~ 19.9 uPa s.
+        for t in [273.15, 285.0, 298.15, 300.0, 310.0, 323.15] {
+            let state = GasState::try_new(&spec, t, 100000.0).unwrap();
+            let source = svehla_viscosity_pa_s(HELIUM_SVEHLA_VISCOSITY, t);
+            let tolerance = if t == 273.15 || t == 323.15 { 1e-12 } else { 6e-4 };
+            assert!((state.dynamic_viscosity / source - 1.0).abs() < tolerance, "{t}");
+            // Monatomic Eucken: kappa = 15/4 (R/M) mu.
+            assert!((state.thermal_conductivity / (3.75 * state.specific_gas_constant * state.dynamic_viscosity) - 1.0).abs() < 1e-12);
+        }
+        let mu300 = svehla_viscosity_pa_s(HELIUM_SVEHLA_VISCOSITY, 300.0);
+        assert!((mu300 - 1.99e-5).abs() < 0.01e-5, "{mu300}");
+        // 80/20 He-O2 against air-like N2/O2 at the same T and p.
+        let heliox = resolve_gas_mixture(&[Helium, Oxygen], &mole(vec![0.8, 0.2]), 293.15, 101325.0).unwrap();
+        let air = resolve_gas_mixture(&[Nitrogen, Oxygen], &mole(vec![0.79, 0.21]), 293.15, 101325.0).unwrap();
+        let m = 0.8 * 4.002_602e-3 + 0.2 * 31.998_80e-3;
+        assert!((heliox.density * R_USSA_1976 * 293.15 / (101325.0 * m) - 1.0).abs() < 1e-12);
+        assert!(heliox.sound_speed > 1.7 * air.sound_speed && heliox.density < 0.35 * air.density);
+        heliox.validate_coherence().unwrap();
     }
 
     #[test]

@@ -159,7 +159,7 @@ fn an_unresolvable_gas_record_refuses_by_name_and_never_becomes_air() {
         ("ambient 293.15 101325", false),
         ("ambient NaN 101325 0", false),
         ("ambient 293.15 101325 0.5 0.5", false),
-        ("ambient mixture 293.15 101325 mole 1 He 1", true),
+        ("ambient mixture 293.15 101325 mole 1 Xe 1", true),
         ("ambient mixture 293.15 101325 mole 2 N2 0.5 O2 0.4", true),
         ("ambient thermochemical 293.15 101325 mole 1 N2 1", false),
         ("ambient 293.15 0 0", true),

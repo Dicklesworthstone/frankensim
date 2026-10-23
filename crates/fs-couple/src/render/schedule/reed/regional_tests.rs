@@ -134,7 +134,7 @@ fn regional_gas_syntax_keeps_shared_material_semantics_and_original_error_lines(
     let expected = resolve_gas_mixture(&[GasSpecies::Nitrogen, GasSpecies::Argon],
         &Composition::new(CompositionBasis::MassFraction, vec![0.8,0.2]).unwrap(), 300.0, 100000.0).unwrap();
     assert_eq!(load(&text, 37).segment_gases()[1], expected);
-    let text = INPUT.replace(ENRICHED, "mixture 300 100000 mole 1 He 1");
+    let text = INPUT.replace(ENRICHED, "mixture 300 100000 mole 1 Xe 1");
     let Err(error) = ReedPerformance::from_bytes(text.as_bytes(), 37) else { panic!("unsupported species accepted") };
     assert!(matches!(error, ReedPerformanceError::Gas { line: 9, .. }));
     assert!(std::error::Error::source(&error).is_some());

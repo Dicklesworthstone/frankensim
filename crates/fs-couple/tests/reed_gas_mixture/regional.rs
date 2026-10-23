@@ -38,7 +38,7 @@ fn invalid_regional_media_refuse_before_creating_audio_or_sidecar() {
     let dir = directory();
     let input = dir.join("regional.performance");
     for (index, record) in [" gas mixture 293.15 50000 mole 1 N2 1",
-        " gas mixture 293.15 100000 mole 1 He 1", " gas 293.15 0 extra",
+        " gas mixture 293.15 100000 mole 1 Xe 1", " gas 293.15 0 extra",
         " gas mixture 293.15 100000 mole 1 H2O 1"].into_iter().enumerate() {
         std::fs::write(&input, REGIONAL.replace(OVERRIDE, record)).unwrap();
         let output = dir.join(format!("refused-regional-{index}.wav"));

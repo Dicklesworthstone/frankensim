@@ -106,7 +106,7 @@ fn five_species_mass_basis_and_mixture_ensemble_keep_the_declared_physical_press
 fn unsupported_materials_refuse_before_creating_either_cli_output() {
     let dir = directory();
     let input = dir.join("input.performance");
-    for (index, gas) in ["mixture 300 100000 mole 1 He 1", "mixture 300 100000 mole 2 N2 0.5 nitrogen 0.5",
+    for (index, gas) in ["mixture 300 100000 mole 1 Xe 1", "mixture 300 100000 mole 2 N2 0.5 nitrogen 0.5",
         "mixture 300 100000 mole 2 N2 70 O2 30", "mixture 300 100000 mole 1 H2O 1",
         "mixture 500 100000 mole 1 N2 1", "mixture 300 0 mole 1 N2 1",
         "mixture 300 100000 mole 1 N2 NaN", "mixture 300 100000 volume 1 N2 1",

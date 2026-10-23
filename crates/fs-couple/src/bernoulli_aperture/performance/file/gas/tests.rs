@@ -207,8 +207,8 @@ fn mixture_pcm_cancel_resume_preserves_loaded_and_observer_history() {
 
 #[test]
 fn invalid_mixtures_and_static_pressure_jumps_never_fall_back() {
-    for input in ["mixture", "mixture 300 100000 mole 0", "mixture 300 100000 mole 6",
-        "mixture 300 100000 volume 1 N2 1", "mixture 300 100000 mole 1 He 1",
+    for input in ["mixture", "mixture 300 100000 mole 0", "mixture 300 100000 mole 7",
+        "mixture 300 100000 volume 1 N2 1", "mixture 300 100000 mole 1 Xe 1",
         "mixture 300 100000 mole 2 N2 0.5 N2 0.5", "mixture 300 100000 mole 2 N2 1 O2 0",
         "mixture 300 100000 mole 2 N2 0.7 O2 0.2", "mixture 300 100000 mole 2 N2 1.1 O2 -0.1",
         "mixture 300 100000 mole 1 N2 NaN", "mixture 300 100000 mole 2 N2 1",

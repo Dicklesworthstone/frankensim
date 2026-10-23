@@ -329,7 +329,7 @@ mod tests {
         for text in ["", "300", "NaN 100000 0", "300 100000 2",
             "mixture 300 100000 volume 1 N2 1", "mixture 300 100000 mole 0",
             "mixture 300 100000 mole 18446744073709551615",
-            "mixture 300 100000 mole 1 He 1", "mixture 300 100000 mole 2 N2 0.5 nitrogen 0.5",
+            "mixture 300 100000 mole 1 Xe 1", "mixture 300 100000 mole 2 N2 0.5 nitrogen 0.5",
             "mixture 300 100000 mole 2 N2 1 O2 0", "mixture 300 100000 mole 2 N2 -0.1 O2 1.1",
             "mixture 300 100000 mole 2 N2 70 O2 30", "mixture 300 100000 mole 1 N2 NaN",
             "mixture 300 100000 mole 1 N2 1 extra", "mixture 500 100000 mole 1 N2 1",

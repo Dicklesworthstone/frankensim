@@ -107,9 +107,11 @@ fn changing_only_the_gas_record_rescales_and_retards_the_sound_physically() {
     let air = with_ambient("ambient 293.15 101325 0");
     let thin = with_ambient("ambient 293.15 70927.5 0");
     let co2 = with_ambient("ambient mixture 293.15 101325 mole 1 CO2 1");
+    let heliox = with_ambient("ambient mixture 293.15 101325 mole 2 He 0.8 O2 0.2");
     let (pa, ga) = pressure(&air);
     let (pt, gt) = pressure(&thin);
     let (pc, gc) = pressure(&co2);
+    let (ph, gh) = pressure(&heliox);
     // Force-driven plate, no reaction load: at equal c the far field scales with rho.
     assert_eq!(ga.sound_speed.to_bits(), gt.sound_speed.to_bits());
     let ratio = gt.density / ga.density;
@@ -118,12 +120,22 @@ fn changing_only_the_gas_record_rescales_and_retards_the_sound_physically() {
     assert!(peak > 1e-6);
     for (a, t) in pa.iter().zip(&pt) { assert!((t - ratio * a).abs() <= 1e-12 * peak); }
     // The first wavefront reaches the 1 m listener r/c after the drive starts.
-    for (out, gas) in [(&pa, ga), (&pt, gt), (&pc, gc)] {
+    for (out, gas) in [(&pa, ga), (&pt, gt), (&pc, gc), (&ph, gh)] {
         let onset = (48_000.0 / gas.sound_speed).floor() as usize;
         assert!(out[..onset].iter().all(|p| *p == 0.0));
         assert!(out[onset] != 0.0);
     }
     assert!(gc.sound_speed < 0.8 * ga.sound_speed && gc.density > 1.4 * ga.density);
+    // 80/20 He-O2 is light and fast: the same motion, heard earlier and quieter
+    // by rho. Over equal windows after each arrival, energy scales with rho^2.
+    assert!(gh.sound_speed > 1.7 * ga.sound_speed && gh.density < 0.35 * ga.density);
+    let window = |out: &[f64], gas: fs_material::gas::GasState| {
+        let onset = (48_000.0 / gas.sound_speed).floor() as usize;
+        out[onset..onset + 4000].iter().map(|p| p * p).sum::<f64>()
+    };
+    let energy = window(&ph, gh) / window(&pa, ga);
+    let expected = (gh.density / ga.density).powi(2);
+    assert!((energy / expected - 1.0).abs() < 1e-2, "{energy} vs {expected}");
     // The command consumes the same edited file.
     let root = scratch();
     for (name, text, gas) in [("air", &air, ga), ("co2", &co2, gc)] {
@@ -143,7 +155,7 @@ fn changing_only_the_gas_record_rescales_and_retards_the_sound_physically() {
 #[test]
 fn a_gas_record_that_does_not_resolve_refuses_by_name_and_writes_nothing() {
     let root = scratch();
-    for record in ["ambient 293.15 101325", "ambient mixture 293.15 101325 mole 1 He 1",
+    for record in ["ambient 293.15 101325", "ambient mixture 293.15 101325 mole 1 Xe 1",
         "ambient thermochemical 293.15 101325 mole 1 N2 1"] {
         let input = root.join("bad-gas.performance");
         std::fs::write(&input, with_ambient(record)).unwrap();

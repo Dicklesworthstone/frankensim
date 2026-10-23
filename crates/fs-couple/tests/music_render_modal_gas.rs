@@ -85,7 +85,8 @@ fn a_ringing_mode_is_heard_at_its_retarded_time_in_each_declared_gas() {
     // One undamped mode ringing from q = 0, qdot = V: q = (V/w) sin(w t), so the
     // compact baffled monopole is p(t) = -rho A w V sin(w (t - r/c)) / (2 pi r).
     let (w, v, area, r) = (2000.0, 0.01, 0.02, 3.0);
-    for record in [AIR, "ambient 293.15 70927.5 0", "ambient mixture 293.15 101325 mole 1 CO2 1"] {
+    for record in [AIR, "ambient 293.15 70927.5 0", "ambient mixture 293.15 101325 mole 1 CO2 1",
+        "ambient mixture 293.15 101325 mole 2 He 0.8 O2 0.2"] {
         let text = format!("frankensim-modal-performance-v1\nsample_rate_hz 48000\nsamples 4800\n\
             full_scale_pa 1\nlimits 0.9 1 100000 1e9 1e7\ncompile_limits 64 256\nvoices 1\n\
             voice retain-state 1 1\nmode {w} 0 0 0 0 {v}\nport 0 1\nevents 0\n\

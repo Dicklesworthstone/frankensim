@@ -72,7 +72,7 @@ fn exterior_refusals_create_neither_audio_nor_sidecar() {
     let dir = directory(); let input = dir.join("refused.performance");
     let declaration = "exterior mixture 293.15 101325 mole 3 N2 0.4 O2 0.2 CO2 0.4";
     for (index, text) in [
-        EXTERIOR.replace(declaration, "exterior mixture 300 101325 mole 1 He 1"),
+        EXTERIOR.replace(declaration, "exterior mixture 300 101325 mole 1 Xe 1"),
         EXTERIOR.replace(declaration, "exterior mixture 300 101325 mole 1 H2O 1"),
         EXTERIOR.replace(declaration, "exterior 293.15 50000 0"),
         EXTERIOR.replace(declaration, &format!("{declaration}\n{declaration}")),
