@@ -708,6 +708,7 @@ dependencies = [
  "fs-contact",
  "fs-dcontact",
  "fs-duct",
+ "fs-em",
  "fs-evidence",
  "fs-exec",
  "fs-feec",
@@ -763,6 +764,20 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-phs",
+]
+
+[[package]]
+name = "fs-em"
+version = "0.0.1"
+dependencies = [
+ "fs-feec",
+ "fs-la",
+ "fs-material",
+ "fs-phs",
+ "fs-qty",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
