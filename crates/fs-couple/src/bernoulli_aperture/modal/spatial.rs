@@ -13,6 +13,8 @@ struct SpatialTrial {
     dp: f64,
     residual: [f64; MAX_MODES],
     scale: [f64; MAX_MODES],
+    flow_residual: f64,
+    flow_scale: f64,
 }
 impl SpatialTrial {
     fn norm(&self, n: usize) -> f64 {
@@ -157,7 +159,33 @@ impl ModalAperture {
                 residual[i] = velocity[i] - predicted;
                 scale[i] = velocity[i].abs() + predicted.abs() + free[i].abs();
             }
+            // dp balanced the PREDICTED swept flow; the frame reports this
+            // iterate, so accepting it leaves -sum a_i r_i in the flow balance.
+            // ModalFlow certifies that against relative_tolerance times the
+            // |jet|+|swept|+|body|+|wave| scale with no absolute term, which the
+            // per-mode test (absolute velocity_tolerance_m_s) does not imply.
+            // Hold half of that budget here, on the smaller scale without |wave|.
+            let jet = match self.viscous_slit {
+                Some(law) => closure
+                    .viscous_flow(law, &middle[..n], self.spec.density_kg_m3, dp)?
+                    .flow_m3_s,
+                None => crate::bernoulli_aperture::moving::volume_flow(
+                    self.spec.width_m,
+                    closure.open_area_m2(&middle[..n])? / self.spec.width_m,
+                    dp,
+                    self.spec.density_kg_m3,
+                ),
+            };
+            let mut flow_residual = 0.0;
+            let mut swept = 0.0;
+            for i in 0..n {
+                flow_residual += areas[i] * residual[i];
+                swept -= areas[i] * velocity[i];
+            }
+            let flow_scale = jet.abs() + swept.abs() + drive.body_flow_m3_s.abs();
             if !dp.is_finite()
+                || !flow_residual.is_finite()
+                || !flow_scale.is_finite()
                 || residual[..n]
                     .iter()
                     .chain(&scale[..n])
@@ -172,14 +200,17 @@ impl ModalAperture {
                 dp,
                 residual,
                 scale,
+                flow_residual,
+                flow_scale,
             })
         };
         let resolved = |t: &SpatialTrial| {
-            (0..n).all(|i| {
-                t.residual[i].abs()
-                    <= self.spec.limits.velocity_tolerance_m_s
-                        + self.spec.limits.relative_tolerance * t.scale[i]
-            })
+            t.flow_residual.abs() <= 0.5 * self.spec.limits.relative_tolerance * t.flow_scale
+                && (0..n).all(|i| {
+                    t.residual[i].abs()
+                        <= self.spec.limits.velocity_tolerance_m_s
+                            + self.spec.limits.relative_tolerance * t.scale[i]
+                })
         };
         let mut velocity = [0.0; MAX_MODES];
         velocity[..n].copy_from_slice(free);
