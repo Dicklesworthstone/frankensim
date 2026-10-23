@@ -59,9 +59,12 @@ mod friction;
 pub mod design;
 /// Explicit broadband receiver block over the same parser and force compiler.
 pub mod broadband;
+/// Observer transfers from declared modal geometry and the surrounding gas.
+pub mod radiation;
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
+use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
 use fs_math::c64::C64;
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
@@ -132,12 +135,15 @@ pub struct ModalPerformanceInfo {
     pub modes: usize,
     /// Number of authored physical-force assignments (not expanded modal controls).
     pub force_events: usize,
+    /// Gas and distance of a `radiation compact-baffled` block, when present.
+    pub radiation: Option<radiation::CompactRadiationInfo>,
 }
 
 /// A completely decoded and admitted performance, ready for block rendering.
 /// The runtime owns the data: no source file is reopened during the render.
 pub struct ModalPerformance {
     info: ModalPerformanceInfo,
+    gas_record: Option<GasRecord>,
     renderer: ScheduledRenderer,
 }
 
@@ -151,6 +157,13 @@ pub enum ModalPerformanceError {
         /// Violated syntax or resource rule.
         what: &'static str,
     },
+    /// The declared radiation gas was refused by its material owner.
+    Gas {
+        /// One-based line of the `ambient` record.
+        line: usize,
+        /// Original material refusal.
+        source: fs_material::MaterialError,
+    },
     /// The same model, preload, projection or scheduling refusal as the native API.
     Render(RenderError),
 }
@@ -158,6 +171,7 @@ impl core::fmt::Display for ModalPerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Input { line, what } => write!(f, "modal performance line {line}: {what}"),
+            Self::Gas { line, source } => write!(f, "modal performance line {line}: ambient gas refused: {source}"),
             Self::Render(error) => write!(f, "modal performance: {error}"),
         }
     }
@@ -183,12 +197,43 @@ impl ModalPerformance {
     /// Malformed, oversized or incomplete input; invalid physical data; and any
     /// existing modal-state, preload, projection or schedule admission refusal.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, ModalPerformanceError> {
-        ParsedPerformance::from_bytes(bytes, max_block)?.compile()
+        Self::from_bytes_with_gas_sources(bytes, max_block, None)
+    }
+
+    /// [`ModalPerformance::from_bytes`], also admitting a trailing
+    /// `radiation compact-baffled` block (see [`radiation`]). Its gas record may
+    /// be `thermochemical` only with an explicit source registry. The input hash
+    /// binds every byte, block included.
+    ///
+    /// # Errors
+    /// As [`ModalPerformance::from_bytes`], plus a refused gas or radiation block.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, ModalPerformanceError> {
+        let block = std::str::from_utf8(bytes).ok()
+            .and_then(|text| radiation::CompactRadiation::offset(text).map(|offset| (text, offset)));
+        let Some((text, offset)) = block else {
+            return ParsedPerformance::from_bytes(bytes, max_block)?.compile();
+        };
+        if bytes.len() > MAX_MODAL_PERFORMANCE_BYTES {
+            return Err(input(1, "input exceeds 4 MiB or callback size is outside 1..=65536"));
+        }
+        let radiation = radiation::CompactRadiation::read(text, offset, sources)?;
+        let mut performance = ParsedPerformance::from_bytes_with(bytes, offset, max_block, Some(&radiation))?
+            .compile()?;
+        performance.gas_record = Some(radiation.gas_record);
+        Ok(performance)
     }
 
     /// Read the frozen input description without advancing the renderer.
     #[must_use]
     pub const fn info(&self) -> ModalPerformanceInfo { self.info }
+
+    /// The radiation block's gas record and any thermochemical receipts.
+    #[must_use]
+    pub const fn gas_record(&self) -> Option<&GasRecord> { self.gas_record.as_ref() }
 
     /// Move the admitted runtime to the existing scheduler/audio export APIs.
     #[must_use]
@@ -211,10 +256,22 @@ struct ParsedPerformance {
 
 impl ParsedPerformance {
     fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, ModalPerformanceError> {
+        Self::from_bytes_with(bytes, bytes.len(), max_block, None)
+    }
+
+    /// Parse the mechanical records in `bytes[..mechanics_len]`; with a radiation
+    /// block, its computed transfers replace the (zero) authored ones. The hash
+    /// covers all of `bytes`.
+    fn from_bytes_with(
+        bytes: &[u8],
+        mechanics_len: usize,
+        max_block: usize,
+        radiation: Option<&radiation::CompactRadiation>,
+    ) -> Result<Self, ModalPerformanceError> {
         if bytes.len() > MAX_MODAL_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(input(1, "input exceeds 4 MiB or callback size is outside 1..=65536"));
         }
-        let text = std::str::from_utf8(bytes).map_err(|_| input(1, "input must be UTF-8"))?;
+        let text = std::str::from_utf8(&bytes[..mechanics_len]).map_err(|_| input(1, "input must be UTF-8"))?;
         let mut reader = Reader { lines: text.lines(), line: 0 };
         let schema = match text.lines().next().and_then(|line| line.split_ascii_whitespace().next()) {
             Some(MODAL_PERFORMANCE_SCHEMA) => MODAL_PERFORMANCE_SCHEMA,
@@ -255,9 +312,10 @@ impl ParsedPerformance {
             return Err(input(reader.line, "voices must be in 1..=64"));
         }
         let mut voices = Vec::with_capacity(voice_count);
+        let mut voice_modes = Vec::with_capacity(voice_count);
         let mut total_modes = 0;
         let mut total_weights = 0;
-        for _ in 0..voice_count {
+        for voice_index in 0..voice_count {
             let mut row = reader.row("voice")?;
             let kind = row.word()?;
             let is_free_mass = matches!(kind, "free-mass" | "free-mass-preload");
@@ -280,6 +338,7 @@ impl ParsedPerformance {
             row.finish()?;
             total_modes += modes;
             total_weights += weights;
+            voice_modes.push(modes);
             let model = if is_free_mass {
                 let mut row = reader.row("mass")?;
                 let mass_kg = row.scalar()?;
@@ -290,18 +349,29 @@ impl ParsedPerformance {
                     return Err(input(row.line, "free-mass preload cannot discard nonzero initial position/velocity"));
                 }
                 row.finish()?;
+                if let Some(radiation) = radiation {
+                    radiation.transfer(voice_index, 0, 0.0, reader.line)?;
+                }
                 ModalAcousticTimeModel::try_free_mass(sample_rate_hz, mass_kg,
                     displacement_m, velocity_m_s, budget).map_err(RenderError::Modal)?
             } else {
                 let mut model_modes = Vec::with_capacity(modes);
                 let mut states = Vec::with_capacity(modes);
-                for _ in 0..modes {
+                for mode_index in 0..modes {
                     let mut row = reader.row("mode")?;
-                    model_modes.push(ModalAcousticMode {
+                    let mut mode = ModalAcousticMode {
                         angular_frequency_rad_s: row.scalar()?,
                         damping_ratio: row.scalar()?,
                         pressure_per_modal_velocity: C64::new(row.scalar()?, row.scalar()?),
-                    });
+                    };
+                    if let Some(radiation) = radiation {
+                        if mode.pressure_per_modal_velocity != C64::ZERO {
+                            return Err(input(row.line, "a radiation block derives every transfer; authored H must be zero"));
+                        }
+                        mode.pressure_per_modal_velocity =
+                            radiation.transfer(voice_index, mode_index, mode.angular_frequency_rad_s, row.line)?;
+                    }
+                    model_modes.push(mode);
                     let state = ModalAcousticState {
                         displacement_m_sqrt_kg: row.scalar()?,
                         velocity_m_sqrt_kg_per_s: row.scalar()?,
@@ -397,6 +467,9 @@ impl ParsedPerformance {
         if reader.lines.next().is_some() {
             return Err(input(reader.line + 1, "unexpected trailing record"));
         }
+        if let Some(radiation) = radiation {
+            radiation.check_counts(&voice_modes, reader.line + 1)?;
+        }
         let force_config = ForceRenderConfig {
             sample_rate_hz, max_block, max_events: event_count, max_controls, max_projection_terms,
         };
@@ -411,7 +484,8 @@ impl ParsedPerformance {
         Ok(Self {
             info: ModalPerformanceInfo { schema, connections: connection_count, contacts: contact_count, friction_contacts: friction_count,
                 sample_rate_hz, samples, full_scale_pa, input_hash: hash_domain(domain, bytes),
-                voices: voice_count, modes: total_modes, force_events: event_count },
+                voices: voice_count, modes: total_modes, force_events: event_count,
+                radiation: radiation.map(radiation::CompactRadiation::info) },
             voices, events, force_config, coupled, contact, multiple, frictions,
         })
     }
@@ -441,7 +515,7 @@ impl ParsedPerformance {
             }
             None => (ScheduledRenderer::from_modal_forces(voices, events, force_config)?, 0, MODAL_PERFORMANCE_HASH_DOMAIN),
         };
-        Ok(ModalPerformance { info, renderer })
+        Ok(ModalPerformance { info, gas_record: None, renderer })
     }
 }
 

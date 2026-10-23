@@ -71,6 +71,34 @@ and multiply-add terms, not elapsed time. The loader additionally caps bytes at
 expanded controls at 262144, projection terms at 16777216 and samples at 28800000.
 These are admission ceilings, not performance guarantees.
 
+## Transfers from geometry and the surrounding gas
+
+Instead of authoring H, a performance can declare its radiating geometry and
+gas in a block after its last force event (see `modal-radiating.performance`):
+
+```text
+radiation compact-baffled
+ambient GAS_RECORD
+observer DISTANCE_M
+areas MODE_COUNT A_0 ... A_LAST
+... exactly one areas row per voice, in voice order ...
+```
+
+`A_k` is the signed modal volume `integral(phi_k dA)` of the baffled face, in
+m^2/sqrt(kg) in the file's mass-normalized basis. `GAS_RECORD` is the shared
+declaration used by every file-driven path: `T_K P_PA RH`, `mixture ...`, or
+`thermochemical ...` with `--gas-component` sources. Each mode then observes
+`H_k = -i omega_k rho A_k exp(i omega_k r / c) / (2 pi r)`. Every mode row must
+carry `0 0` for its H fields, and a free coordinate needs a zero area. A gas
+that does not parse or resolve refuses the file; it never falls back to air.
+
+The narrow-band realization of this H is exactly `rho A qddot(t - r/c) / (2 pi
+r)` for a steady sinusoid at each mode's natural frequency. Density scales it,
+and the sound speed sets each mode's phase lag. Transients are not retarded,
+and no radiation reaction, absorption or directivity is added. The block
+cannot be combined with `broadband`. The sidecar records the resolved gas and
+the distance.
+
 ## Replay and scope
 
 An independent v1 performance can opt into computed broadband receivers by

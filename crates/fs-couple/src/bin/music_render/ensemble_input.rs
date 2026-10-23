@@ -120,12 +120,13 @@ fn load_with_gas_sources(
     if bytes.len() > max_bytes { return Err(format!("ensemble source exceeds its {max_bytes}-byte input budget")); }
     let result = match input.kind {
         Kind::Modal => {
-            let p = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let p = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
+            let gas_json=super::thermochemical::provenance(p.gas_record().map_or(&[][..], std::slice::from_ref));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: i.voices, modes: i.modes, controls: 0, exterior_json: String::new(),
+                components: i.voices, modes: i.modes, controls: 0, exterior_json: gas_json,
             })
         }
         Kind::Bow => {

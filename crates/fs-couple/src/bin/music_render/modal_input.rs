@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use fs_material::gas_species::input::ThermochemicalSources;
 use fs_couple::pcm_wav::observation::DecimatedRenderer;
 use fs_couple::render::schedule::force::file::{
     MAX_MODAL_PERFORMANCE_BYTES, MODAL_PERFORMANCE_SCHEMA, MODAL_CONTACT_PERFORMANCE_SCHEMA,
@@ -41,7 +42,10 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
     Ok((*input, *output, block.unwrap_or(512), decimate))
 }
 
-pub(super) fn run(args: &[String]) -> Result<(), String> {
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let (input, output, block, decimate) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
@@ -57,8 +61,17 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     ) {
         return broadband::run(&bytes, output, &sidecar, block, decimate);
     }
-    let performance = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+    let performance = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources)
+        .map_err(|e| e.to_string())?;
     let info = performance.info();
+    // A radiation block derives every transfer from its gas and geometry.
+    let radiation_provenance = info.radiation.map_or_else(String::new, |r| format!(
+        ",\"radiation\":{{\"model\":\"compact-baffled narrow-band\",\"listener_m\":{:e},\
+         \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
+         \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}}}}{}",
+        r.listener_m, r.gas.temperature, r.gas.pressure, r.gas.density, r.gas.sound_speed,
+        r.gas.water_mole_fraction,
+        super::thermochemical::provenance(performance.gas_record().map_or(&[][..], core::slice::from_ref))));
     if !decimate && info.sample_rate_hz != RATE {
         return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());
     }
@@ -115,7 +128,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
          \"modal_input\":{{\"schema\":\"{input_schema}\",\"blake3\":\"{input_hash}\",\
-         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls}{coupling_provenance}{observation_provenance},\
+         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls}{coupling_provenance}{observation_provenance}{radiation_provenance},\
          \"model_scope\":\"authored reduced model; no physical-validation claim\"}}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.voices, info.modes, info.force_events,

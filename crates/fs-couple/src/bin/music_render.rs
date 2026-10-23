@@ -365,8 +365,8 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|arg| arg == "modal") {
-        if gas_registry.is_some() || gas_options.record.is_some() { fail("modal input has no gas consumer"); }
-        modal_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("modal gas records belong in the performance file's radiation block"); }
+        modal_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "voice") {
