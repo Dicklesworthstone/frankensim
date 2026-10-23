@@ -148,3 +148,56 @@ fn the_command_reports_the_gas_and_refuses_an_unresolved_one_without_artifacts()
     assert!(String::from_utf8_lossy(&result.stdout).contains("ambient gas refused"));
     assert!(!refused.exists() && !refused.with_extension("provenance.json").exists());
 }
+
+#[test]
+fn renders_whose_radiation_ignores_the_air_say_so_in_their_receipt() {
+    const MARK: &str = "\"radiation\":\"authored, gas-invariant\"";
+    let dir = directory();
+    let sidecar = |wav: &Path| std::fs::read_to_string(wav.with_extension("provenance.json")).unwrap();
+    let authored = dir.join("authored.performance");
+    std::fs::write(&authored, include_str!("../examples/modal-ports.performance")).unwrap();
+    let derived = dir.join("derived.performance");
+    std::fs::write(&derived, INPUT).unwrap();
+    let (a, d) = (dir.join("authored.wav"), dir.join("derived.wav"));
+    assert!(invoke(&authored, &a).status.success());
+    assert!(invoke(&derived, &d).status.success());
+    assert!(sidecar(&a).contains(MARK));
+    assert!(!sidecar(&d).contains("gas-invariant"));
+    let string = dir.join("string.wav");
+    let result = Command::new(env!("CARGO_BIN_EXE_music_render")).arg("string").arg(&string)
+        .args(["--seconds", "0.01"]).output().unwrap();
+    assert!(result.status.success());
+    assert!(sidecar(&string).contains(MARK));
+    // In an ensemble only the authored modal part is marked; the plate's gas is declared.
+    let plate = dir.join("plate.performance");
+    std::fs::write(&plate, include_str!("../examples/plate-mesh.performance")).unwrap();
+    let ensemble = dir.join("ensemble.wav");
+    let result = Command::new(env!("CARGO_BIN_EXE_music_render")).arg("ensemble").arg(&ensemble)
+        .args(["--full-scale-pa", "1", "--block", "37"]).arg("--modal").arg(&authored)
+        .arg("--plate").arg(&plate).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+    let receipt = sidecar(&ensemble);
+    assert_eq!(receipt.matches("gas-invariant").count(), 1, "{receipt}");
+    let modal = receipt.find("\"kind\":\"modal\"").unwrap();
+    let plate_part = receipt.find("\"kind\":\"plate\"").unwrap();
+    let mark = receipt.find(MARK).unwrap();
+    assert!(modal < mark && mark < plate_part, "{receipt}");
+}
+
+#[test]
+fn computed_broadband_receivers_are_marked_gas_invariant_too() {
+    // The broadband unit test's constant producer: its samples carry no declared gas.
+    let text = "frankensim-modal-performance-v1\nsample_rate_hz 48000\nsamples 41\nfull_scale_pa 1\n\
+        limits 0.9 1 100000 1000000000 10000000\ncompile_limits 4 32\nvoices 1\nvoice retain-state 1 1\n\
+        mode 3141.592653589793 0.01 0 0 0 0\nport 0 1\nevents 2\nforce 0 0 0 1\nforce 13 0 0 0\n\
+        broadband 1\ntransfer test:computed-constant 0 0.03 1 4 1 1e-6 2 1\nfrequency 100 2 -0.3\n\
+        frequency 300 2 -0.3\nwithheld 200 2 -0.3\n";
+    let dir = directory();
+    let input = dir.join("broadband.performance");
+    std::fs::write(&input, text).unwrap();
+    let output = dir.join("broadband.wav");
+    let result = invoke(&input, &output);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+    let receipt = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    assert!(receipt.contains("\"radiation\":\"producer transfer samples, gas-invariant\""), "{receipt}");
+}

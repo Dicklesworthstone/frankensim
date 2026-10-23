@@ -64,8 +64,10 @@ pub(super) fn run_with_gas_sources(
     let performance = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources)
         .map_err(|e| e.to_string())?;
     let info = performance.info();
-    // A radiation block derives every transfer from its gas and geometry.
-    let radiation_provenance = info.radiation.map_or_else(String::new, |r| format!(
+    // A radiation block derives every transfer from its gas and geometry;
+    // without one, the authored transfers ignore the air, and the receipt says so.
+    let radiation_provenance = info.radiation.map_or_else(
+        || ",\"radiation\":\"authored, gas-invariant\"".to_string(), |r| format!(
         ",\"radiation\":{{\"model\":\"compact-baffled narrow-band\",\"listener_m\":{:e},\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}}}}{}",

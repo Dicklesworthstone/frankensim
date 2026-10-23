@@ -122,7 +122,10 @@ fn load_with_gas_sources(
         Kind::Modal => {
             let p = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
-            let gas_json=super::thermochemical::provenance(p.gas_record().map_or(&[][..], std::slice::from_ref));
+            let gas_json = match p.gas_record() {
+                Some(record) => super::thermochemical::provenance(std::slice::from_ref(record)),
+                None => ",\"radiation\":\"authored, gas-invariant\"".to_string(),
+            };
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,

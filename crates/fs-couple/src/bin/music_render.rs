@@ -543,7 +543,12 @@ fn main() {
             }
             reed_context(samples, block, &air, &duct)
         }
-        "string" => string_context(block),
+        "string" => {
+            // The pinned fixture's transfer is an authored number: say the air
+            // cannot change this sound, where a reader of the receipt will see it.
+            ambient_provenance = ",\"radiation\":\"authored, gas-invariant\"".to_string();
+            string_context(block)
+        }
         _ => fail("fixture must be `reed` or `string`"),
     };
 
