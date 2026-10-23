@@ -13,6 +13,10 @@ use crate::{CorrelationModel, UncertaintyKind, UqPlan, UqStatus};
 #[path = "product_sensitivity_checkpoint.rs"]
 mod checkpoint;
 
+/// Recoverable concurrent physical evaluations of the original Sobol design.
+pub mod batch;
+pub use batch::{SobolBatchExecution, SobolBatchReport};
+
 /// Estimated contribution of one independently distributed physical input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SobolEffect {
@@ -174,7 +178,7 @@ impl SobolExecution {
         let count = allowance.min(self.plan.budget_max_samples - self.values.len());
         for _ in 0..count {
             if cancelled() { self.status = UqStatus::Cancelled; return self.report(); }
-            let parameters = match self.next_parameters() {
+            let parameters = match self.parameters(self.values.len()) {
                 Ok(parameters) => parameters,
                 Err(reason) => return self.fail(reason.into()),
             };
@@ -205,15 +209,15 @@ impl SobolExecution {
         self.report()
     }
 
-    fn next_parameters(&mut self) -> Result<&[f64], &'static str> {
-        let row = self.values.len() / self.width;
+    fn parameters(&mut self, ordinal: usize) -> Result<&[f64], &'static str> {
+        let row = ordinal / self.width;
         if self.cached_row != Some(row) {
             // 2*row+1 < total budget <= 1_000_000, inside the sampler's u32 cap.
             self.a = sample_parameters(&self.plan, None, 2 * row)?;
             self.b = sample_parameters(&self.plan, None, 2 * row + 1)?;
             self.cached_row = Some(row);
         }
-        match self.values.len() % self.width {
+        match ordinal % self.width {
             0 => Ok(&self.a),
             1 => Ok(&self.b),
             slot => {
