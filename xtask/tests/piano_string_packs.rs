@@ -58,12 +58,13 @@ const PIANO_FIXTURES: [(&str, [&str; 4]); 6] = [
 ];
 
 /// Loss packs the grand piano's material-damping board loads (plain claim packs).
-const BOARD_LOSS_FIXTURES: [&str; 5] = [
+const BOARD_LOSS_FIXTURES: [&str; 6] = [
     "spruce-sitka-loss-moisture-qiu2026",
     "spruce-sitka-loss-ono1996",
     "maple-sugar-loss-ono1996",
     "spruce-norway-loss-frequency-spycher2008",
     "spruce-norway-loss-frequency-moisture-merhar2025",
+    "pine-loss-longitudinal-bremaud2012",
 ];
 
 /// Compile one committed seed manifest as a material-state pack, exactly as the piano tools do.
