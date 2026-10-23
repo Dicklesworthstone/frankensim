@@ -2,6 +2,7 @@
 //! Proposal observations are not samples from the physical target distribution.
 mod pilot;
 mod recovery;
+mod decision;
 
 use super::*;
 use fs_uq::{ImportanceConfig, ImportanceExecution, ImportanceReport};
@@ -40,11 +41,14 @@ fn finite(text: &str, name: &str) -> Result<f64> {
 }
 
 pub(super) fn validate_options(options: &Options) -> Result<()> {
-    if options.importance.is_some() && (options.compliance.is_some() || options.design.is_some()
+    if options.importance.is_some() && (options.design.is_some()
         || options.qmc_replicates.is_some() || options.sobol_sensitivity || options.shapley_sensitivity
         || options.adjoint_mean_control || options.polynomial.is_some())
     {
-        return Err(bad("importance requires a fixed experiment without other sampling modes, mean controls or decision flags"));
+        return Err(bad("importance cannot combine other sampling modes, mean controls or candidate selection"));
+    }
+    if matches!(options.importance.as_ref(), Some(Settings::Pilot(_))) && options.compliance.is_some() {
+        return Err(bad("confidence decisions currently require a fixed --importance proposal"));
     }
     Ok(())
 }
@@ -56,7 +60,7 @@ pub(super) fn execute(
         Settings::Fixed(proposal) => proposal,
         Settings::Pilot(settings) => return pilot::execute(base_text, base, config, options, *settings),
     };
-    if options.checkpoint.is_some() || options.resume.is_some() {
+    if options.checkpoint.is_some() || options.resume.is_some() || options.compliance.is_some() {
         return recovery::execute(base_text, base, config, options, proposal);
     }
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
@@ -163,8 +167,7 @@ mod tests {
         for other in [vec!["--importance", "0.5,0"], vec!["--importance-pilot", "1,2,0.2,0.5,1,8"], vec!["--pce", "1,6"],
             vec!["--pce-mean", "1,6,8"], vec!["--sensitivity", "sobol"],
             vec!["--sensitivity", "shapley"], vec!["--qmc-replicates", "2"],
-            vec!["--mean-control", "adjoint"], vec!["--max-new-samples", "0"],
-            vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"]]
+            vec!["--mean-control", "adjoint"], vec!["--max-new-samples", "0"]]
         {
             let fixed = args(&["--importance", "0.2,3"]);
             for reverse in [false, true] {
