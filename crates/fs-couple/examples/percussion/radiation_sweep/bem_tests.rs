@@ -67,9 +67,9 @@ fn parallel_real_bem_preserves_stereo_filters_pcm_and_passive_loads() {
         // reciprocal fixture exercises the one-way branch with NO load bank.
         let loaded = image == radiation_spec::Image::Collocation;
         let (serial, serial_load) = bake_scene_image_with_threads(
-            &boundary, &receivers, spec, &gate, loaded, false, 1).unwrap();
+            &boundary, &receivers, spec, Medium::air(), &gate, loaded, false, 1).unwrap();
         let (parallel, parallel_load) = bake_scene_image_with_threads(
-            &boundary, &receivers, spec, &gate, loaded, false, 4).unwrap();
+            &boundary, &receivers, spec, Medium::air(), &gate, loaded, false, 4).unwrap();
         same_bakes(&serial, &parallel);
         assert_eq!(impulse_response(&serial), impulse_response(&parallel));
         assert_eq!(serial_load.is_some(), loaded);
@@ -95,7 +95,7 @@ fn parallel_real_bem_keeps_budget_band_and_cancellation_refusals() {
             radiation_spec::Spec { band_hz: [40.0, 20_000.0], ..spec }] {
             let gate = CancelGate::new_clock_free();
             let refusal = |threads| bake_scene_image_with_threads(
-                &boundary, &receivers, cfg, &gate, false, false, threads)
+                &boundary, &receivers, cfg, Medium::air(), &gate, false, false, threads)
                 .err().expect("bounded work or unresolved band must refuse").to_string();
             assert_eq!(refusal(1), refusal(4));
         }
@@ -103,7 +103,7 @@ fn parallel_real_bem_keeps_budget_band_and_cancellation_refusals() {
         gate.request();
         for threads in [1, 4] {
             let error = bake_scene_image_with_threads(
-                &boundary, &receivers, spec, &gate, false, false, threads)
+                &boundary, &receivers, spec, Medium::air(), &gate, false, false, threads)
                 .err().expect("cancelled preparation must refuse");
             assert_eq!(error.to_string(), "radiation preparation cancelled");
         }

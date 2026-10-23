@@ -121,10 +121,11 @@ impl Boundary {
     /// The circular aperture must lie within one actual planar sidewall facet.
     /// It may cross that facet's axial subdivisions, which are retriangulated.
     /// Failure leaves no partially usable candidate. No mechanical state changes.
+    /// `medium` is the exterior gas the aperture radiates into (the instrument's ambient).
     pub(crate) fn with_sidewall_aperture(self,port:NeckRadiationPort,azimuth:f64,
-        axial_from_top:f64,depth:f64)->Result<Self,Error>
+        axial_from_top:f64,depth:f64,medium:fs_bem::helmholtz::Medium)->Result<Self,Error>
     {
-        let radius=(port.area_m2/PI).sqrt();let medium=fs_bem::helmholtz::Medium::air();
+        let radius=(port.area_m2/PI).sqrt();
         if ![radius,port.volume_weight_m2_per_sqrt_kg,port.effective_length_m,depth].iter().all(|x|x.is_finite() && *x>0.0)
             || !azimuth.is_finite() || !axial_from_top.is_finite()
             || self.weights.len()>=MAX_INPUTS || self.state_modes.contains(&port.coordinate)

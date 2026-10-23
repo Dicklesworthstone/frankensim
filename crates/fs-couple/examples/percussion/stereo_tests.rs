@@ -70,9 +70,9 @@ fn whole_band_cbie_uses_a_conservative_interior_resonance_bound() {
 fn shared_bem_source_reproduces_independent_spatial_receiver_bakes() {
     let boundary=tetrahedron();
     let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
-    let pair=bake_receivers(&boundary,&receivers).unwrap();let mut different=false;
+    let pair=bake_receivers(&boundary,&receivers,Medium::air()).unwrap();let mut different=false;
     for (channel,&receiver) in receivers.iter().enumerate() {
-        let single=bake_receivers(&boundary,&[receiver]).unwrap();
+        let single=bake_receivers(&boundary,&[receiver],Medium::air()).unwrap();
         assert_eq!(pair[channel].pressure_gain,1.0);
         assert_eq!(pair[channel].propagation_delay_s,single[0].propagation_delay_s);
         for hz in [120.0,400.0,1200.0] {
@@ -85,9 +85,9 @@ fn shared_bem_source_reproduces_independent_spatial_receiver_bakes() {
         }
     }
     assert!(different,"distinct points must observe distinct Green responses");
-    assert!(bake_receivers(&boundary,&[]).is_err());
-    assert!(bake_receivers(&boundary,&[receivers[0];3]).is_err());
-    assert!(bake_receivers(&boundary,&[receivers[0],Receiver::FinitePoint([0.0;3])]).is_err());
+    assert!(bake_receivers(&boundary,&[],Medium::air()).is_err());
+    assert!(bake_receivers(&boundary,&[receivers[0];3],Medium::air()).is_err());
+    assert!(bake_receivers(&boundary,&[receivers[0],Receiver::FinitePoint([0.0;3])],Medium::air()).is_err());
 }
 
 // Authored transfer fixtures test ONLY channel/decimator/physics plumbing. The
@@ -173,7 +173,7 @@ fn wider_radiation_band_uses_real_bem_and_independently_audited_receiver_filters
     let spec=radiation_spec::Spec {band_hz:[40.0,8000.0],training_intervals:64,max_order:24,
         subdivisions:2,max_panels:64,max_dense_work:1_000_000_000,..Default::default()};
     let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
-    let gate=CancelGate::new_clock_free();let result=bake_receivers_with_spec(&b,&receivers,spec,&gate).unwrap();
+    let gate=CancelGate::new_clock_free();let result=bake_receivers_with_spec(&b,&receivers,spec,Medium::air(),&gate).unwrap();
     assert_eq!(result.len(),2);assert_eq!(result[0].filters.len(),1);
     let refined=curved_aperture::uniform_refinement(&b,2,64,&gate).unwrap();
     let surface=SpherePanels::from_triangles(refined.triangles.clone()).unwrap();

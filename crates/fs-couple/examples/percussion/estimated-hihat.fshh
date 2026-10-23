@@ -29,3 +29,6 @@ pedal,0.010,-10
 pedal,0.012,-10
 pedal,0.016,0
 pedal,0.020,0
+# ambient: the air inside and around the instrument, one shared gas declaration
+# (T_K P_PA RH, or mixture/thermochemical; see examples/GAS_MIXTURES.md).
+ambient,293.15 101325 0

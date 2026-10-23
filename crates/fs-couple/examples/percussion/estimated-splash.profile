@@ -16,3 +16,6 @@ station,0.1016,0.0,0.0005
 # Optional physical reference details:
 # ring,radius_m,half_width_m,height_delta_m,thickness_delta_m
 # dent,center_x_m,center_y_m,radius_m,height_delta_m,thickness_delta_m
+# ambient: the air inside and around the instrument, one shared gas declaration
+# (T_K P_PA RH, or mixture/thermochemical; see examples/GAS_MIXTURES.md).
+ambient,293.15 101325 0

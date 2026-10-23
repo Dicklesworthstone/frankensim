@@ -118,7 +118,7 @@ pub(crate) fn prepare(e:Experiment,frames:usize,scale:f64,receivers:&[Receiver],
     let boundary=e.acoustics.as_ref().ok_or("missing feedback boundary")?;
     let sources=boundary.state_modes.clone();
     let reciprocal=e.air.as_ref().is_some_and(|a|a.coupling.neck_count()>0);
-    let (baked,model)=bake_scene_image(boundary,receivers,spec,gate,true,reciprocal)?;
+    let (baked,model)=bake_scene_image(boundary,receivers,spec,e.ambient.medium(),gate,true,reciprocal)?;
     if gate.is_requested() {return Err("radiation feedback cancelled before attachment".into());}
     let model=model.ok_or("missing admitted feedback model")?;
     let e=attach_model(e,&model,&sources)?;

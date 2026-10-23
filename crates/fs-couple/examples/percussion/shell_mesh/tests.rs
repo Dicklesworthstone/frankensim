@@ -6,7 +6,8 @@ use std::path::Path;
 
 fn reference_text() -> String {
     let spec = Specimen::reference(); let shell = spec.build().unwrap();
-    let mut s = format!("{HEADER}\nband_hz,50,1200\nstrike,0.06,0.01\n");
+    // Used on its own as the splash description, so it declares its air.
+    let mut s = format!("{HEADER}\nband_hz,50,1200\nstrike,0.06,0.01\nambient,293.15 101325 0\n");
     writeln!(s,"material,23,{:.17e},{:.17e},{:.17e}",spec.young_pa,spec.poisson,spec.density_kg_m3).unwrap();
     for (i,(p,h)) in shell.mesh.nodes.iter().zip(&shell.nodal_thickness_m).enumerate() {
         writeln!(s,"node,{},{:.17e},{:.17e},{:.17e},{:.17e}",100+3*i,p[0],p[1],p[2],h).unwrap();
@@ -19,9 +20,9 @@ fn reference_text() -> String {
 
 #[test]
 fn sparse_reordered_records_preserve_every_shape_thickness_and_material() {
-    let text = reference_text(); let (a,band,strike) = parse(&text).unwrap();
+    let text = reference_text(); let (a,band,strike,_) = parse(&text).unwrap();
     let mut lines:Vec<_> = text.lines().skip(1).collect(); lines.reverse();
-    let (b,b_band,b_strike) = parse(&format!("{HEADER}\n{}",lines.join("\n"))).unwrap();
+    let (b,b_band,b_strike,_) = parse(&format!("{HEADER}\n{}",lines.join("\n"))).unwrap();
     assert_eq!(a.mesh,b.mesh); assert_eq!(a.nodal_thickness_m,b.nodal_thickness_m);
     assert_eq!(a.mass_kg,b.mass_kg); assert_eq!(band,b_band); assert_eq!(strike,b_strike);
     let reference = Specimen::reference().build().unwrap();
@@ -35,7 +36,7 @@ fn sparse_reordered_records_preserve_every_shape_thickness_and_material() {
 
 #[test]
 fn supplied_geometry_changes_mechanics_without_hidden_profile_or_material_fallback() {
-    let text = reference_text(); let (old,_,_) = parse(&text).unwrap();
+    let text = reference_text(); let (old,_,_,_) = parse(&text).unwrap();
     let mut lines: Vec<_> = text.lines().map(String::from).collect();
     let node = lines.iter_mut().find(|l|l.starts_with("node,400,")).unwrap();
     let mut fields: Vec<_> = node.split(',').map(String::from).collect();
@@ -44,7 +45,7 @@ fn supplied_geometry_changes_mechanics_without_hidden_profile_or_material_fallba
     lines.push("material,99,90e9,0.3,7800".into());
     let face = lines.iter_mut().find(|l|l.starts_with("triangle,10,")).unwrap();
     *face = face.strip_suffix(",23").unwrap().to_string()+",99";
-    let (changed,_,_) = parse(&lines.join("\n")).unwrap();
+    let (changed,_,_,_) = parse(&lines.join("\n")).unwrap();
     assert_ne!(changed.mesh.nodes,old.mesh.nodes); assert_eq!(changed.mesh.tris,old.mesh.tris);
     assert_ne!(changed.mass_kg,old.mass_kg); assert_ne!(changed.sections[0].d,old.sections[0].d);
     let a = old.assemble(&[],fs_plate::shell::ShellSupport::Free).unwrap();
@@ -136,7 +137,7 @@ fn orthotropic_material_uses_one_global_axis_across_the_actual_cymbal_mesh() {
     for i in face_ids {
         lines[i]=lines[i].strip_suffix(",23").unwrap().to_string()+",99";
     }
-    let (shell,_,_)=parse(&lines.join("\n")).unwrap();
+    let (shell,_,_,_)=parse(&lines.join("\n")).unwrap();
     assert_ne!(shell.sections[0].d,shell.sections[1].d,
         "local D should rotate because facet frames differ while the global material axis does not");
     assert_eq!(shell.sections[0].density,8200.0);

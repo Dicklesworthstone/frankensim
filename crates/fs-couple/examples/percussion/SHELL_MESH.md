@@ -50,6 +50,9 @@ node,node_ID,x_m,y_m,z_m,thickness_m
 triangle,triangle_ID,node_a_ID,node_b_ID,node_c_ID,material_ID
 ```
 
+An optional `ambient,<gas record>` row declares the shell's air. A mesh used on
+its own as the splash description must declare it; profile-to-mesh export writes
+geometry only, so add the row before using an exported mesh on its own.
 `band_hz` and `strike` occur exactly once. The explicit default strike is needed
 because a general mesh has no unique radial meridian from which to infer one.
 `--strike-position-m X Y` still overrides it for a particular performance.

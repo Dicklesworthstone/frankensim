@@ -114,8 +114,10 @@ impl Boundary {
     /// Up to 12 conforming refinements resolve chart edges to a/2 near the mouth.
     /// maximum_terms bounds quadrature-point/panel searches. max_panels cannot
     /// exceed the existing BEM ceiling. Neither bound is a convergence claim.
+    /// `medium` is the exterior gas; its sound speed sets the compact-mouth limit.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_unrolled_sidewall_aperture(self, radius: f64, depth: f64, opening: SidewallAperture,
-        volume_port: NeckRadiationPort, max_panels: usize, gate: &CancelGate) -> Result<Self, Error>
+        volume_port: NeckRadiationPort, max_panels: usize, medium: Medium, gate: &CancelGate) -> Result<Self, Error>
     {
         if gate.is_requested() { return Err("aperture preparation cancelled".into()); }
         let a = opening.radius_m; let coordinate=volume_port.coordinate;
@@ -126,7 +128,7 @@ impl Boundary {
             || !volume_port.area_m2.is_finite() || volume_port.area_m2<=0.0
             || (nominal_area-volume_port.area_m2).abs()>1e-12*volume_port.area_m2
             || !volume_port.effective_length_m.is_finite() || volume_port.effective_length_m<=0.0
-            || std::f64::consts::TAU*1640.0/Medium::air().sound_speed*a.max(volume_port.effective_length_m)>0.3
+            || std::f64::consts::TAU*1640.0/medium.sound_speed*a.max(volume_port.effective_length_m)>0.3
             || !opening.azimuth_rad.is_finite() || !opening.axial_position_m.is_finite()
             || opening.axial_position_m-a<0.0 || opening.axial_position_m+a>depth
             || !(1..=64).contains(&opening.radial_rings) || !(8..=256).contains(&opening.angular_points)

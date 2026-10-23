@@ -168,10 +168,11 @@ fn inner_skin_pressure_excites_the_barrel_through_both_existing_cavity_images() 
     let volume = VolumeSpring { bulk_modulus_pa: 1.2*343.0*343.0, volume_m3: spec.volume_m3(), areas };
     let uniform = ImpactSystem::new(bodies.clone(), vec![], vec![], vec![volume], crate::config(32, DT)).unwrap();
     let (distributed, pressure) = cavity::build_with_pads_and_barrel(&films, &modes, bodies.clone(),
-        vec![], vec![], vec![], spec.radius_m, spec.depth_m, 32, DT, None, 0.0, Some((first,&barrel))).unwrap();
+        vec![], vec![], vec![], spec.radius_m, spec.depth_m, 32, DT, None, 0.0, Some((first,&barrel)),
+        AcousticMedium { rho0: 1.2, c0: 343.0 }).unwrap();
     let (prepared, same_pressure) = cavity::build_prepared_with_losses_and_barrel(&films, &modes, bodies,
         vec![], vec![], spec.radius_m, spec.depth_m, crate::mechanics::coupled_config(32,DT,false).unwrap(),
-        None, 0.0, Some((first,&barrel))).unwrap();
+        None, 0.0, Some((first,&barrel)), AcousticMedium { rho0: 1.2, c0: 343.0 }).unwrap();
     assert_eq!(distributed.state(), prepared.state());
     assert_eq!(pressure.coupling.structural_modes(), total);
     assert_eq!(same_pressure.coupling.structural_modes(), total);

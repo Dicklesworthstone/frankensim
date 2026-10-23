@@ -58,6 +58,7 @@ head,batter,0.000254,4000000000,0.38,1390,3000,0.001
 head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
 mesh,5,32
 band_hz,80,500
+ambient,293.15 101325 0
 ```
 
 `geometry` gives vibrating radius [m], cavity depth [m], and outer shell
@@ -73,7 +74,10 @@ means zero declared head drag, not fallback damping. The batter and resonant
 head can have different thicknesses, materials, tensions and losses.
 
 `mesh` gives shared radial intervals and azimuthal divisions. `band_hz` gives
-the explicit retained eigenfrequency window. The five base records are mandatory;
+the explicit retained eigenfrequency window. `ambient` gives the air inside and
+around the drum as one shared gas declaration: the enclosed volume spring (rho
+c^2), the distributed cavities, the neck admissions and the exterior radiation
+all use it. The six base records are mandatory;
 each head appears exactly once. Record order is free, and `#` starts a comment.
 Unknown records, duplicates, missing values, nonfinite parameters and invalid
 material domains refuse. Input reads are bounded to 64 KiB. Constitutive
@@ -122,3 +126,12 @@ tensor prestress to the original head pencil before eigenanalysis. See
 [TENSION.md](TENSION.md) for the SI law, complete example, tensile-domain checks
 and composition with contact, cavity, nonlinear heads and pressure rendering.
 Omitted or all-zero variations preserve the existing uniform-tension image.
+
+## Air
+
+The air is data, never a constant in code. The built-in reference instruments
+load the committed record `examples/dry-air-20c.gas`. An imported description
+declares its own `ambient,<gas record>` row, and `--gas-record FILE` overrides
+either. The record is the shared declaration (`T_K P_PA RH`, `mixture ...`, or
+`thermochemical ...`). A record that does not resolve refuses; there is no air
+default. Each run prints which declaration supplied the air.

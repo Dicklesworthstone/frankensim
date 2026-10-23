@@ -11,7 +11,12 @@ fn text(s: Spec) -> String {
     }
     out.push_str(&format!("mesh,{},{}\nband_hz,{:.17e},{:.17e}\n",
         s.radial_intervals,s.azimuths,s.band_hz[0],s.band_hz[1]));
+    out.push_str("ambient,293.15 101325 0\n");
     out
+}
+/// What `text` declares: the spec with its air read from the ambient row.
+fn declared(s: Spec) -> Spec {
+    Spec {ambient:crate::ambient::Ambient::described("293.15 101325 0").unwrap(),..s}
 }
 fn small() -> Spec { Spec {radial_intervals:2,azimuths:16,..Spec::reference()} }
 fn stroke() -> Stroke {Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])}}
@@ -22,9 +27,9 @@ fn complete_materials_and_mesh_round_trip_without_defaults() {
     spec.heads[0].tension_n_m=2456.7;spec.heads[1].young_pa=3.2e9;
     spec.heads[1].damping_ratio=0.0;spec.depth_m=0.20;
     let file=text(spec);
-    assert_eq!(Spec::read(&file).unwrap(),spec);
+    assert_eq!(Spec::read(&file).unwrap(),declared(spec));
     let mut records:Vec<_>=file.lines().skip(1).collect();records.reverse();
-    assert_eq!(Spec::read(&format!("# inputs, not certified measurements\n{HEADER}\n{}\n",records.join("\n"))).unwrap(),spec);
+    assert_eq!(Spec::read(&format!("# inputs, not certified measurements\n{HEADER}\n{}\n",records.join("\n"))).unwrap(),declared(spec));
     let film=spec.head(1).unwrap();
     assert_eq!(film.spec.young_pa,spec.heads[1].young_pa);
     assert_eq!(film.spec.thickness_m,spec.heads[1].thickness_m);
@@ -247,7 +252,7 @@ fn affine_and_harmonic_records_compose_in_either_order() {
     let mut records: Vec<_> = file.lines().skip(1).collect();
     records.reverse();
     let reversed = Spec::read(&format!("{HEADER}\n{}\n", records.join("\n"))).unwrap();
-    let mut expected = base;
+    let mut expected = declared(base);
     expected.tension_variation[0].constant_n_m = [120.0, 70.0, 10.0];
     expected.tension_variation[0].gradient_n_m2 = [1.0, -2.0, 3.0, 4.0];
     expected.tension_variation[0].harmonics_n_m[0] = [45.0, -12.0];
@@ -299,7 +304,7 @@ fn legacy_affine_and_explicit_zero_harmonics_preserve_the_head_pencil() {
         text(small())
     );
     let affine = Spec::read(&file).unwrap();
-    let mut expected = small();
+    let mut expected = declared(small());
     expected.tension_variation[0].constant_n_m = [120.0, 70.0, 10.0];
     expected.tension_variation[0].gradient_n_m2 = [1.0, -2.0, 3.0, 4.0];
     assert_eq!(affine, expected);

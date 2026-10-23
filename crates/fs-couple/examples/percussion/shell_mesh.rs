@@ -1,6 +1,7 @@
 //! Cold explicit shell-mesh input. All mechanics and radiation use fs-plate's
 //! original geometry, section, reduction and extrusion owners.
 use super::Error;
+use super::super::ambient::Ambient;
 use fs_plate::shell::ShellMesh;
 use fs_plate::shell::survey::{IsotropicMaterial, SurveyMaterial, MeshShell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,12 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_BYTES: usize = 8_388_608;
 pub const HEADER: &str = "frankensim-shell-mesh-v1";
 
-pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
+/// The optional `ambient,<gas record>` row is the shell's declared air; a shell
+/// used on its own must declare it (see `ambient`).
+pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2], Option<Ambient>), Error> {
     if text.len() > MAX_BYTES { return Err("shell mesh exceeds the 8 MiB input limit".into()); }
     let budget = super::super::mesh_budget();
     let mut nodes = BTreeMap::new(); let mut faces = BTreeMap::new();
     let mut materials = BTreeMap::<usize,SurveyMaterial>::new();
-    let mut band = None; let mut strike = None; let mut header = false;
+    let mut band = None; let mut strike = None; let mut header = false; let mut ambient = None;
     for (line, raw) in text.lines().enumerate() {
         let data = raw.split('#').next().unwrap_or("").trim();
         if data.is_empty() { continue; }
@@ -38,6 +41,9 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
                 band = Some(v);
             }
             "strike" if f.len() == 3 && strike.is_none() => { strike = Some([number(1)?,number(2)?]); }
+            "ambient" if f.len() == 2 && ambient.is_none() => {
+                ambient = Some(Ambient::described(f[1]).map_err(|e| format!("shell mesh line {}: {e}",line+1))?);
+            }
             "material" if f.len() == 5 && materials.len() < budget.max_triangles => {
                 let key = id(1)?;
                 let m = IsotropicMaterial { young_pa: number(2)?,poisson:number(3)?,density_kg_m3:number(4)? };
@@ -93,7 +99,7 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2]), Error> {
     }
     let shell = MeshShell::new_with_materials(mesh,thickness,&assigned,budget)?;
     super::super::playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,strike)?;
-    Ok((shell,band,strike))
+    Ok((shell,band,strike,ambient))
 }
 
 #[cfg(test)]

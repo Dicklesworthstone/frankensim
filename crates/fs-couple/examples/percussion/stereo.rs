@@ -43,13 +43,13 @@ pub fn admit_command(right:Option<[f64;3]>,command:&str)->Result<(),Error> {
     Ok(())
 }
 
-fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Error> {
-    bake_receivers_with_spec(boundary,receivers,radiation_spec::Spec::default(),&CancelGate::new_clock_free())
+fn bake_receivers(boundary:&Boundary,receivers:&[Receiver],medium:Medium)->Result<Vec<Bake>,Error> {
+    bake_receivers_with_spec(boundary,receivers,radiation_spec::Spec::default(),medium,&CancelGate::new_clock_free())
 }
 
 fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
-    gate:&CancelGate)->Result<Vec<Bake>,Error> {
-    Ok(bake_scene_with_spec(boundary,receivers,spec,gate,false)?.0)
+    medium:Medium,gate:&CancelGate)->Result<Vec<Bake>,Error> {
+    Ok(bake_scene_with_spec(boundary,receivers,spec,medium,gate,false)?.0)
 }
 
 /// Choose one operator for the whole band, using the actual closed boundary.
@@ -101,8 +101,8 @@ fn negative_beyond_solve_floor(solution:&fs_bem::helmholtz::RadiationSolution)->
 // The same BEM fields feed both pressure observers and (when selected) the
 // complete force/velocity matrix. One-way callers never construct a load.
 fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
-    gate:&CancelGate,load:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
-    bake_scene_image(boundary,receivers,spec,gate,load,false)
+    medium:Medium,gate:&CancelGate,load:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
+    bake_scene_image(boundary,receivers,spec,medium,gate,load,false)
 }
 
 // Preparation is shared with the collocation image, but a reciprocal source
@@ -141,17 +141,20 @@ struct FrequencySample {
     flux_defect: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bake_scene_image(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
-    gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
+    medium:Medium,gate:&CancelGate,load:bool,reciprocal:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
-    bake_scene_image_with_threads(boundary,receivers,spec,gate,load,reciprocal,
+    bake_scene_image_with_threads(boundary,receivers,spec,medium,gate,load,reciprocal,
         radiation_sweep::threads_from_env()?)
 }
 
 // Explicit worker count keeps tests independent of process-global environment
 // mutation. Every production front door selects it once, before preparation.
+// `medium` is the exterior gas: the instrument's declared ambient (see `ambient`).
+#[allow(clippy::too_many_arguments)]
 fn bake_scene_image_with_threads(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
-    gate:&CancelGate,load:bool,reciprocal:bool,threads:usize)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
+    medium:Medium,gate:&CancelGate,load:bool,reciprocal:bool,threads:usize)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
     // A vent can require the reciprocal image independently of file selection.
     // Ordinary one-way and loaded sources can now select it as well. Never
@@ -167,7 +170,7 @@ fn bake_scene_image_with_threads(boundary:&Boundary,receivers:&[Receiver],spec:r
     }
     let radius=boundary.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt())
         .fold(0.0_f64,f64::max);
-    let medium=Medium::air();let dt=1.0/f64::from(OUTPUT_RATE);
+    let dt=1.0/f64::from(OUTPUT_RATE);
     let refined=curved_aperture::uniform_refinement(boundary,spec.subdivisions,spec.max_panels,gate)?;
     let surface=SpherePanels::from_triangles(refined.triangles.clone())?;
     // Admit EVERY receiver against the actual boundary before a source solve.
@@ -320,7 +323,8 @@ pub(crate) fn render_receivers_with_spec(experiment:&mut Experiment,frames:usize
     receivers:&[Receiver],spec:radiation_spec::Spec,gate:&CancelGate)->Result<Vec<u8>,Error> {
     admit_render(experiment,frames,full_scale_pa)?;
     spec.admit_necks(experiment)?;
-    let baked=bake_receivers_with_spec(experiment.acoustics.as_ref().unwrap(),receivers,spec,gate)?;
+    let baked=bake_receivers_with_spec(experiment.acoustics.as_ref().unwrap(),receivers,spec,
+        experiment.ambient.medium(),gate)?;
     if gate.is_requested() {return Err("radiation preparation cancelled before mechanics".into());}
     render_baked_with_gate(experiment,frames,full_scale_pa,baked.as_slice(),gate)
 }

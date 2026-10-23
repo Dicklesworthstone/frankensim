@@ -40,7 +40,7 @@ fn one_way_thin_source_uses_its_own_pressure_field_and_keeps_both_receivers() {
     let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
     // Exercises explicit selection through the ordinary, non-feedback front
     // door. The reciprocal branch must not write into an absent impedance bank.
-    let (baked,load)=bake_scene_with_spec(&b,&receivers,cfg,&gate,false).unwrap();
+    let (baked,load)=bake_scene_with_spec(&b,&receivers,cfg,Medium::air(),&gate,false).unwrap();
     assert!(load.is_none());assert_eq!(baked.len(),2);
     assert!(baked.iter().all(|b|b.filters.len()==1 && b.pressure_gain==1.0));
     let surface=SpherePanels::from_triangles(b.triangles.clone()).unwrap();
@@ -94,9 +94,9 @@ fn refused_reciprocal_work_or_band_does_not_fall_back_to_collocation() {
     // Satisfies the collocation work preflight, but not the Galerkin owner.
     let low=radiation_spec::Spec {max_dense_work:1_000_000,..spec()};
     assert!(low.work(b.triangles.len(),1,1).is_ok());
-    assert!(bake_scene_with_spec(&b,&receiver,low,&gate,false).is_err());
+    assert!(bake_scene_with_spec(&b,&receiver,low,Medium::air(),&gate,false).is_err());
     gate.request();
-    assert!(bake_scene_with_spec(&b,&receiver,spec(),&gate,false).is_err());
+    assert!(bake_scene_with_spec(&b,&receiver,spec(),Medium::air(),&gate,false).is_err());
     let sphere=SpherePanels::icosphere(0.02,0).unwrap();
     let band=radiation_spec::Spec {band_hz:[40.0,10_000.0],max_dense_work:2_000_000_000,..spec()};
     let gate=CancelGate::new_clock_free();

@@ -108,11 +108,12 @@ impl InteriorPressure {
     }
 }
 
-fn basis(radius:f64,depth:f64,gate:&CancelGate)->Result<CylindricalCavity,Error> {
+// The enclosed gas is the instrument's declared ambient (see `ambient`).
+fn basis(radius:f64,depth:f64,medium:AcousticMedium,gate:&CancelGate)->Result<CylindricalCavity,Error> {
     Ok(CylindricalCavity::new(CylinderSpec {radius_m:radius,depth_m:depth,
         radial_intervals:32,maximum_azimuthal_order:4,maximum_axial_order:2,
         maximum_frequency_hz:1100.0,maximum_modes:8,eigen_residual_tolerance:1e-7},
-        AcousticMedium {rho0:1.2,c0:343.0},gate)?)
+        medium,gate)?)
 }
 
 /// Same piecewise-linear head displacement, sampled at three triangle points.
@@ -158,21 +159,21 @@ fn interface(films:&[TensionedDisk],modes:&[Vec<ModePair>],air:&CylindricalCavit
 /// would double it. Acoustic state only reaches exterior sound through head motion.
 #[allow(clippy::too_many_arguments)]
 pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
-    contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
-    ->Result<(ImpactSystem,InteriorPressure),Error> {
-    build_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,steps,dt_s,neck)
+    contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>,
+    medium:AcousticMedium)->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,steps,dt_s,neck,medium)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn build_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
-    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
-    ->Result<(ImpactSystem,InteriorPressure),Error> {
-    build_with_losses(films,modes,bodies,contacts,dampers,radius,depth,steps,dt_s,neck,0.0)
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>,
+    medium:AcousticMedium)->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_losses(films,modes,bodies,contacts,dampers,radius,depth,steps,dt_s,neck,0.0,medium)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn build_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
-    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
-    build_with_pads(films,modes,bodies,contacts,Vec::new(),dampers,radius,depth,steps,dt_s,neck,drag_per_s)
+    neck:Option<NeckOptions>,drag_per_s:f64,medium:AcousticMedium)->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_pads(films,modes,bodies,contacts,Vec::new(),dampers,radius,depth,steps,dt_s,neck,drag_per_s,medium)
 }
 /// Compliant exterior mutes share the nonlinear head/air solve. The cavity
 /// owner extends their physical rows with exact zeros on acoustic inertia.
@@ -180,9 +181,9 @@ pub fn build_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Ve
 pub fn build_with_pads(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,pads:Vec<fs_couple::render::plate::impact::felt::FeltPad>,
     dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
-    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
+    neck:Option<NeckOptions>,drag_per_s:f64,medium:AcousticMedium)->Result<(ImpactSystem,InteriorPressure),Error> {
     build_with_pads_and_barrel(films,modes,bodies,contacts,pads,dampers,radius,depth,
-        steps,dt_s,neck,drag_per_s,None)
+        steps,dt_s,neck,drag_per_s,None,medium)
 }
 
 /// The optional shell contributes actual inner-skin pressure work at its
@@ -191,15 +192,15 @@ pub fn build_with_pads(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<
 pub fn build_with_pads_and_barrel(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,pads:Vec<fs_couple::render::plate::impact::felt::FeltPad>,
     dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
-    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>)
-    ->Result<(ImpactSystem,InteriorPressure),Error> {
+    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>,
+    medium:AcousticMedium)->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     // Both head ranges remain the original prefix. Include every appended
     // striker before allocating cavity inertia; its coupling row stays zero.
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,barrel,&gate)?;
+        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,barrel,medium,&gate)?;
     let (system,coupling)=coupling.build_with_dampers(bodies,contacts,pads,dampers,config(steps,dt_s),&gate)?;
     Ok((system,InteriorPressure {coupling,first,second}))
 }
@@ -209,31 +210,31 @@ pub fn build_with_pads_and_barrel(films:&[TensionedDisk],modes:&[Vec<ModePair>],
 /// the resonant head. Appended inertia follows EVERY original solid coordinate.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prepared(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
-    contacts:Vec<Obstacle>,radius:f64,depth:f64,configuration:LinearImpactConfig)
+    contacts:Vec<Obstacle>,radius:f64,depth:f64,configuration:LinearImpactConfig,medium:AcousticMedium)
     ->Result<(LinearImpactSystem,InteriorPressure),Error> {
-    build_prepared_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,configuration)
+    build_prepared_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,configuration,medium)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn build_prepared_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
-    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig)
-    ->Result<(LinearImpactSystem,InteriorPressure),Error> {
-    build_prepared_with_losses(films,modes,bodies,contacts,dampers,radius,depth,configuration,None,0.0)
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
+    medium:AcousticMedium)->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    build_prepared_with_losses(films,modes,bodies,contacts,dampers,radius,depth,configuration,None,0.0,medium)
 }
 /// The same inputs as the reference: no drag, vent, or muffler is dropped to
 /// select the prepared image. All downstream budgets remain caller-supplied.
 #[allow(clippy::too_many_arguments)]
 pub fn build_prepared_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
-    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    neck:Option<NeckOptions>,drag_per_s:f64,medium:AcousticMedium)->Result<(LinearImpactSystem,InteriorPressure),Error> {
     build_prepared_with_losses_and_barrel(films,modes,bodies,contacts,dampers,radius,depth,
-        configuration,neck,drag_per_s,None)
+        configuration,neck,drag_per_s,None,medium)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_prepared_with_losses_and_barrel(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
-    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>)
-    ->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    neck:Option<NeckOptions>,drag_per_s:f64,barrel:Option<(usize,&super::barrel::Prepared)>,
+    medium:AcousticMedium)->Result<(LinearImpactSystem,InteriorPressure),Error> {
     if neck.is_some_and(|n|n.exterior_load) {
         return Err("an exterior-loaded neck requires the joint impact owner, not the linear-only modal image".into());
     }
@@ -241,7 +242,7 @@ pub fn build_prepared_with_losses_and_barrel(films:&[TensionedDisk],modes:&[Vec<
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("prepared cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        configuration.coupling.max_modes,neck,drag_per_s,barrel,&gate)?;
+        configuration.coupling.max_modes,neck,drag_per_s,barrel,medium,&gate)?;
     let (system,coupling)=coupling.build_linear_with_dampers(bodies,contacts,dampers,
         core::f64::consts::PI*radius*radius,configuration,&gate)?;
     eprintln!("mechanical image: prepared modal heads/wires plus simultaneous distributed-air/contact reactions; no wire homogenization or direct gas audio; real-time performance unqualified");
@@ -251,14 +252,14 @@ pub fn build_prepared_with_losses_and_barrel(films:&[TensionedDisk],modes:&[Vec<
 #[allow(clippy::too_many_arguments)]
 fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
     structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,drag_per_s:f64,
-    barrel:Option<(usize,&super::barrel::Prepared)>,gate:&CancelGate)
+    barrel:Option<(usize,&super::barrel::Prepared)>,medium:AcousticMedium,gate:&CancelGate)
     ->Result<InteriorPressure,Error> {
     validate_drag(drag_per_s)?;
     let heads=1+modes.iter().map(Vec::len).sum::<usize>();
     if structural<heads || structural>maximum_modes || maximum_modes>4096 {
         return Err("cavity needs the original head prefix and a bounded structural layout".into());
     }
-    let air=basis(radius,depth,gate)?;
+    let air=basis(radius,depth,medium,gate)?;
     let head_coupling=interface(films,modes,&air,gate)?;
     let mut coupling=vec![0.0;structural*air.modes().len()];
     coupling[..head_coupling.len()].copy_from_slice(&head_coupling);
@@ -350,7 +351,7 @@ mod tests {
             for i in 0..n {for j in 0..n {k[i*n+j]=film.model.k.get(i,j);m[i*n+j]=film.model.m.get(i,j);}}
             let mut pairs=fs_modal::eigh_gen_dense(&k,&m,n).unwrap();pairs.truncate(2);modes.push(pairs);
         }
-        let air=basis(radius,depth,&gate).unwrap();let c=interface(&films,&modes,&air,&gate).unwrap();
+        let air=basis(radius,depth,AcousticMedium {rho0:1.2,c0:343.0},&gate).unwrap();let c=interface(&films,&modes,&air,&gate).unwrap();
         let count=air.modes().len();let axial=air.modes().iter().position(|m|m.azimuthal_order==0 && m.axial_order==1).unwrap();
         let mut offset=1;
         for head in 0..2 {for mode in &modes[head] {

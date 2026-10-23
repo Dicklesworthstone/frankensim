@@ -191,8 +191,9 @@ Exterior radiation is one-way and linear about the undeformed boundary. No
 radiation mass/damping back-coupling, deformation-updated normals, microphone
 capsule/electronics, air absorption, room, snare wires, vent flow, flexible maple
 shell, full stand rocking, hand/grip model or flexible/anisotropic hickory stick
-is inferred. The original cavity uses its declared approximate bulk modulus;
-exterior dry air comes from `Medium::air()`. A complete timpani needs bowl/head/
+is inferred. The enclosed volume spring, the cavities and the exterior radiation
+all use the instrument's declared ambient gas (rho c^2, rho and c); see
+DRUM_SPEC.md. A complete timpani needs bowl/head/
 air modes and their loading, not just rescaling the example's volume spring.
 
 Geometry, material and contact provenance remain in [README.md](README.md).
@@ -262,3 +263,11 @@ Native execution confirms that `splash-wav` (`Receiver::FarField`) fits all 30 m
 - When `receiver_response` peels the shared traveling-wave delay `propagation_delay_s = (range - radius)/c = 0.7643 ms` (`shift_to_enclosing_sphere(..., -propagation_delay_s)`), the zero-phase Laplace near-field acquires an anticausal phase advance `exp(+s * tau_prop)` (`+360°` across `40..1320 Hz` on `s = +i omega`) at nearly constant amplitude.
 - By Bode's gain-phase relationship, no stable proper rational model (`Re(p_k) < 0`) of any finite order can follow an anticausal phase advance `+omega * tau_prop` without simultaneous exponential gain growth; any stable fit must zero the `40..1080 Hz` near-field floor to fit the causal `1200..1640 Hz` radiative rise, leaving an irreducible `~7.2..7.6%` relative RMS residual on that `-236 dB` mode. The refusal is therefore the mathematically sound outcome of applying uniform per-mode relative holdout gates after peeling a traveling-wave delay from a finite-point multipole near-field.
 
+## Air
+
+The air is data, never a constant in code. The built-in reference instruments
+load the committed record `examples/dry-air-20c.gas`. An imported description
+declares its own `ambient,<gas record>` row, and `--gas-record FILE` overrides
+either. The record is the shared declaration (`T_K P_PA RH`, `mixture ...`, or
+`thermochemical ...`). A record that does not resolve refuses; there is no air
+default. Each run prints which declaration supplied the air.

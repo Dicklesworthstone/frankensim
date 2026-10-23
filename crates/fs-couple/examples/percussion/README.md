@@ -122,7 +122,9 @@ The distributed file reproduces the **estimated** reference meridian and materia
 not a new measurement. Replace its records with specimen data. The strict text
 format begins with `frankensim-shell-profile-v1`, accepts `#` comments, and uses
 comma-separated numeric records. `material,E_Pa,nu,rho_kg_m3`, `azimuths,N` and
-`band_hz,lower,upper` are each mandatory exactly once. At least two
+`band_hz,lower,upper` are each mandatory exactly once. An `ambient,<gas record>`
+row declares the shell's air and is required when the file is the splash
+description; inside a hi-hat it is optional and must agree. At least two
 `station,radius_m,height_m,thickness_m` rows describe the meridian in strictly
 increasing radius. Zero inner radius makes a disk; nonzero radius makes a hole.
 All heights are reference midsurface coordinates, all thicknesses are physical.

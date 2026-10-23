@@ -41,6 +41,7 @@ mod barrel_strike;
 mod sticks;
 mod muffling;
 mod compliant_mute;
+mod ambient;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -77,7 +78,9 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     Ok(Obstacle::new(weights,1,n,vec![0.0],vec![1.0],stiffness,1.5,
         "estimated isotropic Hertz tip: E_eff=0.8GPa, R=3mm; not identified hickory-shell contact".into())?)
 }
-struct Experiment {flexible_sticks:[Option<fs_couple::render::plate::impact::striker::flexible::StrikerPorts>;2],mute:Option<compliant_mute::Attachment>,system:Mechanics,force:Vec<f64>,stick_weight:f64,second_stick:Option<sticks::Port>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>}
+struct Experiment {flexible_sticks:[Option<fs_couple::render::plate::impact::striker::flexible::StrikerPorts>;2],mute:Option<compliant_mute::Attachment>,system:Mechanics,force:Vec<f64>,stick_weight:f64,second_stick:Option<sticks::Port>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>,
+    /// The gas the instrument compresses and radiates into; see `ambient`.
+    ambient:ambient::Ambient}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     splash_with_stroke(steps,dt_s,audio,Stroke::default())
 }
@@ -120,6 +123,9 @@ fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option
     muffling::admit_command(mufflers,"splash")?;
     if let Some(spec)=mute {spec.admit_command("splash")?;}
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
+    let ambient=ambient::effective(specimen.ambient
+        .ok_or("an imported shell description must declare its ambient row")?);
+    eprintln!("{}",ambient.receipt());
     if let Some(material)=material {material.admit_windows(&[specimen.band_hz])?;}
     let (shell,reduction)=match rocking {
         Some(limit)=>shell_prepare::prepare_rocking(&specimen,dt_s,limit)?,
@@ -240,7 +246,7 @@ fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option
     let system=ImpactSystem::new_with_dampers(bodies,contacts,pads,vec![],dampers,config(steps,dt_s))?;
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     let mut a=vec![0.0];a.extend(port);a.resize(total,0.0);let mut b=shaft.tip_row(0,stick_weight)?;b.resize(total,0.0);
-    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;total],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
+    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;total],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -339,6 +345,8 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
     // One declaration supplies BOTH head pencils, the air volume and the
     // closed exterior. No independently retuned oscillator or stock drum mesh.
     let imported=supplied.is_some();let spec=supplied.unwrap_or_else(drum_spec::Spec::reference);
+    let ambient=ambient::effective(spec.ambient);
+    eprintln!("{}",ambient.receipt());
     spec.admit_clock(dt_s,audio)?;
     if let Some(chamber)=chamber {
         if !distributed_cavity {return Err("a chamber profile requires distributed air".into());}
@@ -474,7 +482,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
         bodies.push(barrel.body());
     }
     bodies.append(&mut shaft.elastic);
-    let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:chamber.map_or_else(||spec.volume_m3(),chamber::Spec::volume_m3),areas:area};
+    let volume=VolumeSpring{bulk_modulus_pa:ambient.bulk_modulus_pa(),volume_m3:chamber.map_or_else(||spec.volume_m3(),chamber::Spec::volume_m3),areas:area};
     // Both images consume the identical geometric reduction, strike port,
     // constitutive contact, loss coefficients and air volume. Only the discrete
     // realization changes. Neither path modifies the microphone/BEM boundary.
@@ -482,7 +490,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
     let mut air=None;
     let system=if let Some(profile)=chamber {
         let (system,probe)=profile.build(&films,&mode_sets,bodies,contacts,pads,dampers,
-            steps,dt_s,prepared,snares.is_some(),drag_per_s)?;
+            steps,dt_s,prepared,snares.is_some(),drag_per_s,ambient.acoustic_medium())?;
         air=Some(probe); system
     }else if distributed_cavity {
         if prepared {
@@ -495,11 +503,11 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
                 configuration.coupling.max_setup_terms=1_000_000;
             }
             let (system,probe)=cavity::build_prepared_with_losses_and_barrel(&films,&mode_sets,bodies,contacts,
-                dampers,radius,depth,configuration,neck,drag_per_s,barrel_port)?;
+                dampers,radius,depth,configuration,neck,drag_per_s,barrel_port,ambient.acoustic_medium())?;
             air=Some(probe);Mechanics::Prepared(system)
         } else {
             let (system,probe)=cavity::build_with_pads_and_barrel(&films,&mode_sets,bodies,contacts,pads,
-                dampers,radius,depth,steps,dt_s,neck,drag_per_s,barrel_port)?;
+                dampers,radius,depth,steps,dt_s,neck,drag_per_s,barrel_port,ambient.acoustic_medium())?;
             air=Some(probe);Mechanics::Reference(system)
         }
     }else if prepared {
@@ -520,9 +528,9 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
         let neck=neck.ok_or("missing prescribed neck geometry")?;
         let port=air.as_ref().ok_or("missing neck mechanics")?.coupling.neck_radiation_port(0)?;
         Some(acoustics.ok_or("missing exterior boundary")?.with_sidewall_aperture(
-            port,neck.azimuth_rad,neck.axial_position_m,depth)?)
+            port,neck.azimuth_rad,neck.axial_position_m,depth,ambient.medium())?)
     } else {acoustics};
-    Ok(Experiment{flexible_sticks:shaft.ports,mute,system,force:vec![0.0;count],stick_weight,second_stick,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air})
+    Ok(Experiment{flexible_sticks:shaft.ports,mute,system,force:vec![0.0;count],stick_weight,second_stick,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air,ambient})
 }
 // The stored drum areas encode compression, so positive contraction means
 // positive internal pressure. The volume-spring Hamiltonian is unchanged.
@@ -534,6 +542,8 @@ fn run()->Result<(),Error> {
     run_args(std::env::args().skip(1).collect())
 }
 fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
+    // One override for the whole run, declared before any instrument is built.
+    if let Some(cli)=ambient::option(&mut raw_args)? {ambient::set_command_line(cli)?;}
     if hihat::is_command(raw_args.first().map(String::as_str)) {return hihat::run(raw_args);}
     if specimen::export_command(&raw_args)? {return Ok(());}
     let head_stretching=nonlinear_snare::option(&mut raw_args)?;
@@ -763,6 +773,9 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
 }
 fn main(){if let Err(e)=run(){eprintln!("percussion reference refused: {e}");std::process::exit(1);}}
 
+#[cfg(test)]
+#[path="ambient_render_tests.rs"]
+mod ambient_render_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

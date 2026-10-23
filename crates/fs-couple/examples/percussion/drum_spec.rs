@@ -3,6 +3,7 @@
 use std::io::Read;
 use fs_plate::shell::head::TensionVariation;
 use super::{Error, ModePair, TensionedDisk, TensionedDiskSpec, mesh_budget};
+use super::ambient::Ambient;
 
 pub const HEADER: &str = "frankensim-drum-spec-v1";
 const MAX_BYTES: usize = 65_536;
@@ -29,6 +30,9 @@ pub struct Spec {
     pub radial_intervals: usize,
     pub azimuths: usize,
     pub band_hz: [f64; 2],
+    /// The air inside the shell and around it: compressed by the heads and
+    /// radiated into. Never a constant; see the `ambient` module.
+    pub ambient: Ambient,
 }
 impl Spec {
     /// Original estimated 14 x 6.5 inch host, including its original loss law.
@@ -38,7 +42,8 @@ impl Spec {
         Self { radius_m: 0.1778-0.0075, depth_m: 0.1651, outer_radius_m: 0.1778,
             heads: [batter, Head { thickness_m: 0.0000762, tension_n_m: 1500.0, ..batter }],
             tension_variation: [TensionVariation::default(); 2],
-            radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0] }
+            radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0],
+            ambient: Ambient::reference() }
     }
     pub fn validate(self) -> Result<(), Error> {
         if [self.radius_m, self.depth_m, self.outer_radius_m].iter().any(|v| !v.is_finite() || *v<=0.0)
@@ -121,12 +126,13 @@ impl Spec {
         std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;
         Self::read(&text)
     }
-    /// Geometry, both heads, mesh and band are mandatory. Optional per-head
+    /// Geometry, both heads, mesh, band and the `ambient,<gas record>` row are
+    /// mandatory: an imported drum declares its own air. Optional per-head
     /// tension_variation and tension_harmonic rows add a physical equilibrated tensor, not pitches.
     /// Order is free and comments start with #.
     pub fn read(text: &str) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
-        let (mut header,mut geometry,mut mesh,mut band) = (false,None,None,None);
+        let (mut header,mut geometry,mut mesh,mut band,mut ambient) = (false,None,None,None,None);
         let mut heads = [None,None];
         let mut variations = [None,None];
         let mut variation_seen = [false; 2];
@@ -141,6 +147,7 @@ impl Spec {
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
             let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3, "tension_variation"=>9, "tension_harmonic"=>5,
+                "ambient"=>2,
                 _=>return Err(error("unknown record")) };
             if fields.len()!=count { return Err(error("wrong number of fields")); }
             let value = |i: usize| -> Result<f64,Error> {
@@ -189,6 +196,10 @@ impl Spec {
                     if band.is_some() { return Err(error("duplicate frequency window")); }
                     band=Some([value(1)?,value(2)?]);
                 }
+                "ambient" => {
+                    if ambient.is_some() { return Err(error("duplicate ambient")); }
+                    ambient=Some(Ambient::described(fields[1]).map_err(|e| error(&e.to_string()))?);
+                }
                 _ => unreachable!(),
             }
         }
@@ -198,7 +209,8 @@ impl Spec {
         let result=Self {radius_m,depth_m,outer_radius_m,radial_intervals,azimuths,
             band_hz:band.ok_or("missing head frequency window")?,
             tension_variation:variations.map(Option::unwrap_or_default),
-            heads:[heads[0].ok_or("missing batter head")?,heads[1].ok_or("missing resonant head")?]};
+            heads:[heads[0].ok_or("missing batter head")?,heads[1].ok_or("missing resonant head")?],
+            ambient:ambient.ok_or("missing drum ambient row: an imported drum must declare its air")?};
         result.validate()?; Ok(result)
     }
 }

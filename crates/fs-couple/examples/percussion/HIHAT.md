@@ -53,6 +53,8 @@ comments are allowed. The included `.fshh` supplies every required record:
 - `site,x_m,y_m,fraction` supplies 1..64 distinct reference-XY rim-contact
   stations. Fractions are positive and sum to one; they partition the total
   effective contact stiffness K, NOT independent full-strength duplicates.
+- `ambient,<gas record>` declares the air around both shells; a shell file that
+  declares its own `ambient` row must agree with it.
 - `strike_m,x,y` supplies the first stick's default world-XY station. Existing explicit
   strike position and speed controls override it; first launch defaults to
   0.8 m/s unless zero is selected. A second stick requires its own position.

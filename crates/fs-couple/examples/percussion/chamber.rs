@@ -108,18 +108,19 @@ impl Spec {
             core::f64::consts::PI/3.0*(s[1].z_m-s[0].z_m)*(a*a+a*b+b*b)
         }).sum()
     }
-    fn air(&self, gate: &CancelGate) -> Result<MeridianCavity, Error> {
-        Ok(MeridianCavity::new(self.stations.clone(), AcousticMedium {rho0:1.2,c0:343.0}, self.budget, gate)?)
+    // The enclosed gas is the instrument's declared ambient (see `ambient`).
+    fn air(&self, medium: AcousticMedium, gate: &CancelGate) -> Result<MeridianCavity, Error> {
+        Ok(MeridianCavity::new(self.stations.clone(), medium, self.budget, gate)?)
     }
     /// Compile the whole original solid layout before appending any gas inertia.
     /// Only actual head surfaces overlap pressure: sticks/mutes/shafts are zeros.
     #[allow(clippy::too_many_arguments)]
     pub fn build(&self, films: &[TensionedDisk], modes: &[Vec<ModePair>], bodies: Vec<ImpactBody>,
         contacts: Vec<Obstacle>, pads: Vec<FeltPad>, dampers: Vec<ViscousDamper>,
-        steps: u64, dt_s: f64, prepared: bool, snares: bool, drag: f64)
+        steps: u64, dt_s: f64, prepared: bool, snares: bool, drag: f64, medium: AcousticMedium)
         -> Result<(Mechanics,cavity::InteriorPressure), Error> {
         cavity::validate_drag(drag)?;
-        let gate = CancelGate::new_clock_free(); let air = self.air(&gate)?;
+        let gate = CancelGate::new_clock_free(); let air = self.air(medium, &gate)?;
         let depth = self.stations.last().ok_or("empty chamber")?.z_m;
         let structural = bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
             .ok_or("chamber structural address overflow")?;

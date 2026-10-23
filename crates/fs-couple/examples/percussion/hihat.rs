@@ -154,6 +154,12 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     shafts:&shaft_playing::Selection,mallets:&mallets::Selection,material:Option<&shell_relaxation::Spec>,
     mute:Option<&compliant_mute::Spec>,targets:targets::Selection,rocking:Option<f64>)->Result<Pair,Error> {
     targets.admit(second)?;
+    // The hi-hat's own row owns the air; a shell that declares one must agree.
+    if [upper,lower].iter().any(|s|s.ambient.is_some_and(|a|a.gas!=spec.ambient.gas)) {
+        return Err("hi-hat shells and the hi-hat description declare different ambient gases".into());
+    }
+    let ambient=super::ambient::effective(spec.ambient);
+    eprintln!("{}",ambient.receipt());
     mallets.admit("hihat",stroke,second)?;
     if let Some(mute)=mute {mute.admit_command("hihat")?;}
     if shafts.second.is_some() && second.is_none() {
@@ -303,7 +309,7 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     };
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute,system:Mechanics::Reference(system),force:vec![0.;total],
-        stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
+        stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks,targets})
 }
 

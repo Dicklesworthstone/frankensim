@@ -26,6 +26,9 @@ pub struct Specimen {
     pub poisson: f64,
     pub density_kg_m3: f64,
     pub band_hz: [f64; 2],
+    /// Declared air: the reference record, or the file's `ambient` row. A shell
+    /// used on its own refuses without one; inside a hi-hat it must agree.
+    pub ambient: Option<super::ambient::Ambient>,
     // Profile fields above are used only by the original revolved input.
     sampled: Option<MeshShell>,
     default_strike: Option<[f64;2]>,
@@ -40,7 +43,8 @@ impl Specimen {
                     ProfileStation {radius_m,height_m,thickness_m}).to_vec(),
             rings: vec![], dents: vec![], azimuths: 32,
             young_pa: 112.6e9, poisson: 0.342, density_kg_m3: 8607.0,
-            band_hz: [50.0,1200.0], sampled: None, default_strike: None,
+            band_hz: [50.0,1200.0], ambient: Some(super::ambient::Ambient::reference()),
+            sampled: None, default_strike: None,
         }
     }
 
@@ -56,7 +60,7 @@ impl Specimen {
     /// records refuse, so a misspelled thickness/material cannot go unused.
     pub fn parse(text: &str) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("shell profile exceeds the 1 MiB input limit".into()); }
-        let mut material=None; let mut azimuths=None; let mut band=None;
+        let mut material=None; let mut azimuths=None; let mut band=None; let mut ambient=None;
         let mut stations=Vec::new(); let mut rings=Vec::new(); let mut dents=Vec::new();
         let mut header=false;
         for (line,raw) in text.lines().enumerate() {
@@ -87,6 +91,10 @@ impl Specimen {
                     if v[0]<=0.0 || v[1]<=v[0] {return Err("shell band needs 0 < lower < upper Hz".into());}
                     band=Some([v[0],v[1]]);
                 }
+                "ambient" if ambient.is_none() && fields.len()==2=>{
+                    ambient=Some(super::ambient::Ambient::described(fields[1])
+                        .map_err(|e|format!("shell profile line {}: {e}",line+1))?);
+                }
                 "station" if stations.len()<1024=>{let v=numbers(3)?;
                     stations.push(ProfileStation {radius_m:v[0],height_m:v[1],thickness_m:v[2]});}
                 "ring" if rings.len()<1024=>{let v=numbers(4)?;
@@ -101,7 +109,7 @@ impl Specimen {
         // Physical section and geometric admission belong to revolve, below.
         Ok(Self {stations,rings,dents,young_pa,poisson,density_kg_m3,
             azimuths:azimuths.ok_or("shell profile requires azimuths")?,
-            band_hz:band.ok_or("shell profile requires band_hz")?,sampled:None,default_strike:None})
+            band_hz:band.ok_or("shell profile requires band_hz")?,ambient,sampled:None,default_strike:None})
     }
 
     /// Material and every detail enter the actual mass/stiffness geometry. Keep
@@ -127,9 +135,9 @@ impl Specimen {
     /// Full supplied 3D geometry with explicit per-node thickness and materials.
     /// No meridian, alloy-name lookup or reference profile is substituted.
     pub fn parse_mesh(text: &str) -> Result<Self, Error> {
-        let (shell,band_hz,strike) = mesh_input::parse(text)?;
+        let (shell,band_hz,strike,ambient) = mesh_input::parse(text)?;
         Ok(Self { stations:vec![],rings:vec![],dents:vec![],azimuths:0,
-            young_pa:0.,poisson:0.,density_kg_m3:0.,band_hz,
+            young_pa:0.,poisson:0.,density_kg_m3:0.,band_hz,ambient,
             sampled:Some(shell),default_strike:Some(strike) })
     }
 
@@ -142,6 +150,7 @@ impl Specimen {
 
     /// Export a declared revolved profile as explicit SI samples, before any
     /// modal reduction. Round-trip floats retain the original geometry exactly.
+    /// Geometry only: add an `ambient` row to use the exported mesh on its own.
     pub fn mesh_text(&self) -> Result<String,Error> {
         if self.sampled.is_some() { return Err("profile-to-mesh export requires a profile input".into()); }
         let shell = self.build()?; let strike = self.default_strike_position()?;

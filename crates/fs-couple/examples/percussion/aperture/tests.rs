@@ -30,7 +30,7 @@ fn cavity()->CavityCoupling {
     }],&CancelGate::new_clock_free()).unwrap()
 }
 fn port()->NeckRadiationPort {cavity().neck_radiation_port(0).unwrap()}
-fn vented()->Boundary {boundary().with_sidewall_aperture(port(),PI/8.0,0.06,0.12).unwrap()}
+fn vented()->Boundary {boundary().with_sidewall_aperture(port(),PI/8.0,0.06,0.12,Medium::air()).unwrap()}
 fn flux(b:&Boundary,input:usize)->f64 {
     b.weights[input].iter().zip(&b.triangles).map(|(w,t)|w*area(*t)).sum()
 }
@@ -112,13 +112,13 @@ fn aperture_is_a_real_bem_source_with_linear_superposition_and_compact_monopole_
 fn invalid_aperture_chart_or_source_address_refuses_without_silent_substitution() {
     let p=port();
     for (angle,z) in [(0.0,0.06),(PI/8.0,0.0),(PI/8.0,0.12),(f64::NAN,0.06)] {
-        assert!(boundary().with_sidewall_aperture(p,angle,z,0.12).is_err());
+        assert!(boundary().with_sidewall_aperture(p,angle,z,0.12,Medium::air()).is_err());
     }
     for bad in [NeckRadiationPort {coordinate:1,..p},
         NeckRadiationPort {effective_length_m:0.012,..p},
         NeckRadiationPort {volume_weight_m2_per_sqrt_kg:0.0,..p},
         NeckRadiationPort {area_m2:f64::NAN,..p}] {
-        assert!(boundary().with_sidewall_aperture(bad,PI/8.0,0.06,0.12).is_err());
+        assert!(boundary().with_sidewall_aperture(bad,PI/8.0,0.06,0.12,Medium::air()).is_err());
     }
     let mut args=["snare-mic","64","--prescribed-vent-radiation","--cavity-modes"].map(String::from).to_vec();
     assert!(option(&mut args).unwrap());assert_eq!(args,["snare-mic","64","--cavity-modes"]);

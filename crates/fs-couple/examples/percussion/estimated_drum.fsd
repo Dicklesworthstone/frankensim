@@ -7,3 +7,6 @@ head,batter,0.000254,4000000000,0.38,1390,3000,0.001
 head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
 mesh,5,32
 band_hz,80,500
+# ambient: the air inside and around the instrument, one shared gas declaration
+# (T_K P_PA RH, or mixture/thermochemical; see examples/GAS_MIXTURES.md).
+ambient,293.15 101325 0

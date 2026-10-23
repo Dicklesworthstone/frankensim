@@ -31,7 +31,7 @@ fn profile_pressure_uses_actual_volume_and_the_unchanged_signed_head_overlap() {
     let drum=drum_spec::Spec {radial_intervals:2,azimuths:16,..drum_spec::Spec::reference()};
     let (films,modes)=drum.prepare(2e-6,false).unwrap();
     let profile=Spec::read(INPUT).unwrap();let gate=CancelGate::new_clock_free();
-    let air=profile.air(&gate).unwrap();let count=air.modes().len();
+    let air=profile.air(AcousticMedium {rho0:1.2,c0:343.0},&gate).unwrap();let count=air.modes().len();
     let rows=head_overlaps(&air,&films,&modes,1+modes.iter().map(Vec::len).sum::<usize>(),&gate).unwrap();
     assert!((air.volume_m3()/profile.volume_m3()-1.0).abs()<1e-14);
     assert_eq!(air.modes()[0].norm_m3,air.volume_m3());

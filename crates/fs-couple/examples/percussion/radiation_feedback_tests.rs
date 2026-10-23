@@ -16,7 +16,8 @@ fn experiment(frames:u64)->Experiment {
     body.potential=BodyPotential::Linear(vec![1000.]);
     let s=ImpactSystem::new(vec![body],vec![],vec![],vec![],crate::config(frames*SUBSTEPS as u64,MECHANICAL_DT)).unwrap();
     Experiment{flexible_sticks:[None,None],mute:None,system:Mechanics::Reference(s),force:vec![0.],stick_weight:1.,second_stick:None,
-        observer_a:vec![100.],observer_b:vec![0.],pressure:None,acoustics:Some(boundary()),air:None}
+        observer_a:vec![100.],observer_b:vec![0.],pressure:None,acoustics:Some(boundary()),air:None,
+        ambient:crate::ambient::Ambient::reference()}
 }
 fn energy(s:&Mechanics)->f64 {
     match s{Mechanics::Reference(s)=>s.stored_energy_j(),Mechanics::Nonlinear(s)=>s.stored_energy_j(),
@@ -181,7 +182,7 @@ fn feedback_admission_never_hides_a_different_model_or_consumes_playing_time() {
     admit_command(true,"drum-mic",true).unwrap();
     assert!(admit_command(true,"splash-mic",true).is_err());
     let e=experiment(4);let before=e.system.state().to_vec();let gate=CancelGate::new_clock_free();gate.request();
-    assert!(bake_scene_with_spec(e.acoustics.as_ref().unwrap(),&[Receiver::FinitePoint([0.,0.,0.12])],spec(),&gate,true).is_err());
+    assert!(bake_scene_with_spec(e.acoustics.as_ref().unwrap(),&[Receiver::FinitePoint([0.,0.,0.12])],spec(),Medium::air(),&gate,true).is_err());
     assert_eq!(e.system.state(),before);
     let mut b=boundary();b.weights=vec![b.weights[0].clone();33];b.state_modes=(0..33).collect();assert!(admit_boundary(&b,spec()).is_err());
     assert!(admit_boundary(&boundary(),radiation_spec::Spec{training_intervals:65,..spec()}).is_err());

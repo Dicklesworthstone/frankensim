@@ -14,6 +14,8 @@ pub(super) struct Spec {
     pub sources:[Source;2],pub separation:f64,pub carriage:[f64;3],pub damping:[f64;2],
     pub mounts:[Mount;2],pub contact:[f64;3],pub sites:Vec<(f64,f64,f64)>,
     pub strike:[f64;2],pub pedal:String,
+    /// The air between and around both shells: the description's `ambient` row.
+    pub ambient:super::super::ambient::Ambient,
 }
 impl Spec {
     pub fn load(path:&Path)->Result<Self,Error> {
@@ -31,7 +33,7 @@ impl Spec {
         if text.len()>MAX_BYTES {return Err("hi-hat input exceeds 16 KiB".into());}
         let mut header=false;let mut sources:[Option<Source>;2]=[None,None];
         let mut mounts:[Option<Mount>;2]=[None,None];
-        let (mut gap,mut carriage,mut damping,mut law,mut strike)=(None,None,None,None,None);
+        let (mut gap,mut carriage,mut damping,mut law,mut strike,mut ambient)=(None,None,None,None,None,None);
         let mut sites=Vec::new();let mut pedal=String::new();
         for (line,raw) in text.lines().enumerate() {
             let row=raw.split('#').next().unwrap_or("").trim();if row.is_empty(){continue;}
@@ -52,6 +54,8 @@ impl Spec {
                 "damping_ratio" if f.len()==3 && damping.is_none()=>damping=Some([number(1)?,number(2)?]),
                 "contact" if f.len()==4 && law.is_none()=>law=Some([number(1)?,number(2)?,number(3)?]),
                 "strike_m" if f.len()==3 && strike.is_none()=>strike=Some([number(1)?,number(2)?]),
+                "ambient" if f.len()==2 && ambient.is_none()=>ambient=Some(super::super::ambient::Ambient::described(f[1])
+                    .map_err(|e|format!("hi-hat line {}: {e}",line+1))?),
                 "site" if f.len()==4 && sites.len()<64=>sites.push((number(1)?,number(2)?,number(3)?)),
                 "pedal" if f.len()==3=>{writeln!(pedal,"{},{}",number(1)?,number(2)?)?;}
                 "mount" if f.len()==15=>{
@@ -68,7 +72,8 @@ impl Spec {
             mounts:[um.ok_or("missing upper mount")?,lm.ok_or("missing lower mount")?],
             separation:gap.ok_or("missing separation")?,carriage:carriage.ok_or("missing carriage")?,
             damping:damping.ok_or("missing damping")?,contact:law.ok_or("missing contact law")?,
-            strike:strike.ok_or("missing default strike")?,sites,pedal};
+            strike:strike.ok_or("missing default strike")?,sites,pedal,
+            ambient:ambient.ok_or("missing hi-hat ambient row: an imported hi-hat must declare its air")?};
         out.validate()?;Ok(out)
     }
     pub fn validate(&self)->Result<(),Error> {

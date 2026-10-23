@@ -30,7 +30,7 @@ fn port() -> NeckRadiationPort {
 }
 fn prepare(angle:f64) -> Boundary {
     fixture().with_unrolled_sidewall_aperture(0.11,0.12,opening(angle),port(),2048,
-        &CancelGate::new_clock_free()).unwrap()
+        Medium::air(),&CancelGate::new_clock_free()).unwrap()
 }
 
 #[test]
@@ -79,20 +79,20 @@ fn malformed_missing_and_over_budget_apertures_refuse_without_fallback() {
         SidewallAperture {axial_position_m:0.001,..opening(0.0)},
         SidewallAperture {azimuth_rad:f64::NAN,..opening(0.0)},
         SidewallAperture {maximum_terms:1,..opening(0.0)}] {
-        assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,a,port(),2048,&gate).is_err());
+        assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,a,port(),2048,Medium::air(),&gate).is_err());
     }
     for bad in [NeckRadiationPort {coordinate:1,..port()},
         NeckRadiationPort {volume_weight_m2_per_sqrt_kg:0.0,..port()},
         NeckRadiationPort {volume_weight_m2_per_sqrt_kg:f64::NAN,..port()},
         NeckRadiationPort {coordinate:usize::MAX,..port()},
         NeckRadiationPort {effective_length_m:0.02,..port()}] {
-        assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),bad,2048,&gate).is_err());
+        assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),bad,2048,Medium::air(),&gate).is_err());
     }
     let original=fixture();let count=original.triangles.len();
-    assert!(original.with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),port(),count,&gate).is_err());
+    assert!(original.with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),port(),count,Medium::air(),&gate).is_err());
     // A wrong cylinder radius must not move/snap the source onto some other surface.
-    assert!(fixture().with_unrolled_sidewall_aperture(0.115,0.12,opening(0.0),port(),2048,&gate).is_err());
-    gate.request();assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),port(),2048,&gate).is_err());
+    assert!(fixture().with_unrolled_sidewall_aperture(0.115,0.12,opening(0.0),port(),2048,Medium::air(),&gate).is_err());
+    gate.request();assert!(fixture().with_unrolled_sidewall_aperture(0.11,0.12,opening(0.0),port(),2048,Medium::air(),&gate).is_err());
 }
 
 #[test]
