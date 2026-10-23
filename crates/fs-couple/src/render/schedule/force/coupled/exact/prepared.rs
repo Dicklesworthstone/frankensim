@@ -360,8 +360,12 @@ impl PreparedNetwork {
     /// vector however many links there are; the per-link forms are the port ledger's, evaluated only when it is asked for.
     fn compute_sweep(&self, z: &[f64]) -> Result<LossSweep, ModalCouplingError> {
         self.sweeps.fetch_add(1, Ordering::Relaxed);
-        let component = match &self.component_loss { Some(w) => quadratic(w, z)?, None => 0.0 };
-        let connection = match &self.connection_total { Some(w) => quadratic(w, z)?, None => 0.0 };
+        let (component, connection) = match (&self.component_loss, &self.connection_total) {
+            (Some(c), Some(k)) => quadratic_pair(c, k, z)?,
+            (Some(c), None) => (quadratic(c, z)?, 0.0),
+            (None, Some(k)) => (0.0, quadratic(k, z)?),
+            (None, None) => (0.0, 0.0),
+        };
         Ok(LossSweep { z: z.to_vec(), component, connection })
     }
 
@@ -646,22 +650,19 @@ fn gramian(
 }
 
 fn apply(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
-    // Each entry is its row's left-to-right sum, bit for bit; four rows advance together so their independent sums overlap.
+    // Each entry is its row's left-to-right sum, bit for bit; eight rows advance together so their independent sums overlap.
     // A partial sum that leaves the finite range never returns to it (inf + finite = inf, inf - inf = NaN, NaN stays), so
     // checking each finished row refuses exactly what a check of every partial sum refused.
     let n = z.len();
     let mut result = Vec::with_capacity(matrix.len() / n);
-    let mut blocks = matrix.chunks_exact(4 * n);
+    let mut blocks = matrix.chunks_exact(8 * n);
     for rows in blocks.by_ref() {
-        let (r0, rest) = rows.split_at(n);
-        let (r1, rest) = rest.split_at(n);
-        let (r2, r3) = rest.split_at(n);
-        let mut sums = [0.0_f64; 4];
-        for ((((&value, &a0), &a1), &a2), &a3) in z.iter().zip(r0).zip(r1).zip(r2).zip(r3) {
-            sums[0] += a0 * value;
-            sums[1] += a1 * value;
-            sums[2] += a2 * value;
-            sums[3] += a3 * value;
+        let rows: [&[f64]; 8] = std::array::from_fn(|k| &rows[k * n..(k + 1) * n]);
+        let mut sums = [0.0_f64; 8];
+        for (j, &value) in z.iter().enumerate() {
+            for (sum, row) in sums.iter_mut().zip(&rows) {
+                *sum += row[j] * value;
+            }
         }
         for sum in sums {
             result.push(finite(sum)?);
@@ -676,13 +677,42 @@ fn apply(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
 fn quadratic(matrix: &[f64], z: &[f64]) -> Result<f64, ModalCouplingError> {
     let mut sum = 0.0;
     let mut magnitude = 0.0;
-    for (i, row) in matrix.chunks_exact(z.len()).enumerate() {
-        for (j, value) in row.iter().enumerate() {
-            let term = finite(z[i] * value * z[j])?;
-            sum = finite(sum + term)?;
-            magnitude = finite(magnitude + term.abs())?;
+    for (row, &left) in matrix.chunks_exact(z.len()).zip(z) {
+        for (&value, &right) in row.iter().zip(z) {
+            let term = left * value * right;
+            sum += term;
+            magnitude += term.abs();
         }
     }
+    checked_loss(sum, magnitude)
+}
+
+/// Both loss quadratics of one vector in one pass over the two Gramians. Each keeps its own left-to-right sum and magnitude,
+/// so each equals `quadratic` of its matrix bit for bit, refusals included. The four independent sums overlap in the
+/// pipeline instead of one quadratic running after the other.
+fn quadratic_pair(first: &[f64], second: &[f64], z: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
+    let n = z.len();
+    let (mut sum_first, mut magnitude_first, mut sum_second, mut magnitude_second) = (0.0, 0.0, 0.0, 0.0);
+    for ((row_first, row_second), &left) in first.chunks_exact(n).zip(second.chunks_exact(n)).zip(z) {
+        for ((&a, &b), &right) in row_first.iter().zip(row_second).zip(z) {
+            let term_first = left * a * right;
+            let term_second = left * b * right;
+            sum_first += term_first;
+            magnitude_first += term_first.abs();
+            sum_second += term_second;
+            magnitude_second += term_second.abs();
+        }
+    }
+    // The order of the refusals is the order of the two separate evaluations: the first matrix's, then the second's.
+    let first = checked_loss(sum_first, magnitude_first)?;
+    Ok((first, checked_loss(sum_second, magnitude_second)?))
+}
+
+/// The refusals of a finished quadratic. A term or partial sum that leaves the finite range never returns to it
+/// (inf + finite = inf, inf - inf = NaN, NaN stays), so a non-finite sum or magnitude refuses exactly what a check of every
+/// term and partial sum refused.
+fn checked_loss(sum: f64, magnitude: f64) -> Result<f64, ModalCouplingError> {
+    let (sum, magnitude) = (finite(sum)?, finite(magnitude)?);
     // A Gramian is PSD in exact arithmetic. Only a negative value below its
     // explicit summation-roundoff allowance is reported as zero physical loss.
     // A larger negative quadratic refuses the trial and preserves accepted state.

@@ -319,7 +319,7 @@ fn entries(count: usize, seed: &mut u64) -> Vec<f64> {
 }
 
 #[test]
-fn the_blocked_product_and_four_row_apply_equal_the_textbook_loops_bit_for_bit() {
+fn the_blocked_product_and_interleaved_apply_equal_the_textbook_loops_bit_for_bit() {
     let gate = CancelGate::new_clock_free();
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
     // Sizes below, at and between multiples of the four-row block, and one the size of a small network.
@@ -339,10 +339,54 @@ fn the_blocked_product_and_four_row_apply_equal_the_textbook_loops_bit_for_bit()
         let applied = apply(&a, &z).unwrap();
         assert!(applied.iter().zip(&rows).all(|(x, y)| x.to_bits() == y.to_bits()), "apply, n = {n}");
     }
-    // A row that overflows refuses, inside a four-row block and in the remainder rows alike.
-    for (n, row) in [(5, 1), (5, 4)] {
+    // A row that overflows refuses, inside an eight-row block and in the remainder rows alike.
+    for (n, row) in [(9, 1), (9, 8)] {
         let mut a = vec![1.0; n * n];
         a[row * n] = f64::MAX;
         assert!(apply(&a, &vec![2.0; n]).is_err(), "row {row}");
+    }
+}
+
+/// The previous loss quadratic, a check of every term and partial sum, kept here as the reference the fused sweep must equal.
+fn textbook_quadratic(matrix: &[f64], z: &[f64]) -> Result<f64, ModalCouplingError> {
+    let (mut sum, mut magnitude) = (0.0, 0.0);
+    for (i, row) in matrix.chunks_exact(z.len()).enumerate() {
+        for (j, value) in row.iter().enumerate() {
+            let term = finite(z[i] * value * z[j])?;
+            sum = finite(sum + term)?;
+            magnitude = finite(magnitude + term.abs())?;
+        }
+    }
+    let roundoff = 4096.0 * f64::EPSILON * magnitude.max(f64::MIN_POSITIVE);
+    if sum < -roundoff { return Err(invalid("prepared resistance integral is negative beyond roundoff")); }
+    Ok(sum.max(0.0))
+}
+
+#[test]
+fn the_fused_loss_pair_equals_two_textbook_quadratics_bit_for_bit_refusals_included() {
+    let outcome = |r: Result<f64, ModalCouplingError>| r.map(f64::to_bits).map_err(|e| e.to_string());
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    for n in [1, 2, 3, 5, 8, 13, 64, 99] {
+        // Gramian-like PSD matrices B^T B, and the sign-mixed matrices themselves (some quadratics negative beyond roundoff).
+        let (b1, b2, z) = (entries(n * n, &mut seed), entries(n * n, &mut seed), entries(n, &mut seed));
+        let gram = |b: &[f64]| -> Vec<f64> {
+            (0..n * n).map(|ij| (0..n).fold(0.0, |s, k| s + b[k * n + ij / n] * b[k * n + ij % n])).collect()
+        };
+        for (first, second) in [(gram(&b1), gram(&b2)), (b1.clone(), b2.clone()), (gram(&b1), b2.clone())] {
+            let expected = (outcome(textbook_quadratic(&first, &z)), outcome(textbook_quadratic(&second, &z)));
+            assert_eq!(outcome(quadratic(&first, &z)), expected.0, "n = {n}");
+            let fused = quadratic_pair(&first, &second, &z);
+            match &expected {
+                (Ok(a), Ok(b)) => assert_eq!(fused.map(|(x, y)| (x.to_bits(), y.to_bits())).unwrap(), (*a, *b), "n = {n}"),
+                (Err(e), _) | (Ok(_), Err(e)) => assert_eq!(fused.unwrap_err().to_string(), *e, "n = {n}"),
+            }
+        }
+    }
+    // A term that overflows refuses in either matrix, as the per-term check did.
+    let mut huge = vec![1.0; 9];
+    huge[4] = f64::MAX;
+    for (first, second) in [(huge.clone(), vec![1.0; 9]), (vec![1.0; 9], huge.clone())] {
+        assert!(textbook_quadratic(&huge, &[2.0; 3]).is_err());
+        assert!(quadratic_pair(&first, &second, &[2.0; 3]).is_err());
     }
 }
