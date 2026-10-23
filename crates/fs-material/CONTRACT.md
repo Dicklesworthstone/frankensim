@@ -607,7 +607,11 @@ component, alongside existing thermodynamic/transport receipts. Missing NASA-9
 or transport data refuse. `gas_species::input::read_gas_record` requires an
 already-loaded registry for thermochemical input and returns the full resolved
 state; the legacy two-argument reader preserves its old bits and refuses that
-record without a registry. Phase admission is explicit: frozen gas makes no
+record without a registry. A named `mixture` record keeps its species and
+mole fractions beside its state (`GasRecord::Mixture(state, composition)`;
+a mass record is converted by the species' own molar masses), so a consumer
+that needs the composition reads it and never infers it from the state.
+Phase admission is explicit: frozen gas makes no
 condensation claim; the liquid-water option applies the existing Buck limit
 only inside its stated temperature window. No real-gas or molecular-relaxation
 accuracy is supplied by this adapter. Literal NASA/JANAF disagreements remain
@@ -687,6 +691,12 @@ is that data set: the O2 and N2 vibrations at ISO's theta and rates, with Ar,
 CO2 and H2O declared without reservoirs (ISO's own assumption). Rotation is
 not a reservoir in it, so the rotational bulk loss inside ISO's classical
 constant is left out.
+`RelaxationAbsorption::evaluate_iso9613_rates_held(medium)` evaluates the
+same reservoirs for N2 and O2 in any proportion (with Ar, H2O, and CO2 at or
+below ISO's ceiling) with ISO's relaxation frequencies at the medium's own T, p
+and water fraction HELD: a declared assumption, since the partner rates of any
+other proportion are not sourced. At ISO's own fractions it is ISO's rate
+law. Any other species present refuses by name.
 
 The law also refuses:
 - a present species without data;

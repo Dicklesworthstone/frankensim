@@ -1925,6 +1925,23 @@ clarinet is one filling of those objects.
   `OmissionBound::StandardAirConvention`: standard air's worst ISO absorption.
   It is a convention and not a bound for a gas that relaxes more strongly than
   air (CO2-rich, for example).
+  `air_path::omitted_observer_absorption(record, range, band_top)` is the
+  figure a render that applies no law (or Stokes-Kirchhoff only) leaves out,
+  read from the listener gas's record, never inferred from its state: ISO
+  9613-1 for a legacy record or terrestrial-air composition; Stokes-Kirchhoff,
+  complete, for monatomic species only; the relaxation law with ISO's rates
+  held (declared) for N2 and O2 off ISO's fractions; otherwise `Unbounded`,
+  naming the species (heliox's He, CO2 above ISO's ceiling, SF6). The band top
+  is `observer_band_top_hz`: the declared band, Nyquist and 20 kHz
+  (`OBSERVER_BAND_TOP_CAP_HZ`), whichever is lowest.
+  `ObserverOmission::admit` refuses with
+  `AcousticRealizeError::ObserverOmission` when the omitted figure exceeds
+  `OBSERVER_OMISSION_TOLERANCE_DB` (1.0 dB) or is unbounded, unless the input
+  declares a law (`observer_law none` or `stokes-kirchhoff`), which accepts the
+  omission with its receipt. In air at 20 °C, 50 % RH and 1 atm, at 20 kHz, a
+  1 m listener omits 0.524 dB and passes; a 2 m listener omits 1.048 dB and
+  refuses. A gas without a record naming its composition (a resolved field
+  cell) is `Unrecorded` and is treated like `Unbounded`.
   `GasAbsorptionModel::MolecularRelaxation` applies the gas's own relaxation
   law (`fs_material::relaxation`). It is evaluated from the gas's composition
   and its species' data, and supplied as `RealizeOptions::observer_relaxation`

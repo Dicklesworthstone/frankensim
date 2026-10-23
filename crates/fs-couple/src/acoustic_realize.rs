@@ -90,6 +90,11 @@ pub enum AcousticRealizeError {
         /// what ISO 9613-1's +-10 % on alpha is in response energy).
         budget_energy: f64,
     },
+    /// A render that applies no observer law, or Stokes-Kirchhoff only, would
+    /// leave out more absorption than the tolerance, or an unbounded amount
+    /// (a polyatomic listener gas without sourced relaxation rates), without
+    /// declaring a law. The receipt carries the figure.
+    ObserverOmission(Box<crate::air_path::ObserverOmission>),
     /// Modal time-stepper refusal.
     Modal(ModalAcousticTimeError),
     /// Plate mesh, section, or eigenproblem refusal, retaining the owner diagnostic.
@@ -150,6 +155,12 @@ impl core::fmt::Display for AcousticRealizeError {
                  certified to {budget_energy:e} of its response energy, and the receiver \
                  need {needed_samples:.3}. This law's dispersion cannot be certified this \
                  close: declare observer_law none or move the receiver farther"
+            ),
+            Self::ObserverOmission(omission) => write!(
+                f,
+                "FS-COUPLE-ASSEMBLY-OBSERVER-OMISSION: {omission}. Declare the observer law \
+                 (observer_law none or stokes-kirchhoff) to accept the omission, or move the \
+                 listener closer"
             ),
             Self::Modal(e) => write!(f, "{e}"),
             Self::Plate(e) => write!(f, "{e}"),

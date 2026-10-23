@@ -26,7 +26,7 @@
 //! internal observation that travels no distance, so it passes unfiltered.
 
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::air_path::{ObserverFilter, ObserverFilterReceipt};
+use crate::air_path::{ObserverFilter, ObserverFilterReceipt, legacy_relative_humidity};
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -230,37 +230,10 @@ fn check_receiver_delay(
     Ok(())
 }
 
-/// The authored relative humidity of a legacy (T, p, RH) record, recovered
-/// from its state: `x_w = RH e_sat(T) / p` inverted, then accepted only if
-/// [`GasState::try_new_moist_air`] reproduces the state bit for bit.
-fn legacy_relative_humidity(state: &GasState) -> Option<f64> {
-    let (t, p) = (state.temperature, state.pressure);
-    let guess = if state.water_mole_fraction == 0.0 {
-        0.0
-    } else {
-        state.water_mole_fraction * p / fs_material::gas::saturation_pressure_water_pa(t).ok()?
-    };
-    let reproduces = |rh: f64| {
-        (0.0..=1.0).contains(&rh) && GasState::try_new_moist_air(t, p, rh).ok() == Some(*state)
-    };
-    let (mut up, mut down) = (guess, guess);
-    for _ in 0..=16 {
-        if reproduces(up) {
-            return Some(up);
-        }
-        if reproduces(down) {
-            return Some(down);
-        }
-        up = up.next_up();
-        down = down.next_down();
-    }
-    None
-}
-
 /// ISO 9613-1's admission of the observer medium and its relative humidity,
 /// from the medium's own record: a legacy record's U.S. Standard Atmosphere
-/// air, or a thermochemical record's composition. `None` when the medium has
-/// no composition (a mixture record or a resolved field).
+/// air, or a thermochemical record's composition. `None` for a named mixture
+/// record, whose default law here is Stokes-Kirchhoff, or a resolved field.
 fn iso_admission(
     record: Option<&GasRecord>,
     gas: &GasState,
@@ -280,7 +253,7 @@ fn iso_admission(
                 .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
             Ok(Some((air, rh)))
         }
-        Some(GasRecord::Mixture(_)) | None => Ok(None),
+        Some(GasRecord::Mixture(..)) | None => Ok(None),
     }
 }
 
