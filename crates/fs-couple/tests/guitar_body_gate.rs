@@ -53,19 +53,84 @@ use fs_phs::{PortHamiltonian, QuadraticStorage};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateSection, assemble, modes};
 use fs_psycho::receipt::{ListeningReceipt, ListeningVerdict};
 
+#[path = "support/material_packs.rs"]
+mod material_packs;
+use material_packs::{
+    FPL_MOISTURE_CONTENT, MaterialPack, ROSEWOOD_BACK_FIXTURE, ROSEWOOD_BRAZILIAN, SPRUCE_SITKA,
+    SPRUCE_SITKA_LOSS, at_moisture_content,
+};
+
 const PI: f64 = core::f64::consts::PI;
 const TAU: f64 = core::f64::consts::TAU;
 
-// Sitka spruce top, matdb pack spruce-sitka-fpl-gtr282 (12% MC).
-const SP_EL: f64 = 11.88e9;
-const SP_RHO: f64 = 448.0;
-// Brazilian rosewood back, matdb pack rosewood-brazilian-fpl-gtr282:
-// E_L 14.3 GPa; SG 0.8 (ovendry/green basis — the pack refuses a 12%
-// density, so 800 kg/m3 is used with that caveat DISCLOSED). Elastic
-// ratios are declared-typical hardwood values (the pack carries E_L
-// only); the back is a compliance surrogate.
-const RW_EL: f64 = 14.3e9;
-const RW_RHO: f64 = 800.0;
+/// One wood's longitudinal-radial plane, the four constants the DKT plate
+/// reads: E_L, E_R, nu_LR, G_LR [Pa], and density [kg/m^3].
+#[derive(Clone, Copy)]
+struct Wood {
+    e_l: f64,
+    e_r: f64,
+    nu_lr: f64,
+    g_lr: f64,
+    rho: f64,
+}
+
+impl Wood {
+    fn section(&self, h: f64) -> PlateSection {
+        PlateSection::orthotropic_plane_stress(
+            self.e_l, self.e_r, self.nu_lr, self.g_lr, h, self.rho,
+        )
+        .expect("wood section")
+    }
+}
+
+/// Sitka spruce top: the L-R plane of pack spruce-sitka-fpl-gtr282 through
+/// its reference ratios at 12 % MC.
+fn spruce() -> Wood {
+    let (rho, law) = MaterialPack::seed(SPRUCE_SITKA)
+        .plane_lr(&at_moisture_content(FPL_MOISTURE_CONTENT))
+        .expect("spruce L-R plane");
+    Wood {
+        e_l: law.e[0],
+        e_r: law.e[1],
+        nu_lr: law.nu,
+        g_lr: law.g,
+        rho,
+    }
+}
+
+/// Brazilian rosewood back, a compliance surrogate: E_L from pack
+/// rosewood-brazilian-fpl-gtr282 (12 % MC). That pack carries only E_L and
+/// specific gravity, so it refuses a 12 % density and every elastic ratio by
+/// name; the back's ratios, Poisson ratio and density are the labelled
+/// authored fixture rosewood-brazilian-back-authored-fixture.
+fn rosewood() -> Wood {
+    let at = at_moisture_content(FPL_MOISTURE_CONTENT);
+    let e_l = MaterialPack::seed(ROSEWOOD_BRAZILIAN)
+        .scalar("young_modulus_longitudinal", fs_qty::Pressure::DIMS, &at)
+        .expect("rosewood E_L");
+    let fixture = MaterialPack::fixture(ROSEWOOD_BACK_FIXTURE);
+    let value = |property, dims| {
+        fixture
+            .scalar(property, dims, &at)
+            .expect("authored back value")
+    };
+    Wood {
+        e_l,
+        e_r: value("er_over_el", fs_qty::Dims::NONE) * e_l,
+        nu_lr: value("nu_lr", fs_qty::Dims::NONE),
+        g_lr: value("glr_over_el", fs_qty::Dims::NONE) * e_l,
+        rho: value("density", fs_qty::Density::DIMS),
+    }
+}
+
+/// The top's along-grain loss factor: pack spruce-sitka-loss-qiu2026's first
+/// mode, held at its measured 62.36 Hz and 12 % MC (the plate modes lie
+/// above it; constant loss is assumed there).
+fn spruce_loss_factor() -> f64 {
+    MaterialPack::seed(SPRUCE_SITKA_LOSS)
+        .scalar_as_measured("loss_factor_longitudinal", fs_qty::Dims::NONE)
+        .expect("spruce along-grain loss factor")
+}
 
 // Declared-typical steel-string geometry (shape surrogates).
 const PLATE_A: f64 = 0.36;
@@ -100,37 +165,24 @@ struct PlateModes {
 }
 
 fn spruce_section(h: f64) -> PlateSection {
-    let law = fs_material::elastic::OrthotropicElastic::new(
-        [SP_EL, 0.078 * SP_EL, 0.078 * SP_EL],
-        [0.372, 0.372, 0.435],
-        [0.064 * SP_EL, 0.003 * SP_EL, 0.061 * SP_EL],
-        1.0,
-    )
-    .expect("spruce law");
-    PlateSection::orthotropic(&law, h, SP_RHO).expect("spruce section")
+    spruce().section(h)
 }
 
 fn rosewood_section(h: f64) -> PlateSection {
-    let law = fs_material::elastic::OrthotropicElastic::new(
-        [RW_EL, 0.10 * RW_EL, 0.10 * RW_EL],
-        [0.372, 0.372, 0.435],
-        [0.07 * RW_EL, 0.004 * RW_EL, 0.065 * RW_EL],
-        1.0,
-    )
-    .expect("rosewood law");
-    PlateSection::orthotropic(&law, h, RW_RHO).expect("rosewood section")
+    rosewood().section(h)
 }
 
-fn brace(e: f64, g: f64, rho: f64, plate_h: f64, depth: f64, j: usize) -> fs_plate::Stiffener {
+/// A transverse brace of `wood` along its grain: E_L, G_LR and density.
+fn brace(wood: &Wood, plate_h: f64, depth: f64, j: usize) -> fs_plate::Stiffener {
     fs_plate::Stiffener {
         nodes: (0..=NX).map(|i| j * (NX + 1) + i).collect(),
-        e,
-        g,
+        e: wood.e_l,
+        g: wood.g_lr,
         area: 0.012 * depth,
         inertia: 0.012 * depth.powi(3) / 12.0,
         torsion: 0.229 * depth * 0.012f64.powi(3),
         eccentricity: f64::midpoint(plate_h, depth),
-        density: rho,
+        density: wood.rho,
     }
 }
 
@@ -219,8 +271,8 @@ fn composed_guitar() -> GuitarBody {
     let top = braced_plate_modes(
         &spruce_section(TOP_H),
         &[
-            brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.008, NY / 3),
-            brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.008, 2 * NY / 3),
+            brace(&spruce(), TOP_H, 0.008, NY / 3),
+            brace(&spruce(), TOP_H, 0.008, 2 * NY / 3),
         ],
         (60.0, 500.0),
     );
@@ -229,9 +281,9 @@ fn composed_guitar() -> GuitarBody {
     let back = braced_plate_modes(
         &rosewood_section(BACK_H),
         &[
-            brace(RW_EL, 0.07 * RW_EL, RW_RHO, BACK_H, 0.016, NY / 4),
-            brace(RW_EL, 0.07 * RW_EL, RW_RHO, BACK_H, 0.016, NY / 2),
-            brace(RW_EL, 0.07 * RW_EL, RW_RHO, BACK_H, 0.016, 3 * NY / 4),
+            brace(&rosewood(), BACK_H, 0.016, NY / 4),
+            brace(&rosewood(), BACK_H, 0.016, NY / 2),
+            brace(&rosewood(), BACK_H, 0.016, 3 * NY / 4),
         ],
         (60.0, 500.0),
     );
@@ -274,7 +326,7 @@ fn composed_guitar() -> GuitarBody {
     let structure = StructuralModes {
         omegas: merged.iter().map(|(w, _)| *w).collect(),
         shapes: merged.into_iter().map(|(_, s)| s).collect(),
-        loss_factor: 0.014,
+        loss_factor: spruce_loss_factor(),
     };
     let resonator = helmholtz_resonator_mode(
         CAVITY_M3,
@@ -423,8 +475,8 @@ fn gt_001_composed_triad_vs_carcagno() {
         let top = braced_plate_modes(
             &spruce_section(TOP_H),
             &[
-                brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.008, NY / 3),
-                brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.008, 2 * NY / 3),
+                brace(&spruce(), TOP_H, 0.008, NY / 3),
+                brace(&spruce(), TOP_H, 0.008, 2 * NY / 3),
             ],
             (60.0, 500.0),
         );
@@ -441,7 +493,7 @@ fn gt_001_composed_triad_vs_carcagno() {
         let structure = StructuralModes {
             omegas: vec![breather.0],
             shapes: vec![breather.1.clone()],
-            loss_factor: 0.014,
+            loss_factor: spruce_loss_factor(),
         };
         let resonator = helmholtz_resonator_mode(
             CAVITY_M3,
@@ -515,6 +567,37 @@ fn gt_001_composed_triad_vs_carcagno() {
     );
 }
 
+// G0 (pexfp.32, DONE-WHEN 4): a property the rosewood pack does not carry
+// refuses by name and nothing defaults. Its 12 % density and its elastic
+// ratios exist only as the labelled authored fixture, an authored-fixture card.
+#[test]
+fn g0_missing_pack_property_refuses_by_name() {
+    let at = at_moisture_content(FPL_MOISTURE_CONTENT);
+    let pack = MaterialPack::seed(ROSEWOOD_BRAZILIAN);
+    for (property, dims) in [
+        ("density", fs_qty::Density::DIMS),
+        ("er_over_el", fs_qty::Dims::NONE),
+        ("glr_over_el", fs_qty::Dims::NONE),
+        ("nu_lr", fs_qty::Dims::NONE),
+    ] {
+        let error = pack.scalar(property, dims, &at).unwrap_err();
+        assert!(
+            error.contains("rosewood-brazilian-fpl-gtr282")
+                && error.contains(&format!("'{property}'")),
+            "{error}"
+        );
+    }
+    let plane = pack.plane_lr(&at).unwrap_err();
+    assert!(plane.contains("rosewood-brazilian-fpl-gtr282"), "{plane}");
+    let fixture = MaterialPack::fixture(ROSEWOOD_BACK_FIXTURE);
+    assert_eq!(
+        fixture.card().id().process,
+        material_packs::AUTHORED_FIXTURE
+    );
+    // A fixture never passes as data, nor data as a fixture.
+    assert!(std::panic::catch_unwind(|| MaterialPack::fixture(ROSEWOOD_BRAZILIAN)).is_err());
+}
+
 #[test]
 fn gt_002_midline_brace_negative_control() {
     let areas = node_areas();
@@ -525,12 +608,12 @@ fn gt_002_midline_brace_negative_control() {
     // executed trap.
     let midline = braced_plate_modes(
         &spruce_section(TOP_H),
-        &[brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.014, NY / 2)],
+        &[brace(&spruce(), TOP_H, 0.014, NY / 2)],
         (60.0, 600.0),
     );
     let off_center = braced_plate_modes(
         &spruce_section(TOP_H),
-        &[brace(SP_EL, 0.064 * SP_EL, SP_RHO, TOP_H, 0.008, NY / 3)],
+        &[brace(&spruce(), TOP_H, 0.008, NY / 3)],
         (60.0, 600.0),
     );
     // The (1,2)-class mode: antisymmetric across the midline y = b/2

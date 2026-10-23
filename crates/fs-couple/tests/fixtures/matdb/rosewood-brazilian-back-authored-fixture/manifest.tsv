@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	rosewood-brazilian-back-authored-fixture
+redistribution	permitted	authored test fixture; not data. FrankenSim original work; no external rights involved
+citation	Authored test fixture for crates/fs-couple/tests/guitar_body_gate.rs (bead pexfp.32): the guitar back's rosewood E_R/E_L, G_LR/E_L, nu_LR and density, which no source pack carries; E_L comes from rosewood-brazilian-fpl-gtr282
+license	FrankenSim-Original-Work
+source	primary	properties.tsv	material-tsv-v1

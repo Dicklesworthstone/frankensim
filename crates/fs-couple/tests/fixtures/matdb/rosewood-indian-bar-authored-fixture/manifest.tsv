@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	rosewood-indian-bar-authored-fixture
+redistribution	permitted	authored test fixture; not data. FrankenSim original work; no external rights involved
+citation	Authored test fixture for crates/fs-couple/tests/xylophone_bar.rs (bead pexfp.32): the bar's rosewood density, which no source pack carries; E_L comes from rosewood-indian-fpl-gtr282
+license	FrankenSim-Original-Work
+source	primary	properties.tsv	material-tsv-v1

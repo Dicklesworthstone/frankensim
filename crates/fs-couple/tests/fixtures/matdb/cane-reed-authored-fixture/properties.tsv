@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	authored-reed	authored test fixture; not data	Isotropic Poisson ratio for the bending-dominated reed reduction	No licensable cane Poisson ratio was found; the bending-dominated reduction is insensitive to it. Authored, not measured
+scalar	poisson-ratio	authored-reed	poisson_ratio	0.30	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	moisture_content_known	0	0	1

@@ -27,16 +27,33 @@ use fs_couple::{
     WindowInventorySnapshot, WindowManifestEntry,
 };
 use fs_math::c64::C64;
+
+#[path = "support/material_packs.rs"]
+mod material_packs;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateSection, assemble, modes};
 use fs_qty::{Amount, ElectricCharge, Energy, Mass, Temperature};
+use material_packs::{
+    ALUMINUM_2024_T3, FPL_MOISTURE_CONTENT, MaterialPack, SPRUCE_SITKA, SPRUCE_SITKA_LOSS,
+    at_moisture_content,
+};
 
 const PI: f64 = core::f64::consts::PI;
 
-// Aluminum 2024-T3 from the matdb pack aluminum-2024-t3-nasa-tn-d6448
-// (NASA TN D-6448 page 15 property set).
-const AL_E: f64 = 72.4e9;
-const AL_NU: f64 = 0.33;
-const AL_RHO: f64 = 2705.0;
+/// Aluminum 2024-T3 from the pack aluminum-2024-t3-nasa-tn-d6448 (NASA
+/// TN D-6448 page 15 property set, 300 K): Young's modulus [Pa], Poisson
+/// ratio and density [kg/m^3], each at its measured state.
+fn aluminum() -> (f64, f64, f64) {
+    let pack = MaterialPack::seed(ALUMINUM_2024_T3);
+    let value = |property, dims| {
+        pack.scalar_as_measured(property, dims)
+            .expect("aluminum property")
+    };
+    (
+        value("young_modulus", fs_qty::Pressure::DIMS),
+        value("poisson_ratio", fs_qty::Dims::NONE),
+        value("density", fs_qty::Density::DIMS),
+    )
+}
 
 const PLATE_A: f64 = 0.4;
 const PLATE_B: f64 = 0.3;
@@ -58,7 +75,8 @@ struct PlateBasis {
 /// node areas (interior dx*dy, edges half, corners quarter).
 fn plate_basis(mode_window_hz: (f64, f64)) -> PlateBasis {
     let mesh = PlateMesh::rectangle(PLATE_A, PLATE_B, NX, NY);
-    let section = PlateSection::isotropic(AL_E, AL_NU, PLATE_H, AL_RHO).expect("section");
+    let (al_e, al_nu, al_rho) = aluminum();
+    let section = PlateSection::isotropic(al_e, al_nu, PLATE_H, al_rho).expect("section");
     let boundary = PlateMesh::rectangle_boundary(NX, NY);
     let model = assemble(
         &mesh,
@@ -831,9 +849,11 @@ fn radiated_power_and_accounting_window_audit() {
 /// coupling (Christensen-Vistisen class) built ENTIRELY from
 /// matdb-pack material data and DECLARED typical steel-string
 /// geometry (the paper's own dimensional supplement was not
-/// retrievable): Sitka spruce orthotropic law from
-/// spruce-sitka-fpl-gtr282 (E_L 11.88 GPa, E_R/E_L 0.078, nu_LR
-/// 0.372, G_LR/E_L 0.064, SG 0.4 -> 448 kg/m3 at 12% MC), a braced
+/// retrievable): the Sitka spruce L-R plane resolved from
+/// spruce-sitka-fpl-gtr282 through its reference ratios at 12 % MC
+/// (E_L, E_R/E_L, nu_LR, G_LR/E_L and density), its along-grain loss
+/// factor from spruce-sitka-loss-qiu2026 at the first mode's measured
+/// 62.36 Hz (held there: the plate modes lie above it), a braced
 /// lower-bout stand-in rectangle, and a 13.5 L cavity with an 86 mm
 /// sound hole. HONEST DISCREPANCY DISCUSSION lives in the assertions
 /// and the JSON row: the rectangle + single brace is a shape
@@ -844,21 +864,15 @@ fn radiated_power_and_accounting_window_audit() {
 #[test]
 #[allow(clippy::too_many_lines)] // one coherent literature-comparison fixture
 fn guitar_coupled_pair_vs_carcagno_2018() {
-    // Sitka spruce, matdb pack spruce-sitka-fpl-gtr282 (12% MC).
-    let e_l = 11.88e9;
-    let e_r = 0.078 * e_l;
-    let nu_lr = 0.372;
-    let g_lr = 0.064 * e_l;
-    let rho = 448.0;
-    let law = fs_material::elastic::OrthotropicElastic::new(
-        [e_l, e_r, e_r],
-        [nu_lr, nu_lr, 0.435],
-        [g_lr, 0.003 * e_l, 0.061 * e_l],
-        1.0,
-    )
-    .expect("spruce law");
+    // Sitka spruce L-R plane from its pack (12 % MC); the DKT plate reads
+    // only these four constants and the density.
+    let (rho, law) = MaterialPack::seed(SPRUCE_SITKA)
+        .plane_lr(&at_moisture_content(FPL_MOISTURE_CONTENT))
+        .expect("spruce L-R plane");
+    let ([e_l, e_r], nu_lr, g_lr) = (law.e, law.nu, law.g);
     let h = 0.0029;
-    let section = PlateSection::orthotropic(&law, h, rho).expect("spruce section");
+    let section = PlateSection::orthotropic_plane_stress(e_l, e_r, nu_lr, g_lr, h, rho)
+        .expect("spruce section");
     // Lower-bout stand-in rectangle, grain along x.
     let (a, b) = (0.36, 0.29);
     let (nx, ny) = (12usize, 10usize);
@@ -968,7 +982,9 @@ fn guitar_coupled_pair_vs_carcagno_2018() {
     let structure = StructuralModes {
         omegas: vec![fundamental.lambda.sqrt()],
         shapes: vec![shape],
-        loss_factor: 0.014,
+        loss_factor: MaterialPack::seed(SPRUCE_SITKA_LOSS)
+            .scalar_as_measured("loss_factor_longitudinal", fs_qty::Dims::NONE)
+            .expect("spruce along-grain loss factor"),
     };
     let coupling = assemble_coupling(&structure, &resonator, &node_areas).expect("coupling");
     let two_dof =
@@ -1010,8 +1026,8 @@ fn guitar_coupled_pair_vs_carcagno_2018() {
         "coupled pair ({f1:.1}, {f2:.1}) vs Carcagno means ({meas_f1_mean}, {meas_f2_mean}):          deviations {dev1:.3}, {dev2:.3}"
     );
 
-    // Damping honesty: matdb wood loss factors give material-only
-    // Q = 1/eta ~ 71, ABOVE the measured Q1 33-42 — radiation and
+    // Damping honesty: the pack's wood loss factor gives material-only
+    // Q = 1/eta ~ 70, ABOVE the measured Q1 33-42 — radiation and
     // support losses dominate a real guitar's bandwidth, so a
     // material-damping-only model must underpredict damping. Assert
     // the inequality that makes the discussion executable.

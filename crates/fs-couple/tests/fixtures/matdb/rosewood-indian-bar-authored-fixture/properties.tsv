@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	authored-bar	authored test fixture; not data	Density as specific gravity 0.75 x 1000 kg/m^3 for an authored xylophone bar chart	rosewood-indian-fpl-gtr282 carries specific gravity 0.75 only (ovendry weight over volume at 12 percent moisture content), so it states no density at 12 percent; this value is authored, not measured
+scalar	density	authored-bar	density	750.0	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content	12	12	%

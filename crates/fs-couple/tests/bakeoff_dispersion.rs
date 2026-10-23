@@ -26,15 +26,40 @@ use fs_couple::bakeoff::{BakeoffOutcome, BakeoffReceipt, ContenderResult};
 use fs_fft::{C64, Fft};
 use fs_vfit::discretize::{DelayedFilter, DigitalFilter};
 
+#[path = "support/material_packs.rs"]
+mod material_packs;
+use material_packs::{MUSIC_WIRE_DENSITY, MUSIC_WIRE_MODULI, MaterialPack};
+
 const RATE: f64 = 48_000.0;
 
-/// Music-wire card (shared by both contenders; everything below is
-/// DERIVED from these five numbers).
-const E_PA: f64 = 200.0e9;
+/// The string's geometry and tension, shared by both contenders. With
+/// the wire's material from its packs, everything below is DERIVED from
+/// these numbers.
 const DIAMETER_M: f64 = 1.0e-3;
 const LENGTH_M: f64 = 0.65;
 const TENSION_N: f64 = 700.0;
-const DENSITY: f64 = 7850.0;
+
+/// Music wire from its packs, each value at its own measured 293 K: Young's
+/// modulus from Fuchs 1968 and density from NBS Circular 447.
+struct Wire {
+    e_pa: f64,
+    density: f64,
+    provenance: String,
+}
+
+fn wire() -> Wire {
+    let moduli = MaterialPack::seed(MUSIC_WIRE_MODULI);
+    let density = MaterialPack::seed(MUSIC_WIRE_DENSITY);
+    Wire {
+        e_pa: moduli
+            .scalar_as_measured("young_modulus", fs_qty::Pressure::DIMS)
+            .expect("music-wire Young's modulus"),
+        density: density
+            .scalar_as_measured("density", fs_qty::Density::DIMS)
+            .expect("music-wire density"),
+        provenance: format!("{}; {}", moduli.provenance(), density.provenance()),
+    }
+}
 
 struct Card {
     f0_hz: f64,
@@ -42,11 +67,12 @@ struct Card {
 }
 
 fn card() -> Card {
+    let wire = wire();
     let area = core::f64::consts::PI * DIAMETER_M * DIAMETER_M / 4.0;
-    let mu = DENSITY * area;
+    let mu = wire.density * area;
     let inertia = core::f64::consts::PI * DIAMETER_M.powi(4) / 64.0;
     let f0_hz = (TENSION_N / mu).sqrt() / (2.0 * LENGTH_M);
-    let b = core::f64::consts::PI.powi(2) * E_PA * inertia / (TENSION_N * LENGTH_M * LENGTH_M);
+    let b = core::f64::consts::PI.powi(2) * wire.e_pa * inertia / (TENSION_N * LENGTH_M * LENGTH_M);
     Card { f0_hz, b }
 }
 
@@ -349,8 +375,16 @@ fn mint_dispersion_bakeoff_receipt() {
         modal.states,
         full_band_modes
     );
+    let wire = wire();
     let mut cards_bytes = Vec::new();
-    for v in [E_PA, DIAMETER_M, LENGTH_M, TENSION_N, DENSITY, RATE] {
+    for v in [
+        wire.e_pa,
+        DIAMETER_M,
+        LENGTH_M,
+        TENSION_N,
+        wire.density,
+        RATE,
+    ] {
         cards_bytes.extend_from_slice(&v.to_bits().to_le_bytes());
     }
     let mut reference = BTreeMap::new();
@@ -362,10 +396,12 @@ fn mint_dispersion_bakeoff_receipt() {
     );
     let receipt = BakeoffReceipt {
         filling: "string".to_string(),
-        fixture: "crates/fs-couple/tests/bakeoff_dispersion.rs music-wire card \
-                  (E=200GPa d=1mm L=0.65m T=120N rho=7850), pluck loop 1.5s at 48k, \
-                  partials 1..8 vs the analytic stiff law; dispersionless control in rationale"
-            .to_string(),
+        fixture: format!(
+            "crates/fs-couple/tests/bakeoff_dispersion.rs music-wire string (E={}Pa rho={}kg/m3 \
+             from packs {}; d=1mm L=0.65m T=700N), pluck loop 1.5s at 48k, partials 1..8 vs the \
+             analytic stiff law; dispersionless control in rationale",
+            wire.e_pa, wire.density, wire.provenance
+        ),
         shared_cards: hash_domain("org.frankensim.fs-couple.dispersion-cards.v1", &cards_bytes),
         reference,
         contenders: [
