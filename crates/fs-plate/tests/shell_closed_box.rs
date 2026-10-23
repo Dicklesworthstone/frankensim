@@ -298,7 +298,11 @@ fn find_tight_upper_window_bound(
 /// Solve the first `n_modes` eigenvalues (and mass-normalized eigenvectors) of a `ShellModel`
 /// using a positive shift `sigma` and an inertia-bracketed upper bound so the 6 rigid-body modes
 /// (`lambda ~ 0`) and lowest flexible modes are resolved in a single pass of `fs_modal::slice_window`.
-fn solve_first_modes(model: &ShellModel, n_modes: usize, start_hi: f64) -> (Vec<f64>, Vec<Vec<f64>>) {
+fn solve_first_modes(
+    model: &ShellModel,
+    n_modes: usize,
+    start_hi: f64,
+) -> (Vec<f64>, Vec<Vec<f64>>) {
     let sigma = 1.0e5_f64;
     let k_shifted = add_scaled_csr(&model.k, &model.m, sigma);
     let hi = find_tight_upper_window_bound(&k_shifted, &model.m, n_modes, start_hi + sigma);
@@ -398,15 +402,32 @@ fn g1_nonmatching_box_converges() {
         angle_tolerance_rad: 1e-6,
     };
 
-    // Solve the fundamental flexible box mode (mode index 6) across 3 h-refinement rungs (m = 1, 2, 4)
-    // and Richardson-extrapolated fine monolithic reference (m = 6).
-    let mono_lambda6 = |m: usize| -> f64 {
+    // The eigenvalue error is measured against a monolithic fine solution, not
+    // an extrapolation that would presume the order being measured. Rungs
+    // m = 4, 6, 8 put 8/12/16 cells on every monolithic panel edge (12/18/24 on
+    // the 3-sides of the nonmatching box). The reference is the monolithic box
+    // at m = 32, 64 cells per edge, four times the finest coarse side. The
+    // first ten flexible modes are gated, each against its own monolithic
+    // order.
+    //
+    // At m = 2 (4 cells per edge) the errors were 12-22 % and the close pairs
+    // crossed, so the ladder starts at m = 4. Flexible modes 9 and 10 are a
+    // near pair (86.82e6 and 87.68e6, 1.0 % apart) whose errors exceed that gap
+    // at every affordable rung, so sorted index hands the 9th eigenvalue to
+    // whichever family is lower on each mesh. Consecutive reference eigenvalues
+    // whose gap is below the coarsest-rung error of either therefore form one
+    // cluster, gated by its mean (the cluster trace), which no family swap can
+    // reorder. A singleton cluster is the eigenvalue itself.
+    let rungs = [4usize, 6, 8];
+    let m_ref = 32usize;
+    let flexible = 10usize;
+    let count = 6 + flexible;
+    let mono_lambdas = |m: usize, start_hi: f64| -> Vec<f64> {
         let mesh = build_monolithic_box_mesh(a, b, c, h, &sec, 2 * m, 2 * m, 2 * m);
         let model = assemble_shell(&mesh, &sec, &[], ShellSupport::Free).unwrap();
-        let (lams, _) = solve_first_modes(&model, 10, 2.5e8);
-        lams[6]
+        solve_first_modes(&model, count, start_hi).0
     };
-    let nonmatch_lambda6 = |m: usize| -> f64 {
+    let nonmatch_lambdas = |m: usize| -> Vec<f64> {
         // 2:3 nonmatching panel mesh ratio along all 8 horizontal box edges:
         // Top/Bottom use 2*m x 2*m; Front/Back/Left/Right use 3*m x 2*m.
         let six = build_six_panel_box(
@@ -431,47 +452,85 @@ fn g1_nonmatching_box_converges() {
             })
             .collect();
         let tied = tie_shells(&comps, &six.ties, budget, || false).unwrap();
-        let (lams, _) = solve_first_modes(&tied.model, 10, 2.5e8);
-        lams[6]
+        solve_first_modes(&tied.model, count, 2.5e8).0
     };
 
-    let mono_rungs: [f64; 3] = [mono_lambda6(1), mono_lambda6(2), mono_lambda6(4)];
-    let nonmatch_rungs: [f64; 3] = [nonmatch_lambda6(1), nonmatch_lambda6(2), nonmatch_lambda6(4)];
+    let mono_raw: Vec<Vec<f64>> = rungs.iter().map(|&m| mono_lambdas(m, 2.5e8)).collect();
+    let nonmatch_raw: Vec<Vec<f64>> = rungs.iter().map(|&m| nonmatch_lambdas(m)).collect();
+    // The reference converges from the finest rung's side; seeding its window
+    // there spares the bisection factorizations of the 148k-DOF reference.
+    let reference = mono_lambdas(m_ref, 1.1 * mono_raw.last().unwrap()[count - 1]);
 
-    // Second-order Richardson reference from the fine monolithic pair (m = 2, m = 4):
-    // lambda_extrap = (4 * lambda(4) - lambda(2)) / 3.
-    let lam_ref = (4.0 * mono_rungs[2] - mono_rungs[1]) / 3.0;
-    // Also evaluate a fine m = 6 monolithic check to confirm Richardson consistency:
-    let lam_fine6 = mono_lambda6(6);
-    let ref_exact = (9.0 * lam_fine6 - 4.0 * mono_rungs[2]) / 5.0;
-    let _ = lam_ref;
-
-    let err_mono: [f64; 3] = core::array::from_fn(|r| (mono_rungs[r] - ref_exact).abs() / ref_exact);
-    let err_nonmatch: [f64; 3] =
-        core::array::from_fn(|r| (nonmatch_rungs[r] - ref_exact).abs() / ref_exact);
-
-    let hs = vec![1.0, 0.5, 0.25];
-    let ladder_mono = RefinementLadder::new(hs.clone(), err_mono.to_vec()).unwrap();
-    let ladder_nonmatch = RefinementLadder::new(hs, err_nonmatch.to_vec()).unwrap();
-
-    let p_mono = fit_order(&ladder_mono).observed;
-    let p_nonmatch = fit_order(&ladder_nonmatch).observed;
-
-    let gate = OrderGate {
-        theoretical: p_mono,
+    let flex = |lams: &[f64]| lams[6..count].to_vec();
+    let ref_flex = flex(&reference);
+    let coarse_err: Vec<f64> = flex(&mono_raw[0])
+        .iter()
+        .zip(&ref_flex)
+        .map(|(l, r)| (l - r).abs() / r)
+        .collect();
+    let mut clusters: Vec<Vec<usize>> = vec![vec![0]];
+    for j in 1..flexible {
+        let gap = ref_flex[j] / ref_flex[j - 1] - 1.0;
+        if gap < coarse_err[j].max(coarse_err[j - 1]) {
+            clusters.last_mut().unwrap().push(j);
+        } else {
+            clusters.push(vec![j]);
+        }
+    }
+    let mean = |lams: &[f64], cluster: &[usize]| {
+        cluster.iter().map(|&j| lams[j]).sum::<f64>() / cluster.len() as f64
     };
-    let verdict = gate
-        .check("nonmatching_2_to_3_closed_box", LadderSide::Primal, &ladder_nonmatch)
-        .unwrap_or_else(|e| {
-            panic!(
-                "nonmatching 2:3 box order {p_nonmatch:.3} outside +/-0.2 of monolithic order {p_mono:.3}: {e} (err_mono={err_mono:?}, err_nonmatch={err_nonmatch:?})"
-            )
-        });
+    let hs: Vec<f64> = rungs.iter().map(|&m| 1.0 / m as f64).collect();
+
+    let mut failures = Vec::new();
+    for cluster in &clusters {
+        let target = mean(&ref_flex, cluster);
+        let ladder_of = |raw: &[Vec<f64>]| -> Vec<f64> {
+            raw.iter()
+                .map(|l| (mean(&flex(l), cluster) - target).abs() / target)
+                .collect()
+        };
+        let mono = ladder_of(&mono_raw);
+        let nonmatch = ladder_of(&nonmatch_raw);
+        let own = fit_order(
+            &RefinementLadder::new(hs.clone(), mono.clone()).expect("valid monolithic ladder"),
+        );
+        let ladder =
+            RefinementLadder::new(hs.clone(), nonmatch.clone()).expect("valid nonmatching ladder");
+        let members: Vec<String> = cluster.iter().map(|j| (j + 1).to_string()).collect();
+        let case = format!(
+            "nonmatching-2-to-3-box-flexible-modes-{}",
+            members.join("-")
+        );
+        println!(
+            "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W2b\",\"test\":\"g1_nonmatching_box_converges\",\"tier\":\"G1\",\"case\":\"{case}\",\"rungs_m\":{rungs:?},\"reference_m\":{m_ref},\"reference_lambdas\":{:?},\"monolithic_lambdas\":{:?},\"nonmatching_lambdas\":{:?},\"monolithic_order\":{},\"monolithic_errors\":{mono:?},\"nonmatching_errors\":{nonmatch:?}}}",
+            cluster.iter().map(|&j| ref_flex[j]).collect::<Vec<_>>(),
+            mono_raw
+                .iter()
+                .map(|l| cluster.iter().map(|&j| l[6 + j]).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            nonmatch_raw
+                .iter()
+                .map(|l| cluster.iter().map(|&j| l[6 + j]).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            own.observed,
+        );
+        match (OrderGate {
+            theoretical: own.observed,
+        })
+        .check(&case, LadderSide::Primal, &ladder)
+        {
+            Ok(verdict) => println!("{}", verdict.json_line(true)),
+            Err(refusal) => {
+                println!("{}", refusal.detail());
+                failures.push(case);
+            }
+        }
+    }
     assert!(
-        err_nonmatch[2] < err_nonmatch[1] && err_nonmatch[1] < err_nonmatch[0],
-        "nonmatching 2:3 box errors must decrease monotonically across all 3 rungs: {err_nonmatch:?}"
+        failures.is_empty(),
+        "nonmatching box order gate failed for {failures:?}"
     );
-    println!("{}", verdict.json_line(true));
 }
 
 #[test]
@@ -554,30 +613,28 @@ fn g1_glue_compliance_rigid_limit() {
         );
     }
 
-    // 2. Asymptotic convergence slope in 1/k (or -1 +/- 0.2 in log(err) / log(k)):
-    // Measure mean relative eigenvalue gap across the first 6 flexible modes (6..12).
-    let mean_rel_gap: Vec<f64> = (0..scales.len())
-        .map(|r| {
-            let sum: f64 = (6..12)
-                .map(|m| (lam_rigid[m] - spectra[r][m]).abs() / lam_rigid[m])
-                .sum();
-            sum / 6.0
-        })
-        .collect();
-
-    for r in 0..(scales.len() - 1) {
-        // Slope of log(err) with respect to log(k) is d(log err) / d(log k) = log10(err[r+1] / err[r]),
-        // which must lie in [-1.2, -0.8] (i.e. -1 +/- 0.2).
-        let slope = det::ln(mean_rel_gap[r + 1] / mean_rel_gap[r]) / det::ln(10.0);
-        assert!(
-            (slope - (-1.0)).abs() <= 0.2,
-            "rung {r}->{}: observed log-slope {slope:.4} outside -1.0 +/- 0.2 (gaps={mean_rel_gap:?})",
-            r + 1
-        );
+    // 2. Each flexible mode converges to the rigid-tie spectrum at slope -1 +- 0.2
+    //    in 1/k, per x10 step. Gated per mode: a mean over modes could hide one
+    //    mode converging at a different rate.
+    let mut slopes = Vec::with_capacity(8);
+    for m in 6..14 {
+        let gaps: Vec<f64> = (0..scales.len())
+            .map(|r| (lam_rigid[m] - spectra[r][m]).abs() / lam_rigid[m])
+            .collect();
+        for r in 0..(scales.len() - 1) {
+            let slope = det::ln(gaps[r + 1] / gaps[r]) / det::ln(10.0);
+            slopes.push(slope);
+            assert!(
+                (slope - (-1.0)).abs() <= 0.2,
+                "mode {m}, rung {r}->{}: observed log-slope {slope:.4} outside -1.0 +/- 0.2 (gaps={gaps:?})",
+                r + 1
+            );
+        }
     }
     println!(
-        "G1 glue compliance rigid limit: mean_rel_gaps={mean_rel_gap:?}, last_slope={:.4}",
-        det::ln(mean_rel_gap[3] / mean_rel_gap[2]) / det::ln(10.0)
+        "G1 glue compliance rigid limit: per-mode slopes (modes 6..14, 3 steps each) in [{:.4}, {:.4}]",
+        slopes.iter().copied().fold(f64::INFINITY, f64::min),
+        slopes.iter().copied().fold(f64::NEG_INFINITY, f64::max)
     );
 }
 
@@ -714,14 +771,12 @@ fn g0_glue_compliance_is_data() {
 
     let card = build_card(None);
     assert!(
-        card.third_body()
-            .unwrap()
-            .starts_with("authored-fixture:"),
+        card.third_body().unwrap().starts_with("authored-fixture:"),
         "test fixture card must be named as an authored fixture"
     );
     let point = QueryPoint::new().with("temperature", 293.15).unwrap();
-    let (glue, receipts) =
-        resolve_glue_card_fixture(&card, &spruce, &maple, &point, 0.003).expect("valid card resolves");
+    let (glue, receipts) = resolve_glue_card_fixture(&card, &spruce, &maple, &point, 0.003)
+        .expect("valid card resolves");
     assert_eq!(glue.normal_n_m3, 2.0e11);
     assert_eq!(receipts.len(), 6);
 
@@ -816,7 +871,8 @@ fn build_box_skins(six: &SixPanelBox, sec: &PlateSection) -> Vec<ShellRadiationS
                 },
             )
             .unwrap();
-            red.radiation_surface(&six.thicknesses[i], rad_budget).unwrap()
+            red.radiation_surface(&six.thicknesses[i], rad_budget)
+                .unwrap()
         })
         .collect()
 }
@@ -837,7 +893,13 @@ fn g0_fluid_boundary_ownership_audit() {
         .collect();
 
     // All 6 panels have outward midsurface normals (+n = Exterior, -n = InteriorCavity(0)).
-    let doms = vec![(AcousticDomainId::Exterior, AcousticDomainId::InteriorCavity(0)); 6];
+    let doms = vec![
+        (
+            AcousticDomainId::Exterior,
+            AcousticDomainId::InteriorCavity(0)
+        );
+        6
+    ];
     let assignments = FluidBoundaryAssignments::from_component_sides(
         &comps,
         &doms,
@@ -846,8 +908,8 @@ fn g0_fluid_boundary_ownership_audit() {
         Vec::new(),
     );
 
-    let receipt =
-        FluidBoundaryOwnership::audit(&comps, &skins, &assignments).expect("valid closed box passes audit");
+    let receipt = FluidBoundaryOwnership::audit(&comps, &skins, &assignments)
+        .expect("valid closed box passes audit");
     let cav = &receipt.domains[&AcousticDomainId::InteriorCavity(0)];
     let ext = &receipt.domains[&AcousticDomainId::Exterior];
     assert_eq!(cav.faces.len(), 6 * 8);
@@ -883,10 +945,18 @@ fn g0_fluid_boundary_ownership_audit() {
     // covers the untied boundary edges!
     // Remove the 4 ties touching Top panel (1), and omit Top panel (1) from InteriorCavity(0) by
     // declaring the top rim loop on panels 2, 5, 3, 4 as open apertures:
+    // Each mutation must refuse for its own reason, not for any reason.
+    let refusal = |assignments: &FluidBoundaryAssignments| -> &'static str {
+        match FluidBoundaryOwnership::audit(&comps, &skins, assignments).err() {
+            Some(fs_plate::PlateError::BadConstraint { what }) => what,
+            other => panic!("expected a BadConstraint refusal, got {other:?}"),
+        }
+    };
     let mut open_ap_assignments = assignments.clone();
     // Mutation 1: Missing owner refuses.
     open_ap_assignments.face_owners.pop();
-    assert!(FluidBoundaryOwnership::audit(&comps, &skins, &open_ap_assignments).is_err());
+    let why = refusal(&open_ap_assignments);
+    assert!(why.starts_with("missing owner:"), "{why}");
 
     // Mutation 2: Double owner refuses.
     let mut double_assignments = assignments.clone();
@@ -894,11 +964,15 @@ fn g0_fluid_boundary_ownership_audit() {
     double_assignments
         .face_owners
         .push((first_entry.0, AcousticDomainId::Exterior));
-    assert!(FluidBoundaryOwnership::audit(&comps, &skins, &double_assignments).is_err());
+    let why = refusal(&double_assignments);
+    assert!(why.starts_with("double owner:"), "{why}");
 
     // Mutation 3: Orientation conflict (flip one panel's Positive/Negative domain assignment) refuses.
     let mut flipped_doms = doms.clone();
-    flipped_doms[3] = (AcousticDomainId::InteriorCavity(0), AcousticDomainId::Exterior);
+    flipped_doms[3] = (
+        AcousticDomainId::InteriorCavity(0),
+        AcousticDomainId::Exterior,
+    );
     let flipped_assignments = FluidBoundaryAssignments::from_component_sides(
         &comps,
         &flipped_doms,
@@ -906,7 +980,8 @@ fn g0_fluid_boundary_ownership_audit() {
         Vec::new(),
         Vec::new(),
     );
-    assert!(FluidBoundaryOwnership::audit(&comps, &skins, &flipped_assignments).is_err());
+    let why = refusal(&flipped_assignments);
+    assert!(why.starts_with("orientation conflict:"), "{why}");
 
     // Mutation 4: Unclosed interior (remove one edge tie without declaring an ApertureLoop) refuses.
     let mut unclosed_ties = six.ties.clone();
@@ -918,7 +993,8 @@ fn g0_fluid_boundary_ownership_audit() {
         Vec::new(),
         Vec::new(),
     );
-    assert!(FluidBoundaryOwnership::audit(&comps, &skins, &unclosed_assignments).is_err());
+    let why = refusal(&unclosed_assignments);
+    assert!(why.starts_with("unclosed interior:"), "{why}");
 
     // Verify a 6-panel box with a square sound-hole in Top panel (1) and a declared closed
     // ApertureLoop on the 4 sound-hole nodes [5, 6, 10, 9] succeeds (and refuses if undeclared).
@@ -951,9 +1027,8 @@ fn g0_fluid_boundary_ownership_audit() {
         Vec::new(),
         vec![ap_loop],
     );
-    let hole_receipt =
-        FluidBoundaryOwnership::audit(&hole_comps, &hole_skins, &hole_assignments)
-            .expect("box with declared sound-hole ApertureLoop succeeds");
+    let hole_receipt = FluidBoundaryOwnership::audit(&hole_comps, &hole_skins, &hole_assignments)
+        .expect("box with declared sound-hole ApertureLoop succeeds");
     assert_eq!(hole_receipt.open_aperture_loops, 1);
     let _ = SkinFaceId {
         component: 0,
@@ -993,7 +1068,13 @@ fn g0_interior_volume_from_skins() {
                 nodal_thickness_m: &six.thicknesses[i],
             })
             .collect();
-        let doms = vec![(AcousticDomainId::Exterior, AcousticDomainId::InteriorCavity(0)); 6];
+        let doms = vec![
+            (
+                AcousticDomainId::Exterior,
+                AcousticDomainId::InteriorCavity(0)
+            );
+            6
+        ];
         let assignments = FluidBoundaryAssignments::from_component_sides(
             &comps,
             &doms,
