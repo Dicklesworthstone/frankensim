@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	helium-transport-hurly-mehl2007
+redistribution	permitted	Computed values retained as scientific facts with attribution; the curve is the source-prescribed cubic-spline interpolation of the printed table, sampled; no article text, figure or scanned table is reproduced
+citation	Hurly and Mehl (2007), J Res NIST 112:75, Table 5 and Eq37, doi:10.6028/jres.112.006; https://nvlpubs.nist.gov/nistpubs/jres/112/2/V112.N02.A01.pdf
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure

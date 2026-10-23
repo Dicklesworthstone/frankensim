@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	sulfur-hexafluoride-transport-quinones2012-assael2012
+redistribution	permitted	Numerical correlation coefficients and computed values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Quinones-Cisneros, Huber and Deiters (2012), JPCRD 41:023102, Eq6/Table2, doi:10.1063/1.3702441; Assael et al. (2012), JPCRD 41:023104, Eq6, doi:10.1063/1.4708620; https://srd.nist.gov/jpcrdreprint/1.3702441.pdf; https://srd.nist.gov/jpcrdreprint/1.4708620.pdf
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure

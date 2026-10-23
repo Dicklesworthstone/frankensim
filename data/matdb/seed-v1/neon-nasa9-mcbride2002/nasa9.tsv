@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	Ne	low	200	1000	K	100000	Pa
+coefficient	Ne	low	a0	0	K^2
+coefficient	Ne	low	a1	0	K
+coefficient	Ne	low	a2	2.500000000	1
+coefficient	Ne	low	a3	0	K^-1
+coefficient	Ne	low	a4	0	K^-2
+coefficient	Ne	low	a5	0	K^-3
+coefficient	Ne	low	a6	0	K^-4
+coefficient	Ne	low	a7	-7.453750000e2	K
+coefficient	Ne	low	a8	3.355322720	1
+region	Ne	high	1000	6000	K	100000	Pa
+coefficient	Ne	high	a0	0	K^2
+coefficient	Ne	high	a1	0	K
+coefficient	Ne	high	a2	2.500000000	1
+coefficient	Ne	high	a3	0	K^-1
+coefficient	Ne	high	a4	0	K^-2
+coefficient	Ne	high	a5	0	K^-3
+coefficient	Ne	high	a6	0	K^-4
+coefficient	Ne	high	a7	-7.453750000e2	K
+coefficient	Ne	high	a8	3.355322720	1

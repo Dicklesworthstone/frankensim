@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	SF6	low	200	1000	K	100000	Pa
+coefficient	SF6	low	a0	3.309526740e5	K^2
+coefficient	SF6	low	a1	-4.737685050e3	K
+coefficient	SF6	low	a2	2.247738068e1	1
+coefficient	SF6	low	a3	1.046954309e-2	K^-1
+coefficient	SF6	low	a4	-2.560641961e-5	K^-2
+coefficient	SF6	low	a5	2.153716967e-8	K^-3
+coefficient	SF6	low	a6	-6.516098960e-12	K^-4
+coefficient	SF6	low	a7	-1.255360583e5	K
+coefficient	SF6	low	a8	-1.091760145e2	1
+region	SF6	high	1000	6000	K	100000	Pa
+coefficient	SF6	high	a0	-7.306726500e5	K^2
+coefficient	SF6	high	a1	-6.367056550e2	K
+coefficient	SF6	high	a2	1.947442853e1	1
+coefficient	SF6	high	a3	-1.894325671e-4	K^-1
+coefficient	SF6	high	a4	4.178722830e-8	K^-2
+coefficient	SF6	high	a5	-4.783744950e-12	K^-3
+coefficient	SF6	high	a6	2.213516129e-16	K^-4
+coefficient	SF6	high	a7	-1.510609837e5	K
+coefficient	SF6	high	a8	-8.147574587e1	1

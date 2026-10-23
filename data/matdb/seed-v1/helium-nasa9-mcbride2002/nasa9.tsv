@@ -1,0 +1,21 @@
+frankensim.nasa9-source.v1
+region	He	low	200	1000	K	100000	Pa
+coefficient	He	low	a0	0	K^2
+coefficient	He	low	a1	0	K
+coefficient	He	low	a2	2.500000000	1
+coefficient	He	low	a3	0	K^-1
+coefficient	He	low	a4	0	K^-2
+coefficient	He	low	a5	0	K^-3
+coefficient	He	low	a6	0	K^-4
+coefficient	He	low	a7	-7.453750000e2	K
+coefficient	He	low	a8	9.287239740e-1	1
+region	He	high	1000	6000	K	100000	Pa
+coefficient	He	high	a0	0	K^2
+coefficient	He	high	a1	0	K
+coefficient	He	high	a2	2.500000000	1
+coefficient	He	high	a3	0	K^-1
+coefficient	He	high	a4	0	K^-2
+coefficient	He	high	a5	0	K^-3
+coefficient	He	high	a6	0	K^-4
+coefficient	He	high	a7	-7.453750000e2	K
+coefficient	He	high	a8	9.287239740e-1	1
