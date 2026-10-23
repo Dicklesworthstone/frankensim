@@ -797,8 +797,11 @@ impl Body {
     /// with the baked volume shapes in the receipt.
     pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
         compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
-        if self.viscosity.is_some() || self.vk.is_some() || self.n < 2 {
-            return Err(format!("{}: head radiation applies to tensioned heads without a viscous bending law", self.name));
+        // Air loading is the same physics whatever the film-loss source: a
+        // sourced bending viscosity composes with it (its force is explicit,
+        // the air mass implicit). Shallow shells are not clamped films.
+        if self.vk.is_some() || self.n < 2 {
+            return Err(format!("{}: head radiation applies to clamped tensioned heads, not shells", self.name));
         }
         let (stiff, lap, tension) = (&self.stiff, &self.lap, self.tension);
         let stiffness = |v: &[f64]| {

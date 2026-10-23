@@ -127,6 +127,20 @@ transverse directions) and Poisson ratio 0.38 for biaxially oriented PET, admitt
 from 293.15 to 296.15 K, with material state
 `polyethylene-terephthalate solid biaxially-oriented-film 0`. It makes no loss
 claim: no citable audio-band loss of this film was found.
+
+`packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk` is a sourced stick card,
+compiled from `data/matdb/seed-v1/stick-hickory-shagbark-fpl-gtr282` with
+material state `carya-ovata solid clear-straight-grained-12pct-moisture 0`. It
+uses Wood Handbook Table 5-3a for shagbark hickory at 12 % moisture content:
+- density 806.4 kg/m³, from specific gravity 0.72;
+- Young's modulus 16,390 MPa, the longitudinal modulus: bending MOE 14,900 MPa
+  plus the handbook's 10 % shear correction;
+- Poisson ratio 0.371, a declared composition proxy. Hickory is absent from
+  Table 5-2, so this is the mean μLR of its 16 hardwoods.
+
+It is admitted from 288.15 to 298.15 K, by Table 5-15. The other true
+hickories' values are kept as the stated spread. The tip is treated as
+isotropic in E_L, which makes it stiffer than real wood.
 Supports, snare-wire material/contact and hi-hat rim/friction laws remain separately
 declared presets. The striker's Hunt-Crossley loss is an independent input, not
 inferred from elastic modulus. The head radiation-resistance estimate retains
@@ -207,9 +221,9 @@ viscosity, or implement a hereditary viscoelastic model.
 
 ### Head radiation
 
-A drum whose film loss is a declared stated unknown takes its heads' exterior
-loss and air mass from `data/head-radiation-planar-baffled.tsv`, not from a
-fitted decay. The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)`: the exterior
+A drum built from imported head cards, with a sourced bending loss or a declared
+stated-unknown film loss, takes its heads' exterior loss and air mass from
+`data/head-radiation-planar-baffled.tsv`, not from a fitted decay. The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)`: the exterior
 loading of clamped-membrane shapes `J_m(j_mn r/a) cos(m theta)` (with
 `j_mn <= 20`) on a disk in an infinite rigid baffle. `fs_bem::modal_loading`
 bakes it on the power-consistent Rayleigh route
@@ -222,7 +236,8 @@ bakes it on the power-consistent Rayleigh route
   to 12. A shape whose ka falls outside it, or in a supersonic span whose
   reactance is not mass-like, is refused for that shape alone. It is never
   clamped or extrapolated. The shape gets no exterior load, and the receipt
-  names it as an upper bound.
+  names it as an upper bound. The summary gives the lowest in-vacuo frequency
+  among refused shapes. A refused or unresolved (1,1) shape refuses the drum.
 - Only the `m >= 1` families load a head. Volume motion keeps the compact
   monopole, the piston air mass and the cavity. The baked `m = 0` family only
   prints `R_compact / R_baffled` per volume shape in the receipt.

@@ -236,47 +236,62 @@ fn g1_a_single_shape_decays_at_its_narrowband_radiation_rate() {
 }
 
 #[test]
-fn g0_a_shape_outside_the_table_is_refused_alone_and_named_as_an_upper_bound() {
-    // A slack film without bending: its lowest shapes sit below the table's
-    // smallest ka, its higher ones inside it.
-    let (thickness, rest) = (|_: f64| 1.9e-4, |_: f64| 0.0);
-    let mut head = Body::plate_without_surface_loss(
-        "slack head",
-        &PlateSpec {
-            radius: 0.32,
-            hole: 0.0,
-            grid: 0.02,
-            edge: Edge::Clamped,
-            thickness: &thickness,
-            rest_height: &rest,
-            young: 4.9e9,
-            poisson: 0.38,
-            density: 1390.0,
-            tension: 0.2,
-            bending: false,
-            nonlinear: Nonlinear::None,
-            t60: [(100.0, 1.0), (1000.0, 1.0)],
-            support: None,
-            muffle: None,
-        },
-    )
-    .unwrap();
-    let table = RadiationTable::shipped().unwrap();
-    let receipt = head
-        .attach_head_radiation(&table, 0.32, &standard_gas(), None)
+fn g0_a_shape_outside_the_table_is_refused_alone_unless_it_is_the_fundamental() {
+    // Films without bending: the membrane wave speed sets every shape's ka.
+    let attach = |tension: f64| {
+        let (thickness, rest) = (|_: f64| 1.9e-4, |_: f64| 0.0);
+        let mut head = Body::plate_without_surface_loss(
+            "film head",
+            &PlateSpec {
+                radius: 0.32,
+                hole: 0.0,
+                grid: 0.02,
+                edge: Edge::Clamped,
+                thickness: &thickness,
+                rest_height: &rest,
+                young: 4.9e9,
+                poisson: 0.38,
+                density: 1390.0,
+                tension,
+                bending: false,
+                nonlinear: Nonlinear::None,
+                t60: [(100.0, 1.0), (1000.0, 1.0)],
+                support: None,
+                muffle: None,
+            },
+        )
         .unwrap();
-    let refused = |label: &str| {
-        receipt.iter().any(|line| {
-            line.starts_with(&format!("head radiation {label} refused for this shape"))
-                && line.contains("outside the table")
-                && line.contains("its T60 is an upper bound")
-        })
+        let table = RadiationTable::shipped().unwrap();
+        head.attach_head_radiation(&table, 0.32, &standard_gas(), None)
     };
-    assert!(refused("(1,1) cos") && refused("(1,1) sin"), "{receipt:#?}");
-    // Shapes inside the range still load the head; none is clamped.
+    // Slack: the (1,1) shape lies below the table's smallest ka, so the
+    // receipt's main claim is gone and the drum refuses whole.
+    let slack = attach(0.2);
     assert!(
-        receipt.iter().any(|line| line.starts_with("(1,3) cos: ")),
+        matches!(&slack, Err(error) if error.contains("(1,1)") && error.contains("the drum refuses")),
+        "{slack:?}"
+    );
+    // Taut (wave speed about 275 m/s): (1,1) sits near ka 3, while the
+    // highest resolved shapes pass ka 12 and are refused alone, never clamped.
+    let receipt = attach(20_000.0).unwrap();
+    assert!(
+        receipt.iter().any(|line| line.starts_with("(1,1) cos: ")),
         "{receipt:#?}"
     );
-    assert!(receipt.iter().all(|line| !line.starts_with("(1,1) cos: ")));
+    assert!(
+        receipt
+            .iter()
+            .any(|line| line.starts_with("head radiation (")
+                && line.contains("refused for this shape")
+                && line.contains("outside the table")
+                && line.contains("its T60 is an upper bound")),
+        "{receipt:#?}"
+    );
+    assert!(
+        receipt
+            .iter()
+            .any(|line| line.starts_with("head radiation: ")
+                && line.contains("shapes refused by the table, the lowest")),
+        "{receipt:#?}"
+    );
 }

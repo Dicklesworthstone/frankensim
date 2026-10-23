@@ -177,9 +177,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
     batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
-    // With no film loss to hide behind, the non-volume shapes take their
-    // exterior resistance and air mass from the baked table, in this gas.
-    if let FilmLoss::StatedUnknown = batter_loss {
+    // Without the fitted T60 (which lumped it in), the non-volume shapes take
+    // their exterior resistance and air mass from the baked table, in this
+    // gas, whatever the film-loss source.
+    if !matches!(batter_loss, FilmLoss::FittedT60) {
         let table = crate::radiation::RadiationTable::shipped()?;
         // The volume shapes stay on the compact monopole below; the receipt
         // states its error against the baked baffled self-resistance.

@@ -810,6 +810,8 @@ impl ModalAirLoad {
         let mut retained: Vec<Retained> = Vec::new();
         let (mut phis, mut kphis): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (Vec::new(), Vec::new());
         let mut dropped = Vec::new();
+        // In-vacuo frequency [Hz] and label of every shape the table refused.
+        let mut refused_shapes: Vec<(f64, String)> = Vec::new();
         let mut volume_lines = Vec::new();
         for (index, shape) in table.modes().iter().enumerate() {
             let label = format!("({},{})", shape.m, shape.n);
@@ -819,6 +821,14 @@ impl ModalAirLoad {
                     "volume shape {label}: not resolved by this grid, no comparison"
                 ));
                 continue;
+            }
+            // The receipt's main claim is the (1,1) shape's load: without it
+            // the drum refuses whole.
+            if unresolved && shape.m == 1 && shape.n == 1 {
+                return Err(format!(
+                    "head radiation: this grid cannot resolve the (1,1) shape (j_mn {:.3} > {limit:.3}); the drum refuses",
+                    shape.zero
+                ));
             }
             if unresolved {
                 dropped.push(format!(
@@ -894,9 +904,16 @@ impl ModalAirLoad {
                 let z = match refused.map_or_else(|| table.zhat(index, index, ka), Err) {
                     Ok(z) => z,
                     Err(e) => {
+                        let parity = if sine { "sin" } else { "cos" };
+                        if shape.m == 1 && shape.n == 1 {
+                            return Err(format!(
+                                "head radiation: the (1,1) {parity} shape is refused ({e}); the drum refuses"
+                            ));
+                        }
+                        let hz = (stiff / modal_mass).sqrt() / (2.0 * std::f64::consts::PI);
+                        refused_shapes.push((hz, format!("{label} {parity}")));
                         dropped.push(format!(
-                            "{label} {} refused for this shape ({e}); NO exterior load (no radiation loss, no air mass), so its T60 is an upper bound, not a computed decay",
-                            if sine { "sin" } else { "cos" }
+                            "{label} {parity} refused for this shape at {hz:.1} Hz in vacuo ({e}); NO exterior load (no radiation loss, no air mass), so its T60 is an upper bound, not a computed decay"
                         ));
                         continue;
                     }
@@ -1082,10 +1099,23 @@ impl ModalAirLoad {
                 table.interpolation_error(r.shape, r.ka), share.0, share.1
             ));
         }
+        // At a glance: does a refusal reach into the band that dominates the decay?
+        let refused_note = refused_shapes
+            .iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or_else(
+                || "no shape refused by the table".to_string(),
+                |(hz, label)| {
+                    format!(
+                        "{} shapes refused by the table, the lowest {label} at {hz:.1} Hz in vacuo",
+                        refused_shapes.len()
+                    )
+                },
+            );
         let mut summary = String::new();
         let _ = write!(
             summary,
-            "head radiation: {n} shapes from table {:016x} ({ROUTE}, {GEOMETRY}, {MODE_SET}); largest dropped in-family coupling, first order: {:.2e} of a retained resistance, {:.2e} of a retained air mass; narrowband: Re Z_rr and -Im Z_rr/omega at each mode's loaded frequency (fixed point, refused beyond {MAX_LOADED_ITERATIONS} iterations); ka interpolation <= {:.1e} over the whole table (each shape states its own), discretization <= {:.1e} (relative); {} m >= 1 entries dropped as upper bounds (modes the grid cannot resolve, shapes the table refused); {low_mac} shapes below MAC {LOW_MAC}",
+            "head radiation: {n} shapes from table {:016x} ({ROUTE}, {GEOMETRY}, {MODE_SET}); largest dropped in-family coupling, first order: {:.2e} of a retained resistance, {:.2e} of a retained air mass; narrowband: Re Z_rr and -Im Z_rr/omega at each mode's loaded frequency (fixed point, refused beyond {MAX_LOADED_ITERATIONS} iterations); ka interpolation <= {:.1e} over the whole table (each shape states its own), discretization <= {:.1e} (relative); {} m >= 1 entries dropped as upper bounds (modes the grid cannot resolve, shapes the table refused); {refused_note}; {low_mac} shapes below MAC {LOW_MAC}",
             table.content_hash,
             loss_share,
             mass_share,

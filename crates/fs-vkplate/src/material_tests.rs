@@ -574,6 +574,9 @@ fn g3_source_loss_changes_live_pressure_without_preset_decay_or_hidden_fallback(
     assert_eq!(a.ins.bodies[0].stiff.val, b.ins.bodies[0].stiff.val);
     assert_eq!(a.ins.bodies[0].s1, 0.0);
     assert_eq!(b.ins.bodies[0].s1, 0.0);
+    // Air loading does not depend on the film-loss source: the sourced route
+    // carries the head radiation too.
+    assert!(a.ins.bodies[0].head_radiation().is_some());
     for player in [&mut a, &mut b] {
         player.strike(0.03, 0.01, 1.0);
     }
@@ -866,4 +869,41 @@ fn g1_the_sourced_head_film_card_supplies_density_and_modulus_and_claims_no_loss
             .any(|note| note.starts_with("isotropic batter head: E = mean(MD, TD)"))
     );
     assert_eq!(piece.instrument.bodies[0].loss(), (0.0, 0.0));
+}
+
+/// The stick card compiled from data/matdb/seed-v1/stick-hickory-shagbark-fpl-gtr282.
+const HICKORY: &[u8] = include_bytes!("../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk");
+
+#[test]
+fn g1_the_hickory_stick_card_sets_the_striker_mass_and_its_hertz_pair_with_the_film() {
+    let at = |primary: &[u8], temperature| {
+        KitMaterials::from_packs_at_temperature(
+            primary,
+            &[],
+            HICKORY,
+            "T",
+            temperature,
+            9e-6,
+            0.005,
+            0.05,
+        )
+    };
+    let sticks = at(HEAD_FILM, 293.15).unwrap();
+    // Table 5-3a, shagbark at 12%: SG 0.72 -> 806.4 kg/m^3; E_L = 1.1 x 14,900 MPa.
+    near(sticks.striker().density_kg_m3(), 806.4);
+    near(sticks.striker().young_modulus_pa(), 16_390e6);
+    near(sticks.striker().poisson_ratio(), 0.371);
+    near(sticks.striker_mass_kg(), 806.4 * 9e-6);
+    let e_star =
+        1.0 / ((1.0 - 0.371_f64.powi(2)) / 16_390e6 + (1.0 - 0.38_f64.powi(2)) / 4_903.325e6);
+    let Law::Power { k, .. } = sticks.impact_law();
+    near(k, 4.0 / 3.0 * e_star * 0.005_f64.sqrt());
+    // The stick card alone admits 15 to 25 C (Table 5-15 bounds the MOE change).
+    let wide = pack("wide-band film", 1390.0, 4e9, Some(0.38)).to_bytes();
+    for temperature in [288.15, 298.15] {
+        assert!(at(&wide, temperature).is_ok(), "{temperature} K");
+    }
+    for temperature in [287.9, 298.4] {
+        assert!(at(&wide, temperature).is_err(), "{temperature} K");
+    }
 }

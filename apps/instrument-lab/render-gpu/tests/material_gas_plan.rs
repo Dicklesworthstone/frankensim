@@ -180,10 +180,12 @@ fn gpu_plan_refuses_a_head_carrying_the_native_radiation_load() {
 
 #[test]
 fn g1_gpu_plan_keeps_the_real_viscous_force_and_nonnegative_loss_operators() {
+    // A cymbal: a drum built from cards also carries the native head
+    // radiation, which this planner refuses (see the test above).
     let build = |name| {
-        let mut spec = kit::kick();
-        spec.grid *= 8.0;
-        kit::drum_with_materials(&spec, &[], standard_gas(), &viscous_material(name))
+        let mut spec = kit::splash();
+        spec.grid *= 4.0;
+        kit::cymbal_with_materials(&spec, &[], standard_gas(), &viscous_material(name))
             .unwrap()
             .instrument
     };

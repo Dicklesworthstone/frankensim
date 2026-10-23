@@ -1,0 +1,7 @@
+frankensim.matdb-manifest.v3
+pack_id	stick-hickory-shagbark-fpl-gtr282
+redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory); public domain in the United States; retain the report number, chapter, table numbers, and URL
+citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineering Material, General Technical Report FPL-GTR-282, U.S. Department of Agriculture Forest Service, Chapter 5 Mechanical Properties of Wood (C.A. Senalik and B. Kretschmann), Table 5-3a (true hickories at 12% moisture content, footnotes b and c), Table 5-2 (Poisson's ratios of hardwoods, a composition proxy here) and Table 5-15 (temperature effect on MOE parallel to grain); https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/chapter_05_fpl_gtr282.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature

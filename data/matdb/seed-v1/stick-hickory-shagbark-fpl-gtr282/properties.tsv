@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	wh-shagbark-12pct	Shagbark hickory (Carya ovata), a true hickory, clear straight-grained small specimens at 12% moisture content	FPL-GTR-282 Table 5-3a (metric), true hickories, 12% row: specific gravity 0.72 (footnote b: ovendry weight, volume at 12% moisture content); static bending modulus of elasticity 14,900 MPa from a simply supported, center-loaded beam at span/depth 14 (footnote c: increase by 10% to correct for shear deflection)	Average clear-wood values, not a particular drumstick; drumstick hickory is sold without a species, and the four true hickories at 12% moisture content span specific gravity 0.69 to 0.75 and bending MOE 13,000 to 15,600 MPa (mockernut 0.72 and 15,300, pignut 0.75 and 15,600, shellbark 0.69 and 13,000; stored below). The isotropic young_modulus is the pack author's reduction for a Hertz stick tip: the longitudinal modulus E_L = 1.1 x 14,900 = 16,390 MPa (footnote c). Wood is orthotropic; its transverse moduli are about a tenth of E_L (Table 5-1 hardwood ratios), so a tip treated as isotropic in E_L is stiffer than the real tip. Density at 12% moisture content is specific gravity x 1.12 x 1000 kg/m^3 = 806.4 kg/m^3, the convention of this repository's other FPL-GTR-282 packs. Moisture content is fixed at 12% and is not an axis of this pack. Temperature: Table 5-15 gives MOE parallel to grain at 12% moisture content +17% at -50 C and -7% at +50 C relative to 20 C, approximately linear, so about 0.24% per degree; the rows are admitted from 15 to 25 C, where that effect is within 1.2%
+observation	wh-hardwood-poisson-mean	composition-proxy: mean longitudinal-radial Poisson's ratio of the 16 hardwoods of FPL-GTR-282 Table 5-2 at about 12% moisture content	Arithmetic mean of the tabulated mu_LR of ash white, aspen quaking, balsa, basswood, birch yellow, cherry black, cottonwood eastern, mahogany African, mahogany Honduras, maple sugar, maple red, oak red, oak white, sweetgum, walnut black and yellow-poplar	composition-proxy: hickory is not in Table 5-2, so this is NOT a hickory measurement. The mean is 0.371 (range 0.229 to 0.495; white ash, also a drumstick wood, is 0.371). For the Hertz stick-on-film contact of the kit, the full range changes the effective modulus by about 2%
+scalar	density	wh-shagbark-12pct	density	806.4	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	288.15	298.15	K
+scalar	specific-gravity	wh-shagbark-12pct	specific_gravity	0.72	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	T	288.15	298.15	K
+scalar	moe-bending	wh-shagbark-12pct	modulus_of_elasticity_bending	14900	MPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	T	288.15	298.15	K
+scalar	young-modulus	wh-shagbark-12pct	young_modulus	16390	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	T	288.15	298.15	K
+scalar	young-modulus-longitudinal	wh-shagbark-12pct	young_modulus_longitudinal	16390	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	T	288.15	298.15	K
+scalar	moe-bending-mockernut	wh-shagbark-12pct	modulus_of_elasticity_bending_mockernut	15300	MPa	constant
+uncertainty	moe-bending-mockernut	unstated	-	-	-	-
+validity	moe-bending-mockernut	T	288.15	298.15	K
+scalar	moe-bending-pignut	wh-shagbark-12pct	modulus_of_elasticity_bending_pignut	15600	MPa	constant
+uncertainty	moe-bending-pignut	unstated	-	-	-	-
+validity	moe-bending-pignut	T	288.15	298.15	K
+scalar	moe-bending-shellbark	wh-shagbark-12pct	modulus_of_elasticity_bending_shellbark	13000	MPa	constant
+uncertainty	moe-bending-shellbark	unstated	-	-	-	-
+validity	moe-bending-shellbark	T	288.15	298.15	K
+scalar	poisson-ratio	wh-hardwood-poisson-mean	poisson_ratio	0.371	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	T	288.15	298.15	K
