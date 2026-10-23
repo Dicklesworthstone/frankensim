@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	ncamp-rtd-lamina	Hexcel 8552/IM7 unidirectional tape (190 gsm, 35 % resin content) cured laminate, 3 prepreg lots	ASTM D3039-00E1 longitudinal and transverse tension ([0]6, [90]11; modulus by linear fit 1000-3000 microstrain) and ASTM D3518-94 in-plane shear ([+-45]3S, fit 2000-6000 microstrain), RTD condition, measured (not thickness-normalized) means	Printed RTD measured means: E1t 23.51 Msi (n 18, CV 2.27 %), nu12t 0.316 (n 18) on [0]6 panels with composite density 1.58 g/cc and fiber volume 57.30 % (sec. 2.3.1, p.30); E2t 1.30 Msi (n 20, CV 3.37 %) on [90]11 panels, 1.58 g/cc, 59.92 % (sec. 2.3.2, p.31); G12 0.68 Msi (n 16, CV 3.27 %) on [+-45]3S panels, 1.57 g/cc, 58.93 % (sec. 2.3.5, p.34). Converted to SI with 1 Msi = 6894.757 MPa. The reference-ratio claims E2/E1 and G12/E1 are DERIVED from these printed values; they were measured on different panels (fiber volume 57.3-59.9 %). Validity: the report's own definition, sec. 1.5.5 p.22: RTD = 70+-10 F, room temperature dry (288.71-299.82 K); specimens dried or held at ambient laboratory condition 70+-10 F with no relative-humidity requirement, so no moisture axis is claimed. Runtime uncertainty stays unstated; the printed CVs are recorded here.
+scalar	e1	ncamp-rtd-lamina	young_modulus_longitudinal	162095.74	MPa	constant
+uncertainty	e1	unstated	-	-	-	-
+validity	e1	temperature	288.705556	299.816667	K
+scalar	e2	ncamp-rtd-lamina	young_modulus_transverse	8963.18	MPa	constant
+uncertainty	e2	unstated	-	-	-	-
+validity	e2	temperature	288.705556	299.816667	K
+scalar	g12	ncamp-rtd-lamina	shear_modulus_in_plane	4688.43	MPa	constant
+uncertainty	g12	unstated	-	-	-	-
+validity	g12	temperature	288.705556	299.816667	K
+scalar	e2-over-e1	ncamp-rtd-lamina	er_over_el	0.05529562	1	constant
+uncertainty	e2-over-e1	unstated	-	-	-	-
+validity	e2-over-e1	temperature	288.705556	299.816667	K
+scalar	g12-over-e1	ncamp-rtd-lamina	glr_over_el	0.02892386	1	constant
+uncertainty	g12-over-e1	unstated	-	-	-	-
+validity	g12-over-e1	temperature	288.705556	299.816667	K
+scalar	nu12	ncamp-rtd-lamina	nu_lr	0.316	1	constant
+uncertainty	nu12	unstated	-	-	-	-
+validity	nu12	temperature	288.705556	299.816667	K
+scalar	density	ncamp-rtd-lamina	density	1580	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	288.705556	299.816667	K

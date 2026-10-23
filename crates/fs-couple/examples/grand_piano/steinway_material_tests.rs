@@ -24,6 +24,8 @@ fn humid(temperature_k: f64, relative_humidity: f64) -> BoardEnvironment {
 }
 
 const ENGELMANN_SPRUCE: &[u8] = include_bytes!("packs/spruce-engelmann-fpl-gtr282.fsmatpk");
+const CFRP_IM7_8552: &[u8] =
+    include_bytes!("packs/cfrp-im7-8552-tape-ncamp-cam-rp-2009-015.fsmatpk");
 
 fn pack(bytes: &[u8]) -> NormalizedPack {
     load_pack(bytes).unwrap()
@@ -498,4 +500,64 @@ fn the_default_environment_moves_the_board_by_a_measured_delta() {
         reference.panel.density / tabled.panel.density
     );
     assert!(worst > 0.0 && worst < 1e-3, "{worst}");
+}
+
+/// A non-wood panel: NCAMP's Hexcel IM7/8552 unidirectional tape, fiber along
+/// the board's grain, ribs and bridges unchanged. Its claims hold over the
+/// report's own RTD band, 70 +- 10 F (288.71-299.82 K), which the default
+/// 20 C environment lies in; it has no moisture law, so the wood EMC does not
+/// touch it. The swap moves every mode inside the Courant-Fischer bounds of its
+/// plate law and density. Outside the band the pack refuses by name.
+#[test]
+fn a_carbon_fibre_panel_moves_modes_inside_its_plate_law_bounds_and_refuses_outside_its_temperature()
+ {
+    let base = reference_materials().unwrap();
+    let cfrp = PanelMaterial::from_pack(&pack(CFRP_IM7_8552), &base.environment).unwrap();
+    let msi = 6.894757e9;
+    assert!(close(cfrp.e_l, 23.51 * msi, 1e-6), "{}", cfrp.e_l);
+    assert!(close(cfrp.e_r, 1.30 * msi, 1e-6), "{}", cfrp.e_r);
+    assert!(close(cfrp.g_lr, 0.68 * msi, 1e-6), "{}", cfrp.g_lr);
+    assert_eq!((cfrp.nu_lr, cfrp.density), (0.316, 1580.0));
+    let swapped = BoardMaterials {
+        panel: cfrp,
+        ..base.clone()
+    };
+    let (lo, hi) = law_ratio_range(&base.panel, &swapped.panel);
+    let rho = swapped.panel.density / base.panel.density;
+    let lower = (lo.min(1.0) / rho.max(1.0)).sqrt();
+    let upper = (hi.max(1.0) / rho.min(1.0)).sqrt();
+    let upper_hz = 450.0;
+    let before = modes(&base, upper_hz);
+    let after = modes(&swapped, upper_hz * upper * (1.0 + 1e-9));
+    assert!(before.len() >= 5 && after.len() >= before.len());
+    let ratios: Vec<f64> = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| b.frequency_hz / a.frequency_hz)
+        .collect();
+    eprintln!(
+        "CFRP panel at {} K: Q ratio range [{lo:.4}, {hi:.4}], density ratio {rho:.4}, frequency bounds [{lower:.4}, {upper:.4}], measured {ratios:.4?}",
+        base.environment.temperature_k
+    );
+    for (i, ratio) in ratios.iter().enumerate() {
+        assert!(
+            (lower..=upper).contains(ratio),
+            "mode {i}: {ratio} outside [{lower}, {upper}]"
+        );
+    }
+    assert!(
+        ratios.iter().any(|ratio| (ratio - 1.0).abs() > 1e-2),
+        "the carbon panel did not move the board"
+    );
+    // 30 C is outside the RTD band the claims hold for: refused, never extrapolated.
+    let error = PanelMaterial::from_pack(&pack(CFRP_IM7_8552), &humid(303.15, 0.65)).unwrap_err();
+    eprintln!("CFRP panel at 303.15 K: {error}");
+    assert!(
+        error.contains("cfrp-im7-8552-tape-ncamp-cam-rp-2009-015"),
+        "{error}"
+    );
+    assert!(
+        error.contains("outside the validity of") && error.contains("density [288.706, 299.817] K"),
+        "{error}"
+    );
 }

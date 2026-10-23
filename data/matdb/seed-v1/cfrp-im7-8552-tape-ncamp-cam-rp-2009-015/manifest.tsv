@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	cfrp-im7-8552-tape-ncamp-cam-rp-2009-015
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no report text, figure or table is reproduced. The report states: Distribution Statement A. Approved for public release; distribution is unlimited.
+citation	National Center for Advanced Materials Performance (NCAMP), National Institute for Aviation Research, Wichita State University (2019), Hexcel 8552 IM7 Unidirectional Prepreg 190 gsm & 35%RC Qualification Material Property Data Report, CAM-RP-2009-015 Rev B, 16 April 2019, FAA special project SP4614WI-Q: section 1.5.5 (p.22), sections 2.3.1, 2.3.2 and 2.3.5 (pp.30, 31, 34); Distribution Statement A. Approved for public release; distribution is unlimited.; https://www.wichita.edu/industry_and_defense/NIAR/Documents/Qual-CAM-RP-2009-015-Rev-B-Hexcel-8552-IM7-MPDR-04.16.19.pdf
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1

@@ -17,8 +17,10 @@
 //! (the one environment record the built-in instruments share): FPL eq. (4-5)
 //! gives the EMC, eq. (5-3) the moduli and eqs. (4-9) with (1 + M) the density.
 //! The elastic ratios and Poisson ratios are held at their 12 % values; the
-//! source gives them no moisture law. Swapping a pack or the environment changes
-//! the board with no code change; a pack that lacks a required property refuses. Grain follows the long bridge, perpendicular to
+//! source gives them no moisture law. A pack with no wood moisture laws (a
+//! carbon-fibre laminate) is read at the environment's temperature, which its
+//! claims must bound. Swapping a pack or the environment changes the board with
+//! no code change; a pack that lacks a required property refuses. Grain follows the long bridge, perpendicular to
 //! the ribs. Crown, rim/plate flexibility, glue slip and downbearing remain
 //! outside this flat-plate image.
 //!
@@ -199,13 +201,44 @@ impl BoardEnvironment {
     }
 }
 
-/// One material plane of a pack at the FPL tables' 12 % moisture content,
-/// resolved with receipts; a missing property refuses by name.
-fn resolve_plane(card: &MaterialCard, id: &str, plane: MaterialPlane) -> Result<(f64, OrthotropicPlaneElastic), String> {
-    let point = QueryPoint::new().with("moisture_content", REFERENCE_MOISTURE_CONTENT)
-        .map_err(|e| format!("board pack {id}: {e:?}"))?;
+/// The FPL wood moisture laws a wood pack carries (fs_material::wood_moisture).
+const WOOD_MOISTURE_CLAIMS: [&str; 4] = ["moisture_law_green_bending_modulus",
+    "moisture_law_intersection_moisture_content", "volumetric_shrinkage_green_to_ovendry",
+    "fiber_saturation_moisture_content"];
+
+/// Where a pack's elastic claims are read: a wood pack (one carrying any FPL
+/// moisture law) at its tables' 12 %, later moved to the EMC; any other pack
+/// at the environment's temperature. Neither falls back to the other: a wood
+/// pack missing a law refuses by its name, a pack whose claims bound neither
+/// state refuses at the query.
+fn reading_point(card: &MaterialCard, id: &str, environment: &BoardEnvironment) -> Result<(bool, QueryPoint), String> {
+    let wood = WOOD_MOISTURE_CLAIMS.iter().any(|name| !card.claims().claims_for(name).is_empty());
+    let point = if wood {
+        QueryPoint::new().with("moisture_content", REFERENCE_MOISTURE_CONTENT)
+    } else {
+        QueryPoint::new().with("temperature", environment.temperature_k)
+    }.map_err(|e| format!("board pack {id}: {e:?}"))?;
+    Ok((wood, point))
+}
+
+/// Why a non-wood pack refuses at `temperature_k`: each claim whose
+/// temperature validity excludes it, with that validity.
+fn outside_temperature(card: &MaterialCard, temperature_k: f64) -> String {
+    let outside: Vec<String> = card.claims().claims_ordered().filter_map(|(_, claim)| {
+        claim.validity.bound("temperature").filter(|(lo, hi)| !(*lo..=*hi).contains(&temperature_k))
+            .map(|(lo, hi)| format!("{} [{lo:.3}, {hi:.3}] K", claim.key.name()))
+    }).collect();
+    if outside.is_empty() { String::new() } else {
+        format!("; read at T {temperature_k:.2} K, outside the validity of {}", outside.join(", "))
+    }
+}
+
+/// One material plane of a pack at `point`, resolved with receipts; a missing
+/// property refuses by name.
+fn resolve_plane(card: &MaterialCard, id: &str, plane: MaterialPlane, point: &QueryPoint)
+    -> Result<(f64, OrthotropicPlaneElastic), String> {
     match resolve_orthotropic_elastic_state_point_from_reference_ratios(
-        card, &point, MaterialPropertySelection::SingleClaimOnly, STRAIN_LIMIT,
+        card, point, MaterialPropertySelection::SingleClaimOnly, STRAIN_LIMIT,
         OrthotropicRequirementSet::Plane(plane), PoissonReciprocityRule::MajorRatios,
     ).map_err(|e| format!("board pack {id}: {e:?}"))? {
         ReferenceRatioOrthotropicStatePoint::Plane(state) => Ok((state.density_kg_m3(), state.law().clone())),
@@ -223,9 +256,11 @@ fn moisture_factors(card: &MaterialCard, id: &str, environment: &BoardEnvironmen
 
 impl PanelMaterial {
     pub fn from_pack(pack: &NormalizedPack, environment: &BoardEnvironment) -> Result<Self, String> {
-        let (id, card) = (pack.pack_id(), card(pack, "clear wood")?);
-        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12)?;
-        let (stiffness, mass) = moisture_factors(&card, id, environment)?;
+        let (id, card) = (pack.pack_id(), card(pack, "board material")?);
+        let (wood, point) = reading_point(&card, id, environment)?;
+        let explain = |e: String| if wood { e } else { e + &outside_temperature(&card, environment.temperature_k) };
+        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12, &point).map_err(explain)?;
+        let (stiffness, mass) = if wood { moisture_factors(&card, id, environment)? } else { (1.0, 1.0) };
         Ok(Self { density: density * mass, e_l: lr.e[0] * stiffness, e_r: lr.e[1] * stiffness, nu_lr: lr.nu,
             g_lr: lr.g * stiffness, pack: identity(pack) })
     }
@@ -233,10 +268,12 @@ impl PanelMaterial {
 
 impl BeamMaterial {
     pub fn from_pack(pack: &NormalizedPack, environment: &BoardEnvironment) -> Result<Self, String> {
-        let (id, card) = (pack.pack_id(), card(pack, "clear wood")?);
-        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12)?;
-        let (_, lt) = resolve_plane(&card, id, MaterialPlane::Axes13)?;
-        let (stiffness, mass) = moisture_factors(&card, id, environment)?;
+        let (id, card) = (pack.pack_id(), card(pack, "board material")?);
+        let (wood, point) = reading_point(&card, id, environment)?;
+        let explain = |e: String| if wood { e } else { e + &outside_temperature(&card, environment.temperature_k) };
+        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12, &point).map_err(explain)?;
+        let (_, lt) = resolve_plane(&card, id, MaterialPlane::Axes13, &point).map_err(explain)?;
+        let (stiffness, mass) = if wood { moisture_factors(&card, id, environment)? } else { (1.0, 1.0) };
         Ok(Self { density: density * mass, e_l: lr.e[0] * stiffness, g: (lr.g * lt.g).sqrt() * stiffness,
             pack: identity(pack) })
     }
