@@ -907,3 +907,66 @@ fn g1_the_hickory_stick_card_sets_the_striker_mass_and_its_hertz_pair_with_the_f
         assert!(at(&wide, temperature).is_err(), "{temperature} K");
     }
 }
+
+/// .370 DONE-WHEN 4: a data-only film swap (7.5 mil -> 10 mil resonant head of
+/// the 12" tom, same card, same tension) changes the computed decay in the
+/// predicted direction, inside a band derived before the run.
+///
+/// The (1,1) shape loses energy only by radiation here (stated-unknown film
+/// loss; no uniform-cavity coupling). With T60 = 13.8 (M + Ma) / R, a fixed
+/// stiffness K and omega^2 = K / (M + Ma), Ma about constant at small ka and
+/// R ~ omega^n: T60_thick / T60_thin = q^(1 + n/2), q = (r M1 + Ma) / (M1 + Ma).
+/// r = 2.54e-4 / 1.9e-4 = 1.3368; the thin head's receipt (5d6f99ed7) gives
+/// M1 = 1.769e-2 kg and Ma = 4.052e-3 kg, so q = 1.2741. n is 4 in the dipole
+/// limit and bounded to [3.4, 4] at ka 0.61; bending changes K by under 0.5 %.
+/// Prediction [1.923, 2.068]; with 10 % for the time-domain measurement the
+/// declared band is [1.73, 2.28]. It excludes "no change" (1) and the
+/// mass-only effect (1.34), and asserts the direction: thicker rings longer.
+#[test]
+fn g1_a_thicker_film_lengthens_the_radiation_decay_inside_its_predicted_band() {
+    let materials = KitMaterials::from_packs_at_temperature(
+        HEAD_FILM,
+        &[],
+        HICKORY,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+    )
+    .and_then(KitMaterials::with_stated_unknown_film_loss)
+    .unwrap();
+    let shape = crate::radiation::ModeShape::new(1, 1);
+    let t60 = |thickness: f64| {
+        let mut spec = kit::tom(12.0);
+        spec.grid *= 4.0;
+        spec.reso.thickness = thickness;
+        let mut ins = kit::drum_with_materials(&spec, &[], standard_gas(), &materials)
+            .unwrap()
+            .instrument;
+        let reso = &mut ins.bodies[1];
+        for i in 0..reso.n {
+            let [x, y] = reso.xy[i];
+            reso.w[i] = 1e-5 * shape.value(x / spec.radius, y / spec.radius, false);
+            reso.wp[i] = reso.w[i];
+        }
+        reso.sync();
+        let k = ins.k();
+        let mut out = vec![0.0; ins.mics.len()];
+        let initial = ins.bodies[1].discrete_energy(k);
+        let steps = (0.25 / k) as usize;
+        for _ in 0..steps {
+            ins.step(&mut out);
+        }
+        // The batter is not driven: the shape has no net volume on the grid.
+        assert!(ins.bodies[0].discrete_energy(k) < 1e-9 * initial);
+        let rate = -(ins.bodies[1].discrete_energy(k) / initial).ln() / (steps as f64 * k);
+        2.0 * 6.907755 / rate
+    };
+    let (thin, thick) = (t60(1.9e-4), t60(2.54e-4));
+    let ratio = thick / thin;
+    assert!(
+        (1.73..=2.28).contains(&ratio),
+        "T60 thin {thin:.3} s, thick {thick:.3} s: ratio {ratio:.4} outside the predicted [1.73, 2.28]"
+    );
+}
