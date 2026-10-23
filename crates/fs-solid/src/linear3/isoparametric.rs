@@ -287,6 +287,9 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
     })
 }
 
+// Quadratic thermal equilibrium and integrated stress/energy/support response.
+pub(super) mod thermal_response;
+
 // Public P1 support-motion methods reuse the private linear3 assembly/solve owners.
 mod prescribed;
 

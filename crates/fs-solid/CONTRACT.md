@@ -36,11 +36,36 @@ binds geometry, connectivity, source states, actual elastic coefficients,
 quadrature and supports. Both stiffness and mass quadrature locations retain the
 original geometry-admission checks. Cancellation and numerical/material refusal
 publish no partial load. This does not add a thermal transport solver, within-cell
-temperature interpolation, quadratic stress recovery, geometric prestress, or
+temperature interpolation, geometric prestress, or
 an accuracy certificate for curved-map quadrature. `tests/quadratic_thermal.rs`
 checks uniform anisotropic eigenstrain including Mandel shear, resultant/moment
 balance, thermal work, actual free-expansion solves on all three element families,
 source/state mismatch and constrained loads against analytic references.
+
+The same TET10/HEX20/HEX27 problems expose `solve_thermal_response` for source-bound
+thermal equilibrium on a frozen reference mesh. The existing `fs-solver::CgState`
+and Jacobi preconditioner solve the assembled stiffness with bounded
+iteration/cancellation windows and an independently recomputed true Euclidean
+residual. Every connected component must have all six rigid motions restrained.
+Fully fixed bodies have an exact empty solve, while their nonzero thermal stress,
+elastic energy and support force are retained.
+
+Recovery integrates actual `sigma = C (B u - epsilon_free)` and
+`epsilon_elastic:sigma/2` at the same stiffness quadrature points, checking both
+total and elastic Mandel strain against the caller's finite positive ceiling.
+`QuadraticThermalResponse` contains compatible nodal displacement, explicitly
+named volume-mean element strains/stresses, integrated energy, and full nodal
+internal forces. Those forces are reactions **on the solid** at fixed DOFs and
+unmodified equilibrium residuals at free DOFs, with no external mechanical load.
+Element means do not estimate pointwise or peak stress; energy integrates the
+varying strain field before averaging. The immutable result binds the thermal
+load, actual material coefficients, mesh frame, controls and observations;
+failure publishes no partial solution or field. Geometry, mass and density are
+unchanged. This does not add live thermoelastic transport, geometric stiffness,
+finite-strain behavior, stress extrapolation or quadrature-error certification.
+`tests/quadratic_thermal_response.rs` exercises free expansion, a piecewise
+nonuniform expansion field, clamped stress/energy/support reactions, repeatable
+results and refusals for rigid modes, controls and applicability limits.
 
 `linear3::visco` (IRP M1.3-W2a, in progress) prepares P1 or TET10 elements
 with caller-supplied, mesh-frame `fs-material::TensorProny` laws and density.
@@ -172,8 +197,9 @@ an optional caller-supplied source-surface projection only to boundary edges.
 Straight-sided approximation of curved geometry is a separate error axis.
 Positive sampled Jacobians do not prove injectivity between samples; projection
 does not supply source-surface or specimen authority. Finite-strain, mixed
-incompressible formulations, quadratic geometric prestress and thermal stress
-recovery are outside this quadratic operator's current scope.
+incompressible formulations and quadratic geometric prestress are outside this
+quadratic operator's current scope. Thermal stress observations are limited to
+the explicit volume averages returned by `solve_thermal_response`.
 
 Valve reduction requires `ValveCardRequest::element_order`: `Tet4` or explicit
 `Tet10 { elements, quadrature }`. Quadratic corner sets must match the original

@@ -26,8 +26,9 @@
 //!
 //! [`tet10`] and [`hex`] provide quadratic isoparametric elasticity and thermal
 //! eigenstrain loads through their own sampled-Jacobian and explicit-quadrature
-//! contracts. P1 stress recovery and geometric prestress do not extend to those
-//! quadratic meshes.
+//! contracts. Their thermal response solves recover compatible displacement,
+//! averaged stress, stored energy and support forces on the same reference mesh.
+//! P1 geometric prestress does not extend to those quadratic meshes.
 
 use std::collections::BTreeSet;
 
@@ -52,6 +53,9 @@ use fs_sparse::{Coo, Csr};
 /// Fully integrated quadratic hexahedra using the shared quadratic assembler.
 pub mod hex;
 mod isoparametric;
+pub use isoparametric::thermal_response::{
+    QuadraticElementThermalResponse, QuadraticThermalResponse,
+};
 /// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
 pub mod tet10;
 /// Passive tensor-Prony element operators and exact strain-ramp histories.
@@ -2693,9 +2697,9 @@ fn tet_geometry_identity(
     Ok(identity.finalize())
 }
 
-fn validate_rigid_mode_constraints(
+fn validate_rigid_mode_constraints<const N: usize>(
     nodes_m: &[[f64; 3]],
-    tetrahedra: &[[usize; 4]],
+    tetrahedra: &[[usize; N]],
     fixed_dofs: &[usize],
 ) -> Result<(), TetElasticError> {
     let mut parent = (0..nodes_m.len()).collect::<Vec<_>>();

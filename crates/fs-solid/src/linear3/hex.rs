@@ -409,8 +409,9 @@ impl HexElasticProblem<'_> {
     /// The shared load carrier supplies `K u = f_external + f_thermal` to the
     /// existing solver and retains full rows at supports, including fully fixed
     /// meshes with an empty reduced force vector. This does not update
-    /// geometry, introduce thermal stress recovery, or imply an error bound on
-    /// curved-element quadrature. Cancellation never publishes partial forces.
+    /// geometry or imply an error bound on curved-element quadrature. Physical
+    /// response is available through solve_thermal_response. Cancellation never
+    /// publishes partial forces.
     pub fn assemble_thermal_load(
         &self,
         thermal_strains: TetThermalStrainField<'_>,
@@ -462,6 +463,81 @@ impl HexElasticProblem<'_> {
                             scaled_jacobian: p.scaled_jacobian,
                         })
                     },
+                    cx,
+                )
+            }
+        }
+    }
+
+    /// Solve the source-bound thermal equilibrium with the existing SPD solver,
+    /// then integrate actual stress, stored energy and full support forces.
+    ///
+    /// Every connected component must have its six rigid motions restrained.
+    /// Fully fixed bodies retain zero displacement and nonzero thermal reactions.
+    /// Total and elastic strains are checked against the caller's ceiling at
+    /// each stiffness quadrature point; element stresses are volume averages.
+    /// This frozen-reference solve retains geometry and density and does not
+    /// add geometric stiffness or certify curved-map integration accuracy.
+    pub fn solve_thermal_response(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                self.validate(elements, false, cx)?;
+                let q = self.quadrature.points()?;
+                super::isoparametric::thermal_response::solve::<20, 60, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
+                    self.fixed_dofs,
+                    self.budget,
+                    &q,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex20_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    config,
+                    mesh_frame,
+                    maximum_absolute_mandel_strain,
+                    cx,
+                )
+            }
+            HexConnectivity::Hex27(elements) => {
+                self.validate(elements, false, cx)?;
+                let q = self.quadrature.points()?;
+                super::isoparametric::thermal_response::solve::<27, 81, _>(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    thermal_strains,
+                    self.fixed_dofs,
+                    self.budget,
+                    &q,
+                    &q,
+                    |nodes, r, e, i| {
+                        let p = hex27_point(nodes, r, self.budget.minimum_scaled_jacobian, e, i)?;
+                        Ok(super::isoparametric::Point {
+                            shapes: p.shapes,
+                            gradients: p.gradients,
+                            determinant: p.determinant_m3,
+                            scaled_jacobian: p.scaled_jacobian,
+                        })
+                    },
+                    config,
+                    mesh_frame,
+                    maximum_absolute_mandel_strain,
                     cx,
                 )
             }

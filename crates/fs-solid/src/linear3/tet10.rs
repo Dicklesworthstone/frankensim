@@ -305,8 +305,9 @@ impl QuadraticTetProblem<'_> {
     /// owners: `K u = f_external + reduced_force_n`. Full force rows retain
     /// constrained contributions, including when every degree of freedom is fixed.
     /// Neither geometry nor material history changes,
-    /// and a refusal/cancellation publishes no partial load. Quadratic thermal
-    /// stress recovery and geometric prestress remain separate capabilities.
+    /// and a refusal/cancellation publishes no partial load. Quadratic response
+    /// is available through solve_thermal_response; geometric prestress remains
+    /// a separate capability.
     pub fn assemble_thermal_load(
         &self,
         thermal_strains: TetThermalStrainField<'_>,
@@ -338,6 +339,56 @@ impl QuadraticTetProblem<'_> {
                     scaled_jacobian: p.determinant_m3 / (h * h * h),
                 })
             },
+            cx,
+        )
+    }
+    /// Solve the source-bound thermal equilibrium and recover physical stress,
+    /// elastic energy and support forces on the same reference mesh.
+    ///
+    /// Uses the existing SPD solver with a true-residual gate. Every connected
+    /// component must have its six rigid motions restrained. An entirely fixed
+    /// body returns zero displacement with its thermal stress and reactions.
+    /// Both total and elastic strains must satisfy the caller's small-strain
+    /// ceiling at every stiffness quadrature point. Reported element stresses
+    /// are volume averages; no pointwise or peak-stress accuracy is implied.
+    /// The geometry, density and material state remain fixed through the solve.
+    pub fn solve_thermal_response(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
+        self.validate(false, cx)?;
+        super::isoparametric::thermal_response::solve::<10, 30, _>(
+            self.nodes_m,
+            self.elements,
+            self.materials,
+            thermal_strains,
+            self.fixed_dofs,
+            self.budget,
+            &duffy_quadrature(self.quadrature.stiffness_points_per_dir),
+            &duffy_quadrature(self.quadrature.mass_points_per_dir),
+            |nodes, lambda, element, point| {
+                let p = tet10_point(
+                    nodes,
+                    lambda,
+                    self.budget.minimum_scaled_jacobian,
+                    element,
+                    point,
+                )?;
+                let h = maximum_edge_length([nodes[0], nodes[1], nodes[2], nodes[3]]);
+                Ok(super::isoparametric::Point {
+                    shapes: p.shapes,
+                    gradients: p.gradients,
+                    determinant: p.determinant_m3,
+                    scaled_jacobian: p.determinant_m3 / (h * h * h),
+                })
+            },
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
             cx,
         )
     }
