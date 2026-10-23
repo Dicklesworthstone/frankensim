@@ -276,10 +276,11 @@ fn clamped_plate_body(nx: usize, ny: usize, window: &str, work: usize) -> String
     text
 }
 
-/// Rendered samples of the end-to-end ceiling test. A COST choice, not a limit: nothing caps the sample count. Measured on trj
-/// (release, shared host, 98-coordinate prepared network): construction takes 116 s and rendering about 0.86 s per sample (518
-/// samples in 444 s), so the fixture's own 4096 samples would take about an hour. 96 is the length the curved-body tests in this
-/// file already render. Every dimension the ceilings bound (nodes, triangles, modes, gas memory, projection work) is at full value.
+/// Rendered samples of the end-to-end ceiling test. A COST choice, not a limit: nothing caps the sample count. Measured on ts1
+/// (release, load average about 60, 98-coordinate prepared network, 2026-10-23, bead .358): construction takes 16 s and rendering
+/// about 1.0 ms per sample; before the pre-summed loss (A3) and the one-integral construction they were 115 s and 19.5 ms. 96 is
+/// the length the curved-body tests in this file already render, and the length the route's before/after pressure-bit checks
+/// compare. Every dimension the ceilings bound (nodes, triangles, modes, gas memory, projection work) is at full value.
 const CEILING_SAMPLES: u64 = 96;
 
 /// The ceiling fixture: the clamped 15 x 11 plate with `modes` retained modes under the cylinder-flow performance (its 12 gas-memory

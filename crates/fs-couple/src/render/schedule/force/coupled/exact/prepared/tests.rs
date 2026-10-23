@@ -223,6 +223,8 @@ fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluatio
     assert_eq!(sweeps(&system) - before, steps);
     let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
     assert_eq!(prepared.ledger_evaluations(), 0);
+    // Neither construction nor stepping computed a link's own integral: only the component and summed-connection ones.
+    assert!(prepared.ledger.gramians.get().is_none());
     let x = flatten(&system.models);
     for u in [[0.003, -0.002, 0.001], [0.0, 0.0, 0.0], [0.003, -0.002, 0.001]] {
         let z = prepared.state_input(&x, &u, prepared.dt).unwrap();
@@ -232,9 +234,10 @@ fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluatio
         assert_eq!(component.to_bits(), direct_component.to_bits());
         assert_eq!(connection.to_bits(), direct_connection.to_bits());
         assert!(component > 0.0 && connection > 0.0);
-        // The pre-summed form is the sum of the links' own forms up to summation roundoff, far inside the ledger's 1e-11.
+        // The one integral of the summed resistance is the sum of the links' own integrals up to roundoff, inside the
+        // ledger's 1e-11.
         let mut by_links = 0.0;
-        for w in prepared.ledger.gramians.iter().flatten() {
+        for w in prepared.ledger.gramians(None).unwrap().iter().flatten() {
             by_links = finite(by_links + quadratic(w, &z).unwrap()).unwrap();
         }
         assert!((connection - by_links).abs() <= 1e-12 * connection.max(by_links), "{connection:e} vs {by_links:e}");
@@ -259,7 +262,7 @@ fn the_per_link_ledger_is_evaluated_only_when_asked_once_and_agrees_with_the_pre
             let u: Vec<f64> = external.iter().zip(&prepared.rest_force).map(|(f, r)| f + r).collect();
             let z = prepared.state_input(&flatten(&system.models), &u, prepared.dt).unwrap();
             let total = quadratic(prepared.connection_total.as_ref().unwrap(), &z).unwrap();
-            let by_links: f64 = prepared.ledger.gramians.iter().flatten().map(|w| quadratic(w, &z).unwrap()).sum();
+            let by_links: f64 = prepared.ledger.gramians(None).unwrap().iter().flatten().map(|w| quadratic(w, &z).unwrap()).sum();
             (total - by_links).abs() / total.max(by_links).max(f64::MIN_POSITIVE)
         };
         worst = worst.max(relative);
@@ -276,7 +279,7 @@ fn the_per_link_ledger_is_evaluated_only_when_asked_once_and_agrees_with_the_pre
             assert_eq!(evaluations(&system), asked);
         }
     }
-    eprintln!("pre-summed vs per-link connection loss: worst relative difference {worst:e} over 200 steps (the ledger check allows 1e-11)");
+    eprintln!("summed-resistance vs per-link connection loss: worst relative difference {worst:e} over 200 steps (the ledger check allows 1e-11)");
     assert!(worst < 1e-12, "{worst:e}");
 }
 

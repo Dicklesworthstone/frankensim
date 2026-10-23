@@ -5,15 +5,18 @@
 //! on free coordinates); it is invertible and removes no state. The constant
 //! augmented generator is the same q'=v, v'=-Kq-Cv+u pencil as ExactBlock.
 //! Short-interval Van Loan integrals avoid exp(-A^T dt) overflow for stiff
-//! viscous memory: W(2h)=W(h)+F(h)^T W(h) F(h). Each physical dashpot keeps
-//! its OWN integral. This is a floating-point matrix exponential, not a
-//! nonlinear/continuum accuracy certificate or a real-time timing promise.
+//! viscous memory: W(2h)=W(h)+F(h)^T W(h) F(h). The integral is linear in
+//! the resistance, so the step's total connection loss is ONE integral of the
+//! summed dashpots; each physical dashpot keeps its OWN integral for the port
+//! ledger, computed when a ledger is first asked for. This is a floating-point
+//! matrix exponential, not a nonlinear/continuum accuracy certificate or a
+//! real-time timing promise.
 
 use super::*;
 use fs_phs::linear_exact::{DenseExponentialBudget, exponential_with_budget};
 use crate::port_adoption::{DeferredTransfers, PortTransfer};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Explicit upper bound on complete mechanical modes in the cold dense path.
 /// Each mode retains displacement, velocity and its independent held input.
@@ -26,7 +29,8 @@ pub struct PreparedModalBudget {
     /// Maximum TOTAL original mechanical modes, up to 512; none are dropped.
     pub max_modes: usize,
     /// Conservative peak bytes of additional dense preparation/cache storage.
-    /// Includes up to 48 scale levels, all separately retained loss matrices and the one pre-summed connection-loss matrix.
+    /// Includes up to 48 scale levels (kept for the per-link integrals), the component and total connection loss matrices
+    /// and every per-link loss matrix the port ledger may compute.
     pub max_dense_bytes: usize,
     /// Conservative scalar multiply-add term ceiling, including every shared
     /// exponential's 32 Taylor products and at most 48 squarings.
@@ -43,7 +47,7 @@ struct Propagation {
     supplied: f64,
 }
 
-/// The two loss quadratics z^T W z of ONE state/input vector (the component Gramian and the pre-summed connection Gramian),
+/// The two loss quadratics z^T W z of ONE state/input vector (the component Gramian and the total connection Gramian),
 /// and the exact bits of that vector. One stage evaluates the identical vector in `advance` and in `losses`; they share this
 /// sweep instead of each streaming the dense Gramians again. The values are the very ones a fresh evaluation returns.
 struct LossSweep {
@@ -52,8 +56,9 @@ struct LossSweep {
     connection: f64,
 }
 
-/// What the per-link port ledger needs and every step shares: the dense Gramian of each link (None without damping) and the
-/// little of the layout that turns a state into z. The sweep over all of them runs only when a ledger is asked for.
+/// What the per-link port ledger needs and every step shares: the little of the layout that turns a state into z, and each
+/// link's dense Gramian (None without damping). The Gramians are computed when a ledger is first asked for, and the sweep
+/// over all of them runs only then.
 struct LedgerData {
     count: usize,
     dt: f64,
@@ -61,8 +66,21 @@ struct LedgerData {
     columns: Vec<Vec<f64>>,
     /// (stiffness [N/m], rest extension [m]) of every link.
     springs: Vec<(f64, f64)>,
-    gramians: Vec<Option<Vec<f64>>>,
+    /// Damping [N s/m] of every link.
+    dampings: Vec<f64>,
+    /// What a link's Gramian is computed from; None without a dissipative link.
+    integral: Option<LinkIntegral>,
+    gramians: OnceLock<Vec<Option<Vec<f64>>>>,
     evaluations: AtomicU64,
+}
+
+/// The generator, every scale level (the last is the transition) and the short interval of the network: one link's loss
+/// Gramian is `gramian` of these and its own resistance, bit for bit the integral the construction would have computed.
+struct LinkIntegral {
+    generator: Vec<f64>,
+    levels: Vec<Vec<f64>>,
+    h: f64,
+    budget: DenseExponentialBudget,
 }
 
 /// An accepted step's per-link port ledger, kept as its inputs until an observer asks (`DeferredTransfers`): the start state,
@@ -83,8 +101,8 @@ pub(super) struct PreparedNetwork {
     rest_force: Vec<f64>,
     transition: Vec<f64>,
     component_loss: Option<Vec<f64>>,
-    /// The sum of every link's Gramian in link order: z^T W z of it is the step's total connection loss. None without a
-    /// dissipative link. The per-link Gramians stay in `ledger`, for the port ledger.
+    /// The Gramian of the summed link resistance: z^T W z of it is the step's total connection loss. None without a
+    /// dissipative link. The per-link Gramians are the port ledger's (`ledger`).
     connection_total: Option<Vec<f64>>,
     ledger: Arc<LedgerData>,
     sweep: Mutex<Option<LossSweep>>,
@@ -160,8 +178,10 @@ impl PreparedNetwork {
         }
         let has_component_loss = models.iter().flat_map(|m| m.modes())
             .any(|m| m.damping_ratio != 0.0 && m.angular_frequency_rad_s != 0.0);
-        let losses = usize::from(has_component_loss)
-            + links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
+        // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
+        // observed port ledger computes: all are admitted here, before anything is allocated.
+        let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
+        let losses = usize::from(has_component_loss) + usize::from(dissipative > 0) + dissipative;
         let exp_budget = budget.admit(count, losses, links.len())?;
         let d = 3 * count;
         let mut stiffness = vec![0.0; count * count];
@@ -227,28 +247,31 @@ impl PreparedNetwork {
             }
             component_loss = Some(gramian(&generator, &resistance, &levels, h, d, exp_budget, gate)?);
         }
-        let mut connection_loss = Vec::with_capacity(links.len());
+        // The Gramian is linear in the resistance: ONE integral of the summed dashpots is the total connection loss, however
+        // many links there are. Each link's own integral is left to the port ledger.
+        let mut connection_resistance: Option<Vec<f64>> = None;
         for (column, link) in columns.iter().zip(links) {
             poll(Some(gate))?;
             if link.damping_n_s_m == 0.0 {
-                connection_loss.push(None);
                 continue;
             }
-            let mut resistance = vec![0.0; d * d];
-            for i in 0..count {
-                for j in 0..count {
-                    resistance[(2 * i + 1) * d + 2 * j + 1] =
-                        finite(link.damping_n_s_m * column[i] * column[j])?;
-                }
+            let own = link_resistance(column, link.damping_n_s_m, count)?;
+            match connection_resistance.as_mut() {
+                Some(sum) => for (s, v) in sum.iter_mut().zip(&own) { *s = finite(*s + v)?; },
+                None => connection_resistance = Some(own),
             }
-            connection_loss.push(Some(gramian(&generator, &resistance, &levels, h, d, exp_budget, gate)?));
         }
-        let transition = levels.pop().unwrap();
-        let connection_total = total_gramian(connection_loss.iter().flatten())?;
+        let connection_total = match &connection_resistance {
+            Some(resistance) => Some(gramian(&generator, resistance, &levels, h, d, exp_budget, gate)?),
+            None => None,
+        };
+        let transition = levels.last().unwrap().clone();
+        let integral = connection_resistance.map(|_| LinkIntegral { generator, levels, h, budget: exp_budget });
         let ledger = Arc::new(LedgerData {
             count, dt, weights: weights.clone(), columns: columns.to_vec(),
             springs: links.iter().map(|l| (l.stiffness_n_m, l.rest_extension_m)).collect(),
-            gramians: connection_loss, evaluations: AtomicU64::new(0),
+            dampings: links.iter().map(|l| l.damping_n_s_m).collect(),
+            integral, gramians: OnceLock::new(), evaluations: AtomicU64::new(0),
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total, ledger,
             sweep: Mutex::new(None), sweeps: AtomicU64::new(0) };
@@ -413,7 +436,7 @@ impl PreparedNetwork {
             defect[i] = finite(0.5 * (propagated[i] - storage[i]))?;
             scale[i] = finite(0.5 * (propagated[i].abs() + storage[i].abs()))?;
         }
-        for matrix in self.component_loss.iter().chain(self.ledger.gramians.iter().flatten()) {
+        for matrix in self.component_loss.iter().chain(&self.connection_total) {
             for i in 0..d * d {
                 defect[i] = finite(defect[i] + matrix[i])?;
                 scale[i] = finite(scale[i] + matrix[i].abs())?;
@@ -441,21 +464,46 @@ impl PreparedNetwork {
 }
 
 impl LedgerData {
+    /// Each link's own loss Gramian (None without damping), computed by the first caller and shared after: one Van Loan
+    /// integral per dissipative link, the cost the construction no longer pays. A deferred observation has no gate of its
+    /// own and runs the admitted work to completion.
+    fn gramians(&self, gate: Option<&CancelGate>) -> Result<&[Option<Vec<f64>>], ModalCouplingError> {
+        if let Some(done) = self.gramians.get() {
+            return Ok(done);
+        }
+        let idle = CancelGate::new_clock_free();
+        let gate = gate.unwrap_or(&idle);
+        let d = 3 * self.count;
+        let mut computed = Vec::with_capacity(self.dampings.len());
+        for (column, &damping) in self.columns.iter().zip(&self.dampings) {
+            poll(Some(gate))?;
+            let Some(integral) = self.integral.as_ref().filter(|_| damping != 0.0) else {
+                computed.push(None);
+                continue;
+            };
+            let resistance = link_resistance(column, damping, self.count)?;
+            computed.push(Some(gramian(&integral.generator, &resistance, &integral.levels, integral.h, d,
+                integral.budget, gate)?));
+        }
+        Ok(self.gramians.get_or_init(|| computed))
+    }
+
     /// Work delivered to each port over one accepted step: the spring's stored-energy change, less the port's own viscous loss
     /// z^T W_k z. The per-port losses must add up to the step's total connection loss `connection_loss` (which comes from the
-    /// one pre-summed Gramian, a different summation order), so this is an independent check of both.
+    /// one integral of the summed resistance, a different computation), so this is an independent check of both.
     fn work(
         &self, x: &[f64], u: &[f64], endpoint: &[f64], dt: f64, connection_loss: f64,
         columns: &[Vec<f64>], springs: &[(f64, f64)], gate: Option<&CancelGate>,
     ) -> Result<Vec<PortTransfer>, ModalCouplingError> {
-        if springs.len() != self.gramians.len() || columns.len() != springs.len() || endpoint.len() != x.len() {
+        if springs.len() != self.dampings.len() || columns.len() != springs.len() || endpoint.len() != x.len() {
             return Err(invalid("prepared connection observation layout"));
         }
         self.evaluations.fetch_add(1, Ordering::Relaxed);
         let z = state_vector(self.count, &self.weights, self.dt, x, u, dt)?;
+        let gramians = self.gramians(gate)?;
         let mut transfers = Vec::with_capacity(springs.len());
         let mut total = 0.0;
-        for ((column, &(stiffness, rest_extension)), gramian) in columns.iter().zip(springs).zip(&self.gramians) {
+        for ((column, &(stiffness, rest_extension)), gramian) in columns.iter().zip(springs).zip(gramians) {
             poll(gate)?;
             let coordinate = |state: &[f64]| -> Result<f64, ModalCouplingError> {
                 column.iter().enumerate().try_fold(-rest_extension,
@@ -503,17 +551,16 @@ fn state_vector(count: usize, weights: &[f64], expected_dt: f64, x: &[f64], u: &
     Ok(z)
 }
 
-/// The elementwise sum of the link Gramians in link order: z^T (sum W_k) z is the total connection loss. None without a link.
-fn total_gramian<'a>(gramians: impl Iterator<Item = &'a Vec<f64>>) -> Result<Option<Vec<f64>>, ModalCouplingError> {
-    let mut total: Option<Vec<f64>> = None;
-    for w in gramians {
-        if let Some(sum) = total.as_mut() {
-            for (s, v) in sum.iter_mut().zip(w) { *s = finite(*s + v)?; }
-        } else {
-            total = Some(w.clone());
+/// One link's own resistance: its dashpot c b b^T in the velocity block of a d x d matrix (d = 3 count).
+fn link_resistance(column: &[f64], damping: f64, count: usize) -> Result<Vec<f64>, ModalCouplingError> {
+    let d = 3 * count;
+    let mut resistance = vec![0.0; d * d];
+    for i in 0..count {
+        for j in 0..count {
+            resistance[(2 * i + 1) * d + 2 * j + 1] = finite(damping * column[i] * column[j])?;
         }
     }
-    Ok(total)
+    Ok(resistance)
 }
 
 fn matrix_norm(a: &[f64], n: usize) -> Result<f64, ModalCouplingError> {
