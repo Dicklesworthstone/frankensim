@@ -43,6 +43,10 @@ pub mod materials;
 /// Baked exterior modal loading of drum heads' non-volume motion.
 pub mod radiation;
 
+/// Air loss laws read from the gas record: oscillating-cylinder drag and the
+/// viscous layer on a plate's faces.
+pub mod air_loss;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -58,6 +62,9 @@ mod material_tests;
 
 #[cfg(test)]
 mod radiation_tests;
+
+#[cfg(test)]
+mod air_loss_tests;
 
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
@@ -1286,6 +1293,65 @@ impl Body {
         self.w = saved.0;
         self.g = saved.1;
         lam
+    }
+
+    /// K x alone (bending, tension, supports; the snare-wire bias excluded), without the
+    /// curvature Hessian: the linear part of [`Body::rest_stiffness_apply`]. State is restored.
+    pub fn linear_stiffness_apply(&mut self, x: &[f64]) -> Result<Vec<f64>, String> {
+        let n = self.n;
+        if x.len() != n || x.iter().any(|v| !v.is_finite()) {
+            return Err(format!("{}: linear stiffness needs {n} finite nodal values", self.name));
+        }
+        let saved = (self.w.clone(), self.f.clone(), self.lw.clone());
+        let bias = std::mem::replace(&mut self.bias, vec![0.0; n]);
+        self.w.copy_from_slice(x);
+        self.linear_forces();
+        let out: Vec<f64> = self.f.iter().map(|f| -f).collect();
+        self.bias = bias;
+        (self.w, self.f, self.lw) = saved;
+        Ok(out)
+    }
+
+    /// (K + B) x about the rest state, for offline modal analysis: the linear forces (bending,
+    /// tension, supports; the snare-wire bias excluded) plus the Hessian B of the nonlinear
+    /// potential at w = 0, by a central difference of its gradient,
+    /// B x = (grad V(eps x) - grad V(-eps x)) / (2 eps), eps = 1e-12 m. The difference cancels the
+    /// quadratic term, leaving an O(eps^2) truncation; the Airy load expands l(w + z0) - l(z0)
+    /// analytically, so a small step costs no cancellation. Measured on the kit cymbals (.372):
+    /// K's asymmetry falls as eps^2 down to its roundoff floor near 2e-15 at 1e-12 m. The same two
+    /// owners (linear_forces, nonlinear_gradient); the body's state is restored.
+    pub fn rest_stiffness_apply(&mut self, x: &[f64]) -> Result<Vec<f64>, String> {
+        self.rest_stiffness_apply_step(x, 1e-12)
+    }
+
+    /// [`Body::rest_stiffness_apply`] with an explicit central-difference step `eps` [m], for
+    /// attributing its error: truncation scales as eps^2, the Airy solve's roundoff does not.
+    pub fn rest_stiffness_apply_step(&mut self, x: &[f64], eps: f64) -> Result<Vec<f64>, String> {
+        let n = self.n;
+        if !(eps.is_finite() && eps > 0.0) {
+            return Err(format!("{}: central-difference step must be positive and finite", self.name));
+        }
+        if x.len() != n || x.iter().any(|v| !v.is_finite()) {
+            return Err(format!("{}: rest stiffness needs {n} finite nodal values", self.name));
+        }
+        let saved = (self.w.clone(), self.g.clone(), self.f.clone(), self.lw.clone());
+        let bias = std::mem::replace(&mut self.bias, vec![0.0; n]);
+        self.w.copy_from_slice(x);
+        self.linear_forces();
+        let mut out: Vec<f64> = self.f.iter().map(|f| -f).collect();
+        for sign in [1.0, -1.0] {
+            for i in 0..n {
+                self.w[i] = sign * eps * x[i];
+            }
+            self.linear_forces(); // the Berger term reads this w's Laplacian
+            self.nonlinear_gradient();
+            for i in 0..n {
+                out[i] += sign * self.g[i] / (2.0 * eps);
+            }
+        }
+        self.bias = bias;
+        (self.w, self.g, self.f, self.lw) = saved;
+        Ok(out)
     }
 
     /// Diagnostics between steps: (psi, sqrt(2 V(w))) of the auxiliary variable.

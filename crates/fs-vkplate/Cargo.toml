@@ -25,6 +25,8 @@ fs-qty = { path = "../fs-qty" }
 [dev-dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+# Dense symmetric eigensolver for the offline cymbal clamp-share example (.372).
+fs-la = { path = "../fs-la" }
 
 [profile.release]
 opt-level = 3
