@@ -137,7 +137,7 @@ pub fn drum(s: &DrumSpec, hits: &[(f64, f64)]) -> Result<Piece, String> {
 
 /// The same structural data in one material-resolved cavity/exterior gas.
 pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result<Piece, String> {
-    build_drum(s, hits, gas, None)
+    build_drum(s, hits, gas, None, false)
 }
 
 /// Fixed geometry and installed tension, with both head materials and a
@@ -148,10 +148,21 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
 /// Support/wire laws stay as declared in `s`. The supplied impactor replaces
 /// `s.striker` completely.
 pub fn drum_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_drum(s, hits, gas, Some(materials))
+    build_drum(s, hits, gas, Some(materials), false)
 }
 
-fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
+/// The kick's receipt on the card route: its beater stays the preset.
+pub const KICK_BEATER_PRESET_RECEIPT: &str = "kick beater: PRESET (declared estimate, not a material card)";
+
+/// `drum_with_materials` for the kick: heads from the cards, while the drum
+/// keeps its declared `s.striker`, a felt beater that no material card
+/// describes yet. KICK_BEATER_PRESET_RECEIPT replaces the card striker's tip
+/// note, and the card striker is unused.
+pub fn kick_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
+    build_drum(s, hits, gas, Some(materials), true)
+}
+
+fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>, preset_striker: bool) -> Result<Piece, String> {
     let (batter_loss, reso_loss) = match materials {
         None => (FilmLoss::FittedT60, FilmLoss::FittedT60),
         Some(m) => match (m.primary_bending_loss(), m.secondary_bending_loss()) {
@@ -169,7 +180,8 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         notes.push(crate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT.into());
     }
     if let Some(m) = materials {
-        notes.extend(m.isotropic_reduction_notes());
+        notes.extend(m.head_reduction_notes());
+        notes.push(if preset_striker { KICK_BEATER_PRESET_RECEIPT.into() } else { m.striker_tip_note() });
     }
     let mut batter = head_body(&format!("{} batter", s.name), s.radius, s.grid, s.batter, s.muffle, primary, batter_loss)?;
     batter.origin = [0.0, 0.0, 0.0];
@@ -243,7 +255,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         notes.push(format!("snare: {count} wires of {n} nodes, {:.0} contact points", ins.contacts.len()));
         settle = 0.25;
     }
-    let (m, law, foot) = materials.map_or(s.striker, |m| (m.striker_mass_kg(), m.impact_law(), 0.0));
+    let (m, law, foot) = match materials {
+        Some(m) if !preset_striker => (m.striker_mass_kg(), m.impact_law(), 0.0),
+        _ => s.striker,
+    };
     let st = ins.add(Body::point("striker", m));
     let fp = ins.bodies[bi].footprint(s.strike_xy.0, s.strike_xy.1, foot);
     notes.push(format!("striker {m} kg over {} nodes", fp.len()));

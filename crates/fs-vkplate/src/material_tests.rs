@@ -1063,6 +1063,70 @@ fn g1_a_striker_tip_takes_all_four_anisotropy_claims_or_none() {
     assert!(bind(&singular).is_err());
 }
 
+/// Ruling 6433 (b): on the card route the kick keeps its preset felt beater,
+/// whose receipt replaces the card striker's tip note; the same spec through
+/// `drum_with_materials` strikes with the card's hickory sphere.
+#[test]
+fn g1_the_card_built_kick_keeps_its_preset_beater_and_says_so() {
+    let cards = KitMaterials::from_packs_at_temperature(
+        HEAD_FILM,
+        &[],
+        HICKORY,
+        "T",
+        293.15,
+        9e-6,
+        0.005,
+        0.05,
+    )
+    .and_then(KitMaterials::with_stated_unknown_film_loss)
+    .unwrap();
+    let mut spec = kit::kick();
+    spec.grid *= 4.0;
+    let striker = |piece: &kit::Piece| {
+        let body = piece
+            .instrument
+            .bodies
+            .iter()
+            .find(|b| b.name == "striker")
+            .unwrap();
+        (body.mass[0], impact_k(&piece.instrument))
+    };
+    let kick = kit::kick_with_materials(&spec, &[], standard_gas(), &cards).unwrap();
+    let (mass, Law::Power { k, .. }, _) = spec.striker;
+    assert_eq!(striker(&kick), (mass, k));
+    assert!(
+        kick.notes
+            .iter()
+            .any(|note| note == kit::KICK_BEATER_PRESET_RECEIPT)
+    );
+    assert!(
+        !kick
+            .notes
+            .iter()
+            .any(|note| note.starts_with("striker tip:"))
+    );
+    assert!(
+        kick.notes
+            .iter()
+            .any(|note| note == FILM_LOSS_STATED_UNKNOWN_RECEIPT)
+    );
+    let sphere = kit::drum_with_materials(&spec, &[], standard_gas(), &cards).unwrap();
+    let Law::Power { k: card_k, .. } = cards.impact_law();
+    assert_eq!(striker(&sphere), (cards.striker_mass_kg(), card_k));
+    assert!(
+        sphere
+            .notes
+            .iter()
+            .any(|note| note == &cards.striker_tip_note())
+    );
+    assert!(
+        !sphere
+            .notes
+            .iter()
+            .any(|note| note == kit::KICK_BEATER_PRESET_RECEIPT)
+    );
+}
+
 /// .370 DONE-WHEN 4: a data-only film swap (7.5 mil -> 10 mil resonant head of
 /// the 12" tom, same card, same tension) changes the computed decay in the
 /// predicted direction, inside a band derived before the run.
