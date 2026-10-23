@@ -91,6 +91,10 @@ pub struct IterativeOptions {
     /// owner's triangle near rule as this owner's sparse near rows, built on
     /// the declared workers and refused above its declared pair count. The
     /// default [`PanelRule::Centroid`] is the centroid operator, bitwise.
+    /// [`PanelRule::Triangle`] is refused: its seven-point far rule needs a
+    /// multi-point far field. Plain CBIE ignores the rule, so one set of
+    /// options can route rows of either formulation: its own near table is
+    /// already the dense owner's triangle quadrature.
     pub panel_rule: PanelRule,
 }
 
@@ -294,7 +298,7 @@ const RADON_C: f64 = 0.470_142_064_105_115_1; // (6 + sqrt 15) / 21
 const RADON_D: f64 = 0.059_715_871_789_769_82; // 1 - 2 RADON_C
 const RADON_WA: f64 = 0.125_939_180_544_827_14; // (155 - sqrt 15) / 1200
 const RADON_WC: f64 = 0.132_394_152_788_506_2; // (155 + sqrt 15) / 1200
-const RADON7: [([f64; 3], f64); 7] = [
+pub(crate) const RADON7: [([f64; 3], f64); 7] = [
     ([1.0 / 3.0; 3], 0.225),
     ([RADON_A, RADON_A, RADON_B], RADON_WA),
     ([RADON_A, RADON_B, RADON_A], RADON_WA),
@@ -539,6 +543,10 @@ enum Layers {
     BurtonMiller {
         double: FmmC64<'static>,
         mixed: FmmC64<'static>,
+        /// The B row's single and adjoint double layers, built once: a Robin
+        /// owner applies B on every matvec.
+        single: FmmC64<'static>,
+        adjoint: FmmC64<'static>,
         diagonal_a: Vec<C64>,
         diagonal_b: Vec<C64>,
         near: Option<NearTable>,
@@ -639,14 +647,32 @@ impl<'a> IterativeRadiation<'a> {
         options: &IterativeOptions,
         gate: &CancelGate,
     ) -> Result<Self, IterativeError> {
-        let PanelRule::TriangleNear { max_pairs } = options.panel_rule else {
-            return Self::prepare_with_near(surface, k, medium, formulation, options, None, gate);
+        // A panel rule is a Burton-Miller rule; plain CBIE's own near table is
+        // already the dense owner's triangle quadrature.
+        let rule = if formulation == Formulation::PlainCbie {
+            PanelRule::Centroid
+        } else {
+            options.panel_rule
         };
-        if formulation == Formulation::PlainCbie {
-            return Err(IterativeError::Invalid {
-                what: "plain CBIE already stores the dense triangle near entries",
-            });
-        }
+        let max_pairs = match rule {
+            PanelRule::Centroid => {
+                return Self::prepare_with_near(
+                    surface,
+                    k,
+                    medium,
+                    formulation,
+                    options,
+                    None,
+                    gate,
+                );
+            }
+            PanelRule::TriangleNear { max_pairs } => max_pairs,
+            PanelRule::Triangle { .. } => {
+                return Err(IterativeError::Invalid {
+                    what: "PanelRule::Triangle needs a multi-point far field; this owner's is one point per panel (use TriangleNear)",
+                });
+            }
+        };
         poll(gate)?;
         let rule = NearRule::build(surface, k, max_pairs, options.workers, &|| {
             gate.is_requested()
@@ -903,6 +929,29 @@ impl<'a> IterativeRadiation<'a> {
                 })?;
             blocks.push(NearBlock { indices, inverse });
         }
+        poll(gate)?;
+        let mut single = match &options.directional {
+            Some(o) => FmmC64::new_single_directional(
+                HelmholtzSingle { k },
+                surface.centroids(),
+                options.directional_for(o),
+            )?,
+            None => FmmC64::new_single_within(
+                HelmholtzSingle { k },
+                surface.centroids().to_vec(),
+                options.fmm_order,
+                options.leaf_capacity,
+                options.budget(),
+            )?,
+        };
+        single.set_workers(options.workers)?;
+        poll(gate)?;
+        let adjoint = options.normal_fmm(
+            NormalLayer::Adjoint,
+            k,
+            surface.centroids().to_vec(),
+            surface.normals().to_vec(),
+        )?;
         // Cross-wiring guard for numerical checkpoints, not cryptographic proof.
         let mut stamp = surface_fingerprint(surface);
         let preconditioner_key = match options.precond {
@@ -955,6 +1004,8 @@ impl<'a> IterativeRadiation<'a> {
             layers: Layers::BurtonMiller {
                 double,
                 mixed,
+                single,
+                adjoint,
                 diagonal_a,
                 diagonal_b,
                 near: near_table,
@@ -983,10 +1034,14 @@ impl<'a> IterativeRadiation<'a> {
             .iter()
             .map(|&v| v * C64::new(0.0, self.k * self.medium.sound_speed * self.medium.density))
             .collect();
-        let (diagonal_b, near) = match &self.layers {
+        let (diagonal_b, near, single, adjoint) = match &self.layers {
             Layers::BurtonMiller {
-                diagonal_b, near, ..
-            } => (diagonal_b, near),
+                diagonal_b,
+                near,
+                single,
+                adjoint,
+                ..
+            } => (diagonal_b, near, single, adjoint),
             Layers::PlainCbie(cbie) => {
                 let rhs = cbie.single_layer(self.k, &self.options, &q, gate)?;
                 if rhs.iter().any(|v| !finite(*v)) {
@@ -1002,33 +1057,9 @@ impl<'a> IterativeRadiation<'a> {
             .zip(self.surface.areas())
             .map(|(&q, &a)| q.scale(a))
             .collect();
-        let kernel = HelmholtzSingle { k: self.k };
-        let mut single = match &self.options.directional {
-            Some(o) => FmmC64::new_directional(
-                &kernel,
-                self.surface.centroids(),
-                self.options.directional_for(o),
-            )?,
-            None => FmmC64::new_within(
-                &kernel,
-                self.surface.centroids().to_vec(),
-                self.options.fmm_order,
-                self.options.leaf_capacity,
-                self.options.budget(),
-            )?,
-        };
-        single.set_workers(self.options.workers)?;
         let single = single.potentials(&weighted)?;
         poll(gate)?;
-        let adjoint = self
-            .options
-            .normal_fmm(
-                NormalLayer::Adjoint,
-                self.k,
-                self.surface.centroids().to_vec(),
-                self.surface.normals().to_vec(),
-            )?
-            .potentials(&weighted)?;
+        let adjoint = adjoint.potentials(&weighted)?;
         poll(gate)?;
         let mut rhs_complex: Vec<_> = (0..q.len())
             .map(|i| single[i] + self.alpha * adjoint[i] + diagonal_b[i] * q[i])

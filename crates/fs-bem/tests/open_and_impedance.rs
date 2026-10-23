@@ -481,6 +481,10 @@ mod impedance_sphere_series {
             // pass (the volume depth rule), past the v1 2.7e8.
             directional.max_near_pairs = 600_000_000;
             directional.setup_workers = 16;
+            // At 81920 panels one directional pass counts 8.0e9 compressed
+            // M2L multiply-adds (ts1, a2e2fb443, ka5_beta0 rung 6: 8000017095),
+            // just past the v1 8e9.
+            directional.max_translation_work = 40_000_000_000;
             // The static k = 0 rows delegate whole to W5a at this order 7.
             // At 5120 panels their mixed pass counts past 8e9 M2L
             // multiply-adds (ts1, 610ada520, ka5_beta0). Each static pass
@@ -675,7 +679,8 @@ mod impedance_sphere_series {
 /// rule. The pulsating mean impedance keeps the one-point far weights' O(h)
 /// remnant, so its order is recorded and it must only decrease. The centroid
 /// rows run on the same meshes, and the rule must beat them at the finest
-/// rung.
+/// rung. PanelRule::Triangle (the same near rule plus a Radon seven-point far rule) is
+/// held to the same claims.
 #[test]
 fn impedance_sphere_triangle_rule_ladder() {
     let medium = Medium::air();
@@ -691,6 +696,10 @@ fn impedance_sphere_triangle_rule_ladder() {
         (
             "triangle-near",
             helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 20 },
+        ),
+        (
+            "triangle",
+            helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 },
         ),
     ];
     for ka in [1.0, 3.0] {
@@ -761,7 +770,7 @@ fn impedance_sphere_triangle_rule_ladder() {
                 )
             };
             let (p_fit, s_fit) = (fit(&pulsating), fit(&scattering));
-            let triangle = label == "triangle-near";
+            let triangle = label != "centroid";
             let held =
                 !triangle || (s_fit.observed >= 1.8 && pulsating.windows(2).all(|w| w[1] < w[0]));
             println!(
@@ -787,14 +796,110 @@ fn impedance_sphere_triangle_rule_ladder() {
             assert!(held, "ka={ka} {label}: {pulsating:?} {scattering:?}");
             finest.push(scattering[2]);
         }
-        assert!(finest[1] < finest[0], "ka={ka}: rule {finest:?}");
+        assert!(
+            finest[1..].iter().all(|&e| e < finest[0]),
+            "ka={ka}: rules {finest:?}"
+        );
     }
+}
+
+/// G1: the low-ka dipole radiation resistance, the damping of a rigid-body or
+/// bending mode at small ka. At ka = 0.05 it is 6e-5 of |z|, so a complex
+/// error that looks small can hide it. Under alpha = i/k, one-point far
+/// weights leave an O(h) remnant that the resistance exposes: the centroid
+/// rows overstate it about 11x, and the near rule alone stalls.
+/// PanelRule::Triangle's seven-point far rule must make both its complex and its
+/// resistance errors fall strictly over dense rungs 2-4, and beat both other
+/// rules' resistance at the finest rung. The others are recorded.
+#[test]
+fn impedance_sphere_dipole_resistance_far_rule_ladder() {
+    let medium = Medium::air();
+    let rho_c = medium.density * medium.sound_speed;
+    let ka = 0.05;
+    let (j, y) = spherical(ka, 2);
+    // z_1 = i rho c h_1 / h_1', with h_1' = h_0 - 2 h_1 / ka.
+    let h = C64::new(j[1], y[1]);
+    let hp = C64::new(j[0] - 2.0 / ka * j[1], y[0] - 2.0 / ka * y[1]);
+    let exact = (C64::new(0.0, 1.0) * h / hp).scale(rho_c);
+    let rules = [
+        ("centroid", helmholtz::PanelRule::Centroid),
+        (
+            "triangle-near",
+            helmholtz::PanelRule::TriangleNear { max_pairs: 1 << 20 },
+        ),
+        (
+            "triangle",
+            helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 },
+        ),
+    ];
+    let mut finest = Vec::new();
+    for (label, rule) in rules {
+        let (mut complex, mut resistance) = (Vec::new(), Vec::new());
+        for rung in 2..=4 {
+            let start = Instant::now();
+            let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+            // The dipole (rigid translation along z): v = cos(theta).
+            let v: Vec<_> = surface
+                .centroids()
+                .iter()
+                .map(|c| C64::from_re(c[2] / (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()))
+                .collect();
+            let solution = helmholtz::with_dense_workers(16, || {
+                helmholtz::solve_radiation_with_rule(
+                    &surface,
+                    ka,
+                    medium,
+                    &v,
+                    Formulation::BurtonMiller,
+                    rule,
+                )
+            })
+            .unwrap();
+            let (pv, vv) = solution
+                .pressure
+                .iter()
+                .zip(&v)
+                .zip(surface.areas())
+                .fold((C64::ZERO, 0.0), |(pv, vv), ((&p, &v), &a)| {
+                    (pv + (p * v).scale(a), vv + v.re * v.re * a)
+                });
+            let z = pv.scale(1.0 / vv);
+            complex.push(relative(z, exact));
+            resistance.push((z.re - exact.re).abs() / exact.re);
+            println!(
+                "{{\"suite\":\"fs-bem\",\"case\":\"dipole-resistance\",\"inputs\":{{\"fixture\":\"rigid icosphere, v = cos(theta)\",\"provenance\":\"analytic z_1 = i rho c h_1/h_1'\"}},\"axis\":\"sphere-mesh\",\"rung\":{rung},\"rule\":\"{label}\",\"ka\":{ka},\"observed\":[{:.17e},{:.17e}],\"oracle\":[{:.17e},{:.17e}],\"err\":{{\"complex\":{:.17e},\"resistance\":{:.17e}}},\"tol\":null,\"verdict\":\"measured\",\"elapsed_s\":{:.6}}}",
+                z.re,
+                z.im,
+                exact.re,
+                exact.im,
+                complex[complex.len() - 1],
+                resistance[resistance.len() - 1],
+                start.elapsed().as_secs_f64()
+            );
+        }
+        if label == "triangle" {
+            assert!(
+                complex.windows(2).all(|w| w[1] < w[0]),
+                "complex: {complex:?}"
+            );
+            assert!(
+                resistance.windows(2).all(|w| w[1] < w[0]),
+                "resistance: {resistance:?}"
+            );
+        }
+        finest.push(resistance[2]);
+    }
+    assert!(
+        finest[2] < finest[0] && finest[2] < finest[1],
+        "finest resistance errors {finest:?}"
+    );
 }
 
 /// G5: the iterative owner applies the dense owner's triangle near rule as
 /// its sparse near rows. Sphere rungs 2-4 at k = 1 and pi agree within ten
 /// times the GMRES tolerance at FMM order 7, the bound bem_iterative_matches
-/// _dense holds the centroid rows to. The rule's refusals reach this owner.
+/// _dense holds the centroid rows to. The rule's refusals reach this owner,
+/// and plain CBIE ignores the rule bit for bit.
 #[test]
 fn impedance_sphere_triangle_rule_iterative_matches_dense() {
     let gate = CancelGate::new_clock_free();
@@ -870,7 +975,13 @@ fn impedance_sphere_triangle_rule_iterative_matches_dense() {
             o,
             &gate,
         )
-        .map(|_| ())
+        .map(|(solution, _, _)| {
+            solution
+                .pressure
+                .iter()
+                .map(|p| (p.re.to_bits(), p.im.to_bits()))
+                .collect::<Vec<_>>()
+        })
     };
     let tight = IterativeOptions {
         panel_rule: helmholtz::PanelRule::TriangleNear { max_pairs: 1 },
@@ -883,8 +994,23 @@ fn impedance_sphere_triangle_rule_iterative_matches_dense() {
             ..
         }))
     ));
+    // Plain CBIE ignores the rule: one set of options can route rows of
+    // either formulation, and the CBIE rows keep their own triangle table.
+    let centroid = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::Centroid,
+        ..options.clone()
+    };
+    assert_eq!(
+        solve(Formulation::PlainCbie, &options).unwrap(),
+        solve(Formulation::PlainCbie, &centroid).unwrap()
+    );
+    // The seven-point far rule needs a multi-point far field this owner lacks.
+    let gauss_far = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 },
+        ..options.clone()
+    };
     assert!(matches!(
-        solve(Formulation::PlainCbie, &options),
+        solve(Formulation::BurtonMiller, &gauss_far),
         Err(IterativeError::Invalid { .. })
     ));
 }

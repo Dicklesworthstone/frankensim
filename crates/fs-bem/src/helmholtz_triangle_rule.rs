@@ -27,12 +27,12 @@
 //! one-point weights, so the FMM route applies the rule as a sparse correction
 //! without touching its expansions.
 
-use super::iterative::{NearOperator, NearRows};
+use super::iterative::{NearOperator, NearRows, RADON7};
 use super::{
     DENSE_WORKERS, Formulation, GL8_W, GL8_X, HelmholtzError, Medium, RadiationOperator,
-    RadiationSolution, alpha_for, assemble_dense, condition_lower_bound, cross, dot, kernels, norm,
-    regularized_coplanar_hypersingular, self_terms, sub, triangle_is_near, triangle_self_terms,
-    triangle_static_influence, triangle_weak_influence_with_static,
+    RadiationSolution, alpha_for, assemble_dense, condition_lower_bound, cross, dot, fill_rows,
+    kernels, norm, regularized_coplanar_hypersingular, self_terms, sub, triangle_is_near,
+    triangle_self_terms, triangle_static_influence, triangle_weak_influence_with_static,
 };
 use crate::panel3d::SpherePanels;
 use fs_la::eigen_complex::lu_complex;
@@ -50,6 +50,16 @@ pub enum PanelRule {
     /// more than `max_pairs` near (target, source) pairs.
     TriangleNear {
         /// Declared ceiling on corrected pairs.
+        max_pairs: usize,
+    },
+    /// [`Self::TriangleNear`] plus the Radon seven-point rule for S, D and N on
+    /// every far pair, with both static closures under the same rule. One-point
+    /// far weights leave an O(h) remnant that `alpha = i/k` amplifies at low
+    /// ka (a dipole's radiation resistance stalls); this rule removes it.
+    /// Dense route only: the iterative owner refuses it, since its far field
+    /// is one point per panel.
+    Triangle {
+        /// Declared ceiling on corrected near pairs.
         max_pairs: usize,
     },
 }
@@ -207,6 +217,89 @@ impl NearRule {
             }
         }
     }
+}
+
+/// Far rows for [`PanelRule::Triangle`]. Every pair outside row `i`'s
+/// near zone and off the diagonal replaces its centroid S, D and N by the
+/// source panel's Radon seven-point sums of the same point kernels, and
+/// both static closures follow the same rule. D' keeps its centroid rows.
+/// Rows run on the declared dense workers and read shared data only, so every
+/// bit is independent of the worker count.
+fn correct_dense_far(
+    surface: &SpherePanels,
+    k: f64,
+    alpha: C64,
+    near: &NearRule,
+    a: &mut [C64],
+    b: &mut [C64],
+) {
+    let triangles = surface
+        .triangles()
+        .expect("NearRule::build admitted retained triangles");
+    let (centroids, normals, areas) = (surface.centroids(), surface.normals(), surface.areas());
+    let n = centroids.len();
+    let fill = |i: usize, arow: &mut [C64], brow: &mut [C64]| {
+        let (x, nx) = (centroids[i], normals[i]);
+        let row = &near.cols[near.starts[i]..near.starts[i + 1]];
+        let (mut static_double, mut static_hyper) = (0.0, 0.0);
+        let mut next = 0;
+        for j in 0..n {
+            if next < row.len() && row[next] == j {
+                next += 1;
+                continue;
+            }
+            if j == i {
+                continue;
+            }
+            let (ny, area) = (normals[j], areas[j]);
+            let ([single, double, hyper], [d0, n0]) =
+                triangle_far_layers(k, x, nx, (triangles[j], centroids[j], area), ny);
+            let (g, dgdny, _, d2g) = kernels(k, x, nx, centroids[j], ny);
+            let (_, point_d0, _, point_n0) = kernels(0.0, x, nx, centroids[j], ny);
+            arow[j] = arow[j] + (double - dgdny.scale(area)) + alpha * (hyper - d2g.scale(area));
+            brow[j] = brow[j] + (single - g.scale(area));
+            static_double += d0 - point_d0.re * area;
+            static_hyper += n0 - point_n0.re * area;
+        }
+        arow[i] = arow[i] + C64::from_re(-static_double) - alpha.scale(static_hyper);
+    };
+    fill_rows(a, b, n, &fill);
+}
+
+/// Radon seven-point sums of the point kernels over a source panel at a
+/// well-separated target: `([S, D, N], [D_0, N_0])`. The nodes and weights
+/// are the iterative owner's far-field cloud's: the panel centroid first,
+/// then barycentric nodes, each weight times the panel area.
+pub(crate) fn triangle_far_layers(
+    k: f64,
+    x: [f64; 3],
+    nx: [f64; 3],
+    panel: ([[f64; 3]; 3], [f64; 3], f64),
+    ny: [f64; 3],
+) -> ([C64; 3], [f64; 2]) {
+    let (triangle, centroid, area) = panel;
+    let mut layers = [C64::ZERO; 3];
+    let mut statics = [0.0; 2];
+    for (m, &(barycentric, weight)) in RADON7.iter().enumerate() {
+        let y = if m == 0 {
+            centroid
+        } else {
+            core::array::from_fn(|axis| {
+                barycentric[0] * triangle[0][axis]
+                    + barycentric[1] * triangle[1][axis]
+                    + barycentric[2] * triangle[2][axis]
+            })
+        };
+        let weight = weight * area;
+        let (g, dgdny, _, d2g) = kernels(k, x, nx, y, ny);
+        let (_, d0, _, n0) = kernels(0.0, x, nx, y, ny);
+        layers[0] = layers[0] + g.scale(weight);
+        layers[1] = layers[1] + dgdny.scale(weight);
+        layers[2] = layers[2] + d2g.scale(weight);
+        statics[0] += d0.re * weight;
+        statics[1] += n0.re * weight;
+    }
+    (layers, statics)
 }
 
 /// Sources `j != i` inside the plain-CBIE near zone of each centroid target,
@@ -392,12 +485,13 @@ fn triangle_hypersingular_influence(
 
 /// [`super::solve_radiation_batch`] under a declared [`PanelRule`]. The
 /// centroid rule is that function, bit for bit. The triangle rule corrects
-/// the Burton-Miller rows before the same LU and diagnostics; plain CBIE keeps
-/// its own triangle quadrature and is refused here.
+/// the Burton-Miller rows before the same LU and diagnostics. Plain CBIE ignores
+/// any rule: it keeps its own triangle quadrature, so routed callers can pass
+/// one rule to rows of either formulation.
 ///
 /// # Errors
 /// The admissions of [`super::solve_radiation_batch`], plus the rule's
-/// refusals: missing triangles, plain CBIE, or [`HelmholtzError::NearRuleBudget`].
+/// refusals: missing triangles or [`HelmholtzError::NearRuleBudget`].
 pub fn solve_radiation_batch_with_rule(
     surface: &SpherePanels,
     k: f64,
@@ -406,14 +500,16 @@ pub fn solve_radiation_batch_with_rule(
     formulation: Formulation,
     rule: PanelRule,
 ) -> Result<Vec<RadiationSolution>, HelmholtzError> {
-    let PanelRule::TriangleNear { max_pairs } = rule else {
-        return super::solve_radiation_batch(surface, k, medium, velocity_fields, formulation);
-    };
     if formulation == Formulation::PlainCbie {
-        return Err(HelmholtzError::BadParameter {
-            what: "the triangle near rule corrects Burton-Miller rows; plain CBIE keeps its own triangle quadrature",
-        });
+        return super::solve_radiation_batch(surface, k, medium, velocity_fields, formulation);
     }
+    let (max_pairs, gauss_far) = match rule {
+        PanelRule::Centroid => {
+            return super::solve_radiation_batch(surface, k, medium, velocity_fields, formulation);
+        }
+        PanelRule::TriangleNear { max_pairs } => (max_pairs, false),
+        PanelRule::Triangle { max_pairs } => (max_pairs, true),
+    };
     let operator = RadiationOperator::prepare_ruled(
         surface,
         k,
@@ -425,6 +521,9 @@ pub fn solve_radiation_batch_with_rule(
             let rule = NearRule::build(surface, k, max_pairs, workers, &|| false)?;
             let (mut a, mut b) = assemble_dense(surface, k, alpha);
             rule.correct_dense(alpha, &mut a, &mut b);
+            if gauss_far {
+                correct_dense_far(surface, k, alpha, &rule, &mut a, &mut b);
+            }
             Ok((a, b))
         },
     )?;
@@ -723,11 +822,6 @@ mod tests {
         ));
         let medium = Medium::air();
         let v = vec![C64::ONE; triangles.len()];
-        let rule = PanelRule::TriangleNear { max_pairs: pairs };
-        assert!(matches!(
-            solve_radiation_with_rule(&surface, k, medium, &v, Formulation::PlainCbie, rule),
-            Err(HelmholtzError::BadParameter { .. })
-        ));
         assert!(matches!(
             solve_radiation_with_rule(
                 &surface,
@@ -744,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn centroid_rule_is_the_existing_owner_bit_for_bit() {
+    fn centroid_rule_and_plain_cbie_keep_the_existing_owner_bits() {
         let surface = SpherePanels::icosphere(1.0, 2).unwrap();
         let medium = Medium::air();
         let v: Vec<C64> = surface
@@ -752,18 +846,24 @@ mod tests {
             .iter()
             .map(|c| C64::new(c[2], 0.5 * c[0]))
             .collect();
-        for formulation in [Formulation::BurtonMiller, Formulation::PlainCbie] {
+        // Plain CBIE ignores every rule: its own triangle quadrature stands.
+        let cases = [
+            (Formulation::BurtonMiller, PanelRule::Centroid),
+            (Formulation::PlainCbie, PanelRule::Centroid),
+            (
+                Formulation::PlainCbie,
+                PanelRule::TriangleNear { max_pairs: 1 << 20 },
+            ),
+            (
+                Formulation::PlainCbie,
+                PanelRule::Triangle { max_pairs: 1 << 20 },
+            ),
+        ];
+        for (formulation, rule) in cases {
             let old =
                 super::super::solve_radiation(&surface, 1.3, medium, &v, formulation).unwrap();
-            let new = solve_radiation_with_rule(
-                &surface,
-                1.3,
-                medium,
-                &v,
-                formulation,
-                PanelRule::Centroid,
-            )
-            .unwrap();
+            let new =
+                solve_radiation_with_rule(&surface, 1.3, medium, &v, formulation, rule).unwrap();
             for (a, b) in old.pressure.iter().zip(&new.pressure) {
                 assert_eq!(
                     (a.re.to_bits(), a.im.to_bits()),
@@ -830,5 +930,117 @@ mod tests {
                 "B[{i},{i}]"
             );
         }
+    }
+
+    #[test]
+    fn far_layers_match_subdivided_quadrature_beyond_the_near_zone() {
+        // Targets at 4, 6 and 8 circumradii from the centroid along two
+        // directions, the far side of the triangle_is_near boundary, with a
+        // tilted target normal. The seven-point rule must hold every layer
+        // within 1e-4 there, a hundredth of the 1e-3 acceptance band it
+        // serves. Its static (k = 0) error must also fall with distance; the
+        // oscillatory part keeps a kh-set floor that distance does not remove
+        // (S at k = 1.5: 2.3e-7 at 4 radii, 6.1e-7 at 6). Measured on ts1:
+        // N at 4 radii, k = 0, is 1.05e-5.
+        let triangle = [[0.0, 0.0, 0.0], [1.0, 0.1, 0.0], [0.3, 0.9, 0.05]];
+        let ny = unit(cross(
+            sub(triangle[1], triangle[0]),
+            sub(triangle[2], triangle[0]),
+        ));
+        let c = [0, 1, 2].map(|a| (triangle[0][a] + triangle[1][a] + triangle[2][a]) / 3.0);
+        let radius = triangle
+            .iter()
+            .map(|&v| norm(sub(v, c)))
+            .fold(0.0_f64, f64::max);
+        let area = 0.5
+            * norm(cross(
+                sub(triangle[1], triangle[0]),
+                sub(triangle[2], triangle[0]),
+            ));
+        let nx = unit([0.3, 0.2, 0.9]);
+        // k = 1.5 puts this panel (sqrt area 0.66) at the solver's resolution
+        // floor, six panels per wavelength: the far rule never sees a larger kh.
+        for direction in [unit([0.6, 0.7, 0.4]), unit([-0.8, 0.2, -0.5])] {
+            for k in [0.0, 1.5] {
+                let mut previous = [f64::INFINITY; 5];
+                for scale in [4.0, 6.0, 8.0] {
+                    let x = [0, 1, 2].map(|a| c[a] + 1.0001 * scale * radius * direction[a]);
+                    assert!(!triangle_is_near(x, c, triangle));
+                    let (layers, statics) = triangle_far_layers(k, x, nx, (triangle, c, area), ny);
+                    let reference = subdivided(k, x, nx, triangle, ny, 5);
+                    let static_reference = subdivided(0.0, x, nx, triangle, ny, 5);
+                    let cases = [
+                        (layers[0], reference[0], "S"),
+                        (layers[1], reference[1], "D"),
+                        (layers[2], reference[2], "N"),
+                        (C64::from_re(statics[0]), static_reference[1], "D0"),
+                        (C64::from_re(statics[1]), static_reference[2], "N0"),
+                    ];
+                    for (slot, (got, want, what)) in cases.into_iter().enumerate() {
+                        let error = (got - want).abs() / want.abs();
+                        assert!(error < 1e-4, "{what} {scale}r k={k}: {error:e}");
+                        assert!(
+                            k > 0.0 || error < previous[slot],
+                            "{what} {scale}r k={k}: {error:e} after {:e}",
+                            previous[slot]
+                        );
+                        previous[slot] = error;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn far_rows_hold_their_sums_and_close_both_static_rows() {
+        let surface = SpherePanels::icosphere(1.0, 1).unwrap();
+        let triangles = surface.triangles().unwrap();
+        let (k, alpha) = (1.7, C64::new(0.0, 1.0 / 1.7));
+        let n = surface.areas().len();
+        let rule = NearRule::build(&surface, k, usize::MAX, 1, &|| false).unwrap();
+        let (mut a, mut b) = assemble_dense(&surface, k, alpha);
+        rule.correct_dense(alpha, &mut a, &mut b);
+        let (near_a, near_b) = (a.clone(), b.clone());
+        correct_dense_far(&surface, k, alpha, &rule, &mut a, &mut b);
+        let close = |got: C64, want: C64| (got - want).abs() <= 1e-13 * (1.0 + want.abs());
+        for i in 0..n {
+            let (x, nx) = (surface.centroids()[i], surface.normals()[i]);
+            let (mut d0_delta, mut n0_delta) = (0.0, 0.0);
+            for j in (0..n).filter(|&j| j != i) {
+                let (c, ny, area) = (
+                    surface.centroids()[j],
+                    surface.normals()[j],
+                    surface.areas()[j],
+                );
+                if triangle_is_near(x, c, triangles[j]) {
+                    assert_eq!(
+                        (a[i * n + j], b[i * n + j]),
+                        (near_a[i * n + j], near_b[i * n + j])
+                    );
+                    continue;
+                }
+                let ([s, d, h], [d0, n0]) =
+                    triangle_far_layers(k, x, nx, (triangles[j], c, area), ny);
+                let (_, _, dgdnx, _) = kernels(k, x, nx, c, ny);
+                let (_, point_d0, _, point_n0) = kernels(0.0, x, nx, c, ny);
+                assert!(close(a[i * n + j], d + alpha * h), "A[{i},{j}]");
+                assert!(
+                    close(b[i * n + j], s + alpha * dgdnx.scale(area)),
+                    "B[{i},{j}]"
+                );
+                d0_delta += d0 - point_d0.re * area;
+                n0_delta += n0 - point_n0.re * area;
+            }
+            let want = near_a[i * n + i] - C64::from_re(d0_delta) - alpha.scale(n0_delta);
+            assert!(close(a[i * n + i], want), "A[{i},{i}]");
+            assert_eq!(b[i * n + i], near_b[i * n + i]);
+        }
+        // Declared workers leave every entry bitwise.
+        let (mut wa, mut wb) = assemble_dense(&surface, k, alpha);
+        rule.correct_dense(alpha, &mut wa, &mut wb);
+        super::super::with_dense_workers(4, || {
+            correct_dense_far(&surface, k, alpha, &rule, &mut wa, &mut wb);
+        });
+        assert_eq!((wa, wb), (a, b));
     }
 }

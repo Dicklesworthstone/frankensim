@@ -516,6 +516,7 @@ fn load(
                     match o.panel_rule {
                         PanelRule::Centroid => 0,
                         PanelRule::TriangleNear { .. } => 1,
+                        PanelRule::Triangle { .. } => 2,
                     },
                 ] {
                     hash.update(&v.to_le_bytes());
