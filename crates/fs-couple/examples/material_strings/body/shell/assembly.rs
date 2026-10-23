@@ -8,7 +8,11 @@ use fs_plate::shell::junction::{
     EdgeTie, FaceTie, RotationCoupling, TieBudget, TieKind, TieOffset, TieSide,
 };
 
-const MAX_COMPONENTS: usize = 8;
+/// A shell-assembly table written as this v4 profile.
+#[path = "assembly_table.rs"]
+pub(crate) mod table;
+
+const MAX_COMPONENTS: usize = 32;
 // Totals across every component of one assembled body: four components at the per-component ceiling.
 const MAX_TOTAL_NODES: usize = 4 * MAX_NODES;
 const MAX_TOTAL_TRIANGLES: usize = 4 * MAX_TRIANGLES;

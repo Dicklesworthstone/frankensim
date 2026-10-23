@@ -498,6 +498,126 @@ fn the_violin_sized_g3_rung_renders_two_seconds_for_listening() {
     });
 }
 
+/// The six strings of the guitar E4 rung, E2 A2 D3 G3 B3 E4: pitch [Hz] and radius [m] of plain strings in the synthetic
+/// steel of these tests, NOT guitar strings (the nylon and wound-bass packs in data/matdb are literature facts, not the
+/// string-section properties this route reads). Each speaking length's tension is derived: 70 N each, within 0.4 N.
+const GUITAR_STRINGS: [(f64, f64); 6] =
+    [(82.41, 0.000_5), (110.0, 0.000_375), (146.83, 0.000_28), (196.0, 0.000_21), (246.94, 0.000_166), (329.63, 0.000_125)];
+
+/// Every guitar string keeps every bending and twist mode of its full span below this frequency [Hz]. It is half the
+/// violin rung's: six strings at 10 kHz would exceed the 512-coordinate prepared ceiling with the 128 body modes.
+const GUITAR_STRING_BAND_HZ: f64 = 5_000.0;
+
+/// The Esteso 1964 guitar body (data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv, 19 parts,
+/// 5805 nodes) written as a v4 assembled profile, with its three FPL-GTR-282 shell packs. The spruce top is the performance
+/// body pack. The window holds the body modes from 15 Hz (above the free body's rigid motion) to 2 kHz, the packs' declared
+/// angular-frequency validity.
+fn esteso_profile(strings: &[(f64, f64)]) -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let converted = super::super::shell::assembly::table::convert(
+        include_str!("../../../../../../data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv"),
+        &super::super::shell::assembly::table::TableOptions {
+            window: ((two_pi * 15.0).powi(2), (two_pi * 2000.0).powi(2)),
+            projection_work: MAX_SHELL_PROJECTION_WORK,
+            packs: &[("spruce", "@body"), ("rosewood", "guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk"),
+                ("cedar", "guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk")],
+            reference_thickness_m: ESTESO_REFERENCE_THICKNESS_M,
+            bridge_component: "top",
+            bridges: strings,
+        }).unwrap();
+    (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
+}
+
+/// The performance body record's thickness [m]; every part's own thickness is written as a ratio to it.
+const ESTESO_REFERENCE_THICKNESS_M: f64 = 0.0025;
+
+/// The three guitar shell packs, built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
+fn esteso_pack(name: &str) -> NormalizedPack {
+    let bytes: &[u8] = match name {
+        "guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk" =>
+            include_bytes!("../../packs/guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk"),
+        "guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk" =>
+            include_bytes!("../../packs/guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk"),
+        "guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk" =>
+            include_bytes!("../../packs/guitar-cedar-western-red-fpl-gtr282-shell.fsmatpk"),
+        _ => return pack(name, 1.0, None),
+    };
+    NormalizedPack::from_bytes(bytes).unwrap()
+}
+
+/// The guitar E4 cost rung of bead .358: the Esteso body (`esteso_profile`) with 128 retained modes and its own cavity row
+/// (13.04 L through the 43.5 mm sound hole, both ends flanged), and six strings (`GUITAR_STRINGS`) of 0.65 m speaking length
+/// with a 20 mm afterlength. Each meets its bridge foot at the top node nearest its saddle point. The table's saddle line
+/// x = 334.54 mm carries the strings 11.7 mm apart across the 58.5 mm of its outer drive points, the bass E on the -y side.
+/// Each string has two planes and its twist and keeps every mode below `GUITAR_STRING_BAND_HZ`. String 5 (E4) is plucked:
+/// held by 1 N at a fifth of its speaking length from the bridge in static equilibrium, then released at sample 0. No
+/// cylinder gas loading (the 512-coordinate ceiling).
+fn guitar_inputs(samples: u64) -> (Profile, input::Spec, super::super::shell::assembly::table::ConvertedTable) {
+    use std::f64::consts::PI;
+    let saddles: Vec<(f64, f64)> = (0..6).map(|k| (0.334_54, -0.029_25 + 0.0117 * k as f64)).collect();
+    let (profile, converted) = esteso_profile(&saddles);
+    let (speaking, span) = (0.65_f64, 0.67_f64);
+    let bridge = speaking / span;
+    let (density, young, shear) = (7800.0, 200e9, 80e9);
+    let mut strings = String::new();
+    for &(pitch, radius) in &GUITAR_STRINGS {
+        let tension = density * PI * radius * radius * (2.0 * speaking * pitch).powi(2);
+        let fundamental = 2.0 * speaking * pitch / (2.0 * span);
+        let inharmonicity = PI * PI * young * PI * radius.powi(4) / 4.0 / (tension * span * span);
+        let bending = (1..=input::MAX_MODES)
+            .take_while(|&n| n as f64 * fundamental * (1.0 + inharmonicity * (n * n) as f64).sqrt() < GUITAR_STRING_BAND_HZ)
+            .count();
+        let twist = (GUITAR_STRING_BAND_HZ * 2.0 * span / (shear / density).sqrt()) as usize;
+        strings.push_str(&format!("string wire.fsmatpk {span} {radius} tension {tension} {bending} {twist} {bridge} 3000 0.1\n\
+            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two 0.6 0.8 1 0\n", radius * 2.0 / 3.0));
+    }
+    let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
+    let pluck = bridge * 0.8;
+    let performance = format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
+        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\n\
+        body guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk {} {} {ESTESO_REFERENCE_THICKNESS_M} 128 1\nstrings 6\n{strings}\
+        prepared-linear 512 8589934592 1000000000000000\n\
+        cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1\n\
+        friction stribeck 0.8 0.4 0.1 0\nforces preload 1 1\nport 5 {pluck} centreline 1\nforce 0 0 0\n\
+        schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\n\
+        initial\tbow\t0e0\t0e0\t2e-1\nevents\t0\n", converted.length_m, converted.width_m);
+    let spec = input::Spec::parse(performance.as_bytes()).unwrap();
+    (profile, spec, converted)
+}
+
+/// The guitar E4 rung (above) for a quarter second: the wall time per audio second with what it was measured on, the time of
+/// each stage, the bridge snap distances and the pressure bits.
+#[test]
+#[ignore = "guitar E4 cost rung of bead .358: run with --ignored --nocapture"]
+fn the_esteso_guitar_e4_rung_reports_its_wall_time_per_audio_second() {
+    let (profile, spec, converted) = guitar_inputs(12_000);
+    eprintln!("guitar E4 rung: Esteso h12 as a v4 profile of {} bytes, body {:.4} x {:.4} m; bridge snaps {:?} mm",
+        converted.profile.len(), converted.length_m, converted.width_m,
+        converted.bridge_snaps_m.iter().map(|d| (d * 1e4).round() / 10.0).collect::<Vec<_>>());
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(esteso_pack(name))).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("guitar E4 rung: {}", cost_context(&r.spec));
+        let source = r.performance.bank().source().bank();
+        assert_eq!(source.strings().len(), 6);
+        assert!(source.material_cavity().is_some());
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 12_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        assert!(samples.iter().any(|p| p.abs() > 1e-14), "the plucked body radiated nothing");
+        let per_second = rendered.as_secs_f64() / (samples.len() as f64 / 48_000.0);
+        eprintln!("guitar E4 rung: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({per_second:.1} s render per audio second; a 2 s note with its construction takes {:.1} s per audio second)",
+            samples.len(), (built.as_secs_f64() + 2.0 * per_second) / 2.0);
+        eprintln!("guitar E4 rung: {}", cost_context(&r.spec));
+        eprintln!("guitar E4 rung: pressure bits fnv1a {:#018x}, peak {:.3e} Pa", pressure_bits(&samples),
+            samples.iter().fold(0.0_f64, |m, p| m.max(p.abs())));
+    });
+}
+
 /// Cost probe, not a correctness check (`-- --ignored --nocapture`): prints how the prepared route's construction time and time
 /// per sample grow with the retained body modes of the same plate, so the growth is measured rather than assumed.
 #[test]

@@ -1214,7 +1214,7 @@ retained free coordinate. Its soft isotropic material and supports keep the
 complete coupled fixture within a small spectral envelope. It is an integration
 example, not a violin shape or measured wood. Its material pack, physical shape,
 string pack, tension and gas mixture remain ordinary input data. The CLI admits
-the shell parser's complete 1 MiB profile budget; flat profiles retain their
+the shell parser's complete 4 MiB profile budget; flat profiles retain their
 existing 64 KiB limit.
 
 Open shells, uncapped sound holes, inconsistent face orientations and

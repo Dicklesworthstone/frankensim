@@ -30,8 +30,10 @@ const _: () = assert!(MAX_MODES <= fs_couple::shear_shell::MAX_SHELL_MODES);
 // Interface bindings keep their own allowance.
 const MAX_PROJECTION_WORK: usize = 268_435_456;
 // The shell projection work is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus force and pressure
-// projections (about 2.6e10 for MAX_TRIANGLES triangles and MAX_MODES modes). 2^35 on 64-bit hosts.
-pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 35) > usize::MAX as u64 { usize::MAX } else { (1u64 << 35) as usize };
+// projections (about 2.6e10 for MAX_TRIANGLES triangles and MAX_MODES modes). An assembly adds the owner's
+// conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`: about 4.3e11 in all at the v4 caps
+// (8192 nodes, 16384 triangles, 128 modes, 8 bridges), 2.3e11 for the 5805-node Esteso guitar. 2^39 on 64-bit hosts.
+pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 39) > usize::MAX as u64 { usize::MAX } else { (1u64 << 39) as usize };
 
 #[derive(Clone, Debug)]
 struct Node {

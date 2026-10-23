@@ -10,8 +10,9 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 
 pub const MAX_BYTES: usize = 65_536;
 /// Shell (v3) and assembled (v4) profiles carry node and triangle rows, so they take a larger byte
-/// ceiling; flat plate profiles keep [`MAX_BYTES`].
-pub const MAX_SHELL_BYTES: usize = 1_048_576;
+/// ceiling; flat plate profiles keep [`MAX_BYTES`]. An assembly at its own record caps (8192 nodes, 16384
+/// triangles, both pressure roles on every triangle) writes about 2.1 MB at full float precision.
+pub const MAX_SHELL_BYTES: usize = 4 * 1_048_576;
 const MAX_GRID: usize = 12;
 
 #[path = "body/shell.rs"]
@@ -40,7 +41,7 @@ impl Profile {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 1 MiB".into()); }
+        if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 4 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let version = text.lines().next().and_then(|s| s.split_ascii_whitespace().next())
             .ok_or("missing body profile version")?;

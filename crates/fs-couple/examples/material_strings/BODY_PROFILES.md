@@ -373,13 +373,15 @@ string count, including unplayed strings. Source bytes, geometry, packs,
 physical eigenvectors and force maps remain attached to the performer.
 
 The file admits at most 2048 nodes and 4096 triangles per component, 16 regions, eight string
-attachments and 128 retained shell modes, within 1 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+attachments and 128 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
 `projection-work` declares a separate cold shell-projection budget, at most
-34,359,738,368 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
-force and pressure projections, about 2.6e10 for a cap-sized component). It does not enlarge the existing complete-network limits.
+549,755,813,888 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
+force and pressure projections, about 2.6e10 for a cap-sized component; a v4 assembly adds the owner's
+conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 4.3e11 in all at the v4 caps).
+It does not enlarge the existing complete-network limits.
 These discretization choices require mesh, mode, stabilization and time-step
 refinement for the intended specimen.
 
@@ -645,7 +647,7 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles take the 1 MiB shell limit and admit at most eight components, 8192 total
+Profiles take the 4 MiB shell limit and admit at most 32 components, 8192 total
 nodes, 16384 total triangles, 64 ties and 128 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
@@ -659,3 +661,14 @@ exterior acoustic fields. The inherited compact observer and Helmholtz cavity
 remain explicit approximations. The new native regression sources check tied
 motion, complete material-to-pressure/PCM propagation, material-only changes
 and callback equivalence; they still require execution in the pinned build.
+
+A `frankensim.shell-assembly.v1` table (the Esteso guitar body,
+`data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv`)
+is written as this v4 profile by `body/shell/assembly_table.rs`, choice for
+choice as `examples/guitar_body_modes.rs` assembles it: orthotropic regions on
+their own axes at the part's thickness, a free body, the part flags' exterior
+and cavity facets, full-rotation rigid edge ties on the master's skin or
+midsurface. What the table does not carry is explicit: the window, projection
+work, which wood is `@body`, the reference thickness, and one bridge per string
+at the nearest node of a declared point (the snap distance is reported). The
+table's cavity row supplies the performance's cavity record.
