@@ -164,6 +164,9 @@ pub struct MultiFrictionModalSystem {
     // Constitutive candidates never replace accepted history until the complete
     // coupled network, all contacts and the energy ledger accept the step.
     shear_layers: Vec<Option<layer::MaterialShearLayer>>,
+    // Pivot budget for the active-set rescue (frankensim-o7qbp). Set at
+    // construction; a test may lower it to plant a budget-exhaustion negative.
+    active_set_budget: usize,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -226,7 +229,7 @@ impl MultiFrictionModalSystem {
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
             accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
-            shear_layers: vec![None; p] })
+            shear_layers: vec![None; p], active_set_budget: 4 * p + 16 })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -506,12 +509,16 @@ impl MultiFrictionModalSystem {
     /// Restricted to the plain friction case: when any port carries a unilateral
     /// obstacle or a material shear layer the rescue declines (Ok(false)) and the
     /// caller refuses exactly as before, so no existing path changes behaviour.
-    fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>,
-        budget: usize) -> Result<bool, ModalFrictionError>
+    /// Override the active-set pivot budget (frankensim-o7qbp). For tests that
+    /// plant a budget-exhaustion negative; production uses the construction default.
+    pub fn force_active_set_budget(&mut self, budget: usize) { self.active_set_budget = budget; }
+
+    fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>)
+        -> Result<active_set::Rescue, ModalFrictionError>
     {
         let p = self.points.len();
         if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some) {
-            return Ok(false);
+            return Ok(active_set::Rescue::Declined);
         }
         let dt = self.sample_period_s();
         let mut a = self.compliance.clone();
@@ -529,15 +536,15 @@ impl MultiFrictionModalSystem {
         let laws: Vec<FrictionLaw> = (0..p).map(|i| self.points[i].port.law.clone()).collect();
         let lawrefs: Vec<&FrictionLaw> = laws.iter().collect();
         let seed = self.regimes.clone();
-        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, budget)? {
+        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
             Some((tractions, regimes)) => {
                 poll(gate)?;
                 self.tractions.copy_from_slice(&tractions);
                 self.regimes.copy_from_slice(&regimes);
                 for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
-                Ok(true)
+                Ok(active_set::Rescue::Adopted)
             }
-            None => Ok(false),
+            None => Ok(active_set::Rescue::Exhausted),
         }
     }
 
@@ -618,12 +625,13 @@ impl MultiFrictionModalSystem {
                     // stick/slip partition is unique; solve it directly with the
                     // active-set rescue. If it finds and verifies that partition,
                     // adopt it and accept; otherwise refuse on budget as before.
-                    if self.active_set_rescue(drives, gate, 4 * p + 16)? {
-                        rescues = 1;
-                        sweeps = sweep;
-                        break;
+                    match self.active_set_rescue(drives, gate)? {
+                        active_set::Rescue::Adopted => { rescues = 1; sweeps = sweep; break; }
+                        active_set::Rescue::Declined => return Err(error),
+                        active_set::Rescue::Exhausted => return Err(invalid(
+                            "the active-set rescue could not resolve a consistent joint friction partition within its pivot budget",
+                        ).into()),
                     }
-                    return Err(error);
                 },
                 _ => {},
             }

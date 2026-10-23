@@ -24,6 +24,19 @@
 
 use super::*;
 
+/// Outcome of an active-set rescue attempt, so the caller can tell a spent
+/// pivot budget (a named refusal) from a case the rescue does not apply to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Rescue {
+    /// A consistent partition was found and its tractions/regimes adopted.
+    Adopted,
+    /// The rescue does not apply (an obstacle or shear layer is present); the
+    /// caller refuses with the original Gauss-Seidel error.
+    Declined,
+    /// The pivot budget was spent without a consistent partition.
+    Exhausted,
+}
+
 /// One port's assigned branch in a candidate active set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Branch {
@@ -437,5 +450,24 @@ mod tests {
                 assert!(ti.abs() <= cap * (1.0 + 1e-9), "port {i} stuck traction {ti} exceeds the cone {cap}");
             }
         }
+    }
+
+    #[test]
+    fn active_set_refuses_when_the_pivot_budget_is_spent() {
+        let (a, f) = operating_point();
+        let l = law();
+        let laws: Vec<&FrictionLaw> = (0..5).map(|_| &l).collect();
+        let seed = vec![ModalFrictionRegime::Sticking; 5];
+        // From the all-stuck start the unique partition S+SSS needs more than one
+        // pivot (flip port 1, then re-solve), so budget 1 cannot resolve it and
+        // the rescue refuses (None); the real default budget does resolve it.
+        assert!(
+            solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 1).unwrap().is_none(),
+            "budget 1 must not resolve the partition"
+        );
+        assert!(
+            solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 64).unwrap().is_some(),
+            "the default budget must resolve the partition"
+        );
     }
 }

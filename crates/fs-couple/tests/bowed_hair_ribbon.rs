@@ -694,3 +694,93 @@ fn narrow_ribbon_converges_through_the_first_transition_via_active_set() {
         );
     });
 }
+
+/// o7qbp item 1-2: when the active-set pivot budget is too small to reach the
+/// unique consistent partition, the step refuses with the NAMED active-set error
+/// (not the original Gauss-Seidel error). The default budget converges.
+#[test]
+fn active_set_refuses_with_a_named_error_when_the_budget_is_too_small() {
+    with_cx(|cx, gate| {
+        let drives = ribbon_drives(5, BOW_SPEED_M_S, BOW_FORCE_N);
+        // Default budget: the narrow converges through the first transition.
+        let mut ok = tuned_base(cx, gate, 20)
+            .unwrap()
+            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .unwrap();
+        ok.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        let zero = vec![0.0; ok.system().mode_count()];
+        for s in 0..150 {
+            ok.step(&zero, &drives)
+                .unwrap_or_else(|e| panic!("default budget refused at step {s}: {e:?}"));
+        }
+        // Budget 1: the rescue cannot resolve the partition, so the step refuses
+        // with the named active-set error.
+        let mut starved = tuned_base(cx, gate, 20)
+            .unwrap()
+            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .unwrap();
+        starved.force_active_set_budget(1);
+        starved.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        let mut refusal = None;
+        for s in 0..150 {
+            if let Err(e) = starved.step(&zero, &drives) {
+                refusal = Some((s, format!("{e:?}")));
+                break;
+            }
+        }
+        let (s, msg) = refusal.expect("budget-1 narrow must refuse at the first transition");
+        println!("{{\"test\":\"budget1\",\"refused_at\":{s},\"msg\":{msg:?}}}");
+        assert!(
+            msg.contains("active-set"),
+            "refusal must name the active-set failure, got: {msg}"
+        );
+    });
+}
+
+/// o7qbp item 3 (bit-identity): a step the Gauss-Seidel sweep converges never
+/// invokes the active-set rescue, so the fix cannot perturb it. Run the
+/// converging 1-cell point bow twice -- once with the rescue at its default
+/// budget, once with the budget forced to 0 (rescue disabled) -- and require the
+/// two traction traces byte-for-byte identical. The rescue-count is 0 on every
+/// step, proving the active-set path is inert on a converged run; the trace hash
+/// is reported for the record.
+#[test]
+fn active_set_is_inert_on_a_gs_converged_run() {
+    with_cx(|cx, gate| {
+        let trace = |budget: Option<usize>| -> Vec<u64> {
+            let mut bank = tuned_base(cx, gate, 20)
+                .unwrap()
+                .with_compliant_bow_ribbon(0.0008, 1, violin_hair(), ladder_limits(), gate)
+                .unwrap();
+            if let Some(b) = budget {
+                bank.force_active_set_budget(b);
+            }
+            bank.restore_string_states(0, &helmholtz_start(20)).unwrap();
+            let zero = vec![0.0; bank.system().mode_count()];
+            let drives = ribbon_drives(1, BOW_SPEED_M_S, BOW_FORCE_N);
+            let mut bits = Vec::with_capacity(200);
+            for s in 0..200 {
+                let f = bank
+                    .step(&zero, &drives)
+                    .unwrap_or_else(|e| panic!("point bow refused at step {s}: {e:?}"));
+                assert_eq!(
+                    f.active_set_rescues, 0,
+                    "a converged GS step must not invoke the active-set rescue (step {s})"
+                );
+                bits.push(f.ports[0].traction_n.to_bits());
+            }
+            bits
+        };
+        let with_rescue = trace(None); // default budget: rescue available
+        let rescue_off = trace(Some(0)); // budget 0: rescue disabled
+        assert_eq!(
+            with_rescue, rescue_off,
+            "the active-set changed a Gauss-Seidel-converged run; it must be inert there"
+        );
+        let hash = with_rescue
+            .iter()
+            .enumerate()
+            .fold(0u64, |h, (s, &b)| h ^ b.rotate_left((s % 64) as u32));
+        println!("{{\"test\":\"bit_identity\",\"point_bow_traction_hash\":\"{hash:#018x}\"}}");
+    });
+}
