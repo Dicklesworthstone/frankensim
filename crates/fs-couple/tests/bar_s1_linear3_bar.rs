@@ -21,6 +21,8 @@ use fs_couple::modal_acoustic_time::{
 };
 use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
+use fs_material::gas::GasState;
+use fs_material::gas_species::input::read_gas_state;
 use fs_math::{c64::C64, det};
 use fs_modal::{
     ModePair, SliceOptions, SliceReport, WindowPlan, eigh_gen_dense, slice_window, slice_windows,
@@ -76,6 +78,22 @@ static UNIFORM: OnceLock<Ladder> = OnceLock::new();
 static UNIFORM_TET10: OnceLock<Ladder> = OnceLock::new();
 static UNDERCUT: OnceLock<Ladder> = OnceLock::new();
 static RADIATION: OnceLock<RadiationLadder> = OnceLock::new();
+static AMBIENT: OnceLock<GasState> = OnceLock::new();
+
+/// The declared ambient gas: the shipped reference record, read through the
+/// shared gas-record owner. Every Bar-S1 radiation solve, receiver and time
+/// of flight reads it; nothing here assumes an air constant.
+fn ambient() -> &'static GasState {
+    AMBIENT.get_or_init(|| gas_record(include_str!("../examples/dry-air-20c.gas")))
+}
+
+fn gas_record(text: &str) -> GasState {
+    read_gas_state(&mut text.split_ascii_whitespace(), None).expect("gas record resolves")
+}
+
+fn medium() -> Medium {
+    Medium::from(ambient())
+}
 
 const ROSEWOOD: &str =
     include_str!("../../../data/matdb/seed-v1/rosewood-indian-fpl-gtr282/properties.tsv");
@@ -1290,9 +1308,9 @@ fn radiation() -> &'static RadiationLadder {
                 // unit displacement is -i*w*phi, and the corresponding
                 // displacement transfer is therefore -i*w*H.
                 let velocity: Vec<_> = shapes[mode].iter().map(|&phi| C64::from_re(phi)).collect();
-                let solved = solve_radiation_batch(&surface, omega / Medium::air().sound_speed,
-                    Medium::air(), &[velocity.as_slice()], Formulation::BurtonMiller).unwrap();
-                p[mode] = exterior_pressure_at_points(&surface, &solved[0], Medium::air(), &[RECEIVER]).unwrap()[0];
+                let solved = solve_radiation_batch(&surface, omega / medium().sound_speed,
+                    medium(), &[velocity.as_slice()], Formulation::BurtonMiller).unwrap();
+                p[mode] = exterior_pressure_at_points(&surface, &solved[0], medium(), &[RECEIVER]).unwrap()[0];
                 assert!(p[mode].re.is_finite() && p[mode].im.is_finite());
                 let displacement = p[mode] * C64::new(0.0, -omega);
                 row("Burton-Miller-modal-receiver", KINDS[mode], "pass", &format!(
@@ -1305,6 +1323,89 @@ fn radiation() -> &'static RadiationLadder {
         }
         RadiationLadder { pressures, panel_counts }
     })
+}
+
+/// .362: the bar's radiation follows the declared gas. On the coarse rung, the
+/// receiver pressure of each mode per unit modal velocity is rho-linear to
+/// 1e-12 at equal c (0.7 atm), as the linear BEM requires at fixed k. CO2 and
+/// 80/20 He-O2 move k as well; the bar is not compact (kL near 3 even for the
+/// first mode), so their receiver levels are printed, not ordered. The
+/// shipped record still gives Medium::air() bit for bit, so the existing
+/// renders are unchanged.
+#[test]
+fn bar_radiation_follows_the_declared_gas() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let started = Instant::now();
+    let air = Medium::air();
+    assert_eq!(
+        (medium().density.to_bits(), medium().sound_speed.to_bits()),
+        (air.density.to_bits(), air.sound_speed.to_bits())
+    );
+    let ladder = undercut();
+    let (surface, shapes) = surface_and_shapes(ladder, 1);
+    let gases = [
+        ("reference", *ambient()),
+        ("0.7 atm", gas_record("293.15 70927.5 0")),
+        ("CO2", gas_record("mixture 293.15 101325 mole 1 CO2 1")),
+        (
+            "He-O2",
+            gas_record("mixture 293.15 101325 mole 2 He 0.8 O2 0.2"),
+        ),
+    ];
+    let mut receiver = Vec::new();
+    for (_, gas) in &gases {
+        let medium = Medium::from(gas);
+        let p: Vec<C64> = (0..5)
+            .map(|mode| {
+                let omega = TAU * ladder.rungs[3].frequencies[mode];
+                let velocity: Vec<_> = shapes[mode].iter().map(|&phi| C64::from_re(phi)).collect();
+                let solved = solve_radiation_batch(
+                    &surface,
+                    omega / medium.sound_speed,
+                    medium,
+                    &[velocity.as_slice()],
+                    Formulation::BurtonMiller,
+                )
+                .unwrap();
+                exterior_pressure_at_points(&surface, &solved[0], medium, &[RECEIVER]).unwrap()[0]
+            })
+            .collect();
+        receiver.push(p);
+    }
+    let ratio = gases[1].1.density / gases[0].1.density;
+    assert_eq!(gases[1].1.sound_speed, gases[0].1.sound_speed);
+    for mode in 0..5 {
+        let (p, thin) = (receiver[0][mode], receiver[1][mode]);
+        assert!(
+            (thin - p.scale(ratio)).abs() <= 1e-12 * p.abs(),
+            "{}: {p:?} {thin:?}",
+            KINDS[mode]
+        );
+        row(
+            "gas-follows-record",
+            KINDS[mode],
+            "pass",
+            &format!(
+                "{{\"panel_count\":{},\"p_receiver_abs\":{{\"reference\":{},\"0.7 atm\":{},\"CO2\":{},\"He-O2\":{}}},\"rho\":[{},{},{},{}],\"c\":[{},{},{},{}],\"time_of_flight_s\":{}}}",
+                surface.centroids().len(),
+                p.abs(),
+                thin.abs(),
+                receiver[2][mode].abs(),
+                receiver[3][mode].abs(),
+                gases[0].1.density,
+                gases[1].1.density,
+                gases[2].1.density,
+                gases[3].1.density,
+                gases[0].1.sound_speed,
+                gases[1].1.sound_speed,
+                gases[2].1.sound_speed,
+                gases[3].1.sound_speed,
+                (RECEIVER[0].powi(2) + RECEIVER[1].powi(2) + RECEIVER[2].powi(2)).sqrt()
+                    / medium().sound_speed
+            ),
+            started,
+        );
+    }
 }
 
 #[test]
@@ -2525,15 +2626,13 @@ fn band_solve(surface: &SpherePanels, shapes: &[Vec<f64>], hz: f64) -> Option<(V
         .map(|s| s.iter().map(|&v| C64::from_re(v)).collect())
         .collect();
     let refs: Vec<&[C64]> = fields.iter().map(Vec::as_slice).collect();
-    let k = TAU * hz / Medium::air().sound_speed;
-    match solve_radiation_batch(surface, k, Medium::air(), &refs, Formulation::BurtonMiller) {
+    let k = TAU * hz / medium().sound_speed;
+    match solve_radiation_batch(surface, k, medium(), &refs, Formulation::BurtonMiller) {
         Ok(solved) => {
             let ppw = solved[0].panels_per_wavelength;
             let p = solved
                 .iter()
-                .map(|s| {
-                    exterior_pressure_at_points(surface, s, Medium::air(), &[RECEIVER]).unwrap()[0]
-                })
+                .map(|s| exterior_pressure_at_points(surface, s, medium(), &[RECEIVER]).unwrap()[0])
                 .collect();
             Some((p, ppw))
         }
@@ -2622,7 +2721,7 @@ fn band_radiation() -> &'static BandRadiation {
                 coarse.0.centroids().len(),
                 fine.0.centroids().len(),
                 ladder_change.iter().map(|c| c.0).fold(0.0, f64::max),
-                distance / Medium::air().sound_speed
+                distance / medium().sound_speed
             ),
             started,
         );
@@ -2635,7 +2734,7 @@ fn band_radiation() -> &'static BandRadiation {
                 omega_rad_s: training.iter().map(|&f| TAU * f).collect(),
                 per_mode,
                 held_out,
-                propagation_delay_s: distance / Medium::air().sound_speed,
+                propagation_delay_s: distance / medium().sound_speed,
                 producer_relative_error_estimate: producer,
             },
             panel_counts: [coarse.0.centroids().len(), fine.0.centroids().len()],
