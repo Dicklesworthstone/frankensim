@@ -537,6 +537,7 @@ fn run(args:&[String])->Result<(),String> {
                 let score_report=score.report;
                 let audio=exterior_audio::render(&mut scene.piano,score.performance,n,&baked,
                     scene.spec.full_scale_pa,options.wav_format.unwrap_or_default())?;
+                audio.require_in_band()?;
                 publish(output,&audio.wav)?;
                 let physical_report=options.report(&scene.piano);
                 print!("{}",board_reduction_report(&scene.board));
@@ -732,11 +733,17 @@ mod tests {
             let score=||performance::Performance::read(
                 "sample,event,key,value\n0,note_on,69,2.48\n1200,note_off,69,0\n",
                 &[69],2400).unwrap();
-            // This 10x10x0.3 cm soft panel (E 1e7 Pa, about 13.5 g; not Steinway geometry), struck
-            // at A4 with 2.48 m/s, peaks at 2.78 Pa at its receivers: about 0.5 m/s of mean panel
-            // velocity, which follows from so light and soft a panel. 4 Pa encodes it unclipped.
+            // The fixture's acoustics are sampled on 40-300 Hz and it strikes A4 (440 Hz), so nearly
+            // all of its rendered pressure is extrapolation of the fit, not a physical level (its
+            // 2.78 Pa peak included). 4 Pa only encodes that level unclipped; the renderer reports the
+            // out-of-band share, and the publication gate refuses it.
             let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,4.,wav_output::Format::Pcm16).unwrap();
             let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,4.,wav_output::Format::Pcm16).unwrap();
+            assert!(source.out_of_band_share.iter().all(|s|*s>exterior_audio::MAX_PUBLISHED_OUT_OF_BAND_SHARE),
+                "{:?}",source.out_of_band_share);
+            let refused=source.require_in_band().unwrap_err();
+            assert!(refused.contains("outside the sampled 40-300 Hz band"),"{refused}");
+            assert!(source.report.contains("Per receiver: peak ["),"{}",source.report);
             assert_ne!(source.wav,old.wav);
             assert!(selected.piano.accounting.felt_relaxation_loss_j>0.0);
             assert!(source.peak_pa>0.0);
