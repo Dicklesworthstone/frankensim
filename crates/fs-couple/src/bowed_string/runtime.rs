@@ -12,7 +12,8 @@ use crate::modal_acoustic_time::{
 use crate::stribeck_friction::{
     ContactBranch, ImplicitFrictionError, StribeckFriction, StribeckLoadLine, solve_implicit_friction,
 };
-use crate::thin_plate::CompactBody;
+use crate::render::plate::MAX_PLATE_RETARDED_STEPS;
+use crate::thin_plate::{CompactBody, HeldStep};
 use fs_exec::CancelGate;
 
 /// Sample-clock binding of physical bow gesture tracks to this retained state.
@@ -34,7 +35,8 @@ pub struct BowedSample {
     pub bridge_force_n: f64,
     /// Signed soundboard volume velocity [m^3/s], when a body is attached.
     pub body_volume_velocity_m3_s: Option<f64>,
-    /// Compact-body observer pressure [Pa], when a body is attached.
+    /// Compact-body observer pressure [Pa] at this sample's end, emitted r/c
+    /// earlier, when a body is attached. Zero until the first sound arrives.
     pub radiated_pressure_pa: Option<f64>,
     /// Endpoint string modal energy [J]; does not include soundboard energy.
     pub total_modal_energy_j: f64,
@@ -95,7 +97,7 @@ pub struct BowedStringState {
     contact_velocity_rows: Vec<[f64; 3]>,
     bridge_force_factors: Vec<f64>,
     bridge_viscous_factors: Vec<f64>,
-    plate: Option<(CompactBody, f64)>,
+    plate: Option<RadiatingBody>,
     listener_m: f64,
     forces: Vec<f64>,
     dt: f64,
@@ -109,6 +111,21 @@ pub struct BowedStringState {
 
 fn invalid(what: &'static str) -> BowedRunError {
     BowedRunError::InvalidRequest { what }
+}
+
+/// The bridge-driven body under its declared gas. The gas's baffled-piston
+/// load acts on the body's motion, and the listener hears it at t - r/c,
+/// replayed exactly from the recorded exact-ZOH step (the plate renderer's
+/// scheme).
+struct RadiatingBody {
+    body: CompactBody,
+    density: f64,
+    /// Whole samples of the r/c delay.
+    delay_whole: u64,
+    /// Time into step n - delay_whole that the listener hears at sample n [s].
+    retarded_elapsed_s: f64,
+    /// Ring of the last delay_whole + 1 held steps.
+    history: Vec<HeldStep>,
 }
 
 fn friction_refusal<E>(error: ImplicitFrictionError<E>, source: impl FnOnce(E) -> BowedRunError) -> BowedRunError {
@@ -158,7 +175,31 @@ impl BowedStringState {
                 if !(config.listener_m.is_finite() && config.listener_m > 0.0) {
                     return Err(BowedRunError::InvalidListenerDistance { distance_m: config.listener_m });
                 }
-                Some((body.as_ref().clone(), ambient.density))
+                if !(ambient.sound_speed.is_finite() && ambient.sound_speed > 0.0) {
+                    return Err(invalid("ambient sound speed must be positive and finite"));
+                }
+                let mut body = body.as_ref().clone();
+                // A silent body (zero modal area) has no face to load.
+                if body.area_m2 != 0.0 {
+                    body.attach_piston_load(ambient, config.card.sample_rate_hz)
+                        .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
+                }
+                // Output n is the pressure at t = (n+1) dt. Its source time is
+                // (n+1) dt - r/c = t_{n-m} + (1-f) dt for a delay of m + f samples.
+                let rate = f64::from(config.card.sample_rate_hz);
+                let delay = config.listener_m * rate / ambient.sound_speed;
+                let rows = delay.floor() + 1.0;
+                if !(rows.is_finite() && rows <= MAX_PLATE_RETARDED_STEPS as f64) {
+                    return Err(BowedRunError::Radiation(
+                        "listener distance exceeds the retarded body history budget".to_string()));
+                }
+                Some(RadiatingBody {
+                    body,
+                    density: ambient.density,
+                    delay_whole: delay.floor() as u64,
+                    retarded_elapsed_s: (1.0 - (delay - delay.floor())) / rate,
+                    history: vec![HeldStep::REST; rows as usize],
+                })
             }
             Termination::Rigid => None,
         };
@@ -453,11 +494,23 @@ impl BowedStringState {
         if !bridge_force.is_finite() || !endpoint_velocity.is_finite() {
             return Err(invalid("bowed endpoint observation is non-finite"));
         }
-        let (body_volume_velocity_m3_s, radiated_pressure_pa) = if let Some((body, density)) = self.plate.as_mut() {
-            let acc = body.drive(bridge_force * body.drive_participation, self.dt)
+        let (body_volume_velocity_m3_s, radiated_pressure_pa) = if let Some(plate) = self.plate.as_mut() {
+            let n = self.samples;
+            let rows = plate.delay_whole + 1;
+            // Rows fit MAX_PLATE_RETARDED_STEPS, so the casts are exact.
+            let (_, held) = plate.body.drive_held(bridge_force * plate.body.drive_participation, self.dt)
                 .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
-            let velocity = body.volume_velocity();
-            let pressure = body.radiate(acc, *density, self.listener_m);
+            plate.history[(n % rows) as usize] = held;
+            let velocity = plate.body.volume_velocity();
+            let pressure = if n >= plate.delay_whole {
+                // The row of step n - m; -m is congruent to 1 modulo m + 1.
+                let step = plate.history[((n + 1) % rows) as usize];
+                let acc = plate.body.acceleration_within(step, plate.retarded_elapsed_s)
+                    .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
+                plate.body.radiate(acc, plate.density, self.listener_m)
+            } else {
+                0.0
+            };
             if !(velocity.is_finite() && pressure.is_finite()) {
                 return Err(BowedRunError::Radiation(
                     "compact observer produced non-finite volume velocity or pressure".to_string()));

@@ -50,12 +50,17 @@ fn only_the_gas_record_changes_the_radiated_pressure_scale() {
         assert_eq!(field(&receipt, "sound_speed_m_s"), gas.sound_speed);
         full_scale.push((field(&receipt, "full_scale_pa"), gas.density));
     }
-    // The one-way body motion does not depend on the gas, so the radiated
-    // pressure, and hence its peak, scales with density alone.
+    // The radiated pressure scales with density, and the body now carries the
+    // gas's radiation load (a 0.15 kg, 3e-3 m^2 body: radiation damping near
+    // 1e-4 of critical). At 0.7 atm the sound speed is equal, so the peak
+    // follows rho to within that load but no longer exactly. CO2 and He-O2
+    // also move the time of flight across this 0.1 s attack, so only their
+    // direction is asserted here; bowed_gates checks the amount.
     let (p_air, rho_air) = full_scale[0];
-    for &(p, rho) in &full_scale[1..] {
-        assert!((p / p_air - rho / rho_air).abs() < 1e-12 * (rho / rho_air), "{p} {p_air} {rho} {rho_air}");
-    }
+    let (p_thin, rho_thin) = full_scale[1];
+    assert!((p_thin / p_air - rho_thin / rho_air).abs() < 1e-3 * (rho_thin / rho_air), "{p_thin} {p_air}");
+    assert!(p_thin / p_air != rho_thin / rho_air, "the gas load must reach the body: {p_thin} {p_air}");
+    assert!(full_scale[2].0 > p_air && full_scale[3].0 < p_air, "{full_scale:?}");
     assert!((full_scale[1].1 / rho_air - 0.7).abs() < 1e-12);
     assert!(full_scale[2].1 > 1.4 * rho_air);
     assert!(full_scale[3].1 < 0.35 * rho_air);

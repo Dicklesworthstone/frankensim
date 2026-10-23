@@ -255,7 +255,7 @@ impl CompactBody {
         Ok(self.radiate(acc, rho, listener_m))
     }
 
-    fn attach_piston_load(
+    pub(crate) fn attach_piston_load(
         &mut self,
         gas: &GasState,
         sample_rate_hz: u32,
@@ -1908,6 +1908,241 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Complete baffled-piston face impedance [Pa s/m] under e^{+iwt},
+    /// rho c [1 - J1(2ka)/ka + i H1(2ka)/ka], continued to complex ka by the
+    /// J1 and Struve H1 power series (no fitted digits).
+    fn piston_face_impedance(rho_c: f64, ka: C64) -> C64 {
+        let q = -(ka * ka);
+        let (mut j1, mut tj) = (C64::ZERO, ka);
+        // Gamma(3/2) Gamma(5/2) = 3 pi / 8.
+        let (mut h1, mut th) = (C64::ZERO, (ka * ka).scale(8.0 / (3.0 * core::f64::consts::PI)));
+        for m in 0..80 {
+            let m = f64::from(m);
+            j1 = j1 + tj;
+            h1 = h1 + th;
+            tj = tj * q.scale(1.0 / ((m + 1.0) * (m + 2.0)));
+            th = th * q.scale(1.0 / ((m + 1.5) * (m + 2.5)));
+        }
+        (C64::ONE - j1 / ka + C64::new(0.0, 1.0) * h1 / ka).scale(rho_c)
+    }
+
+    /// The fitted filter's face impedance at a complex frequency s, through
+    /// its own biquads at z^-1 = e^{-s dt}.
+    fn filter_at(filter: &DigitalFilter, s: C64) -> C64 {
+        let e = (-s).scale(filter.t_s);
+        let w = C64::new(det::exp(e.re) * det::cos(e.im), det::exp(e.re) * det::sin(e.im));
+        filter.sections.iter().fold(C64::from_re(filter.direct), |acc, b| {
+            acc + (C64::from_re(b.b[0]) + w.scale(b.b[1]) + (w * w).scale(b.b[2]))
+                / (C64::ONE + w.scale(b.a[0]) + (w * w).scale(b.a[1]))
+        })
+    }
+
+    /// Free-decay root s = -sigma + i omega of m s^2 + s A Z(s) + m w0^2 = 0
+    /// for a face impedance Z, by Newton from `guess`.
+    fn decay_root(mass: f64, omega0: f64, area: f64, guess: C64, z: impl Fn(C64) -> C64) -> C64 {
+        let f = |s: C64| s * s.scale(mass) + s * z(s).scale(area) + C64::from_re(mass * omega0 * omega0);
+        let mut s = guess;
+        for _ in 0..100 {
+            let h = s.scale(1e-7);
+            let step = f(s) * h / (f(s + h) - f(s));
+            s = s - step;
+            if step.abs() <= 1e-15 * s.abs() {
+                break;
+            }
+        }
+        s
+    }
+
+    /// Ring a body down from one impulse step and measure its decay rate
+    /// (least squares on the log of each cycle's peak) and frequency (from
+    /// interpolated upward zero crossings), over 60 ms.
+    fn ring_down(mut body: CompactBody, rate: u32) -> (f64, f64) {
+        let dt = 1.0 / f64::from(rate);
+        body.drive(1.0, dt).unwrap();
+        let v: Vec<f64> = (0..(rate as usize * 6 / 100))
+            .map(|_| {
+                body.drive(0.0, dt).unwrap();
+                body.v
+            })
+            .collect();
+        let mut crossings = Vec::new();
+        for i in 1..v.len() {
+            if v[i - 1] < 0.0 && v[i] >= 0.0 {
+                crossings.push((i - 1) as f64 + v[i - 1] / (v[i - 1] - v[i]));
+            }
+        }
+        let cycles = crossings.len() - 1;
+        let omega = core::f64::consts::TAU * cycles as f64 / ((crossings[cycles] - crossings[0]) * dt);
+        let peaks: Vec<(f64, f64)> = crossings
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0].ceil() as usize, w[1].floor() as usize);
+                let (k, peak) = (a..=b)
+                    .map(|k| (k, v[k]))
+                    .fold((a, f64::MIN), |m, p| if p.1 > m.1 { p } else { m });
+                (k as f64 * dt, peak.ln())
+            })
+            .collect();
+        let n = peaks.len() as f64;
+        let (st, sy) = peaks.iter().fold((0.0, 0.0), |s, p| (s.0 + p.0, s.1 + p.1));
+        let (stt, sty) = peaks.iter().fold((0.0, 0.0), |s, p| (s.0 + p.0 * p.0, s.1 + p.0 * p.1));
+        (-(n * sty - st * sy) / (n * stt - st * st), omega)
+    }
+
+    /// Amount of air loading (.362, rulings 6231 and 6237). A radiation-dominated
+    /// body (0.05 m^2, 0.05 kg, 400 Hz, no structural damping, ka near 0.9 in
+    /// air) is loaded by each gas's piston, whose radius sqrt(A / pi) is the
+    /// declared face area's equivalent circle.
+    /// - Oracle: the exact complex root of m s^2 + s A Z(s) + k = 0, with the
+    ///   closed-form piston impedance continued to complex frequency. The
+    ///   first-order real-axis value is printed beside it: it is biased by up
+    ///   to 3.3 %, which is why the first declared band (decay 3 %, frequency
+    ///   0.3 % against it at 192 kHz) failed at 2 atm (+3.05 %, -0.31 %).
+    /// - Fit term: the same root through the fitted filter alone, measured on
+    ///   the fit, not on the render. Its R and X errors at the loaded
+    ///   frequency are printed, and so is their maximum over the fit band,
+    ///   which is uninformative at the band's low edge where R -> 0.
+    /// - Lag term: residual minus fit, the held reaction's O(dt) lag. On the
+    ///   96/192/384/768 kHz ladder it must shrink at observed order >= 0.8 per
+    ///   doubling, for decay and frequency, in every gas.
+    /// - Gate at 768 kHz: |residual| <= |fit| + |lag(384) - lag(768)| /
+    ///   (2^0.8 - 1), the remaining lag by Richardson at the declared minimum
+    ///   order 0.8 (ruling 6253). The first form, |lag(384) - lag(768)|, is
+    ///   that bound at order exactly 1, a knife edge for a first-order lag: it
+    ///   failed by roundoff on air's frequency (3e-7 absolute) and He-O2's
+    ///   decay (0.0014 %). Direction strict at every rate: 2 atm and CO2 damp
+    ///   more than air, He-O2 less.
+    /// - Planted negative: at 1e-9 of air's density the load vanishes and the
+    ///   body rings at its structural zeta omega0.
+    #[test]
+    fn piston_load_damps_and_mass_loads_the_body_by_the_gas_impedance() {
+        use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
+        use fs_qty::semantic::{Composition, CompositionBasis};
+        let air = fs_material::gas::GasSpec::dry_air_ussa1976();
+        let mixture = |species: &[GasSpecies], fractions: Vec<f64>| {
+            resolve_gas_mixture(
+                species,
+                &Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
+                293.15,
+                101_325.0,
+            )
+            .unwrap()
+        };
+        let gases = [
+            ("air", GasState::try_new(&air, 293.15, 101_325.0).unwrap()),
+            ("2 atm", GasState::try_new(&air, 293.15, 202_650.0).unwrap()),
+            ("CO2", mixture(&[GasSpecies::CarbonDioxide], vec![1.0])),
+            ("He-O2", mixture(&[GasSpecies::Helium, GasSpecies::Oxygen], vec![0.8, 0.2])),
+        ];
+        let rates = [96_000_u32, 192_000, 384_000, 768_000];
+        let (area, mass, omega0) = (0.05, 0.05, core::f64::consts::TAU * 400.0);
+        let radius = (area / core::f64::consts::PI).sqrt();
+        let body = |zeta: f64| {
+            CompactBody::from_radiator(RadiatingPlate {
+                area_m2: area,
+                mass_kg: mass,
+                frequency_hz: 400.0,
+                damping_ratio: zeta,
+            })
+            .unwrap()
+        };
+        // measured[gas][rate] = (sigma, omega)
+        let mut measured = vec![Vec::new(); gases.len()];
+        for (g, (name, gas)) in gases.iter().enumerate() {
+            let rho_c = gas.density * gas.sound_speed;
+            let ka = |s: C64| (C64::new(0.0, -1.0) * s).scale(radius / gas.sound_speed);
+            // First-order real-axis oracle, kept for the record.
+            let mut first = (0.0, omega0);
+            for _ in 0..50 {
+                let (r, x) = fs_phs::baffled_piston_impedance(gas.density, gas.sound_speed, radius, first.1).unwrap();
+                let m_eff = mass - x * area * area / first.1;
+                let sigma = r * area * area / (2.0 * m_eff);
+                first = (sigma, (mass * omega0 * omega0 / m_eff - sigma * sigma).sqrt());
+            }
+            let exact = decay_root(mass, omega0, area, C64::new(-first.0, first.1), |s| piston_face_impedance(rho_c, ka(s)));
+            let (sigma_e, omega_e) = (-exact.re, exact.im);
+            let closed_real = piston_face_impedance(rho_c, C64::from_re(omega_e * radius / gas.sound_speed));
+            let (mut lag_sigma, mut lag_omega, mut fits) = (Vec::new(), Vec::new(), Vec::new());
+            for &rate in &rates {
+                let mut loaded = body(0.0);
+                loaded.attach_piston_load(gas, rate).unwrap();
+                let filter = &loaded.rad.as_ref().unwrap().0;
+                let fitted = decay_root(mass, omega0, area, exact, |s| filter_at(filter, s));
+                let at = filter.eval(omega_e);
+                // The fit's own R and X errors over its band (40 rad/s to 0.4 Nyquist).
+                let (lo, hi) = (40.0_f64, 0.4 * core::f64::consts::PI * f64::from(rate));
+                let (mut band_r, mut band_x) = (0.0_f64, 0.0_f64);
+                for i in 0..=200 {
+                    let w = lo * (hi / lo).powf(f64::from(i) / 200.0);
+                    let closed = piston_face_impedance(rho_c, C64::from_re(w * radius / gas.sound_speed));
+                    let fit = filter.eval(w);
+                    band_r = band_r.max((fit.re - closed.re).abs() / closed.re.abs());
+                    band_x = band_x.max((fit.im - closed.im).abs() / closed.im.abs());
+                }
+                let (sigma_m, omega_m) = ring_down(loaded, rate);
+                let residual = (sigma_m / sigma_e - 1.0, omega_m / omega_e - 1.0);
+                let fit = (-fitted.re / sigma_e - 1.0, fitted.im / omega_e - 1.0);
+                lag_sigma.push(residual.0 - fit.0);
+                lag_omega.push(residual.1 - fit.1);
+                fits.push((residual, fit));
+                measured[g].push((sigma_m, omega_m));
+                println!(
+                    "{{\"case\":\"piston-air-loading\",\"gas\":\"{name}\",\"rate\":{rate},\"rho\":{},\"c\":{},\"ka\":{},\"sigma\":{{\"measured\":{sigma_m},\"exact_root\":{sigma_e},\"first_order\":{},\"fit_root\":{}}},\"omega\":{{\"measured\":{omega_m},\"exact_root\":{omega_e},\"first_order\":{},\"fit_root\":{}}},\"residual\":[{},{}],\"fit_term\":[{},{}],\"lag\":[{},{}],\"fit_error_at_omega\":[{},{}],\"fit_error_over_band\":[{band_r},{band_x}]}}",
+                    gas.density,
+                    gas.sound_speed,
+                    omega_e * radius / gas.sound_speed,
+                    first.0,
+                    -fitted.re,
+                    first.1,
+                    fitted.im,
+                    residual.0,
+                    residual.1,
+                    fit.0,
+                    fit.1,
+                    residual.0 - fit.0,
+                    residual.1 - fit.1,
+                    (at.re - closed_real.re) / closed_real.re,
+                    (at.im - closed_real.im) / closed_real.im
+                );
+            }
+            for lags in [&lag_sigma, &lag_omega] {
+                for pair in lags.windows(2) {
+                    let order = (pair[0].abs() / pair[1].abs()).log2();
+                    assert!(order >= 0.8, "{name}: lag ladder {lags:?} has order {order}");
+                }
+            }
+            let ((residual, fit), last) = (fits[3], rates.len() - 1);
+            let richardson = 2.0_f64.powf(0.8) - 1.0;
+            assert!(
+                residual.0.abs()
+                    <= fit.0.abs() + (lag_sigma[last - 1] - lag_sigma[last]).abs() / richardson,
+                "{name}: decay residual {} against fit {} and lag {lag_sigma:?}",
+                residual.0,
+                fit.0
+            );
+            assert!(
+                residual.1.abs()
+                    <= fit.1.abs() + (lag_omega[last - 1] - lag_omega[last]).abs() / richardson,
+                "{name}: frequency residual {} against fit {} and lag {lag_omega:?}",
+                residual.1,
+                fit.1
+            );
+        }
+        for r in 0..rates.len() {
+            let sigma = |g: usize| measured[g][r].0;
+            assert!(sigma(1) > sigma(0) && sigma(2) > sigma(0) && sigma(3) < sigma(0), "rate {}", rates[r]);
+        }
+        // Planted negative: no gas to speak of, only the structure's own loss.
+        let mut thin = gases[0].1.clone();
+        thin.density *= 1e-9;
+        let mut structural = body(0.02);
+        structural.attach_piston_load(&thin, 192_000).unwrap();
+        let (sigma, _) = ring_down(structural, 192_000);
+        assert!((sigma / (0.02 * omega0) - 1.0).abs() <= 1e-4, "structural decay {sigma}");
+    }
+
     #[test]
     fn explicit_no_exterior_surface_retains_mechanics_without_a_fictitious_piston() {
         use super::*;

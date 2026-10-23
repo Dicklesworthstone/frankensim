@@ -180,6 +180,8 @@ fn run(options: Options) -> Result<(), String> {
     let body = CompactBody::from_radiator(RadiatingPlate {
         area_m2: 3.0e-3, mass_kg: 0.15, frequency_hz: 280.0, damping_ratio: 0.02,
     }).map_err(|e| format!("body: {e:?}"))?;
+    // The run loads the body with the gas's baffled piston of its face area.
+    let face_radius_m = (body.area_m2 / core::f64::consts::PI).sqrt();
     let sources = options.gas.load()?;
     let bindings = sources.bindings();
     let registry = sources.registry(&bindings);
@@ -216,7 +218,8 @@ fn run(options: Options) -> Result<(), String> {
             r#"{{"schema":"{schema}","kind":"listening-receipt","#,
             r#""gesture_schedule_blake3":"{source_hash}","track_index":0,"#,
             r#""control_rate_hz":{control_rate},"applied_bow_controls":{controls},"#,
-            r#""termination":"plate-one-port","frames":{frames},"clipped_samples":{clipped},"#,
+            r#""termination":"plate-one-port","body_radiation":"baffled piston of the face area under the ambient gas, radius sqrt(A/pi) = {face_radius_m:e} m","listener_m":1.0,"time_of_flight_s":{flight:e},"#,
+            r#""frames":{frames},"clipped_samples":{clipped},"#,
             r#""sample_rate_hz":48000,"peak_normalization_factor":0.3,"full_scale_pa":{full_scale_pa},"#,
             r#""ambient_gas":{{"temperature_k":{t:e},"pressure_pa":{p:e},"density_kg_m3":{rho:e},"sound_speed_m_s":{c:e},"water_mole_fraction":{xw:e}}}{gas_sources},"#,
             r#""wav_blake3":"{hash}","no_claim":"peak-normalized listening aid; first-order stiction and one-way bridge-body fixture, not calibrated or experimentally validated instrument audio"}}"#
@@ -224,6 +227,7 @@ fn run(options: Options) -> Result<(), String> {
         schema = SCHEMA, source_hash = source_hash, control_rate = schedule.control_rate_hz,
         controls = render.applied_controls().len(), frames = pressure.len(), clipped = clipped,
         full_scale_pa = full_scale_pa, hash = hash, t = ambient.temperature, p = ambient.pressure,
+        face_radius_m = face_radius_m, flight = 1.0 / ambient.sound_speed,
         rho = ambient.density, c = ambient.sound_speed, xw = ambient.water_mole_fraction,
         gas_sources = thermochemical::provenance(core::slice::from_ref(&gas_record)),
     );

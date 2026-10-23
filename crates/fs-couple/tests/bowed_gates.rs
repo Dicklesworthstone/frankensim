@@ -14,7 +14,7 @@ use fs_couple::bowed_string::{
     Termination, cents_deviation, classify, gate_metrics, run_bowed, run_log_hash,
 };
 use fs_couple::stribeck_friction::StribeckFriction;
-use fs_couple::thin_plate::CompactBody;
+use fs_couple::thin_plate::{CompactBody, PlateBank};
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::RadiatingPlate;
 
@@ -695,7 +695,10 @@ fn plate_one_port_refuses_nonphysical_declared_ambient_density() {
     }
 }
 
-/// G3: observer distance changes inverse-distance pressure, not the trajectory.
+/// G3: observer distance changes inverse-distance pressure and its time of
+/// flight, not the trajectory. The far listener sits a whole 140 samples of
+/// flight farther, so it hears the near listener's pressure 140 samples later
+/// at r_near / r_far of its amplitude.
 #[test]
 fn plate_one_port_listener_distance_scales_pressure_without_changing_motion() {
     let mut near = config(playable_gesture(), FrictionIsland::Stribeck(rosin()), 1024);
@@ -712,8 +715,9 @@ fn plate_one_port_listener_distance_scales_pressure_without_changing_motion() {
         ambient: GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap(),
     };
     near.listener_m = 1.0;
+    let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
     let mut far = near.clone();
-    far.listener_m = 2.0;
+    far.listener_m = 1.0 + 140.0 * air.sound_speed / 48_000.0;
     let near_log = run_bowed(&near).unwrap();
     let far_log = run_bowed(&far).unwrap();
     assert_eq!(
@@ -731,13 +735,28 @@ fn plate_one_port_listener_distance_scales_pressure_without_changing_motion() {
             .iter()
             .any(|p| p.abs() > 1.0e-12)
     );
+    // The two delays share their fractional part to rounding, so the traces
+    // agree to rounding on the trace's own scale.
+    let peak = near_log
+        .radiated_pressure_pa
+        .iter()
+        .fold(0.0_f64, |m, p| m.max(p.abs()));
     for (near_pa, far_pa) in near_log
         .radiated_pressure_pa
         .iter()
-        .zip(&far_log.radiated_pressure_pa)
+        .zip(&far_log.radiated_pressure_pa[140..])
     {
-        assert_eq!(*near_pa, 2.0 * far_pa);
+        let scaled = far_pa * far.listener_m;
+        assert!(
+            (scaled - near_pa).abs() <= 1e-12 * peak,
+            "{near_pa} {scaled}"
+        );
     }
+    assert!(
+        far_log.radiated_pressure_pa[..140]
+            .iter()
+            .all(|p| *p == 0.0)
+    );
 
     // Positive finite distance alone cannot guarantee representable pressure.
     far.listener_m = f64::from_bits(1);
@@ -774,13 +793,31 @@ fn plate_one_port_refuses_invalid_listener_distance() {
     assert!(run_bowed(&cfg).is_ok());
 }
 
-/// Declared ambient pressure scales only the one-way radiation conversion;
-/// the string/body trajectory is independent of it.
+/// The declared gas loads the bridge body and sets its time of flight (.362;
+/// it used to scale only the listener conversion, with gas-invariant motion).
+/// - The run's body motion is the public gas-loaded body
+///   (`PlateBank::attach_radiation_loads`) driven by the run's own bridge
+///   force, bit for bit, in each gas. The string is unchanged: the bridge is
+///   one-way.
+/// - The listener hears silence until the time of flight: the first sound
+///   arrives exactly floor(r fs / c) samples after the body first moves.
+/// - The loads differ: the body motion differs between the gases.
 #[test]
-fn plate_one_port_radiation_scales_with_declared_ambient_density() {
+fn plate_one_port_body_carries_its_gas_load_and_time_of_flight() {
+    use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
+    use fs_qty::semantic::{Composition, CompositionBasis};
     let air = GasSpec::dry_air_ussa1976();
-    let low_pressure = GasState::try_new(&air, 293.15, 101_325.0).expect("low pressure admits");
-    let high_pressure = GasState::try_new(&air, 293.15, 202_650.0).expect("high pressure admits");
+    let gases = [
+        GasState::try_new(&air, 293.15, 101_325.0).expect("air admits"),
+        GasState::try_new(&air, 293.15, 202_650.0).expect("2 atm admits"),
+        resolve_gas_mixture(
+            &[GasSpecies::Helium, GasSpecies::Oxygen],
+            &Composition::new(CompositionBasis::MoleFraction, vec![0.8, 0.2]).unwrap(),
+            293.15,
+            101_325.0,
+        )
+        .expect("He-O2 admits"),
+    ];
     let body_spec = RadiatingPlate {
         area_m2: 3.0e-3,
         mass_kg: 0.15,
@@ -799,44 +836,51 @@ fn plate_one_port_radiation_scales_with_declared_ambient_density() {
         },
         listener_m: 1.0,
     };
-    let low = run_bowed(&config_with(low_pressure)).expect("low-pressure run completes");
-    let high = run_bowed(&config_with(high_pressure)).expect("high-pressure run completes");
-
-    assert_eq!(
-        low.body_volume_velocity_m3_s,
-        high.body_volume_velocity_m3_s
-    );
-    assert_eq!(low.radiated_pressure_pa.len(), 12_000);
-    assert_eq!(high.radiated_pressure_pa.len(), 12_000);
-    assert!(
-        low.radiated_pressure_pa.iter().all(|p| p.is_finite())
-            && high.radiated_pressure_pa.iter().all(|p| p.is_finite()),
-        "both radiation traces must stay finite"
-    );
-    let expected_ratio = high_pressure.density / low_pressure.density;
-    let mut nonzero_samples = 0;
-    for (sample, (low_pressure_pa, high_pressure_pa)) in low
-        .radiated_pressure_pa
+    let runs: Vec<_> = gases
         .iter()
-        .zip(&high.radiated_pressure_pa)
-        .enumerate()
-    {
-        if *low_pressure_pa == 0.0 && *high_pressure_pa == 0.0 {
-            continue;
-        }
-        assert!(
-            *low_pressure_pa != 0.0 && *high_pressure_pa != 0.0,
-            "density scaling must not introduce a one-sided zero at sample {sample}"
+        .map(|gas| run_bowed(&config_with(gas.clone())).expect("run completes"))
+        .collect();
+    let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let dt = 1.0 / f64::from(card().sample_rate_hz);
+    for (gas, run) in gases.iter().zip(&runs) {
+        assert_eq!(bits(&run.bridge_force_n), bits(&runs[0].bridge_force_n));
+        let mut bank = PlateBank::default();
+        bank.linear
+            .push(CompactBody::from_radiator(body_spec).expect("body spec admits"));
+        bank.attach_radiation_loads(gas, card().sample_rate_hz)
+            .expect("gas load admits");
+        let mut body = bank.linear.pop().unwrap();
+        let volume: Vec<f64> = run
+            .bridge_force_n
+            .iter()
+            .map(|force| {
+                body.drive(force * body.drive_participation, dt).unwrap();
+                body.volume_velocity()
+            })
+            .collect();
+        assert_eq!(bits(&run.body_volume_velocity_m3_s), bits(&volume));
+        let first = |values: &[f64]| values.iter().position(|v| *v != 0.0).unwrap();
+        let delay = (1.0 * f64::from(card().sample_rate_hz) / gas.sound_speed).floor() as usize;
+        assert_eq!(
+            first(&run.radiated_pressure_pa),
+            first(&run.body_volume_velocity_m3_s) + delay,
+            "first sound at the time of flight"
         );
-        let observed_ratio = high_pressure_pa / low_pressure_pa;
-        assert!(
-            (observed_ratio - expected_ratio).abs() <= 1e-12 * expected_ratio,
-            "radiation ratio {observed_ratio} must match density ratio {expected_ratio} at sample {sample}"
-        );
-        nonzero_samples += 1;
+        assert!(run.radiated_pressure_pa.iter().all(|p| p.is_finite()));
     }
-    assert!(
-        nonzero_samples > 0,
-        "bridge-driven body must radiate at least one nonzero pressure sample"
+    // Planted negative: a gas with no sound speed refuses before any sample.
+    let mut silent = gases[0].clone();
+    silent.sound_speed = 0.0;
+    assert!(matches!(
+        run_bowed(&config_with(silent)),
+        Err(BowedRunError::InvalidRequest { what }) if what.contains("sound speed")
+    ));
+    assert_ne!(
+        bits(&runs[0].body_volume_velocity_m3_s),
+        bits(&runs[1].body_volume_velocity_m3_s)
+    );
+    assert_ne!(
+        bits(&runs[0].body_volume_velocity_m3_s),
+        bits(&runs[2].body_volume_velocity_m3_s)
     );
 }

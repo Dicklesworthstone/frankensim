@@ -165,7 +165,9 @@ fn bow_part(horizon: u64, prefix: usize) -> ScheduledRenderer {
         },
         island: FrictionIsland::Stribeck(StribeckFriction::try_new(0.8, 0.4, 0.04, 0.04).unwrap()),
         gesture: BowGesture::admit(0.45, 3.9, 0.11).unwrap(),
-        steps: 1024, subsamples: 16, listener_m: 1.0,
+        // A 0.1 m listener hears this short window: its time of flight is
+        // about 14 samples (1 m would be about 140, past the window).
+        steps: 1024, subsamples: 16, listener_m: 0.1,
         termination: Termination::PlateOnePort {
             body: Box::new(CompactBody::from_radiator(RadiatingPlate {
                 area_m2: 3e-3, mass_kg: 0.15, frequency_hz: 280.0, damping_ratio: 0.02,

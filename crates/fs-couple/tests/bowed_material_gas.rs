@@ -99,7 +99,9 @@ fn response(card: BowedStringCard, gas: GasState) -> (Vec<f64>, Vec<f64>) {
             body: Box::new(CompactBody::from_radiator(RadiatingPlate {
                 area_m2: 0.08, mass_kg: 0.2, frequency_hz: 220.0, damping_ratio: 0.02,
             }).unwrap()), ambient: gas,
-        }, listener_m: 1.0,
+        // A 0.1 m listener hears this 128-sample window: the time of flight
+        // is about 14 samples (1 m would be about 140, past the window).
+        }, listener_m: 0.1,
     };
     let mut runtime = BowedStringState::new(&config, 128).unwrap();
     let (mut shear, mut pressure) = (Vec::new(), Vec::new());

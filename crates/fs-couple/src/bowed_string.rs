@@ -21,6 +21,8 @@
 //! - Bridge: rigid v1 logs only the string; the second configuration drives
 //!   a one-port [`CompactBody`] with the transmitted bridge force (rigid,
 //!   massless bridge approximation; the reaction is one-way and disclosed).
+//!   The body carries its declared gas's baffled-piston radiation load, and
+//!   the listener hears it at the gas's time of flight.
 //!
 //! Determinism class: ONE-HOST for this composed fixture. The kinetic curve
 //! uses the shared fs-tribo owner's deterministic exponential through
@@ -340,12 +342,14 @@ pub enum Termination {
     /// Rigid bridge; nothing but the string is logged.
     Rigid,
     /// The bridge force drives this one-port body (one-way rigid-bridge
-    /// approximation, disclosed in the run receipt). `ambient` is the
-    /// admitted gas state used only for the listener-radiation conversion.
+    /// approximation, disclosed in the run receipt). `ambient` is the admitted
+    /// gas: the run attaches its baffled-piston radiation load to the body, so
+    /// the body's radiation damping and added mass follow rho and c, and the
+    /// listener hears rho A a(t - r/c) / (2 pi r) at its time of flight.
     PlateOnePort {
         /// One-port plate body driven by the bridge force.
         body: Box<CompactBody>,
-        /// Declared ambient state for radiation density.
+        /// Declared ambient gas: radiation load, density and time of flight.
         ambient: GasState,
     },
 }

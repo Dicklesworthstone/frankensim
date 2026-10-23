@@ -135,7 +135,9 @@ fn load_with_gas_sources(
         Kind::Bow => {
             let p = BowedPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
-            let gas_json=super::thermochemical::provenance(std::slice::from_ref(p.gas_record()));
+            // The bridge body carries the gas's baffled piston of its face area.
+            let gas_json=format!("{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
+                ",\"radiation\":\"baffled piston of the body face area, radius sqrt(A/pi), under the gas record; heard at r/c\"");
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
