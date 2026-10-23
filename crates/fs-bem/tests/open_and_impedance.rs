@@ -1004,14 +1004,111 @@ fn impedance_sphere_triangle_rule_iterative_matches_dense() {
         solve(Formulation::PlainCbie, &options).unwrap(),
         solve(Formulation::PlainCbie, &centroid).unwrap()
     );
-    // The seven-point far rule needs a multi-point far field this owner lacks.
-    let gauss_far = IterativeOptions {
+    // The seven-point far cloud is W5a only.
+    let directional = IterativeOptions {
         panel_rule: helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 },
+        directional: Some(fs_fmm::DirectionalOptions::for_tolerance(1e-4).unwrap()),
         ..options.clone()
     };
     assert!(matches!(
-        solve(Formulation::BurtonMiller, &gauss_far),
+        solve(Formulation::BurtonMiller, &directional),
         Err(IterativeError::Invalid { .. })
+    ));
+}
+
+/// G5: PanelRule::Triangle on the iterative owner, its far field on the Radon
+/// seven-point cloud. It is the dense Triangle operator to FMM accuracy, at
+/// rungs 2-4, ka 0.05 (where the far rule decides a dipole's resistance) and
+/// ka pi (an interior resonance), within ten times the GMRES tolerance at FMM
+/// order 7. The rule's exact-pair budget reaches this owner.
+#[test]
+fn impedance_sphere_triangle_far_cloud_matches_dense() {
+    let gate = CancelGate::new_clock_free();
+    let rule = helmholtz::PanelRule::Triangle { max_pairs: 1 << 20 };
+    let options = IterativeOptions {
+        tol: 1e-6,
+        fmm_order: 7,
+        leaf_capacity: 128,
+        workers: 16,
+        panel_rule: rule,
+        // At 5120 panels and leaf capacity 128 (896 cloud points a leaf) the
+        // three-operator near rows plus blocks need 18986576 entries (ts1,
+        // ddcf0ceae), past 2^24; the budget changes no bit.
+        max_near_entries: 1 << 25,
+        ..IterativeOptions::default()
+    };
+    for rung in 2..=4 {
+        let surface = SpherePanels::icosphere(1.0, rung).unwrap();
+        // A pulsating part plus the dipole whose resistance the far rule fixes.
+        let velocity: Vec<_> = surface
+            .centroids()
+            .iter()
+            .map(|c| C64::new(1.0 + 0.5 * c[2], 0.2 * c[0]))
+            .collect();
+        for ka in [0.05, PI] {
+            let start = Instant::now();
+            let dense = helmholtz::with_dense_workers(16, || {
+                helmholtz::solve_radiation_with_rule(
+                    &surface,
+                    ka,
+                    Medium::air(),
+                    &velocity,
+                    Formulation::BurtonMiller,
+                    rule,
+                )
+            })
+            .unwrap();
+            let (iterative, report, receipt) = helmholtz::solve_radiation_iterative(
+                &surface,
+                ka,
+                Medium::air(),
+                &velocity,
+                Formulation::BurtonMiller,
+                &options,
+                &gate,
+            )
+            .unwrap();
+            assert!(report.converged_euclidean());
+            let (numerator, denominator) = iterative
+                .pressure
+                .iter()
+                .zip(&dense.pressure)
+                .fold((0.0, 0.0), |(a, b), (&x, &y)| {
+                    (a + (x - y).norm_sq(), b + y.norm_sq())
+                });
+            let error = (numerator / denominator).sqrt();
+            let tol = 10.0 * options.tol;
+            println!(
+                "{{\"suite\":\"fs-bem\",\"case\":\"triangle-far-cloud-dense\",\"inputs\":{{\"fixture\":\"icosphere, pulsating plus dipole velocity\",\"provenance\":\"dense LU under PanelRule::Triangle\"}},\"axis\":\"sphere-mesh\",\"rung\":{rung},\"ka\":{ka},\"panels\":{},\"iterations\":{},\"err\":{error:.17e},\"tol\":{tol:.17e},\"verdict\":\"{}\",\"elapsed_s\":{:.6},\"fmm_stats\":[{},{}]}}",
+                surface.areas().len(),
+                report.iters,
+                if error <= tol { "pass" } else { "fail" },
+                start.elapsed().as_secs_f64(),
+                receipt.fmm_stats[0],
+                receipt.fmm_stats[1]
+            );
+            assert!(error <= tol, "rung {rung} ka={ka}: {error}");
+        }
+    }
+    let surface = SpherePanels::icosphere(1.0, 2).unwrap();
+    let tight = IterativeOptions {
+        panel_rule: helmholtz::PanelRule::Triangle { max_pairs: 1 },
+        ..options
+    };
+    assert!(matches!(
+        helmholtz::solve_radiation_iterative(
+            &surface,
+            1.0,
+            Medium::air(),
+            &vec![C64::ONE; surface.areas().len()],
+            Formulation::BurtonMiller,
+            &tight,
+            &gate,
+        ),
+        Err(IterativeError::Helmholtz(HelmholtzError::NearRuleBudget {
+            maximum_pairs: 1,
+            ..
+        }))
     ));
 }
 

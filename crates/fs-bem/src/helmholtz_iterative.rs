@@ -14,7 +14,7 @@
 //! sums of those of its nodes the far pass already covers. A panel with all
 //! nodes in separated leaves enters through its seven-point sum alone.
 
-use super::triangle_rule::NearRule;
+use super::triangle_rule::{NearRule, triangle_rule_pair};
 use super::{
     Formulation, GL4_W, GL4_X, HelmholtzError, MAX_DENSE_PANELS, MIN_PANELS_PER_WAVELENGTH, Medium,
     PanelRule, RadiationSolution, alpha_for, characteristic_panel_size, evaluate_radiated_power,
@@ -91,8 +91,9 @@ pub struct IterativeOptions {
     /// owner's triangle near rule as this owner's sparse near rows, built on
     /// the declared workers and refused above its declared pair count. The
     /// default [`PanelRule::Centroid`] is the centroid operator, bitwise.
-    /// [`PanelRule::Triangle`] is refused: its seven-point far rule needs a
-    /// multi-point far field. Plain CBIE ignores the rule, so one set of
+    /// [`PanelRule::Triangle`] runs its far field on the Radon seven-point
+    /// cloud (W5a only; directional options are refused) and is the dense
+    /// Triangle operator to FMM accuracy. Plain CBIE ignores the rule, so one set of
     /// options can route rows of either formulation: its own near table is
     /// already the dense owner's triangle quadrature.
     pub panel_rule: PanelRule,
@@ -552,6 +553,7 @@ enum Layers {
         near: Option<NearTable>,
     },
     PlainCbie(Box<CbieLayers>),
+    BurtonMillerCloud(Box<BmCloudLayers>),
 }
 
 /// Prepared immutable geometry/operator, reusable across boundary velocities.
@@ -599,6 +601,54 @@ impl IterativeState {
             self.gmres.history.clone(),
         )
     }
+}
+
+/// Every owner's admission, in this order, before any engine is built:
+/// geometry, frequency and medium, GMRES and preconditioner parameters, then
+/// resolution. Returns the panels per wavelength.
+fn admit(
+    surface: &SpherePanels,
+    k: f64,
+    medium: Medium,
+    options: &IterativeOptions,
+) -> Result<f64, IterativeError> {
+    surface.validate().map_err(IterativeError::Geometry)?;
+    if !k.is_finite()
+        || k <= 0.0
+        || !medium.density.is_finite()
+        || medium.density <= 0.0
+        || !medium.sound_speed.is_finite()
+        || medium.sound_speed <= 0.0
+    {
+        return Err(IterativeError::Invalid {
+            what: "positive finite k, density and sound speed required",
+        });
+    }
+    if !options.tol.is_finite()
+        || options.tol <= 0.0
+        || options.tol >= 1.0
+        || options.restart == 0
+        || options.restart > 256
+    {
+        return Err(IterativeError::Invalid {
+            what: "0 < tol < 1 and 1 <= restart <= 256 required",
+        });
+    }
+    if let Preconditioner::NearFieldBlockJacobi { max_block_panels } = options.precond {
+        if !(1..=128).contains(&max_block_panels) {
+            return Err(IterativeError::Invalid {
+                what: "near blocks require 1..=128 panels",
+            });
+        }
+    }
+    let ppw = 2.0 * core::f64::consts::PI / (k * characteristic_panel_size(surface));
+    if ppw < MIN_PANELS_PER_WAVELENGTH {
+        return Err(HelmholtzError::TooCoarse {
+            panels_per_wavelength: ppw,
+        }
+        .into());
+    }
+    Ok(ppw)
 }
 
 fn poll(gate: &CancelGate) -> Result<(), IterativeError> {
@@ -667,10 +717,16 @@ impl<'a> IterativeRadiation<'a> {
                 );
             }
             PanelRule::TriangleNear { max_pairs } => max_pairs,
-            PanelRule::Triangle { .. } => {
-                return Err(IterativeError::Invalid {
-                    what: "PanelRule::Triangle needs a multi-point far field; this owner's is one point per panel (use TriangleNear)",
-                });
+            PanelRule::Triangle { max_pairs } => {
+                return Self::prepare_cloud(
+                    surface,
+                    k,
+                    medium,
+                    formulation,
+                    options,
+                    max_pairs,
+                    gate,
+                );
             }
         };
         poll(gate)?;
@@ -682,6 +738,63 @@ impl<'a> IterativeRadiation<'a> {
             other => other.into(),
         })?;
         Self::prepare_with_near(surface, k, medium, formulation, options, Some(&rule), gate)
+    }
+
+    /// Burton-Miller under [`PanelRule::Triangle`] (see [`BmCloudLayers`]):
+    /// the same operator as the dense rule, to FMM accuracy.
+    fn prepare_cloud(
+        surface: &'a SpherePanels,
+        k: f64,
+        medium: Medium,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        max_pairs: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeError> {
+        let started = Instant::now();
+        poll(gate)?;
+        let ppw = admit(surface, k, medium, options)?;
+        let alpha = alpha_for(formulation, k);
+        let (cloud, blocks, near_entries) =
+            BmCloudLayers::prepare(surface, k, alpha, max_pairs, options, gate)?;
+        let mut stamp = surface_fingerprint(surface);
+        let preconditioner_key = match options.precond {
+            Preconditioner::None => 0,
+            Preconditioner::NearFieldBlockJacobi { max_block_panels } => max_block_panels as u64,
+        };
+        // 0xB3C7 marks the cloud owner; its table size fixes the partition.
+        for word in [
+            0xB3C7,
+            k.to_bits(),
+            alpha.im.to_bits(),
+            medium.density.to_bits(),
+            medium.sound_speed.to_bits(),
+            options.tol.to_bits(),
+            options.restart as u64,
+            options.max_iters as u64,
+            options.fmm_order as u64,
+            options.leaf_capacity as u64,
+            near_entries as u64,
+            preconditioner_key,
+            cloud.table.pairs() as u64,
+        ] {
+            stamp = (stamp ^ word).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Ok(Self {
+            surface,
+            admittance: None,
+            k,
+            medium,
+            alpha,
+            options: options.clone(),
+            ppw,
+            layers: Layers::BurtonMillerCloud(Box::new(cloud)),
+            blocks,
+            near_entries,
+            near_cache_bytes: 0,
+            setup_s: started.elapsed().as_secs_f64(),
+            stamp,
+        })
     }
 
     /// [`Self::prepare`] with an optional Burton-Miller near-field rule. Its
@@ -702,42 +815,7 @@ impl<'a> IterativeRadiation<'a> {
     ) -> Result<Self, IterativeError> {
         let started = Instant::now();
         poll(gate)?;
-        surface.validate().map_err(IterativeError::Geometry)?;
-        if !k.is_finite()
-            || k <= 0.0
-            || !medium.density.is_finite()
-            || medium.density <= 0.0
-            || !medium.sound_speed.is_finite()
-            || medium.sound_speed <= 0.0
-        {
-            return Err(IterativeError::Invalid {
-                what: "positive finite k, density and sound speed required",
-            });
-        }
-        if !options.tol.is_finite()
-            || options.tol <= 0.0
-            || options.tol >= 1.0
-            || options.restart == 0
-            || options.restart > 256
-        {
-            return Err(IterativeError::Invalid {
-                what: "0 < tol < 1 and 1 <= restart <= 256 required",
-            });
-        }
-        if let Preconditioner::NearFieldBlockJacobi { max_block_panels } = options.precond {
-            if !(1..=128).contains(&max_block_panels) {
-                return Err(IterativeError::Invalid {
-                    what: "near blocks require 1..=128 panels",
-                });
-            }
-        }
-        let ppw = 2.0 * core::f64::consts::PI / (k * characteristic_panel_size(surface));
-        if ppw < MIN_PANELS_PER_WAVELENGTH {
-            return Err(HelmholtzError::TooCoarse {
-                panels_per_wavelength: ppw,
-            }
-            .into());
-        }
+        let ppw = admit(surface, k, medium, options)?;
         if formulation == Formulation::PlainCbie {
             if near.is_some() {
                 return Err(IterativeError::Invalid {
@@ -1051,6 +1129,17 @@ impl<'a> IterativeRadiation<'a> {
                 }
                 return Ok(rhs);
             }
+            Layers::BurtonMillerCloud(cloud) => {
+                let rhs =
+                    cloud.apply_b(self.alpha, &q, self.surface.areas(), self.options.workers)?;
+                poll(gate)?;
+                if rhs.iter().any(|v| !finite(*v)) {
+                    return Err(IterativeError::Invalid {
+                        what: "nonfinite radiation right-hand side",
+                    });
+                }
+                return Ok(rhs);
+            }
         };
         let weighted: Vec<_> = q
             .iter()
@@ -1173,6 +1262,11 @@ impl<'a> IterativeRadiation<'a> {
                 for (i, value) in out.iter_mut().enumerate() {
                     *value = *value + far[i] - pressure[i].scale(0.5);
                 }
+                out
+            }
+            Layers::BurtonMillerCloud(cloud) => {
+                let out = cloud.apply_a(self.alpha, pressure, self.options.workers)?;
+                poll(gate)?;
                 out
             }
         };
@@ -1329,6 +1423,7 @@ impl<'a> IterativeRadiation<'a> {
         match &self.layers {
             Layers::BurtonMiller { near, .. } => near.as_ref(),
             Layers::PlainCbie(cbie) => Some(&cbie.table),
+            Layers::BurtonMillerCloud(cloud) => Some(&cloud.table),
         }
     }
 
@@ -1363,6 +1458,14 @@ impl<'a> IterativeRadiation<'a> {
                         cbie.table.pairs()
                     ),
                 ],
+                Layers::BurtonMillerCloud(cloud) => [
+                    cloud.mixed.stats(),
+                    format!(
+                        "{{\"bm_cloud_points\":{},\"bm_cloud_near_pairs\":{}}}",
+                        cloud.weights.len(),
+                        cloud.table.pairs()
+                    ),
+                ],
             },
         }
     }
@@ -1385,6 +1488,117 @@ fn cbie_entry(
         triangle_weak_influence(k, x, triangles[j], surface.normals()[j])
     } else {
         triangle_weak_influence_with_rule(k, x, triangles[j], surface.normals()[j], &GL4_X, &GL4_W)
+    }
+}
+
+/// The Radon seven-point cloud of every panel, shared by the plain-CBIE and
+/// Burton-Miller far fields: point `j < N` is panel j's centroid, node
+/// `m >= 1` of panel j is point `N + 6j + m - 1`, and each weight is the rule
+/// weight times the panel area. Also returns the largest centroid-vertex
+/// distance.
+fn radon_cloud(
+    surface: &SpherePanels,
+    triangles: &[[[f64; 3]; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<f64>, f64) {
+    let n = triangles.len();
+    let mut points = vec![[0.0; 3]; n * RADON7.len()];
+    let mut normals = vec![[0.0; 3]; points.len()];
+    let mut weights = vec![0.0; points.len()];
+    let mut radius = 0.0_f64;
+    for (j, triangle) in triangles.iter().enumerate() {
+        let centroid = surface.centroids()[j];
+        for vertex in triangle {
+            let d = [
+                vertex[0] - centroid[0],
+                vertex[1] - centroid[1],
+                vertex[2] - centroid[2],
+            ];
+            radius = radius.max((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+        }
+        for (m, &(barycentric, weight)) in RADON7.iter().enumerate() {
+            let index = if m == 0 { j } else { n + 6 * j + m - 1 };
+            points[index] = if m == 0 {
+                centroid
+            } else {
+                core::array::from_fn(|axis| {
+                    barycentric[0] * triangle[0][axis]
+                        + barycentric[1] * triangle[1][axis]
+                        + barycentric[2] * triangle[2][axis]
+                })
+            };
+            normals[index] = surface.normals()[j];
+            weights[index] = weight * surface.areas()[j];
+        }
+    }
+    (points, normals, weights, radius)
+}
+
+/// A far-field-only cloud engine's partition by panel: each point's leaf, each
+/// leaf's direct-interaction leaves, and the panels with a node in them.
+struct CloudPartition {
+    leaves: Vec<Vec<usize>>,
+    neighbours: Vec<Vec<usize>>,
+    point_leaf: Vec<usize>,
+    leaf_panels: Vec<Vec<usize>>,
+}
+
+impl CloudPartition {
+    fn new(engine: &FmmC64<'_>, n: usize, points: usize) -> Self {
+        let leaves: Vec<Vec<usize>> = engine.near_field_blocks().map(<[usize]>::to_vec).collect();
+        let neighbours = engine.near_field_neighbor_leaves();
+        let mut point_leaf = vec![0usize; points];
+        for (l, leaf) in leaves.iter().enumerate() {
+            for &p in leaf {
+                point_leaf[p] = l;
+            }
+        }
+        let panel_of = |p: usize| if p < n { p } else { (p - n) / 6 };
+        let leaf_panels = neighbours
+            .iter()
+            .map(|around| {
+                let mut panels: Vec<usize> = around
+                    .iter()
+                    .flat_map(|&l| leaves[l].iter().map(|&p| panel_of(p)))
+                    .collect();
+                panels.sort_unstable();
+                panels.dedup();
+                panels
+            })
+            .collect();
+        Self {
+            leaves,
+            neighbours,
+            point_leaf,
+            leaf_panels,
+        }
+    }
+
+    /// Panels with a node in a direct-interaction leaf of target `i`'s leaf,
+    /// ascending.
+    fn panels(&self, i: usize) -> &[usize] {
+        &self.leaf_panels[self.point_leaf[i]]
+    }
+
+    /// Whether the far pass omits cloud point `p` at target `i`.
+    fn is_near(&self, i: usize, p: usize) -> bool {
+        self.neighbours[self.point_leaf[i]]
+            .binary_search(&self.point_leaf[p])
+            .is_ok()
+    }
+
+    /// Each leaf's centroid targets in stable order, split at `max_block_panels`.
+    fn leaf_blocks(&self, n: usize, max_block_panels: usize) -> Vec<Vec<usize>> {
+        self.leaves
+            .iter()
+            .flat_map(|leaf| {
+                let targets: Vec<usize> = leaf.iter().copied().filter(|&p| p < n).collect();
+                targets
+                    .chunks(max_block_panels)
+                    .map(<[usize]>::to_vec)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|block| !block.is_empty())
+            .collect()
     }
 }
 
@@ -1414,35 +1628,7 @@ impl CbieLayers {
                 .ok_or(IterativeError::Invalid {
                     what: "leaf capacity overflow",
                 })?;
-        let mut points = vec![[0.0; 3]; n * RADON7.len()];
-        let mut normals = vec![[0.0; 3]; points.len()];
-        let mut weights = vec![0.0; points.len()];
-        let mut radius = 0.0_f64;
-        for (j, triangle) in triangles.iter().enumerate() {
-            let centroid = surface.centroids()[j];
-            for vertex in triangle {
-                let d = [
-                    vertex[0] - centroid[0],
-                    vertex[1] - centroid[1],
-                    vertex[2] - centroid[2],
-                ];
-                radius = radius.max((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
-            }
-            for (m, &(barycentric, weight)) in RADON7.iter().enumerate() {
-                let index = if m == 0 { j } else { n + 6 * j + m - 1 };
-                points[index] = if m == 0 {
-                    centroid
-                } else {
-                    core::array::from_fn(|axis| {
-                        barycentric[0] * triangle[0][axis]
-                            + barycentric[1] * triangle[1][axis]
-                            + barycentric[2] * triangle[2][axis]
-                    })
-                };
-                normals[index] = surface.normals()[j];
-                weights[index] = weight * surface.areas()[j];
-            }
-        }
+        let (points, normals, weights, radius) = radon_cloud(surface, triangles);
         poll(gate)?;
         let mut double = FmmC64::new_double_far_field_within(
             HelmholtzDouble { k },
@@ -1458,44 +1644,15 @@ impl CbieLayers {
                 what: "iterative plain CBIE leaves must span CBIE_MIN_LEAF_RADII panel radii; raise leaf_capacity",
             });
         }
-        let leaves: Vec<&[usize]> = double.near_field_blocks().collect();
-        let neighbours = double.near_field_neighbor_leaves();
-        let mut point_leaf = vec![0usize; points.len()];
-        for (l, leaf) in leaves.iter().enumerate() {
-            for &p in *leaf {
-                point_leaf[p] = l;
-            }
-        }
-        let panel_of = |p: usize| if p < n { p } else { (p - n) / 6 };
-        let leaf_panels: Vec<Vec<usize>> = neighbours
-            .iter()
-            .map(|around| {
-                let mut panels: Vec<usize> = around
-                    .iter()
-                    .flat_map(|&l| leaves[l].iter().map(|&p| panel_of(p)))
-                    .collect();
-                panels.sort_unstable();
-                panels.dedup();
-                panels
-            })
-            .collect();
-        let target_leaf: Vec<usize> = point_leaf[..n].to_vec();
+        let partition = CloudPartition::new(&double, n, points.len());
         let operators = [NearOperator::Single, NearOperator::Double];
         let (row_start, table_values) =
-            NearTable::plan(n, operators.len(), |i| leaf_panels[target_leaf[i]].len())?;
+            NearTable::plan(n, operators.len(), |i| partition.panels(i).len())?;
         let groups: Vec<Vec<usize>> = match options.precond {
             Preconditioner::None => Vec::new(),
-            Preconditioner::NearFieldBlockJacobi { max_block_panels } => leaves
-                .iter()
-                .flat_map(|leaf| {
-                    let targets: Vec<usize> = leaf.iter().copied().filter(|&p| p < n).collect();
-                    targets
-                        .chunks(max_block_panels)
-                        .map(<[usize]>::to_vec)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|block| !block.is_empty())
-                .collect(),
+            Preconditioner::NearFieldBlockJacobi { max_block_panels } => {
+                partition.leaf_blocks(n, max_block_panels)
+            }
         };
         let near_entries = groups
             .iter()
@@ -1516,16 +1673,14 @@ impl CbieLayers {
         }
         poll(gate)?;
         let fill = |i: usize, cols: &mut [u32], values: &mut [C64]| {
-            let leaf = target_leaf[i];
-            let around = &neighbours[leaf];
             let (x, nx) = (surface.centroids()[i], surface.normals()[i]);
-            for (slot, &j) in leaf_panels[leaf].iter().enumerate() {
+            for (slot, &j) in partition.panels(i).iter().enumerate() {
                 let (mut single, mut double) = cbie_entry(k, surface, triangles, i, j);
                 // Remove the nodes the far pass already sums; the stored
                 // entry plus that pass is the dense entry to FMM accuracy.
                 for m in 0..RADON7.len() {
                     let p = if m == 0 { j } else { n + 6 * j + m - 1 };
-                    if around.binary_search(&point_leaf[p]).is_err() {
+                    if !partition.is_near(i, p) {
                         let (g, dgdny, _, _) = kernels(k, x, nx, points[p], normals[p]);
                         single = single - g.scale(weights[p]);
                         double = double - dgdny.scale(weights[p]);
@@ -1615,6 +1770,331 @@ impl CbieLayers {
             .apply(&[(NearOperator::Single, C64::ONE)], q, options.workers);
         for (value, &f) in out.iter_mut().zip(&far) {
             *value = *value + f;
+        }
+        Ok(out)
+    }
+}
+
+/// Burton-Miller under [`PanelRule::Triangle`]: far-field-only S, D and N
+/// passes over the Radon cloud, near rows holding the dense rule's entries
+/// minus the node sums those passes cover, and the dense rule's diagonals. D'
+/// keeps its centroid adjoint pass and point closure.
+struct BmCloudLayers {
+    weights: Vec<f64>,
+    single: FmmC64<'static>,
+    double: FmmC64<'static>,
+    mixed: FmmC64<'static>,
+    adjoint: FmmC64<'static>,
+    table: NearTable,
+    diagonal_a: Vec<C64>,
+    diagonal_b: Vec<C64>,
+}
+
+impl BmCloudLayers {
+    /// Build the cloud passes, the near table, both diagonals and the
+    /// leaf-block preconditioner. Returns the stored complex entries.
+    #[allow(clippy::too_many_lines)] // one admission and assembly audit
+    fn prepare(
+        surface: &SpherePanels,
+        k: f64,
+        alpha: C64,
+        max_pairs: usize,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<(Self, Vec<NearBlock>, usize), IterativeError> {
+        let triangles = surface.triangles().ok_or(IterativeError::Invalid {
+            what: "PanelRule::Triangle requires retained triangles",
+        })?;
+        if options.directional.is_some() {
+            return Err(IterativeError::Invalid {
+                what: "PanelRule::Triangle's far cloud is W5a only; directional rows use TriangleNear",
+            });
+        }
+        let n = triangles.len();
+        let cloud_capacity =
+            options
+                .leaf_capacity
+                .checked_mul(RADON7.len())
+                .ok_or(IterativeError::Invalid {
+                    what: "leaf capacity overflow",
+                })?;
+        let (points, normals, weights, radius) = radon_cloud(surface, triangles);
+        let far = |layer: usize, k: f64| -> Result<FmmC64<'static>, IterativeError> {
+            let (p, nrm) = (points.clone(), normals.clone());
+            let (order, budget) = (options.fmm_order, options.budget());
+            let mut engine = match layer {
+                0 => FmmC64::new_single_far_field_within(
+                    HelmholtzSingle { k },
+                    p,
+                    order,
+                    cloud_capacity,
+                    budget,
+                )?,
+                1 => FmmC64::new_double_far_field_within(
+                    HelmholtzDouble { k },
+                    p,
+                    nrm,
+                    order,
+                    cloud_capacity,
+                    budget,
+                )?,
+                _ => FmmC64::new_hypersingular_far_field_within(
+                    HelmholtzHypersingular { k },
+                    p,
+                    nrm,
+                    order,
+                    cloud_capacity,
+                    budget,
+                )?,
+            };
+            engine.set_workers(options.workers)?;
+            Ok(engine)
+        };
+        poll(gate)?;
+        let double = far(1, k)?;
+        // Every far pair is then at least four radii from the target, where
+        // the dense rule takes the same seven-point sum this pass makes.
+        if double.leaf_box_size() < CBIE_MIN_LEAF_RADII * radius {
+            return Err(IterativeError::Invalid {
+                what: "PanelRule::Triangle cloud leaves must span CBIE_MIN_LEAF_RADII panel radii; raise leaf_capacity",
+            });
+        }
+        let partition = CloudPartition::new(&double, n, points.len());
+        let centroids = surface.centroids();
+        let exact = (0..n)
+            .map(|i| {
+                partition
+                    .panels(i)
+                    .iter()
+                    .filter(|&&j| {
+                        j != i && triangle_is_near(centroids[i], centroids[j], triangles[j])
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        if exact > max_pairs {
+            return Err(HelmholtzError::NearRuleBudget {
+                required_pairs: exact,
+                maximum_pairs: max_pairs,
+            }
+            .into());
+        }
+        let row_len = |i: usize| partition.panels(i).iter().filter(|&&j| j != i).count();
+        let operators = [
+            NearOperator::Single,
+            NearOperator::Double,
+            NearOperator::Hypersingular,
+        ];
+        let (row_start, table_values) = NearTable::plan(n, operators.len(), row_len)?;
+        let groups = match options.precond {
+            Preconditioner::None => Vec::new(),
+            Preconditioner::NearFieldBlockJacobi { max_block_panels } => {
+                partition.leaf_blocks(n, max_block_panels)
+            }
+        };
+        let near_entries = groups
+            .iter()
+            .try_fold(table_values, |count, block| {
+                block
+                    .len()
+                    .checked_mul(block.len())
+                    .and_then(|entries| count.checked_add(entries))
+            })
+            .ok_or(IterativeError::Invalid {
+                what: "near-field extent overflow",
+            })?;
+        if near_entries > options.max_near_entries {
+            return Err(IterativeError::NearFieldBudget {
+                required_entries: near_entries,
+                maximum_entries: options.max_near_entries,
+            });
+        }
+        // Stored entry = dense rule entry minus the nodes the far pass sums,
+        // so the row plus that pass is the dense entry to FMM accuracy.
+        let covered = |i: usize, j: usize, k: f64| -> [C64; 3] {
+            let (x, nx) = (centroids[i], surface.normals()[i]);
+            let mut sums = [C64::ZERO; 3];
+            for m in 0..RADON7.len() {
+                let p = if m == 0 { j } else { n + 6 * j + m - 1 };
+                if !partition.is_near(i, p) {
+                    let (g, dgdny, _, d2g) = kernels(k, x, nx, points[p], normals[p]);
+                    sums[0] = sums[0] + g.scale(weights[p]);
+                    sums[1] = sums[1] + dgdny.scale(weights[p]);
+                    sums[2] = sums[2] + d2g.scale(weights[p]);
+                }
+            }
+            sums
+        };
+        poll(gate)?;
+        let fill = |i: usize, cols: &mut [u32], values: &mut [C64]| {
+            let mut slot = 0;
+            for &j in partition.panels(i).iter().filter(|&&j| j != i) {
+                let (layers, _) = triangle_rule_pair(surface, triangles, k, i, j);
+                let sums = covered(i, j, k);
+                cols[slot] = j as u32;
+                for o in 0..3 {
+                    values[3 * slot + o] = layers[o] - sums[o];
+                }
+                slot += 1;
+            }
+        };
+        let table = NearTable::build(&operators, row_start, options.workers, gate, &fill)?;
+        // Static rows under the same rule: the far static passes over unit
+        // densities, plus the near rows' static entries less their covered
+        // node sums.
+        poll(gate)?;
+        let unit: Vec<C64> = weights.iter().map(|&w| C64::from_re(w)).collect();
+        let far_d0 = far(1, 0.0)?.far_potentials(&unit)?;
+        poll(gate)?;
+        let far_n0 = far(2, 0.0)?.far_potentials(&unit)?;
+        poll(gate)?;
+        let near_statics: Vec<(f64, f64)> = {
+            let row = |i: usize| {
+                let (mut d0, mut n0) = (0.0, 0.0);
+                for &j in partition.panels(i).iter().filter(|&&j| j != i) {
+                    let (_, statics) = triangle_rule_pair(surface, triangles, 0.0, i, j);
+                    let sums = covered(i, j, 0.0);
+                    d0 += statics[0] - sums[1].re;
+                    n0 += statics[1] - sums[2].re;
+                }
+                (d0, n0)
+            };
+            let workers = options.workers.clamp(1, n.max(1));
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|w| {
+                        let row = &row;
+                        scope.spawn(move || {
+                            (w * n / workers..(w + 1) * n / workers)
+                                .map(row)
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().expect("near static row worker panicked"))
+                    .collect()
+            })
+        };
+        // D' keeps its centroid rows: the point D_0 sum closes it.
+        poll(gate)?;
+        let areas: Vec<C64> = surface.areas().iter().map(|&a| C64::from_re(a)).collect();
+        let point_d0 = options
+            .normal_fmm(
+                NormalLayer::Double,
+                0.0,
+                centroids.to_vec(),
+                surface.normals().to_vec(),
+            )?
+            .potentials(&areas)?;
+        let mut diagonal_a = Vec::with_capacity(n);
+        let mut diagonal_b = Vec::with_capacity(n);
+        for i in 0..n {
+            let (s, n_reg) = triangle_self_terms(k, centroids[i], triangles[i]);
+            let d0 = far_d0[i].re + near_statics[i].0;
+            let n0 = far_n0[i].re + near_statics[i].1;
+            diagonal_a.push(C64::from_re(-1.0 - d0) + alpha * (n_reg - C64::from_re(n0)));
+            diagonal_b.push(s - alpha * point_d0[i]);
+        }
+        poll(gate)?;
+        let mut blocks = Vec::with_capacity(groups.len());
+        for indices in groups {
+            poll(gate)?;
+            let m = indices.len();
+            let mut matrix = vec![C64::ZERO; m * m];
+            for (a, &i) in indices.iter().enumerate() {
+                for (b, &j) in indices.iter().enumerate() {
+                    matrix[a * m + b] = if a == b {
+                        diagonal_a[i]
+                    } else {
+                        // j's centroid shares i's leaf, so every node of j is
+                        // near and the stored rows are the dense entry.
+                        let entry = |op| {
+                            table.get(i, j, op).ok_or(IterativeError::Invalid {
+                                what: "near table lacks a same-leaf panel",
+                            })
+                        };
+                        entry(NearOperator::Double)? + alpha * entry(NearOperator::Hypersingular)?
+                    };
+                }
+            }
+            let inverse =
+                lu_complex(&matrix, m).map_err(|_| IterativeError::SingularNearBlock {
+                    block: blocks.len(),
+                })?;
+            blocks.push(NearBlock { indices, inverse });
+        }
+        poll(gate)?;
+        let single = far(0, k)?;
+        poll(gate)?;
+        let mixed = far(2, k)?;
+        poll(gate)?;
+        let adjoint = options.normal_fmm(
+            NormalLayer::Adjoint,
+            k,
+            centroids.to_vec(),
+            surface.normals().to_vec(),
+        )?;
+        Ok((
+            Self {
+                weights,
+                single,
+                double,
+                mixed,
+                adjoint,
+                table,
+                diagonal_a,
+                diagonal_b,
+            },
+            blocks,
+            near_entries,
+        ))
+    }
+
+    /// Panel densities spread to their cloud nodes, with node weights.
+    fn charges(&self, density: &[C64]) -> Vec<C64> {
+        let n = density.len();
+        (0..self.weights.len())
+            .map(|p| density[if p < n { p } else { (p - n) / 6 }].scale(self.weights[p]))
+            .collect()
+    }
+
+    /// The dense rule's A p.
+    fn apply_a(&self, alpha: C64, p: &[C64], workers: usize) -> Result<Vec<C64>, IterativeError> {
+        let charges = self.charges(p);
+        let d = self.double.far_potentials(&charges)?;
+        let h = self.mixed.far_potentials(&charges)?;
+        let mut out = self.table.apply(
+            &[
+                (NearOperator::Double, C64::ONE),
+                (NearOperator::Hypersingular, alpha),
+            ],
+            p,
+            workers,
+        );
+        for (i, value) in out.iter_mut().enumerate() {
+            *value = *value + d[i] + alpha * h[i] + self.diagonal_a[i] * p[i];
+        }
+        Ok(out)
+    }
+
+    /// The dense rule's B q, with D' on its centroid rows.
+    fn apply_b(
+        &self,
+        alpha: C64,
+        q: &[C64],
+        areas: &[f64],
+        workers: usize,
+    ) -> Result<Vec<C64>, IterativeError> {
+        let s = self.single.far_potentials(&self.charges(q))?;
+        let weighted: Vec<C64> = q.iter().zip(areas).map(|(&q, &a)| q.scale(a)).collect();
+        let adjoint = self.adjoint.potentials(&weighted)?;
+        let mut out = self
+            .table
+            .apply(&[(NearOperator::Single, C64::ONE)], q, workers);
+        for (i, value) in out.iter_mut().enumerate() {
+            *value = *value + s[i] + alpha * adjoint[i] + self.diagonal_b[i] * q[i];
         }
         Ok(out)
     }

@@ -404,6 +404,32 @@ fn row_values(
     Ok(out)
 }
 
+/// [`PanelRule::Triangle`]'s entries of a pair `i != j` as
+/// `([S, D, N], [D_0, N_0])`: exact integrals on a `triangle_is_near` pair and
+/// Radon seven-point sums otherwise. The dense rows hold exactly these; the
+/// iterative far cloud stores them minus the node sums its far pass covers,
+/// so both routes apply one operator.
+pub(crate) fn triangle_rule_pair(
+    surface: &SpherePanels,
+    triangles: &[[[f64; 3]; 3]],
+    k: f64,
+    i: usize,
+    j: usize,
+) -> ([C64; 3], [f64; 2]) {
+    let (centroids, normals, areas) = (surface.centroids(), surface.normals(), surface.areas());
+    let (x, nx, triangle, ny) = (centroids[i], normals[i], triangles[j], normals[j]);
+    if triangle_is_near(x, centroids[j], triangle) {
+        let statics = triangle_static_influence(x, triangle, ny);
+        let (single, double) =
+            triangle_weak_influence_with_static(k, x, triangle, ny, (&GL8_X, &GL8_W), statics);
+        let (hyper, static_hyper) =
+            triangle_hypersingular_influence(k, x, nx, triangle, ny, single);
+        ([single, double, hyper], [statics.1, static_hyper])
+    } else {
+        triangle_far_layers(k, x, nx, (triangle, centroids[j], areas[j]), ny)
+    }
+}
+
 /// Finite-part hypersingular layer `(N_k, N_0)` of a flat source triangle with
 /// unit density, at a target `x` off the closed triangle with normal `nx`.
 /// `single` is the same triangle's single layer `S_T(x)`.
