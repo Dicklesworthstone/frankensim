@@ -390,6 +390,13 @@ pipe `Z_in = +i Zc cot(kL)`.
     insufficient elements and material/source/phase refusals return before
     publishing an operator. Temperature and composition are prescribed and
     frozen: no mean flow, heat/species evolution or viscothermal loss is added.
+  - States carry a reproducible identity of the assembled operator, geometry,
+    mass-coordinate transforms, boundaries and typed ports. `step`, fallible
+    `sync_nodal`, and fallible `l2_pressure_error` refuse incompatible states
+    before mutation, including same-sized states from a different medium.
+    Independently rebuilt identical operators remain compatible. Changing
+    `dt` on the same operator reanchors the lossless modal cache at the current
+    physical state; it does not reinterpret elapsed steps with the new `dt`.
   - Interior faces use the alternating flux (`q̂` from the left, `p̂` from the
     right). It is energy-conserving and optimal (`p + 1`) for every `p`;
     `K_q = -K_pᵀ` holds exactly through LGL summation by parts.

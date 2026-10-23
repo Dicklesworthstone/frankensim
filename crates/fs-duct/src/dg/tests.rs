@@ -75,8 +75,8 @@ fn dg_gas_field_uniform_is_bitwise_single_state() {
                     b.step(&mut after, &[]).unwrap()
                 );
             }
-            a.sync_nodal(&mut before);
-            b.sync_nodal(&mut after);
+            a.sync_nodal(&mut before).unwrap();
+            b.sync_nodal(&mut after).unwrap();
             assert_eq!(before.pressure(), after.pressure());
             assert_eq!(before.volume_flow(), after.volume_flow());
         }
@@ -195,7 +195,7 @@ fn dg_gas_field_energy_and_port_work_close() {
                 work += input.effort * output.delta_x;
             }
         }
-        propagator.sync_nodal(&mut state);
+        propagator.sync_nodal(&mut state).unwrap();
         let physical = dg.to_energy_coords(state.pressure(), state.volume_flow());
         let energy = 0.5 * physical.iter().map(|x| x * x).sum::<f64>();
         assert!((energy - initial - work).abs() / (initial + work.abs()) < 1e-12);
@@ -488,9 +488,9 @@ fn ir_error(
     for _ in 0..steps {
         prop.step(&mut state, &[]).expect("step");
     }
-    prop.sync_nodal(&mut state);
+    prop.sync_nodal(&mut state).unwrap();
     (
-        dg.l2_pressure_error(&state, p_exact),
+        dg.l2_pressure_error(&state, p_exact).unwrap(),
         dg.total_dofs(),
         prop.certificate_residual(),
     )
@@ -650,7 +650,7 @@ fn dg_cone_ir_matches_spherical_exact() {
         for _ in 0..6 {
             prop.step(&mut state, &[]).expect("step");
         }
-        prop.sync_nodal(&mut state);
+        prop.sync_nodal(&mut state).unwrap();
         state.pressure().to_vec()
     };
     let (cone, profile) = (run(&cone_fixture()), run(&profile_duct));
@@ -678,7 +678,7 @@ fn dg_cone_ir_matches_spherical_exact() {
 /// `½‖M^{1/2}[p; q]‖²` of the synced nodal state: the energy computed independently of the
 /// propagator's internal coordinates.
 fn nodal_energy(dg: &DgDuct, prop: &DgPropagator, state: &mut DgState) -> f64 {
-    prop.sync_nodal(state);
+    prop.sync_nodal(state).unwrap();
     let tilde = dg.to_energy_coords(state.pressure(), state.volume_flow());
     0.5 * tilde.iter().map(|v| v * v).sum::<f64>()
 }
@@ -1245,7 +1245,7 @@ fn dg_bitwise_repeat() {
                 .expect("step"),
             );
         }
-        prop.sync_nodal(&mut state);
+        prop.sync_nodal(&mut state).unwrap();
         let out = last_out.expect("ran 64 steps");
         let p_bits = state.pressure().iter().map(|v| v.to_bits()).collect();
         let q_bits = state.volume_flow().iter().map(|v| v.to_bits()).collect();
@@ -1264,4 +1264,212 @@ fn dg_bitwise_repeat() {
         "{{\"suite\":\"fs-duct\",\"case\":\"dg_bitwise_repeat\",\"inputs\":\"cone_port_64_steps\",\"observed\":0,\"oracle\":0,\"tol\":0,\"verdict\":\"pass\",\"elapsed_us\":{}}}",
         t0.elapsed().as_micros()
     );
+}
+
+/// Equal dimensions do not make energy coordinates portable across materials,
+/// geometry or boundaries. Every refusing consumer must leave the state intact.
+#[test]
+fn dg_state_binding_refuses_foreign_physics_transactionally() {
+    let geometry = cylinder_fixture();
+    let gas = dry_air();
+    let mesh = DgMesh {
+        elements: 3,
+        order: 2,
+    };
+    let make = |geometry: &Duct, gas: &GasState, inlet, outlet| {
+        DgDuct::new(geometry, gas, mesh, inlet, outlet).unwrap()
+    };
+    let source = make(&geometry, &gas, DgBoundary::Closed, DgBoundary::Closed);
+    let source_prop = source.propagator(1.0 / 48000.0, 1e-13).unwrap();
+    let hot = GasState::try_new(&GasSpec::dry_air_ussa1976(), 330.0, 101325.0).unwrap();
+    let dense = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 202650.0).unwrap();
+    let longer = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.0073,
+            length: 0.7,
+        }],
+    };
+    let wider = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.009,
+            length: 0.57,
+        }],
+    };
+    let others = [
+        make(&geometry, &hot, DgBoundary::Closed, DgBoundary::Closed),
+        make(&geometry, &dense, DgBoundary::Closed, DgBoundary::Closed),
+        make(&longer, &gas, DgBoundary::Closed, DgBoundary::Closed),
+        make(&wider, &gas, DgBoundary::Closed, DgBoundary::Closed),
+        make(&geometry, &gas, DgBoundary::IdealOpen, DgBoundary::Closed),
+        make(&geometry, &gas, DgBoundary::Closed, DgBoundary::Matched),
+    ];
+    for other in others {
+        assert_eq!(source.total_dofs(), other.total_dofs());
+        assert_ne!(source.operator_identity(), other.operator_identity());
+        let propagator = other.propagator(1.0 / 48000.0, 1e-13).unwrap();
+        for dirty in [false, true] {
+            let mut state = source.project_initial_state(|x| 1.0 + x, |_| 0.0);
+            if dirty {
+                source_prop.step(&mut state, &[]).unwrap();
+            }
+            let before = state.clone();
+            assert!(propagator.step(&mut state, &[]).is_err());
+            assert_eq!(state, before);
+            assert!(propagator.sync_nodal(&mut state).is_err());
+            assert_eq!(state, before);
+            assert!(other.l2_pressure_error(&state, |_| 0.0).is_err());
+            assert_eq!(state, before);
+        }
+    }
+
+    // Renaming a port leaves the spatial matrix unchanged but changes its
+    // coupling contract, so its identity must participate independently.
+    let a = make(
+        &geometry,
+        &gas,
+        DgBoundary::Port(PortId(7)),
+        DgBoundary::Closed,
+    );
+    let b = make(
+        &geometry,
+        &gas,
+        DgBoundary::Port(PortId(8)),
+        DgBoundary::Closed,
+    );
+    assert_eq!(a.l_tilde, b.l_tilde);
+    assert_ne!(a.operator_identity(), b.operator_identity());
+    let mut state = a.zero_state();
+    let before = state.clone();
+    assert!(
+        b.propagator(1.0 / 48000.0, 1e-13)
+            .unwrap()
+            .step(&mut state, &[])
+            .is_err()
+    );
+    assert_eq!(state, before);
+}
+
+/// The binding is reproducible content identity, so separately assembled
+/// copies remain compatible without relying on addresses or instance counters.
+#[test]
+fn dg_state_binding_accepts_independent_identical_assemblies() {
+    let build = || {
+        DgDuct::new(
+            &cylinder_fixture(),
+            &dry_air(),
+            DgMesh {
+                elements: 4,
+                order: 3,
+            },
+            DgBoundary::Closed,
+            DgBoundary::IdealOpen,
+        )
+        .unwrap()
+    };
+    let a = build();
+    let b = build();
+    assert_eq!(a.operator_identity(), b.operator_identity());
+    let mut state = a.project_initial_state(|x| 1.0 - x, |_| 0.0);
+    let mut expected = state.clone();
+    let pa = a.propagator(1.0 / 48000.0, 1e-13).unwrap();
+    let pb = b.propagator(1.0 / 48000.0, 1e-13).unwrap();
+    for _ in 0..17 {
+        assert_eq!(
+            pa.step(&mut expected, &[]).unwrap(),
+            pb.step(&mut state, &[]).unwrap()
+        );
+    }
+    pb.sync_nodal(&mut state).unwrap();
+    pa.sync_nodal(&mut expected).unwrap();
+    assert_eq!(state, expected);
+    assert_eq!(
+        a.l2_pressure_error(&state, |_| 0.0).unwrap(),
+        b.l2_pressure_error(&state, |_| 0.0).unwrap(),
+    );
+}
+
+/// Changing dt must preserve the already elapsed phase, physical state and
+/// cumulative port work instead of reinterpreting all old steps with the new dt.
+#[test]
+fn dg_state_binding_step_size_changes_preserve_evolution_and_work() {
+    let field = crate::profile::gas_field::tests::field([300.0, 330.0], [0.8; 2], 101325.0);
+    for with_port in [false, true] {
+        let inlet = if with_port {
+            DgBoundary::Port(PortId(7))
+        } else {
+            DgBoundary::Closed
+        };
+        let dg = DgDuct::new_with_gas_field(
+            &cylinder_fixture(),
+            &field,
+            DgMesh {
+                elements: 3,
+                order: 3,
+            },
+            inlet,
+            DgBoundary::Closed,
+        )
+        .unwrap();
+        let dt = 1.0 / 192000.0;
+        let fine = dg.propagator(dt, 1e-13).unwrap();
+        let coarse = dg.propagator(2.0 * dt, 1e-13).unwrap();
+        let mut state =
+            dg.project_initial_state(|x| det::cos(core::f64::consts::PI * x / 0.57), |_| 0.0);
+        let mut expected = state.clone();
+        let input = if with_port {
+            vec![PortInput {
+                id: PortId(7),
+                effort: 1e-8,
+            }]
+        } else {
+            vec![]
+        };
+        for (multiple, steps) in [(2, 6), (1, 9), (2, 4)] {
+            let propagator = if multiple == 1 { &fine } else { &coarse };
+            // Invalid inputs must not reset the cache when switching dt.
+            let before = state.clone();
+            assert!(
+                propagator
+                    .step(
+                        &mut state,
+                        &[PortInput {
+                            id: PortId(999),
+                            effort: 0.0
+                        }]
+                    )
+                    .is_err()
+            );
+            assert_eq!(state, before);
+            for _ in 0..steps {
+                propagator.step(&mut state, &input).unwrap();
+                for _ in 0..multiple {
+                    fine.step(&mut expected, &input).unwrap();
+                }
+            }
+            let error = det::sqrt(
+                state
+                    .tilde
+                    .iter()
+                    .zip(&expected.tilde)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f64>(),
+            );
+            let scale = det::sqrt(expected.tilde.iter().map(|v| v * v).sum::<f64>());
+            assert!(
+                error / scale < 2e-11,
+                "relative state error = {}",
+                error / scale
+            );
+            let work_scale = expected.initial_energy_j + expected.cumulative_port_work_j.abs();
+            assert!(
+                (state.cumulative_port_work_j - expected.cumulative_port_work_j).abs() / work_scale
+                    < 2e-11
+            );
+            assert!(
+                (state.stored_energy_j() - expected.stored_energy_j()).abs() / work_scale < 2e-11
+            );
+        }
+        assert_eq!(state.step_count(), 19);
+        assert_eq!(expected.step_count(), 29);
+    }
 }

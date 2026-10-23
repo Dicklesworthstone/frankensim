@@ -58,6 +58,7 @@
 
 use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_la::eigen::{admit_jacobi_eigh, householder_eigh, jacobi_eigh};
 use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
@@ -480,6 +481,7 @@ struct DgElement {
 /// Assembled 1-D lossless variable-area discontinuous-Galerkin duct.
 #[derive(Debug, Clone)]
 pub struct DgDuct {
+    operator_identity: ContentHash,
     mesh: DgMesh,
     gas: GasState,
     outlet_gas: GasState,
@@ -498,6 +500,58 @@ pub struct DgDuct {
     g_block: Option<Vec<f64>>,
     /// Active port descriptors `(PortId, tilde_b_vector_of_len_2M)`.
     ports: Vec<(PortId, Vec<f64>)>,
+}
+
+/// Bind the physical coordinate maps as well as the energy-normalized operator.
+/// In particular, changing density can preserve the normalized wave operator
+/// while changing the meaning of every pressure/flow energy coordinate.
+fn hash_operator(
+    mesh: DgMesh,
+    inlet: DgBoundary,
+    outlet: DgBoundary,
+    elements: &[DgElement],
+    l_tilde: &[f64],
+    ports: &[(PortId, Vec<f64>)],
+) -> ContentHash {
+    fn floats(hash: &mut DomainHasher, values: &[f64]) {
+        hash.update(&(values.len() as u64).to_le_bytes());
+        for value in values {
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    let mut hash = DomainHasher::new("org.frankensim.fs-duct.dg-operator.v1");
+    for count in [mesh.elements, mesh.order, ports.len()] {
+        hash.update(&(count as u64).to_le_bytes());
+    }
+    for boundary in [inlet, outlet] {
+        let (tag, port) = match boundary {
+            DgBoundary::Closed => (0, 0),
+            DgBoundary::IdealOpen => (1, 0),
+            DgBoundary::Matched => (2, 0),
+            DgBoundary::Port(id) => (3, id.0),
+        };
+        hash.update(&[tag]);
+        hash.update(&port.to_le_bytes());
+    }
+    for element in elements {
+        floats(&mut hash, &[element.x_left, element.length]);
+        for values in [
+            &element.nodes_x,
+            &element.areas,
+            &element.mp_sqrt,
+            &element.mp_inv_sqrt,
+            &element.mq_sqrt,
+            &element.mq_inv_sqrt,
+        ] {
+            floats(&mut hash, values);
+        }
+    }
+    floats(&mut hash, l_tilde);
+    for (id, vector) in ports {
+        hash.update(&id.0.to_le_bytes());
+        floats(&mut hash, vector);
+    }
+    hash.finalize()
 }
 
 impl DgDuct {
@@ -914,8 +968,10 @@ impl DgDuct {
         let is_lossless_bcs =
             !matches!(inlet, DgBoundary::Matched) && !matches!(outlet, DgBoundary::Matched);
         let g_block = is_lossless_bcs.then_some(g_mat);
+        let operator_identity = hash_operator(mesh, inlet, outlet, &elements, &l_tilde, &ports);
 
         Ok(Self {
+            operator_identity,
             mesh,
             gas: *gas,
             outlet_gas,
@@ -1219,11 +1275,13 @@ impl DgDuct {
         let tilde = self.to_energy_coords(&p, &q);
         let e0 = 0.5 * tilde.iter().map(|v| v * v).sum::<f64>();
         DgState {
+            operator_identity: self.operator_identity,
             p,
             q,
             tilde,
             modal_anchor_p: Vec::new(),
             modal_anchor_q: Vec::new(),
+            modal_anchor_dt_bits: None,
             unforced_steps: 0,
             step_count: 0,
             initial_energy_j: e0,
@@ -1233,15 +1291,24 @@ impl DgDuct {
         }
     }
 
+    /// Identity of the assembled spatial operator, physical mass transforms,
+    /// geometry, and typed boundaries. Independent identical assemblies share it.
+    #[must_use]
+    pub const fn operator_identity(&self) -> ContentHash {
+        self.operator_identity
+    }
+
     /// Initialize a zero [`DgState`].
     #[must_use]
     pub fn zero_state(&self) -> DgState {
         DgState {
+            operator_identity: self.operator_identity,
             p: vec![0.0; self.field_dofs],
             q: vec![0.0; self.field_dofs],
             tilde: vec![0.0; 2 * self.field_dofs],
             modal_anchor_p: Vec::new(),
             modal_anchor_q: Vec::new(),
+            modal_anchor_dt_bits: None,
             unforced_steps: 0,
             step_count: 0,
             initial_energy_j: 0.0,
@@ -1254,10 +1321,18 @@ impl DgDuct {
     /// Compute the continuous $L^2(0, L)$ pressure error
     /// $\left(\int_0^L (p_h(x) - p_{\text{exact}}(x))^2\,dx\right)^{1/2}$ using
     /// $(2p + 4)$-node Gauss–Legendre quadrature over each element.
-    pub fn l2_pressure_error<F>(&self, state: &DgState, mut p_exact: F) -> f64
+    ///
+    /// # Errors
+    /// Refuses a state bound to a different spatial operator or physical mass map.
+    pub fn l2_pressure_error<F>(&self, state: &DgState, mut p_exact: F) -> Result<f64, DuctError>
     where
         F: FnMut(f64) -> f64,
     {
+        if state.operator_identity != self.operator_identity {
+            return Err(DuctError::BadParameter {
+                what: "DG state does not belong to this duct",
+            });
+        }
         let p_nodal = if state.nodal_dirty {
             let (p, _) = self.from_energy_coords(&state.tilde);
             p
@@ -1282,7 +1357,7 @@ impl DgDuct {
                 err_sq += jac * wq * diff * diff;
             }
         }
-        det::sqrt(err_sq)
+        Ok(det::sqrt(err_sq))
     }
 
     /// Build the certified exact-exponential propagator for step `dt` [s] with certificate
@@ -1437,6 +1512,7 @@ impl DgDuct {
         }
 
         Ok(DgPropagator {
+            operator_identity: self.operator_identity,
             dt,
             tol,
             certificate_residual: certificate,
@@ -1491,6 +1567,7 @@ impl DgDuct {
         }
 
         Ok(DgPropagator {
+            operator_identity: self.operator_identity,
             dt,
             tol,
             certificate_residual: certificate,
@@ -1742,11 +1819,13 @@ enum PropagatorKernel {
 /// every step; the nodal `(p, q)` arrays follow on [`DgPropagator::sync_nodal`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DgState {
+    operator_identity: ContentHash,
     p: Vec<f64>,
     q: Vec<f64>,
     tilde: Vec<f64>,
     modal_anchor_p: Vec<f64>,
     modal_anchor_q: Vec<f64>,
+    modal_anchor_dt_bits: Option<u64>,
     unforced_steps: u64,
     step_count: u64,
     initial_energy_j: f64,
@@ -1792,6 +1871,7 @@ impl DgState {
 /// Certified exact matrix-exponential propagator for a [`DgDuct`].
 #[derive(Debug, Clone)]
 pub struct DgPropagator {
+    operator_identity: ContentHash,
     dt: f64,
     tol: f64,
     certificate_residual: f64,
@@ -1843,9 +1923,13 @@ impl DgPropagator {
 
     /// Synchronize the nodal arrays `(state.pressure(), state.volume_flow())` from the
     /// current energy coordinates.
-    pub fn sync_nodal(&self, state: &mut DgState) {
+    ///
+    /// # Errors
+    /// Refuses a state from a different spatial operator without changing it.
+    pub fn sync_nodal(&self, state: &mut DgState) -> Result<(), DuctError> {
+        self.validate_state(state)?;
         if !state.nodal_dirty {
-            return;
+            return Ok(());
         }
         let m = self.field_dofs;
         let n_local = self.order + 1;
@@ -1863,6 +1947,18 @@ impl DgPropagator {
             }
         }
         state.nodal_dirty = false;
+        Ok(())
+    }
+
+    fn validate_state(&self, state: &DgState) -> Result<(), DuctError> {
+        if state.operator_identity != self.operator_identity
+            || state.tilde.len() != 2 * self.field_dofs
+        {
+            return Err(DuctError::BadParameter {
+                what: "DG state does not belong to this propagator",
+            });
+        }
+        Ok(())
     }
 
     /// Advance `state` by one step $\Delta t$ under held `port_inputs`, returning conjugate port
@@ -1871,6 +1967,8 @@ impl DgPropagator {
     /// The lossless kernel keeps modal amplitudes anchored at the last forced step and
     /// evaluates the exact rotation at the elapsed time, so unforced steps accumulate no
     /// rounding; the ledger's energy is always that of the reconstructed physical state.
+    /// Switching to another time step for the same spatial operator reanchors the
+    /// modal cache at the current state, preserving the elapsed physical evolution.
     ///
     /// # Errors
     /// [`DuctError::BadParameter`] if any `PortInput` has a non-finite effort, references an
@@ -1880,11 +1978,7 @@ impl DgPropagator {
         state: &mut DgState,
         port_inputs: &[PortInput],
     ) -> Result<DgStepOutput, DuctError> {
-        if state.tilde.len() != 2 * self.field_dofs {
-            return Err(DuctError::BadParameter {
-                what: "DG state does not belong to this propagator",
-            });
-        }
+        self.validate_state(state)?;
         match &self.kernel {
             PropagatorKernel::SkewModal {
                 sigmas,
@@ -1923,7 +2017,8 @@ impl DgPropagator {
         let m = self.field_dofs;
         let ids: Vec<PortId> = modal_ports.iter().map(|p| p.0).collect();
         let efforts = resolve_efforts(port_inputs, &ids)?;
-        if state.modal_anchor_p.is_empty() {
+        if state.modal_anchor_p.is_empty() || state.modal_anchor_dt_bits != Some(self.dt.to_bits())
+        {
             let mut ap = vec![0.0; m];
             let mut aq = vec![0.0; m];
             for k in 0..m {
@@ -1934,6 +2029,7 @@ impl DgPropagator {
             }
             state.modal_anchor_p = ap;
             state.modal_anchor_q = aq;
+            state.modal_anchor_dt_bits = Some(self.dt.to_bits());
             state.unforced_steps = 0;
         }
         let mut port_outputs = Vec::with_capacity(modal_ports.len());

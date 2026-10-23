@@ -11,6 +11,7 @@ description = "1D viscothermal duct/horn acoustics: transfer matrices over cylin
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
