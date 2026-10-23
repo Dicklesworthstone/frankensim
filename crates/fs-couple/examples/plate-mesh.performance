@@ -5,8 +5,8 @@ observer 1.0
 limits 8 0.9 100.0 1000000.0 32
 mechanics simply-supported 0.0 0.02 5.0 700.0 3
 sections 2
-section 0.003 700.0 7000000000.0 7000000000.0 0.3 2692307692.307692 0.0
-section 0.004 600.0 11000000000.0 1400000000.0 0.3 800000000.0 0.35
+section 0.003 700.0 7000000000.0 7000000000.0 0.3 2692307692.307692 0.0 fixture authored-illustrative-plate-not-measured
+section 0.004 600.0 11000000000.0 1400000000.0 0.3 800000000.0 0.35 fixture authored-illustrative-plate-not-measured
 nodes 30
 node 0.00 0.000
 node 0.08 0.000

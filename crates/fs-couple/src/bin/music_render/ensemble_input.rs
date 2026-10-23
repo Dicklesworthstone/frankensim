@@ -139,6 +139,8 @@ fn load_with_gas_sources(
     file.take((max_bytes + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("input {}: {e}", input.path.display()))?;
     if bytes.len() > max_bytes { return Err(format!("ensemble source exceeds its {max_bytes}-byte input budget")); }
+    // A part's material-card packs are named relative to that part's own file.
+    let parent = input.path.parent().unwrap_or(std::path::Path::new("."));
     let result = match input.kind {
         Kind::Modal => {
             let p = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
@@ -169,9 +171,11 @@ fn load_with_gas_sources(
             })
         }
         Kind::Plate => {
-            let p = PlatePerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
+            let p = PlatePerformance::from_bytes_with_all_sources(&bytes, block, sources,
+                super::plate_input::section_pack_loader(parent)).map_err(|e| e.to_string())?;
             let i = p.info();
-            let gas_json=super::thermochemical::provenance(std::slice::from_ref(p.gas_record()));
+            let gas_json=format!("{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
+                super::plate_input::section_sources_json(p.section_provenance()));
             let listener = Listener::Gas(ListenerMedium::of(p.gas_record().state()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
@@ -180,10 +184,12 @@ fn load_with_gas_sources(
             })
         }
         Kind::Valve => {
-            let p = PlateValvePerformance::from_bytes_with_gas_sources(&bytes, block, &CancelGate::new(),sources).map_err(|e|e.to_string())?;
+            let p = PlateValvePerformance::from_bytes_with_all_sources(&bytes, block, &CancelGate::new(),sources,
+                super::plate_input::section_pack_loader(parent)).map_err(|e|e.to_string())?;
             let i = p.info();
-            let exterior_json = format!("{}{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
-                super::duct_metadata::provenance(&p),super::thermochemical::provenance(p.gas_records()));
+            let exterior_json = format!("{}{}{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
+                super::duct_metadata::provenance(&p),super::thermochemical::provenance(p.gas_records()),
+                super::plate_input::section_sources_json(p.section_provenance()));
             // The receiver's medium (explicit exterior, else the terminal's local rho/c);
             // an internal trace is heard in its explicit exterior only.
             let listener = match (p.renderer().baffled_medium(), p.exterior_gas()) {

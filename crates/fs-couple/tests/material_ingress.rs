@@ -1,5 +1,5 @@
 //! Render-path material ingress (bead `frankensim-irp-v5-instrument-realism-pexfp.32`,
-//! DONE-WHEN 3) on the plate-valve performance files: a section is either a
+//! DONE-WHEN 3) on the plate-valve and flat-plate performance files: a section is either a
 //! pack-backed material record, resolved through `fs_couple::material_source`
 //! from a material-card pack compiled at the named state, or bare numbers with
 //! an explicit `fixture LABEL`. Bare numbers without a label refuse, and every
@@ -213,4 +213,90 @@ fn pack_record_matches_direct_resolution_bitwise() {
         };
         assert!(error.contains(needle), "{row}: {error}");
     }
+}
+
+const PLATE_MESH: &str = include_str!("../examples/plate-mesh.performance");
+const PLATE_REGION: &str = "section 0.004 600.0 11000000000.0 1400000000.0 0.3 800000000.0 0.35 fixture authored-illustrative-plate-not-measured";
+
+fn plate_mesh_with(row: &str) -> String {
+    assert_eq!(
+        PLATE_MESH.matches(PLATE_REGION).count(),
+        1,
+        "the example's second region"
+    );
+    PLATE_MESH.replace(PLATE_REGION, row)
+}
+
+fn plate_with_aluminum(
+    text: &str,
+) -> Result<fs_couple::render::plate::file::PlatePerformance, String> {
+    fs_couple::render::plate::file::PlatePerformance::from_bytes_with_all_sources(
+        text.as_bytes(),
+        64,
+        None,
+        |path| {
+            if path == "aluminum.fsmatpk" {
+                Ok(aluminum_card_pack())
+            } else {
+                Err(format!("no pack {path}"))
+            }
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The flat-plate grammar takes the same record and label: an unlabelled region
+/// refuses, the labelled example keeps its labels, and a pack-backed region
+/// renders with its pack, hash, state and point in the section provenance.
+#[test]
+fn plate_mesh_sections_take_the_same_record_or_fixture_label() {
+    use fs_couple::pcm_wav::observation::PressureRenderer;
+    let labelled = plate_with_aluminum(PLATE_MESH).expect("labelled example");
+    assert_eq!(
+        labelled.section_provenance(),
+        ["fixture authored-illustrative-plate-not-measured"; 2]
+    );
+    let bare =
+        plate_mesh_with("section 0.004 600.0 11000000000.0 1400000000.0 0.3 800000000.0 0.35");
+    let error = plate_with_aluminum(&bare)
+        .err()
+        .expect("an unlabelled region refuses");
+    assert!(error.contains("fixture LABEL"), "{error}");
+    let packed = plate_with_aluminum(&plate_mesh_with(
+        "section material isotropic 0.0018 aluminum.fsmatpk as-tabulated T=300",
+    ))
+    .expect("pack-backed region");
+    let provenance = &packed.section_provenance()[1];
+    assert!(
+        provenance.starts_with("pack aluminum.fsmatpk ")
+            && provenance.contains(&aluminum_card_pack().content_hash().to_hex())
+            && provenance.ends_with("state as-tabulated at T=300.0"),
+        "{provenance}"
+    );
+    assert!(packed.info().retained_modes > 0);
+    let mut renderer = packed.into_renderer();
+    let mut block = vec![0.0; 64];
+    renderer.block(&mut block).expect("renders");
+    assert!(block.iter().all(|x| x.is_finite()));
+    let wrong =
+        plate_mesh_with("section material isotropic 0.0018 aluminum.fsmatpk water-soaked T=300");
+    let error = plate_with_aluminum(&wrong)
+        .err()
+        .expect("a wrong state refuses");
+    assert!(
+        error.contains("not the named state 'water-soaked'"),
+        "{error}"
+    );
+    let default = fs_couple::render::plate::file::PlatePerformance::from_bytes(
+        plate_mesh_with("section material isotropic 0.0018 aluminum.fsmatpk as-tabulated T=300")
+            .as_bytes(),
+        64,
+    );
+    assert!(
+        default
+            .err()
+            .expect("no loader")
+            .to_string()
+            .contains("material-card loader")
+    );
 }
