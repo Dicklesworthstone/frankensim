@@ -730,9 +730,17 @@ fn active_set_refuses_with_a_named_error_when_the_budget_is_too_small() {
         }
         let (s, msg) = refusal.expect("budget-1 narrow must refuse at the first transition");
         println!("{{\"test\":\"budget1\",\"refused_at\":{s},\"msg\":{msg:?}}}");
+        // The refusal must be the NAMED active-set exhaustion carrying its payload
+        // (pivots against budget, last active set, worst KKT violation), never the
+        // original Gauss-Seidel error.
         assert!(
-            msg.contains("active-set"),
-            "refusal must name the active-set failure, got: {msg}"
+            msg.contains("ActiveSetExhausted")
+                && msg.contains("pivots")
+                && msg.contains("budget")
+                && msg.contains("last_active_set")
+                && msg.contains("worst_port")
+                && msg.contains("worst_condition"),
+            "refusal must be the named ActiveSetExhausted with its payload, got: {msg}"
         );
     });
 }

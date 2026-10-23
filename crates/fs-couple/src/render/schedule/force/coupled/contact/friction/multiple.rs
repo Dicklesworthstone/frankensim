@@ -514,11 +514,13 @@ impl MultiFrictionModalSystem {
     pub fn force_active_set_budget(&mut self, budget: usize) { self.active_set_budget = budget; }
 
     fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>)
-        -> Result<active_set::Rescue, ModalFrictionError>
+        -> Result<(), ModalFrictionError>
     {
         let p = self.points.len();
         if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some) {
-            return Ok(active_set::Rescue::Declined);
+            // Not attempted: the active-set model covers only the plain friction
+            // ports. Name it a decline, never the original Gauss-Seidel error.
+            return Err(ModalFrictionError::ActiveSetDeclined);
         }
         let dt = self.sample_period_s();
         let mut a = self.compliance.clone();
@@ -537,14 +539,23 @@ impl MultiFrictionModalSystem {
         let lawrefs: Vec<&FrictionLaw> = laws.iter().collect();
         let seed = self.regimes.clone();
         match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
-            Some((tractions, regimes)) => {
+            active_set::Resolution::Solved(tractions, regimes) => {
                 poll(gate)?;
                 self.tractions.copy_from_slice(&tractions);
                 self.regimes.copy_from_slice(&regimes);
                 for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
-                Ok(active_set::Rescue::Adopted)
+                Ok(())
             }
-            None => Ok(active_set::Rescue::Exhausted),
+            active_set::Resolution::Exhausted { pivots, last_set, worst } => {
+                Err(ModalFrictionError::ActiveSetExhausted {
+                    pivots,
+                    budget: self.active_set_budget,
+                    last_active_set: last_set,
+                    worst_port: worst.port,
+                    worst_condition: worst.condition,
+                    worst_size: worst.size,
+                })
+            }
         }
     }
 
@@ -619,19 +630,19 @@ impl MultiFrictionModalSystem {
             }
             match failure {
                 None => { sweeps = sweep; break; },
-                Some(error) if sweep == self.config.max_sweeps => {
+                Some(_) if sweep == self.config.max_sweeps => {
                     // The Gauss-Seidel sweep could not converge this step
                     // (frankensim-o7qbp). For a well-posed step the consistent
                     // stick/slip partition is unique; solve it directly with the
                     // active-set rescue. If it finds and verifies that partition,
                     // adopt it and accept; otherwise refuse on budget as before.
-                    match self.active_set_rescue(drives, gate)? {
-                        active_set::Rescue::Adopted => { rescues = 1; sweeps = sweep; break; }
-                        active_set::Rescue::Declined => return Err(error),
-                        active_set::Rescue::Exhausted => return Err(invalid(
-                            "the active-set rescue could not resolve a consistent joint friction partition within its pivot budget",
-                        ).into()),
-                    }
+                    // Adopts the unique partition and continues, or returns a
+                    // NAMED active-set error (exhausted with payload, or declined)
+                    // -- never the original Gauss-Seidel error.
+                    self.active_set_rescue(drives, gate)?;
+                    rescues = 1;
+                    sweeps = sweep;
+                    break;
                 },
                 _ => {},
             }
