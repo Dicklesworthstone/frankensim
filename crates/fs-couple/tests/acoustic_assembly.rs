@@ -1169,7 +1169,10 @@ fn tail_period_and_rms(p: &[f64]) -> (f64, f64) {
 
 fn massive_reed_speaks(bore: BoreRealization) {
     let a = reed_on_cylinder(3.0e-4, 0.12);
-    let options = RealizeOptions { bore };
+    let options = RealizeOptions {
+        bore,
+        ..RealizeOptions::default()
+    };
     let out = realize_assembly_with_options(&a, &options).expect("massive reed");
     let (_, rms) = tail_period_and_rms(&out.pressure_pa);
     assert!(
@@ -1222,6 +1225,7 @@ fn reed_default_is_characteristic_line() {
         &a,
         &RealizeOptions {
             bore: BoreRealization::default(),
+            ..RealizeOptions::default()
         },
     )
     .expect("explicit line");
@@ -1238,6 +1242,7 @@ fn reed_default_is_characteristic_line() {
         &a,
         &RealizeOptions {
             bore: BoreRealization::lumped_ladder_with_tolerance(cells, 100.0),
+            ..RealizeOptions::default()
         },
     )
     .expect("requested coarse ladder");
@@ -1262,6 +1267,7 @@ fn reed_default_is_characteristic_line() {
         &a,
         &RealizeOptions {
             bore: BoreRealization::lumped_ladder(cells),
+            ..RealizeOptions::default()
         },
     ) {
         Ok(_) => assert!(passive_cents.abs() <= 1.0, "{passive_cents} cents admitted"),
@@ -1276,6 +1282,7 @@ fn reed_default_is_characteristic_line() {
             &a,
             &RealizeOptions {
                 bore: BoreRealization::lumped_ladder(cells - 1),
+                ..RealizeOptions::default()
             },
         ),
         Err(AcousticRealizeError::LumpedLadderBand { .. })
@@ -1709,7 +1716,10 @@ fn certified_plate_radiates_without_named_hertz() {
 
 mod material_plate_tests {
     use super::*;
-    use fs_couple::acoustic_realize::realize_assembly_with_plate_chart;
+    use fs_couple::acoustic_realize::{
+        realize_assembly_with_plate_chart, realize_assembly_with_plate_chart_and_options,
+    };
+    use fs_couple::air_path::GasAbsorptionModel;
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, CompiledMaterialPlate, MaterialAssemblyError, MaterialSource,
         PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, StringPrestressBinding,
@@ -3509,6 +3519,161 @@ mod material_plate_tests {
             .map(|(a, b)| a - b)
             .collect();
         assert!(peak_abs(&delta) > 1e-7);
+    }
+
+    #[test]
+    fn g3_material_assembly_options_compose_solid_gas_chart_and_observer_laws() {
+        use fs_material::gas::{GasSpec, GasState};
+        use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
+        use fs_qty::semantic::Composition;
+        let card = isotropic_card(450.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.01;
+        input.listener.distance_m = 100.0;
+        // No ambient preset is available: supplied gas is the sole medium
+        // owner, independently of the solid card's fixed 293.15 K state.
+        input.ambient.temperature_k = -1.0;
+        let base_plate = bind(
+            template(),
+            &state(&[
+                ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+                (
+                    "young_modulus",
+                    QuantitySpec::dimensional(Pressure::DIMS),
+                    12e9,
+                ),
+                ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+            ]),
+            Model::Isotropic,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, radiation) = chart_input(&base_plate);
+        let gases = [
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 80_000.0).unwrap(),
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap(),
+            resolve_gas_mixture(
+                &[
+                    GasSpecies::Nitrogen,
+                    GasSpecies::Oxygen,
+                    GasSpecies::CarbonDioxide,
+                ],
+                &Composition::new(CompositionBasis::MoleFraction, vec![0.7, 0.2, 0.1]).unwrap(),
+                293.15,
+                80_000.0,
+            )
+            .unwrap(),
+        ];
+        assert_eq!(gases[0].sound_speed, gases[1].sound_speed);
+        assert!((gases[1].density / gases[0].density - 101_325.0 / 80_000.0).abs() < 1e-14);
+        assert_ne!(gases[0].sound_speed, gases[2].sound_speed);
+        for regional in [false, true] {
+            let mut candidate = input.clone();
+            candidate.plate = (!regional).then_some(template());
+            let plate = if regional {
+                PlateMaterialBinding::Regional {
+                    mesh: chart.mesh.clone(),
+                    boundary_nodes: chart.boundary_nodes.clone(),
+                    regions: vec![PlateRegionSource {
+                        region: fs_plate::PlateRegion {
+                            name: "body".into(),
+                            triangle_indices: (0..chart.mesh.tris.len()).collect(),
+                        },
+                        source: source(&card, &point),
+                        model: Model::Isotropic,
+                        thickness: Thickness::FixedThickness(0.003),
+                        material_angle_rad: 0.0,
+                    }],
+                    radiation: radiation.clone(),
+                }
+            } else {
+                PlateMaterialBinding::Uniform {
+                    source: source(&card, &point),
+                    model: Model::Isotropic,
+                    thickness: Thickness::FixedThickness(0.003),
+                }
+            };
+            let compiled = compile_material_assembly(
+                &candidate,
+                &AcousticMaterialBindings {
+                    string: Some(StringMaterialBinding {
+                        source: source(&card, &point),
+                        geometry: StringGeometryConstraint::FixedRadius(0.0008),
+                        prestress: StringPrestressBinding::Prescribed(
+                            StringPrestress::FixedTension(20.0),
+                        ),
+                    }),
+                    plate: Some(plate),
+                },
+            )
+            .unwrap();
+            let specimen_before = compiled.string().unwrap().material().identity();
+            let mut histories = Vec::new();
+            for gas in gases {
+                let options = RealizeOptions {
+                    gas: Some(gas),
+                    observer_absorption: Some(GasAbsorptionModel::StokesKirchhoff),
+                    ..RealizeOptions::default()
+                };
+                let actual = compiled.realize_with_options(&options).unwrap();
+                let direct = match compiled.plate() {
+                    Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
+                        realize_assembly_with_plate_chart_and_options(
+                            compiled.assembly(),
+                            chart.chart(),
+                            radiation,
+                            &options,
+                        )
+                        .unwrap()
+                    }
+                    _ => realize_assembly_with_options(compiled.assembly(), &options).unwrap(),
+                };
+                assert_eq!(actual, direct);
+                assert_eq!(actual.gas, gas);
+                assert!(peak_abs(&actual.pressure_pa) > 0.0);
+                assert!(actual.pressure_pa.iter().all(|v| v.is_finite()));
+                histories.push(actual.pressure_pa);
+            }
+            assert_ne!(
+                histories[0], histories[1],
+                "pressure changes loading and radiated pressure"
+            );
+            assert_ne!(
+                histories[0], histories[2],
+                "composition changes the same physical path"
+            );
+            let explicit_air = RealizeOptions {
+                gas: Some(gases[0]),
+                observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
+                    relative_humidity: 0.5,
+                }),
+                ..RealizeOptions::default()
+            };
+            let molecular = compiled.realize_with_options(&explicit_air).unwrap();
+            assert_ne!(
+                histories[0], molecular.pressure_pa,
+                "chart compilation must not drop the observer law"
+            );
+            assert_eq!(
+                compiled.string().unwrap().material().identity(),
+                specimen_before
+            );
+            assert!(
+                compiled
+                    .realize_with_options(&RealizeOptions {
+                        observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
+                            relative_humidity: f64::NAN
+                        }),
+                        ..explicit_air
+                    })
+                    .is_err()
+            );
+            assert!(
+                compiled.realize().is_err(),
+                "invalid ambient must not gain an implicit fallback"
+            );
+        }
     }
 
     #[test]

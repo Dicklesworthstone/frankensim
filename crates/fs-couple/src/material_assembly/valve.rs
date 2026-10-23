@@ -15,9 +15,11 @@ use fs_material::gas::GasState;
 use fs_scenario::AcousticAssembly;
 use fs_scenario::reed_source::BeatingReedSource;
 
-use super::{AcousticMaterialBindings, CompiledMaterialAssembly, MaterialAssemblyError,
-    compile_material_assembly, missing};
-use crate::acoustic_realize::{AcousticRealizeError, RealizedAssembly};
+use super::{
+    AcousticMaterialBindings, CompiledMaterialAssembly, MaterialAssemblyError,
+    compile_material_assembly, missing,
+};
+use crate::acoustic_realize::{AcousticRealizeError, RealizeOptions, RealizedAssembly};
 
 /// A component-local compiler refusal, retaining the responsible owner's error.
 #[derive(Debug)]
@@ -83,6 +85,19 @@ impl<S: BeatingReedSource> CompiledValveMaterialAssembly<S> {
     /// Common supplied-gas coherence and ordinary realization refusals propagate.
     pub fn realize_with_gas(&self, gas: &GasState) -> Result<RealizedAssembly, AcousticRealizeError> {
         self.compiled.realize_with_gas(gas)
+    }
+
+    /// Render the material-derived valve and retained body with the common gas,
+    /// observer-absorption and bore-discretization controls. The valve's material
+    /// state, pressure projection and admission remain unchanged.
+    ///
+    /// # Errors
+    /// Common gas, observer, numerical and ordinary realization refusals.
+    pub fn realize_with_options(
+        &self,
+        options: &RealizeOptions,
+    ) -> Result<RealizedAssembly, AcousticRealizeError> {
+        self.compiled.realize_with_options(options)
     }
 }
 

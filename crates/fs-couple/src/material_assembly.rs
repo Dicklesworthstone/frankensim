@@ -25,8 +25,8 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure, Time};
 use fs_scenario::{AcousticAssembly, PrestressedString};
 
 use crate::acoustic_realize::{
-    AcousticRealizeError, RealizedAssembly, realize_assembly, realize_assembly_with_gas,
-    realize_assembly_with_plate_chart, realize_assembly_with_plate_chart_and_gas,
+    AcousticRealizeError, RealizeOptions, RealizedAssembly, realize_assembly_with_options,
+    realize_assembly_with_plate_chart_and_options,
 };
 use crate::string_specimen::{
     EQUILIBRIUM_YOUNG_MODULUS_PROPERTY, KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
@@ -178,11 +178,29 @@ impl CompiledMaterialAssembly {
     /// # Errors
     /// Existing assembly, modal-window, excitation and runtime refusals propagate.
     pub fn realize(&self) -> Result<RealizedAssembly, AcousticRealizeError> {
+        self.realize_with_options(&RealizeOptions::default())
+    }
+
+    /// Render the retained material specimens with explicit medium, observer
+    /// and numerical controls. Uniform and regional plates share the same
+    /// options path; choosing a material chart cannot reset the requested bore
+    /// resolution or silently discard an air-specific absorption declaration.
+    /// Source receipts and solid-state constraints remain those of compilation.
+    ///
+    /// # Errors
+    /// Material-chart, gas, absorption and numerical refusals propagate from
+    /// the common acoustic realizer without changing the compiled specimen.
+    pub fn realize_with_options(
+        &self,
+        options: &RealizeOptions,
+    ) -> Result<RealizedAssembly, AcousticRealizeError> {
         match &self.plate {
             Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
-                realize_assembly_with_plate_chart(&self.assembly, chart.chart(), radiation)
+                realize_assembly_with_plate_chart_and_options(
+                    &self.assembly, chart.chart(), radiation, options,
+                )
             }
-            _ => realize_assembly(&self.assembly),
+            _ => realize_assembly_with_options(&self.assembly, options),
         }
     }
 
@@ -207,17 +225,10 @@ impl CompiledMaterialAssembly {
         &self,
         gas: &GasState,
     ) -> Result<RealizedAssembly, AcousticRealizeError> {
-        match &self.plate {
-            Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
-                realize_assembly_with_plate_chart_and_gas(
-                    &self.assembly,
-                    chart.chart(),
-                    radiation,
-                    gas,
-                )
-            }
-            _ => realize_assembly_with_gas(&self.assembly, gas),
-        }
+        self.realize_with_options(&RealizeOptions {
+            gas: Some(*gas),
+            ..RealizeOptions::default()
+        })
     }
 }
 

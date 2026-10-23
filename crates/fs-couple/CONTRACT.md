@@ -1299,11 +1299,27 @@ both incoming feedback and causal external microphone pressure.
 
 `realize_assembly_with_gas_and_absorption` accepts a caller-resolved gas and
 an explicit `GasAbsorptionModel`. Its observer always uses the selected law;
-invalid ISO-air conditions refuse without a classical fallback. The original
-entry points preserve legacy absorption arithmetic. `RayleighMedium::from`
+invalid ISO-air conditions refuse without a classical fallback. `RealizeOptions`
+carries the same resolved gas and observer law alongside the bore discretization.
+Ordinary assemblies, regional plate charts, `CompiledMaterialAssembly` and
+`CompiledValveMaterialAssembly` all forward those options to one dispatcher.
+Material compilation therefore preserves the caller's explicit absorption and
+reed-bore resolution, including their admission failures. The gas is validated
+once before stepping and supplies excitation, duct coefficients, body/cavity
+loading and observed pressure; solid card temperature and prestress stay
+independent. Missing absorption selection on a supplied gas chooses classical
+Stokes-Kirchhoff by input semantics, never by coefficient equality with a preset
+or an invalid humidity sentinel. The scenario-air entry point preserves its
+legacy absorption arithmetic. `RayleighMedium::from`
 copies density/sound-speed bits without reevaluating an atmosphere. G3 tests
-cover explicit ISO/classical selection, invalid ISO humidity, exact medium
-views and legacy history equality. GasState itself carries no source receipts.
+cover explicit ISO/classical selection through source-bound uniform/regional
+solid bodies and material valves, pressure/composition changes reaching actual
+pressure histories, unchanged solid identities, retained bore refusals, invalid
+ISO humidity, exact medium views and legacy history equality. Ideal-gas pressure
+changes density/loading without an invented sound-speed or pitch retuning.
+GasState itself carries no source receipts; arbitrary-mixture molecular
+relaxation, changing composition during a render and experimental validation
+remain outside these frozen-state paths.
 
 File-driven bowed, reed and plate-valve performances expose
 `from_bytes_with_gas_sources` and retain their authored `GasRecord`s. Ambient,

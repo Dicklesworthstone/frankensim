@@ -227,8 +227,21 @@ pub enum BoreRealizationReceipt {
 /// Non-IR realization options (`scenario.ir` remains frozen per `schema-policy.json`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct RealizeOptions {
-    /// Bore discretization choice for reed/duct realizations.
+    /// Bore discretization choice for reed/duct realizations. Nondefault
+    /// requests refuse on joined string/duct and prescribed-flow paths whose
+    /// propagators do not implement this selector.
     pub bore: BoreRealization,
+    /// Explicit, coherently resolved surrounding gas. Every excitation,
+    /// propagation, loading and pressure-observation consumer receives this
+    /// same state. `None` resolves the scenario's ambient-air declaration.
+    /// Solid material temperature and prestress remain independent inputs.
+    pub gas: Option<GasState>,
+    /// Explicit observer absorption law, independent of gas-state provenance
+    /// and the mechanical discretization. `None` preserves the scenario-air
+    /// path when `gas` is absent, and selects Stokes-Kirchhoff for supplied gas.
+    /// A supplied NASA-9 air state therefore needs an explicit ISO declaration
+    /// to include that air-specific molecular-relaxation model.
+    pub observer_absorption: Option<crate::air_path::GasAbsorptionModel>,
 }
 
 /// Realized observer pressure and the gas state that produced it.
@@ -253,7 +266,7 @@ pub struct RealizedAssembly {
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    realize_assembly_inner(assembly, None, None, None, &RealizeOptions::default())
+    realize_assembly_with_options(assembly, &RealizeOptions::default())
 }
 
 /// Realize an assembly with explicit non-IR [`RealizeOptions`] (such as an
@@ -266,7 +279,7 @@ pub fn realize_assembly_with_options(
     assembly: &AcousticAssembly,
     options: &RealizeOptions,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    realize_assembly_inner(assembly, None, None, None, options)
+    realize_assembly_inner(assembly, None, options)
 }
 
 /// Realize the same assembly in an explicitly supplied gas state.
@@ -279,7 +292,7 @@ pub fn realize_assembly_with_options(
 ///
 /// ISO 9613-1 is an atmospheric-air model and is not applied to arbitrary
 /// mixtures. Free-field propagation therefore uses the existing generic
-/// Stokes-Kirchhoff fallback rather than pretending the external gas has an
+/// Stokes-Kirchhoff model rather than pretending the external gas has an
 /// atmospheric relative-humidity coordinate.
 ///
 /// # Errors
@@ -288,8 +301,13 @@ pub fn realize_assembly_with_gas(
     assembly: &AcousticAssembly,
     gas: &GasState,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    validate_external_gas(gas)?;
-    realize_assembly_inner(assembly, None, Some(*gas), None, &RealizeOptions::default())
+    realize_assembly_with_options(
+        assembly,
+        &RealizeOptions {
+            gas: Some(*gas),
+            ..RealizeOptions::default()
+        },
+    )
 }
 
 /// Realize a caller-resolved gas with an explicit observer constitutive law.
@@ -301,21 +319,13 @@ pub fn realize_assembly_with_gas_and_absorption(
     gas: &GasState,
     absorption: crate::air_path::GasAbsorptionModel,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    validate_external_gas(gas)?;
-    // Validate the selected law before expensive physical stepping.
-    crate::air_path::absorb_pressure_history_with_model(
-        &mut [],
-        1.0 / f64::from(assembly.sample_rate_hz),
-        assembly.listener.distance_m,
-        gas,
-        absorption,
-    )?;
-    realize_assembly_inner(
+    realize_assembly_with_options(
         assembly,
-        None,
-        Some(*gas),
-        Some(absorption),
-        &RealizeOptions::default(),
+        &RealizeOptions {
+            gas: Some(*gas),
+            observer_absorption: Some(absorption),
+            ..RealizeOptions::default()
+        },
     )
 }
 
@@ -332,16 +342,10 @@ pub fn realize_assembly_with_plate_chart(
     chart: &fs_plate::PlateChart,
     options: &PlateChartRadiation,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    if assembly.plate.is_some() {
-        return Err(AcousticRealizeError::InvalidDescription {
-            what: "chart assembly requires the uniform plate description to be absent",
-        });
-    }
-    realize_assembly_inner(
+    realize_assembly_with_plate_chart_and_options(
         assembly,
-        Some((chart, options)),
-        None,
-        None,
+        chart,
+        options,
         &RealizeOptions::default(),
     )
 }
@@ -358,27 +362,42 @@ pub fn realize_assembly_with_plate_chart_and_gas(
     options: &PlateChartRadiation,
     gas: &GasState,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
+    realize_assembly_with_plate_chart_and_options(
+        assembly,
+        chart,
+        options,
+        &RealizeOptions {
+            gas: Some(*gas),
+            ..RealizeOptions::default()
+        },
+    )
+}
+
+/// Realize a plate chart with the same medium, absorption and bore controls as
+/// an ordinary assembly. Regional material assignment does not select or
+/// discard any gas constitutive law or numerical-resolution request.
+///
+/// # Errors
+/// Conflicting plate descriptions, incoherent gas, invalid observer laws, and
+/// ordinary chart/assembly/numerical refusals propagate before publication.
+pub fn realize_assembly_with_plate_chart_and_options(
+    assembly: &AcousticAssembly,
+    chart: &fs_plate::PlateChart,
+    radiation: &PlateChartRadiation,
+    options: &RealizeOptions,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.plate.is_some() {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "chart assembly requires the uniform plate description to be absent",
         });
     }
-    validate_external_gas(gas)?;
-    realize_assembly_inner(
-        assembly,
-        Some((chart, options)),
-        Some(*gas),
-        None,
-        &RealizeOptions::default(),
-    )
+    realize_assembly_inner(assembly, Some((chart, radiation)), options)
 }
 
 #[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
-    gas_override: Option<GasState>,
-    absorption: Option<crate::air_path::GasAbsorptionModel>,
     realize_options: &RealizeOptions,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
@@ -398,10 +417,37 @@ fn realize_assembly_inner(
             what: "listener distance must be positive and finite",
         });
     }
-    let gas = match gas_override {
-        Some(gas) => gas,
+    if realize_options.bore != BoreRealization::default()
+        && (assembly.reed.is_none() || assembly.duct.is_none() || assembly.string.is_some())
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "explicit bore discretization requires a reed-driven duct without a string member",
+        });
+    }
+    let gas = match realize_options.gas {
+        Some(gas) => {
+            validate_external_gas(&gas)?;
+            gas
+        }
         None => gas_state(assembly.ambient)?,
     };
+    // Constitutive selection follows the input path, not equality of floating
+    // coefficients with a freshly resolved air preset. This also lets sourced
+    // plates, strings and reeds carry the same explicit observer law.
+    let absorption = realize_options.observer_absorption.or_else(|| {
+        realize_options
+            .gas
+            .map(|_| crate::air_path::GasAbsorptionModel::StokesKirchhoff)
+    });
+    if let Some(model) = absorption {
+        crate::air_path::absorb_pressure_history_with_model(
+            &mut [],
+            1.0 / f64::from(assembly.sample_rate_hz),
+            assembly.listener.distance_m,
+            &gas,
+            model,
+        )?;
+    }
     if let Some(string) = assembly
         .string
         .as_ref()
@@ -1243,21 +1289,15 @@ fn finish_observer(
             model,
         )?;
     } else {
-        // ISO 9613-1 is only valid for atmospheric air. If this exact state did
-        // not come from the scenario AmbientGas declaration, deliberately pass an
-        // invalid humidity so absorb_pressure_history selects its documented
-        // Stokes-Kirchhoff generic-gas fallback at every frequency bin.
-        let relative_humidity = if gas_state(assembly.ambient).ok().as_ref() == Some(gas) {
-            assembly.ambient.relative_humidity
-        } else {
-            f64::NAN
-        };
+        // Only the original scenario-air path reaches this compatibility law.
+        // Supplied gases and explicitly chosen laws were admitted once before
+        // stepping; they never infer air identity from numerical coefficients.
         crate::air_path::absorb_pressure_history(
             &mut pressure_pa,
             dt,
             assembly.listener.distance_m,
             gas,
-            relative_humidity,
+            assembly.ambient.relative_humidity,
         );
     }
     Ok(RealizedAssembly {
@@ -6138,6 +6178,54 @@ mod arbitrary_gas_realization_tests {
         assert!(changed.pressure_pa.iter().all(|value| value.is_finite()));
         assert_ne!(changed.pressure_pa, air.pressure_pa);
         assert_eq!(description.ambient, AmbientGas::sea_level());
+    }
+
+    #[test]
+    fn explicit_gas_law_does_not_depend_on_equality_with_an_ambient_preset() {
+        use crate::air_path::GasAbsorptionModel;
+        let description = fixture();
+        let gas = gas_state(description.ambient).unwrap();
+        let options = RealizeOptions {
+            gas: Some(gas),
+            ..RealizeOptions::default()
+        };
+        let supplied = realize_assembly_with_options(&description, &options).unwrap();
+        let classical = realize_assembly_with_gas_and_absorption(
+            &description,
+            &gas,
+            GasAbsorptionModel::StokesKirchhoff,
+        )
+        .unwrap();
+        assert_eq!(supplied, classical);
+        let mut unrelated_ambient = description.clone();
+        unrelated_ambient.ambient.relative_humidity = 0.75;
+        assert_eq!(
+            supplied,
+            realize_assembly_with_options(&unrelated_ambient, &options).unwrap()
+        );
+        let explicit_air = realize_assembly_with_options(
+            &description,
+            &RealizeOptions {
+                observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
+                    relative_humidity: 0.0,
+                }),
+                ..options
+            },
+        )
+        .unwrap();
+        assert_ne!(supplied.pressure_pa, explicit_air.pressure_pa);
+        assert!(matches!(
+            realize_assembly_with_options(
+                &description,
+                &RealizeOptions {
+                    bore: BoreRealization::lumped_ladder(1),
+                    ..options
+                }
+            ),
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "explicit bore discretization requires a reed-driven duct without a string member"
+            })
+        ));
     }
 
     #[test]

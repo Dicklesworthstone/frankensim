@@ -340,6 +340,8 @@ fn checked_reed_composes_with_independent_source_bound_string() {
 
 #[test]
 fn same_compiled_reed_uses_the_explicit_gas_renderer_without_a_second_loop() {
+    use fs_couple::acoustic_realize::{AcousticRealizeError, BoreRealization, RealizeOptions};
+    use fs_couple::air_path::GasAbsorptionModel;
     with_cx(|cx| {
         let mut input = template();
         input.ambient.temperature_k = -1.0; // invalid, and ignored ONLY by explicit-gas realization
@@ -367,6 +369,30 @@ fn same_compiled_reed_uses_the_explicit_gas_renderer_without_a_second_loop() {
         let mut invalid = gas;
         invalid.density = 0.0;
         assert!(result.realize_with_gas(&invalid).is_err());
+        let options = RealizeOptions {
+            gas: Some(gas),
+            observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
+                relative_humidity: 0.5,
+            }),
+            ..RealizeOptions::default()
+        };
+        let selected = result.realize_with_options(&options).unwrap();
+        assert_eq!(
+            selected,
+            result.compiled().realize_with_options(&options).unwrap()
+        );
+        assert_eq!(selected.gas, gas);
+        assert_ne!(selected.pressure_pa, actual.pressure_pa);
+        // A material-derived valve must retain the caller's numerical request:
+        // the underresolved ladder refuses rather than silently becoming the
+        // default characteristic line when compiled solid sources are present.
+        assert!(matches!(
+            result.realize_with_options(&RealizeOptions {
+                bore: BoreRealization::lumped_ladder(1),
+                ..options
+            }),
+            Err(AcousticRealizeError::LumpedLadderBand { .. })
+        ));
     });
 }
 
