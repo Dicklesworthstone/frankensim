@@ -335,14 +335,68 @@ fn render_chunked(name: &str, hits: &[(f64, f64)], secs: f64, o: &Opts) -> Vec<V
     y
 }
 
+fn encode_audio(channels: &[Vec<f64>]) -> Result<(Vec<u8>, f64), String> {
+    let mut peak = 0.0_f64;
+    for (channel, samples) in channels.iter().enumerate() {
+        for (frame, &sample) in samples.iter().enumerate() {
+            // f64::max ignores NaN. Validate each sample, including its WAV
+            // conversion, before encoding or opening the destination file.
+            if !(sample as f32).is_finite() {
+                return Err(format!("invalid float32 output at channel {channel}, frame {frame}"));
+            }
+            peak = peak.max(sample.abs());
+        }
+    }
+    Ok((fs_vkplate::wav_f32(channels, kit::OUT_RATE as u32), peak))
+}
+
+fn write_audio(channels: &[Vec<f64>], out: &str) -> f64 {
+    let (bytes, peak) = encode_audio(channels).unwrap_or_else(|e| die(&e));
+    std::fs::write(out, bytes).unwrap_or_else(|e| die(&format!("{out}: {e}")));
+    peak
+}
+
 fn finish(p: &Piece, raw: &[Vec<f64>], skip: usize, out: &str) {
     let ch: Vec<Vec<f64>> = raw.iter().map(|c| fs_vkplate::decimate(&c[skip.min(c.len())..], p.oversample)).collect();
-    let peak = ch.iter().flatten().fold(0.0f64, |m, &x| m.max(x.abs()));
-    if !peak.is_finite() {
-        die("non-finite output");
-    }
-    std::fs::write(out, fs_vkplate::wav_f32(&ch, kit::OUT_RATE as u32)).unwrap_or_else(|e| die(&format!("{out}: {e}")));
+    let peak = write_audio(&ch, out);
     eprintln!("{out}: peak {peak:.3} Pa");
+}
+
+#[cfg(test)]
+mod audio_output_tests {
+    use super::encode_audio;
+
+    // G0: reject invalid output in any channel before WAV conversion can
+    // hide a NaN in the peak reduction or overflow a finite f64 sample.
+    #[test]
+    fn refuses_nonfinite_and_float32_overflow_in_later_channels() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+                        2.0 * f64::from(f32::MAX), -2.0 * f64::from(f32::MAX)] {
+            let channels = [vec![0.0, 0.5, 0.0], vec![0.25, invalid, 0.0]];
+            assert_eq!(encode_audio(&channels).unwrap_err(),
+                "invalid float32 output at channel 1, frame 1");
+        }
+        assert!(encode_audio(&[vec![f64::NAN; 3]]).is_err());
+    }
+
+    #[test]
+    fn preserves_valid_samples_and_interleaving_without_clipping_pressure() {
+        let channels = [vec![-0.0, 2.5, -0.25], vec![0.125, -3.0, 0.5]];
+        let (bytes, peak) = encode_audio(&channels).unwrap();
+        assert_eq!(peak, 3.0);
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..16], b"WAVEfmt ");
+        assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 48000);
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 24);
+        let expected = [-0.0_f32, 0.125, 2.5, -3.0, -0.25, 0.5];
+        assert_eq!(bytes.len(), 44 + 4 * expected.len());
+        for (encoded, sample) in bytes[44..].chunks_exact(4).zip(expected) {
+            assert_eq!(u32::from_le_bytes(encoded.try_into().unwrap()), sample.to_bits());
+        }
+    }
 }
 
 fn fft(re: &mut [f64], im: &mut [f64]) {
@@ -531,11 +585,7 @@ fn main() {
     if o.chunks > 1 {
         let t = Instant::now();
         let y = render_chunked(&pos[0], &hits, secs, &o);
-        let peak = y.iter().flatten().fold(0.0f64, |m, &x| m.max(x.abs()));
-        if !peak.is_finite() {
-            die("non-finite output");
-        }
-        std::fs::write(&pos[2], fs_vkplate::wav_f32(&y, kit::OUT_RATE as u32)).unwrap_or_else(|e| die(&e.to_string()));
+        let peak = write_audio(&y, &pos[2]);
         eprintln!("{}: peak {peak:.3} Pa; {secs} s in {:.1} s overall", pos[2], t.elapsed().as_secs_f64());
         return;
     }
@@ -547,6 +597,6 @@ fn main() {
         let out = kit::render(&mut p, secs, |f| eprint!("\r{:5.1} %", 100.0 * f));
         let wall = t.elapsed().as_secs_f64();
         eprintln!("\r{secs} s rendered on the CPU in {wall:.1} s ({:.1}x real time)", secs / wall);
-        std::fs::write(&pos[2], fs_vkplate::wav_f32(&out, kit::OUT_RATE as u32)).unwrap_or_else(|e| die(&e.to_string()));
+        write_audio(&out, &pos[2]);
     }
 }
