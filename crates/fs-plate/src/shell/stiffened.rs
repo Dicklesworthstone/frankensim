@@ -10,6 +10,8 @@
 
 /// Tapered round-beam flexure with consistent rotary inertia.
 pub mod beam;
+/// Shear-deformable (Timoshenko) segments between a beam's own nodes; Euler-Bernoulli is its Phi = 0 case.
+pub mod timoshenko;
 
 use super::{ShellMesh, ShellModel, ShellSupport, ShellSection};
 use super::section::Section;
