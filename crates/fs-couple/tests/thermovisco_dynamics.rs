@@ -668,3 +668,6 @@ fn g4_failed_thermal_trials_and_cancellation_preserve_the_whole_vibrating_histor
     );
     assert!(a.step(1e9, 0.0001, config(), adiabatic, &gate).is_err());
 }
+
+#[path = "thermovisco_dynamics/finite_gas.rs"]
+mod finite_gas;

@@ -4552,3 +4552,33 @@ rollback. These are synthetic analytic fixtures. The existing sequential
 small-strain, fully-solid, one-way quasistatic approximation remains explicit;
 caloric and elastic energy are reported separately, with no reciprocal
 thermoelastic heat, changing transport geometry or experimental claim.
+
+### Finite source gas on uniform thermal feedback
+
+`finite_gas_thermal::FiniteGasThermalEnvironment` adapts the original
+`LumpedThermalEnvironment` to an `IsochoricGasParcel` through the existing
+`UniformEnthalpyStep` callback. Each proposal retains the accepted body, gas and
+hereditary history. The original gas energy inversion receives prescribed gas
+heat + Q; the original lumped body solves against that trial gas endpoint. The
+shared bounded feedback owner enforces Q + dt*convection_into_body_w = 0. No
+heat-capacity, EOS, Biot or enthalpy solver is replaced.
+
+Accepted body boundary heat is separately integrated enclosure radiation - Q.
+The same Q enters the gas, while the original body's endpoint powers and the
+source mismatch remain explicit in the report. Actual body and combined body/gas
+storage residuals must each meet the declared absolute allowance. Radiation is
+an external enclosure transfer, not a second gas heat credit. Discarded
+material/thermal trials never debit the finite reservoir; callers publish the
+returned gas only after their entire coupled candidate accepts.
+
+The original source, whole-curve Biot, chart and cancellation refusals remain.
+Film coefficient applicability and a well-mixed, fixed-volume gas inventory are
+explicit assumptions. No flow, pressure work, reaction, spatial gas gradient or
+acoustic loading is implied. Source data and numerical energy closure are not
+experimental material validation.
+
+Focused G1/G3/G4 regression definitions in
+`tests/thermovisco_dynamics/finite_gas.rs` cover independent two-capacity exchange,
+finite gas inventory changing actual hereditary vibration, exact insulation
+parity, independent radiation ownership, measured combined energy and
+failed/cancelled proposals preserving both accepted owners.
