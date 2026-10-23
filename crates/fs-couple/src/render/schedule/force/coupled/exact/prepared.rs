@@ -584,11 +584,16 @@ fn matrix_agrees(a: &[f64], b: &[f64], n: usize, what: &'static str) -> Result<(
 
 fn product(a: &[f64], b: &[f64], n: usize, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError> {
     let mut result = vec![0.0; n * n];
-    for i in 0..n {
+    // Every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, bit for bit. Four rows share each row of b while it
+    // is in cache, and the slice update vectorizes over j.
+    for (a_rows, out_rows) in a.chunks(4 * n).zip(result.chunks_mut(4 * n)) {
         poll(Some(gate))?;
-        for k in 0..n {
-            for j in 0..n {
-                result[i * n + j] += a[i * n + k] * b[k * n + j];
+        for (k, b_row) in b.chunks_exact(n).enumerate() {
+            for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
+                let scale = a_row[k];
+                for (value, &right) in out_row.iter_mut().zip(b_row) {
+                    *value += scale * right;
+                }
             }
         }
     }
@@ -641,8 +646,31 @@ fn gramian(
 }
 
 fn apply(matrix: &[f64], z: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
-    matrix.chunks_exact(z.len()).map(|row| row.iter().zip(z)
-        .try_fold(0.0, |s, (a, b)| finite(s + a * b))).collect()
+    // Each entry is its row's left-to-right sum, bit for bit; four rows advance together so their independent sums overlap.
+    // A partial sum that leaves the finite range never returns to it (inf + finite = inf, inf - inf = NaN, NaN stays), so
+    // checking each finished row refuses exactly what a check of every partial sum refused.
+    let n = z.len();
+    let mut result = Vec::with_capacity(matrix.len() / n);
+    let mut blocks = matrix.chunks_exact(4 * n);
+    for rows in blocks.by_ref() {
+        let (r0, rest) = rows.split_at(n);
+        let (r1, rest) = rest.split_at(n);
+        let (r2, r3) = rest.split_at(n);
+        let mut sums = [0.0_f64; 4];
+        for ((((&value, &a0), &a1), &a2), &a3) in z.iter().zip(r0).zip(r1).zip(r2).zip(r3) {
+            sums[0] += a0 * value;
+            sums[1] += a1 * value;
+            sums[2] += a2 * value;
+            sums[3] += a3 * value;
+        }
+        for sum in sums {
+            result.push(finite(sum)?);
+        }
+    }
+    for row in blocks.remainder().chunks_exact(n) {
+        result.push(finite(row.iter().zip(z).fold(0.0, |s, (a, b)| s + a * b))?);
+    }
+    Ok(result)
 }
 
 fn quadratic(matrix: &[f64], z: &[f64]) -> Result<f64, ModalCouplingError> {

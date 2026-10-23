@@ -305,3 +305,44 @@ fn free_prediction_keeps_its_energy_check_on_every_64th_sample_and_equals_the_fu
         system.step(&external).unwrap();
     }
 }
+
+/// Deterministic sign-mixed entries over forty binades, with exact zeros of both signs, for the bit-identity checks.
+fn entries(count: usize, seed: &mut u64) -> Vec<f64> {
+    (0..count).map(|i| {
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        match i % 11 {
+            3 => 0.0,
+            7 => -0.0,
+            _ => ((*seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2f64.powi((*seed % 40) as i32 - 20),
+        }
+    }).collect()
+}
+
+#[test]
+fn the_blocked_product_and_four_row_apply_equal_the_textbook_loops_bit_for_bit() {
+    let gate = CancelGate::new_clock_free();
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    // Sizes below, at and between multiples of the four-row block, and one the size of a small network.
+    for n in [1, 2, 3, 4, 5, 7, 8, 9, 13, 64, 99] {
+        let (a, b, z) = (entries(n * n, &mut seed), entries(n * n, &mut seed), entries(n, &mut seed));
+        let mut textbook = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                for j in 0..n {
+                    textbook[i * n + j] += a[i * n + k] * b[k * n + j];
+                }
+            }
+        }
+        let blocked = product(&a, &b, n, &gate).unwrap();
+        assert!(blocked.iter().zip(&textbook).all(|(x, y)| x.to_bits() == y.to_bits()), "product, n = {n}");
+        let rows: Vec<f64> = a.chunks_exact(n).map(|row| row.iter().zip(&z).fold(0.0, |s, (x, y)| s + x * y)).collect();
+        let applied = apply(&a, &z).unwrap();
+        assert!(applied.iter().zip(&rows).all(|(x, y)| x.to_bits() == y.to_bits()), "apply, n = {n}");
+    }
+    // A row that overflows refuses, inside a four-row block and in the remainder rows alike.
+    for (n, row) in [(5, 1), (5, 4)] {
+        let mut a = vec![1.0; n * n];
+        a[row * n] = f64::MAX;
+        assert!(apply(&a, &vec![2.0; n]).is_err(), "row {row}");
+    }
+}

@@ -148,10 +148,19 @@ fn identity(n: usize) -> Vec<f64> {
 
 fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n * n];
-    for i in 0..n {
-        for k in 0..n {
-            for j in 0..n {
-                out[i * n + j] += a[i * n + k] * b[k * n + j];
+    if n == 0 {
+        return out;
+    }
+    // Every entry is the k = 0, 1, ... sum of the textbook i-k-j loop, so the
+    // result is the same bit for bit. Four rows share each row of b while it
+    // is in cache, and the slice update vectorizes over j.
+    for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
+        for (k, b_row) in b.chunks_exact(n).enumerate() {
+            for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
+                let scale = a_row[k];
+                for (value, &right) in out_row.iter_mut().zip(b_row) {
+                    *value += scale * right;
+                }
             }
         }
     }
@@ -1511,5 +1520,36 @@ mod tests {
         let x = [1.0, 1e-8, 0.0]; // Q*x = [1,1,0] up to declared roundoff.
         let record = step_split(&sys, &split, LinearPropagator::ExactZoh, &x, &[], 1e-5).unwrap();
         assert!(record.balance_residual().abs() <= 1e-12 * sys.hamiltonian(&x));
+    }
+
+    #[test]
+    fn blocked_product_equals_the_textbook_loop_bit_for_bit() {
+        // Sign-mixed entries over forty binades, with exact zeros of both
+        // signs; sizes below, at and between multiples of the four-row block.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut entries = |count: usize| -> Vec<f64> {
+            (0..count).map(|i| {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                match i % 11 {
+                    3 => 0.0,
+                    7 => -0.0,
+                    _ => ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2f64.powi((seed % 40) as i32 - 20),
+                }
+            }).collect()
+        };
+        assert!(product(&[], &[], 0).is_empty());
+        for n in [1, 2, 3, 4, 5, 7, 8, 9, 13, 64, 99] {
+            let (a, b) = (entries(n * n), entries(n * n));
+            let mut textbook = vec![0.0; n * n];
+            for i in 0..n {
+                for k in 0..n {
+                    for j in 0..n {
+                        textbook[i * n + j] += a[i * n + k] * b[k * n + j];
+                    }
+                }
+            }
+            let blocked = product(&a, &b, n);
+            assert!(blocked.iter().zip(&textbook).all(|(x, y)| x.to_bits() == y.to_bits()), "n = {n}");
+        }
     }
 }
