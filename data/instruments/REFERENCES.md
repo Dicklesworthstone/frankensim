@@ -1,0 +1,168 @@
+# Real instrument reference recordings
+
+`references-supplemental.json`, together with its `baseline_ids` from
+`references.json`, supplies actual recordings for all 22 instrument family
+cards, plus piano, organ, steel-string guitar, timpani and the nine drum-kit
+comparison states. Originals remain outside Git. The existing Iowa manifest has
+1,176 files (about 12.3 GB); its selected baseline requires 21 files
+(110,212,120 bytes), including an ambient-noise control.
+
+These recordings test predictions from independently specified geometry,
+materials, contact and atmosphere. They are not synthesis inputs or targets for
+adjusting physical constants until a spectrum matches. Acquisition is not a
+claim that any instrument now sounds realistic.
+
+## Selective acquisition
+
+Set `FRANKENSIM_REFERENCE_DIR` to an existing directory on the reference volume.
+The fetcher verifies SHA-256 and byte length, refuses changed files and preserves
+the originals. It does not resample, normalize or retune.
+
+```sh
+# Listing needs neither a destination nor network access.
+bash data/instruments/fetch-references.sh --list --instrument Violin
+bash data/instruments/fetch-references.sh --list \
+  --manifest data/instruments/references-supplemental.json
+
+# One existing Iowa note sequence.
+bash data/instruments/fetch-references.sh \
+  --id uiowa-violin2012-violin-arco-mf-sula-a4b4-mono
+
+# One supplemental family, without fetching any archives.
+bash data/instruments/fetch-references.sh \
+  --manifest data/instruments/references-supplemental.json --instrument Recorder
+```
+
+`--instrument` is case-insensitive and exact; both selectors are repeatable.
+Combining `--instrument` and `--id` intersects them. Unknown selectors and empty
+intersections fail before downloading. No selector means the entire chosen
+manifest: about 544 MB for the supplement, including the 388 MB drum-kit archive.
+
+Fetch the smaller Iowa selection without copying its IDs:
+
+```sh
+python3 - <<'PY'
+import json, subprocess
+from pathlib import Path
+cohort = json.loads(Path("data/instruments/references-supplemental.json").read_text())
+args = ["bash", "data/instruments/fetch-references.sh"]
+for recording in cohort["baseline_ids"]:
+    args.extend(["--id", recording])
+subprocess.run(args, check=True)
+PY
+```
+
+The pan-flute, steel-string guitar and Salamander entries are archives. Each
+lists the exact selected member names, output paths, SHA-256 and byte length.
+Extract only those named members and check their hashes. The Salamander members
+are the ones already used by `apps/instrument-lab/tools/kitgrade.py`; point its
+Salamander argument at the extracted `Salamander` directory. An archive is a
+source container, not an audio file.
+
+## Coverage
+
+Pitch/dynamic labels below come from the source. Chromatic-range files contain
+individual notes and silence and need segmentation before note-level
+comparison. Instrument keys such as “D whistle” or “C duduk” do not identify
+every performed note.
+
+| Instrument or state | Acquired recording | Source |
+|---|---|---|
+| Violin | arco and pizzicato A4–B4 on A string; arco G3–B3 on G string | Iowa 2012 |
+| Cello | arco A3–Ab4 on A string; arco and pizzicato C2–B2 on C string | Iowa 2012 |
+| Viola | arco A4–B4 on A string | Iowa 2012 |
+| Double bass | arco E1–B1 on E string | Iowa 2012 |
+| Guitar | B3 on B string, mf | Iowa |
+| Steel-string guitar | E4, HV sample, SFZ key 64 | FreePats / FlameStudios |
+| Flute | C5–B5, mf, no vibrato | Iowa |
+| Bb clarinet | C4–B4, mf; ambient silence | Iowa |
+| Oboe | C4–B4, mf | Iowa |
+| Bassoon | C3–B3, mf | Iowa |
+| Alto saxophone | C4–B4, mf, no vibrato | Iowa |
+| Bb trumpet | C4–B4, mf, no vibrato | Iowa |
+| French horn | C4–B4, mf | Iowa |
+| Tenor trombone | C3–B3, mf | Iowa |
+| Tuba | C2–B2, mf | Iowa |
+| Marimba | C4–B4, mf, yarn mallet | Iowa |
+| Xylophone | C5–B5, mf, hard-rubber mallet | Iowa |
+| Vibraphone | sustained C4–B4, mf | Iowa |
+| Recorder | baroque alto recorder, sustained C4/E4 labels, Main microphone | VCSL |
+| Tin whistle | phrase on metal D whistle with wooden stop | TimRoss / Wikimedia Commons |
+| Pan pipes | D4/G4 labels, native untuned recordings | pattingthestar / OpenGameArt |
+| Duduk | C-duduk performance by Steen, public MP3 preview | juskiddink / Freesound |
+| Voice | Mirko “ah”, file 60 (C4 label) | SpectMorph |
+| Piano | Steinway B A4, pp/mf/ff | Iowa |
+| Organ flue pipe | Renaissance organ 8-foot register C3, Room microphone | VCSL |
+| Timpani / kettle | two Timpani 1 strikes, v2/v4 source layers, summed microphones | VCSL |
+| Kick, snare wires on/off, high/low toms, closed/open hi-hat, crash, ride | nine overhead-microphone samples matching `kitgrade.py` | Alexander Holm / Salamander |
+
+On 2026-10-23, the selected existing pins matched, supplemental originals were
+hashed, and all **45 retained audio files (1,569.812 seconds)** passed a complete
+FFmpeg decode. The Salamander archive was fully hashed while streaming and only
+its nine selected members were retained. These checks establish availability
+and integrity, not acoustic fidelity.
+
+## Recording limits and attribution
+
+The supplement has `gradable: false` throughout. It extends listening coverage;
+an objective comparison still needs specimen, pitch, articulation and
+recording-chain controls.
+
+- [Iowa](https://theremin.music.uiowa.edu/MIS.html) documents equipment and
+  anechoic recording for many families, including vibraphone. The piano is a
+  Steinway B recorded in room 2017 of Voxman, with microphones over bass/treble
+  strings; it is not a free-field Steinway D measurement.
+- [VCSL](https://github.com/sgossner/VCSL) is CC0 and supplies real recordings,
+  but permits tuning, mild EQ and noise reduction. Its recorder, organ and
+  timpani files do not establish measured specimen geometry or excitation.
+- [FreePats](https://freepats.zenvoid.org/Guitar/steel-acoustic-guitar.html)
+  explicitly documents filtering, noise suppression, edits and trimming of the
+  Gary Campion / FlameStudios guitar recordings. Its license is GPL-3.0-or-later
+  with the archive's FreePats composition exception.
+- [The pan flute](https://opengameart.org/content/wip-raw-pan-flute-audio) is
+  pattingthestar's CC0 amateur, untuned, one-row instrument.
+  [The whistle](https://commons.wikimedia.org/wiki/File:MetalTinWhistleWoodenStop.ogg)
+  is TimRoss's public-domain lossy phrase.
+  [The duduk](https://freesound.org/people/juskiddink/sounds/180004/) is the
+  openly supplied CC BY 4.0 MP3 preview by juskiddink, played by Steen, not the
+  login-protected original WAV. These are listening references, not
+  characterized specimens.
+- [SpectMorph](https://github.com/swesterfeld/spectmorph-instruments) supplies
+  a real voice recording under CC0. It does not replace the independent
+  VocalSet cohort or establish glottal flow and vocal-tract geometry.
+- [The archived Salamander release](https://archive.org/details/SalamanderDrumkit)
+  by Alexander Holm states CC BY-SA 3.0. Its garage room and microphone response
+  remain, and dynamic labels do not measure strike forces. This license pin
+  refers to that release, not a later relicensed one.
+
+Licenses, credit, source pages, exact original URLs and hashes accompany the
+manifest entries. No audio is redistributed by these metadata files.
+
+## From mechanics to the listening check
+
+For bowed strings, test independently predicted open-string pitch,
+inharmonicity and decay against pizzicato first. With the same string and body
+inputs, inspect arco onset, sustained motion and release. Changing the contact
+implement must affect that same coupled string/body system. Keep recording
+room, microphone, player technique and unmeasured parameters explicit when
+interpreting a discrepancy.
+
+Existing geometry sources include `geometry/violin-mclennan2009`,
+`geometry/violin-cannone-guarneri-1743-esrf2026` and
+`geometry/loc-stradivari-family-bouts`. These are different specimens from the
+Iowa recordings; a shared family name does not establish geometric equivalence.
+
+[Woodhouse's friction/rosin treatment](https://euphonics.org/9-6-friction-and-rosin-a-sticky-problem/)
+and [thermal-model discussion](https://euphonics.org/9-6-3-exploring-the-thermal-bowing-models/)
+explain why rosin state and frictional heating matter and why a velocity-only
+friction curve is an approximation. [Yamaha's bow construction guide](https://www.yamaha.com/en/musical_instrument_guide/violin/mechanism/mechanism003.html)
+describes roughly 160–180 hairs in a ribbon and demonstrates the effect of rosin.
+Neither supplies measured coefficients for the exact recorded bow. Finite
+ribbon geometry, contact load distribution, material measurements and reciprocal
+body/air response must constrain the model; reference audio alone cannot
+identify them.
+
+Across instruments, specified geometry and material laws produce excitation,
+coupled motion and radiated pressure; independently acquired recordings then
+challenge that prediction. Extra-reference beads remain open where their
+characterized-recording requirements are not met.

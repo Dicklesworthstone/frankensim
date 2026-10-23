@@ -3,15 +3,15 @@
   "family": "vibraphone",
   "title": "Vibraphone",
   "reference_instrument": null,
-  "summary": "No vibraphone is rendered and there is no recording of one to compare with: the Iowa library has marimba and xylophone but no vibraphone.",
+  "summary": "No vibraphone is rendered. A real Iowa sustained mf C4-B4 recording has been downloaded and pinned in references-supplemental.json; the instrument still needs measured geometry and a controlled comparison.",
   "physics_present": [],
   "physics_missing": [
-    "A recording of a real vibraphone to grade against",
+    "A segmented, specimen-aware comparison using the acquired recording and its documented recording chain",
     "Published aluminium-bar dimensions and undercut for one real instrument",
     "Resonator tubes with their rotating fan valves, which give the vibrato",
     "The tubular resonator coupling that the marimba also lacks"
   ],
-  "blocked": "No reference recording and no published instrument description have been found; the bar slice built for the xylophone would be the starting point once both exist.",
+  "blocked": "The reference recording is available, but the recorded instrument's bar, undercut and resonator geometry remain unidentified. The xylophone bar slice is a starting point; no vibraphone render or grading claim is made.",
   "beads": [
     "pexfp.274"
   ]

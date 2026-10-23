@@ -1,0 +1,582 @@
+{
+  "schema": "frankensim.instrument-references.v1",
+  "bead": "frankensim-irp-v5-instrument-realism-pexfp.218",
+  "related_beads": [
+    "frankensim-irp-v5-instrument-realism-pexfp.219"
+  ],
+  "retrieved_utc": "2026-10-23T02:23:33Z",
+  "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. Named archive members require separate extraction.",
+  "purpose": "Real recordings for independent listening and validation of physics predictions; never synthesis inputs or parameter-fitting targets. All supplemental entries remain gradable=false pending appropriate specimen, pitch, articulation and recording-chain controls.",
+  "baseline_manifest": "data/instruments/references.json",
+  "baseline_ids": [
+    "uiowa-bbclarinet-bbclar-ambient-silence",
+    "uiowa-bbclarinet-bbclar-mf-c4b4",
+    "uiowa-bbtrumpet-trumpet-novib-mf-c4b4",
+    "uiowa-frenchhorn-horn-mf-c4b4",
+    "uiowa-altosaxophone-altosax-novib-mf-c4b4",
+    "uiowa-bassoon-bassoon-mf-c3b3",
+    "uiowa-cello2012-cello-arco-mf-sulc-c2b2-mono",
+    "uiowa-cello2012-cello-arco-mf-sula-a3ab4-mono",
+    "uiowa-cello2012-cello-pizz-mf-sulc-c2b2-mono",
+    "uiowa-doublebass2012-bass-arco-sule-mf-e1b1-mono",
+    "uiowa-flute-flute-nonvib-mf-c5b5",
+    "uiowa-guitar-guitar-mf-sulb-b3-mono",
+    "uiowa-oboe-oboe-mf-c4b4",
+    "uiowa-tenortrombone-tenortrombone-mf-c3b3",
+    "uiowa-tuba-tuba-mf-c2b2",
+    "uiowa-viola2012-viola-arco-sula-mf-a4b4-mono",
+    "uiowa-violin2012-violin-arco-mf-sulg-g3b3-mono",
+    "uiowa-violin2012-violin-arco-mf-sula-a4b4-mono",
+    "uiowa-violin2012-violin-pizz-mf-sula-a4b4-mono",
+    "uiowa-xylophone-xylophone-hardrubber-mf-c5b5",
+    "uiowa-marimba-marimba-yarn-mf-c4b4"
+  ],
+  "licences": [
+    {
+      "id": "uiowa-mis",
+      "name": "University of Iowa Musical Instrument Samples: unrestricted project use",
+      "url": "https://theremin.music.uiowa.edu/MIS.html",
+      "credit": "University of Iowa Electronic Music Studios; performers and recording staff credited on each instrument page",
+      "notes": "Download for reference comparison. No audio is redistributed in this repository."
+    },
+    {
+      "id": "vcsl-cc0",
+      "name": "CC0 1.0",
+      "url": "https://github.com/sgossner/VCSL",
+      "credit": "Versilian Studios LLC and VCSL contributors",
+      "notes": "Source permits tuning, mild EQ and noise reduction. A microphone label does not establish unprocessed audio or calibrated measurements."
+    },
+    {
+      "id": "spectmorph-cc0",
+      "name": "CC0 1.0",
+      "url": "https://github.com/swesterfeld/spectmorph-instruments",
+      "credit": "SpectMorph contributors; Mirko voice recordings",
+      "notes": "Real voice recording; no documented glottal flow, vocal-tract geometry or microphone calibration. This is not the independent VocalSet cohort."
+    },
+    {
+      "id": "timross-pd",
+      "name": "Public domain: author dedication",
+      "url": "https://commons.wikimedia.org/wiki/File:MetalTinWhistleWoodenStop.ogg",
+      "credit": "TimRoss, 2008-07-01",
+      "notes": "Author's own recording of a metal D tin whistle with wooden stop. Lossy Ogg phrase; room and microphone unknown."
+    },
+    {
+      "id": "duduk-cc-by-4",
+      "name": "CC BY 4.0",
+      "url": "https://freesound.org/people/juskiddink/sounds/180004/",
+      "credit": "juskiddink, Duduk.wav, 2013-03-05; C duduk played by Steen",
+      "notes": "Only the openly supplied lossy MP3 preview was downloaded. The full WAV requires login and was not acquired. Individual phrase notes and recording chain are uncharacterized."
+    },
+    {
+      "id": "panflute-cc0",
+      "name": "CC0 1.0",
+      "url": "https://opengameart.org/content/wip-raw-pan-flute-audio",
+      "credit": "pattingthestar, WIP Raw Pan Flute Audio, 2023-06-14",
+      "notes": "Source describes amateur untuned one-row pan-flute recordings. Retain native tuning; this is not a measured Andean siku specimen."
+    },
+    {
+      "id": "freepats-gpl-exception",
+      "name": "GPL-3.0-or-later with FreePats composition exception",
+      "url": "https://freepats.zenvoid.org/Guitar/steel-acoustic-guitar.html",
+      "credit": "Gary Campion / FlameStudios, 2008; modified by Roberto for FreePats, 2016-2020",
+      "notes": "The archive readme explicitly documents noise suppression, filtering, edits and trimming. Retain readme.txt and gpl.txt if redistributing samples; none are committed here."
+    },
+    {
+      "id": "salamander-cc-by-sa-3",
+      "name": "CC BY-SA 3.0 (the archived release)",
+      "url": "https://archive.org/details/SalamanderDrumkit",
+      "credit": "Alexander Holm, Salamander Drumkit",
+      "notes": "This pin uses the archived release's stated license, not a later relicensed release. Garage room and overhead microphone response remain; source dynamic labels are not measured strike forces."
+    }
+  ],
+  "chains": [
+    {
+      "id": "uiowa-vibraphone-2013",
+      "source_url": "https://theremin.music.uiowa.edu/Misvibraphone.html",
+      "mic": "Earthworks QTC-40",
+      "distance_m": 1.524,
+      "signal_chain": [
+        "Metric Halo 2882"
+      ],
+      "format": "24-bit/44.1 kHz stereo",
+      "room": "anechoic chamber, Wendell Johnson Speech and Hearing Center, University of Iowa",
+      "notes": "The source page does not identify the instrument model or exact left/right microphone routing."
+    },
+    {
+      "id": "uiowa-piano-2001",
+      "source_url": "https://theremin.music.uiowa.edu/MISpiano.html",
+      "mic": "two Neumann KM 84 microphones",
+      "distance_m": 0.2032,
+      "signal_chain": [
+        "Mackie 1402-VLZ mixer",
+        "Panasonic SV-3800 DAT recorder"
+      ],
+      "format": "16-bit/44.1 kHz stereo",
+      "room": "room 2017, Voxman Music Building (not an anechoic chamber)",
+      "notes": "8 inches above bass and treble strings; Steinway B, performed by Evan Mazunik, recorded by Michael Cash in November 2001."
+    }
+  ],
+  "files": [
+    {
+      "id": "vcsl-recorder-c4",
+      "instrument": "Recorder",
+      "path": "VCSL/AltRecorder_Sus_C4_rr1_Main.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Alto%20Recorder/Sustain/AltRecorder_Sus_C4_rr1_Main.wav",
+      "sha256": "aaa4f42f850758a034db08cd42641f85adcb30a99db2fe790db03325c7f78b29",
+      "bytes": 1574224,
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL",
+      "articulation": "sustain",
+      "range": "C4 (filename label)",
+      "dynamic": null,
+      "notes": "Baroque alto recorder, Main microphone. Maker, geometry and breath pressure are uncharacterized.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 48000,
+        "channels": 2,
+        "duration_s": 8.198833,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "vcsl-recorder-e4",
+      "instrument": "Recorder",
+      "path": "VCSL/AltRecorder_Sus_E4_rr1_Main.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Baroque%20Alto%20Recorder/Sustain/AltRecorder_Sus_E4_rr1_Main.wav",
+      "sha256": "e38f3bf2dc571796fecc8b525c303513c93d6d42f6a224acd5a52e613f555be8",
+      "bytes": 2312324,
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL",
+      "articulation": "sustain",
+      "range": "E4 (filename label)",
+      "dynamic": null,
+      "notes": "Same source family and microphone label as the C4 recording. No octave-convention or measured-pitch equivalence to the model is assumed.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 48000,
+        "channels": 2,
+        "duration_s": 12.043104,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "vcsl-organ-c3",
+      "instrument": "Organ flue pipe",
+      "path": "VCSL/RenOrgan_8foot_Room_C3_rr1.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Aerophones/Edge-blown%20Aerophones/Renaissance%20Organ/8%27/RenOrgan_8foot_Room_C3_rr1.wav",
+      "sha256": "90e36226d3448f39800afd68aad68f1902cb280899430789cb77d1ab93bdbb34",
+      "bytes": 2284700,
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL",
+      "articulation": "8-foot register",
+      "range": "C3 (filename label)",
+      "dynamic": null,
+      "notes": "Renaissance organ, Room microphone. Not a calibrated free-field individual pipe measurement.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.634376,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "spectmorph-mirko-ah-c4",
+      "instrument": "Voice",
+      "path": "SpectMorph/mirko-ah-60.flac",
+      "url": "https://raw.githubusercontent.com/swesterfeld/spectmorph-instruments/08eba76eadfdc16ded3209f65d3890bf1a2b8c0c/mirko-ah/mirko-ah-60.flac",
+      "sha256": "8de0b00dc32f5bea1164dbe012b1863ce73befddce2a7587bda758164f01c0a6",
+      "bytes": 78275,
+      "licence": "spectmorph-cc0",
+      "source_page": "https://github.com/swesterfeld/spectmorph-instruments",
+      "articulation": "ah vowel",
+      "range": "MIDI 60 / C4 (filename label)",
+      "dynamic": null,
+      "notes": "Voice source recording. No resynthesis or retuning was applied during acquisition.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 1,
+        "duration_s": 1.549569,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "commons-tin-whistle-d",
+      "instrument": "Tin whistle",
+      "path": "Commons/MetalTinWhistleWoodenStop.ogg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/cb/MetalTinWhistleWoodenStop.ogg",
+      "sha256": "bcbd382a5eb946117285daa766b53adf61f260144a80ac88b7d80860fbed6d9c",
+      "bytes": 105276,
+      "licence": "timross-pd",
+      "source_page": "https://commons.wikimedia.org/wiki/File:MetalTinWhistleWoodenStop.ogg",
+      "articulation": "played phrase",
+      "range": "D tin whistle; individual notes unstated",
+      "dynamic": null,
+      "notes": "Instrument key does not identify every performed note.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 6.112653,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "juskiddink-duduk-preview",
+      "instrument": "Duduk",
+      "path": "Freesound/180004_649468-hq.mp3",
+      "url": "https://cdn.freesound.org/previews/180/180004_649468-hq.mp3",
+      "sha256": "a1ee6c644dcd9cc09f251a1a28da4be94afd1b6cef0fffbd9bc347fab893f8ee",
+      "bytes": 2716488,
+      "licence": "duduk-cc-by-4",
+      "source_page": "https://freesound.org/people/juskiddink/sounds/180004/",
+      "articulation": "played phrase",
+      "range": "C duduk; individual notes unstated",
+      "dynamic": null,
+      "notes": "Actual C duduk performance by Steen. Listening-only lossy preview; no original-WAV or anechoic claim.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 117.942857,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "opengameart-pan-flute",
+      "instrument": "Pan pipes",
+      "path": "OpenGameArt/wip_raw_pan_flute_audio.tar",
+      "url": "https://opengameart.org/sites/default/files/wip_raw_pan_flute_audio.tar",
+      "sha256": "f04997e118199d7e14ae8334dbfa6cbc29ce99e4a6512c5a5e99ad189b06a466",
+      "bytes": 30857728,
+      "licence": "panflute-cc0",
+      "source_page": "https://opengameart.org/content/wip-raw-pan-flute-audio",
+      "articulation": "single notes",
+      "range": "D4 and G4 selected (source labels)",
+      "dynamic": null,
+      "notes": "Extract only the named FLAC members. Neither retune the original nor use it to identify physical constants.",
+      "gradable": false,
+      "kind": "archive",
+      "members": [
+        {
+          "path": "OpenGameArt/Pan-Flute-D4-1.flac",
+          "archive_member": "flac/Pan Flute D4 1.flac",
+          "sha256": "e2d8ba959affb8b70437c7a54d910d28baef7ca183e94b9e02022d04326d53c1",
+          "bytes": 872431,
+          "audio": {
+            "sample_rate_hz": 44100,
+            "channels": 2,
+            "duration_s": 6.397098,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "OpenGameArt/Pan-Flute-G4-1.flac",
+          "archive_member": "flac/Pan Flute G4 1.flac",
+          "sha256": "d6232b45382f23662368f4cb53c805f51501635938e6ef442f545b72b36b0c81",
+          "bytes": 688179,
+          "audio": {
+            "sample_rate_hz": 44100,
+            "channels": 2,
+            "duration_s": 4.760091,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        }
+      ]
+    },
+    {
+      "id": "freepats-steel-guitar",
+      "instrument": "Steel-string guitar",
+      "path": "FreePats/FSS-SteelStringGuitar-SFZ-20200521.tar.xz",
+      "url": "https://freepats.zenvoid.org/Guitar/FSS-SteelStringGuitar/FSS-SteelStringGuitar-SFZ-20200521.tar.xz",
+      "sha256": "720b55c5ad4dcfb9f788ab13a0bda834cbfd7b3214df2ca90648c58951e41777",
+      "bytes": 13130512,
+      "licence": "freepats-gpl-exception",
+      "source_page": "https://freepats.zenvoid.org/Guitar/steel-acoustic-guitar.html",
+      "articulation": "plucked",
+      "range": "MIDI 64 / E4; confirmed by the archive's SFZ key mapping",
+      "dynamic": "HV (source label)",
+      "notes": "Seagull steel-string acoustic guitar. Filtered and edited source is unsuitable for unqualified decay, noise-floor or absolute-spectrum grading.",
+      "gradable": false,
+      "kind": "archive",
+      "members": [
+        {
+          "path": "FreePats/HV_64.wav",
+          "archive_member": "FSS-SteelStringGuitar-SFZ-20200521/samples/HV_64.wav",
+          "sha256": "bfee5142af7719dfeb1438b8324ef111e55bccf9a73192f840768a56323c4afa",
+          "bytes": 396940,
+          "audio": {
+            "sample_rate_hz": 44100,
+            "channels": 1,
+            "duration_s": 4.499955,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        }
+      ]
+    },
+    {
+      "id": "uiowa-vibraphone-sustain-mf-c4b4",
+      "instrument": "Vibraphone",
+      "path": "sound files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C4B4.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/Vibraphone/Vibraphone.sustain.mf.C4B4.aif",
+      "sha256": "ca311594e031bb877c52190f59c3612889471c81e72f0afce20203ff1c0eaff4",
+      "bytes": 84447610,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/Misvibraphone.html",
+      "articulation": "sustain",
+      "range": "C4-B4 chromatic sequence",
+      "dynamic": "mf",
+      "notes": "Andrew Thierauf, 2013-06-10; recorded by Daniel Frantz and Will Huff. Instrument model, bar/rotor geometry and exact left/right microphone routing unstated; segment notes before comparison.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 319.151565,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "chain": "uiowa-vibraphone-2013"
+    },
+    {
+      "id": "uiowa-piano-pp-a4",
+      "instrument": "Piano",
+      "path": "sound files/MIS/Piano_Other/piano/Piano.pp.A4.aiff",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Piano_Other/piano/Piano.pp.A4.aiff",
+      "sha256": "86d6230bfd83be9a0cbf896ca4eed2426a10a4c94909a7377c65419130e23ee1",
+      "bytes": 3963726,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MISpiano.html",
+      "articulation": "struck",
+      "range": "A4",
+      "dynamic": "pp",
+      "notes": "Steinway B, not the simulated Steinway D; room and bass/treble microphone responses remain.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 22.469501,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "chain": "uiowa-piano-2001"
+    },
+    {
+      "id": "uiowa-piano-mf-a4",
+      "instrument": "Piano",
+      "path": "sound files/MIS/Piano_Other/piano/Piano.mf.A4.aiff",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Piano_Other/piano/Piano.mf.A4.aiff",
+      "sha256": "800a6be43a44125bda75f7907aba2f6299287b4060d67e85efcf32a226757563",
+      "bytes": 5289358,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MISpiano.html",
+      "articulation": "struck",
+      "range": "A4",
+      "dynamic": "mf",
+      "notes": "Same session as pp/ff. Dynamic label is not a measured hammer velocity or force.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 29.984422,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "chain": "uiowa-piano-2001"
+    },
+    {
+      "id": "uiowa-piano-ff-a4",
+      "instrument": "Piano",
+      "path": "sound files/MIS/Piano_Other/piano/Piano.ff.A4.aiff",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Piano_Other/piano/Piano.ff.A4.aiff",
+      "sha256": "8139a061109ca2878273f69eaca2cae905e18b9660ec5a97ff0411d3c30f771d",
+      "bytes": 6002902,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MISpiano.html",
+      "articulation": "struck",
+      "range": "A4",
+      "dynamic": "ff",
+      "notes": "Same session as pp/mf. Compare independently predicted dynamic behavior without fitting physical constants to these recordings.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 34.029456,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "chain": "uiowa-piano-2001"
+    },
+    {
+      "id": "vcsl-timpani1-hit-v2",
+      "instrument": "Timpani",
+      "path": "VCSL/Timpani1_Hit_v2_rr1_Sum.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Timpani%201/Hit/Timpani1_Hit_v2_rr1_Sum.wav",
+      "sha256": "cb04c9f4ab7f59442076f3cebe78696e38165abace51b0a99829ec03cc95a5f3",
+      "bytes": 1289332,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 7.308549,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL",
+      "gradable": false,
+      "articulation": "struck, summed microphones",
+      "range": null,
+      "dynamic": "v2 (source layer label)",
+      "notes": "Two strikes of the same source's Timpani 1. Pitch, bowl geometry, head material and SI-valued strike force are uncharacterized. A listening reference for the kettle example, not an identified match to its illustrative parabolic bowl."
+    },
+    {
+      "id": "vcsl-timpani1-hit-v4",
+      "instrument": "Timpani",
+      "path": "VCSL/Timpani1_Hit_v4_rr1_Sum.wav",
+      "url": "https://raw.githubusercontent.com/sgossner/VCSL/c1ea7bcc3c7309650ab0da9d15c9cd1fbc4a4c7e/Membranophones/Struck%20Membranophones/Timpani%201/Hit/Timpani1_Hit_v4_rr1_Sum.wav",
+      "sha256": "b51d81444425e1ba0c09d94dbdc384a8cd4b4681c42959cc8676ccaf6d6ea793",
+      "bytes": 2025204,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 11.480159,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "licence": "vcsl-cc0",
+      "source_page": "https://github.com/sgossner/VCSL",
+      "gradable": false,
+      "articulation": "struck, summed microphones",
+      "range": null,
+      "dynamic": "v4 (source layer label)",
+      "notes": "Two strikes of the same source's Timpani 1. Pitch, bowl geometry, head material and SI-valued strike force are uncharacterized. A listening reference for the kettle example, not an identified match to its illustrative parabolic bowl."
+    },
+    {
+      "id": "salamander-drumkit-archive",
+      "instrument": "Drum kit",
+      "path": "Salamander/salamanderDrumkit.tar.bz2",
+      "url": "https://archive.org/download/SalamanderDrumkit/salamanderDrumkit.tar.bz2",
+      "sha256": "34e746ec1721bb530b1caf5b17443ae3cde45a2cce1a80e2637e4c11d6f1e3f5",
+      "bytes": 387611727,
+      "kind": "archive",
+      "licence": "salamander-cc-by-sa-3",
+      "source_page": "https://archive.org/details/SalamanderDrumkit",
+      "gradable": false,
+      "articulation": "single struck hits; overhead microphone",
+      "notes": "Archive was streamed completely to verify its digest; only the nine exact kitgrade.py reference members were retained. Original stereo audio was not normalized, filtered or retuned during acquisition.",
+      "members": [
+        {
+          "path": "Salamander/OH/loTom_OH_FF_5.wav",
+          "archive_member": "OH/loTom_OH_FF_5.wav",
+          "sha256": "bf58b8ffb94c9c4d48d58f719d725233733be04f693b3cbb0f21be6eddb2248e",
+          "bytes": 681158,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.364979,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/ride1_OH_MP_1.wav",
+          "archive_member": "OH/ride1_OH_MP_1.wav",
+          "sha256": "9e9135d595edf9f41ee3bd5caa9c797233422f62a3fb2c63ea542c58fb5ba155",
+          "bytes": 1946042,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 6.756938,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hiTom_OH_F_4.wav",
+          "archive_member": "OH/hiTom_OH_F_4.wav",
+          "sha256": "6b7dd3ffd91bcaff4879823575571f117114ea196df4af6232fbb0f9361fdf04",
+          "bytes": 784364,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 2.723333,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2OFF_OH_F_1.wav",
+          "archive_member": "OH/snare2OFF_OH_F_1.wav",
+          "sha256": "c0214b067eb9001ebb1505f91ac39589c5c62acdb9e60fb59f89a43336897519",
+          "bytes": 486734,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.689896,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/snare2_OH_F_4.wav",
+          "archive_member": "OH/snare2_OH_F_4.wav",
+          "sha256": "0de2b5be0bd1bd7a529be42f0f10e87a1b96bd80a5c7c09c1742e588491dae3f",
+          "bytes": 506996,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 1.76025,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatClosed_OH_F_13.wav",
+          "archive_member": "OH/hihatClosed_OH_F_13.wav",
+          "sha256": "2d4b3005f4a160b7c529df0b725ae3dfbe6e7c24b159ba9ecc8dec2b515fd548",
+          "bytes": 162758,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.564979,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/hihatOpen_OH_F_1.wav",
+          "archive_member": "OH/hihatOpen_OH_F_1.wav",
+          "sha256": "7493fce31fb00093e4944f878a7fe802177a5c311e82725ac0ce7956e86f2fdc",
+          "bytes": 2554610,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 8.870021,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/crash1_OH_FF_6.wav",
+          "archive_member": "OH/crash1_OH_FF_6.wav",
+          "sha256": "2129a504b143081b84bb70794827ee0dd891996c33f64367751f2263e34319df",
+          "bytes": 3304244,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 11.472917,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        },
+        {
+          "path": "Salamander/OH/kick_OH_F_1.wav",
+          "archive_member": "OH/kick_OH_F_1.wav",
+          "sha256": "fc1a6388402144f1888a3febce1207799795fbbc3d87f41ce84be31f4adc70ae",
+          "bytes": 135920,
+          "audio": {
+            "sample_rate_hz": 48000,
+            "channels": 2,
+            "duration_s": 0.471792,
+            "decode_check": "ffmpeg full decode succeeded"
+          }
+        }
+      ]
+    }
+  ],
+  "acquisition_check": {
+    "date": "2026-10-23",
+    "baseline_downloads": 21,
+    "supplemental_downloads": 15,
+    "retained_audio_files": 45,
+    "retained_audio_duration_s": 1569.812189,
+    "verification": "Selected baseline pins matched. Every supplemental URL was downloaded and SHA-256/length recorded; the complete Salamander archive was hashed while streaming. All 45 retained audio files passed full ffmpeg decoding. Archives are not counted as audio files.",
+    "qualification": "Acquisition and decoding establish availability and integrity, not simulation fidelity or complete specimen/material measurements."
+  }
+}
