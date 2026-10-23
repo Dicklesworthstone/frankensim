@@ -4858,3 +4858,31 @@ pressure compliance, source/aperture refusal and cancellation. Two native
 example regressions check finite-energy temperature, fixed reference mass,
 data-only heat-capacity changes reaching actual microphone pressure,
 deterministic replay and refusal without a sound comparison.
+
+## Native continuously heated string and finite-gas journey
+
+The `finite_gas_string` binary and example share one implementation. A bounded
+scenario declares geometry, force/release, observation, current or voltage,
+prescribed heat, thermal inventory and solve controls. A normalized solid claim
+pack supplies constant density/modulus, temperature-dependent Kelvin-Voigt loss,
+heat capacity, conductivity and optional electrical resistivity. The shared
+native gas loader retains explicit species, NASA-9 and transport associations;
+the finite parcel requires a declared frozen-gas policy.
+
+The same modal state and acceleration history continue through all accepted
+samples. Material loss heats the solid, drag heats the gas, and source-bound
+layer conduction exchanges equal and opposite heat. Resistance, damping, gas
+EOS and the compact pressure observer follow their accepted material states.
+Every CSV row measures the cumulative mechanical/solid/gas storage change from
+actual endpoints and checks it against source work and explicitly accounted
+loss. Metadata retains card/curve/source identities and initial mechanical
+energy. The whole physical trajectory is admitted before output; WAV creation
+requires a new destination and uses the declared pressure scale without peak
+normalization. Clipping is reported. I/O errors are not transactional rollback.
+
+The single-phase interval is a caller declaration, not discovered melting
+physics. All original fixed-geometry/tension, constant-E/density, first-order,
+well-mixed gas and diagnostic-radiation limitations remain. The supplied solid
+fixture is manufactured. Native regressions cover replay, independent storage
+integrals, data-only material/gas/volume changes, strict input and source or
+cancellation refusal; they do not establish measured instrument accuracy.

@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	manufactured	Manufactured heated conductor string	Declared integration coefficients	Not measured wire, metal, polymer or instrument data; deliberately small heat capacity
+scalar	density	manufactured	density	1000	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	400	K
+validity	density	omega	0	200000	rad/s
+scalar	modulus	manufactured	young_modulus	2000000000	Pa	constant
+uncertainty	modulus	unstated	-	-	-	-
+validity	modulus	T	280	400	K
+validity	modulus	omega	0	200000	rad/s
+curve	viscosity	manufactured	kelvin_voigt_bending_viscosity	T	K	Pa*s	280:100000,300:1000000,340:8000000,400:20000000	linear
+uncertainty	viscosity	unstated	-	-	-	-
+validity	viscosity	T	280	400	K
+validity	viscosity	omega	0	200000	rad/s
+scalar	capacity	manufactured	specific_heat_capacity	0.1	J/kg/K	constant
+uncertainty	capacity	unstated	-	-	-	-
+validity	capacity	T	280	400	K
+curve	conductivity	manufactured	thermal_conductivity	T	K	W/m/K	280:20,400:40	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	T	280	400	K
+curve	resistivity	manufactured	electrical_resistivity	T	K	ohm*m	280:0.0000008,300:0.000001,400:0.000002	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	T	280	400	K

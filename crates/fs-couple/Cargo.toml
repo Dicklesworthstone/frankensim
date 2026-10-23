@@ -14,6 +14,13 @@ path = "examples/material_strings.rs"
 test = false
 bench = false
 
+# The native evolving material/gas journey uses the same public physical owners.
+[[bin]]
+name = "finite_gas_string"
+path = "examples/finite_gas_string.rs"
+test = false
+bench = false
+
 [package.metadata.frankensim]
 layer = "L3"
 
