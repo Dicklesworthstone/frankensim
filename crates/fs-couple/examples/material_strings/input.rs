@@ -7,6 +7,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{Transvers
 use fs_scenario::acoustic::BendingRelaxationProperties;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::ShellObserverOptions;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -130,6 +131,7 @@ pub struct Spec {
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
+    pub shell_observer: Option<ShellObserverOptions>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
@@ -439,6 +441,37 @@ impl Spec {
             }
             Some(options)
         } else { None };
+        let shell_observer = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("shell_observer") {
+            let mut row = r.row("shell_observer")?;
+            let receiver = fs_bem::observation_transfers::ReceiverSpec {
+                id: row.word()?.to_string(),
+                position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+            };
+            let minimum_clearance_m = row.positive()?;
+            let pass_band_upper_hz = row.positive()?;
+            let taper_stop_hz = row.positive()?;
+            let filter_latency_samples =
+                row.count(fs_bem::observation_transfers::MAX_OBSERVATION_FFT / 4)?;
+            let count = row.count(fs_bem::observation_transfers::MAX_OBSERVATION_RUNGS)?;
+            let mut fft_lengths = Vec::with_capacity(count);
+            for _ in 0..count {
+                fft_lengths.push(row.count(fs_bem::observation_transfers::MAX_OBSERVATION_FFT)?);
+            }
+            let tail_energy_tolerance = row.positive()?;
+            let dtft_relative_tolerance = row.positive()?;
+            let maximum_frequency_entries =
+                row.count(fs_vfit::observation::MAX_OBSERVATION_ENTRIES)?;
+            let maximum_sweep_terms = row.parse()?;
+            let maximum_replay_terms = row.parse()?;
+            row.end()?;
+            Some(ShellObserverOptions {
+                receiver, minimum_clearance_m, pass_band_upper_hz, taper_stop_hz,
+                filter_latency_samples, fft_lengths, tail_energy_tolerance,
+                dtft_relative_tolerance, maximum_frequency_entries,
+                maximum_sweep_terms, maximum_replay_terms,
+            })
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -629,9 +662,30 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, bending_memory, body_radiation, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
+            longitudinal_loss, bending_memory, body_radiation, shell_observer, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
+        spec.validate_shell_observer()?;
         spec.network_dimensions(false)?;
         Ok(spec)
+    }
+
+    /// The optional listener must observe the same explicitly loaded shell.
+    /// Repeat this cheap source admission before material I/O for programmatic
+    /// edits to an already parsed specification.
+    pub fn validate_shell_observer(&self) -> Result<()> {
+        if let Some(observer) = &self.shell_observer {
+            observer.validate(self.rate)?;
+            let Some(BodyRadiation::ShellBem(load)) = self.body_radiation else {
+                return Err("shell_observer requires the original body-radiation bem load".into());
+            };
+            let finest = *observer.fft_lengths.last()
+                .ok_or("shell_observer requires its explicit FFT ladder")?;
+            let first_positive_hz = f64::from(self.rate) / finest as f64;
+            if self.cavity.is_some() || observer.taper_stop_hz > load.maximum_hz
+                || first_positive_hz < load.minimum_hz {
+                return Err("shell_observer requires no cavity and its positive-frequency band covered by the original BEM load".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn bow_law(&self,port:usize)->Result<&FrictionLaw> {

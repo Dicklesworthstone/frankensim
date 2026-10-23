@@ -188,6 +188,7 @@ impl input::Spec {
         if self.gas != *self.gas_record.state() {
             return Err("material-string gas coefficients must retain their original source record".into());
         }
+        self.validate_shell_observer()?;
         if let Some(body)=&profile { body.preflight(&self)?; }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
@@ -389,6 +390,9 @@ impl input::Spec {
         };
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
+        if let Some(observer)=&self.shell_observer {
+            performance=performance.with_material_shell_observer(observer.clone(),gate)?;
+        }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
     }
@@ -471,6 +475,14 @@ fn main()->Result<()> {
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
+    if let Some(report)=ready.performance.material_shell_observer() {
+        let transfer=report.transfer();
+        eprintln!("shell_observer={:?}; basis={}; loading={}; body_modes={}; surface_panels={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; sweep_terms={}; replay_terms={}; closed-shell finite-distance pressure replaces compact pressure; homogeneous exterior without molecular absorption; declared latency and finite window retained",
+            report.options.receiver,report.basis_identity,report.loading_identity,
+            report.body_modes,report.surface_panels,transfer.pass_band_upper_hz,transfer.taper_stop_hz,
+            transfer.geometric_delays_s,transfer.filter_latency_samples,
+            report.sweep_terms,report.replay_terms);
+    }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {

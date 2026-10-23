@@ -1029,8 +1029,9 @@ configuration, not an accuracy claim.
 
 ## Computed exterior reaction on the shared body
 
-The optional record immediately before `cavity` selects a geometry- and
-gas-derived load on the original material body. Regional flat plates use the
+The optional `body-radiation` record before `cavity` selects a geometry- and
+gas-derived load on the original material body. An optional `shell_observer`
+record may follow it. Regional flat plates use the
 Rayleigh half-space model; closed curved shells and assemblies use the shared
 Helmholtz boundary-element solver:
 
@@ -1112,11 +1113,76 @@ needs an explicit coupled interior/exterior opening model; merely selecting
 `bem` does not create one.
 
 Both computed routes require the ordinary exact owner; `prepared-linear` is
-refused. The receiver remains the existing compact, zero-retardation pressure
-observation of the **loaded** acceleration; it is not a matched broadband
-microphone or a validated violin exterior. The Rayleigh example retains one
-body mode to keep the complete passive acoustic image small; it is an
-integration fixture, not a claim of converged instrument timbre.
+refused. Without the `shell_observer` selection below, the receiver remains the
+existing compact, zero-retardation pressure observation of the **loaded**
+acceleration. The Rayleigh example retains one body mode to keep the complete
+passive acoustic image small; it is an integration fixture, not a claim of
+converged instrument timbre.
+
+## Finite-distance pressure from the loaded material shell
+
+The optional `shell_observer` record follows `body-radiation bem` and precedes
+`cavity none`. It sends the original accepted body modal velocities through the
+shared causal BEM observation transfer. The same closed shell, signed
+mass-normalized displacement fields, boundary triangle integration rule and
+physical gas supply both the mechanical radiation reaction and the listener.
+Receiver pressure and gradient use the existing centroid Green-function rows;
+this does not add higher-order receiver quadrature. Material, geometry and gas
+changes rebuild both from their original source data.
+
+```text
+shell_observer ID X Y Z CLEARANCE_M PASS_HZ STOP_HZ LATENCY N_FFT FFT... TAIL_TOL DTFT_TOL MAX_FREQ_ENTRIES MAX_SWEEP_TERMS MAX_REPLAY_TERMS
+```
+
+`X Y Z` is the listener position in metres in the physical body frame.
+`CLEARANCE_M` must be positive and every surface panel must remain farther from
+the listener than that distance. `PASS_HZ` and `STOP_HZ` declare the useful
+pass band and the end of the smooth reconstruction taper; the original BEM load
+must cover every positive-frequency bin through the taper's upper frequency.
+The finest FFT's first positive bin must not lie below the load's lower bound.
+`LATENCY` is the explicit causal
+reconstruction delay in mechanical samples. Supply at least four successive
+doubling power-of-two FFT lengths and bounded transfer and sweep work budgets.
+`MAX_REPLAY_TERMS` bounds retained convolution work per accepted mechanical
+sample, including pressure and all three gradient outputs. The shared
+observation owner checks causal tail energy and complex
+DTFT reconstruction error against the declared tolerances.
+
+After the wire and closed-shell packs above are built, the corresponding
+integration fixture uses the same installed executable:
+
+```bash
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/closed-shell-observed.material-strings" "$demo/closed-shell-observed.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/closed-shell.body
+```
+
+This fixture declares an 8 kHz mechanical/output clock, a 120 Hz pass band,
+a taper ending at 400 Hz and 256 samples of reconstruction latency. Its shell,
+material and string remain the manufactured integration source described above.
+It is a deliberately narrow-band example, not a full-band violin recording.
+
+When selected, finite-distance pressure replaces the compact pressure channel
+in the existing scheduled renderer and PCM writer. The observer receives each
+accepted body velocity once; callback boundaries do not restart its history.
+It adds no second force solver and does not debit radiation energy again.
+Physical travel delay, declared reconstruction latency and the authored output
+window are retained. The renderer does not normalize pressure, shift the signal
+earlier or append an undeclared tail.
+
+Attachment requires a cold performance with the source-derived shell BEM load.
+An arbitrary fitted load, Rayleigh plate, cavity, open shell or uncapped sound
+hole cannot substitute for that matching exterior problem. An already advanced
+performance refuses a new observer because its past boundary motion is unknown.
+The report exposes basis and loading identities, gas, panel/mode counts,
+transfer controls and work estimates.
+
+This is homogeneous exterior Helmholtz propagation. Gas density and sound speed
+affect radiation and travel, but frequency-dependent molecular absorption is
+not included. The FIR realization tolerances describe reconstruction of the
+computed transfer; they do not certify mesh convergence, material accuracy,
+room acoustics or agreement with a measured instrument. Sound holes still need
+an explicit coupled interior/exterior opening model.
 
 ## Material profile and physical limits
 
@@ -1136,17 +1202,18 @@ retained modes, not only the source query frequency, undergo the existing checks
 
 This executable selects homogeneous, bonded or close-wound circular strings, fixed tension or
 fixed-extension supports and fixed rotational ends. Its shared body is the legacy
-simply supported isotropic flat plate or the explicit material chart described in
-[BODY_PROFILES.md](BODY_PROFILES.md), with an optional uniform-pressure
-cavity/circular neck. Bridges are interior transverse connections on the full
-span **including afterlength**, plus explicitly selected scalar rotational
-spring/dashpot joints. It does not model carved wood shells, a full 3D unilateral
-bridge-contact law, f-hole geometry, distributed cavity
-modes, resolved winding contact/slip, solved finger disengagement,
-bow-hair normal-load distribution, or unbaffled exterior radiation. The optional
-computed planar back-loading is described above. The body
-and neck observations retain the existing compact baffled, zero-retardation
-approximation. Source-state validity is not measured instrument-fidelity evidence.
+simply supported isotropic flat plate or an explicit material plate, shell or
+assembly described in [BODY_PROFILES.md](BODY_PROFILES.md), with an optional
+uniform-pressure cavity/circular neck. Bridges are interior transverse
+connections on the full span **including afterlength**, plus explicitly selected
+scalar rotational spring/dashpot joints. A full 3D unilateral bridge-contact
+law, coupled f-hole/interior/exterior geometry, distributed cavity modes,
+resolved winding contact/slip and solved finger disengagement remain outside
+this composition. The computed planar and closed-shell exterior reactions and
+the optional finite-distance closed-shell observer are described above.
+Without that observer, body and neck pressure retains the existing compact
+baffled, zero-retardation approximation. Source-state validity is not measured
+instrument-fidelity evidence.
 
 Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
 raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 16 rotational
@@ -1167,5 +1234,6 @@ cargo test -p fs-couple --example material_strings -- --test-threads=1
 The tests exercise actual normalized-pack decoding, material-only substitutions,
 shared gas response, source-derived cavity-neck inertia/loss and end conditions,
 causal cylinder memory, joint pluck/double-bow control, callback equivalence, exact
-existing PCM output, and source/input refusals. The fixture TSVs use the existing
+existing PCM output, source/input refusals, and finite-distance shell pressure
+from the original accepted body velocities. The fixture TSVs use the existing
 `xtask matdb-pack` compiler, not a new importer.

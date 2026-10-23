@@ -148,7 +148,8 @@ impl MultiBowStringBank {
         Ok(MultiBowPerformance { bank: self, schedule, tracks, config, events, next: 0,
             base_sample, forces, drives: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count],
             candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false,
-            string_forces: None, stop_motion: None, stop_station_motion: None })
+            string_forces: None, stop_motion: None, stop_station_motion: None,
+            shell_observer: None })
     }
 }
 
@@ -193,6 +194,7 @@ pub struct MultiBowPerformance {
     string_forces: Option<force::BoundStringForces>,
     stop_motion: Option<motion::BoundStopMotion>,
     stop_station_motion: Option<stations::BoundStopStations>,
+    shell_observer: Option<observation::BoundShellObserver>,
 }
 impl MultiBowPerformance {
     /// Original material bank, actual contact maps and accepted joint physics.
@@ -261,7 +263,13 @@ impl PressureRenderer for MultiBowPerformance {
             } else { self.bank.system.step(forces, &self.candidate).map_err(RenderError::Friction) };
             match result {
                 Ok(frame) => {
-                    *slot = frame.observer_pressure_pa;
+                    let compact_pressure = frame.observer_pressure_pa;
+                    *slot = if let Some(observer) = self.shell_observer.as_mut() {
+                        match observer.pressure(&self.bank.system) {
+                            Ok(pressure) => pressure,
+                            Err(error) => { self.poisoned = true; return Err(error); }
+                        }
+                    } else { compact_pressure };
                     self.drives.copy_from_slice(&self.candidate); self.next = next;
                     if let (Some(loads), Some(cursor)) = (self.string_forces.as_mut(), next_force) {
                         self.forces.copy_from_slice(&loads.candidate); loads.next = cursor;
@@ -284,3 +292,6 @@ pub mod motion;
 
 /// Longitudinal stop trajectories using source-derived maps on that same clock.
 pub mod stations;
+
+/// Source-bound finite-distance closed-shell pressure on the same accepted clock.
+pub mod observation;
