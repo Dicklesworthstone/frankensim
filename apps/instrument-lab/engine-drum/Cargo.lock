@@ -540,6 +540,7 @@ version = "0.0.1"
 dependencies = [
  "fs-fft",
  "fs-lbm",
+ "fs-material",
  "fs-math",
 ]
 
@@ -548,6 +549,25 @@ name = "fs-alloc"
 version = "0.0.1"
 dependencies = [
  "fs-obs",
+]
+
+[[package]]
+name = "fs-bem"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-casebook",
+ "fs-exec",
+ "fs-fft",
+ "fs-fmm",
+ "fs-geom",
+ "fs-la",
+ "fs-material",
+ "fs-math",
+ "fs-phs",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-vfit",
 ]
 
 [[package]]
@@ -612,6 +632,8 @@ name = "fs-couple"
 version = "0.0.1"
 dependencies = [
  "fs-aeroac",
+ "fs-alloc",
+ "fs-bem",
  "fs-blake3",
  "fs-conduction",
  "fs-contact",
@@ -634,10 +656,23 @@ dependencies = [
  "fs-qty",
  "fs-rand",
  "fs-scenario",
+ "fs-solid",
  "fs-solver",
  "fs-thermal",
+ "fs-thermochem",
  "fs-tribo",
  "fs-vfit",
+]
+
+[[package]]
+name = "fs-cutfem"
+version = "0.0.1"
+dependencies = [
+ "fs-ivl",
+ "fs-la",
+ "fs-material",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
@@ -653,6 +688,7 @@ dependencies = [
 name = "fs-duct"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-la",
  "fs-material",
  "fs-math",
@@ -686,6 +722,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-math",
+ "fs-modal",
  "fs-qty",
  "fs-rep-mesh",
  "fs-soa",
@@ -701,6 +738,13 @@ dependencies = [
  "fs-exec",
  "fs-math",
  "fs-simd",
+]
+
+[[package]]
+name = "fs-fmm"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
 ]
 
 [[package]]
@@ -754,9 +798,11 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
+ "fs-la",
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-mesh",
  "fs-qty",
  "fs-sparse",
 ]
@@ -792,6 +838,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-ivl",
  "fs-qty",
 ]
 
@@ -1021,6 +1068,27 @@ dependencies = [
 [[package]]
 name = "fs-soa-derive"
 version = "0.0.1"
+
+[[package]]
+name = "fs-solid"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-cutfem",
+ "fs-exec",
+ "fs-feec",
+ "fs-ga",
+ "fs-la",
+ "fs-matdb",
+ "fs-material",
+ "fs-math",
+ "fs-mesh",
+ "fs-modal",
+ "fs-qty",
+ "fs-scenario",
+ "fs-solver",
+ "fs-sparse",
+]
 
 [[package]]
 name = "fs-solver"
