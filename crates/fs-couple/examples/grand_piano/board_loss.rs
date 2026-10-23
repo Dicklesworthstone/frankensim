@@ -1,0 +1,388 @@
+//! Soundboard loss from material data (bead pexfp.373), declared in the board
+//! geometry and applied on the complete certified source slice.
+//!
+//! A `damping,material` board names a loss factor for every share of its
+//! elastic stiffness: the panel's four orthotropic bending parts (`panel-l`,
+//! `panel-r`, `panel-lr`, `panel-12`) and each stiffener group's bending and
+//! torsion (`<group>-bending`, `<group>-torsion`), every stiffener in exactly
+//! one group. Rows (after the header, anywhere among the others):
+//!
+//! - `stiffener-group,name,index,...` stiffener rows by their 0-based order
+//! - `loss-share,share,eta,f_lo_hz,f_hi_hz,strict|extrapolate-frequency,receipt`
+//! - `loss-unknown,share,reason` (the share's loss is omitted: a lower bound)
+//! - `loss-sensitivity,label,from_hz,to_hz,ratio,source` (printed only)
+//!
+//! Each loss factor is constant (hysteretic) over the frequencies its source
+//! measured, `[f_lo, f_hi]`. A source mode outside that domain refuses by name
+//! unless the share declares `extrapolate-frequency`; then the same constant is
+//! taken there and every receipt says so, with the size of the possible error:
+//! the loss each mode would have if extrapolated shares rose with frequency as
+//! a `loss-sensitivity` law measured (`(f/from)^p`, `p = ln ratio / ln(to/from)`,
+//! clamped to `[from, to]`). Nothing falls back to an authored damping ratio.
+//!
+//! The shares' modal strain energies are projected once by the plate loss
+//! owner (`fs_couple::plate_viscosity::hysteretic`); the reduction consumes the
+//! diagonal source damping `c_a = eta_a omega_a`, and the receipt prints each
+//! mode's energy split (including the shares whose loss is unknown) and the
+//! measured off-diagonal coupling the diagonal neglects.
+use fs_couple::plate_viscosity::hysteretic::{self, NeighbourCoupling, OrthotropicBendingParts, StiffnessShare};
+use fs_plate::{PlateMesh, PlateModel, Stiffener};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+/// The panel's four orthotropic bending shares, in projection order.
+pub const PANEL_SHARES: [&str; 4] = ["panel-l", "panel-r", "panel-lr", "panel-12"];
+/// Upper bound on stiffener groups (each adds two shares).
+pub const MAX_GROUPS: usize = 16;
+/// Upper bound on printed sensitivity laws.
+pub const MAX_SENSITIVITY: usize = 4;
+
+/// One share's declared loss.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShareLoss {
+    /// A sourced loss factor holding over `domain_hz`; `extrapolate` takes the
+    /// same value at modes outside it (declared, and printed in every receipt).
+    Claim { eta: f64, domain_hz: (f64, f64), extrapolate: bool, receipt: String },
+    /// No source: the share's loss is omitted and every receipt says so.
+    Unknown { reason: String },
+}
+
+/// A measured rise of loss with frequency, used only for the printed
+/// sensitivity of extrapolated shares.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RiseLaw {
+    pub label: String,
+    pub from_hz: f64,
+    pub to_hz: f64,
+    pub ratio: f64,
+    pub source: String,
+}
+
+impl RiseLaw {
+    /// Loss multiplier at `hz`: one at or below `from_hz`, the measured power
+    /// law up to `to_hz`, and held at `ratio` above it.
+    #[must_use]
+    pub fn factor(&self, hz: f64) -> f64 {
+        if hz <= self.from_hz { return 1.0; }
+        let p = self.ratio.ln() / (self.to_hz / self.from_hz).ln();
+        (hz.min(self.to_hz) / self.from_hz).powf(p)
+    }
+}
+
+/// Every loss row of one `damping,material` board.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LossDeclaration {
+    shares: Vec<(String, ShareLoss)>,
+    groups: Vec<(String, Vec<usize>)>,
+    sensitivity: Vec<RiseLaw>,
+}
+
+fn number(fields: &[&str], i: usize, what: &str) -> Result<f64, String> {
+    let x = fields.get(i).ok_or_else(|| format!("{what} is missing"))?.parse::<f64>()
+        .map_err(|_| format!("invalid {what}"))?;
+    if x.is_finite() { Ok(x) } else { Err(format!("nonfinite {what}")) }
+}
+fn text(fields: &[&str], from: usize, what: &str) -> Result<String, String> {
+    // The geometry reader trims every comma-separated field; rejoin with ", ".
+    let joined = fields.get(from..).map(|rest| rest.join(", ")).unwrap_or_default();
+    if joined.trim().is_empty() { Err(format!("{what} needs its source text")) } else { Ok(joined) }
+}
+fn slug(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+impl LossDeclaration {
+    /// Read one loss row; `Ok(false)` when the row is not a loss row.
+    ///
+    /// # Errors
+    /// Malformed fields, negative or nonfinite loss factors, empty or reversed
+    /// domains, unknown flags and repeated names refuse.
+    pub fn read_row(&mut self, f: &[&str]) -> Result<bool, String> {
+        match f[0] {
+            "stiffener-group" => {
+                let name = f.get(1).copied().unwrap_or("");
+                if !slug(name) || name.starts_with("panel") || self.groups.iter().any(|(n, _)| n == name) {
+                    return Err("stiffener-group needs a unique lowercase name that is not a panel share".into());
+                }
+                if self.groups.len() >= MAX_GROUPS { return Err("too many stiffener groups".into()); }
+                let members = f[2..].iter().map(|v| v.parse::<usize>().map_err(|_| "invalid stiffener index".to_string()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if members.is_empty() { return Err("stiffener-group needs at least one stiffener".into()); }
+                self.groups.push((name.to_string(), members));
+            }
+            "loss-share" => {
+                let share = f.get(1).copied().unwrap_or("");
+                let eta = number(f, 2, "loss factor")?;
+                let (lo, hi) = (number(f, 3, "frequency domain lower edge")?, number(f, 4, "frequency domain upper edge")?);
+                let extrapolate = match f.get(5).copied() {
+                    Some("strict") => false,
+                    Some("extrapolate-frequency") => true,
+                    _ => return Err("loss-share flag must be strict or extrapolate-frequency".into()),
+                };
+                if !(eta >= 0.0 && eta < 1.0) || !(lo > 0.0 && lo <= hi) {
+                    return Err(format!("loss-share {share}: loss factor in [0,1) and a positive frequency domain lo <= hi"));
+                }
+                self.push(share, ShareLoss::Claim { eta, domain_hz: (lo, hi), extrapolate, receipt: text(f, 6, "loss-share")? })?;
+            }
+            "loss-unknown" => {
+                let share = f.get(1).copied().unwrap_or("");
+                self.push(share, ShareLoss::Unknown { reason: text(f, 2, "loss-unknown")? })?;
+            }
+            "loss-sensitivity" => {
+                if self.sensitivity.len() >= MAX_SENSITIVITY { return Err("too many loss-sensitivity laws".into()); }
+                let label = f.get(1).copied().unwrap_or("");
+                let law = RiseLaw { label: label.to_string(), from_hz: number(f, 2, "sensitivity start")?,
+                    to_hz: number(f, 3, "sensitivity end")?, ratio: number(f, 4, "sensitivity ratio")?,
+                    source: text(f, 5, "loss-sensitivity")? };
+                if !slug(label) || self.sensitivity.iter().any(|l| l.label == label)
+                    || !(law.from_hz > 0.0 && law.to_hz > law.from_hz && law.ratio > 0.0) {
+                    return Err("loss-sensitivity needs a unique label, 0 < from < to and a positive ratio".into());
+                }
+                self.sensitivity.push(law);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn push(&mut self, share: &str, loss: ShareLoss) -> Result<(), String> {
+        if !slug(share) || self.shares.iter().any(|(n, _)| n == share) {
+            return Err(format!("loss share '{share}' must be a unique lowercase name"));
+        }
+        self.shares.push((share.to_string(), loss));
+        Ok(())
+    }
+
+    /// True when the declaration holds any loss row.
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self.shares.is_empty() && self.groups.is_empty() && self.sensitivity.is_empty() }
+
+    /// The shares in projection order: the four panel parts, then each group's
+    /// bending and torsion in declared group order.
+    #[must_use]
+    pub fn share_names(&self) -> Vec<String> {
+        PANEL_SHARES.iter().map(|s| (*s).to_string())
+            .chain(self.groups.iter().flat_map(|(g, _)| [format!("{g}-bending"), format!("{g}-torsion")]))
+            .collect()
+    }
+
+    /// Every stiffener in exactly one group and every share declared exactly
+    /// once, with nothing undeclared or extra.
+    ///
+    /// # Errors
+    /// An ungrouped, repeated or out-of-range stiffener, a missing or extra
+    /// share declaration refuse.
+    pub fn validate(&self, stiffeners: usize) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for (group, members) in &self.groups {
+            for &m in members {
+                if m >= stiffeners || !seen.insert(m) {
+                    return Err(format!("stiffener-group {group}: stiffener {m} is out of range or already grouped"));
+                }
+            }
+        }
+        if seen.len() != stiffeners {
+            let missing = (0..stiffeners).find(|m| !seen.contains(m)).unwrap_or(0);
+            return Err(format!("stiffener {missing} belongs to no stiffener-group, so its loss is undeclared"));
+        }
+        let names = self.share_names();
+        for name in &names {
+            if !self.shares.iter().any(|(n, _)| n == name) {
+                return Err(format!("loss share '{name}' is undeclared: give it a loss-share or loss-unknown row"));
+            }
+        }
+        if let Some((extra, _)) = self.shares.iter().find(|(n, _)| !names.contains(n)) {
+            return Err(format!("loss share '{extra}' names no panel part or stiffener group"));
+        }
+        Ok(())
+    }
+
+    fn loss(&self, share: &str) -> &ShareLoss {
+        &self.shares.iter().find(|(n, _)| n == share).expect("validated share").1
+    }
+}
+
+/// One source mode's material loss and its receipt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModeLoss {
+    pub frequency_hz: f64,
+    /// `eta_a = H_aa / omega_a^2`.
+    pub loss_factor: f64,
+    /// `eta_a / 2`, the ratio the authored board stated as one number.
+    pub damping_ratio: f64,
+    /// Each share's fraction of the mode's strain energy, in share order.
+    pub fractions: Vec<f64>,
+    /// The sum of the fractions of shares whose loss is unknown: the missing
+    /// loss is at most their unknown loss factor times this.
+    pub unknown_fraction: f64,
+    /// Shares taken outside their measured frequencies at this mode.
+    pub extrapolated: Vec<usize>,
+    pub max_coupling: f64,
+    pub neighbours: [Option<NeighbourCoupling>; 2],
+    /// The loss factor if the extrapolated shares rose as each sensitivity law.
+    pub sensitivity: Vec<f64>,
+}
+
+/// The applied declaration on every source mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialLossReceipt {
+    pub shares: Vec<(String, ShareLoss)>,
+    pub sensitivity: Vec<RiseLaw>,
+    pub modes: Vec<ModeLoss>,
+    pub caveats: Vec<String>,
+}
+
+/// Per-band summary against a reference damping ratio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandSummary {
+    pub band_hz: (f64, f64),
+    pub modes: usize,
+    pub mean_ratio: f64,
+    pub min_ratio: f64,
+    pub max_ratio: f64,
+}
+
+impl MaterialLossReceipt {
+    /// Damping-ratio statistics per band `[edges[i], edges[i+1])`; empty
+    /// bands are reported with zero modes and NaN statistics.
+    #[must_use]
+    pub fn band_summary(&self, edges_hz: &[f64]) -> Vec<BandSummary> {
+        edges_hz.windows(2).map(|w| {
+            let ratios: Vec<f64> = self.modes.iter().filter(|m| m.frequency_hz >= w[0] && m.frequency_hz < w[1])
+                .map(|m| m.damping_ratio).collect();
+            let n = ratios.len();
+            BandSummary { band_hz: (w[0], w[1]), modes: n,
+                mean_ratio: if n == 0 { f64::NAN } else { ratios.iter().sum::<f64>() / n as f64 },
+                min_ratio: ratios.iter().copied().fold(f64::NAN, f64::min),
+                max_ratio: ratios.iter().copied().fold(f64::NAN, f64::max) }
+        }).collect()
+    }
+
+    /// One line per mode, tab-separated, with a header naming every column.
+    #[must_use]
+    pub fn tsv(&self) -> String {
+        let mut out = String::from("mode\tfrequency_hz\tloss_factor\tdamping_ratio");
+        for (name, _) in &self.shares { let _ = write!(out, "\tf_{name}"); }
+        out.push_str("\tunknown_fraction\textrapolated\tmax_coupling\tlower_neighbour\tlower_ratio\tupper_neighbour\tupper_ratio");
+        for law in &self.sensitivity { let _ = write!(out, "\tloss_factor_if_{}", law.label); }
+        out.push('\n');
+        for (a, m) in self.modes.iter().enumerate() {
+            let _ = write!(out, "{a}\t{:.6}\t{:.6e}\t{:.6e}", m.frequency_hz, m.loss_factor, m.damping_ratio);
+            for f in &m.fractions { let _ = write!(out, "\t{f:.6e}"); }
+            let ext = m.extrapolated.iter().map(|&c| self.shares[c].0.as_str()).collect::<Vec<_>>().join(";");
+            let _ = write!(out, "\t{:.6e}\t{}\t{:.3e}", m.unknown_fraction, if ext.is_empty() { "-" } else { &ext }, m.max_coupling);
+            for side in &m.neighbours {
+                match side {
+                    Some(c) => { let _ = write!(out, "\t{}\t{:.3e}", c.mode, c.ratio); }
+                    None => out.push_str("\t-\t-"),
+                }
+            }
+            for s in &m.sensitivity { let _ = write!(out, "\t{s:.6e}"); }
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// What a `damping,material` board supplies to resolve its loss.
+pub(super) struct BoardParts<'a> {
+    pub mesh: &'a PlateMesh,
+    /// Per triangle: E_L, E_R, nu_LR, G_LR [Pa], thickness [m], grain [rad].
+    pub panel: &'a [[f64; 6]],
+    pub stiffeners: &'a [Stiffener],
+}
+
+/// Resolve the declaration on the source modes: the shares' strain energies
+/// projected once by the owner, each share's loss applied by its domain rule,
+/// and the diagonal source damping `c_a` [1/s] the reduction consumes.
+///
+/// # Errors
+/// A mode outside a strict share's measured frequencies refuses by name, as do
+/// assembly, projection and non-dissipative results; nothing falls back.
+pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, model: &PlateModel,
+    phi: &[Vec<f64>], omega: &[f64], assemble: &dyn Fn(&[Stiffener]) -> Result<PlateModel, String>)
+    -> Result<(Vec<f64>, MaterialLossReceipt), String> {
+    declaration.validate(parts.stiffeners.len())?;
+    let names = declaration.share_names();
+    // Panel bending parts per triangle, rotated as fs-plate rotates the section.
+    let panel_parts = parts.panel.iter().map(|p| OrthotropicBendingParts::new(p[0], p[1], p[2], p[3], p[4], p[5])
+        .map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    let pick = |f: fn(&OrthotropicBendingParts) -> [f64; 9]| panel_parts.iter().map(f).collect::<Vec<_>>();
+    let tensors = [pick(|p| p.longitudinal), pick(|p| p.radial), pick(|p| p.shear), pick(|p| p.poisson)];
+    // Each group's bending (E doubled) and torsion (G doubled) assemblies.
+    let mut doubled = Vec::with_capacity(2 * declaration.groups.len());
+    for (_, members) in &declaration.groups {
+        for torsion in [false, true] {
+            let edited: Vec<Stiffener> = parts.stiffeners.iter().enumerate().map(|(i, s)| {
+                let mut s = s.clone();
+                if members.contains(&i) { if torsion { s.g *= 2.0 } else { s.e *= 2.0 } }
+                s
+            }).collect();
+            doubled.push(assemble(&edited)?);
+        }
+    }
+    let mut shares: Vec<(&str, StiffnessShare<'_>)> = Vec::with_capacity(names.len());
+    for (name, t) in PANEL_SHARES.iter().zip(&tensors) { shares.push((name, StiffnessShare::Panel(t))); }
+    for (name, plus) in names[4..].iter().zip(&doubled) {
+        shares.push((name, StiffnessShare::Difference { plus, minus: model }));
+    }
+    let energies = hysteretic::project_energy_shares_offline(parts.mesh, model, &shares, phi, omega)
+        .map_err(|e| format!("board material loss projection: {e}"))?;
+    // Per-mode loss table by each share's domain rule.
+    let n = omega.len();
+    let mut eta = vec![vec![0.0; n]; names.len()];
+    let mut extrapolated = vec![Vec::new(); n];
+    for (c, name) in names.iter().enumerate() {
+        if let ShareLoss::Claim { eta: value, domain_hz: (lo, hi), extrapolate, receipt } = declaration.loss(name) {
+            for a in 0..n {
+                let hz = omega[a] / std::f64::consts::TAU;
+                if hz < *lo || hz > *hi {
+                    if !extrapolate {
+                        return Err(format!("board mode {a} ({hz:.2} Hz) lies outside the {lo:.2}-{hi:.2} Hz the '{name}' \
+                            loss claim was measured over ({receipt}); declare extrapolate-frequency for that share or the \
+                            board refuses; no authored damping replaces it"));
+                    }
+                    extrapolated[a].push(c);
+                }
+                eta[c][a] = *value;
+            }
+        }
+    }
+    let loss = energies.hysteretic(&eta).map_err(|e| format!("board material loss: {e}"))?;
+    let unknown: Vec<usize> = (0..names.len()).filter(|&c| matches!(declaration.loss(&names[c]), ShareLoss::Unknown { .. })).collect();
+    let modes = (0..n).map(|a| {
+        let hz = omega[a] / std::f64::consts::TAU;
+        let fractions: Vec<f64> = (0..names.len()).map(|c| energies.fraction(c, a)).collect();
+        let sensitivity = declaration.sensitivity.iter().map(|law| {
+            (0..names.len()).map(|c| {
+                let scale = if extrapolated[a].contains(&c) { law.factor(hz) } else { 1.0 };
+                eta[c][a] * scale * fractions[c]
+            }).sum()
+        }).collect();
+        ModeLoss { frequency_hz: hz, loss_factor: loss.loss_factor[a], damping_ratio: loss.loss_factor[a] / 2.0,
+            unknown_fraction: unknown.iter().map(|&c| fractions[c]).sum(), fractions,
+            extrapolated: extrapolated[a].clone(), max_coupling: loss.max_coupling[a],
+            neighbours: loss.neighbours[a], sensitivity }
+    }).collect::<Vec<ModeLoss>>();
+    let mut caveats = Vec::new();
+    for &c in &unknown {
+        if let ShareLoss::Unknown { reason } = declaration.loss(&names[c]) {
+            let most = modes.iter().map(|m| m.fractions[c]).fold(f64::NEG_INFINITY, f64::max);
+            caveats.push(format!("'{}' loss unknown ({reason}); board damping is a lower bound: the missing loss is its \
+                unknown loss factor times f_{} (largest {most:.3e})", names[c], names[c]));
+        }
+    }
+    for (c, name) in names.iter().enumerate() {
+        let outside: Vec<f64> = modes.iter().filter(|m| m.extrapolated.contains(&c)).map(|m| m.frequency_hz).collect();
+        if let (Some(lo), ShareLoss::Claim { eta, domain_hz, .. }) = (outside.iter().copied().reduce(f64::min), declaration.loss(name)) {
+            let hi = outside.iter().copied().fold(lo, f64::max);
+            caveats.push(format!("'{name}' loss factor {eta:.5} taken outside its measured {:.2}-{:.2} Hz at {} modes \
+                ({lo:.1}-{hi:.1} Hz): constant loss is assumed there; see the sensitivity columns", domain_hz.0,
+                domain_hz.1, outside.len()));
+        }
+    }
+    // Shares in projection order, matching every mode's fraction columns.
+    let shares = names.iter().map(|name| (name.clone(), declaration.loss(name).clone())).collect();
+    Ok((loss.source_damping, MaterialLossReceipt { shares,
+        sensitivity: declaration.sensitivity.clone(), modes, caveats }))
+}

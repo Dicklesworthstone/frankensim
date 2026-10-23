@@ -53,6 +53,7 @@ fn validate_source(free: usize, source: &SliceReport,
 pub(super) fn project(
     geometry: &BoardGeometry,
     model: &PlateModel,
+    damping: &[f64],
     source: &SliceReport,
     keys: &[u8],
     edge_cubic_mass: bool,
@@ -91,7 +92,7 @@ pub(super) fn project(
                 [0.,0.,at(0),at(2),-at(1),0.]
             })?;
     }
-    project_modal(model.free, geometry.damping_ratio, source, &ports, options,
+    project_modal_with_damping(model.free, damping, source, &ports, options,
         |x, y| model.m.spmv(x, y))
 }
 
@@ -157,14 +158,31 @@ pub(crate) fn project_modal(
     options: &ritz::RitzOptions,
     apply_mass: impl Fn(&[f64], &mut [f64]),
 ) -> Result<ReducedBoard, String> {
-    validate_source(free, source, &apply_mass)?;
     if !damping_ratio.is_finite() || damping_ratio < 0.0 {
         return Err("invalid source soundboard damping ratio".into());
     }
+    let damping: Vec<_> = source.modes.iter()
+        .map(|pair| 2.0 * damping_ratio * det::sqrt(pair.lambda)).collect();
+    project_modal_with_damping(free, &damping, source, ports, options, apply_mass)
+}
+
+/// `project_modal` with a source damping per mode, `c_a` [1/s] on the diagonal
+/// of the source C (a material board's `eta_a omega_a`, pexfp.373). The same
+/// diagonal shapes the reduced basis and its full congruence.
+pub(crate) fn project_modal_with_damping(
+    free: usize,
+    damping: &[f64],
+    source: &SliceReport,
+    ports: &[Vec<f64>],
+    options: &ritz::RitzOptions,
+    apply_mass: impl Fn(&[f64], &mut [f64]),
+) -> Result<ReducedBoard, String> {
+    validate_source(free, source, &apply_mass)?;
+    if damping.len() != source.modes.len() || damping.iter().any(|c| !c.is_finite() || *c < 0.0) {
+        return Err("invalid source soundboard damping: one finite nonnegative value per source mode".into());
+    }
     let lambda: Vec<_> = source.modes.iter().map(|pair| pair.lambda).collect();
-    let damping: Vec<_> = lambda.iter()
-        .map(|value| 2.0 * damping_ratio * det::sqrt(*value)).collect();
-    let basis = ritz::bridge_basis(&lambda, &damping, ports, options)?;
+    let basis = ritz::bridge_basis(&lambda, damping, ports, options)?;
     let n = source.modes.len();
     let r = basis.columns.len();
     let low = options.keep_low_modes;

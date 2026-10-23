@@ -31,6 +31,8 @@ pub mod ritz;
 pub(super) mod reduction;
 #[path = "board_acoustic_quadrature.rs"]
 mod acoustic_quadrature;
+#[path = "board_loss.rs"]
+pub mod loss;
 use acoustic_quadrature::triangle_weights as acoustic_triangle_weights;
 
 pub const HEADER: &str = "frankensim-board-geometry-si-v1";
@@ -58,7 +60,13 @@ pub struct BoardGeometry {
     supports: AssemblyOptions,
     bridge_sites: Vec<BridgeSite>,
     /// Authored or measured modal damping ratio, not a fitted geometry result.
+    /// NaN on a `damping,material` board, whose loss is `material_loss`, so a
+    /// stray use of a ratio refuses instead of passing silently.
     damping_ratio: f64,
+    /// The sourced loss shares of a `damping,material` board (pexfp.373).
+    material_loss: Option<loss::LossDeclaration>,
+    /// Per triangle: E_L, E_R, nu_LR, G_LR [Pa], thickness [m], grain [rad].
+    panel_laws: Vec<[f64; 6]>,
     /// Acoustic integration only; the structural mesh and eigensolve stay fixed.
     acoustic_refinement_levels: usize,
 }
@@ -140,7 +148,8 @@ impl BoardGeometry {
     /// - stiffener-mass,lumped|consistent-hermite|consistent-eccentric (optional; default lumped)
     /// - panel-rotary-mass,lumped|consistent-cubic (optional; default lumped)
     /// - bridge,midi,triangle_id,bary0,bary1,bary2
-    /// - damping,dimensionless_ratio
+    /// - damping,dimensionless_ratio | damping,material (then every stiffener
+    ///   group and loss share is declared; see [`loss`])
     /// - pretension,N_per_m (uniform nonnegative membrane tension, NOT crown)
     ///
     /// Unknown rows, missing values, duplicate keys and nonphysical data refuse.
@@ -158,6 +167,9 @@ impl BoardGeometry {
         let mut keys = BTreeSet::new();
         let mut support = None;
         let mut damping = None;
+        let mut material = false;
+        let mut losses = loss::LossDeclaration::default();
+        let mut panel_laws = Vec::new();
         let mut pretension = None;
         for (line, raw) in text.lines().enumerate() {
             let raw = raw.trim();
@@ -188,6 +200,8 @@ impl BoardGeometry {
                             return Err("triangle ids must be contiguous and below the element budget".into());
                         }
                         triangles.push([index(&f, 2)?, index(&f, 3)?, index(&f, 4)?]);
+                        panel_laws.push([scalar(&f, 7)?, scalar(&f, 8)?, scalar(&f, 9)?, scalar(&f, 10)?,
+                            scalar(&f, 5)?, scalar(&f, 11)?]);
                         sections.push(PlateSection::orthotropic_plane_stress_at_angle(
                             scalar(&f, 7)?, scalar(&f, 8)?, scalar(&f, 9)?, scalar(&f, 10)?,
                             scalar(&f, 5)?, scalar(&f, 6)?, scalar(&f, 11)?,
@@ -246,6 +260,10 @@ impl BoardGeometry {
                         }
                         sites.push(BridgeSite { midi: key as u8, triangle: index(&f, 2)?, weights });
                     }
+                    ("damping", 2) if f[1] == "material" => {
+                        once(&mut damping, f64::NAN, "damping")?;
+                        material = true;
+                    }
                     ("damping", 2) => {
                         let ratio = scalar(&f, 1)?;
                         if !(0.0..1.0).contains(&ratio) { return Err("damping ratio must be in [0,1)".into()); }
@@ -256,6 +274,7 @@ impl BoardGeometry {
                         if t < 0.0 { return Err("compressive buckling/crown needs a shell model, not this flat adapter".into()); }
                         once(&mut pretension, t, "pretension")?;
                     }
+                    _ if losses.read_row(&f)? => {}
                     _ => return Err(format!("unknown row or wrong field count: {}", f[0])),
                 }
                 Ok(())
@@ -285,7 +304,13 @@ impl BoardGeometry {
                 if !beams.insert(edge) { return Err("duplicate stiffener segment would double mass and stiffness".into()); }
             }
         }
+        if material {
+            losses.validate(stiffeners.len())?;
+        } else if !losses.is_empty() {
+            return Err("loss rows belong to a damping,material board".into());
+        }
         Ok(Self {
+            material_loss: material.then_some(losses), panel_laws,
             provenance: source.ok_or("missing source authority/attribution")?, chart, stiffeners,
             stiffener_mass: stiffener_mass.unwrap_or_default(),
             consistent_rotary_mass: consistent_rotary_mass.unwrap_or(false),
@@ -410,6 +435,20 @@ impl BoardGeometry {
     pub fn prepare_source_slice(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
         self.prepare_inner_with_reduction(keys, upper_hz, false, false, false, false, None, None, true)
     }
+    /// `prepare`, also returning a `damping,material` board's loss receipt.
+    #[allow(dead_code)]
+    pub fn prepare_with_loss_receipt(&self, keys: &[u8], upper_hz: f64)
+        -> Result<(PreparedBoard, Option<loss::MaterialLossReceipt>), String> {
+        self.prepare_core(keys, upper_hz, false, false, false, false, None, None, false)
+    }
+    /// `prepare_reduced`, also returning a `damping,material` board's loss receipt.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn prepare_reduced_with_loss_receipt(&self, keys: &[u8], upper_hz: f64, retain_motion: bool,
+        mass_equilibrated: bool, consistent_mass: bool, edge_cubic_mass: bool, options: &ritz::RitzOptions)
+        -> Result<(PreparedBoard, Option<loss::MaterialLossReceipt>), String> {
+        self.prepare_core(keys, upper_hz, retain_motion, mass_equilibrated, consistent_mass, edge_cubic_mass,
+            Some(options), None, false)
+    }
     fn prepare_inner(
         &self,
         keys: &[u8],
@@ -435,6 +474,22 @@ impl BoardGeometry {
         source_frames: Option<&[motion::SourceBridgeFrame]>,
         source_slice: bool,
     ) -> Result<PreparedBoard, String> {
+        self.prepare_core(keys, upper_hz, retain_motion, mass_equilibrated, consistent_transverse_mass,
+            edge_cubic_transverse_mass, reduction_options, source_frames, source_slice).map(|(board, _)| board)
+    }
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_core(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        retain_motion: bool,
+        mass_equilibrated: bool,
+        consistent_transverse_mass: bool,
+        edge_cubic_transverse_mass: bool,
+        reduction_options: Option<&ritz::RitzOptions>,
+        source_frames: Option<&[motion::SourceBridgeFrame]>,
+        source_slice: bool,
+    ) -> Result<(PreparedBoard, Option<loss::MaterialLossReceipt>), String> {
         if self.consistent_rotary_mass && !edge_cubic_transverse_mass {
             return Err("consistent-cubic panel rotary mass requires the edge-cubic board mass/motion image".into());
         }
@@ -468,15 +523,14 @@ impl BoardGeometry {
         } else {
             TransverseMass::Lumped
         };
-        let model = if self.consistent_rotary_mass {
-            self.chart.assemble_edge_cubic_kinetic_mass(
-                &self.stiffeners, &self.supports, self.stiffener_mass,
-            )
-        } else {
-            self.chart.assemble_with_mass(
-                &self.stiffeners, &self.supports, transverse_mass, self.stiffener_mass,
-            )
-        }.map_err(|e| e.to_string())?;
+        let assemble = |stiffeners: &[Stiffener]| -> Result<PlateModel, String> {
+            if self.consistent_rotary_mass {
+                self.chart.assemble_edge_cubic_kinetic_mass(stiffeners, &self.supports, self.stiffener_mass)
+            } else {
+                self.chart.assemble_with_mass(stiffeners, &self.supports, transverse_mass, self.stiffener_mass)
+            }.map_err(|e| e.to_string())
+        };
+        let model = assemble(&self.stiffeners)?;
         if model.free == 0 { return Err("all soundboard degrees of freedom are constrained".into()); }
         let modal_options = SliceOptions {
             mass_diagonal_equilibration: mass_equilibrated,
@@ -492,8 +546,29 @@ impl BoardGeometry {
         } else if report.modes.is_empty() || report.modes.len() > MAX_BOARD_MODES {
             return Err(format!("certified band contains {} modes; runtime admits 1..={MAX_BOARD_MODES}; choose a narrower explicit band", report.modes.len()));
         }
+        // A damping,material board resolves its loss once, on the complete
+        // source slice; an authored board keeps its one ratio on every mode.
+        let material = match &self.material_loss {
+            None => None,
+            Some(declaration) => {
+                let phi: Vec<Vec<f64>> = report.modes.iter().map(|pair| pair.phi.clone()).collect();
+                let omega: Vec<f64> = report.modes.iter().map(|pair| det::sqrt(pair.lambda)).collect();
+                let parts = loss::BoardParts { mesh: &self.chart.mesh, panel: &self.panel_laws,
+                    stiffeners: &self.stiffeners };
+                Some(loss::resolve(declaration, &parts, &model, &phi, &omega, &assemble)?)
+            }
+        };
+        let source_damping: Vec<f64> = match &material {
+            Some((damping, _)) => damping.clone(),
+            None => report.modes.iter().map(|pair| 2.0 * self.damping_ratio * det::sqrt(pair.lambda)).collect(),
+        };
+        let source_ratio = |mode: usize| match &material {
+            Some((damping, _)) => damping[mode] / (2.0 * det::sqrt(report.modes[mode].lambda)),
+            None => self.damping_ratio,
+        };
         let reduced = reduction_options.map(|options|
-            reduction::project(self, &model, &report, keys, edge_cubic_transverse_mass, options, source_frames))
+            reduction::project(self, &model, &source_damping, &report, keys, edge_cubic_transverse_mass, options,
+                source_frames))
             .transpose()?;
         let pairs = reduced.as_ref().map_or(report.modes.as_slice(), |value| value.modes.as_slice());
         let mesh = &self.chart.mesh;
@@ -556,8 +631,8 @@ impl BoardGeometry {
             }
             modes.push(BoardMode {
                 frequency_hz: det::sqrt(pair.lambda) / TAU,
-                damping_ratio: reduced.as_ref().map_or(self.damping_ratio, |value| {
-                    if mode_id < value.report.protected_low_modes { self.damping_ratio }
+                damping_ratio: reduced.as_ref().map_or_else(|| source_ratio(mode_id), |value| {
+                    if mode_id < value.report.protected_low_modes { source_ratio(mode_id) }
                     else { value.physical_damping[mode_id * pairs.len() + mode_id]
                         / (2.0 * det::sqrt(pair.lambda)) }
                 }), bridge, volume,
@@ -644,6 +719,14 @@ impl BoardGeometry {
             provenance.push_str(&format!("; {field} acoustic-only refinement level {} ({} surface samples)",
                 self.acoustic_refinement_levels, surface.len()));
         }
+        if let Some((_, receipt)) = &material {
+            provenance.push_str(&format!("; damping from material loss shares on {} source modes (pexfp.373): {}; {} caveats",
+                receipt.modes.len(), receipt.shares.iter().map(|(name, share)| match share {
+                    loss::ShareLoss::Claim { eta, extrapolate, .. } =>
+                        format!("{name} {eta:.5}{}", if *extrapolate { " extrapolate-frequency" } else { "" }),
+                    loss::ShareLoss::Unknown { .. } => format!("{name} unknown"),
+                }).collect::<Vec<_>>().join(", "), receipt.caveats.len()));
+        }
         let (physical_damping, reduction) = if let Some(value) = reduced {
             provenance.push_str(&format!("; explicit bridge-driven Ritz projection: {} source modes, {} retained, {} unchanged low modes; mixed tail intervals certify the projected pencil only",
                 value.report.source_modes, modes.len(), value.report.protected_low_modes));
@@ -656,11 +739,11 @@ impl BoardGeometry {
             }
             (Some(value.physical_damping), Some(value.report))
         } else { (None, None) };
-        Ok(PreparedBoard {
+        Ok((PreparedBoard {
             modes, surface, motion, provenance, area_m2: mesh.total_area(),
             mass_kg: mass, frequency_intervals_hz: intervals, physical_damping, reduction,
             free_dofs: model.free,
-        })
+        }, material.map(|(_, receipt)| receipt)))
     }
 
     fn mass_kg(&self) -> f64 {

@@ -24,9 +24,20 @@
 //! the ribs. Crown, rim/plate flexibility, glue slip and downbearing remain
 //! outside this flat-plate image.
 //!
+//! The shipped board keeps its authored `damping,0.015`. The opt-in
+//! `build*_with_material_loss` boards declare `damping,material` instead: each
+//! share of the board's stiffness takes a loss factor from a loss pack at the
+//! board environment (pexfp.373, board_loss.rs). Sitka panel L from Qiu 2026
+//! at the wood's EMC; panel R and LR from Ono 1996 board 1, held at its
+//! unprinted measured moisture; the maple bridges' bending and torsion from
+//! Ono 1996; the Poisson part unsourced. Sugar pine (ribs and cut-off bar) has
+//! no loss source: its loss is omitted only under `sugar_pine_loss_unknown`,
+//! as a printed lower bound, and every claim measured at other frequencies
+//! applies to the board's modes only under `extrapolate_frequency`.
+//!
 //! Produces BOTH the existing fs-plate input and an OBJ from the SAME vertices,
 //! sections and beams. All work is cold. No eigensolver or contact law lives here.
-use fs_matdb::{MaterialCard, MaterialStateId, NormalizedPack, QueryPoint};
+use fs_matdb::{MaterialCard, MaterialStateId, NormalizedPack, PropertyValue, QueryPoint};
 use fs_material::gas::{GasState, saturation_pressure_water_pa};
 use fs_material::gas_species::input::read_gas_record;
 use fs_material::plane_stress_viscosity::MaterialPlane;
@@ -285,6 +296,168 @@ pub const SITKA_SPRUCE: &[u8] = include_bytes!("packs/spruce-sitka-fpl-gtr282.fs
 pub const SUGAR_PINE: &[u8] = include_bytes!("packs/pine-sugar-fpl-gtr282.fsmatpk");
 pub const HARD_MAPLE: &[u8] = include_bytes!("packs/maple-sugar-fpl-gtr282.fsmatpk");
 
+/// Loss packs of the material-damping board (pexfp.373).
+pub const SITKA_LOSS_MOISTURE: &[u8] = include_bytes!("packs/spruce-sitka-loss-moisture-qiu2026.fsmatpk");
+pub const SITKA_LOSS: &[u8] = include_bytes!("packs/spruce-sitka-loss-ono1996.fsmatpk");
+pub const HARD_MAPLE_LOSS: &[u8] = include_bytes!("packs/maple-sugar-loss-ono1996.fsmatpk");
+/// Norway spruce loss against frequency, for the printed sensitivity only.
+pub const NORWAY_SPRUCE_LOSS_SPYCHER: &[u8] = include_bytes!("packs/spruce-norway-loss-frequency-spycher2008.fsmatpk");
+pub const NORWAY_SPRUCE_LOSS_MERHAR: &[u8] =
+    include_bytes!("packs/spruce-norway-loss-frequency-moisture-merhar2025.fsmatpk");
+
+/// What a material-damping board declares beyond its loss packs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LossPolicy {
+    /// Take each loss claim at board modes outside the frequencies it was
+    /// measured at: constant loss there, printed with its sensitivity.
+    pub extrapolate_frequency: bool,
+    /// Omit the sugar pine ribs' and cut-off bar's loss (no source exists),
+    /// printing the lower bound; otherwise the board refuses by name.
+    pub sugar_pine_loss_unknown: bool,
+}
+
+/// What the sugar pine hunt tried (pexfp.373); printed in every refusal and receipt.
+const SUGAR_PINE_SEARCHED: &str = "no sugar pine loss source: Bremaud et al. 2012's 98 woods (five Pinus species, \
+    not lambertiana), the FPL Wood Handbook and softwood tech sheet, Wegst 2006 (not reachable) and web searches";
+
+fn claim_at<'a>(pack: &'a NormalizedPack, property: &str, frequency_hz: f64)
+    -> Result<(fs_matdb::ClaimId, &'a fs_matdb::PropertyClaim), String> {
+    let found: Vec<_> = pack.claims().claims_for(property).into_iter()
+        .filter(|(_, claim)| claim.validity.bounds().get("frequency") == Some(&(frequency_hz, frequency_hz)))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(*one),
+        _ => Err(format!("loss pack {}: {} claims of '{property}' measured at {frequency_hz} Hz, need exactly one",
+            pack.pack_id(), found.len())),
+    }
+}
+
+/// One pinned scalar loss claim measured at one frequency, held at its
+/// measured state: `loss-share` row text.
+fn pinned_share(share: &str, pack: &NormalizedPack, property: &str, frequency_hz: f64, flag: &str, note: &str)
+    -> Result<String, String> {
+    let (id, claim) = claim_at(pack, property, frequency_hz)?;
+    let mut point = QueryPoint::new().with("frequency", frequency_hz).map_err(|e| e.to_string())?;
+    for axis in claim.validity.bounds().keys().filter(|axis| axis.as_str() != "frequency") {
+        let (lo, hi) = claim.validity.bounds()[axis];
+        if lo != hi { return Err(format!("loss pack {}: '{property}' axis {axis} is not one measured state", pack.pack_id())); }
+        point = point.with(axis.clone(), lo).map_err(|e| e.to_string())?;
+    }
+    let answer = pack.claims().query_pinned(property, &point, id)
+        .map_err(|e| format!("loss pack {}: {e}", pack.pack_id()))?;
+    let eta = answer.evidence.value.value;
+    Ok(format!("loss-share,{share},{eta:.17e},{frequency_hz:.17e},{frequency_hz:.17e},{flag},{} {} {property} measured at {frequency_hz} Hz; {note}\n",
+        pack.pack_id(), pack.content_hash().to_hex()))
+}
+
+/// The loss rows of a material-damping board at `environment`, from the
+/// built-in loss packs.
+///
+/// # Errors
+/// A loss pack without its pinned claim, an EMC outside the Sitka moisture
+/// curve's 2-12 percent, and sugar pine without `sugar_pine_loss_unknown`
+/// refuse by name.
+pub fn model_d_loss_rows(environment: &BoardEnvironment, policy: LossPolicy) -> Result<String, String> {
+    use fs_qty::{Dims, QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
+    if !policy.sugar_pine_loss_unknown {
+        return Err(format!("sugar pine ribs and cut-off bar: {SUGAR_PINE_SEARCHED}; declare sugar_pine_loss_unknown \
+            to omit their loss as a printed lower bound, or the board refuses"));
+    }
+    let flag = if policy.extrapolate_frequency { "extrapolate-frequency" } else { "strict" };
+    let mut rows = String::new();
+    // Panel L: Qiu 2026, the first mode's loss over moisture content, at the board's EMC.
+    let qiu = load_pack(SITKA_LOSS_MOISTURE)?;
+    let curve = qiu.claims().claims_for("loss_factor_longitudinal");
+    let [(id, claim)] = curve.as_slice() else { return Err("Sitka moisture pack: need one along-grain curve".into()) };
+    let (lo, hi) = *claim.validity.bounds().get("frequency").ok_or("Sitka moisture curve states no frequency")?;
+    let typed = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let point = QueryPoint::new()
+        .with_quantity("moisture_content", QuantitySpec::dimensional(Dims::NONE), environment.moisture_content)
+        .and_then(|p| p.with_quantity("frequency", typed(QuantityKind::Frequency(FrequencyConvention::Cyclic)), lo))
+        .map_err(|e| e.to_string())?;
+    let answer = qiu.claims().query_pinned("loss_factor_longitudinal", &point, *id).map_err(|e|
+        format!("Sitka moisture curve at EMC {:.6}: {e} (its moisture domain is 2-12 percent)", environment.moisture_content))?;
+    let decision = match &answer.receipt.decision {
+        fs_matdb::EvaluationDecision::LinearInside { x_lo, x_hi } => format!("linear between the {x_lo} and {x_hi} moisture rows"),
+        fs_matdb::EvaluationDecision::ExactTabulated { at } => format!("the {at} moisture row"),
+        other => format!("{other:?}"),
+    };
+    writeln!(rows, "loss-share,panel-l,{:.17e},{lo:.17e},{hi:.17e},{flag},{} {} loss_factor_longitudinal at EMC {:.6} ({decision}); \
+        Sitka along-grain, first flexural mode of 550 x 25 x 3 mm beams", answer.evidence.value.value, qiu.pack_id(),
+        qiu.content_hash().to_hex(), environment.moisture_content).unwrap();
+    // Panel R and LR: Ono 1996, board 1; bridges: Ono 1996 hard maple.
+    let ono = load_pack(SITKA_LOSS)?;
+    let held = "held at its measured state (moisture content not printed; 20-25 C, 50-60 percent RH)";
+    rows.push_str(&pinned_share("panel-r", &ono, "loss_factor_radial", 231.7, flag, &format!("board 1 of two; {held}"))?);
+    rows.push_str(&pinned_share("panel-lr", &ono, "loss_factor_shear_lr", 241.0, flag,
+        &format!("board 1 of two, first torsional mode; {held}"))?);
+    rows.push_str("loss-unknown,panel-12,no Poisson-coupling loss is sourced\n");
+    let maple = load_pack(HARD_MAPLE_LOSS)?;
+    rows.push_str(&pinned_share("bridges-bending", &maple, "loss_factor_longitudinal", 616.6, flag,
+        &format!("hard maple along-grain flexure; {held}"))?);
+    rows.push_str(&pinned_share("bridges-torsion", &maple, "loss_factor_shear_lr", 229.7, flag,
+        &format!("hard maple LR-plane torsion of a thin board; the beam's torsion also strains LT, whose loss is unsourced; {held}"))?);
+    for group in ["ribs", "cutoff-bar"] {
+        for part in ["bending", "torsion"] {
+            writeln!(rows, "loss-unknown,{group}-{part},sugar pine, {SUGAR_PINE_SEARCHED}").unwrap();
+        }
+    }
+    // Printed sensitivity: Spycher 2008's Norway spruce rise (first to last
+    // point) and Merhar 2025's LR-plane rise at the EMC nearest the board's.
+    let spycher = load_pack(NORWAY_SPRUCE_LOSS_SPYCHER)?;
+    let point = |name: &str| -> Result<(f64, f64), String> {
+        let claims = spycher.claims().claims_for(name);
+        let [(_, claim)] = claims.as_slice() else { return Err(format!("Spycher pack: need one '{name}'")) };
+        let (lo, hi) = *claim.validity.bounds().get("frequency").ok_or("Spycher point states no frequency")?;
+        match claim.value { PropertyValue::Scalar { value, .. } => Ok((0.5 * (lo + hi), value)),
+            _ => Err("Spycher point is not a scalar".into()) }
+    };
+    let (f1, d1) = point("log_decrement_longitudinal_fig4_point1")?;
+    let (f3, d3) = point("log_decrement_longitudinal_fig4_point3")?;
+    writeln!(rows, "loss-sensitivity,spycher2008,{f1:.17e},{f3:.17e},{:.17e},{} {} Norway spruce axial log decrement {d1} to {d3} \
+        (graph-read Fig. 4, fixture-only data)", d3 / d1, spycher.pack_id(), spycher.content_hash().to_hex()).unwrap();
+    let merhar = load_pack(NORWAY_SPRUCE_LOSS_MERHAR)?;
+    let lr = merhar.claims().claims_for("flexural_damping_ratio_lr_plane");
+    let at = |claim: &fs_matdb::PropertyClaim, axis: &str| claim.validity.bounds().get(axis).map(|b| b.0);
+    let mc = lr.iter().filter_map(|(_, c)| at(c, "moisture_content"))
+        .min_by(|a, b| (a - environment.moisture_content).abs().total_cmp(&(b - environment.moisture_content).abs()))
+        .ok_or("Merhar pack: no LR-plane claims")?;
+    let mut rows_at: Vec<(f64, f64)> = lr.iter().filter(|(_, c)| at(c, "moisture_content") == Some(mc))
+        .filter_map(|(_, c)| match c.value { PropertyValue::Scalar { value, .. } => at(c, "frequency").map(|f| (f, value)), _ => None })
+        .collect();
+    rows_at.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (Some(first), Some(last)) = (rows_at.first(), rows_at.last()) else { return Err("Merhar pack: empty LR rows".into()) };
+    writeln!(rows, "loss-sensitivity,merhar2025,{:.17e},{:.17e},{:.17e},{} {} Norway spruce LR-plane bar damping ratio {} to {} \
+        at EMC {mc} (deep bars: includes shear loss)", first.0, last.0, last.1 / first.1, merhar.pack_id(),
+        merhar.content_hash().to_hex(), first.1, last.1).unwrap();
+    Ok(rows)
+}
+
+/// `build_with_materials` with the material-loss declaration instead of the
+/// authored damping ratio.
+pub fn build_with_material_loss(divisions: usize, published_contacts: bool, materials: &BoardMaterials,
+    policy: LossPolicy) -> Result<Preset, String> {
+    if !(4..=32).contains(&divisions) { return Err("Model D mesh divisions must be 4..32".into()); }
+    let rows = model_d_loss_rows(&materials.environment, policy)?;
+    build_inner_with_loss(divisions, published_contacts, None, materials, Some(&rows))
+}
+
+/// `build_resolved_with_materials` with the material-loss declaration instead
+/// of the authored damping ratio.
+pub fn build_resolved_with_material_loss(divisions: usize, maximum_rib_normal_step_m: f64,
+    published_contacts: bool, materials: &BoardMaterials, policy: LossPolicy) -> Result<Preset, String> {
+    if !(4..=64).contains(&divisions) {
+        return Err("resolved Model D mesh divisions must be 4..64".into());
+    }
+    let rows = model_d_loss_rows(&materials.environment, policy)?;
+    let gap=resolution::drawing_gap(maximum_rib_normal_step_m,scale(),SLOPE)?;
+    let mut preset=build_inner_with_loss(divisions,published_contacts,Some(gap),materials,Some(&rows))?;
+    let note=format!("# mechanical mesh: {divisions} transverse divisions; maximum rib-normal row spacing {maximum_rib_normal_step_m:.17e} m; same source fields resampled, no convergence certificate\n");
+    preset.geometry.insert_str(0,&note);
+    preset.obj.insert_str(0,&note);
+    Ok(preset)
+}
+
 /// The source's species, from their packs: Sitka spruce panel, sugar pine
 /// ribs, hard (sugar) maple bridges. The source names no cut-off bar
 /// material; it takes the rib pack, as the former constants did.
@@ -477,6 +650,13 @@ pub(crate) fn build_probe_refined(divisions: usize, maximum_station_gap: f64) ->
 
 fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>,
     materials: &BoardMaterials) -> Result<Preset,String> {
+    build_inner_with_loss(divisions, published_contacts, maximum_station_gap, materials, None)
+}
+
+/// The board source; `loss` rows replace the authored damping with
+/// `damping,material` and its stiffener groups (pexfp.373).
+fn build_inner_with_loss(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>,
+    materials: &BoardMaterials, loss: Option<&str>) -> Result<Preset,String> {
     let curves=[LONG_BRIDGE,BASS_BRIDGE,CUTOFF];
     let mut levels:Vec<f64>=OUTLINE.iter().copied().map(station).collect();
     levels.extend(RIBS.iter().map(|r|r.0));
@@ -610,7 +790,11 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     let packs=|label:&str,p:&PackIdentity| format!("{label} {} {}",p.pack_id,p.content_hash);
     let packs=[packs("panel",&materials.panel.pack),packs("ribs",&materials.ribs.pack),
         packs("bridges",&materials.bridges.pack),packs("cut-off bar",&materials.cutoff_bar.pack)].join("; ");
-    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates; material packs: {packs}; environment {environment}\nsupport,clamped\npretension,0\ndamping,0.015\n");
+    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates; material packs: {packs}; environment {environment}\nsupport,clamped\npretension,0\n");
+    match loss {
+        None => geometry.push_str("damping,0.015\n"),
+        Some(rows) => { geometry.push_str("damping,material\n"); geometry.push_str(rows); }
+    }
     let mut obj=String::from("# Source-derived Model D SOUND BOARD assembly, SI metres, z up; not full piano CAD\n# Same flat structural image as the FSB. No invented crown or measured-data claim.\no sitka_spruce_panel\n");
     for (i,p) in xy.iter().enumerate() {
         writeln!(geometry,"node,{i},{:.17e},{:.17e}",p[0],p[1]).unwrap();
@@ -634,6 +818,15 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     for &[a,b,c] in &tris {for (u,v) in [(a,b),(b,c),(c,a)] {
         if edges[&(u.min(v),u.max(v))]==1 {writeln!(obj,"f {} {} {} {}",v+1,u+1,u+1+n,v+1+n).unwrap();}
     }}
+    if loss.is_some() {
+        // Stiffener rows follow `beams` order: one group per loss material.
+        for (name, member) in [("ribs", "sugar_pine_rib_"), ("bridges", "maple_"), ("cutoff-bar", "cutoff_bar")] {
+            let indices: Vec<String> = beams.iter().enumerate()
+                .filter(|(_, beam)| beam.group.starts_with(member)).map(|(i, _)| i.to_string()).collect();
+            if indices.is_empty() { return Err(format!("no {name} stiffeners for the loss groups")); }
+            writeln!(geometry, "stiffener-group,{name},{}", indices.join(",")).unwrap();
+        }
+    }
     let mut vertices=2*n;
     for beam in &beams {
         let (w,h)=(beam.width,beam.height);let area=w*h;let inertia=w*h.powi(3)/12.;
@@ -770,3 +963,7 @@ mod resolution_tests;
 #[cfg(test)]
 #[path = "steinway_material_tests.rs"]
 mod material_tests;
+
+#[cfg(test)]
+#[path = "steinway_loss_tests.rs"]
+mod loss_tests;

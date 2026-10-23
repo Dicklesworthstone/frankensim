@@ -7,7 +7,9 @@
 //! The engine-piano string tests load compiled packs committed under
 //! `apps/instrument-lab/engine-piano/tests/fixtures/packs` (that crate has its own workspace and cannot
 //! run this compiler). Each fixture must be byte-for-byte this compiler's output for its committed seed,
-//! so a seed edit without a refreshed fixture fails here.
+//! so a seed edit without a refreshed fixture fails here. The grand piano board's loss packs
+//! (`crates/fs-couple/examples/grand_piano/packs`, pexfp.373) are guarded the same way; they are plain
+//! claim packs, compiled without a material state, as the board source loads them.
 
 #![deny(unsafe_code)]
 
@@ -55,14 +57,24 @@ const PIANO_FIXTURES: [(&str, [&str; 4]); 6] = [
     ),
 ];
 
+/// Loss packs the grand piano's material-damping board loads (plain claim packs).
+const BOARD_LOSS_FIXTURES: [&str; 5] = [
+    "spruce-sitka-loss-moisture-qiu2026",
+    "spruce-sitka-loss-ono1996",
+    "maple-sugar-loss-ono1996",
+    "spruce-norway-loss-frequency-spycher2008",
+    "spruce-norway-loss-frequency-moisture-merhar2025",
+];
+
 /// Compile one committed seed manifest as a material-state pack, exactly as the piano tools do.
 fn compile(manifest: &str, state: [&str; 4]) -> NormalizedMaterialCardPack {
-    let (_, bytes) = compile_bytes(manifest, state, &state.join("-"));
+    let (_, bytes) = compile_bytes(manifest, Some(state), &state.join("-"));
     NormalizedMaterialCardPack::from_bytes(&bytes).expect("decode compiled pack")
 }
 
-/// The compiler's bytes for one seed, written to `<temp>/<name>.fsmatpk`, and that path.
-fn compile_bytes(manifest: &str, state: [&str; 4], name: &str) -> (PathBuf, Vec<u8>) {
+/// The compiler's bytes for one seed (a material-state pack when `state` is
+/// given, else a plain claim pack), written to `<temp>/<name>.fsmatpk`, and that path.
+fn compile_bytes(manifest: &str, state: Option<[&str; 4]>, name: &str) -> (PathBuf, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!(
         "frankensim-piano-string-packs-{}",
         std::process::id()
@@ -71,14 +83,17 @@ fn compile_bytes(manifest: &str, state: [&str; 4], name: &str) -> (PathBuf, Vec<
     let out = dir.join(format!("{name}.fsmatpk"));
     // The compiler refuses to overwrite; a reused process id may have left this temp file.
     let _ = std::fs::remove_file(&out);
-    let run = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command
         .arg("matdb-pack")
         .arg("--manifest")
         .arg(workspace().join(manifest))
         .arg("--out")
-        .arg(&out)
-        .arg("--material-state")
-        .args(state)
+        .arg(&out);
+    if let Some(state) = state {
+        command.arg("--material-state").args(state);
+    }
+    let run = command
         .env("CARGO_WORKSPACE_DIR", workspace())
         .output()
         .expect("run xtask matdb-pack");
@@ -97,7 +112,7 @@ fn engine_piano_pack_fixtures_are_the_compiled_committed_seeds() {
     let mut stale = Vec::new();
     for (seed, state) in PIANO_FIXTURES {
         let manifest = format!("data/matdb/seed-v1/{seed}/manifest.tsv");
-        let (fresh, bytes) = compile_bytes(&manifest, state, seed);
+        let (fresh, bytes) = compile_bytes(&manifest, Some(state), seed);
         let committed = fixtures.join(format!("{seed}.fsmatpk"));
         if std::fs::read(&committed).ok().as_deref() != Some(bytes.as_slice()) {
             stale.push(format!(
@@ -110,6 +125,29 @@ fn engine_piano_pack_fixtures_are_the_compiled_committed_seeds() {
     assert!(
         stale.is_empty(),
         "stale or missing engine-piano pack fixtures; commit the fresh compiler output:\n{}",
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn grand_piano_loss_pack_fixtures_are_the_compiled_committed_seeds() {
+    let fixtures = workspace().join("crates/fs-couple/examples/grand_piano/packs");
+    let mut stale = Vec::new();
+    for seed in BOARD_LOSS_FIXTURES {
+        let manifest = format!("data/matdb/seed-v1/{seed}/manifest.tsv");
+        let (fresh, bytes) = compile_bytes(&manifest, None, &format!("board-{seed}"));
+        let committed = fixtures.join(format!("{seed}.fsmatpk"));
+        if std::fs::read(&committed).ok().as_deref() != Some(bytes.as_slice()) {
+            stale.push(format!(
+                "{} (fresh: {})",
+                committed.display(),
+                fresh.display()
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale or missing grand piano loss pack fixtures; commit the fresh compiler output:\n{}",
         stale.join("\n")
     );
 }
