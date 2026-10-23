@@ -1882,7 +1882,8 @@ mod render_tests {
         let prepared = prepare_geometric_board(&source.geometry, &keys, 1200.0, true, false, false, 0)
             .expect("mass-equilibrated mesh-20 source board");
         assert_eq!(prepared.free_dofs, 4236);
-        assert_eq!(prepared.modes.len(), 43);
+        // 48 from the FPL-GTR-282 board packs; the former hand-typed constants gave 43.
+        assert_eq!(prepared.modes.len(), 48);
         assert!(prepared.frequency_intervals_hz.iter().all(|(lo, hi)|
             lo.is_finite() && hi.is_finite() && *lo > 0.0 && *lo <= *hi && *hi <= 1200.0));
     }

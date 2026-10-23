@@ -6,16 +6,27 @@
 //! the copyrighted drawing is NOT redistributed. Table 1's 0.127 m mean rib
 //! spacing sets the scale. Ribs are made parallel in this reduced reconstruction.
 //! The 17 heights follow the diagram's H labels; rib widths and end tapers,
-//! bridge widths, cut-off bar section, damping, G and nu are explicit estimates.
+//! bridge widths, cut-off bar section and damping are explicit estimates.
 //!
 //! Materials/dimensions: https://www.steinway.com/pianos/steinway/grand/model-d
-//! Sitka spruce panel (9 -> 6 mm), sugar pine ribs, hard-maple bridges. Panel
-//! elastic constants use the paper's *average spruce*, not a specimen fit.
-//! Grain follows the long bridge, perpendicular to the ribs. Crown, rim/plate
-//! flexibility, glue slip and downbearing remain outside this flat-plate image.
+//! Sitka spruce panel (9 -> 6 mm), sugar pine ribs, hard-maple bridges. Their
+//! elastic constants and densities are DATA: fs-matdb packs compiled from the
+//! FPL-GTR-282 seeds of those species (`packs/`), resolved through
+//! fs-material's reference-ratio law at the tables' 12 % moisture content.
+//! Swapping a pack changes the board with no code change; a pack that lacks a
+//! required property refuses. Grain follows the long bridge, perpendicular to
+//! the ribs. Crown, rim/plate flexibility, glue slip and downbearing remain
+//! outside this flat-plate image.
 //!
 //! Produces BOTH the existing fs-plate input and an OBJ from the SAME vertices,
 //! sections and beams. All work is cold. No eigensolver or contact law lives here.
+use fs_matdb::{MaterialCard, MaterialStateId, NormalizedPack, QueryPoint};
+use fs_material::plane_stress_viscosity::MaterialPlane;
+use fs_material::state_point::{
+    MaterialPropertySelection, OrthotropicPlaneElastic, OrthotropicRequirementSet,
+    PoissonReciprocityRule, ReferenceRatioOrthotropicStatePoint,
+    resolve_orthotropic_elastic_state_point_from_reference_ratios,
+};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -78,6 +89,118 @@ const RT0425_BRIDGE: [[f64; 2]; 84] = [
 pub struct Preset {
     pub geometry: String,
     pub obj: String,
+}
+
+/// The FPL-GTR-282 tables' state: clear wood at 12 % moisture content, as the
+/// fraction the pack compiler stores (it normalizes `%` by 0.01).
+const MOISTURE_CONTENT: f64 = 0.12;
+/// Declared small-strain domain of the linear law, not a measured failure strain.
+const STRAIN_LIMIT: f64 = 1e-3;
+
+/// A pack as the board source line records it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackIdentity {
+    pub pack_id: String,
+    pub content_hash: String,
+}
+
+/// Panel law in the quarter-sawn board plane: material axis 1 is L, along the
+/// grain; axis 2 is R, across the board.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelMaterial {
+    pub density: f64,
+    pub e_l: f64,
+    pub e_r: f64,
+    pub nu_lr: f64,
+    pub g_lr: f64,
+    pub pack: PackIdentity,
+}
+
+/// Beam law along the grain. fs-plate's stiffener takes one torsion modulus;
+/// it is sqrt(G_LR*G_LT), the pack's two longitudinal shear moduli. That is an
+/// approximation: orthotropic Saint-Venant torsion also rescales the section's
+/// effective aspect ratio by (G_LR/G_LT)^(1/4), which is not represented.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeamMaterial {
+    pub density: f64,
+    pub e_l: f64,
+    pub g: f64,
+    pub pack: PackIdentity,
+}
+
+/// Every material of the board, each resolved from one pack.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardMaterials {
+    pub panel: PanelMaterial,
+    pub ribs: BeamMaterial,
+    pub bridges: BeamMaterial,
+    pub cutoff_bar: BeamMaterial,
+}
+
+fn identity(pack: &NormalizedPack) -> PackIdentity {
+    PackIdentity { pack_id: pack.pack_id().to_owned(), content_hash: pack.content_hash().to_hex() }
+}
+
+/// One material plane of a pack, resolved with receipts; a missing property
+/// refuses by name.
+fn resolve_plane(pack: &NormalizedPack, plane: MaterialPlane) -> Result<(f64, OrthotropicPlaneElastic), String> {
+    let id = pack.pack_id();
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: format!("source-pack:{id}"),
+            phase: "clear wood".into(),
+            process: "frozen source-pack realization".into(),
+            revision: 0,
+        },
+        pack.claims().clone(),
+        vec![],
+    ).map_err(|e| format!("board pack {id}: {e:?}"))?;
+    let point = QueryPoint::new().with("moisture_content", MOISTURE_CONTENT)
+        .map_err(|e| format!("board pack {id}: {e:?}"))?;
+    match resolve_orthotropic_elastic_state_point_from_reference_ratios(
+        &card, &point, MaterialPropertySelection::SingleClaimOnly, STRAIN_LIMIT,
+        OrthotropicRequirementSet::Plane(plane), PoissonReciprocityRule::MajorRatios,
+    ).map_err(|e| format!("board pack {id}: {e:?}"))? {
+        ReferenceRatioOrthotropicStatePoint::Plane(state) => Ok((state.density_kg_m3(), state.law().clone())),
+        ReferenceRatioOrthotropicStatePoint::Full3d(_) => Err(format!("board pack {id}: a plane request returned a 3-D law")),
+    }
+}
+
+impl PanelMaterial {
+    pub fn from_pack(pack: &NormalizedPack) -> Result<Self, String> {
+        let (density, lr) = resolve_plane(pack, MaterialPlane::Axes12)?;
+        Ok(Self { density, e_l: lr.e[0], e_r: lr.e[1], nu_lr: lr.nu, g_lr: lr.g, pack: identity(pack) })
+    }
+}
+
+impl BeamMaterial {
+    pub fn from_pack(pack: &NormalizedPack) -> Result<Self, String> {
+        let (density, lr) = resolve_plane(pack, MaterialPlane::Axes12)?;
+        let (_, lt) = resolve_plane(pack, MaterialPlane::Axes13)?;
+        Ok(Self { density, e_l: lr.e[0], g: (lr.g * lt.g).sqrt(), pack: identity(pack) })
+    }
+}
+
+const SITKA_SPRUCE: &[u8] = include_bytes!("packs/spruce-sitka-fpl-gtr282.fsmatpk");
+const SUGAR_PINE: &[u8] = include_bytes!("packs/pine-sugar-fpl-gtr282.fsmatpk");
+const HARD_MAPLE: &[u8] = include_bytes!("packs/maple-sugar-fpl-gtr282.fsmatpk");
+
+/// The source's species, from their packs: Sitka spruce panel, sugar pine
+/// ribs, hard (sugar) maple bridges. The source names no cut-off bar
+/// material; it takes the rib pack, as the former constants did.
+pub fn model_d_materials() -> Result<BoardMaterials, String> {
+    let ribs = BeamMaterial::from_pack(&load_pack(SUGAR_PINE)?)?;
+    Ok(BoardMaterials {
+        panel: PanelMaterial::from_pack(&load_pack(SITKA_SPRUCE)?)?,
+        cutoff_bar: ribs.clone(),
+        ribs,
+        bridges: BeamMaterial::from_pack(&load_pack(HARD_MAPLE)?)?,
+    })
+}
+
+/// Admit compiled pack bytes; truncated or corrupt bytes refuse.
+pub fn load_pack(bytes: &[u8]) -> Result<NormalizedPack, String> {
+    NormalizedPack::from_bytes(bytes).map_err(|e| format!("board pack: {e}"))
 }
 #[derive(Clone)]
 struct Row { station: f64, nodes: Vec<usize>, features: [Option<usize>; 3] }
@@ -185,8 +308,14 @@ pub fn build_with_estimated_contacts(divisions: usize) -> Result<Preset,String> 
 }
 
 fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Preset,String> {
+    build_with_materials(divisions, published_contacts, &model_d_materials()?)
+}
+
+/// `build` with explicitly supplied materials, e.g. another spruce pack.
+pub fn build_with_materials(divisions: usize, published_contacts: bool,
+    materials: &BoardMaterials) -> Result<Preset,String> {
     if !(4..=32).contains(&divisions) { return Err("Model D mesh divisions must be 4..32".into()); }
-    build_inner(divisions, published_contacts, None)
+    build_inner(divisions, published_contacts, None, materials)
 }
 
 /// Production two-direction mechanical resolution of the same source drawing.
@@ -198,11 +327,18 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
 /// The unrefined constructors above keep their original mesh arithmetic.
 pub fn build_resolved(divisions: usize, maximum_rib_normal_step_m: f64,
     published_contacts: bool) -> Result<Preset,String> {
+    build_resolved_with_materials(divisions, maximum_rib_normal_step_m, published_contacts,
+        &model_d_materials()?)
+}
+
+/// `build_resolved` with explicitly supplied materials.
+pub fn build_resolved_with_materials(divisions: usize, maximum_rib_normal_step_m: f64,
+    published_contacts: bool, materials: &BoardMaterials) -> Result<Preset,String> {
     if !(4..=64).contains(&divisions) {
         return Err("resolved Model D mesh divisions must be 4..64".into());
     }
     let gap=resolution::drawing_gap(maximum_rib_normal_step_m,scale(),SLOPE)?;
-    let mut preset=build_inner(divisions,published_contacts,Some(gap))?;
+    let mut preset=build_inner(divisions,published_contacts,Some(gap),materials)?;
     // Comments are accepted by both existing geometry readers and OBJ tools;
     // keep authority labels and every physical material row unchanged.
     let note=format!("# mechanical mesh: {divisions} transverse divisions; maximum rib-normal row spacing {maximum_rib_normal_step_m:.17e} m; same source fields resampled, no convergence certificate\n");
@@ -214,7 +350,7 @@ pub fn build_resolved(divisions: usize, maximum_rib_normal_step_m: f64,
 #[cfg(test)]
 pub(crate) fn build_probe(divisions: usize) -> Result<Preset,String> {
     if !(33..=64).contains(&divisions) { return Err("research mesh divisions must be 33..64".into()); }
-    build_inner(divisions, false, None)
+    build_inner(divisions, false, None, &model_d_materials()?)
 }
 
 #[cfg(test)]
@@ -223,10 +359,11 @@ pub(crate) fn build_probe_refined(divisions: usize, maximum_station_gap: f64) ->
         || maximum_station_gap<=0. {
         return Err("invalid research mesh divisions or row gap".into());
     }
-    build_inner(divisions, false, Some(maximum_station_gap))
+    build_inner(divisions, false, Some(maximum_station_gap), &model_d_materials()?)
 }
 
-fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>) -> Result<Preset,String> {
+fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>,
+    materials: &BoardMaterials) -> Result<Preset,String> {
     let curves=[LONG_BRIDGE,BASS_BRIDGE,CUTOFF];
     let mut levels:Vec<f64>=OUTLINE.iter().copied().map(station).collect();
     levels.extend(RIBS.iter().map(|r|r.0));
@@ -329,8 +466,9 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
             let mid=[0.5*(xy[p[0]][0]+xy[p[1]][0]),0.5*(xy[p[0]][1]+xy[p[1]][1])];
             let u=(mid[0]-left)/span;
             let h=max_h*0.001*(0.30+0.70*(4.0*u*(1.0-u)).min(1.0));
+            let m=&materials.ribs;
             beams.push(Beam{a:p[0],b:p[1],width:0.025,height:h,z:-0.5*(thickness(mid)+h),
-                e:9.0e9,g:0.6e9,rho:400.0,group:format!("sugar_pine_rib_{}",17-index)});
+                e:m.e_l,g:m.g,rho:m.density,group:format!("sugar_pine_rib_{}",17-index)});
         }
     }
     for k in 0..3 {
@@ -340,9 +478,9 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
                 let s=0.5*(pair[0].station+pair[1].station);
                 let first=station(curves[k][0]);let last=station(*curves[k].last().unwrap());
                 let u=((s-first)/(last-first)).clamp(0.,1.);
-                let (w,h,e,g,rho,name,side)=if k==2 {(0.040,0.035,9e9,0.6e9,400.,"cutoff_bar",-1.)}
-                    else {(0.026,0.044-0.022*u,12.6e9,0.9e9,705.,if k==0{"maple_long_bridge"}else{"maple_bass_bridge"},1.)};
-                beams.push(Beam{a,b,width:w,height:h,z:side*0.5*(thickness(mid)+h),e,g,rho,group:name.into()});
+                let (w,h,m,name,side)=if k==2 {(0.040,0.035,&materials.cutoff_bar,"cutoff_bar",-1.)}
+                    else {(0.026,0.044-0.022*u,&materials.bridges,if k==0{"maple_long_bridge"}else{"maple_bass_bridge"},1.)};
+                beams.push(Beam{a,b,width:w,height:h,z:side*0.5*(thickness(mid)+h),e:m.e_l,g:m.g,rho:m.density,group:name.into()});
             }
         }
     }
@@ -354,7 +492,10 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     let contacts = if published_contacts {
         "RT-0425 Appendix A coupling points projected to reconstructed bridges; four extrapolated end keys"
     } else { "estimated per-key bridge stations" };
-    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates\nsupport,clamped\npretension,0\ndamping,0.015\n");
+    let packs=|label:&str,p:&PackIdentity| format!("{label} {} {}",p.pack_id,p.content_hash);
+    let packs=[packs("panel",&materials.panel.pack),packs("ribs",&materials.ribs.pack),
+        packs("bridges",&materials.bridges.pack),packs("cut-off bar",&materials.cutoff_bar.pack)].join("; ");
+    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates; material packs: {packs}\nsupport,clamped\npretension,0\ndamping,0.015\n");
     let mut obj=String::from("# Source-derived Model D SOUND BOARD assembly, SI metres, z up; not full piano CAD\n# Same flat structural image as the FSB. No invented crown or measured-data claim.\no sitka_spruce_panel\n");
     for (i,p) in xy.iter().enumerate() {
         writeln!(geometry,"node,{i},{:.17e},{:.17e}",p[0],p[1]).unwrap();
@@ -366,7 +507,9 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     let grain=1.0f64.atan2(-SLOPE);
     for (i,&[a,b,c]) in tris.iter().enumerate() {
         let mid=[(xy[a][0]+xy[b][0]+xy[c][0])/3.,(xy[a][1]+xy[b][1]+xy[c][1])/3.];
-        writeln!(geometry,"triangle,{i},{a},{b},{c},{:.17e},380,1.15e10,7.4e8,0.35,6.5e8,{grain:.17e}",thickness(mid)).unwrap();
+        let m=&materials.panel;
+        writeln!(geometry,"triangle,{i},{a},{b},{c},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{grain:.17e}",
+            thickness(mid),m.density,m.e_l,m.e_r,m.nu_lr,m.g_lr).unwrap();
         writeln!(obj,"f {} {} {}\nf {} {} {}",a+1,b+1,c+1,c+1+n,b+1+n,a+1+n).unwrap();
     }
     let mut fixed=std::collections::BTreeSet::new();
@@ -508,3 +651,7 @@ mod tests {
 #[cfg(test)]
 #[path = "steinway_resolution_tests.rs"]
 mod resolution_tests;
+
+#[cfg(test)]
+#[path = "steinway_material_tests.rs"]
+mod material_tests;

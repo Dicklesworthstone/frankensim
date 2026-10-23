@@ -584,13 +584,14 @@ mod common_material_acquisition {
     fn g1_g3_sourced_fpl_tonewood_ratios_reach_orthotropic_state() {
         use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
         use fs_material::{plane_stress_viscosity::MaterialPlane, state_point::*};
-        const COMPLETE: [&str; 12] = [
+        const COMPLETE: [&str; 13] = [
             "baldcypress",
             "birch-yellow",
             "cedar-western-red",
             "douglas-fir-coast",
             "hemlock-western",
             "larch-western",
+            "pine-sugar",
             "redwood-old-growth",
             "spruce-engelmann",
             "spruce-sitka",
@@ -756,7 +757,7 @@ mod common_material_acquisition {
                 }
             }
         }
-        assert_eq!(resolved_counts, [12, 18]);
+        assert_eq!(resolved_counts, [13, 19]);
         assert_eq!(missing_counts, [6, 3, 2]);
     }
 
@@ -14098,7 +14099,7 @@ fn g3_cli_retains_prior_admissions_when_later_claim_refuses() {
     );
 }
 
-const TONEWOOD_SEED_PACKS: [&str; 23] = [
+const TONEWOOD_SEED_PACKS: [&str; 24] = [
     "ash-white-fpl-gtr282",
     "baldcypress-fpl-gtr282",
     "balsa-fpl-gtr282",
@@ -14114,6 +14115,7 @@ const TONEWOOD_SEED_PACKS: [&str; 23] = [
     "mahogany-honduras-fpl-gtr282",
     "maple-red-fpl-gtr282",
     "maple-sugar-fpl-gtr282",
+    "pine-sugar-fpl-gtr282",
     "redwood-old-growth-fpl-gtr282",
     "rosewood-brazilian-fpl-gtr282",
     "rosewood-indian-fpl-gtr282",

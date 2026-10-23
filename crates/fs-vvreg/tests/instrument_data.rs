@@ -849,6 +849,7 @@ const SEED_PACKS: &[&str] = &[
     "mahogany-honduras-fpl-gtr282",
     "maple-red-fpl-gtr282",
     "maple-sugar-fpl-gtr282",
+    "pine-sugar-fpl-gtr282",
     "redwood-old-growth-fpl-gtr282",
     "rosewood-brazilian-fpl-gtr282",
     "rosewood-indian-fpl-gtr282",
