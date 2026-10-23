@@ -1,8 +1,9 @@
 //! Canonical material packs reach the original live string/bridge/hammer owner.
 //! Geometry is explicit; neither a material name nor a density implies radius.
 //! Each string is a solid core of perfectly bonded concentric layers with
-//! sourced Kelvin–Voigt bending loss, optionally under helical wraps that add
-//! only their wire mass: the core carries the tension, EA, EI and loss.
+//! sourced bending loss (a Kelvin–Voigt viscosity or a loss tangent, each
+//! layer its own), optionally under helical wraps that add only their wire
+//! mass: the core carries the tension, EA, EI and loss.
 //!
 //! The construction also declares how tension is set and which sourced tensile
 //! limit it is checked against. At a fixed pitch the stress `4 L^2 f^2 rho`
@@ -16,13 +17,14 @@
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::{section::{ConcentricElasticSection, ConcentricKelvinVoigtSection,
-    ConcentricMaterialLayer, MAX_CONCENTRIC_LAYERS, strength::AxialTensileCapacity,
+    ConcentricMaterialLayer, MAX_CONCENTRIC_LAYERS, loss_angle::ConcentricLossAngleSection,
+    strength::AxialTensileCapacity,
     wound::{HelicalWrap, HelicalWrapping, MAX_HELICAL_WRAPS, close_wound_pitch_m}},
     state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, MaterialPropertySelection,
     MaterialStatePointError, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point}};
-use fs_qty::{Density, DynViscosity, Pressure};
-use crate::refmods::geometry::Course;
+use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use crate::refmods::geometry::{CoreLoss, Course};
 
 pub const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PACKS: usize = 128;
@@ -73,6 +75,22 @@ impl TensionPolicy {
             Self::InstalledTension => "\"installed-tension\"".into(),
             Self::YieldFraction(x) => format!("{{\"yieldFraction\":{x}}}"),
         }
+    }
+}
+
+/// Constitutive law of the cores' sourced bending loss, named by the
+/// construction's optional `loss,` line; the bending-loss property passed to
+/// the constructor is read under this law.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BendingLossLaw {
+    /// Solid bending viscosity [Pa s] (`loss,kelvin-voigt`; also when no line).
+    KelvinVoigt,
+    /// Dimensionless loss tangent Im(E)/Re(E) (`loss,loss-angle`).
+    LossAngle,
+}
+impl BendingLossLaw {
+    pub fn name(self) -> &'static str {
+        match self { Self::KelvinVoigt => "kelvin-voigt", Self::LossAngle => "loss-angle" }
     }
 }
 
@@ -130,6 +148,8 @@ impl StrengthReport {
 #[derive(Clone, Debug)]
 pub struct StringMaterials {
     sections: BTreeMap<u8, ConcentricKelvinVoigtSection>,
+    loss_angle_sections: BTreeMap<u8, ConcentricLossAngleSection>,
+    loss: BendingLossLaw,
     wrappings: BTreeMap<u8, HelicalWrapping>,
     capacities: BTreeMap<u8, AxialTensileCapacity>,
     tension: TensionPolicy,
@@ -143,6 +163,7 @@ enum Role { Core, Wrap }
 
 struct Declaration {
     tension: TensionPolicy,
+    loss: BendingLossLaw,
     limit_property: String,
     non_physical_override: bool,
     // Per key: core layers (outer radius, pack) then wraps (diameter, pitch or close, pack).
@@ -186,7 +207,14 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
             Some(["strength", name, "non-physical-override"]) => (property_name(name, "tensile-limit")?, true),
             _ => return Err("third line must be strength,<tensile-limit property>[,non-physical-override]".into()),
         };
-    if lines.next() != Some(COLUMNS) { return Err(format!("fourth line must be {COLUMNS}")); }
+    let mut lines = lines.peekable();
+    let loss = match lines.peek().map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).as_deref() {
+        Some(["loss", "kelvin-voigt"]) => { lines.next(); BendingLossLaw::KelvinVoigt }
+        Some(["loss", "loss-angle"]) => { lines.next(); BendingLossLaw::LossAngle }
+        Some(["loss", ..]) => return Err("loss line must be loss,kelvin-voigt or loss,loss-angle".into()),
+        _ => BendingLossLaw::KelvinVoigt,
+    };
+    if lines.next() != Some(COLUMNS) { return Err(format!("the line after strength (and loss) must be {COLUMNS}")); }
     let mut cores = BTreeMap::<u8, Vec<(f64, usize)>>::new();
     let mut wraps = BTreeMap::<u8, Vec<(f64, Option<f64>, usize)>>::new();
     for line in lines {
@@ -227,14 +255,15 @@ fn parse_declaration(geometry: &str, packs: usize) -> Result<Declaration, String
         }
     }
     if cores.is_empty() { return Err("string material geometry has no sections".into()); }
-    Ok(Declaration { tension, limit_property, non_physical_override, cores, wraps })
+    Ok(Declaration { tension, loss, limit_property, non_physical_override, cores, wraps })
 }
 
 impl StringMaterials {
     /// Read original normalized packs, then assign them by explicit zero-based
     /// index to each key's core layers (innermost first) and wraps. A core pack
-    /// must resolve density, Young's modulus, the bending viscosity and the
-    /// declared tensile limit; a wrap pack must resolve density. Each pack
+    /// must resolve density, Young's modulus, the bending-loss property under
+    /// the declared law and the declared tensile limit; a wrap pack must
+    /// resolve density. Each pack
     /// resolves once, at one complete query, for every role it plays.
     /// Missing/ambiguous claims, wrong dimensions or unsupported state refuse.
     pub fn from_packs(bytes: &[&[u8]], geometry: &str, point: &QueryPoint,
@@ -282,8 +311,10 @@ impl StringMaterials {
                 requirements.extend([
                     ScalarPropertyRequirement::try_new(YOUNG_MODULUS_PROPERTY, Pressure::DIMS,
                         ScalarAdmissibility::StrictlyPositive),
-                    ScalarPropertyRequirement::try_new(viscosity_property, DynViscosity::DIMS,
-                        ScalarAdmissibility::Finite),
+                    ScalarPropertyRequirement::try_new(viscosity_property, match declaration.loss {
+                        BendingLossLaw::KelvinVoigt => DynViscosity::DIMS,
+                        BendingLossLaw::LossAngle => Dims::NONE,
+                    }, ScalarAdmissibility::Finite),
                     ScalarPropertyRequirement::try_new(limit, Pressure::DIMS,
                         ScalarAdmissibility::StrictlyPositive),
                 ]);
@@ -305,8 +336,9 @@ impl StringMaterials {
 
     fn from_states(declaration: Declaration, states: &[ResolvedMaterialStatePoint],
         viscosity_property: &str, packs: Vec<Arc<NormalizedMaterialCardPack>>) -> Result<Self, String> {
-        let Declaration { tension, limit_property, non_physical_override, cores, mut wraps } = declaration;
+        let Declaration { tension, loss, limit_property, non_physical_override, cores, mut wraps } = declaration;
         let mut sections = BTreeMap::new();
+        let mut loss_angle_sections = BTreeMap::new();
         let mut wrappings = BTreeMap::new();
         let mut capacities = BTreeMap::new();
         for (key, layers) in cores {
@@ -328,9 +360,17 @@ impl StringMaterials {
                 }
                 wrappings.insert(key, HelicalWrapping::try_new(&elastic, helical).map_err(failed)?);
             }
-            sections.insert(key, elastic.with_kelvin_voigt_bending(viscosity_property).map_err(failed)?);
+            match loss {
+                BendingLossLaw::KelvinVoigt => {
+                    sections.insert(key, elastic.with_kelvin_voigt_bending(viscosity_property).map_err(failed)?);
+                }
+                BendingLossLaw::LossAngle => {
+                    loss_angle_sections.insert(key, elastic.with_loss_angle_bending(viscosity_property).map_err(failed)?);
+                }
+            }
         }
-        Ok(Self { sections, wrappings, capacities, tension, limit_property, non_physical_override, packs })
+        Ok(Self { sections, loss_angle_sections, loss, wrappings, capacities, tension, limit_property,
+            non_physical_override, packs })
     }
 
     /// Bounded WASM framing of the unchanged canonical bytes; this is not an
@@ -351,8 +391,12 @@ impl StringMaterials {
         Self::from_packs(&packs, geometry, point, viscosity_property)
     }
 
-    /// Bonded core sections, which carry tension, EA, EI and bending loss.
+    /// Bonded Kelvin–Voigt core sections, which carry tension, EA, EI and
+    /// bending loss (empty under the loss-angle law).
     pub fn sections(&self) -> &BTreeMap<u8, ConcentricKelvinVoigtSection> { &self.sections }
+    /// Bonded loss-angle core sections (empty under the Kelvin–Voigt law).
+    pub fn loss_angle_sections(&self) -> &BTreeMap<u8, ConcentricLossAngleSection> { &self.loss_angle_sections }
+    pub fn bending_loss_law(&self) -> BendingLossLaw { self.loss }
     /// Helical wraps of the wound keys; they add only line density.
     pub fn wrappings(&self) -> &BTreeMap<u8, HelicalWrapping> { &self.wrappings }
     /// Each core's axial capacity under the declared tensile limit.
@@ -365,12 +409,17 @@ impl StringMaterials {
     /// Finished outer radius of a key's string: its outermost wrap, else its core.
     pub fn outer_radius_m(&self, key: u8) -> Option<f64> {
         self.wrappings.get(&key).map(HelicalWrapping::outer_radius_m)
-            .or_else(|| self.sections.get(&key).map(|section| section.elastic().outer_radius_m()))
+            .or_else(|| self.core(key).map(|core| core.elastic().outer_radius_m()))
+    }
+
+    fn core(&self, key: u8) -> Option<CoreLoss<'_>> {
+        self.sections.get(&key).map(CoreLoss::KelvinVoigt)
+            .or_else(|| self.loss_angle_sections.get(&key).map(CoreLoss::LossAngle))
     }
 
     fn covers(&self, courses: &[Course]) -> Result<(), String> {
         let keys = courses.iter().map(|course| course.midi).collect::<BTreeSet<_>>();
-        if keys.len() != courses.len() || keys != self.sections.keys().copied().collect() {
+        if keys.len() != courses.len() || keys != self.capacities.keys().copied().collect() {
             return Err("string materials must cover exactly every selected scale key".into());
         }
         Ok(())
@@ -378,11 +427,9 @@ impl StringMaterials {
 
     /// Material coefficients only; the course's own tension is kept.
     fn bind(&self, course: &Course) -> Result<Course, String> {
-        let core = &self.sections[&course.midi];
-        match self.wrappings.get(&course.midi) {
-            Some(wrapping) => course.with_wound_kelvin_voigt_section(core, wrapping),
-            None => course.with_bonded_kelvin_voigt_section(core),
-        }.map_err(|e| format!("string material key {}: {e}", course.midi))
+        let core = self.core(course.midi).ok_or("string material key has no core section")?;
+        course.with_loss_section(core, self.wrappings.get(&course.midi))
+            .map_err(|e| format!("string material key {}: {e}", course.midi))
     }
 
     /// Bind the complete selected scale, set every tension by the declared
@@ -464,14 +511,18 @@ impl StringMaterials {
 
     /// Actual source/state identities and coefficients installed in playback.
     pub fn json(&self) -> String {
-        let sections = self.sections.iter().map(|(key, section)| {
-            let elastic = section.elastic();
+        let sections = self.capacities.keys().map(|key| {
+            let core = self.core(*key).expect("every capacity has its core section");
+            let elastic = core.elastic();
+            let (viscous, hysteretic, band) = match core {
+                CoreLoss::KelvinVoigt(section) => (section.viscous_stiffness_n_m2_s(), 0.0, section.omega_band_rad_s()),
+                CoreLoss::LossAngle(section) => (0.0, section.hysteretic_stiffness_n_m2(), section.omega_band_rad_s()),
+            };
             let identities = elastic.layers().iter().map(|layer|
                 format!("\"{}\"", layer.material.identity().to_hex()))
                 .collect::<Vec<_>>().join(",");
             let radii = elastic.layers().iter().map(|layer| layer.outer_radius_m)
                 .collect::<Vec<_>>();
-            let band = section.omega_band_rad_s();
             let capacity = &self.capacities[key];
             let wraps = self.wrappings.get(key).map_or_else(|| "[]".into(), |wrapping| {
                 let rows = wrapping.wraps().iter().zip(wrapping.wrap_line_density_kg_m()).map(|(wrap, mass)|
@@ -482,18 +533,18 @@ impl StringMaterials {
             });
             format!(concat!("{{\"key\":{},\"stateIdentities\":[{}],\"outerRadiiM\":{:?},",
                 "\"lineDensityKgM\":{},\"axialRigidityN\":{},\"flexuralRigidityNm2\":{},",
-                "\"viscousRigidityNm2S\":{},\"omegaBandRadS\":[{},{}],\"wraps\":{},",
+                "\"viscousRigidityNm2S\":{},\"hystereticRigidityNm2\":{},\"omegaBandRadS\":[{},{}],\"wraps\":{},",
                 "\"outerRadiusM\":{},\"tensileCapacityN\":{},\"governingLayer\":{},\"layerLimitsPa\":{:?}}}"),
                 key, identities, radii, elastic.line_density_kg_m()
                     + self.wrappings.get(key).map_or(0.0, HelicalWrapping::line_density_kg_m),
                 elastic.axial_stiffness_n(), elastic.bending_stiffness_n_m2(),
-                section.viscous_stiffness_n_m2_s(), band.0, band.1, wraps,
+                viscous, hysteretic, band.0, band.1, wraps,
                 self.outer_radius_m(*key).unwrap_or(0.0), capacity.capacity_n(),
                 capacity.governing_layer(), capacity.layer_limits_pa())
         }).collect::<Vec<_>>().join(",");
         format!(concat!("{{\"model\":\"bonded-core-kelvin-voigt-helical-wraps\",\"importedPacks\":{},",
-            "\"tensionPolicy\":{},\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
-            self.packs.len(), self.tension.json(), escape(&self.limit_property),
+            "\"tensionPolicy\":{},\"bendingLoss\":\"{}\",\"limitProperty\":\"{}\",\"nonPhysicalOverride\":{},\"sections\":[{}]}}"),
+            self.packs.len(), self.tension.json(), self.loss.name(), escape(&self.limit_property),
             self.non_physical_override, sections)
     }
 }

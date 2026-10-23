@@ -80,20 +80,26 @@ impl BondedSection {
     pub const fn wrap_line_density_kg_m(self) -> f64 { self.wrap_line_density_kg_m }
 }
 
-/// Frozen Kelvin-Voigt integral from the SAME bonded section, with the
-/// intersection of its source-supported angular-frequency intervals.
+/// Frozen bending-loss integral from the SAME bonded section, with the
+/// intersection of its source-supported angular-frequency intervals: a
+/// Kelvin-Voigt viscous rigidity C_b, or a loss-angle hysteretic rigidity H
+/// (the imaginary part of the complex bending stiffness EI + iH).
 /// Private fields prevent a detached loss coefficient or support override.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BondedBendingLoss {
     viscous_rigidity_nm2s: f64,
+    hysteretic_rigidity_nm2: f64,
     omega_band_rad_s: (f64, f64),
 }
 impl BondedBendingLoss {
     pub const fn viscous_rigidity_nm2s(self) -> f64 { self.viscous_rigidity_nm2s }
+    pub const fn hysteretic_rigidity_nm2(self) -> f64 { self.hysteretic_rigidity_nm2 }
     pub const fn omega_band_rad_s(self) -> (f64, f64) { self.omega_band_rad_s }
 
-    /// Rate multiplying relative modal velocity, C_b k^4 / mu [1/s].
-    /// This is bending strain-rate loss; an uncurved moving chord adds none.
+    /// Rate multiplying relative modal velocity, (C_b + H / omega) k^4 / mu
+    /// [1/s]. For a loss angle this is the viscous rate that dissipates the
+    /// same energy per cycle at the mode's own frequency, so it is evaluated
+    /// per mode. This is bending strain-rate loss; an uncurved moving chord adds none.
     pub fn strain_rate(self, omega: f64, k: f64, mu: f64) -> Result<f64, String> {
         let (lo, hi) = self.omega_band_rad_s;
         if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi {
@@ -102,12 +108,41 @@ impl BondedBendingLoss {
         if !k.is_finite() || k <= 0.0 || !mu.is_finite() || mu <= 0.0 {
             return Err("invalid material bending-loss wavenumber or line density".into());
         }
-        let rate = (self.viscous_rigidity_nm2s / mu) * k.powi(4);
+        let rate = (self.viscous_rigidity_nm2s / mu + self.hysteretic_rigidity_nm2 / (mu * omega)) * k.powi(4);
         if !rate.is_finite() || rate < 0.0
-            || (self.viscous_rigidity_nm2s > 0.0 && rate == 0.0) {
+            || ((self.viscous_rigidity_nm2s > 0.0 || self.hysteretic_rigidity_nm2 > 0.0) && rate == 0.0) {
             return Err("material bending-loss rate is unrepresentable".into());
         }
         Ok(rate)
+    }
+}
+
+/// A string core together with the source-bound bending loss of the SAME
+/// section, under either constitutive law.
+#[derive(Debug, Clone, Copy)]
+pub enum CoreLoss<'a> {
+    KelvinVoigt(&'a fs_material::section::ConcentricKelvinVoigtSection),
+    LossAngle(&'a fs_material::section::loss_angle::ConcentricLossAngleSection),
+}
+impl<'a> CoreLoss<'a> {
+    pub fn elastic(self) -> &'a fs_material::section::ConcentricElasticSection {
+        match self {
+            Self::KelvinVoigt(section) => section.elastic(),
+            Self::LossAngle(section) => section.elastic(),
+        }
+    }
+    fn loss(self) -> BondedBendingLoss {
+        match self {
+            Self::KelvinVoigt(section) => BondedBendingLoss {
+                viscous_rigidity_nm2s: section.viscous_stiffness_n_m2_s(),
+                hysteretic_rigidity_nm2: 0.0, omega_band_rad_s: section.omega_band_rad_s(),
+            },
+            Self::LossAngle(section) => BondedBendingLoss {
+                viscous_rigidity_nm2s: 0.0,
+                hysteretic_rigidity_nm2: section.hysteretic_stiffness_n_m2(),
+                omega_band_rad_s: section.omega_band_rad_s(),
+            },
+        }
     }
 }
 
@@ -160,16 +195,34 @@ impl Course {
         core: &fs_material::section::ConcentricKelvinVoigtSection,
         wrapping: &fs_material::section::wound::HelicalWrapping,
     ) -> Result<Self, String> {
+        self.with_loss_section(CoreLoss::KelvinVoigt(core), Some(wrapping))
+    }
+
+    /// Bind a bonded core with its own source-bound bending loss (either law),
+    /// optionally under helical wraps that add only their wire mass. Tension
+    /// is retained. Every other binder is this one with a fixed choice.
+    ///
+    /// # Errors
+    /// Refuses a hollow core, wraps wound on a different core radius, and any
+    /// unrepresentable derived course; the original course is not mutated.
+    pub fn with_loss_section(
+        &self,
+        core: CoreLoss<'_>,
+        wrapping: Option<&fs_material::section::wound::HelicalWrapping>,
+    ) -> Result<Self, String> {
         let elastic = core.elastic();
-        if wrapping.core_outer_radius_m() != elastic.outer_radius_m() {
-            return Err("string wraps were wound on a different core radius".into());
+        let mut changed = self.with_bonded_material_section(elastic)?;
+        let section = changed.bonded_section.as_mut().expect("bound elastic section");
+        section.bending_loss = Some(core.loss());
+        if let Some(wrapping) = wrapping {
+            if wrapping.core_outer_radius_m() != elastic.outer_radius_m() {
+                return Err("string wraps were wound on a different core radius".into());
+            }
+            let line_density = elastic.line_density_kg_m() + wrapping.line_density_kg_m();
+            section.linear_density_kg_m = line_density;
+            section.wrap_line_density_kg_m = wrapping.line_density_kg_m();
+            changed.linear_density_kg_m = line_density;
         }
-        let mut changed = self.with_bonded_kelvin_voigt_section(core)?;
-        let line_density = elastic.line_density_kg_m() + wrapping.line_density_kg_m();
-        changed.linear_density_kg_m = line_density;
-        let section = changed.bonded_section.as_mut().expect("bound core section");
-        section.linear_density_kg_m = line_density;
-        section.wrap_line_density_kg_m = wrapping.line_density_kg_m();
         changed.validate()?;
         Ok(changed)
     }
@@ -181,14 +234,7 @@ impl Course {
         &self,
         section: &fs_material::section::ConcentricKelvinVoigtSection,
     ) -> Result<Self, String> {
-        let mut changed = self.with_bonded_material_section(section.elastic())?;
-        changed.bonded_section.as_mut().expect("bound elastic section").bending_loss =
-            Some(BondedBendingLoss {
-                viscous_rigidity_nm2s: section.viscous_stiffness_n_m2_s(),
-                omega_band_rad_s: section.omega_band_rad_s(),
-            });
-        changed.validate()?;
-        Ok(changed)
+        self.with_loss_section(CoreLoss::KelvinVoigt(section), None)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -205,6 +251,7 @@ impl Course {
             if let Some(loss) = section.bending_loss {
                 let (lo, hi) = loss.omega_band_rad_s;
                 if !loss.viscous_rigidity_nm2s.is_finite() || loss.viscous_rigidity_nm2s < 0.0
+                    || !loss.hysteretic_rigidity_nm2.is_finite() || loss.hysteretic_rigidity_nm2 < 0.0
                     || !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
                     return Err("invalid bound material bending-loss integral or frequency support".into());
                 }

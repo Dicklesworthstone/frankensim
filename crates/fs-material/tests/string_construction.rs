@@ -221,3 +221,62 @@ fn g0_empty_oversized_mismatched_or_unsourced_wraps_refuse() {
         material: material_at(&[("density", Density::DIMS, 8960.0)], 300.0) };
     assert!(HelicalWrapping::try_new(&core, vec![warm]).is_err());
 }
+
+// ---- Loss-angle (hysteretic) bending loss ----
+
+const TAN: &str = "bending_loss_tangent";
+fn lossy(rho: f64, young: f64, tangent: f64, dims: Dims, band: Option<(f64, f64)>) -> ResolvedMaterialStatePoint {
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, dims, value) in [("density", Density::DIMS, rho), ("young_modulus", Pressure::DIMS, young), (TAN, dims, tangent)] {
+        let validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
+        let validity = match band { Some((lo, hi)) if name == TAN => validity.with("omega", lo, hi), _ => validity };
+        claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims }, validity,
+            uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![], provenance: Provenance { source: "synthetic loss tangent".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "test".into(), phase: "solid".into(),
+        process: "synthetic".into(), revision: 0 }, claims, vec![]).unwrap();
+    resolve_material_state_point(&card, &QueryPoint::new().with("T", 293.15).unwrap().with("omega", 5000.0).unwrap(),
+        &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap()
+}
+
+// G0: H = sum(E_i I_i tan(delta_i)) from independent annular integrals; the
+// bands intersect; subdivision does not change H; explicit zero is lossless.
+#[test]
+fn g0_loss_angle_bending_integrates_each_layer_without_averaging() {
+    let (r1, r2) = (0.0004, 0.0006);
+    let a = lossy(7850.0, 2.1e11, 1.1e-4, Dims::NONE, Some((50.0, 2.0e4)));
+    let b = lossy(19300.0, 7.9e10, 5.0e-3, Dims::NONE, Some((10.0, 1.2e4)));
+    let section = rod(&[(r1, a.clone()), (r2, b)]).with_loss_angle_bending(TAN).unwrap();
+    let moments = [PI * r1.powi(4) / 4.0, PI * (r2.powi(4) - r1.powi(4)) / 4.0];
+    let layers = [2.1e11 * moments[0] * 1.1e-4, 7.9e10 * moments[1] * 5.0e-3];
+    near(section.layer_hysteretic_stiffness_n_m2()[0], layers[0], 1e-14);
+    near(section.layer_hysteretic_stiffness_n_m2()[1], layers[1], 1e-14);
+    near(section.hysteretic_stiffness_n_m2(), layers[0] + layers[1], 1e-14);
+    assert_eq!(section.omega_band_rad_s(), (50.0, 1.2e4));
+    assert_eq!(section.loss_property(), TAN);
+    let whole = rod(&[(r2, a.clone())]).with_loss_angle_bending(TAN).unwrap();
+    let split = rod(&[(r1, a.clone()), (r2, a)]).with_loss_angle_bending(TAN).unwrap();
+    near(split.hysteretic_stiffness_n_m2(), whole.hysteretic_stiffness_n_m2(), 1e-14);
+    let zero = rod(&[(r2, lossy(7850.0, 2.1e11, 0.0, Dims::NONE, Some((1.0, 1e5))))]);
+    assert_eq!(zero.with_loss_angle_bending(TAN).unwrap().hysteretic_stiffness_n_m2(), 0.0);
+}
+
+// Planted negatives: a viscosity in Pa s, a negative tangent, a band-less
+// claim and an absent claim never become a loss tangent.
+#[test]
+fn g0_loss_angle_refuses_wrong_quantity_negative_bandless_or_missing_data() {
+    let r = 0.0005;
+    for bad in [lossy(7850.0, 2e11, 1e-4, Pressure::DIMS, Some((1.0, 1e5))),
+        lossy(7850.0, 2e11, -1e-4, Dims::NONE, Some((1.0, 1e5))),
+        lossy(7850.0, 2e11, 1e-4, Dims::NONE, None)] {
+        assert!(rod(&[(r, bad)]).with_loss_angle_bending(TAN).is_err());
+    }
+    let rated = lossy(7850.0, 2e11, 1e-4, Dims::NONE, Some((1.0, 1e5)));
+    assert!(rod(&[(r, rated)]).with_loss_angle_bending("absent_loss_tangent").is_err());
+}

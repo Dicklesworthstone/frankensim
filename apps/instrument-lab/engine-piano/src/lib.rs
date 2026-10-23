@@ -87,7 +87,12 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         c.full_scale_pa, MIDI_MAXIMUM_VELOCITY_M_S, LivePiano::stations(),
         c.silent_bank_hz, piano.bank_modes(),
         c.retire_ringing_j, c.retire_damped_j,
-        if piano.string_materials().is_some() { "source-kelvin-voigt" }
+        if let Some(materials) = piano.string_materials() {
+            match materials.bending_loss_law() {
+                crate::preparation::materials::BendingLossLaw::KelvinVoigt => "source-kelvin-voigt",
+                crate::preparation::materials::BendingLossLaw::LossAngle => "source-loss-angle",
+            }
+        }
             else if c.rt0425_string_damping { "rt0425" } else { "authored" },
         if c.rt0425_hammer_dissipation { "rt0425 K_H and R_H" }
             else if c.rt0425_hammer_stiffness { "rt0425 K_H, estimated Prony" } else { "legacy" },

@@ -52,6 +52,14 @@ homogenization, the P2 milestone.
   refuses as missing data, never as unbreakable. Only axial-force stress is
   checked: residual drawing/winding stress, thermal eigenstrain, vibration
   bending stress and fatigue are absent.
+- `section::loss_angle::ConcentricLossAngleSection` binds a named dimensionless
+  loss tangent `Im(E)/Re(E)` from every bonded layer: the complex bending
+  stiffness is `EI + iH`, `H = sum(E_i I_i tan(delta_i))`, with no averaged
+  layer loss. A quality factor or decrement is never converted into it. A
+  modal consumer uses the equal-energy-per-cycle rate `H k^4/(mu omega)` at
+  each actual mode, inside the intersected source band. Missing, negative,
+  wrong-quantity, state-varying and band-less claims refuse; explicit zero is
+  lossless. Thermoelastic relaxation from thermal data is not computed.
 
 - `section::relaxation::ConcentricPronySection` and
   `section::torsion::ConcentricPronyTorsionalSection` compose independent

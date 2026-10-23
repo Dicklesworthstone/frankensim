@@ -16,6 +16,8 @@
 
 /// Explicit uniaxial viscosity and longitudinal modal loss.
 pub mod axial;
+/// Per-layer sourced loss tangents as hysteretic bending loss.
+pub mod loss_angle;
 /// Per-layer generalized-Maxwell bending spectra without averaged time constants.
 pub mod relaxation;
 /// Axial tensile capacity from per-layer sourced strength limits.

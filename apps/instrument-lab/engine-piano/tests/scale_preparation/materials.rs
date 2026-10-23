@@ -17,7 +17,7 @@ use fs_material::{
     state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY},
 };
 use fs_qty::{
-    Density, DynViscosity, Frequency, Pressure, QuantitySpec,
+    Density, Dims, DynViscosity, Frequency, Pressure, QuantitySpec,
     semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 use std::{
@@ -839,4 +839,97 @@ fn g1_wound_course_core_carries_tension_and_the_wrap_adds_only_mass() {
         }
     }
     assert!(source.json().contains(&format!("\"outerRadiusM\":{outer}")));
+}
+
+// ---- U2: loss-angle cores ----
+
+const TAN_DELTA: f64 = 2e-3;
+fn tangent_pack(values: [f64; 3], tangent: f64) -> NormalizedMaterialCardPack {
+    pack_with(values, |claim| {
+        if claim.key.name() == ETA {
+            claim.key = PropertyKey::new(ETA, Dims::NONE);
+            claim.value = PropertyValue::Scalar { value: tangent, dims: Dims::NONE };
+        }
+    })
+}
+fn loss_angle_construction(courses: &[Course]) -> String {
+    format!("frankensim-piano-materials-v2\ntension,target-pitch\nstrength,{LIMIT}\nloss,loss-angle\n{COLUMNS}\n{}",
+        single_cores(courses))
+}
+
+// G1: a loss tangent gives each mode the equal-energy-per-cycle rate
+// H k^4 / (mu omega), H = E I tan(delta): it changes decay, not frequency,
+// and it falls one power of omega below a Kelvin-Voigt k^4 law.
+#[test]
+fn g1_loss_angle_cores_give_each_mode_its_hysteretic_rate_without_moving_frequencies() {
+    let desc = small_description();
+    let hysteretic = StringMaterials::from_packs(&[&tangent_pack(CORE, TAN_DELTA).to_bytes()],
+        &loss_angle_construction(&desc.courses), &point(), ETA).unwrap();
+    assert_eq!(hysteretic.loss_angle_sections().len(), 3);
+    assert!(hysteretic.sections().is_empty());
+    let viscous = StringMaterials::from_packs(&[&pack(CORE).to_bytes()],
+        &construction("target-pitch", LIMIT, &single_cores(&desc.courses)), &point(), ETA).unwrap();
+    let (a, b) = (hysteretic.apply(&desc.courses).unwrap(), viscous.apply(&desc.courses).unwrap());
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(Course { bonded_section: y.bonded_section, ..*x }, *y);
+        let loss = x.bonded_section.unwrap().bending_loss().unwrap();
+        assert_eq!(loss.viscous_rigidity_nm2s(), 0.0);
+        near(loss.hysteretic_rigidity_nm2(), CORE[1] * PI * CORE_R.powi(4) / 4.0 * TAN_DELTA);
+    }
+    let bank = |courses: &[Course]| Bank::new_with_string_damping(courses, &desc.board, 48_000, 6000.0, 12,
+        true, None, false).unwrap();
+    let (loss_bank, kv_bank) = (bank(&a), bank(&b));
+    let (losses, _) = bank_string_losses(&loss_bank);
+    let h = CORE[1] * PI * CORE_R.powi(4) / 4.0 * TAN_DELTA;
+    for string in &loss_bank.strings {
+        let course = &a[string.course];
+        for (n, index) in string.modes.clone().enumerate() {
+            let k = (n + 1) as f64 * PI / course.length_m;
+            // Independent stiff-string frequency, not the bank's stored omega.
+            let omega = TAU * course.partial_hz(n + 1, course.tension_n);
+            near(losses[index].strain_rate, h * k.powi(4) / (course.linear_density_kg_m * omega));
+            assert_eq!(losses[index].mass_rate, 0.0);
+            assert_eq!(loss_bank.modes[index].omega, kv_bank.modes[index].omega);
+        }
+        let first = losses[string.modes.start].strain_rate;
+        let last = string.modes.end - 1;
+        let order = (last - string.modes.start + 1) as f64;
+        near(losses[last].strain_rate / first, order.powi(4) * loss_bank.modes[string.modes.start].omega
+            / loss_bank.modes[last].omega);
+    }
+    assert!(hysteretic.json().contains("\"bendingLoss\":\"loss-angle\""));
+    let mut prepared = small_description();
+    let source = Arc::new(hysteretic);
+    preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
+    let mut audio = PianoAudio::new_with_materials(&prepared, config(), 1, gas(), source.clone()).unwrap();
+    assert!(fs_live_piano::describe_audio(&audio).contains("\"stringDamping\":\"source-loss-angle\""));
+    audio.note_on(69, 1.0).unwrap();
+    let mut pcm = vec![0.0_f32; 2048];
+    audio.render(&mut pcm).unwrap();
+    assert!(pcm.iter().all(|x| x.is_finite()) && pcm.iter().any(|x| *x != 0.0));
+    assert!(audio.close_ledger().string_loss_j > 0.0);
+}
+
+// Planted negatives: a viscosity in Pa s is not a loss tangent, an unknown
+// law refuses, and a band that misses a retained mode refuses at build.
+#[test]
+fn g0_loss_angle_law_refuses_wrong_quantity_unknown_law_and_uncovered_modes() {
+    let desc = small_description();
+    assert!(StringMaterials::from_packs(&[&pack(CORE).to_bytes()], &loss_angle_construction(&desc.courses),
+        &point(), ETA).is_err());
+    let unknown = loss_angle_construction(&desc.courses).replace("loss,loss-angle", "loss,quality-factor");
+    assert!(StringMaterials::from_packs(&[&tangent_pack(CORE, TAN_DELTA).to_bytes()], &unknown, &point(), ETA)
+        .is_err());
+    let narrow = pack_with(CORE, |claim| {
+        if claim.key.name() == ETA {
+            claim.key = PropertyKey::new(ETA, Dims::NONE);
+            claim.value = PropertyValue::Scalar { value: TAN_DELTA, dims: Dims::NONE };
+            claim.validity = validity(8.0, 3000.0);
+        }
+    });
+    let source = Arc::new(StringMaterials::from_packs(&[&narrow.to_bytes()],
+        &loss_angle_construction(&desc.courses), &point(), ETA).unwrap());
+    let mut prepared = small_description();
+    preparation::prepare_with_materials(&mut prepared, None, None, Some(&source)).unwrap();
+    assert!(LivePiano::new_with_materials(&prepared, config(), gas(), source).is_err());
 }
