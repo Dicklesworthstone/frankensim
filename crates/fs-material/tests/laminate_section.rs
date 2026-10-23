@@ -363,3 +363,122 @@ fn g0_complex_abd_elastic_layers_are_real_and_match() {
         assert_eq!(d[k].im, 0.0);
     }
 }
+
+// --- viscoelastic passivity ------------------------------------------------
+
+use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
+
+/// Crate Mandel order [11,22,33,12,13,23]; a diagonal positive Mandel tensor is
+/// a valid (Poisson-free) orthotropic SPD law, with shear diagonals = 2G.
+fn diag6(d: [f64; 6]) -> Mandel6 {
+    core::array::from_fn(|i| core::array::from_fn(|j| if i == j { d[i] } else { 0.0 }))
+}
+
+/// A passive orthotropic tensor-Prony law: SPD equilibrium plus one PSD Maxwell
+/// branch, admitted over the audio band.
+fn prony(scale: f64) -> TensorProny {
+    let c_eq = diag6([
+        9.0e9 * scale,
+        2.0e9 * scale,
+        1.0e9 * scale,
+        1.5e9 * scale,
+        1.3e9 * scale,
+        0.9e9 * scale,
+    ]);
+    let branch = PronyBranch::new(
+        diag6([1.0e9, 3.0e8, 2.0e8, 2.5e8, 2.2e8, 1.6e8].map(|v| v * scale)),
+        1.0e-4,
+    )
+    .expect("PSD branch");
+    TensorProny::new(
+        c_eq,
+        None,
+        vec![branch],
+        (
+            2.0 * core::f64::consts::PI * 20.0,
+            2.0 * core::f64::consts::PI * 20_000.0,
+        ),
+    )
+    .expect("passive orthotropic Prony")
+}
+
+fn prony_layer(
+    p: TensorProny,
+    thickness_m: f64,
+    orientation_rad: f64,
+    density: f64,
+) -> LaminaLayer {
+    LaminaLayer {
+        thickness_m,
+        orientation_rad,
+        density_kg_m3: density,
+        material: None,
+        law: LayerLaw::Prony(p),
+    }
+}
+
+#[test]
+fn g1_complex_abd_passivity() {
+    use fs_math::det;
+    // An unsymmetric three-layer viscoelastic stack. The assembled complex
+    // laminate operator [[A,B],[B,D]] must have a PSD imaginary part (passive
+    // dissipation) at every frequency in the source band: each layer gives
+    // Im Q_k ⊗ [[m0,m1],[m1,m2]], a Kronecker of a PSD reduced-loss matrix and a
+    // PSD second-moment matrix, summed over layers. B's own block need not be
+    // sign-definite; the 6×6 operator is the physical passivity statement.
+    let section = LaminateSection::try_new(
+        vec![
+            prony_layer(prony(1.0), 2.0e-3, 0.0, 420.0),
+            prony_layer(prony(1.7), 1.0e-3, core::f64::consts::PI / 5.0, 640.0),
+            prony_layer(prony(0.6), 0.5e-3, -core::f64::consts::FRAC_PI_3, 500.0),
+        ],
+        ReferenceSurface::Midsurface,
+    )
+    .unwrap();
+    let (lo, hi) = (
+        2.0 * core::f64::consts::PI * 20.0,
+        2.0 * core::f64::consts::PI * 20_000.0,
+    );
+    let mut s = fs_rand::StreamKey {
+        seed: 0x4c_414d_5f56_31,
+        kernel: 1,
+        tile: 0,
+    }
+    .stream();
+    let (mut worst_eval, mut max_loss) = (f64::INFINITY, 0.0_f64);
+    for _ in 0..1000 {
+        // Log-uniform frequency strictly inside the band.
+        let omega = det::exp(det::ln(lo) + s.next_f64() * (det::ln(hi) - det::ln(lo)));
+        let (a, b, d) = section.complex_abd(omega).unwrap();
+        // Assemble the symmetric 6×6 imaginary operator, engineering-shear
+        // throughout (the per-layer plane_stress_complex check uses the same
+        // convention). Top-left Im A, off-diagonal Im B, bottom-right Im D.
+        let mut im = [0.0f64; 36];
+        let mut scale = 0.0f64;
+        for r in 0..3 {
+            for c in 0..3 {
+                let (ia, ib, id) = (a[3 * r + c].im, b[3 * r + c].im, d[3 * r + c].im);
+                im[6 * r + c] = ia;
+                im[6 * r + (c + 3)] = ib;
+                im[6 * (r + 3) + c] = ib;
+                im[6 * (r + 3) + (c + 3)] = id;
+                scale = scale.max(ia.abs()).max(id.abs());
+                max_loss = max_loss.max(ia.abs()).max(id.abs());
+            }
+        }
+        let (evals, _) = fs_la::eigen::jacobi_eigh(&im, 6);
+        let min_eval = evals.iter().copied().fold(f64::INFINITY, f64::min);
+        // PSD to a relative floor: the per-layer loss is PSD by construction and
+        // the moment matrices are PSD, so the only negativity is rounding.
+        assert!(
+            min_eval >= -1e-9 * scale.max(1.0),
+            "Im[[A,B],[B,D]] not PSD at ω = {omega}: min eval {min_eval:e}, scale {scale:e}"
+        );
+        worst_eval = worst_eval.min(min_eval / scale.max(1.0));
+    }
+    // Liveness: the stack actually dissipates (nonzero loss) in band.
+    assert!(max_loss > 0.0, "viscoelastic stack shows no loss");
+    println!(
+        "{{\"suite\":\"irp-s1\",\"bead\":\"M1.2-W7\",\"test\":\"g1_complex_abd_passivity\",\"tier\":\"G1\",\"inputs\":{{\"layers\":3,\"band_rad_s\":[{lo:e},{hi:e}],\"frequencies\":1000}},\"provenance\":\"synthetic orthotropic Prony (not measured)\",\"observed\":{{\"worst_relative_min_eigenvalue\":{worst_eval:e},\"max_loss_pa_m\":{max_loss:e}}},\"tolerance\":{{\"psd_relative_floor\":1e-9}},\"verdict\":\"pass\"}}"
+    );
+}
