@@ -10,7 +10,12 @@ mod support;
 use support::packs;
 
 const BLOCK: &str = "gas_field 8 3 mole 2 A B\ngas_station 0 300 1 0\ngas_station 0.285 320 0.75 0.25\ngas_station 0.57 310 0.5 0.5\n";
-const INPUT: &str = include_str!("../../../../../examples/reed-flanged-baffled.performance");
+const INPUT_FIXTURE: &str = include_str!("../../../../../examples/reed-flanged-baffled.performance");
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
+static INPUT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| INPUT_FIXTURE.replace("observer_law stokes-kirchhoff\n", ""));
 
 fn parse(text: &str, sources: &ThermochemicalSources<'_>) -> (AxialGasField, Vec<GasRecord>) {
     let mut reader = Reader { lines: text.lines(), line: 0 };

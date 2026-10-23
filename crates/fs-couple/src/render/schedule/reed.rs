@@ -26,7 +26,10 @@
 //! internal observation that travels no distance, so it passes unfiltered.
 
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::air_path::{ObserverFilter, ObserverFilterReceipt, legacy_relative_humidity};
+use crate::air_path::{
+    GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt, ObserverOmission, legacy_relative_humidity,
+    observer_band_top_hz, omitted_observer_absorption,
+};
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -307,6 +310,21 @@ fn observer_filter(
     filter.map_err(ReedPerformanceError::Model)
 }
 
+/// The absorption the listener gas applies over the observer's range up to
+/// its band top, read from that gas's own record. A gas without one (a
+/// resolved field cell) is unrecorded.
+fn observer_omission(
+    medium: &GasState,
+    records: &[GasRecord],
+    range_m: f64,
+    band_top_hz: f64,
+) -> Result<ObserverOmission, AcousticRealizeError> {
+    match records.iter().find(|record| record.state() == medium) {
+        Some(record) => omitted_observer_absorption(record, range_m, band_top_hz),
+        None => Ok(ObserverOmission::unrecorded(medium, range_m, band_top_hz)),
+    }
+}
+
 /// Source facts; neither a sourced-material receipt nor a fidelity certificate.
 #[derive(Clone, Copy, Debug)]
 pub struct ReedPerformanceInfo {
@@ -357,6 +375,8 @@ pub struct ReedPerformance {
     steady_gas: Option<SteadyGasPerformance>,
     observer: ObserverFilter,
     observer_range_spread_m: Option<f64>,
+    observer_omission: Result<ObserverOmission, AcousticRealizeError>,
+    observer_law_declared: bool,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -791,7 +811,8 @@ impl ReedPerformance {
         };
         let duct = Duct { segments };
         let outlet_radius_m = duct.segments.last().map_or(0.0, Segment::outlet_radius);
-        let (voice, terminal, observer) = if let Some((field, resolution)) = &gas_field {
+        let band_top_hz = observer_band_top_hz(observation.declared_band_hz(), rate);
+        let (voice, terminal, observer, observer_omission) = if let Some((field, resolution)) = &gas_field {
             use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
             let regional = match resolution {
                 GasFieldResolution::Midpoint(cells) => {
@@ -814,6 +835,7 @@ impl ReedPerformance {
             let observer =
                 observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
+            let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
             let (voice, terminal) = observation.build_regional(
                 &duct,
                 regional,
@@ -823,13 +845,14 @@ impl ReedPerformance {
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
             )?;
-            (voice, terminal, observer)
+            (voice, terminal, observer, omission)
         } else {
             let outlet_gas = *segment_gases.last().expect("at least one admitted segment");
             let medium = observer_medium(baffled, &air, &outlet_gas);
             let observer =
                 observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
             admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
+            let omission = observer_omission(&medium, &gas_records, observer_range_m, band_top_hz);
             let (voice, terminal) = observation.build(
                 &duct,
                 &segment_gases,
@@ -839,7 +862,7 @@ impl ReedPerformance {
                 samples as usize,
                 observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
             )?;
-            (voice, terminal, observer)
+            (voice, terminal, observer, omission)
         };
         let observer_range_spread_m =
             baffled.map(|(position, _)| range_spread(position, outlet_radius_m));
@@ -871,6 +894,8 @@ impl ReedPerformance {
             steady_gas,
             observer,
             observer_range_spread_m,
+            observer_omission,
+            observer_law_declared: declared_law.is_some(),
         })
     }
 
@@ -896,6 +921,30 @@ impl ReedPerformance {
             },
             internal_part_unpropagated: self.observer_range_spread_m.is_none(),
         }
+    }
+    /// The absorption the listener gas applies over the observer's range up to
+    /// its band top, and what the applied law leaves of it (rulings 6510,
+    /// 6532). ISO 9613-1 and the relaxation law leave nothing out;
+    /// Stokes-Kirchhoff, the default for a mixture, a thermochemical gas or a
+    /// field, leaves out the gas's relaxation; `none` leaves out everything.
+    /// The library only reports it: a sidecar writer refuses through
+    /// [`ObserverOmission::admit`], which this applies for an undeclared
+    /// Stokes-Kirchhoff law. A declared law always passes.
+    ///
+    /// # Errors
+    /// The figure's own refusal (a state outside its law's window), or
+    /// [`AcousticRealizeError::ObserverOmission`].
+    pub fn observer_admission(&self) -> Result<&ObserverOmission, AcousticRealizeError> {
+        let omission = self.observer_omission.as_ref().map_err(Clone::clone)?;
+        if matches!(self.observer.receipt().absorption.law, GasAbsorptionModel::StokesKirchhoff) {
+            omission.admit(true, self.observer_law_declared)?;
+        }
+        Ok(omission)
+    }
+    /// Whether the file declares its observer law (`observer_law ...`).
+    #[must_use]
+    pub const fn observer_law_declared(&self) -> bool {
+        self.observer_law_declared
     }
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]

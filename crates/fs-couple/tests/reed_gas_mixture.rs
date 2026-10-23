@@ -56,7 +56,10 @@ fn atmosphere_files_change_only_the_medium_and_reach_exact_native_and_decimated_
     for high in [false, true] {
         let mut output_bytes = Vec::new();
         for (index, fixture) in [BASE, CO2, LOW].into_iter().enumerate() {
-            let lines: Vec<_> = fixture.lines().collect();
+            // Only the CO2 file also declares its law: its relaxation is
+            // unbounded, so the sidecar refuses it undeclared (ruling 6532).
+            let lines: Vec<_> = fixture.lines().filter(|line| *line != "observer_law stokes-kirchhoff").collect();
+            assert_eq!(fixture.lines().count() - lines.len(), usize::from(index == 1));
             for (line, baseline) in BASE.lines().enumerate() {
                 if line != 2 { assert_eq!(lines[line], baseline); }
             }

@@ -1,7 +1,12 @@
 use super::*;
 use crate::driving_point::regional::field::tests::field;
 
-const INPUT: &str = include_str!("../../../../examples/reed-flanged-baffled.performance");
+const INPUT_FIXTURE: &str = include_str!("../../../../examples/reed-flanged-baffled.performance");
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
+static INPUT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| INPUT_FIXTURE.replace("observer_law stokes-kirchhoff\n", ""));
 
 fn source() -> String {
     INPUT

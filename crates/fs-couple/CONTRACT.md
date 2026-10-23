@@ -2025,6 +2025,17 @@ clarinet is one filling of those objects.
   distance and passes unfiltered and undelayed
   (`internal_part_unpropagated`). Under `observer_law none` the proxy is the
   voice's own sum, bit for bit.
+  `ReedPerformance::observer_admission` reports the listener gas's figure
+  (`air_path::omitted_observer_absorption`, from its record; a field cell is
+  unrecorded) at the observer's range and band top (the receiver's declared
+  band, or Nyquist for the proxy, capped at 20 kHz), and what the applied law
+  leaves out: nothing under ISO or the relaxation law, the relaxation part
+  under Stokes-Kirchhoff, everything under `none`. It refuses an undeclared
+  Stokes-Kirchhoff law whose omission is unbounded, unrecorded or above
+  1.0 dB. The library builds regardless; `music_render wind` calls it before
+  any output exists and writes the receipt as `reed_input.observer`. The five
+  reed CO2 fixtures declare `observer_law stokes-kirchhoff`, the law they
+  already had by default, so their sound is unchanged.
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a

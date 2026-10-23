@@ -42,7 +42,7 @@ fn independent_exterior_drives_both_feedback_and_receiver_without_replacing_bore
 fn identical_exterior_is_exact_and_unsupported_interfaces_refuse_with_source_lines() {
     let same = SOURCE.replace(RECEIVER, &format!(
         "{RECEIVER}\nexterior mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4"));
-    assert_eq!(raw(SOURCE, 37), raw(&same, 113));
+    assert_eq!(raw(&SOURCE, 37), raw(&same, 113));
     for record in [
         "exterior mixture 300 100000 mole 1 Xe 1",
         "exterior mixture 300 100000 mole 2 N2 70 O2 30",

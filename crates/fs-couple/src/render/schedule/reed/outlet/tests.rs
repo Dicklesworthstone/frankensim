@@ -1,6 +1,11 @@
 use super::*;
 
-const SOURCE: &str = include_str!("../../../../../examples/reed-baffled-mixture.performance");
+const SOURCE_FIXTURE: &str = include_str!("../../../../../examples/reed-baffled-mixture.performance");
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
+static SOURCE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| SOURCE_FIXTURE.replace("observer_law stokes-kirchhoff\n", ""));
 const RECEIVER: &str = "baffled_outlet 0 0 0.5 4 16 1000";
 
 fn voice(p: &ReedPerformance) -> &ReedBoreVoice {
@@ -183,7 +188,7 @@ fn delays_partitioning_and_request_refusals_preserve_the_complete_source() {
     assert_eq!(source.samples_rendered(), 0);
     let mut resumed = vec![0.0; source.info().samples as usize];
     for block in resumed.chunks_mut(113) { source.pressure_block(block).unwrap(); }
-    assert_eq!(resumed, raw(SOURCE, 37));
+    assert_eq!(resumed, raw(&SOURCE, 37));
     assert!(resumed[..first].iter().all(|p| *p == 0.0));
     let mut past_end = [321.0];
     assert!(source.pressure_block(&mut past_end).is_err());
@@ -192,7 +197,7 @@ fn delays_partitioning_and_request_refusals_preserve_the_complete_source() {
 
 #[test]
 fn gas_changes_reach_physical_pressure_and_invalid_observation_retains_its_error() {
-    let base = raw(SOURCE, 37);
+    let base = raw(&SOURCE, 37);
     for text in [
         SOURCE.replace("gas mixture 293.15 100000 mole 3 N2 0.4 O2 0.2 CO2 0.4",
             "gas mixture 293.15 100000 mole 2 N2 0.7 O2 0.3"),

@@ -676,6 +676,7 @@ fn load_with_all_sources(
     } else {
         let p=ReedPerformance::from_bytes_with_gas_sources(bytes,block,policy,sources).map_err(|e|e.to_string())?;
         let i=p.info();
+        let observer_receipt=super::duct_metadata::reed_observer_json(&p).map_err(|e|e.to_string())?;
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
         let slit_json = p.viscous_slit().map_or_else(String::new, |slit| {
             let gas = slit.gas().expect("reed channel retains its actual inlet gas");
@@ -683,7 +684,7 @@ fn load_with_all_sources(
                 slit.length_m(), gas.temperature, gas.pressure, gas.density, gas.dynamic_viscosity)
         });
         let policy_name=if policy==ObservationPolicy::Acceptance {"acceptance"} else {"diagnostic"};
-        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}{slit_json}}}",
+        let source_json=format!("\"reed_input\":{{\"schema\":\"{REED_PERFORMANCE_SCHEMA}\",\"observation_policy\":\"{policy_name}\",\"blake3\":\"{}\",\"segments\":{},\"tone_holes\":{},\"massive_reed\":{},\"gesture_events\":{},\"compiled_controls\":{}{observer_json}{slit_json}{observer_receipt}}}",
             i.input_hash.to_hex(),i.segments,i.tone_holes,i.massive_reed,i.gesture_events,i.compiled_controls);
         Ok(Loaded{source:Box::new(p),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"reed-input",source_json,observation_json:None})

@@ -11,8 +11,12 @@ use fs_material::gas_species::input::{
 mod support;
 use support::packs;
 
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
 fn base() -> String {
     include_str!("../examples/reed-flanged-baffled.performance")
+        .replace("observer_law stokes-kirchhoff\n", "")
         .replace("audio 48000 12000 2", "audio 48000 4801 2")
         .replace("ambient mixture 293.15 100000 mole 2 N2 0.7 O2 0.3", "ambient 300 100000 0")
         .replace("reed 0.0004 0.013 6000 0 0 0.35", "reed 0.0004 0.013 6000 0.00001 100 0.35")

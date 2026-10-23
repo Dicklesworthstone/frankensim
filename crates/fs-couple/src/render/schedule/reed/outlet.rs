@@ -69,6 +69,14 @@ impl ObservationInput {
         }
     }
 
+    /// The receiver's declared band [Hz]; the legacy proxy declares none.
+    pub(super) const fn declared_band_hz(&self) -> Option<f64> {
+        match self {
+            Self::Baffled { receiver, .. } => Some(receiver.maximum_frequency_hz),
+            Self::Legacy(_) => None,
+        }
+    }
+
     /// The baffled receiver's position and its authored exterior gas.
     pub(super) fn baffled(&self) -> Option<([f64; 3], Option<GasState>)> {
         match self {

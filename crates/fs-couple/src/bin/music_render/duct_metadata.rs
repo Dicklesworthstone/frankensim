@@ -203,6 +203,45 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
 
 // Serialize actual admitted states only; never re-resolve names or reconstruct
 // air from density/speed. The same snapshot vocabulary covers ambient and regions.
+/// The reed performance's observer receipt for its sidecar: the applied law
+/// and its causal realization, the listener gas's whole figure, and what the
+/// law leaves out (rulings 6510, 6532). An undeclared law that leaves out more
+/// than the tolerance, or an unbounded or unrecorded amount, refuses here,
+/// before any output exists.
+pub(super) fn reed_observer_json(
+    p: &fs_couple::render::schedule::reed::ReedPerformance,
+) -> Result<String, fs_couple::acoustic_realize::AcousticRealizeError> {
+    use fs_couple::air_path::GasAbsorptionModel;
+    let omission = p.observer_admission()?;
+    let receipt = p.observer();
+    let filter = receipt.filter;
+    let (law, omitted) = match filter.absorption.law {
+        GasAbsorptionModel::Iso9613Air { .. } => ("iso9613", Some(0.0)),
+        GasAbsorptionModel::MolecularRelaxation => ("relaxation", Some(0.0)),
+        GasAbsorptionModel::StokesKirchhoff => ("stokes-kirchhoff", omission.omitted_db(true)),
+        GasAbsorptionModel::Lossless => ("none", omission.omitted_db(false)),
+    };
+    let omitted = omitted.map_or_else(|| "null".to_owned(), |db| format!("{db:e}"));
+    let observer = if receipt.internal_part_unpropagated { "proxy" } else { "baffled-outlet" };
+    Ok(format!(
+        ",\"observer\":{{\"observer\":\"{observer}\",\"law\":\"{law}\",\"declared\":{},\"omitted_db\":{omitted},\
+         \"taps\":{},\"latency_s\":{:e},\"low_frequency_delay_s\":{:e},\"alignment_samples\":{:e},\
+         \"padding_samples\":{},\"truncated_energy\":{:e},\"budget_energy\":{:e},\"receiver_delay_s\":{:e},\
+         \"internal_part_unpropagated\":{},\"figure\":{}}}",
+        p.observer_law_declared(),
+        filter.taps,
+        filter.latency_s,
+        filter.low_frequency_delay_s,
+        filter.alignment_samples,
+        filter.padding_samples,
+        filter.truncated_energy,
+        filter.budget_energy,
+        filter.receiver_delay_s,
+        receipt.internal_part_unpropagated,
+        omission.to_json(),
+    ))
+}
+
 pub(super) fn gas_state(g: &fs_material::gas::GasState) -> String {
     format!("{{\"temperature_k\":{:e},\"static_pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"gamma\":{:e},\"prandtl\":{:e},\"water_mole_fraction\":{:e},\"specific_heat_cp_j_kg_k\":{:e},\"specific_gas_constant_j_kg_k\":{:e},\"characteristic_impedance_pa_s_m\":{:e}}}",
         g.temperature, g.pressure, g.density, g.sound_speed, g.dynamic_viscosity,
