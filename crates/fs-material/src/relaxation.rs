@@ -332,6 +332,57 @@ impl RelaxationAbsorption {
         Ok(Self { species })
     }
 
+    /// ISO 9613-1's terrestrial air as relaxation data. It comprises:
+    /// - the O2 and N2 vibrations, with ISO's characteristic temperatures
+    ///   (2239.1 K and 3352 K) and ISO's relaxation frequencies
+    ///   ([`RelaxationRateLaw::Iso9613TerrestrialAir`]);
+    /// - Ar, CO2 and H2O declared without reservoirs. That is ISO's own
+    ///   assumption inside its CO2 ≤ 1e-3 admission; ISO carries no reservoir
+    ///   of its own for either species.
+    ///
+    /// Rotation is not a reservoir here. Its bulk-viscosity loss, which ISO's
+    /// classical constant includes, is left out.
+    ///
+    /// Evaluating it refuses any gas that is not terrestrial air, naming the
+    /// species.
+    ///
+    /// # Errors
+    /// None for the fixed data; the signature forwards [`Self::new`].
+    pub fn iso9613_terrestrial_air() -> Result<Self, MaterialError> {
+        let id = |name: &str| {
+            SpeciesId::new(name).map_err(|error| parameters(format!("species id {name}: {error}")))
+        };
+        let vibration = |theta_k: f64, iso: IsoRelaxingSpecies| RelaxationProcess {
+            reservoir: InternalReservoir::Vibrational(vec![VibrationalMode {
+                theta_k,
+                degeneracy: 1,
+            }]),
+            rate: RelaxationRateLaw::Iso9613TerrestrialAir(iso),
+        };
+        Self::new(vec![
+            SpeciesRelaxation {
+                species: id("O2")?,
+                processes: vec![vibration(2239.1, IsoRelaxingSpecies::Oxygen)],
+            },
+            SpeciesRelaxation {
+                species: id("N2")?,
+                processes: vec![vibration(3352.0, IsoRelaxingSpecies::Nitrogen)],
+            },
+            SpeciesRelaxation {
+                species: id("Ar")?,
+                processes: Vec::new(),
+            },
+            SpeciesRelaxation {
+                species: id("CO2")?,
+                processes: Vec::new(),
+            },
+            SpeciesRelaxation {
+                species: id("H2O")?,
+                processes: Vec::new(),
+            },
+        ])
+    }
+
     /// Canonical species data.
     #[must_use]
     pub fn species(&self) -> &[SpeciesRelaxation] {

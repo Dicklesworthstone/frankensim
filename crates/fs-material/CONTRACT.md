@@ -655,7 +655,12 @@ mole-fraction rule, a partner-independent power law, or ISO 9613-1's `f_rO`
 and `f_rN` (`iso9613_relaxation_frequencies_hz`, bit-identical to the ISO
 formula's). The ISO laws are a declared terrestrial-air variant: dry-basis O2
 and N2 must be within 1 % of 0.209 and 0.781, with CO2 at most 1e-3. Any other
-mixture is refused.
+mixture is refused, naming the species (the same admission as
+`iso9613::TerrestrialAir`). `RelaxationAbsorption::iso9613_terrestrial_air()`
+is that data set: the O2 and N2 vibrations at ISO's theta and rates, with Ar,
+CO2 and H2O declared without reservoirs (ISO's own assumption). Rotation is
+not a reservoir in it, so the rotational bulk loss inside ISO's classical
+constant is left out.
 
 The law also refuses:
 - a present species without data;

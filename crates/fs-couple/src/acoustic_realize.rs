@@ -233,7 +233,7 @@ pub enum BoreRealizationReceipt {
 
 /// Non-IR realization options (`scenario.ir` remains frozen per `schema-policy.json`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct RealizeOptions {
+pub struct RealizeOptions<'a> {
     /// Bore discretization choice for reed/duct realizations. Nondefault
     /// requests refuse on joined string/duct and prescribed-flow paths whose
     /// propagators do not implement this selector.
@@ -249,6 +249,25 @@ pub struct RealizeOptions {
     /// A supplied NASA-9 air state therefore needs an explicit ISO declaration
     /// to include that air-specific molecular-relaxation model.
     pub observer_absorption: Option<crate::air_path::GasAbsorptionModel>,
+    /// The gas's molecular relaxation, evaluated at exactly the realized gas
+    /// state. It is required by, and only by,
+    /// [`crate::air_path::GasAbsorptionModel::MolecularRelaxation`]. A state
+    /// evaluated for another gas, or a state supplied with another law, refuses
+    /// instead of being ignored.
+    pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
+}
+
+/// The observer law and, for molecular relaxation, its evaluated state.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct ObserverLaw<'a> {
+    model: Option<crate::air_path::GasAbsorptionModel>,
+    relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
+}
+
+impl From<Option<crate::air_path::GasAbsorptionModel>> for ObserverLaw<'_> {
+    fn from(model: Option<crate::air_path::GasAbsorptionModel>) -> Self {
+        Self { model, relaxation: None }
+    }
 }
 
 /// Realized observer pressure and the gas state that produced it.
@@ -449,15 +468,26 @@ fn realize_assembly_inner(
             .gas
             .map(|_| crate::air_path::GasAbsorptionModel::StokesKirchhoff)
     });
-    if let Some(model) = absorption {
-        crate::air_path::absorb_pressure_history_with_model(
+    match (absorption, realize_options.observer_relaxation) {
+        (Some(crate::air_path::GasAbsorptionModel::MolecularRelaxation), relaxation) => {
+            admit_relaxation(relaxation, &gas)?;
+        }
+        (_, Some(_)) => {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "an observer relaxation state needs the MolecularRelaxation observer law",
+            });
+        }
+        (Some(model), None) => crate::air_path::absorb_pressure_history_with_model(
             &mut [],
             1.0 / f64::from(assembly.sample_rate_hz),
             assembly.listener.distance_m,
             &gas,
             model,
-        )?;
+        )?,
+        (None, None) => {}
     }
+    let absorption =
+        ObserverLaw { model: absorption, relaxation: realize_options.observer_relaxation };
     if let Some(string) = assembly
         .string
         .as_ref()
@@ -617,7 +647,7 @@ fn realize_coupled_ode(
     gas: &GasState,
     plates: &mut PlateBank,
     n: usize,
-    absorption: Option<crate::air_path::GasAbsorptionModel>,
+    absorption: ObserverLaw<'_>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     let string = assembly.string.as_ref().expect("checked");
     let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
@@ -953,7 +983,7 @@ fn realize_coupled(
     gas: &GasState,
     plates: &mut PlateBank,
     n: usize,
-    absorption: Option<crate::air_path::GasAbsorptionModel>,
+    absorption: ObserverLaw<'_>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
     use crate::reed_bore::solve_reed_wave;
@@ -1113,7 +1143,7 @@ fn realize_coupled_kc(
     zc: f64,
     area: f64,
     texture: &mut TextureDrive,
-    absorption: Option<crate::air_path::GasAbsorptionModel>,
+    absorption: ObserverLaw<'_>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::reed_bore::solve_reed_wave;
     let string = assembly.string.as_ref().expect("checked");
@@ -1261,11 +1291,28 @@ pub(crate) fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealize
     .map_err(|e| AcousticRealizeError::Ambient(e.to_string()))
 }
 
+/// The relaxation state that molecular relaxation needs, evaluated at exactly
+/// `gas`.
+fn admit_relaxation<'a>(
+    relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
+    gas: &GasState,
+) -> Result<&'a fs_material::relaxation::RelaxationState, AcousticRealizeError> {
+    let state = relaxation.ok_or(AcousticRealizeError::InvalidDescription {
+        what: "the MolecularRelaxation observer law needs RealizeOptions::observer_relaxation",
+    })?;
+    if state.gas() != gas {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "the observer relaxation state was evaluated for a different gas state",
+        });
+    }
+    Ok(state)
+}
+
 fn finish_observer(
     assembly: &AcousticAssembly,
     gas: &GasState,
     mut pressure_pa: Vec<f64>,
-    absorption: Option<crate::air_path::GasAbsorptionModel>,
+    absorption: ObserverLaw<'_>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::air_path::{GasAbsorptionModel, ObserverAbsorptionReceipt, relaxation_omission};
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
@@ -1276,7 +1323,7 @@ fn finish_observer(
     // admits the conditions, and otherwise the documented Stokes-Kirchhoff
     // fallback. Stokes-Kirchhoff leaves molecular relaxation out, which is
     // never silent: the receipt carries the labelled figure over the band.
-    let law = absorption.unwrap_or_else(|| {
+    let law = absorption.model.unwrap_or_else(|| {
         let ambient = assembly.ambient;
         let relative_humidity = ambient.relative_humidity;
         match fs_material::iso9613::TerrestrialAir::moist_air(
@@ -1294,19 +1341,30 @@ fn finish_observer(
         }
     });
     let relaxation_omitted = match law {
-        GasAbsorptionModel::Iso9613Air { .. } => None,
+        GasAbsorptionModel::Iso9613Air { .. } | GasAbsorptionModel::MolecularRelaxation => None,
         GasAbsorptionModel::StokesKirchhoff => Some(relaxation_omission(
             assembly.listener.distance_m,
             0.5 * f64::from(assembly.sample_rate_hz),
         )?),
     };
-    crate::air_path::absorb_pressure_history_with_model(
-        &mut pressure_pa,
-        dt,
-        assembly.listener.distance_m,
-        gas,
-        law,
-    )?;
+    if law == GasAbsorptionModel::MolecularRelaxation {
+        // The bulk delay r / c_inf is returned, not applied: no observer law
+        // here places the arrival.
+        crate::air_path::propagate_pressure_history_relaxing(
+            &mut pressure_pa,
+            dt,
+            assembly.listener.distance_m,
+            admit_relaxation(absorption.relaxation, gas)?,
+        )?;
+    } else {
+        crate::air_path::absorb_pressure_history_with_model(
+            &mut pressure_pa,
+            dt,
+            assembly.listener.distance_m,
+            gas,
+            law,
+        )?;
+    }
     Ok(RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
@@ -6151,7 +6209,7 @@ mod arbitrary_gas_realization_tests {
         let (_, legacy_air) = legacy_admission(&description);
         assert_eq!(
             finish_observer(&description, &gas, history.clone(),
-                Some(GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air: legacy_air })),
+                Some(GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air: legacy_air }).into()),
             Err(AcousticRealizeError::NonTerrestrialAir(
                 fs_material::iso9613::Iso9613Refusal::DifferentState
             ))
@@ -6165,13 +6223,13 @@ mod arbitrary_gas_realization_tests {
             model,
         )
         .unwrap();
-        let result = finish_observer(&description, &gas, history.clone(), Some(model)).unwrap();
+        let result = finish_observer(&description, &gas, history.clone(), Some(model).into()).unwrap();
         assert_eq!(result.pressure_pa, expected);
         let classical = finish_observer(
             &description,
             &gas,
             history.clone(),
-            Some(GasAbsorptionModel::StokesKirchhoff),
+            Some(GasAbsorptionModel::StokesKirchhoff).into(),
         )
         .unwrap();
         assert_ne!(result.pressure_pa, classical.pressure_pa);
@@ -6184,6 +6242,7 @@ mod arbitrary_gas_realization_tests {
                     relative_humidity: f64::NAN,
                     air: admitted_air(gas),
                 })
+                .into()
             )
             .is_err()
         );
@@ -6203,7 +6262,7 @@ mod arbitrary_gas_realization_tests {
         )
         .unwrap();
         assert_eq!(
-            finish_observer(&description, &legacy, history, None)
+            finish_observer(&description, &legacy, history, ObserverLaw::default())
                 .unwrap()
                 .pressure_pa,
             original
@@ -6227,9 +6286,9 @@ mod arbitrary_gas_realization_tests {
         .unwrap()
     }
 
-    /// Terrestrial-air admission of `gas` from an explicit U.S. Standard
-    /// Atmosphere 1976 dry composition plus the state's own water.
-    fn admitted_air(gas: GasState) -> fs_material::iso9613::TerrestrialAir {
+    /// `gas` with an explicit U.S. Standard Atmosphere 1976 dry composition
+    /// plus the state's own water.
+    fn ussa_medium(gas: GasState) -> fs_material::relaxation::RelaxingMedium {
         let dry_parts = [("N2", 0.780_84), ("O2", 0.209_476), ("Ar", 0.009_34), ("CO2", 0.000_314)];
         let total: f64 = dry_parts.iter().map(|(_, x)| x).sum();
         let water = gas.water_mole_fraction;
@@ -6240,8 +6299,59 @@ mod arbitrary_gas_realization_tests {
         if water > 0.0 {
             components.push((fs_thermochem::SpeciesId::new("H2O").unwrap(), water));
         }
-        let medium = fs_material::relaxation::RelaxingMedium::new(gas, components).unwrap();
-        fs_material::iso9613::TerrestrialAir::admit(&medium).unwrap()
+        fs_material::relaxation::RelaxingMedium::new(gas, components).unwrap()
+    }
+
+    /// Terrestrial-air admission of `gas` from its explicit USSA composition.
+    fn admitted_air(gas: GasState) -> fs_material::iso9613::TerrestrialAir {
+        fs_material::iso9613::TerrestrialAir::admit(&ussa_medium(gas)).unwrap()
+    }
+
+    /// MolecularRelaxation applies the evaluated law as the causal transfer and
+    /// names itself in the receipt, with nothing omitted. It refuses:
+    /// - a missing state;
+    /// - a state evaluated for another gas;
+    /// - a state supplied with another law, or with no law at all.
+    #[test]
+    fn molecular_relaxation_observer_is_the_causal_law_and_refuses_mismatches() {
+        use crate::air_path::{GasAbsorptionModel, propagate_pressure_history_relaxing};
+        let description = fixture();
+        let (legacy, _) = legacy_admission(&description);
+        let state = fs_material::relaxation::RelaxationAbsorption::iso9613_terrestrial_air()
+            .unwrap()
+            .evaluate(&ussa_medium(legacy))
+            .unwrap();
+        let relaxing = GasAbsorptionModel::MolecularRelaxation;
+        let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
+        let law = ObserverLaw { model: Some(relaxing), relaxation: Some(&state) };
+        let realized = finish_observer(&description, &legacy, history.clone(), law).unwrap();
+        let mut expected = history.clone();
+        propagate_pressure_history_relaxing(&mut expected, 1.0 / 16000.0,
+            description.listener.distance_m, &state).unwrap();
+        assert_eq!(realized.pressure_pa, expected);
+        assert_eq!(realized.observer_absorption.law, relaxing);
+        assert_eq!(realized.observer_absorption.relaxation_omitted, None);
+        assert!(finish_observer(&description, &helium_like(), history, law).is_err());
+        let options = RealizeOptions {
+            gas: Some(legacy),
+            observer_absorption: Some(relaxing),
+            observer_relaxation: Some(&state),
+            ..RealizeOptions::default()
+        };
+        let rendered = realize_assembly_with_options(&description, &options).unwrap();
+        assert_eq!(rendered.observer_absorption.law, relaxing);
+        assert_ne!(rendered.pressure_pa, realize_assembly(&description).unwrap().pressure_pa);
+        for refused in [
+            RealizeOptions { observer_relaxation: None, ..options },
+            RealizeOptions { gas: Some(helium_like()), ..options },
+            RealizeOptions { observer_absorption: Some(GasAbsorptionModel::StokesKirchhoff), ..options },
+            RealizeOptions { gas: None, observer_absorption: None, ..options },
+        ] {
+            assert!(matches!(
+                realize_assembly_with_options(&description, &refused),
+                Err(AcousticRealizeError::InvalidDescription { .. })
+            ));
+        }
     }
 
     /// Every realized observer names its absorption law. Scenario air carries
@@ -6256,7 +6366,7 @@ mod arbitrary_gas_realization_tests {
         let description = fixture();
         let (legacy, legacy_air) = legacy_admission(&description);
         let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
-        let scenario = finish_observer(&description, &legacy, history.clone(), None).unwrap();
+        let scenario = finish_observer(&description, &legacy, history.clone(), ObserverLaw::default()).unwrap();
         assert_eq!(
             scenario.observer_absorption.law,
             GasAbsorptionModel::Iso9613Air {
@@ -6267,7 +6377,7 @@ mod arbitrary_gas_realization_tests {
         assert_eq!(scenario.observer_absorption.relaxation_omitted, None);
         let supplied = helium_like();
         let classical = finish_observer(&description, &supplied, history.clone(),
-            Some(GasAbsorptionModel::StokesKirchhoff)).unwrap();
+            Some(GasAbsorptionModel::StokesKirchhoff).into()).unwrap();
         let expected = relaxation_omission(description.listener.distance_m,
             0.5 * f64::from(description.sample_rate_hz)).unwrap();
         assert_eq!(classical.observer_absorption.law, GasAbsorptionModel::StokesKirchhoff);

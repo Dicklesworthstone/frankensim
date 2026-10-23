@@ -1925,6 +1925,20 @@ clarinet is one filling of those objects.
   `OmissionBound::StandardAirConvention`: standard air's worst ISO absorption.
   It is a convention and not a bound for a gas that relaxes more strongly than
   air (CO2-rich, for example).
+  `GasAbsorptionModel::MolecularRelaxation` applies the gas's own relaxation
+  law (`fs_material::relaxation`). It is evaluated from the gas's composition
+  and its species' data, and supplied as `RealizeOptions::observer_relaxation`
+  at exactly the realized gas state. It is applied as the causal transfer
+  `air_path::propagate_pressure_history_relaxing`: absorption and dispersion
+  come from one wavenumber, Stokes-Kirchhoff is counted once, and the bulk
+  delay is not applied. The receipt names it, with nothing omitted.
+  These refuse rather than being ignored:
+  - the law without its state;
+  - a state of another gas;
+  - a state supplied with any other law.
+  `xtask/tests/observer_relaxation_amount.rs` gates the amount on a rendered
+  plucked string at 100 m. The humidity change is gated against ISO 9613-1,
+  and the oxygen change against the law with declared rates.
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a

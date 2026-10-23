@@ -33,6 +33,13 @@ pub enum GasAbsorptionModel {
         /// The admission of the gas's own composition, bound to its state.
         air: TerrestrialAir,
     },
+    /// The gas's own molecular relaxation: `fs_material::relaxation` evaluated
+    /// from its composition and its species' relaxation data, together with
+    /// Stokes-Kirchhoff, counted once. It is applied as a causal propagation
+    /// ([`propagate_pressure_history_relaxing`]), so absorption and dispersion
+    /// come from one wavenumber. The evaluated state is supplied beside this
+    /// tag: `RealizeOptions::observer_relaxation`.
+    MolecularRelaxation,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -97,6 +104,11 @@ pub fn absorb_pressure_history_with_model(
     model: GasAbsorptionModel,
 ) -> Result<(), AcousticRealizeError> {
     gas.validate_coherence().map_err(|_| invalid("observer absorption needs a coherent gas state"))?;
+    if model == GasAbsorptionModel::MolecularRelaxation {
+        return Err(invalid(
+            "molecular relaxation is applied by propagate_pressure_history_relaxing with its evaluated state",
+        ));
+    }
     if let GasAbsorptionModel::Iso9613Air { relative_humidity, air } = model {
         // Admit the declared air and its conditions even for an empty or
         // zero-range history. A failed air law is not permission to use a
@@ -110,6 +122,9 @@ pub fn absorb_pressure_history_with_model(
         GasAbsorptionModel::Iso9613Air { relative_humidity, air } => {
             iso9613_absorption(&air, gas, relative_humidity, omega)
                 .map_err(|_| invalid("explicit ISO 9613 absorption could not be evaluated"))
+        }
+        GasAbsorptionModel::MolecularRelaxation => {
+            Err(invalid("molecular relaxation is not a zero-phase absorption"))
         }
     })
 }
