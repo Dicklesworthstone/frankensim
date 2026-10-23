@@ -78,12 +78,14 @@ impl PhaseVolumeFractions {
 /// Explicit Carman–Kozeny closure `K^-1=(1-phi)^2/(K0*phi^3)`.
 ///
 /// `K0` is a positive model length squared, not a fitted universal constant.
-/// No artificial epsilon makes fully solid material weakly mobile: states
-/// below the positive declared minimum liquid volume fraction refuse. Fully
-/// liquid material has zero extra drag. The original liquid viscosity later
-/// gives `drag=mu/K` in N s/m4. This is the stationary, homogeneous,
-/// single-velocity enthalpy/porosity approximation; it cannot represent a
-/// moving elastic skeleton, two-velocity phase transport or solid locking.
+/// No artificial epsilon makes fully solid material weakly mobile. The
+/// original constructor admits only its positive declared liquid-fraction
+/// range. The explicit immobile-solid constructor adds an exact stationary
+/// solid branch and positive fractions with representable finite mobility. Fully liquid
+/// material has zero extra drag. The original liquid viscosity later gives
+/// `drag=mu/K` in N s/m4. This stationary, homogeneous, single-velocity
+/// enthalpy/porosity approximation does not provide a moving elastic skeleton,
+/// two-velocity phase transport or a stress-free resolidification reference.
 #[derive(Clone, Debug)]
 pub struct MushyPhaseLaw<'a> {
     curve: &'a EquilibriumEnthalpyPhaseCurve,
@@ -102,6 +104,51 @@ pub struct MushyPhaseState {
     /// Inverse permeability [1/m2], zero at the fully liquid endpoint.
     pub inverse_permeability_per_m2: f64,
     pub law_identity: ContentHash,
+}
+
+/// Exact stationary solid constraint or a finite mobile phase response.
+///
+/// Immobility is a separate constitutive branch, never an infinite viscosity,
+/// clipped fraction or large finite drag. A momentum owner must enforce its
+/// zero velocity while keeping the original thermal mass and source state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhaseMobility {
+    ImmobileSolid {
+        phase: EquilibriumPhaseState,
+        volumes: PhaseVolumeFractions,
+        law_identity: ContentHash,
+    },
+    Mobile(MushyPhaseState),
+}
+impl PhaseMobility {
+    #[must_use]
+    pub const fn phase(&self) -> EquilibriumPhaseState {
+        match self {
+            Self::ImmobileSolid { phase, .. } => *phase,
+            Self::Mobile(state) => state.phase,
+        }
+    }
+    #[must_use]
+    pub const fn volumes(&self) -> PhaseVolumeFractions {
+        match self {
+            Self::ImmobileSolid { volumes, .. } => *volumes,
+            Self::Mobile(state) => state.volumes,
+        }
+    }
+    #[must_use]
+    pub const fn law_identity(&self) -> ContentHash {
+        match self {
+            Self::ImmobileSolid { law_identity, .. } => *law_identity,
+            Self::Mobile(state) => state.law_identity,
+        }
+    }
+    #[must_use]
+    pub const fn mobile(&self) -> Option<&MushyPhaseState> {
+        match self {
+            Self::ImmobileSolid { .. } => None,
+            Self::Mobile(state) => Some(state),
+        }
+    }
 }
 
 impl<'a> MushyPhaseLaw<'a> {
@@ -126,6 +173,49 @@ impl<'a> MushyPhaseLaw<'a> {
                 "mushy permeability scale must be positive and minimum liquid volume fraction in (0,1)",
             ));
         }
+        Self::build(
+            curve,
+            solid_density_kg_m3,
+            liquid_density_kg_m3,
+            permeability_scale_m2,
+            minimum_liquid_volume_fraction,
+        )
+    }
+
+    /// Admit the exact fully solid endpoint as a stationary constraint and all
+    /// strictly positive liquid fractions whose Carman–Kozeny resistance is
+    /// representable. There is no positive cutoff, epsilon, or fraction clipping.
+    ///
+    /// This supplies no elastic skeleton, residual stress or shrinkage law.
+    /// The consuming momentum owner must implement the exact immobile branch
+    /// and preserve thermal mass/enthalpy when entering or leaving it.
+    pub fn try_new_with_immobile_solid(
+        curve: &'a EquilibriumEnthalpyPhaseCurve,
+        solid_density_kg_m3: f64,
+        liquid_density_kg_m3: f64,
+        permeability_scale_m2: f64,
+    ) -> Result<Self, MaterialError> {
+        if !permeability_scale_m2.is_finite() || permeability_scale_m2 <= 0.0 {
+            return Err(invalid(
+                "mushy permeability scale must be positive and finite",
+            ));
+        }
+        Self::build(
+            curve,
+            solid_density_kg_m3,
+            liquid_density_kg_m3,
+            permeability_scale_m2,
+            0.0,
+        )
+    }
+
+    fn build(
+        curve: &'a EquilibriumEnthalpyPhaseCurve,
+        solid_density_kg_m3: f64,
+        liquid_density_kg_m3: f64,
+        permeability_scale_m2: f64,
+        minimum_liquid_volume_fraction: f64,
+    ) -> Result<Self, MaterialError> {
         for knot in curve.knots() {
             let state = curve
                 .state_at_specific_enthalpy(knot.specific_enthalpy_j_kg)
@@ -152,7 +242,9 @@ impl<'a> MushyPhaseLaw<'a> {
             minimum_liquid_volume_fraction,
             identity: hash.finalize(),
         };
-        law.inverse_permeability(minimum_liquid_volume_fraction)?;
+        if minimum_liquid_volume_fraction > 0.0 {
+            law.inverse_permeability(minimum_liquid_volume_fraction)?;
+        }
         Ok(law)
     }
 
@@ -161,6 +253,12 @@ impl<'a> MushyPhaseLaw<'a> {
     }
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Whether exact zero liquid fraction has an explicit stationary branch.
+    #[must_use]
+    pub const fn admits_immobile_solid(&self) -> bool {
+        self.minimum_liquid_volume_fraction == 0.0
     }
 
     /// Only this exact constant-density subset can enter a fixed-volume
@@ -179,6 +277,19 @@ impl<'a> MushyPhaseLaw<'a> {
     /// Resolve from h, never temperature alone, so latent-plateau melting
     /// changes mobility without inventing a heat capacity or adding latent heat.
     pub fn at_specific_enthalpy(&self, h: f64) -> Result<MushyPhaseState, MaterialError> {
+        match self.classify_at_specific_enthalpy(h)? {
+            PhaseMobility::Mobile(state) => Ok(state),
+            PhaseMobility::ImmobileSolid { .. } => Err(invalid(
+                "exactly solid material has no finite Darcy response; use the immobile phase branch",
+            )),
+        }
+    }
+
+    /// Resolve topology before any liquid-only property query. The original
+    /// positive-cutoff constructor retains its admitted fraction domain; only
+    /// the explicit immobile-solid constructor admits the exact solid branch.
+    /// Finite positive fractions never become solid through a numerical cutoff.
+    pub fn classify_at_specific_enthalpy(&self, h: f64) -> Result<PhaseMobility, MaterialError> {
         let phase =
             self.curve
                 .state_at_specific_enthalpy(h)
@@ -190,17 +301,24 @@ impl<'a> MushyPhaseLaw<'a> {
             self.solid_density_kg_m3,
             self.liquid_density_kg_m3,
         )?;
+        if volumes.liquid == 0.0 && self.minimum_liquid_volume_fraction == 0.0 {
+            return Ok(PhaseMobility::ImmobileSolid {
+                phase,
+                volumes,
+                law_identity: self.identity,
+            });
+        }
         if volumes.liquid < self.minimum_liquid_volume_fraction {
             return Err(invalid(
                 "mushy state is below its admitted liquid volume fraction; solid locking needs its own owner",
             ));
         }
-        Ok(MushyPhaseState {
+        Ok(PhaseMobility::Mobile(MushyPhaseState {
             phase,
             volumes,
             inverse_permeability_per_m2: self.inverse_permeability(volumes.liquid)?,
             law_identity: self.identity,
-        })
+        }))
     }
 
     fn inverse_permeability(&self, phi: f64) -> Result<f64, MaterialError> {
@@ -208,7 +326,17 @@ impl<'a> MushyPhaseLaw<'a> {
             return Ok(0.0);
         }
         let ratio = (1.0 - phi) / phi;
-        let inverse = (ratio * ratio / phi) / self.permeability_scale_m2;
+        let direct = (ratio * ratio / phi) / self.permeability_scale_m2;
+        let inverse = if direct.is_finite() && direct > 0.0 {
+            direct
+        } else {
+            // Preserve the established arithmetic in ordinary cases. Scaling
+            // first avoids intermediate overflow when a large K0 compensates
+            // a small positive fraction. An unrepresentable final resistance
+            // still refuses; no fraction floor or drag cap is introduced.
+            let scaled = (1.0 - phi) / (fs_math::det::sqrt(self.permeability_scale_m2) * phi);
+            (scaled * scaled) / phi
+        };
         if !inverse.is_finite() || inverse <= 0.0 {
             return Err(invalid("mushy inverse permeability is not representable"));
         }
@@ -289,6 +417,58 @@ mod tests {
                 .unwrap()
                 .inverse_permeability_per_m2
                 < 2.0
+        );
+    }
+    #[test]
+    fn explicit_solid_branch_has_no_positive_cutoff_or_finite_drag_surrogate() {
+        let curve = curve([2.0, 2.0]);
+        let strict = MushyPhaseLaw::try_new(&curve, 2.0, 2.0, 1.0, 0.1).unwrap();
+        let full = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1.0).unwrap();
+        assert!(!strict.admits_immobile_solid());
+        assert!(full.admits_immobile_solid());
+        assert_ne!(strict.identity(), full.identity());
+        assert!(strict.classify_at_specific_enthalpy(0.0).is_err());
+        assert!(strict.classify_at_specific_enthalpy(9.0).is_err());
+        assert!(MushyPhaseLaw::try_new(&curve, 2.0, 2.0, 1.0, 0.0).is_err());
+        let solid = full.classify_at_specific_enthalpy(0.0).unwrap();
+        assert!(matches!(solid, PhaseMobility::ImmobileSolid { .. }));
+        assert_eq!(
+            solid.phase(),
+            curve.state_at_specific_enthalpy(0.0).unwrap()
+        );
+        assert_eq!(solid.volumes().liquid, 0.0);
+        assert_eq!(solid.mobile(), None);
+        // The legacy API must not smuggle solid topology into a Darcy tuple.
+        assert!(full.at_specific_enthalpy(0.0).is_err());
+        for h in [1e-10, 9.0, 50.0, 100.0] {
+            let state = full.classify_at_specific_enthalpy(h).unwrap();
+            assert!(state.mobile().is_some());
+            assert!(state.phase().liquid_mass_fraction() > 0.0);
+        }
+        assert_eq!(
+            full.at_specific_enthalpy(100.0)
+                .unwrap()
+                .inverse_permeability_per_m2,
+            0.0
+        );
+    }
+
+    #[test]
+    fn compensating_permeability_scaling_is_finite_but_overflow_never_becomes_solid() {
+        let curve = curve([2.0, 2.0]);
+        let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1e300).unwrap();
+        // The direct phi^-3 intermediate overflows, although the final value
+        // after the explicit model K0 is finite.
+        let state = law.at_specific_enthalpy(1e-108).unwrap();
+        assert!((state.inverse_permeability_per_m2 / 1e30 - 1.0).abs() < 1e-14);
+        let ordinary = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 2.0, 2.0, 1.0).unwrap();
+        assert!(ordinary.classify_at_specific_enthalpy(1e-108).is_err());
+        assert!(
+            ordinary
+                .classify_at_specific_enthalpy(0.0)
+                .unwrap()
+                .mobile()
+                .is_none()
         );
     }
 }

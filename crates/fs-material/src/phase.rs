@@ -14,6 +14,8 @@
 pub mod mushy;
 /// Shared declared phase dependence of thermal conductivity.
 pub mod conductivity;
+/// Phase-first thermal/electrical sources and optional mobile fluid transport.
+pub mod transport;
 
 use core::fmt;
 
@@ -757,12 +759,23 @@ impl EquilibriumEnthalpyPhaseCurve {
                     // specific volume and inverted. Linear density would
                     // violate additive mixture volume through a two-phase
                     // interval.
-                    bulk_density_kg_m3: lerp(
-                        lower_knot.bulk_density_kg_m3.recip(),
-                        upper_knot.bulk_density_kg_m3.recip(),
-                        alpha,
-                    )
-                    .recip(),
+                    // An admissible constant-density segment must retain
+                    // its mass density bit for bit: reciprocal round trips may
+                    // move even a constant value by 1 ULP. Specific volume
+                    // must still be representable, as for every other segment.
+                    bulk_density_kg_m3: if lower_knot.bulk_density_kg_m3.to_bits()
+                        == upper_knot.bulk_density_kg_m3.to_bits()
+                        && lower_knot.bulk_density_kg_m3.recip().is_finite()
+                    {
+                        lower_knot.bulk_density_kg_m3
+                    } else {
+                        lerp(
+                            lower_knot.bulk_density_kg_m3.recip(),
+                            upper_knot.bulk_density_kg_m3.recip(),
+                            alpha,
+                        )
+                        .recip()
+                    },
                 };
                 if !(values.bulk_density_kg_m3.is_finite() && values.bulk_density_kg_m3 > 0.0) {
                     return Err(PhaseStateError::InvalidCurve {
