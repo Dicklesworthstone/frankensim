@@ -47,9 +47,6 @@ pub(super) fn validate_options(options: &Options) -> Result<()> {
     {
         return Err(bad("importance cannot combine other sampling modes, mean controls or candidate selection"));
     }
-    if matches!(options.importance.as_ref(), Some(Settings::Pilot(_))) && options.compliance.is_some() {
-        return Err(bad("confidence decisions currently require a fixed --importance proposal"));
-    }
     Ok(())
 }
 

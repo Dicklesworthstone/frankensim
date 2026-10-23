@@ -70,7 +70,12 @@ learns from complete physical pilots, then freezes independent production.\n\
 The original sample and wall budgets cover every phase; pilots never enter\n\
 the final probability. Both modes require an explicit Gaussian law and ceiling.\n\
 Both fixed and pilot proposals support checkpoint/resume.\n\
-Other sampling/decision modes conflict; partial runs publish progress only.\n\
+Both accept the three sequential compliance flags above. Decisions use weighted\n\
+failure confidence bounds; pilot samples NEVER count toward confidence or its\n\
+minimum. Exhausted unresolved runs exit BUDGET, not approval. Recovery binds\n\
+the original target, alpha and minimum. See IMPORTANCE_DECISIONS.md.\n\
+Other sampling modes and candidate selection conflict. Without a confidence\n\
+policy, partial runs publish progress only.\n\
 See examples/cooling-network/IMPORTANCE_UQ.md and PILOT_IMPORTANCE_UQ.md.\n\
 \nConcurrent fixed-count physical evaluations:\n\
 --workers N runs at most N simultaneous cooling children, N in 1..64.\n\

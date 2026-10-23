@@ -64,12 +64,51 @@ thresholds or policies need their own selection/multiplicity control.
 
 Without the three policy flags, the existing fixed-count importance behavior and
 checkpoint binding are unchanged. Other sampling/mean-control modes and design
-candidate selection remain incompatible. Pilot-learned decisions are not yet
-admitted in this increment.
+candidate selection remain incompatible.
+
+## Learned proposals: decisions use independent production only
+
+The same three policy flags also work with `--importance-pilot`. Every declared
+pilot must finish and its last proposal must freeze before any response can
+enter the confidence sequence. The minimum counts production observations, not
+the total physical call count. Admission refuses when the production allowance
+left after all pilots is smaller than the minimum; it neither skips pilots nor
+enlarges the original budget.
+
+```sh
+frankensim --json cooling-network-uq BASE.json UQ.json \
+  --importance-pilot 2,8,0.2,0.25,1,8 \
+  --compliance-probability 0.95 --confidence-alpha 0.05 \
+  --min-decision-samples 32 --checkpoint learning.imp --max-new-samples 10
+```
+
+This syntax needs at least 48 total calls in the UQ document: 16 for the pilots
+and at least 32 for production. It does not promise resolution in that budget.
+Repeat the learning and confidence settings with `--resume learning.imp` and a
+fresh checkpoint destination to continue. A prefix still inside a pilot reports
+zero confidence samples and null confidence intervals, even when its observed
+pilot failures are numerous. Only final-production outcomes may stop the run.
+
+The `importance-pilot-compliance.v1` report separates pilot and production work,
+retains learned proposals and phase seeds, and uses the same failure-CS owner as
+the fixed-proposal command. Conditional on the completed pilots, production has
+one fixed proposal, independent sampling stream, model and event; the original
+bounded-mean assumptions apply to that production stream. Pilots are never
+pooled into the confidence sequence or its minimum. The declared alpha is not
+spent on separate pilot decisions because none are made.
+
+The existing complete-study checkpoint retains learned history and the current
+phase. Its additional policy identity prevents changing alpha, target or minimum
+after inspecting production results. Restarting across a fit/production boundary
+retains paid calls; restarting a resolved decision makes no further physical
+calls. The original fixed-count pilot command, without confidence flags, remains
+unchanged. No new sampler, proposal update, confidence formula or checkpoint
+codec is introduced by this integration.
 
 Focused tests (native execution required):
 
 ```sh
 cargo test -p fs-cli --bin frankensim uq_command::execute::importance
 cargo test -p fs-cli --test cooling_importance_decision
+cargo test -p fs-cli --test cooling_importance_pilot
 ```

@@ -71,12 +71,21 @@ impl Settings {
             },
         }
     }
+
+    fn validate_decision(self, plan: &UqPlan, policy: Policy) -> Result<usize> {
+        policy.validate_plan(plan)?;
+        let pilots = self.rounds.checked_mul(self.samples_per_pilot)
+            .ok_or_else(|| bad("importance pilot work overflows"))?;
+        plan.budget_max_samples.checked_sub(pilots)
+            .filter(|&n| n >= policy.min_samples)
+            .ok_or_else(|| bad("--min-decision-samples must fit independent production AFTER every declared pilot"))
+    }
 }
 
 pub(super) fn execute(
     base_text: &str, base: &J, config: &Config, options: &Options, settings: Settings,
 ) -> Result<ExecutionOutput> {
-    if options.checkpoint.is_some() || options.resume.is_some() {
+    if options.checkpoint.is_some() || options.resume.is_some() || options.compliance.is_some() {
         return recovery::execute(base_text, base, config, options, settings);
     }
     // Setup, every pilot, production, fitting and publication share ONE allowance.
@@ -107,6 +116,19 @@ pub(super) fn execute(
     Ok(ExecutionOutput { stdout, exit_code: exit::SUCCESS })
 }
 
+fn pilots_json(report: &PilotImportanceReport) -> Result<String> {
+    report.completed_pilots.iter().enumerate().map(|(round, pilot)| {
+        let fit = &pilot.fit;
+        Ok(format!(
+            "{{\"round\":{},\"seed\":{},\"samples\":{},\"sampled_proposal\":{},\"selected\":{},\"observed_failures\":{},\"cutoff_k\":{},\"targets_failure_event\":{},\"effective_samples\":{},\"norm_before_limit\":{},\"norm_limited\":{},\"next_proposal\":{}}}",
+            round, quote(&pilot.seed.to_string()), fit.samples, proposal_json(&pilot.sampled_proposal)?,
+            fit.selected, fit.observed_failures, number_json(fit.cutoff)?, fit.targets_failure_event,
+            number_json(fit.effective_samples)?, number_json(fit.norm_before_limit)?,
+            fit.norm_limited, proposal_json(&fit.proposal)?,
+        ))
+    }).collect::<Result<Vec<_>>>().map(|rows| rows.join(","))
+}
+
 fn render(base: &J, config: &Config, settings: Settings, report: &PilotImportanceReport) -> Result<String> {
     if report.status != UqStatus::Complete {
         return Err(model_failure("only a complete fixed importance study may publish a probability"));
@@ -117,16 +139,7 @@ fn render(base: &J, config: &Config, settings: Settings, report: &PilotImportanc
     let estimate = report.estimate.as_ref().ok_or_else(|| model_failure(
         production.unavailable_reason.unwrap_or("completed importance statistic is unavailable"),
     ))?;
-    let pilots = report.completed_pilots.iter().enumerate().map(|(round, pilot)| {
-        let fit = &pilot.fit;
-        Ok(format!(
-            "{{\"round\":{},\"seed\":{},\"samples\":{},\"sampled_proposal\":{},\"selected\":{},\"observed_failures\":{},\"cutoff_k\":{},\"targets_failure_event\":{},\"effective_samples\":{},\"norm_before_limit\":{},\"norm_limited\":{},\"next_proposal\":{}}}",
-            round, quote(&pilot.seed.to_string()), fit.samples, proposal_json(&pilot.sampled_proposal)?,
-            fit.selected, fit.observed_failures, number_json(fit.cutoff)?, fit.targets_failure_event,
-            number_json(fit.effective_samples)?, number_json(fit.norm_before_limit)?,
-            fit.norm_limited, proposal_json(&fit.proposal)?,
-        ))
-    }).collect::<Result<Vec<_>>>()?.join(",");
+    let pilots = pilots_json(report)?;
     let no_claim = format!(
         "{} The strict event is QoI > temperature_limit_k. Only independently keyed final production contributes target/proposal-weighted failure indicators. Pilot failure counts and proposal failure frequency are not target probabilities. The estimate is neither self-normalized nor clipped to [0,1]. Standard error and effective sample count are descriptive, not confidence bounds or stopping rules. Zero observed failures and zero empirical error do not prove zero risk. Complete means the fixed call design finished, not achieved accuracy, variance reduction or physical approval. A single shift may miss disconnected failure modes. Finite-generator, floating-point, solver and physical-model errors are not bounded.",
         config.qoi.no_claim(),
@@ -182,7 +195,6 @@ mod tests {
             vec!["--pce-mean", "0,2,4"], vec!["--qmc-replicates", "2"],
             vec!["--sensitivity", "sobol"], vec!["--sensitivity", "shapley"],
             vec!["--mean-control", "adjoint"], vec!["--max-new-samples", "0"],
-            vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"],
         ] {
             let own = args(&["--importance-pilot", VALID]);
             let extra = args(&other);
@@ -206,5 +218,47 @@ mod tests {
             let result = PilotImportanceExecution::new(&plan, settings.library_config(1));
             assert_eq!(result.is_ok(), count == 18);
         }
+    }
+
+    #[test]
+    fn decision_minimum_cannot_be_satisfied_by_learning_observations() {
+        let settings = Settings::parse(&OsString::from(VALID)).unwrap();
+        let policy = Policy::new(0.5, 0.05, 16).unwrap();
+        for count in [16, 17, 18, 31, 32] {
+            let plan = UqPlan::new("temperature", PropagationMethod::MonteCarlo, count)
+                .with_parameter(ParameterUncertainty::gaussian("inlet", 300.0, 0.2, "K"))
+                .with_correlation(CorrelationModel::Independent)
+                .with_compliance_threshold(310.0);
+            assert_eq!(settings.validate_decision(&plan, policy).is_ok(), count == 32);
+        }
+        let values = args(&["--importance-pilot", VALID, "--compliance-probability", "0.5",
+            "--confidence-alpha", "0.05", "--min-decision-samples", "16"]);
+        assert!(Options::parse(&values).is_ok());
+    }
+
+    #[test]
+    fn learned_proposal_confidence_reuses_only_the_original_production_owner() {
+        let config = PilotImportanceConfig {
+            pilot_rounds: 2, samples_per_pilot: 4,
+            initial_proposal: ImportanceConfig { germ_shift: vec![0.0], defensive_fraction: 0.5 },
+            fit: ImportanceFitConfig {
+                elite_fraction: 0.5, relaxation: 1.0, maximum_shift_norm: 6.0,
+            },
+        };
+        let plan = UqPlan::new("temperature", PropagationMethod::MonteCarlo, 32)
+            .with_parameter(ParameterUncertainty::gaussian("inlet", 300.0, 1.0, "K"))
+            .with_correlation(CorrelationModel::Independent).with_compliance_threshold(310.0);
+        let mut learned = PilotImportanceExecution::new(&plan, config).unwrap();
+        let policy = Policy::new(0.5, 0.05, 8).unwrap();
+        learned.advance(7, || false, |x| Ok::<_, &str>(x[0]));
+        assert!(decision::assess(policy, learned.production()).unwrap().failure.is_none());
+        learned.advance(5, || false, |x| Ok::<_, &str>(x[0]));
+        assert_eq!(learned.evaluations_attempted(), 12);
+        let assessment = decision::assess(policy, learned.production()).unwrap();
+        assert!(!assessment.reached(), "eight pilots are not eight production observations");
+        let actual = assessment.failure.unwrap();
+        let expected = learned.production().unwrap().assess_failure_probability(0.05, 0.0).unwrap().unwrap();
+        assert_eq!(actual.n, 4);
+        assert_eq!((actual.mean, actual.lo, actual.hi), (expected.mean, expected.lo, expected.hi));
     }
 }

@@ -14,9 +14,15 @@ pub(super) fn execute(
     base_text: &str, base: &J, config: &Config, options: &Options, settings: Settings,
 ) -> Result<ExecutionOutput> {
     let plan = config.plan();
-    let policy = settings.library_config(plan.parameters.len());
-    let mut execution = PilotImportanceExecution::new(&plan, policy.clone()).map_err(bad)?;
-    let identity = checkpoint::model_identity(base_text, &config.render_parameters()?)?;
+    if let Some(policy) = options.compliance { settings.validate_decision(&plan, policy)?; }
+    let learning = settings.library_config(plan.parameters.len());
+    let mut execution = PilotImportanceExecution::new(&plan, learning.clone()).map_err(bad)?;
+    let identity = if options.checkpoint.is_some() || options.resume.is_some() {
+        let parameters = config.render_parameters()?;
+        let binding = options.compliance.map_or_else(|| parameters.clone(),
+            |policy| decision::binding(policy, &parameters));
+        Some(checkpoint::model_identity(base_text, &binding)?)
+    } else { None };
     if let Some(path) = &options.resume {
         let file = std::fs::File::open(path)
             .map_err(|e| failure(format!("{}: {e}", path.display())))?;
@@ -25,14 +31,17 @@ pub(super) fn execute(
         if bytes.len() as u64 > MAX_BYTES {
             return Err(failure("pilot importance checkpoint exceeds its observation/history cap"));
         }
-        execution = PilotImportanceExecution::restore(&plan, policy, identity, &bytes)
+        execution = PilotImportanceExecution::restore(&plan, learning, identity.expect("resume identity"), &bytes)
             .map_err(|e| failure(format!("{}: {e}", path.display())))?;
     }
-    // Validate the exact physical model, law AND learning policy before output.
+    let mut assessment = options.compliance
+        .map(|policy| decision::assess(policy, execution.production())).transpose()?;
+    // Bind both learning and stopping policies before output. Pilots do not
+    // contribute to either the confidence sequence or its minimum sample count.
     let output = options.checkpoint.as_deref().map(checkpoint::Output::reserve).transpose()?;
     let save = |execution: &PilotImportanceExecution| -> Result<()> {
         if let Some(output) = &output {
-            let bytes = execution.checkpoint(identity).map_err(|e| failure(e.to_string()))?;
+            let bytes = execution.checkpoint(identity.expect("output identity")).map_err(|e| failure(e.to_string()))?;
             output.publish(&bytes)?;
         }
         Ok(())
@@ -43,6 +52,7 @@ pub(super) fn execute(
     let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
     let mut report = execution.report();
     loop {
+        if assessment.as_ref().is_some_and(decision::Assessment::reached) { break; }
         if report.status == UqStatus::Complete { break; }
         let paid = execution.evaluations_attempted();
         // A completed physical design can still await publication. Permit that
@@ -62,7 +72,34 @@ pub(super) fn execute(
             return Err(refusal);
         }
         save(&execution)?;
+        assessment = options.compliance
+            .map(|policy| decision::assess(policy, execution.production())).transpose()?;
         if matches!(report.status, UqStatus::Complete | UqStatus::Cancelled) { break; }
+    }
+    if let (Some(policy), Some(assessment)) = (options.compliance, assessment) {
+        let production = execution.production();
+        let production_count = production.map_or(0, |run| run.observations().len());
+        let production_seed = production.map_or_else(|| "null".into(),
+            |run| quote(&run.plan().seed.to_string()));
+        let stage = match report.stage {
+            fs_uq::PilotImportanceStage::Pilot { .. } => "pilot",
+            fs_uq::PilotImportanceStage::Production => "production",
+            fs_uq::PilotImportanceStage::Complete => "complete",
+        };
+        let stdout = format!(
+            "{{\"schema\":\"frankensim.cooling-network-uq.importance-pilot-compliance.v1\",\"sampling\":\"pilot-learned-defensive-gaussian\",\"confidence_scope\":\"independent-production-only\",\"qoi\":{},\"seed\":{},\"production_seed\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"pilot_samples_evaluated\":{},\"production_samples_planned\":{},\"production_samples_evaluated\":{},\"pilot_rounds\":{},\"samples_per_pilot\":{},\"stage\":{},\"current_seed\":{},\"current_proposal\":{},\"temperature_limit_k\":{},\"fit_policy\":{{\"elite_fraction\":{},\"relaxation\":{},\"maximum_shift_norm\":{}}},\"pilots\":[{}],\"correlation\":{},\"parameters\":[{}],{}}}\n",
+            config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()), production_seed,
+            config.samples, report.model_calls_evaluated, report.model_calls_evaluated - production_count,
+            config.samples - settings.rounds * settings.samples_per_pilot, production_count,
+            settings.rounds, settings.samples_per_pilot, quote(stage), quote(&report.current_seed.to_string()),
+            proposal_json(&report.current_proposal)?, optional_number(config.threshold_k)?,
+            number_json(settings.elite_fraction)?, number_json(settings.relaxation)?,
+            number_json(settings.maximum_shift_norm)?, super::pilots_json(&report)?,
+            quote(config.correlation_label), config.render_parameters()?,
+            decision::fields(config, policy, &assessment, decision::termination(&assessment, report.status),
+                options.checkpoint.as_deref())?,
+        );
+        return Ok(ExecutionOutput { stdout, exit_code: decision::exit_code(&assessment) });
     }
     if report.status == UqStatus::Complete {
         // Reuse the existing production-only result; no report schema or

@@ -3,6 +3,8 @@
 mod json;
 #[path = "cooling_importance_pilot/recovery.rs"]
 mod recovery;
+#[path = "cooling_importance_pilot/decision.rs"]
+mod decision;
 use json::JsonValue as J;
 use fs_uq::{
     CorrelationModel, ImportanceConfig, ImportanceFitConfig, ParameterUncertainty,
@@ -152,7 +154,6 @@ fn incompatible_flags_refuse_before_input_reads_or_checkpoint_reservation() {
         vec!["--sensitivity", "shapley"], vec!["--pce", "0,2"],
         vec!["--pce-mean", "0,2,4"], vec!["--mean-control", "adjoint"],
         vec!["--importance-pilot", LAYOUT], vec!["--importance", "0.2,0"],
-        vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "2"],
     ] {
         let result = command(&missing, &missing, LAYOUT).args(extra).output().unwrap();
         assert_eq!(result.status.code(), Some(i32::from(fs_cli::exit::USAGE)));
