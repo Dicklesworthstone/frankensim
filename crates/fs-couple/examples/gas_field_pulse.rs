@@ -134,6 +134,18 @@ fn main() -> Result<()> {
             )?,
         });
     }
+    let viscothermal = match words.next() {
+        None => None,
+        Some("viscothermal") => Some((
+            number::<usize>(&mut words, "viscothermal pole count")?,
+            [
+                number::<f64>(&mut words, "viscothermal minimum frequency [Hz]")?,
+                number::<f64>(&mut words, "viscothermal maximum frequency [Hz]")?,
+            ],
+            number::<f64>(&mut words, "viscothermal maximum relative operator error")?,
+        )),
+        Some(_) => return Err("expected optional viscothermal record after stations".into()),
+    };
     if words.next().is_some() {
         return Err("pulse input has trailing fields".into());
     }
@@ -185,6 +197,16 @@ fn main() -> Result<()> {
         DgBoundary::Closed,
         DgBoundary::Matched,
     )?;
+    let dg = if let Some((poles, band, error)) = viscothermal {
+        dg.with_viscothermal(poles, band, error)?
+    } else {
+        dg
+    };
+    if dg.total_dofs() > 256 {
+        return Err(
+            "example's 256-DOF budget includes all acoustic and viscothermal memory states".into(),
+        );
+    }
     let propagator = dg.propagator(dt, 1e-13)?;
     let mut state = dg.project_initial_state(
         |x| {
@@ -208,7 +230,12 @@ fn main() -> Result<()> {
     let mut csv = Vec::with_capacity((steps + 1) * 140);
     writeln!(
         csv,
-        "time_s,inlet_pressure_pa,outlet_pressure_pa,stored_energy_j,inferred_matched_loss_j"
+        "time_s,inlet_pressure_pa,outlet_pressure_pa,stored_energy_j,{}",
+        if dg.viscothermal_model().is_some() {
+            "inferred_total_loss_j"
+        } else {
+            "inferred_matched_loss_j"
+        }
     )?;
     let mut inferred_loss = 0.0;
     for step in 0..=steps {
@@ -243,8 +270,16 @@ fn main() -> Result<()> {
         .create_new(true)
         .open(output_path)?;
     output.write_all(&csv)?;
+    if let Some(model) = dg.viscothermal_model() {
+        eprintln!(
+            "Bessel wall poles={}; sampled complex error={:e}, real loss error={:e}; wall memory is included in stored_energy_j",
+            model.series_terms().len(),
+            model.max_complex_error(),
+            model.max_real_loss_error()
+        );
+    }
     eprintln!(
-        "wrote {} rows; matched loss is the inferred E(0)-E(t) deficit, not an independent energy-balance check",
+        "wrote {} rows; boundary and any wall loss is the inferred E(0)-E(t) deficit, not an independent energy-balance check",
         steps + 1
     );
     Ok(())

@@ -390,6 +390,19 @@ pipe `Z_in = +i Zc cot(kL)`.
     insufficient elements and material/source/phase refusals return before
     publishing an operator. Temperature and composition are prescribed and
     frozen: no mean flow, heat/species evolution or viscothermal loss is added.
+  - `DgDuct::with_viscothermal(poles, band_hz, maximum_relative_error)` adds
+    both viscous-flow and thermal-pressure memory from `fs_phs::ZkDiffusive`.
+    This attachment admits identical circular cylinders with uniform material
+    gas only; taper, profile and nonuniform gas-field requests refuse explicitly.
+    Density, viscosity, gamma and Prandtl number come from the bound material.
+    Constant normalized wall coefficients commute with the exact DG mass maps.
+    Every positive arm adds a negative-semidefinite coupling to its retained
+    storage coordinate. Poiseuille drag and both complex Bessel wall operators
+    are retained without adding the inviscid L/C twice. The declared pole band
+    is a separate error axis from spatial and exponential convergence.
+    `total_dofs()` includes every memory state; the same 2048-DOF cap applies.
+    The augmented physical operator changes the state identity, so pre-attachment
+    states cannot silently enter it. Initialization starts wall memory at zero.
   - States carry a reproducible identity of the assembled operator, geometry,
     mass-coordinate transforms, boundaries and typed ports. `step`, fallible
     `sync_nodal`, and fallible `l2_pressure_error` refuse incompatible states
@@ -405,12 +418,12 @@ pipe `Z_in = +i Zc cot(kL)`.
     the exact impulse `ΔX = ∫ p dt`, so its work is exactly `e ΔX`.
   - `propagator(dt, tol)` is the exact exponential, with no RK, trapezoid,
     implicit-midpoint or generalized-alpha step.
-    - With lossless boundaries the energy-coordinate operator is skew. It is
+    - Without wall memory and with lossless boundaries the energy-coordinate operator is skew. It is
       diagonalized by the SVD of its coupling block, from the symmetric
       Jordan–Wielandt matrix (`householder_eigh`). The certificate is the
       larger of the relative singular residual and the basis orthogonality
       defects.
-    - `Matched` is dissipative and non-normal. It uses a scaled Taylor
+    - `Matched` and viscothermal memory are dissipative and non-normal. They use a scaled Taylor
       series with squaring, certified by a rigorous truncation bound carried
       through the squarings plus an a-posteriori halving estimate.
     - A certificate above `tol` refuses (`FS-DUCT-PROPAGATOR-CERTIFICATE`).
@@ -418,8 +431,8 @@ pipe `Z_in = +i Zc cot(kL)`.
       refuse in `new` and `propagator`.
   - `DgPropagator::step` returns each port's `ΔX` and an `EnergyLedgerRow`
     whose stored energy is that of the reconstructed physical state.
-    - For lossless boundaries `E(t) - E(0) - W` is a conservation check.
-    - For `Matched` the absorbed energy is inferred from the deficit
+    - For the lossless image and lossless boundaries `E(t) - E(0) - W` is a conservation check.
+    - For `Matched` or wall memory the absorbed energy is inferred from the deficit
       (unclamped), so `balance_checked` is false.
   - Origin: QuietLotus's uncommitted 2026-10-16 work, reworked (see the
     commit for what changed).
@@ -710,10 +723,12 @@ divergence-theorem closure/orientation pin on the lathe).
 
 ## No-claim boundaries
 
-- Time-domain DG (M2.2-W3a) is lossless plane-wave propagation only.
-  - There are no viscothermal losses (M2.2-W3b), side branches or radiation
-    (W3c), moving geometry (W3d) or valve dynamics (W3e). Tone-hole segments
-    refuse.
+- Time-domain DG is plane-wave propagation; exact-Bessel-derived wall memory
+  is currently restricted to uniform gas in identical circular cylinders.
+  - Varying-area/variable-gas viscothermal assembly, independent integrated
+    wall dissipation and the full impedance-peak gates of M2.2-W3b remain open.
+    There are no side branches or radiation (W3c), moving geometry (W3d) or
+    valve dynamics (W3e). Tone-hole segments refuse.
   - The matched boundary's certificate includes an a-posteriori estimate,
     not an enclosure, and its absorbed energy is inferred, not checked.
   - Propagators are dense, `O(N³)` to build, and capped at 2048 DOFs; there

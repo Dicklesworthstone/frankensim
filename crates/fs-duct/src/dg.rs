@@ -55,6 +55,13 @@
 //! state. For lossless boundaries the balance $E(t) - E(0) - W$ is a conservation check; for a
 //! `Matched` boundary the absorbed energy is inferred from the deficit, so that balance is not a
 //! check (`balance_checked` is false).
+//!
+//! [`DgDuct::with_viscothermal`] optionally appends the exact-Bessel-derived
+//! positive viscous and thermal memory supplied by `fs_phs::ZkDiffusive`.
+//! Identical circular cylinders in a uniform material gas are supported. These
+//! states share the same dense exponential and energy coordinates; no midpoint
+//! relaxation or duplicated inviscid storage is introduced. Total energy then
+//! includes wall memory, and the dense ledger still reports inferred loss.
 
 use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
@@ -63,6 +70,8 @@ use fs_la::eigen::{admit_jacobi_eigh, householder_eigh, jacobi_eigh};
 use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
 use fs_math::det;
+
+mod viscothermal;
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;
@@ -142,21 +151,21 @@ pub struct PortOutput {
 pub struct EnergyLedgerRow {
     /// Completed step index (1-indexed after the first step).
     pub step: u64,
-    /// Stored acoustic energy $E(t_n)$ [J] at the end of the step.
+    /// Stored acoustic and any viscothermal memory energy $E(t_n)$ [J].
     pub stored_energy_j: f64,
     /// Exact work $\sum_{\text{ports}} e \cdot \Delta x$ [J] injected by ports during this step.
     pub port_work_step_j: f64,
     /// Cumulative work [J] injected by ports since initialization.
     pub cumulative_port_work_j: f64,
-    /// Cumulative energy [J] absorbed at `Matched` boundaries since initialization, inferred
-    /// from the stored-energy deficit (zero for lossless boundaries).
+    /// Cumulative energy [J] absorbed by `Matched` boundaries and any wall memory,
+    /// inferred from the stored-energy deficit (zero for the fully lossless image).
     pub cumulative_dissipated_j: f64,
     /// Signed energy balance residual $E(t_n) - E(0) - W_{\text{port}} + D_{\text{matched}}$ [J].
     pub energy_balance_residual_j: f64,
     /// Relative drift $|E(t_n) - E(0) - W_{\text{port}} + D_{\text{matched}}| / \max(E(0) + |W_{\text{port}}|, 10^{-300})$.
     pub relative_energy_drift: f64,
-    /// True when the balance is a conservation check (lossless boundaries). False for a
-    /// `Matched` boundary, whose absorbed energy is inferred from the deficit.
+    /// True for the lossless image with lossless boundaries. False when boundary
+    /// absorption or wall dissipation is inferred from the deficit.
     pub balance_checked: bool,
 }
 
@@ -478,7 +487,8 @@ struct DgElement {
     mq_inv_sqrt: Vec<f64>,
 }
 
-/// Assembled 1-D lossless variable-area discontinuous-Galerkin duct.
+/// Assembled 1-D variable-area discontinuous-Galerkin duct, optionally carrying
+/// admitted circular-tube viscothermal memory through the same exponential.
 #[derive(Debug, Clone)]
 pub struct DgDuct {
     operator_identity: ContentHash,
@@ -486,6 +496,10 @@ pub struct DgDuct {
     gas: GasState,
     outlet_gas: GasState,
     gas_field: Option<AxialGasField>,
+    /// Exact source geometry eligibility, not inferred from sampled node radii.
+    uniform_radius_m: Option<f64>,
+    viscothermal: Option<fs_phs::ZkDiffusive>,
+    memory_dofs: usize,
     inlet: DgBoundary,
     outlet: DgBoundary,
     total_length: f64,
@@ -493,12 +507,12 @@ pub struct DgDuct {
     lgl: LglRule,
     /// Number of scalar DOFs per field ($M = K (p + 1)$).
     field_dofs: usize,
-    /// Energy-weighted operator $\tilde{L}$ ($2M \times 2M$, row-major).
+    /// Energy-weighted operator, including every admitted wall-memory coordinate.
     l_tilde: Vec<f64>,
     /// Energy-weighted off-diagonal block $G = M_p^{-1/2} K_p M_q^{-1/2}$ ($M \times M$, row-major)
     /// when boundaries are purely skew-symmetric (`Closed`, `IdealOpen`, `Port`).
     g_block: Option<Vec<f64>>,
-    /// Active port descriptors `(PortId, tilde_b_vector_of_len_2M)`.
+    /// Active port descriptors `(PortId, vector_of_len_total_dofs)`.
     ports: Vec<(PortId, Vec<f64>)>,
 }
 
@@ -967,6 +981,9 @@ impl DgDuct {
             gas: *gas,
             outlet_gas,
             gas_field: field.cloned(),
+            uniform_radius_m: viscothermal::uniform_radius(duct),
+            viscothermal: None,
+            memory_dofs: 0,
             inlet,
             outlet,
             total_length,
@@ -1079,10 +1096,10 @@ impl DgDuct {
         self.mesh
     }
 
-    /// Total scalar DOFs $N = 2 K (p + 1)$ across $(p, q)$.
+    /// Total scalar DOFs, including all retained viscothermal memory.
     #[must_use]
     pub const fn total_dofs(&self) -> usize {
-        2 * self.field_dofs
+        2 * self.field_dofs + self.memory_dofs
     }
 
     /// Scalar DOFs per field $M = K (p + 1)$.
@@ -1145,13 +1162,14 @@ impl DgDuct {
     }
 
     /// Map physical nodal fields $(p, q)$ to energy-weighted coordinates
-    /// $\tilde{x} = [M_p^{1/2} p; M_q^{1/2} q]$.
+    /// $\tilde{x} = [M_p^{1/2} p; M_q^{1/2} q; 0_{memory}]$.
+    /// Wall memories start at zero; this is initialization, not a state transfer.
     #[must_use]
     pub fn to_energy_coords(&self, p: &[f64], q: &[f64]) -> Vec<f64> {
         assert_eq!(p.len(), self.field_dofs);
         assert_eq!(q.len(), self.field_dofs);
         let n_local = self.mesh.order + 1;
-        let mut tilde = vec![0.0; 2 * self.field_dofs];
+        let mut tilde = vec![0.0; self.total_dofs()];
         for (e, elem) in self.elements.iter().enumerate() {
             let base = e * n_local;
             for i in 0..n_local {
@@ -1171,7 +1189,7 @@ impl DgDuct {
     /// Map energy-weighted coordinates $\tilde{x}$ back to physical nodal fields $(p, q)$.
     #[must_use]
     pub fn from_energy_coords(&self, tilde: &[f64]) -> (Vec<f64>, Vec<f64>) {
-        assert_eq!(tilde.len(), 2 * self.field_dofs);
+        assert_eq!(tilde.len(), self.total_dofs());
         let n_local = self.mesh.order + 1;
         let mut p = vec![0.0; self.field_dofs];
         let mut q = vec![0.0; self.field_dofs];
@@ -1296,7 +1314,7 @@ impl DgDuct {
             operator_identity: self.operator_identity,
             p: vec![0.0; self.field_dofs],
             q: vec![0.0; self.field_dofs],
-            tilde: vec![0.0; 2 * self.field_dofs],
+            tilde: vec![0.0; self.total_dofs()],
             modal_anchor_p: Vec::new(),
             modal_anchor_q: Vec::new(),
             modal_anchor_dt_bits: None,
@@ -1361,7 +1379,8 @@ impl DgDuct {
     /// singular residual `sqrt(‖GV − UΣ‖_F² + ‖GᵀU − VΣ‖_F²) / (√2 ‖G‖_F)` and the
     /// orthogonality defects `‖UᵀU − I‖_F`, `‖VᵀV − I‖_F`.
     ///
-    /// A `Matched` boundary makes the operator dissipative and non-normal. Its exponential is
+    /// A `Matched` boundary or attached viscothermal memory makes the operator dissipative
+    /// and non-normal. Its exponential is
     /// a scaled Taylor series with squaring. The certificate is the larger of the rigorous
     /// truncation bound carried through the squarings in the energy norm (where the
     /// semigroup is contractive) and an a-posteriori estimate, the change under one more
@@ -1382,7 +1401,7 @@ impl DgDuct {
                 what: "DG propagator certificate tolerance must be positive and finite",
             });
         }
-        if 2 * self.field_dofs > MAX_DG_PROPAGATOR_DOFS {
+        if self.total_dofs() > MAX_DG_PROPAGATOR_DOFS {
             return Err(DuctError::BadParameter {
                 what: "DG propagator DOFs exceed MAX_DG_PROPAGATOR_DOFS (no Krylov path)",
             });
@@ -1508,6 +1527,7 @@ impl DgDuct {
             tol,
             certificate_residual: certificate,
             field_dofs: m,
+            total_dofs: n,
             elements: self.elements.clone(),
             order: self.mesh.order,
             kernel: PropagatorKernel::SkewModal {
@@ -1521,7 +1541,7 @@ impl DgDuct {
 
     fn build_series_propagator(&self, dt: f64, tol: f64) -> Result<DgPropagator, DuctError> {
         let m = self.field_dofs;
-        let n = 2 * m;
+        let n = self.total_dofs();
         let shift = series_shift(&self.l_tilde, n, dt);
         let (phi0, phi1, phi2, truncation) = series_phis(&self.l_tilde, n, dt, shift)?;
         let (phi0_finer, _, _, _) = series_phis(&self.l_tilde, n, dt, shift + 1)?;
@@ -1563,6 +1583,7 @@ impl DgDuct {
             tol,
             certificate_residual: certificate,
             field_dofs: m,
+            total_dofs: n,
             elements: self.elements.clone(),
             order: self.mesh.order,
             kernel: PropagatorKernel::DenseSeries {
@@ -1840,7 +1861,7 @@ impl DgState {
         &self.q
     }
 
-    /// Stored acoustic energy $E(t) = \tfrac12 \|\tilde x\|^2$ [J] of the current state.
+    /// Stored acoustic and wall-memory energy $E(t) = \tfrac12 \|\tilde x\|^2$ [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         0.5 * self.tilde.iter().map(|v| v * v).sum::<f64>()
@@ -1867,6 +1888,7 @@ pub struct DgPropagator {
     tol: f64,
     certificate_residual: f64,
     field_dofs: usize,
+    total_dofs: usize,
     elements: Vec<DgElement>,
     order: usize,
     kernel: PropagatorKernel,
@@ -1943,7 +1965,7 @@ impl DgPropagator {
 
     fn validate_state(&self, state: &DgState) -> Result<(), DuctError> {
         if state.operator_identity != self.operator_identity
-            || state.tilde.len() != 2 * self.field_dofs
+            || state.tilde.len() != self.total_dofs
         {
             return Err(DuctError::BadParameter {
                 what: "DG state does not belong to this propagator",
@@ -2121,7 +2143,7 @@ impl DgPropagator {
         port_cols_phi2: &[Vec<f64>],
         ports: &[(PortId, Vec<f64>)],
     ) -> Result<DgStepOutput, DuctError> {
-        let n = 2 * self.field_dofs;
+        let n = self.total_dofs;
         let ids: Vec<PortId> = ports.iter().map(|p| p.0).collect();
         let efforts = resolve_efforts(port_inputs, &ids)?;
         let e_prev = state.stored_energy_j();
@@ -2163,7 +2185,7 @@ impl DgPropagator {
         state.step_count += 1;
         state.cumulative_port_work_j += step_work;
         let e_now = state.stored_energy_j();
-        // Absorbed energy at the matched boundary is inferred as the deficit, unclamped: a
+        // Absorbed energy in boundaries and wall memory is inferred as the deficit, unclamped: a
         // negative value would expose a non-passive step.
         state.cumulative_dissipated_j += e_prev + step_work - e_now;
         let residual = e_now - state.initial_energy_j - state.cumulative_port_work_j

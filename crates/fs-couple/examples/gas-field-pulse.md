@@ -53,6 +53,29 @@ stations COUNT
 station X_M T_K MOLE_FRACTION...
 ```
 
+After the last station, an optional record enables physical wall diffusion:
+
+```text
+viscothermal POLES MINIMUM_HZ MAXIMUM_HZ MAXIMUM_RELATIVE_ERROR
+```
+
+The supplied [gas-field-pulse-viscothermal.pulse](gas-field-pulse-viscothermal.pulse)
+uses a 0.5 mm radius bore and a uniform 70% nitrogen / 30% carbon-dioxide
+atmosphere. Substitute this input and a new CSV name in the command above;
+the same source packs serve both examples. Density, viscosity, heat-capacity
+ratio and Prandtl number select the positive wall-memory coefficients. Change
+the static pressure, temperature or mixture at **both** stations to compare
+the resulting attenuation and dispersion. No duct code or loss gain changes.
+
+This attachment currently requires uniform gas and identical circular radii.
+Adding it to the original nonuniform field refuses explicitly. The pole count
+is a resolution axis (1 through 64), with complex wall response and real loss
+checked independently against the exact Bessel owner over the requested band.
+An unresolved count/band refuses. The complete acoustic and memory state uses
+the existing DG exponential. Refine space separately: the declared wall-model
+error does not establish spatial accuracy, and the initial pulse has broadband
+content outside any finite admitted band. There is no automatic spectral filter.
+
 Initial pressure is the DG projection of
 `AMPLITUDE_PA * (1 - ((x-CENTER_M)/HALF_WIDTH_M)^2)^4` inside the support and
 zero elsewhere. Initial volume flow is zero: the pulse splits in both
@@ -68,7 +91,8 @@ Reordering IDs together with fraction columns preserves the field. Exact zero
 fractions are retained, including a species absent at the inlet or everywhere.
 
 The example bounds input to 64 KiB, 16 species, 64 stations, 64 elements,
-order 1 through 8, 256 total DG degrees of freedom, 10000 steps and 4 MiB of CSV.
+order 1 through 8, 256 total DG degrees of freedom **including wall memory**,
+10000 steps and 4 MiB of CSV.
 The mesh must provide at least one element per material span. Source packs
 retain the shared loader's 16 MiB per-pack and 64 MiB aggregate limits.
 Increase element count or polynomial order to refine space. The certified
@@ -87,6 +111,11 @@ Values use 17 digits after the decimal point:
 | `stored_energy_j` | Current acoustic energy in the field-weighted DG state |
 | `inferred_matched_loss_j` | Initial energy minus current energy |
 
+With viscothermal memory the last column is named `inferred_total_loss_j`:
+it includes both outlet absorption and wall dissipation. `stored_energy_j`
+then includes the retained viscous and thermal memory as well as the acoustic
+field. The two losses are not independently separated in this ledger.
+
 Pressure uses LGL endpoint traces after physical-state reconstruction, with no
 nearest-node choice or normalization. Matched loss is inferred from the energy
 deficit. It is **not an independent conservation check**: the existing ledger's
@@ -98,7 +127,8 @@ and energy against the supplied gradient. At fixed temperature and composition,
 this ideal-gas source model's sound speed does not change with static pressure;
 density, characteristic impedance and the energy of a fixed pressure pulse do.
 
-This is frozen, lossless, no-mean-flow plane-wave propagation. The matched outlet
-absorbs energy; it is not a radiation receiver. Thermal/species evolution,
-wall losses and molecular relaxation are outside this DG example. The source
+This is frozen, no-mean-flow plane-wave propagation, lossless in the interior
+unless the optional viscothermal record is supplied. The matched outlet
+absorbs energy; it is not a radiation receiver. Evolution of the equilibrium
+temperature/species and molecular relaxation are outside this DG example. The source
 manifests linked from the reed example retain references and validity domains.
