@@ -23,8 +23,8 @@ jet_limits 1 0.3 8192
 wave_memory_bytes 1048576
 fractional 1000 0.01
 viscothermal sections 2
-loss_section 1 4 300 1000
-loss_section 2 4 300 1000
+loss_section 1 2 300 800
+loss_section 2 2 300 800
 receiver 0 0 0.5 4 16 1000
 outlets 1 1
 outlet 3 0.015 0
@@ -36,4 +36,4 @@ tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	3e2
 events	1
-event	4e-2	5e-3	pressure-pa	0e0
+event	4e-2	5e-3	pressure-pa	1e0

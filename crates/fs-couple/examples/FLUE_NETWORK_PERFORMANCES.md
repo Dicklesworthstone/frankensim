@@ -72,6 +72,14 @@ loss_section 0 CELLS MINIMUM_FREQUENCY_HZ MAXIMUM_FREQUENCY_HZ
 loss_section 2 CELLS MINIMUM_FREQUENCY_HZ MAXIMUM_FREQUENCY_HZ
 ```
 
+Each addressed section is split into 4 x CELLS quarters, and every quarter must
+span at least one acoustic transit sample: `length / (4 x CELLS) >= c / f_mechanics`
+(3.6 mm for air at 96 kHz, 7.3 mm at 48 kHz). A finer split refuses with
+"fractional section needs finite geometry and at least one full transit sample".
+Each cell must also stay within 0.5 rad of phase at MAXIMUM_FREQUENCY_HZ. A short
+section at a low clock can admit no cell count for a wide band (0.06 m at 48 kHz
+with a 1 kHz band needs 3 cells for phase but allows only 2 for transit), so lower
+the loss band or raise the mechanics clock.
 The original section indices survive the shared loss subdivision. No gas is
 averaged across branches. Existing gas, wide-tube, fractional phase, memory and
 frequency-domain admission checks remain in their physics owners. A plain
