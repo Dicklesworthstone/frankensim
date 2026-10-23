@@ -9,6 +9,8 @@ use fs_ascent::scan_design::constraints::value::{ScanConstraintValues,
 use fs_conduction::bc::history::march::enthalpy::scanning::sensitivity::objective::{
     spatial::ScanObservationSpec, value::responses::ScanValueResponseBudget};
 use fs_dfo::differential_evolution::{DifferentialEvolutionConfig, DifferentialEvolutionStop};
+use fs_alloc::OperationMemoryLease;
+use fs_exec::TilePool;
 
 pub(super) const FEASIBILITY_TOLERANCE: f64 = 1e-8;
 
@@ -20,13 +22,16 @@ pub(super) struct PopulationOptions {
     pub seed: u64,
     /// Threshold on the declared sum of residual losses, not a KKT tolerance.
     pub objective_target: f64,
+    /// None is serial; Some selects bounded waves on the original executor.
+    pub workers: Option<usize>,
 }
 impl PopulationOptions {
     pub fn validate(self) -> Result<()> {
         if !self.maximum_w.is_finite() || self.maximum_w <= 0.0
             || !(1..=100_000).contains(&self.attempts)
-            || !self.objective_target.is_finite() || self.objective_target < 0.0 {
-            return Err("population search needs positive finite maximum watts, 1..100000 attempts and a finite nonnegative objective target".into());
+            || !self.objective_target.is_finite() || self.objective_target < 0.0
+            || self.workers.is_some_and(|n| !(1..=128).contains(&n)) {
+            return Err("population search needs positive finite maximum watts, 1..100000 attempts, a finite nonnegative objective target and 1..128 workers when supplied".into());
         }
         Ok(())
     }
@@ -42,6 +47,9 @@ impl PopulationOptions {
                 .absorbed_power_values(program.authored_control_count())?;
             let initial = values[control.value];
             let mut upper = self.maximum_w / control.reference_w;
+            if !upper.is_finite() || upper <= 0.0 {
+                return Err("population watt box is not representable in the original power coordinates".into());
+            }
             if upper * control.reference_w > self.maximum_w { upper = upper.next_down(); }
             if !upper.is_finite() || upper <= 0.0 || initial > self.maximum_w {
                 return Err("population box must contain every selected initial power and have representable scaled bounds".into());
@@ -67,7 +75,7 @@ impl Method {
 /// Unknown arguments stay untouched and are rejected by that parser as before.
 pub(super) fn select(args: &[String]) -> Result<(Vec<String>, Method)> {
     let mut remaining=Vec::new();
-    let mut population=None; let mut seed=None; let mut target=None;
+    let mut population=None; let mut seed=None; let mut target=None; let mut workers=None;
     let mut i=0;
     while i<args.len() {
         match args[i].as_str() {
@@ -85,6 +93,10 @@ pub(super) fn select(args: &[String]) -> Result<(Vec<String>, Method)> {
                 if target.is_some() { return Err("duplicate --objective-target".into()); }
                 i+=1; target=Some(finite(args.get(i).ok_or("--objective-target needs LOSS")?)?);
             }
+            "--workers" => {
+                if workers.is_some() { return Err("duplicate --workers".into()); }
+                i+=1; workers=Some(args.get(i).ok_or("--workers needs a count in 1..128")?.parse::<usize>()?);
+            }
             _ => remaining.push(args[i].clone()),
         }
         i+=1;
@@ -92,13 +104,13 @@ pub(super) fn select(args: &[String]) -> Result<(Vec<String>, Method)> {
     let method=match population {
         Some((maximum_w,attempts)) => {
             let settings=PopulationOptions {maximum_w,attempts,seed:seed.unwrap_or(17),
-                objective_target:target.unwrap_or(1e-8)};
+                objective_target:target.unwrap_or(1e-8),workers};
             settings.validate()?;
             Method::Population(settings)
         }
         None => {
-            if seed.is_some() || target.is_some() {
-                return Err("--seed and --objective-target require --population".into());
+            if seed.is_some() || target.is_some() || workers.is_some() {
+                return Err("--seed, --objective-target and --workers require --population".into());
             }
             Method::Sqp
         }
@@ -112,11 +124,15 @@ pub(super) struct PopulationStatus {
     pub attempts: usize,
     pub objective_target: f64,
     pub target_recovered: bool,
+    pub settings: PopulationOptions,
 }
 
 pub(super) fn print_status(status: &PopulationStatus, objective: f64, violation: f64, evaluations: usize) {
     println!("# optimizer=population stop={:?} search_attempts={} physical_evaluations={} objective={objective:.17e} objective_target={:.17e} target_recovered={} max_scaled_violation={violation:.17e}; no_stationarity_claim=true",
         status.stop,status.attempts,evaluations,status.objective_target,status.target_recovered);
+    println!("# population_maximum_w={:.17e} seed={} evaluation_mode={} requested_workers={} maximum_parallel_wave=24",
+        status.settings.maximum_w,status.settings.seed,
+        if status.settings.workers.is_some() {"parallel"} else {"serial"},status.settings.workers.unwrap_or(1));
 }
 
 pub(super) struct Outcome {
@@ -180,13 +196,22 @@ where F: Fn(&Cx<'_>, Vec<MovingHeatSource>)
                 seed: options.seed, max_evaluations: options.attempts,
                 max_population_entries: population_size * dimension, target: Some(options.objective_target),
             }, FEASIBILITY_TOLERANCE)?;
-            let report = study.advance(cx, options.attempts)?;
+            let report = match options.workers {
+                None => study.advance(cx, options.attempts)?,
+                Some(workers) => {
+                    let pool = TilePool::for_host(workers, options.seed);
+                    // Executor metadata only: each original solver retains its
+                    // own workspace/heap limits, not this lease as a total cap.
+                    let lease = OperationMemoryLease::bounded(64 << 20);
+                    study.advance_parallel(cx, &pool, &lease, options.attempts, 24)?
+                }
+            };
             // The owner has reserved one actual solve, separately from the DE
             // callback budget. Every declared physical constraint is replayed.
             let replay = study.replay_best(cx)?;
             let status = PopulationStatus { stop: report.search.stop,
                 attempts: replay.search_evaluations, objective_target: options.objective_target,
-                target_recovered: replay.target_recovered() };
+                target_recovered: replay.target_recovered(), settings: options };
             Ok(Outcome { sources: replay.sources, value: replay.physical.physical.value,
                 predictions: replay.physical.physical.predictions,
                 residuals: replay.physical.physical.standardized_residuals,

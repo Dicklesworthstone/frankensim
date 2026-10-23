@@ -63,3 +63,44 @@ at 1 and 2 seconds. At the solidus itself it needs 10 W then 20 W. With a
 matching the second target is impossible, even though a feasible fit exists.
 The focused Rust regressions exercise these cases through the actual model;
 native execution of the new tests has not been verified in this session.
+
+## Parallel candidate evaluations
+
+Add `--workers N` (1..128) to opt into the existing TilePool path. The default
+remains serial, and the flag without `--population` refuses. Each worker runs
+its own complete original thermal trajectory from its own execution context;
+the shared immutable specimen, observations, source program and requirements
+are not reconstructed differently per worker. There is no global solver mutex.
+
+The original physical study owns **one** evaluation budget. Workers draw from
+that shared allowance, not ATTEMPTS each. The executor drains launched work
+before returning, and failed physical evaluations propagate without a best-fit
+success report. The one final replay remains serial and reserved. No new
+checkpoint CLI or retry policy is introduced by this mode.
+
+Batches contain at most 24 candidates. Candidate generation and publication
+use the original logical ordering and frozen parent population, not completion
+order. Target checks occur between batches; a parallel run can finish extra
+already-launched evaluations after the target first becomes attainable and can
+therefore return a different best result than an early-stopped serial run.
+Fixed-budget equivalence is covered by focused native regressions, which remain
+unexecuted here. No native parity or speedup result is claimed.
+
+The 64 MiB executor lease covers dispatch bookkeeping, **not** the aggregate
+memory used by simultaneous physical solves. Size the worker count for those
+solver workspaces. Reported worker count is requested parallelism, not a claim
+that all requested workers are busy in every wave.
+
+An explicit cold-start example, beginning with both powers off:
+
+```bash
+cargo run --manifest-path examples/scan_power_fit/Cargo.toml \
+  --example spatial_measurement_fit -- \
+  examples/scan_power_fit/examples/specimens/cold_measurements.csv 0 0 \
+  --specimen examples/scan_power_fit/examples/specimens/cold.scan \
+  --population 40 2400 --seed 17 --objective-target 1e-8 --workers 4
+```
+
+The expected uniform-specimen schedule is 30 W then 20 W. These input files
+make the phase-transition workflow callable without editing Rust source; they
+are manufactured data, not an experimental calibration dataset.
