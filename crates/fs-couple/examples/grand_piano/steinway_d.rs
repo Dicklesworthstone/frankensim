@@ -12,16 +12,23 @@
 //! Sitka spruce panel (9 -> 6 mm), sugar pine ribs, hard-maple bridges. Their
 //! elastic constants and densities are DATA: fs-matdb packs compiled from the
 //! FPL-GTR-282 seeds of those species (`packs/`), resolved through
-//! fs-material's reference-ratio law at the tables' 12 % moisture content.
-//! Swapping a pack changes the board with no code change; a pack that lacks a
-//! required property refuses. Grain follows the long bridge, perpendicular to
+//! fs-material's reference-ratio law at the tables' 12 % moisture content, then
+//! moved to the wood's equilibrium moisture content in the declared environment
+//! (the one environment record the built-in instruments share): FPL eq. (4-5)
+//! gives the EMC, eq. (5-3) the moduli and eqs. (4-9) with (1 + M) the density.
+//! The elastic ratios and Poisson ratios are held at their 12 % values; the
+//! source gives them no moisture law. Swapping a pack or the environment changes
+//! the board with no code change; a pack that lacks a required property refuses. Grain follows the long bridge, perpendicular to
 //! the ribs. Crown, rim/plate flexibility, glue slip and downbearing remain
 //! outside this flat-plate image.
 //!
 //! Produces BOTH the existing fs-plate input and an OBJ from the SAME vertices,
 //! sections and beams. All work is cold. No eigensolver or contact law lives here.
 use fs_matdb::{MaterialCard, MaterialStateId, NormalizedPack, QueryPoint};
+use fs_material::gas::{GasState, saturation_pressure_water_pa};
+use fs_material::gas_species::input::read_gas_record;
 use fs_material::plane_stress_viscosity::MaterialPlane;
+use fs_material::wood_moisture::{self, REFERENCE_MOISTURE_CONTENT, WoodMoistureLaw};
 use fs_material::state_point::{
     MaterialPropertySelection, OrthotropicPlaneElastic, OrthotropicRequirementSet,
     PoissonReciprocityRule, ReferenceRatioOrthotropicStatePoint,
@@ -91,9 +98,6 @@ pub struct Preset {
     pub obj: String,
 }
 
-/// The FPL-GTR-282 tables' state: clear wood at 12 % moisture content, as the
-/// fraction the pack compiler stores (it normalizes `%` by 0.01).
-const MOISTURE_CONTENT: f64 = 0.12;
 /// Declared small-strain domain of the linear law, not a measured failure strain.
 const STRAIN_LIMIT: f64 = 1e-3;
 
@@ -128,9 +132,11 @@ pub struct BeamMaterial {
     pub pack: PackIdentity,
 }
 
-/// Every material of the board, each resolved from one pack.
+/// Every material of the board, each resolved from one pack, and the
+/// environment they were resolved in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardMaterials {
+    pub environment: BoardEnvironment,
     pub panel: PanelMaterial,
     pub ribs: BeamMaterial,
     pub bridges: BeamMaterial,
@@ -141,24 +147,65 @@ fn identity(pack: &NormalizedPack) -> PackIdentity {
     PackIdentity { pack_id: pack.pack_id().to_owned(), content_hash: pack.content_hash().to_hex() }
 }
 
-/// One material plane of a pack, resolved with receipts; a missing property
-/// refuses by name.
-fn resolve_plane(pack: &NormalizedPack, plane: MaterialPlane) -> Result<(f64, OrthotropicPlaneElastic), String> {
+fn card(pack: &NormalizedPack, phase: &str) -> Result<MaterialCard, String> {
     let id = pack.pack_id();
-    let card = MaterialCard::assemble(
+    MaterialCard::assemble(
         MaterialStateId {
             chemistry: format!("source-pack:{id}"),
-            phase: "clear wood".into(),
+            phase: phase.into(),
             process: "frozen source-pack realization".into(),
             revision: 0,
         },
         pack.claims().clone(),
         vec![],
-    ).map_err(|e| format!("board pack {id}: {e:?}"))?;
-    let point = QueryPoint::new().with("moisture_content", MOISTURE_CONTENT)
+    ).map_err(|e| format!("board pack {id}: {e:?}"))
+}
+
+/// The board's operating state, from the one environment record: the gas the
+/// instrument sounds in also sets its wood's equilibrium moisture content.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardEnvironment {
+    pub temperature_k: f64,
+    pub relative_humidity: f64,
+    /// FPL eq. (4-5) EMC at that state (fraction).
+    pub moisture_content: f64,
+}
+
+const EMC_PACK: &[u8] = include_bytes!("packs/wood-emc-hailwood-horrobin-fpl-gtr282.fsmatpk");
+/// The committed environment record of the built-in instruments: the gas the
+/// grand_piano examples radiate into (ambient.rs) and the live piano sounds in.
+pub const ENVIRONMENT_RECORD: &str = include_str!("../moist-air-20c-65rh.gas");
+
+impl BoardEnvironment {
+    /// RH from the gas's water mole fraction by the gas owner's own saturation
+    /// law, then the EMC from the isotherm pack. A state outside the isotherm's
+    /// validity (dry air, RH 0) refuses rather than inventing a moisture content.
+    pub fn from_gas(gas: &GasState) -> Result<Self, String> {
+        let saturation = saturation_pressure_water_pa(gas.temperature).map_err(|e| format!("board environment: {e}"))?;
+        let relative_humidity = gas.water_mole_fraction * gas.pressure / saturation;
+        let isotherm = load_pack(EMC_PACK)?;
+        let moisture_content = wood_moisture::equilibrium_moisture_content(
+            &card(&isotherm, "wood sorption")?, gas.temperature, relative_humidity)
+            .map_err(|e| format!("board environment, isotherm {}: {e}", isotherm.pack_id()))?;
+        Ok(Self { temperature_k: gas.temperature, relative_humidity, moisture_content })
+    }
+
+    /// The committed environment record, read through the gas owner.
+    pub fn reference() -> Result<Self, String> {
+        let mut words = ENVIRONMENT_RECORD.split_ascii_whitespace();
+        let gas = read_gas_record(&mut words, None, None).map_err(|e| format!("environment record: {e}"))?;
+        if words.next().is_some() { return Err("environment record has trailing fields".into()); }
+        Self::from_gas(gas.state())
+    }
+}
+
+/// One material plane of a pack at the FPL tables' 12 % moisture content,
+/// resolved with receipts; a missing property refuses by name.
+fn resolve_plane(card: &MaterialCard, id: &str, plane: MaterialPlane) -> Result<(f64, OrthotropicPlaneElastic), String> {
+    let point = QueryPoint::new().with("moisture_content", REFERENCE_MOISTURE_CONTENT)
         .map_err(|e| format!("board pack {id}: {e:?}"))?;
     match resolve_orthotropic_elastic_state_point_from_reference_ratios(
-        &card, &point, MaterialPropertySelection::SingleClaimOnly, STRAIN_LIMIT,
+        card, &point, MaterialPropertySelection::SingleClaimOnly, STRAIN_LIMIT,
         OrthotropicRequirementSet::Plane(plane), PoissonReciprocityRule::MajorRatios,
     ).map_err(|e| format!("board pack {id}: {e:?}"))? {
         ReferenceRatioOrthotropicStatePoint::Plane(state) => Ok((state.density_kg_m3(), state.law().clone())),
@@ -166,18 +213,32 @@ fn resolve_plane(pack: &NormalizedPack, plane: MaterialPlane) -> Result<(f64, Or
     }
 }
 
+/// A wood pack's moisture laws at the environment's EMC: the factors on its
+/// 12 % moduli (eq. 5-3) and density (eq. 4-9 with 1 + M).
+fn moisture_factors(card: &MaterialCard, id: &str, environment: &BoardEnvironment) -> Result<(f64, f64), String> {
+    let law = WoodMoistureLaw::from_card(card, environment.moisture_content)
+        .map_err(|e| format!("board pack {id} at moisture content {}: {e}", environment.moisture_content))?;
+    Ok((law.modulus_factor(), law.density_factor()))
+}
+
 impl PanelMaterial {
-    pub fn from_pack(pack: &NormalizedPack) -> Result<Self, String> {
-        let (density, lr) = resolve_plane(pack, MaterialPlane::Axes12)?;
-        Ok(Self { density, e_l: lr.e[0], e_r: lr.e[1], nu_lr: lr.nu, g_lr: lr.g, pack: identity(pack) })
+    pub fn from_pack(pack: &NormalizedPack, environment: &BoardEnvironment) -> Result<Self, String> {
+        let (id, card) = (pack.pack_id(), card(pack, "clear wood")?);
+        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12)?;
+        let (stiffness, mass) = moisture_factors(&card, id, environment)?;
+        Ok(Self { density: density * mass, e_l: lr.e[0] * stiffness, e_r: lr.e[1] * stiffness, nu_lr: lr.nu,
+            g_lr: lr.g * stiffness, pack: identity(pack) })
     }
 }
 
 impl BeamMaterial {
-    pub fn from_pack(pack: &NormalizedPack) -> Result<Self, String> {
-        let (density, lr) = resolve_plane(pack, MaterialPlane::Axes12)?;
-        let (_, lt) = resolve_plane(pack, MaterialPlane::Axes13)?;
-        Ok(Self { density, e_l: lr.e[0], g: (lr.g * lt.g).sqrt(), pack: identity(pack) })
+    pub fn from_pack(pack: &NormalizedPack, environment: &BoardEnvironment) -> Result<Self, String> {
+        let (id, card) = (pack.pack_id(), card(pack, "clear wood")?);
+        let (density, lr) = resolve_plane(&card, id, MaterialPlane::Axes12)?;
+        let (_, lt) = resolve_plane(&card, id, MaterialPlane::Axes13)?;
+        let (stiffness, mass) = moisture_factors(&card, id, environment)?;
+        Ok(Self { density: density * mass, e_l: lr.e[0] * stiffness, g: (lr.g * lt.g).sqrt() * stiffness,
+            pack: identity(pack) })
     }
 }
 
@@ -188,14 +249,20 @@ const HARD_MAPLE: &[u8] = include_bytes!("packs/maple-sugar-fpl-gtr282.fsmatpk")
 /// The source's species, from their packs: Sitka spruce panel, sugar pine
 /// ribs, hard (sugar) maple bridges. The source names no cut-off bar
 /// material; it takes the rib pack, as the former constants did.
-pub fn model_d_materials() -> Result<BoardMaterials, String> {
-    let ribs = BeamMaterial::from_pack(&load_pack(SUGAR_PINE)?)?;
+pub fn model_d_materials(environment: &BoardEnvironment) -> Result<BoardMaterials, String> {
+    let ribs = BeamMaterial::from_pack(&load_pack(SUGAR_PINE)?, environment)?;
     Ok(BoardMaterials {
-        panel: PanelMaterial::from_pack(&load_pack(SITKA_SPRUCE)?)?,
+        environment: *environment,
+        panel: PanelMaterial::from_pack(&load_pack(SITKA_SPRUCE)?, environment)?,
         cutoff_bar: ribs.clone(),
         ribs,
-        bridges: BeamMaterial::from_pack(&load_pack(HARD_MAPLE)?)?,
+        bridges: BeamMaterial::from_pack(&load_pack(HARD_MAPLE)?, environment)?,
     })
+}
+
+/// The board's materials in the committed environment record.
+pub fn reference_materials() -> Result<BoardMaterials, String> {
+    model_d_materials(&BoardEnvironment::reference()?)
 }
 
 /// Admit compiled pack bytes; truncated or corrupt bytes refuse.
@@ -308,7 +375,7 @@ pub fn build_with_estimated_contacts(divisions: usize) -> Result<Preset,String> 
 }
 
 fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Preset,String> {
-    build_with_materials(divisions, published_contacts, &model_d_materials()?)
+    build_with_materials(divisions, published_contacts, &reference_materials()?)
 }
 
 /// `build` with explicitly supplied materials, e.g. another spruce pack.
@@ -328,7 +395,7 @@ pub fn build_with_materials(divisions: usize, published_contacts: bool,
 pub fn build_resolved(divisions: usize, maximum_rib_normal_step_m: f64,
     published_contacts: bool) -> Result<Preset,String> {
     build_resolved_with_materials(divisions, maximum_rib_normal_step_m, published_contacts,
-        &model_d_materials()?)
+        &reference_materials()?)
 }
 
 /// `build_resolved` with explicitly supplied materials.
@@ -350,7 +417,7 @@ pub fn build_resolved_with_materials(divisions: usize, maximum_rib_normal_step_m
 #[cfg(test)]
 pub(crate) fn build_probe(divisions: usize) -> Result<Preset,String> {
     if !(33..=64).contains(&divisions) { return Err("research mesh divisions must be 33..64".into()); }
-    build_inner(divisions, false, None, &model_d_materials()?)
+    build_inner(divisions, false, None, &reference_materials()?)
 }
 
 #[cfg(test)]
@@ -359,7 +426,7 @@ pub(crate) fn build_probe_refined(divisions: usize, maximum_station_gap: f64) ->
         || maximum_station_gap<=0. {
         return Err("invalid research mesh divisions or row gap".into());
     }
-    build_inner(divisions, false, Some(maximum_station_gap), &model_d_materials()?)
+    build_inner(divisions, false, Some(maximum_station_gap), &reference_materials()?)
 }
 
 fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>,
@@ -492,10 +559,12 @@ fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: 
     let contacts = if published_contacts {
         "RT-0425 Appendix A coupling points projected to reconstructed bridges; four extrapolated end keys"
     } else { "estimated per-key bridge stations" };
+    let env=&materials.environment;
+    let environment=format!("T {:.2} K / RH {:.4} / wood EMC {:.6} by FPL eq. (4-5)",env.temperature_k,env.relative_humidity,env.moisture_content);
     let packs=|label:&str,p:&PackIdentity| format!("{label} {} {}",p.pack_id,p.content_hash);
     let packs=[packs("panel",&materials.panel.pack),packs("ribs",&materials.ribs.pack),
         packs("bridges",&materials.bridges.pack),packs("cut-off bar",&materials.cutoff_bar.pack)].join("; ");
-    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates; material packs: {packs}\nsupport,clamped\npretension,0\ndamping,0.015\n");
+    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates; material packs: {packs}; environment {environment}\nsupport,clamped\npretension,0\ndamping,0.015\n");
     let mut obj=String::from("# Source-derived Model D SOUND BOARD assembly, SI metres, z up; not full piano CAD\n# Same flat structural image as the FSB. No invented crown or measured-data claim.\no sitka_spruce_panel\n");
     for (i,p) in xy.iter().enumerate() {
         writeln!(geometry,"node,{i},{:.17e},{:.17e}",p[0],p[1]).unwrap();

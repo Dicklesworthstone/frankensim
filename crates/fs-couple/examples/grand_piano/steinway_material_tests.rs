@@ -1,10 +1,27 @@
 //! The board's materials are DATA. Pack values reach the board rows exactly; a
 //! pack that lacks a required property refuses by name; scaling every pack's
 //! E_L by s and density by r moves each mode by sqrt(s/r) and each bridge
-//! amplitude by 1/sqrt(r), as K -> sK, M -> rM require; and another spruce
-//! panel moves the modes inside the Courant-Fischer bounds of its plate law.
+//! amplitude by 1/sqrt(r), as K -> sK, M -> rM require; another spruce panel
+//! moves the modes inside the Courant-Fischer bounds of its plate law; and the
+//! environment record sets the wood's moisture content, so drier air raises
+//! the modes as the FPL moisture laws predict.
 use super::*;
 use fs_matdb::{ClaimSet, PropertyValue};
+
+/// The FPL tables' own state, exactly 12 % moisture content: the moisture
+/// laws are the identity there, so the packs' 12 % values reach the board.
+const AT_12_PERCENT: BoardEnvironment = BoardEnvironment {
+    temperature_k: 293.15,
+    relative_humidity: 0.65,
+    moisture_content: 0.12,
+};
+
+fn humid(temperature_k: f64, relative_humidity: f64) -> BoardEnvironment {
+    BoardEnvironment::from_gas(
+        &GasState::try_new_moist_air(temperature_k, 101_325.0, relative_humidity).unwrap(),
+    )
+    .unwrap()
+}
 
 const ENGELMANN_SPRUCE: &[u8] = include_bytes!("packs/spruce-engelmann-fpl-gtr282.fsmatpk");
 
@@ -61,7 +78,7 @@ fn close(a: f64, b: f64, relative: f64) -> bool {
 
 #[test]
 fn board_materials_are_the_source_species_pack_values() {
-    let m = model_d_materials().unwrap();
+    let m = model_d_materials(&AT_12_PERCENT).unwrap();
     let (sitka, pine, maple) = (pack(SITKA_SPRUCE), pack(SUGAR_PINE), pack(HARD_MAPLE));
     let e_l = scalar(&sitka, "young_modulus_longitudinal");
     assert!(close(m.panel.e_l, e_l, 1e-15));
@@ -107,7 +124,7 @@ fn board_materials_are_the_source_species_pack_values() {
 
     // The board rows carry exactly these values, and the source row names
     // every pack by id and content hash.
-    let board = build(8).unwrap();
+    let board = build_with_materials(8, true, &m).unwrap();
     let panel = [
         m.panel.density,
         m.panel.e_l,
@@ -178,11 +195,13 @@ fn a_missing_or_incomplete_pack_refuses_and_never_falls_back() {
         "er_over_el",
         "glr_over_el",
         "nu_lr",
+        "moisture_law_green_bending_modulus",
+        "volumetric_shrinkage_green_to_ovendry",
     ] {
         let partial = edited(&sitka, "sitka-without-property", |key, value| {
             (key != missing).then_some(value)
         });
-        let error = PanelMaterial::from_pack(&partial).unwrap_err();
+        let error = PanelMaterial::from_pack(&partial, &AT_12_PERCENT).unwrap_err();
         assert!(
             error.contains("sitka-without-property") && error.contains(missing),
             "{missing}: {error}"
@@ -192,7 +211,7 @@ fn a_missing_or_incomplete_pack_refuses_and_never_falls_back() {
     let pine = edited(&pack(SUGAR_PINE), "pine-without-glt", |key, value| {
         (key != "glt_over_el").then_some(value)
     });
-    let error = BeamMaterial::from_pack(&pine).unwrap_err();
+    let error = BeamMaterial::from_pack(&pine, &AT_12_PERCENT).unwrap_err();
     assert!(
         error.contains("pine-without-glt") && error.contains("glt_over_el"),
         "{error}"
@@ -222,13 +241,15 @@ fn materials(
     panel: &NormalizedPack,
     ribs: &NormalizedPack,
     bridges: &NormalizedPack,
+    environment: &BoardEnvironment,
 ) -> BoardMaterials {
-    let ribs = BeamMaterial::from_pack(ribs).unwrap();
+    let ribs = BeamMaterial::from_pack(ribs, environment).unwrap();
     BoardMaterials {
-        panel: PanelMaterial::from_pack(panel).unwrap(),
+        environment: *environment,
+        panel: PanelMaterial::from_pack(panel, environment).unwrap(),
         cutoff_bar: ribs.clone(),
         ribs,
-        bridges: BeamMaterial::from_pack(bridges).unwrap(),
+        bridges: BeamMaterial::from_pack(bridges, environment).unwrap(),
     }
 }
 
@@ -250,11 +271,12 @@ fn scaling_every_pack_moves_modes_and_mobility_exactly() {
             })
         })
     };
-    let base = model_d_materials().unwrap();
+    let base = reference_materials().unwrap();
     let scaled = materials(
         &scale(SITKA_SPRUCE, "sitka-scaled"),
         &scale(SUGAR_PINE, "pine-scaled"),
         &scale(HARD_MAPLE, "maple-scaled"),
+        &base.environment,
     );
     assert!(close(scaled.panel.e_r, s * base.panel.e_r, 1e-15));
     assert!(close(scaled.panel.density, r * base.panel.density, 1e-15));
@@ -328,9 +350,9 @@ fn law_ratio_range(from: &PanelMaterial, to: &PanelMaterial) -> (f64, f64) {
 /// move the board, and stay inside what its plate law allows.
 #[test]
 fn another_spruce_panel_moves_modes_inside_its_plate_law_bounds() {
-    let base = model_d_materials().unwrap();
+    let base = reference_materials().unwrap();
     let swapped = BoardMaterials {
-        panel: PanelMaterial::from_pack(&pack(ENGELMANN_SPRUCE)).unwrap(),
+        panel: PanelMaterial::from_pack(&pack(ENGELMANN_SPRUCE), &base.environment).unwrap(),
         ..base.clone()
     };
     let (lo, hi) = law_ratio_range(&base.panel, &swapped.panel);
@@ -341,8 +363,17 @@ fn another_spruce_panel_moves_modes_inside_its_plate_law_bounds() {
     let upper_hz = 450.0;
     let before = modes(&base, upper_hz);
     let after = modes(&swapped, upper_hz * upper * (1.0 + 1e-9));
-    assert!(before.len() >= 5, "{} modes below {upper_hz} Hz", before.len());
-    assert!(after.len() >= before.len(), "{} < {}", after.len(), before.len());
+    assert!(
+        before.len() >= 5,
+        "{} modes below {upper_hz} Hz",
+        before.len()
+    );
+    assert!(
+        after.len() >= before.len(),
+        "{} < {}",
+        after.len(),
+        before.len()
+    );
     let ratios: Vec<f64> = before
         .iter()
         .zip(&after)
@@ -361,4 +392,110 @@ fn another_spruce_panel_moves_modes_inside_its_plate_law_bounds() {
         ratios.iter().any(|ratio| (ratio - 1.0).abs() > 1e-3),
         "the swap did not move the board"
     );
+}
+
+/// FPL eq. (4-5) through the environment record: the gas owner's moist air at
+/// (T, RH) gives back its RH, and the isotherm pack reproduces Table 4-2 to its
+/// printed 0.1 % of moisture content. Dry air is outside the isotherm and refuses.
+#[test]
+fn the_environment_record_sets_the_wood_moisture_content() {
+    for (celsius, rh, table_percent) in [
+        (-1.1, 0.40, 7.9),
+        (-1.1, 0.65, 12.4),
+        (4.4, 0.65, 12.3),
+        (15.6, 0.65, 12.1),
+        (21.1, 0.40, 7.7),
+        (21.1, 0.65, 12.0),
+        (21.1, 0.80, 16.0),
+    ] {
+        let environment = humid(273.15 + celsius, rh);
+        assert!(
+            (environment.relative_humidity - rh).abs() < 1e-12,
+            "{environment:?}"
+        );
+        assert!(
+            (100.0 * environment.moisture_content - table_percent).abs() <= 0.05 + 1e-9,
+            "{celsius} C, RH {rh}: {} % against Table 4-2's {table_percent} %",
+            100.0 * environment.moisture_content
+        );
+    }
+    let dry =
+        BoardEnvironment::from_gas(&GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap());
+    assert!(dry.unwrap_err().contains("wood-emc-hailwood-horrobin-fpl-gtr282"));
+    let reference = BoardEnvironment::reference().unwrap();
+    assert_eq!(reference.temperature_k, 293.15);
+    assert!((reference.relative_humidity - 0.65).abs() < 1e-12);
+    // At exactly 12 % the moisture laws are the identity, bit for bit.
+    let tabled = model_d_materials(&AT_12_PERCENT).unwrap();
+    assert_eq!(tabled.panel.density, scalar(&pack(SITKA_SPRUCE), "density"));
+    assert!(reference_materials().unwrap().panel != tabled.panel);
+}
+
+/// RH 65 -> 40 % at 20 C: the wood dries from about 12.0 to 7.7 % MC, its
+/// moduli rise by eq. (5-3) and its density falls, so every mode rises. Each
+/// species scales K and M by its own factors, so Courant-Fischer bounds every
+/// sorted eigenvalue ratio by the extreme stiffness and mass factors.
+#[test]
+fn drier_air_raises_the_board_modes_as_the_moisture_laws_predict() {
+    let (humid65, dry40) = (humid(293.15, 0.65), humid(293.15, 0.40));
+    let (wet, dry) = (
+        model_d_materials(&humid65).unwrap(),
+        model_d_materials(&dry40).unwrap(),
+    );
+    let stiffness = [
+        dry.panel.e_l / wet.panel.e_l,
+        dry.ribs.e_l / wet.ribs.e_l,
+        dry.bridges.e_l / wet.bridges.e_l,
+    ];
+    let mass = [
+        dry.panel.density / wet.panel.density,
+        dry.ribs.density / wet.ribs.density,
+        dry.bridges.density / wet.bridges.density,
+    ];
+    let min = |v: [f64; 3]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = |v: [f64; 3]| v.iter().copied().fold(0.0, f64::max);
+    let lower = (min(stiffness) / max(mass)).sqrt();
+    let upper = (max(stiffness) / min(mass)).sqrt();
+    let upper_hz = 450.0;
+    let before = modes(&wet, upper_hz);
+    let after = modes(&dry, upper_hz * upper * (1.0 + 1e-9));
+    assert!(before.len() >= 5 && after.len() >= before.len());
+    let ratios: Vec<f64> = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| b.frequency_hz / a.frequency_hz)
+        .collect();
+    eprintln!(
+        "RH 0.65 -> 0.40 at 293.15 K: MC {:.4} -> {:.4}; stiffness factors {stiffness:.4?}, density factors {mass:.4?}; predicted mode ratio bounds [{lower:.4}, {upper:.4}], measured {ratios:.4?}",
+        humid65.moisture_content, dry40.moisture_content
+    );
+    for (i, ratio) in ratios.iter().enumerate() {
+        assert!(
+            *ratio > 1.0 && (lower..=upper).contains(ratio),
+            "mode {i}: {ratio} outside ({lower}, {upper})"
+        );
+    }
+}
+
+/// The shipped environment (20 C, 65 % RH) gives EMC 11.996 %, not the
+/// tables' 12.000 %: the default board moves by the measured delta below,
+/// reported and never closed by choosing an RH.
+#[test]
+fn the_default_environment_moves_the_board_by_a_measured_delta() {
+    let reference = reference_materials().unwrap();
+    let tabled = model_d_materials(&AT_12_PERCENT).unwrap();
+    let before = modes(&tabled, 450.0);
+    let after = modes(&reference, 450.0 * 1.01);
+    let worst = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| (b.frequency_hz / a.frequency_hz - 1.0).abs())
+        .fold(0.0f64, f64::max);
+    eprintln!(
+        "default environment {:?}: panel E_L x{:.6}, density x{:.6}; max |mode ratio - 1| to 450 Hz {worst:.3e}",
+        reference.environment,
+        reference.panel.e_l / tabled.panel.e_l,
+        reference.panel.density / tabled.panel.density
+    );
+    assert!(worst > 0.0 && worst < 1e-3, "{worst}");
 }

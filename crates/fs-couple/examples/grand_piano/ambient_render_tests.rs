@@ -40,17 +40,24 @@ fn the_radiated_pressure_scales_with_density_and_arrives_with_the_sound_speed() 
     let directory = std::env::temp_dir().join(format!("frankensim-piano-ambient-{}-{stamp}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
     let air = pressure(None, &directory, "reference");
+    let dry = pressure(Some("293.15 101325 0\n"), &directory, "dry");
     let thin = pressure(Some("293.15 70927.5 0\n"), &directory, "thin");
     let co2 = pressure(Some("mixture 293.15 101325 mole 1 CO2 1\n"), &directory, "co2");
     let heliox = pressure(Some("mixture 293.15 101325 mole 2 He 0.8 O2 0.2\n"), &directory, "heliox");
     let reference = ambient::Ambient::reference().gas;
     let dense = ambient::parse("mixture 293.15 101325 mole 1 CO2 1").unwrap();
-    let ratio = ambient::parse("293.15 70927.5 0").unwrap().density / reference.density;
-    let peak = air.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+    let still = ambient::parse("293.15 101325 0").unwrap();
+    let ratio = ambient::parse("293.15 70927.5 0").unwrap().density / still.density;
+    let peak = dry.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
     assert!(peak > 0.0);
     // No radiation backreaction: the motion ignores the air, and the Rayleigh
-    // pressure is rho-linear with identical delays at equal c.
-    for (a, t) in air.iter().zip(&thin) { assert!((t - ratio * a).abs() <= 1e-12 * peak, "{a} {t}"); }
+    // pressure is rho-linear with identical delays at equal c. Equal c needs
+    // equal composition, so the pair is explicitly dry at both pressures.
+    for (a, t) in dry.iter().zip(&thin) { assert!((t - ratio * a).abs() <= 1e-12 * peak, "{a} {t}"); }
+    // The built-in reference is humid (65 % RH): lighter and faster than dry air.
+    assert!(reference.water_mole_fraction > 0.0 && reference.sound_speed > still.sound_speed);
+    assert!(reference.density < still.density);
+    assert!(air.iter().zip(&dry).any(|(h, d)| h != d), "the humid reference rendered as dry air");
     // The CO2 trace lags by the path times (1/c_co2 - 1/c_air); the two surface
     // samples lie 0.82 m and 1.04 m from the microphone.
     let per_metre = (1.0 / dense.sound_speed - 1.0 / reference.sound_speed) * 48_000.0;

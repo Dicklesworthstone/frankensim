@@ -1,7 +1,10 @@
 //! The air the piano radiates into. It is DATA, never a constant in code. The
 //! built-in instruments (the demonstration and preset pianos, and the Model D
 //! strings around an imported board) load the committed record
-//! `examples/dry-air-20c.gas` through the gas owner. `--gas-record FILE`
+//! `examples/moist-air-20c-65rh.gas` (20 C, 101325 Pa, 65 % RH; the water mole
+//! fraction follows from the gas owner's Buck-1996 saturation law) through the
+//! gas owner. The Model D soundboard reads the SAME record for its wood's
+//! moisture content (`steinway_d::BoardEnvironment`). `--gas-record FILE`
 //! overrides it. Every report names which of the two supplied the air.
 use fs_bem::helmholtz::Medium;
 use fs_material::gas::GasState;
@@ -9,7 +12,7 @@ use fs_material::gas_species::input::read_gas_record;
 use std::io::Read;
 
 /// The committed reference record shared by every built-in instrument.
-const REFERENCE_RECORD: &str = include_str!("../dry-air-20c.gas");
+const REFERENCE_RECORD: &str = include_str!("../moist-air-20c-65rh.gas");
 const MAX_RECORD_BYTES: u64 = 8192;
 
 /// Which declaration supplied the air.
@@ -32,7 +35,7 @@ impl Ambient {
     /// The committed reference record, read through the gas owner.
     pub fn reference() -> Self {
         let gas = parse(REFERENCE_RECORD)
-            .expect("the committed examples/dry-air-20c.gas record resolves");
+            .expect("the committed examples/moist-air-20c-65rh.gas record resolves");
         Self { gas, source: Source::Reference }
     }
 
@@ -60,7 +63,7 @@ impl Ambient {
     /// One-line report naming the declaration and the resolved state.
     pub fn receipt(self) -> String {
         let source = match self.source {
-            Source::Reference => "built-in reference record examples/dry-air-20c.gas",
+            Source::Reference => "built-in reference record examples/moist-air-20c-65rh.gas",
             Source::CommandLine => "--gas-record",
         };
         format!("Ambient air: {source}; T={} K, p={} Pa, rho={} kg/m3, c={} m/s, water mole fraction {}.",
@@ -82,13 +85,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_reference_is_the_committed_record_and_matches_the_former_room_air() {
+    fn the_reference_is_the_committed_humid_record_and_dry_air_is_the_former_room_air() {
         let reference = Ambient::reference();
-        assert_eq!(reference.gas, GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap());
-        // fs-bem's room-air medium is the same dry-air state, bit for bit.
-        assert_eq!(reference.medium().density.to_bits(), Medium::air().density.to_bits());
-        assert_eq!(reference.medium().sound_speed.to_bits(), Medium::air().sound_speed.to_bits());
-        assert!(reference.receipt().contains("built-in reference record"));
+        assert_eq!(reference.gas, GasState::try_new_moist_air(293.15, 101_325.0, 0.65).unwrap());
+        assert!(reference.receipt().contains("built-in reference record examples/moist-air-20c-65rh.gas"));
+        // 65 % RH air is lighter and faster than fs-bem's dry room-air medium...
+        assert!(reference.medium().density < Medium::air().density);
+        assert!(reference.medium().sound_speed > Medium::air().sound_speed);
+        // ...which the explicit dry record still reproduces, bit for bit.
+        let dry = Ambient { gas: parse("293.15 101325 0").unwrap(), source: Source::CommandLine };
+        assert_eq!(dry.medium().density.to_bits(), Medium::air().density.to_bits());
+        assert_eq!(dry.medium().sound_speed.to_bits(), Medium::air().sound_speed.to_bits());
     }
 
     #[test]

@@ -48,8 +48,10 @@ The exterior medium is exactly one of two rows. `ambient,<gas record>` is the
 shared gas declaration, resolved through the gas owner. `medium,RHO,C` is a bare
 medium with no thermochemistry, and every report marks it "bare medium, not a
 gas record". The grand_piano microphone, Rayleigh loading and imported-board
-renders use the committed reference record `examples/dry-air-20c.gas` unless
-`--gas-record FILE` overrides it.
+renders use the committed reference record `examples/moist-air-20c-65rh.gas`
+(20 C, 101325 Pa, 65 % RH) unless `--gas-record FILE` overrides it. The Model D
+soundboard reads the same record for its wood's equilibrium moisture content.
+`examples/dry-air-20c.gas` remains available as an explicit record.
 
 `response` and `admittance` accept **1 to 64 `receiver-m` rows**, in the order
 used by the output indices. Coincident receivers remain distinct rows. Optional
