@@ -60,6 +60,15 @@ fn options(level: u32) -> OpenOptions {
         workers: 1,
     }
 }
+/// The disc ladders' options: 16 declared workers, whose results are the
+/// serial owner's bits (`open_screen_workers_are_bitwise`); serial, the
+/// finest rung costs about 500 s per solve.
+fn ladder_options(level: u32) -> OpenOptions {
+    OpenOptions {
+        workers: 16,
+        ..options(level)
+    }
+}
 /// Actual mesh data, not a production disc-shaped solver. r=sin(pi*t/2)
 /// gives quadratic grading of distance to the circular free edge.
 fn disc(radial: usize, azimuth: usize) -> OpenPanels {
@@ -154,7 +163,8 @@ fn open_disc_radiation_and_scattering() {
     let (mut masses, mut biased_masses) = (Vec::new(), Vec::new());
     for (rung, (nr, nt)) in [(4, 32), (8, 64), (16, 128)].into_iter().enumerate() {
         let surface = disc(nr, nt);
-        let prepared = PreparedScreen::new(&surface, 5.0, options(rung as u32), || false).unwrap();
+        let prepared =
+            PreparedScreen::new(&surface, 5.0, ladder_options(rung as u32), || false).unwrap();
         let v = vec![C64::ONE; surface.vertices().len()];
         let scatter = vec![C64::from_re(-1.0 / rho_c); v.len()];
         for (index, &(ka, re, im)) in DISC.iter().enumerate() {
@@ -301,7 +311,8 @@ fn open_disc_edge_grading_ladder() {
     for (rung, (nr, nt)) in [(4, 32), (8, 64), (16, 128)].into_iter().enumerate() {
         let start = Instant::now();
         let surface = disc(nr, nt);
-        let prepared = PreparedScreen::new(&surface, ka, options(rung as u32), || false).unwrap();
+        let prepared =
+            PreparedScreen::new(&surface, ka, ladder_options(rung as u32), || false).unwrap();
         let v = vec![C64::ONE; surface.vertices().len()];
         let solution = prepared
             .solve(
