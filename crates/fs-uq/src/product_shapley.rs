@@ -1,4 +1,4 @@
-//! Physical-input Shapley variance attribution under a declared Gaussian law.
+//! Physical-input Shapley attribution for independent marginals or Gaussian dependence.
 //!
 //! For each coalition S, two samples share X_S and have independent conditional
 //! complements. Half their mean squared QoI difference estimates
@@ -84,13 +84,17 @@ struct Coalition {
     factor: Option<Vec<Vec<f64>>>,
 }
 
-/// Direct physical Shapley effects for 1..=8 nonconstant Gaussian parameters.
+/// Direct physical Shapley effects for 1..=8 nonconstant physical parameters.
 ///
-/// The plan must request Monte Carlo and declare Independent or JointGaussian
-/// dependence. Every coalition's permuted law passes the existing numerical PSD
+/// Independent inputs may mix Gaussian scatter and uniform tolerances. Joint
+/// dependence requires Gaussian marginals and an explicit JointGaussian law.
+/// The plan must request Monte Carlo. Every permuted Gaussian law passes the PSD
 /// policy before any model call. Singular laws are supported without covariance
 /// inversion. Zero-variance inputs must remain fixed in the caller's model:
 /// conditioning on a constant physical input must not reveal a hidden germ.
+/// Independent mixtures use the original product sampler in physical coordinates,
+/// freezing each subset by declaration index. No normal approximation, inverse
+/// CDF, midpoint substitution or endpoint clipping changes a uniform input.
 ///
 /// Each row costs exactly 2*(2^d-1) physical calls: one conditional pair for
 /// each subset except the full set. The empty subset supplies independent base
@@ -108,7 +112,10 @@ struct Coalition {
 #[derive(Debug, Clone)]
 pub struct ShapleyExecution {
     plan: UqPlan,
-    germ_plan: UqPlan,
+    sampling_plan: UqPlan,
+    // Only newly admitted independent mixtures use direct physical pick-freeze.
+    // Keep the existing all-Gaussian germ permutation exactly, including checkpoints.
+    independent_marginals: bool,
     coalitions: Vec<Coalition>,
     rows: usize,
     width: usize,
@@ -124,13 +131,13 @@ pub struct ShapleyExecution {
 
 impl ShapleyExecution {
     /// Admit physical laws, all permuted PSD factors, exact call allocation and
-    /// bounded observation storage before any callback. No uniform/unknown law
-    /// is silently replaced, and a generic correlation matrix is insufficient.
+    /// bounded observation storage before any callback. Uniform marginals require
+    /// explicit independence; a generic correlation matrix is insufficient.
     pub fn new(plan: &UqPlan) -> Result<Self, &'static str> {
         let _ = admit_plan(plan)?;
         let dim = plan.parameters.len();
         if dim > 8 {
-            return Err("physical Shapley execution supports 1..=8 Gaussian inputs");
+            return Err("physical Shapley execution supports 1..=8 varying inputs");
         }
         if !matches!(
             plan.correlation,
@@ -140,14 +147,18 @@ impl ShapleyExecution {
                 "physical Shapley sensitivity requires explicit Independent or JointGaussian dependence",
             );
         }
-        if plan.parameters.iter().any(|p| {
-            !matches!(p.kind,
-            UncertaintyKind::AleatoryGaussian { std_dev, .. } if std_dev > 0.0)
+        if plan.parameters.iter().any(|p| match p.kind {
+            UncertaintyKind::AleatoryGaussian { std_dev, .. } => std_dev <= 0.0,
+            UncertaintyKind::AleatoryUniform { lo, hi } => lo >= hi,
+            _ => true,
         }) {
             return Err(
-                "physical Shapley inputs need nonzero Gaussian uncertainty; keep constants in the physical model",
+                "physical Shapley inputs need nonzero Gaussian or uniform uncertainty; keep constants in the physical model",
             );
         }
+        // Shared admission already refuses non-Gaussian JointGaussian inputs.
+        let independent_marginals = plan.parameters.iter().any(|p|
+            matches!(p.kind, UncertaintyKind::AleatoryUniform { .. }));
         let subset_count = 1usize << dim;
         let width = 2 * (subset_count - 1);
         if plan.budget_max_samples % width != 0 || plan.budget_max_samples / width < 2 {
@@ -178,13 +189,15 @@ impl ShapleyExecution {
                 factor,
             });
         }
-        let mut germ_plan = plan.clone();
-        germ_plan.correlation = CorrelationModel::Independent;
-        for parameter in &mut germ_plan.parameters {
-            parameter.kind = UncertaintyKind::AleatoryGaussian {
-                mean: 0.0,
-                std_dev: 1.0,
-            };
+        let mut sampling_plan = plan.clone();
+        sampling_plan.correlation = CorrelationModel::Independent;
+        if !independent_marginals {
+            for parameter in &mut sampling_plan.parameters {
+                parameter.kind = UncertaintyKind::AleatoryGaussian {
+                    mean: 0.0,
+                    std_dev: 1.0,
+                };
+            }
         }
         let mut values = Vec::new();
         values
@@ -192,7 +205,8 @@ impl ShapleyExecution {
             .map_err(|_| "cannot reserve admitted Shapley observation storage")?;
         Ok(Self {
             plan: plan.clone(),
-            germ_plan,
+            sampling_plan,
+            independent_marginals,
             coalitions,
             rows: plan.budget_max_samples / width,
             width,
@@ -237,7 +251,11 @@ impl ShapleyExecution {
             evaluations_attempted: self.attempted, evaluations_accepted: self.values.len(),
             completed_rows: self.values.len() / self.width, estimate, unavailable_reason,
             evidence_color: Color::Estimated {
-                estimator: "fixed-design physical Gaussian Shapley attribution; no causal, confidence or model-error bound".into(),
+                estimator: if self.independent_marginals {
+                    "fixed-design independent mixed-marginal Shapley attribution; no causal, confidence or model-error bound"
+                } else {
+                    "fixed-design physical Gaussian Shapley attribution; no causal, confidence or model-error bound"
+                }.into(),
                 dispersion: f64::INFINITY,
             }, status: self.status, rejection_reason: self.failure.clone(),
         }
@@ -325,13 +343,28 @@ impl ShapleyExecution {
         let row = ordinal / self.width;
         if self.cached_row != Some(row) {
             // 2*row+1 < original budget <=1_000_000, within u32 tile addressing.
-            self.a = sample_parameters(&self.germ_plan, None, 2 * row)?;
-            self.b = sample_parameters(&self.germ_plan, None, 2 * row + 1)?;
+            self.a = sample_parameters(&self.sampling_plan, None, 2 * row)?;
+            self.b = sample_parameters(&self.sampling_plan, None, 2 * row + 1)?;
             self.cached_row = Some(row);
         }
         let slot = ordinal % self.width;
-        let coalition = &self.coalitions[slot / 2];
         let second = slot % 2 == 1;
+        if self.independent_marginals {
+            // Under a product law, X_{-S}|X_S has its original marginal law.
+            // Keep physical coordinate identities: permuting mixed sampler draws
+            // would attach the wrong law/units to a coordinate. Pair zero is the
+            // original MC pair; all others share exactly the declared X_S.
+            let subset = slot / 2;
+            for (j, value) in self.parameters.iter_mut().enumerate() {
+                *value = if second && subset & (1usize << j) == 0 {
+                    self.b[j]
+                } else {
+                    self.a[j]
+                };
+            }
+            return Ok(&self.parameters);
+        }
+        let coalition = &self.coalitions[slot / 2];
         let germ = |j: usize| {
             if second && j >= coalition.conditioned {
                 self.b[j]

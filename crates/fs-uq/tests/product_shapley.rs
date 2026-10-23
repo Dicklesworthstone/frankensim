@@ -262,7 +262,7 @@ fn malformed_laws_and_incomplete_design_budgets_refuse_before_physical_work() {
     }
     plan.correlation = CorrelationModel::Independent;
     for parameter in [
-        ParameterUncertainty::uniform("load", 1.0, 2.0, "N"),
+        ParameterUncertainty::uniform("load", 1.0, 1.0, "N"),
         ParameterUncertainty::gaussian("load", 1.0, 0.0, "N"),
         ParameterUncertainty::interval("load", 1.0, 2.0, "N"),
     ] {
