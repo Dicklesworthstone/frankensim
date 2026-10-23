@@ -4382,8 +4382,9 @@ parcel model.
 
 This is first-order partitioned feedback with a well-mixed fixed-volume local
 gas inventory. Its volume does not create acoustic chamber boundaries.
-Convective/conductive solid–gas exchange, gas motion/pressure work, radiation
-loading and propagation of a changing atmosphere are outside this rung. The
+The original no-exchange step omits convective/conductive solid–gas transfer.
+Gas motion/pressure work, radiation loading and propagation of a changing
+atmosphere remain outside both finite-gas paths. The
 compact pressure observer is diagnostic, not an additional heat debit.
 Temperature-increment limits require temporal-refinement assessment and do not
 certify acoustic or thermodynamic accuracy. Existing thermal-string restrictions
@@ -4394,6 +4395,56 @@ source-dependent drag without a vibration reset, measured combined energy,
 independent endpoint pressure with the new sound-speed coefficient,
 frozen-initial-medium staging, and atomic refusal. Synthetic source data test
 numerical coupling, not experimental gas/material fidelity.
+
+### Reciprocal thermal exchange with finite surrounding gas
+
+The original `step_with_isochoric_gas` remains the insulated solid/gas API.
+`step_with_isochoric_gas_exchange` adds one signed transfer Q from solid to
+gas, using the existing bounded scalar feedback owner and concrete
+`ConductanceSample` source evaluations. Each proposal advances the original
+solid enthalpy chart by material loss + prescribed solid heat - Q, and the
+original isochoric gas owner by aerodynamic loss + prescribed gas heat + Q.
+The interface residual is Q - dt G(T_s,end - T_g,end). Prescribed heating is
+included before choosing transfer direction; constant heat capacity and
+averaged temperatures are not substituted for either source law.
+
+The source callback receives actual endpoint states and must be repeatable,
+proposal-only, and justified by its own geometry and validity. The concrete
+`step_with_isochoric_gas_conduction` composes the existing
+`MaterialConductionLayers` evaluator: G = A/(d_g/k_g + d_s/k_s), using the
+accepted trial gas conductivity and the same immutable solid card/conditions
+at its trial temperature. The declared area cannot exceed the actual string
+surface. Every trial applies the existing 0.1 lumped Biot ceiling with the
+declared transfer area, Bi = G(V/A)/(A k_s). Zero area or explicitly zero
+conductivity means insulation; missing or dynamically supported source data
+still refuses. Effective distances, initially uniform temperature and local
+spreading remain explicit caller/model limitations. This is a pointwise Biot
+gate, not a validity-wide spatial-gradient certificate.
+
+The bracket contains zero and all evaluated proposals, including the
+source-only probe, must stay within both original charts. Bounded iterations
+admit actual source and thermal storage residuals. A final transfer that
+crosses endpoint temperatures refuses. There is no uniqueness claim for an
+arbitrary nonmonotone conductance, source extrapolation or hidden substepping.
+
+Final material/medium rebinding, pressure history, one sample/epoch, combined
+measured energy and atomic paired publication use the original finite-gas
+path. Internal Q cancels from the combined account; the solid subaccount's
+external boundary heat is prescribed heat - Q, while the frame separately
+exposes prescribed solid heat, signed Q, concrete interface source and both
+exchange residuals. Gas/solid source, geometry, Biot, iteration, energy,
+temperature-increment, epoch, observer or cancellation refusals publish
+neither state. Mechanics still freezes the initial laws for the sample:
+this first-order split requires temporal refinement and does not add a
+spatial gas layer, acoustic chamber, pressure work or radiation loading.
+
+G1/G3/G4 definitions in `tests/string_specimen/finite_gas/exchange.rs` compare
+the independent two-capacity backward-Euler solution in both directions,
+including external heating that reverses the initial ordering; source/geometry
+dependent conduction and damping; insulation parity with the original
+vibration/observer path; independent reciprocal energy; and late refusal and
+cancellation rollback. Synthetic data establish coupling tests, not measured
+material fidelity.
 
 ### Shared environmental response of electrical and thermal contacts
 

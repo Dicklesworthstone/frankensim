@@ -447,3 +447,6 @@ fn g4_finite_gas_late_refusal_epoch_and_cancellation_preserve_both_owners() {
         assert_eq!(live.mechanical().epoch(), 64);
     });
 }
+
+#[path = "finite_gas/exchange.rs"]
+mod exchange;

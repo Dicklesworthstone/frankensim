@@ -4,8 +4,12 @@
 //! The existing NASA-9 parcel owns caloric inversion, EOS and transport. The
 //! acoustic owner then rebuilds drag and its compact observer from that same
 //! accepted gas, preserving modal coordinates and the previous acceleration.
-//! This is a first-order partitioned, well-mixed fixed-volume model. It does
-//! not introduce a chamber boundary, convection, radiation loading or gas work.
+//! This is a first-order partitioned, well-mixed fixed-volume model. The
+//! `exchange` module adds reciprocal source-resolved thermal transfer. Neither
+//! path introduces a chamber boundary, radiation loading or gas pressure work.
+
+/// Reciprocal source-resolved conduction on the same finite-gas/string step.
+pub mod exchange;
 
 use super::{
     AcousticRealizeError, ThermalMaterialStringFrame, ThermalMaterialStringRuntime,
@@ -67,7 +71,8 @@ pub struct FiniteGasStringFrame {
     /// Existing solid/string account. Its air loss is the INTERNAL transfer
     /// `drag_heat_j` in the combined account below, not a second energy debit.
     pub string: ThermalMaterialStringFrame,
-    /// Existing gas-owner account, with drag and prescribed gas heat included.
+    /// Existing gas-owner account, including drag, prescribed gas heat and any
+    /// separately reported reciprocal solid-gas transfer.
     pub gas: GasHeatStep,
     /// Aerodynamic loss deposited exactly once into the gas [J].
     pub drag_heat_j: f64,
@@ -79,6 +84,13 @@ pub struct FiniteGasStringFrame {
     pub energy_balance_residual_j: f64,
     /// Sum of original absolute solve allowances and arithmetic roundoff [J].
     pub energy_tolerance_j: f64,
+}
+
+struct FiniteGasStringCandidate {
+    runtime: ThermalMaterialStringRuntime,
+    gas: IsochoricGasParcel,
+    string: ThermalMaterialStringFrame,
+    gas_step: GasHeatStep,
 }
 
 fn check(cx: &fs_exec::Cx<'_>) -> Result<(), FiniteGasStringError> {
@@ -134,6 +146,45 @@ impl ThermalMaterialStringRuntime {
         heat: FiniteGasStringHeat,
         controls: FiniteGasStringSolve,
     ) -> Result<FiniteGasStringFrame, FiniteGasStringError> {
+        self.admit_finite_gas_step(cx, expected_epoch, gas, heat, controls)?;
+        let mut candidate = self.clone();
+        let mut next_gas = gas.clone();
+        let string = candidate.step(cx, expected_epoch, forces, heat.string_heat_j)?;
+        let drag_heat_j = string.vibration.dissipation.air_loss_j;
+        let total_gas_heat = heat.gas_heat_j + drag_heat_j;
+        if !total_gas_heat.is_finite()
+            || (drag_heat_j != 0.0 && total_gas_heat == heat.gas_heat_j)
+            || (heat.gas_heat_j != 0.0 && total_gas_heat == drag_heat_j)
+        {
+            return Err(FiniteGasStringError::Admission(
+                "gas source and aerodynamic heat overflow or disappear when combined",
+            ));
+        }
+        let gas_step =
+            next_gas.add_heat(total_gas_heat, controls.gas, || cx.checkpoint().is_err())?;
+        self.publish_finite_gas(
+            cx,
+            forces,
+            gas,
+            heat,
+            controls,
+            FiniteGasStringCandidate {
+                runtime: candidate,
+                gas: next_gas,
+                string,
+                gas_step,
+            },
+        )
+    }
+
+    fn admit_finite_gas_step(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        gas: &IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        controls: FiniteGasStringSolve,
+    ) -> Result<(), FiniteGasStringError> {
         check(cx)?;
         if expected_epoch != self.mechanical.epoch() {
             return Err(ThermalStringError::Epoch {
@@ -153,25 +204,29 @@ impl ThermalMaterialStringRuntime {
                 "finite heats, a positive temperature-increment limit and one identical initial gas snapshot required",
             ));
         }
-        let initial_temperature = gas.state().state().temperature;
+        Ok(())
+    }
+
+    fn publish_finite_gas(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        forces: &[f64],
+        gas: &mut IsochoricGasParcel,
+        heat: FiniteGasStringHeat,
+        controls: FiniteGasStringSolve,
+        proposal: FiniteGasStringCandidate,
+    ) -> Result<FiniteGasStringFrame, FiniteGasStringError> {
+        let FiniteGasStringCandidate {
+            runtime: mut candidate,
+            gas: next_gas,
+            mut string,
+            gas_step,
+        } = proposal;
+        let expected_epoch = self.mechanical.epoch();
         let initial_internal_energy = gas.state().specific_internal_energy_j_kg();
         let initial_mechanical_energy = modal_energy(self);
-        let mut candidate = self.clone();
-        let mut next_gas = gas.clone();
-        let mut string = candidate.step(cx, expected_epoch, forces, heat.string_heat_j)?;
         let drag_heat_j = string.vibration.dissipation.air_loss_j;
-        let total_gas_heat = heat.gas_heat_j + drag_heat_j;
-        if !total_gas_heat.is_finite()
-            || (drag_heat_j != 0.0 && total_gas_heat == heat.gas_heat_j)
-            || (heat.gas_heat_j != 0.0 && total_gas_heat == drag_heat_j)
-        {
-            return Err(FiniteGasStringError::Admission(
-                "gas source and aerodynamic heat overflow or disappear when combined",
-            ));
-        }
-        let gas_step =
-            next_gas.add_heat(total_gas_heat, controls.gas, || cx.checkpoint().is_err())?;
-        if (next_gas.state().state().temperature - initial_temperature).abs()
+        if (next_gas.state().state().temperature - gas.state().state().temperature).abs()
             > controls.maximum_gas_temperature_increment_k
         {
             return Err(FiniteGasStringError::Admission(

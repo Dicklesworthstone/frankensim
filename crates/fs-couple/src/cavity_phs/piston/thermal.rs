@@ -15,7 +15,7 @@ pub mod layers;
 pub mod power;
 /// Shared material/phase coordinates for thermal and electrical responses.
 pub mod source;
-mod feedback;
+pub(crate) mod feedback;
 /// A thermal port for reservoirs and jointly solved finite network boundaries.
 pub mod boundary;
 

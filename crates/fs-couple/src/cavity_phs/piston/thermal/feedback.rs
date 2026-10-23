@@ -3,7 +3,7 @@
 
 use super::{HeatExchangeSolve, ThermalPistonError, poll, positive};
 
-pub(super) fn admit<E>(controls: HeatExchangeSolve) -> Result<(), ThermalPistonError<E>> {
+pub(crate) fn admit<E>(controls: HeatExchangeSolve) -> Result<(), ThermalPistonError<E>> {
     let [lo, hi] = controls.heat_bracket_j;
     if !lo.is_finite() || !hi.is_finite() || lo >= hi || lo > 0.0 || hi < 0.0
         || !positive(controls.source_tolerance_j) || !positive(controls.energy_tolerance_j)
@@ -12,7 +12,7 @@ pub(super) fn admit<E>(controls: HeatExchangeSolve) -> Result<(), ThermalPistonE
     Ok(())
 }
 
-pub(super) fn solve<T, E, C: FnMut() -> bool>(
+pub(crate) fn solve<T, E, C: FnMut() -> bool>(
     controls: HeatExchangeSolve,
     mut evaluate: impl FnMut(f64, usize, &mut C) -> Result<(T, f64), ThermalPistonError<E>>,
     cancelled: &mut C,
