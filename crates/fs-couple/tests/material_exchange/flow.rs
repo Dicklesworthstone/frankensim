@@ -5,6 +5,8 @@ mod snapshot_tests;
 mod diffusion_tests;
 #[path = "flow/transport.rs"]
 mod transport_tests;
+#[path = "flow/gas_law.rs"]
+mod gas_law_tests;
 
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::*;
