@@ -102,4 +102,5 @@ pub(super) fn bind<O: AdaptiveSdf3Elasticity>(
 }
 
 #[cfg(test)]
+#[path = "regions/tests.rs"]
 mod tests;

@@ -12862,7 +12862,7 @@ fn trace_path(
         }
 
         if let Material::GrayDiffuseThermal { surface } = prim.material {
-            if !medium_stack.is_empty() {
+            if medium_stack.len() != 0 {
                 return Err(TracerError::ThermalSurfaceMediumUnsupported);
             }
             // These surfaces have no separate NEE light proposal. Every camera

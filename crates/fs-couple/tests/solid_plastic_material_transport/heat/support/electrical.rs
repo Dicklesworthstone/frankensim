@@ -1,4 +1,5 @@
 //! G0/G1/G3: pressure-dependent cooling changes finite current and loaded J2 response.
+#[path = "electrical/pressure.rs"]
 mod pressure;
 use super::*;
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError,CircuitEnthalpySolve,ResistorCell};

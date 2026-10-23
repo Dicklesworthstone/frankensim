@@ -8,6 +8,7 @@ use super::*;
 mod json;
 use json::JsonValue as J;
 
+#[path = "mixed_convection/adjoint.rs"]
 mod adjoint;
 
 fn n(row: &J, key: &str) -> f64 {

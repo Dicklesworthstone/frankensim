@@ -461,5 +461,7 @@ fn g0_fsim_radiation_refuses_missing_emissivity_in_base_and_adaptive() {
     }
 }
 
+#[path = "radiation_product/adaptive_product.rs"]
 mod adaptive_product;
+#[path = "radiation_product/vacuum_product.rs"]
 mod vacuum_product;

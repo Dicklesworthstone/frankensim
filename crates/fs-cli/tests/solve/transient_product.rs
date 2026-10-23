@@ -135,8 +135,7 @@ fn g1_native_transient_uniform_heating_respects_storage_time_and_capacity() {
         let time_scope = qoi_record.get("thermal_time_scope").unwrap();
         assert_eq!(time_scope.str_field("kind"), Some("final"));
         close(n(time_scope, "time_s"), horizon, 0.0);
-        let terms = J::parse(&qoi)
-            .unwrap()
+        let terms = qoi_record
             .get("budget")
             .unwrap()
             .as_array()
@@ -144,8 +143,7 @@ fn g1_native_transient_uniform_heating_respects_storage_time_and_capacity() {
             .get("terms")
             .unwrap()
             .as_array()
-            .unwrap()
-            .clone();
+            .unwrap();
         for kind in ["discretization", "solver-algebraic", "roundoff"] {
             assert!(
                 terms.iter().any(|term| term.str_field("kind") == Some(kind)

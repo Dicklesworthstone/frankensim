@@ -267,4 +267,5 @@ fn aggregate_energy_refusal_cannot_publish_either_key_or_radiation_candidate() {
         reference.step_with_boundaries(drive(0.0), [&quiet, &quiet]).unwrap());
 }
 
+#[path = "keyed/schedule.rs"]
 mod schedule;

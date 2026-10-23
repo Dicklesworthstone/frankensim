@@ -1,17 +1,12 @@
 //! Executable two-pass/layered-strip reduced thermal example, SI units.
 //!
 //! Run with `cargo run -p fs-conduction --example deposited_strip --release`.
-//! The path import also permits `rustc --edition 2024 -O
-//! crates/fs-conduction/examples/deposited_strip.rs -o deposited_strip` when
-//! the workspace's external constellation is unavailable. It uses the exact
-//! production kernel, with no copied implementation or substitute dependencies.
+//! It uses the exact production kernel through the crate's public
+//! `transient::deposition` facade, with no copied implementation or substitute
+//! dependencies.
 //! Coefficients are declared illustrative inputs, not calibrated filament data.
 
-#[path = "../src/transient/deposition.rs"]
-#[allow(dead_code)]
-mod deposition;
-
-use deposition::{
+use fs_conduction::transient::deposition::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, ThermalLink,
     TimedEvent,

@@ -146,4 +146,5 @@ mod material_modal;
 #[path = "music_render_wind/dg.rs"]
 mod dg;
 
+#[path = "music_render_wind/flue_dg.rs"]
 mod flue_dg;

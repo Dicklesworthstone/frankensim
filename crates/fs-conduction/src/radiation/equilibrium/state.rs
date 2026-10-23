@@ -157,7 +157,9 @@ mod condition_tests {
             assert!((emissivity.value() - 0.5).abs() < 1e-14);
             assert_eq!(emissivity.temperature_k(), 350.0);
             assert_eq!(state.card_identity(), card.content_hash());
-            assert_eq!(state.query_point(), &point);
+            let canonical: Vec<(String, f64)> = point.axes().iter()
+                .map(|(axis, value)| (axis.clone(), *value)).collect();
+            assert_eq!(state.query_point(), canonical.as_slice());
             identities.push(state.identity());
         }
         assert_ne!(identities[0], identities[1]);

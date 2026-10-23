@@ -197,7 +197,7 @@ fn check_sources_and_report(solved: &ThermalRun, card: &str, reservoir: f64) {
     assert_eq!(surface.str_field("card"), Some(card));
     assert_eq!(surface.str_field("target"), Some("air"));
     assert!(
-        fs_blake3::ContentHash::from_hex(surface.str_field("emissivity_receipt").unwrap()).is_ok()
+        fs_blake3::ContentHash::from_hex(surface.str_field("emissivity_receipt").unwrap()).is_some()
     );
     close(n(surface, "emissivity"), EMISSIVITY, 0.0);
     close(n(surface, "query_temperature_k"), 300.0, 0.0);

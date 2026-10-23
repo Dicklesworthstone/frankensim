@@ -10,6 +10,7 @@ use fs_project::spec::dims;
 mod json;
 use json::JsonValue as J;
 
+#[path = "transient_conjugate/material_controls.rs"]
 mod material_controls;
 
 const INLET_K: f64 = 293.15;

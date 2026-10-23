@@ -3,6 +3,7 @@ use super::*;
 use fs_topopt::sdf3::PhysicalRegion3;
 use fs_topopt::sdf3::robust::{RobustOptions3, controlled_sdf3_robust_gradient_check};
 
+#[path = "robust/optimize.rs"]
 mod optimize;
 
 #[test]

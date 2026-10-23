@@ -1,4 +1,5 @@
 //! Material data -> accepted solid shape -> real ray hits and thermal pixels.
+#[path = "material_geometry/regional.rs"]
 mod regional;
 
 use fs_alloc::{ArenaConfig, ArenaPool};

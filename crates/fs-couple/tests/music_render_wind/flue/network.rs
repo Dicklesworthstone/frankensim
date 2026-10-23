@@ -3,6 +3,7 @@ use super::*;
 use fs_couple::bernoulli_aperture::network::NetworkNode;
 use fs_couple::flue_loop::{FlueVoice, network::performance::FlueOutletPerformance};
 
+#[path = "network/mouth_reaction.rs"]
 mod mouth_reaction;
 
 const NETWORK: &str = include_str!("../../../examples/flue-network.performance");

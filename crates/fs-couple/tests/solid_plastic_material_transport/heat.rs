@@ -1,6 +1,9 @@
 //! G0/G3: source-backed radiation/contact data reach loaded native J2 tetrahedra.
+#[path = "heat/solid.rs"]
 mod solid;
+#[path = "heat/electrical.rs"]
 mod electrical;
+#[path = "heat/support.rs"]
 mod support;
 
 use super::*;

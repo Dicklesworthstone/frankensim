@@ -373,4 +373,5 @@ fn a_second_or_late_group_and_mismatched_source_geometry_refuse() {
         radiation_limits(), &cancelled).is_err());
 }
 
+#[path = "mimo/keyed.rs"]
 mod keyed;

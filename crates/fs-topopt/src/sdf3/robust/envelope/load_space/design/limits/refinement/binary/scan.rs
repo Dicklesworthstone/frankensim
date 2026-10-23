@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use super::{binary_error, BinaryLoadSpaceCapRefinement3};
 use super::super::{invalid, LoadSpaceCap3};
 use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3};
-use crate::sdf3::robust::envelope::load_space::design::limits::binary::scan::{
+use crate::sdf3::robust::envelope::load_space::design::limits::binary::{
     BinaryLoadSpaceScanOptions3, BinaryLoadSpaceScanStop3,
 };
 use crate::sdf3_goal::{GoalRefinementError3, GoalRefinementOptions3};
