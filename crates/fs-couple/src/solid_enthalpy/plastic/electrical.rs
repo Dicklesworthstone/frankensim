@@ -12,6 +12,86 @@ use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSampl
 use crate::circuit_enthalpy::contacts::heat::solid::SolidHeatError;
 use crate::material_circuit::{MaterialCircuit, MaterialResistor};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
+use crate::material_circuit::contacts::SeriesElectricalContact;
+use fs_matdb::ClaimId;
+use fs_material::electrical_interface::{
+    ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, resolve_electrical_interface_state,
+};
+
+/// Electrical response of an existing whole-face mechanical/thermal support.
+/// The link fixes both material surfaces, area, pressure and thermal coordinates;
+/// this binding only adds its electrical branch, source claim and heat split.
+/// The explicit split is a model input, not inferred from either bulk material.
+#[derive(Clone, Copy, Debug)]
+pub struct ElectricalSupportContact {
+    pub link: u64,
+    pub branch: usize,
+    pub claim: ClaimId,
+    pub heat_fraction_to_first: f64,
+}
+
+impl ElectricalSupportContact {
+    fn resolve(
+        &self,
+        support: &ThermalSupportContact<'_>,
+        sample: &ContactSample,
+    ) -> Result<SeriesElectricalContact, ElectricalSolidSourceError> {
+        use ElectricalSolidSourceError as Error;
+        if self.link != support.link
+            || self.link != sample.link
+            || !self.heat_fraction_to_first.is_finite()
+            || !(0.0..=1.0).contains(&self.heat_fraction_to_first)
+        {
+            return Err(Error::Invalid(
+                "electrical support needs its original link and an explicit heat partition",
+            ));
+        }
+        let point = support
+            .point
+            .at(sample.phases)
+            .map_err(|e| Error::Support(ContactError::State(e)))?
+            .with(support.pressure_axis, sample.compression_pa)
+            .map_err(|_| Error::Invalid("electrical support pressure coordinate refused"))?;
+        let resolved = resolve_electrical_interface_state(
+            support.point.interface,
+            &point,
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                ELECTRICAL_CONTACT_RESISTANCE_PROPERTY.to_owned(),
+                self.claim,
+            )]),
+        )
+        .map_err(Error::ElectricalSupport)?;
+        let claim = support
+            .point
+            .interface
+            .claims()
+            .claim(self.claim)
+            .ok_or(Error::Invalid("pinned electrical support claim is absent"))?;
+        if !claim.value.axes().all(|(axis, dims)| {
+            (axis == support.pressure_axis && dims == fs_qty::Pressure::DIMS)
+                || support.point.is_response_axis(axis, dims)
+        }) {
+            return Err(Error::Invalid(
+                "electrical support law requires solved pressure, thermal or typed fixed external coordinates",
+            ));
+        }
+        let property = resolved
+            .resolved()
+            .property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
+            .ok_or(Error::Invalid("electrical support property is absent"))?;
+        if property
+            .angular_frequency_band_rad_s()
+            .map_err(|_| Error::Invalid("electrical support frequency descriptor refused"))?
+            .is_some_and(|(lower, _)| lower > 0.0)
+        {
+            return Err(Error::Invalid(
+                "electrical support source excludes static response",
+            ));
+        }
+        SeriesElectricalContact::new(self.link, self.branch, resolved, sample.area_m2)
+            .map_err(Error::Circuit)
+    }
+}
 
 /// The original circuit/enthalpy controls plus the work required by native solids.
 #[derive(Clone, Copy, Debug)]
@@ -26,6 +106,8 @@ pub struct ElectricalSolidSolve {
 #[derive(Debug)]
 pub enum ElectricalSolidSourceError {
     Heat(HeatNetworkError),
+    ElectricalSupport(fs_material::state_point::MaterialStatePointError),
+    Circuit(crate::material_circuit::MaterialCircuitError),
     Mechanical(ThermoplasticError),
     Support(ContactError<Infallible>),
     Thermal(DepositionError),
@@ -121,6 +203,69 @@ fn number(value: f64) -> Result<f64, ElectricalSolidSourceError> {
 }
 
 impl<'m> ThermoplasticSolid<'m> {
+    /// Resolve support current sources from the accepted mechanical/thermal state.
+    /// Use these in `MaterialCircuit::new_with_contacts` or its explicit
+    /// `rebind_contacts_candidate` before the first coupled interval. Branches
+    /// are checked by that circuit owner; face/source/pressure and heat-partition
+    /// admission are shared with the evolving solve below.
+    ///
+    /// This does not advance time, modify the circuit or infer an ideal switch.
+    /// The prescribed DOF list identifies the same fixed whole-face supports
+    /// used during evolution; its target values do not author the pressure.
+    pub fn resolve_electrical_supports(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        supports: &[ThermalSupportContact<'_>],
+        electrical: &[ElectricalSupportContact],
+        prescribed_m: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<SeriesElectricalContact>, ElectricalSolidError> {
+        if self.time_s != thermal.time_s() {
+            return Err(ElectricalSolidError::Invalid(
+                "electrical support requires matching accepted clocks",
+            ));
+        }
+        self.enthalpies::<Infallible>(thermal, true, cx)
+            .map_err(ElectricalSolidError::Mechanical)?;
+        let routes = self
+            .support_contact_routes::<Infallible>(thermal, supports, prescribed_m, cx)
+            .map_err(|e| match e {
+                ContactError::Cancelled => ElectricalSolidError::Cancelled,
+                other => ElectricalSolidError::Support(other),
+            })?;
+        if electrical.len() > supports.len() {
+            return Err(ElectricalSolidError::Invalid(
+                "electrical support count exceeds physical supports",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut sources = Vec::with_capacity(electrical.len());
+        for binding in electrical {
+            cx.checkpoint()
+                .map_err(|_| ElectricalSolidError::Cancelled)?;
+            let index = supports.iter().position(|s| s.link == binding.link).ok_or(
+                ElectricalSolidError::Invalid("electrical contact has no solved support"),
+            )?;
+            if !seen.insert(binding.link) {
+                return Err(ElectricalSolidError::Invalid(
+                    "duplicate electrical support",
+                ));
+            }
+            let (element, normal) = routes[index];
+            let sample = supports[index]
+                .sample::<Infallible>(thermal, &self.solution.element_stress[element], normal, 0.0)
+                .map_err(ElectricalSolidError::Support)?;
+            sources.push(
+                binding
+                    .resolve(&supports[index], &sample)
+                    .map_err(|e| ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(e)))?,
+            );
+        }
+        cx.checkpoint()
+            .map_err(|_| ElectricalSolidError::Cancelled)?;
+        Ok(sources)
+    }
+
     /// Jointly propose finite electrical storage, loaded native 3D plasticity,
     /// thermal contact/radiation and the SAME caloric field.
     ///
@@ -177,6 +322,47 @@ impl<'m> ThermoplasticSolid<'m> {
         settings: IncrementSettings, controls: ElectricalSolidSolve,
         guess_j: &[f64], cx: &Cx<'_>,
     ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
+        self.advance_electrical_with_pressure_contacts_candidate(thermal, circuit, prepared,
+            support_contacts, &[], ports, target_s, prescribed_m, nodal_forces_n,
+            settings, controls, guess_j, cx)
+    }
+
+    /// Close support pressure, contact current, Joule heat and solid response
+    /// through the SAME endpoint residual.
+    ///
+    /// Each electrical binding names one of `support_contacts`; both responses
+    /// use its exact ordered interface card, whole-face area, solved compressive
+    /// traction and actual two-sided temperatures. The pinned electrical claim
+    /// supplies R''(pressure, thermal state), reduced to R = R'' / area by the
+    /// original circuit owner. That owner's contact heat enters the two original
+    /// caloric cells exactly once using the explicit partition.
+    ///
+    /// Initialize the accepted circuit contacts with `resolve_electrical_supports`.
+    /// Existing non-support contacts retain their prepared sources and heat routes.
+    /// The prepared network must omit these solved-pressure interface corrections;
+    /// no thermal or electrical resistance may be added twice.
+    ///
+    /// Fixed full-face compression and original circuit topology only: tensile
+    /// traction, unsupported source states and failed coupled balances refuse
+    /// atomically. No changing contact area, opening, arc, electromagnetic force,
+    /// piezoresistive bulk law or contact-temperature field is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_electrical_with_pressure_contacts_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        circuit: &MaterialCircuit,
+        prepared: &PreparedHeatNetwork<'_, '_>,
+        support_contacts: &[ThermalSupportContact<'_>],
+        electrical_supports: &[ElectricalSupportContact],
+        ports: &[f64],
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: ElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
         let dt = target_s - self.time_s;
@@ -195,7 +381,7 @@ impl<'m> ThermoplasticSolid<'m> {
                 other => ElectricalSolidError::Support(other),
             })?;
         let destinations = prepared.resistor_destinations();
-        let contacts = prepared.heat_destinations(thermal).map_err(ElectricalSolidError::Heat)?;
+        let mut contacts = prepared.heat_destinations(thermal).map_err(ElectricalSolidError::Heat)?;
         let routes: BTreeMap<_, _> = destinations.iter().map(|d| (d.branch, d.cell)).collect();
         // Check immutable source dependencies once. PreparedHeatNetwork retains
         // these exact claims, and still re-evaluates their support and values at
@@ -208,6 +394,48 @@ impl<'m> ThermoplasticSolid<'m> {
                     "a solved-pressure support cannot also have a fixed thermal or electrical interface"));
             }
         }
+        if electrical_supports.len() > support_contacts.len() {
+            return Err(ElectricalSolidError::Invalid(
+                "electrical support count exceeds physical supports",
+            ));
+        }
+        for binding in electrical_supports {
+            let support = support_contacts
+                .iter()
+                .find(|s| s.link == binding.link)
+                .ok_or(ElectricalSolidError::Invalid(
+                    "electrical contact has no solved support",
+                ))?;
+            let link = &thermal.links()[&support.link];
+            if contacts.iter().any(|c| c.id == binding.link)
+                || !routes
+                    .get(&binding.branch)
+                    .is_some_and(|id| *id == link.a || *id == link.b)
+            {
+                return Err(ElectricalSolidError::Invalid(
+                    "electrical support needs a unique contact and a branch of one receiving material cell",
+                ));
+            }
+            contacts.push(contacts::ContactHeatCells {
+                id: binding.link,
+                cells: [link.a, link.b],
+                heat_fraction_to_first: binding.heat_fraction_to_first,
+            });
+        }
+        // Check the same accepted source pins before allocating nonlinear trials.
+        let initial_supports = self.resolve_electrical_supports(
+            thermal,
+            support_contacts,
+            electrical_supports,
+            prescribed_m,
+            cx,
+        )?;
+        let mut initial_contacts = initial.contacts;
+        initial_contacts.extend(initial_supports);
+        contacts::admit_sources::<ElectricalSolidSourceError>(circuit, &initial_contacts, || {
+            cx.checkpoint().is_err()
+        })
+        .map_err(ElectricalSolidError::Coupled)?;
         self.admit_electrical_transport(thermal, &initial.bulk.source,
             &initial.bulk.resistors, &routes, cx).map_err(|error|
                 ElectricalSolidError::Coupled(CircuitEnthalpyError::Source(error)))?;
@@ -227,7 +455,7 @@ impl<'m> ThermoplasticSolid<'m> {
                     return Err(ElectricalSolidSourceError::MechanicalBudget);
                 }
                 trials.set(trials.get() + 1);
-                let ContactThermalCoefficients { bulk: mut coefficients, contacts } =
+                let ContactThermalCoefficients { bulk: mut coefficients, mut contacts } =
                     prepared.resolve(cx, endpoint).map_err(ElectricalSolidSourceError::Heat)?;
                 let h = self.enthalpies::<Infallible>(endpoint, false, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
@@ -245,6 +473,22 @@ impl<'m> ThermoplasticSolid<'m> {
                         .map_err(ElectricalSolidSourceError::Support)?;
                     coefficients.conductances_w_k.insert(binding.link, sample.conductance_w_k);
                     support_samples.push(sample);
+                }
+                for binding in electrical_supports {
+                    checkpoint()?;
+                    let support = support_contacts
+                        .iter()
+                        .find(|s| s.link == binding.link)
+                        .ok_or(ElectricalSolidSourceError::Invalid(
+                            "electrical support disappeared",
+                        ))?;
+                    let sample = support_samples
+                        .iter()
+                        .find(|s| s.link == binding.link)
+                        .ok_or(ElectricalSolidSourceError::Invalid(
+                            "solved support pressure is absent",
+                        ))?;
+                    contacts.push(binding.resolve(support, sample)?);
                 }
                 let radiation_net_j = number(dt * coefficients.source.radiation_net_power_w())?;
                 let external_heat_j = number(number(dt * endpoint.external_step_power_w(

@@ -4100,6 +4100,30 @@ identity and context continuity, physical versus numerical heat, and G4 atomic
 source-domain refusal. These synthetic numerical fixtures do not extend the
 existing small-strain, fixed-density, fixed-geometry, single-solid model.
 
+### Solved support pressure, electrical current and heating
+
+`solid_enthalpy::plastic::electrical::ElectricalSupportContact` adds a pinned
+electrical contact claim and explicit two-body heat split to an existing
+whole-face thermal/mechanical support. The accepted-stress source initializer
+and joint `advance_electrical_with_pressure_contacts_candidate` use the same
+ordered interface card, reference face area, actual compressive traction and
+both live material temperatures. The shared static response admission retains
+declared environmental data; source-domain failure refuses the complete step.
+
+The original circuit reduces R'' by area, solves the current and supplies
+contact Joule heat to the original caloric destinations once. The original
+thermal contact, native plastic/reversible heat and closed energy checks stay
+in the same endpoint residual. Support bindings may not duplicate a prepared
+interface correction or change the circuit topology during a step. Explicit
+initial circuit rebinding preserves the native conserved charge/flux state.
+
+The model remains a fixed-footprint, prescribed, compressive support with
+zero interfacial energy storage. It does not infer opening, arcing, evolving
+area, spreading temperature or electromagnetic force. Focused synthetic G1/G3
+regressions compare independent RC/current, two-cell heat and scalar plasticity
+equations, data-only interface swaps, source-pressure refusal and cancellation;
+native execution is required before claiming those regressions pass.
+
 ## Assembled material shell bodies in the reciprocal string bank
 
 `shear_shell::assembly::MaterialShellAssembly` joins independently sourced
