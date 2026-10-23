@@ -28,6 +28,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighReport;
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::{LongitudinalStringResolution,LongitudinalMaterialLoss};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::{MultiBowPerformance,MultiBowPerformanceConfig};
@@ -150,9 +151,22 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
     let query=QueryPoint::new().with("T",spec.temperature)?.with("omega",spec.omega)?;
     Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
+#[derive(Debug)]
+enum BodyRadiationReport {
+    Rayleigh(PlateRayleighReport),
+    ShellBem(ShellBemReport),
+}
+impl core::fmt::Display for BodyRadiationReport {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Rayleigh(report) => write!(formatter, "{report:?}"),
+            Self::ShellBem(report) => write!(formatter, "{report:?}"),
+        }
+    }
+}
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
-    stop_profile: Option<stops::Profile>, body_radiation: Option<PlateRayleighReport> }
+    stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport> }
 impl input::Spec {
     fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
@@ -176,10 +190,21 @@ impl input::Spec {
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
-            if !profile.as_ref().is_some_and(body::Profile::has_planar_material_basis)
-                || self.prepared_linear.is_some()
-                || (radiation.sides == 2 && self.cavity.is_some()) {
-                return Err("computed body radiation needs a regional flat-plate profile, exact propagation, and one exterior side when a cavity is modeled".into());
+            if self.prepared_linear.is_some() {
+                return Err("computed body radiation requires the exact owner with acoustic storage".into());
+            }
+            match radiation {
+                input::BodyRadiation::Rayleigh(options) => {
+                    if !profile.as_ref().is_some_and(body::Profile::has_planar_material_basis)
+                        || (options.sides == 2 && self.cavity.is_some()) {
+                        return Err("computed Rayleigh radiation needs a regional flat-plate profile and one exterior side when a cavity is modeled".into());
+                    }
+                },
+                input::BodyRadiation::ShellBem(_) => {
+                    if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
+                        return Err("computed BEM radiation requires a curved shell or assembled shell body profile".into());
+                    }
+                },
             }
         }
         // Count every fluid inertia and physical connection before pack I/O.
@@ -203,7 +228,7 @@ impl input::Spec {
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
             .ok_or("complete material memory extent overflow")?;
-        let internal_states = self.body_radiation.map_or(0, |r| 2*r.maximum_poles)
+        let internal_states = self.body_radiation.map_or(0, |r| 2*r.maximum_poles())
             .checked_add(memory).ok_or("complete constitutive/acoustic state extent overflow")?;
         if internal_states != 0 {
             let core = settings.network.max_modes.checked_mul(2).ok_or("material setup dimension overflow")?;
@@ -313,9 +338,13 @@ impl input::Spec {
         // The original body basis survives fluid, torsion and material-history
         // binding. Compute its air reaction once, before bows or preload run.
         let (bank, body_radiation) = match self.body_radiation {
-            Some(options) => {
+            Some(input::BodyRadiation::Rayleigh(options)) => {
                 let (bank, report) = bank.with_material_plate_rayleigh(options, gate)?;
-                (bank, Some(report))
+                (bank, Some(BodyRadiationReport::Rayleigh(report)))
+            },
+            Some(input::BodyRadiation::ShellBem(options)) => {
+                let (bank, report) = bank.with_material_shell_bem(options, gate)?;
+                (bank, Some(BodyRadiationReport::ShellBem(report)))
             },
             None => (bank, None),
         };
@@ -432,7 +461,7 @@ fn main()->Result<()> {
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
-    if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report:?}"); }
+    if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {

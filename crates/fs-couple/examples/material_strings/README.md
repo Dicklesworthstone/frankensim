@@ -914,10 +914,13 @@ configuration, not an accuracy claim.
 ## Computed exterior reaction on the shared body
 
 The optional record immediately before `cavity` selects a geometry- and
-gas-derived load on a regional flat-plate body:
+gas-derived load on the original material body. Regional flat plates use the
+Rayleigh half-space model; closed curved shells and assemblies use the shared
+Helmholtz boundary-element solver:
 
 ```text
 body-radiation rayleigh SIDES MIN_HZ MAX_HZ FREQUENCIES MAX_CELLS MAX_SWEEP_TERMS MAX_POLES
+body-radiation bem MIN_HZ MAX_HZ FREQUENCIES MAX_PANELS MAX_SWEEP_TERMS MAX_POLES
 ```
 
 `rayleigh-pluck.material-strings` and `orthotropic.body` provide a small runnable
@@ -953,13 +956,31 @@ resistance gates. Those sampled estimates do not bound mesh or out-of-band
 error. Finer source meshes and wider bands can require fewer retained modes
 or a higher physical clock to fit the explicit resource envelope.
 
-This first computed route requires a v1/v2 regional plate profile and the
-ordinary exact owner. Curved shells and `prepared-linear` are refused. The
-receiver remains the existing compact, zero-retardation pressure observation
-of the **loaded** acceleration; it is not a matched broadband microphone or a
-validated violin exterior. The example retains one body mode to keep the
-complete passive acoustic image small; it is an integration fixture, not a
-claim of converged instrument timbre.
+The `bem` route requires a v3 shell or v4 assembly profile with a closed,
+outward-oriented exterior skin. It uses the original three-dimensional
+displacement fields, triangle normals and areas to compute the full mutual
+modal load. Pressure, temperature and mixture changes enter through the same
+gas state used by the string bank and cavity; the fitted load reacts on the
+same string/body/contact solve. The report records the basis identity, gas,
+panel and pole counts, mesh resolution and conditioning diagnostics, and
+sampled fit errors. `MAX_PANELS` is an admission bound on the source mesh,
+not permission to decimate it. The frequency count and passivity/error gates
+above also apply to BEM.
+
+Open shells, uncapped sound holes, inconsistent face orientations and
+multiply shared edges are refused. Coincident assembly boundary nodes are welded
+by exact coordinates for the acoustic topology; no gaps are filled or holes
+silently capped. This does not certify vertex-manifold quality, absence of
+self-intersection or geometric/acoustic convergence. In particular, a violin with f-holes still
+needs an explicit coupled interior/exterior opening model; merely selecting
+`bem` does not create one.
+
+Both computed routes require the ordinary exact owner; `prepared-linear` is
+refused. The receiver remains the existing compact, zero-retardation pressure
+observation of the **loaded** acceleration; it is not a matched broadband
+microphone or a validated violin exterior. The Rayleigh example retains one
+body mode to keep the complete passive acoustic image small; it is an
+integration fixture, not a claim of converged instrument timbre.
 
 ## Material profile and physical limits
 

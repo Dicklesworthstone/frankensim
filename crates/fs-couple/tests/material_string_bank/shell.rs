@@ -172,3 +172,6 @@ mod pressure;
 
 #[path = "shell/assembly.rs"]
 mod assembly;
+
+#[path = "shell/bem.rs"]
+mod bem;

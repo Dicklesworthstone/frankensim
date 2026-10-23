@@ -14,12 +14,19 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, spec: input::Spec, profile: Profile) ->
     spec.compile_with_body(cx, gate, Some(profile), |name| Ok(pack(name, 1.0, None))).unwrap()
 }
 
+fn report(ready: &Ready) -> &PlateRayleighReport {
+    let BodyRadiationReport::Rayleigh(report) = ready.body_radiation.as_ref().unwrap() else {
+        panic!("Rayleigh source selected a different radiation model");
+    };
+    report
+}
+
 #[test]
 fn computed_air_load_changes_motion_and_streams_the_same_accepted_pressure() {
     scoped(|cx, gate| {
         let spec = selected(101_325.0);
         let mut loaded = ready(cx, gate, spec.clone(), profile());
-        let report = loaded.body_radiation.as_ref().unwrap();
+        let report = report(&loaded);
         assert_eq!(report.body_modes, 1);
         assert_eq!(report.surface_cells, 96);
         assert!(report.acoustic_poles > 0);
@@ -55,9 +62,9 @@ fn gas_and_grain_data_rebuild_the_actual_same_basis_radiation_matrix() {
         let turned = Profile::parse(include_str!("../orthotropic.body")
             .replace("grain 0.17", "grain 0.87").as_bytes()).unwrap();
         let c = ready(cx, gate, selected(101_325.0), turned);
-        let ar = a.body_radiation.as_ref().unwrap();
-        let br = b.body_radiation.as_ref().unwrap();
-        let cr = c.body_radiation.as_ref().unwrap();
+        let ar = report(&a);
+        let br = report(&b);
+        let cr = report(&c);
         assert_eq!(ar.specimen_identity, br.specimen_identity);
         assert_ne!(ar.specimen_identity, cr.specimen_identity);
         assert_eq!(ar.gas.sound_speed, br.gas.sound_speed);
@@ -84,6 +91,54 @@ fn incompatible_or_unbounded_radiation_is_refused_before_pack_io() {
             "rayleigh 1 5 300 65 999999 10000000 48",
             "rayleigh 3 5 300 65 256 10000000 48"] {
             assert!(input::Spec::parse(text.replace("rayleigh 1 5 300 65 256 10000000 48", selected).as_bytes()).is_err());
+        }
+    });
+}
+
+#[test]
+fn bem_source_grammar_retains_its_complete_physical_resolution() {
+    let original = include_str!("../rayleigh-pluck.material-strings");
+    let selected = original.replace("rayleigh 1 5 300 65 256 10000000 48",
+        "bem 10 1000 65 80 100000000 64");
+    let spec = input::Spec::parse(selected.as_bytes()).unwrap();
+    let Some(input::BodyRadiation::ShellBem(options)) = spec.body_radiation else {
+        panic!("BEM source was silently converted to a different acoustic problem");
+    };
+    assert_eq!(options.minimum_hz, 10.0);
+    assert_eq!(options.maximum_hz, 1000.0);
+    assert_eq!(options.frequency_samples, 65);
+    assert_eq!(options.maximum_surface_panels, 80);
+    assert_eq!(options.maximum_sweep_terms, 100_000_000);
+    assert_eq!(options.maximum_poles, 64);
+    for invalid in [
+        "bem 10 1000 64 80 100000000 64",
+        "bem 10 1000 65 3 100000000 64",
+        "bem 10 1000 65 2049 100000000 64",
+        "bem 10 1000 65 80 0 64",
+        "bem 10 1000 65 80 100000000 0",
+        "bem 10 1000 65 80 100000000 64 ignored",
+    ] {
+        assert!(input::Spec::parse(original.replace(
+            "rayleigh 1 5 300 65 256 10000000 48", invalid).as_bytes()).is_err(),
+            "accepted {invalid}");
+    }
+}
+
+#[test]
+fn bem_on_a_missing_or_planar_profile_refuses_before_material_io() {
+    scoped(|cx, gate| {
+        for body in [None, Some(profile())] {
+            let selected = include_str!("../rayleigh-pluck.material-strings")
+                .replace("rayleigh 1 5 300 65 256 10000000 48",
+                    "bem 10 1000 65 80 100000000 64");
+            let spec = input::Spec::parse(selected.as_bytes()).unwrap();
+            let mut loads = 0;
+            let result = spec.compile_with_body(cx, gate, body, |name| {
+                loads += 1;
+                Ok(pack(name, 1.0, None))
+            });
+            assert!(result.is_err());
+            assert_eq!(loads, 0);
         }
     });
 }

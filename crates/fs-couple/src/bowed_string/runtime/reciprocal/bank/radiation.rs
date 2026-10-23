@@ -6,6 +6,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 /// Geometry-derived planar Rayleigh producer on the retained body basis.
 pub mod rayleigh;
 
+/// Closed curved material surfaces through the shared exterior Helmholtz owner.
+pub mod bem;
+
 /// Original medium, complete body basis and passive impedance realization.
 /// A supplied model keeps caller authority; the geometry producer owns the fit
 /// and its continuum/finite-band accuracy. Nothing is inferred from a timbre.

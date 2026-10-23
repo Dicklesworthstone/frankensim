@@ -6,6 +6,7 @@ use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
+use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -88,6 +89,30 @@ pub struct Body {
     pub pack: String, pub length: f64, pub width: f64, pub thickness: f64,
     pub modes: usize, pub listener: f64,
 }
+
+/// One geometry-derived exterior load on the original material body basis.
+/// The source description chooses the physical boundary problem, never a name
+/// for an instrument or a material-dependent output filter.
+#[derive(Clone, Copy, Debug)]
+pub enum BodyRadiation {
+    Rayleigh(PlateRayleighOptions),
+    ShellBem(ShellBemOptions),
+}
+impl BodyRadiation {
+    pub fn validate(self, rate: u32) -> Result<()> {
+        match self {
+            Self::Rayleigh(options) => options.validate(rate)?,
+            Self::ShellBem(options) => options.validate(rate)?,
+        }
+        Ok(())
+    }
+    pub fn maximum_poles(self) -> usize {
+        match self {
+            Self::Rayleigh(options) => options.maximum_poles,
+            Self::ShellBem(options) => options.maximum_poles,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub bytes: Vec<u8>, pub rate: u32, pub samples: u64, pub full_scale: f64, pub block: usize,
@@ -102,7 +127,7 @@ pub struct Spec {
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub bending_memory: Option<bending_memory::Input>,
-    pub body_radiation: Option<PlateRayleighOptions>,
+    pub body_radiation: Option<BodyRadiation>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub schedule: GestureSchedule,
@@ -391,11 +416,18 @@ impl Spec {
         let body_radiation = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("body-radiation") {
             let mut row = r.row("body-radiation")?;
-            if row.word()? != "rayleigh" { return Err("body-radiation requires the computed rayleigh model".into()); }
-            let options = PlateRayleighOptions {
-                sides: row.parse()?, minimum_hz: row.positive()?, maximum_hz: row.positive()?,
-                frequency_samples: row.count(257)?, maximum_surface_cells: row.count(4096)?,
-                maximum_sweep_terms: row.parse()?, maximum_poles: row.count(256)?,
+            let options = match row.word()? {
+                "rayleigh" => BodyRadiation::Rayleigh(PlateRayleighOptions {
+                    sides: row.parse()?, minimum_hz: row.positive()?, maximum_hz: row.positive()?,
+                    frequency_samples: row.count(257)?, maximum_surface_cells: row.count(4096)?,
+                    maximum_sweep_terms: row.parse()?, maximum_poles: row.count(256)?,
+                }),
+                "bem" => BodyRadiation::ShellBem(ShellBemOptions {
+                    minimum_hz: row.positive()?, maximum_hz: row.positive()?,
+                    frequency_samples: row.count(257)?, maximum_surface_panels: row.count(2048)?,
+                    maximum_sweep_terms: row.parse()?, maximum_poles: row.count(256)?,
+                }),
+                _ => return Err("body-radiation requires rayleigh or bem geometry-derived loading".into()),
             };
             row.end()?;
             options.validate(rate)?;

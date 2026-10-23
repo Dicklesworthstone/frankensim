@@ -35,6 +35,9 @@ enum BodyModel {
 }
 impl Profile {
     pub fn has_planar_material_basis(&self) -> bool { matches!(self.model, BodyModel::Plate(_)) }
+    pub fn has_shell_material_basis(&self) -> bool {
+        matches!(self.model, BodyModel::Shell(_) | BodyModel::Assembly(_))
+    }
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 1 MiB".into()); }
