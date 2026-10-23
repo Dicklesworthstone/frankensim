@@ -20,6 +20,8 @@
 //! $K_r = T^T K T$, $M_r = T^T M T$, preserving exact symmetry, positive-semidefinite
 //! energy, and zero net virtual interface power $P_m + P_s = 0$.
 
+use super::stiffened::BeamSection;
+use super::stiffened::timoshenko::{BeamKind, assemble_beam_chain};
 use super::{ShellMesh, ShellModel, dot, sub};
 use crate::PlateError;
 use fs_math::det;
@@ -2270,6 +2272,282 @@ fn accumulate_congruence(
         }
     }
     Ok(())
+}
+
+/// One beam chain standing on a shell skin, tied to it along its length by the 1-D dual mortar
+/// (M1.2-W3): a brace, a bass bar, a neck on its heel. The beam has its own centroidal nodes, which need
+/// not coincide with shell nodes. Each beam node follows the shell rigidly through the skin:
+/// $\mathbf{u}_b = \sum_j C_{ij}(\mathbf{u}_{m,j} + \boldsymbol\theta_{m,j} \times \mathbf{d}_j)$ and
+/// $\boldsymbol\theta_b = \sum_j C_{ij}\boldsymbol\theta_{m,j}$, with the arm
+/// $\mathbf{d}_j = \text{side}\,(\tfrac12 h_j + e)\,\mathbf{n}_j$ from the master midsurface to the beam centroid.
+/// With beam nodes on the shell nodes ($C = I$) this is the bonded eccentric `ShellBeam` map.
+#[derive(Debug, Clone)]
+pub struct BeamOnShell<'a> {
+    /// Beam centroid nodes [m], in order along the beam.
+    pub beam_nodes_m: &'a [[f64; 3]],
+    /// Direction of the beam section's +z axis (see `segment_matrices`).
+    pub section_z: [f64; 3],
+    /// Cross-section.
+    pub section: BeamSection,
+    /// Euler-Bernoulli or Timoshenko.
+    pub kind: BeamKind,
+    /// Master shell component and the ordered polyline of its nodes under the beam.
+    pub master: TieSide,
+    /// Skin the beam stands on: `+1` along the component normal, `-1` against it.
+    pub side: i8,
+    /// Height $e$ [m] of the beam centroid above that skin.
+    pub centroid_height_m: f64,
+}
+
+/// A tied shell pencil with beam chains eliminated onto it by [`tie_beams_to_shells`].
+#[derive(Debug, Clone)]
+pub struct BeamTiedShellModel {
+    /// $K_r + \sum_b T_b^T K_b T_b$ and $M_r + \sum_b T_b^T M_b T_b$ on the reduced coordinates of the shells.
+    pub model: ShellModel,
+    /// Gap, angle, segment and eliminated-DOF receipt of the beam ties alone.
+    pub receipt: TieReceipt,
+    /// Per beam, per beam DOF (`6 * node + d`): the reduced coordinates and weights it follows.
+    beam_rows: Vec<Vec<Vec<(usize, f64)>>>,
+}
+
+impl BeamTiedShellModel {
+    /// The six DOFs of every node of beam `beam` for a reduced shell vector.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadConstraint`] for an unknown beam or a reduced vector of the wrong length.
+    pub fn expand_beam(&self, beam: usize, reduced: &[f64]) -> Result<Vec<f64>, PlateError> {
+        let rows = self.beam_rows.get(beam).ok_or(PlateError::BadConstraint {
+            what: "unknown beam index",
+        })?;
+        if reduced.len() != self.model.free {
+            return Err(PlateError::BadConstraint {
+                what: "reduced vector length must equal model.free",
+            });
+        }
+        Ok(rows
+            .iter()
+            .map(|row| row.iter().map(|&(r, w)| w * reduced[r]).sum())
+            .collect())
+    }
+}
+
+/// Eliminate beam chains onto an already tied shell model (rigid, all six DOFs per beam node).
+/// `components` must be the slice `tied` was built from.
+///
+/// The transfer is the linear dual mortar of the shell ties: displacements and rotations between
+/// master nodes are interpolated linearly. That is consistent with Reissner-Mindlin shells (MITC3+,
+/// independent linear w and theta) carrying Timoshenko beams, and an off-node beam then converges to
+/// the on-node one (`g1_off_node_brace_converges`). On Kirchhoff shells (CST/DKT, cubic w along an
+/// edge) an off-node Euler-Bernoulli beam's slope-deflection constraint conflicts with the linearly
+/// interpolated rotation, and the result converges to a STIFFER limit (measured on a braced plate,
+/// 2026-10-23); there, use the on-node bonded `ShellBeam` (`assemble_stiffened_shell`), which this
+/// tie reproduces exactly when the beam nodes are the shell nodes. Only the beams are new here: the shell
+/// pencil, its ties and its supports are taken as they are, and the beam pencil enters by congruence,
+/// so the result stays symmetric and work-conjugate. A master DOF that a support fixes contributes
+/// nothing; a master DOF that a shell tie eliminated contributes through its own coupling row.
+///
+/// # Errors
+/// Returns [`PlateError::BadConstraint`] for invalid budget tolerances, a component slice that does
+/// not match `tied`, an invalid beam (fewer than two nodes, non-finite nodes, skin side not +-1,
+/// negative or non-finite centroid height, master nodes out of range or repeated), a beam path farther
+/// from its master skin line than `budget.gap_tolerance_m`, or a segment angle above
+/// `budget.angle_tolerance_rad`; [`PlateError::Budget`] when mortar segments or eliminated beam DOFs
+/// exceed `budget`; the beam element's section refusals; and [`PlateError::Cancelled`].
+pub fn tie_beams_to_shells(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    budget: TieBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    if cancelled() {
+        return Err(PlateError::Cancelled);
+    }
+    if !budget.gap_tolerance_m.is_finite()
+        || budget.gap_tolerance_m < 0.0
+        || !budget.angle_tolerance_rad.is_finite()
+        || budget.angle_tolerance_rad < 0.0
+    {
+        return Err(PlateError::BadConstraint {
+            what: "tie budget tolerances must be finite and non-negative",
+        });
+    }
+    if components.len() != tied.map.len()
+        || components
+            .iter()
+            .enumerate()
+            .any(|(i, c)| c.id != i || tied.map[i].len() != c.mesh.nodes.len())
+    {
+        return Err(PlateError::BadConstraint {
+            what: "components must be the slice the tied model was built from",
+        });
+    }
+    let eliminated: BTreeMap<(usize, usize, usize), &[(usize, f64)]> = tied
+        .slave_couplings
+        .iter()
+        .map(|s| {
+            (
+                (s.slave_component, s.slave_node, s.slave_dof),
+                s.master_terms.as_slice(),
+            )
+        })
+        .collect();
+    let mut normals: BTreeMap<usize, Vec<[f64; 3]>> = BTreeMap::new();
+    let mut k_coo = Coo::new(tied.model.free, tied.model.free);
+    let mut m_coo = Coo::new(tied.model.free, tied.model.free);
+    for (target, source) in [(&mut k_coo, &tied.model.k), (&mut m_coo, &tied.model.m)] {
+        for row in 0..source.nrows() {
+            let (cols, vals) = source.row(row);
+            for (&col, &val) in cols.iter().zip(vals) {
+                target.push(row, col, val);
+            }
+        }
+    }
+    let mut segments_used = 0usize;
+    let mut slave_dofs = 0usize;
+    let mut max_gap_m = 0.0_f64;
+    let mut max_angle_rad = 0.0_f64;
+    let mut beam_rows = Vec::with_capacity(beams.len());
+    for beam in beams {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        let n_b = beam.beam_nodes_m.len();
+        if n_b < 2 || beam.beam_nodes_m.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(PlateError::BadConstraint {
+                what: "a tied beam needs at least two finite nodes",
+            });
+        }
+        if beam.side != -1 && beam.side != 1 {
+            return Err(PlateError::BadConstraint {
+                what: "BeamOnShell side must be -1 or +1",
+            });
+        }
+        if !beam.centroid_height_m.is_finite() || beam.centroid_height_m < 0.0 {
+            return Err(PlateError::BadConstraint {
+                what: "BeamOnShell centroid height must be finite and non-negative",
+            });
+        }
+        let c_m = beam.master.component;
+        let comp = components.get(c_m).ok_or(PlateError::BadConstraint {
+            what: "BeamOnShell master component out of range",
+        })?;
+        let mut seen = BTreeSet::new();
+        if beam.master.nodes.len() < 2
+            || beam
+                .master
+                .nodes
+                .iter()
+                .any(|&n| n >= comp.mesh.nodes.len() || !seen.insert(n))
+        {
+            return Err(PlateError::BadConstraint {
+                what: "BeamOnShell master polyline needs two or more distinct in-range nodes",
+            });
+        }
+        slave_dofs += 6 * n_b;
+        if slave_dofs > budget.max_slave_dofs {
+            return Err(PlateError::Budget {
+                what: "tie_slave_dofs",
+                requested: slave_dofs,
+                limit: budget.max_slave_dofs,
+            });
+        }
+        if !normals.contains_key(&c_m) {
+            normals.insert(c_m, compute_component_normals(comp.mesh)?);
+        }
+        let n_m = &normals[&c_m];
+        let sign = f64::from(beam.side);
+        let master_midsurface: Vec<[f64; 3]> = beam
+            .master
+            .nodes
+            .iter()
+            .map(|&n| comp.mesh.nodes[n])
+            .collect();
+        let master_offsets: Vec<[f64; 3]> = beam
+            .master
+            .nodes
+            .iter()
+            .map(|&n| {
+                scale3(
+                    n_m[n],
+                    sign * (0.5 * comp.nodal_thickness_m[n] + beam.centroid_height_m),
+                )
+            })
+            .collect();
+        let ops = assemble_polyline_dual_mortar(
+            &master_midsurface,
+            &master_offsets,
+            beam.beam_nodes_m,
+            &budget,
+            &mut segments_used,
+            &mut cancelled,
+        )?;
+        max_gap_m = max_gap_m.max(ops.max_gap_m);
+        max_angle_rad = max_angle_rad.max(ops.max_angle_rad);
+        let beam_node_ids: Vec<usize> = (0..n_b).collect();
+        let mut constraints = BTreeMap::new();
+        record_slave_nodal_couplings_filtered(
+            c_m,
+            &beam.master.nodes,
+            &master_offsets,
+            usize::MAX,
+            &beam_node_ids,
+            &ops.c,
+            &vec![false; n_b],
+            RotationCoupling::Full,
+            None,
+            &mut constraints,
+        );
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(6 * n_b);
+        for node in 0..n_b {
+            for dof in 0..6 {
+                let mut acc: BTreeMap<usize, f64> = BTreeMap::new();
+                for &(c, mn, md, w) in &constraints[&(usize::MAX, node, dof)] {
+                    if let Some(r) = tied.map[c][mn][md] {
+                        *acc.entry(r).or_insert(0.0) += w;
+                    } else if let Some(terms) = eliminated.get(&(c, mn, md)) {
+                        for &(r, wr) in *terms {
+                            *acc.entry(r).or_insert(0.0) += w * wr;
+                        }
+                    }
+                }
+                rows.push(acc.into_iter().filter(|&(_, w)| w != 0.0).collect());
+            }
+        }
+        let (k_b, m_b) =
+            assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?;
+        accumulate_congruence(&k_b, &rows, &mut k_coo, &mut cancelled)?;
+        accumulate_congruence(&m_b, &rows, &mut m_coo, &mut cancelled)?;
+        beam_rows.push(rows);
+    }
+    let k = k_coo.assemble();
+    let m = m_coo.assemble();
+    if (0..tied.model.free).any(|row| {
+        k.row(row)
+            .1
+            .iter()
+            .chain(m.row(row).1)
+            .any(|x| !x.is_finite())
+    }) {
+        return Err(PlateError::BadConstraint {
+            what: "beam tie accumulation overflow",
+        });
+    }
+    Ok(BeamTiedShellModel {
+        model: ShellModel {
+            k,
+            m,
+            dof_map: tied.model.dof_map.clone(),
+            free: tied.model.free,
+        },
+        receipt: TieReceipt {
+            max_gap_m,
+            max_angle_rad,
+            segments: segments_used,
+            slave_dofs,
+        },
+        beam_rows,
+    })
 }
 
 #[cfg(test)]

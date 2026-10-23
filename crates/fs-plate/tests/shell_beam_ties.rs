@@ -10,9 +10,37 @@
 //! Fixture: a straight wooden bar 300 mm long, 20 mm (y) x 30 mm (z), E_L 12 GPa, G 0.75 GPa,
 //! 450 kg/m3. The shear areas are 5/6 A, the classical value of a rectangle, as section data.
 //! Bending is in the x-y plane (v, theta_z), which a straight bar decouples exactly from the rest.
-use fs_modal::eigh_gen_dense;
+//!
+//! It also holds the off-node beam-to-shell tie (`tie_beams_to_shells`, the linear 1-D dual mortar from
+//! the beam's own nodes to a shell skin line, with the arm u + theta x d):
+//! - `g1_matching_beam_tie_reproduces_on_node_beam`: beam nodes on the shell nodes (C = I) reproduce the
+//!   bonded eccentric `ShellBeam` model (CST/DKT shell, Euler-Bernoulli beam) to 1e-9;
+//! - the off-node convergence gate `g1_off_node_brace_converges` is NOT in this file yet: the off-node
+//!   minus on-node frequency gap converges, but mode 0 at observed order 2.19 (straight) and 2.21
+//!   (curved) over n = 32, 64, 128, just outside a two-sided 2 +- 0.2; the gate's form is an open question
+//!   on bead .52. MITC3+ (Reissner-Mindlin) with a Timoshenko beam is the consistent pairing for the linear
+//!   transfer; on Kirchhoff CST/DKT shells an off-node Euler-Bernoulli beam converges to a stiffer limit
+//!   (see `tie_beams_to_shells`);
+//! - the refusals: a beam path off the surface, a one-node beam, and the tie budgets at cap and cap+1.
+//!
+//! Brace fixture: a cantilevered plate 400 x 200 x 3 mm (clamped along x = 0), isotropic E 10 GPa,
+//! nu 0.3, 450 kg/m3, structured mesh of 2n x n cells; a glued 6 x 10 mm spruce brace (E_L 13.8 GPa,
+//! G 0.8 GPa, 460 kg/m3, shear areas 5/6 A) along the plate's mid line y = W/2 + c sin(pi x / L), with
+//! c = 0 (straight) or 20 mm (curved: the whole mesh follows the same bump, so the brace path is a mesh
+//! line). The off-node beam has 3 nodes per 2 shell edges, so only its ends are shell nodes.
+use fs_modal::{SliceOptions, eigh_gen_dense, slice_window};
+use fs_plate::PlateSection;
+use fs_plate::shell::junction::{
+    BeamOnShell, ShellComponent, TieBudget, TieSide, tie_beams_to_shells, tie_shells,
+};
+use fs_plate::shell::mitc::{
+    ConstraintFrame, MitcBudget, NodalDirectors, ShearShellSection, ShellConstraint, ShellMass,
+    assemble_mitc3p,
+};
 use fs_plate::shell::stiffened::BeamSection;
 use fs_plate::shell::stiffened::timoshenko::{BeamKind, ShearAreas, assemble_beam_chain};
+use fs_plate::shell::stiffened::{ShellBeam, assemble_stiffened_shell};
+use fs_plate::shell::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
 
 const L: f64 = 0.3;
 const HY: f64 = 0.02;
@@ -238,4 +266,321 @@ fn g1_timoshenko_beam_element() {
             "slope {slope:.3} per decade of G"
         );
     }
+}
+
+// ---------------------------------------------------------------- brace fixture
+const PL_L: f64 = 0.4;
+const PL_W: f64 = 0.2;
+const PL_H: f64 = 0.003;
+const PL_E: f64 = 10e9;
+const PL_NU: f64 = 0.3;
+const PL_RHO: f64 = 450.0;
+const BR_B: f64 = 0.006;
+const BR_H: f64 = 0.010;
+
+fn brace_section() -> BeamSection {
+    BeamSection {
+        young_pa: 13.8e9,
+        shear_pa: 0.8e9,
+        density_kg_m3: 460.0,
+        area_m2: BR_B * BR_H,
+        iy_m4: BR_B * BR_H.powi(3) / 12.0,
+        iz_m4: BR_H * BR_B.powi(3) / 12.0,
+        // Saint-Venant constant of a 10 x 6 mm rectangle, beta a b^3 with beta = 0.21 (a/b = 1.67).
+        torsion_m4: 0.21 * BR_H * BR_B.powi(3),
+    }
+}
+
+fn brace_timoshenko() -> BeamKind {
+    BeamKind::Timoshenko(ShearAreas {
+        y_m2: 5.0 / 6.0 * BR_B * BR_H,
+        z_m2: 5.0 / 6.0 * BR_B * BR_H,
+    })
+}
+
+fn budget() -> TieBudget {
+    TieBudget {
+        max_segments: 1_000_000,
+        max_slave_dofs: 1_000_000,
+        gap_tolerance_m: 1e-3,
+        angle_tolerance_rad: 0.3,
+    }
+}
+
+fn mid_line_y(x: f64, bump: f64) -> f64 {
+    0.5 * PL_W + bump * (std::f64::consts::PI * x / PL_L).sin()
+}
+
+struct Plate {
+    mesh: ShellMesh,
+    clamped: Vec<usize>,
+    line: Vec<usize>,
+}
+
+/// 2n x n structured cells; every grid line j = const follows the bump, so the mid line is a mesh line.
+fn plate(n: usize, bump: f64) -> Plate {
+    let (nx, ny) = (2 * n, n);
+    let id = |i: usize, j: usize| j * (nx + 1) + i;
+    let mut nodes = Vec::new();
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let x = PL_L * i as f64 / nx as f64;
+            let y = PL_W * j as f64 / ny as f64 + bump * (std::f64::consts::PI * x / PL_L).sin();
+            nodes.push([x, y, 0.0]);
+        }
+    }
+    let mut tris = Vec::new();
+    for j in 0..ny {
+        for i in 0..nx {
+            let (a, b, c, d) = (id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1));
+            if (i + j) % 2 == 0 {
+                tris.push([a, b, c]);
+                tris.push([a, c, d]);
+            } else {
+                tris.push([a, b, d]);
+                tris.push([b, c, d]);
+            }
+        }
+    }
+    Plate {
+        mesh: ShellMesh::new(nodes, tris).unwrap(),
+        clamped: (0..=ny).map(|j| id(0, j)).collect(),
+        line: (0..=nx).map(|i| id(i, ny / 2)).collect(),
+    }
+}
+
+fn dkt_sections(p: &Plate) -> Vec<PlateSection> {
+    vec![PlateSection::isotropic(PL_E, PL_NU, PL_H, PL_RHO).unwrap(); p.mesh.tris.len()]
+}
+
+/// The plate as CST/DKT (Kirchhoff), without beams.
+fn dkt_plate(p: &Plate) -> ShellModel {
+    assemble_shell_sections(&p.mesh, &dkt_sections(p), &p.clamped, ShellSupport::Clamped).unwrap()
+}
+
+/// The plate as MITC3+ (Reissner-Mindlin), clamped along x = 0 in global frames.
+fn mitc_plate(p: &Plate) -> ShellModel {
+    let g = PL_E / (2.0 * (1.0 + PL_NU));
+    let section = ShearShellSection::from_orthotropic_solid(
+        PL_E,
+        PL_E,
+        PL_NU,
+        g,
+        g,
+        g,
+        PL_H,
+        PL_RHO,
+        0.0,
+        5.0 / 6.0,
+    )
+    .unwrap();
+    let directors =
+        NodalDirectors::new(&p.mesh, vec![[0.0, 0.0, 1.0]; p.mesh.nodes.len()], 0.9).unwrap();
+    let constraints: Vec<ShellConstraint> = p
+        .clamped
+        .iter()
+        .map(|&node| ShellConstraint {
+            node,
+            mask: [true; 6],
+            frame: ConstraintFrame::Global,
+        })
+        .collect();
+    assemble_mitc3p(
+        &p.mesh,
+        &directors,
+        &vec![section; p.mesh.tris.len()],
+        &constraints,
+        ShellMass::Lumped,
+        MitcBudget {
+            max_nodes: p.mesh.nodes.len(),
+            max_triangles: p.mesh.tris.len(),
+        },
+        1e-3,
+        || false,
+    )
+    .unwrap()
+    .pencil()
+    .clone()
+}
+
+fn centroid_arm() -> f64 {
+    0.5 * PL_H + 0.5 * BR_H
+}
+
+/// The bonded eccentric reference on the CST/DKT plate: one `ShellBeam` per shell edge on the mid line.
+fn on_node_shell_beam(p: &Plate) -> (fs_sparse::Csr, fs_sparse::Csr) {
+    let beams: Vec<ShellBeam> = p
+        .line
+        .windows(2)
+        .map(|w| ShellBeam {
+            nodes: [w[0], w[1]],
+            offsets_m: [[0.0, 0.0, centroid_arm()]; 2],
+            section_z: [0.0, 0.0, 1.0],
+            section: brace_section(),
+        })
+        .collect();
+    let model = assemble_stiffened_shell(
+        &p.mesh,
+        &dkt_sections(p),
+        &p.clamped,
+        ShellSupport::Clamped,
+        &beams,
+    )
+    .unwrap();
+    (model.k, model.m)
+}
+
+/// `base` (the plate without beams) tied to a beam chain through `beam_nodes` (centroids).
+fn tie_beam(
+    p: &Plate,
+    base: &ShellModel,
+    beam_nodes: &[[f64; 3]],
+    kind: BeamKind,
+    budget: TieBudget,
+) -> Result<fs_plate::shell::junction::BeamTiedShellModel, fs_plate::PlateError> {
+    let thickness = vec![PL_H; p.mesh.nodes.len()];
+    let components = [ShellComponent {
+        id: 0,
+        mesh: &p.mesh,
+        model: base,
+        nodal_thickness_m: &thickness,
+    }];
+    let tied = tie_shells(&components, &[], budget, || false)?;
+    let beam = BeamOnShell {
+        beam_nodes_m: beam_nodes,
+        section_z: [0.0, 0.0, 1.0],
+        section: brace_section(),
+        kind,
+        master: TieSide {
+            component: 0,
+            nodes: p.line.clone(),
+        },
+        side: 1,
+        centroid_height_m: 0.5 * BR_H,
+    };
+    tie_beams_to_shells(&tied, &components, &[beam], budget, || false)
+}
+
+/// Beam centroids on the shell line nodes (the on-node beam).
+fn on_line_nodes(p: &Plate) -> Vec<[f64; 3]> {
+    p.line
+        .iter()
+        .map(|&n| {
+            let x = p.mesh.nodes[n];
+            [x[0], x[1], centroid_arm()]
+        })
+        .collect()
+}
+
+/// Beam centroids on the mid line, `segments` equal steps in x (off the shell nodes).
+fn beam_nodes(segments: usize, bump: f64) -> Vec<[f64; 3]> {
+    (0..=segments)
+        .map(|k| {
+            let x = PL_L * k as f64 / segments as f64;
+            [x, mid_line_y(x, bump), centroid_arm()]
+        })
+        .collect()
+}
+
+fn lowest_hz(k: &fs_sparse::Csr, m: &fs_sparse::Csr, hi: f64, count: usize) -> Vec<f64> {
+    let report = slice_window(k, m, (0.0, hi), &SliceOptions::default()).unwrap();
+    assert!(
+        report.modes.len() >= count,
+        "window holds {} modes",
+        report.modes.len()
+    );
+    report
+        .modes
+        .iter()
+        .take(count)
+        .map(|p| p.lambda.sqrt() / (2.0 * std::f64::consts::PI))
+        .collect()
+}
+
+/// Twice the sixth eigenvalue of a coarse (n = 8) model, from a dense solve.
+fn window_from(k: &fs_sparse::Csr, m: &fs_sparse::Csr) -> f64 {
+    let n = k.nrows();
+    let dense = |a: &fs_sparse::Csr| -> Vec<f64> {
+        let mut out = vec![0.0; n * n];
+        for r in 0..n {
+            let (cols, vals) = a.row(r);
+            for (&c, &v) in cols.iter().zip(vals) {
+                out[r * n + c] = v;
+            }
+        }
+        out
+    };
+    let modes = eigh_gen_dense(&dense(k), &dense(m), n).unwrap();
+    2.0 * modes[5].lambda
+}
+
+#[test]
+fn g1_matching_beam_tie_reproduces_on_node_beam() {
+    for bump in [0.0, 0.02] {
+        let p = plate(8, bump);
+        let (k, m) = on_node_shell_beam(&p);
+        let hi = window_from(&k, &m);
+        let tied = tie_beam(
+            &p,
+            &dkt_plate(&p),
+            &on_line_nodes(&p),
+            BeamKind::EulerBernoulli,
+            budget(),
+        )
+        .unwrap();
+        let a = lowest_hz(&k, &m, hi, 6);
+        let b = lowest_hz(&tied.model.k, &tied.model.m, hi, 6);
+        println!(
+            "matching nodes, bump {bump}: on-node {a:.4?} Hz, tied {b:.4?} Hz, gap {:.1e} m",
+            tied.receipt.max_gap_m
+        );
+        for (x, y) in a.iter().zip(&b) {
+            assert!(
+                (y / x - 1.0).abs() < 1e-9,
+                "matching tie {y} against on-node {x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_beam_path_off_surface_refuses() {
+    let p = plate(8, 0.0);
+    let base = mitc_plate(&p);
+    let mut nodes = beam_nodes(24, 0.0);
+    assert!(tie_beam(&p, &base, &nodes, brace_timoshenko(), budget()).is_ok());
+    // 5 mm above where a beam standing on the skin can be: beyond the 1 mm gap tolerance.
+    for node in &mut nodes {
+        node[2] += 0.005;
+    }
+    assert!(tie_beam(&p, &base, &nodes, brace_timoshenko(), budget()).is_err());
+    // A one-node beam refuses too.
+    assert!(tie_beam(&p, &base, &nodes[..1], brace_timoshenko(), budget()).is_err());
+}
+
+#[test]
+fn g0_beam_tie_budget_cap_and_cap_plus_one() {
+    let p = plate(8, 0.0);
+    let base = mitc_plate(&p);
+    let nodes = beam_nodes(24, 0.0);
+    let full = tie_beam(&p, &base, &nodes, brace_timoshenko(), budget()).unwrap();
+    let dofs = 6 * nodes.len();
+    assert_eq!(full.receipt.slave_dofs, dofs);
+    let segments = full.receipt.segments;
+    let at = |max_segments: usize, max_slave_dofs: usize| {
+        tie_beam(
+            &p,
+            &base,
+            &nodes,
+            brace_timoshenko(),
+            TieBudget {
+                max_segments,
+                max_slave_dofs,
+                ..budget()
+            },
+        )
+    };
+    assert!(at(segments, dofs).is_ok());
+    assert!(at(segments - 1, dofs).is_err());
+    assert!(at(segments, dofs - 1).is_err());
 }
