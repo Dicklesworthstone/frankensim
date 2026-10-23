@@ -526,7 +526,10 @@ fn resolved_sphere(latitude: usize) -> SpherePanels {
 /// cache are scheduling budgets only: every solve is bit-identical at any
 /// count. Leaf capacity 32 keeps plain CBIE's leaves at 5.3 to 7.6 panel
 /// radii on the 16128-81224 rungs, above CBIE_MIN_LEAF_RADII. Root kD
-/// exceeds W5a's 10 only at ka = 10, which takes the directional route.
+/// exceeds W5a's 10 only at ka = 10, which takes the directional route. The
+/// translation and coefficient-slot budgets admit each row's reciprocity
+/// twins at FMM orders 8 and 10 (9 and 11 on the directional route); budgets
+/// change no bits.
 fn routed_options(ka: f64) -> IterativeOptions {
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
     let directional = (ka > 5.0).then(|| {
@@ -535,6 +538,10 @@ fn routed_options(ka: f64) -> IterativeOptions {
         d.low_freq_threshold = 0.5;
         d.leaf_capacity = 128;
         d.max_coefficient_slots = 1 << 28;
+        // Declared: the order-7 base alone needs 8.0006e9 basis-transfer
+        // work on the 16128-panel rung, above the 8e9 default (ts1,
+        // 2026-10-23), and the finer rungs and twins need more.
+        d.max_translation_work = 1_000_000_000_000;
         d
     });
     IterativeOptions {
@@ -545,7 +552,8 @@ fn routed_options(ka: f64) -> IterativeOptions {
         directional,
         max_near_entries: 1 << 29,
         near_field_cache_bytes: 1 << 31,
-        max_translation_work: 40_000_000_000,
+        max_translation_work: 1_000_000_000_000,
+        max_coefficient_slots: 1 << 27,
         workers,
         m2l_cache_bytes: 1 << 33,
         ..IterativeOptions::default()
@@ -686,10 +694,11 @@ fn sphere_modal_loading_closed_forms() {
 /// - A one-mode (pulsating) bake is reciprocal by construction: it is
 ///   admitted, worker-bitwise, and binds its numerical options (not its
 ///   workers) into the declaration.
-/// - The two-mode bake keeps the unchanged 1e-12 reciprocity gate. The FMM
-///   and GMRES errors are not reciprocal, so it refuses NonReciprocal, at a
-///   defect of their size, carrying the refused matrix. Its pulsating entry is
-///   the one-mode bake's, bitwise.
+/// - The two-mode bake is reciprocal to its measured error scale (the .105
+///   G2 ruling): the defect is at most max(10 eps_gmres, eps_fmm), with
+///   eps_fmm from the order 8 twin, and the receipt records every term. Its
+///   pulsating entry is the one-mode bake's, bitwise. Dense rows record the
+///   1e-12 bound and no scale.
 #[test]
 fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
     let medium = air();
@@ -735,6 +744,9 @@ fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
         let routed = bake(&below, ka, Some(&options)).unwrap();
         assert_eq!(bits(&routed), bits(&dense));
         assert_eq!(routed.declaration_hash(), dense.declaration_hash());
+        let row = &routed.rows()[0];
+        assert_eq!(row.reciprocity_bound(), DENSE_RECIPROCITY_BOUND);
+        assert_eq!(row.iterative_error_scale(), None);
     }
     // Below the cap the declared panel rule reaches the dense bake. A
     // Burton-Miller row (ka 3) is solve_radiation_batch_with_rule's, bitwise,
@@ -832,26 +844,56 @@ fn routed_modal_loading_is_the_dense_bake_below_the_cap() {
     let rule_bm = bake_modes(&just_above, 1, 3.0, Some(&rule)).unwrap();
     assert_ne!(rule_bm.declaration_hash(), centroid_bm.declaration_hash());
     assert_ne!(bits(&rule_bm), bits(&centroid_bm));
-    match bake(&above, 0.05, Some(&options)) {
-        Err(ModalLoadingError::NonReciprocal {
-            relative_defect,
-            impedance,
-            ..
-        }) => {
-            println!(
-                "{{\"suite\":\"fs-bem\",\"case\":\"routed-modal-loading-reciprocity\",\"inputs\":\"analytic icosphere-5, ka 0.05, plain CBIE\",\"panels\":{},\"observed\":{relative_defect},\"tol\":1e-12,\"verdict\":\"refused\"}}",
-                above.areas().len()
-            );
-            assert!(relative_defect > 1e-12 && relative_defect < 1e-6);
-            let z00 = impedance[0];
-            let single = routed.rows()[0].impedance()[0];
-            assert_eq!(
-                (z00.re.to_bits(), z00.im.to_bits()),
-                (single.re.to_bits(), single.im.to_bits())
-            );
-        }
-        other => panic!("expected the unchanged reciprocity refusal: {other:?}"),
+    let pair = bake(&above, 0.05, Some(&options)).unwrap();
+    let row = &pair.rows()[0];
+    let scale = row.iterative_error_scale().unwrap();
+    // The exact bits, for comparison with the same bakes before the twins.
+    let hex = |b: &ModalLoadingBake| {
+        bits(b)
+            .iter()
+            .flat_map(|&(re, im)| [re, im])
+            .map(|v| format!("{v:016x}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    println!(
+        "{{\"suite\":\"fs-bem\",\"case\":\"routed-modal-loading-bits\",\"panels\":{},\"one_mode_z_bits\":\"{}\",\"two_mode_z_bits\":\"{}\"}}",
+        above.areas().len(),
+        hex(&routed),
+        hex(&pair)
+    );
+    println!(
+        "{{\"suite\":\"fs-bem\",\"case\":\"routed-modal-loading-reciprocity\",\"inputs\":\"analytic icosphere-5, ka 0.05, plain CBIE\",\"panels\":{},\"gmres_tol\":{},\"fmm_orders\":{:?},\"eps_gmres\":{},\"eps_fmm\":{},\"eps_fmm_next\":{},\"observed\":{},\"bound\":{},\"verdict\":\"pass\",\"twins\":[{},{}]}}",
+        above.areas().len(),
+        options.tol,
+        scale.fmm_orders,
+        scale.gmres_residual,
+        scale.fmm_error,
+        scale.fmm_error_next,
+        row.reciprocity_relative_defect(),
+        row.reciprocity_bound(),
+        scale.twins[0].to_json(),
+        scale.twins[1].to_json()
+    );
+    assert_eq!(scale.fmm_orders, [6, 8, 10]);
+    for (twin, order) in scale.twins.iter().zip([8, 10]) {
+        assert_eq!(twin.fmm_order, order);
+        assert_eq!(twin.max_translation_work, options.max_translation_work);
+        assert_eq!(twin.max_coefficient_slots, options.max_coefficient_slots);
+        assert_eq!(twin.applies, 2);
     }
+    assert!(scale.gmres_residual <= options.tol && scale.estimate_is_resolved());
+    assert_eq!(
+        row.reciprocity_bound(),
+        (GMRES_RECIPROCITY_FACTOR * scale.gmres_residual).max(scale.fmm_error)
+    );
+    assert!(row.reciprocity_relative_defect() <= row.reciprocity_bound());
+    let z00 = row.impedance()[0];
+    let single = routed.rows()[0].impedance()[0];
+    assert_eq!(
+        (z00.re.to_bits(), z00.im.to_bits()),
+        (single.re.to_bits(), single.im.to_bits())
+    );
 }
 
 /// G1: the low-ka translation (dipole) mode, which motivated the

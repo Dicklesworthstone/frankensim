@@ -344,6 +344,67 @@ fn fmm_c64_caps() {
     );
 }
 
+/// A declared coefficient-slot ceiling admits exactly the counted slots with
+/// bit-identical potentials, and refuses one less (counts in f64 slots, as
+/// the v1 check reports them).
+#[test]
+fn fmm_c64_declared_coefficient_budget() {
+    let start = Instant::now();
+    let (points, charges, normals) = fixture();
+    let kernel = HelmholtzHypersingular { k: 5.0 };
+    let order = 4;
+    let plain =
+        FmmC64::new_hypersingular(kernel, points.clone(), normals.clone(), order, 2).unwrap();
+    let stats = plain.stats();
+    let slots: usize = stats
+        .split("\"complex_coefficient_slots\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(slots > 0, "{stats}");
+    let within = |max_coefficient_slots| {
+        FmmC64::new_hypersingular_within(
+            kernel,
+            points.clone(),
+            normals.clone(),
+            order,
+            2,
+            ComplexBudget {
+                max_coefficient_slots,
+                ..ComplexBudget::V1
+            },
+        )
+    };
+    assert_eq!(
+        bits(&plain.potentials(&charges).unwrap()),
+        bits(&within(slots).unwrap().potentials(&charges).unwrap())
+    );
+    assert!(matches!(
+        within(slots - 1),
+        Err(FmmError::WorkEnvelopeExceeded {
+            operation: "complex coefficient-slot (two f64 per C64)",
+            requested,
+            max,
+        }) if requested == 2 * slots && max == 2 * (slots - 1)
+    ));
+    assert!(matches!(within(0), Err(FmmError::ComplexRequest { .. })));
+    // A second worker's kernel row is charged to the same declared ceiling.
+    let mut tight = within(slots).unwrap();
+    assert!(matches!(
+        tight.set_workers(2),
+        Err(FmmError::WorkEnvelopeExceeded { .. })
+    ));
+    super::measurement(
+        "fmm-hz-caps",
+        "declared_coefficient_budget",
+        format!(
+            "{{\"case\":\"fmm-hz-caps\",\"inputs\":{{\"provenance\":\"counted cells * p^3 * channels\"}},\"axis\":\"max_coefficient_slots\",\"rung\":{order},\"observed\":{slots},\"oracle\":{slots},\"err\":0,\"tol\":0,\"verdict\":\"pass\",\"elapsed_s\":{}}}",
+            start.elapsed().as_secs_f64()
+        ),
+    );
+}
+
 #[test]
 fn fmm_c64_declared_translation_budget() {
     let start = Instant::now();
@@ -371,6 +432,7 @@ fn fmm_c64_declared_translation_budget() {
             2,
             ComplexBudget {
                 max_translation_work,
+                ..ComplexBudget::V1
             },
         )
     };
@@ -389,6 +451,10 @@ fn fmm_c64_declared_translation_budget() {
     ));
     assert!(matches!(within(0), Err(FmmError::ComplexRequest { .. })));
     assert_eq!(ComplexBudget::V1.max_translation_work, MAX_TRANSLATION_WORK);
+    assert_eq!(
+        ComplexBudget::V1.max_coefficient_slots,
+        MAX_COMPLEX_COEFFICIENT_SLOTS
+    );
     super::measurement(
         "fmm-hz-caps",
         "declared_translation_budget",

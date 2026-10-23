@@ -852,7 +852,8 @@ fn dfmm_declared_envelopes_are_neutral_and_enforced() {
     assert!(delegated.directional_stats().is_none());
     assert!(matches!(
         statics(ComplexBudget {
-            max_translation_work: 1
+            max_translation_work: 1,
+            ..ComplexBudget::V1
         }),
         Err(FmmError::WorkEnvelopeExceeded {
             operation: "complex M2L channel multiply-add",

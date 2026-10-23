@@ -175,7 +175,13 @@ A caller can declare a different per-pass M2L ceiling with `ComplexBudget`
 and the `new_within`, `new_double_within`, `new_adjoint_double_within` and
 `new_hypersingular_within` constructors.
 - The plain constructors use `ComplexBudget::V1`, which is
-  `MAX_TRANSLATION_WORK`.
+  `MAX_TRANSLATION_WORK` and `MAX_COMPLEX_COEFFICIENT_SLOTS`.
+- `ComplexBudget::max_coefficient_slots` declares the peak complex
+  coefficients in the same way. W5a admission and `set_workers` check it, and
+  it changes no bit. `fmm_c64_declared_coefficient_budget` admits exactly the
+  counted slots with bit-identical potentials and refuses one less. fs-bem's
+  reciprocity twins (orders p + 2 and p + 4) need it on the finest routed
+  spheres (.105).
 - A larger budget is a longer uncancellable pass, chosen explicitly. The
   81920-panel (icosphere-6) sphere at order 6 counts roughly four times the
   icosphere-5 pass.

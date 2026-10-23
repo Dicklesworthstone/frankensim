@@ -559,7 +559,8 @@ budget for the full frequency sweep and a provenance hash. The bake declaration
 hash includes geometry, all traces, route, medium, frequencies and budget.
 
 Rows use `exp(-i omega t)`: resistance is `Re Z`, added mass is `-Im Z/omega`.
-The unchanged matrix must have relative reciprocity defect at most 1e-12 and
+The unchanged matrix must have relative reciprocity defect at most
+`DENSE_RECIPROCITY_BOUND` = 1e-12 (an iterative row's bound is below) and
 minimum resistance eigenvalue at least `-1e-12 ||Z||_F`, with a resolved full
 eigendecomposition residual. Failed numerical data refuse instead of being
 symmetrized, eigenvalue-clipped or supplied with extra damping. This is a
@@ -607,14 +608,48 @@ was changed.
   cap; that receiver admission itself stops at the dense cap.
   `GeometryPolicy::new` admits surfaces up to `MAX_SURFACE_PANELS`, since its
   box bound holds at any size; its `solve_batch` keeps the dense owner's cap.
-- The reciprocity and passivity gates are unchanged. `NonReciprocal` and
-  `NonPassive` carry the refused matrix as a diagnostic, never as a row.
-  FMM and GMRES errors are not reciprocal, so a routed matrix's defect sits at
-  their level, far above 1e-12.
-- `routed_modal_loading_is_the_dense_bake_below_the_cap` checks the bitwise
-  dense equality for a plain-CBIE and a Burton-Miller row, the unrouted W5c
-  refusal, a live closure refusal and a worker-bitwise, option-bound
-  declaration at 20480 panels.
+- Reciprocity of an iterative row (the .105 G2 ruling, 2026-10-23):
+  - FMM truncation is not reciprocal, and the GMRES residual cannot see it:
+    the residual is measured against the same truncated operator.
+  - On a unit icosphere at ka 0.05 (plain CBIE), a 1e4-tighter GMRES
+    tolerance moves the defect 2%, while +2 FMM orders cut it 30-67x (ts1,
+    2026-10-23).
+  - So each row also applies order p + 2 and p + 4 twins of its operator to
+    the converged fields, one operator at a time, under the declared budgets.
+    eps_fmm is the largest `||A_{p+2} x - A_p x|| / ||A_p x||`, and
+    eps_fmm_next is the same one step up.
+  - The bound is `max(10 eps_gmres, eps_fmm)`, where eps_gmres is the largest
+    achieved Euclidean GMRES residual.
+  - The p + 2 estimate is Richardson-style, valid while the FMM error decays
+    geometrically. A row with `eps_fmm_next > 0.3 eps_fmm` refuses with
+    `UnresolvedFmmEstimate`.
+  - fs-fmm admits orders up to 12, so a row declared above order 8 refuses.
+    The twins obey the row's declared budgets, including
+    `IterativeOptions::max_coefficient_slots` (default fs-fmm's v1
+    `MAX_COMPLEX_COEFFICIENT_SLOTS`), a budget that changes no bits. Twins at
+    p + 2 and p + 4 on the 20480- and 81224-panel spheres need more than v1.
+  - The row's receipt, `IterativeErrorScale`, records eps_gmres, the three
+    orders, both estimates and each twin's budget, applications and wall time
+    (`TwinWork`). `reciprocity_bound` records the bound. Nothing is
+    symmetrised, and the twins change no bit of Z.
+- The passivity gate is unchanged. `NonReciprocal` (with its bound and scale)
+  and `NonPassive` carry the refused matrix as a diagnostic, never as a row.
+- `iterative_rows_are_reciprocal_to_their_measured_error_scale` (unit test)
+  forces 1280- and 20480-panel icospheres onto the iterative owner at FMM
+  orders 4/6/8 and 6/8:
+  - every row passes its bound;
+  - the defect and eps_fmm each shrink at least 10x per +2 orders;
+  - the same row with a swapped projection refuses by more than 3 decades;
+  - an unresolved estimate refuses;
+  - a direct row keeps 1e-12.
+- `routed_modal_loading_is_the_dense_bake_below_the_cap` checks:
+  - the bitwise dense equality for a plain-CBIE and a Burton-Miller row;
+  - the unrouted W5c refusal;
+  - a live closure refusal;
+  - a worker-bitwise, option-bound declaration at 20480 panels;
+  - that declaration's two-mode row admitted with its full receipt;
+  - the routed rows' Z, printed bit for bit, equal to the same bakes before
+    the twins (ts1, 2026-10-23).
 
 G3, loaded modes of a real free aluminium bar (`fs-couple/tests/loaded_free_bar.rs`):
 - Fixture: beam 40 of NASA TM X-2852 (specimen `aluminum-beams-howell1974`)

@@ -37,11 +37,17 @@ pub struct ComplexBudget {
     /// Counted M2L channel multiply-adds in one pass. Passes poll no
     /// cancellation, so this also bounds one uncancellable pass.
     pub max_translation_work: usize,
+    /// Peak complex coefficients of one operator, in C64 units: both passes,
+    /// transient cell buffers and declared worker rows. Like the work
+    /// ceiling, it changes no bits.
+    pub max_coefficient_slots: usize,
 }
 impl ComplexBudget {
-    /// The v1 ceiling, [`MAX_TRANSLATION_WORK`].
+    /// The v1 ceilings, [`MAX_TRANSLATION_WORK`] and
+    /// [`MAX_COMPLEX_COEFFICIENT_SLOTS`].
     pub const V1: Self = Self {
         max_translation_work: MAX_TRANSLATION_WORK,
+        max_coefficient_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
     };
 }
 
@@ -164,6 +170,8 @@ pub struct FmmC64<'k> {
     /// Optional adjacent-leaf pair values in `potentials` order.
     near: Option<Vec<C64>>,
     coefficient_slots: usize,
+    /// Declared W5a coefficient-slot ceiling, kept for [`Self::set_workers`].
+    max_coefficient_slots: usize,
     directional: Option<directional::DirectionalPlan>,
     /// Declared worker threads for the non-directional passes; see
     /// [`Self::set_workers`].
@@ -446,6 +454,11 @@ impl<'k> FmmC64<'k> {
                 reason: "the declared M2L work budget must be positive",
             });
         }
+        if budget.max_coefficient_slots == 0 {
+            return Err(FmmError::ComplexRequest {
+                reason: "the declared coefficient-slot budget must be positive",
+            });
+        }
         if !(MIN_INTERPOLATION_ORDER..=MAX_INTERPOLATION_ORDER).contains(&order) {
             return Err(FmmError::InvalidOrder {
                 order,
@@ -496,7 +509,7 @@ impl<'k> FmmC64<'k> {
         let coefficient_slots = (geometry.cells.len() + 2)
             .saturating_mul(order.pow(3))
             .saturating_mul(ns + nt);
-        Self::validate_coefficient_slots(coefficient_slots)?;
+        Self::validate_coefficient_slots_within(coefficient_slots, budget.max_coefficient_slots)?;
         let mut levels: BTreeMap<u32, Vec<CellKey>> = BTreeMap::new();
         for &key in geometry.cells.keys() {
             levels.entry(key.0).or_default().push(key);
@@ -568,6 +581,7 @@ impl<'k> FmmC64<'k> {
             translations,
             near: None,
             coefficient_slots,
+            max_coefficient_slots: budget.max_coefficient_slots,
             directional: None,
             workers: 1,
             m2l_rows: None,
@@ -849,11 +863,11 @@ impl<'k> FmmC64<'k> {
     ///   groups in their fixed order to its own targets only;
     /// - leaves accumulate their own points, in the serial order.
     ///
-    /// Each extra worker holds one M2L kernel row, charged to the
+    /// Each extra worker holds one M2L kernel row, charged to the declared
     /// coefficient-slot envelope. The directional route stays serial.
     ///
     /// # Errors
-    /// `WorkEnvelopeExceeded` when the worker rows would exceed the
+    /// `WorkEnvelopeExceeded` when the worker rows would exceed the declared
     /// coefficient-slot ceiling; the previous declaration is kept.
     pub fn set_workers(&mut self, workers: usize) -> Result<(), FmmError> {
         let workers = workers.max(1);
@@ -862,7 +876,7 @@ impl<'k> FmmC64<'k> {
             let row = self.nodes.len().pow(3) * ns * nt;
             let base = self.coefficient_slots - (self.workers - 1) * row;
             let slots = base.saturating_add((workers - 1).saturating_mul(row));
-            Self::validate_coefficient_slots(slots)?;
+            Self::validate_coefficient_slots_within(slots, self.max_coefficient_slots)?;
             self.coefficient_slots = slots;
         }
         self.workers = workers;

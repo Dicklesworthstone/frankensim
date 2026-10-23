@@ -25,7 +25,7 @@ use crate::{BemError, panel3d::SpherePanels};
 use fs_exec::CancelGate;
 use fs_fmm::{
     ComplexBudget, DirectionalOptions, FmmC64, FmmError, HelmholtzAdjointDouble, HelmholtzDouble,
-    HelmholtzHypersingular, HelmholtzSingle, MAX_TRANSLATION_WORK,
+    HelmholtzHypersingular, HelmholtzSingle, MAX_COMPLEX_COEFFICIENT_SLOTS, MAX_TRANSLATION_WORK,
 };
 use fs_la::eigen_complex::{LuComplex, lu_complex};
 use fs_math::c64::C64;
@@ -74,6 +74,10 @@ pub struct IterativeOptions {
     /// cancellable. Defaults to the fs-fmm v1 `MAX_TRANSLATION_WORK`. The
     /// directional route declares its envelopes in its own options.
     pub max_translation_work: usize,
+    /// Peak W5a complex coefficients per operator, in C64 units. Defaults to
+    /// the fs-fmm v1 `MAX_COMPLEX_COEFFICIENT_SLOTS`. It changes no bits; the
+    /// directional route declares its own.
+    pub max_coefficient_slots: usize,
     /// Declared worker threads for every W5a operator pass
     /// ([`FmmC64::set_workers`]) and for the directional route's M2L and
     /// direct near passes. Potentials are bit-identical for every count. The
@@ -114,6 +118,7 @@ impl Default for IterativeOptions {
             max_near_entries: 4_194_304,
             near_field_cache_bytes: 1 << 29,
             max_translation_work: MAX_TRANSLATION_WORK,
+            max_coefficient_slots: MAX_COMPLEX_COEFFICIENT_SLOTS,
             workers: 1,
             m2l_cache_bytes: 0,
             panel_rule: PanelRule::Centroid,
@@ -184,6 +189,7 @@ impl IterativeOptions {
     fn budget(&self) -> ComplexBudget {
         ComplexBudget {
             max_translation_work: self.max_translation_work,
+            max_coefficient_slots: self.max_coefficient_slots,
         }
     }
     /// The directional options with this owner's W5a budget, which also

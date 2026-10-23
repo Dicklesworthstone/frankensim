@@ -16,6 +16,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use std::ops::Range;
+use std::time::Instant;
 
 /// Physical boundary and complete outward normal-velocity traces. A structure
 /// must supply a work-consistent transfer; this module does not interpolate it.
@@ -64,8 +65,20 @@ pub enum ModalLoadingError {
     NonReciprocal {
         omega: f64,
         relative_defect: f64,
+        /// [`DENSE_RECIPROCITY_BOUND`] for a direct row, or
+        /// [`IterativeErrorScale::reciprocity_bound`] for an iterative one.
+        bound: f64,
+        /// The measured error scale of an iterative row; `None` for a direct one.
+        scale: Option<IterativeErrorScale>,
         /// The refused row-major matrix, unchanged.
         impedance: Vec<C64>,
+    },
+    /// An iterative row's p + 2 FMM error estimate is outside its
+    /// geometric-decay regime (see [`FMM_ESTIMATE_MAX_DECAY_RATIO`]), so its
+    /// reciprocity scale is unresolved. The row refuses rather than pass.
+    UnresolvedFmmEstimate {
+        omega: f64,
+        scale: IterativeErrorScale,
     },
     /// Symmetric resistance has a resolved negative eigenvalue.
     NonPassive {
@@ -91,10 +104,16 @@ impl core::fmt::Display for ModalLoadingError {
             Self::NonReciprocal {
                 omega,
                 relative_defect,
+                bound,
                 ..
             } => write!(
                 f,
-                "nonreciprocal loading at {omega} rad/s: {relative_defect}"
+                "nonreciprocal loading at {omega} rad/s: {relative_defect} > {bound}"
+            ),
+            Self::UnresolvedFmmEstimate { omega, scale } => write!(
+                f,
+                "unresolved FMM error estimate at {omega} rad/s: orders {:?} give {} then {}",
+                scale.fmm_orders, scale.fmm_error, scale.fmm_error_next
             ),
             Self::NonPassive {
                 omega,
@@ -109,6 +128,91 @@ impl core::fmt::Display for ModalLoadingError {
     }
 }
 impl std::error::Error for ModalLoadingError {}
+
+/// Reciprocity bound of a row from direct (dense LU or Rayleigh) evaluation,
+/// relative to the Frobenius norm.
+pub const DENSE_RECIPROCITY_BOUND: f64 = 1e-12;
+
+/// GMRES residual-to-error amplification allowed in an iterative row's
+/// reciprocity bound.
+pub const GMRES_RECIPROCITY_FACTOR: f64 = 10.0;
+
+/// The p + 2 FMM error estimate is Richardson-style: it holds while the FMM
+/// error decays geometrically in the order. A row whose estimate one step up
+/// exceeds this fraction of it refuses.
+pub const FMM_ESTIMATE_MAX_DECAY_RATIO: f64 = 0.3;
+
+/// Measured error scale of a row assembled from iterative solves, from the
+/// same converged fields x that supplied Z (ruling on .105 G2, 2026-10-23).
+/// - The FMM truncation error is not reciprocal, and the GMRES residual cannot
+///   see it: the residual is measured against the same truncated operator.
+///   `fmm_error` measures it directly against an order p + 2 twin.
+/// - The row's bound is `max(10 gmres_residual, fmm_error)`, and it is valid
+///   while `fmm_error_next <= 0.3 fmm_error`. A reader recomputes both from
+///   this record.
+/// - The twins obey the row's declared budgets, and fs-fmm admits orders up
+///   to 12, so a row declared above order 8 cannot be scaled and refuses.
+///   `twins` records each twin's budget and the work it spent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IterativeErrorScale {
+    /// Largest achieved Euclidean relative GMRES residual over the fields.
+    pub gmres_residual: f64,
+    /// The solves' FMM order p (the directional order on that route) and the
+    /// twin orders p + 2 and p + 4.
+    pub fmm_orders: [usize; 3],
+    /// Largest `||A_{p+2} x - A_p x|| / ||A_p x||` over the fields.
+    pub fmm_error: f64,
+    /// Largest `||A_{p+4} x - A_{p+2} x|| / ||A_{p+2} x||` over the fields.
+    pub fmm_error_next: f64,
+    /// The p + 2 and p + 4 twins' process evidence.
+    pub twins: [TwinWork; 2],
+}
+
+/// Process evidence of one reciprocity twin, separate from its numbers: the
+/// declared budget it ran under and the work it spent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwinWork {
+    /// The twin's FMM order (the directional order on that route).
+    pub fmm_order: usize,
+    /// Its declared translation budget, in counted multiply-adds of one pass:
+    /// the directional route's own budget there, W5a's otherwise.
+    pub max_translation_work: usize,
+    /// Its declared peak complex coefficients, in C64 units: the directional
+    /// route's own budget there, W5a's otherwise.
+    pub max_coefficient_slots: usize,
+    /// Operator applications, one per converged field.
+    pub applies: usize,
+    /// Preparation and applications, in wall seconds.
+    pub wall_s: f64,
+}
+impl TwinWork {
+    /// One JSON object, for receipts and logs.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"fmm_order\":{},\"max_translation_work\":{},\"max_coefficient_slots\":{},\"applies\":{},\"wall_s\":{}}}",
+            self.fmm_order,
+            self.max_translation_work,
+            self.max_coefficient_slots,
+            self.applies,
+            self.wall_s
+        )
+    }
+}
+impl IterativeErrorScale {
+    /// `max(GMRES_RECIPROCITY_FACTOR * gmres_residual, fmm_error)`. The FMM
+    /// term already estimates the operator error that makes the asymmetry,
+    /// so it takes no factor.
+    #[must_use]
+    pub fn reciprocity_bound(&self) -> f64 {
+        (GMRES_RECIPROCITY_FACTOR * self.gmres_residual).max(self.fmm_error)
+    }
+    /// Whether the p + 2 estimate is in its geometric-decay regime.
+    #[must_use]
+    pub fn estimate_is_resolved(&self) -> bool {
+        self.fmm_error_next <= FMM_ESTIMATE_MAX_DECAY_RATIO * self.fmm_error
+    }
+}
 
 /// Allocation-free cap admission. A 257-mode BEM request is two complete source
 /// batches; it never becomes a 256-mode physical model. The output budget counts
@@ -222,6 +326,8 @@ pub struct ModalLoadingRow {
     minimum_resistance_eigenvalue: f64,
     eigen_residual: f64,
     reciprocity_relative_defect: f64,
+    reciprocity_bound: f64,
+    iterative_error_scale: Option<IterativeErrorScale>,
     bem_diagnostics: Option<ModalLoadingBemDiagnostics>,
 }
 impl ModalLoadingRow {
@@ -240,6 +346,17 @@ impl ModalLoadingRow {
     }
     pub const fn reciprocity_relative_defect(&self) -> f64 {
         self.reciprocity_relative_defect
+    }
+    /// The bound the defect met: [`DENSE_RECIPROCITY_BOUND`] for a direct
+    /// row, the scale's [`IterativeErrorScale::reciprocity_bound`] for an
+    /// iterative one.
+    pub const fn reciprocity_bound(&self) -> f64 {
+        self.reciprocity_bound
+    }
+    /// Measured error scale of an iterative row; `None` for a dense or
+    /// Rayleigh row.
+    pub const fn iterative_error_scale(&self) -> Option<IterativeErrorScale> {
+        self.iterative_error_scale
     }
     /// Diagnostics retained from the same closed-body solves that supplied Z.
     /// Rayleigh rows have no BEM solve and return `None`.
@@ -293,10 +410,34 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalLoadingError> {
     }
 }
 
-fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoadingError> {
+/// `scale` is the measured error scale of an iterative row, `None` for a
+/// direct one. Nothing is symmetrised: the returned matrix is the input.
+fn assess(
+    omega: f64,
+    z: Vec<C64>,
+    n: usize,
+    scale: Option<IterativeErrorScale>,
+) -> Result<ModalLoadingRow, ModalLoadingError> {
     if z.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
         return Err(ModalLoadingError::Invalid("nonfinite projected impedance"));
     }
+    let bound = match scale {
+        None => DENSE_RECIPROCITY_BOUND,
+        Some(s) => {
+            if [s.gmres_residual, s.fmm_error, s.fmm_error_next]
+                .iter()
+                .any(|v| !v.is_finite() || *v < 0.0)
+            {
+                return Err(ModalLoadingError::Invalid(
+                    "iterative error scale must be finite and nonnegative",
+                ));
+            }
+            if !s.estimate_is_resolved() {
+                return Err(ModalLoadingError::UnresolvedFmmEstimate { omega, scale: s });
+            }
+            s.reciprocity_bound()
+        }
+    };
     let norm = z.iter().fold(0.0_f64, |s, v| s.hypot(v.abs()));
     if !norm.is_finite() {
         return Err(ModalLoadingError::Invalid("impedance norm overflow"));
@@ -311,10 +452,12 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
             resistance.push(0.5 * z[i * n + j].re + 0.5 * z[j * n + i].re);
         }
     }
-    if defect > 1e-12 * norm {
+    if defect > bound * norm {
         return Err(ModalLoadingError::NonReciprocal {
             omega,
             relative_defect: defect / norm,
+            bound,
+            scale,
             impedance: z,
         });
     }
@@ -325,6 +468,8 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
             minimum_resistance_eigenvalue: 0.0,
             eigen_residual: 0.0,
             reciprocity_relative_defect: 0.0,
+            reciprocity_bound: bound,
+            iterative_error_scale: scale,
             bem_diagnostics: None,
         });
     }
@@ -372,6 +517,8 @@ fn assess(omega: f64, z: Vec<C64>, n: usize) -> Result<ModalLoadingRow, ModalLoa
         minimum_resistance_eigenvalue: minimum * norm,
         eigen_residual: residual * norm,
         reciprocity_relative_defect: defect / norm,
+        reciprocity_bound: bound,
+        iterative_error_scale: scale,
         bem_diagnostics: None,
     })
 }
@@ -412,9 +559,12 @@ pub fn modal_radiation_loading(
 ///   `iterative`, each in its own formulation: plain CBIE on the dense
 ///   owner's triangle quadrature, Burton-Miller on centroid kernels. Every
 ///   field must converge to the declared GMRES tolerance, or the bake
-///   refuses. The declaration identity then binds the numerical options,
-///   panel rule included (not workers, caches or the rule's pair budget,
-///   which change no bits).
+///   refuses. Each row then applies order p + 2 and p + 4 twins of its
+///   operator to the converged fields, under the same declared budgets, and
+///   is reciprocal to its [`IterativeErrorScale`], which its receipt records.
+///   The declaration identity binds the numerical options, panel rule
+///   included (not workers, caches or the rule's pair budget, which change no
+///   bits).
 ///
 /// Cancellation is also polled between fields; one GMRES solve is not
 /// interrupted by `cancelled`.
@@ -454,6 +604,133 @@ fn iterative_error(e: IterativeError) -> ModalLoadingError {
         IterativeError::Helmholtz(e) => ModalLoadingError::Helmholtz(e),
         other => ModalLoadingError::Iterative(other.to_string()),
     }
+}
+
+/// The declared options at FMM order p + `raise` (the directional order on
+/// that route too). A twin applies once, so it builds no M2L row cache; caches
+/// change no bits.
+fn raised(options: &IterativeOptions, raise: usize) -> IterativeOptions {
+    let mut twin = options.clone();
+    twin.fmm_order = twin.fmm_order.saturating_add(raise);
+    if let Some(d) = &mut twin.directional {
+        d.order = d.order.saturating_add(raise);
+    }
+    twin.m2l_cache_bytes = 0;
+    twin
+}
+
+/// Largest `||high_i - low_i|| / ||low_i||` over the fields; an operator
+/// image that vanishes while its twin does not is unbounded.
+fn operator_error(low: &[Vec<C64>], high: &[Vec<C64>]) -> f64 {
+    low.iter().zip(high).fold(0.0_f64, |worst, (a, b)| {
+        let size = a.iter().fold(0.0_f64, |s, v| s.hypot(v.abs()));
+        let difference = a
+            .iter()
+            .zip(b)
+            .fold(0.0_f64, |s, (x, y)| s.hypot((*x - *y).abs()));
+        worst.max(if size > 0.0 {
+            difference / size
+        } else if difference == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        })
+    })
+}
+
+/// Solve every source field of one closed-body row on [`IterativeRadiation`]
+/// and hand each solution to `project`. Then apply order p + 2 and p + 4
+/// twins of the operator to the converged pressures, one operator at a time,
+/// and return the row's measured [`IterativeErrorScale`].
+#[allow(clippy::too_many_arguments)]
+fn solve_iterative(
+    surface: &SpherePanels,
+    shapes: &[Vec<f64>],
+    k: f64,
+    medium: Medium,
+    formulation: Formulation,
+    options: &IterativeOptions,
+    cancelled: &mut impl FnMut() -> bool,
+    mut project: impl FnMut(usize, &RadiationSolution),
+) -> Result<IterativeErrorScale, ModalLoadingError> {
+    let gate = CancelGate::new_clock_free();
+    let operator = IterativeRadiation::prepare(surface, k, medium, formulation, options, &gate)
+        .map_err(iterative_error)?;
+    let mut gmres_residual = 0.0_f64;
+    let mut pressures = reserved(shapes.len())?;
+    for (column, shape) in shapes.iter().enumerate() {
+        poll(cancelled)?;
+        let field: Vec<C64> = shape.iter().map(|&v| C64::from_re(v)).collect();
+        let mut state = operator.start(&field, &gate).map_err(iterative_error)?;
+        operator
+            .advance(&mut state, options.max_iters.saturating_add(1), &gate)
+            .map_err(iterative_error)?;
+        let (solution, report, _) = operator.finish(&state).map_err(iterative_error)?;
+        // finish publishes only a converged, recomputed Euclidean residual.
+        let residual = report
+            .euclidean_rel_residual()
+            .filter(|r| r.is_finite() && *r >= 0.0)
+            .ok_or(ModalLoadingError::Invalid(
+                "iterative solve published no Euclidean residual",
+            ))?;
+        gmres_residual = gmres_residual.max(residual);
+        project(column, &solution);
+        pressures.push(solution.pressure);
+    }
+    let mut images = |operator: &IterativeRadiation<'_>| {
+        let mut out = reserved(pressures.len())?;
+        for pressure in &pressures {
+            poll(cancelled)?;
+            out.push(operator.apply(pressure, &gate).map_err(iterative_error)?);
+        }
+        Ok::<_, ModalLoadingError>(out)
+    };
+    let base = images(&operator)?;
+    drop(operator);
+    let mut twins = [TwinWork {
+        fmm_order: 0,
+        max_translation_work: 0,
+        max_coefficient_slots: 0,
+        applies: pressures.len(),
+        wall_s: 0.0,
+    }; 2];
+    let mut twin_images = |raise: usize, work: &mut TwinWork| {
+        let started = Instant::now();
+        let twin = raised(options, raise);
+        work.fmm_order = twin
+            .directional
+            .as_ref()
+            .map_or(twin.fmm_order, |d| d.order);
+        work.max_translation_work = twin
+            .directional
+            .as_ref()
+            .map_or(twin.max_translation_work, |d| d.max_translation_work);
+        work.max_coefficient_slots = twin
+            .directional
+            .as_ref()
+            .map_or(twin.max_coefficient_slots, |d| d.max_coefficient_slots);
+        let operator = IterativeRadiation::prepare(surface, k, medium, formulation, &twin, &gate)
+            .map_err(iterative_error)?;
+        let out = images(&operator)?;
+        work.wall_s = started.elapsed().as_secs_f64();
+        Ok::<_, ModalLoadingError>(out)
+    };
+    let [low, high] = &mut twins;
+    let next = twin_images(2, low)?;
+    let fmm_error = operator_error(&base, &next);
+    drop(base);
+    let fmm_error_next = operator_error(&next, &twin_images(4, high)?);
+    let order = options
+        .directional
+        .as_ref()
+        .map_or(options.fmm_order, |d| d.order);
+    Ok(IterativeErrorScale {
+        gmres_residual,
+        fmm_orders: [order, order.saturating_add(2), order.saturating_add(4)],
+        fmm_error,
+        fmm_error_next,
+        twins,
+    })
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one admission audit
@@ -636,6 +913,7 @@ fn load(
     for &omega in omegas {
         poll(&mut cancelled)?;
         let mut bem_diagnostics = None;
+        let mut scale = None;
         let z = match traces {
             SurfaceModeTraces::PlanarBaffled { .. } => planar
                 .as_ref()
@@ -675,26 +953,16 @@ fn load(
                 };
                 let k = omega / medium.sound_speed;
                 if let Some(options) = iterative {
-                    let gate = CancelGate::new_clock_free();
-                    let operator = IterativeRadiation::prepare(
+                    scale = Some(solve_iterative(
                         surface,
+                        shapes,
                         k,
                         medium,
                         formulation,
                         options,
-                        &gate,
-                    )
-                    .map_err(iterative_error)?;
-                    for (column, shape) in shapes.iter().enumerate() {
-                        poll(&mut cancelled)?;
-                        let field: Vec<C64> = shape.iter().map(|&v| C64::from_re(v)).collect();
-                        let mut state = operator.start(&field, &gate).map_err(iterative_error)?;
-                        operator
-                            .advance(&mut state, options.max_iters.saturating_add(1), &gate)
-                            .map_err(iterative_error)?;
-                        let (solution, _, _) = operator.finish(&state).map_err(iterative_error)?;
-                        project(column, &solution);
-                    }
+                        &mut cancelled,
+                        &mut project,
+                    )?);
                 } else {
                     for range in source_batches(modes) {
                         poll(&mut cancelled)?;
@@ -721,7 +989,7 @@ fn load(
                 z
             }
         };
-        let mut row = assess(omega, z, modes)?;
+        let mut row = assess(omega, z, modes, scale)?;
         row.bem_diagnostics = bem_diagnostics;
         rows.push(row);
     }
@@ -739,11 +1007,11 @@ mod tests {
     #[test]
     fn active_and_nonreciprocal_data_are_refused_without_repair() {
         assert!(matches!(
-            assess(1.0, vec![C64::from_re(-1.0)], 1),
+            assess(1.0, vec![C64::from_re(-1.0)], 1, None),
             Err(ModalLoadingError::NonPassive { .. })
         ));
         assert!(matches!(
-            assess(1.0, vec![C64::ONE, C64::ONE, C64::ZERO, C64::ONE], 2),
+            assess(1.0, vec![C64::ONE, C64::ONE, C64::ZERO, C64::ONE], 2, None),
             Err(ModalLoadingError::NonReciprocal { .. })
         ));
         let z = vec![
@@ -752,6 +1020,191 @@ mod tests {
             C64::from_re(-1.0),
             C64::from_re(1.0),
         ];
-        assert_eq!(assess(1.0, z.clone(), 2).unwrap().impedance(), z);
+        assert_eq!(assess(1.0, z.clone(), 2, None).unwrap().impedance(), z);
+    }
+
+    /// One row of a unit icosphere at ka 0.05 (plain CBIE) on the iterative
+    /// owner, as the routed bake solves it past the dense cap, with the
+    /// pulsating and z-translating traces and the routed sphere's options at
+    /// FMM order `order`. The same solutions also give a planted swapped
+    /// projection: every field projected on its own trace, not the row's.
+    fn forced_iterative_row(level: u32, order: usize) -> (Vec<C64>, Vec<C64>, IterativeErrorScale) {
+        let surface = SpherePanels::icosphere(1.0, level).unwrap();
+        let shapes = vec![
+            vec![1.0; surface.areas().len()],
+            surface.normals().iter().map(|n| n[2]).collect::<Vec<f64>>(),
+        ];
+        let options = IterativeOptions {
+            tol: 1e-9,
+            fmm_order: order,
+            max_iters: 900,
+            leaf_capacity: 32,
+            max_near_entries: 1 << 29,
+            near_field_cache_bytes: 1 << 31,
+            max_translation_work: 1_000_000_000_000,
+            max_coefficient_slots: 1 << 27,
+            workers: std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
+            m2l_cache_bytes: 1 << 33,
+            ..IterativeOptions::default()
+        };
+        let mut z = vec![C64::ZERO; 4];
+        let mut swapped = vec![C64::ZERO; 4];
+        let scale = solve_iterative(
+            &surface,
+            &shapes,
+            0.05,
+            Medium::air(),
+            Formulation::PlainCbie,
+            &options,
+            &mut || false,
+            |column, solution| {
+                for row in 0..2 {
+                    let mut force = [C64::ZERO; 2];
+                    for (((&own, &other), &p), &area) in shapes[row]
+                        .iter()
+                        .zip(&shapes[column])
+                        .zip(&solution.pressure)
+                        .zip(surface.areas())
+                    {
+                        force[0] = force[0] + p.scale(own * area);
+                        force[1] = force[1] + p.scale(other * area);
+                    }
+                    z[row * 2 + column] = force[0];
+                    swapped[row * 2 + column] = force[1];
+                }
+            },
+        )
+        .unwrap();
+        (z, swapped, scale)
+    }
+
+    /// The .105 G2 ruling (MagentaBadger, 2026-10-23): an iterative row is
+    /// reciprocal to max(10 eps_gmres, eps_fmm), and a direct row keeps 1e-12.
+    /// - (a) On a 1280- and a 20480-panel sphere, +2 FMM orders shrink both the
+    ///   defect and eps_fmm at least 10x. The asymmetry is FMM truncation: a
+    ///   tighter GMRES tolerance does not move it (ts1 probe, 2026-10-23).
+    /// - (d) The swapped projection of every row refuses by >= 3 decades.
+    /// - (e) Each row's receipt is its measured scale and bound.
+    /// - eps_fmm is a Richardson-style p + 2 estimate, valid while the FMM
+    ///   error decays geometrically in p. Every row here decays faster than
+    ///   0.3 per +2 orders, and a row that does not refuses.
+    /// - (c) The direct bound is unchanged: the iterative matrix and a 1e-11
+    ///   defect refuse as direct rows, and the dense bake passes.
+    #[test]
+    fn iterative_rows_are_reciprocal_to_their_measured_error_scale() {
+        let omega = 0.05 * Medium::air().sound_speed;
+        let mut iterative = None;
+        for (level, orders) in [(3, &[4, 6, 8][..]), (5, &[6, 8][..])] {
+            let mut previous: Option<(f64, f64)> = None;
+            for &order in orders {
+                let (z, swapped, scale) = forced_iterative_row(level, order);
+                let row = assess(omega, z.clone(), 2, Some(scale)).unwrap();
+                let planted = match assess(omega, swapped, 2, Some(scale)) {
+                    Err(ModalLoadingError::NonReciprocal {
+                        relative_defect,
+                        bound,
+                        scale: Some(refused),
+                        ..
+                    }) => {
+                        assert_eq!(bound.to_bits(), row.reciprocity_bound().to_bits());
+                        assert_eq!(refused, scale);
+                        relative_defect
+                    }
+                    other => panic!("the swapped projection must refuse: {other:?}"),
+                };
+                println!(
+                    "{{\"case\":\"iterative-reciprocity\",\"panels\":{},\"ka\":0.05,\"gmres_tol\":1e-9,\"fmm_orders\":{:?},\"eps_gmres\":{},\"eps_fmm\":{},\"eps_fmm_next\":{},\"defect\":{},\"bound\":{},\"planted_defect\":{planted},\"verdict\":\"admitted\",\"planted_verdict\":\"refused\",\"twins\":[{},{}]}}",
+                    20 * 4_usize.pow(level),
+                    scale.fmm_orders,
+                    scale.gmres_residual,
+                    scale.fmm_error,
+                    scale.fmm_error_next,
+                    row.reciprocity_relative_defect(),
+                    row.reciprocity_bound(),
+                    scale.twins[0].to_json(),
+                    scale.twins[1].to_json()
+                );
+                assert_eq!(scale.fmm_orders, [order, order + 2, order + 4]);
+                for (twin, raise) in scale.twins.iter().zip([2, 4]) {
+                    assert_eq!(twin.fmm_order, order + raise);
+                    assert_eq!(twin.max_translation_work, 1_000_000_000_000);
+                    assert_eq!(twin.max_coefficient_slots, 1 << 27);
+                    assert_eq!(twin.applies, 2);
+                    assert!(twin.wall_s > 0.0);
+                }
+                assert!(scale.gmres_residual <= 1e-9 && scale.estimate_is_resolved());
+                assert_eq!(row.iterative_error_scale(), Some(scale));
+                assert_eq!(
+                    row.reciprocity_bound(),
+                    (GMRES_RECIPROCITY_FACTOR * scale.gmres_residual).max(scale.fmm_error)
+                );
+                assert!(row.reciprocity_relative_defect() <= row.reciprocity_bound());
+                assert!(planted >= 1e3 * row.reciprocity_bound());
+                if let Some((defect, error)) = previous {
+                    assert!(defect >= 10.0 * row.reciprocity_relative_defect());
+                    assert!(error >= 10.0 * scale.fmm_error);
+                }
+                previous = Some((row.reciprocity_relative_defect(), scale.fmm_error));
+                if (level, order) == (3, 6) {
+                    iterative = Some((z, scale));
+                }
+            }
+        }
+        let (z, scale) = iterative.unwrap();
+        match assess(omega, z.clone(), 2, None) {
+            Err(ModalLoadingError::NonReciprocal {
+                bound, scale: None, ..
+            }) => assert_eq!(bound, DENSE_RECIPROCITY_BOUND),
+            other => panic!("a direct row keeps 1e-12: {other:?}"),
+        }
+        // An estimate outside its geometric-decay regime refuses the same row.
+        let unresolved = IterativeErrorScale {
+            fmm_error_next: 0.31 * scale.fmm_error,
+            ..scale
+        };
+        assert!(matches!(
+            assess(omega, z, 2, Some(unresolved)),
+            Err(ModalLoadingError::UnresolvedFmmEstimate { .. })
+        ));
+        let planted = vec![
+            C64::new(0.5, -0.5),
+            C64::new(1e-11, 0.0),
+            C64::ZERO,
+            C64::new(0.5, -0.5),
+        ];
+        assert!(matches!(
+            assess(omega, planted.clone(), 2, None),
+            Err(ModalLoadingError::NonReciprocal { .. })
+        ));
+        assert!(assess(omega, planted, 2, Some(scale)).is_ok());
+        let surface = SpherePanels::icosphere(1.0, 3).unwrap();
+        let shapes = [
+            vec![C64::ONE; surface.areas().len()],
+            surface
+                .normals()
+                .iter()
+                .map(|n| C64::from_re(n[2]))
+                .collect(),
+        ];
+        let solved = helmholtz::solve_radiation_batch(
+            &surface,
+            0.05,
+            Medium::air(),
+            &[&shapes[0], &shapes[1]],
+            Formulation::PlainCbie,
+        )
+        .unwrap();
+        let mut dense = vec![C64::ZERO; 4];
+        for (column, solution) in solved.iter().enumerate() {
+            for (row, shape) in shapes.iter().enumerate() {
+                for ((phi, &p), &area) in shape.iter().zip(&solution.pressure).zip(surface.areas())
+                {
+                    dense[row * 2 + column] = dense[row * 2 + column] + p.scale(phi.re * area);
+                }
+            }
+        }
+        let row = assess(omega, dense, 2, None).unwrap();
+        assert_eq!(row.reciprocity_bound(), DENSE_RECIPROCITY_BOUND);
+        assert_eq!(row.iterative_error_scale(), None);
     }
 }

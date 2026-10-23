@@ -465,6 +465,7 @@ impl<'k> FmmC64<'k> {
             translations: Vec::new(),
             near: None,
             coefficient_slots: 0,
+            max_coefficient_slots: options.max_coefficient_slots,
             directional: None,
             workers: 1,
             m2l_rows: None,
