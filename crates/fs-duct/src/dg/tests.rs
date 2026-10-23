@@ -31,6 +31,297 @@ fn cone_fixture() -> Duct {
     }
 }
 
+/// G5: a uniform source retains the original assembly and propagation bits,
+/// including the dissipative characteristic boundary and a supplied profile.
+#[test]
+fn dg_gas_field_uniform_is_bitwise_single_state() {
+    let field = crate::profile::gas_field::tests::field([300.0; 2], [0.8; 2], 101325.0);
+    let gas = *field.uniform_state().unwrap().state();
+    let geometries = [
+        cylinder_fixture(),
+        Duct {
+            segments: vec![Segment::Profile {
+                profile: Arc::new(RadiusProfile::exponential(0.0073, 0.8, 0.57).unwrap()),
+                steps: RiccatiSteps(8),
+            }],
+        },
+    ];
+    let mesh = DgMesh {
+        elements: 4,
+        order: 3,
+    };
+    for geometry in geometries {
+        for outlet in [DgBoundary::IdealOpen, DgBoundary::Matched] {
+            let original = DgDuct::new(&geometry, &gas, mesh, DgBoundary::Closed, outlet).unwrap();
+            let bound =
+                DgDuct::new_with_gas_field(&geometry, &field, mesh, DgBoundary::Closed, outlet)
+                    .unwrap();
+            assert_eq!(original.l_tilde, bound.l_tilde);
+            assert_eq!(original.g_block, bound.g_block);
+            assert_eq!(original.node_positions(), bound.node_positions());
+            assert_eq!(bound.gas_field(), Some(&field));
+            assert_eq!(bound.inlet_gas(), &gas);
+            assert_eq!(bound.outlet_gas(), &gas);
+            let initial = |duct: &DgDuct| {
+                duct.project_initial_state(|x| det::sin(core::f64::consts::PI * x / 0.57), |_| 0.0)
+            };
+            let mut before = initial(&original);
+            let mut after = initial(&bound);
+            let a = original.propagator(1.0 / 48000.0, 1e-13).unwrap();
+            let b = bound.propagator(1.0 / 48000.0, 1e-13).unwrap();
+            for _ in 0..64 {
+                assert_eq!(
+                    a.step(&mut before, &[]).unwrap(),
+                    b.step(&mut after, &[]).unwrap()
+                );
+            }
+            a.sync_nodal(&mut before);
+            b.sync_nodal(&mut after);
+            assert_eq!(before.pressure(), after.pressure());
+            assert_eq!(before.volume_flow(), after.volume_flow());
+        }
+    }
+}
+
+/// G1/G3: for constant composition and linear temperature, K=gamma*p is
+/// constant while rho is proportional to 1/T. Integrating rho's exact log
+/// tests material reevaluation, and would reject interpolation of rho itself.
+#[test]
+fn dg_gas_field_masses_match_analytic_thermodynamics() {
+    let field = crate::profile::gas_field::tests::field([300.0, 600.0], [0.8; 2], 101325.0);
+    let dg = DgDuct::new_with_gas_field(
+        &cylinder_fixture(),
+        &field,
+        DgMesh {
+            elements: 3,
+            order: 3,
+        },
+        DgBoundary::Closed,
+        DgBoundary::Closed,
+    )
+    .unwrap();
+    let ones = vec![1.0; dg.field_dofs()];
+    let zeros = vec![0.0; dg.field_dofs()];
+    let norm_squared = |v: Vec<f64>| v.iter().map(|x| x * x).sum::<f64>();
+    let mass_p = norm_squared(dg.to_energy_coords(&ones, &zeros));
+    let mass_q = norm_squared(dg.to_energy_coords(&zeros, &ones));
+    let inlet = field.state_at(0.0).unwrap();
+    let area = core::f64::consts::PI * 0.0073_f64.powi(2);
+    let bulk = inlet.state().density * inlet.state().sound_speed.powi(2);
+    let expected_p = area * 0.57 / bulk;
+    let expected_q = inlet.state().density * 0.57 * det::ln(2.0) / area;
+    assert!((mass_p / expected_p - 1.0).abs() < 1e-12);
+    assert!((mass_q / expected_q - 1.0).abs() < 1e-12);
+    let interpolated_density_mass = 0.75 * inlet.state().density * 0.57 / area;
+    assert!((mass_q / interpolated_density_mass - 1.0).abs() > 0.05);
+}
+
+/// G0: the physical boundary power uses local endpoint impedances, even when
+/// their gases differ. The quadratic form is an independent reconstruction of
+/// the matched-boundary dissipation before any time-step ledger is consulted.
+#[test]
+fn dg_gas_field_matched_boundaries_use_local_impedance() {
+    let field = crate::profile::gas_field::tests::field([300.0, 600.0], [0.95, 0.1], 101325.0);
+    let dg = DgDuct::new_with_gas_field(
+        &cylinder_fixture(),
+        &field,
+        DgMesh {
+            elements: 4,
+            order: 3,
+        },
+        DgBoundary::Matched,
+        DgBoundary::Matched,
+    )
+    .unwrap();
+    let area = core::f64::consts::PI * 0.0073_f64.powi(2);
+    let zi = dg.inlet_gas().density * dg.inlet_gas().sound_speed / area;
+    let zo = dg.outlet_gas().density * dg.outlet_gas().sound_speed / area;
+    assert!((zi / zo - 1.0).abs() > 0.1);
+    let positions = dg.node_positions();
+    let p: Vec<_> = positions.iter().map(|x| 1.0 + x / 0.57).collect();
+    let q: Vec<_> = positions
+        .iter()
+        .map(|x| (3.0 + 4.0 * x / 0.57) * 1e-7)
+        .collect();
+    let state = dg.to_energy_coords(&p, &q);
+    let mut rate = 0.0;
+    for (i, &xi) in state.iter().enumerate() {
+        for (j, &xj) in state.iter().enumerate() {
+            rate += xi * dg.l_tilde[i * state.len() + j] * xj;
+        }
+    }
+    let expected = -0.5 * (1.0 / zi + zi * (3e-7_f64).powi(2) + 4.0 / zo + zo * (7e-7_f64).powi(2));
+    assert!(
+        (rate / expected - 1.0).abs() < 1e-11,
+        "rate={rate:e}, expected={expected:e}"
+    );
+}
+
+/// G0/G3: material gradients change physical storage, while the original
+/// reciprocal time operator still conserves energy and accounts for port work.
+#[test]
+fn dg_gas_field_energy_and_port_work_close() {
+    let field = crate::profile::gas_field::tests::field([300.0, 450.0], [0.9, 0.2], 101325.0);
+    let mesh = DgMesh {
+        elements: 5,
+        order: 3,
+    };
+    for inlet in [DgBoundary::Closed, DgBoundary::Port(PortId(0))] {
+        let dg = DgDuct::new_with_gas_field(
+            &cylinder_fixture(),
+            &field,
+            mesh,
+            inlet,
+            DgBoundary::IdealOpen,
+        )
+        .unwrap();
+        let propagator = dg.propagator(1.0 / 48000.0, 1e-13).unwrap();
+        let mut state =
+            dg.project_initial_state(|x| det::cos(core::f64::consts::PI * x / 1.14), |_| 0.0);
+        let initial = state.initial_energy_j();
+        let mut work = 0.0;
+        for step in 0..1000 {
+            let inputs = if matches!(inlet, DgBoundary::Port(_)) {
+                vec![PortInput {
+                    id: PortId(0),
+                    effort: 1e-6 * det::sin(0.01 * f64::from(step)),
+                }]
+            } else {
+                vec![]
+            };
+            let output = propagator.step(&mut state, &inputs).unwrap();
+            assert!(output.ledger.balance_checked);
+            for (input, output) in inputs.iter().zip(&output.port_outputs) {
+                work += input.effort * output.delta_x;
+            }
+        }
+        propagator.sync_nodal(&mut state);
+        let physical = dg.to_energy_coords(state.pressure(), state.volume_flow());
+        let energy = 0.5 * physical.iter().map(|x| x * x).sum::<f64>();
+        assert!((energy - initial - work).abs() / (initial + work.abs()) < 1e-12);
+    }
+}
+
+/// G1: the first pole converges to the independent Frobenius solution of the
+/// linear-temperature Webster equation; the gas gradient remains audible and
+/// cannot be replaced by the inlet state at every quadrature point.
+#[test]
+fn dg_gas_field_resonance_converges_to_analytic_gradient() {
+    use crate::profile::gas_field::tests::{field, linear_temperature_exact};
+    let source = field([300.0, 330.0], [0.8; 2], 101325.0);
+    let gas = *source.state_at(0.0).unwrap().state();
+    let uniform_omega = core::f64::consts::PI * gas.sound_speed / (2.0 * 0.57);
+    let (mut low, mut high) = (uniform_omega * 0.9, uniform_omega * 1.2);
+    for _ in 0..48 {
+        let middle = 0.5 * (low + high);
+        if linear_temperature_exact(&gas, 30.0, middle)[3].re > 0.0 {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let exact = 0.5 * (low + high);
+    assert!((exact / uniform_omega - 1.0).abs() > 0.005);
+    let mut errors = Vec::new();
+    for elements in [2, 4, 8] {
+        let dg = DgDuct::new_with_gas_field(
+            &cylinder_fixture(),
+            &source,
+            DgMesh { elements, order: 3 },
+            DgBoundary::Closed,
+            DgBoundary::IdealOpen,
+        )
+        .unwrap();
+        let propagator = dg.propagator(1.0 / 48000.0, 1e-13).unwrap();
+        let PropagatorKernel::SkewModal { sigmas, .. } = &propagator.kernel else {
+            panic!("lossless boundaries require the existing skew propagator");
+        };
+        let first = sigmas
+            .iter()
+            .copied()
+            .filter(|x| *x > 0.0)
+            .min_by(f64::total_cmp)
+            .unwrap();
+        errors.push((first / exact - 1.0).abs());
+    }
+    assert!(errors[0] > 20.0 * errors[1], "{errors:?}");
+    assert!(errors[1] > 20.0 * errors[2], "{errors:?}");
+    assert!(errors[2] < 1e-8, "{errors:?}");
+}
+
+/// G0/G3: source knots remain actual element boundaries, even inside a cone.
+/// A budget cannot silently erase a knot or resize the supplied field.
+#[test]
+fn dg_gas_field_coverage_and_material_stations() {
+    use fs_material::gas_species::input::ThermochemicalPhase;
+    let base = crate::profile::gas_field::tests::field([300.0, 450.0], [0.8; 2], 101325.0);
+    let middle = base.primitive_states()[0].clone();
+    let field = AxialGasField::new(
+        vec![0.0, 0.13, 0.57],
+        101325.0,
+        vec![
+            base.primitive_states()[0].clone(),
+            middle,
+            base.primitive_states()[1].clone(),
+        ],
+        base.model().clone(),
+        fs_matdb::QueryPoint::new(),
+        ThermochemicalPhase::FrozenGas,
+    )
+    .unwrap();
+    let cone = Duct {
+        segments: vec![Segment::Cone {
+            inlet_radius: 0.005,
+            outlet_radius: 0.015,
+            length: 0.57,
+        }],
+    };
+    assert!(
+        DgDuct::new_with_gas_field(
+            &cone,
+            &field,
+            DgMesh {
+                elements: 1,
+                order: 3
+            },
+            DgBoundary::Closed,
+            DgBoundary::Closed
+        )
+        .is_err()
+    );
+    assert!(
+        DgDuct::new_with_gas_field(
+            &cone_fixture(),
+            &field,
+            DgMesh {
+                elements: 4,
+                order: 3
+            },
+            DgBoundary::Closed,
+            DgBoundary::Closed
+        )
+        .is_err()
+    );
+    let dg = DgDuct::new_with_gas_field(
+        &cone,
+        &field,
+        DgMesh {
+            elements: 4,
+            order: 3,
+        },
+        DgBoundary::Closed,
+        DgBoundary::Closed,
+    )
+    .unwrap();
+    assert!(dg.elements.iter().any(|element| element.x_left == 0.13));
+    for element in &dg.elements {
+        for (&x, &area) in element.nodes_x.iter().zip(&element.areas) {
+            let radius = 0.005 + 0.01 * x / 0.57;
+            assert!((area / (core::f64::consts::PI * radius * radius) - 1.0).abs() < 1e-14);
+        }
+    }
+}
+
 /// G0: LGL weights integrate polynomials up to degree 2p - 1 exactly (1e-14),
 /// endpoints are included, and discrete integration by parts holds to 1e-14.
 #[test]

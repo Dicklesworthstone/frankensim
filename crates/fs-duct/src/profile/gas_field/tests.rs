@@ -164,7 +164,7 @@ fn primitive(temperature_k: f64, fraction: f64) -> PrimitiveGasState {
         .unwrap(),
     }
 }
-fn field(temperatures: [f64; 2], fractions: [f64; 2], pressure: f64) -> AxialGasField {
+pub(crate) fn field(temperatures: [f64; 2], fractions: [f64; 2], pressure: f64) -> AxialGasField {
     AxialGasField::new(
         vec![0.0, LENGTH],
         pressure,
@@ -283,7 +283,7 @@ fn material_wall_and_composition_field_share_fourth_order_propagation() {
 // This convergent series is the same J0/Y0-in-sqrt(T) solution expressed at
 // the inlet; it needs neither a marching integrator nor Bessel approximations.
 // Our oracle domain |epsilon|<=0.1, k0*L<=4.3 lies inside its convergence disk.
-fn linear_temperature_exact(gas: &GasState, delta_t: f64, omega: f64) -> [C64; 4] {
+pub(crate) fn linear_temperature_exact(gas: &GasState, delta_t: f64, omega: f64) -> [C64; 4] {
     let epsilon = delta_t / gas.temperature;
     let kl = omega * LENGTH / gas.sound_speed;
     let solution = |p: f64, derivative: f64| {

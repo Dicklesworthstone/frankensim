@@ -4,7 +4,7 @@
 //! # Governing equations
 //!
 //! On a 1-D axial domain $x \in [0, L]$ with positive cross-sectional area $A(x) = \pi r(x)^2$,
-//! equilibrium gas density $\rho$, and adiabatic sound speed $c$, acoustic pressure $p(x, t)$ [Pa]
+//! prescribed equilibrium gas density $\rho(x)$, and adiabatic sound speed $c(x)$, acoustic pressure $p(x, t)$ [Pa]
 //! and volume velocity $q(x, t)$ [$\text{m}^3/\text{s}$] satisfy the lossless Webster conservation
 //! system:
 //!
@@ -56,9 +56,11 @@
 //! `Matched` boundary the absorbed energy is inferred from the deficit, so that balance is not a
 //! check (`balance_checked` is false).
 
+use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
 use fs_la::eigen::{admit_jacobi_eigh, householder_eigh, jacobi_eigh};
 use fs_material::gas::GasState;
+use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
 /// Maximum admitted nodal polynomial order $p$ per element.
@@ -363,27 +365,37 @@ fn spd_sqrt_and_inv_sqrt(a: &[f64], m: usize) -> Result<(Vec<f64>, Vec<f64>), Du
 /// Element mass matrices `M_p = ∫ A/(ρc²) ℓ_i ℓ_j dx` and `M_q = ∫ ρ/A ℓ_i ℓ_j dx` over
 /// `[s_left, s_left + h]` of `span`, by Gauss–Legendre rules doubled from `2p + 4` points until
 /// both repeat to `MASS_QUADRATURE_ULPS` ulps of their largest entry.
-fn element_masses(
+fn element_masses<E: From<DuctError>>(
     span: &AxialSpan,
     s_left: f64,
     h: f64,
     lgl: &LglRule,
-    rho: f64,
-    bulk: f64,
-) -> Result<(Vec<f64>, Vec<f64>), DuctError> {
+    gas_at: &mut impl FnMut(f64) -> Result<GasState, E>,
+) -> Result<(Vec<f64>, Vec<f64>), E> {
     let n_local = lgl.order + 1;
     let jac = 0.5 * h;
-    let rule = |points: usize| -> Result<(Vec<f64>, Vec<f64>), DuctError> {
+    let mut rule = |points: usize| -> Result<(Vec<f64>, Vec<f64>), E> {
         let (xi, w) = gauss_legendre_rule(points);
         let mut mp = vec![0.0; n_local * n_local];
         let mut mq = vec![0.0; n_local * n_local];
         for (&x, &wq) in xi.iter().zip(&w) {
-            let r = span.radius_at_local(s_left + jac * (x + 1.0))?;
+            let s = s_left + jac * (x + 1.0);
+            let r = span.radius_at_local(s)?;
             let area = core::f64::consts::PI * r * r;
             if !(area.is_finite() && area > 0.0) {
                 return Err(DuctError::BadParameter {
                     what: "cross-sectional area A(x) must be positive and finite",
-                });
+                }
+                .into());
+            }
+            let gas = gas_at(span.x_start + s)?;
+            let rho = gas.density;
+            let bulk = rho * gas.sound_speed * gas.sound_speed;
+            if !(rho.is_finite() && rho > 0.0 && bulk.is_finite() && bulk > 0.0) {
+                return Err(DuctError::BadParameter {
+                    what: "DG gas density and bulk modulus must be finite and positive",
+                }
+                .into());
             }
             let phi = lgl.eval_basis(x);
             let (cp, lq) = (jac * wq * (area / bulk), jac * wq * (rho / area));
@@ -411,7 +423,8 @@ fn element_masses(
         if points > MAX_MASS_QUADRATURE_POINTS {
             return Err(DuctError::BadParameter {
                 what: "DG mass quadrature of A(x) did not converge",
-            });
+            }
+            .into());
         }
         let finer = rule(points)?;
         if settled(&current.0, &finer.0) && settled(&current.1, &finer.1) {
@@ -425,12 +438,15 @@ fn element_masses(
 struct AxialSpan {
     x_start: f64,
     length: f64,
+    /// Offset into the original geometry after a material station splits it.
+    geometry_start: f64,
     segment: Segment,
 }
 
 impl AxialSpan {
     fn radius_at_local(&self, s: f64) -> Result<f64, DuctError> {
-        let s_clamped = s.clamp(0.0, self.length);
+        let s_clamped = (self.geometry_start + s.clamp(0.0, self.length))
+            .clamp(0.0, self.segment.axial_length());
         match &self.segment {
             Segment::Cylinder { radius, .. } => Ok(*radius),
             Segment::Cone {
@@ -466,6 +482,8 @@ struct DgElement {
 pub struct DgDuct {
     mesh: DgMesh,
     gas: GasState,
+    outlet_gas: GasState,
+    gas_field: Option<AxialGasField>,
     inlet: DgBoundary,
     outlet: DgBoundary,
     total_length: f64,
@@ -500,23 +518,80 @@ impl DgDuct {
         inlet: DgBoundary,
         outlet: DgBoundary,
     ) -> Result<Self, DuctError> {
+        Self::assemble(duct, gas, mesh, inlet, outlet, None, &mut |_| Ok(*gas))
+    }
+
+    /// Bind the shared primitive thermochemical field to the time-domain DG
+    /// operator. Temperature and composition are reevaluated by the material
+    /// owner at every mass quadrature point; derived coefficients are never
+    /// interpolated. Matched boundaries use their own endpoint gas state.
+    ///
+    /// Geometry boundaries and field stations are exact element boundaries.
+    /// `mesh.elements` is the total requested count, not a count per span; it
+    /// must cover all resulting spans. A uniform field delegates [`Self::new`]
+    /// bit-for-bit and retains the original material field for inspection.
+    ///
+    /// This is a frozen, lossless, no-mean-flow field. It does not evolve
+    /// temperature or composition, add viscothermal losses, or model flow.
+    ///
+    /// # Errors
+    /// Refuses unequal field/duct lengths, insufficient mesh resolution,
+    /// material evaluations outside their source/phase domain, and the same
+    /// geometry, quadrature and DOF limits as [`Self::new`].
+    pub fn new_with_gas_field(
+        duct: &Duct,
+        field: &AxialGasField,
+        mesh: DgMesh,
+        inlet: DgBoundary,
+        outlet: DgBoundary,
+    ) -> Result<Self, GasFieldDuctError> {
+        let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+        if !length.is_finite() || length <= 0.0 || length != field.length_m() {
+            return Err(DuctError::BadParameter {
+                what: "gas field must cover the exact complete DG duct length",
+            }
+            .into());
+        }
+        if let Some(state) = field.uniform_state() {
+            let mut duct = Self::new(duct, state.state(), mesh, inlet, outlet)?;
+            duct.gas_field = Some(field.clone());
+            return Ok(duct);
+        }
+        let gas = *field.state_at(0.0)?.state();
+        Self::assemble(duct, &gas, mesh, inlet, outlet, Some(field), &mut |x| {
+            Ok(*field.state_at(x)?.state())
+        })
+    }
+
+    fn assemble<E: From<DuctError>>(
+        duct: &Duct,
+        gas: &GasState,
+        mesh: DgMesh,
+        inlet: DgBoundary,
+        outlet: DgBoundary,
+        field: Option<&AxialGasField>,
+        gas_at: &mut impl FnMut(f64) -> Result<GasState, E>,
+    ) -> Result<Self, E> {
         if duct.segments.is_empty() {
-            return Err(DuctError::EmptyDuct);
+            return Err(DuctError::EmptyDuct.into());
         }
         if mesh.order == 0 || mesh.order > MAX_DG_ORDER {
             return Err(DuctError::BadParameter {
                 what: "DG order must be in 1..=MAX_DG_ORDER",
-            });
+            }
+            .into());
         }
         if mesh.elements == 0 || mesh.elements > MAX_DG_ELEMENTS {
             return Err(DuctError::BadParameter {
                 what: "DG element count must be in 1..=MAX_DG_ELEMENTS",
-            });
+            }
+            .into());
         }
         if 2 * mesh.elements * (mesh.order + 1) > MAX_DG_PROPAGATOR_DOFS {
             return Err(DuctError::BadParameter {
                 what: "DG DOFs 2 K (p + 1) exceed MAX_DG_PROPAGATOR_DOFS (no Krylov path)",
-            });
+            }
+            .into());
         }
         if !(gas.density.is_finite()
             && gas.density > 0.0
@@ -525,14 +600,16 @@ impl DgDuct {
         {
             return Err(DuctError::BadParameter {
                 what: "gas density and sound speed must be finite and positive",
-            });
+            }
+            .into());
         }
         if let (DgBoundary::Port(id_in), DgBoundary::Port(id_out)) = (inlet, outlet)
             && id_in == id_out
         {
             return Err(DuctError::BadParameter {
                 what: "inlet and outlet ports must have distinct PortIds",
-            });
+            }
+            .into());
         }
 
         let mut spans = Vec::with_capacity(duct.segments.len());
@@ -544,7 +621,8 @@ impl DgDuct {
                     {
                         return Err(DuctError::BadParameter {
                             what: "cylinder radius and length must be positive and finite",
-                        });
+                        }
+                        .into());
                     }
                     *length
                 }
@@ -562,7 +640,8 @@ impl DgDuct {
                     {
                         return Err(DuctError::BadParameter {
                             what: "cone radii and length must be positive and finite",
-                        });
+                        }
+                        .into());
                     }
                     *length
                 }
@@ -571,28 +650,61 @@ impl DgDuct {
                     if !(len > 0.0 && len.is_finite()) {
                         return Err(DuctError::BadParameter {
                             what: "profile length must be positive and finite",
-                        });
+                        }
+                        .into());
                     }
                     len
                 }
                 Segment::ToneHole { .. } => {
                     return Err(DuctError::BadParameter {
                         what: "tone-hole side branches require M2.2-W3c coupling",
-                    });
+                    }
+                    .into());
                 }
             };
             spans.push(AxialSpan {
                 x_start: x_cursor,
                 length: len,
+                geometry_start: 0.0,
                 segment: seg.clone(),
             });
             x_cursor += len;
         }
         let total_length = x_cursor;
+        if !total_length.is_finite() || total_length <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "total DG duct length must be finite and positive",
+            }
+            .into());
+        }
+        if let Some(field) = field {
+            let mut split_spans = Vec::new();
+            for span in spans {
+                let end = span.x_start + span.length;
+                let mut left = span.x_start;
+                for right in field
+                    .stations_m()
+                    .iter()
+                    .copied()
+                    .filter(|x| *x > span.x_start && *x < end)
+                    .chain(core::iter::once(end))
+                {
+                    split_spans.push(AxialSpan {
+                        x_start: left,
+                        length: right - left,
+                        geometry_start: left - span.x_start,
+                        segment: span.segment.clone(),
+                    });
+                    left = right;
+                }
+            }
+            spans = split_spans;
+        }
         if mesh.elements < spans.len() {
             return Err(DuctError::BadParameter {
-                what: "DG mesh must have at least one element per duct segment",
-            });
+                what: "DG mesh must have at least one element per geometry/material span",
+            }
+            .into());
         }
 
         // Partition mesh.elements proportionally across spans, guaranteeing >= 1 element per span.
@@ -618,8 +730,7 @@ impl DgDuct {
         let lgl = lgl_rule(mesh.order)?;
         let n_local = mesh.order + 1;
 
-        let rho = gas.density;
-        let bulk = rho * gas.sound_speed * gas.sound_speed;
+        let outlet_gas = gas_at(total_length)?;
 
         let mut elements = Vec::with_capacity(mesh.elements);
         for (span_index, sp) in spans.iter().enumerate() {
@@ -638,13 +749,14 @@ impl DgDuct {
                     if !(area.is_finite() && area > 0.0) {
                         return Err(DuctError::BadParameter {
                             what: "cross-sectional area A(x) must be positive and finite",
-                        });
+                        }
+                        .into());
                     }
                     nodes_x.push(sp.x_start + s_loc);
                     areas.push(area);
                 }
 
-                let (mp, mq) = element_masses(sp, s_left, h, &lgl, rho, bulk)?;
+                let (mp, mq) = element_masses(sp, s_left, h, &lgl, gas_at)?;
                 let (mp_sqrt, mp_inv_sqrt) = spd_sqrt_and_inv_sqrt(&mp, n_local)?;
                 let (mq_sqrt, mq_inv_sqrt) = spd_sqrt_and_inv_sqrt(&mq, n_local)?;
 
@@ -728,7 +840,7 @@ impl DgDuct {
             }
             DgBoundary::Matched => {
                 // Upwind characteristic flux exiting at x = 0 (p_hat_L = 0.5*(p_0 - Zc*q_0), q_hat_L = -0.5*(p_0/Zc - q_0)):
-                let zc0 = rho * gas.sound_speed / elements[0].areas[0];
+                let zc0 = gas.density * gas.sound_speed / elements[0].areas[0];
                 kp[in_node * field_dofs + in_node] += 0.5;
                 d_pp[in_node * field_dofs + in_node] += 0.5 / zc0;
                 kq[in_node * field_dofs + in_node] += 0.5;
@@ -760,7 +872,8 @@ impl DgDuct {
                 kq[out_node * field_dofs + out_node] -= 1.0;
             }
             DgBoundary::Matched => {
-                let zc_l = rho * gas.sound_speed / elements[last_elem].areas[n_local - 1];
+                let zc_l = outlet_gas.density * outlet_gas.sound_speed
+                    / elements[last_elem].areas[n_local - 1];
                 kp[out_node * field_dofs + out_node] -= 0.5;
                 d_pp[out_node * field_dofs + out_node] += 0.5 / zc_l;
                 kq[out_node * field_dofs + out_node] -= 0.5;
@@ -805,6 +918,8 @@ impl DgDuct {
         Ok(Self {
             mesh,
             gas: *gas,
+            outlet_gas,
+            gas_field: field.cloned(),
             inlet,
             outlet,
             total_length,
@@ -935,10 +1050,29 @@ impl DgDuct {
         self.total_length
     }
 
-    /// Underlying gas state.
+    /// Inlet reference state. This is the uniform medium for [`Self::new`];
+    /// a field-backed duct instead uses its local material at each point.
     #[must_use]
     pub const fn gas(&self) -> &GasState {
         &self.gas
+    }
+
+    /// Exact inlet state used by the inlet characteristic boundary.
+    #[must_use]
+    pub const fn inlet_gas(&self) -> &GasState {
+        &self.gas
+    }
+
+    /// Exact outlet state used by the outlet characteristic boundary.
+    #[must_use]
+    pub const fn outlet_gas(&self) -> &GasState {
+        &self.outlet_gas
+    }
+
+    /// Original primitive field and material/source receipts, when supplied.
+    #[must_use]
+    pub const fn gas_field(&self) -> Option<&AxialGasField> {
+        self.gas_field.as_ref()
     }
 
     /// Inlet boundary condition at $x = 0$.

@@ -376,6 +376,20 @@ pipe `Z_in = +i Zc cot(kL)`.
     meshes `Cylinder`, `Cone` and `Profile` segments (at least one element
     each). Its mass matrices integrate the exact `A(x)` by Gauss–Legendre
     rules doubled until they repeat to 64 ulps.
+  - `DgDuct::new_with_gas_field` consumes the same `AxialGasField` as the
+    frequency-domain propagator. The material owner reevaluates primitive
+    temperature/composition at every mass quadrature point, giving the actual
+    `A/(rho*c*c)` and `rho/A` weights. Derived gas coefficients are never
+    interpolated. Both matched boundaries use their own exact endpoint gas.
+    Geometry boundaries and nonuniform-field stations are exact element
+    boundaries; the requested total element count must cover those spans.
+    A uniform field delegates the original constructor bit-for-bit. The
+    complete primitive field and source cards remain available through
+    `gas_field()`; `gas()` is the inlet reference state, with explicit
+    `inlet_gas()`/`outlet_gas()` accessors. Unequal field/geometry lengths,
+    insufficient elements and material/source/phase refusals return before
+    publishing an operator. Temperature and composition are prescribed and
+    frozen: no mean flow, heat/species evolution or viscothermal loss is added.
   - Interior faces use the alternating flux (`q̂` from the left, `p̂` from the
     right). It is energy-conserving and optimal (`p + 1`) for every `p`;
     `K_q = -K_pᵀ` holds exactly through LGL summation by parts.
