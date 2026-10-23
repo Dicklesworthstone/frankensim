@@ -7,6 +7,9 @@
 use crate::PhsError;
 use fs_math::{c64::C64, dd::Dd};
 
+mod diffusive;
+pub use diffusive::{MAX_ZK_DIFFUSIVE_POLES, ZkDiffusive, ZkDiffusiveTerm};
+
 /// Smallest certified shear number; thermal and viscous arguments use this
 /// same domain. This extends the requested 1e-3 endpoint without defaults.
 pub const ZK_MIN_SHEAR: f64 = 1e-6;

@@ -11,6 +11,27 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Exact-Bessel circular wall memory
+
+`ZkDiffusive` converts even truncations of the exact cylindrical Bessel
+continued fractions into positive viscous and thermal Foster arms. The existing
+Jacobi eigensolver owns the spectral decomposition. `series_drag_per_s` is
+Poiseuille resistance divided by inviscid inertance; each `ZkDiffusiveTerm`
+supplies `gain_per_s * s/(s + rate_per_s)`, normalized by the corresponding
+inviscid inertance or compliance. No acoustic baseline storage is duplicated.
+The low-frequency total inertance is 4/3 of the inviscid value and total
+compliance is gamma times the adiabatic value at every pole count.
+
+Pole counts 1..=64 are an explicit diffusion resolution axis. Construction
+refuses nonpositive rates/weights or unresolved spectral decomposition, and
+checks both complex excess wall operators and their real losses against the
+existing exact Bessel owner at 129 logarithmic points in the supplied band.
+The user supplies the error ceiling; no automatic clipping or fallback occurs.
+The reported maximum errors are sampled evidence, not interval bounds. This
+owner supplies immutable coefficients, not a time integrator. Focused regression
+source in `zk/diffusive/tests.rs` covers a 2/4/8/16 pole ladder over viscous shear
+1..30, static storage, physical gas scaling, and refusal boundaries.
+
 ### Opt-in linear evolution (IRP M5.2-W1)
 
 `linear_exact::{split_quadratic, step_split}` requires explicit
