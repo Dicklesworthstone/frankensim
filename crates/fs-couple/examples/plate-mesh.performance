@@ -1,6 +1,7 @@
-frankensim-plate-performance-v1
+frankensim-plate-performance-v2
 audio 48000 4801 1.0
-observer 1.2 1.0
+ambient 293.15 101325 0
+observer 1.0
 limits 8 0.9 100.0 1000000.0 32
 mechanics simply-supported 0.0 0.02 5.0 700.0 3
 sections 2

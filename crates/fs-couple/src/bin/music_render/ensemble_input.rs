@@ -139,12 +139,13 @@ fn load_with_gas_sources(
             })
         }
         Kind::Plate => {
-            let p = PlatePerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let p = PlatePerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
+            let gas_json=super::thermochemical::provenance(std::slice::from_ref(p.gas_record()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.retained_modes, controls: 0, exterior_json: String::new(),
+                components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json,
             })
         }
         Kind::Valve => {

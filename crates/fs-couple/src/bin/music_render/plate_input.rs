@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use fs_material::gas_species::input::ThermochemicalSources;
 use fs_couple::render::plate::file::{
     MAX_PLATE_PERFORMANCE_BYTES, PLATE_PERFORMANCE_SCHEMA, PlatePerformance,
 };
@@ -31,7 +32,10 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     Ok((*input, *output, block.unwrap_or(512)))
 }
 
-pub(super) fn run(args: &[String]) -> Result<(), String> {
+pub(super) fn run_with_gas_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
     let (input, output, block) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
@@ -42,7 +46,9 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("plate input read failed: {e}"))?;
-    let performance = PlatePerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+    let performance = PlatePerformance::from_bytes_with_gas_sources(&bytes, block, sources)
+        .map_err(|e| e.to_string())?;
+    let gas_sources = super::thermochemical::provenance(core::slice::from_ref(performance.gas_record()));
     let info = performance.info();
     if info.sample_rate_hz != RATE {
         return Err("music_render requires an explicitly declared 48000 Hz input; no implicit resampling".into());
@@ -64,10 +70,14 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
          \"plate_input\":{{\"schema\":\"{PLATE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\
          \"nodes\":{},\"triangles\":{},\"sections\":{},\"requested_modes\":{},\
          \"retained_modes\":{},\"force_events\":{},\
-         \"model_scope\":\"linear flat DKT plate; authored sections; compact baffled observer; no radiation loading or physical-validation claim\"}}}}",
+         \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
+         \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
+         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\
+         \"model_scope\":\"linear flat DKT plate; authored sections; compact baffled observer retarded by r/c in the declared gas; no radiation loading or physical-validation claim\"}}{gas_sources}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.nodes, info.triangles, info.sections, info.requested_modes, info.retained_modes,
-        info.force_events,
+        info.force_events, info.gas.temperature, info.gas.pressure, info.gas.density,
+        info.gas.sound_speed, info.gas.water_mole_fraction, info.listener_m, info.propagation_delay_s,
     );
     writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())
         .map_err(|e| format!("sidecar write failed: {e}"))?;

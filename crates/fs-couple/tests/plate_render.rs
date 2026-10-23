@@ -4,10 +4,13 @@ use fs_couple::render::schedule::{ScheduledControl, ScheduledRenderer};
 use fs_couple::thin_plate::{CompactBody, certified_radiators};
 use fs_scenario::{RadiatingPlate, ThinPlate};
 use fs_exec::CancelGate;
+use fs_material::gas::GasState;
 
-fn config() -> PlateVoiceConfig {
+fn air() -> GasState { GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap() }
+fn config() -> PlateVoiceConfig { config_in(air()) }
+fn config_in(gas: GasState) -> PlateVoiceConfig {
     PlateVoiceConfig { sample_rate_hz: 48_000, max_modes: 8, nyquist_guard_fraction: 0.9,
-        density_kg_m3: 1.2, listener_m: 1.0, maximum_abs_force_n: 100.0,
+        gas, listener_m: 1.0, maximum_abs_force_n: 100.0,
         maximum_abs_pressure_pa: 1e6 }
 }
 fn bodies() -> Vec<CompactBody> {
@@ -39,12 +42,31 @@ fn renderer(bodies: Vec<CompactBody>) -> ScheduledRenderer {
     ScheduledRenderer::new(RenderContext::new(vec![RenderVoice::CompactPlate(voice)], 571),
         vec![event(13, 0.0), event(91, -0.4), event(170, 0.0)], 3).unwrap()
 }
-fn direct(mut bodies: Vec<CompactBody>, n: usize) -> Vec<f64> {
+fn scheduled(i: usize) -> f64 { if i < 13 { 1.0 } else if i < 91 { 0.0 } else if i < 170 { -0.4 } else { 0.0 } }
+fn direct(bodies: Vec<CompactBody>, n: usize) -> Vec<f64> { retarded(bodies, n, &air(), scheduled) }
+fn direct_in(bodies: Vec<CompactBody>, n: usize, gas: &GasState) -> Vec<f64> { retarded(bodies, n, gas, scheduled) }
+/// Samples of the 1 m time of flight in the reference air.
+fn onset() -> usize { (48_000.0 / air().sound_speed).floor() as usize }
+/// Independent retarded reference through the public stepper: the listener at
+/// 1 m hears output i = t_{i+1} - r/c, which lies (1 - f) dt into step i - m of
+/// a delay of m + f samples. Step i - m is re-driven for that partial duration
+/// from a clone of its start state; output before the first wavefront is zero.
+fn retarded(mut bodies: Vec<CompactBody>, n: usize, gas: &GasState, force: fn(usize) -> f64) -> Vec<f64> {
+    let delay = 1.0 * 48_000.0 / gas.sound_speed;
+    let whole = delay.floor() as usize;
+    let elapsed = (1.0 - (delay - delay.floor())) * 48_000.0_f64.recip();
+    let mut starts = Vec::with_capacity(n);
     (0..n).map(|i| {
-        let f = if i < 13 { 1.0 } else if i < 91 { 0.0 } else if i < 170 { -0.4 } else { 0.0 };
+        let f = force(i);
+        starts.push((bodies.clone(), f));
+        for body in &mut bodies { body.drive(f*body.drive_participation, 1.0/48_000.0).unwrap(); }
+        if i < whole { return 0.0; }
+        let (start, f) = &starts[i - whole];
         let mut pressure = 0.0;
-        for body in &mut bodies {
-            pressure += body.drive_and_radiate(f*body.drive_participation, 1.0/48_000.0, 1.2, 1.0).unwrap();
+        for body in start {
+            let mut probe = body.clone();
+            let acc = probe.drive(f*probe.drive_participation, elapsed).unwrap();
+            pressure += probe.radiate(acc, gas.density, 1.0);
         }
         pressure
     }).collect()
@@ -52,7 +74,7 @@ fn direct(mut bodies: Vec<CompactBody>, n: usize) -> Vec<f64> {
 #[test]
 fn signed_footprint_and_radiation_projections_match_the_existing_mechanics_bitwise() {
     let expected = direct(bodies(), 577);
-    assert!(expected[13..91].iter().any(|p| p.abs() > 1e-8));
+    assert!(expected[onset() + 13..onset() + 91].iter().any(|p| p.abs() > 1e-8));
     for block in [1, 7, 37, 64, 571] {
         let mut r = renderer(bodies());
         let mut actual = vec![0.0; 577];
@@ -61,6 +83,47 @@ fn signed_footprint_and_radiation_projections_match_the_existing_mechanics_bitwi
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
         assert_eq!(r.samples_rendered(), 577);
     }
+}
+#[test]
+fn the_declared_gas_sets_the_pressure_scale_and_the_time_of_flight() {
+    // Only the gas changes. Without a reaction load the mechanics ignore it, so
+    // p is exactly rho-proportional at equal c, and arrives r/c after the start.
+    let thin = GasState::try_new_moist_air(293.15, 0.7 * 101_325.0, 0.0).unwrap();
+    let co2 = fs_material::gas_species::input::read_gas_state(
+        &mut "mixture 293.15 101325 mole 1 CO2 1".split_ascii_whitespace(), None).unwrap();
+    let render = |gas: GasState| {
+        let voice = CompactPlateVoice::from_radiators(bodies(), 1.0, config_in(gas)).unwrap();
+        let mut r = ScheduledRenderer::new(RenderContext::new(vec![RenderVoice::CompactPlate(voice)], 571),
+            vec![event(13, 0.0), event(91, -0.4), event(170, 0.0)], 3).unwrap();
+        let mut out = vec![0.0; 2000];
+        for chunk in out.chunks_mut(571) { r.block(chunk).unwrap(); }
+        out
+    };
+    let (a, b, c) = (render(air()), render(thin), render(co2));
+    assert_eq!(thin.sound_speed.to_bits(), air().sound_speed.to_bits(), "ideal-gas c is pressure-independent");
+    let peak = a.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+    assert!(peak > 1e-6);
+    let scale = thin.density / air().density;
+    assert!((scale - 0.7).abs() < 1e-12);
+    for (x, y) in a.iter().zip(&b) { assert!((y - scale * x).abs() <= 1e-12 * peak, "{x} {y}"); }
+    for (gas, out) in [(air(), &a), (thin, &b), (co2, &c)] {
+        let onset = (48_000.0 / gas.sound_speed).floor() as usize;
+        assert!(out[..onset].iter().all(|p| *p == 0.0), "no sound before r/c");
+        assert!(out[onset] != 0.0, "the wavefront arrives at r/c");
+        assert_eq!(out.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+            direct_in(bodies(), 2000, &gas).iter().map(|p| p.to_bits()).collect::<Vec<_>>());
+    }
+    // CO2 is slower than air: 1 m takes about 179 rather than 140 samples.
+    assert!((48_000.0 / co2.sound_speed).floor() > (48_000.0 / air().sound_speed).floor() + 30.0);
+}
+#[test]
+fn a_listener_beyond_the_retarded_history_budget_refuses() {
+    let mut far = config();
+    far.listener_m = 1e6;
+    assert!(CompactPlateVoice::from_radiators(bodies(), 0.0, far).is_err());
+    let mut silent = config();
+    silent.gas.sound_speed = f64::NAN;
+    assert!(CompactPlateVoice::from_radiators(bodies(), 0.0, silent).is_err());
 }
 #[test]
 fn actual_plate_geometry_reaches_the_renderer_without_hand_authored_frequencies() {
@@ -73,11 +136,12 @@ fn actual_plate_geometry_reaches_the_renderer_without_hand_authored_frequencies(
         assert_eq!(a.mass_kg.to_bits(), b.mass_kg.to_bits());
         assert_eq!(a.drive_participation.to_bits(), b.drive_participation.to_bits());
     }
-    let expected = direct(reduced, 13);
-    let mut actual = [0.0; 13];
+    // Constant initial force; 13 samples of sound after the 1 m time of flight.
+    let expected = retarded(reduced, onset() + 13, &air(), |_| 1.0);
+    let mut actual = vec![0.0; onset() + 13];
     voice.step_block(&mut actual).unwrap();
-    assert!(actual.iter().any(|x| x.abs() > 1e-10));
-    assert_eq!(actual.map(f64::to_bits).as_slice(), expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+    assert!(actual[onset()..].iter().any(|x| x.abs() > 1e-10));
+    assert_eq!(actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
     let mut thicker = geometry;
     thicker.thickness_m *= 1.5;
     let other = CompactPlateVoice::from_plate(thicker, 1.0, config()).unwrap();
@@ -93,10 +157,11 @@ fn invalid_control_batch_preserves_force_state_clock_and_log() {
         let mut context = renderer(bodies()).into_context();
         assert!(context.apply_controls(&[event(0, -3.0).delta, invalid]).is_err());
         assert!(context.control_log().is_empty());
-        let mut actual = [0.0; 13];
+        let mut actual = vec![0.0; onset() + 13];
         context.block(&mut actual).unwrap();
-        let expected = direct(bodies(), 13);
-        assert_eq!(actual.map(f64::to_bits).as_slice(), expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+        let expected = retarded(bodies(), onset() + 13, &air(), |_| 1.0);
+        assert!(actual[onset()..].iter().any(|x| *x != 0.0));
+        assert_eq!(actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
     }
 }
 #[test]
@@ -139,8 +204,10 @@ fn pressure_refusal_poisoning_prevents_reuse_of_partial_plate_state() {
     let mut c = config();
     c.maximum_abs_pressure_pa = 1e-30;
     let plate = CompactPlateVoice::from_radiators(bodies(), 1.0, c).unwrap();
-    let mut context = RenderContext::new(vec![RenderVoice::CompactPlate(plate)], 32);
-    assert!(context.block(&mut [0.0; 32]).is_err());
+    // The first nonzero pressure arrives after the 1 m time of flight.
+    let mut context = RenderContext::new(vec![RenderVoice::CompactPlate(plate)], 256);
+    assert!(onset() < 256);
+    assert!(context.block(&mut [0.0; 256]).is_err());
     let mut untouched = [17.0; 32];
     assert!(matches!(context.block(&mut untouched), Err(RenderError::Poisoned)));
     assert_eq!(untouched, [17.0; 32]);

@@ -21,9 +21,10 @@ indices are zero-based. ASCII whitespace separates fields. Extra fields, missing
 or trailing records, and unknown versions refuse. There are no ignored comments.
 
 ```text
-frankensim-plate-performance-v1
+frankensim-plate-performance-v2
 audio RATE_HZ SAMPLE_COUNT FULL_SCALE_PA
-observer FLUID_DENSITY_KG_M3 DISTANCE_M
+ambient GAS_RECORD
+observer DISTANCE_M
 limits MAX_MODES NYQUIST_FRACTION MAX_ABS_FORCE_N MAX_ABS_PRESSURE_PA MAX_EVENTS
 mechanics SUPPORT PRETENSION_N_M DAMPING_RATIO LOW_HZ HIGH_HZ RETAINED_MODES
 sections COUNT
@@ -40,6 +41,15 @@ initial_force_n FORCE_N
 events COUNT
 force SAMPLE_INDEX FORCE_N
 ```
+
+`GAS_RECORD` is the shared gas declaration read by
+`fs_material::gas_species::input::read_gas_record`, as in the bowed, lip and
+voice files: `T_K P_PA RH` (moist air), `mixture T_K P_PA mole|mass COUNT
+SPECIES FRACTION...`, or `thermochemical T_K P_PA mole|mass COUNT ID
+FRACTION...` with `--gas-component` source packs on the command line. Its
+density scales the pressure and its sound speed sets the time of flight. A
+record that does not parse or resolve refuses the file; there is no air
+default. Version 1 files, which authored a bare fluid density, refuse.
 
 `SUPPORT` is `simply-supported` (zero transverse displacement) or `clamped`
 (zero displacement and slopes), applied to exactly the listed support nodes.
@@ -75,10 +85,12 @@ certificate. Modal reduction is offline and presently not cancellable. Audio
 output staging is block-sized, uses the existing PCM16 encoder, counts clips,
 and never peak-normalizes. Existing output/sidecar files are never overwritten.
 
-Pressure uses the existing signed-area, endpoint-acceleration compact baffled
-monopole observation. There is no radiation reaction load, propagation delay,
-atmospheric absorption, resolved directivity, or whole-fluid energy balance in
-this input path. Large/noncompact radiators need a more complete acoustic model.
+Pressure uses the existing signed-area compact baffled monopole observation,
+`rho A a(t - r/c) / (2 pi r)`, with `rho` and `c` from the ambient record. The
+retarded acceleration is evaluated exactly inside the recorded exact-ZOH step,
+not interpolated; before the first wavefront arrives the output is zero. There
+is no radiation reaction load, atmospheric absorption, resolved directivity, or
+whole-fluid energy balance in this input path. Large/noncompact radiators need a more complete acoustic model.
 The source hash binds exact bytes; relocation does not change it, but whitespace
 changes do. The sidecar is numerical/software provenance, not a certificate of
 experimental validity, continuum accuracy, or source material truth.

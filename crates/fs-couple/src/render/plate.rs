@@ -9,14 +9,22 @@
 //!
 //! Pressure is the existing endpoint-acceleration observation, not an imaginary
 //! narrow-band transfer applied to displacement (which would radiate a static
-//! deflection). Compact radiation remains an approximation: no retardation,
-//! atmospheric propagation, directivity or whole-fluid energy claim is added.
+//! deflection). The declared exterior gas supplies both its density (pressure
+//! scale) and its sound speed: the listener hears each body's exact-ZOH
+//! acceleration at the retarded time t - r/c, evaluated inside the recorded
+//! step rather than interpolated between samples. Compact radiation remains an
+//! approximation: no atmospheric absorption, directivity or whole-fluid energy
+//! claim is added.
 
 use super::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::modal_acoustic_time::MAX_TIME_DOMAIN_ACOUSTIC_MODES;
-use crate::thin_plate::{CompactBody, certified_radiators};
+use crate::thin_plate::{CompactBody, HeldStep, certified_radiators};
+use fs_material::gas::GasState;
 use fs_scenario::ThinPlate;
+
+/// Largest retained body-step history (one entry per body per delay sample).
+pub const MAX_PLATE_RETARDED_STEPS: usize = 1 << 21;
 
 /// Explicit callback admission; these ceilings do not rescale sound or forces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,8 +35,9 @@ pub struct PlateVoiceConfig {
     pub max_modes: usize,
     /// Fraction of Nyquist allowed for every retained natural frequency.
     pub nyquist_guard_fraction: f64,
-    /// Surrounding fluid density in the compact pressure law [kg/m^3].
-    pub density_kg_m3: f64,
+    /// Exterior gas: its density scales the compact pressure law and its
+    /// sound speed sets the propagation delay to the listener.
+    pub gas: GasState,
     /// Fixed observation distance [m].
     pub listener_m: f64,
     /// Maximum absolute total footprint force [N].
@@ -43,12 +52,19 @@ impl PlateVoiceConfig {
             || self.max_modes > MAX_TIME_DOMAIN_ACOUSTIC_MODES
             || !self.nyquist_guard_fraction.is_finite()
             || !(0.0 < self.nyquist_guard_fraction && self.nyquist_guard_fraction < 1.0)
-            || [self.density_kg_m3, self.listener_m, self.maximum_abs_force_n,
+            || [self.gas.density, self.gas.sound_speed, self.listener_m, self.maximum_abs_force_n,
                 self.maximum_abs_pressure_pa].iter().any(|x| !x.is_finite() || *x <= 0.0)
+            || !self.propagation_delay_samples().is_finite()
         {
-            return Err(invalid("plate voice requires explicit positive finite clock, mode, fluid, force and pressure budgets"));
+            return Err(invalid("plate voice requires explicit positive finite clock, mode, gas, distance, force and pressure budgets"));
         }
         Ok(())
+    }
+
+    /// Time of flight r/c to the listener, in samples of this clock.
+    #[must_use]
+    pub fn propagation_delay_samples(self) -> f64 {
+        self.listener_m * f64::from(self.sample_rate_hz) / self.gas.sound_speed
     }
 }
 
@@ -62,6 +78,12 @@ pub struct CompactPlateVoice {
     force_n: f64,
     sample_index: u64,
     poisoned: bool,
+    /// Whole samples of the r/c delay.
+    delay_whole: u64,
+    /// Time into step n - delay_whole that the listener hears at sample n [s].
+    retarded_elapsed_s: f64,
+    /// Ring of delay_whole + 1 step rows, each with one entry per body.
+    history: Vec<HeldStep>,
 }
 
 impl CompactPlateVoice {
@@ -116,7 +138,18 @@ impl CompactPlateVoice {
                 return Err(invalid("plate bodies need finite physical coefficients and frequencies below the Nyquist guard"));
             }
         }
-        let voice = Self { bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false };
+        // Output n is the pressure at t = (n+1) dt. Its source time is
+        // (n+1) dt - r/c = t_{n-m} + (1-f) dt for a delay of m + f samples.
+        let delay = config.propagation_delay_samples();
+        let rows = delay.floor() + 1.0;
+        if rows * bodies.len() as f64 > MAX_PLATE_RETARDED_STEPS as f64 {
+            return Err(invalid("listener distance exceeds the retarded plate history budget"));
+        }
+        let delay_whole = delay.floor() as u64;
+        let retarded_elapsed_s = (1.0 - (delay - delay.floor())) * f64::from(config.sample_rate_hz).recip();
+        let history = vec![HeldStep::REST; (delay_whole as usize + 1) * bodies.len()];
+        let voice = Self { bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false,
+            delay_whole, retarded_elapsed_s, history };
         voice.validate_force(initial_force_n)?;
         Ok(voice)
     }
@@ -147,29 +180,49 @@ impl CompactPlateVoice {
     // RenderContext validates the whole batch before calling this mutation.
     pub(super) fn set_force_admitted(&mut self, force_n: f64) { self.force_n = force_n; }
 
-    /// Advance existing body mechanics, sum existing compact pressures in body
-    /// order, and retain every state. Refusals leave a partial callback and poison
-    /// this voice. Clock/empty-input admission occurs before any state changes.
-    /// The successful no-filter loop allocates no buffers; measured callback
-    /// timing/allocation and loaded-filter performance remain separate evidence.
+    /// Advance existing body mechanics, sum the retarded compact pressures in
+    /// body order, and retain every state. Before the first wavefront arrives
+    /// (r/c after the render starts) the listener hears the resting past: zero.
+    /// Refusals leave a partial callback and poison this voice. Clock/empty-input
+    /// admission occurs before any state changes. The successful no-filter loop
+    /// allocates no buffers; measured callback timing/allocation and loaded-filter
+    /// performance remain separate evidence.
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
         if out.is_empty() { return Err(RenderError::EmptyBlock); }
         let count = u64::try_from(out.len()).map_err(|_| invalid("plate sample count overflow"))?;
         self.sample_index.checked_add(count).ok_or_else(|| invalid("plate sample clock overflow"))?;
         let dt = self.sample_period_s();
+        let width = self.bodies.len();
+        let rows = self.delay_whole + 1;
         for slot in out {
-            let mut pressure = 0.0_f64;
-            for body in &mut self.bodies {
+            let n = self.sample_index;
+            // Rows times width fit MAX_PLATE_RETARDED_STEPS, so the casts are exact.
+            let row = (n % rows) as usize * width;
+            for (body, step) in self.bodies.iter_mut().zip(&mut self.history[row..row + width]) {
                 let force = self.force_n * body.drive_participation;
-                let sample = match body.drive_and_radiate(force, dt, self.config.density_kg_m3, self.config.listener_m) {
-                    Ok(sample) => sample,
+                match body.drive_held(force, dt) {
+                    Ok((_, held)) => *step = held,
                     Err(error) => {
                         self.poisoned = true;
                         return Err(RenderError::Voice(error));
                     }
-                };
-                pressure += sample;
+                }
+            }
+            let mut pressure = 0.0_f64;
+            if n >= self.delay_whole {
+                // Row of step n - m; -m is congruent to 1 modulo m + 1.
+                let row = ((n + 1) % rows) as usize * width;
+                for (body, step) in self.bodies.iter().zip(&self.history[row..row + width]) {
+                    let acc = match body.acceleration_within(*step, self.retarded_elapsed_s) {
+                        Ok(acc) => acc,
+                        Err(error) => {
+                            self.poisoned = true;
+                            return Err(RenderError::Voice(error));
+                        }
+                    };
+                    pressure += body.radiate(acc, self.config.gas.density, self.config.listener_m);
+                }
             }
             if !pressure.is_finite() || pressure.abs() > self.config.maximum_abs_pressure_pa {
                 self.poisoned = true;

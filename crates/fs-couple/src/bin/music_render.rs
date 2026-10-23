@@ -360,8 +360,8 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|arg| arg == "plate") {
-        if gas_registry.is_some() || gas_options.record.is_some() { fail("plate input has no gas consumer"); }
-        plate_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        if gas_options.record.is_some() { fail("plate gas records belong in the performance file"); }
+        plate_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
         return;
     }
     if args.first().is_some_and(|arg| arg == "modal") {

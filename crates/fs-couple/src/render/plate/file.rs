@@ -6,10 +6,15 @@
 //! masses, force participation and signed radiation areas come from the chart
 //! reduction, never from an authored oscillator list. The admitted search window
 //! need not include every physical mode; no continuum convergence is implied.
+//! The exterior medium is one shared gas record: its density and sound speed
+//! reach the observer, and a record that does not resolve refuses (never air).
 
 use std::collections::BTreeSet;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
+use fs_material::MaterialError;
+use fs_material::gas::GasState;
+use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
@@ -18,7 +23,7 @@ use crate::thin_plate::{PlateChartRadiation, certified_chart_radiators};
 use super::{CompactPlateVoice, PlateVoiceConfig};
 
 /// Versioned grammar for the source geometry, mechanics and force history.
-pub const PLATE_PERFORMANCE_SCHEMA: &str = "frankensim-plate-performance-v1";
+pub const PLATE_PERFORMANCE_SCHEMA: &str = "frankensim-plate-performance-v2";
 /// Maximum source bytes read or parsed by this input path.
 pub const MAX_PLATE_PERFORMANCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NODES: usize = 512;
@@ -37,6 +42,13 @@ pub enum PlatePerformanceError {
         /// Refused condition.
         what: &'static str,
     },
+    /// The declared exterior gas was refused by its material owner.
+    Gas {
+        /// One-based source line of the `ambient` record.
+        line: usize,
+        /// Original material refusal.
+        source: MaterialError,
+    },
     /// The existing plate geometry or section owner refused.
     Geometry(fs_plate::PlateError),
     /// The existing plate reduction refused.
@@ -48,6 +60,7 @@ impl core::fmt::Display for PlatePerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Input { line, what } => write!(f, "plate input line {line}: {what}"),
+            Self::Gas { line, source } => write!(f, "plate input line {line}: ambient gas refused: {source}"),
             Self::Geometry(e) => write!(f, "plate geometry/section: {e}"),
             Self::Reduction(e) => write!(f, "plate reduction: {e}"),
             Self::Render(e) => write!(f, "plate render: {e}"),
@@ -67,6 +80,12 @@ pub struct PlatePerformanceInfo {
     pub samples: u64,
     /// Declared pascals mapped to PCM full scale.
     pub full_scale_pa: f64,
+    /// Resolved exterior gas the observer uses.
+    pub gas: GasState,
+    /// Observation distance [m].
+    pub listener_m: f64,
+    /// Time of flight to the listener, r/c [s].
+    pub propagation_delay_s: f64,
     /// Geometry counts of the actual assembled chart.
     pub nodes: usize,
     /// Triangle count of the actual assembled chart.
@@ -84,6 +103,7 @@ pub struct PlatePerformanceInfo {
 /// Complete, admitted geometry-derived plate performance.
 pub struct PlatePerformance {
     info: PlatePerformanceInfo,
+    gas_record: GasRecord,
     renderer: ScheduledRenderer,
 }
 impl PlatePerformance {
@@ -96,9 +116,23 @@ impl PlatePerformance {
     /// noncancellable; its fixed owner solver policy is not a wall-time bound.
     ///
     /// # Errors
-    /// Bad syntax/limits, geometry/section, eigenproblem or rendering admission.
+    /// Bad syntax/limits, gas, geometry/section, eigenproblem or rendering admission.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, PlatePerformanceError> {
-        let input = Parsed::read(bytes, max_block)?;
+        Self::from_bytes_with_gas_sources(bytes, max_block, None)
+    }
+
+    /// [`PlatePerformance::from_bytes`] with an explicit thermochemical source
+    /// registry for `ambient thermochemical` records. Without one, such a record
+    /// refuses; supplied sources never select a gas by themselves.
+    ///
+    /// # Errors
+    /// As [`PlatePerformance::from_bytes`], plus missing or refused gas sources.
+    pub fn from_bytes_with_gas_sources(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, PlatePerformanceError> {
+        let input = Parsed::read(bytes, max_block, sources)?;
         let bodies = certified_chart_radiators(&input.chart, &input.options)
             .map_err(PlatePerformanceError::Reduction)?;
         let retained_modes = bodies.len();
@@ -107,7 +141,10 @@ impl PlatePerformance {
         let info = PlatePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.plate-performance.v1", bytes),
             sample_rate_hz: input.config.sample_rate_hz, samples: input.samples,
-            full_scale_pa: input.full_scale_pa, nodes: input.chart.mesh.nodes.len(),
+            full_scale_pa: input.full_scale_pa, gas: input.config.gas,
+            listener_m: input.config.listener_m,
+            propagation_delay_s: input.config.listener_m / input.config.gas.sound_speed,
+            nodes: input.chart.mesh.nodes.len(),
             triangles: input.chart.mesh.tris.len(), sections: input.sections,
             requested_modes: input.options.n_modes, retained_modes,
             force_events: input.events.len(),
@@ -115,12 +152,16 @@ impl PlatePerformance {
         let context = RenderContext::new(vec![RenderVoice::CompactPlate(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, input.events, input.max_events)
             .map_err(PlatePerformanceError::Render)?;
-        Ok(Self { info, renderer })
+        Ok(Self { info, gas_record: input.gas_record, renderer })
     }
 
     /// Retained source and reduction counts for the output consumer.
     #[must_use]
     pub const fn info(&self) -> PlatePerformanceInfo { self.info }
+
+    /// The exterior gas record, with any thermochemical source receipts.
+    #[must_use]
+    pub const fn gas_record(&self) -> &GasRecord { &self.gas_record }
 
     /// Transfer the complete physical state to existing rendering/WAV consumers.
     #[must_use]
@@ -128,6 +169,7 @@ impl PlatePerformance {
 }
 
 struct Parsed {
+    gas_record: GasRecord,
     chart: PlateChart,
     options: PlateChartRadiation,
     config: PlateVoiceConfig,
@@ -140,7 +182,11 @@ struct Parsed {
 }
 impl Parsed {
     #[allow(clippy::too_many_lines)] // fixed-order grammar; all records precede reduction
-    fn read(bytes: &[u8], max_block: usize) -> Result<Self, PlatePerformanceError> {
+    fn read(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, PlatePerformanceError> {
         if bytes.len() > MAX_PLATE_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 4 MiB or callback capacity is outside 1..=65536"));
         }
@@ -155,10 +201,14 @@ impl Parsed {
         if sample_rate_hz == 0 || samples == 0 || samples > u64::from(sample_rate_hz) * 600
             || samples > crate::pcm_wav::stream::MAX_PCM16_WAV_SAMPLES || full_scale_pa <= 0.0
         { return Err(bad(r.line, "audio needs a positive rate, full scale and RIFF-sized duration at most 600 seconds")); }
-        let mut observer = r.row("observer")?;
-        let density_kg_m3 = observer.scalar()?;
-        let listener_m = observer.scalar()?;
-        observer.finish()?;
+        let mut ambient = r.row("ambient")?;
+        let gas_record = read_gas_record(&mut ambient.fields, None, sources).map_err(|error| match error {
+            GasInputError::Input(what) => bad(ambient.line, what),
+            GasInputError::Material(source) => PlatePerformanceError::Gas { line: ambient.line, source },
+        })?;
+        ambient.finish()?;
+        let gas = *gas_record.state();
+        let listener_m: f64 = r.one("observer")?;
         let mut limits = r.row("limits")?;
         let max_modes = limits.count(MAX_MODES)?;
         let nyquist_guard_fraction = limits.scalar()?;
@@ -167,7 +217,7 @@ impl Parsed {
         let max_events = limits.count(MAX_EVENTS)?;
         limits.finish()?;
         let config = PlateVoiceConfig { sample_rate_hz, max_modes, nyquist_guard_fraction,
-            density_kg_m3, listener_m, maximum_abs_force_n, maximum_abs_pressure_pa };
+            gas, listener_m, maximum_abs_force_n, maximum_abs_pressure_pa };
         config.validate().map_err(PlatePerformanceError::Render)?;
         let mut mechanics = r.row("mechanics")?;
         let support = match mechanics.word()? {
@@ -270,7 +320,7 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { chart, options, config, samples, full_scale_pa, initial_force_n,
+        Ok(Self { gas_record, chart, options, config, samples, full_scale_pa, initial_force_n,
             sections: sections_count, events, max_events })
     }
 }

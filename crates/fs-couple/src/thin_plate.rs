@@ -63,6 +63,19 @@ pub struct CompactBody {
     rad: Option<(DigitalFilter, DigitalFilterState)>,
 }
 
+/// One exact-ZOH step of a [`CompactBody`]: its start state and held force.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HeldStep {
+    y: f64,
+    v: f64,
+    force_n: f64,
+}
+
+impl HeldStep {
+    /// A body at rest under no force (the quiescent past before a render).
+    pub(crate) const REST: Self = Self { y: 0.0, v: 0.0, force_n: 0.0 };
+}
+
 impl CompactBody {
     // Shared geometric reducers already use M-orthonormal physical vectors.
     // Unit modal mass preserves their signed volume and force projections;
@@ -119,6 +132,16 @@ impl CompactBody {
     /// demoting the reaction force to zero (which would mask model
     /// instability as benign decay).
     pub fn drive(&mut self, force_n: f64, dt: f64) -> Result<f64, AcousticRealizeError> {
+        self.drive_held(force_n, dt).map(|(acc, _)| acc)
+    }
+
+    /// [`CompactBody::drive`], also returning the step's start state and the
+    /// total generalized force (reaction included) held over it.
+    pub(crate) fn drive_held(
+        &mut self,
+        force_n: f64,
+        dt: f64,
+    ) -> Result<(f64, HeldStep), AcousticRealizeError> {
         if !(force_n.is_finite()
             && dt.is_finite()
             && dt > 0.0
@@ -144,6 +167,33 @@ impl CompactBody {
         } else {
             0.0
         };
+        let step = HeldStep { y: self.y, v: self.v, force_n: force_n + f_rad };
+        let (y, v, acc) = self.transition(step, dt)?;
+        self.v = v;
+        self.y = y;
+        Ok((acc, step))
+    }
+
+    /// Exact acceleration `elapsed_s` into a recorded step of this body, under
+    /// the same exact-ZOH law; the body's own state is not touched. At the full
+    /// step duration it is the acceleration [`CompactBody::drive`] returned.
+    ///
+    /// # Errors
+    /// Invalid elapsed time, or non-finite motion.
+    pub(crate) fn acceleration_within(
+        &self,
+        step: HeldStep,
+        elapsed_s: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        if !(elapsed_s.is_finite() && elapsed_s > 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "retarded radiator time must lie inside a recorded step",
+            });
+        }
+        self.transition(step, elapsed_s).map(|(_, _, acc)| acc)
+    }
+
+    fn transition(&self, step: HeldStep, dt: f64) -> Result<(f64, f64, f64), AcousticRealizeError> {
         let root_mass = self.mass_kg.sqrt();
         let next = advance_exact_zoh(
             ModalAcousticMode {
@@ -152,15 +202,15 @@ impl CompactBody {
                 pressure_per_modal_velocity: C64::new(0.0, 0.0),
             },
             ModalAcousticState {
-                displacement_m_sqrt_kg: self.y * root_mass,
-                velocity_m_sqrt_kg_per_s: self.v * root_mass,
+                displacement_m_sqrt_kg: step.y * root_mass,
+                velocity_m_sqrt_kg_per_s: step.v * root_mass,
             },
-            (force_n + f_rad) / root_mass,
+            step.force_n / root_mass,
             dt,
         );
         let y = next.displacement_m_sqrt_kg / root_mass;
         let v = next.velocity_m_sqrt_kg_per_s / root_mass;
-        let acc = (force_n + f_rad) / self.mass_kg
+        let acc = step.force_n / self.mass_kg
             - 2.0 * self.zeta * self.omega * v
             - self.omega * self.omega * y;
         if !(y.is_finite() && v.is_finite() && acc.is_finite()) {
@@ -168,9 +218,7 @@ impl CompactBody {
                 "compact radiator transition is not finite".to_string(),
             ));
         }
-        self.v = v;
-        self.y = y;
-        Ok(acc)
+        Ok((y, v, acc))
     }
 
     /// Compact monopole pressure at distance `listener_m`.
