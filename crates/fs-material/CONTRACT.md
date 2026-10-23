@@ -223,8 +223,13 @@ homogenization, the P2 milestone.
   silently substituted. Original source claims and state receipts are retained.
   Charge and flux-linkage energies use `q^2/(2C)` and `lambda^2/(2L)`.
   Only linear isotropic, nondispersive, lossless uniform-field reductions are
-  admitted. Temperature-only coefficients may be resolved at a fixed state;
-  frequency- or field-restricted sources require another storage model.
+  admitted. Curves and surfaces may be resolved at fixed temperature and typed
+  pressure, composition, moisture or concentration. The shared fixed-external
+  source policy checks every value axis and applicability bound; dimensional
+  equality does not turn stress into pressure or strain into composition.
+  Frequency-, field-, strain- or stress-dependent/restricted sources require
+  another storage model. Changing a resolved coefficient is a new snapshot;
+  live evolution must account its parameter work and any field entropy.
   Invalid geometry, ambiguous sources and unrepresentable coefficients/energy
   refuse. These reductions introduce no circuit solver, hysteresis or loss law.
 - `thermoelectric::ResolvedSeebeckSpan` resolves one source-owned scalar, linear-inside curve
@@ -2010,6 +2015,13 @@ law. The immutable equilibrium h chart remains the phase-state owner.
 scalar permeability admission used by `ResolvedInductor`. The linear planar
 `fs-em` field owner calls this same function, so circuit storage and spatial
 fields share dimensions, source support and linear lossless model restrictions.
-Fixed-temperature source snapshots are allowed; field/frequency dependence and
-operating-field bounds still require a richer owner and refuse here.
+Fixed temperature and explicitly typed pressure/composition/moisture/concentration
+source snapshots are allowed, including source curves and surfaces. Both source
+axes and applicability domains use the public
+`ResolvedScalarProperty::is_static_at_fixed_external_conditions` classification,
+backed by the same fixed-external policy as mechanical and thermal laws. Field/frequency/strain/stress dependence or bounds still require
+a richer owner and refuse here. The existing circuit rebind path owns explicit
+parameter work; fixed-storage winding and moving-gap owners retain their stricter
+source-evolution guards. Focused field-storage tests cover pressure/composition
+surfaces, typed external curves, original claim retention and dynamic-role refusal.
 This adds no independent constitutive formula or magnetic heating law.

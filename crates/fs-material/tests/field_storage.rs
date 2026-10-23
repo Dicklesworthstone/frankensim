@@ -1,4 +1,4 @@
-//! G0/G1 uniform-field reductions from synthetic data, not measurements.
+//! G0/G1/G4 uniform-field reductions from synthetic data, not measurements.
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
@@ -6,7 +6,13 @@ use fs_matdb::{
 };
 use fs_material::field_storage::*;
 use fs_material::state_point::MaterialPropertySelection;
-use fs_qty::{Dims, Temperature};
+use fs_qty::{
+    Dims, QuantitySpec, Temperature,
+    semantic::{
+        CompositionBasis, FrequencyConvention, MoistureBasis, QuantityKind, SemanticType,
+        StrainBasis, StrainComponent, ValueForm,
+    },
+};
 
 fn card(key: &str, dims: Dims, value: PropertyValue, validity: ValidityDomain) -> MaterialCard {
     let mut claims = ClaimSet::new();
@@ -239,4 +245,169 @@ fn incompatible_quantities_dispersive_curves_and_field_support_refuse() {
         )
         .is_err()
     );
+}
+
+fn static_quantity(kind: QuantityKind) -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+
+#[test]
+fn g1_typed_fixed_external_curves_set_magnetic_storage_without_losing_sources() {
+    for kind in [
+        QuantityKind::Pressure,
+        QuantityKind::Composition(CompositionBasis::MassFraction),
+        QuantityKind::Moisture(MoistureBasis::RelativeHumidity),
+        QuantityKind::MassConcentration,
+        QuantityKind::AmountConcentration,
+    ] {
+        let quantity = static_quantity(kind);
+        let source = card(
+            MAGNETIC_PERMEABILITY_PROPERTY,
+            MAGNETIC_PERMEABILITY_DIMS,
+            PropertyValue::Curve {
+                abscissa: "environment".into(),
+                abscissa_dims: quantity.dims(),
+                knots: vec![(0.25, 2e-4), (0.75, 4e-4)],
+                dims: MAGNETIC_PERMEABILITY_DIMS,
+            },
+            ValidityDomain::unconstrained()
+                .with_quantity("environment", quantity, 0.25, 0.75),
+        );
+        let point = QueryPoint::new()
+            .with_quantity("environment", quantity, 0.5)
+            .unwrap();
+        let first = ResolvedInductor::resolve(
+            &source, &point, MaterialPropertySelection::SingleClaimOnly, 0.001, 0.1, 50,
+        )
+        .unwrap();
+        near(first.inductance_h(), 0.0075);
+        near(linear_magnetic_permeability(first.material()).unwrap(), 3e-4);
+        assert_eq!(first.material().card_identity(), source.content_hash());
+        assert_eq!(first.material().axis_quantities().get("environment"), Some(&quantity));
+        assert_eq!(first.material().properties()[0].source_axes().len(), 1);
+        assert!(first.material().properties()[0].is_static_at_fixed_external_conditions());
+
+        // Another fixed physical context is a new snapshot, not a live zero-work update.
+        let next_point = point.clone().with("environment", 0.625).unwrap();
+        let refreshed = first.material().at_query_point(&source, &next_point).unwrap();
+        let second = ResolvedInductor::try_from_material(refreshed, 0.001, 0.1, 50).unwrap();
+        near(second.inductance_h(), 0.00875);
+        near(first.inductance_h(), 0.0075);
+        assert_eq!(
+            first.material().properties()[0].answer().receipt.selected,
+            second.material().properties()[0].answer().receipt.selected
+        );
+        assert!(ResolvedInductor::resolve(
+            &source,
+            &point.clone().with("environment", 0.8).unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,
+            0.001,
+            0.1,
+            50,
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn g1_fixed_pressure_composition_and_temperature_surfaces_set_electric_storage() {
+    let pressure = static_quantity(QuantityKind::Pressure);
+    for (kind, low, high) in [
+        (QuantityKind::Composition(CompositionBasis::MoleFraction), 0.0, 1.0),
+        (QuantityKind::AbsoluteTemperature, 300.0, 400.0),
+    ] {
+        let context = static_quantity(kind);
+        let source = card(
+            ELECTRIC_PERMITTIVITY_PROPERTY,
+            ELECTRIC_PERMITTIVITY_DIMS,
+            PropertyValue::Surface2D {
+                axes: ["pressure".into(), "context".into()],
+                axis_dims: [pressure.dims(), context.dims()],
+                samples: vec![
+                    ([1e5, low], 4e-11),
+                    ([3e5, low], 8e-11),
+                    ([1e5, high], 6e-11),
+                    ([3e5, high], 10e-11),
+                ],
+                triangles: vec![[0, 1, 2], [1, 3, 2]],
+                dims: ELECTRIC_PERMITTIVITY_DIMS,
+            },
+            ValidityDomain::unconstrained()
+                .with_quantity("pressure", pressure, 1e5, 3e5)
+                .with_quantity("context", context, low, high),
+        );
+        let point = QueryPoint::new()
+            .with_quantity("pressure", pressure, 2e5)
+            .unwrap()
+            .with_quantity("context", context, f64::midpoint(low, high))
+            .unwrap();
+        let first = ResolvedCapacitor::resolve(
+            &source, &point, MaterialPropertySelection::SingleClaimOnly, 0.01, 0.001,
+        )
+        .unwrap();
+        // Independent affine field coefficient: epsilon=4e-11+4e-11*p_hat+2e-11*c_hat.
+        near(first.capacitance_f(), 7e-10);
+        near(first.stored_energy_j(2e-9).unwrap(), 0.5 * 4e-18 / 7e-10);
+        assert_eq!(first.material().properties()[0].source_axes().len(), 2);
+        let changed = first.material().at_query_point(
+            &source, &point.clone().with("pressure", 2.5e5).unwrap(),
+        )
+        .unwrap();
+        let second = ResolvedCapacitor::try_from_material(changed, 0.01, 0.001).unwrap();
+        near(second.capacitance_f(), 8e-10);
+        assert_eq!(first.material().card_identity(), second.material().card_identity());
+        assert_eq!(
+            first.material().properties()[0].answer().receipt.selected,
+            second.material().properties()[0].answer().receipt.selected
+        );
+    }
+}
+
+#[test]
+fn g4_dynamic_or_untyped_dependencies_and_applicability_bounds_are_not_fixed_context() {
+    let cases = [
+        ("frequency", static_quantity(QuantityKind::Frequency(FrequencyConvention::Cyclic))),
+        ("stress", static_quantity(QuantityKind::Stress)),
+        ("strain", static_quantity(QuantityKind::Strain {
+            basis: StrainBasis::Tensor,
+            component: StrainComponent::Normal,
+        })),
+        ("B", QuantitySpec::dimensional(Dims([0, 1, -2, 0, -1, 0]))),
+        ("E", QuantitySpec::dimensional(Dims([1, 1, -3, 0, -1, 0]))),
+        ("strain_rate", QuantitySpec::dimensional(Dims([0, 0, -1, 0, 0, 0]))),
+        ("pressure", QuantitySpec::dimensional(Dims([-1, 1, -2, 0, 0, 0]))),
+        ("composition", QuantitySpec::dimensional(Dims([0; 6]))),
+    ];
+    for (axis, quantity) in cases {
+        for varying in [false, true] {
+            let dims = ELECTRIC_PERMITTIVITY_DIMS;
+            let value = if varying {
+                PropertyValue::Curve {
+                    abscissa: axis.into(),
+                    abscissa_dims: quantity.dims(),
+                    knots: vec![(0.25, 4e-11), (0.75, 8e-11)],
+                    dims,
+                }
+            } else {
+                PropertyValue::Scalar { value: 4e-11, dims }
+            };
+            let source = card(
+                ELECTRIC_PERMITTIVITY_PROPERTY,
+                dims,
+                value,
+                ValidityDomain::unconstrained().with_quantity(axis, quantity, 0.25, 0.75),
+            );
+            let result = ResolvedCapacitor::resolve(
+                &source,
+                &QueryPoint::new().with_quantity(axis, quantity, 0.5).unwrap(),
+                MaterialPropertySelection::SingleClaimOnly,
+                1.0,
+                1.0,
+            );
+            assert!(
+                matches!(result, Err(FieldStorageError::Invalid(_))),
+                "unsupported {axis} must be refused by field-storage admission; varying={varying}"
+            );
+        }
+    }
 }

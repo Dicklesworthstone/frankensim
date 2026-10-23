@@ -17,6 +17,8 @@ pub mod contacts;
 pub mod thermoelectric;
 /// Joint material electric/magnetic gap motion and finite-body Joule heating.
 pub mod motion;
+/// Distributed sourced winding loss on the same native thermal residual.
+pub mod winding;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -292,14 +294,7 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
-    controls.newton.validate()?;
-    if controls.maximum_cells == 0 || thermal.cells().len() > controls.maximum_cells
-        || initial_energy_increments_j.len() != thermal.cells().len()
-        || controls.maximum_circuit_trials == 0 || controls.maximum_newton_iterations == 0
-        || [controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, controls.total_energy_tolerance_j]
-            .iter().any(|v| !v.is_finite() || *v < 0.0) {
-        return Err(CircuitEnthalpyError::Invalid("invalid thermal unknowns, work budget or absolute energy tolerance"));
-    }
+    admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
     let mut destinations = BTreeMap::new();
     if input.destinations.len() != input.circuit.resistors().len() {
         return Err(CircuitEnthalpyError::Invalid("every resistor requires exactly one thermal destination"));
@@ -312,6 +307,57 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
         }
     }
     let contact_routes = contacts::admit_routes(thermal, input.circuit, contact_cells, checkpoint)?;
+    cell_driver_candidate(thermal, target_s, controls, initial_energy_increments_j, resolve,
+        |driver: &D, dt, check| {
+        let account = driver.account();
+        let mut powers = BTreeMap::new();
+        for branch in account.resistors {
+            check()?;
+            let cell = *destinations.get(&branch.material.branch)
+                .ok_or(CircuitEnthalpyError::Invalid("circuit returned heat without a destination"))?;
+            let power = finite(branch.heat_j/dt)?;
+            if branch.heat_j != 0.0 && power == 0.0 {
+                return Err(CircuitEnthalpyError::Invalid("branch heat disappeared during power conversion"));
+            }
+            let sum = powers.entry(cell).or_insert(0.0);
+            *sum = finite(*sum + power)?;
+        }
+        contacts::deposit(account.contacts, &contact_routes, dt, &mut powers, || check())?;
+        Ok(powers)
+    }, || (*cancel.borrow_mut())())
+}
+
+fn admit_driver_unknowns<E>(
+    thermal: &DepositionSimulation<'_>, controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+) -> Result<(), CircuitEnthalpyError<E>> {
+    controls.newton.validate()?;
+    if controls.maximum_cells == 0 || thermal.cells().len() > controls.maximum_cells
+        || initial_energy_increments_j.len() != thermal.cells().len()
+        || controls.maximum_circuit_trials == 0 || controls.maximum_newton_iterations == 0
+        || [controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, controls.total_energy_tolerance_j]
+            .iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err(CircuitEnthalpyError::Invalid("invalid thermal unknowns, work budget or absolute energy tolerance"));
+    }
+    Ok(())
+}
+
+// Only physical heat routing differs between branch/contact and spatial winding
+// drivers. The thermal residual, numerical owner, budget and fresh acceptance
+// below remain shared; this boundary is private and accepts admitted candidates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
+    deposit: impl Fn(&D, f64, &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model, CircuitEnthalpyReport<S, D::Step>), CircuitEnthalpyError<E>> {
+    let cancel = RefCell::new(cancelled);
+    let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
+    checkpoint()?;
+    admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
     let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
     let dt = step.duration_s();
     let trials = Cell::new(0usize);
@@ -326,19 +372,7 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
         trials.set(trials.get()+coefficients.circuit_trials);
         let circuit = coefficients.circuit;
         let account = circuit.account();
-        let mut powers = BTreeMap::new();
-        for branch in account.resistors {
-            checkpoint()?;
-            let cell = *destinations.get(&branch.material.branch)
-                .ok_or(CircuitEnthalpyError::Invalid("circuit returned heat without a destination"))?;
-            let power = finite(branch.heat_j/dt)?;
-            if branch.heat_j != 0.0 && power == 0.0 {
-                return Err(CircuitEnthalpyError::Invalid("branch heat disappeared during power conversion"));
-            }
-            let sum = powers.entry(cell).or_insert(0.0);
-            *sum = finite(*sum + power)?;
-        }
-        contacts::deposit(account.contacts, &contact_routes, dt, &mut powers, checkpoint)?;
+        let mut powers = deposit(&circuit, dt, &mut || checkpoint())?;
         let deposited = finite(dt * powers.values().try_fold(0.0, |s, &p| finite(s+p))?)?;
         if (deposited-account.heat_j).abs() > controls.total_energy_tolerance_j {
             return Err(CircuitEnthalpyError::Invalid("branch heat and receiving-cell power disagree"));

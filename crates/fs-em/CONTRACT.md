@@ -111,3 +111,35 @@ Native test execution remains a separate verification requirement. This lane
 keeps geometry and material state fixed during evolution; it does not infer
 nonlinear magnetics, motion, skin/proximity losses, changing-material work or
 three-dimensional winding-end fields.
+
+
+## Spatial material winding resistance and native-circuit heat
+
+`winding::ohmic::OhmicWindingCircuit` binds every active original magnetic
+triangle to its complete `ResolvedConductorState`. The same signed unit-current
+profile and actual extruded mesh volume give each winding's intrinsic series
+resistance, `R_w = sum(rho_e * J_unit,w^2 * volume)`. Conductivity and resistivity
+use the canonical scalar conductor owner; no metal names or preset coefficients
+enter the solver. Current-carrying windings must occupy disjoint triangles;
+unresolved mixtures/fill factors and skin, proximity, eddy and end-turn losses
+are not inferred.
+
+Resistance is stamped on the mapped native flux coordinates, conjugate to the
+full mutually coupled `L^-1 lambda` currents. All original magnetic/capacitive
+storage, Dirac structure, ports, ideal constraints and numeric graph resistors
+are retained. The existing descriptor midpoint step remains the only electrical
+time integrator. Per-triangle `E.J` heat, every graph-resistor heat, integrated
+series `I^2 R` work, native dissipation and total stored-energy/source-work balance
+must agree within explicitly supplied absolute power/energy allowances. These
+checks do not certify temporal or spatial approximation error.
+
+Each candidate begins with the original accepted fluxes/charges and time; source
+refresh, nonlinear thermal trials and cancellation cannot debit accepted history.
+A refresh retains the complete original card, coordinate schema, requirements,
+selected source claims and independent electrical source basis. Only the owned
+absolute-temperature coordinate may change. Fixed external conditions and the
+prepared magnetic permeability stay fixed. A temperature-dependent permeability
+source refuses changed temperature even if its endpoint values coincide, since
+fixed-L evolution cannot account for magnetic parameter work along that path.
+Data-only material replacements are prepared as a new magnetic/electrical model.
+Changing live geometry or storage requires an explicit coupled work owner.

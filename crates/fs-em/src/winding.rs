@@ -15,9 +15,12 @@
 //! publication; the residual is an estimate, not a discretization certificate.
 //! Geometry/material state stays fixed. No moving winding, nonlinear magnetic
 //! law, skin/proximity loss, end mutual coupling or temperature-work law is
-//! inferred. Resistive loss remains owned by the circuit's resistor branches.
+//! inferred. The optional `ohmic` owner derives intrinsic series resistance
+//! from the same spatial material/profile data and retains explicit graph losses.
 
 pub mod circuit;
+/// Spatial material-derived winding resistance and native-circuit Joule heat.
+pub mod ohmic;
 
 use crate::{
     planar::{MagneticError, PlanarField, PlanarMagnetostatics, poll},
