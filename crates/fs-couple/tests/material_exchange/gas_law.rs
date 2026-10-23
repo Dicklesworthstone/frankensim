@@ -5,6 +5,8 @@ use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::Contact;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::exchange::gas_law::GasSurface;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::NetworkError;
 use fs_couple::cavity_phs::piston::thermal::ThermalPistonError;
+use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::{ChamberDrive, MaterialExchangeState};
+use std::collections::BTreeMap;
 
 fn surfaces(patches: &[MaterialContact]) -> Vec<GasSurface> {
     patches.iter().map(|p| GasSurface { contact: p.contact, area_m2: p.geometry.area_m2 }).collect()
@@ -121,5 +123,80 @@ fn source_error_and_late_cancellation_do_not_publish_chemical_or_electrical_stat
         assert!(matches!(cancelled,Err(ReactiveExchangeError::Cancelled)));
         assert_eq!(gas,old);assert_eq!(thermal.cells(),&cells);assert_eq!(circuit,electrical);
         assert_eq!(thermal.time_s(),0.0);
+    }));
+}
+
+
+fn live_drive(id: u64, gas: &GasPiston) -> ChamberDrive {
+    let chamber = gas_fixture::chamber(id, gas, 0.00005);
+    ChamberDrive {
+        chamber: id,
+        heat_j: chamber.input.heat_j,
+        exterior_pressure_pa: chamber.input.exterior_pressure_pa,
+        external_force_n: chamber.input.external_force_n,
+        piston_solve: chamber.piston_solve,
+        exchange: chamber.exchange,
+    }
+}
+
+#[test]
+fn live_state_preview_and_advance_publish_the_typed_heat_law_once() {
+    fixture([0.8,0.8],150.0,|assembly,thermal,circuit| with_cx(|cx,_| {
+        let prepared=assembly.prepare(cx,&thermal).unwrap();
+        let law=reaction(50.0);
+        let mut state=MaterialExchangeState::from_parts(
+            thermal,circuit,BTreeMap::from([
+                (10,piston(&law)),
+                (20,gas_fixture::pistons()[1].clone()),
+            ]));
+        let drives=[
+            live_drive(10,&state.chambers()[&10]),
+            live_drive(20,&state.chambers()[&20]),
+        ];
+        let reactions=[ChamberReaction {chamber:10,reaction:&law,controls:chemical()}];
+        let patches=gas_fixture::patches();
+        let geometry=surfaces(&patches);
+        let chemistry=law.parcel_candidate(
+            state.chambers()[&10].gas(),0.00005,chemical(),||false).unwrap();
+        let resolve=|contact:Contact,state:&DepositionSimulation<'_>,
+            source:&MaterialExchangeSample,
+            gas:&fs_material::thermochemical_gas::ResolvedThermochemicalGasState| {
+            let patch=*patches.iter().find(|p|p.contact==contact).unwrap();
+            let sample=prepared.resolve_conductive_gas_contact(patch,state,source,gas)?;
+            Ok::<_,MaterialNetworkError>(ConductanceSample {
+                conductance_w_k:sample.conductance_w_k,
+                source:(sample.source,gas.clone()),
+            })
+        };
+        let (preview,preview_report)=state.step_with_gas_law_candidate(
+            &prepared,cx,0.00005,&[],&drives,&reactions,&geometry,
+            controls(),&[0.0;2],resolve).unwrap();
+        assert_eq!(state.time_s(),0.0);
+        assert_eq!(preview_report.report.source.reactions[0].reaction,*chemistry.step());
+
+        let report=state.advance_with_gas_law(
+            &prepared,cx,0.00005,&[],&drives,&reactions,&geometry,
+            controls(),&[0.0;2],|contact,state,source,gas| {
+                let patch=*patches.iter().find(|p|p.contact==contact).unwrap();
+                let sample=prepared.resolve_conductive_gas_contact(patch,state,source,gas)?;
+                Ok::<_,MaterialNetworkError>(ConductanceSample {
+                    conductance_w_k:sample.conductance_w_k,
+                    source:(sample.source,gas.clone()),
+                })
+            }).unwrap();
+        assert_eq!(state.time_s(),0.00005);
+        assert_eq!(state.thermal().cells(),preview.thermal().cells());
+        assert_eq!(state.circuit(),preview.circuit());
+        assert_eq!(state.chambers(),preview.chambers());
+        assert_eq!(report.step,preview_report.step);
+        assert_eq!(report.report.source.reactions,preview_report.report.source.reactions);
+        for chamber in &report.report.source.chambers {
+            let accepted=&state.chambers()[&chamber.id];
+            assert_eq!(accepted.last_window_duration_s(),Some(0.00005));
+            assert_eq!(accepted.last_window_transfers(),preview.chambers()[&chamber.id].last_window_transfers());
+            for surface in &chamber.surfaces {
+                assert_eq!(&surface.source.1,&chamber.boundary.piston.midpoint);
+            }
+        }
     }));
 }
