@@ -489,6 +489,8 @@ fn pack_card(tsv: &str, label: &str) -> MaterialCard {
             "MPa" => (Pressure::DIMS, raw * 1e6),
             "GPa" => (Pressure::DIMS, raw * 1e9),
             "kg/m3" => (Density::DIMS, raw),
+            // A moisture content or shrinkage (the pack's moisture-law rows, pexfp.364), as a fraction.
+            "%" => (Dims::NONE, raw * 0.01),
             unit => panic!("unexpected source unit {unit} on {}", f[3]),
         };
         let mut domain = ValidityDomain::unconstrained();
