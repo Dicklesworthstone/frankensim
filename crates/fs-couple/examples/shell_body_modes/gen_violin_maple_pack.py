@@ -22,11 +22,14 @@ PACK = "violin-maple-sycamore-sonderegger2013-shell"
 
 
 def scalars(pack):
+    # Keyed by property name AND by row id: the Sonderegger pack has two density rows (density-normal-climate and density-ovendry), and the
+    # property name alone kept whichever came last (the oven-dry 563 kg/m3, against moduli measured at about 12 percent moisture).
     out = {}
     for line in open(SEED + pack + "/properties.tsv", encoding="utf-8").read().splitlines():
         f = line.split("\t")
         if f[0] == "scalar":
             out[f[3]] = float(f[4])
+            out["row:" + f[1]] = float(f[4])
     return out
 
 
@@ -34,7 +37,7 @@ so = scalars("maple-sycamore-sonderegger2013")
 la = scalars("maple-sycamore-loss-lammlein2020")
 E_L = so["young_modulus_longitudinal_bending"] * 1e6
 E_R = 0.5 * (so["young_modulus_radial_tension"] + so["young_modulus_radial_compression"]) * 1e6
-vals = dict(density=so["density"], young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=so["shear_modulus_lr_ultrasonic"] * 1e6,
+vals = dict(density=so["row:density-normal-climate"], young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=so["shear_modulus_lr_ultrasonic"] * 1e6,
             shear_modulus_13=so["shear_modulus_lt_ultrasonic"] * 1e6, shear_modulus_23=so["shear_modulus_rt_ultrasonic"] * 1e6)
 eta = dict(L=la["loss_factor_longitudinal"], LR=la["loss_factor_shear_lr"])
 eta.update(R=eta["LR"], LT=eta["LR"], RT=eta["LR"])
