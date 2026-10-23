@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
 use fs_couple::render::plate::file::PlatePerformance;
 use fs_couple::render::schedule::force::file::ModalPerformance;
+use fs_material::gas::GasState;
 
 const STRIKER: &str = include_str!("../examples/free-striker-192k.performance");
 const PLATE: &str = include_str!("../examples/plate-mesh.performance");
+const REED_OUTLET: &str = include_str!("../examples/reed-baffled-mixture.performance");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn directory() -> PathBuf {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -135,4 +137,54 @@ fn all_sources_and_clocks_are_admitted_before_either_output_artifact_is_created(
         assert!(!run(&out, &[("--modal", &a), ("--modal", &b)], 37, decimate).status.success());
         assert!(!out.exists()); assert!(!out.with_extension("provenance.json").exists());
     }
+}
+
+#[test]
+fn a_part_heard_in_another_gas_refuses_before_either_output_exists() {
+    // The exact mix reed_gas_mixture::outlet once summed: one baffled reed heard
+    // in its 100 kPa terminal gas, the same reed in the same mixture at 50 kPa.
+    let dir = directory(); let (a, b) = (dir.join("100kPa.performance"), dir.join("50kPa.performance"));
+    std::fs::write(&a, REED_OUTLET).unwrap();
+    assert!(REED_OUTLET.contains("mixture 293.15 100000"));
+    std::fs::write(&b, REED_OUTLET.replace("mixture 293.15 100000", "mixture 293.15 50000")).unwrap();
+    let out = dir.join("two-gases.wav");
+    let refused = run(&out, &[("--reed", &a), ("--reed", &b)], 37, false);
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stdout);
+    assert!(message.contains("ensemble part 1 (reed) is heard in a different gas than part 0 (reed)")
+        && message.contains("one ensemble has one listener gas"), "{message}");
+    assert!(!out.exists()); assert!(!out.with_extension("provenance.json").exists());
+    // Either reed alone, or twice, is one listener gas.
+    succeeded(run(&dir.join("one-gas.wav"), &[("--reed", &b), ("--reed", &b)], 37, false));
+}
+
+#[test]
+fn the_receipt_names_the_one_listener_gas_and_each_unconstrained_part() {
+    let dir = directory(); let striker = dir.join("striker.performance");
+    let dry = dir.join("dry.performance"); let thin = dir.join("thin.performance");
+    std::fs::write(&striker, STRIKER).unwrap(); std::fs::write(&dry, PLATE).unwrap();
+    let row = "ambient 293.15 101325 0\n";
+    assert_eq!(PLATE.matches(row).count(), 1);
+    std::fs::write(&thin, PLATE.replace(row, "ambient 293.15 70927.5 0\n")).unwrap();
+    let medium = |gas: GasState, first: usize, rest: &str| format!(
+        "\"listener_medium\":{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"set_by_part\":{first},\"unconstrained_parts\":[{rest}]}}",
+        gas.density, gas.sound_speed);
+    let receipt = |out: &Path| std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
+    // One gas, bit for bit, set by the first part.
+    let same = dir.join("one-gas.wav");
+    succeeded(run(&same, &[("--plate", &dry), ("--plate", &dry)], 37, false));
+    let air = GasState::try_new_moist_air(293.15, 101_325.0, 0.0).unwrap();
+    assert!(receipt(&same).contains(&medium(air, 0, "")), "{}", receipt(&same));
+    // An authored modal transfer does not constrain the listener, and says why.
+    let mixed = dir.join("unconstrained.wav");
+    succeeded(run(&mixed, &[("--modal", &striker), ("--plate", &thin)], 37, true));
+    let thin_air = GasState::try_new_moist_air(293.15, 70_927.5, 0.0).unwrap();
+    let modal_part = "{\"part\":0,\"kind\":\"modal\",\"reason\":\"authored transfer; no radiation block\"}";
+    assert!(receipt(&mixed).contains(&medium(thin_air, 1, modal_part)), "{}", receipt(&mixed));
+    // No part declares a listener gas.
+    let a = dir.join("a.performance"); std::fs::write(&a, modal(48_000, 257, 1.0)).unwrap();
+    let none = dir.join("none.wav");
+    succeeded(run(&none, &[("--modal", &a), ("--modal", &a)], 37, false));
+    assert!(receipt(&none).contains(&format!("\"listener_medium\":{{\"declared\":\"none\",\"unconstrained_parts\":[{modal_part},{}]}}",
+        modal_part.replace("\"part\":0", "\"part\":1"))), "{}", receipt(&none));
 }

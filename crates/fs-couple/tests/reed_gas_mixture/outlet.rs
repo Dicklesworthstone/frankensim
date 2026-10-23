@@ -97,10 +97,11 @@ fn outlet_ensemble_sums_actual_pressure_not_source_encoding_scales() {
     let dir = directory();
     let first = dir.join("first.performance");
     let second = dir.join("second.performance");
-    let low = SOURCE.replace("mixture 293.15 100000", "mixture 293.15 50000");
-    std::fs::write(&second, &low).unwrap();
+    // One listener gas (ensemble guard): the second part differs by its receiver.
+    let far = SOURCE.replace(RECEIVER, "baffled_outlet 0 0 0.7 4 16 1000");
+    std::fs::write(&second, &far).unwrap();
     let mut mixed = pressure(SOURCE);
-    for (a, b) in mixed.iter_mut().zip(pressure(&low)) { *a += b; }
+    for (a, b) in mixed.iter_mut().zip(pressure(&far)) { *a += b; }
     let (expected, _) = encode_pcm16_wav(&mixed, 48000, 4.0).unwrap();
     for (index, scale) in ["2", "2000000"].iter().enumerate() {
         let text = SOURCE.replace("audio 48000 4801 2", &format!("audio 48000 4801 {scale}"));

@@ -103,16 +103,18 @@ fn invalid_composition_and_pressure_refuse_before_cli_creates_artifacts() {
 
 #[test]
 fn mixture_ensemble_uses_the_same_physical_sources_without_per_source_pcm_gain() {
-    let dir = directory(); let base = dir.join("base.performance"); let enriched = dir.join("co2.performance");
+    let dir = directory(); let base = dir.join("base.performance"); let moved = dir.join("moved.performance");
     std::fs::write(&base, BASE).unwrap();
+    // One listener gas (ensemble guard): the second part differs by its receiver.
+    let far = BASE.replace("network-baffled 2 0 0 0.2", "network-baffled 2 0.1 0 0.4");
     let mut combined = reference(BASE);
-    for (out, value) in combined.iter_mut().zip(reference(CO2)) { *out += value; }
+    for (out, value) in combined.iter_mut().zip(reference(&far)) { *out += value; }
     let (expected, _) = encode_pcm16_wav(&combined, 48000, 0.02).unwrap();
-    for (index, text) in [CO2.to_string(), CO2.replace("9602 0.01", "9602 100")].iter().enumerate() {
-        std::fs::write(&enriched, text).unwrap();
+    for (index, text) in [far.clone(), far.replace("9602 0.01", "9602 100")].iter().enumerate() {
+        std::fs::write(&moved, text).unwrap();
         let output = dir.join(format!("mixture-ensemble-{index}.wav"));
         success(Command::new(env!("CARGO_BIN_EXE_music_render")).arg("ensemble").arg(&output)
-            .arg("--valve").arg(&base).arg("--valve").arg(&enriched)
+            .arg("--valve").arg(&base).arg("--valve").arg(&moved)
             .args(["--decimate", "--block", "37", "--full-scale-pa", "0.02"]).output().unwrap());
         assert_eq!(std::fs::read(&output).unwrap(), expected);
         let meta = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();

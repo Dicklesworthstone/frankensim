@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
+use fs_material::gas::GasState;
 use fs_material::gas_species::input::ThermochemicalSources;
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
@@ -94,6 +95,26 @@ struct SourceInfo {
     modes: usize,
     controls: usize,
     exterior_json: String,
+    listener: Listener,
+}
+/// The gas a part's pressure is heard in, read from its own declaration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Listener {
+    Gas(ListenerMedium),
+    /// The part's sound depends on no exterior gas; the reason is receipted.
+    Unconstrained(&'static str),
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ListenerMedium { density: f64, sound_speed: f64, gas: Option<GasState> }
+impl ListenerMedium {
+    fn of(gas: &GasState) -> Self { Self { density: gas.density, sound_speed: gas.sound_speed, gas: Some(*gas) } }
+    /// The observer consumes rho (amplitude) and c (time of flight) bit for bit;
+    /// two complete states must also be the same state.
+    fn agrees(&self, other: &Self) -> bool {
+        self.density.to_bits() == other.density.to_bits()
+            && self.sound_speed.to_bits() == other.sound_speed.to_bits()
+            && match (self.gas, other.gas) { (Some(a), Some(b)) => a == b, _ => true }
+    }
 }
 // Preserve finite wrappers for producers whose raw scheduler has no horizon.
 type DynamicEnsemble = PressureEnsemble<Box<dyn PressureRenderer>>;
@@ -126,10 +147,12 @@ fn load_with_gas_sources(
                 Some(record) => super::thermochemical::provenance(std::slice::from_ref(record)),
                 None => ",\"radiation\":\"authored, gas-invariant\"".to_string(),
             };
+            let listener = p.gas_record().map_or(Listener::Unconstrained("authored transfer; no radiation block"),
+                |record| Listener::Gas(ListenerMedium::of(record.state())));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: i.voices, modes: i.modes, controls: 0, exterior_json: gas_json,
+                components: i.voices, modes: i.modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
         Kind::Bow => {
@@ -138,20 +161,22 @@ fn load_with_gas_sources(
             // The bridge body carries the gas's baffled piston of its face area.
             let gas_json=format!("{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
                 ",\"radiation\":\"baffled piston of the body face area, radius sqrt(A/pi), under the gas record; heard at r/c\"");
+            let listener = Listener::Gas(ListenerMedium::of(p.gas_record().state()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: gas_json,
+                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: gas_json, listener,
             })
         }
         Kind::Plate => {
             let p = PlatePerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();
             let gas_json=super::thermochemical::provenance(std::slice::from_ref(p.gas_record()));
+            let listener = Listener::Gas(ListenerMedium::of(p.gas_record().state()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json,
+                components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
         Kind::Valve => {
@@ -159,10 +184,18 @@ fn load_with_gas_sources(
             let i = p.info();
             let exterior_json = format!("{}{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
                 super::duct_metadata::provenance(&p),super::thermochemical::provenance(p.gas_records()));
+            // The receiver's medium (explicit exterior, else the terminal's local rho/c);
+            // an internal trace is heard in its explicit exterior only.
+            let listener = match (p.renderer().baffled_medium(), p.exterior_gas()) {
+                (Some(m), exterior) => Listener::Gas(ListenerMedium {
+                    density: m.density, sound_speed: m.sound_speed, gas: exterior.copied() }),
+                (None, Some(exterior)) => Listener::Gas(ListenerMedium::of(exterior)),
+                (None, None) => Listener::Unconstrained("internal trace; no declared exterior"),
+            };
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
-                components:1,modes:1,controls:i.compiled_controls+i.force_controls,exterior_json,
+                components:1,modes:1,controls:i.compiled_controls+i.force_controls,exterior_json,listener,
             })
         }
         Kind::Reed => {
@@ -170,10 +203,13 @@ fn load_with_gas_sources(
                 fs_couple::pcm_wav::observation::ObservationPolicy::Diagnostic,sources).map_err(|e| e.to_string())?;
             let i = p.info();
             let exterior_json = format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
+            // The baffled outlet's one bound exterior; the legacy proxy has none.
+            let listener = p.outlet_receiver().map_or(Listener::Unconstrained("legacy listener_m bore/jet proxy"),
+                |o| Listener::Gas(ListenerMedium::of(&o.gas)));
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: 0, controls: i.compiled_controls, exterior_json,
+                components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
             })
         }
     };
@@ -191,6 +227,7 @@ fn prepare_with_gas_sources(
     let mut sources = Vec::new();
     let mut horizon = None;
     let mut converted = false;
+    let mut listener: Option<(usize, Kind, ListenerMedium)> = None;
     let (mut components, mut modes, mut controls) = (0_usize, 0_usize, 0_usize);
     for (index, input) in options.inputs.iter().enumerate() {
         let (renderer, info) = load_with_gas_sources(input, options.block,gas_sources)
@@ -199,6 +236,17 @@ fn prepare_with_gas_sources(
             return Err(format!("ensemble part {index} needs explicit --decimate; mechanics run at {} Hz", info.rate));
         }
         converted |= info.rate != RATE;
+        // One observer sits in one gas: every part that declares the gas it is
+        // heard in must declare the same one.
+        if let Listener::Gas(medium) = info.listener {
+            match listener {
+                None => listener = Some((index, info.kind, medium)),
+                Some((first, kind, shared)) if !shared.agrees(&medium) => return Err(format!(
+                    "ensemble part {index} ({}) is heard in a different gas than part {first} ({}): rho {:e} kg/m3, c {:e} m/s against rho {:e} kg/m3, c {:e} m/s; one ensemble has one listener gas",
+                    info.kind.label(), kind.label(), medium.density, medium.sound_speed, shared.density, shared.sound_speed)),
+                Some(_) => {}
+            }
+        }
         components = components.checked_add(info.components).ok_or("ensemble component count overflow")?;
         modes = modes.checked_add(info.modes).ok_or("ensemble mode count overflow")?;
         controls = controls.checked_add(info.controls).ok_or("ensemble control count overflow")?;
@@ -266,13 +314,24 @@ pub(super) fn run_with_gas_sources(
             o.first_output_source_index, source.source_full_scale_pa, source.components, source.modes, source.controls)
     }).collect();
     let hash = rendered.hash.to_hex();
+    let unconstrained: Vec<_> = sources.iter().enumerate().filter_map(|(i, s)| match s.listener {
+        Listener::Unconstrained(reason) => Some(format!("{{\"part\":{i},\"kind\":\"{}\",\"reason\":\"{reason}\"}}", s.kind.label())),
+        Listener::Gas(_) => None,
+    }).collect();
+    let listener = match sources.iter().enumerate().find_map(|(i, s)| match s.listener {
+        Listener::Gas(m) => Some((i, m)), Listener::Unconstrained(_) => None,
+    }) {
+        Some((first, m)) => format!("{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"set_by_part\":{first},\"unconstrained_parts\":[{}]}}",
+            m.density, m.sound_speed, unconstrained.join(",")),
+        None => format!("{{\"declared\":\"none\",\"unconstrained_parts\":[{}]}}", unconstrained.join(",")),
+    };
     let provenance = format!("{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"ensemble-input\",\
         \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{},\"full_scale_pa\":{:e},\
         \"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{hash}\",\
         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
         \"ensemble\":{{\"sum_order\":\"input-order\",\"common_delay_output_samples\":{},\
         \"delay_compensated\":false,\"initial_history\":\"zero\",\"tail\":\"no-flush-declared-window\",\
-        \"parts\":[{}],\"model_scope\":\"independent source pressures; common observer and time origin required; no new mechanical coupling or physical-validation claim\"}}}}",
+        \"listener_medium\":{listener},\"parts\":[{}],\"model_scope\":\"independent source pressures; common observer and time origin required; no new mechanical coupling or physical-validation claim\"}}}}",
         options.block, options.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         renderer.delay_output_samples(), parts.join(","));
     writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())

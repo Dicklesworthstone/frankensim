@@ -51,10 +51,14 @@ fn exterior_ensemble_sums_the_same_pressure_without_source_scale_gains() {
     let dir = directory();
     let (a, b) = (dir.join("inside.performance"), dir.join("outside.performance"));
     std::fs::write(&a, REGIONAL).unwrap();
+    // One listener gas (ensemble guard): the outside part declares the inside
+    // part's terminal gas `gas 313.15 0.5` as its exterior, and moves its receiver.
+    let outside = EXTERIOR.replace("exterior mixture 293.15 101325 mole 3 N2 0.4 O2 0.2 CO2 0.4",
+        "exterior 313.15 101325 0.5").replace("network-baffled 2 0 0 0.2", "network-baffled 2 0.1 0 0.4");
     let mut combined = reference(REGIONAL);
-    for (p, q) in combined.iter_mut().zip(reference(EXTERIOR)) { *p += q; }
+    for (p, q) in combined.iter_mut().zip(reference(&outside)) { *p += q; }
     let (expected, _) = encode_pcm16_wav(&combined, 48000, 0.02).unwrap();
-    for (index, text) in [EXTERIOR.to_string(), EXTERIOR.replace("9602 0.01", "9602 100")].iter().enumerate() {
+    for (index, text) in [outside.clone(), outside.replace("9602 0.01", "9602 100")].iter().enumerate() {
         std::fs::write(&b, text).unwrap();
         let output = dir.join(format!("exterior-ensemble-{index}.wav"));
         success(Command::new(env!("CARGO_BIN_EXE_music_render")).arg("ensemble").arg(&output)
