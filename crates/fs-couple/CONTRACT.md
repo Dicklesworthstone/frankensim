@@ -4831,3 +4831,30 @@ independent current/voltage work and signed-drive parity, source resistance and
 damping feedback into actual pressure, cumulative mechanical/solid/gas storage,
 and late refusal with deterministic retry and cancellation. Their manufactured
 coefficients establish integration behavior, not measured material validation.
+
+## Finite enthalpy heating through a pressure-loaded solid valve
+
+`solid_enthalpy::valve` binds each accepted P1 material/caloric state to the
+existing thermal pressure-valve reducer. `advance_pressure_valve_to` advances
+the original source-observed thermal timeline, refreshes pinned elastic and
+expansion claims, solves compatible equilibrium once, then admits displaced
+aperture geometry, complete tangent stability and pressure/modal compliance.
+It returns the thermal state, caloric audit, resolved source state and valve as
+one candidate. Reference mass, mesh frame and the original dead-pressure
+footprint remain fixed. Source, phase, geometry, reduction or cancellation
+refusal leaves the accepted input intact.
+
+`examples/heated_valve_sound` accepts normalized material packs or explicitly
+manufactured coefficients and carries finite heat through ordinary material
+acoustic assembly to physical-pressure CSV and stereo WAV. The caller declares
+a fully solid temperature interval; the example does not infer a melting law
+from heat capacity. Its cold and heated outputs are frozen-state experiments.
+They do not claim live modal-state transfer, reciprocal thermoelastic heat,
+moving load geometry, measured damping or instrument validation. The thermal
+audit remains caloric rather than a claim of reciprocal thermomechanical work.
+
+Three core regressions compare an independent six-tetrahedron tangent and
+pressure compliance, source/aperture refusal and cancellation. Two native
+example regressions check finite-energy temperature, fixed reference mass,
+data-only heat-capacity changes reaching actual microphone pressure,
+deterministic replay and refusal without a sound comparison.
