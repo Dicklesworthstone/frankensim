@@ -162,7 +162,8 @@ impl Fixture {
             }
             claims.insert_claim(strength).unwrap();
             let mut transport = scalar(K, THERMAL_CONDUCTIVITY_DIMS, k);
-            transport.validity = ValidityDomain::unconstrained().with("p", 199999.0, 200001.0);
+            transport.validity =
+                ValidityDomain::unconstrained().with_quantity("p", pressure_quantity(), 199999.0, 200001.0);
             if let Some(axis) = mechanical_axis {
                 transport.validity = transport.validity.with(axis, 0.0, 0.001);
             }
@@ -176,7 +177,7 @@ impl Fixture {
             if conductivity_gap && side == 0 {
                 let mut alternate = scalar(K, THERMAL_CONDUCTIVITY_DIMS, 10.0 * k);
                 alternate.validity = ValidityDomain::unconstrained()
-                    .with("p", 199999.0, 200001.0)
+                    .with_quantity("p", pressure_quantity(), 199999.0, 200001.0)
                     .with("T", 300.11, 320.0);
                 claims.insert_claim(alternate).unwrap();
             }
@@ -287,6 +288,11 @@ fn thermal_with(curves: [&dyn ThermalLaw; 2]) -> DepositionSimulation<'_> {
     let mut events: Vec<_> = [0, 1]
         .map(|side| {
             let center = [L / 4.0, L / 4.0, if side == 0 { L / 4.0 } else { -L / 4.0 }];
+            // A birth segment must have length (fs-thermal refuses start == end). Each
+            // cell's segment runs along z through its tetrahedron's centroid, +-L/8, so
+            // it stays inside the tet and its midpoint (the cell position) is unchanged.
+            let start_m = [center[0], center[1], center[2] - L / 8.0];
+            let end_m = [center[0], center[1], center[2] + L / 8.0];
             TimedEvent {
                 time_s: 0.0,
                 event: Event::Birth(DepositedCell {
@@ -297,8 +303,8 @@ fn thermal_with(curves: [&dyn ThermalLaw; 2]) -> DepositionSimulation<'_> {
                     mass_kg: MASS,
                     specific_h_j_kg: 0.0,
                     geometry: CellGeometry {
-                        start_m: center,
-                        end_m: center,
+                        start_m,
+                        end_m,
                         volume_m3: VOLUME,
                         surface_area_m2: surface(),
                     },
