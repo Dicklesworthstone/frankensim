@@ -18,7 +18,8 @@ function recording() {
   return { Engine, calls };
 }
 const scale = '# supplied SI scale text is passed to Rust, never interpreted here\n';
-const geometry = 'frankensim-piano-materials-v1\nkey,outer_radius_m,material_index\n69,0.0004,0\n69,0.0006,1\n';
+const geometry = 'frankensim-piano-materials-v2\ntension,target-pitch\nstrength,ultimate_tensile_strength\n'
+  + 'key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index\n69,core,0.0004,,,0\n69,core,0.0006,,,1\n';
 const materialInput = () => ({ packs: [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5]).buffer],
   geometry, temperatureAxis: 'T', temperatureK: 293.15, viscosityProperty: 'solid_viscosity',
   frequencyAxis: 'frequency', frequencyHz: 1000 });

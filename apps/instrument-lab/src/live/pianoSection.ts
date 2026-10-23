@@ -217,8 +217,8 @@ export class LivePianoSection {
           <summary>Choose string materials</summary>
           <div class="evidence-body">
             <label class="small"><input type="checkbox" class="lp-material-enabled"> Use my canonical material packs and section geometry</label>
-            <p class="small muted">Perfectly bonded solid or concentric layers, with source bending viscosity at a fixed temperature.
-              Choose every value before Start; the construction stays fixed during playback.</p>
+            <p class="small muted">Perfectly bonded concentric core layers, optionally under helical wraps that add only their mass, with
+              sourced bending loss at a fixed temperature. Choose every value before Start; the construction stays fixed during playback.</p>
             <fieldset class="lp-material-fields" disabled style="display:grid;gap:10px;border:0;padding:0;min-width:0">
               <legend class="sr-only">String material source data</legend>
               <div class="field"><label for="${id}-material-packs">Canonical packs · up to 128, 16 MiB total</label>
@@ -226,22 +226,27 @@ export class LivePianoSection {
               <p class="small num lp-material-index" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">Material indices will appear here in file selection order.</p>
               <div class="field"><label for="${id}-material-geometry">String construction CSV · up to 256 KiB</label>
                 <input id="${id}-material-geometry" class="lp-material-geometry" type="file" accept=".csv,text/csv,text/plain" required style="width:100%;min-width:0"></div>
-              <p class="small muted">Start with <code>frankensim-piano-materials-v2</code>, a <code>tension,…</code> policy line, a
-                <code>strength,&lt;tensile-limit property&gt;</code> line, then <code>key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index</code>.
+              <p class="small muted">Start with <code>frankensim-piano-materials-v2</code>, a <code>tension,…</code> policy line
+                (<code>target-pitch</code>, <code>installed-tension</code> or <code>yield-fraction,&lt;x&gt;</code>), a
+                <code>strength,&lt;tensile-limit property&gt;</code> line with optional <code>pack=&lt;index&gt;</code>,
+                <code>extrapolate-diameter</code> or <code>diameter-free</code> flags, an optional <code>loss,…</code> line and an optional
+                <code>geometry,back-solved,&lt;first&gt;-&lt;last&gt;</code> line, then <code>key,layer,outer_radius_m,wire_diameter_m,pitch_m,material_index</code>.
                 Supply each MIDI key 21–108; list its core layers from inner to outer, then any wraps, using the pack indices above.</p>
               <div class="lp-controls">
                 <div class="field"><label for="${id}-material-t-axis">Temperature axis in the packs</label>
                   <input id="${id}-material-t-axis" class="lp-material-t-axis" type="text" placeholder="e.g. T" maxlength="128" required></div>
                 <div class="field"><label for="${id}-material-t">String temperature [K]</label>
                   <input id="${id}-material-t" class="lp-material-t" type="number" step="any" min="0" placeholder="e.g. 293.15" required></div>
-                <div class="field"><label for="${id}-material-viscosity">Solid viscosity property [Pa s]</label>
+                <div class="field"><label for="${id}-material-viscosity">Bending-loss property (viscosity [Pa s] or loss tangent)</label>
                   <input id="${id}-material-viscosity" class="lp-material-viscosity" type="text" placeholder="Exact property name in the packs" maxlength="128" required></div>
                 <div class="field"><label for="${id}-material-f-axis">Cyclic-frequency axis in the packs</label>
                   <input id="${id}-material-f-axis" class="lp-material-f-axis" type="text" placeholder="e.g. frequency" maxlength="128" required></div>
                 <div class="field"><label for="${id}-material-f">Source query frequency [Hz]</label>
                   <input id="${id}-material-f" class="lp-material-f" type="number" step="any" min="0" placeholder="e.g. 1000" required></div>
               </div>
-              <p class="small muted">The supplied source band must cover the simulated partials. Helical winding, interlayer slip and evolving string temperature need additional physical models.</p>
+              <p class="small muted">Each core's tensile limit is its claim at the core's own diameter; a string that would break refuses,
+                naming every overstressed key and its highest pitch. The source band must cover the simulated partials. Wrap stiffness,
+                interlayer slip and evolving string temperature are not modelled.</p>
             </fieldset>
           </div>
         </details>
