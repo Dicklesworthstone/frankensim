@@ -53,14 +53,14 @@ def ledger_rows():
     return [dict(zip(header, line.split("\t"))) for line in lines[2:] if line.strip()]
 
 
-def fetch(directory, entries, mount="/fake-external", mode=None):
+def fetch(directory, entries, mount="/fake-external", mode=None, selectors=()):
     """Run the real script against a temporary manifest; FRANKENSIM_TEST_MOUNT stands in for df."""
     test_manifest = Path(directory) / "manifest.json"
     test_manifest.write_text(json.dumps({"files": entries}))
     env = dict(os.environ, FRANKENSIM_REFERENCE_DIR=str(Path(directory) / "refs"),
                FRANKENSIM_REFERENCES_MANIFEST=str(test_manifest), FRANKENSIM_TEST_MOUNT=mount)
     (Path(directory) / "refs").mkdir(exist_ok=True)
-    command = ["bash", str(FETCH)] + ([mode] if mode else [])
+    command = ["bash", str(FETCH)] + ([mode] if mode else []) + list(selectors)
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
     events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
     return result, events
@@ -81,6 +81,38 @@ def tree(directory):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_list_selection_needs_no_audio_destination(self):
+        env = dict(os.environ, FRANKENSIM_REFERENCE_DIR="/nonexistent-reference-directory")
+        result = subprocess.run(["bash", str(FETCH), "--list", "--instrument", "violin"],
+                                env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertGreater(len(entries), 0)
+        self.assertEqual({entry["instrument"] for entry in entries}, {"Violin"})
+
+    def test_id_selection_does_not_fetch_unselected_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            good = dict(entry(b"right bytes"), instrument="Violin")
+            other = dict(entry(b"unavailable"), id="other", path="other.aiff", instrument="Cello")
+            target = Path(directory) / "refs" / good["path"]
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"right bytes")
+            result, events = fetch(directory, [good, other], selectors=("--id", good["id"]))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([event["id"] for event in events], [good["id"]])
+            self.assertFalse((Path(directory) / "refs" / other["path"]).exists())
+
+    def test_bad_or_disjoint_selectors_refuse_before_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entries = [dict(entry(b"x"), instrument="Violin"),
+                       dict(entry(b"y"), id="cello", path="cello.aiff", instrument="Cello")]
+            for selectors in (("--instrument", "misspelt"), ("--id", "missing"),
+                              ("--instrument", "Violin", "--id", "cello")):
+                result, events = fetch(directory, entries, selectors=selectors)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(events, [])
+                self.assertEqual(tree(Path(directory) / "refs"), [])
+
     def test_schema_and_required_fields(self):
         start = time.monotonic()
         m = manifest()

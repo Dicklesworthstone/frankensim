@@ -3,34 +3,26 @@
 #   --verify (default)  verify present files; fetch absent ones, checking the remote bytes'
 #                       sha256 and length BEFORE they are moved into place. Any mismatch refuses.
 #   --pin               print the observed sha256 and bytes of every entry for review; writes nothing.
+#   --instrument NAME   select an instrument (repeatable, case-insensitive exact name).
+#   --id ID             select a recording (repeatable); combined selectors intersect.
+#   --list              print selected manifest entries without downloading or requiring a destination.
+#   --manifest PATH     use another reference manifest with the same file fields.
 # Never overwrites and never deletes. Audio is never committed: FRANKENSIM_REFERENCE_DIR must be an
 # existing directory, and a directory on the Mac Data volume (/System/Volumes/Data) is refused.
 # One JSONL line per file on stdout: utc, event, id, url, sha256_expected, sha256_observed, bytes,
-# dest_mount, elapsed_ms, host. FRANKENSIM_REFERENCES_MANIFEST and FRANKENSIM_TEST_MOUNT exist for
-# scripts/tests/test_instrument_references.py only.
+# dest_mount, elapsed_ms, host. No selectors means the complete corpus (over 12 GB).
+# FRANKENSIM_TEST_MOUNT exists for scripts/tests/test_instrument_references.py only.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-mode="${1:---verify}"
-case "$mode" in
---verify | --pin) ;;
-*)
-    echo "usage: fetch-references.sh [--verify|--pin]" >&2
-    exit 2
-    ;;
-esac
-dest="${FRANKENSIM_REFERENCE_DIR:?set FRANKENSIM_REFERENCE_DIR to an existing directory off the Mac Data volume}"
-[ -d "$dest" ] || {
-    echo "REFUSED: FRANKENSIM_REFERENCE_DIR is not an existing directory: $dest" >&2
-    exit 1
-}
-mount="${FRANKENSIM_TEST_MOUNT:-$(df -P "$dest" | awk 'NR == 2 {print $6}')}"
-if [ "$mount" = "/System/Volumes/Data" ]; then
-    echo "REFUSED: $dest is on the Mac Data volume ($mount); reference audio lives off-volume" >&2
-    exit 1
+dest="${FRANKENSIM_REFERENCE_DIR:-}"
+mount="${FRANKENSIM_TEST_MOUNT:-}"
+if [ -d "$dest" ] && [ -z "$mount" ]; then
+    mount="$(df -P "$dest" | awk 'NR == 2 {print $6}')"
 fi
 manifest="${FRANKENSIM_REFERENCES_MANIFEST:-$here/references.json}"
 
-exec python3 -I - "$mode" "$manifest" "$dest" "$mount" <<'PY'
+exec python3 -I - "$manifest" "$dest" "$mount" "$@" <<'PY'
+import argparse
 import datetime
 import hashlib
 import json
@@ -40,7 +32,17 @@ import sys
 import time
 import urllib.request
 
-mode, manifest, dest, mount = sys.argv[1:]
+manifest, dest, mount = sys.argv[1:4]
+parser = argparse.ArgumentParser(description="Fetch checksum-pinned real instrument recordings; no selectors downloads the complete corpus.")
+modes = parser.add_mutually_exclusive_group()
+modes.add_argument("--verify", action="store_true", help="verify present files and fetch absent ones (default)")
+modes.add_argument("--pin", action="store_true", help="report remote or local digests without retaining downloads")
+parser.add_argument("--instrument", action="append", default=[], help="exact instrument name, repeatable and case-insensitive")
+parser.add_argument("--id", action="append", default=[], help="exact recording ID, repeatable")
+parser.add_argument("--list", action="store_true", help="list selected manifest entries without downloading")
+parser.add_argument("--manifest", default=manifest, help="reference manifest JSON")
+args = parser.parse_args(sys.argv[4:])
+mode = "--pin" if args.pin else "--verify"
 USER_AGENT = "frankensim-agent (+https://github.com/Dicklesworthstone/frankensim)"
 host = socket.gethostname()
 refused = 0
@@ -75,7 +77,29 @@ def download(url, part):
     return h.hexdigest(), size
 
 
-files = json.load(open(manifest))["files"]
+with open(args.manifest) as source:
+    files = json.load(source)["files"]
+instruments = {f.get("instrument", "").casefold() for f in files}
+ids = {f["id"] for f in files}
+unknown = [name for name in args.instrument if name.casefold() not in instruments]
+unknown += [name for name in args.id if name not in ids]
+if unknown:
+    parser.error("unknown recording selector(s): " + ", ".join(unknown))
+selected_instruments = {name.casefold() for name in args.instrument}
+selected_ids = set(args.id)
+files = [f for f in files
+         if (not selected_instruments or f.get("instrument", "").casefold() in selected_instruments)
+         and (not selected_ids or f["id"] in selected_ids)]
+if not files:
+    parser.error("selectors match no recordings")
+if args.list:
+    for entry in files:
+        print(json.dumps(entry))
+    sys.exit(0)
+if not os.path.isdir(dest):
+    sys.exit("REFUSED: set FRANKENSIM_REFERENCE_DIR to an existing directory off the Mac Data volume")
+if mount == "/System/Volumes/Data":
+    sys.exit(f"REFUSED: {dest} is on the Mac Data volume ({mount}); reference audio lives off-volume")
 for entry in files:
     start = time.monotonic()
     parts = entry["path"].split("/")
