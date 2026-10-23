@@ -44,6 +44,7 @@
 use super::super::{ReciprocalStringBank, StringBowLocation};
 use super::{MaterialBowContact, MultiBowStringBank};
 use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, invalid, poll};
+use crate::modal_acoustic_time::ModalAcousticState;
 use crate::render::schedule::force::coupled::contact::friction::{
     FrictionDrive, multiple::MultiFrictionConfig,
 };
@@ -373,6 +374,26 @@ impl ReciprocalStringBank {
             system,
             stop_stations,
         })
+    }
+}
+
+impl MultiBowStringBank {
+    /// Replace a string component's modal state before playback, for example to
+    /// begin the string from a known Helmholtz motion rather than from rest.
+    /// The common clock and every source binding are unchanged; any later
+    /// contact history starts fresh.
+    ///
+    /// # Errors
+    /// A sample already rendered, an unknown string index, or a state the modal
+    /// basis or budgets reject.
+    pub fn restore_string_states(
+        &mut self,
+        string: usize,
+        states: &[ModalAcousticState],
+    ) -> Result<(), ReciprocalStringError> {
+        self.system
+            .restore_component_states(string, states)
+            .map_err(ReciprocalStringError::Friction)
     }
 }
 

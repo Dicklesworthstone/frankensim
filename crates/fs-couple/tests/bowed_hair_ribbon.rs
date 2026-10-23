@@ -16,7 +16,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource, ReciprocalStringBank, StringBankOptions, StringBowLocation,
     plate::{SharedMaterialPlateBody, SharedPlateBridge},
 };
-use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
+use fs_couple::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
 use fs_couple::render::schedule::force::coupled::{
     ModalCouplingConfig,
     contact::friction::{FrictionDrive, ModalFrictionConfig, multiple::MultiFrictionConfig},
@@ -373,5 +373,54 @@ fn g0_binding_refusals() {
                 .with_compliant_bow_ribbon(0.02, 5, bad, ribbon_limits(), gate)
                 .is_err()
         );
+    });
+}
+
+#[test]
+fn g0_restore_string_states_seeds_the_motion_and_refuses_bad_input() {
+    with_cx(|cx, gate| {
+        let (width, cells) = (0.02, 5usize);
+        let mut bank = base(cx, gate)
+            .with_compliant_bow_ribbon(width, cells, violin_hair(), ribbon_limits(), gate)
+            .unwrap();
+        let n = bank.system().components()[0].states().len();
+        assert!(
+            bank.system().total_energy_j().unwrap() <= 1e-12,
+            "a fresh bank should start at rest"
+        );
+        // Seed the string's first mode with a known velocity.
+        let mut states = vec![
+            ModalAcousticState {
+                displacement_m_sqrt_kg: 0.0,
+                velocity_m_sqrt_kg_per_s: 0.0
+            };
+            n
+        ];
+        states[0].velocity_m_sqrt_kg_per_s = 1.0e-3;
+        bank.restore_string_states(0, &states).unwrap();
+        assert!(
+            (bank.system().components()[0].states()[0].velocity_m_sqrt_kg_per_s - 1.0e-3).abs()
+                <= 1e-15,
+            "the restored velocity did not reach the string's first mode"
+        );
+        assert!(
+            bank.system().total_energy_j().unwrap() > 0.0,
+            "restoring a nonzero state must seed motion"
+        );
+        // A step from the seeded state (released bow, free ring) still balances.
+        let zero = vec![0.0; bank.system().mode_count()];
+        let released = ribbon_drives(cells, 0.0, 0.0);
+        let f = bank.step(&zero, &released).unwrap();
+        assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
+
+        // Refusals: a wrong mode count and an unknown string before playback.
+        let mut fresh = base(cx, gate)
+            .with_compliant_bow_ribbon(width, cells, violin_hair(), ribbon_limits(), gate)
+            .unwrap();
+        assert!(fresh.restore_string_states(0, &states[..n - 1]).is_err());
+        assert!(fresh.restore_string_states(9, &states).is_err());
+        // And a refusal once a sample has been rendered.
+        fresh.step(&zero, &released).unwrap();
+        assert!(fresh.restore_string_states(0, &states).is_err());
     });
 }

@@ -17,6 +17,7 @@
 
 use super::*;
 use super::super::network_response;
+use crate::modal_acoustic_time::ModalAcousticState;
 
 /// Compliant obstacles in the same joint solve as prescribed or contact-loaded friction.
 pub mod obstacles;
@@ -286,6 +287,34 @@ impl MultiFrictionModalSystem {
             self.series_drives[port] = Some(compliant_drive::SeriesCompliantDrive::new(stiffness_n_m, damping_kg_s)?);
         }
         Ok(self)
+    }
+
+    /// Replace one component's modal state before playback, for example to
+    /// begin a string from a known Helmholtz motion. The component's model and
+    /// its staging candidate are both set through the modal model's own restart
+    /// seam, which checks the basis and the displacement/velocity/energy
+    /// budgets; `prepare_prediction` re-derives the network's cached positions
+    /// from the models on the next step, so no other cache needs touching. The
+    /// shared clock is unchanged and any later contact history starts fresh.
+    ///
+    /// # Errors
+    /// A sample already rendered, an unknown component, or a state that the
+    /// modal basis or budgets reject.
+    pub fn restore_component_states(&mut self, component: usize, states: &[ModalAcousticState])
+        -> Result<(), ModalFrictionError>
+    {
+        if self.samples_rendered() != 0 {
+            return Err(invalid("restore component states before any sample is rendered").into());
+        }
+        let network = &mut self.core.network;
+        if component >= network.models.len() {
+            return Err(invalid("restore names a component outside the coupled network").into());
+        }
+        network.models[component].restore_states(states)
+            .map_err(|source| ModalCouplingError::Component { component, source })?;
+        network.candidates[component].restore_states(states)
+            .map_err(|source| ModalCouplingError::Component { component, source })?;
+        Ok(())
     }
 
     /// Settle the complete network with every driven friction port released.
