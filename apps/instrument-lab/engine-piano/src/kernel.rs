@@ -39,6 +39,7 @@
 use crate::refmods::{
     board_geometry, felt,
     geometry::{self, Course},
+    hammer_felt,
     linear::{Bank, BoardMode, string_stretching::{Material, Specification, WaveMaterial}},
     relaxation, shank, steinway_d, steinway_scale,
 };
@@ -120,6 +121,11 @@ pub struct Config {
     /// RT-0425's published R_H rate term (the reference's `--rt0425-hammer-dissipation`).
     /// Requires `rt0425_hammer_stiffness`, as the reference does.
     pub rt0425_hammer_dissipation: bool,
+    /// Hammers from the felt pack (`hammer_felt.rs`): Stulov's 88 measured Abel
+    /// hammers, each the whole hammer's K u^p + R d(u^p)/dt shared by its unison,
+    /// with the hammer mass from the same pack. It takes precedence over the
+    /// RT-0425 and legacy felt cards. The browser plays it.
+    pub felt_pack_hammers: bool,
     /// Silent strings. Every partial up to this frequency of every string that is not
     /// sounding moves, as a bank of damped modes driven by the bridge (0: the rigid-chord
     /// image alone). Their dampers and intrinsic losses act per partial; they exchange
@@ -205,6 +211,7 @@ impl Config {
             rt0425_string_damping: false,
             rt0425_hammer_stiffness: false,
             rt0425_hammer_dissipation: false,
+            felt_pack_hammers: false,
             silent_bank_hz: 0.0,
             string_stretching: None,
         }
@@ -1986,19 +1993,24 @@ impl LivePiano {
         if cfg.rt0425_hammer_dissipation && !cfg.rt0425_hammer_stiffness {
             return Err("hammer dissipation R_H requires RT-0425's per-string stiffness K_H".into());
         }
+        let felt_pack = if cfg.felt_pack_hammers { Some(hammer_felt::stulov_abel()?) } else { None };
         let mut keys = Vec::with_capacity(courses.len());
         for (ci, c) in courses.iter().enumerate() {
-            let (law, prony) = if cfg.rt0425_hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(c) }
+            let pack_hammer = felt_pack.as_ref().map(|card| card.hammer(c.midi)).transpose()?;
+            let (law, prony) = if let Some(h) = &pack_hammer { h.material(c) }
+                else if cfg.rt0425_hammer_dissipation { steinway_scale::hammer_material_rt0425_damped(c) }
                 else if cfg.rt0425_hammer_stiffness { steinway_scale::hammer_material_rt0425(c) }
                 else { steinway_scale::hammer_material(c) }?;
             let area = c.felt_area_m2 / c.unison as f64;
             // engine.rs `configure_source_hammer_dissipation`: the per-string R_H on this site's area.
-            let rate_n_s_m_p = if cfg.rt0425_hammer_dissipation {
+            let rate_n_s_m_p = if let Some(h) = &pack_hammer { h.rate_per_string(c) }
+                else if cfg.rt0425_hammer_dissipation {
                 steinway_scale::hammer_relaxation_rt0425(c.midi)? * area * c.unison as f64 / c.felt_area_m2
             } else { 0.0 };
             let thickness = c.felt_thickness_m;
             let creep = relaxation::Spectrum::from_prony(&prony)?.prepare(area, thickness, dt)?;
-            let model = shank::Prepared::from_geometry(geometry, c.hammer_mass_kg, rate)?;
+            let hammer_mass_kg = pack_hammer.map_or(c.hammer_mass_kg, |h| h.mass_kg);
+            let model = shank::Prepared::from_geometry(geometry, hammer_mass_kg, rate)?;
             let rest = model.rest(CATCH_DISTANCE);
             let rest_energy = model.energy(&rest, CATCH_DISTANCE);
             let contacts = (0..c.unison)

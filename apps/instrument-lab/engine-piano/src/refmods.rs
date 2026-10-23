@@ -8,6 +8,7 @@
 //! * the Model D soundboard reconstruction and its FE eigen-solve
 //!   (`steinway_d`, `board_geometry`),
 //! * the energy-discrete WoolFelt contact adapter (`felt`),
+//! * the felt pack's per-key hammers, Stulov's 88 measured Abel hammers (`hammer_felt`),
 //! * the Prony creep realization (`relaxation`) and the geometry-derived
 //!   hammer shank (`shank`),
 //! * the reference string/board bank (`linear`), used here for its
@@ -32,6 +33,8 @@ pub mod board_geometry;
 pub mod steinway_d;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/felt.rs"]
 pub mod felt;
+#[path = "../../../../crates/fs-couple/examples/grand_piano/hammer_felt.rs"]
+pub mod hammer_felt;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/felt_relaxation.rs"]
 pub mod relaxation;
 #[path = "../../../../crates/fs-couple/examples/grand_piano/hammer_shank.rs"]

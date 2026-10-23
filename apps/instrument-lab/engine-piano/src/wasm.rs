@@ -87,12 +87,11 @@ impl Playback {
 fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
     full_scale_pa: f64) -> Config {
     let mut cfg = Config::live(sample_rate);
-    // The browser plays the published RT-0425 string losses and hammer law, K_H on each string
-    // with its R_H (Config field docs). The reference admits that law with a supplied scale too:
-    // both felt laws key K_H by key number, and the published one only stops dividing it by the unison.
+    // The browser plays the published RT-0425 string losses and the felt pack's hammers:
+    // Stulov's 88 measured Abel hammers, K u^p + R d(u^p)/dt per hammer with its mass
+    // (Config field docs).
     cfg.rt0425_string_damping = true;
-    cfg.rt0425_hammer_stiffness = true;
-    cfg.rt0425_hammer_dissipation = true;
+    cfg.felt_pack_hammers = true;
     // The silent strings move: every partial to 600 Hz of every string not sounding
     // (671 partials; frankensim-ie2zx). The board and mode cap are timed with them.
     cfg.silent_bank_hz = 600.0;
