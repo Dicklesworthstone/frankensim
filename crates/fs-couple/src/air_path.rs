@@ -10,6 +10,7 @@ pub mod cylinder;
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_material::iso9613::iso9613_absorption;
+use fs_material::relaxation::RelaxationState;
 use fs_math::det;
 use crate::acoustic_realize::AcousticRealizeError;
 
@@ -127,6 +128,135 @@ pub fn absorb_pressure_history(
         Ok(iso9613_absorption(gas, relative_humidity, omega)
             .unwrap_or_else(|_| gas.stokes_kirchhoff_absorption(omega)))
     });
+}
+
+/// Molecular relaxation that an observer path did not apply, with an upper
+/// bound on its effect at the listener. A render may omit relaxation only with
+/// this receipt, never silently (orchestrator ruling of 2026-10-23 on pexfp.18).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelaxationOmission {
+    /// Listener distance the bound covers [m].
+    pub range_m: f64,
+    /// Highest frequency of the observed band [Hz].
+    pub band_hz: f64,
+    /// Upper bound on the omitted attenuation over the band [dB].
+    pub bound_db: f64,
+}
+
+/// What an observer path applied for gas absorption.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObserverAbsorptionReceipt {
+    /// The law applied to the pressure history.
+    pub law: GasAbsorptionModel,
+    /// Molecular relaxation that the law leaves out, with its bound. `None`
+    /// when the law includes it (ISO 9613-1 for terrestrial air).
+    pub relaxation_omitted: Option<RelaxationOmission>,
+}
+
+/// Bound the attenuation that omitting molecular relaxation can leave out:
+/// the worst ISO 9613-1 absorption of standard air at `band_hz`, times
+/// `range_m`, in dB.
+///
+/// "Worst" is the maximum over ISO's tabulated domain (-20..+50 C, 10..100 %
+/// RH, 1 atm), sampled on a 1 K by 1 % grid. ISO absorption rises
+/// monotonically with frequency, so the band's top bounds the whole band.
+/// ISO's figure includes classical loss, so the bound also covers the
+/// viscothermal part.
+///
+/// This bound is the ruling's convention for mixtures whose relaxation rates
+/// are unsourced. It is not a proof for such mixtures: a CO2-rich gas can
+/// relax more strongly than air.
+///
+/// # Errors
+/// A negative or non-finite range, or a band that is not positive and finite.
+pub fn relaxation_omission(range_m: f64, band_hz: f64) -> Result<RelaxationOmission, AcousticRealizeError> {
+    if !(range_m.is_finite() && range_m >= 0.0 && band_hz.is_finite() && band_hz > 0.0) {
+        return Err(invalid("relaxation omission needs a finite nonnegative range and positive band"));
+    }
+    let omega = core::f64::consts::TAU * band_hz;
+    let mut worst: f64 = 0.0;
+    for kelvin in 0..=70 {
+        for percent in 10..=100 {
+            let db_per_km = fs_material::iso9613::iso9613_absorption_db_per_km(
+                253.15 + f64::from(kelvin), 101_325.0, f64::from(percent) / 100.0, omega,
+            ).map_err(|_| invalid("standard-air absorption could not be evaluated for the bound"))?;
+            worst = worst.max(db_per_km);
+        }
+    }
+    let bound_db = worst * 1e-3 * range_m;
+    if !bound_db.is_finite() {
+        return Err(invalid("relaxation omission bound is unrepresentable"));
+    }
+    Ok(RelaxationOmission { range_m, band_hz, bound_db })
+}
+
+/// Propagate a pressure history over `range_m` through a gas whose molecular
+/// relaxation has been evaluated, as a causal complex transfer.
+///
+/// Every positive-frequency DFT bin is multiplied by
+/// `exp(-Im k r) exp(-i (Re k - w / c_inf) r)`, where `k` is
+/// [`RelaxationState::causal_wavenumber`] and `c_inf` is the frozen sound
+/// speed. This is fs-duct's `e^{-iwt}` wave `e^{i(kr - wt)}` written for the
+/// DFT's `e^{+iwt}` synthesis. Unlike the zero-phase map above, absorption and
+/// dispersion come from one wavenumber, counted once, and the frequency
+/// response is that of a causal medium.
+///
+/// The bulk delay `r / c_inf` is not applied; it is returned so the caller can
+/// place the arrival. The Nyquist bin of the even transform keeps only the real
+/// part of its transfer, as a real signal requires. Sampling the response on
+/// the DFT grid is exact for the bins; between them it inherits the usual
+/// band-limiting of a response that is not itself band-limited. A zero range
+/// and histories shorter than four samples are no-ops.
+///
+/// # Errors
+/// Invalid samples, time/range, or an unrepresentable wavenumber or output
+/// refuse WITHOUT changing the history.
+pub fn propagate_pressure_history_relaxing(
+    pressure_pa: &mut [f64],
+    dt: f64,
+    range_m: f64,
+    relaxation: &RelaxationState,
+) -> Result<f64, AcousticRealizeError> {
+    if !dt.is_finite() || dt <= 0.0 || !range_m.is_finite() || range_m < 0.0
+        || pressure_pa.iter().any(|sample| !sample.is_finite())
+    {
+        return Err(invalid("propagation needs finite pressure, positive dt and nonnegative range"));
+    }
+    let c_inf = relaxation.frozen_sound_speed_m_s();
+    let delay_s = range_m / c_inf;
+    if !(delay_s.is_finite() && delay_s >= 0.0) {
+        return Err(invalid("relaxation bulk delay is unrepresentable"));
+    }
+    if pressure_pa.len() < 4 || range_m == 0.0 { return Ok(delay_s); }
+    let n = pressure_pa.len();
+    let n_fft = n.checked_next_power_of_two()
+        .ok_or_else(|| invalid("propagation FFT length is unrepresentable"))?.max(8);
+    let fft = Fft::new(n_fft);
+    let mut buf: Vec<FftC64> = (0..n_fft)
+        .map(|i| FftC64::new(if i < n { pressure_pa[i] } else { 0.0 }, 0.0))
+        .collect();
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
+    fft.forward(&mut buf, &mut scratch);
+    for (k, bin) in buf.iter_mut().enumerate().take(n_fft / 2 + 1) {
+        if k == 0 { continue; }
+        let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
+        let wave = relaxation.causal_wavenumber(omega)
+            .map_err(|_| invalid("relaxation wavenumber could not be evaluated"))?;
+        let magnitude = det::exp(-wave.im * range_m);
+        let (sin, cos) = det::sin_cos(-(wave.re - omega / c_inf) * range_m);
+        let (h_re, h_im) = if k == n_fft / 2 { (magnitude * cos, 0.0) } else { (magnitude * cos, magnitude * sin) };
+        *bin = FftC64::new(bin.re * h_re - bin.im * h_im, bin.re * h_im + bin.im * h_re);
+    }
+    for k in 1..n_fft / 2 {
+        let c = buf[k];
+        buf[n_fft - k] = FftC64::new(c.re, -c.im);
+    }
+    fft.inverse(&mut buf, &mut scratch);
+    if buf[..n].iter().any(|value| !value.re.is_finite()) {
+        return Err(invalid("propagated pressure is unrepresentable"));
+    }
+    for (i, sample) in pressure_pa.iter_mut().enumerate() { *sample = buf[i].re; }
+    Ok(delay_s)
 }
 
 // One transform implementation for explicit and legacy model selection.
@@ -257,5 +387,124 @@ mod tests {
             absorb_pressure_history_with_model(&mut explicit, 1.0 / 8000.0, 100.0, &gas, model).unwrap();
             assert_eq!(legacy, explicit);
         }
+    }
+
+    use fs_material::relaxation::{
+        InternalReservoir, RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw,
+        RelaxationState, RelaxingMedium, SpeciesRelaxation, VibrationalMode,
+    };
+    use fs_thermochem::SpeciesId;
+
+    /// One synthetic reservoir (theta 960 K, degeneracy 2, tau 1e-4 s), or none,
+    /// in dry USSA air: a test medium for the transfer, not gas data.
+    fn relaxing_air(reservoir: bool) -> RelaxationState {
+        let p = 101_325.0;
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, p).unwrap();
+        let id = SpeciesId::new("A").unwrap();
+        let processes = if reservoir {
+            vec![RelaxationProcess {
+                reservoir: InternalReservoir::Vibrational(vec![VibrationalMode { theta_k: 960.0, degeneracy: 2 }]),
+                rate: RelaxationRateLaw::PartnerIndependent {
+                    p_tau_ref_pa_s: 1e-4 * p,
+                    t_ref_k: 293.15,
+                    exponent: 0.0,
+                    t_min_k: 100.0,
+                    t_max_k: 2000.0,
+                },
+            }]
+        } else {
+            Vec::new()
+        };
+        let law = RelaxationAbsorption::new(vec![SpeciesRelaxation { species: id.clone(), processes }]).unwrap();
+        law.evaluate(&RelaxingMedium::new(gas, vec![(id, 1.0)]).unwrap()).unwrap()
+    }
+
+    /// The transfer is exactly the law's wavenumber in every bin, and the
+    /// propagated impulse of a strongly dispersive reservoir arrives no earlier
+    /// than the bulk delay: pre-arrival energy at most 1e-12 of the total.
+    #[test]
+    fn relaxation_transfer_is_the_law_per_bin_and_causal() {
+        let state = relaxing_air(true);
+        let (n, dt, range, n0) = (1usize << 16, 1.0 / 48_000.0, 10.0, 1usize << 14);
+        let mut x = vec![0.0; n];
+        x[n0] = 1.0;
+        let delay = propagate_pressure_history_relaxing(&mut x, dt, range, &state).unwrap();
+        assert_eq!(delay.to_bits(), (range / state.frozen_sound_speed_m_s()).to_bits());
+        let total: f64 = x.iter().map(|v| v * v).sum();
+        let early: f64 = x[..n0].iter().map(|v| v * v).sum();
+        println!(
+            "{{\"bead\":\"M0.1-W2\",\"test\":\"relaxation_transfer_causal\",\"range_m\":{range},\"pre_arrival_energy_ratio\":{:e},\"tolerance\":1e-12}}",
+            early / total
+        );
+        assert!(early <= 1e-12 * total, "pre-arrival energy ratio {:e}", early / total);
+        let fft = Fft::new(n);
+        let mut y: Vec<FftC64> = x.iter().map(|&v| FftC64::new(v, 0.0)).collect();
+        let mut scratch = vec![FftC64::new(0.0, 0.0); n];
+        fft.forward(&mut y, &mut scratch);
+        let c_inf = state.frozen_sound_speed_m_s();
+        let mut worst: f64 = 0.0;
+        for k in (1..n / 2).step_by(997) {
+            let omega = core::f64::consts::TAU * k as f64 / (n as f64 * dt);
+            let wave = state.causal_wavenumber(omega).unwrap();
+            let magnitude = (-wave.im * range).exp();
+            // Bins attenuated below 1e-6 hold only transform roundoff.
+            if magnitude < 1e-6 {
+                continue;
+            }
+            let phase = -(wave.re - omega / c_inf) * range - core::f64::consts::TAU * (k * n0) as f64 / n as f64;
+            let (er, ei) = (magnitude * phase.cos(), magnitude * phase.sin());
+            worst = worst.max(((y[k].re - er).hypot(y[k].im - ei)) / magnitude);
+        }
+        assert!(worst <= 1e-9, "per-bin transfer error {worst:e}");
+    }
+
+    /// The omission bound is the worst standard-air ISO absorption at the band
+    /// top times the range: linear in range, rising with the band, never below
+    /// ISO at any grid state it covers, and refusing invalid inputs.
+    #[test]
+    fn relaxation_omission_bounds_standard_air_absorption() {
+        let one = relaxation_omission(1.0, 24_000.0).unwrap();
+        let two = relaxation_omission(2.0, 24_000.0).unwrap();
+        assert_eq!(two.bound_db.to_bits(), (2.0 * one.bound_db).to_bits());
+        let lower = relaxation_omission(1.0, 10_000.0).unwrap();
+        assert!(lower.bound_db < one.bound_db);
+        let omega = core::f64::consts::TAU * 24_000.0;
+        for (t, rh) in [(253.15, 0.1), (293.15, 0.5), (303.15, 0.2), (323.15, 1.0)] {
+            let iso = fs_material::iso9613::iso9613_absorption_db_per_km(t, 101_325.0, rh, omega).unwrap() * 1e-3;
+            assert!(one.bound_db >= iso, "bound {} below ISO {iso} at {t} K, RH {rh}", one.bound_db);
+        }
+        assert_eq!(relaxation_omission(0.0, 24_000.0).unwrap().bound_db, 0.0);
+        for (r, f) in [(-1.0, 1_000.0), (f64::NAN, 1_000.0), (1.0, 0.0), (1.0, f64::INFINITY)] {
+            assert!(relaxation_omission(r, f).is_err());
+        }
+        println!(
+            "{{\"bead\":\"M0.1-W2\",\"test\":\"relaxation_omission\",\"band_hz\":24000,\"bound_db_1m\":{},\"bound_db_2m\":{},\"bound_db_1m_10kHz\":{}}}",
+            one.bound_db, two.bound_db, lower.bound_db
+        );
+    }
+
+    /// With no relaxing reservoir the causal transfer's loss is Stokes-Kirchhoff
+    /// to relative O(w delta), and a non-dispersive gas adds only that small
+    /// causal phase.
+    #[test]
+    fn classical_only_transfer_reduces_to_stokes_kirchhoff() {
+        let state = relaxing_air(false);
+        let gas = *state.gas();
+        for f in [100.0, 1_000.0, 10_000.0, 20_000.0] {
+            let omega = core::f64::consts::TAU * f;
+            let k = state.causal_wavenumber(omega).unwrap();
+            let rel = (k.im / gas.stokes_kirchhoff_absorption(omega) - 1.0).abs();
+            assert!(rel <= 1e-6, "f={f}: causal loss off Stokes-Kirchhoff by {rel:e}");
+        }
+        let original = vec![1.0, -1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.0];
+        let mut signal = original.clone();
+        assert!(propagate_pressure_history_relaxing(&mut signal, 0.0, 1.0, &state).is_err());
+        assert!(propagate_pressure_history_relaxing(&mut signal, 1e-4, -1.0, &state).is_err());
+        let mut poisoned = original.clone();
+        poisoned[3] = f64::NAN;
+        assert!(propagate_pressure_history_relaxing(&mut poisoned, 1e-4, 1.0, &state).is_err());
+        assert_eq!(signal, original);
+        propagate_pressure_history_relaxing(&mut signal, 1e-4, 0.0, &state).unwrap();
+        assert_eq!(signal, original, "zero range is a no-op");
     }
 }

@@ -689,6 +689,31 @@ impl RelaxationState {
         Ok(C64::new(k.re, im))
     }
 
+    /// Causal complete wavenumber for propagating a history:
+    /// `k = (w / c(w)) (1 - i w delta)^{-1/2}` with
+    /// `delta = (4 mu / 3 + (gamma - 1) kappa / c_p) / (rho c^2)` from the
+    /// equilibrium state. The viscothermal factor is the first-order Kirchhoff
+    /// dispersion relation. Its imaginary part reproduces Stokes-Kirchhoff to
+    /// relative `O(w delta)` (`delta` is about 1e-10 s in air), and unlike adding
+    /// `i alpha_SK` it is analytic in the upper half plane. A history
+    /// propagated with it therefore stays causal. The losses are still counted
+    /// once.
+    ///
+    /// # Errors
+    /// As [`Self::relaxing_wavenumber`].
+    pub fn causal_wavenumber(&self, omega: f64) -> Result<C64, MaterialError> {
+        let k = self.relaxing_wavenumber(omega)?;
+        let gas = &self.gas;
+        let delta = (4.0 / 3.0 * gas.dynamic_viscosity
+            + (gas.gamma - 1.0) * gas.thermal_conductivity / gas.specific_heat_cp)
+            / (gas.density * gas.sound_speed * gas.sound_speed);
+        let k = k * C64::new(1.0, -omega * delta).sqrt().recip();
+        if !(k.re.is_finite() && k.re > 0.0 && k.im.is_finite() && k.im >= 0.0) {
+            return Err(state_error("causal wavenumber is unrepresentable"));
+        }
+        Ok(k)
+    }
+
     /// Amplitude absorption coefficient `Im k` [Np/m].
     ///
     /// # Errors

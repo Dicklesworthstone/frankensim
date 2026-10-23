@@ -258,6 +258,9 @@ pub struct RealizedAssembly {
     pub gas: GasState,
     /// Bore realization receipt when a reed bore was realized.
     pub bore_receipt: Option<BoreRealizationReceipt>,
+    /// The observer absorption law applied, and any molecular relaxation it
+    /// left out, with an upper bound on its effect at the listener.
+    pub observer_absorption: crate::air_path::ObserverAbsorptionReceipt,
 }
 
 /// Realize every described member and sum their observer pressures.
@@ -1260,7 +1263,27 @@ fn finish_observer(
     mut pressure_pa: Vec<f64>,
     absorption: Option<crate::air_path::GasAbsorptionModel>,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
+    use crate::air_path::{GasAbsorptionModel, ObserverAbsorptionReceipt, relaxation_omission};
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
+    // The law actually applied. The scenario-air compatibility law is ISO 9613
+    // when ISO admits the state, and otherwise its documented Stokes-Kirchhoff
+    // fallback. Stokes-Kirchhoff leaves molecular relaxation out, which is never
+    // silent: the receipt carries a bound over the observed band.
+    let law = absorption.unwrap_or_else(|| {
+        let relative_humidity = assembly.ambient.relative_humidity;
+        if fs_material::iso9613::iso9613_absorption(gas, relative_humidity, 1.0).is_ok() {
+            GasAbsorptionModel::Iso9613Air { relative_humidity }
+        } else {
+            GasAbsorptionModel::StokesKirchhoff
+        }
+    });
+    let relaxation_omitted = match law {
+        GasAbsorptionModel::Iso9613Air { .. } => None,
+        GasAbsorptionModel::StokesKirchhoff => Some(relaxation_omission(
+            assembly.listener.distance_m,
+            0.5 * f64::from(assembly.sample_rate_hz),
+        )?),
+    };
     if let Some(model) = absorption {
         crate::air_path::absorb_pressure_history_with_model(
             &mut pressure_pa,
@@ -1286,6 +1309,7 @@ fn finish_observer(
         pressure_pa,
         gas: *gas,
         bore_receipt: None,
+        observer_absorption: ObserverAbsorptionReceipt { law, relaxation_omitted },
     })
 }
 
@@ -6174,6 +6198,43 @@ mod arbitrary_gas_realization_tests {
             .unwrap()
             .pressure_pa,
             realize_assembly(&description).unwrap().pressure_pa
+        );
+    }
+
+    /// Every realized observer names its absorption law. Scenario air carries
+    /// ISO 9613 with nothing omitted. A supplied gas on Stokes-Kirchhoff, by
+    /// default or by choice, carries the molecular-relaxation omission with its
+    /// bound at the listener distance over the band up to Nyquist. Numerics are
+    /// unchanged.
+    #[test]
+    fn observer_absorption_receipt_names_the_law_and_bounds_any_omitted_relaxation() {
+        use crate::air_path::{GasAbsorptionModel, relaxation_omission};
+        let description = fixture();
+        let legacy = gas_state(description.ambient).unwrap();
+        let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
+        let scenario = finish_observer(&description, &legacy, history.clone(), None).unwrap();
+        assert_eq!(
+            scenario.observer_absorption.law,
+            GasAbsorptionModel::Iso9613Air { relative_humidity: description.ambient.relative_humidity }
+        );
+        assert_eq!(scenario.observer_absorption.relaxation_omitted, None);
+        let supplied = helium_like();
+        let classical = finish_observer(&description, &supplied, history.clone(),
+            Some(GasAbsorptionModel::StokesKirchhoff)).unwrap();
+        let expected = relaxation_omission(description.listener.distance_m,
+            0.5 * f64::from(description.sample_rate_hz)).unwrap();
+        assert_eq!(classical.observer_absorption.law, GasAbsorptionModel::StokesKirchhoff);
+        assert_eq!(classical.observer_absorption.relaxation_omitted, Some(expected));
+        assert!(expected.bound_db > 0.0);
+        let realized = realize_assembly_with_gas(&description, &supplied).unwrap();
+        assert_eq!(realized.observer_absorption.relaxation_omitted, Some(expected));
+        let mut reference = history.clone();
+        crate::air_path::absorb_pressure_history_with_model(&mut reference, 1.0 / 16000.0,
+            description.listener.distance_m, &supplied, GasAbsorptionModel::StokesKirchhoff).unwrap();
+        assert_eq!(classical.pressure_pa, reference);
+        println!(
+            "{{\"bead\":\"M0.1-W2\",\"test\":\"observer_absorption_receipt\",\"range_m\":{},\"band_hz\":{},\"omitted_relaxation_bound_db\":{}}}",
+            expected.range_m, expected.band_hz, expected.bound_db
         );
     }
 
