@@ -6,7 +6,7 @@
 
 use crate::json::{self, Value};
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::read_gas_state;
+use fs_material::gas_species::input::{ThermochemicalPhase, read_gas_state};
 use fs_plate::shell::head::TensionVariation;
 use fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT;
 
@@ -59,6 +59,28 @@ impl Atmosphere {
             return Err(Refusal::new("gas_refused", "unexpected fields after the gas declaration"));
         }
         Ok(Self { declaration: text.split_ascii_whitespace().collect::<Vec<_>>().join(" "), state })
+    }
+
+    /// The same declaration resolved through its source packs, framed exactly
+    /// as the live kit's browser packet: each consecutive species, NASA-9 and
+    /// transport triple of `lengths` names unchanged canonical bytes. A
+    /// `thermochemical ...` record resolves only this way. An empty
+    /// `water_species` means none; the phase is `frozen` or `liquid-water`.
+    /// Nothing is defaulted.
+    pub fn from_source_packet(text: &str, bytes: &[u8], lengths: &[u32], water_species: &str,
+        phase: &str) -> Result<Self, Refusal> {
+        if text.len() > 8192 {
+            return Err(Refusal::new("gas_refused", "gas declaration exceeds 8 KiB"));
+        }
+        let phase = match phase {
+            "frozen" => ThermochemicalPhase::FrozenGas,
+            "liquid-water" => ThermochemicalPhase::LiquidWaterLimit,
+            _ => return Err(Refusal::new("gas_refused", "gas source phase must be frozen or liquid-water")),
+        };
+        let water = (!water_species.is_empty()).then_some(water_species);
+        let record = fs_material::gas_species::input::packs::read_source_packet(text, bytes, lengths, water, phase)
+            .map_err(|e| Refusal::new("gas_refused", e.to_string()))?;
+        Ok(Self { declaration: text.split_ascii_whitespace().collect::<Vec<_>>().join(" "), state: *record.state() })
     }
 
     /// Exact resolved coefficients, without reevaluation or editable overrides.

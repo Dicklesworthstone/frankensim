@@ -12,7 +12,6 @@ use fs_live_drum::{DrumParams, Instrument, LiveDrumCore};
 fn atmosphere_rebuild_reuses_heads_and_changes_coupling_propagation_and_sound() {
     let mut drum = LiveDrumCore::new(r#"{"substeps":2,"gas":"293.15 50000 0"}"#).unwrap();
     let head_frequencies = drum.instrument().heads[0].frequencies_hz();
-    let low_modes = drum.instrument().coupled_frequencies_hz.clone();
     let low_bulk = drum.instrument().params.bulk_modulus_pa();
     let low_delay = drum.voice().travel_delay_frames();
     drum.strike(0.06, 0.01, 2.0).unwrap();
@@ -23,7 +22,6 @@ fn atmosphere_rebuild_reuses_heads_and_changes_coupling_propagation_and_sound() 
     assert_eq!(drum.instrument().heads[0].frequencies_hz(), head_frequencies);
     assert_eq!(drum.instrument().params.bulk_modulus_pa(), 2.0 * low_bulk);
     assert_eq!(drum.voice().travel_delay_frames(), low_delay);
-    assert!(drum.instrument().coupled_frequencies_hz[0] > low_modes[0]);
     drum.strike(0.06, 0.01, 2.0).unwrap();
     let high_pcm = drum.render_f32(1024);
     assert_ne!(high_pcm, low_pcm);
@@ -256,4 +254,86 @@ fn info_json_is_parseable_and_declares_scope() {
         }
     }
     assert_eq!(depth, 0);
+}
+
+/// The lowest coupled mode of the RENDERED sound moves with the cavity's air by
+/// the amount the model's own coupled eigenproblem predicts (ruling 6474).
+///
+/// The small-signal system is diag(w^2) + (K/V) a a^T, with K = gamma p, and
+/// the heads are reused when only the gas changes. The air spring's share of
+/// the lowest mode's stiffness is s = d ln w^2 / d ln K, by Hellmann-Feynman
+/// the spring's energy fraction. Doubling p doubles K, and
+/// ln(w^2(2K)/w^2(K)) is the integral of s over ln K. While s is monotone
+/// between the two pressures, the frequency ratio lies between 2^(s/2) at its
+/// two ends. (It falls here: a stiffer spring pushes the lowest mode toward
+/// the next uncoupled volume mode and out of the spring.) That band is
+/// computed and printed before any rendering; monotonicity is checked at 75 kPa.
+#[test]
+fn the_rendered_lowest_coupled_peak_moves_by_the_cavity_share_of_its_stiffness() {
+    let gas = |p: f64| format!(r#"{{"substeps":2,"gas":"293.15 {p} 0"}}"#);
+    let mut model = LiveDrumCore::new(&gas(50_000.0)).unwrap();
+    let mut lowest = |p: f64| {
+        assert!(!model.rebuild(&gas(p)).unwrap(), "a gas change reuses the heads");
+        model.instrument().coupled_frequencies_hz[0]
+    };
+    let step = 1e-4;
+    let mut share = |p: f64| 2.0 * (lowest(p * (1.0 + step)) / lowest(p)).ln() / (1.0 + step).ln();
+    let s = [50_000.0, 75_000.0, 100_000.0].map(&mut share);
+    let monotone = (s[0] <= s[1] && s[1] <= s[2]) || (s[0] >= s[1] && s[1] >= s[2]);
+    assert!(s.iter().all(|v| *v > 0.0 && *v < 1.0) && monotone, "cavity share {s:?}");
+    let band = (2.0_f64.powf(s[0].min(s[2]) / 2.0), 2.0_f64.powf(s[0].max(s[2]) / 2.0));
+    let predicted = [lowest(50_000.0), lowest(100_000.0)];
+    println!("{{\"suite\":\"fs-live-drum\",\"case\":\"cavity-share-band\",\"share\":[{:.6},{:.6},{:.6}],\"band\":[{:.6},{:.6}],\"model_hz\":[{:.4},{:.4}]}}",
+        s[0], s[1], s[2], band.0, band.1, predicted[0], predicted[1]);
+    // The sound: one strike, 1 s of batter-microphone pressure, Hann window;
+    // the strongest spectral peak, on a 0.02 Hz grid, between 0.9 of the
+    // 50 kPa model frequency and 1.1 of the 100 kPa one. A peak at the edge
+    // means the search did not find this mode, and the test fails on it.
+    let (lo, hi) = (0.9 * predicted[0], 1.1 * predicted[1]);
+    let peak = |p: f64| {
+        let mut drum = LiveDrumCore::new(&gas(p)).unwrap();
+        drum.strike(0.06, 0.01, 2.0).unwrap();
+        let pressure = drum.render_pa(48_000).0.to_vec();
+        assert!(drum.take_refusal().is_none());
+        let n = pressure.len() as f64;
+        let windowed: Vec<f64> = pressure.iter().enumerate()
+            .map(|(i, x)| x * (0.5 - 0.5 * (core::f64::consts::TAU * i as f64 / n).cos())).collect();
+        let magnitude = |f: f64| {
+            let w = core::f64::consts::TAU * f / 48_000.0;
+            let (re, im) = windowed.iter().enumerate()
+                .fold((0.0, 0.0), |(re, im), (i, x)| (re + x * (w * i as f64).cos(), im - x * (w * i as f64).sin()));
+            re.hypot(im)
+        };
+        let steps = ((hi - lo) / 0.02) as usize;
+        let best = (0..=steps).map(|k| lo + 0.02 * k as f64)
+            .max_by(|a, b| magnitude(*a).total_cmp(&magnitude(*b))).unwrap();
+        assert!(best > lo + 0.02 && best < hi - 0.02, "{p} Pa: peak {best} Hz at the search edge [{lo}, {hi}]");
+        best
+    };
+    let rendered = [peak(50_000.0), peak(100_000.0)];
+    let ratio = rendered[1] / rendered[0];
+    println!("{{\"suite\":\"fs-live-drum\",\"case\":\"rendered-coupled-peak\",\"rendered_hz\":[{:.3},{:.3}],\"ratio\":{ratio:.6},\"band\":[{:.6},{:.6}],\"model_ratio\":{:.6}}}",
+        rendered[0], rendered[1], band.0, band.1, predicted[1] / predicted[0]);
+    assert!(band.0 <= ratio && ratio <= band.1, "rendered ratio {ratio} outside the predicted band [{}, {}]", band.0, band.1);
+}
+
+/// A thermochemical record reaches the drum only through its source packet,
+/// the live kit's framing. The bare JSON route keeps refusing it (no sources),
+/// and an incomplete packet or an unnamed phase refuses by name before any
+/// construction. Resolving a complete packet is fs-material's
+/// `read_source_packet`, shared unchanged with the kit.
+#[test]
+fn a_thermochemical_record_needs_its_source_packet_and_bad_packets_refuse_by_name() {
+    let record = "thermochemical 293.15 100000 mole 1 N2 1";
+    let bare = LiveDrumCore::new(&format!(r#"{{"gas":"{record}"}}"#)).err().unwrap();
+    assert_eq!(bare.code, "gas_refused", "{bare}");
+    for (bytes, lengths, phase) in [
+        (&[1_u8, 2, 3][..], &[1_u32, 1, 1][..], "frozen"),
+        (&[][..], &[][..], "frozen"),
+        (&[1, 2][..], &[1, 1][..], "frozen"),
+        (&[1, 2, 3][..], &[1, 1, 1][..], "unspecified"),
+    ] {
+        let refused = LiveDrumCore::with_gas_sources("{}", record, bytes, lengths, "", phase).err().unwrap();
+        assert_eq!(refused.code, "gas_refused", "{refused}");
+    }
 }

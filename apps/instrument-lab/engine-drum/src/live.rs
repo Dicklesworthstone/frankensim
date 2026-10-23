@@ -47,7 +47,25 @@ impl LiveDrumCore {
     /// # Errors
     /// Any typed refusal of parameters, geometry, eigen-solve or owners.
     pub fn new(params_json: &str) -> Result<Self, Refusal> {
-        let params = DrumParams::default().overlay_json(params_json)?;
+        Self::from_params(DrumParams::default().overlay_json(params_json)?)
+    }
+
+    /// As `new`, with the atmosphere resolved from `gas_record` through its
+    /// source packet ([`crate::params::Atmosphere::from_source_packet`]). A
+    /// later `rebuild` without a `gas` key keeps this atmosphere.
+    ///
+    /// # Errors
+    /// Any typed refusal, including `gas_refused` for the record or packet.
+    pub fn with_gas_sources(params_json: &str, gas_record: &str, bytes: &[u8], lengths: &[u32],
+        water_species: &str, phase: &str) -> Result<Self, Refusal> {
+        let mut params = DrumParams::default().overlay_json(params_json)?;
+        params.atmosphere = crate::params::Atmosphere::from_source_packet(
+            gas_record, bytes, lengths, water_species, phase)?;
+        params.validate()?;
+        Self::from_params(params)
+    }
+
+    fn from_params(params: DrumParams) -> Result<Self, Refusal> {
         let inst = Instrument::build(params)?;
         let voice = Voice::new(&inst, inst.params.substeps)?;
         Ok(Self { inst, voice, batter: Vec::new(), resonant: Vec::new(), refusal: None, builds: 1 })
