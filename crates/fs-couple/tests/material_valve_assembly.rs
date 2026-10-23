@@ -369,10 +369,14 @@ fn same_compiled_reed_uses_the_explicit_gas_renderer_without_a_second_loop() {
         let mut invalid = gas;
         invalid.density = 0.0;
         assert!(result.realize_with_gas(&invalid).is_err());
+        let (dry_air, air) =
+            fs_material::iso9613::TerrestrialAir::moist_air(293.15, 80_000.0, 0.0).unwrap();
+        assert_eq!(dry_air, gas);
         let options = RealizeOptions {
             gas: Some(gas),
             observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
                 relative_humidity: 0.5,
+                air,
             }),
             ..RealizeOptions::default()
         };

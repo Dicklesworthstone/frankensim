@@ -1916,6 +1916,15 @@ clarinet is one filling of those objects.
   The finished pressure history is passed through ISO 9613-1
   absorption (`air_path`) with the assembly's explicit humidity;
   Stokes–Kirchhoff is only the fallback outside the ISO window.
+  ISO is applied only with an `fs_material::iso9613::TerrestrialAir`
+  admission bound to the gas state. The scenario's legacy moist air makes its
+  own. An explicit `GasAbsorptionModel::Iso9613Air` carries one made from the
+  gas's composition, so heliox, oxygen-poor or CO2-rich gas refuses with
+  `AcousticRealizeError::NonTerrestrialAir`, naming the species.
+  The receipt's `relaxation_omitted` is
+  `OmissionBound::StandardAirConvention`: standard air's worst ISO absorption.
+  It is a convention and not a bound for a gas that relaxes more strongly than
+  air (CO2-rich, for example).
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a

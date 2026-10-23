@@ -498,20 +498,22 @@ impl GasState {
     }
 
     /// ISO 9613-1 absorption [Np/m] at this `(T, p)` and an explicit
-    /// relative humidity in `[0, 1]`.
+    /// relative humidity in `[0, 1]`, for a state admitted as terrestrial air.
     ///
     /// Transport coefficients on this state are **not** used — ISO's
     /// classical term is the air fit. Do not add
     /// [`Self::stokes_kirchhoff_absorption`] on top.
     ///
     /// # Errors
-    /// Forwards ISO meteorological-window and finite-evaluation refusals.
+    /// An admission made for a different state, and ISO
+    /// meteorological-window and finite-evaluation refusals.
     pub fn iso9613_absorption(
         &self,
+        air: &crate::iso9613::TerrestrialAir,
         relative_humidity: f64,
         omega: f64,
     ) -> Result<f64, crate::MaterialError> {
-        crate::iso9613::iso9613_absorption(self, relative_humidity, omega)
+        crate::iso9613::iso9613_absorption(air, self, relative_humidity, omega)
     }
 }
 

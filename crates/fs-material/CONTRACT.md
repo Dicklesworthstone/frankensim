@@ -693,9 +693,16 @@ at 20 C it IS the pair the acoustic crates' `air()` conveniences
 hardcode (asserted in the fs-couple casebook).
 `GasState::stokes_kirchhoff_absorption(ω)` is the classical
 viscothermal `α ~ ω²` law from `(μ, κ, γ, c_p)`.
-`GasState::iso9613_absorption(h_r, ω)` is ISO 9613-1
+`GasState::iso9613_absorption(air, h_r, ω)` is ISO 9613-1
 (molecular + classical) with humidity as an explicit `[0, 1]`
-argument; do not add Stokes on top. Pr is DERIVED, never an
+argument; do not add Stokes on top. It needs `air`, an
+`iso9613::TerrestrialAir` admission bound to this state. The admission is
+made from the gas's explicit composition (`TerrestrialAir::admit`, the
+relaxation law's own policy) or with the legacy moist-air state
+(`TerrestrialAir::moist_air`, U.S. Standard Atmosphere 1976 dry air). Any
+other composition is refused by `Iso9613Refusal`, which names the species:
+a foreign species (He, SF6, ...), O2 or N2 off ISO's dry fraction, or CO2
+above 1e-3. Pr is DERIVED, never an
 input — the emergent ~0.71 for air is the built-in kinetic-theory
 falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 200..600 K, monotone-worsening) is asserted as the relation's honest

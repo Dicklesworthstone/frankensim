@@ -3643,13 +3643,25 @@ mod material_plate_tests {
                 histories[0], histories[2],
                 "composition changes the same physical path"
             );
+            let (dry_air, air) =
+                fs_material::iso9613::TerrestrialAir::moist_air(293.15, 80_000.0, 0.0).unwrap();
+            assert_eq!(dry_air, gases[0]);
             let explicit_air = RealizeOptions {
                 gas: Some(gases[0]),
                 observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
                     relative_humidity: 0.5,
+                    air,
                 }),
                 ..RealizeOptions::default()
             };
+            // ISO asked of the CO2-rich mixture with air's admission refuses.
+            assert!(matches!(
+                compiled.realize_with_options(&RealizeOptions {
+                    gas: Some(gases[2]),
+                    ..explicit_air
+                }),
+                Err(AcousticRealizeError::NonTerrestrialAir(_))
+            ));
             let molecular = compiled.realize_with_options(&explicit_air).unwrap();
             assert_ne!(
                 histories[0], molecular.pressure_pa,
@@ -3663,7 +3675,8 @@ mod material_plate_tests {
                 compiled
                     .realize_with_options(&RealizeOptions {
                         observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
-                            relative_humidity: f64::NAN
+                            relative_humidity: f64::NAN,
+                            air,
                         }),
                         ..explicit_air
                     })

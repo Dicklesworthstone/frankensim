@@ -54,6 +54,10 @@ use crate::gas::GasState;
 use crate::iso9613::iso9613_relaxation_frequencies_hz;
 use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
+/// The ISO terrestrial-air admission policy, shared with
+/// [`crate::iso9613::TerrestrialAir`].
+pub use crate::iso9613::{ISO9613_DRY_AIR_RELATIVE_TOLERANCE, ISO9613_MAX_DRY_CO2};
+
 /// Most relaxing reservoirs one data set may declare across all species.
 pub const MAX_RELAXATION_PROCESSES: usize = 32;
 /// Most vibrational modes one reservoir may lump together.
@@ -62,15 +66,7 @@ pub const MAX_MODES_PER_PROCESS: usize = 16;
 pub const MAX_COLLISION_PARTNERS: usize = 16;
 /// Most species one data set or medium may carry.
 pub const MAX_RELAXING_SPECIES: usize = 128;
-/// Admission policy of the ISO terrestrial-air variant: dry-basis O2 and N2
-/// mole fractions within this relative distance of ISO's 0.209 and 0.781.
-/// It identifies terrestrial air; it is not an accuracy statement.
-pub const ISO9613_DRY_AIR_RELATIVE_TOLERANCE: f64 = 0.01;
-/// Admission policy of the ISO terrestrial-air variant: dry-basis CO2 ceiling.
-pub const ISO9613_MAX_DRY_CO2: f64 = 1.0e-3;
 
-const ISO9613_DRY_O2: f64 = 0.209;
-const ISO9613_DRY_N2: f64 = 0.781;
 const COMPOSITION_SUM_TOLERANCE: f64 = 1.0e-9;
 
 fn parameters(what: impl Into<String>) -> MaterialError {
@@ -490,43 +486,11 @@ fn relaxation_time(
     }
 }
 
-/// Molar water percent of a terrestrial-air medium, or a refusal. Species are
-/// identified by their canonical ids N2, O2, Ar, CO2 and H2O.
+/// Molar water percent of a terrestrial-air medium, or the refusal naming the
+/// species, by the same admission as [`crate::iso9613::TerrestrialAir`].
 fn iso_terrestrial_air_water_percent(medium: &RelaxingMedium) -> Result<f64, MaterialError> {
-    let (mut n2, mut o2, mut co2, mut h2o) = (0.0, 0.0, 0.0, 0.0);
-    for (species, fraction) in &medium.components {
-        if *fraction == 0.0 {
-            continue;
-        }
-        match species.as_str() {
-            "N2" => n2 = *fraction,
-            "O2" => o2 = *fraction,
-            "CO2" => co2 = *fraction,
-            "H2O" => h2o = *fraction,
-            "Ar" => {}
-            other => {
-                return Err(parameters(format!(
-                    "the ISO 9613 rate law is valid for terrestrial air only; {other} is present"
-                )));
-            }
-        }
-    }
-    let dry = 1.0 - h2o;
-    let near = |value: f64, iso: f64| {
-        (value / dry / iso - 1.0).abs() <= ISO9613_DRY_AIR_RELATIVE_TOLERANCE
-    };
-    if !(dry > 0.0
-        && near(o2, ISO9613_DRY_O2)
-        && near(n2, ISO9613_DRY_N2)
-        && co2 / dry <= ISO9613_MAX_DRY_CO2)
-    {
-        return Err(parameters(format!(
-            "the ISO 9613 rate law is valid for terrestrial air only; dry-basis O2 {}, N2 {}, CO2 {} are not standard air",
-            o2 / dry,
-            n2 / dry,
-            co2 / dry
-        )));
-    }
+    let (_, h2o) = crate::iso9613::admit_composition(&medium.components)
+        .map_err(|refusal| parameters(format!("the ISO 9613 rate law: {refusal}")))?;
     Ok(100.0 * h2o)
 }
 

@@ -1,7 +1,8 @@
 //! Gas-related losses: cylinder motion and free-field observer absorption.
 //!
 //! A generic gas uses its own Stokes-Kirchhoff viscothermal loss. The
-//! air-specific ISO 9613 law requires an explicit choice; temperature and
+//! air-specific ISO 9613 law needs an explicit choice and a
+//! [`TerrestrialAir`] admission of the gas's own composition. Temperature and
 //! pressure alone do not establish that an arbitrary mixture is air.
 
 /// Refinable causal gas inertia and viscous memory for circular transverse motion.
@@ -9,7 +10,7 @@ pub mod cylinder;
 
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
-use fs_material::iso9613::iso9613_absorption;
+use fs_material::iso9613::{TerrestrialAir, iso9613_absorption};
 use fs_material::relaxation::RelaxationState;
 use fs_math::det;
 use crate::acoustic_realize::AcousticRealizeError;
@@ -22,12 +23,15 @@ pub enum GasAbsorptionModel {
     /// Molecular relaxation, bulk viscosity and chemical relaxation are not
     /// supplied by this model. No air-specific coefficients are substituted.
     StokesKirchhoff,
-    /// Explicit caller assertion of terrestrial air and ISO applicability.
-    /// The ISO term already includes classical loss; it must not be added to
-    /// Stokes-Kirchhoff. Out-of-window requests refuse rather than switch laws.
+    /// ISO 9613-1 for a gas admitted as terrestrial air. The ISO term already
+    /// includes classical loss; it must not be added to Stokes-Kirchhoff.
+    /// Out-of-window requests refuse rather than switch laws, and so does a
+    /// gas state the admission was not made for.
     Iso9613Air {
         /// Relative humidity as a fraction in [0, 1], not water mole fraction.
         relative_humidity: f64,
+        /// The admission of the gas's own composition, bound to its state.
+        air: TerrestrialAir,
     },
 }
 
@@ -81,8 +85,10 @@ pub fn oscillating_cylinder_air_resistance_per_length(
 /// Source/material receipts remain with the caller's evaluated gas model.
 ///
 /// # Errors
-/// Invalid samples, time/range, incoherent gas, unavailable ISO conditions, or
-/// unrepresentable absorption/FFT output refuse WITHOUT changing the history.
+/// Invalid samples, time/range, incoherent gas, a gas the ISO admission was
+/// not made for ([`AcousticRealizeError::NonTerrestrialAir`]), unavailable ISO
+/// conditions, or unrepresentable absorption/FFT output refuse WITHOUT
+/// changing the history.
 pub fn absorb_pressure_history_with_model(
     pressure_pa: &mut [f64],
     dt: f64,
@@ -91,56 +97,50 @@ pub fn absorb_pressure_history_with_model(
     model: GasAbsorptionModel,
 ) -> Result<(), AcousticRealizeError> {
     gas.validate_coherence().map_err(|_| invalid("observer absorption needs a coherent gas state"))?;
-    if let GasAbsorptionModel::Iso9613Air { relative_humidity } = model {
-        // Admit the declared air conditions even for an empty or zero-range
-        // history. A failed air law is not permission to use a different law.
-        iso9613_absorption(gas, relative_humidity, 1.0)
+    if let GasAbsorptionModel::Iso9613Air { relative_humidity, air } = model {
+        // Admit the declared air and its conditions even for an empty or
+        // zero-range history. A failed air law is not permission to use a
+        // different law.
+        air.check(gas).map_err(AcousticRealizeError::NonTerrestrialAir)?;
+        iso9613_absorption(&air, gas, relative_humidity, 1.0)
             .map_err(|_| invalid("explicit ISO 9613 air conditions are outside the model domain"))?;
     }
     transform_history(pressure_pa, dt, range_m, |omega| match model {
         GasAbsorptionModel::StokesKirchhoff => Ok(gas.stokes_kirchhoff_absorption(omega)),
-        GasAbsorptionModel::Iso9613Air { relative_humidity } => {
-            iso9613_absorption(gas, relative_humidity, omega)
+        GasAbsorptionModel::Iso9613Air { relative_humidity, air } => {
+            iso9613_absorption(&air, gas, relative_humidity, omega)
                 .map_err(|_| invalid("explicit ISO 9613 absorption could not be evaluated"))
         }
     })
 }
 
-/// Compatibility path for callers that explicitly supply terrestrial-air
-/// humidity. Retains the legacy ISO-to-classical fallback, including NaN
-/// humidity used by older generic-gas callers. New generic consumers should
-/// use [`absorb_pressure_history_with_model`] and [`GasAbsorptionModel`] so
-/// physical model selection is not encoded in an invalid numerical value.
-///
-/// `range_m <= 0` and histories shorter than four samples remain no-ops.
-/// Invalid/unrepresentable transformations leave the history unchanged.
-pub fn absorb_pressure_history(
-    pressure_pa: &mut [f64],
-    dt: f64,
-    range_m: f64,
-    gas: &GasState,
-    relative_humidity: f64,
-) {
-    if pressure_pa.len() < 4 || !(dt > 0.0 && range_m > 0.0) {
-        return;
-    }
-    let _ = transform_history(pressure_pa, dt, range_m, |omega| {
-        Ok(iso9613_absorption(gas, relative_humidity, omega)
-            .unwrap_or_else(|_| gas.stokes_kirchhoff_absorption(omega)))
-    });
+/// What an omitted-relaxation figure is. It is labelled, so that a convention
+/// is not read as a bound.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OmissionBound {
+    /// Standard air's worst ISO 9613-1 absorption at the band top, times the
+    /// range [dB]: the convention of the orchestrator ruling of 2026-10-23 on
+    /// pexfp.18, for a gas whose relaxation rates are unsourced. It is not a
+    /// bound for a gas that relaxes more strongly than air, such as a CO2-rich
+    /// mixture.
+    StandardAirConvention {
+        /// The figure [dB].
+        db: f64,
+    },
 }
 
-/// Molecular relaxation that an observer path did not apply, with an upper
-/// bound on its effect at the listener. A render may omit relaxation only with
-/// this receipt, never silently (orchestrator ruling of 2026-10-23 on pexfp.18).
+/// Molecular relaxation that an observer path did not apply, with a labelled
+/// figure for its effect at the listener. A render may omit relaxation only
+/// with this receipt, never silently (orchestrator ruling of 2026-10-23 on
+/// pexfp.18).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RelaxationOmission {
-    /// Listener distance the bound covers [m].
+    /// Listener distance the figure covers [m].
     pub range_m: f64,
     /// Highest frequency of the observed band [Hz].
     pub band_hz: f64,
-    /// Upper bound on the omitted attenuation over the band [dB].
-    pub bound_db: f64,
+    /// The omitted attenuation over the band, and what kind of figure it is.
+    pub bound: OmissionBound,
 }
 
 /// What an observer path applied for gas absorption.
@@ -148,24 +148,24 @@ pub struct RelaxationOmission {
 pub struct ObserverAbsorptionReceipt {
     /// The law applied to the pressure history.
     pub law: GasAbsorptionModel,
-    /// Molecular relaxation that the law leaves out, with its bound. `None`
-    /// when the law includes it (ISO 9613-1 for terrestrial air).
+    /// Molecular relaxation that the law leaves out, with its labelled figure.
+    /// `None` when the law includes it (ISO 9613-1 for terrestrial air).
     pub relaxation_omitted: Option<RelaxationOmission>,
 }
 
-/// Bound the attenuation that omitting molecular relaxation can leave out:
-/// the worst ISO 9613-1 absorption of standard air at `band_hz`, times
-/// `range_m`, in dB.
+/// The standard-air convention for omitted molecular relaxation: the worst
+/// ISO 9613-1 absorption of standard air at `band_hz`, times `range_m`, in dB
+/// ([`OmissionBound::StandardAirConvention`]).
 ///
 /// "Worst" is the maximum over ISO's tabulated domain (-20..+50 C, 10..100 %
 /// RH, 1 atm), sampled on a 1 K by 1 % grid. ISO absorption rises
-/// monotonically with frequency, so the band's top bounds the whole band.
-/// ISO's figure includes classical loss, so the bound also covers the
+/// monotonically with frequency, so the band's top covers the whole band.
+/// ISO's figure includes classical loss, so the figure also covers the
 /// viscothermal part.
 ///
-/// This bound is the ruling's convention for mixtures whose relaxation rates
-/// are unsourced. It is not a proof for such mixtures: a CO2-rich gas can
-/// relax more strongly than air.
+/// This is the ruling's convention for mixtures whose relaxation rates are
+/// unsourced. It is not a bound for such mixtures: a CO2-rich gas can relax
+/// more strongly than air.
 ///
 /// # Errors
 /// A negative or non-finite range, or a band that is not positive and finite.
@@ -183,11 +183,11 @@ pub fn relaxation_omission(range_m: f64, band_hz: f64) -> Result<RelaxationOmiss
             worst = worst.max(db_per_km);
         }
     }
-    let bound_db = worst * 1e-3 * range_m;
-    if !bound_db.is_finite() {
-        return Err(invalid("relaxation omission bound is unrepresentable"));
+    let db = worst * 1e-3 * range_m;
+    if !db.is_finite() {
+        return Err(invalid("relaxation omission figure is unrepresentable"));
     }
-    Ok(RelaxationOmission { range_m, band_hz, bound_db })
+    Ok(RelaxationOmission { range_m, band_hz, bound: OmissionBound::StandardAirConvention { db } })
 }
 
 /// Propagate a pressure history over `range_m` through a gas whose molecular
@@ -312,17 +312,24 @@ mod tests {
     use super::*;
     use fs_material::gas::{GasSpec, GasState};
 
+    /// Dry USSA air at `t` and 1 atm with its terrestrial-air admission, and
+    /// the ISO law at 50 % RH.
+    fn iso_air(t: f64) -> (GasState, GasAbsorptionModel) {
+        let (gas, air) = TerrestrialAir::moist_air(t, 101_325.0, 0.0).expect("air");
+        (gas, GasAbsorptionModel::Iso9613Air { relative_humidity: 0.50, air })
+    }
+
     #[test]
     fn farther_path_kills_high_frequency_more() {
-        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 288.15, 101_325.0).expect("air");
+        let (gas, iso) = iso_air(288.15);
         let n = 256;
         let dt = 1.0 / 8_000.0;
         let mut near: Vec<f64> = (0..n)
             .map(|i| (core::f64::consts::TAU * 2_000.0 * f64::from(i) * dt).sin())
             .collect();
         let mut far = near.clone();
-        absorb_pressure_history(&mut near, dt, 1.0, &gas, 0.50);
-        absorb_pressure_history(&mut far, dt, 200.0, &gas, 0.50);
+        absorb_pressure_history_with_model(&mut near, dt, 1.0, &gas, iso).unwrap();
+        absorb_pressure_history_with_model(&mut far, dt, 200.0, &gas, iso).unwrap();
         let en: f64 = near.iter().map(|x| x * x).sum();
         let ef: f64 = far.iter().map(|x| x * x).sum();
         assert!(ef < en * 0.98, "200 m must absorb more 2 kHz energy than 1 m");
@@ -330,10 +337,10 @@ mod tests {
 
     #[test]
     fn g0_history_beyond_legacy_fft_cap_is_transformed_in_full() {
-        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 288.15, 101_325.0).expect("air");
+        let (gas, iso) = iso_air(288.15);
         let mut pressure = vec![0.0; 8_193];
         pressure[8_192] = 1.0;
-        absorb_pressure_history(&mut pressure, 1.0 / 48_000.0, 200.0, &gas, 0.50);
+        absorb_pressure_history_with_model(&mut pressure, 1.0 / 48_000.0, 200.0, &gas, iso).unwrap();
         assert_eq!(pressure.len(), 8_193);
         assert!(pressure.iter().all(|sample| sample.is_finite()));
         assert!(pressure[8_192].abs() < 1.0);
@@ -359,13 +366,20 @@ mod tests {
         assert_ne!(outputs[0], outputs[1]);
     }
 
+    /// ISO applied to steam refuses with the named refusal, leaving the history
+    /// unchanged: an air admission does not transfer to another gas.
     #[test]
     fn explicit_air_refuses_instead_of_silently_using_another_law() {
         let gas = GasState::try_new(&GasSpec::water_vapor_nist(), 450.0, 100000.0).unwrap();
+        let (_, iso) = iso_air(293.15);
         let original = vec![1.0, -1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.0];
         let mut signal = original.clone();
-        assert!(absorb_pressure_history_with_model(&mut signal, 1.0 / 8000.0, 100.0,
-            &gas, GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5 }).is_err());
+        assert_eq!(
+            absorb_pressure_history_with_model(&mut signal, 1.0 / 8000.0, 100.0, &gas, iso),
+            Err(AcousticRealizeError::NonTerrestrialAir(
+                fs_material::iso9613::Iso9613Refusal::DifferentState
+            ))
+        );
         assert_eq!(signal, original);
         let mut forged = gas;
         forged.density *= 2.0;
@@ -374,18 +388,21 @@ mod tests {
         assert_eq!(signal, original);
     }
 
+    /// The admitted ISO path multiplies a single tone by exactly the
+    /// formula's `exp(-alpha r)`.
     #[test]
-    fn old_nan_selector_and_explicit_generic_share_the_same_operator() {
-        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 100000.0).unwrap();
-        for (humidity, model) in [
-            (f64::NAN, GasAbsorptionModel::StokesKirchhoff),
-            (0.5, GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5 }),
-        ] {
-            let mut legacy = vec![1.0, -1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.0];
-            let mut explicit = legacy.clone();
-            absorb_pressure_history(&mut legacy, 1.0 / 8000.0, 100.0, &gas, humidity);
-            absorb_pressure_history_with_model(&mut explicit, 1.0 / 8000.0, 100.0, &gas, model).unwrap();
-            assert_eq!(legacy, explicit);
+    fn admitted_iso_transfer_is_the_formula() {
+        let dt = 1.0 / 8000.0;
+        let omega = core::f64::consts::TAU * 1000.0;
+        let input: Vec<_> = (0..256).map(|i| (omega * f64::from(i) * dt).cos()).collect();
+        let (gas, iso) = iso_air(300.0);
+        let alpha = fs_material::iso9613::iso9613_absorption_neper_per_m(300.0, 101_325.0, 0.5, omega)
+            .unwrap();
+        let expected = det::exp(-alpha * 100.0);
+        let mut signal = input.clone();
+        absorb_pressure_history_with_model(&mut signal, dt, 100.0, &gas, iso).unwrap();
+        for (&actual, &before) in signal.iter().zip(&input) {
+            assert!((actual - expected * before).abs() < 1e-10);
         }
     }
 
@@ -458,28 +475,33 @@ mod tests {
         assert!(worst <= 1e-9, "per-bin transfer error {worst:e}");
     }
 
-    /// The omission bound is the worst standard-air ISO absorption at the band
-    /// top times the range: linear in range, rising with the band, never below
-    /// ISO at any grid state it covers, and refusing invalid inputs.
+    fn convention_db(omission: RelaxationOmission) -> f64 {
+        let OmissionBound::StandardAirConvention { db } = omission.bound;
+        db
+    }
+
+    /// The omission figure is labelled the standard-air convention: the worst
+    /// standard-air ISO absorption at the band top times the range, linear in
+    /// range, rising with the band, never below ISO at any grid state it
+    /// covers, and refusing invalid inputs.
     #[test]
-    fn relaxation_omission_bounds_standard_air_absorption() {
-        let one = relaxation_omission(1.0, 24_000.0).unwrap();
-        let two = relaxation_omission(2.0, 24_000.0).unwrap();
-        assert_eq!(two.bound_db.to_bits(), (2.0 * one.bound_db).to_bits());
-        let lower = relaxation_omission(1.0, 10_000.0).unwrap();
-        assert!(lower.bound_db < one.bound_db);
+    fn relaxation_omission_is_the_standard_air_convention() {
+        let one = convention_db(relaxation_omission(1.0, 24_000.0).unwrap());
+        let two = convention_db(relaxation_omission(2.0, 24_000.0).unwrap());
+        assert_eq!(two.to_bits(), (2.0 * one).to_bits());
+        let lower = convention_db(relaxation_omission(1.0, 10_000.0).unwrap());
+        assert!(lower < one);
         let omega = core::f64::consts::TAU * 24_000.0;
         for (t, rh) in [(253.15, 0.1), (293.15, 0.5), (303.15, 0.2), (323.15, 1.0)] {
             let iso = fs_material::iso9613::iso9613_absorption_db_per_km(t, 101_325.0, rh, omega).unwrap() * 1e-3;
-            assert!(one.bound_db >= iso, "bound {} below ISO {iso} at {t} K, RH {rh}", one.bound_db);
+            assert!(one >= iso, "convention {one} below ISO {iso} at {t} K, RH {rh}");
         }
-        assert_eq!(relaxation_omission(0.0, 24_000.0).unwrap().bound_db, 0.0);
+        assert_eq!(convention_db(relaxation_omission(0.0, 24_000.0).unwrap()), 0.0);
         for (r, f) in [(-1.0, 1_000.0), (f64::NAN, 1_000.0), (1.0, 0.0), (1.0, f64::INFINITY)] {
             assert!(relaxation_omission(r, f).is_err());
         }
         println!(
-            "{{\"bead\":\"M0.1-W2\",\"test\":\"relaxation_omission\",\"band_hz\":24000,\"bound_db_1m\":{},\"bound_db_2m\":{},\"bound_db_1m_10kHz\":{}}}",
-            one.bound_db, two.bound_db, lower.bound_db
+            "{{\"bead\":\"M0.1-W2\",\"test\":\"relaxation_omission\",\"label\":\"standard-air convention\",\"band_hz\":24000,\"db_1m\":{one},\"db_2m\":{two},\"db_1m_10kHz\":{lower}}}"
         );
     }
 

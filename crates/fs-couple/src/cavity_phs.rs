@@ -133,14 +133,18 @@ pub fn realize_plate_cavity(
 }
 
 /// Explicit terrestrial-air realization using the spec's relative humidity.
-/// This is a caller assertion of ISO applicability, not gas identity inferred
-/// from coefficients. Cavity mechanics still use the same supplied gas state.
+/// `air` admits the spec's gas state as terrestrial air from its own
+/// composition. Gas identity is never inferred from coefficients. Cavity
+/// mechanics still use the same supplied gas state.
 ///
 /// # Errors
-/// All [`realize_plate_cavity`] refusals plus out-of-domain ISO conditions.
-/// An unavailable air law is never silently replaced with a different law.
+/// All [`realize_plate_cavity`] refusals, an admission not made for
+/// `spec.gas` (`AcousticRealizeError::NonTerrestrialAir`), and out-of-domain
+/// ISO conditions. An unavailable air law is never silently replaced with a
+/// different law.
 pub fn realize_plate_cavity_in_air(
     spec: &PlateCavitySpec,
+    air: &fs_material::iso9613::TerrestrialAir,
     force_n: &[f64],
     sample_rate_hz: u32,
     listener_m: f64,
@@ -152,6 +156,7 @@ pub fn realize_plate_cavity_in_air(
         listener_m,
         GasAbsorptionModel::Iso9613Air {
             relative_humidity: spec.relative_humidity,
+            air: *air,
         },
     )
 }
@@ -511,13 +516,15 @@ mod tests {
                 if what == "relative humidity must be finite and inside [0, 1]"
         ));
 
-        spec.gas = GasState::try_new_moist_air(293.15, 101_325.0, 0.5).expect("admitted moist air");
+        let (moist, air) = fs_material::iso9613::TerrestrialAir::moist_air(293.15, 101_325.0, 0.5)
+            .expect("admitted moist air");
+        spec.gas = moist;
         spec.relative_humidity = 0.5;
         assert!(
             realize_plate_cavity(&spec, &[1.0], 8_000, 1.0).is_ok(),
             "the shared guard must preserve an admitted moist state"
         );
-        assert!(realize_plate_cavity_in_air(&spec, &[1.0], 8_000, 1.0).is_ok());
+        assert!(realize_plate_cavity_in_air(&spec, &air, &[1.0], 8_000, 1.0).is_ok());
     }
 
     #[test]
@@ -541,6 +548,15 @@ mod tests {
         assert!(steam.iter().all(|sample| sample.is_finite()));
         assert!(steam.iter().any(|sample| *sample != 0.0));
         assert_ne!(air, steam);
-        assert!(realize_plate_cavity_in_air(&spec, &input, 8000, 1.0).is_err());
+        // ISO asked of steam refuses: an air admission does not transfer.
+        let (_, admission) =
+            fs_material::iso9613::TerrestrialAir::moist_air(293.15, 101_325.0, 0.0)
+                .expect("air admission");
+        assert!(matches!(
+            realize_plate_cavity_in_air(&spec, &admission, &input, 8000, 1.0),
+            Err(CavityPhsError::Plate(
+                AcousticRealizeError::NonTerrestrialAir(_)
+            ))
+        ));
     }
 }

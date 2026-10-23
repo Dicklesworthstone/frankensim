@@ -72,6 +72,9 @@ pub enum AcousticRealizeError {
     },
     /// Gas-state derivation failed.
     Ambient(String),
+    /// ISO 9613-1 was asked of a gas not admitted as terrestrial air; the
+    /// refusal names the species.
+    NonTerrestrialAir(fs_material::iso9613::Iso9613Refusal),
     /// Modal time-stepper refusal.
     Modal(ModalAcousticTimeError),
     /// Plate mesh, section, or eigenproblem refusal, retaining the owner diagnostic.
@@ -124,6 +127,7 @@ impl core::fmt::Display for AcousticRealizeError {
                 write!(f, "FS-COUPLE-ASSEMBLY: {what}")
             }
             Self::Ambient(what) => write!(f, "FS-COUPLE-ASSEMBLY-GAS: {what}"),
+            Self::NonTerrestrialAir(refusal) => write!(f, "FS-COUPLE-ASSEMBLY-ISO9613: {refusal}"),
             Self::Modal(e) => write!(f, "{e}"),
             Self::Plate(e) => write!(f, "{e}"),
             Self::PlateAssignment {
@@ -1265,16 +1269,28 @@ fn finish_observer(
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::air_path::{GasAbsorptionModel, ObserverAbsorptionReceipt, relaxation_omission};
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
-    // The law actually applied. The scenario-air compatibility law is ISO 9613
-    // when ISO admits the state, and otherwise its documented Stokes-Kirchhoff
-    // fallback. Stokes-Kirchhoff leaves molecular relaxation out, which is never
-    // silent: the receipt carries a bound over the observed band.
+    // The law actually applied. Only the scenario-air path arrives without one
+    // (supplied gases and explicitly chosen laws were admitted before
+    // stepping). Its legacy moist air is terrestrial air by construction, so it
+    // makes its own admission, bound to the state. The law is ISO 9613 when ISO
+    // admits the conditions, and otherwise the documented Stokes-Kirchhoff
+    // fallback. Stokes-Kirchhoff leaves molecular relaxation out, which is
+    // never silent: the receipt carries the labelled figure over the band.
     let law = absorption.unwrap_or_else(|| {
-        let relative_humidity = assembly.ambient.relative_humidity;
-        if fs_material::iso9613::iso9613_absorption(gas, relative_humidity, 1.0).is_ok() {
-            GasAbsorptionModel::Iso9613Air { relative_humidity }
-        } else {
-            GasAbsorptionModel::StokesKirchhoff
+        let ambient = assembly.ambient;
+        let relative_humidity = ambient.relative_humidity;
+        match fs_material::iso9613::TerrestrialAir::moist_air(
+            ambient.temperature_k,
+            ambient.pressure_pa,
+            relative_humidity,
+        ) {
+            Ok((_, air))
+                if fs_material::iso9613::iso9613_absorption(&air, gas, relative_humidity, 1.0)
+                    .is_ok() =>
+            {
+                GasAbsorptionModel::Iso9613Air { relative_humidity, air }
+            }
+            _ => GasAbsorptionModel::StokesKirchhoff,
         }
     });
     let relaxation_omitted = match law {
@@ -1284,26 +1300,13 @@ fn finish_observer(
             0.5 * f64::from(assembly.sample_rate_hz),
         )?),
     };
-    if let Some(model) = absorption {
-        crate::air_path::absorb_pressure_history_with_model(
-            &mut pressure_pa,
-            dt,
-            assembly.listener.distance_m,
-            gas,
-            model,
-        )?;
-    } else {
-        // Only the original scenario-air path reaches this compatibility law.
-        // Supplied gases and explicitly chosen laws were admitted once before
-        // stepping; they never infer air identity from numerical coefficients.
-        crate::air_path::absorb_pressure_history(
-            &mut pressure_pa,
-            dt,
-            assembly.listener.distance_m,
-            gas,
-            assembly.ambient.relative_humidity,
-        );
-    }
+    crate::air_path::absorb_pressure_history_with_model(
+        &mut pressure_pa,
+        dt,
+        assembly.listener.distance_m,
+        gas,
+        law,
+    )?;
     Ok(RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
@@ -6141,7 +6144,18 @@ mod arbitrary_gas_realization_tests {
         let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
         let model = GasAbsorptionModel::Iso9613Air {
             relative_humidity: 0.5,
+            air: admitted_air(gas),
         };
+        // The legacy atmosphere's admission does not transfer to the external
+        // state, even though both are air: ISO needs this state's own.
+        let (_, legacy_air) = legacy_admission(&description);
+        assert_eq!(
+            finish_observer(&description, &gas, history.clone(),
+                Some(GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air: legacy_air })),
+            Err(AcousticRealizeError::NonTerrestrialAir(
+                fs_material::iso9613::Iso9613Refusal::DifferentState
+            ))
+        );
         let mut expected = history.clone();
         absorb_pressure_history_with_model(
             &mut expected,
@@ -6167,20 +6181,27 @@ mod arbitrary_gas_realization_tests {
                 &gas,
                 history.clone(),
                 Some(GasAbsorptionModel::Iso9613Air {
-                    relative_humidity: f64::NAN
+                    relative_humidity: f64::NAN,
+                    air: admitted_air(gas),
                 })
             )
             .is_err()
         );
-        let legacy = gas_state(description.ambient).unwrap();
+        let (legacy, legacy_air) = legacy_admission(&description);
+        assert_eq!(legacy, gas_state(description.ambient).unwrap());
+        let scenario_law = GasAbsorptionModel::Iso9613Air {
+            relative_humidity: description.ambient.relative_humidity,
+            air: legacy_air,
+        };
         let mut original = history.clone();
-        crate::air_path::absorb_pressure_history(
+        absorb_pressure_history_with_model(
             &mut original,
             1.0 / 16000.0,
             description.listener.distance_m,
             &legacy,
-            description.ambient.relative_humidity,
-        );
+            scenario_law,
+        )
+        .unwrap();
         assert_eq!(
             finish_observer(&description, &legacy, history, None)
                 .unwrap()
@@ -6188,34 +6209,60 @@ mod arbitrary_gas_realization_tests {
             original
         );
         assert_eq!(
-            realize_assembly_with_gas_and_absorption(
-                &description,
-                &legacy,
-                GasAbsorptionModel::Iso9613Air {
-                    relative_humidity: description.ambient.relative_humidity
-                }
-            )
-            .unwrap()
-            .pressure_pa,
+            realize_assembly_with_gas_and_absorption(&description, &legacy, scenario_law)
+                .unwrap()
+                .pressure_pa,
             realize_assembly(&description).unwrap().pressure_pa
         );
     }
 
+    /// The scenario's legacy moist air with its own terrestrial-air admission.
+    fn legacy_admission(description: &AcousticAssembly) -> (GasState, fs_material::iso9613::TerrestrialAir) {
+        let ambient = description.ambient;
+        fs_material::iso9613::TerrestrialAir::moist_air(
+            ambient.temperature_k,
+            ambient.pressure_pa,
+            ambient.relative_humidity,
+        )
+        .unwrap()
+    }
+
+    /// Terrestrial-air admission of `gas` from an explicit U.S. Standard
+    /// Atmosphere 1976 dry composition plus the state's own water.
+    fn admitted_air(gas: GasState) -> fs_material::iso9613::TerrestrialAir {
+        let dry_parts = [("N2", 0.780_84), ("O2", 0.209_476), ("Ar", 0.009_34), ("CO2", 0.000_314)];
+        let total: f64 = dry_parts.iter().map(|(_, x)| x).sum();
+        let water = gas.water_mole_fraction;
+        let mut components: Vec<_> = dry_parts
+            .iter()
+            .map(|(name, x)| (fs_thermochem::SpeciesId::new(*name).unwrap(), x / total * (1.0 - water)))
+            .collect();
+        if water > 0.0 {
+            components.push((fs_thermochem::SpeciesId::new("H2O").unwrap(), water));
+        }
+        let medium = fs_material::relaxation::RelaxingMedium::new(gas, components).unwrap();
+        fs_material::iso9613::TerrestrialAir::admit(&medium).unwrap()
+    }
+
     /// Every realized observer names its absorption law. Scenario air carries
     /// ISO 9613 with nothing omitted. A supplied gas on Stokes-Kirchhoff, by
-    /// default or by choice, carries the molecular-relaxation omission with its
-    /// bound at the listener distance over the band up to Nyquist. Numerics are
-    /// unchanged.
+    /// default or by choice, carries the molecular-relaxation omission. Its
+    /// figure at the listener distance over the band up to Nyquist is labelled
+    /// the standard-air convention, not a bound. ISO asked of the helium-like
+    /// gas refuses. Numerics are unchanged.
     #[test]
-    fn observer_absorption_receipt_names_the_law_and_bounds_any_omitted_relaxation() {
-        use crate::air_path::{GasAbsorptionModel, relaxation_omission};
+    fn observer_absorption_receipt_names_the_law_and_labels_any_omitted_relaxation() {
+        use crate::air_path::{GasAbsorptionModel, OmissionBound, relaxation_omission};
         let description = fixture();
-        let legacy = gas_state(description.ambient).unwrap();
+        let (legacy, legacy_air) = legacy_admission(&description);
         let history: Vec<_> = (0..128).map(|i| det::sin(i as f64 * 0.29)).collect();
         let scenario = finish_observer(&description, &legacy, history.clone(), None).unwrap();
         assert_eq!(
             scenario.observer_absorption.law,
-            GasAbsorptionModel::Iso9613Air { relative_humidity: description.ambient.relative_humidity }
+            GasAbsorptionModel::Iso9613Air {
+                relative_humidity: description.ambient.relative_humidity,
+                air: legacy_air,
+            }
         );
         assert_eq!(scenario.observer_absorption.relaxation_omitted, None);
         let supplied = helium_like();
@@ -6225,16 +6272,22 @@ mod arbitrary_gas_realization_tests {
             0.5 * f64::from(description.sample_rate_hz)).unwrap();
         assert_eq!(classical.observer_absorption.law, GasAbsorptionModel::StokesKirchhoff);
         assert_eq!(classical.observer_absorption.relaxation_omitted, Some(expected));
-        assert!(expected.bound_db > 0.0);
+        let OmissionBound::StandardAirConvention { db } = expected.bound;
+        assert!(db > 0.0);
         let realized = realize_assembly_with_gas(&description, &supplied).unwrap();
         assert_eq!(realized.observer_absorption.relaxation_omitted, Some(expected));
         let mut reference = history.clone();
         crate::air_path::absorb_pressure_history_with_model(&mut reference, 1.0 / 16000.0,
             description.listener.distance_m, &supplied, GasAbsorptionModel::StokesKirchhoff).unwrap();
         assert_eq!(classical.pressure_pa, reference);
+        assert!(matches!(
+            realize_assembly_with_gas_and_absorption(&description, &supplied,
+                GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air: legacy_air }),
+            Err(AcousticRealizeError::NonTerrestrialAir(_))
+        ));
         println!(
-            "{{\"bead\":\"M0.1-W2\",\"test\":\"observer_absorption_receipt\",\"range_m\":{},\"band_hz\":{},\"omitted_relaxation_bound_db\":{}}}",
-            expected.range_m, expected.band_hz, expected.bound_db
+            "{{\"bead\":\"M0.1-W2\",\"test\":\"observer_absorption_receipt\",\"range_m\":{},\"band_hz\":{},\"omitted_relaxation_standard_air_convention_db\":{db}}}",
+            expected.range_m, expected.band_hz
         );
     }
 
@@ -6306,6 +6359,7 @@ mod arbitrary_gas_realization_tests {
             &RealizeOptions {
                 observer_absorption: Some(GasAbsorptionModel::Iso9613Air {
                     relative_humidity: 0.0,
+                    air: legacy_admission(&description).1,
                 }),
                 ..options
             },

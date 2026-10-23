@@ -167,6 +167,9 @@ pub enum DuctError {
     EmptyDuct,
     /// Singular local algebra or a declared composition condition bound exceeded.
     Singular,
+    /// ISO 9613-1 was asked of a gas not admitted as terrestrial air; the
+    /// refusal names the species.
+    NonTerrestrialAir(fs_material::iso9613::Iso9613Refusal),
 }
 
 impl core::fmt::Display for DuctError {
@@ -202,6 +205,7 @@ impl core::fmt::Display for DuctError {
             ),
             DuctError::EmptyDuct => write!(f, "FS-DUCT-EMPTY: a duct needs at least one segment"),
             DuctError::Singular => write!(f, "FS-DUCT-SINGULAR: basis solve refused"),
+            DuctError::NonTerrestrialAir(refusal) => write!(f, "FS-DUCT-NON-TERRESTRIAL-AIR: {refusal}"),
         }
     }
 }
@@ -1106,24 +1110,28 @@ pub fn compact_radiation_impedance(
 /// spreading times ISO 9613-1 molecular absorption.
 ///
 /// Humidity is explicit. This does **not** add Stokes–Kirchhoff on
-/// top of ISO (ISO already includes a classical term).
+/// top of ISO (ISO already includes a classical term). `air` is the
+/// terrestrial-air admission of `state`'s own composition.
 ///
 /// # Errors
-/// ISO window refusals or a non-positive range.
+/// [`DuctError::NonTerrestrialAir`] when `air` was not admitted for `state`,
+/// ISO window refusals, or a non-positive range.
 pub fn absorbed_spherical_pressure(
     mouth_pressure: f64,
     state: &GasState,
+    air: &fs_material::iso9613::TerrestrialAir,
     omega: f64,
     range_m: f64,
     relative_humidity: f64,
 ) -> Result<f64, DuctError> {
     validate_gas(state)?;
+    air.check(state).map_err(DuctError::NonTerrestrialAir)?;
     if !(range_m > 0.0 && range_m.is_finite() && mouth_pressure.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "observer range must be positive and pressures finite",
         });
     }
-    let alpha = fs_material::iso9613::iso9613_absorption(state, relative_humidity, omega).map_err(
+    let alpha = fs_material::iso9613::iso9613_absorption(air, state, relative_humidity, omega).map_err(
         |err| DuctError::BadParameter {
             what: match err {
                 fs_material::MaterialError::Parameters { .. } => {
@@ -3522,12 +3530,19 @@ mod radiation_and_free_field {
 
     #[test]
     fn iso_absorption_on_a_spherical_observer_kills_high_frequency() {
-        let state =
-            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
-        let lo = absorbed_spherical_pressure(1.0, &state, 2.0e3, 200.0, 0.50).expect("lo");
-        let hi = absorbed_spherical_pressure(1.0, &state, 2.0e4, 200.0, 0.50).expect("hi");
+        use fs_material::iso9613::{Iso9613Refusal, TerrestrialAir};
+        let (state, air) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.0).expect("air");
+        let lo = absorbed_spherical_pressure(1.0, &state, &air, 2.0e3, 200.0, 0.50).expect("lo");
+        let hi = absorbed_spherical_pressure(1.0, &state, &air, 2.0e4, 200.0, 0.50).expect("hi");
         assert!(hi < lo, "high frequency {hi} must fall below low {lo}");
-        assert!(absorbed_spherical_pressure(1.0, &state, 2.0e3, 0.0, 0.50).is_err());
+        assert!(absorbed_spherical_pressure(1.0, &state, &air, 2.0e3, 0.0, 0.50).is_err());
+        // An admission does not transfer: another gas state refuses ISO.
+        let other =
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 2.0 * 101_325.0).expect("2 atm");
+        assert_eq!(
+            absorbed_spherical_pressure(1.0, &other, &air, 2.0e3, 200.0, 0.50),
+            Err(DuctError::NonTerrestrialAir(Iso9613Refusal::DifferentState))
+        );
     }
 }
 

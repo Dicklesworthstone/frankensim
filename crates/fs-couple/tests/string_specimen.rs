@@ -4537,14 +4537,16 @@ fn g1_prony_pressure_converges_to_independent_hereditary_dynamics() {
             reference.push(weight * rhs(x)[1]);
         }
         // The shared propagation operator is outside this constitutive check;
-        // apply it to both histories, after independent mechanical integration.
-        fs_couple::air_path::absorb_pressure_history(
+        // apply the law the render reports to both histories, after
+        // independent mechanical integration.
+        fs_couple::air_path::absorb_pressure_history_with_model(
             &mut reference,
             1.0 / f64::from(rate),
             scene.listener.distance_m,
             &gas,
-            scene.ambient.relative_humidity,
-        );
+            output.observer_absorption.law,
+        )
+        .unwrap();
         let (mut error, mut norm) = (0.0, 0.0);
         for (pressure, expected) in output.pressure_pa.iter().zip(reference) {
             error += (pressure - expected).powi(2);

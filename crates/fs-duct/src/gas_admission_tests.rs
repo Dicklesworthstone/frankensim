@@ -98,7 +98,9 @@ fn stale_thermodynamic_snapshots_refuse_across_frequency_time_and_radiation() {
             compact_radiation_impedance(Termination::UnflangedOpen, &gas, 0.01, omega).is_err()
         );
         assert!(flanged_pipe_impedance(&gas, 0.01, omega, 1).is_err());
-        assert!(absorbed_spherical_pressure(1.0, &gas, omega, 1.0, 0.0).is_err());
+        let (_, witness) =
+            fs_material::iso9613::TerrestrialAir::moist_air(293.15, 101_325.0, 0.0).unwrap();
+        assert!(absorbed_spherical_pressure(1.0, &gas, &witness, omega, 1.0, 0.0).is_err());
     }
 }
 

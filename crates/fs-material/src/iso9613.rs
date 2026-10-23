@@ -6,9 +6,10 @@
 //! includes a classical viscothermal piece. Adding the two double-counts.
 //!
 //! Humidity is an explicit argument in `[0, 1]`, never a hidden
-//! scenario field. The standard is for terrestrial air; callers that
-//! have a [`GasState`] may pass its `(T, p)` but the relaxation
-//! frequencies stay the ISO-9613 air fit.
+//! scenario field. The standard is for terrestrial air. A [`GasState`] is
+//! evaluated only with a [`TerrestrialAir`] admission of its explicit
+//! composition, so heliox or a CO2-rich mixture refuses (naming the species)
+//! instead of receiving air's absorption.
 //!
 //! Formula (ISO 9613-1:1993 / Bass–Sutherland–Zuckerwar):
 //!
@@ -26,8 +27,11 @@
 
 use fs_math::det;
 
+use fs_thermochem::SpeciesId;
+
 use crate::MaterialError;
 use crate::gas::GasState;
+use crate::relaxation::RelaxingMedium;
 
 /// ISO reference temperature [K].
 pub const T0_K: f64 = 293.15;
@@ -181,17 +185,269 @@ fn finite_absorption(value: f64, unit: &str) -> Result<f64, MaterialError> {
     }
 }
 
-/// Same as [`iso9613_absorption_neper_per_m`] but taking `(T, p)` from
-/// a [`GasState`]. The state's transport coefficients are **not**
-/// used — ISO's classical term is the air fit, not Stokes–Kirchhoff.
+/// Admission policy for terrestrial air: dry-basis O2 and N2 mole fractions
+/// within this relative distance of ISO's 0.209 and 0.781. It identifies
+/// terrestrial air; it is not an accuracy statement.
+pub const ISO9613_DRY_AIR_RELATIVE_TOLERANCE: f64 = 0.01;
+/// Admission policy for terrestrial air: dry-basis CO2 ceiling.
+pub const ISO9613_MAX_DRY_CO2: f64 = 1.0e-3;
+/// ISO 9613-1's dry-air oxygen mole fraction.
+pub const ISO9613_DRY_O2: f64 = 0.209;
+/// ISO 9613-1's dry-air nitrogen mole fraction.
+pub const ISO9613_DRY_N2: f64 = 0.781;
+
+// U.S. Standard Atmosphere 1976, Table 3: the dry composition behind
+// `GasSpec::dry_air_ussa1976`, and so behind every legacy (T, p, RH) record.
+const USSA1976_DRY_O2: f64 = 0.209_476;
+const USSA1976_DRY_N2: f64 = 0.780_84;
+const USSA1976_DRY_CO2: f64 = 0.000_314;
+
+/// Why ISO 9613-1 refused a gas. ISO 9613-1 is a law for terrestrial air.
+/// It is applied only to a gas whose explicit composition was admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Iso9613Refusal {
+    /// A species the standard does not model is present.
+    ForeignSpecies {
+        /// The species.
+        species: SpeciesId,
+        /// Its mole fraction.
+        mole_fraction: f64,
+    },
+    /// O2 or N2 is off ISO's dry-basis fraction by more than the tolerance.
+    OffStandard {
+        /// `"O2"` or `"N2"`.
+        species: &'static str,
+        /// The gas's dry-basis mole fraction.
+        dry_mole_fraction: f64,
+        /// ISO's dry-basis mole fraction.
+        iso_dry_mole_fraction: f64,
+        /// [`ISO9613_DRY_AIR_RELATIVE_TOLERANCE`].
+        relative_tolerance: f64,
+    },
+    /// CO2 above the admitted dry-basis ceiling.
+    AboveCeiling {
+        /// `"CO2"`.
+        species: &'static str,
+        /// The gas's dry-basis mole fraction.
+        dry_mole_fraction: f64,
+        /// [`ISO9613_MAX_DRY_CO2`].
+        ceiling: f64,
+    },
+    /// The gas is all water vapour.
+    NoDryAir,
+    /// The admission was made for a different gas state.
+    DifferentState,
+}
+
+impl Iso9613Refusal {
+    /// The species the refusal names, if any.
+    #[must_use]
+    pub fn species(&self) -> Option<&str> {
+        match self {
+            Self::ForeignSpecies { species, .. } => Some(species.as_str()),
+            Self::OffStandard { species, .. } | Self::AboveCeiling { species, .. } => {
+                Some(*species)
+            }
+            Self::NoDryAir | Self::DifferentState => None,
+        }
+    }
+}
+
+impl core::fmt::Display for Iso9613Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ForeignSpecies {
+                species,
+                mole_fraction,
+            } => write!(
+                f,
+                "ISO 9613-1 is for terrestrial air only; {species} is present (mole fraction {mole_fraction})"
+            ),
+            Self::OffStandard {
+                species,
+                dry_mole_fraction,
+                iso_dry_mole_fraction,
+                relative_tolerance,
+            } => write!(
+                f,
+                "ISO 9613-1 is for terrestrial air only; dry-basis {species} is {dry_mole_fraction}, not ISO's {iso_dry_mole_fraction} within {relative_tolerance} relative"
+            ),
+            Self::AboveCeiling {
+                species,
+                dry_mole_fraction,
+                ceiling,
+            } => write!(
+                f,
+                "ISO 9613-1 is for terrestrial air only; dry-basis {species} {dry_mole_fraction} exceeds the {ceiling} ceiling"
+            ),
+            Self::NoDryAir => {
+                f.write_str("ISO 9613-1 is for terrestrial air only; the gas has no dry air")
+            }
+            Self::DifferentState => f.write_str(
+                "ISO 9613-1 terrestrial-air admission was made for a different gas state",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Iso9613Refusal {}
+
+/// The dry-basis air check shared by [`TerrestrialAir`] and the relaxation
+/// law's ISO rate variant. Returns the dry-basis (O2, N2, CO2) fractions.
+pub(crate) fn admit_dry_air(
+    o2: f64,
+    n2: f64,
+    co2: f64,
+    h2o: f64,
+) -> Result<[f64; 3], Iso9613Refusal> {
+    let dry = 1.0 - h2o;
+    if !(dry > 0.0) {
+        return Err(Iso9613Refusal::NoDryAir);
+    }
+    let fractions = [o2 / dry, n2 / dry, co2 / dry];
+    for (species, value, iso) in [
+        ("O2", fractions[0], ISO9613_DRY_O2),
+        ("N2", fractions[1], ISO9613_DRY_N2),
+    ] {
+        if !((value / iso - 1.0).abs() <= ISO9613_DRY_AIR_RELATIVE_TOLERANCE) {
+            return Err(Iso9613Refusal::OffStandard {
+                species,
+                dry_mole_fraction: value,
+                iso_dry_mole_fraction: iso,
+                relative_tolerance: ISO9613_DRY_AIR_RELATIVE_TOLERANCE,
+            });
+        }
+    }
+    if !(fractions[2] <= ISO9613_MAX_DRY_CO2) {
+        return Err(Iso9613Refusal::AboveCeiling {
+            species: "CO2",
+            dry_mole_fraction: fractions[2],
+            ceiling: ISO9613_MAX_DRY_CO2,
+        });
+    }
+    Ok(fractions)
+}
+
+/// Admit an explicit composition as terrestrial air. Species are identified
+/// by their canonical ids N2, O2, Ar, CO2 and H2O; zero fractions are ignored.
+/// Returns the dry-basis (O2, N2, CO2) fractions and the water mole fraction.
+pub(crate) fn admit_composition(
+    components: &[(SpeciesId, f64)],
+) -> Result<([f64; 3], f64), Iso9613Refusal> {
+    let (mut n2, mut o2, mut co2, mut h2o) = (0.0, 0.0, 0.0, 0.0);
+    for (species, fraction) in components {
+        if *fraction == 0.0 {
+            continue;
+        }
+        match species.as_str() {
+            "N2" => n2 = *fraction,
+            "O2" => o2 = *fraction,
+            "CO2" => co2 = *fraction,
+            "H2O" => h2o = *fraction,
+            "Ar" => {}
+            _ => {
+                return Err(Iso9613Refusal::ForeignSpecies {
+                    species: species.clone(),
+                    mole_fraction: *fraction,
+                });
+            }
+        }
+    }
+    Ok((admit_dry_air(o2, n2, co2, h2o)?, h2o))
+}
+
+/// A gas admitted as terrestrial air, the only gas ISO 9613-1 describes.
+///
+/// The witness can be made in two ways:
+/// - from the gas's own explicit composition ([`Self::admit`]);
+/// - together with the legacy moist-air state it describes ([`Self::moist_air`]).
+///
+/// It is bound to that exact gas state, so it does not transfer to another
+/// gas. It admits the dry composition only. Humidity stays ISO's own
+/// relative-humidity coordinate, declared by the caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrestrialAir {
+    state: GasState,
+    dry: [f64; 3],
+}
+
+impl TerrestrialAir {
+    /// Admit a gas by its explicit composition.
+    ///
+    /// # Errors
+    /// The [`Iso9613Refusal`] naming the first species that is not
+    /// terrestrial air: a foreign species (in species-id order), then O2, N2
+    /// and CO2.
+    pub fn admit(medium: &RelaxingMedium) -> Result<Self, Iso9613Refusal> {
+        let (dry, _) = admit_composition(medium.components())?;
+        Ok(Self {
+            state: *medium.state(),
+            dry,
+        })
+    }
+
+    /// The legacy moist-air state at `(T, p, RH)`
+    /// ([`GasState::try_new_moist_air`]), with its witness. Its dry gas is
+    /// U.S. Standard Atmosphere 1976 air.
+    ///
+    /// # Errors
+    /// The state's own refusals.
+    pub fn moist_air(
+        temperature_k: f64,
+        pressure_pa: f64,
+        relative_humidity: f64,
+    ) -> Result<(GasState, Self), MaterialError> {
+        let state = GasState::try_new_moist_air(temperature_k, pressure_pa, relative_humidity)?;
+        let dry = admit_dry_air(USSA1976_DRY_O2, USSA1976_DRY_N2, USSA1976_DRY_CO2, 0.0).map_err(
+            |refusal| MaterialError::State {
+                what: refusal.to_string(),
+            },
+        )?;
+        Ok((state, Self { state, dry }))
+    }
+
+    /// Whether this admission was made for exactly `state` (every coefficient).
+    #[must_use]
+    pub fn admits(&self, state: &GasState) -> bool {
+        self.state == *state
+    }
+
+    /// [`Self::admits`] as a refusal.
+    ///
+    /// # Errors
+    /// [`Iso9613Refusal::DifferentState`].
+    pub fn check(&self, state: &GasState) -> Result<(), Iso9613Refusal> {
+        if self.admits(state) {
+            Ok(())
+        } else {
+            Err(Iso9613Refusal::DifferentState)
+        }
+    }
+
+    /// Dry-basis (O2, N2, CO2) mole fractions of the admitted gas.
+    #[must_use]
+    pub const fn dry_mole_fractions(&self) -> [f64; 3] {
+        self.dry
+    }
+}
+
+/// ISO 9613-1 absorption [Np/m] of an admitted terrestrial-air `state`, at an
+/// explicit relative humidity. The state's transport coefficients are **not**
+/// used: ISO's classical term is the air fit, not Stokes–Kirchhoff.
 ///
 /// # Errors
-/// Forwards the ISO window refusals.
+/// [`MaterialError::Parameters`] when `air` was not admitted for `state`, and
+/// the ISO window refusals.
 pub fn iso9613_absorption(
+    air: &TerrestrialAir,
     state: &GasState,
     relative_humidity: f64,
     omega: f64,
 ) -> Result<f64, MaterialError> {
+    air.check(state)
+        .map_err(|refusal| MaterialError::Parameters {
+            what: refusal.to_string(),
+        })?;
     iso9613_absorption_neper_per_m(state.temperature, state.pressure, relative_humidity, omega)
 }
 
@@ -270,9 +526,13 @@ mod tests {
 
     #[test]
     fn iso_includes_classical_do_not_add_stokes() {
-        let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
+        let (air, witness) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.0).expect("air");
+        assert_eq!(
+            air,
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("dry air")
+        );
         let omega = 2.0 * core::f64::consts::PI * 1_000.0;
-        let iso = iso9613_absorption(&air, 0.0, omega).expect("iso");
+        let iso = iso9613_absorption(&witness, &air, 0.0, omega).expect("iso");
         let stokes = air.stokes_kirchhoff_absorption(omega);
         // ISO's classical floor plus O₂/N₂ relaxation sits above
         // Stokes–Kirchhoff. They are alternate packages, not addends.
@@ -330,6 +590,70 @@ mod tests {
         let tiny = iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.5, f64::from_bits(1))
             .expect("representable underflow");
         assert_eq!(tiny.to_bits(), 0.0_f64.to_bits());
+    }
+
+    fn medium(state: GasState, parts: &[(&str, f64)]) -> RelaxingMedium {
+        RelaxingMedium::new(
+            state,
+            parts
+                .iter()
+                .map(|(name, x)| (SpeciesId::new(*name).expect("id"), *x))
+                .collect(),
+        )
+        .expect("medium")
+    }
+
+    /// Terrestrial air is admitted; heliox, oxygen-poor air and CO2-rich air
+    /// refuse, each naming its species. A witness does not transfer to a
+    /// different gas state, and the legacy moist-air witness is bitwise the
+    /// formula it always used.
+    #[test]
+    fn iso_refuses_non_standard_composition_naming_the_species() {
+        let (humid, legacy) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).expect("air");
+        let omega = 2.0 * core::f64::consts::PI * 4_000.0;
+        assert_eq!(
+            iso9613_absorption(&legacy, &humid, 0.5, omega)
+                .expect("legacy")
+                .to_bits(),
+            iso9613_absorption_neper_per_m(293.15, 101_325.0, 0.5, omega)
+                .expect("formula")
+                .to_bits()
+        );
+        let water = humid.water_mole_fraction;
+        let dry = 1.0 - water;
+        let air = medium(
+            humid,
+            &[
+                ("N2", 0.7808 * dry),
+                ("O2", 0.2095 * dry),
+                ("Ar", 0.0093 * dry),
+                ("CO2", 0.0004 * dry),
+                ("H2O", water),
+            ],
+        );
+        let admitted = TerrestrialAir::admit(&air).expect("terrestrial air");
+        assert!(admitted.admits(&humid));
+        let cases: [(&[(&str, f64)], &str); 4] = [
+            (&[("He", 0.8), ("O2", 0.2)], "He"),
+            (&[("N2", 0.85), ("O2", 0.15)], "O2"),
+            (&[("N2", 0.7908), ("O2", 0.2092)], "N2"),
+            (&[("N2", 0.786), ("O2", 0.209), ("CO2", 0.005)], "CO2"),
+        ];
+        for (parts, named) in cases {
+            let refusal =
+                TerrestrialAir::admit(&medium(humid, parts)).expect_err("not terrestrial air");
+            assert_eq!(refusal.species(), Some(named), "{refusal}");
+            assert!(refusal.to_string().contains(named), "{refusal}");
+        }
+        let (dry_air, _) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.0).expect("dry");
+        assert_eq!(
+            admitted.check(&dry_air),
+            Err(Iso9613Refusal::DifferentState)
+        );
+        assert!(matches!(
+            iso9613_absorption(&admitted, &dry_air, 0.5, omega),
+            Err(MaterialError::Parameters { .. })
+        ));
     }
 
     #[test]

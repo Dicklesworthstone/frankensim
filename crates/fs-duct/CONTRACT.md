@@ -249,6 +249,9 @@ fit and cannot call this L3 owner; no default consumer is migrated here.
 - `absorbed_spherical_pressure` — free-field observer: spherical
   spreading times ISO 9613-1 molecular absorption. Humidity is an
   explicit `[0, 1]` argument. Do not add Stokes–Kirchhoff on top.
+  It needs an `fs_material::iso9613::TerrestrialAir` admission of the
+  state's own composition. Anything else is refused by
+  `DuctError::NonTerrestrialAir`, which names the species.
 - `segment_wave` — complex `k` and characteristic impedance from the
   gas state: `k = k0 [1 + (1+i)/(sqrt2 rv)(1 + (gamma-1)/sqrt Pr)]`,
   `Zc` with the `(1 - (gamma-1)/sqrt Pr)` factor; shear number
