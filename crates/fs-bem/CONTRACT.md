@@ -488,6 +488,46 @@ No-claim: aperture shapes are panel unions. The collocation route is
 reciprocal only to discretization error. A passive row is not a causal
 positive-real time model; that is M2.5-W3b's realization gate.
 
+### `plate_aperture` (IRP pexfp.366)
+
+`plate_aperture_conductance(raster, options)` returns the potential-flow
+conductance `K = Q / delta-phi` [m] of a raster of open square cells cut
+straight through a rigid plate `0 <= z <= t` in an infinite baffle.
+Rayleigh's thin circular hole gives `K = 2a`. Each raster cell is split
+`m x m`.
+- Each half-space is exact through the Neumann kernel `1/(2 pi r)`, by P0
+  collocation with exact cell integrals, applied as an FFT convolution.
+- The duct is cell-centred finite volumes on the voxel prism, in
+  `round(t / h)` layers.
+- The coupled system `(I + Lambda H2) u = Lambda e` is solved by CG in the
+  `H2` inner product. A thin plate solves `2 H w = 1`.
+- Refusals: invalid inputs, the cell, FFT-grid and voxel budgets, and a CG
+  miss, including an outer residual above ten times the tolerance once
+  recomputed.
+- Results are bitwise identical at every worker count and in any listed
+  cell order.
+
+`K` converges at about first order in `h` (thin plate 0.94-0.95, thick
+1.2), so a caller ladders `m` and extrapolates. Gates (tests/plate_aperture.rs):
+
+| case | measured | gate |
+|---|---|---|
+| Rayleigh disc, cells of `R/rpx`, `rpx` 4 to 64 | error 0.18 % at 64 | order >= 0.8, finest <= 0.25 % |
+| 42 x 3.1 mm ellipse at the CT's 0.5 mm, `m` 1 to 8 | limit +0.40 % of `2a AGM(1, b/a)` | within 0.5 % |
+| flanged duct, `t = 4a` | end correction 0.8189 vs 0.8216 | within 1 % |
+
+- Rotations, a mirror and a translation of the raster agree to 1e-9.
+- The 3-D finite-volume Schur complement agrees with the duct map.
+
+`cannone_f_hole_conductance_ladder` measures the CT f-holes of il Cannone
+in the body table's top thickness. It reports their ratio to the body
+example's equivalent-ellipse neck and gates only convergence.
+
+No-claim: the plate is flat and infinite, and each side is a half-space,
+not the arched top, the finite body or its closed cavity. The flow is
+inviscid and incompressible. A raster stands in for the outline, and on a
+slender ellipse its staircase raises `K` by 0.4 %.
+
 ## Invariants
 
 ### Solid-mode radiation loading (IRP M2.5-W4a)

@@ -228,6 +228,8 @@ pub mod near_field;
 pub mod observation_transfers;
 pub mod panel2d;
 pub mod panel3d;
+/// Potential-flow conductance of raster apertures cut through a rigid plate.
+pub mod plate_aperture;
 pub mod radiation_bake;
 /// Geometry-derived resonance-exclusion policy for the existing radiation solver.
 pub mod radiation_policy;
