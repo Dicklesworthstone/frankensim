@@ -1,0 +1,5 @@
+frankensim.matdb-source.v1
+observation	c447-table67-copper-density	Copper (element, Cu), NBS C447 Table 67 physical-property row	NBS Circular C447 Table 67 p.459, density at 20 C printed as 8.96 g/cm3	Converted at 1000 (kg/m3)/(g/cm3) and admitted at T = 293.15 K (20 C), the printed temperature; the same value as copper-pure-nbs-c447, here with a typed temperature axis for string wraps. Pure annealed element; drawn wrap wire's density is not separately printed. No uncertainty is printed
+scalar	density	c447-table67-copper-density	density	8960	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
