@@ -317,3 +317,48 @@ The CLI sidecar includes the supplied coefficient/source, bound effective area
 and actual gas density/sound speed. This remains a quasi-steady separation
 closure with no vortex memory, resolved shedding or measured flute accuracy.
 It does not qualify the full Boehm assembly or the plan's register experiment.
+
+## Causal DG bore through the original jet and wind renderer
+
+`flue-dg.performance` selects the explicit
+`frankensim-flue-dg-performance-v1` format. The original jet, mouth equation,
+material-gas windway and gesture compiler then use the same prepared DG port
+as moving reeds. The exact propagator exposes its current step-mean pressure
+law; the original mouth solve supplies the same accepted flow to that owner.
+Every acoustic and viscothermal memory state survives callback boundaries.
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-dg.performance flue-dg.wav --decimate
+```
+
+The fixture declares a 96 kHz mechanical clock. The command's existing
+`--decimate` path produces 48 kHz PCM with its reported filter delay. Its
+short 1 mm-radius bore is an integration fixture, not a flute specimen.
+
+Source records, in order, are `clock RATE`,
+`output SAMPLES FULL_SCALE_PA MAX_ABS_PRESSURE_PA`, `gas GAS_RECORD`,
+the shared `dg_tube` or `dg_bore` declaration and its geometry/gas-field rows,
+`flue WIDTH HEIGHT CUT_UP OFFSET ANGLE MOUTH_LOSS_REL`,
+`windway none|slit LENGTH|unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS`,
+`jet_card tonal-interim|json CANONICAL_CARD`,
+`jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`,
+`jet_limits MIN_SPEED MAX_MACH MAX_HISTORY`, `controls MAX_CONTROLS MAX_WORK`,
+and `observation inlet-pressure`, followed by the existing canonical
+`gesture` suffix. Pressure and optional jet-angle tracks retain their existing
+physical units and interpolation. The actual DG inlet supplies mouth bore area,
+density, viscosity and sound speed; there is no second authored inlet medium.
+
+The bore declaration is shared with plate valves; see
+[PLATE_VALVE_PERFORMANCES.md](PLATE_VALVE_PERFORMANCES.md) for its numerical
+limits and geometry/gas-field syntax. Static gas/material substitutions rebuild
+the source and causal bore together. They do not mutate an accepted history.
+
+This format explicitly emits **internal step-mean inlet pressure**. It has no
+exterior microphone, terminal radiation model, solid-wall motion or room.
+The retained tonal jet card and authored receptivity remain exploration-only;
+`--acceptance` refuses this source. This connection does not implement the
+resolved compressible jet or zonal interface required by the instrument plan.
+Dense DG dissipation remains an inferred energy deficit where the original
+ledger reports `balance_checked = false`. Numerical spatial/time convergence
+and measured instrument fidelity require separate evidence.

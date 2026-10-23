@@ -653,38 +653,44 @@ enum WindwayInput {
     Unsteady { length_m: f64, transverse_cells: usize, convection_cells: usize },
 }
 
-struct Rows<'a> { lines: Lines<'a>, line: usize }
+pub(in crate::flue_loop) struct Rows<'a> {
+    pub(in crate::flue_loop) lines: Lines<'a>,
+    pub(in crate::flue_loop) line: usize,
+}
 impl<'a> Rows<'a> {
-    fn next_is(&self, expected: &str) -> bool {
+    pub(in crate::flue_loop) fn next_is(&self, expected: &str) -> bool {
         self.lines.clone().next().is_some_and(|line|
             line.trim_ascii().split_ascii_whitespace().next() == Some(expected))
     }
-    fn record(&mut self, expected: &'static str) -> Result<&'a str, FlueInputError> {
+    pub(in crate::flue_loop) fn record(&mut self, expected: &'static str) -> Result<&'a str, FlueInputError> {
         self.line += 1;
         let text = self.lines.next().ok_or_else(|| bad(self.line,"missing source record"))?.trim_ascii();
         let key = text.split_ascii_whitespace().next().unwrap_or("");
         if key != expected { return Err(bad(self.line, expected)); }
         Ok(text[key.len()..].trim_ascii())
     }
-    fn row(&mut self, expected: &'static str) -> Result<Row<'a>, FlueInputError> {
+    pub(in crate::flue_loop) fn row(&mut self, expected: &'static str) -> Result<Row<'a>, FlueInputError> {
         let text = self.record(expected)?;
         Ok(Row { fields: text.split_ascii_whitespace(), line: self.line })
     }
 }
-struct Row<'a> { fields: SplitAsciiWhitespace<'a>, line: usize }
+pub(in crate::flue_loop) struct Row<'a> {
+    pub(in crate::flue_loop) fields: SplitAsciiWhitespace<'a>,
+    pub(in crate::flue_loop) line: usize,
+}
 impl Row<'_> {
-    fn number<T: FromStr>(&mut self) -> Result<T, FlueInputError> {
+    pub(in crate::flue_loop) fn number<T: FromStr>(&mut self) -> Result<T, FlueInputError> {
         self.fields.next().and_then(|s| s.parse().ok()).ok_or_else(|| bad(self.line,"missing or invalid numeric field"))
     }
-    fn scalar(&mut self) -> Result<f64, FlueInputError> {
+    pub(in crate::flue_loop) fn scalar(&mut self) -> Result<f64, FlueInputError> {
         let x: f64 = self.number()?;
         if !x.is_finite() { return Err(bad(self.line,"physical scalars must be finite")); }
         Ok(x)
     }
-    fn end(mut self) -> Result<(), FlueInputError> {
+    pub(in crate::flue_loop) fn end(mut self) -> Result<(), FlueInputError> {
         if self.fields.next().is_some() { Err(bad(self.line,"unexpected trailing fields")) } else { Ok(()) }
     }
-    fn gas(&mut self, sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>)
+    pub(in crate::flue_loop) fn gas(&mut self, sources: Option<&ThermochemicalSources<'_>>, records: &mut Vec<GasRecord>)
         -> Result<GasState, FlueInputError>
     {
         let record = read_gas_record(&mut self.fields, None, sources)

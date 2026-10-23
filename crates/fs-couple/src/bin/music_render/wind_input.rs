@@ -486,6 +486,44 @@ fn load_with_all_sources(
     }
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
+    // The exact DG source reuses the same jet and material input owners. Its
+    // internal pressure follows the existing explicit decimation path below.
+    if bytes.starts_with(b"frankensim-flue-dg-performance-v1\n") {
+        use fs_couple::flue_loop::dg::performance::file::FlueDgFilePerformance;
+        if policy == ObservationPolicy::Acceptance {
+            return Err("DG flue files retain an exploration-only jet card; --acceptance requires resolved qualified source flow".into());
+        }
+        if flow_tap.is_some() {
+            return Err("DG flue input does not declare exterior aperture flows".into());
+        }
+        let p = FlueDgFilePerformance::from_bytes_with_gas_sources(
+            bytes, block, &CancelGate::new(), sources).map_err(|e| e.to_string())?;
+        let i = p.info();
+        let voice = p.renderer().voice();
+        let load = voice.dg().expect("file retains original DG source").load();
+        let duct = load.duct();
+        let geometry = p.geometry();
+        let band = duct.viscothermal_band_rad_s().map_or_else(|| "null".into(), |band|
+            format!("[{:e},{:e}]", band[0], band[1]));
+        let field = duct.gas_field().map_or_else(String::new,
+            super::duct_metadata::dg_field_provenance);
+        let inlet_gas = super::duct_metadata::gas_state(duct.inlet_gas());
+        let outlet_gas = super::duct_metadata::gas_state(duct.outlet_gas());
+        let gas_sources = super::thermochemical::provenance(p.gas_records());
+        let wall = duct.spatial_viscothermal_admission().map_or_else(
+            || "\"uniform-consistent-mass\"".to_owned(),
+            |wall| format!("{{\"model\":\"local-cylinder-positive-quadrature\",\"quadrature_points\":{},\"poles_per_field\":{},\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e}}}",
+                wall.resolution.quadrature_points, wall.resolution.poles_per_field,
+                wall.max_complex_error, wall.max_real_loss_error));
+        let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"mean-inlet\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; internal mean pressure, not an exterior microphone; rigid bore wall; taper uses local-cylinder Webster approximation; no resolved turbulence or measured flute qualification\"{field}{gas_sources}}}",
+            i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
+            i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),
+            duct.total_length(), duct.inlet_area_m2(), duct.outlet_area_m2(),
+            geometry.flue_width_m, geometry.flue_height_m, geometry.cut_up_m);
+        return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.sample_rate_hz,
+            samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
+            fixture: "flue-dg-input", source_json, observation_json: None });
+    }
     if bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("flue files retain an explicitly estimated tonal-jet/cylindrical-graph image; --acceptance requires an independently qualified physical model".into());

@@ -13,7 +13,7 @@
 
 /// Versioned data-driven flue construction through this same pressure renderer.
 pub mod file;
-mod controls;
+pub(in crate::flue_loop) mod controls;
 pub mod aperture_flows;
 
 use super::{FlueError, FlueResonator, FlueVoice};
@@ -275,7 +275,9 @@ impl FlueOutletPerformance {
             environment.validate_receiver(network.graph(), receiver.source(), *receiver.exterior_gas())
                 .map_err(|e| GestureCompileError::Render(RenderError::Voice(e)))?;
         }
-        let controls = controls::compile(&voice, &schedule, &config,
+        let controls = controls::compile(&voice, &schedule,
+            controls::FlueControlLimits { max_controls: config.max_controls,
+                max_compile_work: config.max_compile_work },
             mechanics_rate_hz, mechanical_samples)?;
         let mut launched = Vec::new();
         launched.try_reserve_exact(scratch_samples)

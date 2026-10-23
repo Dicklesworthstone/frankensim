@@ -1,6 +1,6 @@
 //! Physical pressure, jet direction and closing forces on one mechanical clock.
 //! All interpolation remains in fs-scenario, including interruptible force ramps.
-use super::{FlueOutletConfig, FlueVoice, invalid, source_error};
+use super::{FlueVoice, invalid, source_error};
 use crate::flue_loop::FlueControl;
 use crate::render::ControlDelta;
 use crate::render::schedule::{
@@ -9,15 +9,22 @@ use crate::render::schedule::{
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ScheduledFlueControl {
-    pub sample: u64,
-    pub delta: FlueControl,
+pub(in crate::flue_loop) struct ScheduledFlueControl {
+    pub(in crate::flue_loop) sample: u64,
+    pub(in crate::flue_loop) delta: FlueControl,
 }
 
-pub(super) fn compile(
+/// Shared source-control bounds, independent of the physical observation path.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::flue_loop) struct FlueControlLimits {
+    pub(in crate::flue_loop) max_controls: usize,
+    pub(in crate::flue_loop) max_compile_work: u64,
+}
+
+pub(in crate::flue_loop) fn compile(
     voice: &FlueVoice,
     schedule: &GestureSchedule,
-    config: &FlueOutletConfig,
+    limits: FlueControlLimits,
     mechanics_rate_hz: u32,
     mechanical_samples: u64,
 ) -> Result<Vec<ScheduledFlueControl>, GestureCompileError> {
@@ -56,7 +63,7 @@ pub(super) fn compile(
     let last_tick = u128::from(mechanical_samples - 1) * u128::from(rate)
         / u128::from(mechanics_rate_hz);
     let ticks = last_tick + 1;
-    if ticks * tracks.len() as u128 > config.max_controls as u128
+    if ticks * tracks.len() as u128 > limits.max_controls as u128
         || tracks.iter().any(|track| track.events.iter()
             .any(|event| event.time_s > last_tick as f64 / f64::from(rate))) {
         return Err(invalid("flue commands exceed the observed window or total control-assignment budget"));
@@ -67,8 +74,8 @@ pub(super) fn compile(
         .map(|track| tracks.len() as u128 + track.events.len() as u128 + 1).sum();
     let required = ticks.checked_mul(per_tick)
         .ok_or_else(|| invalid("flue gesture sampling work overflows"))?;
-    if required > u128::from(config.max_compile_work) {
-        return Err(GestureCompileError::WorkBudget { required, allowed: config.max_compile_work });
+    if required > u128::from(limits.max_compile_work) {
+        return Err(GestureCompileError::WorkBudget { required, allowed: limits.max_compile_work });
     }
     // Lower an already-bound pressure parameter to the original scalar pressure
     // compiler. The public schedule remains all-v1 or all-resolved-v2; neither
@@ -79,7 +86,7 @@ pub(super) fn compile(
         .map_err(GestureCompileError::Gesture)?;
     let pressure_controls = compile_pressure_gestures(&pressure_schedule,
         &[PressureGestureBinding { track: pressure.id.clone(), voice: 0 }],
-        mechanics_rate_hz, mechanical_samples, config.max_compile_work)?;
+        mechanics_rate_hz, mechanical_samples, limits.max_compile_work)?;
     let mut controls = Vec::new();
     controls.try_reserve_exact(pressure_controls.len())
         .map_err(|_| invalid("flue controls exceed available allocation"))?;

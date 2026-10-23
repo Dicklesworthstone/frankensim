@@ -258,5 +258,8 @@ impl FlueVoice {
     }
 }
 
+/// Existing scheduled pressure/PCM interface for explicit mean-inlet observation.
+pub mod performance;
+
 #[cfg(test)]
 mod tests;

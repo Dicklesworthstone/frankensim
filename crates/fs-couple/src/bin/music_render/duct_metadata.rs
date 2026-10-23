@@ -203,7 +203,7 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
 
 // Serialize actual admitted states only; never re-resolve names or reconstruct
 // air from density/speed. The same snapshot vocabulary covers ambient and regions.
-fn gas_state(g: &fs_material::gas::GasState) -> String {
+pub(super) fn gas_state(g: &fs_material::gas::GasState) -> String {
     format!("{{\"temperature_k\":{:e},\"static_pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"gamma\":{:e},\"prandtl\":{:e},\"water_mole_fraction\":{:e},\"specific_heat_cp_j_kg_k\":{:e},\"specific_gas_constant_j_kg_k\":{:e},\"characteristic_impedance_pa_s_m\":{:e}}}",
         g.temperature, g.pressure, g.density, g.sound_speed, g.dynamic_viscosity,
         g.thermal_conductivity, g.gamma, g.prandtl, g.water_mole_fraction,
@@ -264,7 +264,7 @@ fn reed_steady_provenance(p: &fs_couple::render::schedule::reed::ReedPerformance
 }
 
 // Keep the original field primitives and source receipts with the DG observation.
-fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField) -> String {
+pub(super) fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField) -> String {
     let species: Vec<_> = field.model().thermodynamics().components().iter()
         .map(|component| super::json_string(component.species().as_str())).collect();
     let stations: Vec<_> = field.stations_m().iter().zip(field.primitive_states())
