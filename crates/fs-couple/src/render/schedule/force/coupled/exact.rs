@@ -281,6 +281,14 @@ impl ExactNetwork {
         Ok((record.x, x))
     }
 
+    /// The accepted step's per-port ledger as a deferred observation, for the owner whose ledger costs a sweep over every
+    /// dense link Gramian (the prepared one); `None` for every other owner, which computes it eagerly in `connection_work`.
+    pub(super) fn deferred_connection_work(&self, x: &[f64], u: &[f64], endpoint: &[f64], connection_loss: f64)
+        -> Option<std::sync::Arc<dyn crate::port_adoption::DeferredTransfers>>
+    {
+        self.prepared.as_ref().map(|prepared| prepared.pending_ledger(x, u, endpoint, connection_loss))
+    }
+
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         if column.len() != self.count {
             return Err(invalid("complete contact force column"));
@@ -875,6 +883,27 @@ pub(super) fn stage(
         solve_relative_residual: 0.0,
         connection_forces_n: network.reactions.clone(),
     };
+    let account = crate::port_adoption::StepAccount {
+        tick: sample,
+        duration_s: network.dt,
+        storage_change_j: Some(after - before),
+        loss_j: Some(component_loss + connection_loss + material_loss + radiation_loss),
+        included_work_j: work,
+        entropy_change_j_k: 0.0,
+        tolerance_j: Some(tolerance),
+        unavailable: None,
+    };
+    // The prepared owner's per-port ledger is a sweep over every dense link Gramian: it is kept as this step's inputs and
+    // evaluated only if an observer asks for the window's transfers (`PreparedNetwork::pending_ledger`). Its refusal, if any,
+    // is the same independent observation refusal as below.
+    if let Some(pending) = network
+        .exact
+        .as_ref()
+        .and_then(|exact| exact.deferred_connection_work(&x, &u, &rec_x, connection_loss))
+    {
+        network.staged_ports.accept_deferred(account, pending);
+        return Ok(());
+    }
     // Independent port observations cannot turn an accepted physical step into
     // a refusal. Preserve their original diagnostic instead of a zero account.
     let transfers = match &network.exact {
@@ -899,19 +928,7 @@ pub(super) fn stage(
         owner: "coupled-modal".into(),
         reason: error.to_string(),
     });
-    network.staged_ports.accept_result(
-        crate::port_adoption::StepAccount {
-            tick: sample,
-            duration_s: network.dt,
-            storage_change_j: Some(after - before),
-            loss_j: Some(component_loss + connection_loss + material_loss + radiation_loss),
-            included_work_j: work,
-            entropy_change_j_k: 0.0,
-            tolerance_j: Some(tolerance),
-            unavailable: None,
-        },
-        transfers,
-    );
+    network.staged_ports.accept_result(account, transfers);
     Ok(())
 }
 

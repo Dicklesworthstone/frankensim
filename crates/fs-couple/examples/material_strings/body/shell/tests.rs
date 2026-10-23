@@ -308,6 +308,7 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
         let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
             pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
         // Timing lines go to stderr (visible with --nocapture): this test is slow by the cost measured above.
+        eprintln!("ceiling e2e: {}", cost_context(&r.spec));
         eprintln!("ceiling e2e: constructed in {:.1?}", constructing.elapsed());
         let source = r.performance.bank().source().bank();
         let image = source.material_shell_image().unwrap();
@@ -321,6 +322,52 @@ fn a_mesh_and_mode_count_beyond_every_former_ceiling_run_through_the_whole_pipel
         eprintln!("ceiling e2e: {} samples in {:.1?}", samples.len(), rendering.elapsed());
         assert!(samples.iter().all(|p| p.is_finite()));
         assert!(samples.iter().any(|p| p.abs() > 1e-14), "the body radiated nothing");
+        eprintln!("ceiling e2e: pressure bits fnv1a {:#018x}", pressure_bits(&samples));
+    });
+}
+
+/// FNV-1a over the exact bits of every pressure sample: an identity of the rendered sound, not a tolerance. It is printed,
+/// not pinned: an exact restructuring of the route is checked by comparing it before and after the change.
+fn pressure_bits(samples: &[f64]) -> u64 {
+    samples.iter().flat_map(|p| p.to_bits().to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// What a wall time was measured on: host, logical CPUs, the load average when the line is printed, the render's thread,
+/// and the complete network the prepared route propagates (coordinates, connections).
+fn cost_context(spec: &input::Spec) -> String {
+    let host = std::fs::read_to_string("/etc/hostname").map_or_else(|_| "unknown".into(), |s| s.trim().to_string());
+    let cpus = std::thread::available_parallelism().map_or(0, |n| n.get());
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .map_or_else(|_| "unavailable".into(), |s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+    let (coordinates, links, _) = spec.network_dimensions(true).unwrap();
+    format!("host {host}, {cpus} logical CPUs, load average {load}, render on the test thread, \
+        {coordinates} coordinates, {links} connections")
+}
+
+/// The ceiling fixture rendered for half a second (24000 samples at 48 kHz) through the prepared exact route: the wall time
+/// per audio second with what it was measured on, and the pressure bits of the whole half second.
+#[test]
+#[ignore = "half-second ceiling render: run with --ignored --nocapture"]
+fn the_half_second_ceiling_render_reports_its_cost_and_pressure_bits() {
+    let (profile, spec) = ceiling_inputs(70, 24_000);
+    scoped(|cx, gate| {
+        eprintln!("half-second ceiling: {}", cost_context(&spec));
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(if name == "body.fsmatpk" {
+            pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) })).unwrap();
+        let built = constructing.elapsed();
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 7);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 24_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        let audio_s = samples.len() as f64 / 48_000.0;
+        eprintln!("half-second ceiling: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({:.1} s render per audio second, {:.1} s with construction)", samples.len(),
+            rendered.as_secs_f64() / audio_s, (built + rendered).as_secs_f64() / audio_s);
+        eprintln!("half-second ceiling: {}", cost_context(&r.spec));
+        eprintln!("half-second ceiling: pressure bits fnv1a {:#018x}", pressure_bits(&samples));
     });
 }
 

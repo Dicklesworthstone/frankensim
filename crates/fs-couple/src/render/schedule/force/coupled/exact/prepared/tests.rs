@@ -219,27 +219,65 @@ fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluatio
         let external = [0.003, if tick % 2 == 0 { -0.002 } else { 0.004 }, 0.001];
         system.step(&external).unwrap();
     }
-    // `advance`, `losses` and `connection_work` of a stage evaluate the same vector: one sweep per step, not three.
+    // `advance` and `losses` of a stage evaluate the same vector: one sweep (two dense forms) per step, and no per-link form.
     assert_eq!(sweeps(&system) - before, steps);
     let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
+    assert_eq!(prepared.ledger_evaluations(), 0);
     let x = flatten(&system.models);
     for u in [[0.003, -0.002, 0.001], [0.0, 0.0, 0.0], [0.003, -0.002, 0.001]] {
         let z = prepared.state_input(&x, &u, prepared.dt).unwrap();
         let direct_component = quadratic(prepared.component_loss.as_ref().unwrap(), &z).unwrap();
-        let mut direct_connection = 0.0;
-        for w in prepared.connection_loss.iter().flatten() {
-            direct_connection = finite(direct_connection + quadratic(w, &z).unwrap()).unwrap();
-        }
+        let direct_connection = quadratic(prepared.connection_total.as_ref().unwrap(), &z).unwrap();
         let (component, connection) = prepared.loss_sums(&z).unwrap();
         assert_eq!(component.to_bits(), direct_component.to_bits());
         assert_eq!(connection.to_bits(), direct_connection.to_bits());
         assert!(component > 0.0 && connection > 0.0);
+        // The pre-summed form is the sum of the links' own forms up to summation roundoff, far inside the ledger's 1e-11.
+        let mut by_links = 0.0;
+        for w in prepared.ledger.gramians.iter().flatten() {
+            by_links = finite(by_links + quadratic(w, &z).unwrap()).unwrap();
+        }
+        assert!((connection - by_links).abs() <= 1e-12 * connection.max(by_links), "{connection:e} vs {by_links:e}");
         // A second request for the same vector is served from the sweep, bit for bit.
         let count = prepared.sweeps();
         let (again_component, again_connection) = prepared.loss_sums(&z).unwrap();
         assert_eq!(prepared.sweeps(), count);
         assert_eq!((again_component.to_bits(), again_connection.to_bits()), (component.to_bits(), connection.to_bits()));
     }
+}
+
+#[test]
+fn the_per_link_ledger_is_evaluated_only_when_asked_once_and_agrees_with_the_pre_summed_loss() {
+    let mut system = fixture(48_000, true);
+    let evaluations = |s: &CoupledModalSystem| s.exact.as_ref().unwrap().prepared.as_ref().unwrap().ledger_evaluations();
+    let (mut asked, mut worst) = (0u64, 0.0_f64);
+    for tick in 0..200u64 {
+        let external = [0.003 * (tick as f64 * 0.37).sin(), if tick % 2 == 0 { -0.002 } else { 0.004 }, 0.001 * (tick % 7) as f64];
+        // The sum of the links' own forms against the one pre-summed form, on the very vector this step uses.
+        let relative = {
+            let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
+            let u: Vec<f64> = external.iter().zip(&prepared.rest_force).map(|(f, r)| f + r).collect();
+            let z = prepared.state_input(&flatten(&system.models), &u, prepared.dt).unwrap();
+            let total = quadratic(prepared.connection_total.as_ref().unwrap(), &z).unwrap();
+            let by_links: f64 = prepared.ledger.gramians.iter().flatten().map(|w| quadratic(w, &z).unwrap()).sum();
+            (total - by_links).abs() / total.max(by_links).max(f64::MIN_POSITIVE)
+        };
+        worst = worst.max(relative);
+        system.step(&external).unwrap();
+        // Stepping evaluated no ledger; the first request evaluates it once and every later request shares it.
+        assert_eq!(evaluations(&system), asked, "tick {tick}");
+        if tick % 10 == 3 {
+            let first: Vec<f64> = system.last_window_transfers().unwrap().iter().map(|t| t.energy_into().value()).collect();
+            asked += 1;
+            assert_eq!(evaluations(&system), asked);
+            let again: Vec<f64> = system.last_window_transfers().unwrap().iter().map(|t| t.energy_into().value()).collect();
+            assert_eq!(first, again);
+            assert!(system.last_window_transfer_error().is_none(), "tick {tick}");
+            assert_eq!(evaluations(&system), asked);
+        }
+    }
+    eprintln!("pre-summed vs per-link connection loss: worst relative difference {worst:e} over 200 steps (the ledger check allows 1e-11)");
+    assert!(worst < 1e-12, "{worst:e}");
 }
 
 #[test]

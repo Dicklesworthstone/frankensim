@@ -8,7 +8,7 @@
 
 use fs_ports::*;
 use fs_qty::{ElectricCharge, Energy, Mass};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub(crate) fn id(value: &str) -> StableId {
     StableId::new(value).expect("adapter identifiers use canonical static segments")
@@ -29,6 +29,28 @@ pub(crate) fn schema(owner: &str, name: &str, kind: PortKind) -> PortSchema {
     .expect("static scalar schema has the kind's canonical SI dimensions")
 }
 
+/// A port observation whose transfers are computed only when an observer asks for them: the owner keeps what the accepted
+/// step needs and the evaluation is expensive. `evaluate` returns exactly what `accept_result` would have been given.
+pub(crate) trait DeferredTransfers: Send + Sync {
+    fn evaluate(&self) -> Result<Vec<PortTransfer>, CoupleError>;
+}
+
+/// The shared handle of a deferred observation. Equality is identity: the same evaluator.
+#[derive(Clone)]
+struct Deferred(Arc<dyn DeferredTransfers>);
+
+impl core::fmt::Debug for Deferred {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Deferred(..)")
+    }
+}
+
+impl PartialEq for Deferred {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ModulePorts {
     owner: String,
@@ -37,6 +59,9 @@ pub(crate) struct ModulePorts {
     pub(crate) junctions: Vec<JunctionSchema>,
     last: Option<StepAccount>,
     raw: Vec<PortTransfer>,
+    /// When set, `raw` is empty and the last window's transfers come from this evaluator, run once on first request.
+    deferred: Option<Deferred>,
+    evaluated: OnceLock<Result<Vec<PortTransfer>, CoupleError>>,
     integrated: OnceLock<Result<Vec<IntegratedWindowTransfer>, CoupleError>>,
 }
 
@@ -92,6 +117,8 @@ impl ModulePorts {
             junctions: Vec::new(),
             last: None,
             raw,
+            deferred: None,
+            evaluated: OnceLock::new(),
             integrated: OnceLock::new(),
         }
     }
@@ -127,6 +154,8 @@ impl ModulePorts {
     ) {
         self.raw.clear();
         self.raw.extend(ports);
+        self.deferred = None;
+        self.evaluated = OnceLock::new();
         self.last = Some(account);
         self.integrated = OnceLock::new();
     }
@@ -145,16 +174,35 @@ impl ModulePorts {
             }
         }
     }
+    /// Publish an observation whose transfers are evaluated on the first request (`transfers`, `transfer_error`, `audit`) and
+    /// retained. A refusal of that evaluation is retained exactly like one given to `accept_result`; it never touches the motion.
+    pub(crate) fn accept_deferred(&mut self, account: StepAccount, source: Arc<dyn DeferredTransfers>) {
+        self.accept(account, []);
+        self.deferred = Some(Deferred(source));
+    }
+    /// The last window's raw transfers: the stored ones, or the deferred evaluation (run once, then retained).
+    fn raw_transfers(&self) -> Result<&[PortTransfer], CoupleError> {
+        match &self.deferred {
+            None => Ok(self.raw.as_slice()),
+            Some(deferred) => self
+                .evaluated
+                .get_or_init(|| deferred.0.evaluate())
+                .as_ref()
+                .map(|raw| raw.as_slice())
+                .map_err(Clone::clone),
+        }
+    }
     fn integrated(&self) -> Option<&Result<Vec<IntegratedWindowTransfer>, CoupleError>> {
         let account = self.last.as_ref()?;
         Some(self.integrated.get_or_init(|| {
             let interval = self.interval(account.tick)?;
-            if self.raw.len() != self.schemas.len() {
+            let raw = self.raw_transfers()?;
+            if raw.len() != self.schemas.len() {
                 return Err(CoupleError::AccountingWindowContextMismatch {
                     field: "adapter_port_count",
                 });
             }
-            self.raw
+            raw
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
@@ -201,11 +249,12 @@ impl ModulePorts {
         let convention = id("accepted-step/midpoint-heat-entropy");
         let mut manifest = Vec::new();
         let mut values = Vec::new();
+        let raw = self.raw_transfers()?;
         for (i, original) in self
             .schemas
             .iter()
             .enumerate()
-            .filter(|(i, _)| self.raw[*i].boundary)
+            .filter(|(i, _)| raw[*i].boundary)
         {
             let mut port = schema(&self.owner, &format!("audit/{i}"), original.kind());
             // PortSchema has no public timestamp setter: admit the new window binding.
@@ -510,5 +559,67 @@ mod tests {
             panic!("replacement accepted account missing")
         };
         assert!(report.violations().is_empty());
+    }
+
+    /// Evaluates to one boundary transfer, or refuses; counts its evaluations.
+    struct Counting {
+        calls: std::sync::atomic::AtomicU64,
+        fail: bool,
+    }
+    impl DeferredTransfers for Counting {
+        fn evaluate(&self) -> Result<Vec<PortTransfer>, CoupleError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(CoupleError::ModuleObservationFailed {
+                    owner: "deferred-test".into(),
+                    reason: "deferred loss integral refused".into(),
+                });
+            }
+            Ok(vec![PortTransfer::work(0.25, true)])
+        }
+    }
+    fn calls(source: &Counting) -> u64 {
+        source.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn g0_deferred_observation_is_evaluated_only_when_asked_once_and_equals_the_eager_account() {
+        let account = StepAccount {
+            tick: 1,
+            duration_s: 0.01,
+            storage_change_j: Some(0.0),
+            loss_j: Some(0.0),
+            included_work_j: 0.0,
+            entropy_change_j_k: 0.0,
+            tolerance_j: Some(1e-12),
+            unavailable: None,
+        };
+        let source = Arc::new(Counting { calls: Default::default(), fail: false });
+        let mut deferred = ModulePorts::mechanical("deferred-test", 1);
+        deferred.accept_deferred(account.clone(), source.clone());
+        // Facts that need no transfers do not run the evaluation.
+        assert_eq!(deferred.duration_s(), Some(0.01));
+        assert_eq!(deferred.next_tick(), 2);
+        assert_eq!(calls(&source), 0);
+        let mut eager = ModulePorts::mechanical("deferred-test", 1);
+        eager.accept(account.clone(), [PortTransfer::work(0.25, true)]);
+        assert_eq!(deferred.transfers(), eager.transfers());
+        assert_eq!(deferred.audit(), eager.audit());
+        assert!(deferred.transfer_error().is_none());
+        // Every observer shares the single evaluation.
+        assert_eq!(calls(&source), 1);
+        // A refusing evaluation is retained as the window's observation refusal.
+        let refusing = Arc::new(Counting { calls: Default::default(), fail: true });
+        deferred.accept_deferred(StepAccount { tick: 2, ..account.clone() }, refusing.clone());
+        assert_eq!(calls(&refusing), 0);
+        assert!(deferred.transfers().is_none());
+        let error = deferred.transfer_error().cloned().expect("the refusal is retained");
+        assert_eq!(deferred.audit(), Err(error));
+        assert_eq!(calls(&refusing), 1);
+        // The next acceptance replaces it.
+        deferred.accept(StepAccount { tick: 3, ..account }, [PortTransfer::work(0.0, true)]);
+        assert!(deferred.transfer_error().is_none());
+        assert_eq!(deferred.transfers().unwrap().len(), 1);
+        assert_eq!(calls(&refusing), 1);
     }
 }
