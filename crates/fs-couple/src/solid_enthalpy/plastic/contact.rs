@@ -634,6 +634,7 @@ impl<'m> ThermoplasticSolid<'m> {
             physical_heat_j: mechanical.physical_heat_j,
             reversible_heat_j: mechanical.reversible_heat_j,
             thermoelastic_storage_change_j: mechanical.thermoelastic_storage_change_j,
+            coefficient_storage_change_j: mechanical.coefficient_storage_change_j,
             applied_heat_j,
             external_heat_j,
             stored_mechanical_change_j: mechanical.stored_change_j,

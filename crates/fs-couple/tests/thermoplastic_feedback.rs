@@ -1,6 +1,8 @@
 //! Synthetic source data, native J2 work, and actual lumped conduction feedback.
 #[path = "thermoplastic_feedback/expansion_curve.rs"]
 mod expansion_curve;
+#[path = "thermoplastic_feedback/modulus_curve.rs"]
+mod modulus_curve;
 
 use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};
 use fs_evidence::ValidityDomain;
@@ -691,11 +693,11 @@ fn thermal_evolution_keeps_initial_claims_and_refuses_disjoint_source_handoffs()
 }
 
 #[test]
-fn varying_energetic_coefficients_density_phase_and_foreign_context_refuse() {
+fn nonaffine_moduli_variable_poisson_density_phase_and_foreign_context_refuse() {
     for (index, value) in [(0, 1.2e9), (1, 0.2), (3, 1e8), (5, 1000.0)] {
         let mut data = properties(5.0, false);
-        // Initial and both span endpoints agree. Interior variation still needs
-        // reversible thermodynamics; equal endpoint samples cannot admit it.
+        // Initial and both span endpoints agree. Non-affine modulus slopes need
+        // entropy jumps; fixed Poisson/density also cannot vary in the interior.
         curve(
             &mut data[index],
             "T",
@@ -921,11 +923,11 @@ fn source_surfaces_admit_energetic_constants_over_the_complete_fixed_pressure_li
 }
 
 #[test]
-fn every_surface_cell_crossing_checks_energetic_constancy_and_positive_yield() {
+fn every_surface_cell_crossing_checks_modulus_affinity_fixed_coefficients_and_positive_yield() {
     for (index, value) in [(0, 1.2e9), (1, 0.25), (3, 1e8), (5, 1000.0)] {
         let mut data = pressure_properties();
         // At this pressure the two endpoints agree, but the diagonal cut has
-        // a different energetic coefficient. Sampling endpoints is unsound.
+        // a non-affine modulus or varying fixed coefficient. Endpoint sampling is unsound.
         pressure_surface(&mut data[index], [value, 0.8 * value, 0.8 * value, value]);
         let fixture = Fixture::from_properties(
             data,

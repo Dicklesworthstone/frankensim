@@ -1867,15 +1867,19 @@ yield reduction at fixed strain, and invalid-history refusal.
 
 `plastic::thermal::CaloricPoint` binds a virgin native J2 history to a
 source-resolved, strictly increasing solid caloric chart. Yield stress and heat
-capacity may vary with absolute temperature. Elastic coefficients, the chosen
-hardening datum, density and reference thermal geometry remain fixed; all six
-property roles share one material card and source context. Each selected claim
-supplies one continuously supported canonical temperature line over the full
-chart. Every crossed curve knot and surface-cell edge participates in exact
-energetic-coefficient constancy and positive yield/Cp checks; equal endpoints
-alone cannot establish either condition. Mechanically bounded strain,
-stress or rate coefficients cannot be frozen while their histories evolve.
-Renamed temperature coordinates require explicit absolute-temperature semantics.
+capacity may vary with absolute temperature; Young's modulus E and native
+energetic hardening H may be globally affine in temperature. Poisson ratio,
+density and reference thermal geometry remain fixed. All property roles share
+one material card and source context. Each selected claim supplies one
+continuously supported canonical temperature line over the full chart. Every
+crossed curve knot and surface-cell edge participates in affine-slope, fixed
+coefficient and positive yield/Cp admission; equal endpoints cannot hide an
+interior derivative jump. Mechanically bounded strain, stress or rate
+coefficients cannot be frozen while their histories evolve. Renamed temperature
+coordinates require explicit absolute-temperature semantics. Variable energetic
+H requires the explicit native plastic-strain-modulus basis. Uniaxial tangent
+conversion retains its constant-E/Et path; variable E with exactly zero Et is
+also admitted, but a generally rational derived H(T) is not treated as affine.
 
 This reduction declares energetic isotropic hardening: `H alpha^2/2` is stored
 energy. `sigma_y(T1) delta_alpha` is the physical plastic heat supplied to the
@@ -1886,9 +1890,10 @@ proposal starts from the same accepted mechanical/caloric history; the actual
 returned temperature re-evaluates the native J2 increment before separate heat
 and combined-work gates accept the candidate. A rejected or cancelled proposal
 changes neither history nor time. Optional sourced isotropic thermal
-expansion is supported as described below. The model excludes temperature-varying
-elastic coefficients, phase change and finite-deformation volume work;
-source receipts and residual gates do not establish empirical accuracy.
+expansion is supported as described below. The model excludes nonlinear or
+piecewise-affine E/H slopes, variable Poisson ratio, phase change and
+finite-deformation volume work; source receipts and residual gates do not
+establish empirical accuracy.
 
 ### Sourced thermoelastic J2 expansion
 
@@ -1903,35 +1908,44 @@ history update. The reference temperature stays fixed at specimen birth.
 Renamed temperature coordinates retain their explicit absolute-temperature
 semantics and the original fixed nonthermal conditions.
 
-With fixed elastic tensor C and energetic hardening H, the free energy remains
-`psi=e:C:e/2+H p²/2`; mechanical entropy is `s=alpha(T) tr(sigma)` and the
-additional internal energy is `T s`. Reversible caloric transfer is
-`tr(sigma_new) integral_Told^Tnew(alpha dT)-delta(T s)`, evaluated using the
-direct step integral and actual pinned endpoint coefficients. Constant alpha
-retains the original `-T_old alpha delta(tr(sigma))` arithmetic. Physical
-plastic heat is still `sigma_y delta_p`; numerical loss is a separate account.
-This closes the endpoint work balance and does not replace time refinement.
+With fixed Poisson ratio and globally affine E(T)/H(T), free energy remains
+`psi=e:C(T):e/2+H(T) p²/2`. Mechanical entropy is
+`s=alpha(T) tr(sigma)-(E'/E) psi_elastic-H' p²/2`; internal energy adds `T s`.
+The native J2 energy account still evaluates both histories with the new law.
+`coefficient_storage_change_j_m3` exposes the missing frozen-history coefficient
+change `Cpsi=psi(T_new,e_old,p_old)-psi(T_old,e_old,p_old)`; the increment's
+`stored_change_j_m3()` includes it exactly once. Signed reversible caloric
+transfer is `tr(sigma_new) integral_Told^Tnew(alpha dT)-Cpsi-delta(T s)`, using
+the direct step integral and actual pinned endpoint coefficients. With fixed
+E/H and constant alpha, the original `-T_old alpha delta(tr(sigma))` arithmetic
+is retained. Physical plastic heat is still `sigma_y delta_p`; numerical loss
+remains separate. This closes the actual two-temperature endpoint work balance
+without replacing the native return map, history, tangent or time refinement.
 
-Source Cp and the actual caloric segment slopes must stay positive after
-thermomechanical coupling. For variable alpha the sufficient full-span gate is
-`rho c_min > T_max [9K max|alpha|² + 3sqrt(3)K strain_limit max|alpha'|]`.
+Source Cp and actual caloric segment slopes must stay positive after
+thermomechanical coupling. Let A=max|alpha|, A'=max|alpha'| and K_max be the
+maximum bulk modulus over the complete source span. The sufficient gate is
+`rho c_min > T_max [9K_max A² + 3sqrt(3)K_max strain_limit A' + 6sqrt(3)|K'| strain_limit A]`.
 The native energy owner bounds the actual elastic tensor by the tensor-Voigt
-norm (diagonal squares plus twice shear squares), so
-`|tr(sigma)|=3K|tr(e)| <= 3sqrt(3)K strain_limit`. This bounds the potentially
-negative term in
-`c_eff=rho c_caloric+T alpha' tr(sigma)-9KT alpha²`, including both sides of
-piecewise-linear source knots. The constant-alpha path retains its sharper
-existing capacity check. Failed admission publishes no material or thermal
-candidate. Reference mass, geometry, C and H remain fixed; phase change,
-variable elastic/hardening free energy and finite volume work remain outside
+norm (diagonal squares plus twice shear squares), giving
+`|tr(sigma)| <= 3sqrt(3)K_max strain_limit` and
+`|tr(C' e)| <= 3sqrt(3)|K'| strain_limit` without assuming exact zero plastic
+trace. These bound the signed terms in
+`c_eff=rho c_caloric+T[alpha' tr(sigma)+2alpha tr(C' e)-9K alpha²]`, including
+both sides of expansion-curve knots. Affine E/H have no second derivatives;
+no unsupported plastic-history bound is needed for H. Fixed E/H retain the
+previous capacity arithmetic. Failed admission publishes no material or
+thermal candidate. Reference mass, geometry and Poisson ratio remain fixed;
+phase change, derivative jumps in E/H and finite volume work remain outside
 this model.
 
-Focused synthetic tests cover source-knot integration and cooling, signed and
-zero expansion, a surface with an explicitly named temperature axis, reciprocal
-energy, material swaps through native 3D stress/shape/heat and thermally driven
-plasticity, and atomic capacity refusal. These fixtures are not measured
-material validation; native execution of the new curve regressions remains
-pending in the configured build environment.
+Focused synthetic tests cover expansion-knot integration and cooling, signed
+and zero expansion, affine-modulus curves and typed source surfaces, independent
+free-energy/entropy identities, data-only changes to adiabatic temperature and
+native 3D loaded shape/plasticity/heat, continuation with coefficient work, and
+atomic effective-capacity refusal. These fixtures are not measured material
+validation; native execution of the new modulus regressions remains pending
+in the configured build environment.
 
 ### Structural source bindings for thermal transport
 

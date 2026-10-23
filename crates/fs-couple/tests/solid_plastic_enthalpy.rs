@@ -4,6 +4,8 @@
 mod contact;
 #[path = "solid_plastic_enthalpy/expansion_curve.rs"]
 mod expansion_curve;
+#[path = "solid_plastic_enthalpy/modulus_curve.rs"]
+mod modulus_curve;
 
 use std::collections::BTreeMap;
 
@@ -89,12 +91,25 @@ impl Fixture {
         )
     }
     fn with_expansion_claim(cp: f64, expansion: Option<PropertyClaim>) -> Self {
+        Self::with_constitutive_claims(
+            cp,
+            expansion,
+            scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
+            scalar(BASIS.property_name(), Pressure::DIMS, H),
+        )
+    }
+    fn with_constitutive_claims(
+        cp: f64,
+        expansion: Option<PropertyClaim>,
+        youngs: PropertyClaim,
+        hardening: PropertyClaim,
+    ) -> Self {
         let has_expansion = expansion.is_some();
         let mut claims = ClaimSet::new();
         for p in [
-            scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
+            youngs,
             scalar(POISSON_RATIO_PROPERTY, Dims([0; 6]), 0.2),
-            scalar(BASIS.property_name(), Pressure::DIMS, H),
+            hardening,
             scalar(DENSITY_PROPERTY, Density::DIMS, RHO),
             scalar(CP, CP_DIMS, cp),
         ] {

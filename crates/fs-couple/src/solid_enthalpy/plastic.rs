@@ -7,8 +7,8 @@
 //! All coupled proposals restart from the same accepted mechanical, thermal and
 //! observer states. Only a converged, balanced pair is returned.
 //!
-//! This uses the energetic-hardening reduction of ThermoplasticSource: constant
-//! E, nu, H and reference density, optional source-integrated isotropic expansion,
+//! This uses the energetic-hardening reduction of ThermoplasticSource: affine
+//! sourced E(T)/H(T), fixed nu/reference density, integrated isotropic expansion,
 //! fully solid caloric charts, small strain AND rotation. Hardening storage and backward-Euler loss
 //! are not heat. Spatial conduction, boundary exchange and existing observers
 //! remain in DepositionSimulation. Refine both physical load intervals and
@@ -349,6 +349,7 @@ impl<'a> ThermoplasticSolid<'a> {
         let mut physical_heat_j = 0.0;
         let mut reversible_heat_j = 0.0;
         let mut thermoelastic_storage_change_j = 0.0;
+        let mut coefficient_storage_change_j = 0.0;
         for (i, bound) in self.cells.iter().enumerate() {
             poll(cx)?;
             let law = materials[i].law();
@@ -385,6 +386,12 @@ impl<'a> ThermoplasticSolid<'a> {
             )?;
             internal_work_j =
                 finite(internal_work_j + bound.volume_m3 * increment.mechanical_work_j_m3)?;
+            coefficient_storage_change_j = finite(
+                coefficient_storage_change_j
+                    + bound.volume_m3 * increment.coefficient_storage_change_j_m3,
+            )?;
+            stored_change_j =
+                finite(stored_change_j + bound.volume_m3 * increment.stored_change_j_m3())?;
             let account = increment.mechanical;
             if account.state != solution.element_states[i] {
                 return Err(ThermoplasticError::Invalid(
@@ -394,8 +401,6 @@ impl<'a> ThermoplasticSolid<'a> {
             physical_heat_j = finite(
                 physical_heat_j + bound.volume_m3 * account.energy.physical_dissipation_j_m3,
             )?;
-            stored_change_j =
-                finite(stored_change_j + bound.volume_m3 * account.energy.stored_change_j_m3())?;
             numerical_loss_j = finite(
                 numerical_loss_j + bound.volume_m3 * account.energy.numerical_dissipation_j_m3,
             )?;
@@ -424,6 +429,7 @@ impl<'a> ThermoplasticSolid<'a> {
             physical_heat_j,
             reversible_heat_j,
             thermoelastic_storage_change_j,
+            coefficient_storage_change_j,
             stored_change_j,
             numerical_loss_j,
             external_work_j,
@@ -573,6 +579,7 @@ impl<'a> ThermoplasticSolid<'a> {
                     physical_heat_j: actual.physical_heat_j,
                     reversible_heat_j: actual.reversible_heat_j,
                     thermoelastic_storage_change_j: actual.thermoelastic_storage_change_j,
+                    coefficient_storage_change_j: actual.coefficient_storage_change_j,
                     applied_heat_j,
                     external_heat_j,
                     stored_mechanical_change_j: actual.stored_change_j,
@@ -617,6 +624,7 @@ struct MechanicalProposal {
     physical_heat_j: f64,
     reversible_heat_j: f64,
     thermoelastic_storage_change_j: f64,
+    coefficient_storage_change_j: f64,
     stored_change_j: f64,
     numerical_loss_j: f64,
     external_work_j: f64,
@@ -629,16 +637,21 @@ struct MechanicalProposal {
 pub struct ThermoplasticReport {
     pub iterations: usize,
     pub thermal_audit: EnergyAudit,
+    /// Native endpoint-modulus J2 accounts. Their sum needs the explicitly
+    /// reported coefficient correction for the actual two-temperature storage.
     pub element_energy: Vec<EnergyIncrement>,
     pub physical_heat_j: f64,
     /// Signed reversible thermoelastic exchange into caloric storage [J].
     pub reversible_heat_j: f64,
-    /// Change in T alpha tr(sigma), distinct from elastic free energy [J].
+    /// Change in T times mechanical entropy, distinct from free energy [J].
     pub thermoelastic_storage_change_j: f64,
+    /// Frozen-history E(T)/H(T) free-energy change [J], already included in
+    /// stored_mechanical_change_j; never added again to the total balance.
+    pub coefficient_storage_change_j: f64,
     /// Net plastic plus reversible caloric source applied to thermal transport.
     pub applied_heat_j: f64,
     pub external_heat_j: f64,
-    /// Elastic and hardening free-energy change, excluding T alpha tr(sigma).
+    /// Actual elastic and hardening free-energy change, excluding T s_mechanical.
     pub stored_mechanical_change_j: f64,
     pub numerical_loss_j: f64,
     pub mechanical_work_j: f64,

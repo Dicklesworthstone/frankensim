@@ -1,13 +1,15 @@
 //! Source-bound uniform thermoplastic heat feedback using native J2 and transport.
 //!
 //! The declared reduction has energetic linear isotropic hardening, fixed
-//! reference geometry/density, temperature-independent elastic/hardening coefficients,
-//! optional sourced isotropic expansion, and a strictly increasing single-solid caloric
-//! chart. Yield stress, Cp and the expansion coefficient may depend on temperature. Under these fixed
-//! reference-density assumptions, the stress-free caloric enthalpy is the caloric
-//! internal-energy chart. Expansion includes reversible stress/temperature energy.
-//! Variable elastic free energy, phase/volume work and finite
-//! deformation require additional terms and are outside this reduction.
+//! reference geometry/density and Poisson ratio, globally affine E(T) and native
+//! energetic H(T), optional sourced isotropic expansion, and a strictly increasing
+//! single-solid caloric chart. Yield stress, Cp and expansion may be piecewise linear.
+//! Under these fixed-reference-density assumptions, stress-free caloric enthalpy
+//! is the caloric internal-energy chart. Coefficient work and temperature derivatives
+//! of elastic/hardening free energy enter the same reversible heat/storage account.
+//! Kinked moduli require strain/history-dependent entropy jumps and are refused.
+//! Phase/volume work, general nonlinear coefficient laws and finite deformation
+//! remain outside this reduction.
 //!
 //! Physical yield dissipation and signed reversible thermoelastic exchange are
 //! passed separately to the existing thermal owner.
@@ -130,10 +132,10 @@ impl<E: std::error::Error + 'static> std::error::Error for FeedbackError<E> {}
 
 /// Source admission shared by material points and spatial solid elements.
 /// This owns no mechanical history, thermal inventory, geometry or integrator.
-/// The complete caloric interval has the same constant elastic/hardening energy
-/// and density assumptions as [`CaloricPoint`]. Yield stress, Cp and the optional
-/// expansion coefficient may vary. Integrated expansion contributes both its
-/// reversible caloric transfer and the corresponding internal-energy storage.
+/// The complete caloric interval admits globally affine Young's modulus and native
+/// energetic hardening, with fixed Poisson ratio and density. Yield stress, Cp and
+/// optional expansion may be piecewise linear. Modulus derivatives and integrated
+/// expansion contribute both reversible heat and their internal-energy storage.
 #[derive(Clone, Debug)]
 pub struct ThermoplasticSource<'a> {
     card: &'a MaterialCard,
@@ -149,6 +151,9 @@ pub struct ThermoplasticSource<'a> {
     // Otherwise the source owner's complete fixed-context line, including cell cuts.
     expansion_knots: Vec<(f64, f64)>,
     minimum_source_heat_capacity_j_kg_k: f64,
+    youngs_temperature_slope_pa_k: f64,
+    hardening_temperature_slope_pa_k: f64,
+    maximum_youngs_modulus_pa: f64,
     reference_temperature_k: f64,
 }
 
@@ -188,7 +193,10 @@ pub struct FeedbackStep<'a, R> {
     pub physical_heat_j: f64,
     /// Signed reversible thermoelastic exchange into the caloric chart [J].
     pub reversible_heat_j: f64,
-    /// Change in T alpha tr(sigma) over the reference volume [J].
+    /// Frozen-history free-energy change caused by sourced E(T)/H(T) [J].
+    /// Add this to mechanical.energy.stored_change_j_m3() times reference volume.
+    pub coefficient_storage_change_j: f64,
+    /// Change in T times mechanical entropy, separate from free energy [J].
     pub thermoelastic_storage_change_j: f64,
     /// Plastic heat plus reversible exchange passed to the thermal proposal [J].
     pub applied_heat_j: f64,
@@ -198,7 +206,7 @@ pub struct FeedbackStep<'a, R> {
     pub temperature_defect_k: f64,
     /// m delta_h - physical dissipation - reversible exchange - boundary heat [J].
     pub thermal_residual_j: f64,
-    /// delta_elastic + delta_hardening + delta(T alpha tr(sigma)) + m delta_h + numerical_loss
+    /// Actual delta_free_energy + delta(T s_mechanical) + m delta_h + numerical_loss
     /// - endpoint mechanical work - boundary heat [J].
     pub combined_residual_j: f64,
 }
@@ -207,10 +215,13 @@ impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
     /// The six source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
-    /// E, nu, H (or Et) and density must be constant over every canonical
-    /// source-line segment at the fixed external conditions. Expansion is
-    /// integrated along its complete pinned source path. Every crossed surface
-    /// cell edge is checked; equal endpoints alone do not suffice.
+    /// E and native H may vary affinely over the complete temperature span;
+    /// nu and density remain fixed. A nonzero uniaxial Et reduction remains
+    /// constant: its generally rational H(T) conversion is not an affine law.
+    /// Expansion is integrated along its complete pinned path. Every crossed
+    /// source knot/surface edge is checked; equal endpoints alone do not suffice.
+    /// Modulus derivative jumps refuse because this caloric chart has no
+    /// strain/history-dependent entropy discontinuity.
     pub fn try_new(
         query: SourceQuery<'a>,
         specific_enthalpy_j_kg: f64,
@@ -385,6 +396,8 @@ impl<'a> ThermoplasticSource<'a> {
             knots[knots.len() - 1].temperature_k,
         )?;
         let mut expansion_knots = Vec::new();
+        let mut youngs_knots = Vec::new();
+        let mut hardening_knots = Vec::new();
         let mut minimum_source_heat_capacity_j_kg_k = f64::INFINITY;
         for property in bundle.properties() {
             let receipt = &property.answer().receipt;
@@ -399,10 +412,9 @@ impl<'a> ThermoplasticSource<'a> {
                     ))?;
             let expansion =
                 name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
-            let fixed = name == YOUNG_MODULUS_PROPERTY
-                || name == POISSON_RATIO_PROPERTY
-                || name == query.hardening_basis.property_name()
-                || name == density_name;
+            let youngs = name == YOUNG_MODULUS_PROPERTY;
+            let hardening = name == query.hardening_basis.property_name();
+            let fixed = name == POISSON_RATIO_PROPERTY || name == density_name;
             // Mechanics, caloric data and linked transport use the same
             // rate-independent source admission.
             admit_rate_independent_property(property, &query.temperature_axis)?;
@@ -430,18 +442,29 @@ impl<'a> ThermoplasticSource<'a> {
                     }
                     expansion_knots.push((temperature, value));
                 }
+                if youngs {
+                    youngs_knots.push((temperature, value));
+                }
+                if hardening {
+                    if !value.is_finite() || value < 0.0 {
+                        return Err(FeedbackError::Invalid(
+                            "hardening must be finite and nonnegative over the complete source path",
+                        ));
+                    }
+                    hardening_knots.push((temperature, value));
+                }
                 if name == receipts[0].property {
                     minimum_source_heat_capacity_j_kg_k =
                         minimum_source_heat_capacity_j_kg_k.min(value);
                 }
                 if fixed && value != property.value_si() {
                     return Err(FeedbackError::Invalid(
-                        "elasticity, hardening and density must be constant on every source-line segment",
+                        "Poisson ratio and reference density must be constant on every source-line segment",
                     ));
                 }
-                if !fixed && !expansion && !positive(value) {
+                if !fixed && !expansion && !hardening && !positive(value) {
                     return Err(FeedbackError::Invalid(
-                        "yield and Cp must be positive at every source-line breakpoint",
+                        "Young's modulus, yield and Cp must be positive at every source-line breakpoint",
                     ));
                 }
             }
@@ -452,11 +475,41 @@ impl<'a> ThermoplasticSource<'a> {
             query.strain_limit,
         )
         .map_err(FeedbackError::Source)?;
+        let youngs_temperature_slope_pa_k = affine_temperature_slope(
+            &youngs_knots,
+            state.temperature_k(),
+            source.law().elastic.youngs,
+        )?;
+        let hardening_source_slope = affine_temperature_slope(
+            &hardening_knots,
+            state.temperature_k(),
+            source.hardening_source().value_si(),
+        )?;
+        let hardening_temperature_slope_pa_k = match query.hardening_basis {
+            HardeningPropertyBasis::PlasticStrainModulus => hardening_source_slope,
+            HardeningPropertyBasis::UniaxialTangentModulus => {
+                if (youngs_temperature_slope_pa_k != 0.0 || hardening_source_slope != 0.0)
+                    && hardening_knots.iter().any(|(_, value)| *value != 0.0)
+                {
+                    return Err(FeedbackError::Invalid(
+                        "temperature-dependent energetic hardening requires the native plastic-strain modulus; E*Et/(E-Et) is not this affine model",
+                    ));
+                }
+                0.0
+            }
+        };
+        let maximum_youngs_modulus_pa = youngs_knots
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(0.0_f64, f64::max);
         let expansion_per_k = source
             .material()
             .property(crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
             .map_or(0.0, |p| p.value_si());
-        if expansion_knots.iter().all(|(_, alpha)| *alpha == expansion_per_k) {
+        if expansion_knots
+            .iter()
+            .all(|(_, alpha)| *alpha == expansion_per_k)
+        {
             expansion_knots.clear();
         }
         let result = Self {
@@ -471,8 +524,15 @@ impl<'a> ThermoplasticSource<'a> {
             expansion_per_k,
             expansion_knots,
             minimum_source_heat_capacity_j_kg_k,
+            youngs_temperature_slope_pa_k,
+            hardening_temperature_slope_pa_k,
+            maximum_youngs_modulus_pa,
             reference_temperature_k: state.temperature_k(),
         };
+        // Affine extrema occur at the span ends; the native owner checks the
+        // elastic tensor, hardening conversion and return-map denominator there.
+        result.resolve_temperature(knots[0].temperature_k)?;
+        result.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
         result.admit_thermoelastic_capacity()?;
         Ok(result)
     }
@@ -573,11 +633,14 @@ impl<'a> ThermoplasticSource<'a> {
             self.source.law().elastic.strain_limit,
         )
         .map_err(FeedbackError::Source)?;
-        if source.law().elastic != self.source.law().elastic
-            || source.law().hardening != self.source.law().hardening
+        if source.law().elastic.poisson != self.source.law().elastic.poisson
+            || self.youngs_temperature_slope_pa_k == 0.0
+                && source.law().elastic.youngs != self.source.law().elastic.youngs
+            || self.hardening_temperature_slope_pa_k == 0.0
+                && source.law().hardening != self.source.law().hardening
         {
             return Err(FeedbackError::Invalid(
-                "elastic and hardening energies changed without reversible caloric terms",
+                "pinned coefficients left the admitted affine thermal free-energy model",
             ));
         }
         Ok(source)
@@ -765,6 +828,9 @@ impl<'a> CaloricPoint<'a> {
             let thermoelastic_storage_change_j =
                 product(self.volume_m3, increment.thermoelastic_storage_change_j_m3)?;
             let mechanical_work_j = product(self.volume_m3, increment.mechanical_work_j_m3)?;
+            let coefficient_storage_change_j =
+                product(self.volume_m3, increment.coefficient_storage_change_j_m3)?;
+            let stored_change_j = product(self.volume_m3, increment.stored_change_j_m3())?;
             let mechanical = increment.mechanical;
             let physical_heat_j =
                 product(self.volume_m3, mechanical.energy.physical_dissipation_j_m3)?;
@@ -772,7 +838,7 @@ impl<'a> CaloricPoint<'a> {
             let thermal_residual =
                 finite(caloric_change - caloric_heat_j - proposal.external_heat_j)?;
             let combined_residual = finite(
-                product(self.volume_m3, mechanical.energy.stored_change_j_m3())?
+                stored_change_j
                     + thermoelastic_storage_change_j
                     + caloric_change
                     + product(self.volume_m3, mechanical.energy.numerical_dissipation_j_m3)?
@@ -806,6 +872,7 @@ impl<'a> CaloricPoint<'a> {
                     mechanical_work_j,
                     physical_heat_j,
                     reversible_heat_j,
+                    coefficient_storage_change_j,
                     thermoelastic_storage_change_j,
                     applied_heat_j,
                     heat_defect_j: defects[1],
@@ -843,6 +910,57 @@ impl<'a> CaloricPoint<'a> {
             tolerances,
         )
     }
+}
+
+/// Admit one differentiable affine source path, including every surface-cell cut.
+/// Only floating-point slope roundoff is tolerated; a resolved derivative jump
+/// would create mechanical entropy/energy discontinuities absent from this chart.
+fn affine_temperature_slope(
+    knots: &[(f64, f64)],
+    reference_k: f64,
+    reference_value: f64,
+) -> Result<f64, FeedbackError> {
+    if knots.len() < 2 {
+        return Err(FeedbackError::Invalid(
+            "affine modulus needs a complete temperature path",
+        ));
+    }
+    if knots.iter().all(|(_, value)| *value == reference_value) {
+        return Ok(0.0);
+    }
+    let first = knots[0];
+    let last = knots[knots.len() - 1];
+    let width = last.0 - first.0;
+    if !positive(width) {
+        return Err(FeedbackError::Invalid(
+            "modulus temperature span is invalid",
+        ));
+    }
+    let slope = finite((last.1 - first.1) / width)?;
+    for pair in knots.windows(2) {
+        let width = pair[1].0 - pair[0].0;
+        if !positive(width) {
+            return Err(FeedbackError::Invalid(
+                "modulus source temperatures must increase",
+            ));
+        }
+        let local = finite((pair[1].1 - pair[0].1) / width)?;
+        let scale = local.abs().max(slope.abs());
+        if (local - slope).abs() > 128.0 * f64::EPSILON * scale {
+            return Err(FeedbackError::Invalid(
+                "elastic and hardening moduli must be globally affine; derivative jumps need a different caloric model",
+            ));
+        }
+    }
+    let expected = finite(slope.mul_add(reference_k - first.0, first.1))?;
+    if (expected - reference_value).abs()
+        > 128.0 * f64::EPSILON * expected.abs().max(reference_value.abs())
+    {
+        return Err(FeedbackError::Invalid(
+            "reference modulus differs from its admitted affine path",
+        ));
+    }
+    Ok(slope)
 }
 
 fn admit_rate_independent_property<E>(

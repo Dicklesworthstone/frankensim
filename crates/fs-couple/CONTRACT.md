@@ -4090,20 +4090,27 @@ through `SourceQuery`. Each native element receives its actual temperature and
 compatible displacement, support reactions and plastic history. The material
 owner supplies physical yield heat and signed reversible exchange to the same
 enthalpy graph, including the existing coupled contact and electrical paths.
-Reports retain elastic/hardening free energy, `T alpha(T) tr(sigma)` internal
+Reports retain actual elastic/hardening free energy, `T s_mechanical` internal
 energy, plastic heat, reversible exchange and numerical loss separately.
-Combined energy and actual nodal-work gates must pass before acceptance.
+Globally affine sourced E(T)/H(T) use the material owner's entropy
+`s=alpha(T) tr(sigma)-(E'/E) psi_elastic-H' p²/2`. The separately exposed
+`coefficient_storage_change_j` corrects native endpoint-modulus element accounts
+and is already included in `stored_mechanical_change_j`; it is never counted
+twice or turned into plastic heat. Combined energy and actual nodal-work gates
+must pass before acceptance, including the existing support-contact path.
 
 Expansion claims remain pinned over the fully solid caloric span. Curves and
 fixed-context surfaces may vary with temperature, including negative/zero
 coefficients; the shared material owner admits a conservative positive
 effective-capacity bound for the complete strain and temperature domain.
-Reference mass, geometry, elastic moduli and energetic hardening remain fixed;
-finite deformation and melting are outside this model. Focused native-mesh
-tests exercise data-only expansion-curve swaps, free and constrained heating,
-actual thermal yielding, energy balance and unchanged thermal inventory on
-capacity refusal. Native execution of the new curve regressions is pending in
-the configured build environment.
+Reference mass, geometry and Poisson ratio remain fixed. E(T) and native H(T)
+may be globally affine over the supported solid span; source-cell derivative
+jumps, finite deformation and melting remain outside this model. Focused
+native-mesh tests exercise data-only expansion and modulus swaps, free and
+constrained heating, two successive loaded plastic increments, independent
+shape/heat/free-energy oracles and unchanged inventory on capacity refusal.
+Native execution of the new modulus regressions is pending in the configured
+build environment.
 
 ### Shared structural and conductive material assignments
 
@@ -4314,9 +4321,11 @@ or alternate caloric model. Numerical dissipation is not converted to heat.
 The existing native tetrahedral plasticity solve and prepared material heat
 network consume the same fixed-context source surfaces. `ThermoplasticSource`
 retains every crossed temperature-line breakpoint, original role pin, material
-identity and typed external condition. At fixed pressure, energetic coefficients
-must remain exactly constant while yield and heat capacity may vary with
-supported temperature; conductivity resolves at the actual thermal endpoint.
+identity and typed external condition. At fixed pressure, Poisson ratio and
+reference density remain constant while native E/H may be globally affine in
+temperature with explicit coefficient work and mechanical entropy. Yield and
+heat capacity may vary over their supported source paths; conductivity resolves
+at the actual thermal endpoint.
 
 The spatial regression changes only the pressure query on identical material
 cards and checks the resulting free-node displacement, plastic history,
