@@ -583,6 +583,7 @@ pub fn network_chain_two_port(
 }
 
 fn validate_medium(gas: &GasState, omega: f64) -> Result<(), DuctError> {
+    crate::validate_gas(gas)?;
     if !omega.is_finite()
         || omega <= 0.0
         || !gas.density.is_finite()

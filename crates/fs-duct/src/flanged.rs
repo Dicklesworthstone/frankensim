@@ -304,6 +304,7 @@ pub fn flanged_pipe_impedance(
     omega: f64,
     modes: usize,
 ) -> Result<C64, DuctError> {
+    crate::validate_gas(state)?;
     if !(radius > 0.0 && radius.is_finite() && omega > 0.0 && omega.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "flanged radiation needs positive finite radius and frequency",

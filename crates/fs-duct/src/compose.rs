@@ -818,13 +818,8 @@ pub fn duct_chain_with_wall(
     options.validate()?;
     poll(&mut cancelled, 0)?;
     let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
-    if !omega.is_finite()
-        || omega <= 0.0
-        || !state.density.is_finite()
-        || state.density <= 0.0
-        || !state.sound_speed.is_finite()
-        || state.sound_speed <= 0.0
-    {
+    crate::validate_gas(state)?;
+    if !omega.is_finite() || omega <= 0.0 {
         return Err(bad(
             "composition requires positive finite gas and angular frequency",
         ));

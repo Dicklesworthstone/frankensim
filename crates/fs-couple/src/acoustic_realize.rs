@@ -1231,32 +1231,10 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
 }
 
 pub(crate) fn validate_external_gas(gas: &GasState) -> Result<(), AcousticRealizeError> {
-    let positive = [
-        gas.temperature, gas.pressure, gas.density, gas.sound_speed,
-        gas.dynamic_viscosity, gas.thermal_conductivity, gas.gamma,
-        gas.specific_gas_constant, gas.specific_heat_cp, gas.prandtl,
-        gas.characteristic_impedance,
-    ].into_iter().all(|value| value.is_finite() && value > 0.0);
-    if !positive || !gas.water_mole_fraction.is_finite()
-        || !(0.0..=1.0).contains(&gas.water_mole_fraction)
-    {
-        return Err(AcousticRealizeError::Ambient(
-            "supplied gas state must contain finite positive thermodynamic/transport coefficients and water mole fraction in [0,1]".into(),
-        ));
-    }
-    let impedance = gas.density * gas.sound_speed;
-    let prandtl = gas.dynamic_viscosity * gas.specific_heat_cp / gas.thermal_conductivity;
-    let zi = gas.characteristic_impedance.abs().max(impedance.abs()).max(1.0);
-    let zp = gas.prandtl.abs().max(prandtl.abs()).max(1.0);
-    if !impedance.is_finite() || !prandtl.is_finite()
-        || (impedance - gas.characteristic_impedance).abs() > 32.0 * f64::EPSILON * zi
-        || (prandtl - gas.prandtl).abs() > 64.0 * f64::EPSILON * zp
-    {
-        return Err(AcousticRealizeError::Ambient(
-            "supplied gas state has independently mutated derived impedance or Prandtl number".into(),
-        ));
-    }
-    Ok(())
+    // Use the same EOS/caloric/transport admission as heat and flow. Checking
+    // only rho*c and Pr would admit a pressure-only edit with stale density,
+    // or a detuned sound speed unrelated to the declared gas composition.
+    gas.validate_coherence().map_err(|error| AcousticRealizeError::Ambient(error.to_string()))
 }
 
 pub(crate) fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
@@ -6236,5 +6214,25 @@ mod arbitrary_gas_realization_tests {
         let mut gas = helium_like();
         gas.prandtl = f64::NAN;
         assert!(matches!(realize_assembly_with_gas(&fixture(), &gas), Err(AcousticRealizeError::Ambient(_))));
+    }
+
+    #[test]
+    fn acoustic_admission_cannot_disagree_with_the_material_eos() {
+        let changes: [fn(&mut GasState); 5] = [
+            |gas| gas.pressure *= 2.0,
+            |gas| gas.temperature *= 1.1,
+            |gas| gas.gamma = 1.3,
+            |gas| gas.specific_gas_constant *= 1.1,
+            |gas| {
+                gas.sound_speed *= 1.1;
+                gas.characteristic_impedance = gas.density * gas.sound_speed;
+            },
+        ];
+        for change in changes {
+            let mut gas = helium_like();
+            change(&mut gas);
+            assert!(matches!(realize_assembly_with_gas(&fixture(), &gas),
+                Err(AcousticRealizeError::Ambient(_))), "accepted split physical state: {gas:?}");
+        }
     }
 }

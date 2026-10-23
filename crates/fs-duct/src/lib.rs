@@ -89,6 +89,8 @@ pub mod flanged;
 pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance};
 /// Lossless variable-area plane-wave DG in the time domain (M2.2-W3a).
 pub mod dg;
+#[cfg(test)]
+mod gas_admission_tests;
 /// Tone holes whose chimney is a chain of duct sections (undercuts).
 mod chimney;
 pub use chimney::{
@@ -449,6 +451,7 @@ pub fn segment_wave(
     omega: f64,
     loss: LossModel,
 ) -> Result<SegmentWave, DuctError> {
+    validate_gas(state)?;
     if !(radius > 0.0 && radius.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "radius must be positive and finite",
@@ -1114,6 +1117,7 @@ pub fn absorbed_spherical_pressure(
     range_m: f64,
     relative_humidity: f64,
 ) -> Result<f64, DuctError> {
+    validate_gas(state)?;
     if !(range_m > 0.0 && range_m.is_finite() && mouth_pressure.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "observer range must be positive and pressures finite",
@@ -1148,6 +1152,7 @@ fn termination_impedance(
     radius: f64,
     omega: f64,
 ) -> Result<(Option<C64>, f64), DuctError> {
+    validate_gas(state)?;
     let ka = omega / state.sound_speed * radius;
     let area = core::f64::consts::PI * radius * radius;
     let z0 = state.density * state.sound_speed / area;
@@ -1181,6 +1186,15 @@ fn termination_impedance(
             ka,
         )),
     }
+}
+
+// GasState is public data, so source-derived and caller-supplied snapshots
+// must enter the same material-owned EOS, caloric and transport checks.
+// This is admission only: no state or coefficient is repaired here.
+pub(crate) fn validate_gas(state: &GasState) -> Result<(), DuctError> {
+    state.validate_coherence().map_err(|_| DuctError::BadParameter {
+        what: "duct requires one coherent material gas state; re-evaluate temperature, pressure and composition together",
+    })
 }
 
 /// Input impedance of the duct at angular frequency `omega`, derived

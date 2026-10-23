@@ -647,16 +647,7 @@ impl DgDuct {
             }
             .into());
         }
-        if !(gas.density.is_finite()
-            && gas.density > 0.0
-            && gas.sound_speed.is_finite()
-            && gas.sound_speed > 0.0)
-        {
-            return Err(DuctError::BadParameter {
-                what: "gas density and sound speed must be finite and positive",
-            }
-            .into());
-        }
+        crate::validate_gas(gas)?;
         if let (DgBoundary::Port(id_in), DgBoundary::Port(id_out)) = (inlet, outlet)
             && id_in == id_out
         {

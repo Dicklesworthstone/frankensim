@@ -315,6 +315,7 @@ pub fn levine_schwinger_impedance(
     omega: f64,
     q: LsQuadrature,
 ) -> Result<C64, DuctError> {
+    crate::validate_gas(state)?;
     if [state.density, state.sound_speed, radius, omega]
         .iter()
         .any(|v| !v.is_finite() || *v <= 0.0)
