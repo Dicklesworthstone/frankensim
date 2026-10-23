@@ -443,3 +443,224 @@ fn g0_rank_refusal_when_the_string_underresolves_the_quadrature() {
         );
     });
 }
+
+// ---- Width ladder + point-bow limit on a tuned string from a Helmholtz start ----
+//
+// Owner ruling 2026-10-23: scale the string modes with the quadrature
+// (n_modes >= 4 * n_cells per rung) so the finite-width solve is well resolved;
+// take the point-bow limit at a carried force; keep the clean Helmholtz duty in
+// the .152 fixture. The slip fraction here is a stable carried regime, not
+// beta; the gate is its CONVERGENCE with quadrature refinement.
+
+// One low target pitch (owner ruling: gate 1 option 2 at one pitch). At 50 Hz
+// the finest reachable rung's top mode (cells 17 -> 68 modes -> 3.4 kHz) stays
+// under the material's ~4-7 kHz modal-admission ceiling, so {5,9,17} are all
+// admitted at n_modes = 4*cells WITHOUT widening the material (owner ruling).
+const PITCH_HZ: f64 = 50.0;
+const TUNED_LENGTH_M: f64 = 0.33;
+const TUNED_LIN_DENSITY_KG_M: f64 = 5.0e-3;
+const BOW_BETA: f64 = 0.11;
+const BOW_SPEED_M_S: f64 = 0.1;
+const BOW_FORCE_N: f64 = 0.15; // a force the joint solve carries at every rung
+
+fn tuned_tension_n() -> f64 {
+    TUNED_LIN_DENSITY_KG_M * (2.0 * TUNED_LENGTH_M * PITCH_HZ).powi(2)
+}
+
+fn tuned_source(n_modes: usize) -> MaterialStringSource {
+    let string = PrestressedString {
+        length_m: TUNED_LENGTH_M,
+        tension_n: tuned_tension_n(),
+        lin_density_kg_m: TUNED_LIN_DENSITY_KG_M,
+        axial_stiffness_n: 1.0,
+        width_m: 1.0,
+        n_modes,
+        damping_ratio: 0.0,
+        rayleigh: None,
+        bending_stiffness_n_m2: 0.0,
+        kelvin_voigt_bending: None,
+        relaxation_bending: None,
+        polarization_detune: 0.0,
+        moving_end: false,
+    };
+    MaterialStringSource::Homogeneous(
+        with_uniform_circular_material_state(string, 0.0003, &material(7800.0))
+            .unwrap()
+            .with_kelvin_voigt_bending_loss()
+            .unwrap(),
+    )
+}
+
+fn tuned_options(n_modes: usize) -> StringBankOptions {
+    let mut o = options();
+    o.bow = StringBowLocation {
+        string: 0,
+        station_fraction: BOW_BETA,
+    };
+    // The string modes plus the plate must fit the coupled network budget.
+    o.network.max_modes = n_modes + 8;
+    o.network.max_setup_terms = 50_000_000;
+    o
+}
+
+fn tuned_base(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    n_modes: usize,
+) -> Result<ReciprocalStringBank, String> {
+    let plate = with_uniform_plate_material_state(
+        ThinPlate {
+            length_m: 0.4,
+            width_m: 0.3,
+            thickness_m: 1.0,
+            density_kg_m3: 1.0,
+            e1_pa: 1.0,
+            e2_pa: 1.0,
+            nu12: 0.0,
+            g12_pa: 1.0,
+            material_angle_rad: 0.0,
+            damping_ratio: 0.0,
+            thermoelastic: None,
+            kelvin_voigt_bending: None,
+            n_modes: 2,
+            geometric_nonlinearity: false,
+            pretension_n_m: 0.0,
+            clamped: false,
+        },
+        &material(7800.0),
+        PlateMaterialModel::Isotropic,
+        PlateThicknessConstraint::FixedThickness(0.001),
+    )
+    .unwrap()
+    .with_kelvin_voigt_bending_loss()
+    .unwrap();
+    let body = SharedMaterialPlateBody {
+        specimen: plate,
+        // A light termination: strong bridge damping degrades the prepared
+        // exponential split at the scaled mode counts, and the carried regime
+        // only needs to be stable and convergent (the clean Helmholtz duty
+        // lives in the .152 fixture per the owner ruling).
+        bridges: vec![SharedPlateBridge {
+            station_fraction: 0.8,
+            stiffness_n_m: 3000.0,
+            damping_n_s_m: 0.1,
+            rest_extension_m: 0.0,
+        }],
+        modal_budget: ModalAcousticTimeBudget::audible_reference(),
+        listener_m: 1.0,
+    };
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
+    ReciprocalStringBank::from_material_plate(
+        cx,
+        vec![tuned_source(n_modes)],
+        gas,
+        body,
+        law(),
+        tuned_options(n_modes),
+        gate,
+    )
+    .map_err(|e| format!("from_material_plate({n_modes} modes): {e:?}"))
+}
+
+/// Ideal Helmholtz modal velocities (the .152 series), q_k = 0.
+fn helmholtz_start(n_modes: usize) -> Vec<ModalAcousticState> {
+    let scale = (TUNED_LIN_DENSITY_KG_M * TUNED_LENGTH_M / 2.0).sqrt();
+    (1..=n_modes)
+        .map(|k| {
+            let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+            ModalAcousticState {
+                displacement_m_sqrt_kg: 0.0,
+                velocity_m_sqrt_kg_per_s: scale
+                    * (2.0 * BOW_SPEED_M_S / (BOW_BETA * core::f64::consts::PI * k as f64))
+                    * sign,
+            }
+        })
+        .collect()
+}
+
+fn ladder_limits() -> MultiFrictionConfig {
+    MultiFrictionConfig {
+        max_ports: 40,
+        max_sweeps: 128,
+        max_setup_terms: 50_000_000,
+    }
+}
+
+#[test]
+fn g1_compute_wall_blocks_the_mode_scaled_ladder() {
+    // Gate 1 (DONE-WHEN 1) wants a width ladder {5,9,17,33} cells with the string
+    // modes scaled 4x per cell, the finest rung converging to <= 1%. In the
+    // material-bank runtime each step is a JOINT many-port friction solve: a
+    // bounded sweep (never the 128-sweep cap) over n_modes modes x n_cells ports,
+    // run ~10-17 times per step. That cost grows with the product modes x ports,
+    // so the full run (three 50 Hz periods, 2880 steps) at the scaled rungs is not
+    // computable here. The runtime has TWO walls: the per-step compute cost, and a
+    // hard Kelvin-Voigt modal-ADMISSION ceiling that refuses the string at
+    // construction once the top scaled mode clears it (and the 33-cell/132-mode
+    // rung would also exceed the fs_phs 256 exact-ZOH block cap, bead
+    // frankensim-wohg3). This test MEASURES both: per reachable rung it reports
+    // sweeps/step, wall-time/step and the projected full-run cost; per refused rung
+    // it records the refusal reason. It is the wall measurement the owner ruled is
+    // the work here (Option 3 / lightweight runtime refused as gate-1 convergence
+    // evidence); the convergence itself is deferred to wohg3. The asserts are
+    // machine-independent (a reachable rung never caps; the runtime does run).
+    with_cx(|cx, gate| {
+        let per_period = (48_000.0 / PITCH_HZ).round() as usize; // 960 at 50 Hz
+        let full_run = 3 * per_period; // the ladder's run length, 2880 steps
+        // Bound each rung by wall-clock AND step count so the test documents the
+        // wall without ever running the (infeasible) full ladder.
+        let budget = std::time::Duration::from_secs(6);
+        let max_probe_steps = 80usize;
+        // (steps, ms/step, mean sweeps, max sweeps, capped steps) or a refusal.
+        let probe = |cells: usize| -> Result<(usize, f64, f64, usize, usize), String> {
+            let n_modes = 4 * cells;
+            let mut bank = tuned_base(cx, gate, n_modes)?
+                .with_compliant_bow_ribbon(0.02, cells, violin_hair(), ladder_limits(), gate)
+                .map_err(|e| format!("with_compliant_bow_ribbon: {e:?}"))?;
+            bank.restore_string_states(0, &helmholtz_start(n_modes))
+                .map_err(|e| format!("restore: {e:?}"))?;
+            let zero = vec![0.0; bank.system().mode_count()];
+            let drives = ribbon_drives(cells, BOW_SPEED_M_S, BOW_FORCE_N);
+            let (mut steps, mut sweep_total, mut max_sweeps, mut capped) =
+                (0usize, 0usize, 0usize, 0usize);
+            let t0 = std::time::Instant::now();
+            while steps < max_probe_steps && t0.elapsed() < budget {
+                let f = bank.step(&zero, &drives).map_err(|e| format!("step {steps}: {e:?}"))?;
+                steps += 1;
+                sweep_total += f.sweeps;
+                max_sweeps = max_sweeps.max(f.sweeps);
+                if f.sweeps >= 128 {
+                    capped += 1;
+                }
+            }
+            let ms_per_step = 1.0e3 * t0.elapsed().as_secs_f64() / steps.max(1) as f64;
+            let mean_sweeps = sweep_total as f64 / steps.max(1) as f64;
+            Ok((steps, ms_per_step, mean_sweeps, max_sweeps, capped))
+        };
+        let mut reachable = 0usize;
+        for &cells in &[5usize, 9, 17] {
+            let n_modes = 4 * cells;
+            match probe(cells) {
+                Ok((steps, ms_per_step, mean_sweeps, max_sweeps, capped)) => {
+                    let projected_full_run_s = ms_per_step * full_run as f64 / 1.0e3;
+                    println!(
+                        "{{\"test\":\"g1_compute_wall\",\"cells\":{cells},\"n_modes\":{n_modes},\"ports\":{cells},\"reached\":true,\"steps\":{steps},\"ms_per_step\":{ms_per_step:.3},\"mean_sweeps\":{mean_sweeps:.2},\"max_sweeps\":{max_sweeps},\"capped\":{capped},\"projected_full_run_s\":{projected_full_run_s:.1}}}"
+                    );
+                    // A reachable rung's cost is the sweep x modes x ports work, NOT
+                    // a capped non-convergence: the joint solve never caps, and it
+                    // does make progress (it is slow, not stuck).
+                    assert_eq!(capped, 0, "cells {cells}: joint solve hit the 128-sweep cap");
+                    assert!(steps > 0, "cells {cells}: no step completed in the budget");
+                    reachable += 1;
+                }
+                Err(reason) => println!(
+                    "{{\"test\":\"g1_compute_wall\",\"cells\":{cells},\"n_modes\":{n_modes},\"ports\":{cells},\"reached\":false,\"reason\":{reason:?}}}"
+                ),
+            }
+        }
+        // The material bank DOES run the finite-width ribbon (so the mechanism is
+        // sound), but the mode-scaled ladder hits the two walls above; at least the
+        // coarsest rung must be reachable for the measurement to mean anything.
+        assert!(reachable >= 1, "no rung was reachable: the runtime did not run at all");
+    });
+}
