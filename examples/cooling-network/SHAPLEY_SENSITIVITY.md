@@ -1,9 +1,11 @@
-# Correlated physical sensitivity through actual cooling solves
+# Physical sensitivity through actual cooling solves
 
 `cooling-network-uq BASE UQ --sensitivity shapley` attributes the variance of the
 cooling response to its original uncertain physical parameters, including their
 declared dependence. It uses `fs_uq::ShapleyExecution` conditional Gaussian
-pairs, not independent-coordinate swaps or surrogate-germ Sobol coefficients.
+pairs for Gaussian dependence, or physical pick-freeze pairs for explicitly
+independent Gaussian/uniform mixtures. It never substitutes independent swaps
+for correlated sampling or reports surrogate-germ Sobol coefficients.
 Every callback still invokes the existing cooling product and its watchdog.
 
 ```sh
@@ -17,10 +19,11 @@ The example declares correlated inlet temperature and component power. Its
 illustrates the interface, not a precision or hardware qualification. For d
 inputs, samples MUST equal N*2*(2^d-1), with N>=2; nothing is rounded, added or
 silently discarded. The existing 10,000-physical-call ceiling applies. Up to
-eight varying Gaussian inputs are supported under explicit independent or
-joint-gaussian laws, including admitted singular correlations. Keep constants
-in the base model. Uniform inputs, zero standard deviations, unknown dependence
-and invalid conditional factors refuse before any physical work or file output.
+eight varying physical inputs are supported. Independent laws may mix Gaussian
+and uniform marginals; joint-gaussian laws require all-Gaussian marginals and
+support admitted singular correlations. Keep constants in the base model.
+Zero uncertainty, unknown dependence, correlated uniforms and invalid conditional
+factors refuse before any physical work or file output.
 
 The original target lowering, names and units are retained. Draws outside the
 physical input domain fail the experiment; they are not clipped or replaced.
@@ -48,6 +51,39 @@ Their sum being one is an algebraic identity, not evidence of accuracy.
 Undefined normalization emits a diagnostic, not invented zero effects.
 There is no confidence interval, convergence decision or continuous-time peak
 bound. The original `--sensitivity sobol` behavior is unchanged.
+
+## Uniform tolerances mixed with Gaussian scatter
+
+`uq-shapley-mixed-hotspot.json` declares Gaussian inlet scatter and independent
+uniform component-power tolerance. Both laws reach the original physical model:
+
+```sh
+frankensim --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-shapley-mixed-hotspot.json \
+  --sensitivity shapley --workers 3
+```
+
+The 24 calls are four complete six-evaluation rows, an interface example rather
+than a precision claim. No uniform is approximated by a Gaussian or sampled at
+its midpoint. Pair coordinates retain the declared marginal, name and unit;
+independence must be explicitly declared, not inferred from bounded supports.
+Epistemic bounds do not automatically define a uniform probability distribution.
+
+Mixed and all-uniform designs report `method: conditional-product-philox`.
+Existing all-Gaussian designs keep `conditional-gaussian-philox`, their original
+samples and their original arithmetic. The effect definition and `shapley.v1`
+schema are unchanged. Serial and parallel execution use the same producer;
+their existing checkpoints bind each uniform endpoint as well as every Gaussian
+parameter. Changing a support or law on restart refuses rather than reweighting
+previous observations. The recovery and failure rules below apply to both.
+
+Native checks for this extension:
+
+```sh
+cargo test -p fs-uq --test product_shapley --test product_shapley_mixed
+cargo test -p fs-cli --test cooling_shapley_mixed
+```
 
 ## Recover every paid conditional half-pair
 

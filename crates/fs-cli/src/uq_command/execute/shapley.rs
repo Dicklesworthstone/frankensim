@@ -1,5 +1,5 @@
-//! Correlated physical-input attribution through the original cooling producer.
-//! No whitening effects, independent-coordinate swaps or surrogate substitute.
+//! Physical-input attribution through the original cooling producer.
+//! Conditional Gaussian dependence or explicitly independent mixed marginals.
 use super::*;
 use fs_uq::{ShapleyExecution, ShapleyReport};
 
@@ -90,13 +90,20 @@ pub(super) fn render(base: &J, config: &Config, report: &ShapleyReport) -> Resul
     let fractions = estimate.conditional_variance_fractions.iter().map(|&v| number_json(v))
         .collect::<Result<Vec<_>>>()?.join(",");
     let width = 2 * (estimate.conditional_variance_fractions.len() - 1);
+    let mixed = config.plan().parameters.iter().any(|parameter|
+        matches!(parameter.kind, fs_uq::UncertaintyKind::AleatoryUniform { .. }));
+    let (method, law) = if mixed {
+        ("conditional-product-philox", "explicitly independent Gaussian/uniform product law")
+    } else {
+        ("conditional-gaussian-philox", "declared Gaussian joint law")
+    };
     let no_claim = format!(
-        "{} Physical-input Shapley variance attribution under the declared Gaussian joint law, not independent-germ Sobol effects, local derivatives or causal effects. Dependence and interactions both contribute. Noisy effects and conditional variance fractions remain unclipped; summing to one does not prove accuracy. Fixed-design sampling supplies no confidence bound, automatic convergence or model validation. A temperature ceiling does not turn this response into a compliance indicator.",
+        "{} Physical-input Shapley variance attribution under the {law}, not independent-germ Sobol effects, local derivatives or causal effects. Dependence and interactions both contribute. Noisy effects and conditional variance fractions remain unclipped; summing to one does not prove accuracy. Fixed-design sampling supplies no confidence bound, automatic convergence or model validation. A temperature ceiling does not turn this response into a compliance indicator.",
         config.qoi.no_claim(),
     );
     Ok(format!(
-        "{{\"schema\":\"frankensim.cooling-network-uq.shapley.v1\",\"authority\":\"estimated-direct-model-shapley\",\"method\":\"conditional-gaussian-philox\",\"status\":\"complete\",\"qoi\":{},\"seed\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"base_samples\":{},\"evaluations_per_row\":{},\"base_output_std_dev_k\":{},\"correlation\":{},\"parameters\":[{}],\"effects\":[{}],\"conditional_variance_fractions\":[{}],\"no_claim\":{}}}\n",
-        config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()),
+        "{{\"schema\":\"frankensim.cooling-network-uq.shapley.v1\",\"authority\":\"estimated-direct-model-shapley\",\"method\":{},\"status\":\"complete\",\"qoi\":{},\"seed\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"base_samples\":{},\"evaluations_per_row\":{},\"base_output_std_dev_k\":{},\"correlation\":{},\"parameters\":[{}],\"effects\":[{}],\"conditional_variance_fractions\":[{}],\"no_claim\":{}}}\n",
+        quote(method), config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()),
         report.evaluations_planned, report.evaluations_attempted, report.base_samples, width,
         optional_number(estimate.base_output_std_dev)?, quote(config.correlation_label),
         config.render_parameters()?, effects, fractions, quote(&no_claim),

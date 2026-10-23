@@ -57,8 +57,9 @@ fn model_failure(message: impl Into<String>) -> Failure {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let help = format!("{HELP}\nCorrelated physical-input variance sensitivity:\n\
---sensitivity shapley supports 1..8 varying Gaussian inputs under explicit\n\
-independent or joint-gaussian dependence. samples=N*2*(2^d-1), N>=2.\n\
+--sensitivity shapley supports 1..8 varying Gaussian/uniform inputs under\n\
+explicit independence, or Gaussian inputs with joint-gaussian dependence.\n\
+samples=N*2*(2^d-1), N>=2. Uniform tolerances are not Gaussian approximations.\n\
 Checkpoint/resume retains every paid conditional half-pair. Repeat the selector\n\
 on resume. Only a complete fixed design publishes effects; no causal or\n\
 confidence claim. Other sampling, mean-control and decision modes conflict.\n\
@@ -83,7 +84,7 @@ Add --qmc-replicates R for parallel randomized QMC with unchanged net layout\n\
 and between-replicate errors. Ordinary Monte Carlo remains the default.\n\
 Add --sensitivity sobol for concurrent A/B/hybrid physical sensitivity with\n\
 the original pairing and indices. Partial rows never yield sensitivity.\n\
-Add --sensitivity shapley for correlated Gaussian physical attribution;\n\
+Add --sensitivity shapley for Gaussian dependence or independent mixed laws;\n\
 conditional pairs and original physical units are retained. See SHAPLEY_SENSITIVITY.md.\n\
 Original samples and reductions retain serial order. Recovery preserves later\n\
 successful siblings behind interrupted calls; worker count may change on resume.\n\
