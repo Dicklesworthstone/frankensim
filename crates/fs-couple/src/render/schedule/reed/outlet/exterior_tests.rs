@@ -4,7 +4,10 @@ use super::*;
 fn independent_exterior_drives_both_feedback_and_receiver_without_replacing_bore_gas() {
     let text = SOURCE.replace("reed 0.0004 0.013 6000 0 0 0.35",
         "reed 0.0004 0.013 6000 0.00001 100 0.35");
-    let explicit = text.replace(RECEIVER, &format!("{RECEIVER}\nexterior 303.15 100000 0.4"));
+    // The receiver is compared with its lossless Rayleigh owner, so the
+    // comparison declares the lossless observer law (ruling 6283).
+    let explicit = text.replace(RECEIVER,
+        &format!("{RECEIVER}\nexterior 303.15 100000 0.4\nobserver_law none"));
     let mut original = ReedPerformance::from_bytes(text.as_bytes(), 37).unwrap();
     let mut changed = ReedPerformance::from_bytes(explicit.as_bytes(), 37).unwrap();
     let external = GasState::try_new_moist_air(303.15, 100000.0, 0.4).unwrap();

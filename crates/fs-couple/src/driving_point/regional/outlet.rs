@@ -131,12 +131,30 @@ impl RegionalDuct {
     pub fn baffled_outlet_with_wall(&self, sample_rate_hz: u32, fft_samples: usize,
         receiver: CircularOutletReceiver, wall: WallModel<'_>)
         -> Result<OutletPressure, OutletError> {
+        let speed = self.exterior_gas().sound_speed;
+        self.baffled_outlet_delayed_at(sample_rate_hz, fft_samples, receiver, wall, speed)
+    }
+
+    /// The same transfer with the receiver's propagation delays referenced to
+    /// `delay_speed_m_s` instead of the exterior's equilibrium speed `c_0`.
+    ///
+    /// A dispersive observer law applied after the receiver supplies its own
+    /// low-frequency excess delay `r (1/c_0 - 1/c_inf)`; its receipt names the
+    /// speed that makes the total low-frequency delay `r / c_0` exactly once.
+    /// The Rayleigh kernel uses the speed only in its delays.
+    ///
+    /// # Errors
+    /// As [`Self::baffled_outlet_with_wall`], and a non-finite or non-positive
+    /// speed.
+    pub fn baffled_outlet_delayed_at(&self, sample_rate_hz: u32, fft_samples: usize,
+        receiver: CircularOutletReceiver, wall: WallModel<'_>, delay_speed_m_s: f64)
+        -> Result<OutletPressure, OutletError> {
         let terminal = self.regions.last().expect("admitted nonempty regional duct");
         let radius_m = terminal.duct.segments.last().expect("admitted axial terminal").outlet_radius();
         let gas = *self.exterior_gas();
         // Geometry/medium/phase/history admission belongs to the shared receiver.
         let mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver,
-            RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })
+            RayleighMedium { density: gas.density, sound_speed: delay_speed_m_s })
             .map_err(OutletError::Receiver)?;
         let exterior_delay_samples = mic.delay_samples;
         let (kernel, axial_delay_samples) = acceleration_kernel(sample_rate_hz, fft_samples,

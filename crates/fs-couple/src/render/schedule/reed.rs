@@ -14,8 +14,17 @@
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects the existing terminal-only Rayleigh observation.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
+//!
+//! Both observers then apply one observer absorption law over their range,
+//! chosen as in `acoustic_realize`: a legacy (T, p, RH) medium gets ISO
+//! 9613-1, and a supplied mixture or thermochemical medium gets
+//! Stokes-Kirchhoff with its omission receipted. An optional
+//! `observer_law none|iso9613|stokes-kirchhoff|relaxation
+//! iso9613-terrestrial-air` record after the observation declares the law
+//! instead. `none` is a receipted lossless choice for analytic oracles.
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::air_path::{ObserverFilter, ObserverFilterReceipt};
 use crate::driving_point::regional::outlet::{OutletError, OutletReceiverInfo};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -112,6 +121,211 @@ fn bad(line: usize, what: &'static str) -> ReedPerformanceError {
     ReedPerformanceError::Input { line, what }
 }
 
+/// The observer law a performance file declares with `observer_law`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclaredObserverLaw {
+    Lossless,
+    Iso9613,
+    StokesKirchhoff,
+    IsoAirRelaxation,
+}
+
+/// The observer law applied to a performance's emitted pressure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReedObserverReceipt {
+    /// The law, its causal realization and its certificates. The baffled
+    /// receiver's propagation delays use `filter.delay_speed_m_s`, so its
+    /// delay plus the filter's low-frequency delay is `r / c_0` once. The
+    /// legacy proxy applies no propagation delay.
+    pub filter: ObserverFilterReceipt,
+    /// The law is applied at the receiver's distance from the outlet centre.
+    /// This is the largest difference from it over the outlet's Rayleigh
+    /// elements [m]. `None` for the legacy proxy.
+    pub range_spread_m: Option<f64>,
+    /// The legacy proxy applies no propagation delay, so its filter's
+    /// low-frequency delay (dispersion plus `filter.latency_s`) is
+    /// uncompensated. A consumer placing the proxy at its range must delay its
+    /// output by this much [s]: `filter.receiver_delay_s`, exactly what the
+    /// baffled receiver applies, so both total `r / c_0`. Negative when the
+    /// filter's delay exceeds the propagation delay at this range. `None` for
+    /// the baffled receiver, which applies it itself.
+    pub consumer_delay_s: Option<f64>,
+}
+
+/// The medium between instrument and listener: the baffled receiver's
+/// exterior gas (by default the outlet's own gas), or the ambient for the
+/// legacy proxy.
+fn observer_medium(
+    baffled: Option<([f64; 3], Option<GasState>)>,
+    ambient: &GasState,
+    outlet: &GasState,
+) -> GasState {
+    match baffled {
+        None => *ambient,
+        Some((_, Some(exterior))) => exterior,
+        Some((_, None)) => *outlet,
+    }
+}
+
+/// Nearest and farthest element ranges of a baffled circular outlet of
+/// `radius_m`, seen from `position_m`.
+fn element_ranges(position_m: [f64; 3], radius_m: f64) -> (f64, f64) {
+    let rho = position_m[0].hypot(position_m[1]);
+    let z = position_m[2];
+    ((rho - radius_m).max(0.0).hypot(z), (rho + radius_m).hypot(z))
+}
+
+/// Largest `|element range - centre range|` over a baffled circular outlet of
+/// `radius_m`, seen from `position_m`.
+fn range_spread(position_m: [f64; 3], radius_m: f64) -> f64 {
+    let centre = position_m[0].hypot(position_m[1]).hypot(position_m[2]);
+    let (near, far) = element_ranges(position_m, radius_m);
+    (far - centre).max(centre - near)
+}
+
+/// A baffled receiver delays each element by its range over the receipt's
+/// delay speed. At the nearest element that delay must keep the receiver's
+/// one-sample minimum after the filter's low-frequency delay is absorbed.
+fn admit_receiver_delay(
+    observer: &ObserverFilter,
+    baffled: Option<([f64; 3], Option<GasState>)>,
+    radius_m: f64,
+    c0: f64,
+) -> Result<(), ReedPerformanceError> {
+    let Some((position, _)) = baffled else { return Ok(()) };
+    let receipt = observer.receipt();
+    let rate = f64::from(receipt.sample_rate_hz);
+    let (near, _) = element_ranges(position, radius_m);
+    let available_samples = near / c0 * rate;
+    let needed_samples = near * receipt.low_frequency_delay_s / receipt.range_m * rate + 1.0;
+    check_receiver_delay(receipt.range_m, available_samples, needed_samples, receipt.budget_energy)
+        .map_err(ReedPerformanceError::Model)
+}
+
+/// The receiver-delay admission itself, on explicit numbers. A 5 cm receiver
+/// at 48 kHz under a dispersive law refuses here; the budget sets where the
+/// law's dispersion can be certified for each law, gas, clock and range.
+fn check_receiver_delay(
+    range_m: f64,
+    available_samples: f64,
+    needed_samples: f64,
+    budget_energy: f64,
+) -> Result<(), AcousticRealizeError> {
+    if available_samples < needed_samples {
+        return Err(AcousticRealizeError::ObserverLatency {
+            range_m,
+            available_samples,
+            needed_samples,
+            budget_energy,
+        });
+    }
+    Ok(())
+}
+
+/// The authored relative humidity of a legacy (T, p, RH) record, recovered
+/// from its state: `x_w = RH e_sat(T) / p` inverted, then accepted only if
+/// [`GasState::try_new_moist_air`] reproduces the state bit for bit.
+fn legacy_relative_humidity(state: &GasState) -> Option<f64> {
+    let (t, p) = (state.temperature, state.pressure);
+    let guess = if state.water_mole_fraction == 0.0 {
+        0.0
+    } else {
+        state.water_mole_fraction * p / fs_material::gas::saturation_pressure_water_pa(t).ok()?
+    };
+    let reproduces = |rh: f64| {
+        (0.0..=1.0).contains(&rh) && GasState::try_new_moist_air(t, p, rh).ok() == Some(*state)
+    };
+    let (mut up, mut down) = (guess, guess);
+    for _ in 0..=16 {
+        if reproduces(up) {
+            return Some(up);
+        }
+        if reproduces(down) {
+            return Some(down);
+        }
+        up = up.next_up();
+        down = down.next_down();
+    }
+    None
+}
+
+/// ISO 9613-1's admission of the observer medium and its relative humidity,
+/// from the medium's own record: a legacy record's U.S. Standard Atmosphere
+/// air, or a thermochemical record's composition. `None` when the medium has
+/// no composition (a mixture record or a resolved field).
+fn iso_admission(
+    record: Option<&GasRecord>,
+    gas: &GasState,
+) -> Result<Option<(fs_material::iso9613::TerrestrialAir, f64)>, AcousticRealizeError> {
+    use fs_material::iso9613::{TerrestrialAir, iso9613_relative_humidity};
+    match record {
+        Some(GasRecord::Legacy(state)) => Ok(legacy_relative_humidity(state).and_then(|rh| {
+            let (rebuilt, air) =
+                TerrestrialAir::moist_air(state.temperature, state.pressure, rh).ok()?;
+            (rebuilt == *gas).then_some((air, rh))
+        })),
+        Some(GasRecord::Thermochemical(resolved)) => {
+            let medium = fs_material::relaxation::RelaxingMedium::from_thermochemical(resolved)
+                .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
+            let air = TerrestrialAir::admit(&medium).map_err(AcousticRealizeError::NonTerrestrialAir)?;
+            let rh = iso9613_relative_humidity(gas.temperature, gas.pressure, gas.water_mole_fraction)
+                .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
+            Ok(Some((air, rh)))
+        }
+        Some(GasRecord::Mixture(_)) | None => Ok(None),
+    }
+}
+
+/// The observer filter for the medium `gas`, as `acoustic_realize` chooses:
+/// declared, or by default ISO 9613-1 for a legacy air record inside ISO's
+/// window, otherwise Stokes-Kirchhoff.
+fn observer_filter(
+    declared: Option<DeclaredObserverLaw>,
+    gas: &GasState,
+    records: &[GasRecord],
+    range_m: f64,
+    rate: u32,
+) -> Result<ObserverFilter, ReedPerformanceError> {
+    let record = records.iter().find(|record| record.state() == gas);
+    let filter = match declared {
+        Some(DeclaredObserverLaw::Lossless) => ObserverFilter::lossless(gas, range_m, rate),
+        Some(DeclaredObserverLaw::StokesKirchhoff) => {
+            ObserverFilter::stokes_kirchhoff(gas, range_m, rate)
+        }
+        Some(DeclaredObserverLaw::Iso9613) => match iso_admission(record, gas) {
+            Ok(Some((air, rh))) => ObserverFilter::iso9613(&air, gas, rh, range_m, rate),
+            Ok(None) => Err(AcousticRealizeError::InvalidDescription {
+                what: "observer_law iso9613 needs a legacy or thermochemical observer gas record",
+            }),
+            Err(error) => Err(error),
+        },
+        Some(DeclaredObserverLaw::IsoAirRelaxation) => match record {
+            Some(GasRecord::Thermochemical(resolved)) => {
+                fs_material::relaxation::RelaxingMedium::from_thermochemical(resolved)
+                    .and_then(|medium| {
+                        fs_material::relaxation::RelaxationAbsorption::iso9613_terrestrial_air()?
+                            .evaluate(&medium)
+                    })
+                    .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))
+                    .and_then(|state| ObserverFilter::molecular_relaxation(&state, range_m, rate))
+            }
+            _ => Err(AcousticRealizeError::InvalidDescription {
+                what: "observer_law relaxation needs a thermochemical observer gas record",
+            }),
+        },
+        None => match iso_admission(record, gas) {
+            Ok(Some((air, rh)))
+                if matches!(record, Some(GasRecord::Legacy(_)))
+                    && fs_material::iso9613::iso9613_absorption(&air, gas, rh, 1.0).is_ok() =>
+            {
+                ObserverFilter::iso9613(&air, gas, rh, range_m, rate)
+            }
+            _ => ObserverFilter::stokes_kirchhoff(gas, range_m, rate),
+        },
+    };
+    filter.map_err(ReedPerformanceError::Model)
+}
+
 /// Source facts; neither a sourced-material receipt nor a fidelity certificate.
 #[derive(Clone, Copy, Debug)]
 pub struct ReedPerformanceInfo {
@@ -160,6 +374,8 @@ pub struct ReedPerformance {
     gas_records: Vec<GasRecord>,
     gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
     steady_gas: Option<SteadyGasPerformance>,
+    observer: ObserverFilter,
+    observer_range_spread_m: Option<f64>,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -365,6 +581,31 @@ impl ReedPerformance {
         let observation =
             outlet::ObservationInput::read_with_gas_sources(&mut r, sources, &mut gas_records)?;
         observation.validate_policy(policy)?;
+        let declared_law = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("observer_law") {
+            let mut row = r.row("observer_law")?;
+            let law = match row.word()? {
+                "none" => DeclaredObserverLaw::Lossless,
+                "iso9613" => DeclaredObserverLaw::Iso9613,
+                "stokes-kirchhoff" => DeclaredObserverLaw::StokesKirchhoff,
+                "relaxation" => {
+                    if row.word()? != "iso9613-terrestrial-air" {
+                        return Err(bad(r.line, "observer relaxation data must be iso9613-terrestrial-air"));
+                    }
+                    DeclaredObserverLaw::IsoAirRelaxation
+                }
+                _ => return Err(bad(
+                    r.line,
+                    "observer_law must be none, iso9613, stokes-kirchhoff or relaxation iso9613-terrestrial-air",
+                )),
+            };
+            row.finish()?;
+            Some(law)
+        } else {
+            None
+        };
+        let observer_range_m = observation.range_m();
+        let baffled = observation.baffled();
         let mut row = r.row("termination")?;
         let termination = match row.word()? {
             "closed" => Termination::Closed,
@@ -568,7 +809,8 @@ impl ReedPerformance {
             compiled_controls: controls.len(),
         };
         let duct = Duct { segments };
-        let (voice, terminal) = if let Some((field, resolution)) = &gas_field {
+        let outlet_radius_m = duct.segments.last().map_or(0.0, Segment::outlet_radius);
+        let (voice, terminal, observer) = if let Some((field, resolution)) = &gas_field {
             use crate::driving_point::regional::{RegionalDuct, field::GasFieldDuctError};
             let regional = match resolution {
                 GasFieldResolution::Midpoint(cells) => {
@@ -587,24 +829,39 @@ impl ReedPerformance {
                 }
             })?;
             segment_gases = regional.segment_gases().to_vec();
-            observation.build_regional(
+            let medium = observer_medium(baffled, &air, regional.outlet_gas());
+            let observer =
+                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+            admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
+            let (voice, terminal) = observation.build_regional(
                 &duct,
                 regional,
                 reed,
                 termination,
                 rate,
                 samples as usize,
-            )?
+                observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+            )?;
+            (voice, terminal, observer)
         } else {
-            observation.build(
+            let outlet_gas = *segment_gases.last().expect("at least one admitted segment");
+            let medium = observer_medium(baffled, &air, &outlet_gas);
+            let observer =
+                observer_filter(declared_law, &medium, &gas_records, observer_range_m, rate)?;
+            admit_receiver_delay(&observer, baffled, outlet_radius_m, medium.sound_speed)?;
+            let (voice, terminal) = observation.build(
                 &duct,
                 &segment_gases,
                 reed,
                 termination,
                 rate,
                 samples as usize,
-            )?
+                observer.receipt().delay_speed_m_s.unwrap_or(medium.sound_speed),
+            )?;
+            (voice, terminal, observer)
         };
+        let observer_range_spread_m =
+            baffled.map(|(position, _)| range_spread(position, outlet_radius_m));
         let mut voice = voice;
         if let Some(lay) = lay {
             voice.set_lay(lay).map_err(ReedPerformanceError::Model)?;
@@ -631,6 +888,8 @@ impl ReedPerformance {
             gas_records,
             gas_field,
             steady_gas,
+            observer,
+            observer_range_spread_m,
         })
     }
 
@@ -642,6 +901,19 @@ impl ReedPerformance {
     /// Admission scope; diagnostic output must not be used as acceptance audio.
     pub const fn observation_policy(&self) -> ObservationPolicy {
         self.observation_policy
+    }
+    /// The observer absorption law applied to the emitted pressure.
+    #[must_use]
+    pub const fn observer(&self) -> ReedObserverReceipt {
+        let filter = *self.observer.receipt();
+        ReedObserverReceipt {
+            filter,
+            range_spread_m: self.observer_range_spread_m,
+            consumer_delay_s: match self.observer_range_spread_m {
+                None => Some(filter.receiver_delay_s),
+                Some(_) => None,
+            },
+        }
     }
     /// Read-only access to sample-addressed controls and retained state clocks.
     #[must_use]
@@ -858,6 +1130,17 @@ impl<'a> Row<'a> {
             return Err(bad(self.line, "unexpected extra field"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ReedPerformance {
+    /// A fresh filter for this performance's observer law, rebuilt from its
+    /// receipt alone, to apply the same law to an unabsorbed reference.
+    pub(super) fn reference_observer(&self, medium: &GasState) -> ObserverFilter {
+        let filter = self.observer().filter;
+        ObserverFilter::for_law(filter.absorption.law, medium, None, filter.range_m, filter.sample_rate_hz)
+            .expect("the receipt's law rebuilds")
     }
 }
 

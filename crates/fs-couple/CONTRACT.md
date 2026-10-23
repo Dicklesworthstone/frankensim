@@ -1939,6 +1939,69 @@ clarinet is one filling of those objects.
   `xtask/tests/observer_relaxation_amount.rs` gates the amount on a rendered
   plucked string at 100 m. The humidity change is gated against ISO 9613-1,
   and the oxygen change against the law with declared rates.
+  Streaming renderers apply the same laws through `air_path::ObserverFilter`,
+  a causal FIR built once per law, range and clock. The reed performance
+  (`render::schedule::reed`) applies it to both observers, the legacy
+  `listener_m` proxy and the `baffled_outlet` receiver. It chooses as above:
+  ISO 9613-1 for a legacy (T, p, RH) medium, Stokes-Kirchhoff (with the
+  omission receipted) for a supplied mixture or thermochemical medium, or the
+  `observer_law none|iso9613|stokes-kirchhoff|relaxation
+  iso9613-terrestrial-air` record. `none` (`GasAbsorptionModel::Lossless`) is
+  a receipted lossless choice for comparisons with lossless analytic oracles,
+  never a default. `ReedPerformance::observer` returns the receipt.
+  How each law is made causal:
+  - Molecular relaxation: its own causal transfer.
+  - ISO 9613-1: each O2 and N2 term by its exact complex Debye
+    (Kramers-Kronig) pair, so the magnitude is ISO's exactly and the dispersion
+    is its own. The classical term is the in-band minimum phase.
+  - Stokes-Kirchhoff: the in-band minimum phase. The receipt names the band
+    where `omega tau_v << 1` fails.
+  A minimum phase built from the in-band magnitude is not used where
+  dispersion exists, because it cannot see absorption above Nyquist. For air
+  at RH 50 % and 30 m, against the direct causal relaxation transfer:
+
+  | Grid Nyquist | Worst in-band complex error | LF delay (physical 34.5 us) |
+  |---|---|---|
+  | 24 kHz | 2.0 | 20.2 us |
+  | 48 kHz | 1.07 | 27.4 us |
+  | 192 kHz | 0.11 | 33.8 us |
+
+  A dispersive transfer sampled only to Nyquist rings before `t = 0`. Its
+  excess phase at Nyquist is nonzero, so the periodic DFT spectrum jumps there,
+  and no zero-latency causal FIR drops the precursor below a fixed fraction.
+  That is a property of band-limited dispersive transfers, not of one law. Its
+  FIR is therefore delayed by a sub-sample alignment `d` (making the Nyquist
+  bin real) plus the fewest whole samples `D` for the precursor to meet the
+  certificate. Each receipt's certificate (`budget_energy`) is
+  `min(OBSERVER_TRUNCATION_ENERGY = 1e-9, OBSERVER_UNCERTAINTY_MARGIN = 1e-3 x
+  alpha_uncertainty_energy)` of the response energy. `alpha_uncertainty_energy`
+  is what ISO 9613-1's stated +-10 % on alpha is in the same measure. The
+  dropped energy therefore sits three orders below the law's own uncertainty
+  at every range, and short ranges pay more padding. The receipt prints `d`,
+  `D`, the budget, the latency and the realized dropped energy. There is no
+  fixed range floor: a baffled receiver whose own delay cannot absorb the
+  filter's refuses (`ObserverLatency`, naming `observer_law none`), wherever the
+  physics puts that for its law, gas, clock and range. A 5 cm receiver at
+  48 kHz in air refuses.
+  Precursor energy left before `-D`, ISO companion, air, 48 kHz (prototype):
+
+  | Range | Alignment | D = 16 | D = 64 | D = 256 | D = 1024 |
+  |---|---|---|---|---|---|
+  | 0.5 m | none | 3.1e-5 | 8.0e-6 | 1.9e-6 | 3.7e-7 |
+  | 0.5 m | d | 1.7e-9 | 3.3e-11 | 5.5e-13 | 9.4e-15 |
+  | 30 m | none | 2.7e-4 | 7.1e-5 | 1.7e-5 | 3.4e-6 |
+  | 30 m | d | 3.0e-7 | 6.3e-9 | 1.1e-10 | 1.8e-12 |
+  The filter is referenced to its front. The baffled receiver's propagation
+  delays use the receipt's `delay_speed_m_s`
+  (`RegionalDuct::baffled_outlet_delayed_at`), so receiver delay plus the
+  filter's low-frequency delay (dispersion and latency) is `r / c_0` exactly
+  once. A receiver too close to absorb it refuses with
+  `AcousticRealizeError::ObserverLatency` (range, available and needed
+  samples). The law is applied at the receiver's distance from the outlet
+  centre; `range_spread_m` bounds the difference over the Rayleigh elements.
+  The proxy has no propagation delay, so its filter delay is uncompensated.
+  `ReedObserverReceipt::consumer_delay_s` is the delay a consumer must apply
+  to place the proxy as the baffled path is placed: both total `r / c_0`.
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a

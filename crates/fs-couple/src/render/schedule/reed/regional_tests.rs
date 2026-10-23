@@ -52,11 +52,12 @@ fn regional_input_matches_direct_material_and_voice_construction_at_every_sample
         let mut direct = ReedBoreVoice::new_with_segment_gases(&geometry(), &gases, reed(mass),
             Termination::UnflangedOpen, PlateBank::default(), 1.0, 48000, 4801, None).unwrap();
         let schedule = GestureSchedule::from_canonical_bytes(text.split_once("\nschedule\n").unwrap().1.as_bytes()).unwrap();
+        let mut observer = actual.reference_observer(&gases[0]);
         for n in 0..4801 {
             direct.set_blowing_pressure(schedule.sample("blow", n*700/48000).unwrap());
             let mut a = [0.0]; let mut b = [0.0];
             actual.block(&mut a).unwrap(); direct.step_block(&mut b).unwrap();
-            assert_eq!(a[0].to_bits(), b[0].to_bits());
+            assert_eq!(a[0].to_bits(), observer.process(b[0]).to_bits());
             assert_eq!(motion(voice(&actual)), motion(&direct));
         }
         assert_eq!(render(&text, 37), render(&text, 113));
@@ -77,11 +78,12 @@ fn uniform_explicit_regions_preserve_the_original_reed_initialization_and_runtim
             Termination::UnflangedOpen, PlateBank::default(), 1.0, 48000, 4801, None).unwrap();
         assert_eq!(motion(voice(&actual)), motion(&original));
         let schedule = GestureSchedule::from_canonical_bytes(text.split_once("\nschedule\n").unwrap().1.as_bytes()).unwrap();
+        let mut observer = actual.reference_observer(&gas);
         for n in 0..4801 {
             original.set_blowing_pressure(schedule.sample("blow", n*700/48000).unwrap());
             let mut a = [0.0]; let mut b = [0.0];
             actual.block(&mut a).unwrap(); original.step_block(&mut b).unwrap();
-            assert_eq!(a[0].to_bits(), b[0].to_bits());
+            assert_eq!(a[0].to_bits(), observer.process(b[0]).to_bits());
             assert_eq!(motion(voice(&actual)), motion(&original));
         }
     }

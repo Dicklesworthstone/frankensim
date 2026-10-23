@@ -52,12 +52,19 @@ fn complete_reed_input_matches_direct_physics_for_legacy_air_and_all_five_specie
                 blowing_pressure_pa: 0.0, attack_s: 0.0,
             }, Termination::UnflangedOpen, PlateBank::default(), 1.0, 48000, 4801, None).unwrap();
             let schedule = GestureSchedule::from_canonical_bytes(text.split_once("\nschedule\n").unwrap().1.as_bytes()).unwrap();
+            // The default observer law: ISO 9613-1 for the legacy (T, p, RH)
+            // records, Stokes-Kirchhoff for the supplied mixture. The direct
+            // reference receives the same law, rebuilt from the receipt.
+            let law = loaded.observer().filter.absorption.law;
+            assert_eq!(matches!(law, crate::air_path::GasAbsorptionModel::Iso9613Air { .. }),
+                !declaration.starts_with("mixture"), "{declaration}");
+            let mut observer = loaded.reference_observer(&gas);
             let actual = render(&text, 37);
             for (n, pressure) in actual.iter().enumerate() {
                 voice.set_blowing_pressure(schedule.sample("blow", n as u64*700/48000).unwrap());
                 let mut expected = [0.0];
                 voice.step_block(&mut expected).unwrap();
-                assert_eq!(pressure.to_bits(), expected[0].to_bits(), "{declaration} mass={mass} sample={n}");
+                assert_eq!(pressure.to_bits(), observer.process(expected[0]).to_bits(), "{declaration} mass={mass} sample={n}");
             }
         }
     }

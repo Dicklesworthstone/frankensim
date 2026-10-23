@@ -57,6 +57,26 @@ impl ObservationInput {
         Ok(observation)
     }
 
+    /// Distance the observer law covers: the proxy's listener distance, or the
+    /// baffled receiver's distance from the outlet centre.
+    pub(super) fn range_m(&self) -> f64 {
+        match self {
+            Self::Legacy(distance) => *distance,
+            Self::Baffled { receiver, .. } => {
+                let [x, y, z] = receiver.position_m;
+                x.hypot(y).hypot(z)
+            }
+        }
+    }
+
+    /// The baffled receiver's position and its authored exterior gas.
+    pub(super) fn baffled(&self) -> Option<([f64; 3], Option<GasState>)> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Baffled { receiver, exterior } => Some((receiver.position_m, *exterior)),
+        }
+    }
+
     pub(super) fn validate_termination(&self, termination: Termination, line: usize)
         -> Result<(), ReedPerformanceError> {
         if matches!(self, Self::Baffled { .. }) && !matches!(termination, Termination::FlangedOpen) {
@@ -65,16 +85,20 @@ impl ObservationInput {
         Ok(())
     }
 
+    /// `delay_speed_m_s` references the baffled receiver's propagation delays
+    /// (the observer law's receipt names it); the proxy has no such delay.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build(self, duct: &Duct, gases: &[GasState], reed: BeatingReed,
-        termination: Termination, rate: u32, samples: usize)
+        termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         let regional = RegionalDuct::new(duct, gases)
             .map_err(|error| ReedPerformanceError::Model(map_drive(DrivingPointError::Duct(error))))?;
-        self.build_regional(duct, regional, reed, termination, rate, samples)
+        self.build_regional(duct, regional, reed, termination, rate, samples, delay_speed_m_s)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_regional(self, duct: &Duct, regional: RegionalDuct, reed: BeatingReed,
-        termination: Termination, rate: u32, samples: usize)
+        termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
         if let Self::Legacy(distance) = self {
             let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
@@ -102,7 +126,8 @@ impl ObservationInput {
                     .map_err(map_drive)
             }).map_err(ReedPerformanceError::Model)?;
         let grid = voice.line.history().len();
-        let mut pressure = regional.baffled_outlet(rate, grid, receiver, None)
+        let mut pressure = regional.baffled_outlet_delayed_at(rate, grid, receiver,
+            fs_duct::WallModel::from_pin(None), delay_speed_m_s)
             .map_err(ReedPerformanceError::Outlet)?;
         // Sample -1 exists in the original feedback history. Supply exactly
         // that same wave once, before sample zero, to the terminal transfer.
@@ -145,8 +170,14 @@ impl ReedPerformance {
     pub fn pressure_block(&mut self, output: &mut [f64]) -> Result<(), ReedPerformanceError> {
         self.validate_sample_count(output.len() as u64).map_err(ReedPerformanceError::Render)?;
         self.renderer.context().validate_block_len(output.len()).map_err(ReedPerformanceError::Render)?;
+        // The observer law acts on emitted pressure only, after the receiver:
+        // the mechanics and feedback never see it.
         let Some(terminal) = &mut self.terminal else {
-            return self.renderer.block(output).map_err(ReedPerformanceError::Render);
+            self.renderer.block(output).map_err(ReedPerformanceError::Render)?;
+            for slot in output.iter_mut() {
+                *slot = self.observer.process(*slot);
+            }
+            return Ok(());
         };
         for slot in output {
             let mut proxy = [0.0];
@@ -155,7 +186,7 @@ impl ReedPerformance {
                 unreachable!("reed performance owns exactly one reed voice")
             };
             match terminal.pressure.step(voice.p_plus_prev) {
-                Ok(pressure) => *slot = pressure,
+                Ok(pressure) => *slot = self.observer.process(pressure),
                 Err(error) => {
                     terminal.failure = Some(error.clone());
                     return Err(ReedPerformanceError::Outlet(error));

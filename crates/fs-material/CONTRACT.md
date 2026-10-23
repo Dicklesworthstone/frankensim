@@ -733,7 +733,11 @@ relaxation law's own policy) or with the legacy moist-air state
 (`TerrestrialAir::moist_air`, U.S. Standard Atmosphere 1976 dry air). Any
 other composition is refused by `Iso9613Refusal`, which names the species:
 a foreign species (He, SF6, ...), O2 or N2 off ISO's dry fraction, or CO2
-above 1e-3. Pr is DERIVED, never an
+above 1e-3. `iso9613::iso9613_terms` exposes ISO's own decomposition, its
+classical coefficient and each relaxing species' strength and `f_r`.
+Consumers that need ISO's dispersion (its exact Debye pairs) build it from
+there, not from a second transcription. `iso9613_relative_humidity` inverts
+ISO's humidity-to-water conversion. Pr is DERIVED, never an
 input — the emergent ~0.71 for air is the built-in kinetic-theory
 falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 200..600 K, monotone-worsening) is asserted as the relation's honest

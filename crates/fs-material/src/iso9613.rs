@@ -89,14 +89,7 @@ pub fn iso9613_absorption_neper_per_m(
     let t_over_t0 = t / T0_K;
     let p_over_p0 = pressure_pa / P0_PA;
     let freq_hz = omega / (2.0 * core::f64::consts::PI);
-
-    // ISO saturation vapour pressure: psat/p0 = 10^C with
-    // C = -6.8346 (T01/T)^1.261 + 4.6151.
-    let t01_over_t = T01_K / t;
-    let c_sat = -6.8346 * det::exp(1.261 * det::ln(t01_over_t)) + 4.6151;
-    let psat_over_p0 = det::exp(c_sat * core::f64::consts::LN_10);
-    // Molar concentration of water vapour, *percent*.
-    let h = 100.0 * relative_humidity * psat_over_p0 * P0_PA / pressure_pa;
+    let h = water_percent(t, pressure_pa, relative_humidity);
 
     let (fr_o, fr_n) = relaxation_frequencies(t_over_t0, p_over_p0, h);
 
@@ -106,6 +99,81 @@ pub fn iso9613_absorption_neper_per_m(
     let classical = 1.84e-11 * det::exp(0.5 * det::ln(t_over_t0)) / p_over_p0;
     let molecular = det::exp(-2.5 * det::ln(t_over_t0)) * (x_o + x_n);
     finite_absorption(f2 * (classical + molecular), "Np/m")
+}
+
+// ISO's molar water concentration in percent, from its saturation fit
+// psat/p0 = 10^C with C = -6.8346 (T01/T)^1.261 + 4.6151.
+fn water_percent(temperature_k: f64, pressure_pa: f64, relative_humidity: f64) -> f64 {
+    let t01_over_t = T01_K / temperature_k;
+    let c_sat = -6.8346 * det::exp(1.261 * det::ln(t01_over_t)) + 4.6151;
+    let psat_over_p0 = det::exp(c_sat * core::f64::consts::LN_10);
+    100.0 * relative_humidity * psat_over_p0 * P0_PA / pressure_pa
+}
+
+/// ISO 9613-1's absorption at `(T, p, h_r)` as its own terms:
+/// `alpha(f) = classical f^2 + sum_j strength_j f^2 / (f_r,j + f^2 / f_r,j)`,
+/// O2 first, then N2.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Iso9613Terms {
+    /// `1.84e-11 (T/T0)^{1/2} (p0/p)` [Np/(m Hz^2)].
+    pub classical_np_per_m_hz2: f64,
+    /// Per relaxing species: `(T/T0)^{-5/2} a_j e^{-theta_j/T}` [Np/(m Hz)]
+    /// with ISO's `a_O = 0.01275`, `a_N = 0.1068`, and `f_r,j` [Hz].
+    pub relaxation: [(f64, f64); 2],
+}
+
+/// [`Iso9613Terms`] at `(T, p, h_r)`, with the same window as
+/// [`iso9613_absorption_neper_per_m`].
+///
+/// # Errors
+/// As [`iso9613_absorption_neper_per_m`], without the frequency.
+pub fn iso9613_terms(
+    temperature_k: f64,
+    pressure_pa: f64,
+    relative_humidity: f64,
+) -> Result<Iso9613Terms, MaterialError> {
+    iso9613_absorption_neper_per_m(temperature_k, pressure_pa, relative_humidity, 1.0)?;
+    let t = temperature_k;
+    let t_over_t0 = t / T0_K;
+    let (fr_o, fr_n) = relaxation_frequencies(
+        t_over_t0,
+        pressure_pa / P0_PA,
+        water_percent(t, pressure_pa, relative_humidity),
+    );
+    let scale = det::exp(-2.5 * det::ln(t_over_t0));
+    Ok(Iso9613Terms {
+        classical_np_per_m_hz2: 1.84e-11 * det::exp(0.5 * det::ln(t_over_t0))
+            / (pressure_pa / P0_PA),
+        relaxation: [
+            (scale * 0.01275 * det::exp(-2239.1 / t), fr_o),
+            (scale * 0.1068 * det::exp(-3352.0 / t), fr_n),
+        ],
+    })
+}
+
+/// ISO's relative-humidity coordinate of a gas whose water mole fraction is
+/// `water_mole_fraction`, by ISO's own saturation fit: the inverse of the
+/// humidity-to-water conversion inside [`iso9613_absorption_neper_per_m`].
+///
+/// # Errors
+/// [`MaterialError::Parameters`] outside ISO's window, or for a water fraction
+/// that is negative or above ISO's saturation.
+pub fn iso9613_relative_humidity(
+    temperature_k: f64,
+    pressure_pa: f64,
+    water_mole_fraction: f64,
+) -> Result<f64, MaterialError> {
+    admit_temperature_pressure(temperature_k, pressure_pa)?;
+    let relative_humidity =
+        100.0 * water_mole_fraction / water_percent(temperature_k, pressure_pa, 1.0);
+    if !(relative_humidity.is_finite() && (0.0..=1.0).contains(&relative_humidity)) {
+        return Err(MaterialError::Parameters {
+            what: format!(
+                "water mole fraction {water_mole_fraction} is not between dry and ISO 9613's saturation"
+            ),
+        });
+    }
+    Ok(relative_humidity)
 }
 
 fn admit_temperature_pressure(temperature_k: f64, pressure_pa: f64) -> Result<(), MaterialError> {
@@ -654,6 +722,37 @@ mod tests {
             iso9613_absorption(&admitted, &dry_air, 0.5, omega),
             Err(MaterialError::Parameters { .. })
         ));
+    }
+
+    /// ISO's own terms reassemble its absorption to rounding across its domain.
+    #[test]
+    fn iso_terms_reassemble_the_absorption() {
+        for t in [253.15, 293.15, 323.15] {
+            for rh in [0.0, 0.2, 0.8, 1.0] {
+                let terms = iso9613_terms(t, 101_325.0, rh).expect("terms");
+                for f in [50.0, 1_000.0, 8_000.0, 20_000.0] {
+                    let f2 = f * f;
+                    let relaxation: f64 = terms
+                        .relaxation
+                        .iter()
+                        .map(|(strength, fr)| strength * f2 / (fr + f2 / fr))
+                        .sum();
+                    let rebuilt = terms.classical_np_per_m_hz2 * f2 + relaxation;
+                    let direct = iso9613_absorption_neper_per_m(
+                        t,
+                        101_325.0,
+                        rh,
+                        2.0 * core::f64::consts::PI * f,
+                    )
+                    .expect("iso");
+                    assert!(
+                        (rebuilt / direct - 1.0).abs() <= 1e-13,
+                        "T={t} RH={rh} f={f}"
+                    );
+                }
+            }
+        }
+        assert!(iso9613_terms(100.0, 101_325.0, 0.5).is_err());
     }
 
     #[test]
