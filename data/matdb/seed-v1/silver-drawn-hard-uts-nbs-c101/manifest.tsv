@@ -1,0 +1,7 @@
+frankensim.matdb-manifest.v3
+pack_id	silver-drawn-hard-uts-nbs-c101
+redistribution	permitted	Work of the US Government (Circular of the Bureau of Standards No. 101, Government Printing Office 1921); public domain; retain circular number, edition, table and page
+citation	Bureau of Standards (1921), Physical Properties of Materials: I. Strengths and Related Properties of Metals and Certain Other Engineering Materials, Circular of the Bureau of Standards No. 101, Edition No. 1 (preliminary, February 9, 1921), Table 25 (Properties of miscellaneous metals and alloys, experimental results unless otherwise noted) p.46 row Silver, Ag 100, drawn, hard; https://nvlpubs.nist.gov/nistpubs/Legacy/circ/nbscircular101.pdf (sha256 f0b0f0218a7bc686a1cb4e2654b299e3a423e5b2d0ea275b13644a5b90cc2666)
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature

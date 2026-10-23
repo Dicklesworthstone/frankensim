@@ -1,0 +1,21 @@
+frankensim.matdb-source.v1
+observation	c447-3801-hard-drawn	Silver, hard-drawn	NBS C447 Table 60 p.419 serial 3801 (reference [579]): modulus of elasticity and Miscellaneous columns	The modulus of elasticity column prints 10,900 kips/in2, converted at 6.894757293168 MPa per kip/in2; the Miscellaneous column prints shear modulus 3,900 kips/in2, Poisson's ratio 0.392 and specific gravity 10.43, stored as density 10430 kg/m3 (the water reference is not printed; it moves the third figure by under 0.01 percent). The isotropic relation E/(2(1+nu)) gives 26.99 GPa against the printed 26.89 GPa shear modulus (0.4 percent), so the shear modulus is not stored separately. No strength, yield, elongation or wire diameter is printed for this specimen. Normal (room) temperature, not stated numerically; admitted at T = 293.15 K. The annealed silver of serial 3802 (same reference) prints 10,600 kips/in2, Poisson's ratio 0.369 and specific gravity 10.49: drawing raises the modulus and lowers the density
+observation	c447-table67-silver-thermal	Silver (element, Ag), NBS C447 Table 67 thermal columns	NBS Circular C447 Table 67 p.460, row Silver: coefficient of linear thermal expansion 18.9 x 10^-6 per deg C, specific heat 0.056 cal/g/deg C and thermal conductivity 4.08 W cm^-1 deg C^-1, each printed at room temperature	Room temperature admitted at T = 293.15 K. Specific heat converted at 4.184 J/cal (the circular does not name its calorie; the 15-degree and international-table calories differ by under 0.1 percent, below the two printed figures), 0.056 cal/g/K = 234.3 J/kg/K; conductivity converted at 100 (W/m/K) per (W/cm/K); the zero of 4.08 is faint in the scan and was read on a 500 dpi rendering. The same row prints density 10.49 g/cm3 at 20 C and modulus 10,300 kips/in2 for the element; the hard-drawn values of serial 3801 are stored instead, because a string core is drawn wire
+scalar	density	c447-3801-hard-drawn	density	10430	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	293.15	293.15	K
+scalar	young-modulus	c447-3801-hard-drawn	young_modulus	75152.8545	MPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	T	293.15	293.15	K
+scalar	poisson-ratio	c447-3801-hard-drawn	poisson_ratio	0.392	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	T	293.15	293.15	K
+scalar	thermal-expansion	c447-table67-silver-thermal	linear_thermal_expansion_coefficient	18.9e-6	K^-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	T	293.15	293.15	K
+scalar	specific-heat	c447-table67-silver-thermal	specific_heat_capacity	234.304	J/kg/K	constant
+uncertainty	specific-heat	unstated	-	-	-	-
+validity	specific-heat	T	293.15	293.15	K
+scalar	thermal-conductivity	c447-table67-silver-thermal	thermal_conductivity	408	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	T	293.15	293.15	K
