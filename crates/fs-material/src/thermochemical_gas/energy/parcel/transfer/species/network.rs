@@ -199,7 +199,10 @@ pub fn exchange_candidate(
         for (species,change) in &budget.species {
             let value = before.get(species).copied().unwrap_or(0.0);
             let updated = value+change.value;
-            if !positive(updated) || (change.value != 0.0 && updated == value) {
+            // A net increment below half an ulp of the inventory rounds away. That is
+            // refused only when it exceeds the declared mass budget; smaller residues
+            // stay bounded by the global species balance below.
+            if !positive(updated) || (updated == value && change.value.abs() > controls.mass_tolerance_kg) {
                 return Err(Error::Invalid("selective network exhausted or lost a species increment"));
             }
             target.insert(species.clone(),updated);
