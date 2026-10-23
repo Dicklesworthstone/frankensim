@@ -1,5 +1,5 @@
 frankensim.matdb-source.v1
-observation	wh-clear-wood	Engelmann spruce (Picea engelmannii) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species and the source warns values vary within and between species; the source reports representative coefficients of variation separately in its Table 5-6 without per-value confidence metadata, so runtime uncertainty stays Unstated; bending MOE is printed with span-to-depth 14 shear deflection included and the chapter states it may be increased by 10 percent to remove that effect, which is how the derived young_modulus_longitudinal row is computed; axis convention: L longitudinal (grain), R radial, T tangential, matching the instrument-axis-convention file in this directory; Table 5-3a specific gravity is ovendry-weight over volume-at-12-percent basis, so density = 1000 * SG * 1.12 kg/m3 at 12 percent moisture content
+observation	wh-clear-wood	Engelmann spruce (Picea engelmannii) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species and the source warns values vary within and between species; the source reports representative coefficients of variation separately in its Table 5-6 without per-value confidence metadata, so runtime uncertainty stays Unstated; bending MOE is printed with span-to-depth 14 shear deflection included and the chapter states it may be increased by 10 percent to remove that effect, which is how the derived young_modulus_longitudinal row is computed; axis convention: L longitudinal (grain), R radial, T tangential, matching the instrument-axis-convention file in this directory; Table 5-3a specific gravity is ovendry-weight over volume-at-12-percent basis, so density = 1000 * SG * 1.12 kg/m3 at 12 percent moisture content; moisture-content adjustment parameters: green bending MOE 7100 MPa (Table 5-3a, green row), the Pg of Equation (5-3), valid below Mp; Mp = 25 percent (not in Table 5-13; the chapter text: "for other species, Mp = 25 may be assumed"); volumetric shrinkage green to ovendry 11.0 percent (Table 4-3) and fiber saturation point 30 percent ("If MCfs is not known, 30% MC can be used as an approximation", Equation (4-9) text), valid below it
 scalar	et-over-el	wh-clear-wood	et_over_el	0.059	1	constant
 uncertainty	et-over-el	unstated	-	-	-	-
 validity	et-over-el	moisture_content	12	12	%
@@ -45,3 +45,15 @@ validity	specific-gravity	moisture_content	12	12	%
 scalar	density-12pct	wh-clear-wood	density	392.0	kg/m3	constant
 uncertainty	density-12pct	unstated	-	-	-	-
 validity	density-12pct	moisture_content	12	12	%
+scalar	moe-green	wh-clear-wood	moisture_law_green_bending_modulus	7100	MPa	constant
+uncertainty	moe-green	unstated	-	-	-	-
+validity	moe-green	moisture_content	0	25	%
+scalar	mp-intersection	wh-clear-wood	moisture_law_intersection_moisture_content	25	%	constant
+uncertainty	mp-intersection	unstated	-	-	-	-
+validity	mp-intersection	moisture_content	0	25	%
+scalar	shrinkage-volumetric	wh-clear-wood	volumetric_shrinkage_green_to_ovendry	11.0	%	constant
+uncertainty	shrinkage-volumetric	unstated	-	-	-	-
+validity	shrinkage-volumetric	moisture_content	0	30	%
+scalar	fiber-saturation	wh-clear-wood	fiber_saturation_moisture_content	30	%	constant
+uncertainty	fiber-saturation	unstated	-	-	-	-
+validity	fiber-saturation	moisture_content	0	30	%

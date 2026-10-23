@@ -73,6 +73,8 @@ pub mod visco;
 pub mod visco_hyper;
 /// Passive full-tensor Prony memory with work-conjugate stress and heat.
 pub mod visco_tensor;
+/// Wood equilibrium moisture content and the FPL moisture-content adjustments of stiffness and density.
+pub mod wood_moisture;
 
 pub use calibrate::{CalibrationFit, calibrate_bilinear};
 pub use elastic::{IsotropicElastic, OrthotropicElastic};

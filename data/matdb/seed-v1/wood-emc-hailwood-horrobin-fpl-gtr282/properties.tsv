@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	fpl-emc-equation	Wood in general: the species-independent equilibrium moisture content of the Wood Handbook (no species named)	Hailwood-Horrobin form fitted by Simpson (1973) to the EMC data of the 1955 Wood Handbook; Table 4-2 (temperature -1.1 to 132.2 C, relative humidity 5 to 95 percent) is calculated from it	EMC(%) = (1800/W) [K h/(1 - K h) + (K1 K h + 2 K1 K2 K^2 h^2)/(1 + K1 K h + K1 K2 K^2 h^2)], h the relative humidity as a decimal, with W = 349 + 1.29 T + 0.0135 T^2, K = 0.805 + 0.000736 T - 0.00000273 T^2, K1 = 6.27 - 0.00938 T - 0.000303 T^2, K2 = 1.91 + 0.0407 T - 0.000293 T^2 for T in degrees Celsius, as printed (Equation 4-5). The polynomial argument is the Celsius temperature, so the linear and quadratic coefficients carry K-1 and K-2 (a Celsius degree equals a kelvin) and an evaluator must subtract 273.15 K first. Validity is the span of Table 4-2, which the chapter says was calculated from this equation; outside it the fit is not documented. The form is a sorption (desorption-averaged) EMC, not a hysteresis model
+scalar	numerator	fpl-emc-equation	wood_emc_hailwood_horrobin_numerator	1800	1	constant
+uncertainty	numerator	unstated	-	-	-	-
+validity	numerator	temperature	271.95	405.35	K
+validity	numerator	relative_humidity	0.05	0.95	1
+scalar	w-c0	fpl-emc-equation	wood_emc_hailwood_horrobin_w_constant	349	1	constant
+uncertainty	w-c0	unstated	-	-	-	-
+validity	w-c0	temperature	271.95	405.35	K
+validity	w-c0	relative_humidity	0.05	0.95	1
+scalar	w-c1	fpl-emc-equation	wood_emc_hailwood_horrobin_w_per_celsius	1.29	K-1	constant
+uncertainty	w-c1	unstated	-	-	-	-
+validity	w-c1	temperature	271.95	405.35	K
+validity	w-c1	relative_humidity	0.05	0.95	1
+scalar	w-c2	fpl-emc-equation	wood_emc_hailwood_horrobin_w_per_celsius_squared	0.0135	K-2	constant
+uncertainty	w-c2	unstated	-	-	-	-
+validity	w-c2	temperature	271.95	405.35	K
+validity	w-c2	relative_humidity	0.05	0.95	1
+scalar	k-c0	fpl-emc-equation	wood_emc_hailwood_horrobin_k_constant	0.805	1	constant
+uncertainty	k-c0	unstated	-	-	-	-
+validity	k-c0	temperature	271.95	405.35	K
+validity	k-c0	relative_humidity	0.05	0.95	1
+scalar	k-c1	fpl-emc-equation	wood_emc_hailwood_horrobin_k_per_celsius	0.000736	K-1	constant
+uncertainty	k-c1	unstated	-	-	-	-
+validity	k-c1	temperature	271.95	405.35	K
+validity	k-c1	relative_humidity	0.05	0.95	1
+scalar	k-c2	fpl-emc-equation	wood_emc_hailwood_horrobin_k_per_celsius_squared	-0.00000273	K-2	constant
+uncertainty	k-c2	unstated	-	-	-	-
+validity	k-c2	temperature	271.95	405.35	K
+validity	k-c2	relative_humidity	0.05	0.95	1
+scalar	k1-c0	fpl-emc-equation	wood_emc_hailwood_horrobin_k1_constant	6.27	1	constant
+uncertainty	k1-c0	unstated	-	-	-	-
+validity	k1-c0	temperature	271.95	405.35	K
+validity	k1-c0	relative_humidity	0.05	0.95	1
+scalar	k1-c1	fpl-emc-equation	wood_emc_hailwood_horrobin_k1_per_celsius	-0.00938	K-1	constant
+uncertainty	k1-c1	unstated	-	-	-	-
+validity	k1-c1	temperature	271.95	405.35	K
+validity	k1-c1	relative_humidity	0.05	0.95	1
+scalar	k1-c2	fpl-emc-equation	wood_emc_hailwood_horrobin_k1_per_celsius_squared	-0.000303	K-2	constant
+uncertainty	k1-c2	unstated	-	-	-	-
+validity	k1-c2	temperature	271.95	405.35	K
+validity	k1-c2	relative_humidity	0.05	0.95	1
+scalar	k2-c0	fpl-emc-equation	wood_emc_hailwood_horrobin_k2_constant	1.91	1	constant
+uncertainty	k2-c0	unstated	-	-	-	-
+validity	k2-c0	temperature	271.95	405.35	K
+validity	k2-c0	relative_humidity	0.05	0.95	1
+scalar	k2-c1	fpl-emc-equation	wood_emc_hailwood_horrobin_k2_per_celsius	0.0407	K-1	constant
+uncertainty	k2-c1	unstated	-	-	-	-
+validity	k2-c1	temperature	271.95	405.35	K
+validity	k2-c1	relative_humidity	0.05	0.95	1
+scalar	k2-c2	fpl-emc-equation	wood_emc_hailwood_horrobin_k2_per_celsius_squared	-0.000293	K-2	constant
+uncertainty	k2-c2	unstated	-	-	-	-
+validity	k2-c2	temperature	271.95	405.35	K
+validity	k2-c2	relative_humidity	0.05	0.95	1
