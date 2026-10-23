@@ -1,6 +1,62 @@
 frankensim.specimen-body-mode-outcome.v1
-id	band_lo_hz	band_hi_hz	registered_rule_outcome	candidate_rank	candidate_f_hz	signed_offset_hz	note
-a0	270	290	not found: no mode has a neck share of 0.2 or more, the largest is 0.195	11	312.61	22.61	rank 11 has the largest net cavity volume change of the modes below 400 Hz (0.117 per unit modal mass) and the largest neck share (0.195), 0.005 under the registered threshold, which is not relaxed; the offset is from the band top; rank 9 at 278.61 Hz lies inside the band with neck share 0.008
-cbr	380	420	not found: the registered rule starts above the air mode, which was not found	none	none	none	outside the registered chain and for information only: the lowest mode whose top displacement is odd in x at 0.6 or more is rank 7 at 237.90 Hz (odd 0.61, waist share 0.40; the registered text gives no waist threshold, 0.3 was used for this look), 142 Hz under the band; ranks 15 to 18 (385.01, 396.08, 413.53, 419.00 Hz) lie inside it and are not odd-dominated
-b1-	430	480	not found: the registered chain is broken at cbr	none	none	none	outside the chain and for information only: the lowest even mode with opposite plate signs and a small volume change above rank 7 is rank 9 at 278.61 Hz (odd 0.17, net dV 0.019), 151 Hz under the band; ranks 19 to 21 (429.56, 449.15, 475.09 Hz) lie inside it
-b1+	510	580	not found: the registered chain is broken at b1-	none	none	none	outside the chain and for information only: the lowest even mode with equal plate signs above rank 9 is rank 10 at 303.78 Hz, 206 Hz under the band; ranks 23 to 25 (512.26, 517.46, 554.45 Hz) lie inside it
+run	id	band_lo_hz	band_hi_hz	registered_rule_outcome	candidate_rank	candidate_f_hz	signed_offset_hz	note
+vex-n5	a0	270	290	found, MISS	1	241.28	-28.7	rank 1 at 241.28 Hz (neck share 0.944); the corrected cavity record (2.0610 L instead of the origin-dependent facet sum 1.9653 L): this A0 supersedes the base-n5 value, the geometry and every other record of the table are the same
+vex-n5	cbr	380	420	found, MISS	3	480.73	60.7	rank 3 at 480.73 Hz (odd 0.99, waist share 0.59); unchanged by the cavity record (it does not couple to the air): 480.73 against 480.75 Hz
+vex-n5	b1-	430	480	not found	none	none	none	not found
+vex-n5	b1+	510	580	not found	none	none	none	not found
+vex-n6	a0	270	290	found, MISS	1	240.56	-29.4	rank 1 at 240.56 Hz (neck share 0.944)
+vex-n6	cbr	380	420	found, MISS	3	480.72	60.7	rank 3 at 480.72 Hz (odd 0.99, waist share 0.59)
+vex-n6	b1-	430	480	not found	none	none	none	not found
+vex-n6	b1+	510	580	not found	none	none	none	not found
+base-n5	a0	270	290	found, MISS	1	245.75	-24.2	rank 1 at 245.75 Hz (neck share 0.938)
+base-n5	cbr	380	420	found, MISS	3	480.75	60.8	rank 3 at 480.75 Hz (odd 0.99, waist share 0.59); the registered text says 'concentrated at the waist' without a number; the classifier used a waist share of 0.3; the outcome is the same for any threshold up to 0.58 (the mode has 0.585)
+base-n5	b1-	430	480	not found	none	none	none	not found; ranks 4 to 6 above the CBR mode (522.17, 621.58, 648.83 Hz) all have top and back displacement of the same sign along the outward directors, the rule needs opposite signs; the registered B1- definition (opposite signs along the outward directors, net volume change below 20 percent of A0, above the CBR mode) CONTRADICTS the page named as its source, which says (read after the run) that B1- and B1+ both have a significant volume change with the plates moving in opposite directions: the rule was mis-specified, the outcome stays as registered; by that description the only mode with a large volume change besides A0 is rank 4 at 522.17 Hz and none lies in the B1- band
+base-n5	b1+	510	580	not found	none	none	none	not found; the chain stops at b1-; for information only, outside the chain: rank 4 at 522.17 Hz is even in x (odd fraction 0.30), has top and back of the same sign and the largest net cavity volume change of the list, and lies inside the band
+base-n6	a0	270	290	found, MISS	1	245.00	-25.0	rank 1 at 245.00 Hz (neck share 0.939)
+base-n6	cbr	380	420	found, MISS	3	480.74	60.7	rank 3 at 480.74 Hz (odd 0.99, waist share 0.59)
+base-n6	b1-	430	480	not found	none	none	none	not found
+base-n6	b1+	510	580	not found	none	none	none	not found
+wh10	a0	270	290	found, MISS	1	245.65	-24.3	rank 1 at 245.65 Hz (neck share 0.942)
+wh10	cbr	380	420	found, MISS	3	482.33	62.3	rank 3 at 482.33 Hz (odd 0.99, waist share 0.60)
+wh10	b1-	430	480	not found	none	none	none	not found
+wh10	b1+	510	580	not found	none	none	none	not found
+wh12	a0	270	290	found, MISS	1	249.57	-20.4	rank 1 at 249.57 Hz (neck share 0.949)
+wh12	cbr	380	420	found, MISS	3	504.41	84.4	rank 3 at 504.41 Hz (odd 0.94, waist share 0.55)
+wh12	b1-	430	480	not found	none	none	none	not found
+wh12	b1+	510	580	not found	none	none	none	not found
+alpha-0.1	a0	270	290	found, MISS	1	245.75	-24.2	rank 1 at 245.75 Hz (neck share 0.938)
+alpha-0.1	cbr	380	420	found, MISS	3	480.72	60.7	rank 3 at 480.72 Hz (odd 0.99, waist share 0.59)
+alpha-0.1	b1-	430	480	not found	none	none	none	not found
+alpha-0.1	b1+	510	580	not found	none	none	none	not found
+alpha-10	a0	270	290	found, MISS	1	245.76	-24.2	rank 1 at 245.76 Hz (neck share 0.938)
+alpha-10	cbr	380	420	found, MISS	3	480.96	61.0	rank 3 at 480.96 Hz (odd 0.99, waist share 0.59)
+alpha-10	b1-	430	480	not found	none	none	none	not found
+alpha-10	b1+	510	580	not found	none	none	none	not found
+tw004	a0	270	290	found, MISS	1	245.01	-25.0	rank 1 at 245.01 Hz (neck share 0.937)
+tw004	cbr	380	420	found, MISS	3	478.51	58.5	rank 3 at 478.51 Hz (odd 0.99, waist share 0.59)
+tw004	b1-	430	480	not found	none	none	none	not found
+tw004	b1+	510	580	not found	none	none	none	not found
+tw018	a0	270	290	found, MISS	1	242.33	-27.7	rank 1 at 242.33 Hz (neck share 0.930)
+tw018	cbr	380	420	found, MISS	3	470.61	50.6	rank 3 at 470.61 Hz (odd 0.99, waist share 0.59)
+tw018	b1-	430	480	not found	none	none	none	not found
+tw018	b1+	510	580	not found	none	none	none	not found
+scw098	a0	270	290	found, MISS	1	249.79	-20.2	rank 1 at 249.79 Hz (neck share 0.946)
+scw098	cbr	380	420	found, MISS	3	495.74	75.7	rank 3 at 495.74 Hz (odd 0.97, waist share 0.60)
+scw098	b1-	430	480	not found	none	none	none	not found
+scw098	b1+	510	580	not found	none	none	none	not found
+scw102	a0	270	290	found, MISS	1	241.58	-28.4	rank 1 at 241.58 Hz (neck share 0.931)
+scw102	cbr	380	420	found, MISS	3	466.42	46.4	rank 3 at 466.42 Hz (odd 0.98, waist share 0.58)
+scw102	b1-	430	480	not found	none	none	none	not found
+scw102	b1+	510	580	not found	none	none	none	not found
+fplshear	a0	270	290	found, MISS	1	245.19	-24.8	rank 1 at 245.19 Hz (neck share 0.936)
+fplshear	cbr	380	420	found, MISS	3	463.55	43.6	rank 3 at 463.55 Hz (odd 0.99, waist share 0.58)
+fplshear	b1-	430	480	not found	none	none	none	not found
+fplshear	b1+	510	580	not found	none	none	none	not found
+npost	a0	270	290	found, MISS	1	202.91	-67.1	rank 1 at 202.91 Hz (neck share 0.749); the registered rules applied to a configuration that was NOT registered (the body without the soundpost, chosen after the first result because a measured body-only violin exists); information only
+npost	cbr	380	420	found, MISS	4	456.92	36.9	rank 4 at 456.92 Hz (odd 0.99, waist share 0.58); the registered rules applied to a configuration that was NOT registered (the body without the soundpost, chosen after the first result because a measured body-only violin exists); information only
+npost	b1-	430	480	not found	none	none	none	not found; the registered rules applied to a configuration that was NOT registered (the body without the soundpost, chosen after the first result because a measured body-only violin exists); information only
+npost	b1+	510	580	not found	none	none	none	not found; the registered rules applied to a configuration that was NOT registered (the body without the soundpost, chosen after the first result because a measured body-only violin exists); information only
+cracked-base	a0	270	290	not found	none	none	none	SUPERSEDED (cracked model). not found
+cracked-base	cbr	380	420	not found	none	none	none	SUPERSEDED (cracked model). not found
+cracked-base	b1-	430	480	not found	none	none	none	SUPERSEDED (cracked model). not found
+cracked-base	b1+	510	580	not found	none	none	none	SUPERSEDED (cracked model). not found

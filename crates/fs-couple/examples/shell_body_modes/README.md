@@ -28,16 +28,22 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
 - `gen_violin_shell_assembly.py SPECIMEN_DIR OUT.tsv H_MM [key=value ...]` writes the table from the specimen
   tables (options: `scale_xz`, `thickness_shift_mm` as declared sensitivities; `bar`, `post`, `bridge` = 0 or 1;
   `zone_step_top_mm`, `zone_step_back_mm`, `min_patch`, `edge`; `fanfix=1` repairs the vertices where a component meets itself,
-  which some scaled meshes need and the base table does not). Every choice that is not a table number is a
-  `meta` row of the output.
+  which some scaled meshes need and the base table does not; `cavity_volume=exact` records the air volume enclosed by the
+  inner skins, 2.0610 L for the base table, instead of the default facet sum, 1.9653 L, which is origin dependent for open surfaces;
+  `uniform_t_mm` gives every plate zone one thickness, a weld diagnostic). With every option at its default the output is
+  byte-identical to the committed `shell-assembly-h8.tsv`. Every choice that is not a table number is a `meta` row of the output.
 - `check_shell_assembly.py TABLE name=kg/m3 ...` prints per component the facet-against-director alignment,
   triangle quality and mass, every tie's gap (about 1e-9 m when the generator is right) and the cavity volume, and
   refuses (as the owner's code does) a component that is not edge-connected, a vertex with several fans, or neighbouring
   facets whose normals differ by more than 0.9 in cosine.
 - `classify_violin_modes.py TABLE OUTPUT.txt SHAPES.tsv` applies the identification rules of `body-mode-preregistration.tsv`
   to a run and prints each named mode against its band.
-- `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready maple pack from the committed
-  Sonderegger 2013 and Laemmlein 2020 packs.
+- `make_results.py OUT.tsv UNUSED RUN=OUTPUT.txt ...` and `make_outcome.py OUT.tsv RUN=CLASSIFY_OUTPUT.txt ...` write
+  `body-mode-results.tsv` (the air-coupled mode list of each run) and `body-mode-outcome.tsv` (the registered rules per run);
+  a run whose name starts with `cracked` is labelled superseded.
+- `gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=fpl]` writes the shell-ready maple pack from the committed
+  Sonderegger 2013 and Laemmlein 2020 packs; `shear=fpl` writes the declared shear sensitivity pack (Wood Handbook
+  sugar maple G_LR and G_LT ratios times E_L) under the name `...-fplshear-shell`.
 
 Modelled: top plate with its two f-holes, back plate, one rib strip, bass bar (wall shell on the top), soundpost
 (tube shell between the inner skins), bridge (shell on the outer skin at its two feet), enclosed air with the two

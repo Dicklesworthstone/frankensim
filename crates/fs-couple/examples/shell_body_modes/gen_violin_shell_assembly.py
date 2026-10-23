@@ -27,6 +27,8 @@ BAR_ON = opts.get("bar", "1") == "1"
 POST_ON = opts.get("post", "1") == "1"
 BRIDGE_ON = opts.get("bridge", "1") == "1"
 EDGE = float(opts.get("edge", "0.45"))  # spacing of the outline and attachment-ring vertices in units of H: a fine ring keeps the ring band narrow
+UNIFORM_T = float(opts.get("uniform_t_mm", "0"))  # diagnostic: every plate zone gets this thickness, so that splitting a plate into zones must not change any frequency (a test of the welds)
+CAVITY_EXACT = opts.get("cavity_volume", "facet") == "exact"  # "exact": the air volume enclosed by the inner skins (the divergence sum over open midsurfaces is origin dependent, P13 mail 5583); default keeps the old facet sum
 ONLY = opts.get("only", "")  # diagnostic: "top" or "back" builds that plate alone (with bar=0 post=0 bridge=0), free in space, to read its modes without the box
 FANFIX = opts.get("fanfix", "0") == "1"  # repairs for meshes that leave a vertex with several fans in one component (needed by some of the scaled sensitivity meshes; the base table does not need them)
 MIN_PATCH = int(opts.get("min_patch", "24"))  # interior zone patches smaller than this many triangles are merged into their neighbour
@@ -668,7 +670,7 @@ def zone_components(prefix, fld, V, T, chains, ring, feature_chains, circles, pa
         counters[kind] += 1
         name = "%s-%s%d" % (prefix, kind, counters[kind])
         w = tri_area[tris]
-        t_eq = float(np.cbrt(np.sum(w * tc[tris] ** 3) / w.sum())) + T_SHIFT
+        t_eq = (float(np.cbrt(np.sum(w * tc[tris] ** 3) / w.sum())) if not UNIFORM_T else UNIFORM_T) + T_SHIFT
         comp = Comp(name, pack, t_eq, True, True)
         comp.regions = [(0.0, 0.0, 1.0)]
         comp.zone_kind = kind
@@ -1119,6 +1121,36 @@ def main():
         hole_area += ah
     inner = sum(area_by[c.name] * c.t / 2.0 for c in components if c.cavity)
     vol_inner = vol_mid - inner
+    if CAVITY_EXACT:
+        # exact inner volume: integral over the planform of the rib's inner skin (the rib ring moved in by half the rib thickness) of the distance between the inner skins of the back and the top, on a 0.5 mm grid,
+        # minus the shells of the bass bar and the soundpost (the model's solids inside the box); the f-holes are closed by the planar patches, so the volume under them counts
+        t_rib_half = 0.5 * float(np.percentile(rr_t, 10)) if False else 0.5 * [c.t for c in components if c.name == "rib"][0]
+        cen = ring.mean(axis=0)
+        dirs = ring - cen
+        ring_in = ring.copy()
+        n_ = len(ring)
+        for i in range(n_):
+            tv = ring[(i + 1) % n_] - ring[i - 1]
+            tv = tv / np.hypot(*tv)
+            nv = np.array([tv[1], -tv[0]])
+            if nv @ dirs[i] > 0:
+                nv = -nv  # inward
+            ring_in[i] = ring[i] + nv * t_rib_half
+        lo, hi = ring_in.min(axis=0), ring_in.max(axis=0)
+        gx, gz = np.meshgrid(np.arange(lo[0], hi[0], 0.5) + 0.25, np.arange(lo[1], hi[1], 0.5) + 0.25)
+        G = np.c_[gx.ravel(), gz.ravel()]
+        G = G[inside_many(ring_in, G)]
+        h_in = (back_fld.y(G) - 0.5 * back_fld.t(G)) - (top_fld.y(G) + 0.5 * top_fld.t(G))
+        vol_exact = float(np.sum(h_in)) * 0.25
+        solids = 0.0
+        for c in components:
+            if c.name in ("bass-bar", "soundpost"):
+                Pn = np.array([nn[:3] for nn in c.nodes])
+                a_c = sum(0.5 * np.linalg.norm(np.cross(Pn[j] - Pn[i], Pn[k] - Pn[i])) for (i, j, k, g) in c.tris)
+                solids += a_c * c.t
+        meta("cavity_volume_facet_sum_L", "%.4f (the divergence-theorem sum minus half thicknesses; open surfaces make it origin dependent, so it is NOT the cavity record when cavity_volume=exact)" % (vol_inner / 1e6))
+        meta("cavity_volume_exact", "inner-skin planform integral %.4f L (planform = the rib ring moved in by half the rib thickness %.3f mm, %d grid cells of 0.5 mm, height from the inner skins of back and top) minus the shells of the bass bar and soundpost %.4f L" % (vol_exact / 1e6, t_rib_half, len(G), solids / 1e6))
+        vol_inner = vol_exact - solids
     t_holes = float(np.mean(top_fld.t(to_plan(np.vstack(hole_rings)))))
     # the two f-holes as one circular neck of the same conductance: each hole is a thin-plate aperture of its elliptic equivalent (K0 = 2 a AGM(1, b/a)) in series with its through-thickness
     # resistance t / A; the neck radius follows from K = pi r^2 / (t + 2 x 0.8216 r), the library's flanged end correction at both ends, at the top thickness at the holes
@@ -1130,7 +1162,7 @@ def main():
     r_eq = (1.6432 * k_tot + math.sqrt((1.6432 * k_tot) ** 2 + 4 * math.pi * k_tot * t_holes)) / (2 * math.pi)
     f_rigid = 343.0 / (2 * math.pi) * math.sqrt(k_tot * 1e-3 / (vol_inner * 1e-9))
     meta("cavity_volume_midsurface_L", "%.4f" % (vol_mid / 1e6))
-    meta("cavity_volume_L", "%.4f (midsurface facets oriented outward, the f-holes closed by planar patches at their mean height, minus half the thickness of every wall)" % (vol_inner / 1e6))
+    meta("cavity_volume_L", ("%.4f (the exact inner-skin volume minus the bass bar and soundpost shells, see cavity_volume_exact)" if CAVITY_EXACT else "%.4f (midsurface facets oriented outward, the f-holes closed by planar patches at their mean height, minus half the thickness of every wall)") % (vol_inner / 1e6))
     meta("neck", "one circular neck of the conductance of the two f-holes: per hole the equivalent ellipse (semi-axes %s mm) has thin-plate conductance K0 %s mm, in series with t/A at the top thickness %.2f mm gives %s mm; total %.2f mm; the neck radius that gives it with the flanged end correction 0.8216 r at both ends is %.2f mm (area %.0f mm2 against the hole area %.0f mm2), length = the top thickness; rigid-wall Helmholtz frequency of this neck and cavity %.0f Hz (c = 343 m/s); the equivalent-ellipse conductance of a curved f-hole is an approximation (UNKNOWN size of the error; named in the pre-registered scope)" % (
         " and ".join("%.1f x %.1f" % (k[3], k[4]) for k in k_parts), " and ".join("%.1f" % k[1] for k in k_parts), t_holes, " and ".join("%.1f" % k[0] for k in k_parts), k_tot, r_eq, math.pi * r_eq ** 2, hole_area, f_rigid))
     meta("scale_and_shift", "plan-view scale %.4f (declared sensitivity u-inplane-scale), thickness shift %.3f mm (declared sensitivity u-segmentation-error)" % (SC, T_SHIFT))

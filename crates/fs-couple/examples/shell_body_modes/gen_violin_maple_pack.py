@@ -7,18 +7,21 @@ orchestrator: T and RT/LT shear loss are unknown in every open source). The nine
 omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. A constant loss factor per mode is recovered by the example as
 C_hyst(omega) = (omega_ref / omega) C_KV, and the packs of the wood-loss lane replace these numbers.
 
-usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT
+usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=fpl]
 Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020}/properties.tsv and writes OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
+With shear=fpl (a declared SENSITIVITY, not the registered model) G_LR and G_LT are the Wood Handbook sugar maple ratios times the same E_L (glr_over_el 0.111, glt_over_el 0.063 of the committed pack
+maple-sugar-fpl-gtr282) instead of the ultrasonic values; G_RT stays ultrasonic (the Wood Handbook set has no G_RT ratio); the pack is then named ...-fplshear-shell.
 """
 import math
 import os
 import sys
 
 REPO, OUT = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
+FPL_SHEAR = "shear=fpl" in sys.argv[3:]
 SEED = REPO + "/data/matdb/seed-v1/"
 OMEGA_MAX = 12566.37
 OMEGA_REF = 2.0 * math.pi * 200.0
-PACK = "violin-maple-sycamore-sonderegger2013-shell"
+PACK = "violin-maple-sycamore-sonderegger2013-shell" + ("-fplshear" if FPL_SHEAR else "")
 
 
 def scalars(pack):
@@ -37,6 +40,11 @@ so = scalars("maple-sycamore-sonderegger2013")
 la = scalars("maple-sycamore-loss-lammlein2020")
 E_L = so["young_modulus_longitudinal_bending"] * 1e6
 E_R = 0.5 * (so["young_modulus_radial_tension"] + so["young_modulus_radial_compression"]) * 1e6
+if FPL_SHEAR:
+    fpl = scalars("maple-sugar-fpl-gtr282")
+    so["shear_modulus_lr_ultrasonic"] = fpl["glr_over_el"] * E_L / 1e6
+    so["shear_modulus_lt_ultrasonic"] = fpl["glt_over_el"] * E_L / 1e6
+    print("shear=fpl: G_LR = %.3f x E_L = %.0f MPa, G_LT = %.3f x E_L = %.0f MPa (sugar maple ratios, Wood Handbook GTR-282)" % (fpl["glr_over_el"], so["shear_modulus_lr_ultrasonic"], fpl["glt_over_el"], so["shear_modulus_lt_ultrasonic"]))
 vals = dict(density=so["row:density-normal-climate"], young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=so["shear_modulus_lr_ultrasonic"] * 1e6,
             shear_modulus_13=so["shear_modulus_lt_ultrasonic"] * 1e6, shear_modulus_23=so["shear_modulus_rt_ultrasonic"] * 1e6)
 eta = dict(L=la["loss_factor_longitudinal"], LR=la["loss_factor_shear_lr"])
@@ -71,9 +79,10 @@ AXES = ("Axis convention: material axis 1 = L (grain), axis 2 = R (across the gr
 OBS = [
     ("sond-shell", "Sycamore maple (Acer pseudoplatanus L.), clear wood of ONE tree of Eastern Switzerland, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH",
      "Sonderegger et al. (2013) Eur J Wood Prod 71:91-99 as committed in the pack maple-sycamore-sonderegger2013: E_L = the static bending modulus %.0f MPa; E_R = the mean of the static radial tension %.0f and "
-     "compression %.0f MPa = %.0f MPa; nu_LR = the mean over tension and compression %.2f; G_LR %.0f, G_LT %.0f and G_RT %.0f MPa are ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)" % (
+     "compression %.0f MPa = %.0f MPa; nu_LR = the mean over tension and compression %.2f; G_LR %.0f, G_LT %.0f and G_RT %.0f MPa are %s" % (
          so["young_modulus_longitudinal_bending"], so["young_modulus_radial_tension"], so["young_modulus_radial_compression"], E_R / 1e6, so["nu_lr"], so["shear_modulus_lr_ultrasonic"],
-         so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"]),
+         so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"],
+         "SENSITIVITY values: G_LR and G_LT from the Wood Handbook sugar maple ratios times E_L, G_RT ultrasonic" if FPL_SHEAR else "ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)"),
      "The shear moduli are not audio-band (ultrasonic moduli exceed static ones) and the single tree is not the violin's wood. A violin-grade (curly, resonance) maple of the committed Spycher pack has "
      "E_L about 9700 to 10000 MPa and E_R about 1650 to 1700 MPa dynamically: carry that as the sensitivity. " + AXES),
     ("laemmlein-maple-loss", "Sycamore maple violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished",
