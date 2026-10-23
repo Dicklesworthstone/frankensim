@@ -1,13 +1,18 @@
-//! Play one kit piece through a list of strokes: `perform PIECE HITS.csv OUT.wav SECONDS`.
+//! Play one kit piece through a list of strokes: `perform PIECE HITS.csv OUT.wav SECONDS [--preset-heads]`.
 //! HITS.csv holds `time_s,speed_m_s` lines (a header line is allowed); every stroke goes through
 //! the same simulation, so each one lands on whatever the piece is still doing from the last.
+//! The drums' heads and stick come from sourced material cards (see `drum_cards`);
+//! `--preset-heads` renders the recording-fitted preset heads instead, and says so.
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
+mod drum_cards;
+
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
+    let a: Vec<String> = std::env::args().filter(|a| a != drum_cards::PRESET_HEADS_FLAG).collect();
     if a.len() != 5 {
-        eprintln!("usage: perform PIECE HITS.csv OUT.wav SECONDS");
+        eprintln!("usage: perform PIECE HITS.csv OUT.wav SECONDS [--preset-heads]");
         std::process::exit(2);
     }
     let text = std::fs::read_to_string(&a[2]).expect("read hits");
@@ -24,11 +29,11 @@ fn main() {
     let secs: f64 = a[4].parse().expect("seconds");
     let cym = |r: f64, tip: f64| hits.iter().map(|&(t, v)| (t, v, r, tip)).collect::<Vec<_>>();
     let piece: Result<Piece, String> = match a[1].as_str() {
-        "kick" => kit::drum(&kit::kick(), &hits),
-        "snare" => kit::drum(&kit::snare(), &hits),
-        "snare-off" => kit::drum(&kit::snare_wires_off(), &hits),
-        "tom-12" => kit::drum(&kit::tom(12.0), &hits),
-        "tom-14" => kit::drum(&kit::tom(14.0), &hits),
+        "kick" => drum_cards::drum(&kit::kick(), &hits, true, preset_heads),
+        "snare" => drum_cards::drum(&kit::snare(), &hits, false, preset_heads),
+        "snare-off" => drum_cards::drum(&kit::snare_wires_off(), &hits, false, preset_heads),
+        "tom-12" => drum_cards::drum(&kit::tom(12.0), &hits, false, preset_heads),
+        "tom-14" => drum_cards::drum(&kit::tom(14.0), &hits, false, preset_heads),
         "hihat-closed" => kit::hihat(0.0, 80.0, &hits),
         "hihat-open" => kit::hihat(0.002, 0.0, &hits),
         "crash" => kit::cymbal(&kit::crash(), &cym(0.95, 0.008)),

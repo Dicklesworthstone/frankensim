@@ -1,14 +1,20 @@
 //! Render one drum-kit piece to a 48 kHz float WAV.
 //!
-//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS]
+//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]
 //! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | ride
+//!
+//! The drums' heads and stick come from sourced material cards (see `drum_cards`);
+//! `--preset-heads` renders the recording-fitted preset heads instead, and says so.
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
+mod drum_cards;
+
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
+    let a: Vec<String> = std::env::args().filter(|a| a != drum_cards::PRESET_HEADS_FLAG).collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]");
         std::process::exit(2);
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
@@ -17,15 +23,16 @@ fn main() {
     // FS_KIT_TUNE scales a drum's head tensions (tuning experiments)
     let tune: f64 = std::env::var("FS_KIT_TUNE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let d = |s: kit::DrumSpec| kit::retune(s, tune);
+    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&d(s), &[(0.005, v)], kick, preset_heads);
     // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
-        "kick" => (kit::drum(&d(kit::kick()), &[(0.005, v(3.0))]), 1.2),
-        "snare" => (kit::drum(&d(kit::snare()), &[(0.005, v(4.5))]), 1.2),
-        "snare-off" => (kit::drum(&d(kit::snare_wires_off()), &[(0.005, v(4.5))]), 1.2),
-        "tom-12" => (kit::drum(&d(kit::tom(12.0)), &[(0.005, v(3.5))]), 2.0),
-        "tom-14" => (kit::drum(&d(kit::tom(14.0)), &[(0.005, v(3.5))]), 2.5),
+        "kick" => (drum(kit::kick(), true, v(3.0)), 1.2),
+        "snare" => (drum(kit::snare(), false, v(4.5)), 1.2),
+        "snare-off" => (drum(kit::snare_wires_off(), false, v(4.5)), 1.2),
+        "tom-12" => (drum(kit::tom(12.0), false, v(3.5)), 2.0),
+        "tom-14" => (drum(kit::tom(14.0), false, v(3.5)), 2.5),
         "hihat-closed" => (kit::hihat(0.0, 80.0, &[(0.005, v(2.5))]), 0.8),
         "hihat-open" => (kit::hihat(0.002, 0.0, &[(0.005, v(2.5))]), 2.5),
         "splash" => (kit::cymbal(&cy(kit::splash()), &[(0.005, v(2.0), 0.78, 0.005)]), 2.6),

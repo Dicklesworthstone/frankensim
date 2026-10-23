@@ -169,6 +169,12 @@ README for the physics). Render each piece, then grade them against the Salamand
     kit crash $KIT/crash.wav 0 3; kit ride $KIT/ride.wav 0 3                       # ~20 min each
     uv run --with numpy --with pillow python tools/kitgrade.py $KIT $SALAMANDER/OH public
 
+The five drums render from the sourced material cards by default: PET head film, hickory stick,
+the film loss a stated unknown, and the kick's preset felt beater. See the crate README's usage.
+Add `--preset-heads` for the recording-fitted preset heads, the drums' earlier default.
+The card-built drums carry the head-radiation load, which costs time. On ts1, 0.3 s of tom-12
+took 20 s on cards against 2.4 s preset, and 0.3 s of kick took 90 s.
+
 `kitgrade.py` writes `data/kit.json`, level-matched excerpts, spectrograms and the two grooves
 (the same two bars on the real kit and on FrankenSim's). Its ruler is real-vs-real: another stroke
 of the same real drum at the same dynamic, and the same drum one dynamic away. Octave-band balance

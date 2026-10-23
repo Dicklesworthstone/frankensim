@@ -523,3 +523,17 @@ cargo test --release
 ```
 Live pieces: `kick snare snare-off tom-12 tom-14 hihat hihat-closed hihat-open crash ride`.
 The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also renders `splash`.
+
+Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced cards by default
+(`examples/drum_cards/mod.rs`):
+- the heads come from the PET film card and the stick from the hickory card, at the standard gas's
+  293.15 K;
+- the film loss is a stated unknown, with its receipt in the notes;
+- the stick's moving volume is `kit::STICK_TIP_KG` over the 800 kg/m³ at which that Z5A
+  contact-effective mass was integrated, so the card's density sets the mass (7.30 g);
+- the tip radius (5 mm) and Hunt-Crossley loss (0.05 s/m) are the presets' declared values;
+- the kick keeps its preset felt beater (`kit::kick_with_materials`) and says so.
+
+`--preset-heads` (anywhere on the command line) renders the recording-fitted preset heads instead,
+and adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to
+the notes. The cymbals and the hi-hat are unchanged.
