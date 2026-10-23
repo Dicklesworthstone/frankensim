@@ -1,6 +1,79 @@
 use super::*;
 
 #[test]
+fn shell_compatibility_retains_motion_below_the_rest_height_ulp() {
+    // Exact dyadic rest heights: at the origin the curvatures are (1,1,0),
+    // while the (1,1) stencil has mixed rest curvature -1/4. E*t = h = 1.
+    let rest = |r: f64| if r < 0.5 { 0.0 } else if r < 1.1 { 0.5 } else { 1.0 };
+    let mut body = Body::plate("small shell motion", &PlateSpec {
+        radius: 3.5, hole: 0.0, grid: 1.0, edge: Edge::Free,
+        thickness: &|_| 1.0 / 128.0, rest_height: &rest, young: 128.0,
+        poisson: 0.3, density: 1000.0, tension: 0.0, bending: true,
+        nonlinear: Nonlinear::VonKarman, t60: NO_LOSS, support: None, muffle: None,
+    }).unwrap();
+    assert_eq!(body.vk.as_ref().unwrap().eh, 1.0);
+    let node = |x, y| body.xy.iter().position(|&p| p == [x, y]).unwrap();
+    let origin = node(0.0, 0.0);
+    let diagonal = node(1.0, 1.0);
+    let core = |center| body.vk.as_ref().unwrap().nb.iter()
+        .position(|s| s[0] == Some(center)).unwrap();
+    let center_core = core(origin);
+    let mixed_core = core(diagonal);
+    let east = body.vk.as_ref().unwrap().nb[center_core][1].unwrap();
+    let north_east = body.vk.as_ref().unwrap().nb[mixed_core][5].unwrap();
+    let delta = 2.0_f64.powi(-55);
+    let check_tangent = |body: &mut Body| {
+        let potential = body.nonlinear_gradient();
+        assert!(potential > 0.0);
+        let work: f64 = body.w.iter().zip(&body.g).map(|(w, g)| w * g).sum();
+        // Euler's identity for the quadratic rest-tangent energy. Higher
+        // orders are smaller by O(delta); missing rest terms in g fail this.
+        assert!((work - 2.0 * potential).abs() <= 1e-12 * (2.0 * potential),
+            "the shell gradient must retain its linear rest tangent");
+    };
+    for displacement in [delta, -delta] {
+        // The former nodal w+z0 evaluation loses this motion before it even
+        // reaches the curvature/product subtraction. This is the negative.
+        assert_eq!(0.5 + displacement, 0.5);
+        body.w.fill(0.0);
+        body.w[east] = displacement;
+        check_tangent(&mut body);
+        assert_eq!(body.vk.as_ref().unwrap().q[center_core], -displacement);
+        body.w.fill(0.0);
+        body.w[north_east] = displacement;
+        check_tangent(&mut body);
+        // w_xy = displacement/4, z_xy = -1/4. The quadratic term is below
+        // half an ULP of the exact linear term -displacement/8.
+        assert_eq!(body.vk.as_ref().unwrap().q[mixed_core], -displacement / 8.0);
+    }
+    body.w.fill(0.0);
+    assert_eq!(body.nonlinear_gradient(), 0.0);
+    assert!(body.vk.as_ref().unwrap().q.iter().all(|&q| q == 0.0));
+}
+
+#[test]
+fn live_airy_source_system_matches_its_actual_solved_stress() {
+    assert!(Body::point("no Airy system",1.0).airy_system().is_none());
+    let mut live = live::Live::with_hihat_pedal(7.0,0.0).unwrap();
+    live.strike(0.85*0.1778,0.0,2.5);
+    let mut observed_nonzero = false;
+    for _ in 0..8 {
+        live.render(&mut [0.0;128],1.0);
+        for b in &live.instrument().bodies {
+            let Some((a,q,f)) = b.airy_system() else { continue; };
+            assert_eq!(a.n,q.len()); assert_eq!(a.n,f.len());
+            let mut af = vec![0.0;a.n]; a.mul_add(f,1.0,&mut af);
+            let residual = af.iter().zip(q).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
+            let qnorm = q.iter().map(|x|x*x).sum::<f64>().sqrt();
+            let scale = qnorm + a.val.iter().map(|x|x*x).sum::<f64>().sqrt()*f.iter().map(|x|x*x).sum::<f64>().sqrt();
+            assert!(residual.is_finite() && residual <= 1e-11*scale.max(1e-300), "Airy backward error {residual:e}/{scale:e}");
+            observed_nonzero |= qnorm > 0.0;
+        }
+    }
+    assert!(observed_nonzero,"exercise the actual struck source, not just its zero state");
+}
+
+#[test]
 fn g0_affine_mount_energy_and_admission() {
     let mut body=Body::point("attachment",1.0);
     body.n=4;

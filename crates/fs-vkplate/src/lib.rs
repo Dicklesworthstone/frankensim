@@ -397,8 +397,10 @@ struct VonKarman {
     eh: f64,
     nb: Vec<[Option<usize>; 9]>, // C, E, W, N, S, NE, NW, SE, SW
     l0: Vec<f64>,              // l(z0) at core
+    rest_curv: Vec<(f64, f64, f64)>, // xx, yy, xy of z0 at core
     z0: Vec<f64>,              // rest height per node
     airy: Band,
+    matrix: Csr,
     f: Vec<f64>,
     q: Vec<f64>,
     curv: Vec<(f64, f64, f64)>,
@@ -719,10 +721,8 @@ impl Body {
                 let xy_ = (g(s9[5]) - g(s9[6]) - g(s9[7]) + g(s9[8])) / (4.0 * h2);
                 (xx, yy, xy_)
             };
-            let l0: Vec<f64> = nb.iter().map(|s9| {
-                let (a, b, c) = curv(&z0, s9);
-                a * b - c * c
-            }).collect();
+            let rest_curv: Vec<_> = nb.iter().map(|s9| curv(&z0, s9)).collect();
+            let l0: Vec<f64> = rest_curv.iter().map(|&(a, b, c)| a * b - c * c).collect();
             // Airy energy 1/2 sum (Lap_h F)^2 over every node where it is nonzero; F = 0 off the core
             let nc = sorted.len();
             let mut arows = vec![BTreeMap::new(); nc];
@@ -744,7 +744,8 @@ impl Body {
                 }
             }
             let airy = Band::factor(&arows)?;
-            Some(VonKarman { eh: s.young * t_mean, nb, l0, z0, airy, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
+            let matrix = Csr::from_rows(&arows);
+            Some(VonKarman { eh: s.young * t_mean, nb, l0, rest_curv, z0, airy, matrix, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
         } else {
             None
         };
@@ -933,9 +934,9 @@ impl Body {
         if let Some(vk) = self.vk.as_mut() {
             let h2 = self.h * self.h;
             let w = &self.w;
-            let VonKarman { eh, nb, l0, z0, airy, f, q, curv } = vk;
+            let VonKarman { eh, nb, rest_curv, airy, f, q, curv, .. } = vk;
             let eh = *eh;
-            let u = |o: Option<usize>| o.map_or(0.0, |k| w[k] + z0[k]);
+            let u = |o: Option<usize>| o.map_or(0.0, |k| w[k]);
             // q = -E t (l(w + z0) - l(z0)) per core node, built row by row inside the Airy solve's
             // forward sweep (it fills that sweep's latency chain); A F = q
             airy.solve_with(f, |c| {
@@ -943,9 +944,13 @@ impl Body {
                 let xx = (u(s9[1]) - 2.0 * u(s9[0]) + u(s9[2])) / h2;
                 let yy = (u(s9[3]) - 2.0 * u(s9[0]) + u(s9[4])) / h2;
                 let xy = (u(s9[5]) - u(s9[6]) - u(s9[7]) + u(s9[8])) / (4.0 * h2);
-                let qc = -eh * (xx * yy - xy * xy - l0[c]);
+                // Expand l(w + z0) - l(z0) before evaluating: adding a tiny
+                // displacement to z0 can erase it, as can subtracting the
+                // two nearly equal curvature products. Keep the rest tangent.
+                let (zx, zy, zxy) = rest_curv[c];
+                let qc = -eh * (xx * yy - xy * xy + xx * zy + yy * zx - 2.0 * xy * zxy);
                 q[c] = qc;
-                curv[c] = (xx, yy, xy);
+                curv[c] = (xx + zx, yy + zy, xy + zxy);
                 qc
             });
             // V = h^2/(2 E t) F' A F with A F = q; the force h^2 (dq/dw)' F is -grad V
@@ -2411,6 +2416,8 @@ pub struct VonKarmanImage {
     pub eh: f64,
     pub nb: Vec<[Option<usize>; 9]>,
     pub l0: Vec<f64>,
+    /// Cached rest curvatures (xx, yy, xy), one triple per core stencil.
+    pub rest_curv: Vec<(f64, f64, f64)>,
     pub z0: Vec<f64>,
     pub f: Vec<f64>,
 }
@@ -2510,7 +2517,7 @@ impl Body {
             tension: self.tension,
             berger: self.berger,
             bias: self.bias.clone(),
-            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), z0: v.z0.clone(), f: v.f.clone() }),
+            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), rest_curv: v.rest_curv.clone(), z0: v.z0.clone(), f: v.f.clone() }),
             area: self.area,
             air_mass: self.air_mass,
             w: self.w.clone(),
@@ -2533,6 +2540,15 @@ impl Body {
             }
             _ => false,
         }
+    }
+
+    /// Original Airy operator, last solved right-hand side and stress function
+    /// in the same core-node order as `airy_solve`. The last evaluation may
+    /// precede the current nodal state after an instrument step rotates it.
+    /// This borrows the actual source system; it does not reconstruct A from
+    /// an inverse or rerun/alter the physical trajectory.
+    pub fn airy_system(&self) -> Option<(&Csr, &[f64], &[f64])> {
+        self.vk.as_ref().map(|v| (&v.matrix, v.q.as_slice(), v.f.as_slice()))
     }
 }
 

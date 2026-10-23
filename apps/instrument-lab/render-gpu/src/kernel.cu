@@ -492,14 +492,17 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
 #pragma unroll
         for (int j = 0; j < 9; j++) nb[j] = __ldg(&p.cnb[9ll * c + j]);
 #pragma unroll
-        for (int j = 0; j < 9; j++) u[j] = nb[j] < 0 ? 0.0 : W[o + nb[j]] + __ldg(&p.z0[nb[j]]);
+        for (int j = 0; j < 9; j++) u[j] = nb[j] < 0 ? 0.0 : W[o + nb[j]];
         const double xx = (u[1] - 2.0 * u[0] + u[2]) * ih2;
         const double yy = (u[3] - 2.0 * u[0] + u[4]) * ih2;
         const double xy = (u[5] - u[6] - u[7] + u[8]) * (0.25 * ih2);
-        const double qc = -__ldg(&p.beh[b]) * (xx * yy - xy * xy - __ldg(&p.cl0[c]));
+        const double zx = __ldg(&p.crest[3ll * c]), zy = __ldg(&p.crest[3ll * c + 1]);
+        const double zxy = __ldg(&p.crest[3ll * c + 2]);
+        // Same expanded compatibility and rest tangent as the native solver.
+        const double qc = -__ldg(&p.beh[b]) * (xx * yy - xy * xy + xx * zy + yy * zx - 2.0 * xy * zxy);
         const ll oc = (ll)s * NC + c;
         p.Q[oc] = qc; p.QF[oc] = (float)qc;
-        p.CXX[oc] = xx; p.CYY[oc] = yy; p.CXY[oc] = xy;
+        p.CXX[oc] = xx + zx; p.CYY[oc] = yy + zy; p.CXY[oc] = xy + zxy;
       }
     }
     // link forces, one thread per (simulation, link); the nodes add them in link order in P3

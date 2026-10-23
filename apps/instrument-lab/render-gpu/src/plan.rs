@@ -9,6 +9,39 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use fs_vkplate::materials::KitMaterials;
 
+#[cfg(test)]
+mod rest_curvature_tests {
+    use super::*;
+
+    #[test]
+    fn packed_rest_curvatures_retain_both_plate_stencils() {
+        let mut ins = fs_vkplate::kit::hihat_scaled(0.002, 0.0, &[], 7.0).unwrap().instrument;
+        let image = ins.image();
+        let plan = Plan::new(&image, &ins, 256, 256, true).unwrap();
+        let mut at = 0;
+        let mut plates = 0;
+        let mut nonzero = false;
+        for body in &image.bodies {
+            let Some(vk) = &body.vk else { continue; };
+            plates += 1;
+            for s in &vk.nb {
+                let z = |j: usize| s[j].map_or(0.0, |i| vk.z0[i]);
+                let h2 = body.h * body.h;
+                let expected = [(z(1) - 2.0 * z(0) + z(2)) / h2,
+                    (z(3) - 2.0 * z(0) + z(4)) / h2,
+                    (z(5) - z(6) - z(7) + z(8)) / (4.0 * h2)];
+                assert_eq!(&plan.crest[at..at + 3], &expected);
+                nonzero |= expected.iter().any(|&x| x != 0.0);
+                at += 3;
+            }
+        }
+        assert_eq!(plates, 2);
+        assert!(nonzero);
+        assert_eq!(at, plan.crest.len());
+        assert_eq!(at, 3 * plan.nc);
+    }
+}
+
 pub const TPB: usize = 256;
 /// Microphone taps per segment (two per lane of a warp).
 const SEG: usize = 64;
@@ -88,7 +121,7 @@ pub struct Plan {
     pub brad: Vec<i32>,
     // core nodes of the von Karman plates
     pub cnb: Vec<i32>,
-    pub cl0: Vec<f64>,
+    pub crest: Vec<f64>, // cached rest xx, yy, xy per core node
     pub vk_body: Vec<i32>,
     pub airy_off: Vec<i64>,
     pub airy: Vec<f64>,
@@ -369,7 +402,8 @@ impl Plan {
                     for s in v.nb[c] {
                         p.cnb.push(s.map_or(-1, |i| i32s(o + i)));
                     }
-                    p.cl0.push(v.l0[c]);
+                    let (xx, yy, xy) = v.rest_curv[c];
+                    p.crest.extend_from_slice(&[xx, yy, xy]);
                 }
                 for s0 in (0..nc).step_by(item) {
                     p.citem_body.push(i32s(bi));
