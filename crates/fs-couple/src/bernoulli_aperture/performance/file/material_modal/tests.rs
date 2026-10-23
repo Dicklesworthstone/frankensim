@@ -264,3 +264,51 @@ fn g0_missing_material_coefficients_and_incomplete_physical_inputs_refuse() {
 }
 
 mod spatial;
+
+
+#[test]
+fn g3_local_opening_gas_and_geometry_reach_modal_valve_and_microphone() {
+    // Explicit manufactured closure, not a measured instrument coefficient.
+    let reference = input();
+    let text = reference.replace("valve 0.0004",
+        "opening_losses 1\nopening_loss downstream 2 0.6 0.2 authored-comparison\nvalve 0.0004");
+    assert_ne!(reference, text);
+    let source = build(&text, 37);
+    let system = source.renderer().source().system();
+    let binding = &system.opening_losses(ValveSide::Downstream)[0];
+    assert_eq!(system.opening_losses(ValveSide::Upstream).len(), 0);
+    assert_eq!(binding.input().node, 2);
+    assert_eq!(binding.radius_m(), 0.007);
+    assert_eq!(binding.gas(), &system.source(ValveSide::Downstream).gases[1]);
+    assert_eq!(binding.gas().temperature, 303.15);
+    let coefficient = binding.loss().coefficient_pa_s2_m6();
+    let density = binding.gas().density;
+    let mixed = text.replace("gas 303.15 0 viscothermal",
+        "gas mixture 303.15 101325 mole 2 N2 0.6 O2 0.4 viscothermal");
+    assert_ne!(mixed, text);
+    let mixture = build(&mixed, 37);
+    let mixed_binding = &mixture.renderer().source().system()
+        .opening_losses(ValveSide::Downstream)[0];
+    assert_ne!(mixed_binding.gas().density, density);
+    assert!((mixed_binding.loss().coefficient_pa_s2_m6()/coefficient
+        - mixed_binding.gas().density/density).abs() < 2e-12);
+    let narrow = text.replace("duct_section 1 2 0.15 0.007",
+        "duct_section 1 2 0.15 0.006");
+    assert_ne!(narrow, text);
+    let narrow = build(&narrow, 37);
+    let narrow_binding = &narrow.renderer().source().system()
+        .opening_losses(ValveSide::Downstream)[0];
+    assert!((narrow_binding.loss().coefficient_pa_s2_m6()/coefficient
+        - (0.007_f64/0.006).powi(4)).abs() < 2e-12);
+    let (pressure, rendered) = render(source);
+    let node = rendered.source().system().node_frame(ValveSide::Downstream, 2).unwrap();
+    assert!(node.quadratic_loss_j > 0.0);
+    assert!(node.absorbed_energy_j >= node.quadratic_loss_j);
+    for alternative in [build(&reference, 37), mixture, narrow] {
+        let (altered, _) = render(alternative);
+        assert!(pressure.iter().zip(&altered).any(|(a,b)| a != b),
+            "declared opening physics must reach the actual microphone");
+    }
+    let (partitioned, _) = render(build(&text, 1));
+    assert_eq!(pressure, partitioned);
+}

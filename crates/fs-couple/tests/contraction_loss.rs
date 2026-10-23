@@ -72,3 +72,28 @@ fn bad_material_geometry_or_solved_mach_refuses_without_clipping() {
     assert!(l.solve(1.0,f64::INFINITY).is_err());
     assert!(l.at_flow(f64::NAN).is_err());
 }
+
+
+#[test]
+fn circular_terminal_uses_the_same_bernoulli_law_and_material_gas_as_the_window() {
+    use fs_couple::bernoulli_aperture::contraction::quadratic_opening_loss;
+    for pressure in [65000.0, 101325.0, 202650.0] {
+        for width in [0.005, 0.01, 0.02] {
+            let gas = gas(pressure);
+            let spec = spec(0.6);
+            let window = ContractionLoss::new(width, 0.004, gas, spec.clone()).unwrap();
+            let terminal = quadratic_opening_loss(width*0.004, &gas, &spec).unwrap();
+            for flow in [-1e-5_f64, -1e-8, 0.0, 1e-8, 1e-5] {
+                let original = window.at_flow(flow).unwrap();
+                let (drop, power) = terminal.at_flow(flow).unwrap();
+                assert!((drop-original.pressure_drop_pa).abs()
+                    <= 2e-12*drop.abs().max(1e-30));
+                assert!((power-original.dissipated_power_w).abs()
+                    <= 2e-12*power.abs().max(1e-30));
+            }
+            let limit = window.effective_area_m2()*gas.sound_speed*0.2;
+            assert!((terminal.maximum_flow_m3_s()/limit-1.0).abs() < 2e-12);
+            assert!(terminal.at_flow(limit*1.01).is_err());
+        }
+    }
+}

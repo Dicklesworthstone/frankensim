@@ -101,3 +101,5 @@ pub mod viscothermal;
 
 /// Fixed-window separated flow using the shared continuous Bernoulli law.
 pub mod contraction;
+/// Geometry/material-bound nonlinear opening losses on retained duct terminals.
+pub mod opening_loss;

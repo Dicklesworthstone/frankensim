@@ -16,6 +16,23 @@ use fs_exec::CancelGate;
 use fs_material::gas_species::input::ThermochemicalSources;
 use super::{RATE, create_outputs, json_string, stream_output};
 
+fn opening_loss_provenance<'a>(
+    bindings: impl Iterator<Item = (&'static str,
+        &'a fs_couple::bernoulli_aperture::opening_loss::BoundOpeningLoss)>,
+) -> String {
+    let records = bindings.map(|(side, binding)| {
+        let input = binding.input();
+        let gas = binding.gas();
+        let law = binding.loss();
+        format!("{{\"side\":\"{side}\",\"node\":{},\"radius_m\":{:e},\"area_ratio\":{:e},\"maximum_contracted_mach\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"coefficient_pa_s2_m6\":{:e},\"maximum_flow_m3_s\":{:e},\"source\":{}}}",
+            input.node, binding.radius_m(), input.contraction.area_ratio,
+            input.contraction.maximum_contracted_mach, gas.density, gas.sound_speed,
+            law.coefficient_pa_s2_m6(), law.maximum_flow_m3_s(),
+            json_string(&input.contraction.provenance))
+    }).collect::<Vec<_>>().join(",");
+    format!(",\"opening_losses\":[{records}],\"opening_loss_scope\":\"same-sample symmetric quasi-steady separation in series with original local radiation; no vortex memory, directional pressure recovery or measured instrument coefficient\"")
+}
+
 fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>), String> {
     let mut paths = Vec::new();
     let mut flows = None;
@@ -391,6 +408,16 @@ fn load_with_all_sources(
             + p.mimo_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>()
             + p.computed_radiation_records().iter().map(|(_, r)| r.apertures().len()).sum::<usize>();
         let boundary_json = modal_boundary_provenance(&p);
+        let opening_loss_json = opening_loss_provenance(
+            [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
+             fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream]
+                .into_iter().flat_map(|side| {
+                    let label = match side {
+                        fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream => "upstream",
+                        fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream => "downstream",
+                    };
+                    system.opening_losses(side).iter().map(move |binding| (label, binding))
+                }));
         let force_programs = valve.material_plates().iter().enumerate().filter_map(|(blade, plate)| {
             let events = p.renderer().pending_plate_force_controls(blade);
             if events.is_empty() { return None; }
@@ -413,7 +440,7 @@ fn load_with_all_sources(
         let closure_scope = if valve.plate_closure().is_some() {
             "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
         } else { "effective uniform slit/contact" };
-        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}}}",
+        let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}}}",
             i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
             compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
             terminals);
@@ -488,6 +515,8 @@ fn load_with_all_sources(
         let duct_json = flue_duct_provenance(renderer);
         let wall_json = flue_wall_provenance(&p);
         let boundary_json = flue_boundary_provenance(&p);
+        let opening_loss_json = opening_loss_provenance(
+            network.opening_losses().iter().map(|binding| ("network", binding)));
         let mimo_json = if let Some(record) = p.computed_radiation_record() {
             format!(",\"computed_radiation\":{}", super::duct_metadata::computed_baffled_provenance(record))
         } else {
@@ -514,7 +543,7 @@ fn load_with_all_sources(
         let mouth_scope = if mouth_reaction.is_some() {
             "same-sample compact rectangular mouth reaction and matched exterior observation"
         } else { "optional rectangular mouth is observation only" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{duct_json}{wall_json}{boundary_json}{mimo_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

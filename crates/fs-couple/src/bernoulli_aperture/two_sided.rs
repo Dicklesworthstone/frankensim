@@ -257,6 +257,7 @@ struct DuctSide {
     fractional: Option<(FractionalTubePolicy, Vec<FractionalSection>)>,
     mimo_environment: Option<MimoEnvironment>,
     boundaries: Option<BoundaryApertures>,
+    opening_losses: Vec<super::opening_loss::BoundOpeningLoss>,
 }
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -362,7 +363,7 @@ impl TwoSidedAperture {
                 (network, represented, None)
             };
             Ok(DuctSide { source, graph, gases, represented, losses, network, fractional,
-                mimo_environment: None, boundaries: None })
+                mimo_environment: None, boundaries: None, opening_losses: Vec::new() })
         };
         let [up, down] = sources;
         let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
@@ -390,6 +391,28 @@ impl TwoSidedAperture {
     /// Actual graph, including lowered loss sites and current terminal controls.
     #[must_use]
     pub fn graph(&self, side: ValveSide) -> &TubeNetworkSpec { &self.sides[side.index()].graph }
+    /// Original gas/geometry and closure data for each nonlinear terminal.
+    pub fn opening_losses(&self, side: ValveSide) -> &[super::opening_loss::BoundOpeningLoss] {
+        &self.sides[side.index()].opening_losses
+    }
+    /// Attach passive opening losses without replacing either acoustic side.
+    /// The original valve, all material histories, terminal loads and waves
+    /// remain in the same accepted transaction. A low-Mach closure is explicit;
+    /// this does not qualify resolved flow or a measured instrument coefficient.
+    pub fn with_opening_losses(mut self, side: ValveSide,
+        inputs: Vec<super::opening_loss::OpeningLossInput>, gate: &CancelGate)
+        -> Result<Self, AcousticRealizeError> {
+        if self.valve.accepted_steps() != 0 {
+            return Err(invalid("opening losses require an unadvanced two-sided valve"));
+        }
+        let duct = &mut self.sides[side.index()];
+        if !duct.opening_losses.is_empty() {
+            return Err(invalid("each side's opening losses must be supplied together once"));
+        }
+        duct.opening_losses = super::opening_loss::bind_opening_losses(
+            &duct.graph, &duct.gases, &mut duct.network, inputs, gate)?;
+        Ok(self)
+    }
     /// Original-owner represented lengths, delays and characteristic impedances.
     #[must_use]
     pub fn represented_sections(&self, side: ValveSide) -> &[SectionRealization] {

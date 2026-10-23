@@ -6,6 +6,17 @@
 //! Local isotropic walls, compact baffled loads and supplied mutual-radiation
 //! operators retain their original limits; this is not a measured Boehm flute,
 //! full shell model, resolved turbulent jet or broadband unbaffled qualification.
+//!
+//! Optional records after the duct and material walls, before boundaries or
+//! radiation: `opening_losses COUNT` followed by COUNT records
+//! `opening_loss NODE AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN` (at most 64).
+//! Each named node must carry a local RLC/relaxation terminal, either authored
+//! or installed by `radiation compact-baffled`. Area comes from that terminal's
+//! section and density/sound speed from its local gas, including mixtures.
+//! The symmetric quasi-steady loss shares the current flow and original load
+//! history; it does not replace radiation. Memoryless reflections, driven
+//! moving apertures and mutual-radiation ports refuse this local closure.
+//! AREA_RATIO is in (0,1], MAXIMUM_MACH in (0,0.3]; SOURCE_TOKEN is mandatory.
 
 use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
@@ -343,6 +354,20 @@ impl FlueFilePerformance {
         let exterior_record = gas_records.last().expect("both gas routes retain their source record").clone();
         let mut duct = duct::Input::read(&mut rows, gas, sources, &mut gas_records, gate)?;
         let walls = wall::ParsedWalls::read(&mut rows)?;
+        // Independent terminal separation loss, in series with whatever
+        // physical radiation load the description selects below.
+        let mut opening_losses = Vec::new();
+        if rows.next_is("opening_losses") {
+            let mut row = rows.row("opening_losses")?;
+            let count: usize = row.number()?;
+            row.end()?;
+            if count > 64 { return Err(bad(rows.line, "opening_losses exceeds 64 endpoints")); }
+            for _ in 0..count {
+                let row = rows.row("opening_loss")?;
+                opening_losses.push(crate::bernoulli_aperture::opening_loss::parse_record(row.fields)
+                    .map_err(|what| bad(row.line, what))?);
+            }
+        }
         let boundaries = boundary::ParsedBoundaries::read(&mut rows)?;
         let (radiation_reaction, mimo_input) = if rows.next_is("radiation") {
             let record = rows.record("radiation")?;
@@ -571,6 +596,9 @@ impl FlueFilePerformance {
                 }
             }
             None => (voice, None, None),
+        };
+        let voice = if opening_losses.is_empty() { voice } else {
+            voice.with_opening_losses(opening_losses, gate).map_err(FlueInputError::Physics)?
         };
         let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,

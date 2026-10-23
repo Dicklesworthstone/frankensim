@@ -102,6 +102,7 @@ pub struct FlueNetwork {
     boundary_paths: Vec<ParameterPath>,
     boundary_drives: Vec<BoundaryDrive>,
     source_paths: Option<FlueSourcePaths>,
+    opening_losses: Vec<crate::bernoulli_aperture::opening_loss::BoundOpeningLoss>,
 }
 
 pub(super) enum FlueResonator {
@@ -162,7 +163,8 @@ impl FlueNetwork {
         poll(gate)?;
         Ok(Self { source, wall_input, walls, graph, gases, represented, losses, physics,
             last: None, fractional, mimo_environment: None, boundaries: None,
-            boundary_paths: Vec::new(), boundary_drives: Vec::new(), source_paths: None })
+            boundary_paths: Vec::new(), boundary_drives: Vec::new(), source_paths: None,
+            opening_losses: Vec::new() })
     }
     /// Original data before any loss-cell subdivision.
     #[must_use]
@@ -174,6 +176,10 @@ impl FlueNetwork {
     /// Original material states and their geometry-derived pressure/flow laws.
     #[must_use]
     pub fn material_walls(&self) -> &[BoundMaterialWall] { &self.walls }
+    /// Nonlinear terminal losses with their original local gas and opening area.
+    pub fn opening_losses(&self) -> &[crate::bernoulli_aperture::opening_loss::BoundOpeningLoss] {
+        &self.opening_losses
+    }
     /// Accepted displacement, velocity and BASE mechanical storage at a material node.
     /// Hereditary spring energy is separately available via `wall_relaxation_energy_j`.
     /// Reads the same shunt advanced by the jet/bore solve, not another oscillator.
@@ -516,6 +522,23 @@ impl FlueVoice {
     #[must_use]
     pub fn network(&self) -> Option<&FlueNetwork> {
         match &self.line { FlueResonator::Network(n) => Some(n), FlueResonator::Tmm(_) => None }
+    }
+    /// Add explicit gas/geometry-derived separation losses at physical outlets.
+    /// Original radiation, wall and wave histories share the same solved flow.
+    /// This is a cold quasi-steady closure, not resolved vortex shedding.
+    pub fn with_opening_losses(mut self,
+        inputs: Vec<crate::bernoulli_aperture::opening_loss::OpeningLossInput>,
+        gate: &CancelGate) -> Result<Self, FlueError> {
+        if self.samples != 0 { return Err(invalid("opening losses require an unadvanced flue source")); }
+        let FlueResonator::Network(network) = &mut self.line else {
+            return Err(invalid("opening losses require the retained physical tube graph"));
+        };
+        if !network.opening_losses.is_empty() {
+            return Err(invalid("opening losses must be supplied together once"));
+        }
+        network.opening_losses = crate::bernoulli_aperture::opening_loss::bind_opening_losses(
+            &network.graph, &network.gases, &mut network.physics, inputs, gate).map_err(physical)?;
+        Ok(self)
     }
     /// Change an ideal memoryless terminal without resetting any traveling wave.
     /// This is not moving-pad contact, displacement work or a radiation model.

@@ -47,6 +47,31 @@ pub struct ContractionLoss {
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
 }
+
+/// Derive the same separated-flow law for an actual opening area of any shape.
+/// The caller supplies physical area; density and the Mach ceiling use one gas.
+/// This is the existing Bernoulli closure, not a shape-dependent coefficient fit.
+pub fn quadratic_opening_loss(area_m2: f64, gas: &GasState, spec: &ContractionSpec)
+    -> Result<fs_vfit::quadratic_loss::QuadraticLossSpec, AcousticRealizeError> {
+    gas.validate_coherence().map_err(|_| invalid("opening loss needs one coherent material gas"))?;
+    if !area_m2.is_finite() || area_m2 <= 0.0
+        || !spec.area_ratio.is_finite() || spec.area_ratio <= 0.0 || spec.area_ratio > 1.0
+        || !spec.maximum_contracted_mach.is_finite() || spec.maximum_contracted_mach <= 0.0
+        || spec.maximum_contracted_mach > 0.3 || spec.provenance.trim().is_empty() {
+        return Err(invalid("opening loss needs physical area, explicit source, Cc<=1 and Mach<=0.3"));
+    }
+    let area = spec.area_ratio*area_m2;
+    // Ask the original law for its unit-pressure flow. No independent density
+    // constant or differently normalized discharge relation is introduced.
+    let unit_flow = moving::volume_flow(area, 1.0, 1.0, gas.density);
+    let coefficient = (1.0/unit_flow)/unit_flow;
+    let maximum_flow = (area*gas.sound_speed)*spec.maximum_contracted_mach;
+    if !coefficient.is_finite() || coefficient <= 0.0 {
+        return Err(invalid("opening loss coefficient is not representable"));
+    }
+    fs_vfit::quadratic_loss::QuadraticLossSpec::new(coefficient, maximum_flow)
+        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))
+}
 impl ContractionLoss {
     /// Bind an explicitly supplied area contraction to an actual fixed window.
     /// Density and sound speed come from the SAME gas state. No source identity

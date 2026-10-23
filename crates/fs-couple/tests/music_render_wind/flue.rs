@@ -128,3 +128,50 @@ fn published_jet_transfer_is_opt_in_by_name_and_refuses_malformed_rows() {
 
 #[path = "flue/material.rs"]
 mod material;
+
+
+#[test]
+fn terminal_separation_loss_reaches_flue_feedback_microphone_and_cli() {
+    let reference = short().replace("\nflue ",
+        "\nradiation compact-baffled\nflue ");
+    let source = reference.replace("\nradiation ",
+        "\nopening_losses 1\nopening_loss 1 0.6 0.2 authored-comparison\nradiation ");
+    let p = FlueFilePerformance::from_bytes(source.as_bytes(), 37,
+        &CancelGate::new_clock_free()).unwrap();
+    let network = p.renderer().voice().network().unwrap();
+    let binding = &network.opening_losses()[0];
+    assert_eq!(binding.input().node, 1);
+    assert_eq!(binding.radius_m(), 0.006);
+    assert_eq!(binding.gas(), &network.source().gases[0]);
+    assert_eq!(p.radiation_bindings().len(), 1);
+    let pressure = physical(&source).0;
+    assert_ne!(pressure, physical(&reference).0);
+    let mixed = source.replace("gas 293.15 101325 0",
+        "gas mixture 293.15 101325 mole 2 N2 0.6 O2 0.4");
+    assert_ne!(pressure, physical(&mixed).0);
+    let dir = directory();
+    let input = dir.join("opening-loss.performance");
+    std::fs::write(&input, &source).unwrap();
+    let expected = encode_pcm16_wav(&pressure, 48000, 1.0).unwrap().0;
+    for block in [1, 37] {
+        let output = dir.join(format!("opening-loss-{block}.wav"));
+        success(run(&input, &output, block, false));
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"opening_losses\":[{\"side\":\"network\",\"node\":1",
+            "\"coefficient_pa_s2_m6\":", "\"maximum_flow_m3_s\":",
+            "\"source\":\"authored-comparison\"", "same-sample symmetric quasi-steady"] {
+            assert!(sidecar.contains(token), "{token}: {sidecar}");
+        }
+    }
+    for bad in [
+        source.replace("radiation compact-baffled\n", ""),
+        source.replace("opening_loss 1 0.6", "opening_loss 0 0.6"),
+        source.replace("opening_loss 1 0.6", "opening_loss 1 1.1"),
+        source.replace("0.2 authored-comparison", "0.4 authored-comparison"),
+        source.replace("opening_losses 1\n", "opening_losses 2\nopening_loss 1 0.6 0.2 duplicate\n"),
+    ] {
+        assert!(FlueFilePerformance::from_bytes(bad.as_bytes(), 37,
+            &CancelGate::new_clock_free()).is_err());
+    }
+}

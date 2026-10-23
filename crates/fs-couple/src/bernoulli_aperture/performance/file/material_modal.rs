@@ -21,6 +21,17 @@
 //! band and the mechanics clock must resolve the declared temporal limits.
 //! These passive memories act through the original tract/bore pressure solve;
 //! they do not add Kelvin-Voigt loss or a second wall-motion integrator.
+//!
+//! After optional duct walls and before `valve`, `opening_losses COUNT` selects
+//! up to 64 explicit terminal losses. Each following record is
+//! `opening_loss upstream|downstream NODE AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN`.
+//! The original local opening area and gas derive the dimensional coefficient
+//! and Mach limit; original reactive radiation and all valve/material histories
+//! remain coupled through the same solved current flow. AREA_RATIO is in
+//! (0,1] and MAXIMUM_MACH in (0,0.3]. This symmetric quasi-steady closure
+//! requires a local passive impedance terminal; memoryless, moving-boundary
+//! and mutually coupled radiation ports refuse. It is not a vortex model or
+//! a measured tone-hole coefficient; the source token must state its basis.
 mod plate;
 mod boundaries;
 mod radiation;
@@ -252,6 +263,20 @@ impl MaterialModalValvePerformance {
             |p| p.iter().map(|p| p.maximum_frequency_hz).fold(receiver.maximum_frequency_hz, f64::max));
         let (walls, wall_records) = wall::read(&mut rows, wall_band, &mut cache,
             &mut load_material, gate)?;
+        let mut opening_losses = [Vec::new(), Vec::new()];
+        if rows.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+            == Some("opening_losses") {
+            let count = rows.count("opening_losses", 64)?;
+            for _ in 0..count {
+                let mut row = rows.row("opening_loss")?;
+                let side = match row.word()? {
+                    "upstream" => 0, "downstream" => 1,
+                    _ => return Err(bad(row.line, "opening_loss must name upstream or downstream")),
+                };
+                opening_losses[side].push(crate::bernoulli_aperture::opening_loss::parse_record(row.fields)
+                    .map_err(|what| bad(row.line, what))?);
+            }
+        }
         let mut row = rows.row("valve")?;
         let rest_opening = row.scalar()?;
         row.finish()?;
@@ -357,6 +382,13 @@ impl MaterialModalValvePerformance {
         let (system, programs, boundaries) = boundaries.bind(
             prepared.system, &mut cache, &mut load_material, gate)?;
         prepared.system = system;
+        for (side, inputs) in [ValveSide::Upstream, ValveSide::Downstream]
+            .into_iter().zip(opening_losses) {
+            if !inputs.is_empty() {
+                prepared.system = prepared.system.with_opening_losses(side, inputs, gate)
+                    .map_err(PlateValveInputError::Physics)?;
+            }
+        }
         let (source, radiation, mimo_radiation, computed_radiation) = prepared.observe(max_block)?;
         let mut renderer = programs.compile(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
