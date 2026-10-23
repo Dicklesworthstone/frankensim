@@ -13,13 +13,26 @@ named by the table instead of fixed in the code.
 ```bash
 cargo run --release -p fs-couple --example shell_body_modes -- \
   data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv PACK_DIR \
-  --modes 24 --fmin 20 --fmax 700 --shapes shapes.tsv
+  --modes 6 --fmin 20 --fmax 900 --shapes shapes.tsv
 ```
+
+These are the arguments of the run of record (`body-mode-results.tsv`). The window must hold at least `--modes` shell
+modes, or the assembly refuses ("assembled shell window has fewer modes than requested"); 24 modes in 20-700 Hz,
+the arguments this README showed before, refuse on this table.
 
 `--shapes` writes the displacement of the top and back nodes along their directors; `--node-shapes PATH` writes the three
 global displacement components of every node of every part (m/sqrt(kg), mass-normalized) for the first 36 air-coupled modes.
 After the coupled lists the example prints, for every open-sound-hole mode, the share of the shell kinetic energy carried by each group of
 parts, using lumped nodal masses: a third of each triangle's area times its thickness and its pack's density.
+
+`--fholes RASTER.tsv` replaces the table's neck. The table's `cavity` row is its generator's estimate: one circular neck
+of the summed equivalent-ellipse conductances (the `neck` meta row). With `--fholes`, the example computes the
+conductance of all the raster's holes together with `fs_bem::plate_aperture`, through a rigid plate of the neck length
+(the top thickness at the holes). It runs subdivisions 1, 2, 4 and 8 of the 0.5 mm cells and takes the Richardson
+limit, and it refuses a ladder that is not monotone or has an observed order below 0.5. The neck becomes the circular
+flanged neck of that conductance, found by bisection on the library's own neck. For il Cannone the raster is
+`top-plate-fholes.tsv`; the ladder takes about a minute on 16 workers. Still not represented: the arching of the top,
+the finite body, and the cavity side of the holes (a half-space stands in for each side).
 
 `PACK_DIR/<name>.fsmatpk` must exist for the pack names in the table (`spruce`, `maple`). The violin top, bass bar and
 soundpost are Norway spruce (Viala et al. 2020 violin quarters); the runs before 2026-10-23 used the guitar Sitka pack
