@@ -41,8 +41,13 @@
 //! carries singular edge forces, which the hair compliance spreads into a
 //! smooth interior distribution.
 
-use super::super::{ReciprocalStringError, invalid};
-use crate::bowed_string::runtime::reciprocal::bank::StringBowLocation;
+use super::super::{ReciprocalStringBank, StringBowLocation};
+use super::{MaterialBowContact, MultiBowStringBank};
+use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, invalid, poll};
+use crate::render::schedule::force::coupled::contact::friction::{
+    FrictionDrive, multiple::MultiFrictionConfig,
+};
+use fs_exec::CancelGate;
 
 /// Measured hair-ribbon material and geometry. Every field is DATA, e.g. the
 /// matdb pack `bow-hair-horse-pitteroff-woodhouse-acustica1998` (Pitteroff &
@@ -257,6 +262,118 @@ impl CompliantBowRibbon {
         -(self.cell_tangential_stiffness_n_m() * eta_m
             + self.cell_tangential_damping_kg_s() * eta_dot_m_s)
     }
+
+    /// Split one total ribbon drive into the per-cell prescribed drives: the
+    /// common bow-stick speed and the equal `1/n` share of the total normal
+    /// load (uniform normal, P&W Part I). The hair compliance is NOT here; it is
+    /// the per-cell series drive bound by `with_compliant_bow_ribbon`. Output
+    /// storage is caller-owned and must cover every spatial cell.
+    ///
+    /// # Errors
+    /// A non-finite or negatively loaded drive, or an output length mismatch.
+    pub fn project_drive(
+        &self,
+        drive: FrictionDrive,
+        output: &mut [FrictionDrive],
+    ) -> Result<(), ReciprocalStringError> {
+        if output.len() != self.stations.len()
+            || !drive.speed_m_s.is_finite()
+            || !drive.normal_force_n.is_finite()
+            || drive.normal_force_n < 0.0
+        {
+            return Err(invalid(
+                "ribbon drive requires finite speed, nonnegative total load and one output per cell",
+            ));
+        }
+        output.fill(FrictionDrive {
+            speed_m_s: drive.speed_m_s,
+            normal_force_n: drive.normal_force_n * self.load_fraction(),
+        });
+        Ok(())
+    }
+}
+
+impl ReciprocalStringBank {
+    /// Resolve a COMPLIANT finite-width bow-hair ribbon on the existing bow's
+    /// string. Like `with_uniform_bow_ribbon` it adds one jointly solved
+    /// friction port per contact cell on the original string, but then binds a
+    /// per-cell series spring-dashpot drive (M4.4 bow-hair compliance) whose
+    /// stiffness and damping come from the hair DATA. The bow stick still moves
+    /// at the prescribed common speed; each cell reaches the string only through
+    /// its hair, so the contact-point velocities differ across the width and
+    /// differential slip EMERGES (Pitteroff & Woodhouse 1998, Part I). The
+    /// prescribed normal load is the uniform `1/n` share (Part I); a per-cell
+    /// resolved normal distribution (Part III) is the existing contact-load
+    /// composition and is not inferred here.
+    ///
+    /// # Errors
+    /// An already bound interface, a cell count over the joint budget, a
+    /// non-physical ribbon geometry or hair data, or a friction / series-drive
+    /// refusal from the underlying owner.
+    pub fn with_compliant_bow_ribbon(
+        self,
+        width_m: f64,
+        cells: usize,
+        hair: HairRibbonProperties,
+        joint: MultiFrictionConfig,
+        gate: &CancelGate,
+    ) -> Result<MultiBowStringBank, ReciprocalStringError> {
+        poll(gate)?;
+        if self.bow_interface().is_some() {
+            return Err(invalid(
+                "bind ribbon interfaces per cell after resolving the contact area",
+            ));
+        }
+        if cells > joint.max_ports {
+            return Err(invalid(
+                "ribbon cells exceed the declared joint contact budget",
+            ));
+        }
+        let centre = self.source.options.bow;
+        let ribbon = CompliantBowRibbon::new(
+            centre,
+            self.cards[centre.string].length_m,
+            width_m,
+            cells,
+            hair,
+        )?;
+        let law = self.system.port().law.clone();
+        let friction = self.source.options.friction;
+        let additional = ribbon.stations[1..]
+            .iter()
+            .map(|&station_fraction| MaterialBowContact {
+                location: StringBowLocation {
+                    string: centre.string,
+                    station_fraction,
+                },
+                law: law.clone(),
+                friction,
+            })
+            .collect();
+        let bank = self.with_additional_bows(additional, joint, gate)?;
+        // One series spring-dashpot per contact cell; the hairs in parallel are
+        // the ribbon's lumped stiffness S, so each of the n cells carries S/n.
+        let (k, c) = (
+            ribbon.cell_tangential_stiffness_n_m(),
+            ribbon.cell_tangential_damping_kg_s(),
+        );
+        let drives = (0..ribbon.stations.len()).map(|i| (i, k, c)).collect();
+        let super::MultiBowStringBank {
+            source,
+            cards,
+            system,
+            stop_stations,
+        } = bank;
+        let system = system
+            .with_series_compliant_drives(drives, gate)
+            .map_err(ReciprocalStringError::Friction)?;
+        Ok(super::MultiBowStringBank {
+            source,
+            cards,
+            system,
+            stop_stations,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -396,5 +513,60 @@ mod tests {
         ] {
             assert!(CompliantBowRibbon::new(centre(), 0.33, 0.010, 5, bad).is_err());
         }
+    }
+
+    #[test]
+    fn project_drive_shares_load_and_keeps_common_speed() {
+        let ribbon = CompliantBowRibbon::new(centre(), 0.33, 0.010, 5, violin_hair()).unwrap();
+        let mut out = vec![
+            FrictionDrive {
+                speed_m_s: 0.0,
+                normal_force_n: 0.0
+            };
+            5
+        ];
+        ribbon
+            .project_drive(
+                FrictionDrive {
+                    speed_m_s: 0.2,
+                    normal_force_n: 1.0,
+                },
+                &mut out,
+            )
+            .unwrap();
+        for d in &out {
+            assert!((d.speed_m_s - 0.2).abs() <= 0.0);
+            assert!((d.normal_force_n - 0.2).abs() <= 1e-12); // 1.0 / 5 cells
+        }
+        // A wrong output length or a negative total load refuses.
+        let mut short = vec![
+            FrictionDrive {
+                speed_m_s: 0.0,
+                normal_force_n: 0.0
+            };
+            4
+        ];
+        assert!(
+            ribbon
+                .project_drive(
+                    FrictionDrive {
+                        speed_m_s: 0.2,
+                        normal_force_n: 1.0
+                    },
+                    &mut short
+                )
+                .is_err()
+        );
+        assert!(
+            ribbon
+                .project_drive(
+                    FrictionDrive {
+                        speed_m_s: 0.2,
+                        normal_force_n: -1.0
+                    },
+                    &mut out
+                )
+                .is_err()
+        );
     }
 }
