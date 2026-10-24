@@ -98,8 +98,10 @@ identification. Density is 1000 kg/m3, reference length 0.1 m, square section
 area 1e-5 m2; thermal volume/surface are fixed. Conductivity is 10 W/(m K),
 ambient is 300 K, and radiation is explicitly disabled. All choices are printed.
 CSV separates extension, stress, physical heat, algorithmic loss, imposed work,
-boundary heat, caloric/elastic storage and cumulative energy defect. It prints
-only after the complete bounded trajectory succeeds.
+boundary heat, spring free energy, caloric storage, reversible heat, actual
+deposited heat, mechanical internal-energy change and mechanical entropy. Its
+cumulative energy defect uses internal energy, including the entropy term. It
+prints only after the complete bounded trajectory succeeds.
 
 ## Evidence and limits
 
@@ -180,6 +182,25 @@ cargo run --release -p fs-couple --example self_heating_creep -- --table crates/
 cargo run --release -p fs-couple --example self_heating_creep -- --pack material.fsmat 1 2 2000000 4.8 48
 ```
 
+To change the thermal spring response alone, compare `cp5.txt` with
+`cp5_affine.txt` through the same executable:
+
+```sh
+cargo run --release -p fs-couple --example self_heating_creep -- --table crates/fs-couple/examples/self_heating_creep/cp5.txt 2 2000000 4.8 48
+cargo run --release -p fs-couple --example self_heating_creep -- --table crates/fs-couple/examples/self_heating_creep/cp5_affine.txt 2 2000000 4.8 48
+```
+
+The second table changes only the common spring multiplier to
+`S(T)=1-0.005*(T-300)`, with the same initial stiffness, heat capacity,
+relaxation law, density, conductivity, geometry, load and cooling boundary.
+The original material and transport owners then solve the altered temperature,
+creep and unloading history. This synthetic sensitivity case is not a measured
+metal or polymer. The executable regression independently checks the affine
+law's `U=2.5*psi/S` and `s=0.005*psi/S`, loading-induced reversible cooling,
+unloading heat, and cumulative internal-energy closure with actual convection.
+The new Rust regression remains unrun here; an independent equation calculation
+checks its reference trajectory, not native execution or experimental accuracy.
+
 For `--pack`, the extra integer explicitly selects 0..30 branches; the example
 uses the existing `NormalizedMaterialCardPack` decoder and the declared 280..320 K
 span with a legacy `T` axis and no other coordinates. The pack must supply
@@ -195,7 +216,7 @@ A table starts with `frankensim.thermovisco.v1`, followed by exactly one
 `state T_K modulus_scale relaxation_scale free_strain Cp_J_kg_K rho_kg_m3 k_W_m_K`.
 Its temperature span comes from those rows and must include the initial 300 K.
 Comments begin with `#`; files are limited to 16 MiB. This is declared input,
-not independently sourced material evidence. The two supplied tables are synthetic.
+not independently sourced material evidence. All supplied tables are synthetic.
 They are converted to ordinary material-card claims, then pass through the same
 library source, caloric and transport evaluators as canonical packs.
 

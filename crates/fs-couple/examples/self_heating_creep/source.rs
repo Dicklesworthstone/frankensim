@@ -48,7 +48,8 @@ impl Source {
             &PropertyKey::new(THERMAL_CONDUCTIVITY_PROPERTY,THERMAL_CONDUCTIVITY_DIMS),"T",
             &[lower,upper],SelectionPolicy::SingleClaimOnly)?;
         // Initial feedback admission checks the common card/context and the
-        // existing fixed-density, constant-energy, solid-only physical limits.
+        // existing fixed-density, affine spring-scale, fixed-free-strain,
+        // solid-only physical limits over the complete source interval.
         mechanical.caloric_point(&caloric,300.0,0.0,VOLUME_M3,surface_area())?;
         if gate.is_requested() { return Err("cancelled material ingress".into()); }
         Ok(Self {card,mechanical,caloric,transport})

@@ -75,6 +75,8 @@ struct Record {
     time: f64, temperature: f64, strain: f64, stress: f64, target_stress: f64,
     physical_heat: f64, numerical_loss: f64, mechanical_work: f64, boundary_heat: f64,
     elastic_storage: f64, caloric_storage: f64, combined_defect: f64, proposals: usize,
+    reversible_heat: f64, deposited_heat: f64, mechanical_internal_change: f64,
+    mechanical_entropy: f64,
 }
 fn simulate(request: Request, gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Record>> {
     let request = request.validate()?;
@@ -93,6 +95,7 @@ fn simulate_source(request: Request, source: &source::Source, gate: &CancelGate,
 fn simulate_state(request: Request, mut state: CaloricPoint<'_>, environment: &LumpedThermalEnvironment,
     gate: &CancelGate, cx: &Cx<'_>) -> Result<Vec<Record>> {
     let initial = *state.caloric_state();
+    let initial_mechanical_internal = state.mechanical_internal_energy_j();
     let mut records = Vec::with_capacity(request.steps);
     let (mut work, mut external, mut numerical) = (0.0, 0.0, 0.0);
     for index in 1..=request.steps {
@@ -109,9 +112,14 @@ fn simulate_state(request: Request, mut state: CaloricPoint<'_>, environment: &L
         numerical += VOLUME_M3 * step.mechanical_energy.numerical_dissipation;
         let next = step.next;
         let elastic = VOLUME_M3 * next.mechanical().stored_energy_j_m3();
+        let mechanical_internal_change = next.mechanical_internal_energy_j()
+            - initial_mechanical_internal;
         let caloric = next.mass_kg() * (next.caloric_state().specific_enthalpy_j_kg()
             - initial.specific_enthalpy_j_kg());
-        let defect = elastic + caloric + numerical - work - external;
+        // Temperature-dependent elastic storage is Helmholtz free energy.
+        // The original material owner also retains its mechanical entropy;
+        // the first law uses U = psi + T*s, evaluated from the actual endpoint.
+        let defect = mechanical_internal_change + caloric + numerical - work - external;
         if ![work, external, numerical, defect].iter().all(|v| v.is_finite())
             || defect.abs() > index as f64 * config().energy_tolerance_j {
             return Err("cumulative thermo-mechanical energy gate failed".into());
@@ -122,7 +130,9 @@ fn simulate_state(request: Request, mut state: CaloricPoint<'_>, environment: &L
             numerical_loss: VOLUME_M3 * step.mechanical_energy.numerical_dissipation,
             mechanical_work: step.external_mechanical_work_j, boundary_heat: step.transport.external_heat_j,
             elastic_storage: elastic, caloric_storage: caloric, combined_defect: defect,
-            proposals: step.iterations });
+            proposals: step.iterations, reversible_heat: step.reversible_heat_j,
+            deposited_heat: step.applied_heat_j, mechanical_internal_change,
+            mechanical_entropy: next.mechanical_entropy_j_k() });
         state = next;
     }
     Ok(records)
@@ -157,12 +167,13 @@ fn run(args: &[String]) -> Result<()> {
             surface_area(),request.htc,request.duration/2.0)))
     })?;
     eprintln!("{description}");
-    println!("time_s,temperature_K,total_strain,extension_m,stress_Pa,target_stress_Pa,physical_heat_J,numerical_loss_J,mechanical_work_J,boundary_heat_J,elastic_storage_J,caloric_storage_change_J,cumulative_defect_J,thermal_proposals");
+    println!("time_s,temperature_K,total_strain,extension_m,stress_Pa,target_stress_Pa,physical_heat_J,numerical_loss_J,mechanical_work_J,boundary_heat_J,elastic_free_energy_J,caloric_storage_change_J,cumulative_defect_J,thermal_proposals,reversible_heat_J,deposited_heat_J,mechanical_internal_energy_change_J,mechanical_entropy_J_per_K");
     for r in records {
-        println!("{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.time, r.temperature, r.strain,
+        println!("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.time, r.temperature, r.strain,
             LENGTH_M*r.strain, r.stress, r.target_stress, r.physical_heat, r.numerical_loss,
             r.mechanical_work, r.boundary_heat, r.elastic_storage, r.caloric_storage,
-            r.combined_defect, r.proposals);
+            r.combined_defect, r.proposals, r.reversible_heat, r.deposited_heat,
+            r.mechanical_internal_change, r.mechanical_entropy);
     }
     Ok(())
 }
@@ -245,6 +256,41 @@ mod tests {
             assert_eq!(low.transport.material_card_identity(),Some(low.card.content_hash()));
             assert_eq!(low.caloric.curve().material_card_identity(),low.card.content_hash());
             assert!(!low.transport.conductivity_receipts().is_empty());
+        });
+    }
+    #[test]
+    fn affine_material_file_changes_creep_and_closes_internal_energy_with_real_transport() {
+        context(|gate,cx| {
+            let fixed=source::Source::table_text(include_str!("self_heating_creep/cp5.txt"),gate).unwrap();
+            let affine=source::Source::table_text(include_str!("self_heating_creep/cp5_affine.txt"),gate).unwrap();
+            let fixed_rows=simulate_source(request(5.0,2.0),&fixed,gate,cx).unwrap();
+            let rows=simulate_source(request(5.0,2.0),&affine,gate,cx).unwrap();
+            // Both files have the same initial stiffness, heat capacity, density,
+            // relaxation law, geometry, load and actual convection owner.
+            // Only S(T)=2.5-0.005*T differs from the constant reference file.
+            assert_eq!(fixed.mechanical.law().birth(300.0,0.0).unwrap()
+                .linearize(300.0,0.1).unwrap().tangent_pa,
+                affine.mechanical.law().birth(300.0,0.0).unwrap()
+                .linearize(300.0,0.1).unwrap().tangent_pa);
+            assert!(rows[0].physical_heat>0.0 && rows[0].reversible_heat<0.0);
+            assert!(rows[0].deposited_heat<0.0 && rows[0].temperature<300.0);
+            assert!(rows[24].reversible_heat>0.0);
+            assert!((rows[23].temperature-fixed_rows[23].temperature).abs()>0.1);
+            assert!((rows[23].strain-fixed_rows[23].strain).abs()>1e-5);
+            for (index,row) in rows.iter().enumerate() {
+                let scale=2.5-0.005*row.temperature;
+                // Independently, psi=S*Xi, s=-S'*Xi and U=(S-T*S')*Xi.
+                let unscaled=row.elastic_storage/scale;
+                assert!((row.mechanical_internal_change-2.5*unscaled).abs()<1e-12);
+                assert!((row.mechanical_entropy-0.005*unscaled).abs()<1e-12);
+                assert!((row.physical_heat+row.reversible_heat-row.deposited_heat).abs()
+                    <=config().energy_tolerance_j);
+                assert!(row.physical_heat>=0.0 && row.numerical_loss>=0.0);
+                assert!((row.stress-row.target_stress).abs()<=1e-6);
+                assert!(row.combined_defect.abs()<(index+1) as f64*config().energy_tolerance_j);
+            }
+            // Using free energy in the first law would miss this finite term.
+            assert!((rows[23].mechanical_internal_change-rows[23].elastic_storage).abs()>1e-3);
         });
     }
     #[test]
