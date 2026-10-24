@@ -31,6 +31,8 @@ pub use shear_layer::*;
 
 mod thermal_expansion;
 pub use thermal_expansion::*;
+mod hygroscopic_expansion;
+pub use hygroscopic_expansion::*;
 
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
@@ -4803,3 +4805,4 @@ mod tests {
         ));
     }
 }
+

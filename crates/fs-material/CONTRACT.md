@@ -2052,3 +2052,20 @@ field_storage::thermal supplies source-bound reversible thermal field response f
 ## Spatial affine magnetic thermal material
 
 `field_storage::thermal::magnetic::ThermalMagneticMaterial` pins a complete original material snapshot, its immutable card and selected claims, an explicit absolute-temperature axis, fixed remaining context, and a positive globally affine permeability path. It shares source-path admission, Helmholtz derivatives and capacity arithmetic with lumped C(T)/L(T). For actual cell volume V and gauge-invariant |B| it returns psi=V B²/(2mu), entropy=psi mu_prime/mu, U=psi+T entropy and fixed-B heat capacity=−2T psi(mu_prime/mu)². The full-range conservative capacity bound requires the caller to enforce its B envelope and add all field contributions to the caloric capacity. This is a linear reversible fixed-geometry rung; kinked/nonaffine paths, hysteresis, saturation, transition physics and experimental validation are not inferred.
+
+## Source-integrated directional hygroscopic strain
+
+`state_point::integrate_orthotropic_hygroscopic_expansion` integrates three
+explicit dimensionless `linear_hygroscopic_expansion_coefficient_{1,2,3}`
+claims with respect to dry-basis moisture (kg water/kg dry solid). Coefficients
+are engineering-strain derivatives relative to the original stress-free length.
+The typed `hygroscopic_strain_reference_moisture_content` claim must equal the
+reference query throughout the admitted path. Temperature is explicitly absolute
+and fixed; all other query coordinates and schemas remain identical. Selected
+claims are pinned and the original material-line owner admits continuous support
+and exact piecewise-linear integration, including surfaces and drying. Missing
+axes/directions, ambiguous sources, datum changes and domain gaps refuse.
+This is a reversible additive small-strain constitutive path, not a finite-strain,
+hysteretic, sorption-energy or stress-assisted transport law. Source and datum
+identities accompany the complete endpoint evaluations. Tests use authored
+analytic coefficients, not experimental wood validation.

@@ -1,4 +1,4 @@
-//! One material model selection for thermal shape, stress, inertia and vibration.
+//! One material model selection for shape, stress, inertia and vibration.
 use super::SolidMaterialError;
 use crate::linear3::TetElasticMaterial;
 use fs_blake3::ContentHash;
@@ -17,7 +17,7 @@ use fs_qty::{Density, Dims, Pressure};
 /// Thermal expansion independently selects its own source law and fixed axes.
 /// Orthotropic stiffness does not imply an anisotropic expansion coefficient.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ThermalStiffnessModel {
+pub enum SolidStiffnessModel {
     /// Scalar E and nu, with the original isotropic tensor construction.
     Isotropic,
     /// Nine principal-axis engineering constants, rotated once into mesh axes.
@@ -29,7 +29,10 @@ pub enum ThermalStiffnessModel {
     },
 }
 
-impl ThermalStiffnessModel {
+/// Thermal consumer name for the shared solid material schema.
+pub type ThermalStiffnessModel = SolidStiffnessModel;
+
+impl SolidStiffnessModel {
     fn requirements(self) -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
         let mut requirements = Vec::with_capacity(10);
         match self {
@@ -169,3 +172,4 @@ impl ThermalStiffnessModel {
         })
     }
 }
+

@@ -1460,3 +1460,27 @@ unchanged mass/support maps, spectral shifts, and a manufactured varying-stress
 quadratic field whose geometric energy differs from an element-average shortcut.
 They also check the fully constrained and cancellation boundaries. These are
 numerical approximation checks, not experimental material validation.
+
+## Generic initial strain on the native tetrahedral owner
+
+`linear3::eigenstrain` admits source-bound mesh-frame Mandel initial strain
+without manufacturing a temperature. Principal strains rotate through the
+existing second-order Mandel transform with explicit nonzero source/mesh frames.
+Generic and thermal inputs share the original equivalent-load, PCG displacement,
+stress recovery, geometry admission and prestress kernels; thermal source types
+and thermal identity formats remain intact. Generic output carriers now name
+the shared eigenstrain response; existing thermal names denote those same results.
+`SolidStiffnessModel` is the existing source schema and lowering shared across
+thermal and other evolving material conditions. No duplicate constitutive or
+linear solver is introduced. Deformed charts expose their admitted tetrahedral
+volumes for mass-conserving current density.
+
+Generic initial strain is checked against exact current elastic identities;
+stress/tangent recovery refuses a stale material/source/load/solution. Fully
+constrained equilibrium returns zero displacement and actual reactions; a modal
+pencil still requires free DOFs. The tangent uses the existing signed
+reference-configuration initial-stress approximation, not a finite-deformation
+or post-buckling theory. Input source work is external to this mechanical energy
+account; no combined chemo/thermo-mechanical passivity claim is added. G1 tests
+cover free directional deformation, constrained stress and energy, thermal/generic
+numerical equivalence, frame rotation, stale input and cancellation.
