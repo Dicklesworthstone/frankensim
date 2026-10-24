@@ -2283,12 +2283,18 @@ dependencies = [
 name = "fs-plate-transient"
 version = "0.0.1"
 dependencies = [
+ "fs-contact",
  "fs-dcontact",
+ "fs-evidence",
+ "fs-matdb",
+ "fs-material",
  "fs-phs",
  "fs-plate",
+ "fs-qty",
  "fs-solver",
  "fs-sparse",
  "fs-time",
+ "fs-tribo",
 ]
 
 [[package]]

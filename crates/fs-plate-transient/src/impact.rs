@@ -16,6 +16,7 @@
 //! preserve the nonlinear contact energy exactly.
 
 use crate::{PlateDynamics, PlateLoad, PlateMassPreconditioner};
+use fs_contact::normal_patch::{NormalPatchError, source::SourcePointContact};
 use fs_dcontact::{ContactStorage, DContactError, Obstacle};
 use fs_phs::Storage;
 use fs_plate::loading::{PlateLoadError, PlatePatchStencil, PlatePointSample};
@@ -46,6 +47,8 @@ pub enum PlateImpactError {
     Contact(DContactError),
     /// The original finite-patch owner refused its input.
     Patch(PlateLoadError),
+    /// The retained material/interface/geometry owner refused this physical state.
+    Source(NormalPatchError),
 }
 impl core::fmt::Display for PlateImpactError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -61,6 +64,12 @@ impl From<DContactError> for PlateImpactError {
 impl From<PlateLoadError> for PlateImpactError {
     fn from(error: PlateLoadError) -> Self {
         Self::Patch(error)
+    }
+}
+
+impl From<NormalPatchError> for PlateImpactError {
+    fn from(error: NormalPatchError) -> Self {
+        Self::Source(error)
     }
 }
 
@@ -140,6 +149,12 @@ pub struct PlateImpact<'a, L: ?Sized> {
     contact: ContactStorage,
     closure: Vec<f64>,
     dimension: usize,
+    source: Option<SourceBinding>,
+}
+
+struct SourceBinding {
+    owner: SourcePointContact,
+    gap_m: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -241,7 +256,94 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
             contact,
             closure,
             dimension,
+            source: None,
         })
+    }
+
+    /// Bind the original sourced point-contact owner without caller overrides
+    /// of its Hertz coefficient or Hunt--Crossley loss. A point law has unit
+    /// quadrature measure; the finite footprint distributes its total reaction.
+    ///
+    /// The complete immutable bulk/interface/model receipts remain available
+    /// through source(). The caller must assemble the plate from its matching
+    /// source surface state and supply consistent depth/layer geometry: an
+    /// already assembled PlateModel does not retain that material identity.
+    /// The original authored constructor remains a separate explicit model.
+    pub fn from_source(
+        plate: PlateDynamics<'a, L>,
+        patch: PlatePatchStencil,
+        indenter_mass_kg: f64,
+        source: SourcePointContact,
+        gap_m: f64,
+        budget: PlateImpactBudget,
+    ) -> Result<Self, PlateImpactError> {
+        if !gap_m.is_finite() {
+            return Err(PlateImpactError::Invalid(
+                "finite sourced contact gap required",
+            ));
+        }
+        let law = Obstacle::new(
+            vec![1.0],
+            1,
+            1,
+            vec![gap_m],
+            vec![1.0],
+            source.stiffness_n_per_m_3_2(),
+            1.5,
+            format!(
+                "source-point-contact/plate-impact/{}",
+                source.model().identity()
+            ),
+        )?
+        .with_internal_loss(source.dissipation_s_per_m())?;
+        let mut impact = Self::new(plate, patch, indenter_mass_kg, law, budget)?;
+        impact.source = Some(SourceBinding {
+            owner: source,
+            gap_m,
+        });
+        Ok(impact)
+    }
+
+    /// Original immutable material/interface/geometry owner, when source-bound.
+    #[must_use]
+    pub fn source(&self) -> Option<&SourcePointContact> {
+        self.source.as_ref().map(|binding| &binding.owner)
+    }
+
+    // Callers have already checked full state dimensions and finiteness. Use
+    // the same ordered row accumulation and gap subtraction as ContactStorage.
+    // In particular, test signed finiteness BEFORE taking the positive part.
+    fn validate_source_kinematics(
+        &self,
+        q: &[f64],
+        v: Option<&[f64]>,
+    ) -> Result<(), PlateImpactError> {
+        let Some(binding) = &self.source else {
+            return Ok(());
+        };
+        let mut closure = 0.0;
+        let mut rate = 0.0;
+        for (i, coefficient) in self.closure.iter().enumerate() {
+            closure += coefficient * q[i];
+            if let Some(velocity) = v {
+                rate += coefficient * velocity[i];
+            }
+        }
+        let signed_penetration = closure - binding.gap_m;
+        if !signed_penetration.is_finite() {
+            return Err(PlateImpactError::Source(NormalPatchError::InvalidInput {
+                field: "source point indentation",
+            }));
+        }
+        // These instantaneous callbacks have no timestep. Check their state
+        // against the complete admitted box; validate_step separately receives
+        // the actual integrator step before any trial or accepted publication.
+        binding.owner.validate_kinematics(
+            signed_penetration.max(0.0),
+            rate,
+            binding.owner.envelope().maximum_step_s,
+        )?;
+        Ok(())
     }
 
     /// The original spatial model, physical parameters and external load owner.
@@ -317,6 +419,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
         if let Some(d) = direction {
             self.check(&[d])?;
         }
+        self.validate_source_kinematics(q, v)?;
         let x = self.pack(q)?;
         let mut conservative = zeros(x.len())?;
         let mut dissipative = zeros(x.len())?;
@@ -395,6 +498,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
     /// Observe the actual physical state without changing history or solver state.
     pub fn probe(&self, q: &[f64], v: &[f64]) -> Result<PlateImpactProbe, PlateImpactError> {
         self.check(&[q, v])?;
+        self.validate_source_kinematics(q, Some(v))?;
         let n = self.plate_dofs();
         let mut work = zeros(n)?;
         self.plate.mass_apply(&v[..n], &mut work);
@@ -458,6 +562,23 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
 }
 
 impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateImpact<'_, L> {
+    fn validate_step(&self, step_s: f64) -> Result<(), String> {
+        self.plate.validate_step(step_s)?;
+        if let Some(binding) = &self.source {
+            binding
+                .owner
+                .validate_kinematics(0.0, 0.0, step_s)
+                .map_err(|error| PlateImpactError::Source(error).to_string())?;
+        }
+        Ok(())
+    }
+    fn validate_state(&self, q: &[f64], v: &[f64]) -> Result<(), String> {
+        self.check(&[q, v]).map_err(|error| error.to_string())?;
+        let n = self.plate_dofs();
+        self.plate.validate_state(&q[..n], &v[..n])?;
+        self.validate_source_kinematics(q, Some(v))
+            .map_err(|error| error.to_string())
+    }
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -724,6 +845,8 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpact<'_, L> {
         output: &mut [f64],
     ) -> Result<(), String> {
         self.check(&[q, v, a, seed]).map_err(|e| e.to_string())?;
+        self.validate_source_kinematics(q, Some(v))
+            .map_err(|e| e.to_string())?;
         let n = self.plate_dofs();
         self.plate
             .residual_parameter_vjp(&q[..n], &v[..n], &a[..n], &seed[..n], output)

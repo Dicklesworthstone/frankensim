@@ -103,3 +103,40 @@ force, penetration and energy/dissipation, using explicitly illustrative SI
 inputs. `tests/plate_impact.rs` covers reciprocal power, unchanged law measure,
 unloading/separation branches, tangent/transpose finite differences, momentum
 transfer and rebound, coupled step derivatives, and binding/budget refusals.
+
+## Source-bound material impact
+
+`PlateImpact::from_source` consumes the existing
+`fs-contact::normal_patch::source::SourcePointContact` and retains that exact
+owner, including both bulk states, the ordered interface/model card, geometry,
+applicability envelope and original receipts. The adapter lowers its original
+Hertz coefficient and Hunt–Crossley coefficient into the existing distributed
+contact owner with unit point weight. It neither accepts replacement contact
+coefficients nor adds a second constitutive formula. `source()` exposes the
+retained owner for original pressure/footprint observations and identity checks.
+
+The shared structural time owner calls the new model admission hooks with the
+actual timestep, starting state, implicit stage and proposed endpoint. Invalid
+stages never reach the contact constitutive callbacks. A failed solve or
+inadmissible endpoint leaves displacement, velocity, acceleration, time, step
+count and history unchanged. Consistent initialization and adjoints enforce
+the same state domain. Direct contact actions, transposed actions, parameter
+pullbacks and probes also check the original source's indentation/rate limits.
+Instantaneous actions use the source's maximum duration only for a state-only
+box check; actual integration duration is checked independently by the driver.
+
+An arbitrary assembled `PlateModel` does not retain its source material
+identity. Callers of the general constructor must therefore assemble the plate
+from the matching source surface and keep the depth/layer geometry consistent.
+The `material_plate_impact` example demonstrates this complete path: it derives
+plate Young modulus, Poisson ratio and density from the exact retained
+surface-B state, then uses the same source for contact. Its two explicitly
+synthetic cases change both plate response and contact response. A material
+change requires re-resolution and reassembly; the existing dynamics scale
+parameters are not derivatives of the material-card resolver.
+
+Run `cargo run -p fs-plate-transient --example material_plate_impact`.
+The example uses the existing material/interface evaluators and retains
+`SyntheticFixture` authority. It does not claim experimental calibration,
+thermal evolution, three-dimensional contact conformity, or independent
+material identity verification for arbitrary preassembled matrices.
