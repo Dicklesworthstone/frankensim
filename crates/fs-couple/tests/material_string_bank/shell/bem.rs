@@ -200,10 +200,11 @@ fn closed_bank_in_gas(
 fn resolution() -> ShellBemOptions {
     ShellBemOptions {
         minimum_hz: 10.0,
-        maximum_hz: 1000.0,
+        maximum_hz: 750.0,
         frequency_samples: 65,
         maximum_surface_panels: 80,
-        maximum_sweep_terms: 100_000_000,
+        // Actual P1/P0 source work is about 10.54 billion for this 65-row sweep.
+        maximum_sweep_terms: 12_000_000_000,
         maximum_poles: 64,
     }
 }
@@ -217,6 +218,9 @@ fn original_curved_material_modes_receive_reciprocal_air_reaction() {
             .unwrap();
         assert_eq!(report.surface_panels, 80);
         assert_eq!(report.body_modes, 1);
+        assert_eq!(report.reciprocal.unknowns,122);
+        assert_eq!(report.sweep_terms,65*report.reciprocal.frequency_work);
+        assert!(report.sweep_terms<=resolution().maximum_sweep_terms);
         assert!(report.acoustic_poles > 0 && report.acoustic_poles <= 64);
         assert!(report.minimum_panels_per_wavelength >= 6.0);
         assert!(

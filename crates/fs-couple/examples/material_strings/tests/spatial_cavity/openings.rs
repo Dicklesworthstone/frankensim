@@ -11,9 +11,9 @@ fn open_source() -> input::Spec {
 
 #[test]
 fn declared_opening_faces_reach_joint_bem_and_actual_flow_observation() {
-    // This unexecuted integration input may refuse at the unchanged dense-BEM
-    // reciprocity gate: generic collocation traces do not guarantee its 1e-12
-    // bound. Construction errors and failed assertions remain hard native gates.
+    // The same original reciprocal P1/P0 source now carries independent body
+    // and mouth columns. Native execution still owns qualification: construction,
+    // strict matrix admission, causal fit and receiver assertions remain hard gates.
     scoped(|cx,gate| {
         let mut loaded = ready(cx,gate,open_source(),OPEN_BODY,700.0);
         let cavity = loaded.performance.bank().source().bank().spatial_cavity().unwrap();
@@ -33,6 +33,9 @@ fn declared_opening_faces_reach_joint_bem_and_actual_flow_observation() {
         };
         assert_eq!(load.opening_ports,1);
         assert_eq!(load.surface_panels,80);
+        assert_eq!(load.reciprocal.unknowns,122);
+        assert_eq!(load.reciprocal.angular_refinement,0);
+        assert_eq!(load.sweep_terms,10_535_395_000);
         assert_eq!(load.gas,loaded.spec.gas);
         let observer = loaded.performance.material_shell_observer().unwrap();
         assert_eq!(observer.body_modes,1);

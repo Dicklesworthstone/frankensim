@@ -5803,3 +5803,56 @@ Focused tests cover physical flow normalization, compact mutual phase,
 signed interference, gas changes and source refusal; native execution remains
 pending. This is a declared infinite-baffle surface reduction, without resolved
 jet flow, free-field instrument scattering or empirical acoustic qualification.
+
+
+## Shared reciprocal material-shell exterior and observer
+
+Material-string `with_material_shell_bem` and
+`prepare_material_shell_bem` now select the existing symmetric P1/P0 reciprocal
+boundary owner through the shared complete modal-loading adapter. Existing
+`ShellBemOptions` fields are unchanged. The corresponding
+`*_with_angular_refinement` methods expose the original 0..=2 angular refinement;
+the existing methods select level zero. Every original signed structural mode
+and explicitly admitted compact mouth volume-flow column enters the same
+work-conjugate matrix. The strict existing reciprocity/passivity assessment and
+full causal fit precede attachment to the original complete mechanical model.
+No computed collocation matrix is repaired or silently substituted.
+
+`ShellBemReport::reciprocal` records actual original unknown/cache/work and
+backward-residual/flux diagnostics. `maximum_sweep_terms` admits the complete
+original per-frequency source work times the declared grid, including singular
+moment preparation, angular Gram assembly, dense factorization and all source
+columns. The retained legacy condition-number lower-bound field is the
+universal lower bound one; it is not a condition probe or enclosure.
+
+The material-shell observer reconstructs the same original boundary, gas,
+complete source order and load angular refinement, then observes its actual
+P1/P0 solution at the declared receiver. It consumes each accepted body
+generalized velocity and compact mouth's actual SI volume flow exactly once on
+the existing mechanical clock. The default receiver uses the original adaptive
+near-field quadrature defaults. `with_material_shell_observer_with_quadrature`
+exposes that owner's independent tolerance, depth and per-frequency kernel
+allowance. The full boundary sweep allowance and the receiver kernel allowance
+are separate units; neither replaces the unchanged FIR tail, wrap and DTFT
+admission or replay-work cap.
+
+The authored material-string format exposes optional
+`shell_angular_refinement LEVEL` immediately after `body-radiation bem`, and
+`shell_quadrature REL_TOL MAX_DEPTH MAX_KERNEL_EVALUATIONS` immediately after
+`shell_observer`. Missing records retain level zero and the original receiver
+defaults; malformed or incompatible records refuse before material-pack I/O.
+The manufactured 80-panel/42-vertex, two-source, 65-frequency level-zero example
+requires 10,535,395,000 conservative source-work units and declares 12 billion.
+Its observer separately declares at most 80 billion boundary-work units under
+the unchanged 100-billion hard ceiling, plus the original two-million
+adaptive-kernel allowance per frequency. These declarations change numerical
+work capacity, not physical materials or fit/FIR tolerances.
+
+Original geometry, resonance-exclusion, angular-resolution, compact-mouth,
+gas-coherence, complete-source, cold-history and exact-state gates remain
+authoritative. This joins the previously admitted compact uniform opening
+velocity to its exterior reaction and receiver; it does not resolve an f-hole
+flow field or interior viscothermal losses. Native compilation and the new
+integration regressions were unavailable in the implementation environment;
+the source-defined gates remain required before qualification of these
+manufactured examples.

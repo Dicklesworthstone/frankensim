@@ -830,19 +830,32 @@ and retains that exact face in the original 80-tetrahedron volume. The explicit
 opening has a 0.04 m internal length and zero internal resistance. Its order-two
 interior selects the complete 0–180 Hz window with one pressure-mode allowance;
 the same eigensolver refuses if that allowance cannot retain the full window.
-The paired performance declares BEM loading over 0.5–180 Hz and an 8 kHz
+The paired performance declares BEM loading over 0.4–180 Hz and an 8 kHz
 microphone with a 60 Hz pass-band endpoint and a 180 Hz taper stop. The nominal
 uniform-neck resonance lies within that declared taper, so this example is a
 finite-band source/observer integration, not full-passband instrument audio or
 a measured violin, cello or bass. Frequency, panel and FIR error gates remain
 those of the original owners.
 
-The two `open-shell-cavity` files are unexecuted integration inputs. The command
-below is pending native validation and may currently refuse at the unchanged
-dense-BEM reciprocity gate: generic collocation traces do not guarantee the
-fitter's `1e-12` reciprocity bound for independent shell and opening sources.
-The corresponding integration test retains all construction and numerical
-assertions as hard gates.
+The joint load now uses the existing symmetric P1/P0 Galerkin source; the
+receiver evaluates that same source's P1 pressure and P0 auxiliary density.
+Independent body and mouth columns retain the unchanged `1e-12` reciprocity,
+passivity and causal-fit gates. No collocation matrix is repaired. The owner's
+slab resonance exclusion and angular-resolution chart limit the declared band;
+spatial, angular, receiver and FIR refinement remain independent obligations.
+
+The 80-panel, 42-vertex, two-source load requires 162,083,000 original work units
+per frequency and 10,535,395,000 over its 65 frequencies. Its file therefore
+declares a bounded 12-billion-unit source allowance. The microphone has an
+80-billion-unit boundary-sweep allowance and separately declares at most two
+million adaptive receiver-kernel evaluations per frequency. These are numerical
+work ceilings, not time estimates or relaxed error tolerances.
+`shell_angular_refinement 0` and `shell_quadrature 1e-7 14 2000000` expose the
+existing owners' refinement controls as input data.
+
+The integration inputs and command remain pending native execution. Their test
+retains all construction, matrix, fit, field and sample-level assertions as hard
+gates; this implementation is not measured-instrument qualification.
 
 After generating the two material packs using the commands above, the pending
 integration command is:

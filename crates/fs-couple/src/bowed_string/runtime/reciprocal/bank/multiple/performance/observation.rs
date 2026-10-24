@@ -2,8 +2,8 @@
 //!
 //! This is an output owner only: the accepted source-bound air reaction remains
 //! inside the existing mechanics. Boundary traces, gas and geometry policy are
-//! shared with that load. The existing observation producer supplies centroid
-//! receiver p/grad rows and the existing FIR retains their causal history.
+//! shared with that load. Its same reciprocal P1/P0 source supplies adaptive
+//! receiver pressure/gradient rows; the existing FIR retains their history.
 //! Finite-band reconstruction convergence does not certify spatial accuracy or
 //! molecular gas attenuation.
 
@@ -11,9 +11,10 @@ use super::{MultiBowPerformance, render_invalid};
 use crate::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemError;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::friction::multiple::MultiFrictionModalSystem;
-use fs_bem::helmholtz::{Medium, PanelRule};
+use fs_bem::helmholtz::Medium;
+use fs_bem::near_field::Options as ReceiverQuadrature;
 use fs_bem::observation_transfers::{
-    BemObservation, ObservationTransferBake, ProducerUncertainty, ReceiverSpec,
+    ReciprocalBemObservation, ObservationTransferBake, ProducerUncertainty, ReceiverSpec,
     SourceId, TransferDeclaration, TransferError, MAX_OBSERVATION_RUNGS,
 };
 use fs_blake3::ContentHash;
@@ -34,8 +35,8 @@ pub struct ShellObserverOptions {
     pub tail_energy_tolerance: f64,
     pub dtft_relative_tolerance: f64,
     pub maximum_frequency_entries: usize,
-    /// Conservative frequency-count * dense shell algebraic work bound, using
-    /// the same panel/mode expression as the original loading owner.
+    /// Complete original reciprocal boundary-source work over every sampled
+    /// frequency. Adaptive receiver quadrature has a separate explicit allowance.
     pub maximum_sweep_terms: u64,
     /// Maximum retained FIR multiply-add terms PER accepted physical sample,
     /// including all four pressure/gradient outputs.
@@ -122,6 +123,8 @@ pub struct ShellObserverReport {
     /// Explicit compact mouth volume-flow inputs, after structural velocities.
     pub opening_ports: usize,
     pub surface_panels: usize,
+    /// Adaptive P1/P0 receiver accuracy and per-frequency kernel-work allowance.
+    pub quadrature: ReceiverQuadrature,
     pub sweep_terms: u64,
     /// Complete retained convolution terms per accepted sample.
     pub replay_terms: u64,
@@ -178,9 +181,18 @@ impl MultiBowPerformance {
     /// cavity mouths share that same boundary and supply their accepted physical
     /// volume flows. Undeclared holes and molecular attenuation remain outside it.
     pub fn with_material_shell_observer(
-        mut self, options: ShellObserverOptions, gate: &CancelGate,
+        self, options: ShellObserverOptions, gate: &CancelGate,
     ) -> Result<Self, ShellObserverError> {
+        self.with_material_shell_observer_with_quadrature(options,ReceiverQuadrature::default(),gate)
+    }
+
+    /// Refine the original P1/P0 receiver integration independently of the
+    /// boundary/angular source and the FIR ladder. No centroid fallback occurs.
+    pub fn with_material_shell_observer_with_quadrature(
+        mut self, options:ShellObserverOptions, quadrature:ReceiverQuadrature, gate:&CancelGate,
+    ) -> Result<Self,ShellObserverError> {
         poll(gate)?;
+        quadrature.validate().map_err(TransferError::Helmholtz)?;
         if self.poisoned || self.shell_observer.is_some() || self.base_sample != 0
             || self.bank.system.samples_rendered() != 0
         {
@@ -232,7 +244,7 @@ impl MultiBowPerformance {
         // below the stop band, conservatively including its last boundary bin.
         let frequency_samples =
             (options.taper_stop_hz * finest as f64 / f64::from(rate)).ceil() as usize;
-        let (surface, mut traces, sweep_terms) = source.shell_surface_traces(
+        let (surface, mut traces, _) = source.shell_surface_traces(
             body_modes, loading.options.maximum_surface_panels, options.maximum_sweep_terms,
             frequency_samples, gate,
         ).map_err(ShellObserverError::Shell)?;
@@ -269,11 +281,19 @@ impl MultiBowPerformance {
             }
         }
         let gas = *source.gas();
-        let owner = BemObservation::new_routed(
+        let mut boundary_allowance=loading.options;
+        boundary_allowance.maximum_sweep_terms=options.maximum_sweep_terms;
+        let owner = ReciprocalBemObservation::new(
             &surface, Medium { density: gas.density, sound_speed: gas.sound_speed },
             &sources, &traces, core::slice::from_ref(&options.receiver), options.minimum_clearance_m,
-            PanelRule::Triangle { max_pairs: surface_panels.saturating_pow(2) },
+            core::f64::consts::TAU*loading.options.maximum_hz,
+            boundary_allowance.reciprocal_budget(frequency_samples,loading.reciprocal.angular_refinement)
+                .map_err(ShellObserverError::Shell)?,
+            quadrature,||gate.is_requested(),
         )?;
+        let sweep_terms=owner.frequency_work().map_err(TransferError::Helmholtz)?
+            .checked_mul(frequency_samples as u64)
+            .ok_or_else(||invalid("reciprocal receiver source sweep work overflow"))?;
         let declaration = options.declaration(
             rate, sources, owner.geometric_delays_s(), owner.operator_hash(), loading.loading_identity,
         );
@@ -284,7 +304,7 @@ impl MultiBowPerformance {
         let report = ShellObserverReport {
             options, basis_identity: loading.basis_identity, loading_identity: loading.loading_identity,
             gas, body_modes, opening_ports: loading.opening_ports,
-            surface_panels, sweep_terms, replay_terms, transfer,
+            surface_panels, quadrature, sweep_terms, replay_terms, transfer,
         };
         self.shell_observer = Some(BoundShellObserver {
             report, observer, coordinates, velocity: vec![0.0; source_count],

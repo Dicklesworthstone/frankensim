@@ -1,35 +1,30 @@
-//! Exterior air reaction of the SAME material shell used by every string.
+//! Exterior air reaction of the SAME material shell and explicit cavity mouths.
 //!
-//! The original global displacement modes are traced onto the explicitly owned
-//! exterior triangles. The Helmholtz owner solves all normal-velocity fields in
-//! one batch per frequency. Pressure is projected with the transpose of that
-//! same trace and physical panel areas: Z_ij = sum_p phi_pi A_p p_pj. Thus
-//! opposing faces, modal signs, mutual radiation and the complete gas survive;
-//! no equivalent piston, copied damping ratio or fitted timbre is introduced.
+//! The original signed structural/flow traces drive the shared symmetric P1/P0
+//! Galerkin owner. Its transpose work projection produces every body/mouth cross
+//! term. The unchanged strict reciprocity/passivity gate precedes the existing
+//! causal passive fit and complete mechanical propagator. No collocation result
+//! is symmetrized, no resistance is added, and no mode is discarded.
 //!
-//! Scope: a closed, oriented midsurface and piecewise-constant acoustic panels,
-//! with the shared triangle quadrature and geometry-bound formulation policy.
-//! CBIE is used below the closed components' interior-resonance exclusion bound;
-//! Burton--Miller is used above it. The shared modal-loading owner admits the
-//! unchanged matrix's reciprocity and resistance before causal fitting.
-//! This is a cold finite-band passive approximation of a BEM calculation, not a
-//! continuum certificate or measured-instrument claim. The existing compact
-//! microphone still observes loaded acceleration; this module does not turn it
-//! into a finite-distance broadband receiver. Explicit compact mouths from the
-//! original cavity own their fluid boundary panels and mass-normalized flow
-//! traces. Undeclared holes are refused, never silently capped.
-//! Independent body/mouth columns can expose the existing collocation owner's
-//! reciprocity error. The passive loading gate remains 1e-12; an inadmissible
-//! source refuses, with no matrix symmetrization or instrument qualification.
+//! This is the original owner's bounded, below-resonance chart. Its geometric
+//! slab exclusion and angular-resolution guard refuse wider unresolved bands;
+//! there is no alternate-solver fallback. Spatial/angular refinement and the
+//! unchanged finite-band realization gates remain necessary. The same P1/P0
+//! solution supplies the optional receiver, not a pressure-mean conversion.
+//! These discrete physical identities do not qualify a measured instrument.
 
 use super::super::{ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
 use crate::shear_shell::ResolvedShearShell;
-use fs_bem::helmholtz::{HelmholtzError, IterativeOptions, Medium, PanelRule};
+use fs_bem::helmholtz::{HelmholtzError, Medium};
 use fs_bem::modal_loading::{
-    LoadingRoute, ModalLoadingBake, ModalLoadingError, SurfaceModeTraces,
-    modal_radiation_loading_routed,
+    ModalLoadingError, ReciprocalLoadingDiagnostics, modal_radiation_loading_reciprocal,
 };
+use fs_bem::reciprocal_radiation::Budget as ReciprocalBudget;
+#[cfg(test)]
+use fs_bem::{helmholtz::{IterativeOptions,PanelRule},modal_loading::{
+    LoadingRoute,ModalLoadingBake,SurfaceModeTraces,modal_radiation_loading_routed,
+}};
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
@@ -47,12 +42,35 @@ pub struct ShellBemOptions {
     pub frequency_samples: usize,
     /// All selected exterior triangles must fit; none are discarded.
     pub maximum_surface_panels: usize,
-    /// Ceiling on frequencies * (panels^3 + panels^2*modes + panels*modes^2).
+    /// Ceiling on the original Galerkin velocity_port_work times every sampled
+    /// frequency, including singular moments, angular Gram assembly and full LU.
     pub maximum_sweep_terms: u64,
     /// Complete acoustic pole count, before the exact owner's stricter limits.
     pub maximum_poles: usize,
 }
 impl ShellBemOptions {
+    /// The declared panel ceiling bounds the original P1/P0 unknowns and cached
+    /// singular moments. The original owner still checks its exact byte/work
+    /// requirements; these are conservative storage allowances, not estimates
+    /// of accuracy or measured execution time.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn reciprocal_budget(
+        &self, frequencies:usize, angular_refinement:u32,
+    ) -> Result<ReciprocalBudget,ShellBemError> {
+        if frequencies==0 || angular_refinement>2 {
+            return Err(ShellBemError::Invalid("reciprocal source requires a nonempty grid and angular refinement 0..2"));
+        }
+        let panels=self.maximum_surface_panels;
+        let cache=panels.checked_mul(panels).and_then(|n|n.checked_mul(128))
+            .and_then(|n|panels.checked_mul(4096).and_then(|m|n.checked_add(m)))
+            .ok_or(ShellBemError::Invalid("reciprocal cache allowance overflow"))?;
+        Ok(ReciprocalBudget {
+            maximum_unknowns:panels.saturating_mul(2).min(4096),
+            maximum_cache_bytes:cache,
+            maximum_work:self.maximum_sweep_terms/(frequencies as u64),
+            angular_refinement,
+        })
+    }
+
     /// Admission before geometry allocation or a Helmholtz factorization.
     pub fn validate(&self, rate: u32) -> Result<(), ShellBemError> {
         if !self.minimum_hz.is_finite()
@@ -90,11 +108,14 @@ pub struct ShellBemReport {
     /// Actual compact aperture-flow ports after the complete structural basis.
     pub opening_ports: usize,
     pub surface_panels: usize,
+    /// Actual original variational source diagnostics, including refinement/work.
+    pub reciprocal: ReciprocalLoadingDiagnostics,
     pub acoustic_poles: usize,
     pub sweep_terms: u64,
     /// Lowest panel-resolution diagnostic on the complete sampled band.
     pub minimum_panels_per_wavelength: f64,
-    /// Largest original BEM probe-based condition LOWER bound, not an enclosure.
+    /// Universal condition-number lower bound 1. The variational owner reports
+    /// its actual backward residual instead of a condition probe or enclosure.
     pub maximum_condition_lower_bound: f64,
     /// Largest relative reciprocity defect admitted by the shared loading owner.
     pub reciprocity_relative_residual: f64,
@@ -144,7 +165,16 @@ impl ReciprocalStringBank {
         options: ShellBemOptions,
         gate: &CancelGate,
     ) -> Result<(Self, ShellBemReport), ShellBemError> {
-        let (model, report) = self.prepare_material_shell_bem(options, gate)?;
+        self.with_material_shell_bem_with_angular_refinement(options,0,gate)
+    }
+
+    /// Independently refine the original outgoing angular Gram quadrature
+    /// (0..=2), retaining the same declared geometry, band and work ceilings.
+    pub fn with_material_shell_bem_with_angular_refinement(
+        self, options:ShellBemOptions, angular_refinement:u32, gate:&CancelGate,
+    ) -> Result<(Self,ShellBemReport),ShellBemError> {
+        let (model, report) = self.prepare_material_shell_bem_with_angular_refinement(
+            options,angular_refinement,gate)?;
         let mut bank = self
             .with_body_radiation_load(model, options.maximum_poles, gate)
             .map_err(ShellBemError::Bank)?;
@@ -173,6 +203,15 @@ impl ReciprocalStringBank {
         options: ShellBemOptions,
         gate: &CancelGate,
     ) -> Result<(Model, ShellBemReport), ShellBemError> {
+        self.prepare_material_shell_bem_with_angular_refinement(options,0,gate)
+    }
+
+    /// Preparation with explicitly selected angular refinement of the SAME
+    /// variational source. Unresolved bands/budgets refuse without changing
+    /// owner, weakening admission or returning a partial fitted model.
+    pub fn prepare_material_shell_bem_with_angular_refinement(
+        &self, options:ShellBemOptions, angular_refinement:u32, gate:&CancelGate,
+    ) -> Result<(Model,ShellBemReport),ShellBemError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
         if self.system.samples_rendered() != 0
@@ -226,7 +265,7 @@ impl ReciprocalStringBank {
                 }
             }
         }
-        let (surface, fields, work) = self.source.shell_surface_traces(
+        let (surface, fields, _) = self.source.shell_surface_traces(
             modes.len(), options.maximum_surface_panels, options.maximum_sweep_terms,
             options.frequency_samples, gate,
         )?;
@@ -245,26 +284,30 @@ impl ReciprocalStringBank {
             .collect();
         omega[0] = low;
         omega[options.frequency_samples - 1] = high;
-        let loading = surface_loading(&surface, &fields, &omega, medium, basis_identity, gate)?;
+        let entries=fields.len().checked_mul(fields.len()).and_then(|n|n.checked_mul(omega.len()))
+            .ok_or(ShellBemError::Invalid("complete reciprocal matrix extent overflow"))?;
+        let source=modal_radiation_loading_reciprocal(&surface,&fields,&omega,medium,
+            options.reciprocal_budget(omega.len(),angular_refinement)?,basis_identity,entries,
+            ||gate.is_requested()).map_err(|error|match error {
+                ModalLoadingError::Helmholtz(HelmholtzError::Cancelled)=>ShellBemError::Cancelled,
+                ModalLoadingError::Helmholtz(error)=>ShellBemError::Solve(error),
+                other=>ShellBemError::Loading(other),
+            })?;
+        let loading=&source.loading;
+        let reciprocal=source.diagnostics;
         let mut impedance = Vec::with_capacity(omega.len());
-        let mut ppw = f64::INFINITY;
-        let mut condition = 0.0_f64;
         let mut reciprocity = 0.0_f64;
         for row in loading.rows() {
             poll(gate)?;
-            let diagnostics = row.bem_diagnostics().ok_or(ShellBemError::Invalid(
-                "closed-body loading omitted its original BEM diagnostics",
-            ))?;
             impedance.push(row.impedance().to_vec());
-            ppw = ppw.min(diagnostics.minimum_panels_per_wavelength);
-            condition = condition.max(diagnostics.maximum_condition_lower_bound);
             reciprocity = reciprocity.max(row.reciprocity_relative_defect());
         }
         let mut extent = 0.0_f64;
         for a in surface.centroids() {
             poll(gate)?;
             for b in surface.centroids() {
-                extent = extent.max((a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2]));
+                extent = extent.max(fs_math::det::hypot(
+                    fs_math::det::hypot(a[0]-b[0],a[1]-b[1]),a[2]-b[2]));
             }
         }
         let spacing = if extent > 0.0 {
@@ -288,10 +331,11 @@ impl ReciprocalStringBank {
             body_modes: modes.len(),
             opening_ports,
             surface_panels: panels,
+            reciprocal,
             acoustic_poles: fitted.model.poles.len(),
-            sweep_terms: work,
-            minimum_panels_per_wavelength: ppw,
-            maximum_condition_lower_bound: condition,
+            sweep_terms: reciprocal.sweep_work,
+            minimum_panels_per_wavelength: reciprocal.minimum_panels_per_wavelength,
+            maximum_condition_lower_bound: 1.0,
             reciprocity_relative_residual: reciprocity,
             peak_error: fitted.peak_error,
             rms_error: fitted.rms_error,
@@ -472,6 +516,7 @@ fn surface_trace(
 
 // Retain the instrument's physical trace and work ceiling while delegating
 // geometry admission, formulation, projection and matrix assessment together.
+#[cfg(test)]
 fn surface_loading(
     surface: &SpherePanels,
     fields: &[Vec<f64>],

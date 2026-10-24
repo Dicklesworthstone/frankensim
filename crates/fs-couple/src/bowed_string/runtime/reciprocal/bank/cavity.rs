@@ -187,9 +187,9 @@ impl ReciprocalStringBank {
     /// One source-derived interior/compact-mouth/exterior construction. The
     /// existing BEM and passive realization retain all signed body-mouth and
     /// mouth-mouth reactions in the original exact mechanical propagator.
-    /// Independent source columns must pass the original dense reciprocity
-    /// gate. Collocation does not guarantee that precision; an unresolved
-    /// exterior refuses without changing its matrix or relaxing admission.
+    /// Independent columns use the original symmetric P1/P0 source and must
+    /// pass unchanged reciprocity, passivity and causal-fit gates. Its geometric
+    /// resonance-exclusion and angular-resolution chart remains authoritative.
     pub fn with_material_shell_cavity_and_bem(
         self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
         openings: Vec<ShellCavityOpening>,

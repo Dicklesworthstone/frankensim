@@ -353,7 +353,8 @@ impl input::Spec {
                 (bank, Some(BodyRadiationReport::Rayleigh(report)))
             },
             Some(input::BodyRadiation::ShellBem(options)) => {
-                let (bank, report) = bank.with_material_shell_bem(options, gate)?;
+                let (bank, report) = bank.with_material_shell_bem_with_angular_refinement(
+                    options,self.shell_bem_angular_refinement,gate)?;
                 (bank, Some(BodyRadiationReport::ShellBem(report)))
             },
             None => (bank, None),
@@ -401,7 +402,8 @@ impl input::Spec {
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
         if let Some(observer)=&self.shell_observer {
-            performance=performance.with_material_shell_observer(observer.clone(),gate)?;
+            performance=performance.with_material_shell_observer_with_quadrature(
+                observer.clone(),self.shell_receiver_quadrature,gate)?;
         }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })

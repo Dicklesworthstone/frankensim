@@ -119,7 +119,7 @@ fn opening(face:[u32;3]) -> ShellCavityOpening {
 }
 fn exterior() -> ShellBemOptions {
     ShellBemOptions {minimum_hz:1.0,maximum_hz:300.0,frequency_samples:65,
-        maximum_surface_panels:80,maximum_sweep_terms:100_000_000,maximum_poles:64}
+        maximum_surface_panels:80,maximum_sweep_terms:12_000_000_000,maximum_poles:64}
 }
 fn load() -> Model {
     // Explicit synthetic passive matrix for an independent work oracle; only
@@ -207,14 +207,17 @@ fn mouth_exterior_pressure_reacts_in_the_same_string_body_air_energy_balance() {
 
 #[test]
 fn original_bem_boundary_closes_with_a_fluid_mouth_and_keeps_mutual_reaction() {
-    // Pending native integration gate: independent localized columns expose
-    // collocation reciprocity error. A source refusal is a failure of this
-    // qualification, never permission to symmetrize or weaken the 1e-12 gate.
+    // Independent localized columns now use the original symmetric P1/P0
+    // source. The unchanged strict matrix and fit gates remain hard assertions;
+    // source-derived integration and continuum accuracy require native execution.
     with_cx(|cx,gate| with_volume(gas(101_325.0),|fe,face| {
         let (loaded,report) = bank(cx,gate,fe,&[face],gas(101_325.0),700.0)
             .with_material_shell_cavity_and_bem(fe,interior(),vec![opening(face)],exterior(),gate).unwrap();
         assert_eq!(report.body_modes,1); assert_eq!(report.opening_ports,1);
         assert_eq!(report.surface_panels,80);
+        assert_eq!(report.reciprocal.unknowns,122);
+        assert_eq!(report.reciprocal.angular_refinement,0);
+        assert_eq!(report.sweep_terms,10_535_395_000);
         assert!(report.reciprocity_relative_residual <= 1e-12);
         let binding = loaded.source().body_radiation().unwrap();
         assert_eq!(binding.source_body_coordinates(),&[0,1]);

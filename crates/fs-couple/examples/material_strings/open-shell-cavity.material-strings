@@ -5,8 +5,10 @@ gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
 body closed-shell.fsmatpk 0.4 0.4 0.001 1 1
 strings 1
 string wire.fsmatpk 0.5 0.0003 20 4 0 0.8 3000 0.1
-body-radiation bem 0.5 180 65 80 80000000 36
-shell_observer front 0.2 0.2 1.0 0.01 60 180 256 5 1024 2048 4096 8192 16384 1e-10 1e-4 65536 10000000000 65536
+body-radiation bem 0.4 180 65 80 12000000000 36
+shell_angular_refinement 0
+shell_observer front 0.2 0.2 1.0 0.01 60 180 256 5 1024 2048 4096 8192 16384 1e-10 1e-4 65536 80000000000 65536
+shell_quadrature 1e-7 14 2000000
 cavity none
 friction stribeck 0.8 0.4 0.1 0
 forces preload 1 1

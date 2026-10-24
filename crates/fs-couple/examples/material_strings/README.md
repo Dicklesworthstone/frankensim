@@ -1151,6 +1151,7 @@ Helmholtz boundary-element solver:
 ```text
 body-radiation rayleigh SIDES MIN_HZ MAX_HZ FREQUENCIES MAX_CELLS MAX_SWEEP_TERMS MAX_POLES
 body-radiation bem MIN_HZ MAX_HZ FREQUENCIES MAX_PANELS MAX_SWEEP_TERMS MAX_POLES
+shell_angular_refinement LEVEL
 ```
 
 `rayleigh-pluck.material-strings` and `orthotropic.body` provide a small runnable
@@ -1192,10 +1193,21 @@ displacement fields, triangle normals and areas to compute the full mutual
 modal load. Pressure, temperature and mixture changes enter through the same
 gas state used by the string bank and cavity; the fitted load reacts on the
 same string/body/contact solve. The report records the basis identity, gas,
-panel and pole counts, mesh resolution and conditioning diagnostics, and
-sampled fit errors. `MAX_PANELS` is an admission bound on the source mesh,
-not permission to decimate it. The frequency count and passivity/error gates
-above also apply to BEM.
+panel and pole counts, actual work, backward residual, outgoing-flux balance,
+and sampled fit errors. The source is the existing symmetric P1/P0 Galerkin
+owner: the original transpose work map retains reciprocity before projection.
+The unchanged strict matrix and passive-fit gates still apply; no collocation
+result is symmetrized. `MAX_PANELS` bounds the source mesh and its cache, without
+decimation. `MAX_SWEEP_TERMS` bounds the owner's complete per-frequency work
+times the declared frequency count, including singular moments, angular Gram
+assembly and dense factorization. The 80-panel two-source 65-frequency fixture
+requires 10,535,395,000 units and declares 12 billion.
+
+The optional `shell_angular_refinement` record immediately after `body-radiation
+bem` selects the original angular level 0, 1 or 2; omission retains level 0.
+Its geometric slab-resonance exclusion and angular-resolution limits refuse
+unresolved bands, without falling back to a different solver. These numerical
+limits and discrete passivity do not certify acoustic convergence.
 
 `closed-shell-pluck.material-strings` and `closed-shell.body` supply a complete
 data-only route through this same shell/BEM owner. After the initial copy and
@@ -1237,15 +1249,23 @@ converged instrument timbre.
 The optional `shell_observer` record follows `body-radiation bem` and precedes
 `cavity none`. It sends the original accepted body modal velocities through the
 shared causal BEM observation transfer. The same closed shell, signed
-mass-normalized displacement fields, boundary triangle integration rule and
-physical gas supply both the mechanical radiation reaction and the listener.
-Receiver pressure and gradient use the existing centroid Green-function rows;
-this does not add higher-order receiver quadrature. Material, geometry and gas
-changes rebuild both from their original source data.
+mass-normalized displacement fields, explicit mouth-flow traces and physical
+gas supply both mechanical reaction and the listener. The existing reciprocal
+P1/P0 source supplies its actual mixed layer densities to its adaptive receiver;
+panel pressure means are used only for mechanical work. Pressure and all three
+gradient components use the same Green field and retained angular resolution.
+Material, geometry and gas changes rebuild both from their original data.
 
 ```text
 shell_observer ID X Y Z CLEARANCE_M PASS_HZ STOP_HZ LATENCY N_FFT FFT... TAIL_TOL DTFT_TOL MAX_FREQ_ENTRIES MAX_SWEEP_TERMS MAX_REPLAY_TERMS
+shell_quadrature REL_TOL MAX_DEPTH MAX_KERNEL_EVALUATIONS
 ```
+
+The optional `shell_quadrature` record follows `shell_observer`. It exposes the
+existing adaptive receiver controls; omission uses relative tolerance `1e-7`,
+maximum depth 14 and two million kernel evaluations per frequency. This budget
+is separate from `MAX_SWEEP_TERMS`, which bounds complete boundary-source work.
+Exhausted quadrature refuses without substituting a centroid receiver.
 
 `X Y Z` is the listener position in metres in the physical body frame.
 `CLEARANCE_M` must be positive and every surface panel must remain farther from
@@ -1284,8 +1304,10 @@ window are retained. The renderer does not normalize pressure, shift the signal
 earlier or append an undeclared tail.
 
 Attachment requires a cold performance with the source-derived shell BEM load.
-An arbitrary fitted load, Rayleigh plate, cavity, open shell or uncapped sound
-hole cannot substitute for that matching exterior problem. An already advanced
+An arbitrary fitted load, Rayleigh plate, unrelated lumped cavity or undeclared
+opening cannot substitute for that matching exterior problem. Explicit compact
+mouths from the original distributed cavity contribute accepted physical volume
+flow alongside structural velocities. An already advanced
 performance refuses a new observer because its past boundary motion is unknown.
 The report exposes basis and loading identities, gas, panel/mode counts,
 transfer controls and work estimates.
