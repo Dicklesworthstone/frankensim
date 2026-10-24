@@ -5,10 +5,13 @@ use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };
 use fs_convection::{CorrelationId, ThermalDirection};
+use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};
 use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_couple::cavity_phs::piston::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
+use fs_couple::finite_gas_thermal::{ConvectionCoefficient, ConvectionError, FiniteGasThermalEnvironment};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, UniformEnthalpyStepInput};
-use fs_material::thermochemical_gas::energy::{GasEnergySolve, parcel::ClosedGasParcel};
+use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel, parcel::ClosedGasParcel};
 use fs_qty::Length;
 
 const DT: f64 = 0.00005;
@@ -183,4 +186,153 @@ fn heat_flow_direction_comes_from_actual_midpoints_not_an_authored_flag() {
         s.characteristic_length, ForcedConvectionSettings {direction: ThermalDirection::HeatingFluid, ..settings}).unwrap();
     near(hot.conductance_w_k, expected.coefficient().value.value()*s.area_m2, 1e-12);
     near(hot.conductance_w_k/cold.conductance_w_k, old.gas().state().state().prandtl.powf(0.1), 1e-10);
+}
+
+fn scope(test: impl FnOnce(&Cx<'_>, &CancelGate)) {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(&gate, arena, StreamKey { seed: 0, kernel_id: 0x464743,
+            tile: 0, iteration: 0 }, Budget::INFINITE, ExecMode::Deterministic);
+        test(&cx, &gate);
+    });
+}
+
+fn uniform_boundary() -> LumpedThermalEnvironment {
+    LumpedThermalEnvironment {
+        temperature_k: 12345.0, // Replaced by the physical finite gas endpoint.
+        radiation_temperature_k: 300.0,
+        convection_w_per_m2_k: 1e9, // Must not leak into source-driven convection.
+        transport: LumpedThermalTransport::try_declared(20.0, 0.0).unwrap(),
+        enthalpy_tolerance_j_kg: 1e-8, maximum_thermal_residual_j: 1e-8,
+    }
+}
+
+fn uniform_environment<'a>(gas: &'a IsochoricGasParcel, body: &'a LumpedThermalEnvironment)
+    -> FiniteGasThermalEnvironment<'a>
+{
+    FiniteGasThermalEnvironment { gas, body, gas_heat_j: 0.0, gas_solve: controls().gas,
+        exchange: HeatExchangeSolve { heat_bracket_j: [-20.0, 20.0], ..exchange() },
+        maximum_gas_temperature_increment_k: 100.0 }
+}
+
+#[test]
+fn isochoric_convection_uses_the_actual_endpoint_and_closes_both_energy_stores() {
+    scope(|cx, _| {
+        let curve = source::body_curve();
+        let old = IsochoricGasParcel::new(source::model_transport(0.75, true),
+            source::point(350.0, 100000.0), 0.001).unwrap();
+        let saved = old.clone();
+        let boundary = uniform_boundary();
+        let mut environment = uniform_environment(&old, &boundary);
+        environment.gas_heat_j = 0.2;
+        let thermal = UniformEnthalpyStepInput { duration_s: 0.1, internal_heat_j: 0.1,
+            ..body(&curve, 260000.0) };
+        let next = surface().isochoric_body_candidate(cx, &environment, thermal).unwrap();
+        let report = &next.report;
+        let endpoint = report.next_gas.state();
+        let evaluated = report.convection.source.as_ref().unwrap();
+        let fresh = evaluate_forced_from_material(surface().correlation, endpoint,
+            surface().speed_m_s, surface().characteristic_length, surface().settings).unwrap();
+        assert_eq!(report.convection.coefficient_w_per_m2_k, fresh.coefficient().value.value());
+        assert_eq!(&evaluated.transport, fresh.transport());
+        assert_eq!(endpoint.source_packs(), old.state().source_packs());
+        let initial = evaluate_forced_from_material(surface().correlation, old.state(),
+            surface().speed_m_s, surface().characteristic_length, surface().settings).unwrap();
+        assert!((report.convection.coefficient_w_per_m2_k - initial.coefficient().value.value()).abs() > 1e-4);
+        let q = thermal.duration_s * report.convection.coefficient_w_per_m2_k * thermal.surface_area_m2
+            * (next.state.temperature_k() - endpoint.state().temperature);
+        near(report.solid_to_gas_heat_j, q, environment.exchange.source_tolerance_j);
+        assert_eq!(next.external_heat_j, -report.solid_to_gas_heat_j);
+        let storage = thermal.mass_kg * (next.state.specific_enthalpy_j_kg()
+            - thermal.initial.specific_enthalpy_j_kg())
+            + old.mass_kg() * (endpoint.specific_internal_energy_j_kg()
+                - old.state().specific_internal_energy_j_kg());
+        near(storage, thermal.internal_heat_j + environment.gas_heat_j,
+            environment.exchange.energy_tolerance_j);
+        assert_eq!(old, saved);
+    });
+}
+
+#[test]
+fn transport_data_only_swap_changes_heat_transfer_temperature_and_acoustic_state() {
+    scope(|cx, _| {
+        let curve = source::body_curve();
+        let boundary = uniform_boundary();
+        let gases = [false, true].map(|variable| IsochoricGasParcel::new(
+            source::model_transport(0.75, variable), source::point(350.0, 100000.0), 0.001).unwrap());
+        assert_eq!(gases[0].state().state().sound_speed, gases[1].state().state().sound_speed);
+        assert_eq!(gases[0].state().specific_internal_energy_j_kg(), gases[1].state().specific_internal_energy_j_kg());
+        let thermal = UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 260000.0) };
+        let run = |gas: &IsochoricGasParcel| surface().isochoric_body_candidate(
+            cx, &uniform_environment(gas, &boundary), thermal).unwrap();
+        let a = run(&gases[0]);
+        let b = run(&gases[1]);
+        assert!((a.report.convection.coefficient_w_per_m2_k-b.report.convection.coefficient_w_per_m2_k).abs() > 0.1);
+        assert!((a.report.solid_to_gas_heat_j-b.report.solid_to_gas_heat_j).abs() > 0.01);
+        assert!((a.state.temperature_k()-b.state.temperature_k()).abs() > 0.01);
+        assert!((a.report.next_gas.state().state().sound_speed-b.report.next_gas.state().state().sound_speed).abs() > 0.01);
+    });
+}
+
+#[test]
+fn isochoric_insulation_and_fixed_coefficient_paths_keep_the_same_thermal_solver() {
+    scope(|cx, _| {
+        let curve = source::body_curve();
+        let old = IsochoricGasParcel::new(source::model(0.75), source::point(400.0, 100000.0), 0.001).unwrap();
+        let mut boundary = uniform_boundary();
+        boundary.convection_w_per_m2_k = 10.0;
+        let thermal = UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 260000.0) };
+        let environment = uniform_environment(&old, &boundary);
+        let declared = environment.advance(cx, thermal).unwrap();
+        let resolved = environment.advance_with_convection(cx, thermal, |_| {
+            Ok::<_, core::convert::Infallible>(ConvectionCoefficient { coefficient_w_per_m2_k: 10.0, source: () })
+        }).unwrap();
+        assert_eq!(declared, resolved);
+        let isolated = ForcedGasSurface { area_m2: 0.0, speed_m_s: 0.0, ..surface() }
+            .isochoric_body_candidate(cx, &environment, thermal).unwrap();
+        let zero_boundary = LumpedThermalEnvironment { convection_w_per_m2_k: 0.0, ..boundary.clone() };
+        let explicit_zero = uniform_environment(&old, &zero_boundary).advance(cx, thermal).unwrap();
+        assert_eq!(isolated.state, explicit_zero.state);
+        assert_eq!(isolated.report.body, explicit_zero.report.body);
+        near(isolated.state.specific_enthalpy_j_kg(), thermal.initial.specific_enthalpy_j_kg(),
+            boundary.enthalpy_tolerance_j_kg);
+        assert_eq!(isolated.report.next_gas, old);
+        assert_eq!(isolated.report.solid_to_gas_heat_j, 0.0);
+        assert!(isolated.report.convection.source.is_none());
+    });
+}
+
+#[test]
+fn isochoric_source_correlation_biot_and_cancellation_refusals_publish_nothing() {
+    scope(|cx, gate| {
+        let curve = source::body_curve();
+        let old = IsochoricGasParcel::new(source::model(0.75), source::point(400.0, 100000.0), 0.001).unwrap();
+        let saved = old.clone();
+        let boundary = uniform_boundary();
+        let environment = uniform_environment(&old, &boundary);
+        let thermal = UniformEnthalpyStepInput { duration_s: 0.1, ..body(&curve, 260000.0) };
+        for invalid in [ForcedGasSurface { area_m2: 0.01, ..surface() },
+            ForcedGasSurface { speed_m_s: 1e20, ..surface() },
+            ForcedGasSurface { correlation: CorrelationId::DittusBoelter, ..surface() },
+            ForcedGasSurface { correlation: CorrelationId::CircularDuctLaminarChf, ..surface() }]
+        {
+            assert!(invalid.isochoric_body_candidate(cx, &environment, thermal).is_err());
+        }
+        let mut calls = 0;
+        let refused = environment.advance_with_convection(cx, thermal, |_| {
+            calls += 1;
+            if calls > 1 { return Err("source domain refusal"); }
+            Ok(ConvectionCoefficient { coefficient_w_per_m2_k: 10.0, source: () })
+        });
+        assert!(matches!(refused, Err(ConvectionError::Convection("source domain refusal"))));
+        let poor_conductor = LumpedThermalEnvironment {
+            transport: LumpedThermalTransport::try_declared(1e-5, 0.0).unwrap(), ..boundary.clone() };
+        assert!(surface().isochoric_body_candidate(cx, &uniform_environment(&old, &poor_conductor), thermal).is_err());
+        gate.request();
+        assert!(matches!(surface().isochoric_body_candidate(cx, &environment, thermal),
+            Err(ConvectionError::Thermal(ThermalPistonError::Cancelled))));
+        assert_eq!(old, saved);
+        assert_eq!(thermal.initial, curve.state_at_specific_enthalpy(260000.0).unwrap());
+    });
 }

@@ -56,7 +56,23 @@ input. `tests/steady_material_gas.rs` checks independent heat/pressure balances,
 temperature-dependent transport, species injection, pressure changes,
 final-state hydraulic admission and transactional failure/cancellation.
 
-This is a first-order steady reduced model with prescribed positive mass flow,
+`medium::convection::finite_gas::ForcedGasSurface::isochoric_body_candidate`
+connects the same material/correlation evaluator to the generic finite-gas,
+uniform-body thermal callback in `fs-couple`. Each coupled trial resolves h from
+the actual candidate gas endpoint; accepted transport and correlation sources
+remain beside the same gas state used for energy and acoustic observations.
+The original body solver retains conductivity, radiation, Biot admission and
+enthalpy, and the single exchanged heat cancels in the combined energy balance.
+A positive patch must cover the whole body surface; zero area explicitly
+insulates it. Bulk-gas property evaluation and prescribed relative flow retain
+their correlation limits. Dittus-Boelter's unknown endpoint direction and
+constant-heat-flux duct correlations refuse on this isothermal-body path.
+The explicit constant-h API remains available. `tests/finite_gas_convection.rs`
+checks endpoint coefficient re-evaluation, transport-only data substitution,
+energy closure, fixed-h identity and transactional refusals. No spatial flow,
+film-temperature solve or experimental fidelity claim is introduced.
+
+`solve_material_gas_transport` is a first-order steady reduced model with prescribed positive mass flow,
 supplied wall temperatures, downstream mixed-cell bulk properties and a common
 static EOS pressure. Total pressure loss must fit the explicit small-drop
 limit. It does not solve fan mass flow or axial pressure, advance reactions or

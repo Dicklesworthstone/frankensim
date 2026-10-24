@@ -18,6 +18,7 @@ use fs_conduction::{
 use fs_exec::Cx;
 use fs_material::{
     phase::{UniformEnthalpyStep, UniformEnthalpyStepInput},
+    thermochemical_gas::ResolvedThermochemicalGasState,
     thermochemical_gas::energy::{
         GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
     },
@@ -26,12 +27,40 @@ use fs_material::{
 /// Original thermal, gas or bounded-feedback refusal. No piston is introduced.
 pub type Error = ThermalPistonError<ConductionError>;
 
+/// Original coupled-thermal refusal or the caller's concrete convection law.
+#[derive(Debug)]
+pub enum ConvectionError<E> {
+    Thermal(Error),
+    Convection(E),
+}
+impl<E> From<Error> for ConvectionError<E> {
+    fn from(error: Error) -> Self { Self::Thermal(error) }
+}
+impl<E: core::fmt::Display> core::fmt::Display for ConvectionError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Thermal(error) => write!(f, "{error}"),
+            Self::Convection(error) => write!(f, "finite-gas convection: {error}"),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for ConvectionError<E> {}
+
+/// Whole-surface coefficient and its retained constitutive evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConvectionCoefficient<S> {
+    /// Nonnegative h [W/(m² K)]; zero explicitly insulates the body.
+    pub coefficient_w_per_m2_k: f64,
+    pub source: S,
+}
+
 /// One finite gas inventory and the existing body boundary law for a proposal.
 ///
-/// Only `body.temperature_k` is replaced, by the gas endpoint at each trial.
+/// `body.temperature_k` is replaced by the gas endpoint at each trial.
 /// The radiation temperature remains an independent external enclosure.
 /// The declared film coefficient is not inferred from a gas name: its physical
 /// applicability, mixing and flow regime remain the caller's responsibility.
+/// `advance_with_convection` instead resolves h from the same candidate gas.
 #[derive(Clone, Debug)]
 pub struct FiniteGasThermalEnvironment<'a> {
     pub gas: &'a IsochoricGasParcel,
@@ -47,13 +76,15 @@ pub struct FiniteGasThermalEnvironment<'a> {
 
 /// Both original owner reports and the candidate finite gas at one endpoint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteGasThermalReport {
+pub struct FiniteGasThermalReport<S = ()> {
     /// Publish only after the enclosing mechanical/thermal proposal accepts.
     pub next_gas: IsochoricGasParcel,
     /// Original gas storage and inversion report.
     pub gas: GasHeatStep,
     /// Original body trajectory, including actual endpoint boundary powers.
     pub body: LumpedEnthalpyMarch,
+    /// Coefficient actually used at the accepted gas endpoint and its sources.
+    pub convection: ConvectionCoefficient<S>,
     /// One signed interface transfer, removed from body and added to gas [J].
     pub solid_to_gas_heat_j: f64,
     /// Caller-prescribed gas heat, excluding the reciprocal transfer [J].
@@ -71,10 +102,11 @@ pub struct FiniteGasThermalReport {
     pub trials: usize,
 }
 
-struct Candidate {
+struct Candidate<S> {
     next_gas: IsochoricGasParcel,
     gas: GasHeatStep,
     body: UniformEnthalpyStep<LumpedEnthalpyMarch>,
+    convection: ConvectionCoefficient<S>,
     heat_j: f64,
     source_residual_j: f64,
     trials: usize,
@@ -82,6 +114,21 @@ struct Candidate {
 
 fn gas_error(error: GasEnergyError) -> Error {
     PistonError::from(error).into()
+}
+
+fn feedback_error<E>(error: feedback::ScalarError<ConvectionError<E>>) -> ConvectionError<E> {
+    let thermal = match error {
+        feedback::ScalarError::Evaluation(error) => return error,
+        feedback::ScalarError::Invalid(_) => Error::Invalid("nonfinite physical energy feedback residual"),
+        feedback::ScalarError::Cancelled => Error::Cancelled,
+        feedback::ScalarError::OutsideBracket { lower, upper } => Error::OutsideBracket {
+            lower_residual_j: lower, upper_residual_j: upper,
+        },
+        feedback::ScalarError::NotConverged { iterations, residual } => Error::NotConverged {
+            iterations, residual_j: residual,
+        },
+    };
+    thermal.into()
 }
 
 impl FiniteGasThermalEnvironment<'_> {
@@ -111,6 +158,35 @@ impl FiniteGasThermalEnvironment<'_> {
         cx: &Cx<'_>,
         input: UniformEnthalpyStepInput<'_>,
     ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport>, Error> {
+        self.advance_with_convection(cx, input, |_| {
+            Ok::<_, core::convert::Infallible>(ConvectionCoefficient {
+                coefficient_w_per_m2_k: self.body.convection_w_per_m2_k,
+                source: (),
+            })
+        }).map_err(|error| match error {
+            ConvectionError::Thermal(error) => error,
+            ConvectionError::Convection(never) => match never {},
+        })
+    }
+
+    /// Use a state-dependent whole-surface convection coefficient in the SAME
+    /// reciprocal heat solve. `resolve` sees the actual candidate gas endpoint,
+    /// including its source-selected Cp, viscosity, conductivity and composition.
+    /// Its result replaces only `body.convection_w_per_m2_k`; the original body
+    /// conductivity, radiation, enthalpy and Biot checks remain active.
+    ///
+    /// The repeatable callback owns correlation/geometry validity and returns
+    /// its concrete source evaluation. This seam admits laws of the gas endpoint
+    /// and prescribed geometry/flow, not laws requiring an unknown wall endpoint
+    /// or a film temperature. Arbitrary state-dependent h has no monotonicity or
+    /// unconditional convergence guarantee; bracket/work/refusal limits apply.
+    /// No callback effects are rolled back. Neither physical input is mutated.
+    pub fn advance_with_convection<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        mut resolve: impl FnMut(&ResolvedThermochemicalGasState) -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S>>, ConvectionError<E>> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         self.gas_solve.validate().map_err(gas_error)?;
         feedback::admit::<ConductionError>(self.exchange)?;
@@ -120,10 +196,12 @@ impl FiniteGasThermalEnvironment<'_> {
         {
             return Err(Error::Invalid(
                 "finite prescribed gas heat and positive gas temperature-increment limit required",
-            ));
+            ).into());
         }
-        let solved = feedback::solve(
-            self.exchange,
+        let solved = feedback::solve_scalar(
+            self.exchange.heat_bracket_j,
+            self.exchange.source_tolerance_j,
+            self.exchange.maximum_iterations,
             |q, trials, cancelled| {
                 let gas_heat = self.gas_heat_j + q;
                 if !gas_heat.is_finite()
@@ -132,7 +210,7 @@ impl FiniteGasThermalEnvironment<'_> {
                 {
                     return Err(Error::Invalid(
                         "gas source or exchange heat overflows or disappears when combined",
-                    ));
+                    ).into());
                 }
                 let mut next_gas = self.gas.clone();
                 let gas = next_gas
@@ -140,6 +218,13 @@ impl FiniteGasThermalEnvironment<'_> {
                     .map_err(gas_error)?;
                 let mut environment = self.body.clone();
                 environment.temperature_k = next_gas.state().state().temperature;
+                let convection = resolve(next_gas.state()).map_err(ConvectionError::Convection)?;
+                if !convection.coefficient_w_per_m2_k.is_finite()
+                    || convection.coefficient_w_per_m2_k < 0.0
+                {
+                    return Err(Error::Invalid("convection coefficient must be finite and nonnegative").into());
+                }
+                environment.convection_w_per_m2_k = convection.coefficient_w_per_m2_k;
                 let body = environment.advance(cx, input).map_err(Error::Interface)?;
                 let endpoint = body.report.samples().last().ok_or(Error::Invalid(
                     "thermal owner returned no accepted endpoint",
@@ -150,13 +235,14 @@ impl FiniteGasThermalEnvironment<'_> {
                     || !residual.is_finite()
                     || (endpoint.convection_into_body_w != 0.0 && convective_heat == 0.0)
                 {
-                    return Err(Error::Invalid("convective heat is unrepresentable"));
+                    return Err(Error::Invalid("convective heat is unrepresentable").into());
                 }
                 Ok((
                     Candidate {
                         next_gas,
                         gas,
                         body,
+                        convection,
                         heat_j: q,
                         source_residual_j: residual,
                         trials,
@@ -165,11 +251,12 @@ impl FiniteGasThermalEnvironment<'_> {
                 ))
             },
             &mut || cx.checkpoint().is_err(),
-        )?;
+        ).map_err(feedback_error)?;
         let Candidate {
             next_gas,
             gas,
             body,
+            convection,
             heat_j: q,
             source_residual_j,
             trials,
@@ -183,7 +270,7 @@ impl FiniteGasThermalEnvironment<'_> {
         {
             return Err(Error::Invalid(
                 "accepted exchange crosses endpoint temperatures or exceeds the gas increment limit",
-            ));
+            ).into());
         }
         let endpoint = body.report.samples().last().ok_or(Error::Invalid(
             "thermal owner returned no accepted endpoint",
@@ -210,7 +297,7 @@ impl FiniteGasThermalEnvironment<'_> {
         {
             return Err(Error::Invalid(
                 "finite body/gas storage does not close the declared energy allowance",
-            ));
+            ).into());
         }
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         Ok(UniformEnthalpyStep {
@@ -221,6 +308,7 @@ impl FiniteGasThermalEnvironment<'_> {
                 next_gas,
                 gas,
                 body: body.report,
+                convection,
                 solid_to_gas_heat_j: q,
                 external_gas_heat_j: self.gas_heat_j,
                 radiation_heat_j,
