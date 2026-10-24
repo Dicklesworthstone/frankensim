@@ -107,6 +107,35 @@ phase, resolve boundary layers, or claim experimental accuracy. Hydraulic
 `dp*Q` is reported separately and neglected in the thermal equation; it is not
 silently added to wall heat or enthalpy.
 
+### Natural convection in finite gas and coupled surface networks
+
+`medium::convection::finite_gas::NaturalGasSurface` evaluates the shared
+vertical-plate correlation from the coupling owner's actual gas and body query
+states. The retained ideal-gas EOS supplies beta = 1/T; the same resolved
+thermochemical gas supplies density, Cp, viscosity and conductivity. Pressure
+and composition therefore propagate through Ra, Pr, h and the original signed
+gas/body heat residual. The existing piston, phase-enthalpy and gas owners
+advance their own energy, including latent heat and piston work.
+
+`finite_gas::network::exchange::GasHeatLaw::NaturalConvection` carries that
+same law into the material electrical/contact/radiation/thermal network and its
+chamber-flow step. Natural, forced and explicit conductive laws may occupy
+disjoint exposed patches, with aggregate area admission and one energy owner.
+Accepted samples retain the exact queried gas and wall states. Candidate solves,
+atomic flow-step publication and cancellation use the existing network path.
+
+This is an unconfined isothermal vertical-plate approximation evaluated at bulk
+gas properties; it does not resolve buoyant velocity or supply enclosure
+corrections. The caller must admit the geometry and temperature contrast.
+Exact equilibrium and zero patch area have zero transfer without a fabricated
+Ra=0 coefficient; every nonzero contrast retains the original correlation
+domain. Tests in `tests/finite_gas_convection/natural.rs` and
+`tests/finite_gas_convection/natural_network.rs` cover independent correlation
+values, pressure/composition substitution, both heat directions, latent heat,
+gas/body/piston energy closure, mixed surface laws, source identity, area
+overlap and late-cancellation rollback. The flow-step regression uses zero
+nozzle links and checks the original publication path.
+
 ### Coupled total-enthalpy endpoint adjoints
 
 `graph::thermal::coupled_transport::sensitivity::enthalpy` binds the concrete

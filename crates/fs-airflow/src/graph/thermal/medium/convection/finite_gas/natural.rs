@@ -1,0 +1,164 @@
+//! Natural convection on the original finite gas/body heat residual.
+//!
+//! The shared vertical-plate correlation reads one actual source-resolved gas
+//! state and both current temperatures. This adapter owns no energy store,
+//! flow field, gas law or timestepper.
+
+use super::super::evaluate_vertical_plate_from_material;
+use super::{
+    ConductanceSample, EquilibriumPhaseState, FiniteGasConvectionSample, GasConvectionEvaluation,
+    GasPiston, HeatExchangeSolve, Length, MaterialConvectionError, PistonInput, PistonSolve,
+    ResolvedThermochemicalGasState, ThermalPistonCandidate, ThermalPistonError,
+    UniformEnthalpyStepInput, invalid,
+};
+use fs_qty::Temperature;
+
+/// Exposed isothermal vertical plate with explicitly declared gravity.
+///
+/// The original Churchill-Chu card consumes transport at the supplied BULK gas
+/// state. This uniform-reservoir approximation requires the caller to admit
+/// its temperature contrast; there is no independently resolved film state,
+/// enclosure circulation, neighbouring-wall correction or measured-fidelity
+/// claim. Geometry and temperature contrast must fit the vertical-plate model.
+/// No flow speed, independent beta or material-name switch is introduced.
+#[derive(Clone, Copy, Debug)]
+pub struct NaturalGasSurface {
+    /// Actual exposed patch area [m2]; zero explicitly isolates this patch.
+    pub area_m2: f64,
+    /// Vertical plate height [m], used by the original correlation.
+    pub characteristic_length: Length,
+    /// Positive magnitude of gravitational acceleration [m/s2]. Zero gravity
+    /// requires an independently admitted conduction law, not a Ra=0 fallback.
+    pub gravity_m_s2: f64,
+}
+
+impl NaturalGasSurface {
+    pub(super) fn validate(self) -> Result<(), MaterialConvectionError> {
+        if !self.area_m2.is_finite()
+            || self.area_m2 < 0.0
+            || !self.characteristic_length.value().is_finite()
+            || self.characteristic_length.value() <= 0.0
+            || !self.gravity_m_s2.is_finite()
+            || self.gravity_m_s2 <= 0.0
+        {
+            return Err(invalid(
+                "finite gas natural convection requires nonnegative area, positive vertical length and positive gravity",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve natural convection at the ORIGINAL coupling owner's gas/body
+    /// query states. Pressure, composition, density, Cp, viscosity and k remain
+    /// bound to that same gas evaluation. Heating and cooling use the vertical
+    /// plate's admitted symmetry; the signed heat remains with the outer owner.
+    ///
+    /// This concrete gas owns `IdealGasEosEvaluationV1`. Its fixed-composition
+    /// constant-pressure derivative is `beta = -(1/rho) d(rho)/dT = 1/T`, using
+    /// the EOS's actual query temperature. This identity is not imposed on an
+    /// arbitrary FluidTransport implementation or inferred from a gas name.
+    ///
+    /// Exact equal temperatures have exactly zero transfer. Return G=0 and no
+    /// correlation evaluation for that state, retaining both original sources;
+    /// this does not claim the Ra=0 heat-transfer coefficient. Any nonzero
+    /// contrast must pass the original correlation's Rayleigh-domain admission.
+    /// Zero area likewise returns explicit isolation. Nonzero subnormal heat
+    /// response is not silently clipped to either of these exact limits.
+    pub fn resolve(
+        self,
+        gas: &ResolvedThermochemicalGasState,
+        body: EquilibriumPhaseState,
+    ) -> Result<ConductanceSample<FiniteGasConvectionSample>, MaterialConvectionError> {
+        self.validate()?;
+        let wall_temperature_k = body.temperature_k();
+        let gas_temperature_k = gas.equation_of_state().temperature().value();
+        if !wall_temperature_k.is_finite() || wall_temperature_k <= 0.0 {
+            return Err(invalid(
+                "finite gas natural convection needs a positive body temperature",
+            ));
+        }
+        if self.area_m2 == 0.0 || wall_temperature_k == gas_temperature_k {
+            return Ok(ConductanceSample {
+                conductance_w_k: 0.0,
+                source: FiniteGasConvectionSample {
+                    gas: gas.clone(),
+                    body,
+                    area_m2: self.area_m2,
+                    evaluation: None,
+                },
+            });
+        }
+        let evaluated = evaluate_vertical_plate_from_material(
+            gas,
+            self.gravity_m_s2,
+            1.0 / gas_temperature_k,
+            Temperature::new(wall_temperature_k),
+            Temperature::new(gas_temperature_k),
+            self.characteristic_length,
+        )?;
+        let (transport, nusselt, coefficient) = evaluated.into_parts();
+        let conductance = self.area_m2 * coefficient.value.value();
+        if !conductance.is_finite() || conductance <= 0.0 {
+            return Err(invalid(
+                "finite gas natural conductance overflowed or vanished",
+            ));
+        }
+        Ok(ConductanceSample {
+            conductance_w_k: conductance,
+            source: FiniteGasConvectionSample {
+                gas: gas.clone(),
+                body,
+                area_m2: self.area_m2,
+                evaluation: Some(GasConvectionEvaluation {
+                    transport,
+                    nusselt,
+                    coefficient,
+                }),
+            },
+        })
+    }
+
+    /// Propose buoyant heat exchange, finite body enthalpy and gas/piston motion
+    /// together through the original thermal residual. Neither input mutates;
+    /// publish both returned endpoints only after the enclosing step accepts.
+    ///
+    /// The patch must fit the declared body boundary and have one heat owner.
+    /// The original uniform-body and negligible body pV-work assumptions remain;
+    /// the interface does not infer body conductivity or a Biot certificate.
+    /// Gravity drives the correlation, not a resolved momentum field. There is
+    /// no added gravitational storage, viscous heat or radiation path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finite_body_candidate(
+        self,
+        piston: &GasPiston,
+        input: PistonInput,
+        body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        ThermalPistonCandidate<FiniteGasConvectionSample>,
+        ThermalPistonError<MaterialConvectionError>,
+    > {
+        if cancelled() {
+            return Err(ThermalPistonError::Cancelled);
+        }
+        self.validate().map_err(ThermalPistonError::Interface)?;
+        if !body.surface_area_m2.is_finite()
+            || body.surface_area_m2 <= 0.0
+            || self.area_m2 > body.surface_area_m2
+        {
+            return Err(ThermalPistonError::Invalid(
+                "natural convective patch exceeds the finite body's exposed area",
+            ));
+        }
+        piston.thermal_candidate(
+            input,
+            body,
+            controls,
+            exchange,
+            |gas, wall| self.resolve(gas, wall),
+            cancelled,
+        )
+    }
+}

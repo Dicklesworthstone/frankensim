@@ -961,6 +961,7 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-math",
+ "fs-phs",
  "fs-qty",
  "fs-regime",
  "fs-rep-mesh",

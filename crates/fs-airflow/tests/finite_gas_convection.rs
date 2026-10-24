@@ -3,6 +3,10 @@
 mod source;
 #[path = "finite_gas_convection/uniform.rs"]
 mod uniform;
+#[path = "finite_gas_convection/natural.rs"]
+mod natural;
+#[path = "finite_gas_convection/natural_network.rs"]
+mod natural_network;
 use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };

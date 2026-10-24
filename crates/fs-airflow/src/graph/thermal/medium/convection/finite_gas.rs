@@ -8,6 +8,9 @@
 
 /// Multiple finite gases and convective patches on the existing circuit/thermal assembly.
 pub mod network;
+/// Buoyancy-driven vertical-plate heat exchange at actual gas/body states.
+pub mod natural;
+pub use natural::NaturalGasSurface;
 
 use super::{ForcedConvectionSettings, MaterialConvectionError, evaluate_forced_from_material};
 use fs_convection::{CorrelationId, HeatTransferCoefficient, NusseltEvaluation, ThermalDirection};
@@ -57,7 +60,8 @@ pub struct FiniteGasConvectionSample {
     pub gas: ResolvedThermochemicalGasState,
     pub body: EquilibriumPhaseState,
     pub area_m2: f64,
-    /// None only for an explicitly isolated zero-area patch, not a fallback.
+    /// None for an explicitly isolated zero-area patch or the natural law's
+    /// exact thermal equilibrium. Neither case extrapolates a correlation.
     pub evaluation: Option<GasConvectionEvaluation>,
 }
 

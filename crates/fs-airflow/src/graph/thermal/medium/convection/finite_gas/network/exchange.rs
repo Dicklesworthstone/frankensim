@@ -1,6 +1,7 @@
 //! Mixed material gas heat laws on the original reacting/radiative assembly.
 //! Each patch selects its actual law; no material-name or phase-name dispatch.
 use super::*;
+use super::super::NaturalGasSurface;
 use fs_couple::cavity_phs::piston::thermal::ConductanceSample;
 use fs_couple::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::{
@@ -22,6 +23,8 @@ pub enum GasHeatLaw {
     Conduction(GasConductionGeometry),
     /// Original forced correlation at the actual gas energy midpoint.
     ForcedConvection(ForcedGasSurface),
+    /// Buoyant vertical-plate transfer from the same material gas and wall state.
+    NaturalConvection(NaturalGasSurface),
 }
 /// One patch using the same chamber/cell IDs as the complete assembly.
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +37,7 @@ pub struct ExchangeContact {
 pub enum GasHeatSample {
     Conduction(ResolvedMaterialStatePoint),
     ForcedConvection(FiniteGasConvectionSample),
+    NaturalConvection(FiniteGasConvectionSample),
 }
 /// Preserve the original domain refusal, not an invented substitute coefficient.
 #[derive(Debug)]
@@ -51,6 +55,13 @@ impl std::error::Error for GasHeatError {}
 /// Compose mixed gas heat laws with the SAME declared reactions, electrical
 /// contact losses, thermal interface resistance, radiation, finite cell storage
 /// and wall motion. Empty reactions retain the original nonreacting physics.
+///
+/// Forced and natural patches consume the same actual source gas and caloric
+/// wall endpoint. Natural convection needs no authored flow speed: the shared
+/// vertical-plate law resolves buoyant transfer from those temperatures and
+/// the gas's ideal EOS, viscosity, conductivity and heat capacity. Its bulk-gas
+/// property convention and unconfined vertical-plate assumptions must fit the
+/// physical patch; a chamber ID does not establish enclosure applicability.
 ///
 /// Each chemical stage runs once on its original gas (including optional
 /// chemical subcycling). Then the existing coupled owner solves every thermal
@@ -99,6 +110,10 @@ pub fn step_candidate<'m>(
                 surface.validate().map_err(|_| ReactiveExchangeError::Invalid("invalid forced-convection geometry"))?;
                 surface.area_m2
             }
+            GasHeatLaw::NaturalConvection(surface) => {
+                surface.validate().map_err(|_| ReactiveExchangeError::Invalid("invalid natural-convection geometry"))?;
+                surface.area_m2
+            }
         };
         if mapped.insert(patch.contact.id, patch).is_some() {
             return Err(ReactiveExchangeError::Invalid("duplicate mixed heat-law contact ID"));
@@ -122,6 +137,13 @@ pub fn step_candidate<'m>(
                     let sample = surface.resolve(gas, phase).map_err(GasHeatError::Convection)?;
                     Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
                         source: GasHeatSample::ForcedConvection(sample.source) })
+                }
+                GasHeatLaw::NaturalConvection(surface) => {
+                    let phase = source.bulk.cells.iter().find(|c| c.cell == contact.cell)
+                        .ok_or_else(|| GasHeatError::Convection(invalid("gas patch lacks its actual cell phase")))?.phase;
+                    let sample = surface.resolve(gas, phase).map_err(GasHeatError::Convection)?;
+                    Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
+                        source: GasHeatSample::NaturalConvection(sample.source) })
                 }
             }
         })
@@ -162,6 +184,11 @@ pub fn flow_step_candidate<'m>(
                     "invalid forced-convection geometry"))?;
                 surface.area_m2
             }
+            GasHeatLaw::NaturalConvection(surface) => {
+                surface.validate().map_err(|_| MaterialGasLawFlowError::Invalid(
+                    "invalid natural-convection geometry"))?;
+                surface.area_m2
+            }
         };
         if mapped.insert(patch.contact.id, patch).is_some() {
             return Err(MaterialGasLawFlowError::Invalid(
@@ -186,6 +213,14 @@ pub fn flow_step_candidate<'m>(
                 let sample=surface.resolve(gas,phase).map_err(GasHeatError::Convection)?;
                 Ok(ConductanceSample {conductance_w_k:sample.conductance_w_k,
                     source:GasHeatSample::ForcedConvection(sample.source)})
+            }
+            GasHeatLaw::NaturalConvection(surface) => {
+                let phase=source.bulk.cells.iter().find(|c|c.cell==contact.cell)
+                    .ok_or_else(||GasHeatError::Convection(
+                        invalid("gas patch lacks its actual cell phase")))?.phase;
+                let sample=surface.resolve(gas,phase).map_err(GasHeatError::Convection)?;
+                Ok(ConductanceSample {conductance_w_k:sample.conductance_w_k,
+                    source:GasHeatSample::NaturalConvection(sample.source)})
             }
         })
 }
