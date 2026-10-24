@@ -579,13 +579,23 @@ fn load_with_all_sources(
                 if let Some(mouth) = p.renderer().mouth_radiation() {
                     let source = load.radiation_record().expect("bound DG exterior");
                     let exterior = super::duct_metadata::gas_state(source.gas_record().state());
-                    let aperture = source.apertures().first().expect("single DG outlet");
                     let microphone = p.renderer().mouth_receiver().expect("admitted DG mouth");
                     let support = p.renderer().propagation_delay_samples().expect("exterior kernels");
                     let mouth_reaction = voice.mouth_radiation_load();
-                    let terminal_json = format!(",\"outlet_receiver\":{{\"radius_m\":{:e},\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
-                        aperture.radius_m, receiver.radial_rings, receiver.angular_points,
-                        terminal.delay_samples.0, terminal.delay_samples.1, terminal.filter_delay_samples());
+                    let terminal_json = if source.apertures().len() == 1 {
+                        let aperture = &source.apertures()[0];
+                        format!(",\"outlet_receiver\":{{\"radius_m\":{:e},\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
+                            aperture.radius_m, receiver.radial_rings, receiver.angular_points,
+                            terminal.delay_samples.0, terminal.delay_samples.1, terminal.filter_delay_samples())
+                    } else {
+                        let apertures = load.terminal_ports().iter().zip(source.apertures())
+                            .map(|(port, aperture)| format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+                                port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m))
+                            .collect::<Vec<_>>().join(",");
+                        format!(",\"terminal_receiver\":{{\"apertures\":[{apertures}],\"flow_order\":\"original DG terminal channels\",\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
+                            receiver.radial_rings, receiver.angular_points, terminal.delay_samples.0,
+                            terminal.delay_samples.1, terminal.filter_delay_samples())
+                    };
                     let mouth_json = format!(",\"mouth_receiver\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"negative accepted DG inlet volume flow\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"reaction_added\":{}}}",
                         mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
                         mouth.cells[0], mouth.cells[1], microphone.delay_samples.0,
@@ -598,11 +608,18 @@ fn load_with_all_sources(
                             reaction.static_quadrature_relative_error(), reaction.max_complex_relative_error(),
                             reaction.max_resistance_relative_error())
                     });
-                    ("baffled-mouth-and-outlet", format!(",\"observation_scope\":\"signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation\",\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"exterior_gas\":{exterior},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"delay_compensated\":false{terminal_json}{mouth_json}{reaction_json}",
+                    let (point, scope) = if source.apertures().len() == 1 {
+                        ("baffled-mouth-and-outlet", "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation")
+                    } else {
+                        ("baffled-mouth-and-terminals", "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular terminals in one material exterior and infinite rigid baffle; no mutual reaction between mouth and terminals, resolved jet, free-field body or room radiation")
+                    };
+                    (point, format!(",\"observation_scope\":\"{scope}\",\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"exterior_gas\":{exterior},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"delay_compensated\":false{terminal_json}{mouth_json}{reaction_json}",
                         receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
                         receiver.maximum_frequency_hz, support.0, support.1))
                 } else {
-                    ("baffled-outlet", super::duct_metadata::dg_baffled_observation_provenance(
+                    let point = if load.terminal_ports().len() == 1 { "baffled-outlet" }
+                        else { "baffled-terminals" };
+                    (point, super::duct_metadata::dg_baffled_observation_provenance(
                         load, receiver, terminal,
                     ))
                 }

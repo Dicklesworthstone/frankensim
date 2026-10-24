@@ -36,6 +36,7 @@ pub struct LoadedDgPerformance {
     system: LoadedApertureDg,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    terminal_flows: Vec<f64>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
     controls: Vec<ScheduledControl>,
@@ -78,8 +79,11 @@ impl LoadedDgPerformance {
             _ => return Err(invalid("loaded DG observation must name its inlet or computed baffled outlet")),
         };
         let controls = compile_schedule(&schedule, &config)?;
+        let terminal_flows = if receiver.is_some() {
+            vec![0.0; system.load().terminal_ports().len()]
+        } else { Vec::new() };
         Ok(Self {
-            system, observation, receiver, config, schedule, controls, next: 0,
+            system, observation, receiver, terminal_flows, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, plate_forces: [None, None],
             spatial_pressures: [None, None], last: None, poisoned: false,
         })
@@ -157,11 +161,14 @@ impl LoadedDgPerformance {
         let output = match self.observation {
             ApertureObservation::Inlet => frame.aperture.bore_pressure_pa,
             ApertureObservation::TubeBaffled(_) => {
-                let flow = frame.terminal.as_ref()
-                    .expect("computed DG outlet retains its accepted terminal exchange")
-                    .outward_flow_m3_s;
+                if frame.terminals.len() != self.terminal_flows.len() || frame.terminals.is_empty() {
+                    return Err(sizing("loaded DG microphone requires every accepted terminal flow"));
+                }
+                for (flow, terminal) in self.terminal_flows.iter_mut().zip(&frame.terminals) {
+                    *flow = terminal.outward_flow_m3_s;
+                }
                 self.receiver.as_mut().expect("admitted original DG receiver")
-                    .step_trace(&[flow])
+                    .step_trace(&self.terminal_flows)
                     .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?
             }
             _ => unreachable!("physical observation admitted at construction"),

@@ -8,8 +8,10 @@ use super::DgPortLoad;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
+use crate::bernoulli_aperture::radiation::environment::multiport::bake::MAX_BAFFLED_MIMO_PORTS;
+use crate::pcm_wav::baffled::openings::CircularOpening;
 use fs_duct::dg::{
-    DgBoundary, DgDuct, DgMesh, DgWallResolution, MAX_DG_ELEMENTS, MAX_DG_ORDER,
+    DgBoundary, DgDuct, DgMesh, DgSidePort, DgWallResolution, MAX_DG_ELEMENTS, MAX_DG_ORDER,
     MAX_DG_PROPAGATOR_DOFS, PortId,
 };
 use fs_duct::profile::gas_field::GasFieldDuctError;
@@ -99,6 +101,7 @@ pub struct DgSourceInput {
     field: Option<AxialGasField>,
     outlet: DgBoundary,
     radiation: Option<(ComputedBaffledInput, GasRecord)>,
+    side_openings: Vec<(DgSidePort, CircularOpening)>,
     mesh: DgMesh,
     poles: usize,
     band_hz: [f64; 2],
@@ -131,6 +134,15 @@ impl DgSourceInput {
     /// area supplies its circle; the exterior record retains its own material
     /// sources. Bore/exterior equilibrium pressures must agree. The original
     /// bake covers mechanical Nyquist, independent of the microphone band.
+    ///
+    /// Before dg_radiation, optional dg_side_openings COUNT declares up to seven
+    /// additional flush circular openings, followed by exactly COUNT rows:
+    /// dg_side_opening PORT_ID DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M
+    /// Each selects an existing interior mesh face, a unique ID above 1, and
+    /// independent physical opening geometry in the common rigid baffle. Its
+    /// radius is not inferred from bore area. These have zero internal neck
+    /// length; finite chimneys and moving tone-hole pads are not synthesized.
+    /// The axial outlet is matrix channel zero, followed by the authored order.
     ///
     /// Error type E lets callers retain their existing line-aware row reader.
     #[allow(clippy::too_many_arguments)]
@@ -216,7 +228,8 @@ impl DgSourceInput {
             }
         }
         let mut source = Self {
-            geometry: Duct { segments }, field: None, outlet, radiation: None, mesh, poles, band_hz,
+            geometry: Duct { segments }, field: None, outlet, radiation: None,
+            side_openings: Vec::new(), mesh, poles, band_hz,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature, line,
         };
         // Admission before collecting/evaluating a potentially large field.
@@ -255,7 +268,36 @@ impl DgSourceInput {
         }
         if matches!(outlet, DgBoundary::Port(_)) {
             checkpoint(gate, line)?;
-            let (radiation_line, mut fields) = next_row()?;
+            let (mut radiation_line, mut fields) = next_row()?;
+            if fields.clone().next() == Some("dg_side_openings") {
+                let mut row = Row { line: radiation_line, fields: &mut fields };
+                row.word()?;
+                let count = row.count(MAX_BAFFLED_MIMO_PORTS - 1)?;
+                row.finish()?;
+                source.side_openings.reserve(count);
+                for _ in 0..count {
+                    checkpoint(gate, radiation_line)?;
+                    let (line, mut fields) = next_row()?;
+                    let mut row = Row { line, fields: &mut fields };
+                    if row.word()? != "dg_side_opening" {
+                        return Err(bad(line, "expected a declared DG flush side opening").into());
+                    }
+                    let id = PortId(row.word()?.parse::<u32>()
+                        .map_err(|_| bad(line, "DG side opening requires an unsigned port ID"))?);
+                    let downstream_element = row.count(mesh.elements - 1)?;
+                    let aperture = CircularOpening {
+                        center_m: [row.scalar()?, row.scalar()?], radius_m: row.positive()?,
+                    };
+                    row.finish()?;
+                    if id.0 <= 1 || source.side_openings.iter().any(|(port, _)|
+                        port.id == id || port.downstream_element == downstream_element)
+                    {
+                        return Err(bad(line, "DG side openings require unique interior faces and unique port IDs above 1").into());
+                    }
+                    source.side_openings.push((DgSidePort { id, downstream_element }, aperture));
+                }
+                (radiation_line, fields) = next_row()?;
+            }
             let mut row = Row { line: radiation_line, fields: &mut fields };
             if row.word()? != "dg_radiation" || row.word()? != "computed-baffled" {
                 return Err(bad(radiation_line, "baffled DG outlet requires its computed radiation declaration").into());
@@ -316,6 +358,9 @@ impl DgSourceInput {
             ).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
+        let ports: Vec<_> = self.side_openings.iter().map(|(port, _)| *port).collect();
+        let owner = owner.with_side_ports(&ports)
+            .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
         let owner = if let Some(points) = self.wall_quadrature {
             owner.with_spatial_viscothermal(DgWallResolution {
                 poles_per_field: self.poles,
@@ -333,9 +378,15 @@ impl DgSourceInput {
             if rate == 0 || dt.to_bits() != (1.0 / f64::from(rate)).to_bits() {
                 return Err(bad(self.line, "computed DG radiation requires an exact whole-Hz mechanics clock"));
             }
-            DgPortLoad::new_with_computed_baffled(
+            let mut openings = Vec::with_capacity(self.side_openings.len() + 1);
+            openings.push((PortId(1), CircularOpening {
+                center_m: [0.0; 2],
+                radius_m: fs_math::det::sqrt(owner.outlet_area_m2() / core::f64::consts::PI),
+            }));
+            openings.extend(self.side_openings.iter().map(|(port, aperture)| (port.id, *aperture)));
+            DgPortLoad::new_with_computed_baffled_ports(
                 owner, rate, self.exponential_tolerance, self.maximum_dofs,
-                &exterior, controls, gate,
+                &exterior, controls, &openings, gate,
             ).map_err(|source| DgSourceError::Radiation { line: self.line, source })?
         } else {
             DgPortLoad::new(owner, dt, self.exponential_tolerance, self.maximum_dofs)

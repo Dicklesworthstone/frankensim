@@ -56,8 +56,8 @@ pub enum ApertureObservation {
     TubeTerminal,
     /// Actual accepted node pressure in a connected tube network.
     NetworkNode(usize),
-    /// One-way exterior receiver of a single tube or DG outlet's actual flow.
-    /// The circular mouth lies in an infinite rigid baffle. A legacy tube keeps
+    /// Exterior receiver of a tube outlet or every bound DG terminal flow.
+    /// The circular openings lie in an infinite rigid baffle. A legacy tube keeps
     /// its authored reflection; a DG outlet requires its computed baffled load
     /// and uses that load's original geometry and exterior gas. Observation
     /// adds no second reaction. DG uses the existing same-clock differentiating
@@ -106,6 +106,7 @@ pub struct AperturePerformance {
     system: CoupledAperture,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    dg_terminal_flows: Vec<f64>,
     exterior_gas: Option<GasState>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
@@ -250,8 +251,10 @@ impl AperturePerformance {
             (CoupledAperture::Dg(model), ApertureObservation::TubeBaffled(_)) => {
                 let record = model.load().radiation_record()
                     .ok_or_else(|| invalid("DG exterior observation requires its computed baffled reaction source"))?;
-                if record.apertures().len() != 1 {
-                    return Err(invalid("DG exterior observation requires exactly one bound opening"));
+                if record.apertures().is_empty()
+                    || record.apertures().len() != model.load().terminal_ports().len()
+                {
+                    return Err(invalid("DG exterior observation requires every original bound terminal opening"));
                 }
                 let bound = *record.gas_record().state();
                 if exterior_gas.is_some_and(|gas| gas != bound) {
@@ -321,7 +324,11 @@ impl AperturePerformance {
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
         };
         let controls = compile_schedule(&schedule, &config)?;
-        Ok(Self { system, observation, receiver, exterior_gas, config, schedule, controls, next: 0,
+        let dg_terminal_flows = match (&system, &receiver) {
+            (CoupledAperture::Dg(model), Some(_)) => vec![0.0; model.load().terminal_ports().len()],
+            _ => Vec::new(),
+        };
+        Ok(Self { system, observation, receiver, dg_terminal_flows, exterior_gas, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false, forces: None, boundaries: None,
             boundary_frame: None, mechanical_work_j: 0.0,
             observation_policy: ObservationPolicy::Diagnostic })
@@ -387,11 +394,16 @@ impl AperturePerformance {
                 let pressure = match self.observation {
                     ApertureObservation::Inlet => frame.aperture.bore_pressure_pa,
                     ApertureObservation::TubeBaffled(_) => {
-                        let flow = frame.terminal.as_ref()
-                            .expect("computed DG outlet retains its accepted terminal exchange")
-                            .outward_flow_m3_s;
+                        if frame.terminals.len() != self.dg_terminal_flows.len()
+                            || frame.terminals.is_empty()
+                        {
+                            return Err(sizing("DG microphone requires every accepted terminal flow"));
+                        }
+                        for (flow, terminal) in self.dg_terminal_flows.iter_mut().zip(&frame.terminals) {
+                            *flow = terminal.outward_flow_m3_s;
+                        }
                         self.receiver.as_mut().expect("admitted DG outlet receiver")
-                            .step(&[flow]).map_err(receiver_error)?
+                            .step(&self.dg_terminal_flows).map_err(receiver_error)?
                     }
                     _ => unreachable!("observer admitted against the exclusively owned system"),
                 };

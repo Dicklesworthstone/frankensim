@@ -130,6 +130,38 @@ const COMPUTED_CONTROLS: &str =
     "20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257";
 const RADIATION_EXTERIOR: &str = "mixture 293.15 101325 mole 2 N2 0.8 CO2 0.2";
 
+#[test]
+fn authored_flush_side_openings_keep_original_faces_ids_and_independent_areas() {
+    let text = baffled_tube_input(RADIATION_EXTERIOR).replace("\ndg_radiation", concat!(
+        "\ndg_side_openings 1\ndg_side_opening 7 1 0.01 -0.002 0.0004",
+        "\ndg_radiation",
+    ));
+    let (source, records) = read_receipted(&text, None).unwrap();
+    let (port, aperture) = source.side_openings[0];
+    assert_eq!(port, DgSidePort { id: PortId(7), downstream_element: 1 });
+    assert_eq!(aperture.center_m, [0.01, -0.002]);
+    assert_eq!(aperture.radius_m, 0.0004);
+    assert_eq!(source.mesh, DgMesh { elements: 2, order: 2 });
+    assert_eq!(records.len(), 1);
+    assert_eq!(source.radiation.as_ref().unwrap().1, records[0]);
+    assert!(read(&baffled_tube_input(RADIATION_EXTERIOR)).unwrap().side_openings.is_empty());
+    for invalid in [
+        text.replace("dg_side_openings 1", "dg_side_openings 0"),
+        text.replace("dg_side_openings 1", "dg_side_openings 8"),
+        text.replace("dg_side_opening 7 1", "dg_side_opening 0 1"),
+        text.replace("dg_side_opening 7 1", "dg_side_opening 1 1"),
+        text.replace("dg_side_opening 7 1", "dg_side_opening 7 0"),
+        text.replace("dg_side_opening 7 1", "dg_side_opening 7 2"),
+        text.replace("0.0004\n", "0\n"),
+        text.replace("0.01 -0.002", "NaN -0.002"),
+        text.replace("dg_side_openings 1", "dg_side_openings 2")
+            .replace("\ndg_radiation", "\ndg_side_opening 8 1 0.02 0 0.0004\ndg_radiation"),
+        text.replace("dg_side_opening 7 1", "dg_side_opening 7 1 extra"),
+    ] {
+        assert!(read_receipted(&invalid, None).is_err(), "admitted {invalid}");
+    }
+}
+
 fn baffled_tube_input(exterior: &str) -> String {
     format!("{}\ndg_radiation computed-baffled {COMPUTED_CONTROLS}\ndg_exterior {exterior}",
         TUBE.replace(" open ", " baffled "))

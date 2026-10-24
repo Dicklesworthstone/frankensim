@@ -1,4 +1,4 @@
-//! Bind a physical baffled exterior to the original DG endpoint.
+//! Bind one physical baffled exterior to original DG endpoint and side ports.
 //!
 //! This reuses the existing geometry/gas BEM sampling, rational bake and common
 //! load admission. A circular outlet at the origin of an infinite rigid baffle
@@ -11,6 +11,8 @@ use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
+use fs_duct::dg::PortId;
+use fs_duct::profile::gas_field::GasFieldDuctError;
 use fs_material::gas_species::input::GasRecord;
 use fs_math::det;
 use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
@@ -37,29 +39,58 @@ impl DgPortLoad {
         source: ComputedBaffledInput,
         gate: &CancelGate,
     ) -> Result<Self, MimoRadiationInputError> {
+        let DgBoundary::Port(port) = duct.outlet() else {
+            return Err(MimoRadiationInputError::Physics(invalid(
+                "computed DG outlet radiation requires its original port",
+            )));
+        };
+        let radius_m = det::sqrt(duct.outlet_area_m2() / core::f64::consts::PI);
+        Self::new_with_computed_baffled_ports(
+            duct, mechanics_rate_hz, exponential_tolerance, maximum_dofs,
+            exterior, source, &[(port, CircularOpening { center_m: [0.0; 2], radius_m })], gate,
+        )
+    }
+
+    /// Couple every non-driven DG port to one complete baffled radiation matrix.
+    ///
+    /// Each tuple binds an original port identity to its actual circular opening
+    /// in a shared infinite rigid baffle. Tuple order is retained by the matrix,
+    /// accepted terminal frames and microphone. The original BEM/VF owner keeps
+    /// all mutual entries; they are not replaced by independent self loads.
+    ///
+    /// An axial outlet must retain its original bore area. Interior ports are
+    /// explicit zero-volume flush openings: their areas are authored separately
+    /// from bore area, with no inferred chimney or junction correction. Each
+    /// consumes its actual face gas for equilibrium admission. All non-inlet
+    /// ports must be supplied exactly once before the expensive source bake.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_computed_baffled_ports(
+        duct: DgDuct,
+        mechanics_rate_hz: u32,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        exterior: &GasRecord,
+        source: ComputedBaffledInput,
+        openings: &[(PortId, CircularOpening)],
+        gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         let dt = 1.0 / f64::from(mechanics_rate_hz);
         if mechanics_rate_hz == 0
             || !matches!(duct.inlet(), DgBoundary::Port(_))
-            || !matches!(duct.outlet(), DgBoundary::Port(_))
             || duct.total_dofs() > maximum_dofs
             || duct.viscothermal_band_rad_s().is_some_and(|band|
                 band[1] * dt > core::f64::consts::PI)
-            || exterior.state().pressure.to_bits() != duct.outlet_gas().pressure.to_bits()
         {
             return Err(MimoRadiationInputError::Physics(invalid(
                 "computed DG radiation requires owned ports, a resolved clock/state budget and equal equilibrium pressures",
             )));
         }
-        let area = duct.outlet_area_m2();
-        let radius_m = det::sqrt(area / core::f64::consts::PI);
-        if !radius_m.is_finite() || radius_m <= 0.0 {
-            return Err(MimoRadiationInputError::Physics(invalid(
-                "computed DG radiation requires a finite positive original outlet",
-            )));
-        }
+        admit_openings(&duct, exterior, openings).map_err(MimoRadiationInputError::Physics)?;
+        let ports: Vec<_> = openings.iter().map(|(port, _)| *port).collect();
+        let apertures: Vec<_> = openings.iter().map(|(_, aperture)| *aperture).collect();
         let (model, record) = source.build_apertures(
-            exterior, &[CircularOpening { center_m: [0.0; 2], radius_m }],
+            exterior, &apertures,
             mechanics_rate_hz, gate,
         )?;
         let limits = source.limits();
@@ -75,8 +106,8 @@ impl DgPortLoad {
             max_memory_bytes: limits.max_memory_bytes,
         }).map_err(|error| MimoRadiationInputError::Physics(invalid(error.0)))?;
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
-        let mut load = Self::new_with_terminal(
-            duct, dt, exponential_tolerance, maximum_dofs, terminal,
+        let mut load = Self::new_with_terminal_ports(
+            duct, dt, exponential_tolerance, maximum_dofs, ports, terminal,
         ).map_err(MimoRadiationInputError::Physics)?;
         load.radiation_record = Some(record);
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
@@ -84,8 +115,52 @@ impl DgPortLoad {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
+fn admit_openings(
+    duct: &DgDuct,
+    exterior: &GasRecord,
+    openings: &[(PortId, CircularOpening)],
+) -> Result<(), AcousticRealizeError> {
+    use crate::bernoulli_aperture::radiation::environment::multiport::bake::MAX_BAFFLED_MIMO_PORTS;
+    let expected = duct.side_ports().len()
+        + usize::from(matches!(duct.outlet(), DgBoundary::Port(_)));
+    if openings.is_empty() || openings.len() > MAX_BAFFLED_MIMO_PORTS
+        || openings.len() != expected
+    {
+        return Err(invalid("computed DG radiation must bind every non-inlet port within the original aperture budget"));
+    }
+    for (index, (port, aperture)) in openings.iter().enumerate() {
+        if duct.inlet() == DgBoundary::Port(*port)
+            || openings[..index].iter().any(|(other, _)| other == port)
+            || !aperture.radius_m.is_finite() || aperture.radius_m <= 0.0
+            || !aperture.center_m.iter().all(|value| value.is_finite())
+        {
+            return Err(invalid("computed DG openings need distinct owned terminal IDs and finite positive geometry"));
+        }
+        let gas = if duct.outlet() == DgBoundary::Port(*port) {
+            let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
+            let actual = duct.outlet_area_m2();
+            if !area.is_finite() || (area - actual).abs() > 64.0 * f64::EPSILON * actual {
+                return Err(invalid("computed DG axial opening must retain its actual bore outlet area"));
+            }
+            *duct.outlet_gas()
+        } else {
+            duct.side_port_source(*port).map_err(|error| match error {
+                GasFieldDuctError::Duct(source) => AcousticRealizeError::Duct(source),
+                GasFieldDuctError::Material(source) => AcousticRealizeError::Ambient(source.to_string()),
+            })?.gas
+        };
+        if gas.pressure.to_bits() != exterior.state().pressure.to_bits() {
+            return Err(invalid("computed DG openings and their exterior require equal equilibrium pressures"));
+        }
+    }
+    Ok(())
+}
+
 impl DgPortLoad {
-    /// Prepare an observer of this computed exterior's accepted terminal flow.
+    /// Prepare an observer of this computed exterior's accepted terminal flows.
     /// Source geometry, full gas state, clock and radiation/wall bands remain
     /// owned by this load; a microphone never substitutes or re-bakes them.
     /// The original Rayleigh owner admits quadrature, delay/history and its
@@ -104,19 +179,15 @@ impl DgPortLoad {
         let source = self.radiation_record().ok_or_else(|| invalid(
             "baffled DG observation requires the original computed radiation source",
         ))?;
-        let [aperture] = source.apertures() else {
-            return Err(invalid("baffled DG observation requires one bound circular outlet"));
-        };
-        let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
-        let actual_area = self.duct().outlet_area_m2();
-        if aperture.center_m != [0.0; 2]
-            || !area.is_finite()
-            || (area - actual_area).abs() > 64.0 * f64::EPSILON * actual_area
+        // The private source record and ordered terminal basis were bound
+        // together at construction; observation cannot substitute geometry.
+        if source.apertures().is_empty()
+            || source.apertures().len() != self.terminal_ports().len()
             || source.band_hz()[1].to_bits()
                 != (0.5 * f64::from(mechanics_rate_hz)).to_bits()
         {
             return Err(invalid(
-                "baffled DG observation must use its original outlet geometry and physical clock",
+                "baffled DG observation must use its original terminal geometry and physical clock",
             ));
         }
         // Compare in the wall owner's native angular-frequency arithmetic.

@@ -72,8 +72,21 @@ pub(super) fn aperture_exterior_gas(
 
 // The source record is meaningful even when the selected output is internal.
 pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> String {
-    load.radiation_record().map_or_else(String::new, |record|
-        format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)))
+    let mut output = load.radiation_record().map_or_else(String::new, |record|
+        format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)));
+    if !load.duct().side_ports().is_empty() {
+        let ports = load.terminal_ports().iter().map(|port| port.0.to_string())
+            .collect::<Vec<_>>().join(",");
+        let sides = load.duct().side_ports().iter().map(|port| {
+            let source = load.duct().side_port_source(port.id)
+                .expect("computed source admitted every original side-port gas");
+            format!("{{\"port\":{},\"downstream_element\":{},\"station_m\":{:e},\"bore_area_m2\":{:e},\"gas\":{}}}",
+                port.id.0, port.downstream_element, source.station_m,
+                source.bore_area_m2, gas_state(&source.gas))
+        }).collect::<Vec<_>>().join(",");
+        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"side_opening_scope\":\"zero-volume flush plane-wave junctions at original DG faces; independently declared circular opening areas; full computed mutual terminal radiation; no finite chimney or moving pad\""));
+    }
+    output
 }
 
 // Both existing wind owners observe this same accepted DG terminal and record.
@@ -83,8 +96,19 @@ pub(super) fn dg_baffled_observation_provenance(
     microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
 ) -> String {
     let source = load.radiation_record().expect("admitted bound DG radiation source");
-    let aperture = source.apertures().first().expect("admitted single DG outlet");
     let exterior = gas_state(source.gas_record().state());
+    if !load.duct().side_ports().is_empty() {
+        let apertures = load.terminal_ports().iter().zip(source.apertures()).map(|(port, aperture)|
+            format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+                port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m)
+        ).collect::<Vec<_>>().join(",");
+        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from every accepted held DG terminal flow in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback; no mouth, finite chimney, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+            receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
+            receiver.radial_rings, receiver.angular_points, receiver.maximum_frequency_hz,
+            microphone.delay_samples.0, microphone.delay_samples.1,
+            microphone.filter_delay_samples());
+    }
+    let aperture = source.apertures().first().expect("admitted bound DG outlet");
     format!(",\"observation_scope\":\"exterior Rayleigh pressure from each accepted held DG outlet flow in the bound computed-source gas; one uniform circular opening in an infinite rigid baffle; no mouth, free-field body or room radiation\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
         receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
         aperture.radius_m, receiver.radial_rings, receiver.angular_points,

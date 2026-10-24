@@ -5541,3 +5541,34 @@ for numerical cancellation checks. Tests cover independent 2x2 elimination,
 raw original DG/MimoZoh state and work, both kernels, wall memory, rollback,
 side-only ownership and bitwise legacy scalar arithmetic. These regressions
 are authored; native execution remains pending.
+
+
+## Authored DG openings with shared exterior reaction and observation
+
+`DgPortLoad::new_with_computed_baffled_ports` binds explicit ordered port/circle
+pairs to one original computed BEM/VF source and one complete terminal group.
+Every non-inlet port is required. Axial geometry retains the original outlet
+area; side geometry is independent and uses the actual face's gas for common
+static-pressure admission. All mutual source entries, local bore/wall physics,
+full mechanical Nyquist fit and original passivity/error refusals are retained.
+No duplicate propagation or load owner is introduced. A microphone consumes the
+same original geometry, exterior gas and accepted ordered terminal-flow vector.
+Scalar, paired/material-modal and DG flue performances now pass every accepted
+flow exactly once, with buffers allocated at construction.
+
+The shared `dg_tube`/`dg_bore` input admits optional `dg_side_openings COUNT`
+before `dg_radiation`, followed by `dg_side_opening PORT_ID DOWNSTREAM_ELEMENT
+X_M Y_M RADIUS_M`. IDs exceed 1; faces and IDs are unique. The computed source's
+existing eight-opening cap permits seven side openings plus the axial outlet.
+The original element face is explicit: no station snapping occurs. These are
+zero-volume flush plane-wave junctions in one infinite rigid baffle, without
+finite chimneys, moving pads or free-field instrument-body scattering. Flue
+mouth reaction remains its separate compact self load; terminal mutual terms
+do not imply mouth-to-terminal mutual reaction.
+
+`examples/flue-dg-side-openings.performance` exercises the complete authored
+selection. Focused source tests retain original face/material/area identities,
+reverse matrix order independently of DG order, and compare the common
+microphone with original individual receivers driven by actual accepted flows.
+The fit, native tests and example audio remain unexecuted in this environment;
+no instrument-accuracy or measured-audio qualification is claimed.

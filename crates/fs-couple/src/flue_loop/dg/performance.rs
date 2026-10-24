@@ -2,8 +2,8 @@
 //!
 //! The default observation is the original interval-mean inlet pressure.
 //! An explicit baffled microphone instead consumes every accepted exterior
-//! terminal flow through the original retarded Rayleigh pressure owner, using
-//! the same bound aperture and material gas as the computed reaction source.
+//! terminal flows through the original retarded Rayleigh pressure owner, using
+//! the same bound apertures and material gas as the computed reaction source.
 //! This keeps the existing flue control compiler, accepted source histories,
 //! finite pressure ceiling and common PressureRenderer/PCM interface.
 //! An optional physical rectangular mouth shares that exterior and microphone.
@@ -54,6 +54,7 @@ pub struct FlueDgConfig {
 struct BaffledOutletObservation {
     config: CircularOutletReceiver,
     receiver: BaffledPressure,
+    terminal_flows_m3_s: Vec<f64>,
 }
 
 pub struct FlueDgPerformance {
@@ -79,16 +80,17 @@ impl FlueDgPerformance {
         Self::build(voice, schedule, config, None)
     }
 
-    /// Observe the actual held outward flow of the computed baffled DG terminal.
+    /// Observe the held outward flows of every computed baffled DG terminal.
     ///
-    /// The original radiation record supplies the aperture and exterior gas;
+    /// The original radiation record supplies all apertures and exterior gas;
     /// neither is inferred from the inlet or independently re-baked. One accepted
-    /// source sample enters the existing differentiating Rayleigh observer once.
+    /// source sample enters the existing differentiating Rayleigh observer once,
+    /// in the shared terminal owner's exact channel order.
     /// Both clocks are the declared source rate. Receiver band, quadrature and
     /// causal-history limits belong to that owner, including its 8..192 kHz
     /// same-clock range. Numerical filter delay is exposed by baffled_receiver().
     ///
-    /// This is one circular opening in an infinite rigid baffle, not free-field
+    /// These are coplanar circular openings in an infinite rigid baffle, not free-field
     /// instrument-body/mouth radiation or a new qualification of the jet card.
     pub fn with_baffled_outlet(
         voice: FlueVoice,
@@ -124,7 +126,12 @@ impl FlueDgPerformance {
             let load = voice.dg().expect("admitted original DG voice").load();
             let pressure = load.baffled_receiver(config.sample_rate_hz, receiver)
                 .map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
-            Some(BaffledOutletObservation { config: receiver, receiver: pressure })
+            let mut terminal_flows_m3_s = Vec::new();
+            terminal_flows_m3_s.try_reserve_exact(load.terminal_ports().len())
+                .map_err(|_| invalid("DG flue terminal flow trace exceeds available allocation"))?;
+            terminal_flows_m3_s.resize(load.terminal_ports().len(), 0.0);
+            Some(BaffledOutletObservation { config: receiver, receiver: pressure,
+                terminal_flows_m3_s })
         } else { None };
         let controls = controls::compile(
             &voice,
@@ -181,10 +188,16 @@ impl FlueDgPerformance {
                     return Err(FlueError::Invalid { what: "DG pressure lost its original bore" });
                 };
                 let mut pressure = if let Some(observer) = outlet.as_mut() {
-                    let flow = duct.load().last_terminal_frame().ok_or(FlueError::Invalid {
-                        what: "baffled DG pressure has no accepted original terminal flow",
-                    })?.outward_flow_m3_s;
-                    observer.receiver.step_trace(&[flow])
+                    let frames = duct.load().last_terminal_frames();
+                    if frames.is_empty() || frames.len() != observer.terminal_flows_m3_s.len() {
+                        return Err(FlueError::Invalid {
+                            what: "baffled DG pressure requires every accepted terminal flow in source order",
+                        });
+                    }
+                    for (flow, frame) in observer.terminal_flows_m3_s.iter_mut().zip(frames) {
+                        *flow = frame.outward_flow_m3_s;
+                    }
+                    observer.receiver.step_trace(&observer.terminal_flows_m3_s)
                         .map_err(|error| FlueError::Physics(
                             AcousticRealizeError::Nonlinear(error),
                         ))?
