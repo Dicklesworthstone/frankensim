@@ -4896,3 +4896,45 @@ For each field, the source law supplies psi=z²/(2K), s=-partial_T psi and U=psi
 The bounded reduction requires fixed geometry, complete storage mapping, one field branch per thermal material cell, fully solid constant-density caloric charts for mapped fields, positive affine coefficients and positive total caloric plus field heat capacity across each declared temperature/coordinate envelope. Both endpoint charges/fluxes must satisfy that envelope. Other thermal cells keep their original phase and boundary behavior. Source constraints, material-domain errors, unresolved thermal events, failed residuals, budget exhaustion and cancellation return no live-state mutation. Ideal-source constraint incompatibilities during frozen-coordinate rebinding refuse; no impulsive source exchange is inferred. Hysteresis, dielectric relaxation, moving geometry, field-dependent constitutive response, spatial field reassembly and phase transitions of mapped fields are separate owners. This first-order endpoint-temperature split does not claim unconditional passivity or temporal accuracy.
 
 Focused authored RC/RL fixtures cover both thermal coefficient signs, exact constant-coefficient recovery, independent total-U scalar roots, repeated accepted history, Joule versus reversible versus external heat, positive closed-system entropy, source/volume mismatch, capacity envelope, budget and late cancellation. These are numerical regressions, not measured material validation. Native Cargo/DSR execution was unavailable for this increment.
+
+### Implicit conservative homogeneous reaction extent
+
+`cavity_phs::piston::reactive::implicit::ImplicitReactionSolve` selects
+backward Euler for one reversible source-bound reaction, including inerts and
+initially absent products. It solves `xi - dt V r_end = 0` in moles with the
+same bounded scalar feedback algorithm used by thermal exchange. Each trial
+starts from the same accepted gas mass, volume and TOTAL internal energy,
+reconstructs the original NASA-9 mixture, and re-evaluates canonical partial
+activities, the actual temperature-dependent material rate and thermodynamic
+reverse closure. No formation-energy heat is added. Source/model identities
+and explicit/implicit paths share the original inventory reconstruction and
+final species, mass, energy and entropy admission.
+
+The caller's signed molar bracket is intersected with current donor allowances;
+accepted species are never clipped. Search endpoints retain strictly positive
+donors. Zero-rate states accept before querying the nonzero edge. Every queried
+state must remain inside the declared caloric/transport/kinetic source domain.
+Rejected bracket samples need not pass the accepted-trajectory entropy gate;
+the converged physical endpoint must. Reports retain endpoint rates, actual
+nonlinear residual, admitted extent bracket and bounded trial count. Thermal
+feedback's joule API and numerical operation order remain unchanged; the shared
+internal scalar core attaches units only in its physical wrappers.
+
+Existing parcel, piston, flow/diffusion and finite electrical/thermal consumers
+select this method through the same `GasReaction` value. Existing dyadic
+subcycling also refines implicit trajectories and may retry donor, entropy or
+nonlinear-root failures, while source, arithmetic and cancellation errors
+remain hard refusals. The root cap is at most 128 interior trials plus two
+endpoints per attempted substep; every gas inversion retains its separate cap.
+An aggregate subcycling report does not mislabel its summed extent as one root:
+individual endpoint equations remain in the actual accepted substeps.
+
+This is a first-order homogeneous reaction-then-motion/heat split, not a
+multi-reaction implicit mechanism, chemical-equilibrium acoustic derivative or
+validated ignition/engine model. Multi-channel implicit construction refuses.
+Temporal refinement and nonlinear-source branch admission remain necessary.
+Focused regressions use synthetic balanced isomers with an independent analytic
+backward-Euler limit and exponential relaxation, actual temperature-dependent
+source kinetics, formation-energy pressure/sound response, material piston
+motion, absent reagents, source/work limits and cancellation rollback. Native
+workspace execution and experimental mechanism qualification remain separate.

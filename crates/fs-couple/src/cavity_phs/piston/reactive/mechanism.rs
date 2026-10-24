@@ -64,8 +64,8 @@ impl GasReaction {
         if reactions.len() == 1 {
             return Ok(reactions.into_iter().next().expect("nonempty admitted mechanism"));
         }
-        if reactions.iter().any(|r| r.subcycling.is_some()) {
-            return Err(invalid("combine channels before binding one shared subcycling policy"));
+        if reactions.iter().any(|r| r.subcycling.is_some() || r.implicit.is_some()) {
+            return Err(invalid("combine channels before binding one shared integration policy"));
         }
         let catalog = &reactions[0].catalog;
         if reactions.iter().any(|r| &r.catalog != catalog) {
@@ -82,7 +82,7 @@ impl GasReaction {
         let mut inputs = reactions.into_iter();
         let first = inputs.next().expect("nonempty admitted mechanism");
         if count == 1 { return Ok(first); }
-        let GasReaction { catalog, kinetics, rate_material, additional_channels, subcycling: _ } = first;
+        let GasReaction { catalog, kinetics, rate_material, additional_channels, subcycling: _, implicit: _ } = first;
         let mut channels = Vec::with_capacity(count);
         channels.push(Channel { kinetics, rate_material });
         channels.extend(additional_channels);
@@ -97,7 +97,7 @@ impl GasReaction {
         let mut channels = channels.into_iter();
         let primary = channels.next().expect("admitted channel count");
         Ok(Self { catalog, kinetics: primary.kinetics, rate_material: primary.rate_material,
-            additional_channels: channels.collect(), subcycling: None })
+            additional_channels: channels.collect(), subcycling: None, implicit: None })
     }
 
     /// Original immutable kinetic laws and source bindings, in canonical order.
@@ -148,6 +148,33 @@ impl Sum {
 }
 
 impl GasReaction {
+    /// Shared canonical activities and material-rate query for explicit initial
+    /// states and implicit endpoint trials. No caller supplies partial pressures.
+    pub(super) fn evaluate_channel(
+        &self, kinetics: &DeclaredStoichiometricMassActionV1,
+        source: Option<&MaterialRateScale>, gas: &ClosedGasParcel, amounts: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DeclaredStoichiometricMassActionEvaluationV1, Option<ResolvedMaterialStatePoint>), GasReactionError> {
+        let components = self.catalog.thermodynamics().components();
+        let total: f64 = amounts.iter().sum();
+        if !positive(total) { return Err(invalid("reaction total amount is unrepresentable")); }
+        let equilibrium = kinetics.reverse_rate_closure().equilibrium();
+        let pressure_ratio = gas.state().state().pressure / equilibrium.convention().reference_pressure().value();
+        let mut activities = Vec::with_capacity(equilibrium.terms().len());
+        for term in equilibrium.terms() {
+            poll(cancelled)?;
+            let index = components.binary_search_by(|s| s.species().cmp(term.species()))
+                .map_err(|_| invalid("bound reaction species disappeared"))?;
+            let value = (amounts[index] / total) * pressure_ratio;
+            if amounts[index] > 0.0 && !positive(value) {
+                return Err(invalid("positive species partial pressure is unrepresentable"));
+            }
+            activities.push(IdealGasSpeciesActivityV1::new(term.species().clone(), Dimensionless::new(value))?);
+        }
+        poll(cancelled)?;
+        material_rate::evaluate_rate_for(kinetics, source, gas, activities, cancelled)
+    }
+
     /// Shared single/multiple-channel rate and inventory operation. No gas
     /// state is reconstructed or modified until every channel has succeeded.
     pub(super) fn progress(
@@ -155,8 +182,6 @@ impl GasReaction {
         controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Progress, GasReactionError> {
         let components = self.catalog.thermodynamics().components();
-        let total: f64 = initial.iter().sum();
-        if !positive(total) { return Err(invalid("reaction total amount is unrepresentable")); }
         let mut changes = vec![Sum::default(); components.len()];
         let mut withdrawn = vec![Sum::default(); components.len()];
         let mut reports = Vec::with_capacity(1 + self.additional_channels.len());
@@ -164,20 +189,7 @@ impl GasReaction {
             poll(cancelled)?;
             let equilibrium = kinetics.reverse_rate_closure().equilibrium();
             let terms = equilibrium.terms();
-            let pressure_ratio = gas.state().state().pressure / equilibrium.convention().reference_pressure().value();
-            let mut activities = Vec::with_capacity(terms.len());
-            for term in terms {
-                poll(cancelled)?;
-                let index = components.binary_search_by(|s| s.species().cmp(term.species()))
-                    .map_err(|_| invalid("bound reaction species disappeared"))?;
-                let value = (initial[index] / total) * pressure_ratio;
-                if initial[index] > 0.0 && !positive(value) {
-                    return Err(invalid("positive species partial pressure is unrepresentable"));
-                }
-                activities.push(IdealGasSpeciesActivityV1::new(term.species().clone(), Dimensionless::new(value))?);
-            }
-            poll(cancelled)?;
-            let (rate, rate_material) = material_rate::evaluate_rate_for(kinetics, source, gas, activities, cancelled)?;
+            let (rate, rate_material) = self.evaluate_channel(kinetics, source, gas, initial, cancelled)?;
             let progress = rate.net_progress_rate().ok_or_else(||
                 invalid("reaction rate is log-only; no finite extent can be integrated"))?.value();
             let extent = (progress * gas.volume_m3()) * duration_s;
@@ -219,3 +231,4 @@ impl GasReaction {
             additional: reports.collect(), changes: changes.into_iter().map(|x| x.value).collect(), expected, consumed })
     }
 }
+
