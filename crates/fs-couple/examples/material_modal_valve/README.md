@@ -689,3 +689,25 @@ source pressures, and the canonical schedule keep the same record meanings
 shown above. This DG route has one explicit upstream pressure supply; it
 does not declare the separate upstream tract or moving graph boundaries of
 the two-sided schema. Every force/pressure event uses the mechanical clock.
+
+## Ensemble playback
+
+The existing `music_render ensemble --valve` input accepts both material-modal
+schemas as well as the original plate-valve schema. Each input keeps its own
+physical renderer, material histories, controls and microphone. Supply the
+ensemble's explicit `--full-scale-pa`; individual source PCM scales do not
+become mix gains. Sources must declare the same physical duration.
+
+Rate conversion follows the source's pressure output clock. The original
+two-sided source already produces 48 kHz frames from its faster mechanics;
+`--decimate` is required when a selected producer, such as the 96 kHz DG
+fixture, still needs conversion to the ensemble's 48 kHz output. Numerical
+receiver-filter and outer-decimator delays are aligned together. Physical
+distance/sound-speed travel remains in each original receiver, and fractional
+final-output alignment delays refuse rather than being rounded.
+
+Actual exterior microphones must agree on the complete bound listener gas.
+A selected internal DG pressure trace is identified as internal in the output
+metadata; combining it with other traces does not make it an exterior
+microphone. The ensemble superposes independent physical pressure sources and
+does not introduce mechanical coupling between instruments.

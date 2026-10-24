@@ -6,6 +6,14 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::ThermochemicalSources;
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, PLATE_VALVE_PERFORMANCE_SCHEMA};
+use fs_couple::bernoulli_aperture::performance::file::material_modal::{
+    MaterialModalValvePerformance, MATERIAL_MODAL_VALVE_SCHEMA,
+};
+use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::{
+    MaterialModalDgValvePerformance, MATERIAL_MODAL_DG_VALVE_SCHEMA,
+};
+use fs_couple::bernoulli_aperture::radiation::environment::multiport::input::MAX_MIMO_RADIATION_BYTES;
+use fs_couple::bernoulli_aperture::two_sided::ValveSide;
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
@@ -88,8 +96,15 @@ struct SourceInfo {
     kind: Kind,
     schema: &'static str,
     hash: ContentHash,
+    // Actual pressure-producer clock; an existing source may already own a
+    // multirate microphone. The physical mechanics are reported separately.
     rate: u32,
     samples: u64,
+    mechanics_rate: u32,
+    mechanics_samples: u64,
+    // Existing receiver's numerical latency on the producer clock. This never
+    // includes its physical source-to-listener travel time.
+    source_filter_delay_samples: f64,
     source_full_scale_pa: f64,
     components: usize,
     modes: usize,
@@ -173,6 +188,7 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: i.voices, modes: i.modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
@@ -186,6 +202,7 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: gas_json, listener,
             })
         }
@@ -199,10 +216,88 @@ fn load_with_gas_sources(
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
-        Kind::Valve => {
+        Kind::Valve => match std::str::from_utf8(&bytes)
+            .map_err(|_| "valve performance must be UTF-8")?
+            .lines().next().unwrap_or("").trim()
+        {
+            MATERIAL_MODAL_DG_VALVE_SCHEMA => {
+                let p = MaterialModalDgValvePerformance::from_bytes_with_sources(
+                    &bytes, block, &CancelGate::new(), sources,
+                    super::plate_input::section_pack_loader(parent),
+                ).map_err(|e| e.to_string())?;
+                let i = p.info();
+                let renderer = p.renderer();
+                let microphone = renderer.baffled_receiver();
+                let listener = if microphone.is_some() {
+                    let exterior = renderer.system().load().radiation_record()
+                        .ok_or("DG microphone lacks its original computed radiation source")?
+                        .gas_record().state();
+                    Listener::Gas(ListenerMedium::of(exterior))
+                } else {
+                    Listener::Unconstrained("internal DG inlet trace; no exterior microphone")
+                };
+                let source_filter_delay_samples = microphone.map_or(0.0, |m| m.filter_delay_samples());
+                let controls = renderer.pending_controls().len() + (0..i.blades).map(|blade|
+                    renderer.pending_plate_force_controls(blade).len()
+                        + renderer.pending_material_pressure_controls(blade).len()).sum::<usize>();
+                let scope = if microphone.is_some() {
+                    "computed DG terminal flow through its original baffled exterior receiver"
+                } else { "internal DG step-mean inlet pressure; not an exterior microphone" };
+                let exterior_json = format!(",{},\"observation_scope\":{}",
+                    super::wind_input::material_modal_dg_provenance(&p), json_string(scope));
+                (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                    kind: input.kind, schema: MATERIAL_MODAL_DG_VALVE_SCHEMA, hash: i.input_hash,
+                    rate: i.output_rate_hz, samples: i.samples,
+                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples: i.samples,
+                    source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
+                    components: i.blades, modes: i.modes, controls, exterior_json, listener,
+                })
+            }
+            MATERIAL_MODAL_VALVE_SCHEMA => {
+                let p = MaterialModalValvePerformance::from_bytes_with_all_sources(
+                    &bytes, block, &CancelGate::new(), sources,
+                    super::plate_input::section_pack_loader(parent), |name| {
+                        let file = std::fs::File::open(parent.join(name))
+                            .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;
+                        let mut bytes = Vec::new();
+                        file.take((MAX_MIMO_RADIATION_BYTES + 1) as u64).read_to_end(&mut bytes)
+                            .map_err(|e| format!("MIMO radiation artifact {name:?} read failed: {e}"))?;
+                        if bytes.len() > MAX_MIMO_RADIATION_BYTES {
+                            return Err("MIMO radiation artifact exceeds its input budget".into());
+                        }
+                        Ok(bytes)
+                    },
+                ).map_err(|e| e.to_string())?;
+                let i = p.info();
+                let renderer = p.renderer();
+                // This source already owns every mechanical substep and its
+                // differentiating microphone. Ensemble receives OUTPUT frames.
+                let exterior = renderer.source().radiation().exterior.as_ref()
+                    .ok_or("material-modal microphone requires its declared complete exterior gas")?;
+                let listener = Listener::Gas(ListenerMedium::of(exterior));
+                let source_filter_delay_samples = renderer.source().receiver().filter_delay_samples();
+                let mechanics_samples = i.samples.checked_mul(renderer.source().mechanics_per_output() as u64)
+                    .ok_or("material-modal mechanical window overflow")?;
+                let controls = renderer.pending_controls().len()
+                    + [ValveSide::Upstream, ValveSide::Downstream].into_iter().map(|side|
+                        renderer.pending_boundary_controls(side).len()).sum::<usize>()
+                    + (0..i.blades).map(|blade| renderer.pending_plate_force_controls(blade).len()
+                        + renderer.pending_material_pressure_controls(blade).len()).sum::<usize>();
+                let exterior_json = format!(",{},\"observation_scope\":\"exterior pressure from the original multirate material-modal receiver\"",
+                    super::wind_input::material_modal_provenance(&p));
+                (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                    kind: input.kind, schema: MATERIAL_MODAL_VALVE_SCHEMA, hash: i.input_hash,
+                    rate: i.output_rate_hz, samples: i.samples,
+                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples, source_filter_delay_samples,
+                    source_full_scale_pa: i.full_scale_pa, components: i.blades, modes: i.modes,
+                    controls, exterior_json, listener,
+                })
+            }
+            PLATE_VALVE_PERFORMANCE_SCHEMA => {
             let p = PlateValvePerformance::from_bytes_with_all_sources(&bytes, block, &CancelGate::new(),sources,
                 super::plate_input::section_pack_loader(parent)).map_err(|e|e.to_string())?;
             let i = p.info();
@@ -220,12 +315,17 @@ fn load_with_gas_sources(
                     |exterior| Listener::Gas(ListenerMedium::of(exterior)),
                 ),
             };
+            let source_filter_delay_samples = p.renderer().baffled_receiver()
+                .map_or(0.0, |receiver| receiver.filter_delay_samples());
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
+                mechanics_rate:i.sample_rate_hz,mechanics_samples:i.samples,source_filter_delay_samples,
                 components:1,modes:1,controls:i.compiled_controls+i.force_controls,exterior_json,listener,
             })
-        }
+            }
+            _ => return Err("--valve requires a supported plate-valve, material-modal or material-modal-DG source schema".into()),
+        },
         Kind::Reed => {
             let p = ReedPerformance::from_bytes_with_gas_sources(&bytes, block,
                 fs_couple::pcm_wav::observation::ObservationPolicy::Diagnostic,sources).map_err(|e| e.to_string())?;
@@ -237,6 +337,7 @@ fn load_with_gas_sources(
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
                 components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
             })
         }
@@ -253,6 +354,7 @@ fn prepare_with_gas_sources(
 ) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64), String> {
     let mut parts = Vec::new();
     let mut sources = Vec::new();
+    let mut source_delays = Vec::new();
     let mut horizon = None;
     let mut converted = false;
     let mut listener: Option<(usize, Kind, ListenerMedium)> = None;
@@ -261,7 +363,7 @@ fn prepare_with_gas_sources(
         let (renderer, info) = load_with_gas_sources(input, options.block,gas_sources)
             .map_err(|e| format!("ensemble part {index} ({}): {e}", input.kind.label()))?;
         if info.rate != RATE && !options.decimate {
-            return Err(format!("ensemble part {index} needs explicit --decimate; mechanics run at {} Hz", info.rate));
+            return Err(format!("ensemble part {index} needs explicit --decimate; its pressure producer outputs {} Hz", info.rate));
         }
         converted |= info.rate != RATE;
         // One observer sits in one gas: every part that declares the gas it is
@@ -283,6 +385,10 @@ fn prepare_with_gas_sources(
         }
         let observed = DecimatedRenderer::new(renderer, info.rate, RATE, options.block)
             .map_err(|e| format!("ensemble part {index} clock: {e}"))?;
+        // Receiver latency is already present in its pressure trace. Convert
+        // only its units; the shared ensemble owner validates exact integrality
+        // and adds the remaining pure delay. Physical r/c stays untouched.
+        source_delays.push(info.source_filter_delay_samples / observed.info().ratio as f64);
         let samples = observed.output_samples_for(info.samples).map_err(|e| e.to_string())?;
         if samples == 0 || samples > MAX_SAMPLES { return Err("ensemble duration must be in (0,600] seconds".into()); }
         if let Some(expected) = horizon {
@@ -295,9 +401,9 @@ fn prepare_with_gas_sources(
         return Err("--decimate requires at least one higher-rate source; 48000-Hz parts need no conversion".into());
     }
     let samples = horizon.ok_or_else(|| "ensemble has no source duration".to_string())?;
-    let renderer = PressureEnsemble::new(parts, PressureEnsembleConfig {
+    let renderer = PressureEnsemble::new_with_source_delays(parts, PressureEnsembleConfig {
         sample_rate_hz: RATE, samples, max_block: options.block, max_parts: MAX_PARTS,
-    }).map_err(|e| e.to_string())?;
+    }, &source_delays).map_err(|e| e.to_string())?;
     renderer.validate_sample_count(samples).map_err(|e| e.to_string())?;
     Ok((renderer, sources, samples))
 }
@@ -324,6 +430,10 @@ pub(super) fn run_with_gas_sources(
     )?;
     let parts: Vec<_> = sources.iter().zip(renderer.part_info()).map(|(source, aligned)| {
         let o = aligned.observation;
+        let mechanics_rate = source.mechanics_rate;
+        let mechanics_samples = source.mechanics_samples;
+        let source_delay = aligned.source_filter_delay_output_samples;
+        let total_delay = aligned.total_filter_delay_output_samples;
         let default_scope = if source.exterior_json.contains("\"observation_scope\":") {
             ""
         } else if source.kind == Kind::Reed {
@@ -333,8 +443,10 @@ pub(super) fn run_with_gas_sources(
         } else { "" };
         let scope = source.exterior_json.as_str();
         format!("{{\"kind\":\"{}\",\"schema\":\"{}\",\"blake3\":\"{}\",\
-            \"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"ratio\":{},\
+            \"mechanics_sample_rate_hz\":{mechanics_rate},\"mechanics_samples\":{mechanics_samples},\
+            \"pressure_sample_rate_hz\":{},\"pressure_samples\":{},\"ratio\":{},\
             \"filter\":\"{}\",\"filter_delay_output_samples\":{},\"alignment_delay_samples\":{},\
+            \"source_filter_delay_output_samples\":{source_delay},\"total_filter_delay_output_samples\":{total_delay},\
             \"first_output_source_index\":{},\"source_full_scale_pa\":{:e},\"source_pcm_scale_applied\":false,\
             \"components\":{},\"modes\":{},\"compiled_controls\":{}{default_scope}{scope}}}",
             source.kind.label(), source.schema, source.hash.to_hex(), source.rate, source.samples,
@@ -358,7 +470,8 @@ pub(super) fn run_with_gas_sources(
         \"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\"wav_blake3\":\"{hash}\",\
         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
         \"ensemble\":{{\"sum_order\":\"input-order\",\"common_delay_output_samples\":{},\
-        \"delay_compensated\":false,\"initial_history\":\"zero\",\"tail\":\"no-flush-declared-window\",\
+        \"delay_compensated\":false,\"alignment_scope\":\"declared receiver numerical filter plus outer decimator; physical propagation retained\",\
+        \"initial_history\":\"zero\",\"tail\":\"no-flush-declared-window\",\
         \"listener_medium\":{listener},\"parts\":[{}],\"model_scope\":\"independent source pressures; common observer and time origin required; no new mechanical coupling or physical-validation claim\"}}}}",
         options.block, options.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         renderer.delay_output_samples(), parts.join(","));

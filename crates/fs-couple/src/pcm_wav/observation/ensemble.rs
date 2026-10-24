@@ -2,7 +2,9 @@
 //!
 //! Each source keeps its own mechanics, sample-timed inputs and existing causal
 //! decimator. A pure integer delay aligns the faster observation paths to the
-//! largest filter delay. Nothing resamples forces or physical state, invents a
+//! largest declared numerical filter delay, including an existing source
+//! receiver when explicitly supplied. Physical travel times stay in that
+//! receiver. Nothing resamples forces or physical state, invents a
 //! gain, or interconnects the mechanics. Sources must describe the SAME observer
 //! and physical time origin; type/clock admission cannot establish that fact.
 //!
@@ -14,6 +16,10 @@
 
 use super::{DecimatedRenderer, DecimationInfo, PressureRenderer};
 use crate::render::{RenderError, schedule::ScheduledRenderer};
+
+/// Bounded per-part alignment storage, in final output samples. Source receiver
+/// latency plus the outer decimator must fit this domain without rounding.
+pub const MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES: usize = 4096;
 
 /// Finite output and storage limits, independent of each source's own budgets.
 #[derive(Clone, Copy, Debug)]
@@ -33,6 +39,11 @@ pub struct PressureEnsembleConfig {
 pub struct AlignedPartInfo {
     /// The existing decimator's clock, filter profile and original latency.
     pub observation: DecimationInfo,
+    /// Already-applied source receiver latency, expressed on the final output
+    /// clock. Zero preserves the original decimator-only composition contract.
+    pub source_filter_delay_output_samples: usize,
+    /// Source receiver plus outer decimator latency, before alignment.
+    pub total_filter_delay_output_samples: usize,
     /// Extra pure delay on the OUTPUT clock; never applied to the mechanics.
     pub alignment_delay_samples: usize,
 }
@@ -86,13 +97,40 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
     pub fn new(parts: Vec<DecimatedRenderer<S>>, config: PressureEnsembleConfig)
         -> Result<Self, RenderError>
     {
+        Self::build(parts, config, None)
+    }
+
+    /// Align existing receiver filters as well as the outer decimators.
+    /// Each supplied delay is ALREADY present in that source and is measured
+    /// in final output samples, not mechanical samples or seconds. It excludes
+    /// physical source-to-listener propagation. No filter is rebuilt or removed.
+    ///
+    /// There must be one finite, nonnegative, integral delay per part. Each
+    /// combined latency is bounded by MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES;
+    /// fractional output delays refuse instead of being rounded or resampled.
+    pub fn new_with_source_delays(
+        parts: Vec<DecimatedRenderer<S>>,
+        config: PressureEnsembleConfig,
+        source_delay_output_samples: &[f64],
+    ) -> Result<Self, RenderError> {
+        Self::build(parts, config, Some(source_delay_output_samples))
+    }
+
+    fn build(
+        parts: Vec<DecimatedRenderer<S>>,
+        config: PressureEnsembleConfig,
+        source_delays: Option<&[f64]>,
+    ) -> Result<Self, RenderError> {
         if parts.is_empty() || parts.len() > config.max_parts
             || config.max_block == 0 || config.sample_rate_hz == 0
         {
             return Err(sizing("pressure ensemble needs parts, a positive clock and explicit capacities"));
         }
+        if source_delays.is_some_and(|delays| delays.len() != parts.len()) {
+            return Err(sizing("pressure alignment needs one declared source filter delay per part"));
+        }
         let mut common_delay = 0_usize;
-        for part in &parts {
+        for (index, part) in parts.iter().enumerate() {
             part.validate_sample_rate(config.sample_rate_hz)?;
             part.validate_sample_count(config.samples)?;
             if part.samples_rendered() != 0 || config.max_block > part.max_block_len() {
@@ -102,7 +140,13 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
             if !delay.is_finite() || !(0.0..=80.0).contains(&delay) || delay.fract() != 0.0 {
                 return Err(sizing("pressure alignment requires an admitted integral decimator latency"));
             }
-            common_delay = common_delay.max(delay as usize);
+            let source_delay = source_delays.map_or(0.0, |delays| delays[index]);
+            if !source_delay.is_finite() || source_delay < 0.0 || source_delay.fract() != 0.0
+                || delay + source_delay > MAX_TOTAL_FILTER_DELAY_OUTPUT_SAMPLES as f64
+            {
+                return Err(sizing("pressure alignment needs bounded integral source/total filter delays on the output clock"));
+            }
+            common_delay = common_delay.max((delay + source_delay) as usize);
         }
         let mut info = Vec::new();
         let mut delays = Vec::new();
@@ -111,10 +155,14 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
         delays.try_reserve_exact(parts.len()).map_err(|_| sizing("cannot reserve pressure alignment lines"))?;
         scratch.try_reserve_exact(config.max_block).map_err(|_| sizing("cannot reserve pressure mixing scratch"))?;
         scratch.resize(config.max_block, 0.0);
-        for part in &parts {
+        for (index, part) in parts.iter().enumerate() {
             let observation = part.info();
-            let alignment_delay_samples = common_delay - observation.delay_output_samples as usize;
-            info.push(AlignedPartInfo { observation, alignment_delay_samples });
+            let source_filter_delay_output_samples = source_delays.map_or(0.0, |delays| delays[index]) as usize;
+            let total_filter_delay_output_samples = source_filter_delay_output_samples
+                + observation.delay_output_samples as usize;
+            let alignment_delay_samples = common_delay - total_filter_delay_output_samples;
+            info.push(AlignedPartInfo { observation, source_filter_delay_output_samples,
+                total_filter_delay_output_samples, alignment_delay_samples });
             delays.push(DelayLine::new(alignment_delay_samples)?);
         }
         Ok(Self { parts, info, delays, scratch, config, common_delay, completed: 0, poisoned: false })

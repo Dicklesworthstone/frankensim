@@ -5332,3 +5332,24 @@ Regression source covers physical motion/PCM propagation, pressure/composition
 and solid-material substitutions, retained fluid augmentation, zero-inertia
 uniform compression and strict resource/geometry admission. Fixture topology
 was checked independently; native Rust execution remains required.
+
+## Material-wind ensembles and complete numerical observation latency
+
+The existing ensemble `--valve` input selects plate-valve, material-modal and
+material-modal-DG schemas without replacing their physical renderers. Material
+modes, constitutive histories, controls, reaction loads and microphone histories
+stay source-owned. Pressure-producer clocks govern outer conversion; actual
+mechanical clocks/counts are recorded separately. Listener compatibility uses
+the microphone's bound complete exterior gas. Internal DG inlet traces are
+explicitly identified and do not infer a listener gas.
+
+`PressureEnsemble::new_with_source_delays` accepts the numerical receiver
+latency already present in each producer, in final-output samples, and aligns
+that plus the existing outer decimator delay using the original pure-delay
+owner. Every total must be finite, nonnegative, integral and at most 4096
+samples. Fractional totals refuse. Physical propagation remains within each
+receiver; no source state, source event or sound-travel time is resampled to
+perform alignment. The original `new` constructor retains zero-source-delay
+behavior. Focused regression source compares independently filtered modal
+trajectories across callback partitions and covers exact zero-delay parity and
+invalid latency admission; native execution is still required.
