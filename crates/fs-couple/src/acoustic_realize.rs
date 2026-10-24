@@ -9,6 +9,8 @@
 pub mod finite_gas;
 /// Source-backed fixed-support expansion and elastic storage during vibration.
 pub mod thermoelastic;
+/// Layer-resolved heat and continuing vibration on the same material sources.
+pub mod concentric;
 mod thermal_step;
 
 use crate::modal_acoustic_time::{

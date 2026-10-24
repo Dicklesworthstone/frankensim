@@ -5684,3 +5684,57 @@ reconstructed internal energy, original inertia/flux, positive-capacity refusal,
 cancellation and exact retry. The changed Rust files passed syntax parsing;
 native compilation and these tests were not executed in the connector-only
 session because DSR, RCH, Cargo and rustc were unavailable.
+
+## Continuing layered-string heat, electrical drive and sound
+
+`acoustic_realize::concentric::ThermalConcentricStringRuntime` connects the
+shared source-bound thermoelastic section to continuing native string modes,
+gas resistance, pressure history and finite thermal cells. Each perfectly
+bonded annulus retains its own material, temperature, expansion, modulus,
+caloric law and Kelvin–Voigt bending viscosity. Reference cards, complete
+property requirements, source selections and original annular inventories
+survive every step; there is no equivalent homogeneous material card.
+
+The existing exact modal propagator advances once at the accepted temperature.
+The existing backward-Euler network and Newton–Krylov owner then solve layer
+temperatures at frozen new modal displacement and momentum. The original
+source section rebuilds tension, bending stiffness, damping and pressure
+coefficients without resetting physical motion or observer acceleration history.
+Each layer receives its actual share of bending dissipation, proportional to
+its own `eta_i*I_i`, and reversible heat
+`-delta(Psi_axial_i)-delta(Psi_modal_i at fixed new q)-delta(T_i*s_i)`.
+The entropy term includes the change in physical modal displacement, not just
+temperature. Independent combined-energy acceptance includes full mechanical
+internal energy, caloric storage, supplied force work and the native air-loss
+account. Local and global heat residuals must also pass before publication.
+
+`step_with_ohmic_heating` reuses the original parallel-conductor model on the
+SAME already-resolved trial section. Current or voltage determines each layer's
+current and Joule heat from its actual resistivity/conductivity. Total current
+is shared by conductance; it is not applied independently to every layer.
+The payload separates electrical supply and per-layer Joule energy from other
+external heat. Joule heat, physical bending heat and reversible exchange each
+enter the original thermal cells once. Independent sources and thermal links
+continue through the existing callback and network; no second electrical,
+mechanical or thermal integrator is introduced.
+
+This is a fixed-section, fixed-density, small-strain bonded-member model with
+scalar expansion, globally affine modulus, solid caloric charts and sourced
+Kelvin–Voigt bending. A per-layer capacity check includes axial AND modal
+thermoelastic curvature over every original caloric segment. Slack, source
+exits, excessive strain/temperature increments, changed inventory, cancellation
+and solver/balance failures publish neither thermal nor acoustic history.
+The thermal/mechanical split is first order and needs timestep/modal refinement.
+Gas is the supplied fixed physical state; microphone pressure is the existing
+diagnostic radiation approximation. This does not thermally evolve a complete
+bow/string/body network, resolve helical winding slip, radial gradients inside
+an annulus, skin effects, changing geometry or phase transitions.
+
+Four focused tests cover unequal temperatures with continuing motion, independent
+internal-energy accounting and layer-loss ownership; source-only expansion and
+resistivity changes affecting tension and pressure; implicit `R(T)`/current/
+Joule energy; and refusal with exact retry. The changed Rust files passed syntax
+parsing and the thermal identities were checked by independent numerical
+reductions. Native compilation/tests and audio rendering/listening were not
+performed in this connector-only session. No measured instrument-fidelity claim
+is made by these synthetic constitutive tests.
