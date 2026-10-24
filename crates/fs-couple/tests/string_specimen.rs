@@ -5624,3 +5624,6 @@ fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch
 
 #[path = "string_specimen/finite_gas.rs"]
 mod finite_gas;
+
+#[path = "string_specimen/thermoelastic.rs"]
+mod thermoelastic;

@@ -57,8 +57,9 @@ impl ThermalMaterialStringRuntime {
     /// This insulated solid/gas interface has no reciprocal thermal exchange;
     /// use `step_with_drive_and_isochoric_gas_conduction` for a sourced layer.
     /// Electrical and mechanical coefficients remain frozen at the initial
-    /// state during one sample: this is first-order partitioned coupling, with
-    /// the original fixed-E/density, fixed-tension, solid-phase restrictions.
+    /// state during one sample: this is first-order partitioned coupling. A
+    /// thermoelastic string then updates stiffness/prestress through its original
+    /// material laws and reversible heat account, with invariant reference mass.
     /// No circuit dynamics, contact resistance, skin effect, Lorentz force,
     /// pressure work, radiation loading or acoustic chamber is supplied.
     #[allow(clippy::too_many_arguments)]

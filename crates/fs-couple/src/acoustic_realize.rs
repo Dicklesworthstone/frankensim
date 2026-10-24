@@ -7,6 +7,9 @@
 
 /// Finite source-backed gas storage coupled to the live material string.
 pub mod finite_gas;
+/// Source-backed fixed-support expansion and elastic storage during vibration.
+pub mod thermoelastic;
+mod thermal_step;
 
 use crate::modal_acoustic_time::{
     MAX_TIME_DOMAIN_ACOUSTIC_MODES, ModalAcousticFrame, ModalAcousticMode, ModalAcousticState,
@@ -3098,6 +3101,16 @@ pub enum ThermalStringError {
     Query(fs_matdb::MatDbError),
     /// The pinned material claims cannot supply the candidate state.
     Material(fs_material::state_point::MaterialStatePointError),
+    /// The declared reversible-heat bracket does not contain a consistent endpoint.
+    ThermoelasticBracket {
+        lower_residual_j: f64,
+        upper_residual_j: f64,
+    },
+    /// The bounded thermal/mechanical energy solve exhausted its work allowance.
+    ThermoelasticConvergence {
+        iterations: usize,
+        residual_j: f64,
+    },
 }
 
 impl core::fmt::Display for ThermalStringError {
@@ -3110,9 +3123,11 @@ impl std::error::Error for ThermalStringError {}
 
 /// Uniform solid temperature coupled to material-resolved viscous vibration.
 ///
-/// Density and Young's modulus must be validity-wide constants, with prescribed
-/// radius or mass and fixed tension: no changing elastic/prestress potential or
-/// expansion work is hidden in heat. Viscosity may depend on temperature.
+/// The ordinary constructor uses constant density/Young's modulus and fixed
+/// tension. `try_new_thermoelastic` also admits sourced fixed-support expansion
+/// and affine temperature-dependent stiffness, with axial/modal elastic storage
+/// and its entropy contribution exchanged through the same thermal owner.
+/// Viscosity may depend on temperature in both cases.
 /// The admitted thermal chart has constant solid density and uses total
 /// specific enthalpy; neither latent heat nor air loss is credited twice.
 ///
@@ -3121,8 +3136,9 @@ impl std::error::Error for ThermalStringError {}
 /// the new temperature. This is first-order partitioned feedback, not an exact
 /// continuous-temperature solution. The explicit temperature-increment budget
 /// limits a step; time refinement is still required to assess coupling error.
-/// Spatial transport, thermal expansion, melting and acoustic radiation loading are
-/// outside this rung. Ambient gas remains independent of the solid temperature.
+/// Spatial gradients, moving geometry, melting and acoustic radiation loading
+/// are outside this rung. Ambient gas remains independent of the solid temperature
+/// unless explicitly coupled through the finite-gas transaction.
 #[derive(Clone)]
 pub struct ThermalMaterialStringRuntime {
     mechanical: LinearMaterialStringRuntime,
@@ -3133,6 +3149,7 @@ pub struct ThermalMaterialStringRuntime {
     curve: EquilibriumEnthalpyPhaseCurve,
     thermal: EquilibriumPhaseState,
     maximum_temperature_increment_k: f64,
+    thermoelastic: Option<thermoelastic::ThermoelasticString>,
 }
 
 /// One accepted thermal/mechanical sample, with a single publication epoch.
@@ -3146,6 +3163,17 @@ pub struct ThermalMaterialStringFrame {
     pub external_heat_j: f64,
     /// Actual increase in total thermal enthalpy [J].
     pub enthalpy_change_j: f64,
+    /// Change in fixed-support axial elastic free energy [J].
+    pub axial_free_energy_change_j: f64,
+    /// Change in `T*s_mechanical`, including axial and retained modal entropy [J].
+    /// Together with free energy this forms the mechanical internal energy.
+    pub mechanical_entropy_energy_change_j: f64,
+    /// Elastic parameter work into the retained modes at their unchanged endpoint
+    /// coordinates [J]. Included in the final modal energy, not added twice.
+    pub modal_parameter_work_j: f64,
+    /// Signed reversible heat supplied to the original caloric/transport owner [J],
+    /// separate from the physical Kelvin-Voigt heat in `vibration.dissipation`.
+    pub reversible_heat_j: f64,
     /// Work + external heat - mechanical/thermal storage changes - outgoing
     /// air/authored loss - the separately reported mechanical numerical loss [J].
     pub energy_balance_residual_j: f64,
@@ -3201,6 +3229,20 @@ impl ThermalMaterialStringRuntime {
         specific_enthalpy_j_kg: f64,
         maximum_temperature_increment_k: f64,
     ) -> Result<Self, ThermalStringError> {
+        Self::try_new_impl(cx, mechanical, card, curve, specific_enthalpy_j_kg,
+            maximum_temperature_increment_k, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_impl(
+        cx: &fs_exec::Cx<'_>,
+        mechanical: LinearMaterialStringRuntime,
+        card: fs_matdb::MaterialCard,
+        curve: EquilibriumEnthalpyPhaseCurve,
+        specific_enthalpy_j_kg: f64,
+        maximum_temperature_increment_k: f64,
+        thermoelastic: Option<thermoelastic::ThermoelasticString>,
+    ) -> Result<Self, ThermalStringError> {
         use crate::string_specimen::StringPrestress;
         let refuse = ThermalStringError::Admission;
         cx.checkpoint()
@@ -3213,7 +3255,8 @@ impl ThermalMaterialStringRuntime {
         if !(maximum_temperature_increment_k.is_finite() && maximum_temperature_increment_k > 0.0)
             || card.content_hash() != material.card_identity()
             || thermal.material_card_identity() != material.card_identity()
-            || !matches!(specimen.prestress(), StringPrestress::FixedTension(_))
+            || (thermoelastic.is_none()
+                && !matches!(specimen.prestress(), StringPrestress::FixedTension(_)))
         {
             return Err(refuse(
                 "thermal string requires one card, fixed tension and a positive temperature-increment budget",
@@ -3227,7 +3270,8 @@ impl ThermalMaterialStringRuntime {
                 .claims()
                 .claim(property.answer().receipt.selected)
                 .ok_or(refuse("thermal string selected claim is absent"))?;
-            if !matches!(claim.value, fs_matdb::PropertyValue::Scalar { .. }) {
+            if !matches!(claim.value, fs_matdb::PropertyValue::Scalar { .. })
+                && (name == "density" || thermoelastic.is_none()) {
                 return Err(refuse(
                     "changing density or elastic stiffness requires thermodynamic work and state transfer",
                 ));
@@ -3322,6 +3366,7 @@ impl ThermalMaterialStringRuntime {
             curve,
             thermal,
             maximum_temperature_increment_k,
+            thermoelastic,
         };
         // Validate the initial law against its original receipt. Pinning an
         // already selected claim changes the query-policy receipt identity;
@@ -3563,7 +3608,7 @@ impl ThermalMaterialStringRuntime {
         expected_epoch: u64,
         forces: &[f64],
         current_a: f64,
-        transport: impl FnOnce(
+        transport: impl FnMut(
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
     ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
@@ -3585,7 +3630,7 @@ impl ThermalMaterialStringRuntime {
         expected_epoch: u64,
         forces: &[f64],
         voltage_v: f64,
-        transport: impl FnOnce(
+        transport: impl FnMut(
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
     ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
@@ -3610,7 +3655,7 @@ impl ThermalMaterialStringRuntime {
         forces: &[f64],
         drive: fs_material::conductor::OhmicDrive,
         state: &mut S,
-        transport: impl FnOnce(
+        mut transport: impl FnMut(
             &S,
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<(S, fs_material::phase::UniformEnthalpyStep<R>), E>,
@@ -3650,7 +3695,7 @@ impl ThermalMaterialStringRuntime {
         expected_epoch: u64,
         forces: &[f64],
         drive: fs_material::conductor::OhmicDrive,
-        transport: impl FnOnce(
+        mut transport: impl FnMut(
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
     ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
@@ -3694,6 +3739,9 @@ impl ThermalMaterialStringRuntime {
         &self,
         thermal: EquilibriumPhaseState,
     ) -> Result<crate::string_specimen::ResolvedStringSpecimen, ThermalStringError> {
+        if let Some(law) = &self.thermoelastic {
+            return law.specimen_at(self, thermal);
+        }
         let point = self
             .point
             .clone()
@@ -3717,7 +3765,7 @@ impl ThermalMaterialStringRuntime {
         .map_err(ThermalStringError::Acoustic)
     }
 
-    /// Advance mechanics, material heating and viscosity feedback as one commit.
+    /// Advance mechanics, material heating and thermoelastic feedback as one commit.
     /// `expected_epoch` prevents replaying an accepted heat/source application.
     /// Signed external heat is supplied as energy [J], not an inferred ambient
     /// flux. A refusal consumes neither this input nor an audio sample.
@@ -3743,22 +3791,23 @@ impl ThermalMaterialStringRuntime {
         let vibration = candidate
             .step(cx, forces)
             .map_err(ThermalStringError::Acoustic)?;
-        let heat = vibration.dissipation.material_heat_j + external_heat_j;
-        let thermal = self
-            .curve
-            .advance_specific_energy(self.thermal, heat / candidate.specimen().mass_kg())
-            .map_err(ThermalStringError::Phase)?;
+        let proposed = self.propose_thermal_step(cx, &candidate, &vibration, |input| {
+            let heat = input.internal_heat_j + external_heat_j;
+            let thermal = input.curve.advance_specific_energy(input.initial, heat / input.mass_kg)
+                .map_err(ThermalStringError::Phase)?;
+            Ok::<_, ThermalStringError>(fs_material::phase::UniformEnthalpyStep {
+                state: thermal,
+                external_heat_j,
+                energy_residual_tolerance_j: 0.0,
+                report: (),
+            })
+        })?;
         let result = self.finish_thermal_step(
             cx,
             forces,
             candidate,
             vibration,
-            fs_material::phase::UniformEnthalpyStep {
-                state: thermal,
-                external_heat_j,
-                energy_residual_tolerance_j: 0.0,
-                report: (),
-            },
+            proposed,
         )?;
         Ok(result.coupled)
     }
@@ -3772,12 +3821,16 @@ impl ThermalMaterialStringRuntime {
     /// The transport must justify its lumped approximation and return actual
     /// boundary heat, separately from internal heating and solver residual.
     /// It proposes a result; it must not publish state or debit a mutable source.
+    /// Thermoelastic feedback can call it repeatedly from the SAME accepted
+    /// state with different signed internal heat. Only the accepted proposal
+    /// survives; the callback must be repeatable and retain its actual boundary
+    /// transfer. Ordinary fixed-tension strings still call it once.
     pub fn step_with_thermal_transport<R, E: core::fmt::Display>(
         &mut self,
         cx: &fs_exec::Cx<'_>,
         expected_epoch: u64,
         forces: &[f64],
-        transport: impl FnOnce(
+        mut transport: impl FnMut(
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
     ) -> Result<ThermalStringTransportFrame<R>, ThermalStringError> {
@@ -3787,35 +3840,13 @@ impl ThermalMaterialStringRuntime {
                 actual: self.mechanical.epoch(),
             });
         }
-        let specimen = self.mechanical.specimen();
-        let radius = specimen.radius_m();
-        let length = specimen.string().length_m;
-        let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
-        let volume = specimen.area_m2() * length;
         let mut candidate = self.mechanical.clone();
         let vibration = candidate
             .step(cx, forces)
             .map_err(ThermalStringError::Acoustic)?;
-        let dt = candidate.member.model.sample_period_s();
-        let proposed = transport(fs_material::phase::UniformEnthalpyStepInput {
-            curve: &self.curve,
-            initial: self.thermal,
-            mass_kg: specimen.mass_kg(),
-            volume_m3: volume,
-            surface_area_m2: area,
-            internal_heat_j: vibration.dissipation.material_heat_j,
-            duration_s: dt,
-        })
-        .map_err(|error| ThermalStringError::Transport(error.to_string()))?;
-        if proposed.state.phase_curve_identity() != self.curve.identity()
-            || !proposed.external_heat_j.is_finite()
-            || !proposed.energy_residual_tolerance_j.is_finite()
-            || proposed.energy_residual_tolerance_j < 0.0
-        {
-            return Err(ThermalStringError::Admission(
-                "thermal transport returned a foreign chart, invalid heat or invalid residual budget",
-            ));
-        }
+        let proposed = self.propose_thermal_step(cx, &candidate, &vibration, |input| {
+            transport(input).map_err(|error| ThermalStringError::Transport(error.to_string()))
+        })?;
         self.finish_thermal_step(cx, forces, candidate, vibration, proposed)
     }
 
@@ -3835,7 +3866,7 @@ impl ThermalMaterialStringRuntime {
         expected_epoch: u64,
         forces: &[f64],
         state: &mut S,
-        transport: impl FnOnce(
+        mut transport: impl FnMut(
             &S,
             fs_material::phase::UniformEnthalpyStepInput<'_>,
         ) -> Result<(S, fs_material::phase::UniformEnthalpyStep<R>), E>,
@@ -3862,7 +3893,7 @@ impl ThermalMaterialStringRuntime {
         &mut self,
         cx: &fs_exec::Cx<'_>,
         forces: &[f64],
-        mut candidate: LinearMaterialStringRuntime,
+        candidate: LinearMaterialStringRuntime,
         mut vibration: MaterialStringFrame,
         proposed: fs_material::phase::UniformEnthalpyStep<R>,
     ) -> Result<ThermalStringTransportFrame<R>, ThermalStringError> {
@@ -3884,21 +3915,17 @@ impl ThermalMaterialStringRuntime {
             .sum();
         let mass = candidate.specimen().mass_kg();
         let heat = vibration.dissipation.material_heat_j + external_heat_j;
-        if thermal.phase() != SolidLiquidPhase::Solid
-            || (thermal.temperature_k() - self.thermal.temperature_k()).abs()
-                > self.maximum_temperature_increment_k
-        {
-            return Err(ThermalStringError::Admission(
-                "thermal step left the solid phase or exceeded its temperature-increment budget",
-            ));
+        let (mut candidate, exchange) = self.prepare_thermal_rebind(cx, &candidate, thermal)?;
+        // The accepted frame reports the new elastic law's actual energy.
+        // Losses/work above still belong to the frozen-temperature mechanical
+        // substep; parameter work is the separately balanced thermal exchange.
+        if self.thermoelastic.is_some() {
+            vibration.acoustic.modal_energy_j = candidate.modes().iter().zip(candidate.states())
+                .map(|(mode, state)| 0.5 * (state.velocity_m_sqrt_kg_per_s.powi(2)
+                    + (mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg).powi(2)))
+                .collect();
+            vibration.acoustic.total_modal_energy_j = vibration.acoustic.modal_energy_j.iter().sum();
         }
-        let specimen = self.specimen_at(thermal)?;
-        // The internal rebind shares this sample's publication epoch. Start
-        // from the accepted epoch so the last representable epoch is usable.
-        candidate.epoch = self.mechanical.epoch();
-        candidate
-            .rebind(cx, specimen, 0.0)
-            .map_err(ThermalStringError::Acoustic)?;
         // Rebinding is internal to this sample's transaction, not a second
         // accepted instant. Observe the final acceleration with the previous
         // accepted history, so pressure and its retained history use the new law.
@@ -3924,6 +3951,8 @@ impl ThermalMaterialStringRuntime {
         let d = &vibration.dissipation;
         let energy_balance_residual_j = a.input_work_j + external_heat_j
             - ((a.total_modal_energy_j - energy_before_j)
+                + exchange.axial_free_energy_change_j
+                + exchange.mechanical_entropy_energy_change_j
                 + enthalpy_change_j
                 + d.air_loss_j
                 + d.authored_loss_j
@@ -3938,7 +3967,8 @@ impl ThermalMaterialStringRuntime {
             + heat.abs()
             + d.air_loss_j
             + d.authored_loss_j;
-        let energy_roundoff_tolerance_j = d.roundoff_tolerance_j + 32.0 * f64::EPSILON * scale;
+        let energy_roundoff_tolerance_j = d.roundoff_tolerance_j
+            + exchange.roundoff_tolerance_j + 32.0 * f64::EPSILON * scale;
         if !energy_balance_residual_j.is_finite()
             || !energy_roundoff_tolerance_j.is_finite()
             || energy_balance_residual_j.abs()
@@ -3958,6 +3988,10 @@ impl ThermalMaterialStringRuntime {
                 thermal,
                 external_heat_j,
                 enthalpy_change_j,
+                axial_free_energy_change_j: exchange.axial_free_energy_change_j,
+                mechanical_entropy_energy_change_j: exchange.mechanical_entropy_energy_change_j,
+                modal_parameter_work_j: exchange.modal_parameter_work_j,
+                reversible_heat_j: exchange.reversible_heat_j,
                 energy_balance_residual_j,
                 energy_roundoff_tolerance_j,
                 thermal_solve_tolerance_j,

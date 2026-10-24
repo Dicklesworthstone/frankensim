@@ -1775,8 +1775,14 @@ pub(crate) fn pinned_temperature_line(
 
 /// One differentiable affine coefficient over every admitted source-line cell.
 /// A derivative jump carries entropy/energy absent from an affine caloric model.
-/// Shared by thermoplastic solids and retained thermal shear layers.
-pub(crate) fn affine_temperature_slope(
+/// Shared by thermoplastic solids, retained thermal shear layers and acoustic
+/// thermoelasticity. The caller supplies the complete, source-admitted path;
+/// this arithmetic check does not resolve sources or extend their validity.
+///
+/// # Errors
+/// Refuses an incomplete/non-affine path, inconsistent reference value or
+/// unrepresentable derivative. Constant paths return an exact zero slope.
+pub fn affine_temperature_slope(
     knots: &[(f64, f64)],
     reference_k: f64,
     reference_value: f64,

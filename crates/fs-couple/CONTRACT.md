@@ -982,8 +982,9 @@ Existing G4 refusal/retry tests compare the complete frame, including loss field
 
 `acoustic_realize::ThermalMaterialStringRuntime` owns that incremental string,
 its immutable material card and a uniform equilibrium enthalpy state. It closes
-the dissipative temperature/viscosity feedback for the prescribed-radius or
-prescribed-mass, fixed-tension, constant-density, constant-Young's-modulus solid rung. Those
+the dissipative temperature/viscosity feedback. Its ordinary constructor admits
+the prescribed-radius or prescribed-mass, fixed-tension, constant-density,
+constant-Young's-modulus solid rung. Those
 restrictions keep elastic and axial prestress storage independent of temperature;
 there is no omitted stiffness-change or expansion work. Density must agree with
 the solid branch of the thermal chart. The initial absolute temperature and card
@@ -997,7 +998,51 @@ For `FixedMass`, the prescribed mass and `m/L` remain exact through thermal
 updates; constant density and loaded length keep the resolved radius and basis
 unchanged. Thermal area and volume use `ResolvedStringSpecimen::radius_m()` and
 its cross-section, rather than reconstructing mass through a rounded radius.
-This does not admit changing density, expansion or geometric state transfer.
+This ordinary constructor does not admit changing density, expansion or geometric
+state transfer. The source-bound thermoelastic constructor below also keeps mass,
+section and loaded length fixed while evolving its thermal eigenstrain.
+
+`try_new_thermoelastic` admits the original sourced `FixedThermalExtension`, a
+scalar expansion coefficient and scalar or globally affine temperature-dependent
+Young's modulus. Every original modulus knot must belong to that same affine law;
+derivative jumps require a different caloric model. The original material and
+expansion owners resolve the complete temperature path, retaining source claims,
+reference temperature and reference stress-free length. At each accepted sample,
+thermal expansion changes the actual tensile force and modal operator without
+resetting displacement, velocity, observer history or the accepted sample count.
+Slack, changing density/geometry, melting and unsupported source paths refuse.
+
+The axial Helmholtz storage is `Psi_a = A L_ref E(T) e(T)^2 / 2`, with
+`e = (L-L_ref)/L_ref - integral(alpha dT)`. The retained native transverse
+storage is `Psi_v = sum(omega_n(T)^2 q_n^2 / 2)`. Mechanical entropy is
+`s = -partial_T(Psi_a + Psi_v)` at fixed supports and modal coordinates, and
+mechanical internal energy is `K + Psi_a + Psi_v + T*s`. The public
+`mechanical_internal_energy_j` reports this same storage for coupled consumers.
+Positive total fixed-coordinate heat capacity is checked on every original
+caloric segment, including the amplitude-dependent modal term; the exact
+quadratic extrema of `T*Psi_TT` are checked for the admitted affine law.
+
+Mechanics advances once at the accepted temperature. At its resulting modal
+coordinates the existing bounded scalar feedback solver closes reversible heat
+`Q_rev = -delta(Psi_a) - modal_parameter_work - delta(T*s)` through the original
+caloric/transport owner. The heat includes entropy change due to modal motion,
+not just the endpoint temperature change. Thermal callbacks are repeatable
+`FnMut` proposals from the same accepted state; only the final report/reservoir
+candidate survives. The ordinary constant-stiffness path still calls transport
+once. The final frame exposes axial, modal-parameter and entropy-energy changes
+separately, updates the actual modal energies and pressure, and checks the full
+first law. Material dissipation remains distinct from signed reversible heat;
+neither numerical loss nor diagnostic acoustic pressure is deposited as heat.
+The electrical and finite-gas paths share this owner, including reciprocal
+conduction at the actual solved solid and gas endpoint temperatures.
+
+This remains a first-order partitioned small-strain model with a fixed section,
+uniform temperature and diagnostic compact radiation. Energy closure does not
+prove exact entropy conservation, timestep convergence or instrument fidelity.
+`tests/string_specimen/thermoelastic.rs` defines synthetic live-pitch, independent
+internal-energy, electrical-source and refusal/retry checks. Native compilation
+and execution were unavailable in the implementation environment; syntax and
+energy-algebra checks are not reported as native test passes.
 
 Each sample advances mechanics at its initial viscosity, credits material loss
 and explicit external heat to total enthalpy, then resolves the new material
@@ -4518,8 +4563,10 @@ Gas motion/pressure work, radiation loading and propagation of a changing
 atmosphere remain outside both finite-gas paths. The
 compact pressure observer is diagnostic, not an additional heat debit.
 Temperature-increment limits require temporal-refinement assessment and do not
-certify acoustic or thermodynamic accuracy. Existing thermal-string restrictions
-(constant density/E, fixed tension, solid phase and fixed modal basis) remain in force.
+certify acoustic or thermodynamic accuracy. The same thermal-string admission
+applies: either constant stiffness/fixed tension or sourced fixed-support
+thermoelasticity, with constant density, solid phase and a fixed modal basis.
+The combined account includes axial storage and mechanical entropy for the latter.
 
 G1/G3/G4 regression definitions in `tests/string_specimen/finite_gas.rs` check
 source-dependent drag without a vibration reset, measured combined energy,
@@ -4838,10 +4885,11 @@ not add it again. Material viscous loss heats the solid, aerodynamic drag heats
 the finite gas, and signed interfacial heat cancels between their inventories.
 Numerical loss and diagnostic radiation are not converted to extra heat.
 
-The existing first-order frozen-coefficient split, fixed tension and geometry,
-constant elastic modulus/density, fully solid caloric state, source validity,
-layer geometry and Biot restrictions remain in force. This supplies no circuit
-dynamics, contact/skin effects, Lorentz force, thermoelastic work, gas pressure
+The existing first-order frozen-coefficient split, fixed geometry/density,
+fully solid caloric state, source validity, layer geometry and Biot restrictions
+remain in force. The sourced thermoelastic constructor also propagates heating
+into tension/stiffness and its reversible work through this same path. This
+supplies no circuit dynamics, contact/skin effects, Lorentz force, gas pressure
 work or radiation loading. Gas volume specifies a thermal inventory, not an
 acoustic chamber geometry.
 

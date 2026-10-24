@@ -1,6 +1,7 @@
 //! Finite source-backed surrounding gas on the existing live string step.
 //!
-//! Material viscous loss heats the string; aerodynamic drag heats the gas.
+//! Material viscous loss and reversible thermoelastic exchange heat the string;
+//! aerodynamic drag heats the gas.
 //! The existing NASA-9 parcel owns caloric inversion, EOS and transport. The
 //! acoustic owner then rebuilds drag and its compact observer from that same
 //! accepted gas, preserving modal coordinates and the previous acceleration.
@@ -80,7 +81,7 @@ pub struct FiniteGasStringFrame {
     pub drag_heat_j: f64,
     /// External gas heat only [J], excluding that internal transfer.
     pub external_gas_heat_j: f64,
-    /// Work + two prescribed heats - three storage changes - authored loss
+    /// Work + two prescribed heats - complete solid/mechanical/gas storage changes - authored loss
     /// - the explicitly reported damping-partition roundoff residual [J].
     /// All storage changes are measured from accepted endpoint states.
     pub energy_balance_residual_j: f64,
@@ -271,7 +272,9 @@ impl ThermalMaterialStringRuntime {
         let gas_storage = gas.mass_kg() * (final_internal_energy - initial_internal_energy);
         let solid_storage = self.mechanical.specimen().mass_kg()
             * (candidate.thermal.specific_enthalpy_j_kg() - self.thermal.specific_enthalpy_j_kg());
-        let mechanical_storage = modal_energy(&candidate) - initial_mechanical_energy;
+        let mechanical_storage = modal_energy(&candidate) - initial_mechanical_energy
+            + string.axial_free_energy_change_j
+            + string.mechanical_entropy_energy_change_j;
         let dissipation = &string.vibration.dissipation;
         let input = string.vibration.acoustic.input_work_j + heat.string_heat_j + heat.gas_heat_j;
         let residual = input
