@@ -1015,3 +1015,28 @@ the two rules, condition/block/mode cap boundaries, cancellation, multiport
 unit-column solutions, opaque network admittance and G5 repeats. No previous
 tolerance, assert, golden or line-ladder baseline is weakened. Native proof,
 wasm compilation, causality and reed rerender remain pending centrally.
+
+
+## DG interior point-flow junctions
+
+`DgDuct::with_side_ports` attaches at most 32 explicitly identified interior
+mesh faces. The downstream pressure trace is the original alternating-flux
+trace. Its held inflow changes the local through-flow jump by that inflow and
+uses the same pressure integral for exact port work. Only conjugate port
+columns and their operator identity change: the acoustic, constitutive wall,
+energy-coordinate and exponential owners remain unchanged. Existing states
+cannot be reinterpreted after changing this port basis. An empty attachment
+preserves the original owner and identity.
+
+`side_port_source` returns the actual face station, local bore area and complete
+original gas-field evaluation; a bore area is never presented as a hole area.
+Finite chimneys, aperture geometry, junction corrections, moving pads and
+exterior radiation require explicit coupled owners. All unknown loads must
+consume the complete `multiport_response` together to retain their same-step
+interaction; independent scalar boundary solves are not equivalent. This is a
+zero-volume plane-wave junction, not a resolved three-dimensional tone hole.
+
+Focused regressions cover pressure/work conjugacy, integrated discrete
+continuity, source identity and local material fields, wall attachment order,
+and equal-pressure/opposite-work composition with a second original DG duct.
+Native execution and instrument qualification remain pending.
