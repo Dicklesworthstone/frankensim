@@ -39,6 +39,8 @@ impl PlanarField<'_> {
     /// the SAME resolved induced-linear exterior material state, with zero
     /// impressed current and no permanent remanence ON the contour. Enclosed
     /// recoil magnets are supported after the field owner's operating checks.
+    /// A current derivative on a magnetized problem is not an actual operating
+    /// field and refuses; unbiased current responses remain usable.
     /// This refuses contours on material interfaces, current-carrying cells or
     /// the exterior mesh boundary instead of choosing an ambiguous field side.
     /// All contour cells must share that one exterior snapshot. The physical
@@ -71,6 +73,11 @@ impl PlanarField<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Wrench, MagneticError> {
         poll(cancelled)?;
+        if self.is_incremental_response() && self.problem().has_permanent_magnets() {
+            return Err(MagneticError::Invalid(
+                "Maxwell force requires the actual operating field including permanent-magnet bias",
+            ));
+        }
         let mesh = self.problem().mesh();
         let currents = self
             .impressed_current_density_a_m2()

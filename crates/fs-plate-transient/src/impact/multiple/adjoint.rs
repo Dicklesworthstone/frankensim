@@ -1,7 +1,9 @@
 //! Pullbacks for one shared plate and all of its simultaneous contact bodies.
 //!
 //! The plate/load prefix appears once. Each opted-in authored contact appends
-//! its original mass/K/chi/gap coordinates in body order. Every state action
+//! its original mass/K/chi/gap coordinates in body order. Optional body-force
+//! parameters follow; only the forcing pullback contributes to that suffix.
+//! Every state action
 //! uses the complete shared plate state and the corresponding body coordinate.
 
 use super::PlateImpactSet;
@@ -123,6 +125,7 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpactSet<'_, L> {
         if output.len() != self.parameters {
             return Err("invalid simultaneous impact parameter derivative dimension".into());
         }
+        let body_forcing = self.checked_body_forcing()?;
         // Admit every original source before evaluating or publishing any
         // parameter contribution, including bodies whose coefficients are fixed.
         self.validate_state(q, v)?;
@@ -147,6 +150,11 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpactSet<'_, L> {
             body.contact_parameter_vjp(&q, &v, &a, &seed, &mut output[range])
                 .map_err(|error| format!("impact body {i}: {error}"))?;
         }
+        if let Some((_, range)) = body_forcing {
+            // Applied force controls enter through forcing_vjp, never twice
+            // through the mass/resistance residual at fixed state.
+            output[range].fill(0.0);
+        }
         if !finite(output) {
             return Err("nonfinite simultaneous impact parameter derivative".into());
         }
@@ -156,23 +164,43 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpactSet<'_, L> {
 
 impl<L: PlateLoad + ?Sized> StructuralTrajectoryModel for PlateImpactSet<'_, L> {
     fn forcing(&self, time: f64, output: &mut [f64]) -> Result<(), String> {
-        if output.len() != self.dimension {
-            return Err("invalid simultaneous impact forcing dimension".into());
+        if output.len() != self.dimension || !time.is_finite() {
+            return Err("invalid simultaneous impact forcing time or dimension".into());
         }
+        let body_forcing = self.checked_body_forcing()?;
         self.plate().forcing(time, &mut output[..self.plate_dofs])?;
-        output[self.plate_dofs..].fill(0.0);
+        let bodies = &mut output[self.plate_dofs..];
+        if let Some((load, _)) = body_forcing {
+            bodies.fill(f64::NAN);
+            load.forcing(time, bodies)
+                .map_err(|error| format!("body-force history: {error}"))?;
+            if !finite(bodies) {
+                return Err("nonfinite or unwritten body-force history output".into());
+            }
+        } else {
+            bodies.fill(0.0);
+        }
         Ok(())
     }
 
     fn forcing_vjp(&self, time: f64, seed: &[f64], output: &mut [f64]) -> Result<(), String> {
         self.check(&[seed]).map_err(|error| error.to_string())?;
-        if output.len() != self.parameters {
-            return Err("invalid simultaneous impact forcing derivative dimension".into());
+        if output.len() != self.parameters || !time.is_finite() {
+            return Err("invalid simultaneous impact forcing derivative time or dimension".into());
         }
+        let body_forcing = self.checked_body_forcing()?;
         let prefix = self.plate().parameter_count();
         self.plate()
             .forcing_vjp(time, &seed[..self.plate_dofs], &mut output[..prefix])?;
         output[prefix..].fill(0.0);
+        if let Some((load, range)) = body_forcing {
+            output[range.clone()].fill(f64::NAN);
+            load.forcing_vjp(time, &seed[self.plate_dofs..], &mut output[range])
+                .map_err(|error| format!("body-force history derivative: {error}"))?;
+            if !finite(output) {
+                return Err("nonfinite or unwritten body-force derivative output".into());
+            }
+        }
         Ok(())
     }
 }

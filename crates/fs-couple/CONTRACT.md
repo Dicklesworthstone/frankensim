@@ -6059,3 +6059,60 @@ Focused tests cover analytic star-tet heat rates/projections, coherent gas and
 length substitutions, reciprocal pressure/force/storage/loss, strict budgets,
 original bank history and reconstruction. Native Rust execution remains
 required; syntax and independent matrix identities are not runtime proof.
+
+## Refined sealed multi-chamber material assemblies
+
+`cavity_phs::piston::thermal::boundary::ports::network::material::state::subcycling` extends the existing co-owned `MaterialExchangeState` with `step_subcycled_candidate`/`advance_subcycled` and their source-bearing `with_gas_law` counterparts. Each real subinterval advances the original circuit charge/flux, every finite cell enthalpy, declared chamber reactions and independent piston walls together. Subsequent chemical stages therefore see actual material wall heat and compression within the same requested interval. Existing thermal contact resistance, electrical contact losses, radiation and caller-selected gas convection/conduction continue through their original source owners and nonlinear equations.
+
+`MaterialExchangeSubcycling` reuses `ReactiveThermalSubcycling`'s gas/species/enthalpy scales, scalar comparison and 256-substep/511-evaluation bounds, adding independently dimensioned charge and flux tolerances. It compares complete N and 2N trajectories and accepts the finer actual trajectory without extrapolating physical state. Each species and reaction channel is compared separately; every finite cell uses its own enthalpy coordinate, including latent plateaus. Node potentials and branch currents remain the original circuit's resolved algebraic efforts, not new differential stores. Nested chemistry/network/thermal/momentum solvers retain their original explicit work limits. All accepted source reports are retained within the bounded fine trajectory; discarded trajectories publish nothing.
+
+Electrical port inputs, exterior pressures and applied forces are held at their caller values. Each chamber's `heat_j` is integrated external heat, apportioned at constant power over actual representable subinterval boundaries, with a final remainder. Thermal `source_w` and existing boundary/source integrals are not divided again. Numerical cell-energy guesses are scaled to the actual subinterval without changing a physical source. Chemical formation energy, Joule heat, wall exchange, contact conduction and closed-enclosure radiation are never credited twice.
+
+The macro audit independently reconstructs all finite-cell enthalpy change, circuit-owner initial/final Hamiltonians, each sealed gas internal-energy change, piston kinetic changes and accepted source/mechanical work. Original electrical, thermal, circuit/thermal and complete-network energy tolerances remain enforced. The sum of accepted maximum cell residuals conservatively bounds each fixed cell's accumulated residual at the original cell tolerance. Original chemical energy/entropy/species and independently reconstructed pressure/applied/support impulse bounds also remain in force. Each gas receives one macro port tick with its actual endpoint entropy and integrated heat entropy Σ(Q/T), including sign-reversing heat histories. Final publication moves the entire assembly only after all checks and cancellation gates succeed.
+
+This is bounded temporal refinement of the existing first-order sealed-chamber split, not a monolithic implicit chemistry solve or a reacting compressible-flow model. Cell masses, thermal/circuit topology and chamber identities remain fixed; the `state::flow` transport stages are not composed by this API. Source-domain refusal, failed numerical work and cancellation preserve the complete original assembly and its port/history state.
+
+Focused regressions in `tests/material_exchange/subcycling.rs` exercise a data-only emissivity change reaching reaction progress within the interval, real circuit/contact/radiation source histories, independent total physical energy and impulse balances, integrated heat versus held electrical-current/force semantics, nonzero-clock resume, charge-controlled refinement, and late source/work-limit/cancellation rollback. Fixtures are synthetic and establish integration behavior rather than empirical combustion calibration.
+
+## Consistent-inertia solids with original tensor material memory
+
+`tensor_material::TensorMaterialBody::from_mass_matrix` admits the complete
+symmetric positive-definite inertia in the caller's displacement coordinates.
+Momentum is `M v`, velocity is `M^-1 p`, and the kinetic Hamiltonian retains
+the full quadratic block. The existing `fs-la` Cholesky owner supplies the
+inverse; a dimension-scaled floating-point identity-residual check rejects
+unrepresentable inertia, including dependent bases that leave a tiny positive
+pivot. It never regularizes mass or removes coordinates. Existing diagonal
+inertia and plane-stress paths keep their own original arithmetic.
+
+`tensor_material::solid::TensorSolidBody` connects
+`fs-solid::linear3::visco::ProjectedViscoSolid` to this same full-memory
+`TensorMaterialBody` and the existing `fs-phs` exact-ZOH propagator. The
+source tetrahedral basis owns consistent mass, strain maps, supports and
+force/velocity transformations together. Every material point retains its
+equilibrium stiffness, Kelvin matrix and all Maxwell branches. Initial
+constitutive prehistory remains explicit. Held nodal forces are projected by
+the same basis transpose; the reported mean nodal velocity expands the same
+work-conjugate port output used for integrated supplied work.
+
+`TensorMaterialHistory::advance_with_material_heat` independently integrates
+each original point's Kelvin and Maxwell resistance channels along the same
+complete coupled trajectory using `fs-phs::integrated_resistance_loss`.
+`TensorSolidHistory::advance` aggregates those channels to their original
+elements. No work-minus-storage residual is assigned as material heat.
+Both point and element totals must agree with the original total dissipated
+energy within the caller's explicit positive absolute attribution tolerance.
+Failed propagation, heat attribution, nodal expansion or cancellation preserves
+the entire original history, clock and accumulated heat.
+
+Existing material-point/state-coordinate and dense-propagation capacities remain
+in force; oversized requests refuse without dropping modes or memories.
+Geometry, basis and material temperature/composition are fixed. The returned
+element heat is available for a thermal owner but this API does not itself
+advance caloric state. Separate point heat for plane-stress histories is
+explicitly refused; their existing total-loss dynamics remain available.
+There is no claim of nonlinear mechanics, acoustic radiation, spatial/modal
+convergence or empirical material calibration. Five focused G0/G3 regressions
+in `tests/tensor_solid.rs` exercise off-diagonal inertia and analytic force work,
+Tet4/Tet10 shear/mass, Maxwell prehistory, regional loss attribution, constrained
+nonorthogonal work maps, dependent-basis refusal and transactional failure.

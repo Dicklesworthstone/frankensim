@@ -222,11 +222,21 @@ fn bind(
         {
             return Err(Invalid("winding electrical source basis or triangle correspondence changed"));
         }
-        admit_fixed_magnetic_refresh(&problem.materials()[source.triangle], source.conductor.material())
-            .map_err(|e| match e {
-                FieldStorageError::Invalid(why) => OhmicWindingError::Invalid(why),
-                other => OhmicWindingError::Magnetic(other),
-            })?;
+        if problem.recoil_materials()[source.triangle].is_some() {
+            // The generic fixed-mu refresh cannot establish fixed Br, recoil
+            // slope or source limits. A conducting magnet must reuse the exact
+            // original complete bundle, including its electrical claim. No
+            // generic permeability claim is needed or substituted for recoil.
+            if &problem.materials()[source.triangle] != source.conductor.material() {
+                return Err(Invalid("conducting recoil material requires its exact original fixed-state source bundle"));
+            }
+        } else {
+            admit_fixed_magnetic_refresh(&problem.materials()[source.triangle], source.conductor.material())
+                .map_err(|e| match e {
+                    FieldStorageError::Invalid(why) => OhmicWindingError::Invalid(why),
+                    other => OhmicWindingError::Magnetic(other),
+                })?;
+        }
         admit_electrical_law(source.conductor.source_property())?;
         let j = basis.profiles_per_m2()[winding][source.triangle];
         let volume = problem.mesh().face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
@@ -285,6 +295,7 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
         let dae = lower(magnetic, &resistance_ohm)?;
         let initial = magnetic.consistent_initial_state(currents_a, charges_c, ports, cancelled)?;
         let state = dae.consistent_initial_state(&initial, ports)?;
+        magnetic.admit_state(&state, cancelled)?;
         let h = dae.system.hamiltonian(&state);
         if !h.is_finite() || h < 0.0 || state.iter().any(|v| !v.is_finite()) {
             return Err(OhmicWindingError::Invalid("initial electrical state is not representable"));
@@ -332,7 +343,12 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
             }
         }
         poll(cancelled)?;
+        // Native flux coordinates remain delta_lambda=L*i. Permanent linkage
+        // is a separate fixed offset; the same whole-field validator used by
+        // field sampling checks both actual endpoints before publication.
+        self.magnetic.admit_state(&x0, cancelled)?;
         let (native, _) = dae.step_audited(&x0, ports, dt)?;
+        self.magnetic.admit_state(&native.x, cancelled)?;
         let stored_before_j = dae.system.hamiltonian(&x0);
         let stored_after_j = dae.system.hamiltonian(&native.x);
         if native.x.iter().chain(&native.y).any(|v| !v.is_finite())

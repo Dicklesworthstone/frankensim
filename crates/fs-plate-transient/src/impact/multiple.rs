@@ -26,7 +26,7 @@ pub struct PlateImpactSetBudget {
     pub max_free_dofs: usize,
     /// Maximum sum of original contact-law quadrature points over all bodies.
     pub max_contact_points: usize,
-    /// Maximum shared plate/load parameters plus enabled body calibration suffixes.
+    /// Maximum shared plate/load, body calibration and body-force parameters.
     pub max_parameters: usize,
 }
 
@@ -61,7 +61,8 @@ pub struct PlateImpactSetProbe {
 ///
 /// The common plate/load parameter prefix appears once. Each body's existing
 /// optional calibration suffix follows in body order; source-bound and fixed
-/// authored bodies append no parameters. Contact geometry, finite footprints,
+/// authored bodies append no parameters. Optional applied body-force controls
+/// append after those suffixes. Contact geometry, finite footprints,
 /// and body identities are fixed. This adds neither collision detection nor
 /// tangential/rotational body motion or body-to-body contacts.
 pub struct PlateImpactSet<'a, L: ?Sized> {
@@ -70,6 +71,8 @@ pub struct PlateImpactSet<'a, L: ?Sized> {
     dimension: usize,
     parameters: usize,
     parameter_ranges: Vec<Range<usize>>,
+    parameter_cap: usize,
+    body_forcing: Option<(&'a dyn PlateLoad, usize)>,
 }
 
 impl<'a, L: PlateLoad + ?Sized> PlateImpactSet<'a, L> {
@@ -132,7 +135,54 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpactSet<'a, L> {
             dimension,
             parameters,
             parameter_ranges,
+            parameter_cap: budget.max_parameters,
+            body_forcing: None,
         })
+    }
+
+    /// Bind prescribed normal forces on the ordered finite-body coordinates.
+    ///
+    /// Reuses the existing pure time-dependent [`PlateLoad`] protocol with an
+    /// output slice of length body_count(), in constructor order. These are
+    /// external forces in newtons; state-dependent contact remains in the
+    /// coupled residual. Positive force follows the positive body coordinate.
+    ///
+    /// Force-history parameters append after all existing plate/contact
+    /// coordinates, including when contact coefficients are source-owned. Their
+    /// residual partials are zero; the trajectory forcing pullback owns their
+    /// contribution. The original set parameter cap remains binding. Rebinding
+    /// replaces this history and its parameter suffix, preserving every prior
+    /// contact range. Rebuild at each new immutable physical parameter point.
+    pub fn with_body_forcing(mut self, load: &'a dyn PlateLoad) -> Result<Self, PlateImpactError> {
+        let old_count = self.body_forcing.map_or(0, |(_, count)| count);
+        let fixed = self.parameters - old_count;
+        let count = load.parameter_count();
+        let parameters = fixed
+            .checked_add(count)
+            .filter(|n| *n <= self.parameter_cap)
+            .ok_or(PlateImpactError::Budget("body-force parameter count"))?;
+        self.body_forcing = Some((load, count));
+        self.parameters = parameters;
+        Ok(self)
+    }
+
+    /// Ordered body-force history coordinates in the complete parameter vector.
+    /// None denotes no bound history; a prescribed parameter-free history has
+    /// a present empty range.
+    #[must_use]
+    pub fn body_forcing_parameter_range(&self) -> Option<Range<usize>> {
+        self.body_forcing
+            .map(|(_, count)| self.parameters - count..self.parameters)
+    }
+
+    fn checked_body_forcing(&self) -> Result<Option<(&dyn PlateLoad, Range<usize>)>, String> {
+        let Some((load, count)) = self.body_forcing else {
+            return Ok(None);
+        };
+        if load.parameter_count() != count {
+            return Err("body-force history parameter count changed".into());
+        }
+        Ok(Some((load, self.parameters - count..self.parameters)))
     }
 
     /// Number of original finite bodies.

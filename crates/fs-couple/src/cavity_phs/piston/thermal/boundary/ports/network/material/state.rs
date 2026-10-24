@@ -2,6 +2,8 @@
 //! Delegate physics to the existing candidate; move every endpoint together.
 /// Conservative nozzle connectivity before the shared reacting/thermal advance.
 pub mod flow;
+/// Bounded temporal refinement of the complete sealed material assembly.
+pub mod subcycling;
 
 use super::exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork, gas_law::GasSurface};
 use super::reactive::{ChamberReaction, ChamberReactionStep, ReactiveExchangeError};

@@ -10,7 +10,7 @@ use fs_em::{
         permanent::{MagneticEnergyReference, PlanarMagneticMaterial, PlanarRecoilMaterial},
     },
     transfer::{CellSample, PlanarFrame},
-    winding::{PlanarWindingBasis, WindingConfig, WindingError},
+    winding::{PlanarWindingBasis, WindingConfig},
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -224,6 +224,73 @@ fn enclosed_recoil_magnets_drive_static_wrenches_but_remanence_on_the_contour_re
                 "load={load:?}, exact torque={exact_torque}"
             );
             assert!(load.force.x.abs() < 1e-8 && load.force.y.abs() < 1e-8);
+            let profile: Vec<_> = problem
+                .mesh()
+                .faces()
+                .iter()
+                .enumerate()
+                .map(|(cell, face)| {
+                    if problem.recoil_materials()[cell].is_some() {
+                        let x_sum: f64 = face
+                            .iter()
+                            .map(|&v| problem.mesh().vertices()[v as usize][0])
+                            .sum();
+                        1000.0 * x_sum.signum()
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let prescribed: Vec<_> = boundary.iter().map(|&(v, _)| v).collect();
+            let winding = PlanarWindingBasis::new_with_fixed_remanence(
+                &problem,
+                vec![profile.clone()],
+                &prescribed,
+                vec![0.0],
+                WindingConfig {
+                    max_windings: 1,
+                    max_basis_values: 20000,
+                    pairing_tolerance_h: 1e-8,
+                    current_balance_tolerance_turns: 1e-8,
+                    inverse_residual_tolerance: 1e-8,
+                },
+                1e-8,
+                config(),
+                &mut || false,
+            )
+            .unwrap();
+            let actual = winding.field_for_currents(&[0.7], &mut || false).unwrap();
+            let currents: Vec<_> = profile.iter().map(|j| 0.7 * j).collect();
+            assert!(!actual.is_incremental_response());
+            assert_eq!(
+                actual.impressed_current_density_a_m2(),
+                Some(currents.as_slice())
+            );
+            let homogeneous: Vec<_> = prescribed.iter().map(|&v| (v, 0.0)).collect();
+            let direct = problem
+                .solve(&currents, &homogeneous, config(), &mut || false)
+                .unwrap();
+            let load = |field: &fs_em::planar::PlanarField<'_>| {
+                field
+                    .maxwell_wrench(
+                        &enclosed,
+                        &frame,
+                        [0.0, 0.0, depth / 2.0],
+                        MaxwellForceLimits {
+                            max_cells: 10000,
+                            max_edges: 20000,
+                        },
+                        &mut || false,
+                    )
+                    .unwrap()
+            };
+            for (got, expected) in load(&actual)
+                .to_array()
+                .into_iter()
+                .zip(load(&direct).to_array())
+            {
+                near(got, expected);
+            }
         }
     }
 }
@@ -516,7 +583,7 @@ fn recoil_requires_original_units_explicit_source_roles_and_fixed_condition_doma
 }
 
 #[test]
-fn homogeneous_dynamic_owners_cannot_silently_treat_magnet_bias_as_inductance() {
+fn affine_windings_admit_fixed_magnets_while_dynamic_induction_still_refuses() {
     let problem = layered_problem(recoil(2e-6, 0.8), [0.0, 1.0]);
     let field = problem
         .solve(&[0.0; 4], &ends(0.0), config(), &mut || false)
@@ -539,26 +606,27 @@ fn homogeneous_dynamic_owners_cannot_silently_treat_magnet_bias_as_inductance() 
             "permanent-magnet induction requires explicit remanence source and parameter-work ownership"
         ))
     ));
-    assert!(matches!(
-        PlanarWindingBasis::new(
-            &problem,
-            vec![vec![1.0, 1.0, -1.0, -1.0]],
-            &[0, 3, 2, 5],
-            vec![0.0],
-            WindingConfig {
-                max_windings: 1,
-                max_basis_values: 1000,
-                pairing_tolerance_h: 1e-8,
-                current_balance_tolerance_turns: 1e-8,
-                inverse_residual_tolerance: 1e-8
-            },
-            config(),
-            &mut || false
-        ),
-        Err(WindingError::Invalid(
-            "permanent-magnet bias cannot enter a homogeneous unit-current inductance basis"
-        ))
-    ));
+    let winding = PlanarWindingBasis::new_with_fixed_remanence(
+        &problem,
+        vec![vec![1.0, 1.0, -1.0, -1.0]],
+        &[0, 3, 2, 5],
+        vec![0.0],
+        WindingConfig {
+            max_windings: 1,
+            max_basis_values: 1000,
+            pairing_tolerance_h: 1e-8,
+            current_balance_tolerance_turns: 1e-8,
+            inverse_residual_tolerance: 1e-8,
+        },
+        1e-8,
+        config(),
+        &mut || false,
+    )
+    .unwrap();
+    assert!(winding.bias_field().is_some());
+    assert!(winding.unit_fields()[0].is_incremental_response());
+    let reconstructed = winding.field_for_currents(&[0.0], &mut || false).unwrap();
+    near(reconstructed.energy_j(), field.energy_j());
     assert!(matches!(
         problem.solve(&[0.0; 4], &ends(0.0), config(), &mut || true),
         Err(MagneticError::Cancelled)

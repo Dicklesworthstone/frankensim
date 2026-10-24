@@ -1606,3 +1606,32 @@ port-Hamiltonian decay, Prony changes to frequency and damping, equilibrium
 compliance disclosure, codec-to-reed continuity, uniform/per-element identity,
 and refusal of incompatible bands, double-counted loss, excessive dispersion
 or modal loss requiring a coupled runtime.
+
+## Source tetrahedra projected into full-memory structural dynamics
+
+`linear3::visco::ViscoElements::project_basis` projects an explicit displacement
+basis using the original Tet4/Tet10 strain matrices, physical quadrature volumes,
+material laws and constrained free-DOF map. The resulting
+`ProjectedViscoSolid` retains the complete consistent mass matrix
+`Phi^T M Phi`, each original quadrature-point tensor constitutive contribution,
+and its owning element. It converts Mandel shear to tensor shear at the existing
+`TensorProny::project_strain` boundary. All Kelvin cross terms and all original
+Maxwell factor rows survive; no mass lumping, material averaging, fitted damping
+or silent basis truncation is introduced.
+
+The same retained basis maps nodal loads by its transpose and expands
+displacement/velocity with the original supports. These maps preserve discrete
+virtual work; fixed rows contribute no work. `SolidProjectionBudget` bounds
+coordinate count, stored basis entries, quadrature points and scalar projection
+work before constructing the result. Overflow, nonfinite maps, source refusal
+and cancellation return errors without a partial projection. The immutable
+projection borrows its original source assembly.
+
+A dynamic consumer must independently admit positive-definite, representable
+projected inertia. Geometry, supports, basis and material state remain fixed.
+This API does not claim spatial/modal convergence, arbitrary frequency validity,
+nonlinear strain or thermally evolving geometry. Focused G0/G3 integration
+regressions in `fs-couple/tests/tensor_solid.rs` cover Tet4/Tet10 shear and
+consistent mass, nodal virtual work, nonorthogonal constrained bases, original
+Maxwell prehistory and regional material-loss swaps. They use synthetic material
+fixtures and do not establish empirical calibration.

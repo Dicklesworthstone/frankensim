@@ -32,7 +32,7 @@ pub struct ReactiveThermalSubcycling {
     pub maximum_evaluations: usize,
 }
 impl ReactiveThermalSubcycling {
-    fn validate<E>(self) -> Result<(), ReactiveThermalPistonError<E>> {
+    pub(crate) fn validate<E>(self) -> Result<(), ReactiveThermalPistonError<E>> {
         if ![
             self.absolute_amount_mol,
             self.absolute_temperature_k,
@@ -547,21 +547,36 @@ fn summarize<S, E>(
     })
 }
 
+/// Shared dimensionless coordinate error for coupled temporal refinement.
+pub(crate) fn scaled_difference<E>(
+    left: f64,
+    right: f64,
+    absolute: f64,
+    relative: f64,
+) -> Result<f64, ReactiveThermalPistonError<E>> {
+    let scale = absolute + relative * left.abs().max(right.abs());
+    let ratio = (left - right).abs() / scale;
+    if !positive(scale) || !ratio.is_finite() {
+        return Err(ReactiveThermalPistonError::Invalid(
+            "coupled temporal estimate is unrepresentable",
+        ));
+    }
+    Ok(ratio)
+}
+
 fn compare<S, E>(
     a: &ReactiveThermalSubcyclingCandidate<S>,
     b: &ReactiveThermalSubcyclingCandidate<S>,
     policy: ReactiveThermalSubcycling,
 ) -> Result<f64, ReactiveThermalPistonError<E>> {
     let mut error = 0.0_f64;
-    let mut observe = |left: f64, right: f64, absolute: f64| {
-        let scale = absolute + policy.relative_tolerance * left.abs().max(right.abs());
-        let ratio = (left - right).abs() / scale;
-        if !positive(scale) || !ratio.is_finite() {
-            return Err(ReactiveThermalPistonError::Invalid(
-                "coupled temporal estimate is unrepresentable",
-            ));
-        }
-        error = error.max(ratio);
+    let mut observe = |left: f64, right: f64, absolute: f64| -> Result<(), ReactiveThermalPistonError<E>> {
+        error = error.max(scaled_difference::<E>(
+            left,
+            right,
+            absolute,
+            policy.relative_tolerance,
+        )?);
         Ok(())
     };
     let ga = a.piston.gas().state().state();

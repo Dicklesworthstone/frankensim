@@ -84,7 +84,9 @@ field solve and its source-envelope operating checks. The contour cannot touch
 the outer mesh boundary or run along a material interface; incident triangles
 must also lie on opposite geometric sides rather than form a folded embedding.
 The original static solve retains its actual cell-current field for this admission;
-induction-history recovery alone cannot satisfy it.
+induction-history recovery alone cannot satisfy it. Incremental responses on
+magnetized problems also refuse because they omit the fixed bias and carry no
+actual recoil operating-point admission. Unbiased current responses remain usable.
 
 The model assumes a homogeneous linear exterior medium without mechanical
 pressure response or magnetostriction. Its permeability comes from the same
@@ -144,7 +146,7 @@ measured `L L_inverse - I` row-sum residual must pass the declared threshold.
 
 `winding::circuit::WindingCircuit` binds every original graph inductor exactly
 once through explicit branch indices. Positive winding current follows that
-branch's first-to-second terminal orientation. Total `lambda = L i` replaces
+branch's first-to-second terminal orientation. Native `delta_lambda = L i` replaces
 placeholder branch inductance; the full inverse replaces only the original
 flux storage block. Capacitor charges, algebraic rows, Kirchhoff stamps and
 source ports retain their original correspondence. The existing `CircuitDae`
@@ -177,7 +179,7 @@ unresolved mixtures/fill factors and skin, proximity, eddy and end-turn losses
 are not inferred.
 
 Resistance is stamped on the mapped native flux coordinates, conjugate to the
-full mutually coupled `L^-1 lambda` currents. All original magnetic/capacitive
+full mutually coupled `L^-1 delta_lambda` currents. All original magnetic/capacitive
 storage, Dirac structure, ports, ideal constraints and numeric graph resistors
 are retained. The existing descriptor midpoint step remains the only electrical
 time integrator. Per-triangle `E.J` heat, every graph-resistor heat, integrated
@@ -201,6 +203,10 @@ branch correspondence and all nonmagnetic graph data. Every differential flux
 linkage and capacitor charge is preserved bit-for-bit; the native consistency
 solver re-equilibrates algebraic voltages/currents. Incompatible ideal constraints
 refuse instead of creating an unaccounted flux or charge impulse.
+This replacement requires both bases to have no fixed-remanence bias. A biased
+native state stores incremental linkage; conserving total linkage would require
+`delta_lambda_new=delta_lambda_old+lambda0_old-lambda0_new` and material work from
+the changed constant field reference W0. This owner does not supply that work.
 
 Replacement adopts the new full mutual-inductance block and spatial conductor
 sources, including a different admitted resistivity/conductivity source basis.
@@ -230,6 +236,16 @@ Each triangle reports actual old/new curl A, magnetic free energy, volume and si
 
 `PlanarMagnetostatics::new_with_material_models` accepts induced-linear and `PlanarRecoilMaterial` cells on the same mesh. Each magnet supplies a complete `ResolvedRecoilMaterial` and an explicit unit direction in the original planar frame. The same FEEC stiffness and checked CG solve impressed current together with the exact P1 weak load `integral (Br/mu_recoil).rot(grad(phi)) dV`. Retaining this whole moment includes material-interface and natural-boundary source contributions even when Br is constant inside a cell. Unprescribed exterior edges continue to impose zero tangential physical H.
 
-Recovery reports `H=(B-Br)/mu_recoil`, source-envelope operating margins, and cell storage `V*(B-Br).H/2`, with the `FixedRemanence` reference explicit. Induced cells retain `V*B.H/2`. A source-envelope exit refuses the complete field, including fully prescribed solutions. This is fixed-state constitutive storage, not a force, hysteresis-loss, demagnetization-history or live parameter-work result. Existing explicit frame/triangle sampling consumes the resulting B. The homogeneous winding-basis and eddy-history owners refuse biased permanent-magnet problems until their distinct source/storage trajectories account for Br.
+Recovery reports `H=(B-Br)/mu_recoil`, source-envelope operating margins, and cell storage `V*(B-Br).H/2`, with the `FixedRemanence` reference explicit. Induced cells retain `V*B.H/2`. A source-envelope exit refuses the complete field, including fully prescribed solutions. This is fixed-state constitutive storage, not a force, hysteresis-loss, demagnetization-history or live parameter-work result. Existing explicit frame/triangle sampling consumes the resulting B. Fixed-remanence winding response requires the explicit affine constructor described below. The stationary eddy-history owner continues to refuse permanent-magnet bias until its source/storage trajectory accounts for Br.
 
 The recoil convention follows [COMSOL's remanent-flux constitutive relation](https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.032.html); the shifted fixed-state energy reference follows the linear-recoil discussion in [FEMM's permanent-magnet energy note](https://femm.info/doku/doku.php?id=pmenergy). `material_permanent` adds manufactured-source regressions for constant-Br natural boundaries, current-plus-remanence loading, magnet/air interface fields, direction reversal, material/temperature swaps, source/domain refusals and consumer guards. These are analytic model checks, not measured catalog-material validation.
+
+## Fixed-remanence affine winding and circuit response
+
+`PlanarWindingBasis::new_with_fixed_remanence` uses the same linear operator for a source-admitted zero-current field and explicit incremental unit-current responses. Its additional stationarity allowance is in Wb and checks `integral H0.B_unit dV`; the inductance-pairing allowance remains in H. Retained-basis capacity includes the bias field. The generic entry also accepts entirely induced-linear meshes as zero bias.
+
+Total linkage is `lambda=lambda0+L*i`. Native `CircuitDae` coordinates remain `delta_lambda=L*i`, including declared end inductance; initialization and current recovery do not interpret permanent flux as current. Native magnetic/capacitor energy is relative to the zero-current state. `bias_energy_j` retains its constant field reference W0, and `stored_energy_with_bias_j` adds it for reporting without subtracting a large constant during step accounting. Changing fixed Br data changes bias flux/field/storage without inventing electrical power.
+
+`field_for_currents` reconstructs `A0+sum(i_w*A_unit,w)` and uses original physical recovery to admit every recoil cell. It also superposes the original static current snapshots, allowing this actual field to use the existing instantaneous Maxwell-force owner; arbitrary induction recovery still lacks that provenance. Sampling, checked circuit initialization/`step_audited`, and Ohmic candidate endpoints share the recoil admission. Incremental responses are explicitly marked and carry no actual magnet operating-point claim. Envelope exits/cancellation return no accepted replacement. Endpoint checks do not bound the continuous trajectory between steps. The raw DAE exposes incremental coordinates and carries no material-domain policy itself; fixed-remanence callers use the checked wrapper.
+
+An active conducting recoil triangle must reuse its exact original complete material bundle, including its electrical claim. This admits unchanged recoil/conductivity sources without generic permeability and refuses temperature, remanence, slope, limit or source refresh that would leave stale fixed bias. Ordinary induced-material electrical refresh retains its previous policy. Geometry, material conditions and remanence stay fixed; no motional EMF, hysteresis or thermal parameter work is supplied. Manufactured-card `winding_permanent` regressions cover affine linkage/storage and layered inductance oracles, native RL/Ohmic work, mutual branch mapping, data swaps, source-envelope refusal and fixed conducting-magnet source binding.

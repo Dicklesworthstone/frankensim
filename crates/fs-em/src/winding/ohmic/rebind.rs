@@ -113,6 +113,9 @@ impl OhmicWindingCircuit<'_, '_> {
     /// The explicit work is the magnetic Hamiltonian change at fixed lambda,
     /// including full mutual coupling. This is an external material-change
     /// operation, not continuous heating, motion or magnetic hysteresis.
+    /// Either basis having fixed remanence refuses: its native coordinate is
+    /// delta_lambda, so conserving total flux would require the old/new bias
+    /// offset and work from the changed constant storage reference W0.
     pub fn rebind_material_candidate<'c, 'm>(
         &self,
         magnetic: &'c WindingCircuit<'m>,
@@ -122,6 +125,11 @@ impl OhmicWindingCircuit<'_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(OhmicWindingCircuit<'c, 'm>, WindingMaterialRebind), OhmicWindingError> {
         poll(cancelled)?;
+        if self.magnetic.basis().bias_field().is_some() || magnetic.basis().bias_field().is_some() {
+            return Err(OhmicWindingError::Invalid(
+                "fixed-remanence material replacement requires total-flux offset and bias-storage work ownership",
+            ));
+        }
         if !controls.maximum_absolute_work_j.is_finite()
             || controls.maximum_absolute_work_j < 0.0
             || !positive(controls.energy_tolerance_j)

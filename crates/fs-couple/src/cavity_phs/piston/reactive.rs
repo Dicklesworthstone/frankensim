@@ -265,7 +265,7 @@ impl GasReaction {
 
     // Validate the live subset against the full catalog. An absent product's
     // sources remain in the immutable catalog, and are restored when it appears.
-    fn inventory(&self, gas: &ClosedGasParcel) -> Result<Vec<f64>, GasReactionError> {
+    pub(crate) fn inventory(&self, gas: &ClosedGasParcel) -> Result<Vec<f64>, GasReactionError> {
         let components = self.catalog.thermodynamics().components();
         let model = gas.model();
         let active = model.thermodynamics().components();

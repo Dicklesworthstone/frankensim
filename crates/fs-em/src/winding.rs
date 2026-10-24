@@ -38,7 +38,9 @@ pub struct WindingConfig {
     /// Maximum profiles, in 1..=MAX_WINDINGS.
     pub max_windings: usize,
     /// Ceiling on retained scalar basis values: windings*(2*vertices+7*cells),
-    /// including each solved field's original impressed-current snapshot.
+    /// plus 2*vertices+12*cells+windings for a retained fixed-remanence bias.
+    /// These include each solved field's original impressed-current snapshot
+    /// and the bias field's recoil operating-point margins.
     pub max_basis_values: usize,
     /// Absolute source/energy flux-pairing agreement tolerance [H].
     pub pairing_tolerance_h: f64,
@@ -107,13 +109,18 @@ fn finite(value: f64) -> Result<f64, WindingError> {
 
 /// Fixed-mesh/material unit-current fields and their reciprocal magnetic block.
 /// Original problem, complete material snapshots, signed winding data and field
-/// residual reports remain reachable. The physical Hamiltonian is
-/// H(lambda)=lambda^T L^-1 lambda/2; terminal currents are L^-1 lambda.
+/// residual reports remain reachable.
+/// Incremental circuit storage is delta_lambda^T L^-1 delta_lambda/2.
+/// Fixed remanence additionally supplies total lambda=lambda_0+delta_lambda,
+/// a source-admitted zero-current field, and its constant storage reference W0.
 pub struct PlanarWindingBasis<'a> {
     problem: &'a PlanarMagnetostatics,
     prescribed_vertices: Vec<usize>,
     profiles_per_m2: Vec<Vec<f64>>,
     fields: Vec<PlanarField<'a>>,
+    bias_field: Option<PlanarField<'a>>,
+    bias_flux_linkages_wb: Vec<f64>,
+    maximum_bias_stationarity_defect_wb: f64,
     active_inductance_h: Vec<f64>,
     inductance_h: Vec<f64>,
     inverse_inductance_per_h: Vec<f64>,
@@ -140,10 +147,70 @@ impl<'a> PlanarWindingBasis<'a> {
         linear: CheckedCgConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, WindingError> {
-        poll(cancelled)?;
-        if problem.has_permanent_magnets() {
+        Self::new_impl(
+            problem,
+            profiles_per_m2,
+            prescribed_vertices,
+            end_inductance_h,
+            config,
+            None,
+            linear,
+            cancelled,
+        )
+    }
+
+    /// Extract an affine fixed-remanence winding response. A homogeneous
+    /// zero-current field must first satisfy every original recoil envelope.
+    /// Unit-current derivatives need not themselves be admissible physical
+    /// magnet states; actual reconstructed fields are checked as a whole.
+    ///
+    /// The explicit Wb allowance bounds the measured stationarity defect
+    /// integral H0.B_unit dV. It is distinct from the H-valued inductance
+    /// pairing allowance. Geometry, Br, direction and material state stay fixed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_fixed_remanence(
+        problem: &'a PlanarMagnetostatics,
+        profiles_per_m2: Vec<Vec<f64>>,
+        prescribed_vertices: &[usize],
+        end_inductance_h: Vec<f64>,
+        config: WindingConfig,
+        bias_stationarity_tolerance_wb: f64,
+        linear: CheckedCgConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, WindingError> {
+        if !bias_stationarity_tolerance_wb.is_finite() || bias_stationarity_tolerance_wb < 0.0 {
             return Err(WindingError::Invalid(
-                "permanent-magnet bias cannot enter a homogeneous unit-current inductance basis",
+                "fixed-remanence stationarity allowance must be finite and nonnegative",
+            ));
+        }
+        Self::new_impl(
+            problem,
+            profiles_per_m2,
+            prescribed_vertices,
+            end_inductance_h,
+            config,
+            Some(bias_stationarity_tolerance_wb),
+            linear,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_impl(
+        problem: &'a PlanarMagnetostatics,
+        profiles_per_m2: Vec<Vec<f64>>,
+        prescribed_vertices: &[usize],
+        end_inductance_h: Vec<f64>,
+        config: WindingConfig,
+        bias_stationarity_tolerance_wb: Option<f64>,
+        linear: CheckedCgConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, WindingError> {
+        poll(cancelled)?;
+        let has_bias = problem.has_permanent_magnets();
+        if has_bias && bias_stationarity_tolerance_wb.is_none() {
+            return Err(WindingError::Invalid(
+                "permanent-magnet basis requires explicit fixed-remanence stationarity admission",
             ));
         }
         let count = profiles_per_m2.len();
@@ -156,7 +223,18 @@ impl<'a> PlanarWindingBasis<'a> {
         let values = cells
             .checked_mul(7)
             .and_then(|n| vertices.checked_mul(2).and_then(|v| n.checked_add(v)))
-            .and_then(|n| n.checked_mul(count));
+            .and_then(|n| n.checked_mul(count))
+            .and_then(|n| {
+                if has_bias {
+                    cells
+                        .checked_mul(12)
+                        .and_then(|c| vertices.checked_mul(2).and_then(|v| c.checked_add(v)))
+                        .and_then(|bias| bias.checked_add(count))
+                        .and_then(|bias| n.checked_add(bias))
+                } else {
+                    Some(n)
+                }
+            });
         if count == 0
             || count > config.max_windings
             || config.max_windings == 0
@@ -220,10 +298,50 @@ impl<'a> PlanarWindingBasis<'a> {
             net_turns_by_component.push(net);
         }
         let boundary: Vec<_> = prescribed_vertices.iter().map(|&v| (v, 0.0)).collect();
+        let bias_field = if has_bias {
+            Some(problem.solve(&vec![0.0; cells], &boundary, linear, cancelled)?)
+        } else {
+            None
+        };
         let mut fields = Vec::with_capacity(count);
         for profile in &profiles_per_m2 {
             poll(cancelled)?;
-            fields.push(problem.solve(profile, &boundary, linear, cancelled)?);
+            fields.push(problem.solve_response(profile, &boundary, linear, cancelled)?);
+        }
+        let mut bias_flux_linkages_wb = vec![0.0; count];
+        let mut maximum_bias_stationarity_defect_wb = 0.0_f64;
+        if let Some(bias) = &bias_field {
+            for i in 0..count {
+                bias_flux_linkages_wb[i] = pairing(
+                    problem,
+                    bias.potential_wb_m(),
+                    &profiles_per_m2[i],
+                    cancelled,
+                )?;
+                let mut stationarity = 0.0;
+                for cell in 0..cells {
+                    poll(cancelled)?;
+                    let h = bias.magnetic_field_a_m()[cell];
+                    let b = fields[i].magnetic_flux_density_t()[cell];
+                    let derivative = finite(h[0].mul_add(b[0], h[1] * b[1]))?;
+                    stationarity = finite(
+                        problem
+                            .mesh()
+                            .face_measure(cell)
+                            .unwrap()
+                            .mul_add(derivative, stationarity),
+                    )?;
+                }
+                maximum_bias_stationarity_defect_wb =
+                    maximum_bias_stationarity_defect_wb.max(stationarity.abs());
+                if stationarity.abs()
+                    > bias_stationarity_tolerance_wb.expect("admitted fixed remanence")
+                {
+                    return Err(WindingError::Invalid(
+                        "zero-current magnet field exceeds the fixed-remanence stationarity allowance",
+                    ));
+                }
+            }
         }
         let mut active = vec![0.0; count * count];
         for i in 0..count {
@@ -289,6 +407,9 @@ impl<'a> PlanarWindingBasis<'a> {
             prescribed_vertices,
             profiles_per_m2,
             fields,
+            bias_field,
+            bias_flux_linkages_wb,
+            maximum_bias_stationarity_defect_wb,
             active_inductance_h: active,
             inductance_h,
             inverse_inductance_per_h,
@@ -316,9 +437,27 @@ impl<'a> PlanarWindingBasis<'a> {
     pub fn profiles_per_m2(&self) -> &[Vec<f64>] {
         &self.profiles_per_m2
     }
-    /// Original unit-current solutions, retaining their actual solver reports.
+    /// Original incremental unit-current responses and their solver reports.
+    /// Remanence is omitted from these derivatives, never from the actual field.
     pub fn unit_fields(&self) -> &[PlanarField<'a>] {
         &self.fields
+    }
+    /// Source-admitted zero-current field, including fixed-remanence storage.
+    pub fn bias_field(&self) -> Option<&PlanarField<'a>> {
+        self.bias_field.as_ref()
+    }
+    /// Constant total-flux offset [Wb], in original winding order.
+    pub fn bias_flux_linkages_wb(&self) -> &[f64] {
+        &self.bias_flux_linkages_wb
+    }
+    /// Constant W0 [J] of the zero-current field under its declared recoil
+    /// reference. The native circuit evolves energy relative to this state.
+    pub fn bias_energy_j(&self) -> f64 {
+        self.bias_field.as_ref().map_or(0.0, PlanarField::energy_j)
+    }
+    /// Measured largest |integral H0.B_unit dV| [Wb]. Exact stationarity is zero.
+    pub fn maximum_bias_stationarity_defect_wb(&self) -> f64 {
+        self.maximum_bias_stationarity_defect_wb
     }
     /// Symmetric row-major active-section inductance [H].
     pub fn active_inductance_h(&self) -> &[f64] {
@@ -350,15 +489,45 @@ impl<'a> PlanarWindingBasis<'a> {
         self.inverse_residual
     }
 
-    /// Terminal flux linkage lambda=L*i [Wb], including declared end storage.
+    /// Total physical flux linkage lambda=lambda0+L*i [Wb], including declared
+    /// end storage. Native circuit coordinates are the INCREMENT L*i instead.
     pub fn flux_linkages_wb(&self, currents_a: &[f64]) -> Result<Vec<f64>, WindingError> {
+        let mut flux = self.incremental_flux_linkages_wb(currents_a)?;
+        for (value, &bias) in flux.iter_mut().zip(&self.bias_flux_linkages_wb) {
+            *value = finite(*value + bias)?;
+        }
+        Ok(flux)
+    }
+    /// Incremental linkage delta_lambda=L*i [Wb], the native circuit coordinate.
+    pub fn incremental_flux_linkages_wb(
+        &self,
+        currents_a: &[f64],
+    ) -> Result<Vec<f64>, WindingError> {
         multiply(&self.inductance_h, currents_a, self.winding_count())
     }
-    /// Terminal current i=L^-1*lambda [A].
+    /// Terminal current i=L^-1*(lambda-lambda0) [A] from TOTAL physical linkage.
     pub fn currents_a(&self, flux_linkages_wb: &[f64]) -> Result<Vec<f64>, WindingError> {
+        if flux_linkages_wb.len() != self.winding_count() {
+            return Err(WindingError::Invalid(
+                "one total flux linkage per winding is required",
+            ));
+        }
+        let incremental = flux_linkages_wb
+            .iter()
+            .zip(&self.bias_flux_linkages_wb)
+            .map(|(&total, &bias)| finite(total - bias))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.currents_from_incremental_flux_wb(&incremental)
+    }
+    /// Recover currents from the native incremental magnetic coordinates,
+    /// without adding and subtracting a potentially much larger permanent flux.
+    pub fn currents_from_incremental_flux_wb(
+        &self,
+        incremental_flux_wb: &[f64],
+    ) -> Result<Vec<f64>, WindingError> {
         multiply(
             &self.inverse_inductance_per_h,
-            flux_linkages_wb,
+            incremental_flux_wb,
             self.winding_count(),
         )
     }
@@ -375,7 +544,7 @@ impl<'a> PlanarWindingBasis<'a> {
             .map(|profile| pairing(self.problem, potential_wb_m, profile, cancelled))
             .collect()
     }
-    /// Reconstruct the same fixed linear field from terminal currents, then
+    /// Reconstruct the same fixed affine field from terminal currents, then
     /// transfer it under the existing explicit triangle/position/frame contract.
     /// End/leakage energy has no field in this cross-section. This is still
     /// point sampling, with no inferred conservative voxel projection.
@@ -388,11 +557,14 @@ impl<'a> PlanarWindingBasis<'a> {
         max_samples: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<[f64; 3]>, WindingError> {
-        if currents_a.len() != self.winding_count() || currents_a.iter().any(|v| !v.is_finite()) {
-            return Err(WindingError::Invalid(
-                "one finite terminal current per winding is required",
-            ));
+        if self.bias_field.is_some() {
+            return Ok(self
+                .field_for_currents(currents_a, cancelled)?
+                .sample_cells(frame, samples, position_tolerance_m, max_samples, cancelled)?);
         }
+        // Preserve the sparse point-query cost of the original unbiased lane.
+        // No recoil envelope exists there that could require an unseen-cell scan.
+        self.admit_currents(currents_a, cancelled)?;
         let mut result = Vec::new();
         for (index, field) in self.fields.iter().enumerate() {
             poll(cancelled)?;
@@ -409,6 +581,77 @@ impl<'a> PlanarWindingBasis<'a> {
         }
         poll(cancelled)?;
         Ok(result)
+    }
+
+    /// Reconstruct A=A0+sum(i_w*A_unit,w) on the original mesh and invoke the
+    /// original physical recovery. EVERY magnet cell must satisfy its source
+    /// envelope, including cells absent from a subsequent sampling request.
+    /// The result has no new solver report; original bias/response reports stay
+    /// attached here. Declared end inductance has no cross-section field.
+    /// Original static current snapshots are superposed with the potentials,
+    /// so the recovered actual field can use the existing static-force owner.
+    pub fn field_for_currents(
+        &self,
+        currents_a: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'a>, WindingError> {
+        poll(cancelled)?;
+        if currents_a.len() != self.winding_count() || currents_a.iter().any(|v| !v.is_finite()) {
+            return Err(WindingError::Invalid(
+                "one finite terminal current per winding is required",
+            ));
+        }
+        let mut potential = self.bias_field.as_ref().map_or_else(
+            || vec![0.0; self.problem.mesh().vertices().len()],
+            |bias| bias.potential_wb_m().to_vec(),
+        );
+        let mut current_density = vec![0.0; self.problem.mesh().faces().len()];
+        if let Some(bias) = &self.bias_field {
+            current_density.copy_from_slice(bias.impressed_current_density_a_m2().ok_or(
+                WindingError::Invalid(
+                    "winding reconstruction requires the original static bias current snapshot",
+                ),
+            )?);
+        }
+        for (index, field) in self.fields.iter().enumerate() {
+            poll(cancelled)?;
+            for (out, &value) in potential.iter_mut().zip(field.potential_wb_m()) {
+                poll(cancelled)?;
+                *out = finite(currents_a[index].mul_add(value, *out))?;
+            }
+            let source = field
+                .impressed_current_density_a_m2()
+                .ok_or(WindingError::Invalid(
+                    "winding reconstruction requires original static unit-current snapshots",
+                ))?;
+            for (out, &value) in current_density.iter_mut().zip(source) {
+                poll(cancelled)?;
+                *out = finite(currents_a[index].mul_add(value, *out))?;
+            }
+        }
+        Ok(self
+            .problem
+            .recover_static(potential, current_density, cancelled)?)
+    }
+
+    /// Admit actual currents against the complete fixed material field. Circuit
+    /// and Ohmic candidate owners share this validator with field sampling.
+    pub fn admit_currents(
+        &self,
+        currents_a: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WindingError> {
+        poll(cancelled)?;
+        if currents_a.len() != self.winding_count() || currents_a.iter().any(|v| !v.is_finite()) {
+            return Err(WindingError::Invalid(
+                "one finite terminal current per winding is required",
+            ));
+        }
+        if self.bias_field.is_none() {
+            return Ok(());
+        }
+        self.field_for_currents(currents_a, cancelled)?;
+        Ok(())
     }
 }
 

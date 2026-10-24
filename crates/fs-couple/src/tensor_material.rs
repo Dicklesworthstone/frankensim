@@ -3,7 +3,7 @@
 //! Every material point supplies a fixed 3D strain map and positive quadrature
 //! volume through fs-material. Equilibrium stiffness is assembled ONCE; each
 //! original factor row becomes a retained internal coordinate z with energy
-//! z^2/2. With displacement u, momentum p and diagonal inertia M:
+//! z^2/2. With displacement u, momentum p and admitted SPD inertia M:
 //! u' = M^-1 p, p' = -K_eq u - C_kv M^-1 p - sum A_j^T z_j + force,
 //! z_j' = A_j M^-1 p - z_j/tau_j.
 //! These are the original constitutive equations, not scalar modal damping.
@@ -11,7 +11,7 @@
 //! The existing fs-phs exact-ZOH propagator advances the entire coupled state
 //! and independently integrates port work and dashpot loss. This module adds
 //! no time integrator, mode truncation, empirical loss or radiation observer.
-//! Scope: fixed kinematics, diagonal physical inertia, small strain, fixed
+//! Scope: fixed kinematics, diagonal or consistent physical inertia, small strain, fixed
 //! material state. Plane-stress Maxwell points have an explicit alternate
 //! constructor; neither path is a nonlinear shell or a radiation model.
 use fs_exec::CancelGate;
@@ -22,6 +22,14 @@ use fs_phs::linear_exact::{LinearSplit, LinearSplitBudget, split_quadratic, step
 
 /// Mesh-backed constant-strain membranes with original material memory.
 pub mod membrane;
+/// Original tetrahedral quadrature and consistent inertia in the same runtime.
+pub mod solid;
+
+mod inertia;
+use inertia::Inertia;
+
+mod heat;
+pub use heat::MaterialHeatStep;
 
 mod plane_stress;
 pub use plane_stress::PlaneStressPoint;
@@ -42,6 +50,8 @@ pub enum TensorMaterialError {
     Invalid(&'static str),
     /// Original material or strain-map admission failed.
     Material(TensorPronyError),
+    /// The original dense SPD factorization refused consistent inertia.
+    Mass(fs_la::factor::FactorError),
     /// Original exact propagation/admission failed; never retry another solver.
     Propagation(PhsError),
     /// Observed before publishing a complete state.
@@ -52,6 +62,7 @@ impl core::fmt::Display for TensorMaterialError {
         match self {
             Self::Invalid(what)=>write!(f,"tensor material dynamics: {what}"),
             Self::Material(error)=>write!(f,"tensor material dynamics: {error}"),
+            Self::Mass(error)=>write!(f,"tensor material inertia: {error}"),
             Self::Propagation(error)=>write!(f,"tensor material dynamics: {error}"),
             Self::Cancelled=>write!(f,"tensor material dynamics cancelled"),
         }
@@ -80,7 +91,7 @@ pub enum InitialMemory {
 pub struct TensorMaterialBody {
     system: PortHamiltonian,
     split: LinearSplit,
-    masses: Vec<f64>,
+    inertia: Inertia,
     points: Vec<ProjectedTensorProny>,
     plane_points: Vec<PlaneStressPoint>,
     plane_offsets: Vec<usize>,
@@ -97,29 +108,35 @@ impl TensorMaterialBody {
     {
         poll(gate)?;
         let n=masses_kg.len();
-        if n==0 || n>128 || budget.max_state_coordinates==0
-            || budget.max_state_coordinates>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
-            || budget.max_material_points==0 || budget.max_material_points>4096
-            || points.is_empty() || points.len()>budget.max_material_points
-            || masses_kg.iter().any(|m|!m.is_finite() || *m<=0.0 || !m.recip().is_finite())
-            || points.iter().any(|p|p.coordinates()!=n) {
-            return Err(bad("bounded matching material points and finite positive inertia required"));
-        }
-        let branches=points.iter().try_fold(0_usize,|sum,p|sum.checked_add(p.branches().len()))
-            .ok_or_else(||bad("material branch count overflow"))?;
-        let states=branches.checked_mul(6).and_then(|v|v.checked_add(2*n))
-            .ok_or_else(||bad("material state extent overflow"))?;
-        let block=states.checked_add(n+1).and_then(|v|v.checked_mul(2))
-            .ok_or_else(||bad("material exponential extent overflow"))?;
-        if states>budget.max_state_coordinates || block>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
-            return Err(bad("complete tensor-memory dynamics exceed dense capacity; no coordinates removed"));
-        }
+        let states=full_3d_extent(n,&points,budget)?;
+        let inertia=Inertia::diagonal(masses_kg)?;
+        Self::from_inertia(inertia,points,states,gate)
+    }
+
+    /// Use the COMPLETE symmetric positive-definite mass matrix [kg], row-major.
+    /// Momentum is M*v and kinetic energy is p^T M^-1 p/2; force ports remain
+    /// conjugate to the original coordinate velocities. No diagonal mass is
+    /// substituted. Capacity is checked before dense inversion or propagation.
+    pub fn from_mass_matrix(coordinates:usize,mass_kg:Vec<f64>,points:Vec<ProjectedTensorProny>,
+        budget:TensorMaterialBudget,gate:&CancelGate)->Result<Self>
+    {
+        poll(gate)?;
+        let states=full_3d_extent(coordinates,&points,budget)?;
+        let inertia=Inertia::consistent(coordinates,mass_kg,gate)?;
+        Self::from_inertia(inertia,points,states,gate)
+    }
+
+    fn from_inertia(inertia:Inertia,points:Vec<ProjectedTensorProny>,states:usize,
+        gate:&CancelGate)->Result<Self>
+    {
+        let n=inertia.dimension();
+        poll(gate)?;
         let mut q=vec![0.0;states*states];
         let mut j=vec![0.0;states*states];
         let mut r=vec![0.0;states*states];
         let mut g=vec![0.0;states*n];
         for i in 0..n {
-            q[(n+i)*states+n+i]=masses_kg[i].recip();
+            for k in 0..n {q[(n+i)*states+n+k]=inertia.inverse_entry(i,k);}
             j[i*states+n+i]=1.0; j[(n+i)*states+i]=-1.0;
             g[(n+i)*n+i]=1.0;
         }
@@ -152,10 +169,12 @@ impl TensorMaterialBody {
         let split=split_quadratic(&system,LinearSplitBudget {max_modes:states,
             max_omega_dt:core::f64::consts::PI}).map_err(TensorMaterialError::Propagation)?;
         poll(gate)?;
-        Ok(Self {system,split,masses:masses_kg,points,plane_points:Vec::new(),plane_offsets:Vec::new()})
+        Ok(Self {system,split,inertia,points,plane_points:Vec::new(),plane_offsets:Vec::new()})
     }
     /// Original physical coordinate count.
-    pub fn coordinates(&self)->usize {self.masses.len()}
+    pub fn coordinates(&self)->usize {self.inertia.dimension()}
+    /// Full physical inertia in the unchanged coordinate order [kg].
+    pub fn mass_matrix_kg(&self)->Vec<f64> {self.inertia.matrix()}
     /// Full retained state count, including every material factor row.
     pub fn state_dimension(&self)->usize {self.system.state_dim()}
     /// Original full-3D quadrature, in assembly order; empty for plane-stress bodies.
@@ -190,7 +209,7 @@ impl TensorMaterialBody {
             return Err(bad("initial displacement/velocity must match physical coordinates"));
         }
         let mut state=vec![0.0;self.state_dimension()];state[..n].copy_from_slice(displacement_m);
-        for i in 0..n {state[n+i]=self.masses[i]*velocity_m_s[i];}
+        state[n..2*n].copy_from_slice(&self.inertia.momentum(velocity_m_s));
         if memory==InitialMemory::Instantaneous {
             let mut at=2*n;
             for point in &self.points {for branch in point.branches() {
@@ -216,6 +235,26 @@ impl TensorMaterialBody {
     }
 }
 
+fn full_3d_extent(n:usize,points:&[ProjectedTensorProny],budget:TensorMaterialBudget)->Result<usize> {
+    if n==0 || n>128 || budget.max_state_coordinates==0
+        || budget.max_state_coordinates>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        || budget.max_material_points==0 || budget.max_material_points>4096
+        || points.is_empty() || points.len()>budget.max_material_points
+        || points.iter().any(|p|p.coordinates()!=n) {
+        return Err(bad("bounded matching material points and finite positive inertia required"));
+    }
+    let branches=points.iter().try_fold(0_usize,|sum,p|sum.checked_add(p.branches().len()))
+        .ok_or_else(||bad("material branch count overflow"))?;
+    let states=branches.checked_mul(6).and_then(|v|v.checked_add(2*n))
+        .ok_or_else(||bad("material state extent overflow"))?;
+    let block=states.checked_add(n+1).and_then(|v|v.checked_mul(2))
+        .ok_or_else(||bad("material exponential extent overflow"))?;
+    if states>budget.max_state_coordinates || block>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+        return Err(bad("complete tensor-memory dynamics exceed dense capacity; no coordinates removed"));
+    }
+    Ok(states)
+}
+
 /// Accepted state borrows its immutable body; memory cannot be rebound to a
 /// different material. Cloning explicitly forks the complete accepted history.
 #[derive(Clone)]
@@ -236,7 +275,7 @@ impl TensorMaterialHistory<'_> {
     pub fn displacement_m(&self)->&[f64] {&self.state[..self.body.coordinates()]}
     /// Accepted physical velocities [m/s].
     pub fn velocity_m_s(&self)->Vec<f64> {
-        let n=self.body.coordinates();(0..n).map(|i|self.state[n+i]/self.body.masses[i]).collect()
+        let n=self.body.coordinates();self.body.inertia.velocity(&self.state[n..2*n])
     }
     /// Accepted physical time [s].
     pub fn time_s(&self)->f64 {self.time}

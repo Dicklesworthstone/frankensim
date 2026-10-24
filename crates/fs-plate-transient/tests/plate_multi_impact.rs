@@ -20,8 +20,17 @@ use fs_solver::FlexiblePreconditioner;
 use fs_sparse::Coo;
 use fs_time::galpha::{
     SecondOrderProblem, SecondOrderState, TimeSolveError,
-    initialization::{InitialSolveConfig, initial_workspace_components, second_order_acceleration},
-    second_order_adjoint::{SecondOrderVjp, trajectory::StructuralTrajectoryModel},
+    initialization::{
+        InitialSolveConfig, initial_workspace_components, second_order_acceleration,
+        second_order_acceleration_vjp,
+    },
+    second_order_adjoint::{
+        SecondOrderVjp,
+        trajectory::{
+            RecordedStructural, StructuralRecordingConfig, StructuralReplayBudget,
+            StructuralTrajectoryModel,
+        },
+    },
 };
 
 // Common plate/load prefix, then [mass, K, chi, gap] for each body.
@@ -604,4 +613,268 @@ fn admission_rejects_distinct_owners_mismatched_plate_parameters_and_all_caps() 
             Err(PlateImpactError::Budget(_))
         ));
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ForceFault {
+    Healthy,
+    ChangedCount,
+    Refused,
+    NonFinite,
+    Unwritten,
+}
+
+struct BodyForces {
+    amplitude: [f64; 2],
+    parameters: usize,
+    fault: std::cell::Cell<ForceFault>,
+}
+impl BodyForces {
+    fn new(amplitude: [f64; 2]) -> Self {
+        Self {
+            amplitude,
+            parameters: 2,
+            fault: std::cell::Cell::new(ForceFault::Healthy),
+        }
+    }
+}
+impl PlateLoad for BodyForces {
+    fn parameter_count(&self) -> usize {
+        if self.fault.get() == ForceFault::ChangedCount {
+            3
+        } else {
+            self.parameters
+        }
+    }
+    fn forcing(&self, time: f64, out: &mut [f64]) -> Result<(), String> {
+        if out.len() != 2 {
+            return Err("expected two ordered body coordinates".into());
+        }
+        let force = [
+            self.amplitude[0] * (1.0 + 20.0 * time),
+            self.amplitude[1] * (1.0 - 10.0 * time),
+        ];
+        match self.fault.get() {
+            ForceFault::Refused => return Err("authored body forcing refused".into()),
+            ForceFault::NonFinite => out.copy_from_slice(&[force[0], f64::NAN]),
+            ForceFault::Unwritten => out[0] = force[0],
+            _ => out.copy_from_slice(&force),
+        }
+        Ok(())
+    }
+    fn forcing_vjp(&self, time: f64, seed: &[f64], out: &mut [f64]) -> Result<(), String> {
+        if seed.len() != 2 || out.len() != self.parameters {
+            return Err("body force derivative shape".into());
+        }
+        if self.parameters == 2 {
+            out.copy_from_slice(&[(1.0 + 20.0 * time) * seed[0], (1.0 - 10.0 * time) * seed[1]]);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn body_force_histories_append_parameters_once_and_preserve_residual_partials() {
+    let (mesh, plate) = fixture(4.0);
+    let load = driving_load(&mesh, &plate, PARAMETERS[4]).unwrap();
+    let drive = BodyForces::new([0.6, -0.4]);
+    let plain = pair(&mesh, &plate, &load, PARAMETERS, false);
+    assert_eq!(plain.body_forcing_parameter_range(), None);
+    let model = pair(&mesh, &plate, &load, PARAMETERS, false)
+        .with_body_forcing(&drive)
+        .unwrap();
+    assert_eq!(model.parameter_count(), 15);
+    assert_eq!(model.body_forcing_parameter_range(), Some(13..15));
+    assert_eq!(model.contact_parameter_range(0), Some(5..9));
+    assert_eq!(model.contact_parameter_range(1), Some(9..13));
+    let time = 0.0125;
+    let (mut force, mut common) = (vec![f64::NAN; 11], vec![f64::NAN; 9]);
+    model.forcing(time, &mut force).unwrap();
+    model.plate().forcing(time, &mut common).unwrap();
+    close_vectors(&force[..9], &common, 1e-14);
+    close_vectors(&force[9..], &[0.75, -0.35], 1e-14);
+    let (q, v, a) = state_vectors();
+    let (mut gradient, mut base) = (vec![f64::NAN; 15], vec![f64::NAN; 13]);
+    model
+        .residual_parameter_vjp(&q, &v, &a, &v, &mut gradient)
+        .unwrap();
+    plain
+        .residual_parameter_vjp(&q, &v, &a, &v, &mut base)
+        .unwrap();
+    close_vectors(&gradient[..13], &base, 1e-14);
+    assert_eq!(&gradient[13..], &[0.0; 2]);
+    model.forcing_vjp(time, &v, &mut gradient).unwrap();
+    plain.forcing_vjp(time, &v, &mut base).unwrap();
+    close_vectors(&gradient[..13], &base, 1e-14);
+    close_vectors(&gradient[13..], &[1.25 * v[9], 0.875 * v[10]], 1e-14);
+    let fixed = BodyForces {
+        parameters: 0,
+        ..BodyForces::new([0.2, 0.3])
+    };
+    let rebound = model.with_body_forcing(&fixed).unwrap();
+    assert_eq!(rebound.parameter_count(), 13);
+    assert_eq!(rebound.body_forcing_parameter_range(), Some(13..13));
+    rebound.forcing(time, &mut force).unwrap();
+    close_vectors(&force[9..], &[0.25, 0.2625], 1e-14);
+}
+
+#[test]
+fn checkpointed_body_force_gradients_include_consistent_initial_acceleration() {
+    let (mesh, plate) = fixture(4.0);
+    let load = driving_load(&mesh, &plate, PARAMETERS[4]).unwrap();
+    let (q, v, _) = state_vectors();
+    let q_seed: Vec<_> = (0..11).map(|i| 0.03 * (i as f64 - 3.0)).collect();
+    let v_seed: Vec<_> = (0..11).map(|i| 0.02 * (5.0 - i as f64)).collect();
+    let a_seed: Vec<_> = (0..11).map(|i| 0.005 * (i as f64 + 1.0)).collect();
+    let evaluate = |amplitude: [f64; 2], reverse: bool| {
+        let drive = BodyForces::new(amplitude);
+        let model = pair(&mesh, &plate, &load, PARAMETERS, false)
+            .with_body_forcing(&drive)
+            .unwrap();
+        let initial = consistent_state(&model, &q, &v);
+        let mut recorded = RecordedStructural::new(
+            method(11, 0.002),
+            &model,
+            &initial,
+            StructuralRecordingConfig {
+                steps: 5,
+                adjoint: adjoint_config(11),
+                max_workspace_components: 10_000,
+            },
+        )
+        .unwrap();
+        recorded.advance(5, 5, &mut || false).unwrap();
+        assert_eq!(recorded.accepted_steps(), 5);
+        let end = recorded.state();
+        let objective = dot(&q_seed, &end.q) + dot(&v_seed, &end.v) + dot(&a_seed, &end.a);
+        if !reverse {
+            return (objective, None);
+        }
+        let pulled = recorded
+            .pullback(
+                (&q_seed, &v_seed, &a_seed),
+                &[0.0; 15],
+                &model.mass_preconditioner(),
+                StructuralReplayBudget {
+                    checkpoints: recorded.required_checkpoints(),
+                    forward_steps: 64,
+                },
+                &mut || false,
+            )
+            .unwrap();
+        let mut gradient = pulled.parameters;
+        let unchained = [gradient[13], gradient[14]];
+        let mut initial_force = vec![0.0; 11];
+        model.forcing(0.0, &mut initial_force).unwrap();
+        let config = InitialSolveConfig {
+            restart: 11,
+            max_cycles: 4,
+            tolerance: 1e-12,
+        };
+        let initial_pullback = second_order_acceleration_vjp(
+            &model,
+            &q,
+            &v,
+            &initial_force,
+            &pulled.initial_a,
+            &model.mass_preconditioner(),
+            &model.mass_preconditioner(),
+            config,
+            initial_workspace_components(11, 15, config).unwrap(),
+            &mut || false,
+        )
+        .unwrap();
+        let mut forcing = vec![f64::NAN; 15];
+        model
+            .forcing_vjp(0.0, &initial_pullback.forcing, &mut forcing)
+            .unwrap();
+        for ((g, initial), applied) in gradient
+            .iter_mut()
+            .zip(initial_pullback.parameters)
+            .zip(forcing)
+        {
+            *g += initial + applied;
+        }
+        assert!(
+            (gradient[13] - unchained[0]).abs() + (gradient[14] - unchained[1]).abs() > 1e-9,
+            "consistent acceleration must contribute to the force-amplitude gradient"
+        );
+        (objective, Some(gradient))
+    };
+    let amplitudes = [0.6, -0.4];
+    let (_, gradient) = evaluate(amplitudes, true);
+    let gradient = gradient.unwrap();
+    for i in 0..2 {
+        let h = 1e-5 * amplitudes[i].abs();
+        let (mut plus, mut minus) = (amplitudes, amplitudes);
+        plus[i] += h;
+        minus[i] -= h;
+        let fd = (evaluate(plus, false).0 - evaluate(minus, false).0) / (2.0 * h);
+        close(gradient[13 + i], fd, 3e-6);
+        assert!(gradient[13 + i].abs() > 1e-7);
+    }
+}
+
+#[test]
+fn invalid_body_force_callbacks_preserve_accepted_recording_and_respect_budget() {
+    let (mesh, plate) = fixture(4.0);
+    let load = driving_load(&mesh, &plate, PARAMETERS[4]).unwrap();
+    let (q, v, _) = state_vectors();
+    for fault in [
+        ForceFault::ChangedCount,
+        ForceFault::Refused,
+        ForceFault::NonFinite,
+        ForceFault::Unwritten,
+    ] {
+        let drive = BodyForces::new([0.6, -0.4]);
+        let model = pair(&mesh, &plate, &load, PARAMETERS, false)
+            .with_body_forcing(&drive)
+            .unwrap();
+        let initial = consistent_state(&model, &q, &v);
+        let mut recorded = RecordedStructural::new(
+            method(11, 0.001),
+            &model,
+            &initial,
+            StructuralRecordingConfig {
+                steps: 2,
+                adjoint: adjoint_config(11),
+                max_workspace_components: 10_000,
+            },
+        )
+        .unwrap();
+        recorded.advance(1, 2, &mut || false).unwrap();
+        assert_eq!(recorded.accepted_steps(), 1);
+        let before = recorded.state().clone();
+        drive.fault.set(fault);
+        assert!(recorded.advance(1, 2, &mut || false).is_err());
+        assert_eq!(recorded.state(), &before);
+        assert_eq!(recorded.accepted_steps(), 1);
+    }
+    let bodies = (0..2)
+        .map(|i| {
+            body(
+                &mesh,
+                &plate,
+                &load,
+                PARAMETERS[..4].try_into().unwrap(),
+                PARAMETERS[5 + 4 * i..9 + 4 * i].try_into().unwrap(),
+                POINTS[i],
+            )
+            .with_contact_calibration()
+            .unwrap()
+        })
+        .collect();
+    let capped = PlateImpactSet::new(
+        bodies,
+        PlateImpactSetBudget {
+            max_parameters: 14,
+            ..budget()
+        },
+    )
+    .unwrap();
+    let drive = BodyForces::new([0.6, -0.4]);
+    assert!(matches!(
+        capped.with_body_forcing(&drive),
+        Err(PlateImpactError::Budget(_))
+    ));
 }
