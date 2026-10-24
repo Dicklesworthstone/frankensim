@@ -294,6 +294,38 @@ mod tests {
         });
     }
     #[test]
+    fn expansion_material_file_changes_the_same_loaded_and_unloaded_trajectory() {
+        context(|gate,cx| {
+            let fixed=source::Source::table_text(include_str!("self_heating_creep/cp5_affine.txt"),gate).unwrap();
+            let expanding=source::Source::table_text(include_str!("self_heating_creep/cp5_expanding.txt"),gate).unwrap();
+            let reference=simulate_source(request(5.0,2.0),&fixed,gate,cx).unwrap();
+            let rows=simulate_source(request(5.0,2.0),&expanding,gate,cx).unwrap();
+            let alpha=2e-5;let slope=-0.005;
+            assert!(rows[0].temperature<reference[0].temperature-1.0);
+            assert!((rows[0].strain-reference[0].strain).abs()>1e-5);
+            for (index,row) in rows.iter().enumerate() {
+                let scale=1.0+slope*(row.temperature-300.0);
+                let xi=row.elastic_storage/scale;
+                let entropy=alpha*VOLUME_M3*row.stress-slope*xi;
+                // The same accepted stress and elastic history define the
+                // thermoelastic entropy; no extra specimen or thermal step.
+                assert!((row.mechanical_entropy-entropy).abs()<1e-12);
+                assert!((row.mechanical_internal_change-row.elastic_storage-row.temperature*entropy).abs()<1e-12);
+                assert!((row.physical_heat+row.reversible_heat-row.deposited_heat).abs()
+                    <=config().energy_tolerance_j);
+                assert!(row.combined_defect.abs()<(index+1) as f64*config().energy_tolerance_j);
+            }
+            let first=&rows[0];
+            let xi=first.elastic_storage/(1.0+slope*(first.temperature-300.0));
+            // From a stress-free birth, Qrev=-alpha*T_birth*stress*V
+            // + S'*T_new*Xi; endpoint thermal-eigenstrain work is essential.
+            let reversible=-alpha*300.0*first.stress*VOLUME_M3+slope*first.temperature*xi;
+            assert!((first.reversible_heat-reversible).abs()<1e-12);
+            assert!(rows[24].strain!=0.0 && rows[24].physical_heat>0.0);
+            assert!(rows[24..].iter().all(|row|row.mechanical_work==0.0));
+        });
+    }
+    #[test]
     fn sourced_density_changes_reference_heat_storage_without_changing_geometry() {
         context(|gate,cx| {
             let text=include_str!("self_heating_creep/cp5.txt");

@@ -235,6 +235,25 @@ unloading heat, and cumulative internal-energy closure with actual convection.
 The new Rust regression remains unrun here; an independent equation calculation
 checks its reference trajectory, not native execution or experimental accuracy.
 
+To add expansion through material data, use `cp5_expanding.txt` with the same
+command arguments:
+
+```sh
+cargo run --release -p fs-couple --example self_heating_creep -- --table crates/fs-couple/examples/self_heating_creep/cp5_expanding.txt 2 2000000 4.8 48
+```
+
+This table differs from `cp5_affine.txt` only in
+`free_strain=0.00002*(T-300)`. The point's birth datum remains 300 K. The existing
+load/transport trajectory now includes free expansion and the entropy contribution
+`alpha*stress*volume`; no geometry, material name, spectrum or output filter is
+changed to obtain the response. The same CSV channels expose the result.
+Its regression checks the first-load identity
+`Q_rev=-alpha*T_birth*stress*volume+S_prime*T_new*Xi` and the actual internal-energy
+balance through subsequent creep and unloading. This table is also synthetic.
+The independent equation reference predicts a first-step temperature of about
+296.486636 K, compared with 298.729676 K without expansion; these are calculation
+references, not executed Rust output or measured-material validation.
+
 For `--pack`, the extra integer explicitly selects 0..30 branches; the example
 uses the existing `NormalizedMaterialCardPack` decoder and the declared 280..320 K
 span with a legacy `T` axis and no other coordinates. The pack must supply
