@@ -81,7 +81,11 @@ fn network_controls() -> NetworkSolve {
         thermal_energy_tolerance_j: 1e-7, total_energy_tolerance_j: 1e-7,
         circuit: MaterialCircuitSolve { energy_tolerance_j: 1e-7, power_tolerance_w: 1e-7 },
         newton: fs_solver::NewtonKrylovConfig { absolute_tolerance: 1e-10, relative_tolerance: 1e-12,
-            linear_restart: 4, ..fs_solver::NewtonKrylovConfig::default() },
+            // The heat residual is admitted at 1e-10 J. Differencing it across
+            // 1e-5 J gives an O(2e-5) relative Jacobian noise floor. Do not ask
+            // FGMRES for analytic-Jacobian accuracy after the first Newton step;
+            // the outer residual and independent physical gates remain strict.
+            forcing_minimum: 1e-4, linear_restart: 4, ..fs_solver::NewtonKrylovConfig::default() },
     }, maximum_chambers: 1, maximum_contacts: 3, maximum_boundary_solves: 1000, total_energy_tolerance_j: 1e-6 }
 }
 
