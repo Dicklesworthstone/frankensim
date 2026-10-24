@@ -2343,3 +2343,17 @@ Admission is closed fixed geometry, laminar Newtonian source transport, constant
 All state, source snapshots, prepared momentum, heat and accounts remain inside the original thermal deep-clone transaction. A pending interval can be prepared and accepted only once; solver, caloric, endpoint, history, cancellation or budget refusal publishes none of it. Focused G1/G3/G4 regressions cover the independently reduced 2x2 MAC startup/work identity, negative actuator work, drive-off kinetic decay without numerical heating, material feedback, CFL clipping, latent Darcy heating and late rollback. Exact-phase cases additionally cover cold-solid startup, quiescent freeze/remelt, the independent eight-face moving-ring kinetic/work account while its central solid melts, data-only viscosity changes, and atomic refusal to lock a moving face.
 
 Additional G1/G3/G4 cases in `tests/liquid_flow_enthalpy/viscous/unsteady.rs` independently reduce source-density-driven circulation and its work/heat/storage account, compare combined buoyancy and absorbing actuators/walls with the identical prescribed total force, and retain accepted thermal and momentum histories through late refusal/cancellation. These regressions exercise the original native solver and source cards; adding or compiling them is not a claim of executed numerical or experimental validation.
+
+`examples/material_buoyant_flow.rs` exposes this same composition as a runnable
+material-swap entry. A bounded synthetic input table becomes one immutable
+`MaterialCard`; the existing liquid and caloric owners supply all interpolation
+and source evaluation. Local source density drives buoyancy, local viscosity
+drives stress, and local conductivity drives the four declared thermal faces.
+The accepted native momentum and enthalpy history continue across reports.
+CSV output separates physical heat, native kinetic storage, numerical loss,
+signed buoyancy work and the combined energy defect. The two supplied material
+files change only the density curve. They are numerical examples, not measured
+substance data or a spatially converged benchmark. The example retains the
+closed single-phase Boussinesq/Stokes restrictions and introduces no additional
+solver, state clock or gravitational-potential reservoir. Its actual entry tests
+cover material source identity, bounded support and data-only coupled response.
