@@ -14,6 +14,9 @@
 //! storage. These are snapshots; evolving a coefficient requires its parameter
 //! work and, where relevant, thermal entropy to be accounted by the caller.
 
+/// Source-bound reversible thermal field energy and entropy at fixed geometry.
+pub mod thermal;
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 
