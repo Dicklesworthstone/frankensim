@@ -100,12 +100,16 @@ fn electrical_resistivity_only_substitution_changes_current_temperature_and_sag(
 
 #[test]
 fn endpoint_resistance_feedback_replays_original_owners_and_preserves_finite_supply() {
-    let m=material_r(3e8,vec![(280.0,0.1),(300.0,0.1),(320.0,0.5)]);
+    let slope=-0.005;
+    let m=material_with_affine_scale(5.0,3e8,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,
+        vec![(280.0,0.1),(300.0,0.1),(320.0,0.5)],slope);
     let (mut heat,mut beam)=seed(&m,0.001);
     let context=point(300.0);let cells=cells(&m,&context);let resistors=resistors();
     let network=MaterialNetwork {cells:&cells,resistors:&resistors,links:&[]};
     let prepared=network.prepare(&heat,||false).unwrap();let mut old=circuit(&prepared,&heat,CHARGE);
     let mut work=0.0;let mut other=0.0;let mut numerical=0.0;
+    let mut mechanical_u=0.0;let mut entropy_energy=0.0;let mut saw_coefficient_work=false;
     for i in 1..=4 {
         let g=if i<=2 {1.0}else{0.0};let loads=[if i<=2 {0.02}else{0.0}];
         let run=||step_candidate(&heat,&beam,&bindings(&m),&old,&prepared,&[],i as f64*0.2,
@@ -123,11 +127,24 @@ fn endpoint_resistance_feedback_replays_original_owners_and_preserves_finite_sup
         assert_eq!(next.bridge(),&manual.0);
         near(r.other_external_heat_j,0.0002,1e-12);
         near(r.thermal.external_heat_j,r.deposited_joule_j+r.deposited_mechanical_heat_j+r.other_external_heat_j,1e-10);
+        near(r.deposited_mechanical_heat_j,r.mechanical.energy_j.dissipated+r.reversible_heat_j,1e-12);
+        near(r.reversible_heat_j+r.mechanical.energy_j.modulus_work+r.mechanical_entropy_energy_change_j,0.0,1e-12);
+        assert!(r.mechanical.energy_j.dissipated>=0.0);
+        if i==1 {assert!(r.reversible_heat_j<0.0);}
+        saw_coefficient_work|=r.mechanical.energy_j.modulus_work.abs()>1e-12;
         work+=r.mechanical.load_work_j;other+=r.other_external_heat_j;numerical+=r.mechanical.energy_j.numerical_dissipation;
-        near(next.bridge().stored_energy_j()+next.thermal().energy_j()+r.electrical.stored_after_j
+        mechanical_u+=r.mechanical_internal_energy_change_j;entropy_energy+=r.mechanical_entropy_energy_change_j;
+        // Use the authored affine law and retained native point histories as an
+        // independent endpoint oracle, including the previously loaded branches.
+        let xi_j=next.bridge().cells()[0].section().layers()[&LAYERS[0]].material_points()
+            .iter().map(|p|0.5*VOLUME*p.stored_energy_j_m3()/(1.0+slope*(t-300.0))).sum::<f64>();
+        near(mechanical_u,(1.0-300.0*slope)*xi_j,1e-12);
+        near(entropy_energy,-slope*t*xi_j,1e-12);
+        near(mechanical_u+next.thermal().energy_j()+r.electrical.stored_after_j
             +numerical-work-other,CHARGE*CHARGE/(2.0*CAP),i as f64*config().total_energy_tolerance_j);
         let (t,b,c,_) = next.into_parts();heat=t;beam=b;old=c;
     }
+    assert!(saw_coefficient_work,"heating must recouple the preloaded material, not a fresh spring");
     assert!(beam.cells()[0].section().layers()[&LAYERS[0]].material_points()[0].branch_strains()[0].abs()>1e-10);
 }
 
@@ -166,7 +183,9 @@ fn electrical_only_context_mismatch_and_expired_source_refuse_all_histories() {
 
 #[test]
 fn final_cancellation_and_structural_budget_leave_three_owners_unchanged() {
-    let m=material_r(3e8,vec![(280.0,0.1),(320.0,0.1)]);let (heat,beam)=seed(&m,0.0);
+    let m=material_with_affine_scale(5.0,3e8,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,vec![(280.0,0.1),(320.0,0.1)],-0.005);
+    let (heat,beam)=seed(&m,0.0);
     let context=point(300.0);let cells=cells(&m,&context);let resistors=resistors();
     let network=MaterialNetwork {cells:&cells,resistors:&resistors,links:&[]};
     let prepared=network.prepare(&heat,||false).unwrap();let old=circuit(&prepared,&heat,CHARGE);

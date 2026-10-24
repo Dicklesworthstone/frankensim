@@ -166,6 +166,9 @@ impl<'t,'m> GrowingBridge<'t,'m> {
             reports.push(report);
         }
         next.admit(cancelled)?;
+        // The native append leaves all old points unchanged and adds Xi=0
+        // stress-free points. Its mechanical entropy increment is also zero,
+        // so this zero-duration birth storage difference is an internal one.
         let residual=finite(next.bridge.stored_energy_j()-self.bridge.stored_energy_j()
             +audit.stored_energy_change_j-audit.incoming_energy_j-audit.external_heat_j)?;
         if residual.abs()>tolerance { return Err(invalid("spatial birth storage and incoming enthalpy do not close")); }
@@ -181,7 +184,10 @@ impl<'t,'m> GrowingBridge<'t,'m> {
         let mechanics=solid::Config {section:config.feedback.mechanics,maximum_deflection_m:config.maximum_deflection_m};
         let (next,births)=staged.synchronize(mechanics,config.feedback.thermal_energy_tolerance_j,cancelled)
             .map_err(GrowthError::Birth)?;
+        // Births add no mechanical entropy; the original interval accounts for
+        // every changing old point's T*s alongside actual spring free energy.
         let total=next.bridge.stored_energy_j()-self.bridge.stored_energy_j()
+            +interval.mechanical_entropy_energy_change_j
             +next.thermal.energy_j()-self.thermal.energy_j()
             +interval.mechanical.energy_j.numerical_dissipation-interval.mechanical.load_work_j
             -interval.non_mechanical_heat_j-births.thermal.incoming_energy_j-births.thermal.external_heat_j;

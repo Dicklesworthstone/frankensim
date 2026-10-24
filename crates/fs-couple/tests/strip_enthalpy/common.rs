@@ -50,13 +50,28 @@ pub fn material_with_transport(cp: f64, branch_pa: f64, hot_shift: f64,
 pub fn material_with_transport_alternatives(cp: f64, branch_pa: f64, hot_shift: f64,
     free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>,
     electrical: (Vec<(f64,f64)>, Option<Vec<(f64,f64)>>)) -> Material {
+    material_with_transport_and_scale(cp, branch_pa, hot_shift, free_at_320,
+        conductivity, alternative, electrical, 0.0)
+}
+/// Manufactured affine modulus scale S(T)=1+slope*(T-300 K), with the original
+/// mechanical, caloric and transport claims retained on one source card.
+pub fn material_with_affine_scale(cp: f64, branch_pa: f64, hot_shift: f64,
+    free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>,
+    resistivity: Vec<(f64,f64)>, slope_per_k: f64) -> Material {
+    material_with_transport_and_scale(cp, branch_pa, hot_shift, free_at_320,
+        conductivity, alternative, (resistivity, None), slope_per_k)
+}
+fn material_with_transport_and_scale(cp: f64, branch_pa: f64, hot_shift: f64,
+    free_at_320: f64, conductivity: Vec<(f64,f64)>, alternative: Option<Vec<(f64,f64)>>,
+    electrical: (Vec<(f64,f64)>, Option<Vec<(f64,f64)>>), slope_per_k: f64) -> Material {
     let (resistivity, electrical_alternative) = electrical;
     let mut claims = ClaimSet::new();
     for (name, dims, knots) in [
         ("equilibrium", Pressure::DIMS, vec![(280.0,1e8),(320.0,1e8)]),
         ("branch", Pressure::DIMS, vec![(280.0,branch_pa),(320.0,branch_pa)]),
         ("time", Time::DIMS, vec![(280.0,1.0),(320.0,1.0)]),
-        ("modulus_scale", Dims([0;6]), vec![(280.0,1.0),(320.0,1.0)]),
+        ("modulus_scale", Dims([0;6]),
+            vec![(280.0,1.0-20.0*slope_per_k),(320.0,1.0+20.0*slope_per_k)]),
         ("shift", Dims([0;6]), vec![(280.0,1.0),(300.0,1.0),(320.0,hot_shift)]),
         ("free", Dims([0;6]), vec![(280.0,0.0),(320.0,free_at_320)]),
         ("density", Density::DIMS, vec![(280.0,DENSITY),(320.0,DENSITY)]),

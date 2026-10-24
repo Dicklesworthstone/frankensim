@@ -7,9 +7,10 @@ also accepts `MechanicalControl::Stress { stress_pa, tolerance_pa }`.
 
 At every trial temperature, stress control solves the existing affine law
 `sigma = C epsilon + b` for the new total engineering strain. It then executes
-the original `Point::advance`, checks the actual stress, and supplies ONLY
-physical dashpot dissipation to thermal transport. The returned temperature
-changes the relaxation time and therefore creep, stress and heat generation.
+the original `Point::advance`, checks the actual stress, and supplies physical
+dashpot dissipation plus the admitted signed reversible exchange to thermal
+transport. The returned temperature changes spring stiffness and relaxation time,
+and therefore creep, stress and heat generation.
 The material history, caloric state, mass and duration are held fixed at their
 accepted old values throughout all trials. There is no repeated time advancement
 inside the nonlinear iteration and no frozen-temperature mechanical endpoint.
@@ -23,7 +24,7 @@ Only the returned `FeedbackStep` may be published with those other states.
 
 ## Distinct energy and control accounts
 
-With temperature-independent spring energies and free strain, the existing
+For temperature-independent spring energies and free strain, the existing
 backward-Euler law supplies, per reference volume,
 
 `delta_elastic + physical_dissipation + numerical_dissipation = sigma_new delta_epsilon`.
@@ -38,13 +39,39 @@ residual, physical heat defect and endpoint-temperature defect are all exposed.
 The scalar material tangent remains isothermal; it is not the derivative of the
 coupled thermal solve.
 
+With an admitted affine common modulus multiplier `S(T)=a+b*T`, the original
+retained branch strains define reference spring potential
+`Xi=(E_inf*e^2 + sum(E_j*q_j^2))/2`. Mechanical free energy is `psi=S*Xi`,
+mechanical entropy is `s=-b*Xi`, and mechanical internal energy is `U=psi+T*s`.
+The original native mechanical update reports coefficient work
+`C_psi=(S_new-S_old)*Xi_old`; its branch state and time integration are unchanged.
+The SAME caloric callback receives
+
+`Q_internal = volume*(D - C_psi) - delta(volume*T*s)`.
+
+The second and third terms are reversible exchange and may cool the specimen.
+Physical dashpot dissipation `D` stays nonnegative and numerical loss remains
+outside thermal storage. `FeedbackStep::applied_heat_j` is this signed total;
+`mechanical_energy.dissipated` remains the independent physical loss density.
+The report additionally exposes `reversible_heat_j`,
+`mechanical_entropy_energy_change_j`, and `mechanical_internal_energy_change_j`.
+`CaloricPoint::mechanical_internal_energy_j()` and `mechanical_entropy_j_k()`
+read the actual accepted endpoint contributions. Global balances use internal
+energy, whereas the original point's `stored_energy_j_m3()` is spring free energy.
+
+Every source/law knot participates in affine admission. A modulus kink refuses
+even if endpoint values alone suggest an affine line. Affine `S` contributes no
+fixed-strain heat-capacity correction. Endpoint integration remains first order
+and need not conserve adiabatic entropy exactly; its error is not extra material
+heating. These quantities do not claim a measured constitutive law.
+
 All admissible dashpot dissipation is assumed to thermalize locally in this
 rung. The chart must be strictly increasing, single-solid-phase and
-constant-density; mass must match reference volume times that density. Spring
-modulus and free-strain tables must be temperature-independent. Relaxation and
-heat capacity may vary with temperature. Variable elastic free energy, thermal
-eigenstrain, phase changes and volume work require additional thermodynamic
-terms and are refused. Independent model inputs are not automatically qualified
+constant-density; mass must match reference volume times that density. The common
+spring multiplier must be globally affine, and free strain remains constant.
+Relaxation and heat capacity may vary with temperature. Non-affine modulus,
+thermal eigenstrain, phase changes and volume work require additional terms and
+are refused. Independent model inputs are not automatically qualified
 as the same measured material. A material name never selects missing properties.
 
 ## Runnable coupled example
@@ -96,11 +123,25 @@ iteration and one successful step do not imply unconditional stability or a
 physical error bound. Stress discontinuities use endpoint work and can produce
 substantial numerical loss; no unloading impulse or inertial response is claimed.
 
-This is uniform, small-strain constitutive feedback, not a spatial structural
-solver, dynamics, metal plastic creep, melting, or thermally induced stiffness
-softening. It does not retrofit every rod/beam consumer automatically. Existing
-spatial rod and deposition solvers remain the owners of their geometry and
-compatibility; they must explicitly compose this admitted feedback where valid.
+The constitutive law remains small-strain generalized Maxwell behavior; it does
+not model metal plastic creep or melting. The existing `thermovisco_dynamics`
+owner uses the same internal-energy account for inertial motion and finite-gas
+heat exchange. The layered-strip and spatial-beam enthalpy couplers integrate
+that account over the original two Gauss points in every layer, retaining the
+native geometry, compatibility solve and branch histories. Their electrical
+heating path deposits signed material exchange beside the original circuit
+heat in the same thermal cells. Contact and radiation transport remain with
+their existing owners.
+
+These spatial reports expose `mechanical_internal_energy_change_j`,
+`mechanical_entropy_energy_change_j` and `reversible_heat_j`. Their deposited
+material heat is the signed sum of physical dashpot loss and reversible exchange;
+numerical loss stays outside thermal storage. Scheduled-growth wrappers include
+the same entropy contribution through the complete interval and birth account.
+New material is born stress-free in the native solid owner, with zero branch
+history and zero mechanical entropy contribution, while existing histories are
+retained. Affine-source regressions exercise continuation after actual births
+and rollback when a later birth is invalid.
 
 ## Source-backed material substitution
 
@@ -121,6 +162,13 @@ caloric chart only when it comes from the same card, fixed nonthermal context an
 coordinate conventions. It derives reference mass from the source density and
 specified volume, and keeps all of the original heat-feedback physical limits.
 Source agreement is not a guarantee that a measured specimen fits the model.
+
+Four additional regressions cover independent signed affine-elastic heat,
+heating at held strain, a hereditary loading/hold/unload history with a closed
+scalar temperature reference, and source-knot derivative-jump refusal. The
+existing cancellation/budget regression also uses affine stiffness. Native
+execution remains unrun in this editing environment; syntax parsing and equation
+checks do not establish experimental accuracy.
 
 The existing executable now reads either a canonical material pack or an editable
 SI table. Geometry, ambient conditions, load schedule, solver and CSV fields stay

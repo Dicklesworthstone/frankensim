@@ -13,7 +13,15 @@ pub struct StripEnthalpyReport<S>{
     pub nonlinear:NewtonReport,
     pub structural_trials:usize,
     pub maximum_cell_residual_j:f64,
+    /// Signed physical dashpot heat plus reversible caloric exchange [J].
+    /// This is the actual increment in the receiving-cell sources.
     pub deposited_heat_j:f64,
+    /// Signed exchange -Cpsi-Delta(T*s); distinct from positive dashpot loss.
+    pub reversible_heat_j:f64,
+    /// Change in mechanical internal energy psi+T*s, at the original Gauss points.
+    pub mechanical_internal_energy_change_j:f64,
+    /// Change in the mechanical entropy contribution T*s [J].
+    pub mechanical_entropy_energy_change_j:f64,
     pub non_mechanical_heat_j:f64,
     pub external_mechanical_work_j:f64,
     pub total_energy_residual_j:f64,

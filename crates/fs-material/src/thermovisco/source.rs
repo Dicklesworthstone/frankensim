@@ -370,9 +370,10 @@ impl ResolvedThermoMaxwell {
     /// Initialize heat feedback from the SAME material card and fixed context.
     /// Caloric interpolation may introduce extra knots but must stay inside the
     /// mechanical span and retain identical nonthermal coordinates and conventions.
-    /// The existing CaloricPoint admission still refuses variable spring energy,
-    /// thermal eigenstrain, density changes or phase change. No restriction is
-    /// relaxed just because both models came from a material card.
+    /// The caloric owner admits a globally affine common spring multiplier with
+    /// its mechanical entropy and reversible heat. Thermal eigenstrain, density
+    /// changes, modulus derivative jumps and phase change still refuse. The
+    /// original union of every source knot is retained for this admission.
     pub fn caloric_point<'a>(
         &'a self,
         caloric: &'a ResolvedHeatCapacityCurve,

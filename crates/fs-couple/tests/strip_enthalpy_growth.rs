@@ -20,9 +20,31 @@ fn event(id: u64, index: usize) -> TimedEvent {
     TimedEvent { time_s: 0.4, event: Event::Birth(incoming) }
 }
 
+fn growth_materials(slope: f64) -> [Material; 2] {
+    [5.0,10.0].map(|cp|material_with_affine_scale(cp,3e8,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,
+        vec![(280.0,0.1),(320.0,0.1)],slope))
+}
+
+// Independent fixture law U=(1-300*b)*Xi, integrated over the original two
+// Gauss points. No source coefficient or accepted branch history is reset.
+fn internal_energy(strip: &LayeredStrip<'_>, slope: f64) -> f64 {
+    strip.layers().values().map(|layer| {
+        0.5*strip.length_m()*layer.geometry.area_m2*layer.material_points().iter().map(|p| {
+            let e=p.total_strain()-p.birth_strain();
+            let q=p.branch_strains()[0];
+            (1.0-300.0*slope)*0.5*(1e8*e*e+3e8*q*q)
+        }).sum::<f64>()
+    }).sum()
+}
+
 #[test]
 fn joint_birth_matches_original_owners_and_keeps_existing_histories() {
-    let materials = [material(5.0,3e8,0.05,0.0),material(10.0,3e8,0.05,0.0)];
+    joint_birth_case(0.0);
+}
+
+fn joint_birth_case(slope: f64) {
+    let materials = growth_materials(slope);
     let (heat, strip) = initial(&materials,0.002,vec![event(99,2)]);
     let map = bindings(&materials);
     let (old, initialization) = GrowingStrip::try_new(heat.clone(),strip.clone(),1,
@@ -45,7 +67,23 @@ fn joint_birth_matches_original_owners_and_keeps_existing_histories() {
     assert_eq!(next.remaining_births(),0);
     near(report.events.incoming_mass_kg,MASS,1e-16);
     for id in LAYERS { assert_eq!(next.strip().layers()[&id],left.strip().layers()[&id]); }
-    for point in next.strip().layers()[&99].material_points() { assert_eq!(point.stress_pa(),0.0); }
+    for point in next.strip().layers()[&99].material_points() {
+        assert_eq!(point.stress_pa(),0.0);
+        assert_eq!(point.branch_strains(),&[0.0]);
+        assert_eq!(point.total_strain(),point.birth_strain());
+    }
+    near(internal_energy(next.strip(),slope)-internal_energy(old.strip(),slope),
+        report.interval.mechanical_internal_energy_change_j,1e-10);
+    near(internal_energy(next.strip(),slope)-internal_energy(old.strip(),slope)
+        +next.thermal().energy_j()-old.thermal().energy_j()
+        +report.interval.mechanical.energy_j.numerical_dissipation
+        -report.interval.external_mechanical_work_j-report.interval.non_mechanical_heat_j
+        -report.events.incoming_energy_j-report.events.external_heat_j,
+        0.0,config().total_energy_tolerance_j);
+    if slope!=0.0 {
+        assert!(report.interval.reversible_heat_j!=0.0);
+        assert!(report.interval.mechanical_entropy_energy_change_j.abs()>1e-8);
+    }
     // Birth has no prior physical heat or aging. The subsequent real interval does.
     assert!(!report.interval.layer_energy_j.contains_key(&99));
     let (after, r) = next.step_candidate(0.6,stretched(0.015),config(),&[0.0;3],coefficients,||false).unwrap();
@@ -56,13 +94,21 @@ fn joint_birth_matches_original_owners_and_keeps_existing_histories() {
     assert!(r.interval.layer_energy_j[&99].dissipated>0.0);
     assert!(!r.birth_equilibrium_pending);
     assert_eq!(after.strip().layers()[&99].birth_time_s,0.4);
+    near(internal_energy(after.strip(),slope)-internal_energy(next.strip(),slope),
+        r.interval.mechanical_internal_energy_change_j,1e-10);
+    assert!(report.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
+    assert!(r.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
     assert_eq!(old.thermal().time_s(),0.0);
     assert_eq!(old.remaining_births(),1);
 }
 
 #[test]
 fn last_bad_birth_discards_the_solved_interval_and_all_earlier_births() {
-    let materials = [material(5.0,3e8,0.05,0.0),material(10.0,3e8,0.05,0.0)];
+    bad_birth_case(0.0);
+}
+
+fn bad_birth_case(slope: f64) {
+    let materials = growth_materials(slope);
     for wrong_body in [false,true] {
         let mut bad = event(100,3);
         if let Event::Birth(c) = &mut bad.event {
@@ -82,7 +128,14 @@ fn last_bad_birth_discards_the_solved_interval_and_all_earlier_births() {
         assert_eq!(old.strip(),before.strip());
         assert_eq!(old.remaining_births(),2);
         assert_eq!(old.thermal().time_s(),0.0);
+        assert_eq!(internal_energy(old.strip(),slope),internal_energy(before.strip(),slope));
     }
+}
+
+#[test]
+fn affine_hereditary_internal_energy_survives_actual_birth_and_late_refusal() {
+    joint_birth_case(-0.005);
+    bad_birth_case(-0.005);
 }
 
 #[test]

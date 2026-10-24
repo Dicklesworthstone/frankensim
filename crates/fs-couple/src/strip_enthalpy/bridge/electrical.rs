@@ -2,8 +2,8 @@
 //!
 //! The original circuit/enthalpy owner supplies the nonlinear solve, Kirchhoff
 //! update and branch-local Joule deposition. Its coefficient callback evaluates
-//! the original beam from the same accepted history and adds ONLY physical
-//! Maxwell heat. No thermal step is nested in another thermal step. All three
+//! the original beam from the same accepted history and adds physical Maxwell
+//! loss plus signed reversible exchange. No thermal step is nested in another. All three
 //! endpoints publish together after independent combined work/storage admission.
 //! Fixed C/L, electrical paths and thermal geometry; no field force or reciprocal
 //! thermoelastic expansion is inferred. Endpoint R(T), k(T), relaxation and BE
@@ -41,6 +41,7 @@ pub enum EvaluationError {
     Heat(HeatNetworkError),
     Context { cell: CellId, error: SourceError },
     Mechanical(solid::Error),
+    Thermodynamics(StripEnthalpyError<Infallible>),
     Thermal(DepositionError),
     Invalid(&'static str),
     StructuralBudget,
@@ -76,7 +77,7 @@ pub struct ElectricalReport<S = MaterialNetworkSample> {
     pub contact_heat_destinations: Vec<ContactHeatCells>,
     pub mechanical: solid::Report,
     pub layer_energy_j: BTreeMap<(u64,u64), Energy>,
-    /// Includes both physical Joule and Maxwell heat; neither is added again.
+    /// Includes Joule/dashpot heat and reversible exchange; none is added again.
     pub thermal: EnergyAudit,
     /// Original complete transport/electrical material samples at the endpoint.
     pub material: S,
@@ -85,13 +86,17 @@ pub struct ElectricalReport<S = MaterialNetworkSample> {
     pub structural_trials: usize,
     pub maximum_cell_residual_j: f64,
     pub deposited_joule_j: f64,
+    /// Signed dashpot heat plus reversible material exchange, already deposited.
     pub deposited_mechanical_heat_j: f64,
+    pub reversible_heat_j: f64,
+    pub mechanical_internal_energy_change_j: f64,
+    pub mechanical_entropy_energy_change_j: f64,
     /// Roundoff-net energy of closed radiative exchange, not external supply.
     /// It is retained in the thermal source account but excluded from external heat.
     pub closed_radiation_net_j: f64,
     /// Independently evaluated boundaries/heaters, excluding internal losses and radiation.
     pub other_external_heat_j: f64,
-    /// Delta electrical + elastic + thermal + numerical - supply - load - heat.
+    /// Delta electrical + mechanical internal + caloric + numerical - supply - load - heat.
     pub total_energy_residual_j: f64,
 }
 
@@ -116,6 +121,9 @@ struct Trial<'m,S> {
     local: BTreeMap<(u64,u64),Energy>,
     material: S,
     heat_j: f64,
+    reversible_heat_j: f64,
+    mechanical_internal_energy_change_j: f64,
+    mechanical_entropy_energy_change_j: f64,
     other_j: f64,
     radiation_net_j: f64,
 }
@@ -303,36 +311,33 @@ fn driven_candidate<'t,'m,S: SourceSample>(
         let (next,mechanical,local)=bridge.advance_with_cell_energy(target_s,&temperatures,
             gravity_m_s2,loads_n_m,mechanics,&mut ||(*cancel.borrow_mut())())
             .map_err(EvaluationError::Mechanical)?;
+        let exchange=bridge_exchange(thermal,endpoint,bridge,&next,&bound,&local,checkpoint)
+            .map_err(EvaluationError::Thermodynamics)?;
         let mut heat_j=0.0;
-        for (id,energy) in &local {
+        for (id,account) in &exchange.layers {
             checkpoint()?;
-            if !energy.dissipated.is_finite() || energy.dissipated<0.0 {
-                return Err(EvaluationError::Invalid("nonphysical mechanical heat"));
-            }
-            let power=finite(energy.dissipated/dt)?;
-            if energy.dissipated!=0.0 && power==0.0 {
-                return Err(EvaluationError::Invalid("mechanical heat underflowed to zero power"));
-            }
-            heat_j=finite(heat_j+finite(dt*power)?)?;
-            if power!=0.0 {
-                let source=material.sources_w.entry(bound[id].section.cell).or_insert(0.0);
-                *source=finite(*source+power)?;
-            }
+            heat_j=finite(heat_j+deposit_heat_j(&mut material.sources_w,bound[id].section.cell,
+                account.total_material_heat_j,dt,c.total_energy_tolerance_j)
+                .map_err(EvaluationError::Thermodynamics)?)?;
         }
-        if (heat_j-mechanical.energy_j.dissipated).abs()>c.total_energy_tolerance_j {
-            return Err(EvaluationError::Invalid("local and total physical mechanical heat differ"));
+        if (exchange.dissipated_j-mechanical.energy_j.dissipated).abs()>c.total_energy_tolerance_j
+            || (heat_j-exchange.dissipated_j-exchange.reversible_heat_j).abs()>c.total_energy_tolerance_j {
+            return Err(EvaluationError::Invalid("spatial dashpot/reversible heat differs from total"));
         }
         checkpoint()?;
         Ok(ContactThermalCoefficients {contacts,bulk:CircuitThermalCoefficients {
             resistors:material.resistors,sources_w:material.sources_w,
             conductances_w_k:material.conductances_w_k,source:Trial {bridge:next,mechanical,local,
-                material:material.source,heat_j,other_j,radiation_net_j}}})
+                material:material.source,heat_j,other_j,radiation_net_j,
+                reversible_heat_j:exchange.reversible_heat_j,
+                mechanical_internal_energy_change_j:exchange.mechanical_internal_energy_change_j,
+                mechanical_entropy_energy_change_j:exchange.mechanical_entropy_energy_change_j}}})
     },||(*cancel.borrow_mut())()).map_err(ElectricalError::Coupled)?;
     let (thermal,next_circuit,r)=candidate.into_parts();
     let contact_heat_destinations=r.source.destinations;
     let trial=r.source.material;
     let total=(r.electrical.stored_after_j-r.electrical.stored_before_j)
-        +(trial.bridge.stored_energy_j()-bridge.stored_energy_j())+r.thermal.stored_energy_change_j
+        +trial.mechanical_internal_energy_change_j+r.thermal.stored_energy_change_j
         +trial.mechanical.energy_j.numerical_dissipation-r.electrical.native.supplied
         -trial.mechanical.load_work_j-trial.other_j;
     let heat_defect=r.thermal.external_heat_j-r.deposited_joule_j-trial.heat_j
@@ -348,6 +353,9 @@ fn driven_candidate<'t,'m,S: SourceSample>(
             circuit_trials:r.circuit_trials,structural_trials:trials.get(),
             maximum_cell_residual_j:r.maximum_cell_residual_j,deposited_joule_j:r.deposited_joule_j,
             deposited_mechanical_heat_j:trial.heat_j,other_external_heat_j:trial.other_j,
+            reversible_heat_j:trial.reversible_heat_j,
+            mechanical_internal_energy_change_j:trial.mechanical_internal_energy_change_j,
+            mechanical_entropy_energy_change_j:trial.mechanical_entropy_energy_change_j,
             closed_radiation_net_j:trial.radiation_net_j,
             total_energy_residual_j:total}})
 }

@@ -238,6 +238,57 @@ fn replacing_only_caloric_source_data_changes_actual_stress_and_self_heating() {
 }
 
 #[test]
+fn original_source_knots_admit_affine_spring_heat_and_refuse_a_hidden_entropy_jump() {
+    for (middle, admissible) in [(1.0, true), (1.1, false)] {
+        let mut claims = ClaimSet::new();
+        for (name, dims, value) in [
+            ("E_inf", Pressure::DIMS, 1e8), ("E0", Pressure::DIMS, 3e8),
+            ("tau0", Time::DIMS, 1.0), ("shift", ONE, 1.0), ("free", ONE, 0.0),
+            ("density", Density::DIMS, 1000.0),
+            ("cp", Dims([2, 0, -2, -1, 0, 0]), 100.0),
+        ] {
+            add(&mut claims, name, dims, vec![(280.0, value), (320.0, value)]);
+        }
+        add(&mut claims, "scale", ONE,
+            vec![(280.0, 1.1), (300.0, middle), (320.0, 0.9)]);
+        let card = card(claims);
+        let source = resolve(&card, &point(280.0), &point(320.0)).unwrap();
+        let heat = caloric(&card, 100.0, &point(280.0), &point(320.0));
+        // The constitutive law retains the actual middle source knot. The
+        // thermal owner must not infer a slope using only endpoint values that
+        // are shared by the affine and kinked source variants.
+        assert_eq!(source.samples().len(), 3);
+        let old = source.caloric_point(&heat, 300.0, 0.0, 1e-6, 0.001);
+        if !admissible {
+            assert!(matches!(old, Err(SourceError::Feedback(_))));
+            continue;
+        }
+        let old = old.unwrap();
+        let step = old.advance(0.02, 0.2, FeedbackConfig {
+            max_iterations: 100, temperature_tolerance_k: 1e-10,
+            energy_tolerance_j: 1e-9, relaxation: 1.0,
+        }, |input| {
+            Ok::<_, Infallible>(UniformEnthalpyStep {
+                state: input.curve.state_at_specific_enthalpy(
+                    input.initial.specific_enthalpy_j_kg()+input.internal_heat_j/input.mass_kg).unwrap(),
+                external_heat_j: 0.0, energy_residual_tolerance_j: 1e-10, report: (),
+            })
+        }, || false).unwrap();
+        let q = 0.02_f64/1.2;
+        let xi = 0.5e-6*(1e8*0.02_f64.powi(2)+3e8*q*q);
+        let base_loss = 1e-6*3e8*0.2*q*q;
+        let expected_t = (0.1*300.0+2.5*base_loss)/(0.1+0.005*(base_loss+xi));
+        assert!((step.next.caloric_state().temperature_k()-expected_t).abs() < 1e-9);
+        assert!((step.next.mechanical_internal_energy_j()-2.5*xi).abs() < 1e-14);
+        assert!(step.mechanical_energy.dissipated > 0.0);
+        assert!(step.reversible_heat_j < 0.0 && step.applied_heat_j < 0.0);
+        assert_eq!(step.next.caloric_curve().material_card_identity(), card.content_hash());
+        assert!(core::ptr::eq(step.next.mechanical().law(), source.law()));
+        assert_eq!(old.time_s(), 0.0);
+    }
+}
+
+#[test]
 fn interior_conflicts_and_hidden_reference_coefficient_changes_are_not_averaged() {
     let mut conflict = claims(5.0);
     add(

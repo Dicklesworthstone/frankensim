@@ -2010,8 +2010,13 @@ fixed-external-coordinate policy. Typed pressure, composition, moisture and
 concentration may describe fixed external conditions. Evolving mechanical
 coordinates and a second temperature coordinate cannot be frozen into a thermal
 law. Frequency-dependent values refuse; thermovisco frequency applicability
-alone must retain its static/relaxed endpoint. The original caloric restrictions
-on spring energy, free strain, density and phase remain unchanged.
+alone must retain its static/relaxed endpoint. Caloric feedback admits a globally
+affine common modulus multiplier across the complete retained knot union. It
+uses mechanical entropy from the free-energy derivative and accounts for
+internal energy separately from spring free energy. Physical dashpot loss and
+signed reversible exchange enter the original caloric transport owner; numerical
+loss remains separate. Changing free strain, density, phase, or modulus derivative
+still requires additional thermodynamic terms and refuses.
 
 ### Shared phase-dependent conductivity
 

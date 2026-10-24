@@ -9,8 +9,9 @@
 //!
 //! The endpoint work audit separates mechanical work, thermal-eigenstrain work,
 //! modulus-change work, physical dashpot dissipation, and backward-Euler numerical
-//! dissipation. It is a discrete balance, NOT a caloric/entropy model. Dissipated
-//! mechanical energy is not automatically fed back to a thermal solver.
+//! dissipation. The mechanical update alone is a discrete free-energy balance;
+//! `thermal` supplies affine-modulus entropy and internal energy when explicitly
+//! bound to a caloric owner. Mechanical loss is not implicitly deposited as heat.
 //! No glass-transition plateau, crystallization, plasticity, damage, finite-strain
 //! response, calibration, or three-dimensional constitutive law is inferred.
 
@@ -216,6 +217,7 @@ impl<'a> Point<'a> {
             .map(|(&(modulus, _), &q)| 0.5*modulus*q*q).sum::<f64>()
     }
     #[must_use]
+    /// Spring potential (Helmholtz free energy in the admitted caloric model).
     pub fn stored_energy_j_m3(&self) -> f64 {
         self.law.at(self.temperature_k).expect("accepted temperature").modulus_scale*self.unscaled_storage()
     }

@@ -9,13 +9,15 @@
 //! Backward Euler condenses inertia to an affine endpoint stress constraint.
 //! The existing Maxwell/enthalpy owner solves that constraint at EVERY thermal
 //! trial, retaining the original branch history until the complete step passes.
-//! Only physical Maxwell dashpot work is deposited as heat. Endpoint numerical
-//! losses in material and kinetic energy remain separate, nonthermal accounts.
+//! Physical Maxwell dashpot work and signed reversible thermoelastic exchange
+//! reach that same thermal owner. Endpoint numerical losses in material and
+//! kinetic energy remain separate, nonthermal accounts.
 //!
-//! Source admission deliberately retains the original caloric restriction to
-//! constant spring energies/free strain/density and a single solid phase.
-//! Relaxation times and heat capacity can depend on temperature. No thermal
-//! modulus work, expansion, phase change, spatial heat gradients, radiation of
+//! Source admission requires constant free strain/density, a single solid phase
+//! and a globally affine spring-modulus scale. The original material owner
+//! retains coefficient work and mechanical entropy when stiffness changes.
+//! Relaxation times and heat capacity can also depend on temperature. No expansion,
+//! phase change, spatial heat gradients, radiation of
 //! sound or high-frequency structural accuracy is inferred from this reduction.
 
 use core::{convert::Infallible, fmt};
@@ -101,14 +103,22 @@ pub struct Oscillator<'a> {
 #[derive(Debug)]
 pub struct Step<'a, R> {
     pub next: Oscillator<'a>,
-    /// Original Maxwell storage/work/loss audit [J/m3].
+    /// Original Maxwell free-energy/work/loss audit [J/m3]. Its stored energy
+    /// is Helmholtz free energy; `material_internal_energy_change_j` below
+    /// includes the mechanical entropy contribution at changing temperature.
     pub material_energy: Energy,
     pub transport: UniformEnthalpyStep<R>,
     pub thermal_iterations: usize,
-    /// Final physical material loss [J], re-evaluated at accepted temperature.
+    /// Final nonnegative Maxwell dashpot loss [J], re-evaluated at accepted temperature.
     pub material_heat_j: f64,
-    /// Heat actually supplied to the final transport trial [J]. The existing
-    /// feedback gate checks its difference from `material_heat_j`.
+    /// Signed reversible exchange into caloric storage [J], distinct from loss.
+    pub reversible_material_heat_j: f64,
+    /// Change of mechanical internal energy psi + T*s over the same step [J].
+    pub material_internal_energy_change_j: f64,
+    /// Change of the mechanical T*s contribution [J].
+    pub mechanical_entropy_energy_change_j: f64,
+    /// Total signed material heat supplied to the final transport trial [J].
+    /// Feedback checks it against dashpot loss plus reversible exchange.
     pub applied_material_heat_j: f64,
     pub heat_defect_j: f64,
     pub thermal_residual_j: f64,
@@ -119,7 +129,7 @@ pub struct Step<'a, R> {
     /// Prescribed endpoint force times actual end displacement increment [J].
     pub external_work_j: f64,
     pub force_residual_n: f64,
-    /// Delta kinetic + delta elastic + delta enthalpy + numerical loss
+    /// Delta kinetic + delta mechanical internal energy + delta enthalpy + numerical loss
     /// minus external endpoint work and actual boundary heat [J].
     pub combined_residual_j: f64,
 }
@@ -225,7 +235,9 @@ impl<'a> Oscillator<'a> {
     ///
     /// Endpoint work obeys F1*delta_q = delta_K + m*(delta_v)^2/2
     /// + material_work. The nonnegative kinetic term and the original Maxwell
-    /// numerical term never enter transport. Only physical dashpot heat does.
+    /// numerical term never enter transport. The material thermal owner supplies
+    /// physical dashpot heat plus signed reversible exchange from its affine
+    /// free-energy law; its mechanical internal energy closes the balance.
     ///
     /// The transport callback follows the existing candidate contract: it must
     /// not mutate reservoirs during trials. For example use the existing
@@ -315,7 +327,7 @@ impl<'a> Oscillator<'a> {
         let material_heat_j = finite(volume * feedback.mechanical_energy.dissipated)?;
         let combined_residual_j = finite(
             kinetic_change_j
-                + finite(volume * feedback.mechanical_energy.stored_change)?
+                + feedback.mechanical_internal_energy_change_j
                 + thermal_change
                 + numerical_loss_j
                 - external_work_j
@@ -342,6 +354,9 @@ impl<'a> Oscillator<'a> {
             transport: feedback.transport,
             thermal_iterations: feedback.iterations,
             material_heat_j,
+            reversible_material_heat_j: feedback.reversible_heat_j,
+            material_internal_energy_change_j: feedback.mechanical_internal_energy_change_j,
+            mechanical_entropy_energy_change_j: feedback.mechanical_entropy_energy_change_j,
             applied_material_heat_j: feedback.applied_heat_j,
             heat_defect_j: feedback.heat_defect_j,
             thermal_residual_j: feedback.thermal_residual_j,

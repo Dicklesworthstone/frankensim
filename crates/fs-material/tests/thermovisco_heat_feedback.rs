@@ -151,7 +151,7 @@ fn foreign_states_heat_creation_and_transport_failures_cannot_publish() {
 
 #[test]
 fn cancellation_work_exhaustion_and_late_material_failure_leave_both_histories_intact() {
-    let material = law(0.05);
+    let material = affine_law(-0.005, vec![(3e8, 1.0)]);
     let curve = chart(5.0, 8);
     let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
     let saved = old.clone();
@@ -176,10 +176,11 @@ fn cancellation_work_exhaustion_and_late_material_failure_leave_both_histories_i
 fn unsupported_caloric_physics_is_refused_instead_of_inventing_missing_work() {
     let material = law(1.0);
     let curve = chart(100.0, 9);
-    for (modulus, expansion) in [(0.5, 0.0), (1.0, 0.001)] {
+    for (middle_modulus, expansion) in [(0.75, 0.0), (1.0, 0.001)] {
         let unsupported = ThermoMaxwell::new(1e8, vec![], vec![
             ThermalKnot { temperature_k: 300.0, modulus_scale: 1.0, relaxation_scale: 1.0, free_strain: 0.0 },
-            ThermalKnot { temperature_k: 600.0, modulus_scale: modulus, relaxation_scale: 1.0, free_strain: expansion },
+            ThermalKnot { temperature_k: 400.0, modulus_scale: middle_modulus, relaxation_scale: 1.0, free_strain: 0.0 },
+            ThermalKnot { temperature_k: 600.0, modulus_scale: 1.0, relaxation_scale: 1.0, free_strain: expansion },
         ], Limits { max_strain: 0.04, max_strain_rate_s: 10.0 }).unwrap();
         assert!(CaloricPoint::try_new(unsupported.birth(300.0, 0.0).unwrap(), &curve, 0.0, MASS, VOLUME, 0.001).is_err());
     }
@@ -313,4 +314,98 @@ fn invalid_or_unattainable_loads_refuse_without_changing_history() {
         cancelled.set(true); adiabatic(input)
     }, || cancelled.get()), Err(FeedbackError::Cancelled)));
     assert_eq!(old, saved);
+}
+
+fn affine_law(slope: f64, branches: Vec<(f64, f64)>) -> ThermoMaxwell {
+    ThermoMaxwell::new(1e8, branches, [280.0, 300.0, 320.0].into_iter()
+        .map(|t| ThermalKnot { temperature_k: t, modulus_scale: 1.0+slope*(t-300.0),
+            relaxation_scale: 1.0, free_strain: 0.0 }).collect(),
+        Limits { max_strain: 0.04, max_strain_rate_s: 10.0 }).unwrap()
+}
+
+#[test]
+fn affine_elastic_heat_has_the_independent_closed_form_and_preserves_its_sign() {
+    let curve = chart(100.0, 17);
+    for slope in [-0.005, 0.005] {
+        let material = affine_law(slope, vec![]);
+        let loaded = material.birth(300.0, 0.0).unwrap()
+            .advance(300.0, 0.01, 0.1, 1e-5).unwrap().point;
+        let old = CaloricPoint::try_new(loaded, &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+        let step = old.advance(0.02, 0.2, config(), adiabatic, || false).unwrap();
+        let xi0 = 0.5*VOLUME*1e8*0.01_f64.powi(2);
+        let xi1 = 0.5*VOLUME*1e8*0.02_f64.powi(2);
+        let capacity = MASS*100.0;
+        let t = 300.0/(1.0-slope*(xi1-xi0)/capacity);
+        close(step.next.caloric_state().temperature_k(), t, 1e-9);
+        close(step.reversible_heat_j, slope*t*(xi1-xi0), 1e-12);
+        close(step.applied_heat_j, capacity*(t-300.0), 1e-10);
+        assert_eq!(step.mechanical_energy.dissipated, 0.0);
+        assert_eq!(step.reversible_heat_j.is_sign_positive(), slope.is_sign_positive());
+        assert!(step.mechanical_energy.numerical_dissipation > 0.0);
+        close(step.next.mechanical_entropy_j_k(), -slope*xi1, 1e-16);
+        close(step.next.mechanical_internal_energy_j(), (1.0-300.0*slope)*xi1, 1e-15);
+        close(step.mechanical_internal_energy_change_j, (1.0-300.0*slope)*(xi1-xi0), 1e-15);
+        close(step.reversible_heat_j + VOLUME*step.mechanical_energy.modulus_work
+            + step.mechanical_entropy_energy_change_j, 0.0, 1e-15);
+        assert!(step.combined_residual_j.abs() < 1e-10);
+    }
+}
+
+#[test]
+fn heating_held_strain_changes_free_energy_without_inventing_internal_work() {
+    let material = affine_law(-0.005, vec![]);
+    let curve = chart(100.0, 18);
+    let loaded = material.birth(300.0, 0.0).unwrap()
+        .advance(300.0, 0.01, 0.1, 1e-5).unwrap().point;
+    let old = CaloricPoint::try_new(loaded, &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let step = old.advance(0.01, 1.0, config(), |input| {
+        let state = input.curve.state_at_specific_enthalpy(100.0*20.0).unwrap();
+        Ok::<_, Infallible>(UniformEnthalpyStep { state,
+            external_heat_j: MASS*2000.0-input.internal_heat_j,
+            energy_residual_tolerance_j: 1e-10, report: () })
+    }, || false).unwrap();
+    close(step.next.mechanical().stress_pa(), 0.9*old.mechanical().stress_pa(), 1e-8);
+    close(step.mechanical_internal_energy_change_j, 0.0, 1e-16);
+    close(step.reversible_heat_j, 0.0, 1e-16);
+    assert!(step.mechanical_energy.modulus_work < 0.0);
+    assert!(step.mechanical_entropy_energy_change_j > 0.0);
+    assert_eq!(step.external_mechanical_work_j, 0.0);
+    assert_eq!(step.mechanical_energy.dissipated, 0.0);
+    close(step.next.mechanical_internal_energy_j(), old.mechanical_internal_energy_j(), 1e-16);
+    close(step.next.mechanical_entropy_j_k(), old.mechanical_entropy_j_k(), 1e-16);
+}
+
+#[test]
+fn affine_hereditary_history_matches_independent_cooling_relaxation_and_unloading_accounts() {
+    let slope = -0.005;
+    let intercept = 1.0-300.0*slope;
+    let material = affine_law(slope, vec![(3e8, 1.0)]);
+    let curve = chart(100.0, 19);
+    let mut old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+        &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+    let (mut q, mut strain, mut temperature, mut work, mut numerical) = (0.0, 0.0, 300.0, 0.0, 0.0);
+    let capacity = MASS*100.0;
+    let dt = 0.2;
+    for next_strain in [0.02, 0.02, 0.0, -0.01, 0.0] {
+        let next_q = (q+next_strain-strain)/(1.0+dt);
+        let xi0 = 0.5*VOLUME*(1e8*strain*strain + 3e8*q*q);
+        let xi1 = 0.5*VOLUME*(1e8*next_strain*next_strain + 3e8*next_q*next_q);
+        let base_loss = VOLUME*3e8*dt*next_q*next_q;
+        let next_t = (capacity*temperature + intercept*base_loss)
+            /(capacity-slope*(base_loss+xi1-xi0));
+        let scale = intercept+slope*next_t;
+        let step = old.advance(next_strain, dt, config(), adiabatic, || false).unwrap();
+        close(step.next.mechanical().branch_strains()[0], next_q, 1e-15);
+        close(step.next.caloric_state().temperature_k(), next_t, 1e-9);
+        close(VOLUME*step.mechanical_energy.dissipated, scale*base_loss, 1e-12);
+        close(step.reversible_heat_j, slope*next_t*(xi1-xi0), 1e-12);
+        close(step.next.mechanical_internal_energy_j(), intercept*xi1, 1e-14);
+        assert!(step.mechanical_energy.dissipated >= 0.0);
+        assert!(step.combined_residual_j.abs() < 1e-9);
+        work += step.external_mechanical_work_j;
+        numerical += VOLUME*step.mechanical_energy.numerical_dissipation;
+        close(step.next.mechanical_internal_energy_j()
+            + MASS*step.next.caloric_state().specific_enthalpy_j_kg() + numerical, work, 1e-9);
+        q = next_q; strain = next_strain; temperature = next_t; old = step.next;
+    }
 }

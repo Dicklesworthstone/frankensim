@@ -7,6 +7,7 @@ use fs_solver::{NewtonKrylovState,SolverRunProgress};
 use fs_solver::finite_difference::{FallibleFiniteDifference,FiniteDifferenceError};
 use fs_thermal::enthalpy::{DepositionError,DepositionSimulation};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep,StepCoefficients};
+use super::exchange::{LayerThermalExchange,deposit_heat_j,layer_exchange};
 use super::types::*;
 
 fn finite(value:f64)->Result<f64,DepositionError>{
@@ -107,27 +108,30 @@ pub fn step_candidate<'t, 'm, S, E>(
             &coefficients.conductances_w_k, checkpoint)?)?;
         let mut sources = coefficients.sources_w;
         let mut deposited = 0.0;
+        let mut exchange = LayerThermalExchange::default();
         for (&id, energy) in &layer_energy {
             checkpoint()?;
-            if !energy.dissipated.is_finite() || energy.dissipated < 0.0 {
-                return Err(StripEnthalpyError::Invalid("nonphysical layer dissipation"));
-            }
-            let power = finite(energy.dissipated/dt)?;
-            if energy.dissipated != 0.0 && power == 0.0 {
-                return Err(StripEnthalpyError::Invalid("layer heat underflowed in power conversion"));
-            }
-            deposited = finite(deposited + finite(dt*power)?)?;
-            if power != 0.0 {
-                let total = sources.entry(layers[&id].cell).or_insert(0.0);
-                *total = finite(*total + power)?;
-            }
+            let binding = layers[&id];
+            let local = layer_exchange(&strip.layers()[&id], &next.layers()[&id],
+                &thermal.cells()[&binding.cell], &endpoint.cells()[&binding.cell],
+                binding, strip.length_m(), *energy)?;
+            deposited = finite(deposited + deposit_heat_j(&mut sources, binding.cell,
+                local.total_material_heat_j, dt, config.total_energy_tolerance_j)?)?;
+            exchange.mechanical_internal_energy_change_j = finite(
+                exchange.mechanical_internal_energy_change_j+local.mechanical_internal_energy_change_j)?;
+            exchange.mechanical_entropy_energy_change_j = finite(
+                exchange.mechanical_entropy_energy_change_j+local.mechanical_entropy_energy_change_j)?;
+            exchange.reversible_heat_j = finite(exchange.reversible_heat_j+local.reversible_heat_j)?;
+            exchange.dissipated_j = finite(exchange.dissipated_j+local.dissipated_j)?;
+            exchange.total_material_heat_j = finite(exchange.total_material_heat_j+local.total_material_heat_j)?;
         }
-        if (deposited-mechanical.energy_j.dissipated).abs() > config.total_energy_tolerance_j {
-            return Err(StripEnthalpyError::Invalid("layer heat differs from the complete material account"));
+        if finite(exchange.dissipated_j-mechanical.energy_j.dissipated)?.abs() > config.total_energy_tolerance_j
+            || finite(deposited-exchange.total_material_heat_j)?.abs() > config.total_energy_tolerance_j {
+            return Err(StripEnthalpyError::Invalid("layer losses or signed heat differ from the complete material account"));
         }
         Ok::<_, StripEnthalpyError<E>>(StepCoefficients { sources_w: sources,
             conductances_w_k: coefficients.conductances_w_k,
-            payload: (next, mechanical, layer_energy, coefficients.source, deposited, other_heat) })
+            payload: (next, mechanical, layer_energy, coefficients.source, deposited, other_heat, exchange) })
     }, checkpoint);
     let problem = FallibleFiniteDifference::new(step.cell_ids().len(), config.difference_step_j,
         |x: &[f64]| evaluate(x).map(|trial| trial.residual_j().to_vec())).map_err(numerical)?;
@@ -143,13 +147,13 @@ pub fn step_candidate<'t, 'm, S, E>(
     let trial = evaluate(&solver.x)?;
     let maximum_cell_residual_j = trial.maximum_cell_residual_j();
     let (thermal_next, (strip_next, mechanical, layer_energy_j, source, deposited_heat_j,
-        non_mechanical_heat_j), audit) = trial.accept(config.cell_energy_tolerance_j,
+        non_mechanical_heat_j, exchange), audit) = trial.accept(config.cell_energy_tolerance_j,
             config.thermal_energy_tolerance_j, checkpoint)?;
     let force = match control.axial { AxialControl::Strain(_) => mechanical.axial_force_n, AxialControl::ForceN(n) => n };
     let moment = match control.bending { BendingControl::CurvaturePerM(_) => mechanical.bending_moment_nm, BendingControl::MomentNm(m) => m };
     let work = finite(strip.length_m() * finite(force * (strip_next.axial_strain()-strip.axial_strain())
         + moment * (strip_next.curvature_per_m()-strip.curvature_per_m()))?)?;
-    let total = finite(finite(strip_next.stored_energy_j()-strip.stored_energy_j())?
+    let total = finite(exchange.mechanical_internal_energy_change_j
         + audit.stored_energy_change_j + mechanical.energy_j.numerical_dissipation
         - work - non_mechanical_heat_j)?;
     if total.abs() > config.total_energy_tolerance_j
@@ -160,6 +164,9 @@ pub fn step_candidate<'t, 'm, S, E>(
     Ok(StripEnthalpyCandidate { thermal: thermal_next, strip: strip_next,
         report: StripEnthalpyReport { mechanical, layer_energy_j, thermal: audit, source,
             nonlinear: result.report, structural_trials: trials.get(), maximum_cell_residual_j,
-            deposited_heat_j, non_mechanical_heat_j, external_mechanical_work_j: work,
+            deposited_heat_j, reversible_heat_j: exchange.reversible_heat_j,
+            mechanical_internal_energy_change_j: exchange.mechanical_internal_energy_change_j,
+            mechanical_entropy_energy_change_j: exchange.mechanical_entropy_energy_change_j,
+            non_mechanical_heat_j, external_mechanical_work_j: work,
             total_energy_residual_j: total } })
 }

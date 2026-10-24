@@ -204,7 +204,12 @@ impl<'t, 'm> GrowingStrip<'t, 'm> {
         layers.pending = false;
         let (thermal, layers, events) = synchronize(&thermal, &layers,
             config.thermal_energy_tolerance_j, &mut check).map_err(GrowthError::Events)?;
+        // Native births retain every existing Gauss-point history and add
+        // stress-free points (Xi=0), so their mechanical entropy change is zero.
+        // The actual full-interval spring storage is free energy; the interval's
+        // original Delta(T*s) completes internal energy through the birth batch.
         let residual = (layers.strip.stored_energy_j() - self.layers.strip.stored_energy_j())
+            + interval.mechanical_entropy_energy_change_j
             + (thermal.energy_j() - self.thermal.energy_j())
             + interval.mechanical.energy_j.numerical_dissipation
             - interval.external_mechanical_work_j - interval.non_mechanical_heat_j

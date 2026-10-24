@@ -75,9 +75,32 @@ fn circuit(p:&PreparedMaterialNetwork<'_,'_>,t:&DepositionSimulation<'_>) -> Mat
 fn materials() -> [Material;2] { [5.0,10.0].map(|cp|material(cp,3e8,0.05,0.0)) }
 fn key() -> PropertyKey { PropertyKey::new("conductivity",THERMAL_CONDUCTIVITY_DIMS) }
 
+fn affine_materials(slope: f64) -> [Material;2] {
+    [5.0,10.0].map(|cp|material_with_affine_scale(cp,3e8,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,
+        vec![(280.0,0.1),(320.0,0.1)],slope))
+}
+
+// Independent affine fixture internal energy on native section quadrature.
+fn internal_energy(bridge: &Bridge<'_>, slope: f64) -> f64 {
+    bridge.cells().iter().map(|cell| {
+        let section=cell.section();
+        section.layers().values().map(|layer| {
+            0.5*section.length_m()*layer.geometry.area_m2*layer.material_points().iter().map(|p| {
+                let e=p.total_strain()-p.birth_strain();let q=p.branch_strains()[0];
+                (1.0-300.0*slope)*0.5*(1e8*e*e+3e8*q*q)
+            }).sum::<f64>()
+        }).sum::<f64>()
+    }).sum()
+}
+
 #[test]
 fn electrical_interval_and_real_birth_match_original_owners_then_continue_with_finite_supply() {
-    let m=materials();
+    electrical_birth_case(0.0);
+}
+
+fn electrical_birth_case(slope: f64) {
+    let m=affine_materials(slope);
     let old=seed(&m,vec![arrival(99,3,LENGTH,0.02,1),TimedEvent {time_s:0.2,event:Event::Contact(
         ThermalLink {id:5,a:CellId(90),b:CellId(99),area_m2:AREA,conductance_w_k:9.0})}],vec![birth(&m[1],99,3,0.02)]);
     let context=point(300.0); let key=key(); let bound=cells(&m,&context,&key,&[(90,0)]); let resistors=resistors();
@@ -96,6 +119,16 @@ fn electrical_interval_and_real_birth_match_original_owners_then_continue_with_f
     assert_eq!(r.births.mechanical.len(),1); assert!(r.birth_equilibrium_pending);
     assert!(!r.interval.layer_energy_j.contains_key(&(3,LAYERS[0])));
     assert_eq!(born.bridge().cells()[1].section().stored_energy_j(),0.0);
+    for point in born.bridge().cells()[1].section().layers()[&LAYERS[0]].material_points() {
+        assert_eq!(point.branch_strains(),&[0.0]);
+        assert_eq!(point.total_strain(),point.birth_strain());
+    }
+    near(internal_energy(born.bridge(),slope)-internal_energy(old.bridge(),slope),
+        r.interval.mechanical_internal_energy_change_j,1e-10);
+    if slope!=0.0 {
+        assert!(r.interval.reversible_heat_j!=0.0);
+        assert!(r.interval.mechanical_entropy_energy_change_j.abs()>1e-10);
+    }
     assert!(p.resolve(born.thermal(),||false).is_err());
     let expanded=cells(&m,&context,&key,&[(90,0),(99,1)]);
     let links=[ConductionLink {link:5,distance_a_m:0.05,distance_b_m:0.01}];
@@ -109,16 +142,24 @@ fn electrical_interval_and_real_birth_match_original_owners_then_continue_with_f
     assert!(r2.interval.layer_energy_j[&(3,LAYERS[0])].dissipated>0.0);
     assert_eq!(after.bridge().cells()[1].section().layers()[&LAYERS[0]].birth_time_s,0.2);
     assert!(!r2.birth_equilibrium_pending);
-    let total=after.thermal().energy_j()+after.bridge().stored_energy_j()+r2.interval.electrical.stored_after_j
+    near(internal_energy(after.bridge(),slope)-internal_energy(born.bridge(),slope),
+        r2.interval.mechanical_internal_energy_change_j,1e-10);
+    let total=after.thermal().energy_j()+internal_energy(after.bridge(),slope)+r2.interval.electrical.stored_after_j
         +r.interval.mechanical.energy_j.numerical_dissipation+r2.interval.mechanical.energy_j.numerical_dissipation
         -r.interval.mechanical.load_work_j-r2.interval.mechanical.load_work_j;
     near(total,Q0*Q0/(2.0*CAP),2.0*config().total_energy_tolerance_j);
+    assert!(r.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
+    assert!(r2.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
     assert_eq!(circuit.charges_c(),&[Q0]); assert_eq!(old.thermal().time_s(),0.0);
 }
 
 #[test]
 fn final_bad_birth_rolls_back_the_electrical_debit_and_earlier_valid_append() {
-    let m=materials(); let mut bad=arrival(2,1,0.12,0.015,0);
+    electrical_bad_birth_case(0.0);
+}
+
+fn electrical_bad_birth_case(slope: f64) {
+    let m=affine_materials(slope); let mut bad=arrival(2,1,0.12,0.015,0);
     if let Event::Birth(c)=&mut bad.event { c.mass_kg*=2.0; }
     let old=seed(&m,vec![arrival(99,3,LENGTH,0.02,1),bad],vec![birth(&m[1],99,3,0.02),birth(&m[0],2,1,0.015)]);
     let context=point(300.0); let key=key(); let bound=cells(&m,&context,&key,&[(90,0)]); let resistors=resistors();
@@ -132,6 +173,13 @@ fn final_bad_birth_rolls_back_the_electrical_debit_and_earlier_valid_append() {
         Err(ElectricalGrowthError::Birth(_))));
     assert_eq!(circuit,original); assert_eq!(old.bridge(),before.bridge());
     assert_eq!(old.thermal().cells(),before.thermal().cells()); assert_eq!(old.remaining_births(),2);
+    assert_eq!(internal_energy(old.bridge(),slope),internal_energy(before.bridge(),slope));
+}
+
+#[test]
+fn affine_electrothermal_growth_keeps_internal_energy_charge_and_births_together() {
+    electrical_birth_case(-0.005);
+    electrical_bad_birth_case(-0.005);
 }
 
 #[test]

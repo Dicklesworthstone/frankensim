@@ -1,16 +1,20 @@
 //! Dissipation/heat feedback using the existing Maxwell update and thermal owner.
 //!
 //! One accepted mechanical history and one accepted caloric state are held fixed
-//! through all within-step trials. Only physical dashpot dissipation is supplied
-//! to transport. Backward-Euler numerical dissipation remains a separate loss.
+//! through all within-step trials. Physical dashpot dissipation and signed
+//! reversible thermoelastic exchange enter the SAME transport owner.
+//! Backward-Euler numerical dissipation remains a separate, nonthermal loss.
 //!
-//! This rung requires temperature-INDEPENDENT spring energies and free strain,
+//! This rung admits a globally affine common spring-modulus multiplier, fixed free strain,
 //! a strictly increasing single-solid-phase caloric chart, and constant density.
-//! Relaxation times and heat capacity may depend on temperature. Under those
-//! restrictions, changes in the chart's h equal caloric internal-energy changes
-//! at fixed pressure/density; its arbitrary reference cancels. Variable elastic
-//! free energy, thermal eigenstrain, phase changes and volume work need a more
-//! complete caloric law and are refused, not assigned invented heat sources.
+//! With reference spring potential Xi, psi=S(T)*Xi, s=-S'*Xi and U=psi+T*s.
+//! Every original modulus knot participates in affine admission; derivative
+//! jumps refuse. Affine S adds no fixed-strain heat-capacity correction.
+//! Relaxation times and caloric heat capacity may depend on temperature.
+//! At fixed reference pressure/density, chart h changes are caloric internal
+//! energy changes. Thermal eigenstrain, phase changes and volume work remain
+//! unsupported. Endpoint integration can create numerical entropy; it is not
+//! physical dashpot heating or a proof of exact adiabatic entropy conservation.
 
 use core::{convert::Infallible, fmt};
 
@@ -175,6 +179,9 @@ pub struct CaloricPoint<'a> {
     volume_m3: f64,
     surface_area_m2: f64,
     time_s: f64,
+    modulus_slope_per_k: f64,
+    mechanical_entropy_j_k: f64,
+    mechanical_internal_energy_j: f64,
 }
 
 /// A complete proposed endpoint and the actual accepted transport-owner result.
@@ -191,18 +198,26 @@ pub struct FeedbackStep<'a, R> {
     /// control it is the original law's mechanical work times reference volume.
     pub external_mechanical_work_j: f64,
     /// Original Maxwell endpoint audit, in J/m3; not recomputed by this adapter.
+    /// Its spring storage is FREE energy. The terms below complete the caloric account.
     pub mechanical_energy: Energy,
+    /// Change in mechanical internal energy psi+T*s, including all retained branches [J].
+    pub mechanical_internal_energy_change_j: f64,
+    /// Change in the mechanical entropy contribution T*s to internal energy [J].
+    pub mechanical_entropy_energy_change_j: f64,
+    /// Signed reversible exchange with caloric storage, distinct from dashpot loss [J].
+    pub reversible_heat_j: f64,
     /// Final thermal proposal, including its concrete report and boundary heat.
     pub transport: UniformEnthalpyStep<R>,
     pub iterations: usize,
-    /// Physical dissipation supplied to the final thermal proposal [J].
+    /// Physical dashpot heat PLUS signed reversible exchange supplied to the
+    /// final thermal proposal [J]. May be negative. Numerical loss is excluded.
     pub applied_heat_j: f64,
-    /// Mismatch against dissipation reevaluated at the final temperature [J].
+    /// Mismatch against total material heat reevaluated at the final temperature [J].
     pub heat_defect_j: f64,
     pub temperature_defect_k: f64,
-    /// m delta_h - final physical dissipation - external heat [J].
+    /// m delta_h - dashpot heat - reversible exchange - external heat [J].
     pub thermal_residual_j: f64,
-    /// delta_elastic + m delta_h + numerical_loss - imposed work - heat [J].
+    /// delta_internal + m delta_h + numerical_loss - imposed work - external heat [J].
     pub combined_residual_j: f64,
 }
 
@@ -211,8 +226,8 @@ impl<'a> CaloricPoint<'a> {
     /// Its temperature must exactly match the supplied caloric coordinate.
     ///
     /// # Errors
-    /// Refuses non-solid/variable-density caloric charts, temperature-dependent
-    /// spring energy or free strain, inconsistent mass/volume, and invalid state.
+    /// Refuses non-solid/variable-density caloric charts, non-affine spring
+    /// multipliers, changing free strain, inconsistent mass/volume, and invalid state.
     pub fn try_new(point: Point<'a>, curve: &'a EquilibriumEnthalpyPhaseCurve,
         specific_enthalpy_j_kg: f64, mass_kg: f64, volume_m3: f64,
         surface_area_m2: f64) -> Result<Self, FeedbackError> {
@@ -224,10 +239,14 @@ impl<'a> CaloricPoint<'a> {
         }
         let knots = &point.law.knots;
         let reference = knots[0];
-        if knots.iter().any(|k| k.modulus_scale != reference.modulus_scale
-            || k.free_strain != reference.free_strain) {
-            return Err(FeedbackError::Invalid("temperature-dependent spring energy or eigenstrain needs a coupled caloric law"));
+        if knots.iter().any(|k| k.free_strain != reference.free_strain) {
+            return Err(FeedbackError::Invalid("thermal eigenstrain needs its own coupled caloric law"));
         }
+        let modulus_knots: Vec<_> = knots.iter()
+            .map(|k| (k.temperature_k, k.modulus_scale)).collect();
+        let modulus_slope_per_k = crate::state_point::affine_temperature_slope(
+            &modulus_knots, reference.temperature_k, reference.modulus_scale)
+            .map_err(FeedbackError::Invalid)?;
         let density = curve.knots()[0].bulk_density_kg_m3;
         let represented_mass = product(volume_m3, density)?;
         if (represented_mass / mass_kg - 1.0).abs() > 32.0 * f64::EPSILON
@@ -242,7 +261,10 @@ impl<'a> CaloricPoint<'a> {
             || !point.stored_energy_j_m3().is_finite() {
             return Err(FeedbackError::Invalid("mechanical history and caloric temperature must match"));
         }
-        Ok(Self { point, curve, state, mass_kg, volume_m3, surface_area_m2, time_s: 0.0 })
+        let (mechanical_entropy_j_k, mechanical_internal_energy_j) =
+            thermodynamics(&point, modulus_slope_per_k, volume_m3)?;
+        Ok(Self { point, curve, state, mass_kg, volume_m3, surface_area_m2, time_s: 0.0,
+            modulus_slope_per_k, mechanical_entropy_j_k, mechanical_internal_energy_j })
     }
 
     #[must_use]
@@ -257,6 +279,15 @@ impl<'a> CaloricPoint<'a> {
     pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
     #[must_use]
     pub const fn time_s(&self) -> f64 { self.time_s }
+    /// Mechanical entropy from the admitted affine free energy, excluding the
+    /// independent caloric chart [J/K]. This is a constitutive contribution,
+    /// not the total specimen entropy or an entropy-production receipt.
+    #[must_use]
+    pub const fn mechanical_entropy_j_k(&self) -> f64 { self.mechanical_entropy_j_k }
+    /// Mechanical internal energy psi+T*s [J], including retained branch state.
+    /// Add the caloric energy with its declared reference to form total storage.
+    #[must_use]
+    pub const fn mechanical_internal_energy_j(&self) -> f64 { self.mechanical_internal_energy_j }
     /// Original declared material strain-rate ceiling [1/s], also applicable
     /// to the initial velocity of a structural owner using this specimen.
     #[must_use]
@@ -316,7 +347,7 @@ impl<'a> CaloricPoint<'a> {
         for iteration in 1..=config.max_iterations {
             poll(&mut cancelled)?;
             let trial = control.propose(&self.point, temperature, duration_s, material_tolerance)?;
-            let applied_heat_j = product(self.volume_m3, trial.energy.dissipated)?;
+            let applied_heat_j = self.transfer(&trial)?.heat_j;
             let proposal = transport(UniformEnthalpyStepInput { curve: self.curve, initial: self.state,
                 mass_kg: self.mass_kg, volume_m3: self.volume_m3, surface_area_m2: self.surface_area_m2,
                 internal_heat_j: applied_heat_j, duration_s }).map_err(FeedbackError::Transport)?;
@@ -337,7 +368,8 @@ impl<'a> CaloricPoint<'a> {
             }
             let final_temperature = proposal.state.temperature_k();
             let mechanical = control.propose(&self.point, final_temperature, duration_s, material_tolerance)?;
-            let actual_heat = product(self.volume_m3, mechanical.energy.dissipated)?;
+            let exchange = self.transfer(&mechanical)?;
+            let actual_heat = exchange.heat_j;
             let thermal_residual = finite(thermal_change - actual_heat - proposal.external_heat_j)?;
             let target = control.target_stress(mechanical.point.total_strain())?;
             let stress_residual_pa = target.map(|(stress, _)| finite(mechanical.stress_pa-stress)).transpose()?;
@@ -347,7 +379,7 @@ impl<'a> CaloricPoint<'a> {
                     mechanical.point.total_strain() - self.point.total_strain())?,
             };
             let external_mechanical_work_j = product(self.volume_m3, work_density)?;
-            let combined_residual = finite(product(self.volume_m3, mechanical.energy.stored_change)?
+            let combined_residual = finite(exchange.internal_change_j
                 + thermal_change + product(self.volume_m3, mechanical.energy.numerical_dissipation)?
                 - external_mechanical_work_j - proposal.external_heat_j)?;
             defects = [(final_temperature - temperature).abs(), (actual_heat - applied_heat_j).abs(),
@@ -357,9 +389,15 @@ impl<'a> CaloricPoint<'a> {
                 poll(&mut cancelled)?;
                 let next = Self { point: mechanical.point, curve: self.curve, state: proposal.state,
                     mass_kg: self.mass_kg, volume_m3: self.volume_m3,
-                    surface_area_m2: self.surface_area_m2, time_s: final_time };
+                    surface_area_m2: self.surface_area_m2, time_s: final_time,
+                    modulus_slope_per_k: self.modulus_slope_per_k,
+                    mechanical_entropy_j_k: exchange.entropy_j_k,
+                    mechanical_internal_energy_j: exchange.internal_energy_j };
                 return Ok(FeedbackStep { next, control, stress_residual_pa, external_mechanical_work_j,
                     mechanical_energy: mechanical.energy, transport: proposal,
+                    mechanical_internal_energy_change_j: exchange.internal_change_j,
+                    mechanical_entropy_energy_change_j: exchange.entropy_energy_change_j,
+                    reversible_heat_j: exchange.reversible_heat_j,
                     iterations: iteration, applied_heat_j, heat_defect_j: defects[1],
                     temperature_defect_k: defects[0], thermal_residual_j: defects[2], combined_residual_j: defects[3] });
             }
@@ -370,6 +408,47 @@ impl<'a> CaloricPoint<'a> {
             temperature_defect_k: defects[0], heat_defect_j: defects[1],
             thermal_residual_j: defects[2], combined_residual_j: defects[3] })
     }
+
+    fn transfer<E>(&self, step: &super::Step<'_>) -> Result<ThermalExchange, FeedbackError<E>> {
+        let (entropy_j_k, internal_energy_j) = thermodynamics(&step.point,
+            self.modulus_slope_per_k, self.volume_m3)?;
+        let entropy_energy_change_j = if self.modulus_slope_per_k == 0.0 { 0.0 } else {
+            finite(product(step.point.temperature_k(), entropy_j_k)?
+                - product(self.point.temperature_k(), self.mechanical_entropy_j_k)?)?
+        };
+        // The original native balance is delta(psi)+D+N=W+C_psi.
+        // Adding delta(T*s) gives internal energy; caloric exchange cancels
+        // C_psi+delta(T*s), with numerical loss N never supplied to transport.
+        let reversible_heat_j = finite(-product(self.volume_m3, step.energy.modulus_work)?
+            - entropy_energy_change_j)?;
+        let dissipated_j = product(self.volume_m3, step.energy.dissipated)?;
+        if dissipated_j < 0.0 {
+            return Err(FeedbackError::Invalid("native Maxwell dissipation must be nonnegative"));
+        }
+        Ok(ThermalExchange { entropy_j_k, internal_energy_j,
+            internal_change_j: finite(internal_energy_j - self.mechanical_internal_energy_j)?,
+            entropy_energy_change_j, reversible_heat_j,
+            heat_j: finite(dissipated_j + reversible_heat_j)? })
+    }
+}
+
+struct ThermalExchange {
+    entropy_j_k: f64,
+    internal_energy_j: f64,
+    internal_change_j: f64,
+    entropy_energy_change_j: f64,
+    reversible_heat_j: f64,
+    heat_j: f64,
+}
+
+fn thermodynamics<E>(point: &Point<'_>, slope_per_k: f64, volume_m3: f64)
+    -> Result<(f64, f64), FeedbackError<E>> {
+    let entropy_j_k = if slope_per_k == 0.0 { 0.0 } else {
+        product(volume_m3, product(-slope_per_k, point.unscaled_storage())?)?
+    };
+    let internal_energy_j = finite(product(volume_m3, point.stored_energy_j_m3())?
+        + product(point.temperature_k(), entropy_j_k)?)?;
+    Ok((entropy_j_k, internal_energy_j))
 }
 
 fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }

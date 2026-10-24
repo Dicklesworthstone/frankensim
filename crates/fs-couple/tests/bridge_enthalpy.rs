@@ -132,6 +132,49 @@ fn numerical_loss_does_not_heat_a_lossless_beam() {
 }
 
 #[test]
+fn affine_spring_material_cools_original_spatial_cells_and_changes_sag_without_dashpots() {
+    let slope=-0.005;
+    let m=[0.05,0.5].map(|cp|material_with_affine_scale(cp,0.0,0.05,0.0,
+        vec![(280.0,0.002),(320.0,0.002)],None,vec![(280.0,0.1),(320.0,0.1)],slope));
+    let (heat,bridge)=initial_bridge(&m,1.0);
+    let next=step_candidate(&heat,&bridge,&map(&m),0.2,1.0,&[0.1;2],solve_config(),&[0.0;4],coefficients,||false).unwrap();
+    let r=next.report();
+    assert_eq!(r.mechanical.energy_j.dissipated,0.0);
+    assert_eq!(r.mechanical.energy_j.modulus_work,0.0,"initial springs are stress-free");
+    assert!(r.mechanical.energy_j.numerical_dissipation>0.0);
+    assert!(r.reversible_heat_j<0.0 && r.deposited_heat_j<0.0);
+    near(r.deposited_heat_j,r.reversible_heat_j,1e-12);
+    near(next.thermal().energy_j()-heat.energy_j(),r.deposited_heat_j,1e-9);
+    let mut expected_u=0.0;let mut expected_ts=0.0;
+    for (i,cell) in next.bridge().cells().iter().enumerate() {
+        for (j,&layer) in LAYERS.iter().enumerate() {
+            let t=next.thermal().temperature_k(HEAT[i][j]).unwrap();
+            assert!(t<300.0);
+            // Independent oracle for the authored S(T), evaluated at the actual
+            // original Gauss histories. This fixture starts with U=s=0.
+            for point in cell.section().layers()[&layer].material_points() {
+                let xi=point.stored_energy_j_m3()/(1.0+slope*(t-300.0));
+                let weight=0.5*AREA*cell.length_m();
+                expected_u+=weight*(1.0-300.0*slope)*xi;
+                expected_ts+=weight*(-slope)*t*xi;
+            }
+        }
+    }
+    near(r.mechanical_internal_energy_change_j,expected_u,1e-12);
+    near(r.mechanical_entropy_energy_change_j,expected_ts,1e-12);
+    near(r.reversible_heat_j+expected_ts,0.0,1e-12);
+    near(expected_u+next.thermal().energy_j()+r.mechanical.energy_j.numerical_dissipation
+        -r.mechanical.load_work_j,0.0,solve_config().feedback.total_energy_tolerance_j);
+    let constant=materials(0.002,0.0);let (old_heat,old_beam)=initial_bridge(&constant,1.0);
+    let baseline=step_candidate(&old_heat,&old_beam,&map(&constant),0.2,1.0,&[0.1;2],solve_config(),&[0.0;4],coefficients,||false).unwrap();
+    assert!((next.bridge().deformed_position_m(LENGTH,0.0).unwrap()[1]
+        -baseline.bridge().deformed_position_m(LENGTH,0.0).unwrap()[1]).abs()>1e-9);
+    assert_eq!(next.bridge().mass_kg(),bridge.mass_kg());
+    assert_eq!(next.bridge().mass_kg(),baseline.bridge().mass_kg());
+    assert_eq!(heat.time_s(),0.0);assert_eq!(bridge.time_s(),0.0);
+}
+
+#[test]
 fn unloading_retains_spatial_memory_and_closes_the_whole_history() {
     let m=materials(0.002,3e8); let (heat,bridge)=initial_bridge(&m,1.0);
     let context=point(300.0); let key=key(); let cells=transport_cells(&m,&context,&key);

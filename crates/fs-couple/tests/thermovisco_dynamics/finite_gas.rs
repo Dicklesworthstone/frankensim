@@ -95,7 +95,8 @@ fn gas_solve() -> GasEnergySolve {
 fn exchange(bracket: f64) -> HeatExchangeSolve {
     HeatExchangeSolve {
         heat_bracket_j: [-bracket, bracket], source_tolerance_j: 1e-12,
-        energy_tolerance_j: 1e-9, maximum_iterations: 64,
+        // An inner thermal report cannot exceed its enclosing material gate.
+        energy_tolerance_j: config().feedback.energy_tolerance_j, maximum_iterations: 64,
     }
 }
 fn boundary(source: &Sources, film: f64) -> LumpedThermalEnvironment {
@@ -177,7 +178,7 @@ fn g1_finite_source_gas_matches_two_capacity_solution_and_opposite_heat() {
 #[test]
 fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() {
     scope(|cx, gate| {
-        let source = sources(0.02, 1000.0, true, true);
+        let source = sources_with_modulus_slope(0.02, 1000.0, true, true, None, -0.005);
         let initial = Oscillator::try_new(&source.mechanical, &source.caloric,
             geometry(0.0), 300.0, 0.0, 0.5).unwrap();
         let mut states = [initial.clone(), initial.clone()];
@@ -185,6 +186,7 @@ fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() 
         let original_gases = gases.clone();
         let body = boundary(&source, 100.0);
         let mut numerical = [0.0; 2];
+        let mut reversible = [0.0; 2];
         let mut max_velocity_difference = 0.0_f64;
         for _ in 0..32 {
             for index in 0..2 {
@@ -203,10 +205,20 @@ fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() 
                 ).unwrap();
                 assert_eq!(step.next.point().mechanical(), &expected.point);
                 assert!(step.material_heat_j >= 0.0);
+                close(step.applied_material_heat_j,
+                    step.material_heat_j + step.reversible_material_heat_j,
+                    config().feedback.energy_tolerance_j);
+                close(step.reversible_material_heat_j
+                    + old.point().volume_m3() * step.material_energy.modulus_work
+                    + step.mechanical_entropy_energy_change_j, 0.0, 1e-12);
+                close(step.next.point().mechanical_internal_energy_j()
+                    - old.point().mechanical_internal_energy_j(),
+                    step.material_internal_energy_change_j, 1e-12);
                 assert_eq!(step.transport.external_heat_j,
                     -step.transport.report.solid_to_gas_heat_j);
                 assert!(step.transport.report.combined_energy_residual_j.abs() <= exchange(8e-4).energy_tolerance_j);
                 numerical[index] += step.numerical_loss_j;
+                reversible[index] += step.reversible_material_heat_j.abs();
                 gases[index] = step.transport.report.next_gas;
                 states[index] = step.next;
             }
@@ -225,10 +237,11 @@ fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() 
                 * (gases[index].state().specific_internal_energy_j_kg()
                     - original_gases[index].state().specific_internal_energy_j_kg());
             let stored = state.kinetic_energy_j()
-                + state.point().volume_m3() * state.point().mechanical().stored_energy_j_m3()
+                + state.point().mechanical_internal_energy_j()
                 + body_storage + gas_storage;
             close(stored + numerical[index], initial.kinetic_energy_j(), 5e-8);
             assert!(numerical[index] > 0.0, "BE loss is an explicit nonthermal account");
+            assert!(reversible[index] > 0.0, "stiffness and strain changes exchange reversible heat");
         }
     });
 }
@@ -280,7 +293,7 @@ fn g3_insulation_preserves_original_motion_and_radiation_stays_external() {
 #[test]
 fn g4_failed_finite_gas_trials_and_late_cancellation_preserve_both_owners() {
     scope(|cx, gate| {
-        let source = sources(0.02, 1000.0, true, true);
+        let source = sources_with_modulus_slope(0.02, 1000.0, true, true, None, -0.005);
         let initial = Oscillator::try_new(&source.mechanical, &source.caloric,
             geometry(0.0), 300.0, 0.0, 0.5).unwrap();
         let old = initial.step(0.0, 0.00005, config(), adiabatic, gate).unwrap().next;
