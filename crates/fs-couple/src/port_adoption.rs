@@ -65,12 +65,14 @@ pub(crate) struct ModulePorts {
     integrated: OnceLock<Result<Vec<IntegratedWindowTransfer>, CoupleError>>,
 }
 
-/// Actual signed work/heat on one port. `None` denotes a mechanical exchange;
-/// a thermal exchange carries the owner's actual discrete effort temperature.
+/// Actual signed work/heat on one port. A thermal exchange retains either the
+/// owner's discrete effort temperature or its integrated temperature-profile
+/// entropy. A mechanical exchange carries neither.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PortTransfer {
     pub(crate) energy_j: f64,
     pub(crate) temperature_k: Option<f64>,
+    heat_entropy_j_k: Option<f64>,
     pub(crate) boundary: bool,
 }
 impl PortTransfer {
@@ -78,6 +80,7 @@ impl PortTransfer {
         Self {
             energy_j,
             temperature_k: None,
+            heat_entropy_j_k: None,
             boundary,
         }
     }
@@ -85,6 +88,20 @@ impl PortTransfer {
         Self {
             energy_j,
             temperature_k: Some(temperature_k),
+            heat_entropy_j_k: None,
+            boundary: true,
+        }
+    }
+    /// Aggregate actual accepted heat increments and their sum of Q/T. The
+    /// physical owner retains the substep temperatures and sources. Sign-changing
+    /// heat can have zero net energy and nonzero entropy; no effective single
+    /// temperature is inferred. Typed transfer admission still rejects nonfinite
+    /// energy or entropy.
+    pub(crate) fn heat_profile(energy_j: f64, entropy_j_k: f64) -> Self {
+        Self {
+            energy_j,
+            temperature_k: None,
+            heat_entropy_j_k: Some(entropy_j_k),
             boundary: true,
         }
     }
@@ -206,7 +223,8 @@ impl ModulePorts {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    transfer(p.energy_j, p.temperature_k, &interval, &format!("port/{i}"))
+                    transfer(p.energy_j, p.temperature_k, p.heat_entropy_j_k,
+                        &interval, &format!("port/{i}"))
                 })
                 .collect()
         }))
@@ -291,7 +309,7 @@ impl ModulePorts {
                 base.conservation_roles().iter().copied(),
             )?;
             manifest.push(boundary_entry(&port, key, &interval)?);
-            values.push((key.into(), transfer(energy, None, &interval, key)?));
+            values.push((key.into(), transfer(energy, None, None, &interval, key)?));
         }
         let charge = WindowChargeSchema::ProvenNeutral {
             projection_evidence: evidence(
@@ -425,11 +443,12 @@ fn boundary_entry(
 fn transfer(
     energy: f64,
     temperature: Option<f64>,
+    heat_entropy: Option<f64>,
     interval: &AccountingWindowInterval,
     key: &str,
 ) -> Result<IntegratedWindowTransfer, CoupleError> {
-    let (heat, temperature_reference) = match temperature {
-        Some(t) => {
+    let (heat, temperature_reference) = match (temperature, heat_entropy) {
+        (Some(t), None) => {
             if !t.is_finite() || t <= 0.0 {
                 return Err(CoupleError::NonPositiveBoundaryTemperature);
             }
@@ -447,10 +466,28 @@ fn transfer(
                 ),
             )
         }
-        None => (
+        (None, Some(entropy)) => (
+            entropy,
+            BoundaryTemperatureReference::profile(
+                id(&format!("accepted-substep-temperature-profile/{key}")),
+                evidence(
+                    interval,
+                    WindowEvidenceRole::BoundaryTemperature {
+                        contribution_id: id(key),
+                    },
+                    &format!("temperature-profile/{key}"),
+                ),
+            ),
+        ),
+        (None, None) => (
             0.0,
             BoundaryTemperatureReference::not_applicable(id("mechanical/no-heat-entropy")),
         ),
+        (Some(_), Some(_)) => {
+            return Err(CoupleError::AccountingWindowContextMismatch {
+                field: "adapter_temperature_representation",
+            });
+        }
     };
     IntegratedWindowTransfer::try_new(
         Energy::new(energy),
@@ -525,6 +562,40 @@ pub(crate) fn junction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_heat_profile_retains_entropy_when_net_heat_is_zero() {
+        // Equal heat enters at 600 K and leaves at 300 K. Net energy is zero,
+        // but the temperature profile transfers negative entropy and generates
+        // positive entropy inside the enclosing constant-storage system.
+        let entropy = 12.0 / 600.0 - 12.0 / 300.0;
+        let mut ports = ModulePorts::new("profile-test",
+            vec![("heat", PortKind::ThermalTemperatureEntropy)]);
+        let account = StepAccount {
+            tick: 1,
+            duration_s: 0.2,
+            storage_change_j: Some(0.0),
+            loss_j: Some(0.0),
+            included_work_j: 0.0,
+            entropy_change_j_k: 0.0,
+            tolerance_j: Some(1e-12),
+            unavailable: None,
+        };
+        ports.accept(account.clone(), [PortTransfer::heat_profile(0.0, entropy)]);
+        let transfers = ports.transfers().expect("admitted heat profile");
+        assert_eq!(transfers[0].energy_into().value(), 0.0);
+        assert_eq!(transfers[0].entropy_into().heat().value(), entropy);
+        let ModuleWindowAudit::Available(report) = ports.audit().unwrap() else {
+            panic!("profile account missing");
+        };
+        assert_eq!(report.residuals().first_law().value(), 0.0);
+        assert_eq!(report.residuals().entropy_generation().value(), -entropy);
+        assert!(report.violations().is_empty());
+        ports.accept(StepAccount { tick: 2, ..account },
+            [PortTransfer::heat_profile(0.0, f64::NAN)]);
+        assert!(ports.transfers().is_none());
+        assert!(ports.transfer_error().is_some());
+    }
 
     #[test]
     fn g0_observation_refusal_is_visible_and_next_acceptance_replaces_it() {

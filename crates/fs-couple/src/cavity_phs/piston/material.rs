@@ -140,6 +140,43 @@ impl MaterialGasPiston {
             |gas, thermal| layers.resolve(gas, thermal), cancelled)
     }
 
+    /// Refine chemistry, material heat and pressure work together while keeping
+    /// the original source-resolved rigid inertia and joint publication boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactive_thermal_subcycled_candidate<S, E>(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, kinetics: super::reactive::GasReactionSolve,
+        controls: PistonSolve, exchange: HeatExchangeSolve,
+        policy: super::reactive::thermal::subcycling::ReactiveThermalSubcycling,
+        resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::subcycling::ReactiveThermalSubcyclingCandidate<S, Self>,
+        super::reactive::thermal::ReactiveThermalPistonError<E>>
+    {
+        let candidate = self.piston.reactive_thermal_subcycled_candidate(reaction, input, thermal_body,
+            kinetics, controls, exchange, policy, resolve, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::thermal::ReactiveThermalPistonError::Cancelled); }
+        Ok(candidate)
+    }
+
+    /// Source-bound wall heat feeds the next chemical substep within the same
+    /// macro interval; the returned body heat and port account cover all steps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reactive_thermal_layers_subcycled_candidate(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, kinetics: super::reactive::GasReactionSolve,
+        controls: PistonSolve, exchange: HeatExchangeSolve,
+        policy: super::reactive::thermal::subcycling::ReactiveThermalSubcycling,
+        layers: MaterialConductionLayers<'_>, cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::subcycling::ReactiveThermalSubcyclingCandidate<ResolvedMaterialStatePoint, Self>,
+        super::reactive::thermal::ReactiveThermalPistonError<LayerConductionError>>
+    {
+        self.reactive_thermal_subcycled_candidate(reaction, input, thermal_body, kinetics, controls,
+            exchange, policy, |gas, thermal| layers.resolve(gas, thermal), cancelled)
+    }
+
     /// Keep the original material-derived inertia while reaction products drive
     /// the finite circuit/thermal network, reciprocal wall heat and motion.
     /// The network's thermal material state is explicit; it does not silently

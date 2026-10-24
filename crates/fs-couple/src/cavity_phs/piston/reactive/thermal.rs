@@ -5,6 +5,9 @@
 //! finite-body heat exchange together. Both stages approximate the same dt;
 //! chemistry is never repeated by a heat or momentum residual iteration.
 
+/// Bounded refinement of chemistry, wall heat and piston motion together.
+pub mod subcycling;
+
 use super::{
     GasPiston, GasReaction, GasReactionError, GasReactionSolve, GasReactionStep, PistonInput,
     PistonSolve,
@@ -26,6 +29,12 @@ pub enum ReactiveThermalPistonError<E> {
     Reaction(GasReactionError),
     /// The original heat, source-domain or mechanical owner refused a proposal.
     Thermal(ThermalPistonError<E>),
+    /// No error-admitted whole-system trajectory fits the explicit work limits.
+    SubcyclingLimit {
+        evaluations: usize,
+        substeps: usize,
+        last_error_ratio: Option<f64>,
+    },
     /// Cancellation before returning the joint candidate.
     Cancelled,
 }
@@ -53,6 +62,14 @@ impl<E: core::fmt::Display> core::fmt::Display for ReactiveThermalPistonError<E>
             Self::Invalid(message) => write!(f, "reactive gas/body coupling: {message}"),
             Self::Reaction(error) => write!(f, "reactive gas/body coupling: {error}"),
             Self::Thermal(error) => write!(f, "reactive gas/body coupling: {error}"),
+            Self::SubcyclingLimit {
+                evaluations,
+                substeps,
+                last_error_ratio,
+            } => write!(
+                f,
+                "reactive gas/body refinement exhausted after {evaluations} steps at mesh {substeps}, error {last_error_ratio:?}"
+            ),
             Self::Cancelled => write!(f, "reactive gas/body coupling cancelled"),
         }
     }
