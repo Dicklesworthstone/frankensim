@@ -4994,3 +4994,63 @@ pack, native modal stiffness/inertia scaling, spatial anisotropic material
 consumption, complete mechanical-source refusal, budgets, quantity-basis
 refusal and cancellation. Native Cargo execution is a separate gate; parsing
 and independent numerical oracles do not establish executed native test results.
+
+### Simultaneous implicit conservative reaction mechanisms
+
+`GasReaction::with_implicit_mechanism(implicit::coupled::ImplicitMechanismSolve)`
+solves every canonical reaction extent together with the existing
+`fs-solver::NewtonKrylovState`. The residual is
+`F_r = xi_r - dt V rate_r(n0 + S xi, U0, V)`. A trial reconstructs one original
+`ClosedGasParcel` at conserved mass, volume and total internal energy, then
+evaluates every original material rate and detailed-balance reverse closure at
+that same actual temperature, pressure and composition. NASA-9 formation energy
+is included once by the existing gas chart. No reaction heat source or new
+caloric/rate engine is introduced. Existing piston, flow/diffusion and finite
+thermal/electrical consumers select the method through their original
+`parcel_candidate` calls.
+
+Each channel has an explicit signed extent range keyed by its original reaction
+ID. Newton uses dimensionless extents/residuals normalized by the channel's
+largest absolute range endpoint. Physical acceptance separately checks every
+unscaled molar residual, source support, stoichiometric species balance, mass,
+total-U balance and entropy. A converged native solver report alone is
+insufficient. Canonical accumulation uses the explicit mechanism's compensated
+sum owner. The numerical Jacobian admits feasible centered/one-sided columns
+inside the stoichiometric positivity domain and caller ranges; it supplies the
+existing native Krylov/preconditioner interfaces and has no analytic tangent or
+adjoint authority. Negative-inventory/range trials request native globalization;
+missing source data, arithmetic failure, exhausted work or cancellation latch a
+hard refusal. Accepted species are never clipped.
+
+Initially absent intermediates can be produced and consumed in the same
+implicit interval. A conservative interior *initial guess* is built only on the
+reaction support reachable from the original species. Inaccessible reaction
+channels remain at zero extent, with their original rates and residuals still
+checked at acceptance. The seed is never published or counted as a physical
+burn. For this simultaneous method, the existing consumed-fraction control
+bounds gross withdrawals divided by original stock plus simultaneous channel
+production. Explicit and scalar integration retain their original-stock
+denominator. Source domains and finite representability can refuse an interior
+seed or derivative stencil; there is no guaranteed solve at every valid state.
+
+The original 32-channel bound remains. Outer attempts are capped at 128, total
+residual evaluations (including stencils/rejected trials) at 65536, and native
+restart/cycle counts at 32 each. Every gas inversion retains its own work bound.
+Cancellation is polled through physical work and native solver callbacks.
+Accepted gas and enclosing motion/heat history remain unchanged on any refusal.
+The report retains every channel's endpoint residual and the native nonlinear
+report. Existing dyadic refinement replays complete coupled trajectories; an
+aggregate report retains solved equations in its actual substeps instead of
+mislabeling summed extents as one nonlinear root.
+
+This is a first-order homogeneous backward-Euler reaction stage with the existing
+reaction-then-motion/heat split, not a validated combustion mechanism, flame or
+shock solver, equilibrium acoustic derivative, or nonlinear uniqueness/stability
+certificate. The scalar `with_implicit` API still accepts one reaction; it and
+the coupled method cannot be bound together. Direct manufactured regressions
+cover a stiff A/B/C chain against an independent matrix inverse, absent
+intermediate production/consumption, source-driven temperature/pressure/sound,
+inactive species, source/budget/cancellation refusals, native piston energy,
+replay and actual subcycling. Native Cargo/DSR execution was unavailable in this
+environment; source parsing and independent numerical references do not replace
+those gates.

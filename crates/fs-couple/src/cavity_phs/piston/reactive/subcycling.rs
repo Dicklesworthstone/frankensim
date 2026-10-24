@@ -212,6 +212,7 @@ fn summarize(
     // An aggregate extent is not the root of one endpoint equation. Preserve
     // each actual implicit residual only in its corresponding substep.
     report.implicit = None;
+    report.implicit_mechanism = None;
     let mut extents = vec![Sum::default(); 1 + report.additional_reactions.len()];
     let mut changes = vec![Sum::default(); report.species.len()];
     let before = law.inventory(initial)?;
@@ -291,4 +292,5 @@ fn compare(a: &Trajectory, b: &Trajectory, policy: ReactionSubcycling) -> Result
     }
     Ok(error)
 }
+
 

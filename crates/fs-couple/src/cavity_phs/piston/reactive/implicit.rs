@@ -6,15 +6,19 @@
 //! composition, T, p, transport and acoustic response at the SAME mass and
 //! total internal energy; formation enthalpy is never added again as heat.
 //!
-//! This bounded rung admits one reaction, including inerts and initially absent
+//! This scalar rung admits one reaction, including inerts and initially absent
 //! products. It is first order and can use the existing dyadic subcycling error
 //! estimate. It is not a coupled implicit mechanism, equilibrium projection,
 //! ignition-time accuracy certificate or unconditional nonlinear stability
 //! theorem. Source support is required at all queried bracket states. The
 //! accepted state must independently pass the existing entropy/balance gates.
+//! Use [`coupled`] for the simultaneous multi-reaction endpoint equations.
 
 use super::*;
 use crate::cavity_phs::piston::thermal::feedback::{self, ScalarError};
+
+/// Simultaneous endpoint extents on the native Newton--Krylov owner.
+pub mod coupled;
 
 /// Opt-in endpoint integration, retained across all existing gas consumers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,7 +66,7 @@ impl GasReaction {
     /// no channel is silently omitted or advanced by a different time policy.
     pub fn with_implicit(mut self, policy: ImplicitReactionSolve) -> Result<Self, GasReactionError> {
         policy.validate()?;
-        if self.implicit.is_some() || !self.additional_channels.is_empty() {
+        if self.implicit.is_some() || self.implicit_mechanism.is_some() || !self.additional_channels.is_empty() {
             return Err(invalid("implicit extent requires one reaction without an existing implicit policy"));
         }
         self.implicit = Some(policy);
@@ -178,3 +182,4 @@ pub(super) fn candidate(
     poll(cancelled)?;
     Ok(result)
 }
+

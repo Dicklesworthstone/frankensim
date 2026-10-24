@@ -2,7 +2,7 @@
 //!
 //! The existing mass-action owner supplies `r(T, p_i/p0)` in mol/(m3 s).
 //! By default `dξ_r = dt V r_r` uses the accepted initial rate; the optional
-//! single-reaction [`implicit`] path solves the endpoint rate instead. Both
+//! [`implicit`] paths solve the single or coupled endpoint rates instead. Both
 //! update `n_i' = n_i + sum_r ν_ir dξ_r` with the same conservative owner.
 //! The original gas owner reconstructs temperature at conserved mass, volume
 //! and TOTAL internal energy, including species formation references. Chemical
@@ -17,7 +17,7 @@
 //! consumption, source-domain, entropy and extensive-balance checks refuse
 //! an unresolved step instead of clipping species or renormalizing energy.
 //! Refine the interval to assess temporal error. No flame/shock propagation,
-//! heterogeneous chemistry, implicit multi-reaction mechanisms or equilibrium sound
+//! heterogeneous chemistry or equilibrium sound
 //! speed is claimed. The gas owner still enforces its dilute gas/T/p envelope.
 //!
 //! Control-volume species/energy convention:
@@ -61,6 +61,7 @@ pub struct GasReaction {
     additional_channels: Vec<mechanism::Channel>,
     subcycling: Option<subcycling::ReactionSubcycling>,
     implicit: Option<implicit::ImplicitReactionSolve>,
+    implicit_mechanism: Option<implicit::coupled::ImplicitMechanismSolve>,
 }
 
 /// Physical step admission. Consumption is measured from actual reacting
@@ -69,7 +70,10 @@ pub struct GasReaction {
 pub struct GasReactionSolve {
     /// Original fixed-density internal-energy reconstruction controls.
     pub gas: GasEnergySolve,
-    /// Maximum gross fraction consumed across ALL channels per admitted substep, in `(0,1)`.
+    /// Maximum fraction withdrawn across ALL channels per substep, in `(0,1)`.
+    /// Explicit/scalar steps use the original inventory. Coupled implicit steps
+    /// also count simultaneous production as available stock, so an intermediate
+    /// can be produced and consumed within the same endpoint solve.
     pub maximum_consumed_fraction: f64,
     /// Maximum discrepancy of any final `n_i` from its stoichiometric value [mol].
     pub species_tolerance_mol: f64,
@@ -100,6 +104,8 @@ pub enum GasReactionError {
     ImplicitOutsideBracket { lower_residual_mol: f64, upper_residual_mol: f64 },
     /// Bounded nonlinear work ended before the amount residual was admitted.
     ImplicitNotConverged { iterations: usize, residual_mol: f64 },
+    /// Total coupled endpoint/Jacobian work, including rejected trials, is spent.
+    ImplicitEvaluationLimit { evaluations: usize, maximum: usize },
     Cancelled,
 }
 impl core::fmt::Display for GasReactionError {
@@ -189,6 +195,9 @@ pub struct GasReactionStep {
     /// Endpoint equation for one implicit step. A subcycled summary leaves this
     /// None and retains each original equation in its actual substeps instead.
     pub implicit: Option<implicit::ImplicitReactionReport>,
+    /// Coupled endpoint equations, distinct from the legacy scalar bracket.
+    /// Subcycling retains these only in each actual accepted substep.
+    pub implicit_mechanism: Option<implicit::coupled::ImplicitMechanismReport>,
 }
 
 /// A proposed gas state usable by the existing flow, thermal and acoustic paths.
@@ -243,7 +252,7 @@ impl GasReaction {
                 "declared species molar masses do not conserve reaction mass within roundoff",
             ));
         }
-        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new(), subcycling: None, implicit: None })
+        Ok(Self { catalog, kinetics, rate_material: None, additional_channels: Vec::new(), subcycling: None, implicit: None, implicit_mechanism: None })
     }
     pub const fn catalog(&self) -> &ThermochemicalGasModel {
         &self.catalog
@@ -348,6 +357,9 @@ impl GasReaction {
         }
         if let Some(policy) = self.implicit {
             return implicit::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
+        }
+        if let Some(policy) = &self.implicit_mechanism {
+            return implicit::coupled::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
         }
         let initial = self.inventory(gas)?;
         let progress = self.progress(gas, &initial, duration_s, controls, &mut cancelled)?;
@@ -459,6 +471,7 @@ impl GasReaction {
                 entropy_change_j_k: entropy,
                 subcycling: None,
                 implicit: None,
+                implicit_mechanism: None,
             },
             gas: next,
         })
@@ -592,4 +605,5 @@ impl GasPiston {
 
 #[cfg(test)]
 mod tests;
+
 

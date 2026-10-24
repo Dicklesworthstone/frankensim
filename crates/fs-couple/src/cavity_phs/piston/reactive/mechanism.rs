@@ -5,7 +5,8 @@
 //! reconstructs temperature/composition once. A channel cannot consume species
 //! just produced by another channel in this explicit interval. Gross consumed
 //! amounts across signed net channel extents are bounded by the original stock.
-//! This is first-order integration, not a stiff or equilibrium chemistry solve.
+//! This is the default first-order explicit path. The optional
+//! `implicit::coupled` path evaluates all channels at one solved endpoint.
 
 use super::*;
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -64,7 +65,7 @@ impl GasReaction {
         if reactions.len() == 1 {
             return Ok(reactions.into_iter().next().expect("nonempty admitted mechanism"));
         }
-        if reactions.iter().any(|r| r.subcycling.is_some() || r.implicit.is_some()) {
+        if reactions.iter().any(|r| r.subcycling.is_some() || r.implicit.is_some() || r.implicit_mechanism.is_some()) {
             return Err(invalid("combine channels before binding one shared integration policy"));
         }
         let catalog = &reactions[0].catalog;
@@ -82,7 +83,7 @@ impl GasReaction {
         let mut inputs = reactions.into_iter();
         let first = inputs.next().expect("nonempty admitted mechanism");
         if count == 1 { return Ok(first); }
-        let GasReaction { catalog, kinetics, rate_material, additional_channels, subcycling: _, implicit: _ } = first;
+        let GasReaction { catalog, kinetics, rate_material, additional_channels, subcycling: _, implicit: _, implicit_mechanism: _ } = first;
         let mut channels = Vec::with_capacity(count);
         channels.push(Channel { kinetics, rate_material });
         channels.extend(additional_channels);
@@ -97,7 +98,7 @@ impl GasReaction {
         let mut channels = channels.into_iter();
         let primary = channels.next().expect("admitted channel count");
         Ok(Self { catalog, kinetics: primary.kinetics, rate_material: primary.rate_material,
-            additional_channels: channels.collect(), subcycling: None, implicit: None })
+            additional_channels: channels.collect(), subcycling: None, implicit: None, implicit_mechanism: None })
     }
 
     /// Original immutable kinetic laws and source bindings, in canonical order.
@@ -133,9 +134,9 @@ pub(super) struct Progress {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sum { value: f64, correction: f64 }
+pub(super) struct Sum { pub(super) value: f64, correction: f64 }
 impl Sum {
-    fn add(&mut self, term: f64) -> Result<(), GasReactionError> {
+    pub(super) fn add(&mut self, term: f64) -> Result<(), GasReactionError> {
         let adjusted = term - self.correction;
         let next = self.value + adjusted;
         let correction = (next - self.value) - adjusted;
@@ -231,4 +232,5 @@ impl GasReaction {
             additional: reports.collect(), changes: changes.into_iter().map(|x| x.value).collect(), expected, consumed })
     }
 }
+
 
