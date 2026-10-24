@@ -1,8 +1,9 @@
 //! Lower field-derived self/mutual inductance into the original circuit DAE.
 //!
 //! Winding current orientation is the original graph branch's first-to-second
-//! terminal direction. Flux linkage lambda and current i obey lambda=L*i,
-//! including the separately declared end/leakage self-inductance. All capacitor
+//! terminal direction. Total linkage is lambda=lambda0+L*i; the native circuit
+//! retains incremental delta_lambda=L*i, including declared end/leakage
+//! self-inductance. Fixed lambda0 creates no spurious voltage or current. All capacitor
 //! storage, Kirchhoff stamps, algebraic constraints, ports, initial-condition
 //! solves and time stepping remain owned by fs-phs. This module adds no circuit
 //! solver or time integrator.
@@ -13,13 +14,14 @@ use crate::{
     transfer::{CellSample, PlanarFrame},
 };
 use fs_phs::{
-    DescriptorPortHamiltonian, QuadraticStorage,
+    DescriptorPortHamiltonian, QuadraticStorage, StepRecord,
     circuit::{Branch, CircuitDae, CircuitGraph, assemble_circuit},
 };
 
 /// The original circuit DAE with the exact field/material basis retained.
-/// The differential flux coordinates are mapped from original branch indices;
-/// their conjugate currents include every mutual term, not lambda_i/L_ii.
+/// Differential magnetic coordinates are INCREMENTAL linkage relative to the
+/// fixed zero-current magnet state. They map from original branch indices;
+/// conjugate currents include every mutual term, not delta_lambda_i/L_ii.
 pub struct WindingCircuit<'a> {
     basis: PlanarWindingBasis<'a>,
     dae: CircuitDae,
@@ -192,7 +194,11 @@ impl WindingCircuit<'_> {
     pub fn basis(&self) -> &PlanarWindingBasis<'_> {
         &self.basis
     }
-    /// Existing circuit owner: use its consistency solve and audited step.
+    /// Existing circuit owner in incremental linkage coordinates. Its energy
+    /// is relative to the zero-current magnet state. For permanent magnets use
+    /// this wrapper's checked initialization/step so physical recoil envelopes
+    /// are admitted before publishing a state; the raw DAE has no field-domain
+    /// policy of its own.
     pub fn dae(&self) -> &CircuitDae {
         &self.dae
     }
@@ -206,7 +212,8 @@ impl WindingCircuit<'_> {
     pub fn branch_indices(&self) -> &[usize] {
         &self.branch_indices
     }
-    /// Original extended-state flux coordinate corresponding to each winding.
+    /// Original extended-state INCREMENTAL flux coordinate for each winding.
+    /// Add `basis().bias_flux_linkages_wb()` only when reporting total linkage.
     pub fn flux_coordinates(&self) -> &[usize] {
         &self.flux_coordinates
     }
@@ -222,7 +229,7 @@ impl WindingCircuit<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f64>, WindingError> {
         poll(cancelled)?;
-        let flux = self.basis.flux_linkages_wb(currents_a)?;
+        let flux = self.basis.incremental_flux_linkages_wb(currents_a)?;
         if charges_c.len() != self.dae.charge_index.len()
             || inputs.len() != self.dae.ports
             || charges_c.iter().chain(inputs).any(|v| !v.is_finite())
@@ -231,6 +238,7 @@ impl WindingCircuit<'_> {
                 "complete finite capacitor charges and source ports are required",
             ));
         }
+        self.basis.admit_currents(currents_a, cancelled)?;
         let mut state = vec![0.0; self.dae.system.state_dim()];
         for (&index, &value) in self.flux_coordinates.iter().zip(&flux) {
             state[index] = value;
@@ -239,18 +247,68 @@ impl WindingCircuit<'_> {
             state[index] = value;
         }
         let result = self.dae.consistent_initial_state(&state, inputs)?;
+        self.admit_state(&result, cancelled)?;
         poll(cancelled)?;
         Ok(result)
     }
     /// Read physical terminal currents from a complete original circuit state.
     pub fn currents_a(&self, state: &[f64]) -> Result<Vec<f64>, WindingError> {
+        self.basis
+            .currents_from_incremental_flux_wb(&self.incremental_flux_linkages_wb(state)?)
+    }
+    /// Native delta_lambda=L*i [Wb], in winding order. Keeping this coordinate
+    /// avoids subtracting large permanent-flux offsets during every step.
+    pub fn incremental_flux_linkages_wb(&self, state: &[f64]) -> Result<Vec<f64>, WindingError> {
         if state.len() != self.dae.system.state_dim() || state.iter().any(|v| !v.is_finite()) {
             return Err(WindingError::Invalid(
                 "complete finite original circuit state is required",
             ));
         }
-        let flux: Vec<_> = self.flux_coordinates.iter().map(|&i| state[i]).collect();
-        self.basis.currents_a(&flux)
+        Ok(self.flux_coordinates.iter().map(|&i| state[i]).collect())
+    }
+    /// Total physical lambda=lambda0+delta_lambda [Wb], in winding order.
+    pub fn total_flux_linkages_wb(&self, state: &[f64]) -> Result<Vec<f64>, WindingError> {
+        let mut total = self.incremental_flux_linkages_wb(state)?;
+        for (value, &bias) in total.iter_mut().zip(self.basis.bias_flux_linkages_wb()) {
+            *value = super::finite(*value + bias)?;
+        }
+        Ok(total)
+    }
+    /// Native magnetic/capacitor storage plus the constant zero-current field
+    /// reference W0 [J]. Stepping uses the incremental energy directly so a
+    /// large W0 cannot obscure small electrical work through subtraction.
+    pub fn stored_energy_with_bias_j(&self, state: &[f64]) -> Result<f64, WindingError> {
+        self.incremental_flux_linkages_wb(state)?;
+        super::finite(self.dae.system.hamiltonian(state) + self.basis.bias_energy_j())
+    }
+    /// Validate actual reconstructed B/H on every original material cell.
+    /// This is source-domain admission, not a Kirchhoff consistency solve.
+    pub fn admit_state(
+        &self,
+        state: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WindingError> {
+        self.basis
+            .admit_currents(&self.currents_a(state)?, cancelled)
+    }
+    /// Advance through the existing audited circuit DAE, then admit the whole
+    /// endpoint field before returning it. Fixed recoil envelopes are convex
+    /// in current; admitted endpoints also admit their linear interpolation.
+    /// This does not bound the continuous physical trajectory between steps.
+    /// Failure/cancellation returns no accepted replacement for the input.
+    pub fn step_audited(
+        &self,
+        state: &[f64],
+        inputs: &[f64],
+        dt: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(StepRecord, f64), WindingError> {
+        poll(cancelled)?;
+        self.admit_state(state, cancelled)?;
+        let candidate = self.dae.step_audited(state, inputs, dt)?;
+        self.admit_state(&candidate.0.x, cancelled)?;
+        poll(cancelled)?;
+        Ok(candidate)
     }
     /// Reconstruct the field of an actual circuit state and use the original
     /// explicit geometry/frame transfer into moving-conductor/flow consumers.

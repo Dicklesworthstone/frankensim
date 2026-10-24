@@ -14,14 +14,18 @@
 //! inductance from the actual field/material geometry. The full magnetic
 //! storage block drives the existing Kirchhoff circuit DAE, with explicit
 //! end/leakage data and circuit-state field reconstruction in the same frame.
+//! Fixed-remanence windings additionally retain their zero-current field and
+//! total-flux offset. Native circuit coordinates remain incremental linkage;
+//! actual reconstructed fields and accepted Ohmic/circuit endpoints must stay
+//! within every original recoil envelope.
 //!
 //! Explicit geometry/frame correspondence transfers the computed field into
 //! existing moving-conductor/current/heat/flow owners. That coupling is one-way
 //! in the low-induction regime: their induced currents do not update this field.
 //! `planar::eddy` additionally retains stationary planar induction history and
 //! spatial Ohmic heat, including floating conductor current-return constraints.
-//! The homogeneous winding and induction owners refuse permanent-magnet bias
-//! until their source/storage trajectories account for it explicitly. There is
+//! The stationary induction-history owner still refuses permanent-magnet bias
+//! until its source/storage trajectory accounts for it explicitly. There is
 //! no nonlinear ferromagnetism, hysteresis, irreversible demagnetization, moving
 //! conductor induction feedback or distributed magnetostriction claim.
 //! [`force`] transfers a static field's closed exterior Maxwell-stress integral

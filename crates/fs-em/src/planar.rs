@@ -240,6 +240,41 @@ impl PlanarMagnetostatics {
         config: CheckedCgConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarField<'_>, MagneticError> {
+        self.solve_impl(
+            current_density_a_m2,
+            boundary_potential_wb_m,
+            config,
+            true,
+            cancelled,
+        )
+    }
+
+    // A derivative with respect to impressed current, not a realizable magnet
+    // operating state. It shares the exact operator but has no remanence RHS.
+    pub(crate) fn solve_response(
+        &self,
+        current_density_a_m2: &[f64],
+        boundary_potential_wb_m: &[(usize, f64)],
+        config: CheckedCgConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'_>, MagneticError> {
+        self.solve_impl(
+            current_density_a_m2,
+            boundary_potential_wb_m,
+            config,
+            false,
+            cancelled,
+        )
+    }
+
+    fn solve_impl(
+        &self,
+        current_density_a_m2: &[f64],
+        boundary_potential_wb_m: &[(usize, f64)],
+        config: CheckedCgConfig,
+        include_remanence: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'_>, MagneticError> {
         poll(cancelled)?;
         if current_density_a_m2.len() != self.mesh.faces().len()
             || !current_density_a_m2.iter().all(|v| v.is_finite())
@@ -262,7 +297,10 @@ impl PlanarMagnetostatics {
             for &vertex in face {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + load)?;
             }
-            if let Some(recoil) = &self.recoil_materials[cell] {
+            if let Some(recoil) = self.recoil_materials[cell]
+                .as_ref()
+                .filter(|_| include_remanence)
+            {
                 let br = recoil.remanence_t();
                 let source_h = [
                     finite(br[0] / self.permeability_h_m[cell])?,
@@ -329,7 +367,7 @@ impl PlanarMagnetostatics {
             }
             Some(result.report)
         };
-        let mut field = self.recover(potential, report, cancelled)?;
+        let mut field = self.recover_impl(potential, report, include_remanence, cancelled)?;
         field.impressed_current_density_a_m2 = Some(current_density_a_m2.to_vec());
         poll(cancelled)?;
         Ok(field)
@@ -387,12 +425,50 @@ impl PlanarMagnetostatics {
         Ok(prescribed)
     }
 
-    fn recover(
+    pub(crate) fn recover(
         &self,
         potential: Vec<f64>,
         report: Option<SolveReport>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarField<'_>, MagneticError> {
+        self.recover_impl(potential, report, true, cancelled)
+    }
+
+    /// Reconstruct an actual static field when the winding owner also retains
+    /// the corresponding source current. Generic induction recovery deliberately
+    /// does not establish this provenance for static force admission.
+    pub(crate) fn recover_static(
+        &self,
+        potential: Vec<f64>,
+        current_density_a_m2: Vec<f64>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'_>, MagneticError> {
+        if current_density_a_m2.len() != self.mesh.faces().len()
+            || current_density_a_m2.iter().any(|v| !v.is_finite())
+        {
+            return Err(MagneticError::Invalid(
+                "static field recovery requires complete finite impressed currents",
+            ));
+        }
+        let mut field = self.recover(potential, None, cancelled)?;
+        field.impressed_current_density_a_m2 = Some(current_density_a_m2);
+        poll(cancelled)?;
+        Ok(field)
+    }
+
+    fn recover_impl(
+        &self,
+        potential: Vec<f64>,
+        report: Option<SolveReport>,
+        include_remanence: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'_>, MagneticError> {
+        if potential.len() != self.mesh.vertices().len() || potential.iter().any(|v| !v.is_finite())
+        {
+            return Err(MagneticError::Invalid(
+                "field recovery requires complete finite nodal potentials",
+            ));
+        }
         let mut magnetic_flux_density_t = Vec::with_capacity(self.mesh.faces().len());
         let mut magnetic_field_a_m = Vec::with_capacity(self.mesh.faces().len());
         let mut cell_energy_j = Vec::with_capacity(self.mesh.faces().len());
@@ -414,13 +490,17 @@ impl PlanarMagnetostatics {
             let b = [grad[1], -grad[0]];
             let br = self.recoil_materials[cell]
                 .as_ref()
+                .filter(|_| include_remanence)
                 .map_or([0.0; 2], PlanarRecoilMaterial::remanence_t);
             let induced_b = [finite(b[0] - br[0])?, finite(b[1] - br[1])?];
             let h = [
                 finite(induced_b[0] / self.permeability_h_m[cell])?,
                 finite(induced_b[1] / self.permeability_h_m[cell])?,
             ];
-            let operating_point = if let Some(recoil) = &self.recoil_materials[cell] {
+            let operating_point = if let Some(recoil) = self.recoil_materials[cell]
+                .as_ref()
+                .filter(|_| include_remanence)
+            {
                 let n = recoil.direction();
                 let parallel = finite(n[0].mul_add(h[0], n[1] * h[1]))?;
                 let transverse = finite(n[0].mul_add(h[1], -n[1] * h[0]))?.abs();
@@ -460,6 +540,7 @@ impl PlanarMagnetostatics {
             recoil_operating_points,
             energy_j,
             report,
+            incremental_response: !include_remanence,
         })
     }
 
@@ -528,8 +609,8 @@ pub(crate) fn gradients(points: [[f64; 2]; 3]) -> Result<[[f64; 2]; 3], Magnetic
 /// state, where Br is zero for induced cells. The reference is explicit.
 pub struct PlanarField<'a> {
     pub(crate) problem: &'a PlanarMagnetostatics,
-    // Present only after a static solve. Induction recovery alone cannot
-    // establish a current-free integration contour for static Maxwell force.
+    // Present after a static solve or a winding's static superposition.
+    // Induction recovery alone cannot establish a current-free force contour.
     impressed_current_density_a_m2: Option<Vec<f64>>,
     potential_wb_m: Vec<f64>,
     magnetic_flux_density_t: Vec<[f64; 2]>,
@@ -538,6 +619,7 @@ pub struct PlanarField<'a> {
     recoil_operating_points: Vec<Option<RecoilOperatingPoint>>,
     energy_j: f64,
     report: Option<SolveReport>,
+    incremental_response: bool,
 }
 impl PlanarField<'_> {
     /// Original mesh, sources and coefficient state.
@@ -552,15 +634,17 @@ impl PlanarField<'_> {
     pub fn magnetic_flux_density_t(&self) -> &[[f64; 2]] {
         &self.magnetic_flux_density_t
     }
-    /// Actual cell H=(B-Br)/mu [A/m], from the same per-cell material. Br is
-    /// zero for induced-linear cells, with its original source retained above.
+    /// Physical H=(B-Br)/mu [A/m], or the derivative B/mu when
+    /// `is_incremental_response()` is true. Source data stay with the problem.
     pub fn magnetic_field_a_m(&self) -> &[[f64; 2]] {
         &self.magnetic_field_a_m
     }
-    /// Actual impressed J_z [A/m2] used by the static solve, in triangle order.
-    /// The same static provenance includes any retained, operating-admitted
-    /// recoil sources available through the original problem; zero J does
-    /// not imply absence of permanent magnetization.
+    /// Actual impressed J_z [A/m2] from a static solve or winding superposition,
+    /// in triangle order.
+    /// Actual fields also retain operating-admitted recoil sources through the
+    /// original problem; zero J does not imply absence of permanent magnetization.
+    /// Incremental responses omit remanence and do not establish a magnet's
+    /// operating field even when this current snapshot is present.
     /// Absent for fields recovered from induction history; that history does
     /// not establish the static, current-free exterior used by Maxwell force.
     pub fn impressed_current_density_a_m2(&self) -> Option<&[f64]> {
@@ -577,18 +661,26 @@ impl PlanarField<'_> {
     /// Reference of this field's constitutive storage. Remanence is held fixed;
     /// changing temperature or magnetization requires separate parameter work.
     pub fn energy_reference(&self) -> MagneticEnergyReference {
-        if self.problem.has_permanent_magnets() {
+        if !self.incremental_response && self.problem.has_permanent_magnets() {
             MagneticEnergyReference::FixedRemanence
         } else {
             MagneticEnergyReference::ZeroFlux
         }
     }
     /// Admitted physical H components and remaining source-envelope margins
-    /// per original triangle. These are numerical estimates, not field bounds.
+    /// per original triangle. Incremental responses have no operating-point
+    /// entries. These are numerical estimates, not certified field bounds.
     pub fn recoil_operating_points(&self) -> &[Option<RecoilOperatingPoint>] {
         &self.recoil_operating_points
     }
-    /// Recomputed free-DOF residual report; absent when all DOFs are prescribed.
+    /// Whether this is a current derivative with remanence omitted. An
+    /// incremental response has H=B/mu and no magnet operating-point claim;
+    /// its source limits apply only after combining it with the bias field.
+    pub fn is_incremental_response(&self) -> bool {
+        self.incremental_response
+    }
+    /// Recomputed free-DOF residual report. Absent when all DOFs are prescribed
+    /// or when a winding owner explicitly reconstructs accepted basis fields.
     pub fn report(&self) -> Option<&SolveReport> {
         self.report.as_ref()
     }

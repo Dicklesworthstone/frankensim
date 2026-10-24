@@ -10,6 +10,7 @@ use fs_em::{
         eddy::{EddyControls, PlanarEddy},
     },
     transfer::PlanarFrame,
+    winding::{PlanarWindingBasis, WindingConfig},
 };
 use fs_ga::{Mat3, Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -447,4 +448,71 @@ fn recovered_induction_history_is_not_silently_treated_as_a_static_field() {
             .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
             .is_err()
     );
+}
+
+#[test]
+fn unbiased_unit_current_response_remains_a_valid_static_force_field() {
+    let (problem, enclosed, body) = specimen(8, AMBIENT_MU, false, DEPTH);
+    let mut profile = vec![0.0; problem.mesh().faces().len()];
+    for cell in body {
+        let x_sum: f64 = problem.mesh().faces()[cell]
+            .iter()
+            .map(|&v| problem.mesh().vertices()[v as usize][0])
+            .sum();
+        profile[cell] = 1000.0 * x_sum.signum();
+    }
+    let bc = boundary(&problem, |_| 0.0);
+    let prescribed: Vec<_> = bc.iter().map(|&(v, _)| v).collect();
+    let winding = PlanarWindingBasis::new(
+        &problem,
+        vec![profile.clone()],
+        &prescribed,
+        vec![0.0],
+        WindingConfig {
+            max_windings: 1,
+            max_basis_values: 10000,
+            pairing_tolerance_h: 1e-8,
+            current_balance_tolerance_turns: 1e-8,
+            inverse_residual_tolerance: 1e-8,
+        },
+        config(),
+        &mut || false,
+    )
+    .unwrap();
+    let response = &winding.unit_fields()[0];
+    assert!(response.is_incremental_response());
+    assert!(!problem.has_permanent_magnets());
+    assert_eq!(
+        response.impressed_current_density_a_m2(),
+        Some(profile.as_slice())
+    );
+    let load = response
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
+    let direct = problem
+        .solve(&profile, &bc, config(), &mut || false)
+        .unwrap()
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
+    for (got, expected) in load.to_array().into_iter().zip(direct.to_array()) {
+        near(got, expected);
+    }
+    let actual = winding.field_for_currents(&[0.7], &mut || false).unwrap();
+    let currents: Vec<_> = profile.iter().map(|j| 0.7 * j).collect();
+    assert!(!actual.is_incremental_response());
+    assert_eq!(
+        actual.impressed_current_density_a_m2(),
+        Some(currents.as_slice())
+    );
+    let reconstructed = actual
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
+    let direct = problem
+        .solve(&currents, &bc, config(), &mut || false)
+        .unwrap()
+        .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
+        .unwrap();
+    for (got, expected) in reconstructed.to_array().into_iter().zip(direct.to_array()) {
+        near(got, expected);
+    }
 }
