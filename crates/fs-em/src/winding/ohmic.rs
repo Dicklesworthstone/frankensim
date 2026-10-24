@@ -11,6 +11,11 @@
 //! skin/proximity/eddy loss, movement and variable magnetic storage are not inferred.
 //! Changing the material data before preparation changes both field and resistance;
 //! during evolution only temperature may change, with permeability held constant.
+//! Explicit material replacement at an accepted time uses `rebind_material_candidate`:
+//! conserved flux/charge, refreshed fields/current/resistance and external work.
+
+mod rebind;
+pub use rebind::{WindingMaterialRebind, WindingMaterialRebindControls};
 
 use super::{WindingError, circuit::WindingCircuit};
 use crate::planar::MagneticError;

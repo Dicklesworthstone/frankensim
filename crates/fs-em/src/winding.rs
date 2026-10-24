@@ -111,6 +111,7 @@ fn finite(value: f64) -> Result<f64, WindingError> {
 /// H(lambda)=lambda^T L^-1 lambda/2; terminal currents are L^-1 lambda.
 pub struct PlanarWindingBasis<'a> {
     problem: &'a PlanarMagnetostatics,
+    prescribed_vertices: Vec<usize>,
     profiles_per_m2: Vec<Vec<f64>>,
     fields: Vec<PlanarField<'a>>,
     active_inductance_h: Vec<f64>,
@@ -280,9 +281,12 @@ impl<'a> PlanarWindingBasis<'a> {
             config.inverse_residual_tolerance,
             cancelled,
         )?;
+        let mut prescribed_vertices = prescribed_vertices.to_vec();
+        prescribed_vertices.sort_unstable();
         poll(cancelled)?;
         Ok(Self {
             problem,
+            prescribed_vertices,
             profiles_per_m2,
             fields,
             active_inductance_h: active,
@@ -298,6 +302,11 @@ impl<'a> PlanarWindingBasis<'a> {
     /// Exact original spatial material/geometry owner.
     pub fn problem(&self) -> &PlanarMagnetostatics {
         self.problem
+    }
+    /// Canonical vertices carrying the original homogeneous A_z boundary.
+    /// Material replacement retains this physical boundary, not just the mesh.
+    pub fn prescribed_vertices(&self) -> &[usize] {
+        &self.prescribed_vertices
     }
     /// Number of terminal-current coordinates.
     pub fn winding_count(&self) -> usize {

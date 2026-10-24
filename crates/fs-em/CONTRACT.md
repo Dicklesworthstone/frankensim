@@ -194,7 +194,31 @@ prepared magnetic permeability stay fixed. A temperature-dependent permeability
 source refuses changed temperature even if its endpoint values coincide, since
 fixed-L evolution cannot account for magnetic parameter work along that path.
 Data-only material replacements are prepared as a new magnetic/electrical model.
-Changing live geometry or storage requires an explicit coupled work owner.
+`OhmicWindingCircuit::rebind_material_candidate` transfers accepted history to
+that model at the same clock. It retains the exact mesh/metric, original
+homogeneous magnetic boundary, signed current profiles, end-inductance model,
+branch correspondence and all nonmagnetic graph data. Every differential flux
+linkage and capacitor charge is preserved bit-for-bit; the native consistency
+solver re-equilibrates algebraic voltages/currents. Incompatible ideal constraints
+refuse instead of creating an unaccounted flux or charge impulse.
+
+Replacement adopts the new full mutual-inductance block and spatial conductor
+sources, including a different admitted resistivity/conductivity source basis.
+The signed external work is `lambda^T (L_after^-1-L_before^-1) lambda / 2`,
+independently compared with the native field/capacitor storage change and checked
+against the caller's absolute work bound. The report retains before/after current,
+resistance and source-state identities. No time, source-port work or Joule heat is
+advanced. Subsequent original midpoint steps and field sampling use the new
+material basis; resistance-only replacements have zero instantaneous storage work.
+Source, geometry, ideal-constraint, work and late-cancellation refusals publish
+nothing. G1/G3 regressions in `tests/winding_ohmic/rebind.rs` cover analytic mutual
+current/work, nonzero-time continuation with actual new spatial heat, reverse and
+zero-work replacements, and incompatible geometry/constraints.
+
+This is externally supplied material reconfiguration, not continuous thermal
+evolution, motion, hysteresis, mass transfer or a caloric heat debit. Changing
+geometry or automatically closing magnetic parameter work into thermal storage
+still requires its own coupled owner.
 
 ## Temperature-refreshed spatial induction
 
