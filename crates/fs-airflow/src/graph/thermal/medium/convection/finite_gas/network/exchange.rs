@@ -5,15 +5,21 @@ use super::super::NaturalGasSurface;
 use fs_couple::cavity_phs::piston::thermal::ConductanceSample;
 use fs_couple::cavity_phs::piston::thermal::boundary::network::material::GasConductionGeometry;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::{
-    MaterialContact, exchange::{PreparedMaterialExchangeNetwork, gas_law::GasSurface},
+    MaterialContact, exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork, gas_law::GasSurface},
     reactive::{ChamberReaction, ReactiveExchangeCandidate, ReactiveExchangeError},
     state::{ChamberDrive, MaterialExchangeState},
     state::flow::{MaterialFlowAdvance, MaterialGasLawFlowError},
 };
 use fs_exec::Cx;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::{
     GasNetworkLink, GasNetworkSolve, GasNetworkStep,
+};
+use fs_material::thermochemical_gas::energy::parcel::transfer::{
+    nozzle::network::snapshot::SnapshotNozzleLink,
+    species::{diffusion::network::DiffusionNetworkLink,
+        network::transport::{GasTransportSolve, GasTransportStep}},
 };
 
 /// Constitutive choice for a disjoint physical patch, not an object preset.
@@ -51,6 +57,75 @@ impl core::fmt::Display for GasHeatError {
     }
 }
 impl std::error::Error for GasHeatError {}
+
+impl GasHeatLaw {
+    fn area(self) -> Result<f64, &'static str> {
+        match self {
+            Self::Conduction(geometry) => {
+                if ![geometry.area_m2, geometry.gas_distance_m, geometry.cell_distance_m]
+                    .iter().all(|v| v.is_finite())
+                    || geometry.area_m2 < 0.0 || geometry.gas_distance_m <= 0.0
+                    || geometry.cell_distance_m <= 0.0 {
+                    return Err("valid conductive patch area and positive layer lengths required");
+                }
+                Ok(geometry.area_m2)
+            }
+            Self::ForcedConvection(surface) => {
+                surface.validate().map_err(|_| "invalid forced-convection geometry")?;
+                Ok(surface.area_m2)
+            }
+            Self::NaturalConvection(surface) => {
+                surface.validate().map_err(|_| "invalid natural-convection geometry")?;
+                Ok(surface.area_m2)
+            }
+        }
+    }
+
+    fn resolve(
+        self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, contact: Contact,
+        thermal: &DepositionSimulation<'_>, source: &MaterialExchangeSample,
+        gas: &ResolvedThermochemicalGasState,
+    ) -> Result<ConductanceSample<GasHeatSample>, GasHeatError> {
+        if let Self::Conduction(geometry) = self {
+            let sample = prepared.resolve_conductive_gas_contact(
+                MaterialContact { contact, geometry }, thermal, source, gas)
+                .map_err(GasHeatError::Conduction)?;
+            return Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
+                source: GasHeatSample::Conduction(sample.source) });
+        }
+        let phase = source.bulk.cells.iter().find(|c| c.cell == contact.cell)
+            .ok_or_else(|| GasHeatError::Convection(
+                invalid("gas patch lacks its actual cell phase")))?.phase;
+        let (sample, natural) = match self {
+            Self::ForcedConvection(surface) => (surface.resolve(gas, phase), false),
+            Self::NaturalConvection(surface) => (surface.resolve(gas, phase), true),
+            Self::Conduction(_) => unreachable!("conduction returned above"),
+        };
+        let sample = sample.map_err(GasHeatError::Convection)?;
+        Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
+            source: if natural { GasHeatSample::NaturalConvection(sample.source) }
+                else { GasHeatSample::ForcedConvection(sample.source) } })
+    }
+}
+
+fn flow_patches<'a>(
+    cx: &Cx<'_>, patches: &'a [ExchangeContact], controls: NetworkSolve,
+) -> Result<(BTreeMap<u64, &'a ExchangeContact>, Vec<GasSurface>), MaterialGasLawFlowError<GasHeatError>> {
+    if patches.len() > controls.maximum_contacts {
+        return Err(MaterialGasLawFlowError::Invalid("mixed heat-law contact capacity exceeded"));
+    }
+    let mut mapped = BTreeMap::new();
+    let mut surfaces = Vec::with_capacity(patches.len());
+    for patch in patches {
+        cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
+        let area = patch.law.area().map_err(MaterialGasLawFlowError::Invalid)?;
+        if mapped.insert(patch.contact.id, patch).is_some() {
+            return Err(MaterialGasLawFlowError::Invalid("duplicate mixed heat-law contact ID"));
+        }
+        surfaces.push(GasSurface { contact: patch.contact, area_m2: area });
+    }
+    Ok((mapped, surfaces))
+}
 
 /// Compose mixed gas heat laws with the SAME declared reactions, electrical
 /// contact losses, thermal interface resistance, radiation, finite cell storage
@@ -98,23 +173,7 @@ pub fn step_candidate<'m>(
     let mut surfaces = Vec::with_capacity(patches.len());
     for patch in patches {
         check()?;
-        let area = match patch.law {
-            GasHeatLaw::Conduction(geometry) => {
-                if ![geometry.gas_distance_m, geometry.cell_distance_m].iter()
-                    .all(|v| v.is_finite() && *v > 0.0) {
-                    return Err(ReactiveExchangeError::Invalid("positive finite conductive layer lengths required"));
-                }
-                geometry.area_m2
-            }
-            GasHeatLaw::ForcedConvection(surface) => {
-                surface.validate().map_err(|_| ReactiveExchangeError::Invalid("invalid forced-convection geometry"))?;
-                surface.area_m2
-            }
-            GasHeatLaw::NaturalConvection(surface) => {
-                surface.validate().map_err(|_| ReactiveExchangeError::Invalid("invalid natural-convection geometry"))?;
-                surface.area_m2
-            }
-        };
+        let area = patch.law.area().map_err(ReactiveExchangeError::Invalid)?;
         if mapped.insert(patch.contact.id, patch).is_some() {
             return Err(ReactiveExchangeError::Invalid("duplicate mixed heat-law contact ID"));
         }
@@ -122,31 +181,8 @@ pub fn step_candidate<'m>(
     }
     prepared.reactive_with_gas_law_candidate(cx, thermal, target_s, circuit,
         ports, chambers, reactions, &surfaces, controls, guess_j,
-        |contact, state, source, gas| {
-            match mapped[&contact.id].law {
-                GasHeatLaw::Conduction(geometry) => {
-                    let sample = prepared.resolve_conductive_gas_contact(
-                        MaterialContact { contact, geometry }, state, source, gas)
-                        .map_err(GasHeatError::Conduction)?;
-                    Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
-                        source: GasHeatSample::Conduction(sample.source) })
-                }
-                GasHeatLaw::ForcedConvection(surface) => {
-                    let phase = source.bulk.cells.iter().find(|c| c.cell == contact.cell)
-                        .ok_or_else(|| GasHeatError::Convection(invalid("gas patch lacks its actual cell phase")))?.phase;
-                    let sample = surface.resolve(gas, phase).map_err(GasHeatError::Convection)?;
-                    Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
-                        source: GasHeatSample::ForcedConvection(sample.source) })
-                }
-                GasHeatLaw::NaturalConvection(surface) => {
-                    let phase = source.bulk.cells.iter().find(|c| c.cell == contact.cell)
-                        .ok_or_else(|| GasHeatError::Convection(invalid("gas patch lacks its actual cell phase")))?.phase;
-                    let sample = surface.resolve(gas, phase).map_err(GasHeatError::Convection)?;
-                    Ok(ConductanceSample { conductance_w_k: sample.conductance_w_k,
-                        source: GasHeatSample::NaturalConvection(sample.source) })
-                }
-            }
-        })
+        |contact, state, source, gas| mapped[&contact.id].law.resolve(
+            prepared, contact, state, source, gas))
 }
 
 
@@ -163,66 +199,11 @@ pub fn flow_step_candidate<'m>(
     controls: NetworkSolve, guess_j: &[f64],
 ) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasNetworkStep, GasHeatSample>),
     MaterialGasLawFlowError<GasHeatError>> {
-    let mut mapped = BTreeMap::new();
-    let mut surfaces = Vec::with_capacity(patches.len());
-    for patch in patches {
-        cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
-        let area = match patch.law {
-            GasHeatLaw::Conduction(geometry) => {
-                if ![geometry.area_m2, geometry.gas_distance_m, geometry.cell_distance_m]
-                    .iter().all(|v| v.is_finite())
-                    || geometry.area_m2 < 0.0
-                    || geometry.gas_distance_m <= 0.0
-                    || geometry.cell_distance_m <= 0.0 {
-                    return Err(MaterialGasLawFlowError::Invalid(
-                        "valid conductive patch area and positive layer lengths required"));
-                }
-                geometry.area_m2
-            }
-            GasHeatLaw::ForcedConvection(surface) => {
-                surface.validate().map_err(|_| MaterialGasLawFlowError::Invalid(
-                    "invalid forced-convection geometry"))?;
-                surface.area_m2
-            }
-            GasHeatLaw::NaturalConvection(surface) => {
-                surface.validate().map_err(|_| MaterialGasLawFlowError::Invalid(
-                    "invalid natural-convection geometry"))?;
-                surface.area_m2
-            }
-        };
-        if mapped.insert(patch.contact.id, patch).is_some() {
-            return Err(MaterialGasLawFlowError::Invalid(
-                "duplicate mixed heat-law contact ID"));
-        }
-        surfaces.push(GasSurface { contact: patch.contact, area_m2: area });
-    }
+    let (mapped, surfaces) = flow_patches(cx, patches, controls)?;
     state.flow_step_with_gas_law_candidate(prepared,cx,target_s,ports,drives,
         reactions,&surfaces,links,flow_controls,controls,guess_j,
-        |contact,thermal,source,gas| match mapped[&contact.id].law {
-            GasHeatLaw::Conduction(geometry) => {
-                let sample=prepared.resolve_conductive_gas_contact(
-                    MaterialContact {contact,geometry},thermal,source,gas)
-                    .map_err(GasHeatError::Conduction)?;
-                Ok(ConductanceSample {conductance_w_k:sample.conductance_w_k,
-                    source:GasHeatSample::Conduction(sample.source)})
-            }
-            GasHeatLaw::ForcedConvection(surface) => {
-                let phase=source.bulk.cells.iter().find(|c|c.cell==contact.cell)
-                    .ok_or_else(||GasHeatError::Convection(
-                        invalid("gas patch lacks its actual cell phase")))?.phase;
-                let sample=surface.resolve(gas,phase).map_err(GasHeatError::Convection)?;
-                Ok(ConductanceSample {conductance_w_k:sample.conductance_w_k,
-                    source:GasHeatSample::ForcedConvection(sample.source)})
-            }
-            GasHeatLaw::NaturalConvection(surface) => {
-                let phase=source.bulk.cells.iter().find(|c|c.cell==contact.cell)
-                    .ok_or_else(||GasHeatError::Convection(
-                        invalid("gas patch lacks its actual cell phase")))?.phase;
-                let sample=surface.resolve(gas,phase).map_err(GasHeatError::Convection)?;
-                Ok(ConductanceSample {conductance_w_k:sample.conductance_w_k,
-                    source:GasHeatSample::NaturalConvection(sample.source)})
-            }
-        })
+        |contact, thermal, source, gas| mapped[&contact.id].law.resolve(
+            prepared, contact, thermal, source, gas))
 }
 
 /// Publish the complete transport/reaction/mixed-heat assembly atomically.
@@ -240,5 +221,56 @@ pub fn advance_with_flow<'m>(
         reactions,patches,links,flow_controls,controls,guess_j)?;
     cx.checkpoint().map_err(|_|MaterialGasLawFlowError::Cancelled)?;
     *state=next;
+    Ok(report)
+}
+
+/// Preview same-snapshot pressure flow AND molecular mixing, then the original
+/// reacting/electrical/thermal/mechanical assembly with mixed gas heat laws.
+///
+/// Both transport mechanisms consume one original species budget, reconstruct
+/// each chamber once and carry partial enthalpy once. Conduction, forced and
+/// natural patches all receive the actual transported/reacted trial gas. Thus
+/// diffusion changes heat transfer, storage and sound speed through shared
+/// material data even at equal total pressure, with no ambient composition cache.
+///
+/// Nozzles and diffusion faces describe distinct physical paths. Empty lists
+/// disable that mechanism. The existing explicit first-order split, diffusion
+/// temperature/pressure domains and convection geometry restrictions apply;
+/// forced speeds are still prescribed, not inferred from nozzle jet velocity.
+/// Every physical endpoint and its port history is returned together or none.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn transport_step_candidate<'m>(
+    state: &MaterialExchangeState<'m>,
+    prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+    target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    nozzles: &[SnapshotNozzleLink], diffusion: &[DiffusionNetworkLink<'_>],
+    transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+) -> Result<(MaterialExchangeState<'m>, MaterialFlowAdvance<GasTransportStep, GasHeatSample>),
+    MaterialGasLawFlowError<GasHeatError>> {
+    let (mapped, surfaces) = flow_patches(cx, patches, controls)?;
+    state.transport_step_with_gas_law_candidate(prepared, cx, target_s, ports,
+        drives, reactions, &surfaces, nozzles, diffusion, transport_controls,
+        controls, guess_j, |contact, thermal, source, gas|
+            mapped[&contact.id].law.resolve(prepared, contact, thermal, source, gas))
+}
+
+/// Publish combined species transport, mixed gas heat laws and every original
+/// coupled owner atomically. A late material/domain/solve refusal changes none.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_with_transport<'m>(
+    state: &mut MaterialExchangeState<'m>,
+    prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>,
+    target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+    reactions: &[ChamberReaction<'_>], patches: &[ExchangeContact],
+    nozzles: &[SnapshotNozzleLink], diffusion: &[DiffusionNetworkLink<'_>],
+    transport_controls: GasTransportSolve, controls: NetworkSolve, guess_j: &[f64],
+) -> Result<MaterialFlowAdvance<GasTransportStep, GasHeatSample>,
+    MaterialGasLawFlowError<GasHeatError>> {
+    let (next, report) = transport_step_candidate(state, prepared, cx, target_s,
+        ports, drives, reactions, patches, nozzles, diffusion, transport_controls,
+        controls, guess_j)?;
+    cx.checkpoint().map_err(|_| MaterialGasLawFlowError::Cancelled)?;
+    *state = next;
     Ok(report)
 }

@@ -136,6 +136,30 @@ gas/body/piston energy closure, mixed surface laws, source identity, area
 overlap and late-cancellation rollback. The flow-step regression uses zero
 nozzle links and checks the original publication path.
 
+### Mixed gas heat laws after combined species transport
+
+`finite_gas::network::exchange::{transport_step_candidate, advance_with_transport}`
+connects the same conductive, forced and natural patches to the shared
+same-snapshot nozzle/Maxwell–Stefan transport owner. Both connection lists
+consume one original species allowance and reconstruct each gas once. The
+actual transported/reacted gas enters every heat/momentum trial, including its
+composition, density, heat capacity, viscosity and thermal conductivity. No
+ambient composition, coefficient cache or separate heat integrator is added.
+One resolver supplies every mixed-law path; the original `fs-couple` owner
+accounts for the complete interval and atomically publishes all histories.
+
+Nozzle and molecular paths remain distinct physical declarations. Empty lists
+disable either mechanism. Existing molar-average diffusion T/p restrictions,
+withdrawal/entropy/source gates, convection domains and first-order splitting
+remain binding. A forced patch still has prescribed relative speed; a nozzle
+mass rate does not establish a resolved surface velocity or jet thrust.
+`tests/finite_gas_convection/natural_network.rs` exercises nonzero nozzle and
+diffusive transport with mixed convection, exact independently staged physical
+endpoints, original source composition in accepted heat samples, signed cell
+heat, full endpoint energy, diffusivity-only trajectory changes and complete
+rollback after a late correlation refusal. Synthetic sources establish these
+integration identities, not empirical gas or enclosure accuracy.
+
 ### Coupled total-enthalpy endpoint adjoints
 
 `graph::thermal::coupled_transport::sensitivity::enthalpy` binds the concrete

@@ -4151,6 +4151,29 @@ the binary limit, diffusivity-only physical response, post-mixing reaction,
 zero-net-mass stream accounting, closed faces and transactional refusal.
 Native execution and experimental qualification remain separate requirements.
 
+### Combined species transport with selected material heat laws
+
+`MaterialExchangeState::{transport_step_with_gas_law_candidate,
+advance_with_transport_and_gas_law}` lets the original combined nozzle and
+Maxwell–Stefan transport use the same typed gas-heat callback as the closed and
+sequential-flow assemblies. Transport samples one accepted snapshot and checks
+one gross species budget, then chemistry runs once and the existing joint
+electrical/enthalpy/heat/momentum solve receives those actual material gases.
+The heat law sees each trial gas midpoint and exact cell material endpoint;
+its source payload and refusal type survive unchanged. Empty path lists select
+either transport mechanism alone, including a closed assembly.
+
+All transport variants and heat laws now share the original whole-interval
+mass/energy audit and changed-inventory port accounting. There is one accepted
+clock and one publication; carried partial enthalpy or reaction formation
+energy is not deposited again as heat. Failed transport, heat-law resolution,
+nonlinear solve or cancellation leaves every owner intact. Existing
+first-order splitting, distinct physical transport paths, molar-average
+diffusion domains and material/geometry restrictions remain; this is not a
+resolved advection-diffusion or boundary-layer solve. The existing material
+exchange regressions exercise conductive-law parity, actual post-transport
+chemistry once, typed late heat errors, atomic publication and cancellation.
+
 ### Curved material shell bodies in the reciprocal string network
 
 `shear_shell::compile_material_shear_shell` binds original

@@ -1,5 +1,6 @@
 //! Existing complete-assembly fixtures; no replacement thermal/electrical solver.
 use super::*;
+use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::exchange::gas_law::GasSurface;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     nozzle::network::snapshot::SnapshotNozzleLink,
     species::{network::{SpeciesNetworkSolve, transport::{self as shared, GasTransportSolve}},
@@ -75,6 +76,21 @@ fn original_material_stage_enters_one_joint_assembly_solve() {
         let (actual,report)=state.transport_step_candidate(&prepared,cx,DT,&[],&drives,&[],
             &gas_fixture::patches(),&[restriction()],&faces,admission(),coupled(),&[0.0;2]).unwrap();
         assert_eq!(report.flow,flux);
+        let patches = gas_fixture::patches();
+        let surfaces = patches.iter().map(|p| GasSurface {
+            contact: p.contact, area_m2: p.geometry.area_m2,
+        }).collect::<Vec<_>>();
+        let (selected, selected_report) = state.transport_step_with_gas_law_candidate(
+            &prepared, cx, DT, &[], &drives, &[], &surfaces, &[restriction()], &faces,
+            admission(), coupled(), &[0.0; 2], |contact, thermal, source, gas| {
+                let patch = *patches.iter().find(|p| p.contact == contact).unwrap();
+                prepared.resolve_conductive_gas_contact(patch, thermal, source, gas)
+            }).unwrap();
+        assert_eq!(selected_report.flow, report.flow);
+        assert_eq!(selected.chambers(), actual.chambers());
+        assert_eq!(selected.circuit(), actual.circuit());
+        assert_eq!(selected.thermal().cells(), actual.thermal().cells());
+        assert_eq!(selected_report.total_energy_residual_j, report.total_energy_residual_j);
         // Independent staging has a different port-account reference. Compare
         // physical endpoints, then independently check the actual full interval.
         for (&id,gas) in actual.chambers() {
@@ -140,9 +156,17 @@ fn chemistry_consumes_combined_arrivals_once_not_per_nonlinear_trial() {
         let endpoints=drives.iter().map(|d|(d.chamber,d.piston_solve.gas)).collect();
         let moved=shared::step_candidate(&parcels,&[restriction()],&faces,DT,&endpoints,admission(),||false).unwrap();
         let expected=law.parcel_candidate(&moved.parcels()[&10],DT,chemical(),||false).unwrap();
-        let (next,report)=state.transport_step_candidate(&prepared,cx,DT,&[],&drives,
-            &[ChamberReaction {chamber:10,reaction:&law,controls:chemical()}],&gas_fixture::patches(),
-            &[restriction()],&faces,admission(),coupled(),&[0.0;2]).unwrap();
+        let patches = gas_fixture::patches();
+        let surfaces = patches.iter().map(|p| GasSurface {
+            contact: p.contact, area_m2: p.geometry.area_m2,
+        }).collect::<Vec<_>>();
+        let (next,report)=state.transport_step_with_gas_law_candidate(&prepared,cx,DT,&[],&drives,
+            &[ChamberReaction {chamber:10,reaction:&law,controls:chemical()}],&surfaces,
+            &[restriction()],&faces,admission(),coupled(),&[0.0;2],
+            |contact, thermal, source, gas| {
+                let patch = *patches.iter().find(|p| p.contact == contact).unwrap();
+                prepared.resolve_conductive_gas_contact(patch, thermal, source, gas)
+            }).unwrap();
         assert_eq!(report.exchange.report.source.reactions[0].reaction,*expected.step());
         assert!(report.total_energy_residual_j.abs()<=coupled().total_energy_tolerance_j);
         assert_eq!(next.time_s(),DT);assert_eq!(state.time_s(),0.0);
@@ -161,14 +185,34 @@ fn late_feedback_failure_and_cancellation_publish_no_partial_assembly() {
             &[restriction()],&faces,admission(),limited,&[0.0;2]).is_err());
         assert_eq!(state.chambers(),&gases);assert_eq!(state.thermal().cells(),&cells);
         assert_eq!(state.circuit(),&electrical);assert_eq!(state.time_s(),0.0);
+        let patches = gas_fixture::patches();
+        let surfaces = patches.iter().map(|p| GasSurface {
+            contact: p.contact, area_m2: p.geometry.area_m2,
+        }).collect::<Vec<_>>();
+        let refused = state.advance_with_transport_and_gas_law::<(), _>(
+            &prepared, cx, DT, &[], &drives, &[], &surfaces, &[restriction()], &faces,
+            admission(), coupled(), &[0.0; 2], |_, _, _, _| Err("typed heat-law refusal"));
+        assert!(matches!(refused, Err(MaterialGasLawFlowError::Exchange(
+            ReactiveExchangeError::Exchange(CircuitEnthalpyError::Source(
+                fs_couple::cavity_phs::piston::thermal::boundary::ports::network::NetworkError::Boundary {
+                    error: fs_couple::cavity_phs::piston::thermal::ThermalPistonError::Interface("typed heat-law refusal"), ..
+                }))))));
+        assert_eq!(state.chambers(), &gases); assert_eq!(state.thermal().cells(), &cells);
+        assert_eq!(state.circuit(), &electrical); assert_eq!(state.time_s(), 0.0);
         let (preview,_)=state.transport_step_candidate(&prepared,cx,DT,&[],&drives,&[],&gas_fixture::patches(),
             &[restriction()],&faces,admission(),coupled(),&[0.0;2]).unwrap();
-        state.advance_with_transport(&prepared,cx,DT,&[],&drives,&[],&gas_fixture::patches(),
-            &[restriction()],&faces,admission(),coupled(),&[0.0;2]).unwrap();
+        state.advance_with_transport_and_gas_law(&prepared,cx,DT,&[],&drives,&[],&surfaces,
+            &[restriction()],&faces,admission(),coupled(),&[0.0;2],
+            |contact, thermal, source, gas| {
+                let patch = *patches.iter().find(|p| p.contact == contact).unwrap();
+                prepared.resolve_conductive_gas_contact(patch, thermal, source, gas)
+            }).unwrap();
         assert_eq!(state.chambers(),preview.chambers());assert_eq!(state.circuit(),preview.circuit());
         assert_eq!(state.thermal().cells(),preview.thermal().cells());gate.request();
-        assert!(matches!(state.advance_with_transport(&prepared,cx,2.0*DT,&[],&drives,&[],&gas_fixture::patches(),
-            &[restriction()],&faces,admission(),coupled(),&[0.0;2]),Err(MaterialFlowError::Cancelled)));
+        assert!(matches!(state.advance_with_transport_and_gas_law::<(), _>(
+            &prepared,cx,2.0*DT,&[],&drives,&[],&surfaces,
+            &[restriction()],&faces,admission(),coupled(),&[0.0;2],
+            |_, _, _, _| Err("must not be called")), Err(MaterialGasLawFlowError::Cancelled)));
         assert_eq!(state.time_s(),DT);assert_eq!(state.chambers(),preview.chambers());
         assert_eq!(state.circuit(),preview.circuit());assert_eq!(state.thermal().cells(),preview.thermal().cells());
     }));
