@@ -40,17 +40,17 @@ where
     /// energy closure. Steady heat APIs still refuse in either attachment order.
     /// Fixed mass/density,
     /// phase mobility and free-surface restrictions of this owner still apply.
-    /// Exact-solid continuation from `try_new_phase` refuses: changing native
-    /// occupancy needs a solid momentum/kinetic-energy handoff. The original
-    /// mobile-only mushy closure remains supported on its fixed native domain.
+    /// Exact-solid phase cells retain their caloric/material identities. A
+    /// melting face opens at its existing zero speed while every other native
+    /// velocity survives. A newly frozen face must ALREADY have zero native
+    /// speed, otherwise the step refuses an unavailable momentum/kinetic-energy
+    /// handoff. No tolerance clipping or projection energy becomes heat.
+    /// All-solid intervals carry the same clock without a momentum solve or
+    /// fabricated liquid transport. This is a fixed stationary phase skeleton,
+    /// not moving solid mechanics, shrinkage or stress-reference restoration.
     /// SIMPLEC's existing max_iterations/tolerance bound each momentum step.
     pub fn with_unsteady_momentum(mut self) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
-        if self.exact_phase {
-            return Err(invalid(
-                "retained momentum cannot change exact-solid phase occupancy without a solid momentum/kinetic-energy handoff; use quasisteady phase flow or a fixed-domain mobile closure",
-            ).into());
-        }
         if self.unsteady.is_some() || self.applied.is_some() {
             return Err(invalid(
                 "attach retained momentum before the first advance; an accepted flow history cannot be replaced by rest",
@@ -61,14 +61,23 @@ where
                 "steady viscous/body-force heat omits kinetic storage and cannot be combined with retained momentum",
             ).into());
         }
-        let fluid = self.reference_fluid()?;
-        self.unsteady = Some(MaterialMomentum::at_rest(
-            self.domain,
-            &fluid,
-            self.config,
-            self.bound_time_s,
-            self.gate,
-        )?);
+        let active = self.momentum_domain(&self.endpoint, &mut || Ok(()))?;
+        let domain = active.as_ref().unwrap_or(self.domain);
+        self.check_phase_drives(domain, &mut || Ok(()))?;
+        self.reference = self.reference.or_else(|| self.endpoint.iter()
+            .find_map(|sample| sample.transport.mobile_transport()));
+        self.unsteady = Some(if domain.fluid_count() == 0 {
+            MaterialMomentum::at_rest_immobile(domain, self.bound_time_s, self.gate)?
+        } else {
+            let fluid = self.reference_fluid()?;
+            MaterialMomentum::at_rest(
+                domain,
+                &fluid,
+                self.config,
+                self.bound_time_s,
+                self.gate,
+            )?
+        });
         Ok(self)
     }
 
@@ -87,8 +96,8 @@ where
     /// kinetic change, physical heat and that numerical loss to the declared
     /// power allowance. Refine time and space for accuracy.
     ///
-    /// Exact phase locking, openings, fans, configured resistance, turbulence
-    /// and Boussinesq forcing refuse. A stationary Darcy skeleton must share
+    /// Phase locking of a moving face, openings, fans, configured resistance,
+    /// turbulence and Boussinesq forcing refuse. A stationary Darcy skeleton must share
     /// the mapped bulk enthalpy at local thermal equilibrium. This mode does
     /// not debit a finite actuator reservoir, nor model gravitational energy,
     /// pressure compressibility, moving solid work or phase-density changes.
@@ -147,6 +156,8 @@ where
         }
         let mut coupled = self.with_unsteady_viscous_heating(controls)?;
         coupled.external_force_n_m3 = Some(force_density_n_m3);
+        let active = coupled.momentum_domain(&coupled.endpoint, &mut || Ok(()))?;
+        coupled.check_phase_drives(active.as_ref().unwrap_or(coupled.domain), &mut || Ok(()))?;
         Ok(coupled)
     }
 
@@ -305,7 +316,6 @@ where
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), MaterialFlowError<O::Error>> {
         check_gate(self.gate, check)?;
-        let fluid = self.reference_fluid()?;
         let applied = self.applied.as_ref().ok_or(invalid(
             "retained momentum needs the applied material epoch",
         ))?;
@@ -314,10 +324,9 @@ where
                 invalid("retained momentum source epoch differs from the thermal start").into(),
             );
         }
-        let reference = self.reference.ok_or(invalid(
-            "retained momentum lacks its admitted mobile reference",
-        ))?;
-        let mut viscosity = vec![reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
+        let active = self.momentum_domain(&applied.samples, check)?;
+        let domain = active.as_ref().unwrap_or(self.domain);
+        self.check_phase_drives(domain, check)?;
         for sample in &applied.samples {
             check_gate(self.gate, check)?;
             if old.get(&sample.cell).map(|t| t.to_bits()) != Some(sample.temperature_k.to_bits()) {
@@ -326,16 +335,35 @@ where
                 )
                 .into());
             }
-            let transport = sample.transport.mobile_transport().ok_or(invalid(
-                "retained momentum cannot restore motion onto an exact solid constraint",
-            ))?;
-            viscosity[sample.voxel] = transport.dynamic_viscosity_pa_s();
+        }
+        if domain.fluid_count() == 0 {
+            self.unsteady.as_mut().expect("checked retained momentum").advance_immobile(
+                domain,
+                start_s,
+                dt_s,
+                end_s,
+                applied.mushy_drag_pa_s_m2.is_some(),
+                applied.external_force_n_m3.is_some(),
+                self.gate,
+            )?;
+            return check_gate(self.gate, check).map_err(Into::into);
+        }
+        let fluid = self.reference_fluid()?;
+        let reference = self.reference.ok_or(invalid(
+            "retained momentum lacks its admitted mobile reference",
+        ))?;
+        let mut viscosity = vec![reference.dynamic_viscosity_pa_s(); self.domain.cell_count()];
+        for sample in &applied.samples {
+            check_gate(self.gate, check)?;
+            if let Some(transport) = sample.transport.mobile_transport() {
+                viscosity[sample.voxel] = transport.dynamic_viscosity_pa_s();
+            }
         }
         self.unsteady
             .as_mut()
             .expect("checked retained momentum")
             .advance(
-                self.domain,
+                domain,
                 &fluid,
                 self.config,
                 &viscosity,

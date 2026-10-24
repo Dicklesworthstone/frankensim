@@ -6,7 +6,8 @@ use super::{FlowStepRecord, UnsteadyConfig, admit_unsteady, converge_step};
 use crate::conjugate::simple::{MomentumState, Solver, material_solver};
 use crate::conjugate::{
     ChtError, FluidProperties, FvBoundary, FvFlow, SimpleConfig, TimeScheme, Turbulence,
-    UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls, VoxelDomain, finite, poll,
+    UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls, ViscousPower, VoxelDomain,
+    finite, poll,
 };
 use fs_exec::CancelGate;
 
@@ -15,7 +16,9 @@ pub(in crate::conjugate) struct MaterialMomentum {
     pub time_s: f64,
     pub flow: FvFlow,
     pub record: Option<FlowStepRecord>,
-    state: MomentumState,
+    // No liquid transport or fictitious inertia solve is needed before an
+    // initially exact-solid domain first opens. Its native face state is zero.
+    state: Option<MomentumState>,
     pub mechanical_step: Option<UnsteadyMechanicalStep>,
     heating: Option<MaterialHeating>,
 }
@@ -82,10 +85,57 @@ impl MaterialMomentum {
             time_s,
             flow,
             record: None,
-            state,
+            state: Some(state),
             mechanical_step: None,
             heating: None,
         })
+    }
+
+    /// An exact stationary-solid start, without a made-up viscosity or Cp.
+    pub fn at_rest_immobile(
+        domain: &VoxelDomain,
+        time_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, ChtError> {
+        poll(gate)?;
+        finite("material_unsteady.time_s", time_s)?;
+        if domain.fluid_count() != 0 {
+            return Err(invalid("immobile momentum start requires an all-solid domain"));
+        }
+        Ok(Self {
+            time_s,
+            flow: FvFlow::stationary(domain),
+            record: None,
+            state: None,
+            mechanical_step: None,
+            heating: None,
+        })
+    }
+
+    /// A zero-speed face can open or close without momentum or kinetic work.
+    /// The caller supplies the same fixed grid and admits zero solid drives.
+    /// Pressure in a newly constrained cell is only a Lagrange multiplier;
+    /// clearing it removes no compressible or elastic stored energy here.
+    pub fn accept_phase_domain(
+        &mut self,
+        domain: &VoxelDomain,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        poll(gate)?;
+        if let Some(state) = &mut self.state {
+            state.admit_phase_domain(domain, gate)?;
+            state.clear_solid_pressure(domain);
+        }
+        for c in 0..domain.cell_count() {
+            if c % 256 == 0 {
+                poll(gate)?;
+            }
+            if !domain.is_fluid(c) {
+                self.flow.pressure_pa[c] = 0.0;
+                self.flow.velocity_m_s[c] = [0.0; 3];
+            }
+        }
+        Ok(())
     }
 
     pub fn has_heating(&self) -> bool {
@@ -171,6 +221,71 @@ impl MaterialMomentum {
         Ok(())
     }
 
+    fn admit_interval(&self, start_s: f64, dt_s: f64, end_s: f64) -> Result<(), ChtError> {
+        self.check_time(start_s)?;
+        if self.heating.as_ref().is_some_and(|heating| heating.pending) {
+            return Err(invalid("transient momentum already prepared for this thermal interval"));
+        }
+        // Accept both actual clock conventions used by the thermal owner.
+        if !end_s.is_finite()
+            || end_s <= start_s
+            || !dt_s.is_finite()
+            || dt_s <= 0.0
+            || ((start_s + dt_s).to_bits() != end_s.to_bits()
+                && (end_s - start_s).to_bits() != dt_s.to_bits())
+        {
+            return Err(invalid("momentum interval must equal the accepted thermal interval"));
+        }
+        Ok(())
+    }
+
+    /// Advance the actual accepted interval of an all-solid, zero-drive state.
+    /// There is no momentum solve, physical heat or numerical time loss.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_immobile(
+        &mut self,
+        domain: &VoxelDomain,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        darcy: bool,
+        body: bool,
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        self.admit_interval(start_s, dt_s, end_s)?;
+        if domain.fluid_count() != 0 {
+            return Err(invalid("immobile momentum interval requires an all-solid domain"));
+        }
+        self.accept_phase_domain(domain, gate)?;
+        let mechanical_step = self.heating.as_ref().map(|_| UnsteadyMechanicalStep {
+            start_s,
+            duration_s: dt_s,
+            end_s,
+            power: ViscousPower::stationary(domain, darcy, body),
+            initial_kinetic_energy_j: 0.0,
+            final_kinetic_energy_j: 0.0,
+            backward_euler_loss_j: 0.0,
+            residual_j: 0.0,
+        });
+        poll(gate)?;
+        self.state = None;
+        self.flow = FvFlow::stationary(domain);
+        self.record = Some(FlowStepRecord {
+            time_s: end_s,
+            inner_iterations: 0,
+            mass_residual: 0.0,
+            momentum_residual: 0.0,
+            probe_velocity_m_s: [0.0; 3],
+            kinetic_energy_j: 0.0,
+        });
+        self.mechanical_step = mechanical_step;
+        if let Some(heating) = &mut self.heating {
+            heating.pending = true;
+        }
+        self.time_s = end_s;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &mut self,
@@ -185,25 +300,7 @@ impl MaterialMomentum {
         end_s: f64,
         gate: &CancelGate,
     ) -> Result<(), ChtError> {
-        self.check_time(start_s)?;
-        if self.heating.as_ref().is_some_and(|heating| heating.pending) {
-            return Err(invalid(
-                "transient momentum already prepared for this thermal interval",
-            ));
-        }
-        // Deposition either adds dt or snaps to a stop whose exact difference
-        // supplied dt. Admit precisely those two floating-point conventions.
-        if !end_s.is_finite()
-            || end_s <= start_s
-            || !dt_s.is_finite()
-            || dt_s <= 0.0
-            || ((start_s + dt_s).to_bits() != end_s.to_bits()
-                && (end_s - start_s).to_bits() != dt_s.to_bits())
-        {
-            return Err(invalid(
-                "momentum interval must equal the accepted thermal interval",
-            ));
-        }
+        self.admit_interval(start_s, dt_s, end_s)?;
         let unsteady = controls(dt_s, config);
         admit_unsteady(domain, config, &unsteady)?;
         let mut solver = material_solver(
@@ -218,7 +315,9 @@ impl MaterialMomentum {
         if let Some(heating) = &self.heating {
             solver.enable_unsteady_stokes_heat(heating.controls)?;
         }
-        solver.restore_momentum(&self.state)?;
+        if let Some(state) = &self.state {
+            solver.restore_momentum(state)?;
+        }
         solver.start_time(dt_s, TimeScheme::BackwardEuler);
         let (inner_iterations, residuals) = converge_step(&mut solver, &unsteady, 1, gate)?;
         solver.project(gate)?;
@@ -252,7 +351,7 @@ impl MaterialMomentum {
             kinetic_energy_j,
         };
         poll(gate)?;
-        self.state = state;
+        self.state = Some(state);
         self.flow = flow;
         self.record = Some(record);
         self.mechanical_step = mechanical_step;

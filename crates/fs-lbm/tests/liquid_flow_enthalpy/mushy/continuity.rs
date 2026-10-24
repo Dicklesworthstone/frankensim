@@ -14,6 +14,9 @@ use fs_material::phase::transport::{
 };
 use fs_material::thermal::source::ThermalMaterialPoint;
 
+#[path = "continuity/electrothermal_momentum.rs"]
+mod electrothermal_momentum;
+
 pub(super) fn source(mu: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
