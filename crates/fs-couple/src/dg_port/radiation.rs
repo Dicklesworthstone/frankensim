@@ -8,6 +8,8 @@ use super::{DgBoundary, DgDuct, DgPortLoad, invalid};
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
 use crate::pcm_wav::baffled::openings::CircularOpening;
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::gas_species::input::GasRecord;
 use fs_math::det;
@@ -79,5 +81,56 @@ impl DgPortLoad {
         load.radiation_record = Some(record);
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         Ok(load)
+    }
+}
+
+impl DgPortLoad {
+    /// Prepare an observer of this computed exterior's accepted terminal flow.
+    /// Source geometry, full gas state, clock and radiation/wall bands remain
+    /// owned by this load; a microphone never substitutes or re-bakes them.
+    /// The original Rayleigh owner admits quadrature, delay/history and its
+    /// same-clock differentiating image. This adds no acoustic reaction.
+    pub fn baffled_receiver(
+        &self,
+        mechanics_rate_hz: u32,
+        receiver: CircularOutletReceiver,
+    ) -> Result<BaffledPressure, AcousticRealizeError> {
+        if mechanics_rate_hz == 0 || self.state().step_count() != 0
+            || self.propagator().dt().to_bits()
+                != (1.0 / f64::from(mechanics_rate_hz)).to_bits()
+        {
+            return Err(invalid("DG receiver requires a cold source and its original physical clock"));
+        }
+        let source = self.radiation_record().ok_or_else(|| invalid(
+            "baffled DG observation requires the original computed radiation source",
+        ))?;
+        let [aperture] = source.apertures() else {
+            return Err(invalid("baffled DG observation requires one bound circular outlet"));
+        };
+        let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
+        let actual_area = self.duct().outlet_area_m2();
+        if aperture.center_m != [0.0; 2]
+            || !area.is_finite()
+            || (area - actual_area).abs() > 64.0 * f64::EPSILON * actual_area
+            || source.band_hz()[1].to_bits()
+                != (0.5 * f64::from(mechanics_rate_hz)).to_bits()
+        {
+            return Err(invalid(
+                "baffled DG observation must use its original outlet geometry and physical clock",
+            ));
+        }
+        // Compare in the wall owner's native angular-frequency arithmetic.
+        // Converting its endpoint back to Hz can reject the identical endpoint
+        // solely because multiplication and division round differently.
+        if receiver.maximum_frequency_hz > source.band_hz()[1]
+            || self.duct().viscothermal_band_rad_s().is_some_and(|band|
+                receiver.maximum_frequency_hz * core::f64::consts::TAU > band[1])
+        {
+            return Err(invalid("baffled DG receiver exceeds its radiation or wall-loss band"));
+        }
+        BaffledPressure::circular_openings_multirate_differentiating(
+            source.apertures(), mechanics_rate_hz, mechanics_rate_hz,
+            receiver, source.gas_record().state().into(),
+        ).map_err(AcousticRealizeError::Nonlinear)
     }
 }

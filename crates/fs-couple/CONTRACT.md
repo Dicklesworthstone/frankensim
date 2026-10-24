@@ -5207,3 +5207,34 @@ independently measured solid/gas storage and cumulative heat. Both complete
 frozen-state acoustic experiments precede output creation. The gas volume is
 thermal storage, not a modeled acoustic enclosure; pressure work, live modal
 state transfer and reciprocal thermoelastic heat remain outside this slice.
+
+## Material valves on the original DG bore
+
+`bernoulli_aperture::dg::LoadedApertureDg` binds the existing
+`LoadedAperture` single, independent-paired or material-modal owner to the same
+DG mean-port relation used by the scalar valve and flue source. It requires cold
+ExactZoh mechanics, matching physical clock, inlet density and mean impedance;
+retained paired/modal gas states must match the complete inlet material state.
+No blade, mode, contact coordinate or constitutive memory is collapsed to the
+diagnostic opening. Both wrappers share one acoustic/work acceptance path.
+Additional source-mesh pressure work appears in the frame and is already
+credited once in mechanical work. Rational terminal exchange remains signed
+port work, not an invented heat or storage certificate. Failed trials leave
+mechanical, wall and terminal histories unchanged.
+
+`dg::loaded::performance::LoadedDgPerformance` adds a finite canonical
+blowing-pressure phrase and the existing source-mesh force/pressure compilers.
+All auxiliary controls share one remaining storage/work allowance. Each accepted
+mechanical sample advances its source once and publishes its controls; a failed
+callback poisons further output while retaining the accepted prefix. Inlet
+pressure and an explicitly selected computed baffled outlet are distinct
+observations. `DgPortLoad::baffled_receiver` is the shared scalar/flue/loaded
+admission owner for original outlet geometry, exterior gas, physical clock and
+radiation/wall bands. It feeds the existing retarded pressure observer without
+rebaking or adding a reaction.
+
+Regressions exercise original scalar arithmetic, independent material blades,
+all retained modal/Maxwell coordinates, prescribed traction work, rollback and
+scheduled playback. These are coupling invariants, not measured
+clarinet/oboe fidelity or convergence certificates. Native test execution and
+instrument-specific time/space/material validation remain separate requirements.

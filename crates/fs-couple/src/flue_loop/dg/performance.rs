@@ -115,41 +115,8 @@ impl FlueDgPerformance {
             .map_err(|error| GestureCompileError::Render(source_error(error)))?;
         let outlet = if let Some(receiver) = receiver {
             let load = voice.dg().expect("admitted original DG voice").load();
-            let source = load.radiation_record().ok_or_else(|| invalid(
-                "baffled DG observation requires the original computed radiation source",
-            ))?;
-            let [aperture] = source.apertures() else {
-                return Err(invalid("baffled DG observation requires one bound circular outlet"));
-            };
-            let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
-            let actual_area = load.duct().outlet_area_m2();
-            if aperture.center_m != [0.0; 2]
-                || !area.is_finite()
-                || (area - actual_area).abs() > 64.0 * f64::EPSILON * actual_area
-                || source.band_hz()[1].to_bits()
-                    != (0.5 * f64::from(config.sample_rate_hz)).to_bits()
-            {
-                return Err(invalid(
-                    "baffled DG observation must use its original outlet geometry and physical clock",
-                ));
-            }
-            if receiver.maximum_frequency_hz > source.band_hz()[1]
-                || load.duct().viscothermal_band_rad_s().is_some_and(|band|
-                    receiver.maximum_frequency_hz * core::f64::consts::TAU > band[1])
-            {
-                return Err(invalid(
-                    "baffled DG receiver exceeds the source or wall-loss admission band",
-                ));
-            }
-            let pressure = BaffledPressure::circular_outlet_multirate_differentiating(
-                aperture.radius_m,
-                config.sample_rate_hz,
-                config.sample_rate_hz,
-                receiver,
-                source.gas_record().state().into(),
-            ).map_err(|error| GestureCompileError::Render(RenderError::Voice(
-                AcousticRealizeError::Nonlinear(error),
-            )))?;
+            let pressure = load.baffled_receiver(config.sample_rate_hz, receiver)
+                .map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
             Some(BaffledOutletObservation { config: receiver, receiver: pressure })
         } else { None };
         let controls = controls::compile(

@@ -14,15 +14,15 @@ pub struct MaterialPressureEvent {
     pub pressure_pa: f64,
 }
 
-pub(super) struct PressureSchedule {
-    pub(super) events: Vec<MaterialPressureEvent>,
+pub(in crate::bernoulli_aperture) struct PressureSchedule {
+    pub(in crate::bernoulli_aperture) events: Vec<MaterialPressureEvent>,
     controls: Vec<ScheduledControl>,
-    next: usize,
-    held: f64,
-    pub(super) work: u64,
+    pub(in crate::bernoulli_aperture) next: usize,
+    pub(in crate::bernoulli_aperture) held: f64,
+    pub(in crate::bernoulli_aperture) work: u64,
 }
 impl PressureSchedule {
-    fn compile(mut events: Vec<MaterialPressureEvent>, samples: u64,
+    pub(in crate::bernoulli_aperture) fn compile(mut events: Vec<MaterialPressureEvent>, samples: u64,
         max_events: usize, max_work: u64) -> Result<Self, GestureCompileError>
     {
         let work = 2 * events.len() as u128;
@@ -39,10 +39,10 @@ impl PressureSchedule {
         }).collect();
         Ok(Self { events, controls, next: 0, held: 0.0, work: work as u64 })
     }
-    pub(super) fn candidate(&self, sample: u64) -> f64 {
+    pub(in crate::bernoulli_aperture) fn candidate(&self, sample: u64) -> f64 {
         pressure_candidate(&self.controls, self.next, self.held, sample).1
     }
-    pub(super) fn accept(&mut self, sample: u64) {
+    pub(in crate::bernoulli_aperture) fn accept(&mut self, sample: u64) {
         (self.next, self.held) = pressure_candidate(&self.controls, self.next, self.held, sample);
     }
 }

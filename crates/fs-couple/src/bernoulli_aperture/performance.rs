@@ -288,18 +288,8 @@ impl AperturePerformance {
             (_, ApertureObservation::Inlet) | (CoupledAperture::Tube(_), ApertureObservation::TubeTerminal) => None,
             (CoupledAperture::Network(m), ApertureObservation::NetworkNode(n)) if n < m.spec().nodes.len() => None,
             (CoupledAperture::Dg(model), ApertureObservation::TubeBaffled(location)) => {
-                let record = model.load().radiation_record()
-                    .expect("DG receiver admission retained its computed reaction source");
-                if location.maximum_frequency_hz > record.band_hz()[1]
-                    || model.load().duct().viscothermal_band_rad_s().is_some_and(|band|
-                        location.maximum_frequency_hz * core::f64::consts::TAU > band[1])
-                {
-                    return Err(invalid("DG receiver band exceeds its radiation or viscothermal source band"));
-                }
-                Some(BaffledPressure::circular_openings_multirate_differentiating(
-                    record.apertures(), config.sample_rate_hz, config.sample_rate_hz,
-                    location, RayleighMedium::from(record.gas_record().state()),
-                ).map_err(|e| GestureCompileError::Render(receiver_error(e)))?)
+                Some(model.load().baffled_receiver(config.sample_rate_hz, location)
+                    .map_err(|e| GestureCompileError::Render(RenderError::Voice(e)))?)
             }
             (CoupledAperture::Tube(m), ApertureObservation::TubeBaffled(location)) => {
                 // Radius and gas are the actual physical tube's, never an
