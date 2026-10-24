@@ -34,11 +34,40 @@ mod rest_curvature_tests {
                 nonzero |= expected.iter().any(|&x| x != 0.0);
                 at += 3;
             }
+            if let Some(terms) = &vk.membrane_terms {
+                assert_eq!(terms.len(), vk.nb.len() + 3);
+                assert_eq!(&plan.crest[at..at + 9], &[0.0; 9]);
+                at += 9;
+            }
         }
         assert_eq!(plates, 2);
         assert!(nonzero);
         assert_eq!(at, plan.crest.len());
         assert_eq!(at, 3 * plan.nc);
+    }
+
+    #[test]
+    fn batch_refuses_a_different_annular_strain_operator() {
+        let mut ins = fs_vkplate::kit::hihat_scaled(0.002, 0.0, &[], 7.0).unwrap().instrument;
+        let image = ins.image();
+        let plan = Plan::new(&image, &ins, 2, 256, true).unwrap();
+        assert!(plan.state(&image).is_ok());
+        for mutation in 0..4 {
+            let mut changed = image.clone();
+            let vk = changed.bodies[0].vk.as_mut().unwrap();
+            match mutation {
+                0 => {
+                    let term = vk.membrane_terms.as_mut().unwrap().iter_mut()
+                        .find_map(|row| row.first_mut()).unwrap();
+                    term.weight *= 2.0;
+                }
+                1 => vk.membrane_terms = None,
+                2 => vk.z0[0] += 0.001,
+                _ => vk.eh *= 2.0,
+            }
+            assert!(plan.state(&changed).err().expect("mismatch must refuse").contains("annular"),
+                "a batch must not silently use the first member's physics");
+        }
     }
 }
 
@@ -110,6 +139,7 @@ pub struct Plan {
     pub barea: Vec<f64>,
     pub beh: Vec<f64>,
     pub bvk: Vec<i32>,
+    pub bweak: Vec<i32>,
     pub bviscous: Vec<i32>,
     pub bcoff: Vec<i32>,
     pub bnc: Vec<i32>,
@@ -122,6 +152,14 @@ pub struct Plan {
     // core nodes of the von Karman plates
     pub cnb: Vec<i32>,
     pub crest: Vec<f64>, // cached rest xx, yy, xy per core node
+    pub q_ptr: Vec<i32>,
+    pub q_a: Vec<i32>,
+    pub q_b: Vec<i32>,
+    pub q_weight: Vec<f64>,
+    pub wg_ptr: Vec<i32>,
+    pub wg_core: Vec<i32>,
+    pub wg_other: Vec<i32>,
+    pub wg_weight: Vec<f64>,
     pub vk_body: Vec<i32>,
     pub airy_off: Vec<i64>,
     pub airy: Vec<f64>,
@@ -322,6 +360,7 @@ impl Plan {
         // nodes, operators, work items
         let (mut lap_ptr, mut stf_ptr) = (vec![0i32], vec![0i32]);
         p.visc_ptr.push(0);
+        p.q_ptr.push(0);
         p.vroot_ptr.push(0);
         let mut coff = 0usize;
         for (bi, b) in img.bodies.iter().enumerate() {
@@ -393,17 +432,30 @@ impl Plan {
             p.bcoff.push(i32s(coff));
             p.bcitem0.push(i32s(p.citem_body.len()));
             if let Some(v) = &b.vk {
-                let nc = v.nb.len();
+                let nc = v.f.len();
                 p.beh.push(v.eh);
                 p.bvk.push(1);
+                p.bweak.push(v.membrane_terms.is_some() as i32);
                 p.bnc.push(i32s(nc));
                 p.vk_body.push(i32s(bi));
                 for c in 0..nc {
-                    for s in v.nb[c] {
+                    for s in v.nb.get(c).copied().unwrap_or([None; 9]) {
                         p.cnb.push(s.map_or(-1, |i| i32s(o + i)));
                     }
-                    let (xx, yy, xy) = v.rest_curv[c];
+                    let (xx, yy, xy) = v.rest_curv.get(c).copied().unwrap_or((0.0, 0.0, 0.0));
                     p.crest.extend_from_slice(&[xx, yy, xy]);
+                    if let Some(rows) = &v.membrane_terms {
+                        if rows.len() != nc { return Err("annular load row count mismatch".into()); }
+                        for t in &rows[c] {
+                            if t.a >= b.n || t.b >= b.n || !t.weight.is_finite() {
+                                return Err("invalid annular geometric-strain term".into());
+                            }
+                            p.q_a.push(i32s(o + t.a));
+                            p.q_b.push(i32s(o + t.b));
+                            p.q_weight.push(t.weight);
+                        }
+                    }
+                    p.q_ptr.push(i32s(p.q_a.len()));
                 }
                 for s0 in (0..nc).step_by(item) {
                     p.citem_body.push(i32s(bi));
@@ -414,6 +466,7 @@ impl Plan {
             } else {
                 p.beh.push(0.0);
                 p.bvk.push(0);
+                p.bweak.push(0);
                 p.bnc.push(0);
             }
             p.bcitem1.push(i32s(p.citem_body.len()));
@@ -424,9 +477,19 @@ impl Plan {
         // the nonlinear gradient as a gather: node k sums its core contributions in core order, the order
         // the CPU's scatter adds them in (each core node touches a node through at most one slot)
         let mut gather: Vec<Vec<(i32, i32)>> = vec![vec![]; p.nt];
+        let mut weak_gather: Vec<Vec<(i32, i32, f64)>> = vec![vec![]; p.nt];
         for (bi, b) in img.bodies.iter().enumerate() {
             if let Some(v) = &b.vk {
                 let c0 = p.bcoff[bi] as usize;
+                if let Some(rows) = &v.membrane_terms {
+                    for (c, row) in rows.iter().enumerate() {
+                        for t in row {
+                            weak_gather[g(bi, t.a)].push((i32s(c0+c), i32s(g(bi,t.b)), t.weight));
+                            weak_gather[g(bi, t.b)].push((i32s(c0+c), i32s(g(bi,t.a)), t.weight));
+                        }
+                    }
+                    continue;
+                }
                 for (c, s9) in v.nb.iter().enumerate() {
                     for slot in [1usize, 2, 0, 3, 4, 5, 6, 7, 8] {
                         if let Some(node) = s9[slot] {
@@ -437,6 +500,15 @@ impl Plan {
             }
         }
         p.gt_ptr.push(0);
+        p.wg_ptr.push(0);
+        for row in weak_gather {
+            for (core, other, weight) in row {
+                p.wg_core.push(core);
+                p.wg_other.push(other);
+                p.wg_weight.push(weight);
+            }
+            p.wg_ptr.push(i32s(p.wg_core.len()));
+        }
         for list in &gather {
             for &(c, s) in list {
                 p.gt_core.push(c);
@@ -729,6 +801,35 @@ impl Plan {
         // same weights, gap and law
         if img.bodies.iter().zip(&self.body_off).enumerate().any(|(b, (bi, &o))| o + bi.n != self.body_off.get(b + 1).copied().unwrap_or(self.nt)) {
             return Err("a batch member's bodies differ from the first member's".into());
+        }
+        for (bi, body) in img.bodies.iter().enumerate() {
+            let rows = body.vk.as_ref().and_then(|v| v.membrane_terms.as_ref());
+            if rows.is_some() != (self.bweak[bi] != 0) {
+                return Err("a batch member's annular membrane formulation differs".into());
+            }
+            if let Some(rows) = rows {
+                let vk = body.vk.as_ref().expect("annular rows belong to a plate");
+                let offset = self.body_off[bi];
+                if rows.len() != self.bnc[bi] as usize
+                    || vk.eh.to_bits() != self.beh[bi].to_bits()
+                    || vk.z0 != self.z0[offset..offset + body.n]
+                {
+                    return Err("a batch member's annular membrane geometry differs".into());
+                }
+                let core = self.bcoff[bi] as usize;
+                for (c, row) in rows.iter().enumerate() {
+                    let first = self.q_ptr[core + c] as usize;
+                    let end = self.q_ptr[core + c + 1] as usize;
+                    if row.len() != end - first || row.iter().zip(first..end).any(|(t, q)| {
+                        t.a >= body.n || t.b >= body.n
+                            || (offset + t.a) as i32 != self.q_a[q]
+                            || (offset + t.b) as i32 != self.q_b[q]
+                            || t.weight.to_bits() != self.q_weight[q].to_bits()
+                    }) {
+                        return Err("a batch member's annular strain rows differ".into());
+                    }
+                }
+            }
         }
         let g = |b: usize, i: usize| self.body_off[b] + i;
         for (j, c) in img.contacts.iter().enumerate() {

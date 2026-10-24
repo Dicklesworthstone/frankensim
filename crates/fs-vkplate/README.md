@@ -24,7 +24,14 @@ Node count alone does not establish audio-band fidelity.
   `(1 - nu)` twist term; free edges are the natural boundary of that energy. Von Karman coupling
   through the Airy stress function with a rest shape `z0(r)`:
   `Lap^2 F = -E t [l(w + z0) - l(z0)]` for uniform thickness,
-  `l(u) = u_xx u_yy - u_xy^2`, `F = dF/dn = 0` at the rim.
+  `l(u) = u_xx u_yy - u_xy^2`. The outer rim fixes the affine Airy
+  gauge with `F = dF/dn = 0`. A hole has its own three affine trace
+  coordinates; imposing the same zero trace on both boundaries incorrectly
+  removes physical stress fields. Annuli use the complementary weak load
+  `cof(Hess F) : [grad(w)⊗grad(w)/2 + sym(grad(z0)⊗grad(w))]`,
+  retaining the boundary contribution and its exact discrete energy gradient.
+  The three extra coordinates use a Schur complement of the narrow-band factor.
+  Native and CUDA steppers consume the same quadratic strain rows.
   With varying thickness, the stress operator comes from the local complementary
   membrane energy `(F_xx^2 + F_yy^2 - 2 nu F_xx F_yy + 2(1+nu) F_xy^2)/(2 E t)`.
   Normal derivatives live at nodes and mixed derivatives at cell centres. This

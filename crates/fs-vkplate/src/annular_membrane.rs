@@ -1,0 +1,359 @@
+//! Multiply-connected free-traction Airy problem, from complementary energy.
+//!
+//! A free hole permits an independent affine Airy trace (value and two slopes).
+//! Fixing that trace to the outer rim's gauge removes compatible stress fields.
+//! The load is the weak geometric strain, including its boundary contribution;
+//! merely adding three unknowns to the strong determinant load is incorrect.
+use super::{Band, Csr, PlateSpec, add};
+use std::collections::{BTreeMap, BTreeSet};
+
+type Row = Vec<(usize, f64)>;
+
+/// One symmetric quadratic term in a weak geometric-strain load. Node indices
+/// are body-local. For rest height z, evaluate weight*(wa*wb+za*wb+wa*zb).
+#[derive(Clone, Debug)]
+pub struct MembraneTerm {
+    pub a: usize,
+    pub b: usize,
+    pub weight: f64,
+}
+
+#[derive(Clone)]
+pub(super) struct AnnularMembrane {
+    pub terms: Vec<Vec<MembraneTerm>>,
+    core: Band,
+    cross: [Vec<f64>; 3],
+    lift: [Vec<f64>; 3],
+    schur: Band,
+    nc: usize,
+}
+
+fn outer(m: &mut [BTreeMap<usize, f64>], a: &Row, b: &Row, scale: f64) {
+    for &(i, x) in a {
+        for &(j, y) in b {
+            add(m, i, j, scale * x * y);
+        }
+    }
+}
+
+fn quadratic(
+    q: &mut [BTreeMap<(usize, usize), f64>],
+    stress: &Row,
+    dx: &Row,
+    dy: &Row,
+    scale: f64,
+) {
+    for &(c, v) in stress {
+        for &(a, x) in dx {
+            for &(b, y) in dy {
+                *q[c].entry((a.min(b), a.max(b))).or_default() += scale * v * x * y;
+            }
+        }
+    }
+}
+
+impl AnnularMembrane {
+    pub(super) fn new(
+        grid: &BTreeMap<(i64, i64), usize>,
+        sorted: &[(i64, i64)],
+        spec: &PlateSpec<'_>,
+        compliance: impl Fn(f64, f64) -> Result<f64, String>,
+    ) -> Result<(Self, Csr), String> {
+        let (h, hole, radius, nu) = (spec.grid, spec.hole, spec.radius, spec.poisson);
+        let ci: BTreeMap<_, _> = sorted.iter().enumerate().map(|(k, &p)| (p, k)).collect();
+        let nc = sorted.len();
+        let trace = |i: i64, j: i64| -> Row {
+            if let Some(&k) = ci.get(&(i, j)) {
+                return vec![(k, 1.0)];
+            }
+            let (x, y) = (i as f64 * h, j as f64 * h);
+            if x.hypot(y) < (radius + hole) * 0.5 {
+                vec![(nc, 1.0), (nc + 1, x), (nc + 2, y)]
+            } else {
+                vec![]
+            }
+        };
+        let stencil = |i: i64, j: i64, offsets: &[(i64, i64, f64)]| -> Row {
+            let mut row = BTreeMap::<usize, f64>::new();
+            for &(di, dj, weight) in offsets {
+                for (k, v) in trace(i + di, j + dj) {
+                    *row.entry(k).or_default() += weight * v / (h * h);
+                }
+            }
+            row.into_iter().filter(|&(_, v)| v != 0.0).collect()
+        };
+        let gradient = |i: i64, j: i64, di: i64, dj: i64| -> Result<Row, String> {
+            let at = |d| grid.get(&(i + d * di, j + d * dj)).copied();
+            let c = *grid
+                .get(&(i, j))
+                .ok_or("membrane gradient centre missing")?;
+            Ok(match (at(-1), at(1)) {
+                (Some(a), Some(b)) => vec![(a, -0.5 / h), (b, 0.5 / h)],
+                (None, Some(b)) => match at(2) {
+                    Some(d) => vec![(c, -1.5 / h), (b, 2.0 / h), (d, -0.5 / h)],
+                    None => vec![(c, -1.0 / h), (b, 1.0 / h)],
+                },
+                (Some(a), None) => match at(-2) {
+                    Some(d) => vec![(c, 1.5 / h), (a, -2.0 / h), (d, 0.5 / h)],
+                    None => vec![(c, 1.0 / h), (a, -1.0 / h)],
+                },
+                _ => return Err("annulus grid cannot resolve a surface gradient".into()),
+            })
+        };
+        let mut matrix = vec![BTreeMap::new(); nc + 3];
+        let mut load = vec![BTreeMap::new(); nc + 3];
+        for &(i, j) in grid.keys() {
+            let xx = stencil(i, j, &[(-1, 0, 1.0), (0, 0, -2.0), (1, 0, 1.0)]);
+            let yy = stencil(i, j, &[(0, -1, 1.0), (0, 0, -2.0), (0, 1, 1.0)]);
+            if xx.is_empty() && yy.is_empty() {
+                continue;
+            }
+            let weight = compliance(i as f64 * h, j as f64 * h)?;
+            outer(&mut matrix, &xx, &xx, weight);
+            outer(&mut matrix, &yy, &yy, weight);
+            outer(&mut matrix, &xx, &yy, -nu * weight);
+            outer(&mut matrix, &yy, &xx, -nu * weight);
+            let dx = gradient(i, j, 1, 0)?;
+            let dy = gradient(i, j, 0, 1)?;
+            quadratic(&mut load, &xx, &dy, &dy, 0.5);
+            quadratic(&mut load, &yy, &dx, &dx, 0.5);
+        }
+        let cells: BTreeSet<_> = sorted
+            .iter()
+            .flat_map(|&(i, j)| [(i - 1, j - 1), (i - 1, j), (i, j - 1), (i, j)])
+            .collect();
+        for (i, j) in cells {
+            let xy = stencil(
+                i,
+                j,
+                &[(0, 0, 1.0), (1, 0, -1.0), (0, 1, -1.0), (1, 1, 1.0)],
+            );
+            let mut nodes = [0; 4];
+            for (n, (di, dj)) in nodes.iter_mut().zip([(0, 0), (1, 0), (0, 1), (1, 1)]) {
+                *n = *grid
+                    .get(&(i + di, j + dj))
+                    .ok_or("annulus shear cell is incomplete")?;
+            }
+            let dx = nodes
+                .into_iter()
+                .zip([-0.5 / h, 0.5 / h, -0.5 / h, 0.5 / h])
+                .collect();
+            let dy = nodes
+                .into_iter()
+                .zip([-0.5 / h, -0.5 / h, 0.5 / h, 0.5 / h])
+                .collect();
+            let weight = 2.0 * (1.0 + nu) * compliance((i as f64 + 0.5) * h, (j as f64 + 0.5) * h)?;
+            outer(&mut matrix, &xy, &xy, weight);
+            quadratic(&mut load, &xy, &dx, &dy, -1.0);
+        }
+        // Keep the narrow band. Only the three boundary modes are dense;
+        // eliminate them with the exact Schur complement, factored once.
+        let interior: Vec<BTreeMap<usize, f64>> = matrix[..nc]
+            .iter()
+            .map(|r| r.range(..nc).map(|(&i, &v)| (i, v)).collect())
+            .collect();
+        let core = Band::factor(&interior)?;
+        let cross: [Vec<f64>; 3] = std::array::from_fn(|k| {
+            (0..nc)
+                .map(|i| *matrix[i].get(&(nc + k)).unwrap_or(&0.0))
+                .collect()
+        });
+        let lift: [Vec<f64>; 3] = std::array::from_fn(|k| {
+            let mut x = cross[k].clone();
+            core.solve(&mut x);
+            x
+        });
+        let mut border = vec![BTreeMap::new(); 3];
+        for (i, row) in border.iter_mut().enumerate() {
+            for (j, column) in lift.iter().enumerate() {
+                let reduction: f64 = cross[i].iter().zip(column).map(|(a, b)| a * b).sum();
+                row.insert(
+                    j,
+                    matrix[nc + i].get(&(nc + j)).copied().unwrap_or(0.0) - reduction,
+                );
+            }
+        }
+        let schur = Band::factor(&border)?;
+        let terms = load
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .filter(|&(_, v)| v != 0.0)
+                    .map(|((a, b), weight)| MembraneTerm { a, b, weight })
+                    .collect()
+            })
+            .collect();
+        Ok((
+            Self {
+                terms,
+                core,
+                cross,
+                lift,
+                schur,
+                nc,
+            },
+            Csr::from_rows(&matrix),
+        ))
+    }
+
+    pub(super) fn solve(&self, f: &mut [f64]) {
+        let (interior, boundary) = f.split_at_mut(self.nc);
+        self.core.solve(interior);
+        for (k, cross) in self.cross.iter().enumerate() {
+            boundary[k] -= cross
+                .iter()
+                .zip(interior.iter())
+                .map(|(a, b)| a * b)
+                .sum::<f64>();
+        }
+        self.schur.solve(boundary);
+        for (k, lift) in self.lift.iter().enumerate() {
+            for (x, a) in interior.iter_mut().zip(lift) {
+                *x -= a * boundary[k];
+            }
+        }
+    }
+
+    pub(super) fn load(&self, w: &[f64], z: &[f64], eh: f64, q: &mut [f64]) {
+        for (row, qc) in self.terms.iter().zip(q) {
+            *qc = eh
+                * row
+                    .iter()
+                    .map(|t| t.weight * (w[t.a] * w[t.b] + z[t.a] * w[t.b] + w[t.a] * z[t.b]))
+                    .sum::<f64>();
+        }
+    }
+
+    pub(super) fn gradient(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
+        for (row, &fc) in self.terms.iter().zip(f) {
+            for t in row {
+                let scale = h2 * fc * t.weight;
+                g[t.a] += scale * (w[t.b] + z[t.b]);
+                g[t.b] += scale * (w[t.a] + z[t.a]);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Body, Edge, Nonlinear, PlateSpec};
+
+    fn plate(h: f64, hole: f64, curved: bool) -> Body {
+        Body::plate(
+            "annular compatibility",
+            &PlateSpec {
+                radius: 0.5,
+                hole,
+                grid: h,
+                edge: Edge::Free,
+                thickness: &|r| if curved { 0.01 / (1.0 + r * r) } else { 0.01 },
+                rest_height: &|r| if curved { 0.03 * r * r } else { 0.0 },
+                young: 100.0,
+                poisson: 0.33,
+                density: 1000.0,
+                tension: 0.0,
+                bending: true,
+                nonlinear: Nonlinear::VonKarman,
+                t60: [(100.0, f64::INFINITY), (1000.0, f64::INFINITY)],
+                support: None,
+                muffle: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g1_free_annulus_energy_converges_to_radial_equilibrium() {
+        // Independent plane-stress radial displacement solution for w=A*r^2,
+        // with zero radial traction at both a and b. No engine matrix in oracle.
+        let (b, amplitude, nu) = (0.5_f64, 0.1_f64, 0.33_f64);
+        for a in [0.1_f64, 0.25] {
+            let dr = (b - a) / 100_000.0;
+            let mut exact = 0.0;
+            for i in 0..100_000 {
+                let r = a + (i as f64 + 0.5) * dr;
+                let rr =
+                    amplitude.powi(2) / 4.0 * (a * a + b * b - r * r - a * a * b * b / (r * r));
+                let tt = amplitude.powi(2) / 4.0
+                    * (a * a + b * b - 3.0 * r * r + a * a * b * b / (r * r));
+                exact += (rr * rr + tt * tt - 2.0 * nu * rr * tt) * std::f64::consts::PI * r * dr;
+            }
+            let mut previous = f64::INFINITY;
+            for h in [0.04, 0.02, 0.01] {
+                let mut body = plate(h, a, false);
+                for (w, &[x, y]) in body.w.iter_mut().zip(&body.xy) {
+                    *w = amplitude * (x * x + y * y);
+                }
+                let computed = body.nonlinear_gradient();
+                let error = (computed / exact - 1.0).abs();
+                eprintln!(
+                    "annulus a={a} h={h} energy={computed:e} exact={exact:e} relative_error={error}"
+                );
+                assert!(
+                    error < 0.65 * previous,
+                    "annulus energy must converge under refinement"
+                );
+                previous = error;
+            }
+            assert!(
+                previous < 0.13,
+                "finest staircase grid remains first-order at its rim"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_annular_force_is_energy_gradient_with_rest_shape_and_taper() {
+        let mut body = plate(0.04, 0.1, true);
+        for (w, &[x, y]) in body.w.iter_mut().zip(&body.xy) {
+            *w = 0.007 * (3.0 * x + 2.0 * y).sin();
+        }
+        let energy = body.nonlinear_gradient();
+        assert!(energy > 0.0);
+        let expected = body.g.clone();
+        for i in (0..body.n).step_by(17) {
+            let original = body.w[i];
+            let eps = 1e-7;
+            body.w[i] = original + eps;
+            let plus = body.nonlinear_gradient();
+            body.w[i] = original - eps;
+            let minus = body.nonlinear_gradient();
+            body.w[i] = original;
+            let actual = (plus - minus) / (2.0 * eps);
+            assert!(
+                (actual - expected[i]).abs() < 1e-11,
+                "node {i}: {actual} != {}",
+                expected[i]
+            );
+        }
+        let vk = body.vk.as_ref().unwrap();
+        let mut applied = vec![0.0; vk.f.len()];
+        vk.matrix.mul_add(&vk.f, 1.0, &mut applied);
+        let residual = applied
+            .iter()
+            .zip(&vk.q)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm = vk.q.iter().map(|q| q * q).sum::<f64>().sqrt();
+        assert!(
+            residual < 1e-8 * norm,
+            "Schur solve residual {residual} / {norm}"
+        );
+    }
+
+    #[test]
+    fn g3_free_annular_rigid_tilt_has_no_membrane_energy() {
+        for curved in [false, true] {
+            let mut body = plate(0.02, 0.1, curved);
+            for (w, &[x, y]) in body.w.iter_mut().zip(&body.xy) {
+                *w = 0.03 * x - 0.07 * y + 0.02;
+            }
+            // A tilt's cross strain with the rest shape is compatible with
+            // an in-plane displacement too; curvature must not pin rotation.
+            assert!(body.nonlinear_gradient().abs() < 1e-20);
+            assert!(body.g.iter().all(|g| g.abs() < 1e-16));
+        }
+    }
+}

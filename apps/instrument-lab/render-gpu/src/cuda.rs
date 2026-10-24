@@ -34,6 +34,8 @@ params! {
     bh: "double*", bih2: "double*", bs1: "double*", bten: "double*", bber: "double*", bairm: "double*", barea: "double*", beh: "double*",
     bvk: "int*", bcoff: "int*", bnc: "int*", bitem0: "int*", bitem1: "int*", bcitem0: "int*", bcitem1: "int*", bcav: "int*", brad: "int*",
     cnb: "int*", crest: "double*", vk_body: "int*", airy_off: "ll*", airy64: "double*", airy32: "float*",
+    bweak: "int*", q_ptr: "int*", q_a: "int*", q_b: "int*", q_weight: "double*",
+    wg_ptr: "int*", wg_core: "int*", wg_other: "int*", wg_weight: "double*",
     item_body: "int*", item_start: "int*", item_len: "int*", citem_body: "int*", citem_start: "int*", citem_len: "int*",
     W0: "double*", W1: "double*", W2: "double*", LW0: "double*", LW1: "double*", F: "double*", G: "double*", TMP: "double*",
     Q: "double*", QF: "float*", CXX: "double*", CYY: "double*", CXY: "double*", AF: "double*",
@@ -272,6 +274,10 @@ pub fn run(
     p.bitem0 = m.i32(&plan.bitem0)?; p.bitem1 = m.i32(&plan.bitem1)?; p.bcitem0 = m.i32(&plan.bcitem0)?;
     p.bcitem1 = m.i32(&plan.bcitem1)?; p.bcav = m.i32(&plan.bcav)?; p.brad = m.i32(&plan.brad)?;
     p.cnb = m.i32(&plan.cnb)?; p.crest = m.f64(&plan.crest)?; p.vk_body = m.i32(&plan.vk_body)?; p.airy_off = m.i64(&plan.airy_off)?;
+    p.bweak = m.i32(&plan.bweak)?; p.q_ptr = m.i32(&plan.q_ptr)?;
+    p.q_a = m.i32(&plan.q_a)?; p.q_b = m.i32(&plan.q_b)?; p.q_weight = m.f64(&plan.q_weight)?;
+    p.wg_ptr = m.i32(&plan.wg_ptr)?; p.wg_core = m.i32(&plan.wg_core)?;
+    p.wg_other = m.i32(&plan.wg_other)?; p.wg_weight = m.f64(&plan.wg_weight)?;
     if airy_f32 {
         let a32: Vec<f32> = plan.airy.iter().map(|&x| x as f32).collect();
         p.airy32 = m.f32(&a32)?;

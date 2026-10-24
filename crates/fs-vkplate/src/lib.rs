@@ -34,6 +34,9 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
+mod annular_membrane;
+pub use annular_membrane::MembraneTerm;
+
 pub use fs_material::gas::GasState;
 pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 
@@ -422,8 +425,9 @@ struct VonKarman {
     l0: Vec<f64>,              // l(z0) at core
     rest_curv: Vec<(f64, f64, f64)>, // xx, yy, xy of z0 at core
     z0: Vec<f64>,              // rest height per node
-    airy: Band,
+    airy: Option<Band>,
     matrix: Csr,
+    annulus: Option<annular_membrane::AnnularMembrane>,
     f: Vec<f64>,
     q: Vec<f64>,
     curv: Vec<(f64, f64, f64)>,
@@ -803,9 +807,15 @@ impl Body {
                     }
                 }
             }
-            let airy = Band::factor(&arows)?;
-            let matrix = Csr::from_rows(&arows);
-            Some(VonKarman { eh: s.young * t_mean, nb, l0, rest_curv, z0, airy, matrix, f: vec![0.0; nc], q: vec![0.0; nc], curv: vec![(0.0, 0.0, 0.0); nc] })
+            let airy = if s.hole > 0.0 { None } else { Some(Band::factor(&arows)?) };
+            let (annulus, matrix) = if s.hole > 0.0 {
+                let (a, matrix) = annular_membrane::AnnularMembrane::new(&grid_index, &sorted, s, compliance)?;
+                (Some(a), matrix)
+            } else {
+                (None, Csr::from_rows(&arows))
+            };
+            let na = matrix.n;
+            Some(VonKarman { eh: s.young * t_mean, nb, l0, rest_curv, z0, airy, matrix, annulus, f: vec![0.0; na], q: vec![0.0; na], curv: vec![(0.0, 0.0, 0.0); nc] })
         } else {
             None
         };
@@ -994,9 +1004,18 @@ impl Body {
         if let Some(vk) = self.vk.as_mut() {
             let h2 = self.h * self.h;
             let w = &self.w;
-            let VonKarman { eh, nb, rest_curv, airy, f, q, curv, .. } = vk;
+            let VonKarman { eh, nb, rest_curv, airy, f, q, curv, annulus, z0, .. } = vk;
             let eh = *eh;
+            if let Some(annulus) = annulus {
+                annulus.load(w, z0, eh, q);
+                f.copy_from_slice(q);
+                annulus.solve(f);
+                v += h2 / (2.0 * eh) * f.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
+                annulus.gradient(w, z0, f, h2, &mut self.g);
+                return v.max(0.0);
+            }
             let u = |o: Option<usize>| o.map_or(0.0, |k| w[k]);
+            let airy = airy.as_ref().expect("simply-connected plate retains its Airy factor");
             // q = -E t (l(w + z0) - l(z0)) per core node, built row by row inside the Airy solve's
             // forward sweep (it fills that sweep's latency chain); A F = q
             airy.solve_with(f, |c| {
@@ -2575,6 +2594,8 @@ pub struct VonKarmanImage {
     pub l0: Vec<f64>,
     /// Cached rest curvatures (xx, yy, xy), one triple per core stencil.
     pub rest_curv: Vec<(f64, f64, f64)>,
+    /// Weak annular geometric-strain rows; includes the hole's three affine modes.
+    pub membrane_terms: Option<Vec<Vec<MembraneTerm>>>,
     pub z0: Vec<f64>,
     pub f: Vec<f64>,
 }
@@ -2674,7 +2695,7 @@ impl Body {
             tension: self.tension,
             berger: self.berger,
             bias: self.bias.clone(),
-            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), rest_curv: v.rest_curv.clone(), z0: v.z0.clone(), f: v.f.clone() }),
+            vk: self.vk.as_ref().map(|v| VonKarmanImage { eh: v.eh, nb: v.nb.clone(), l0: v.l0.clone(), rest_curv: v.rest_curv.clone(), membrane_terms: v.annulus.as_ref().map(|a| a.terms.clone()), z0: v.z0.clone(), f: v.f.clone() }),
             area: self.area,
             air_mass: self.air_mass,
             w: self.w.clone(),
@@ -2686,13 +2707,15 @@ impl Body {
         }
     }
 
-    /// Solve the plate's Airy system A F = x in place (core numbering), with the factor every step
-    /// uses. False (and `x` untouched) for a body without von Karman coupling. Column j of A^-1 is
+    /// Solve A F = x with the factor every step uses. Rows are core nodes followed
+    /// by three affine hole-trace coordinates for an annulus. This is the same order
+    /// as the exported stress and weak-load rows. False for an incompatible length.
+    /// False (and `x` untouched) for a body without von Karman coupling. Column j of A^-1 is
     /// the solve of the j-th unit vector.
     pub fn airy_solve(&self, x: &mut [f64]) -> bool {
         match &self.vk {
-            Some(v) if x.len() == v.nb.len() => {
-                v.airy.solve(x);
+            Some(v) if x.len() == v.f.len() => {
+                if let Some(a) = &v.annulus { a.solve(x); } else if let Some(a) = &v.airy { a.solve(x); }
                 true
             }
             _ => false,

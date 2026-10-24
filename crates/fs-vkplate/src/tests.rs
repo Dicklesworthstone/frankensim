@@ -273,21 +273,32 @@ fn g3_hihat_refinement_preserves_joint_load_and_rim_traction() {
 
 #[test]
 fn g0_shell_admission_includes_curvature_without_changing_live_state() {
-    let mut spec=kit::ride(); spec.grid*=2.6;
-    let mut p=kit::cymbal(&spec,&[]).unwrap();
-    let mut b=p.instrument.bodies[0].clone();
+    // Isolate the shell tangent from bending: a product preset may have a
+    // bending-dominated highest mode even when its rest curvature matters.
+    let mut b=Body::plate("shell admission", &PlateSpec {
+        radius: 0.1, hole: 0.02, grid: 0.01, edge: Edge::Free,
+        thickness: &|_| 0.001, rest_height: &|r| 0.2*r*r,
+        young: 1e11, poisson: 0.3, density: 8000.0, tension: 0.0,
+        bending: false, nonlinear: Nonlinear::VonKarman,
+        t60: NO_LOSS, support: None, muffle: None,
+    }).unwrap();
     let linear=b.max_rate2(); let shell=b.max_rate2_with_shell();
-    assert!(shell>1.1*linear,"fixture must expose unresolved rest curvature");
+    assert_eq!(linear,0.0);
+    assert!(shell.is_finite() && shell>0.0,"curved shell must have a tangent");
+    let mut instrument=Instrument::new((shell/(4.0*0.5)).sqrt());
+    instrument.add(b);
+    assert!(instrument.stability().0<=0.6);
     let old_rate=((linear+shell)/(8.0*0.6)).sqrt();
-    assert!(shell/(4.0*p.instrument.rate.powi(2))<=0.6);
-    p.instrument.rate=old_rate;
-    p.instrument.bodies[0].f[0]+=0.5;
-    let before=p.instrument.bodies[0].clone();
-    assert!(p.instrument.stability().0>0.6);
-    assert_eq!(p.instrument.bodies[0].f,before.f);
-    assert_eq!(p.instrument.bodies[0].w,before.w);
-    assert_eq!(p.instrument.bodies[0].wp,before.wp);
-    assert_eq!(p.instrument.bodies[0].lw,before.lw);
+    // Negative control: the former linear-only admission accepts this rate.
+    assert!(linear/(4.0*old_rate.powi(2))<=0.6);
+    instrument.rate=old_rate;
+    instrument.bodies[0].f[0]+=0.5;
+    let before=instrument.bodies[0].clone();
+    assert!(instrument.stability().0>0.6);
+    assert_eq!(instrument.bodies[0].f,before.f);
+    assert_eq!(instrument.bodies[0].w,before.w);
+    assert_eq!(instrument.bodies[0].wp,before.wp);
+    assert_eq!(instrument.bodies[0].lw,before.lw);
 }
 
 
@@ -478,7 +489,7 @@ fn exporting_an_instrument_changes_nothing_and_exports_a_spd_airy_inverse() {
     let (exported, mut p) = run(true);
     assert_eq!(plain, exported, "exporting changed the output");
     let img = p.ins.image();
-    let (bi, nc) = img.bodies.iter().enumerate().find_map(|(i, b)| b.vk.as_ref().map(|v| (i, v.nb.len()))).unwrap();
+    let (bi, nc) = img.bodies.iter().enumerate().find_map(|(i, b)| b.vk.as_ref().map(|v| (i, v.f.len()))).unwrap();
     assert!(nc > 10, "no von Karman core found");
     let shell = &p.ins.bodies[bi];
     assert!(!shell.airy_solve(&mut vec![0.0; nc + 1]), "a wrong-length solve must refuse");

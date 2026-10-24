@@ -511,6 +511,18 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const int b = __ldg(&p.citem_body[item]);
         const ll o = (ll)s * NT;
         const double ih2 = __ldg(&p.bih2[b]);
+        if (__ldg(&p.bweak[b])) {
+          double sum = 0.0;
+          for (int j = __ldg(&p.q_ptr[c]); j < __ldg(&p.q_ptr[c+1]); j++) {
+            const int a = __ldg(&p.q_a[j]), d = __ldg(&p.q_b[j]);
+            const double wa = W[o+a], wd = W[o+d];
+            sum += __ldg(&p.q_weight[j]) * (wa*wd + __ldg(&p.z0[a])*wd + wa*__ldg(&p.z0[d]));
+          }
+          const double qc = __ldg(&p.beh[b]) * sum;
+          const ll oc = (ll)s * NC + c;
+          p.Q[oc] = qc; p.QF[oc] = (float)qc;
+          p.CXX[oc] = p.CYY[oc] = p.CXY[oc] = 0.0;
+        } else {
         int nb[9]; double u[9];
 #pragma unroll
         for (int j = 0; j < 9; j++) nb[j] = __ldg(&p.cnb[9ll * c + j]);
@@ -526,6 +538,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const ll oc = (ll)s * NC + c;
         p.Q[oc] = qc; p.QF[oc] = (float)qc;
         p.CXX[oc] = xx + zx; p.CYY[oc] = yy + zy; p.CXY[oc] = xy + zxy;
+        }
       }
     }
     // link forces, one thread per (simulation, link); the nodes add them in link order in P3
@@ -591,6 +604,13 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           double g = 0.0;
           if (__ldg(&p.bber[b]) > 0.0) g = g + sv[0] * LW[o + i];
           if (__ldg(&p.bvk[b])) {
+            if (__ldg(&p.bweak[b])) {
+              for (int q = __ldg(&p.wg_ptr[i]); q < __ldg(&p.wg_ptr[i+1]); q++) {
+                const int other = __ldg(&p.wg_other[q]);
+                const ll oc = (ll)s * NC + __ldg(&p.wg_core[q]);
+                g += (h*h*p.AF[oc]*__ldg(&p.wg_weight[q])) * (W[o+other]+__ldg(&p.z0[other]));
+              }
+            } else {
 #pragma unroll 9
             for (int q = 0; q < p.KG; q++) {
               const int gc = __ldg(&p.gtE_core[(ll)q * NT + i]);
@@ -598,6 +618,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
                 const ll oc = (ll)s * NC + gc;
                 g = g - p.AF[oc] * slot_val(__ldg(&p.gtE_slot[(ll)q * NT + i]), p.CXX[oc], p.CYY[oc], p.CXY[oc]);
               }
+            }
             }
           }
           p.G[o + i] = g;
