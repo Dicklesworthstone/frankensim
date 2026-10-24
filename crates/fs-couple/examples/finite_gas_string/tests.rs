@@ -36,15 +36,21 @@ fn scoped<T>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> T) -> T {
 }
 
 fn source(viscosity_scale: f64) -> MaterialCard {
+    source_law(viscosity_scale, None)
+}
+
+fn source_law(viscosity_scale: f64, expansion_per_k: Option<f64>) -> MaterialCard {
     let mut claims = ClaimSet::new();
-    for (name, dims, low, high, constant) in [
+    let mut properties = vec![
         ("density", Density::DIMS, 1000.0, 1000.0, true),
-        ("young_modulus", Pressure::DIMS, 2e9, 2e9, true),
+        if expansion_per_k.is_some() {
+            ("young_modulus", Pressure::DIMS, 2.02e9, 1.9e9, false)
+        } else { ("young_modulus", Pressure::DIMS, 2e9, 2e9, true) },
         (
             "specific_heat_capacity",
             SPECIFIC_HEAT_CAPACITY_DIMS,
-            0.1,
-            0.1,
+            if expansion_per_k.is_some() { 10.0 } else { 0.1 },
+            if expansion_per_k.is_some() { 10.0 } else { 0.1 },
             true,
         ),
         (
@@ -68,7 +74,12 @@ fn source(viscosity_scale: f64) -> MaterialCard {
             2e-6,
             false,
         ),
-    ] {
+    ];
+    if let Some(alpha) = expansion_per_k {
+        properties.push(("linear_thermal_expansion_coefficient",
+            fs_qty::Dims([0, 0, 0, -1, 0, 0]), alpha, alpha, true));
+    }
+    for (name, dims, low, high, constant) in properties {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -242,7 +253,8 @@ fn continuous_pressure_replays_and_matches_independent_three_storage_energy() {
         let second_moment = std::f64::consts::PI * one.radius_m.powi(4) / 4.0;
         let solid_mass = 1000.0 * area * one.length_m;
         let wavenumber = std::f64::consts::PI / one.length_m;
-        let omega_squared = (one.tension_n * wavenumber.powi(2)
+        let input::Prestress::FixedTension(tension) = one.prestress else { panic!("fixed tension fixture") };
+        let omega_squared = (tension * wavenumber.powi(2)
             + 2e9 * second_moment * wavenumber.powi(4))
             / (1000.0 * area);
         let phi_squared = 2.0 * (std::f64::consts::PI * one.station).sin().powi(2) / solid_mass;
@@ -271,6 +283,47 @@ fn continuous_pressure_replays_and_matches_independent_three_storage_energy() {
             assert!((row[20] / (resistivity * one.length_m / area) - 1.0).abs() < 1e-12);
             assert!((row[6] / (85000.0 * row[5] / 300.0) - 1.0).abs() < 1e-12);
         }
+    });
+}
+
+#[test]
+fn sourced_expansion_changes_live_tension_pitch_and_pressure_through_the_same_input() {
+    let text = include_str!("expanding.string");
+    assert!(input::parse(&text.replace("fixed_support", "20")).is_err());
+    let missing = text.split("thermoelastic").next().unwrap();
+    assert!(input::parse(missing).is_err());
+    scoped(|cx, _| {
+        let mut spec = input::parse(text).unwrap();
+        spec.samples = 128;
+        spec.modes = 2;
+        let thermal = spec.thermoelastic.unwrap();
+        let card = source_law(1.0, Some(2e-5));
+        let gas = parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3);
+        let history = simulate(cx, &spec, &card, gas.clone()).unwrap();
+        let without_expansion = simulate(cx, &spec, &source_law(1.0, Some(0.0)), gas).unwrap();
+        assert_ne!(history.pressure_pa, without_expansion.pressure_pa);
+        let area = std::f64::consts::PI * spec.radius_m.powi(2);
+        let second_moment = area * spec.radius_m.powi(2) / 4.0;
+        let k = std::f64::consts::PI / spec.length_m;
+        for row in &history.records {
+            let young = 2e9 - 1e6 * (row[4] - 300.0);
+            let strain = (spec.length_m - thermal.reference_length_m) / thermal.reference_length_m
+                - 2e-5 * (row[4] - thermal.reference_temperature_k);
+            let tension = young * area * strain;
+            let frequency = ((tension * k.powi(2) + young * second_moment * k.powi(4))
+                / (1000.0 * area)).sqrt() / (2.0 * std::f64::consts::PI);
+            assert!((row[22] - tension).abs() < 1e-12);
+            assert!((row[23] - frequency).abs() < 1e-10);
+            assert!(row[15].abs() <= row[16]);
+        }
+        let first = history.records.first().unwrap();
+        let last = history.records.last().unwrap();
+        assert!(last[4] > first[4]);
+        assert!(last[22] < first[22]);
+        assert!(last[23] < first[23]);
+        assert!(last[24].abs() > 0.0);
+        assert!(last[25].abs() > 0.0);
+        assert!(last[26].abs() > 0.0);
     });
 }
 

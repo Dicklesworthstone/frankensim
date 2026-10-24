@@ -1,11 +1,26 @@
 //! Explicit bounded native input; all physical values are SI.
 
 use fs_couple::cavity_phs::piston::thermal::HeatExchangeSolve;
+use fs_couple::acoustic_realize::thermoelastic::ThermoelasticStringSolve;
 use fs_material::conductor::OhmicDrive;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 
 pub const MAX_INPUT_BYTES: usize = 8192;
 pub const MAX_SAMPLES: usize = 262_144;
+
+#[derive(Clone, Copy, Debug)]
+pub enum Prestress {
+    FixedTension(f64),
+    FixedSupports,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Thermoelastic {
+    pub reference_length_m: f64,
+    pub reference_temperature_k: f64,
+    pub strain_limit: f64,
+    pub solve: ThermoelasticStringSolve,
+}
 
 #[derive(Clone, Debug)]
 pub struct Spec {
@@ -14,7 +29,7 @@ pub struct Spec {
     pub full_scale_pa: f64,
     pub length_m: f64,
     pub radius_m: f64,
-    pub tension_n: f64,
+    pub prestress: Prestress,
     pub modes: usize,
     pub station: f64,
     pub force_n: f64,
@@ -36,6 +51,7 @@ pub struct Spec {
     pub drive: Option<OhmicDrive>,
     pub solid_power_w: f64,
     pub gas_power_w: f64,
+    pub thermoelastic: Option<Thermoelastic>,
 }
 
 struct Fields<'a>(std::str::SplitAsciiWhitespace<'a>);
@@ -72,12 +88,13 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         f.value("full scale")?,
     );
     f.keyword("string")?;
-    let (length_m, radius_m, tension_n, modes) = (
-        f.value("length")?,
-        f.value("radius")?,
-        f.value("tension")?,
-        f.value("modes")?,
-    );
+    let length_m = f.value("length")?;
+    let radius_m = f.value("radius")?;
+    let prestress = match f.0.next().ok_or("missing string tension or fixed_support")? {
+        "fixed_support" => Prestress::FixedSupports,
+        value => Prestress::FixedTension(value.parse()?),
+    };
+    let modes = f.value("modes")?;
     f.keyword("release")?;
     let (station, force_n, release_sample) = (
         f.value("station")?,
@@ -134,6 +151,26 @@ pub fn parse(text: &str) -> super::Result<Spec> {
     };
     f.keyword("heat")?;
     let (solid_power_w, gas_power_w) = (f.value("solid power")?, f.value("gas power")?);
+    let thermoelastic = match f.0.next() {
+        None => None,
+        Some("thermoelastic") => {
+            let reference_length_m = f.value("reference stress-free length")?;
+            let reference_temperature_k = f.value("reference temperature")?;
+            let strain_limit = f.value("linear strain limit")?;
+            let bound: f64 = f.value("reversible heat bracket")?;
+            Some(Thermoelastic {
+                reference_length_m,
+                reference_temperature_k,
+                strain_limit,
+                solve: ThermoelasticStringSolve {
+                    reversible_heat_bracket_j: [-bound, bound],
+                    energy_tolerance_j: f.value("reversible heat tolerance")?,
+                    maximum_iterations: f.value("reversible heat iterations")?,
+                },
+            })
+        }
+        _ => return Err("only a thermoelastic record may follow heat".into()),
+    };
     if f.0.next().is_some() {
         return Err("string scenario contains trailing fields".into());
     }
@@ -143,7 +180,7 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         full_scale_pa,
         length_m,
         radius_m,
-        tension_n,
+        prestress,
         modes,
         station,
         force_n,
@@ -165,6 +202,7 @@ pub fn parse(text: &str) -> super::Result<Spec> {
         drive,
         solid_power_w,
         gas_power_w,
+        thermoelastic,
     };
     spec.validate()?;
     Ok(spec)
@@ -184,7 +222,6 @@ impl Spec {
             self.full_scale_pa,
             self.length_m,
             self.radius_m,
-            self.tension_n,
             self.listener_m,
             self.solid_temperature_k,
             self.solid_minimum_k,
@@ -206,6 +243,24 @@ impl Spec {
             return Err(
                 "physical magnitudes, brackets and tolerances must be finite and positive".into(),
             );
+        }
+        match (self.prestress, self.thermoelastic) {
+            (Prestress::FixedTension(tension), None) if tension.is_finite() && tension > 0.0 => {}
+            (Prestress::FixedSupports, Some(thermal)) => {
+                if [thermal.reference_length_m, thermal.reference_temperature_k,
+                    thermal.strain_limit, thermal.solve.reversible_heat_bracket_j[1],
+                    thermal.solve.energy_tolerance_j]
+                    .iter().any(|value| !value.is_finite() || *value <= 0.0)
+                    || !(self.solid_minimum_k..=self.solid_maximum_k)
+                        .contains(&thermal.reference_temperature_k)
+                    || thermal.solve.reversible_heat_bracket_j[0]
+                        != -thermal.solve.reversible_heat_bracket_j[1]
+                    || !(1..=128).contains(&thermal.solve.maximum_iterations)
+                {
+                    return Err("invalid thermoelastic reference, strain bound or heat controls".into());
+                }
+            }
+            _ => return Err("use positive fixed tension without thermoelastic, or fixed_support with its thermoelastic record".into()),
         }
         if !self.station.is_finite()
             || !(0.0..=1.0).contains(&self.station)
