@@ -38,7 +38,12 @@ impl Default for InitialSolveConfig {
 #[derive(Debug, Clone)]
 pub enum InitialSolveError {
     InvalidInput(&'static str),
-    WorkspaceLimit { required: usize, limit: usize },
+    /// The original physical model refused the initial displacement/velocity.
+    ModelRefused(String),
+    WorkspaceLimit {
+        required: usize,
+        limit: usize,
+    },
     NotConverged(SolveReport),
     Derivative(String),
     NonFiniteOutput,
@@ -296,6 +301,9 @@ where
         config,
         max_workspace_components,
     )?;
+    let admission = model.validate_state(displacement, velocity);
+    poll(cancelled)?;
+    admission.map_err(InitialSolveError::ModelRefused)?;
     let mut rhs = vec![f64::NAN; displacement.len()];
     model.resistance(displacement, velocity, &mut rhs);
     poll(cancelled)?;

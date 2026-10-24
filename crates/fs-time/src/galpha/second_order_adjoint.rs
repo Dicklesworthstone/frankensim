@@ -8,7 +8,7 @@
 
 use super::{
     ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderProblem, SecondOrderState,
-    TimeSolveError, checked_time_advance, structural_poll,
+    TimeSolveError, checked_time_advance, structural_admit, structural_poll,
 };
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport, StallDiagnosis};
 use std::cell::RefCell;
@@ -387,6 +387,17 @@ impl OperatorGeneralizedAlpha {
         P: FlexiblePreconditioner,
         Cancel: FnMut() -> bool,
     {
+        let admission = model.validate_step(self.h);
+        structural_poll(cancelled)?;
+        structural_admit(admission, "adjoint timestep")?;
+        for (q, v, phase) in [
+            (&initial.q, &initial.v, "adjoint initial state"),
+            (&next.q, &next.v, "adjoint endpoint"),
+        ] {
+            let admission = model.validate_state(q, v);
+            structural_poll(cancelled)?;
+            structural_admit(admission, phase)?;
+        }
         let [acceleration_q, acceleration_v, acceleration_a, velocity_a] =
             self.adjoint_coefficients()?;
         if !finite(&next.q) || !finite(&next.v) || !finite(&next.a) {
@@ -408,6 +419,9 @@ impl OperatorGeneralizedAlpha {
         if !finite(&q_eval) || !finite(&v_eval) || !finite(&a_eval) || !finite(&rhs) {
             return Err(SecondOrderAdjointError::NonFiniteAccumulation);
         }
+        let admission = model.validate_state(&q_eval, &v_eval);
+        structural_poll(cancelled)?;
+        structural_admit(admission, "adjoint implicit stage")?;
         let operator = StructuralTranspose {
             model,
             q: &q_eval,
