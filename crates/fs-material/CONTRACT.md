@@ -20,6 +20,28 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+
+- `section_temperature::thermoelastic::ConcentricThermoelasticLaw` derives
+  layer force, Helmholtz storage, entropy and thermal curvature from the same
+  source-bound axial potential. Each layer retains its own temperature, card,
+  original annular geometry and integrated thermal-expansion path. Scalar
+  reference density and expansion, plus scalar or globally affine `E(T)`, are
+  admitted; every original modulus knot is checked. Continuous material support
+  and all original property selections survive reevaluation, including auxiliary
+  electrical/thermal properties. For elastic strain `e`, the per-reference-length
+  potential is `psi=E*A*e^2/2`, entropy is
+  `s=A*(E*alpha*e-E'*e^2/2)` and curvature is
+  `psi_TT=A*(E*alpha^2-2*E'*alpha*e)`. Consumers add `psi+T*s` to the original
+  stress-free caloric energy and must admit positive combined heat capacity,
+  `C_caloric-T*psi_TT`, on their actual displacement and temperature domain.
+  This shared law supplies constitutive derivatives; continuing motion, heat
+  transfer and atomic publication belong to the native coupling owners.
+  It does not infer zero expansion, average materials, evolve mass, model slip,
+  or certify a radial/finite-strain/phase-changing constitutive law. The focused
+  G0/G1 tests cover unequal layer temperatures, opposing stresses, source pins,
+  negative expansion and independent free-energy derivative identities. Those
+  tests were added but not executed natively in the connector-only session;
+  syntax parsing and independent derivative arithmetic were checked.
 - `section::winding::CloseWoundSection` retains a sourced circular core and a
   distinct round-wire winding. Exact helical length gives winding line mass;
   the close-coiled spring law gives its axial rigidity with core and winding
