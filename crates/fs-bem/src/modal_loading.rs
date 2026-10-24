@@ -18,6 +18,10 @@ use fs_math::c64::C64;
 use std::ops::Range;
 use std::time::Instant;
 
+mod reciprocal;
+pub use reciprocal::{ReciprocalLoadingBake, ReciprocalLoadingDiagnostics,
+    modal_radiation_loading_reciprocal};
+
 /// Physical boundary and complete outward normal-velocity traces. A structure
 /// must supply a work-consistent transfer; this module does not interpolate it.
 #[derive(Clone, Copy)]

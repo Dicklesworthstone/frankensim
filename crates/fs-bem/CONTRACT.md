@@ -1070,3 +1070,24 @@ doi:10.1121/1.2000828, eqs.47–54, b=a; it conjugates the paper's time conventi
 No recording or plot was fitted. Native execution is pending: these are gates,
 not passing claims. Existing panel-bits goldens are unchanged; there is no
 schema migration, new dependency, instrument qualification or render claim.
+
+
+## Reciprocal complete source loads and matched receiver transfers
+
+`modal_loading::modal_radiation_loading_reciprocal` exposes the existing
+symmetric P1/P0 Galerkin owner's complete work-conjugate velocity-port matrix
+through the unchanged strict modal reciprocity and resistance admissions.
+Independent localized structural and aperture columns remain intact. Reported
+unknowns, retained cache, original source/projection work, angular refinement,
+backward residual and flux balance describe the actual bounded discrete owner.
+No collocation output is symmetrized and no failed admission is repaired.
+
+`observation_transfers::ReciprocalBemObservation` observes the same retained
+P1 pressure and P0 auxiliary density through the original adaptive near-field
+receiver, including pressure gradients from that field's particle velocity.
+It reuses the existing source/receiver declaration and causal FIR realization.
+Cross-wired declarations, out-of-band requests, original geometry/resonance
+exclusions, work limits and cancellation refuse. The existing continuum and
+finite-band limitations remain; algebraic reciprocity does not establish
+measured acoustic accuracy. Focused original-owner equality regressions are
+authored; native execution remains pending.

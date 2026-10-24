@@ -19,6 +19,9 @@ use fs_vfit::observation::{
 };
 use std::collections::BTreeMap;
 
+mod reciprocal;
+pub use reciprocal::ReciprocalBemObservation;
+
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.
 pub const MAX_OBSERVATION_FFT: usize = 65_536;
 /// At most eight fixed, doubling ladder rungs; at least four are required.
