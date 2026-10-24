@@ -199,6 +199,68 @@ fn plate_clock_nyquist_and_nonlinear_admission_refuse_without_silently_retuning(
     // A refused sink clock does not poison a valid renderer.
     r.block(&mut [0.0; 1]).unwrap();
 }
+
+#[test]
+fn retained_reaction_must_match_the_observer_gas_and_clock() {
+    let loaded = CompactPlateVoice::from_radiators_with_piston_loads(bodies(), 1.0, config()).unwrap();
+    let bodies = loaded.bodies().to_vec();
+    let mut different_gas = config();
+    different_gas.gas = GasState::try_new_moist_air(293.15, 202_650.0, 0.0).unwrap();
+    assert!(CompactPlateVoice::from_radiators(bodies.clone(), 0.0, different_gas).is_err());
+    let mut different_clock = config();
+    different_clock.sample_rate_hz = 96_000;
+    assert!(CompactPlateVoice::from_radiators(bodies.clone(), 0.0, different_clock).is_err());
+    let mut incoherent = config();
+    incoherent.gas.sound_speed *= 2.0;
+    assert!(CompactPlateVoice::from_radiators(bodies.clone(), 0.0, incoherent).is_err());
+    assert!(CompactPlateVoice::from_radiators(bodies, 0.0, config()).is_ok());
+}
+
+#[test]
+fn retained_piston_load_keeps_its_gas_clock_and_memory() {
+    let gas = air();
+    let other = GasState::try_new_moist_air(293.15, 202_650.0, 0.0).unwrap();
+    let mut bank = fs_couple::thin_plate::PlateBank::default();
+    bank.linear.push(CompactBody::from_radiator(RadiatingPlate {
+        area_m2: 0.01, mass_kg: 0.1, frequency_hz: 220.0, damping_ratio: 0.001,
+    }).unwrap());
+    bank.attach_radiation_loads(&gas, 48_000).unwrap();
+    let dt = 48_000.0_f64.recip();
+    for _ in 0..19 { bank.linear[0].drive(1.0, dt).unwrap(); }
+    let mut original = bank.linear[0].clone();
+    assert!(bank.attach_radiation_loads(&other, 48_000).is_err());
+    assert!(bank.attach_radiation_loads(&gas, 96_000).is_err());
+    assert!(bank.linear[0].drive(0.0, dt*0.5).is_err());
+    bank.attach_radiation_loads(&gas, 48_000).unwrap();
+    for _ in 0..200 {
+        assert_eq!(bank.linear[0].drive(0.0, dt).unwrap().to_bits(),
+            original.drive(0.0, dt).unwrap().to_bits());
+    }
+    assert_eq!(bank.linear[0].volume_velocity(), original.volume_velocity());
+}
+
+#[test]
+fn selected_gas_reaction_changes_body_kinetic_energy_not_only_output() {
+    let dense = GasState::try_new_moist_air(293.15, 202_650.0, 0.0).unwrap();
+    let energy = |gas, loaded| {
+        let mut voice = if loaded {
+            CompactPlateVoice::from_radiators_with_piston_loads(bodies(), 1.0, config_in(gas))
+        } else {
+            CompactPlateVoice::from_radiators(bodies(), 1.0, config_in(gas))
+        }.unwrap();
+        voice.step_block(&mut [0.0; 2048]).unwrap();
+        // The retained body's actual velocity, independent of the observer's
+        // density scale and time-of-flight: Q = modal_area * q_dot.
+        voice.bodies().iter().map(|body|
+            0.5*body.mass_kg*(body.volume_velocity()/body.area_m2).powi(2)
+        ).sum::<f64>()
+    };
+    assert_eq!(energy(air(), false), energy(dense, false));
+    let (ordinary, doubled) = (energy(air(), true), energy(dense, true));
+    assert!(ordinary > 0.0 && doubled > 0.0);
+    assert!((ordinary-doubled).abs()/ordinary.max(doubled) > 1e-5,
+        "the actual body's kinetic energy must respond to the selected gas: {ordinary}, {doubled}");
+}
 #[test]
 fn pressure_refusal_poisoning_prevents_reuse_of_partial_plate_state() {
     let mut c = config();

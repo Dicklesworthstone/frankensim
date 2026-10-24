@@ -60,7 +60,18 @@ pub struct CompactBody {
     v: f64,
     // Physical face area, independent of modal normalization and cancellation.
     piston_area_m2: f64,
-    rad: Option<(DigitalFilter, DigitalFilterState)>,
+    rad: Option<PistonLoad>,
+}
+
+/// The numerical filter and the physical state/clock from which it was built.
+/// Keeping these together prevents a retained reaction from silently using a
+/// different atmosphere or sample rate than the pressure observer.
+#[derive(Debug, Clone)]
+struct PistonLoad {
+    filter: DigitalFilter,
+    state: DigitalFilterState,
+    gas: GasState,
+    sample_rate_hz: u32,
 }
 
 /// One exact-ZOH step of a [`CompactBody`]: its start state and held force.
@@ -128,6 +139,8 @@ impl CompactBody {
     /// Refuses invalid force, duration, mass, frequency or damping and
     /// non-finite motion. A filter already advanced before a motion refusal
     /// is not rolled back; callers must discard a refused coupled run.
+    /// A retained digital radiation load requires its original sample period;
+    /// a clock mismatch refuses before either the filter or body advances.
     /// Propagates the radiation-filter step refusal instead of silently
     /// demoting the reaction force to zero (which would mask model
     /// instability as benign decay).
@@ -156,11 +169,16 @@ impl CompactBody {
                 what: "compact radiator step requires finite force, positive duration/mass/frequency and nonnegative damping",
             });
         }
-        let f_rad = if let Some((filter, state)) = self.rad.as_mut() {
+        let f_rad = if let Some(load) = self.rad.as_mut() {
+            if dt.to_bits() != f64::from(load.sample_rate_hz).recip().to_bits() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "piston radiation load and mechanical step require the same sample clock",
+                });
+            }
             // p = Z_face * mean surface velocity, Q = area_modal * q_dot.
             // Generalized reaction is -area_modal * p, preserving work and
             // eigenvector scaling even for negative or nearly cancelling modes.
-            match filter.step(state, self.v * self.area_m2 / self.piston_area_m2) {
+            match load.filter.step(&mut load.state, self.v * self.area_m2 / self.piston_area_m2) {
                 Ok(p_face) => -p_face * self.area_m2,
                 Err(e) => return Err(AcousticRealizeError::Nonlinear(e.to_string())),
             }
@@ -260,9 +278,11 @@ impl CompactBody {
         gas: &GasState,
         sample_rate_hz: u32,
     ) -> Result<(), AcousticRealizeError> {
-        if !self.piston_area_m2.is_finite() || self.piston_area_m2 <= 0.0 {
+        gas.validate_coherence().map_err(|e| AcousticRealizeError::Ambient(e.to_string()))?;
+        self.validate_radiation_load(gas, sample_rate_hz)?;
+        if !self.piston_area_m2.is_finite() || self.piston_area_m2 <= 0.0 || sample_rate_hz == 0 {
             return Err(AcousticRealizeError::InvalidDescription {
-                what: "piston radiation loading requires an actual positive physical face area",
+                what: "piston radiation loading requires a positive physical face area and sample clock",
             });
         }
         if self.rad.is_some() || self.area_m2 == 0.0 {
@@ -271,7 +291,22 @@ impl CompactBody {
         let radius = (self.piston_area_m2 / core::f64::consts::PI).sqrt();
         let filter = piston_radiation_filter(radius, gas, sample_rate_hz)?;
         let state = filter.zero_state();
-        self.rad = Some((filter, state));
+        self.rad = Some(PistonLoad { filter, state, gas: *gas, sample_rate_hz });
+        Ok(())
+    }
+
+    /// Admit a retained load against the exact environment and clock of its
+    /// consumer without clearing filter memory or rebuilding material physics.
+    pub(crate) fn validate_radiation_load(
+        &self, gas: &GasState, sample_rate_hz: u32,
+    ) -> Result<(), AcousticRealizeError> {
+        if let Some(load) = &self.rad {
+            if load.gas != *gas || load.sample_rate_hz != sample_rate_hz {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "retained piston radiation load differs from the declared gas or sample clock",
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -2068,7 +2103,7 @@ mod tests {
             for &rate in &rates {
                 let mut loaded = body(0.0);
                 loaded.attach_piston_load(gas, rate).unwrap();
-                let filter = &loaded.rad.as_ref().unwrap().0;
+                let filter = &loaded.rad.as_ref().unwrap().filter;
                 let fitted = decay_root(mass, omega0, area, exact, |s| filter_at(filter, s));
                 let at = filter.eval(omega_e);
                 // The fit's own R and X errors over its band (40 rad/s to 0.4 Nyquist).
@@ -2135,8 +2170,7 @@ mod tests {
             assert!(sigma(1) > sigma(0) && sigma(2) > sigma(0) && sigma(3) < sigma(0), "rate {}", rates[r]);
         }
         // Planted negative: no gas to speak of, only the structure's own loss.
-        let mut thin = gases[0].1.clone();
-        thin.density *= 1e-9;
+        let thin = GasState::try_new(&air, 293.15, 101_325.0*1e-9).unwrap();
         let mut structural = body(0.02);
         structural.attach_piston_load(&thin, 192_000).unwrap();
         let (sigma, _) = ring_down(structural, 192_000);

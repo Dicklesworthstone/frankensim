@@ -8,6 +8,9 @@
 //! need not include every physical mode; no continuum convergence is implied.
 //! The exterior medium is one shared gas record: its density and sound speed
 //! reach the observer, and a record that does not resolve refuses (never air).
+//! The optional `radiation-load none|baffled-piston` record after `observer`
+//! selects the existing compact reaction model from the SAME gas and clock.
+//! Omission keeps the original unloaded image; no loss model is inferred.
 //!
 //! A section is either bare numbers ending in an explicit `fixture LABEL`
 //! (`section THICK RHO E1 E2 NU12 G12 ANGLE fixture LABEL`), or pack-backed:
@@ -106,6 +109,8 @@ pub struct PlatePerformanceInfo {
     pub listener_m: f64,
     /// Time of flight to the listener, r/c [s].
     pub propagation_delay_s: f64,
+    /// Whether the input explicitly requested the compact piston reaction.
+    pub baffled_piston_loading: bool,
     /// Geometry counts of the actual assembled chart.
     pub nodes: usize,
     /// Triangle count of the actual assembled chart.
@@ -133,7 +138,8 @@ impl PlatePerformance {
     /// reducer, plate voice and scheduler retain their own admission boundaries.
     /// Caller-supplied meshes must be conforming and nonoverlapping: this parser
     /// does not certify arbitrary triangle-soup topology or source materials.
-    /// No new reaction filter is attached. Reduction is offline and currently
+    /// An explicit `radiation-load baffled-piston` attaches the existing reaction
+    /// filter from the same exterior gas. Reduction is offline and currently
     /// noncancellable; its fixed owner solver policy is not a wall-time bound.
     ///
     /// # Errors
@@ -174,7 +180,11 @@ impl PlatePerformance {
         let bodies = certified_chart_radiators(&input.chart, &input.options)
             .map_err(PlatePerformanceError::Reduction)?;
         let retained_modes = bodies.len();
-        let voice = CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
+        let voice = if input.baffled_piston_loading {
+            CompactPlateVoice::from_radiators_with_piston_loads(bodies, input.initial_force_n, input.config)
+        } else {
+            CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
+        }
             .map_err(PlatePerformanceError::Render)?;
         let info = PlatePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.plate-performance.v1", bytes),
@@ -182,6 +192,7 @@ impl PlatePerformance {
             full_scale_pa: input.full_scale_pa, gas: input.config.gas,
             listener_m: input.config.listener_m,
             propagation_delay_s: input.config.listener_m / input.config.gas.sound_speed,
+            baffled_piston_loading: input.baffled_piston_loading,
             nodes: input.chart.mesh.nodes.len(),
             triangles: input.chart.mesh.tris.len(), sections: input.sections,
             requested_modes: input.options.n_modes, retained_modes,
@@ -217,6 +228,7 @@ struct Parsed {
     chart: PlateChart,
     options: PlateChartRadiation,
     config: PlateVoiceConfig,
+    baffled_piston_loading: bool,
     samples: u64,
     full_scale_pa: f64,
     initial_force_n: f64,
@@ -263,6 +275,18 @@ impl Parsed {
         ambient.finish()?;
         let gas = *gas_record.state();
         let listener_m: f64 = r.one("observer")?;
+        let baffled_piston_loading = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("radiation-load")
+        {
+            let mut row = r.row("radiation-load")?;
+            let enabled = match row.word()? {
+                "none" => false,
+                "baffled-piston" => true,
+                _ => return Err(bad(row.line, "radiation-load must be none or baffled-piston")),
+            };
+            row.finish()?;
+            enabled
+        } else { false };
         let mut limits = r.row("limits")?;
         let max_modes = limits.count(MAX_MODES)?;
         let nyquist_guard_fraction = limits.scalar()?;
@@ -405,7 +429,8 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { gas_record, chart, options, config, samples, full_scale_pa, initial_force_n,
+        Ok(Self { gas_record, chart, options, config, baffled_piston_loading,
+            samples, full_scale_pa, initial_force_n,
             sections: sections_count, section_provenance, events, max_events })
     }
 }

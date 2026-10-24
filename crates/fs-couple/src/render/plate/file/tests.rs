@@ -95,6 +95,7 @@ fn public_loader_renders_geometry_derived_modes_like_direct_chart_mechanics() {
         assert_eq!(info.force_events, 3);
         assert_eq!(info.gas, source_air());
         assert_eq!(info.propagation_delay_s, 1.0 / source_air().sound_speed);
+        assert!(!info.baffled_piston_loading);
         assert!(info.retained_modes > 0 && info.retained_modes <= 3);
         let mut renderer = performance.into_renderer();
         let mut actual = vec![0.0; 4801];

@@ -30,6 +30,29 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Material gas loading in the file-driven plate renderer
+
+The optional `radiation-load none|baffled-piston` record after `observer` in a
+plate performance selects the existing compact piston reaction. The one
+resolved ambient gas and output clock supply both mechanical loading and the
+retarded pressure observer. Physical face area, modal mass and signed volume
+and force projections remain those of the original chart reduction. The input
+hash and CLI sidecar retain the load selection. Omission preserves the original
+unloaded image; no material loss or radiation model is inferred.
+
+`CompactPlateVoice::from_radiators_with_piston_loads` exposes the same path to
+code consumers. A retained filter owns its original gas snapshot and sample
+clock: mismatched consumers or step durations refuse before filter mutation;
+reattachment of the identical load preserves its history. Gas snapshots pass
+the material owner's coherence admission. This remains the existing sampled,
+per-mode compact piston approximation, without mutual radiation, atmospheric
+absorption, a whole-fluid energy claim or continuum/experimental validation.
+G3 regressions distinguish a pressure-induced change in mechanical response
+from density-only output scaling, check the actual retained body's kinetic
+energy, and compare loaded file/WAV renders across callback partitions. The original piston
+decay/frequency oracle retains its tolerance and uses a coherent low-pressure
+gas for its vanishing-load limit.
+
 ### Material-driven finite-body sliding
 
 `tribothermal::dynamics::SlidingPair` adds force-driven tangent inertia to the
