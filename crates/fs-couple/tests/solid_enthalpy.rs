@@ -22,6 +22,8 @@ mod directional;
 mod gas;
 #[path = "solid_enthalpy/valve.rs"]
 mod valve;
+#[path = "solid_enthalpy/rebind.rs"]
+mod rebind;
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
@@ -40,6 +42,11 @@ fn material(young:f64,alpha:f64,cp:f64,nu:f64,split:bool)->(MaterialCard,Resolve
 }
 fn material_with_modulus_endpoint(young:f64,young_end:f64,alpha:f64,cp:f64,nu:f64,split:bool)
     ->(MaterialCard,ResolvedHeatCapacityCurve) {
+    material_with_density(young,young_end,alpha,cp,nu,split,6.0)
+}
+#[allow(clippy::too_many_arguments)]
+fn material_with_density(young:f64,young_end:f64,alpha:f64,cp:f64,nu:f64,split:bool,rho:f64)
+    ->(MaterialCard,ResolvedHeatCapacityCurve) {
     let heat=PropertyKey::new("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS);
     let density=PropertyKey::new("density",Density::DIMS);
     let mut claims=ClaimSet::new();
@@ -55,7 +62,7 @@ fn material_with_modulus_endpoint(young:f64,young_end:f64,alpha:f64,cp:f64,nu:f6
                 license:"CC0-1.0".into(),artifact:None}}).unwrap();
     };
     add(heat.clone(),cp,cp,300.,500.);
-    add(density.clone(),6.,2.,300.,500.);
+    add(density.clone(),rho,rho/3.,300.,500.);
     add(PropertyKey::new("young_modulus",Pressure::DIMS),young,young_end,300.,if split {349.} else {500.});
     if split { add(PropertyKey::new("young_modulus",Pressure::DIMS),2.*young,1.2*young,350.,500.); }
     add(PropertyKey::new("poisson_ratio",Dims([0;6])),nu,nu,300.,500.);

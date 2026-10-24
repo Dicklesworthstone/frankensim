@@ -28,10 +28,8 @@ use crate::linear3::{
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_modal::{
-    ModePair,
-    damping::{
-        CertifiedModalDamping, ModalDampingBlock, ModalDampingBudget, certify_modal_damping,
-    },
+    CertifiedModalDamping, ModalDampingBlock, ModalDampingBudget, ModePair,
+    certify_modal_damping,
 };
 use fs_sparse::Csr;
 

@@ -45,6 +45,7 @@ pub use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSourc
 use fs_solid::linear3::source::SolidMaterialError;
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3, TetLoadSolution3};
 use fs_solid::loads3::transient::{TetTransientRun3, TransientError3};
+use fs_solid::loads3::transient::events::{MaterialRebind3, MaterialRebindConfig3};
 use fs_solid::loads3::transient::thermal::ThermalTransientStep3;
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation,
@@ -379,6 +380,31 @@ pub struct TetMaterialSample {
     pub reference_volume_m3: f64,
 }
 
+/// One explicitly replaced cell; paired values are ordered [before, after].
+/// The two caloric energies retain their OWN chart references. Their difference
+/// is not declared heat or work: replacement may exchange matter, and distinct
+/// materials need not share an enthalpy zero or chemical-energy convention.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SolidMaterialRebindCell {
+    pub cell: CellId,
+    pub reference_mass_kg: [f64; 2],
+    /// Complete local h/T/phase/card/chart bindings, without a second heat state.
+    pub phase: [EquilibriumPhaseState; 2],
+    /// The extensive m*h inventories on their respective admitted charts [J].
+    pub caloric_chart_energy_j: [f64; 2],
+}
+
+/// Native mechanical transfer plus the actual exchanged material inventories.
+/// The external replacement owner must account for matter and its chosen
+/// caloric/chemical reference; this report does not silently debit either heat
+/// graph, infer a phase transition, or treat mechanical replacement work as heat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SolidMaterialRebind {
+    pub mechanical: MaterialRebind3,
+    /// Original tetrahedron order, with unchanged persistent cell IDs.
+    pub cells: Vec<SolidMaterialRebindCell>,
+}
+
 /// A complete local state ready for the native load, support-motion, stress,
 /// prestress/vibration and transient-solid APIs. Those owners remain unchanged.
 #[derive(Clone, Debug)]
@@ -417,6 +443,77 @@ impl SolidEnthalpyState<'_> {
             }
     }
 
+    fn matches_transient(&self, run: &TetTransientRun3<'_, '_, '_, '_>) -> bool {
+        let thermal_matches = match run.thermal_strain_field() {
+            Some(TetThermalStrainField::Uniform(state)) => self.strains.iter().all(|s| s == state),
+            Some(TetThermalStrainField::PerElement(states)) => states == self.strains,
+            None => false,
+        };
+        run.state().time_s.to_bits() == self.time_s.to_bits()
+            && self.matches_problem(run.material_problem()) && thermal_matches
+    }
+
+    /// Replace a running specimen with this source-resolved material state at
+    /// the SAME physical time. Construct both states through their actual
+    /// `SolidEnthalpy`/`DepositionSimulation` owners; supply this state's
+    /// `problem()` and an explicitly assembled replacement load, including any
+    /// changed weight. No density, elastic constant or thermal strain is copied
+    /// into a separate coefficient API.
+    ///
+    /// Displacement, time and step count survive. The native rebind solves the
+    /// replacement velocity from retained reduced canonical momentum and then
+    /// equilibrates acceleration with the new mass/stiffness/thermal/load data.
+    /// Reference mesh, zero supports, frame and cell correspondence stay fixed.
+    /// The new binding supplies its own stress-free reference and caloric chart.
+    ///
+    /// This is an explicit external replacement, not the ordinary heating path
+    /// or a melting/mass-flow closure. Mechanical work is bounded by `controls`;
+    /// chart-specific mass/enthalpy inventories are reported separately because
+    /// unrelated caloric zeros cannot be subtracted as physical energy. Accept
+    /// the new thermal owner, material binding, resolved state and returned run
+    /// together. Every input remains unchanged on any refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebind_transient_candidate<'g, 'm, 'p, 's>(
+        &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'g, 'm>,
+        controls: MaterialRebindConfig3, cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, SolidMaterialRebind), SolidEnthalpyError> {
+        poll(cx)?;
+        if !previous.matches_transient(run) || !self.matches_problem(problem)
+            || self.time_s.to_bits() != previous.time_s.to_bits()
+            || self.mesh_frame != previous.mesh_frame
+            || self.nodes_m != previous.nodes_m || self.tetrahedra != previous.tetrahedra
+            || self.samples.len() != previous.samples.len()
+            || !controls.maximum_strain.is_finite()
+            || controls.maximum_strain > self.maximum_absolute_mandel_strain
+            || controls.maximum_strain > previous.maximum_absolute_mandel_strain {
+            return Err(SolidEnthalpyError::Invalid(
+                "material replacement must bind the accepted motion and the exact new sources at one clock, mesh, frame and admitted strain limit"));
+        }
+        let mut cells = Vec::with_capacity(self.samples.len());
+        for (old, next) in previous.samples.iter().zip(&self.samples) {
+            poll(cx)?;
+            if old.cell != next.cell
+                || old.reference_volume_m3.to_bits() != next.reference_volume_m3.to_bits() {
+                return Err(SolidEnthalpyError::Invalid(
+                    "material replacement must retain each reference tetrahedron and cell correspondence"));
+            }
+            let energies = [old.reference_mass_kg*old.phase.specific_enthalpy_j_kg(),
+                next.reference_mass_kg*next.phase.specific_enthalpy_j_kg()];
+            if !energies.iter().all(|e| e.is_finite()) {
+                return Err(SolidEnthalpyError::Invalid(
+                    "replacement caloric inventories must be representable on both original charts"));
+            }
+            cells.push(SolidMaterialRebindCell { cell: old.cell,
+                reference_mass_kg: [old.reference_mass_kg,next.reference_mass_kg],
+                phase: [old.phase,next.phase], caloric_chart_energy_j: energies });
+        }
+        let (candidate, mechanical) = run.rebind_material_candidate(problem,
+            Some(self.thermal_strains()), loads, self.mesh_frame, controls, cx)?;
+        poll(cx)?;
+        Ok((candidate, SolidMaterialRebind { mechanical, cells }))
+    }
+
     /// Use actual local enthalpy temperatures to drive the SAME inertial state.
     /// `previous` must exactly match the accepted run's material/thermal fields
     /// and clock. `problem` must come from this endpoint's `problem()`; it is
@@ -436,13 +533,7 @@ impl SolidEnthalpyState<'_> {
         problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>, cx: &Cx<'_>,
     ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SolidEnthalpyError> {
         poll(cx)?;
-        let thermal_matches = match run.thermal_strain_field() {
-            Some(TetThermalStrainField::Uniform(state)) => previous.strains.iter().all(|s| s == state),
-            Some(TetThermalStrainField::PerElement(states)) => states == previous.strains,
-            None => false,
-        };
-        if run.state().time_s.to_bits() != previous.time_s.to_bits()
-            || !previous.matches_problem(run.material_problem()) || !thermal_matches
+        if !previous.matches_transient(run)
             || !self.matches_problem(problem) || self.mesh_frame != previous.mesh_frame
             || self.maximum_absolute_mandel_strain.to_bits()
                 != previous.maximum_absolute_mandel_strain.to_bits()

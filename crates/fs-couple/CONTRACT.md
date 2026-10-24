@@ -4780,6 +4780,26 @@ elastic strain makes omitted stiffness work exceed the energy allowance.
 The endpoint adapter does not observe intervening thermal events: callers
 must admit that path, resolve heating events and check temporal refinement.
 
+`SolidEnthalpyState::rebind_transient_candidate` connects explicit source-card
+replacement to the same retained 3-D motion. Both snapshots must originate from
+their material/caloric owners and match the accepted clock, reference mesh/frame,
+zero supports and persistent cell correspondence. The old snapshot must exactly
+match the run; the new problem must exactly match the replacement snapshot. The
+native owner transfers displacement and reduced canonical momentum, rebuilds
+mass/stiffness/thermal forces, re-equilibrates acceleration and reports bounded
+signed mechanical work. Subsequent ordinary heating retains the new sources and
+delivered mass.
+
+`SolidMaterialRebind` separately retains each cell's old/new mass, exact
+phase/card/chart identity and extensive `m*h` inventory. Different caloric charts
+may use unrelated energy zeros, so these values are not subtracted into heat or a
+purported closed total-energy balance. The caller accepts the new thermal owner,
+source binding, resolved state and run together and owns the external matter/energy
+replacement. This is neither continuous mass flow nor a melting closure. Synthetic
+G1/G4 tests in `tests/solid_enthalpy/rebind.rs` exercise changed density, modulus,
+expansion and heat capacity through nonzero-time motion, reverse replacement,
+subsequent heating, and exact binding/work/cancellation rollback.
+
 ### Finite source gas on uniform thermal feedback
 
 `finite_gas_thermal::FiniteGasThermalEnvironment` adapts the original
