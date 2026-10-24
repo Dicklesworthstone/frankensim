@@ -87,6 +87,20 @@ pub(super) fn aperture_exterior_gas(
 pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> String {
     let mut output = load.radiation_record().map_or_else(String::new, |record|
         format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)));
+    if !load.terminal_channels().is_empty() {
+        use fs_couple::dg_port::DgTerminalChannelKind;
+        let channels = load.terminal_channels().iter().map(|bound| {
+            let input = bound.input();
+            let law = match input.kind {
+                DgTerminalChannelKind::Closed => "\"kind\":\"closed\"".to_owned(),
+                DgTerminalChannelKind::Slit {
+                    width_m, height_m, length_m, transverse_cells, maximum_mach,
+                } => format!("\"kind\":\"unsteady-fixed-slit\",\"width_m\":{width_m:e},\"height_m\":{height_m:e},\"length_m\":{length_m:e},\"transverse_cells\":{transverse_cells},\"maximum_mach\":{maximum_mach:e}"),
+            };
+            format!("{{\"port\":{},{law},\"gas\":{}}}", input.port.0, gas_state(bound.gas()))
+        }).collect::<Vec<_>>().join(",");
+        output.push_str(&format!(",\"terminal_channels\":[{channels}],\"terminal_channel_scope\":\"same-step original transverse-momentum slit states or exact zero-flow closures in the complete exterior matrix; fixed geometry and laminar port reduction; no moving-pad work, annular-gap resolution, edge shedding or turbulent-loss calibration\""));
+    }
     if !load.duct().side_ports().is_empty() {
         let ports = load.terminal_ports().iter().map(|port| port.0.to_string())
             .collect::<Vec<_>>().join(",");
@@ -403,3 +417,4 @@ pub(super) fn dg_field_provenance(field: &fs_material::gas_field::AxialGasField)
     format!(",\"axial_gas_field\":{{\"static_pressure_pa\":{:e},\"canonical_species\":[{}],\"stations\":[{}],\"source_packs\":[{}],\"scope\":\"frozen primitive temperature/composition; shared EOS and transport at original spatial quadrature; no mean-flow correction\"}}",
         field.static_pressure_pa(), species.join(","), stations.join(","), packs.join(","))
 }
+

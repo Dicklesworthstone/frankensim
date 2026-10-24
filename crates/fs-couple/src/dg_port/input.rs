@@ -4,7 +4,10 @@
 //! resolution are data. All propagation and material evaluation remain with
 //! their original owners. This parser opens no files and creates no oscillator.
 
-use super::{DgBranch, DgPortLoad};
+use super::{
+    DgBranch, DgPortLoad, DgTerminalChannelInput, DgTerminalChannelKind,
+    MAX_DG_TERMINAL_TRANSVERSE_CELLS,
+};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
@@ -103,6 +106,8 @@ pub struct DgSourceInput {
     radiation: Option<(ComputedBaffledInput, GasRecord)>,
     side_openings: Vec<(DgSidePort, CircularOpening)>,
     chimneys: Vec<DgChimneyInput>,
+    terminal_channels: Vec<DgTerminalChannelInput>,
+    maximum_terminal_transverse_cells: usize,
     mesh: DgMesh,
     poles: usize,
     band_hz: [f64; 2],
@@ -166,8 +171,19 @@ impl DgSourceInput {
     /// using the parent wall poles/band/tolerance and common physical clock.
     /// The total DOF allowance includes every branch. The exterior circle is
     /// the actual chimney outlet; all terminal frames use its outward flow.
-    /// Moving pads, internal 3D junction corrections and mean flow are absent.
+    /// Internal 3D junction corrections and mean flow are absent.
     /// The axial outlet is matrix channel zero, followed by the authored order.
+    ///
+    /// After any side openings and before dg_radiation, an optional block
+    /// declares finite fixed slit channels or exact closures in series with
+    /// existing terminals:
+    /// dg_terminal_channels COUNT MAX_TOTAL_TRANSVERSE_CELLS
+    /// dg_terminal_closed PORT_ID
+    /// dg_terminal_slit PORT_ID WIDTH_M HEIGHT_M LENGTH_M CELLS MAX_MACH
+    /// Omitted ports remain directly connected to the full exterior matrix.
+    /// A slit uses the actual terminal gas and the original unsteady transverse
+    /// momentum owner. Its fluid memory has a separate explicit cell budget;
+    /// it is not a resolved moving pad, annular gap or turbulent jet model.
     ///
     /// Error type E lets callers retain their existing line-aware row reader.
     #[allow(clippy::too_many_arguments)]
@@ -255,6 +271,7 @@ impl DgSourceInput {
         let mut source = Self {
             geometry: Duct { segments }, field: None, outlet, radiation: None,
             side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
+            terminal_channels: Vec::new(), maximum_terminal_transverse_cells: 0,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature, line,
         };
         // Admission before collecting/evaluating a potentially large field.
@@ -345,6 +362,60 @@ impl DgSourceInput {
                             port: id, radius_m: aperture.radius_m, length_m, mesh, gas,
                         });
                     }
+                }
+                (radiation_line, fields) = next_row()?;
+            }
+            if fields.clone().next() == Some("dg_terminal_channels") {
+                let mut row = Row { line: radiation_line, fields: &mut fields };
+                row.word()?;
+                let count = row.count(source.side_openings.len() + 1)?;
+                let allowance = row.word()?.parse::<usize>()
+                    .map_err(|_| bad(radiation_line, "invalid terminal transverse-cell allowance"))?;
+                if allowance > MAX_DG_TERMINAL_TRANSVERSE_CELLS {
+                    return Err(bad(radiation_line, "terminal channel cells exceed the shared hard ceiling").into());
+                }
+                row.finish()?;
+                source.maximum_terminal_transverse_cells = allowance;
+                source.terminal_channels.reserve(count);
+                let mut total_cells = 0usize;
+                for _ in 0..count {
+                    checkpoint(gate, radiation_line)?;
+                    let (line, mut fields) = next_row()?;
+                    let mut row = Row { line, fields: &mut fields };
+                    let channel_kind = row.word()?;
+                    let port = PortId(row.word()?.parse::<u32>()
+                        .map_err(|_| bad(line, "terminal channel requires an unsigned port ID"))?);
+                    if (port != PortId(1) && !source.side_openings.iter().any(|(side, _)| side.id == port))
+                        || source.terminal_channels.iter().any(|channel| channel.port == port)
+                    {
+                        return Err(bad(line, "terminal channels require distinct declared exterior ports").into());
+                    }
+                    let kind = match channel_kind {
+                        "dg_terminal_closed" => DgTerminalChannelKind::Closed,
+                        "dg_terminal_slit" => {
+                            let width_m = row.positive()?;
+                            let height_m = row.positive()?;
+                            let length_m = row.positive()?;
+                            let transverse_cells = row.count(MAX_DG_TERMINAL_TRANSVERSE_CELLS)?;
+                            let maximum_mach = row.positive()?;
+                            if maximum_mach > 0.3 {
+                                return Err(bad(line, "terminal slit Mach ceiling must be in (0, 0.3]").into());
+                            }
+                            total_cells = total_cells.checked_add(transverse_cells)
+                                .ok_or_else(|| bad(line, "complete terminal cell count overflow"))?;
+                            if total_cells > allowance {
+                                return Err(bad(line, "complete slit state exceeds its transverse-cell allowance").into());
+                            }
+                            DgTerminalChannelKind::Slit {
+                                width_m, height_m, length_m, transverse_cells, maximum_mach,
+                            }
+                        },
+                        _ => return Err(bad(line, "expected a closed terminal or finite slit channel").into()),
+                    };
+                    row.finish()?;
+                    let channel = DgTerminalChannelInput { port, kind };
+                    channel.validate().map_err(DgSourceError::Physics)?;
+                    source.terminal_channels.push(channel);
                 }
                 (radiation_line, fields) = next_row()?;
             }
@@ -463,9 +534,11 @@ impl DgSourceInput {
                 .map_err(DgSourceError::Physics)?
         };
         checkpoint(gate, self.line)?;
-        Ok(load)
+        load.with_terminal_channels(self.terminal_channels, self.maximum_terminal_transverse_cells)
+            .map_err(DgSourceError::Physics)
     }
 }
 
 #[cfg(test)]
 mod tests;
+

@@ -283,3 +283,6 @@ fn g0_baffled_input_refuses_missing_malformed_extra_fields_and_static_pressure_j
 
 #[path = "tests/chimneys.rs"]
 mod chimneys;
+
+mod terminal_channels;
+
