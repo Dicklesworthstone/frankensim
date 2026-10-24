@@ -135,9 +135,9 @@ def mouthpiece_segments(desc, dims):
     interior_volume = volume["internal-volume"] - cone_volume
     if interior_length <= 0 or interior_volume <= 0:
         refuse("mouthpiece total length or volume does not exceed its exit cone")
-    r_eq = math.sqrt(interior_volume / (math.pi * interior_length))
+    l_eq = interior_volume / (math.pi * r_in**2)
     return [
-        f"cylinder {num(r_eq)} {num(interior_length)}",
+        f"cylinder {num(r_in)} {num(l_eq)}",
         f"cone {num(r_in)} {num(r_out)} {num(cone_length)}",
     ]
 
