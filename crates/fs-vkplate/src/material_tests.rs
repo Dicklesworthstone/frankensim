@@ -458,7 +458,7 @@ fn g1_bending_viscosity_has_the_sourced_tensor_power_and_physical_orientation() 
         };
         let (_, power_density) = law.stress_and_power(local_curvature).unwrap();
         let root = &body.viscosity.as_ref().unwrap().root;
-        let points = root.ptr.windows(2).filter(|p| p[0] != p[1]).count() / 3;
+        let points = root.ptr.windows(2).filter(|p| p[0] != p[1]).count() / BENDING_ROOT_ROWS_PER_NODE;
         let expected = power_density * 0.001_f64.powi(3) / 12.0 * points as f64 * body.h.powi(2);
         let mut rates = vec![0.0; root.n];
         root.mul_add(&v, 1.0, &mut rates);

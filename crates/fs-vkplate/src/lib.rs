@@ -69,6 +69,13 @@ mod radiation_tests;
 #[cfg(test)]
 mod air_loss_tests;
 
+#[cfg(test)]
+mod bending_quadrature_tests;
+
+/// Four quarter-cell quadrature points, each with three tensor-root rows.
+/// Shared with consumers of `BodyImage::viscous_root`.
+pub const BENDING_ROOT_ROWS_PER_NODE: usize = 12;
+
 // ----------------------------------------------------------------------------- sparse
 #[derive(Clone, Debug, Default)]
 pub struct Csr {
@@ -114,7 +121,7 @@ impl Csr {
         c
     }
 
-    /// Maximal runs of rows sharing one stencil shape with 3, 5 or 17 entries (a string, the
+    /// Maximal runs of rows sharing one stencil shape with 3, 5, 13 or 17 entries (a string, the
     /// Laplacian, the bending operator).
     fn find_runs(&self) -> Vec<Run> {
         let (ptr, col) = (&self.ptr, &self.col);
@@ -124,13 +131,13 @@ impl Csr {
         while i < self.n {
             let k = ptr[i + 1] - ptr[i];
             let mut e = i + 1;
-            if matches!(k, 3 | 5 | 17) {
+            if matches!(k, 3 | 5 | 13 | 17) {
                 while e < self.n && ptr[e + 1] - ptr[e] == k && off(e).eq(off(i)) {
                     e += 1;
                 }
             }
             let len = e - i;
-            if len >= MIN_RUN && matches!(k, 3 | 5 | 17) {
+            if len >= MIN_RUN && matches!(k, 3 | 5 | 13 | 17) {
                 let row = |t: usize| &self.val[ptr[i + t]..ptr[i + t + 1]];
                 let uniform = (1..len).all(|t| row(t).iter().zip(row(0)).all(|(a, b)| a.to_bits() == b.to_bits()));
                 let val = if uniform { row(0).to_vec() } else { (0..k).flat_map(|q| (0..len).map(move |t| row(t)[q])).collect() };
@@ -154,7 +161,9 @@ impl Csr {
             match r.off.len() {
                 3 => r.mul_add::<3>(x, s, y),
                 5 => r.mul_add::<5>(x, s, y),
-                _ => r.mul_add::<17>(x, s, y),
+                13 => r.mul_add::<13>(x, s, y),
+                17 => r.mul_add::<17>(x, s, y),
+                _ => self.rows_add(r.r0, r.r0 + r.len, x, s, y),
             }
             i = r.r0 + r.len;
         }
@@ -610,16 +619,24 @@ impl Body {
             Edge::Clamped => grid_index.keys().copied().collect(),
             Edge::Free => core.clone(),
         };
-        let stencil = |i: i64, j: i64| -> [Vec<(Option<usize>, f64)>; 3] {
+        // Average four positive tensor energies, not the twisting curvature
+        // before squaring it. Centered Dxy loses alternating cell twists:
+        // its squared Fourier symbol has extra cos²(kx h/2) cos²(ky h/2).
+        // Cell D+x D+y instead satisfies the discrete integration-by-parts
+        // identity; constant-D interior bending is exactly D*Laplacian_h².
+        // Symmetric quarter-cell weights retain second-order consistency and
+        // the energy's natural free-edge conditions without boundary clamps.
+        let stencil = |i: i64, j: i64, di: i64, dj: i64| -> [Vec<(Option<usize>, f64)>; 3] {
             let h2 = h * h;
+            let (ci, cj) = (i + di, j + dj);
             [
                 vec![(at(i - 1, j), 1.0 / h2), (at(i, j), -2.0 / h2), (at(i + 1, j), 1.0 / h2)],
                 vec![(at(i, j - 1), 1.0 / h2), (at(i, j), -2.0 / h2), (at(i, j + 1), 1.0 / h2)],
                 vec![
-                    (at(i + 1, j + 1), 0.25 / h2),
-                    (at(i - 1, j + 1), -0.25 / h2),
-                    (at(i + 1, j - 1), -0.25 / h2),
-                    (at(i - 1, j - 1), 0.25 / h2),
+                    (at(ci + 1, cj + 1), 1.0 / h2),
+                    (at(ci, cj + 1), -1.0 / h2),
+                    (at(ci + 1, cj), -1.0 / h2),
+                    (at(ci, cj), 1.0 / h2),
                 ],
             ]
         };
@@ -629,16 +646,18 @@ impl Body {
                 let r = ((i * i + j * j) as f64).sqrt() * h;
                 let t = (s.thickness)(r);
                 let d = s.young * t * t * t / (12.0 * (1.0 - nu * nu));
-                let b = stencil(i, j);
-                for a in 0..3 {
-                    for c in 0..3 {
-                        if q[a][c] == 0.0 {
-                            continue;
-                        }
-                        for &(pa, va) in &b[a] {
-                            for &(pc, vc) in &b[c] {
-                                if let (Some(pa), Some(pc)) = (pa, pc) {
-                                    add(&mut krows, pa, pc, d * h * h * q[a][c] * va * vc);
+                for (di, dj) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+                    let b = stencil(i, j, di, dj);
+                    for a in 0..3 {
+                        for c in 0..3 {
+                            if q[a][c] == 0.0 {
+                                continue;
+                            }
+                            for &(pa, va) in &b[a] {
+                                for &(pc, vc) in &b[c] {
+                                    if let (Some(pa), Some(pc)) = (pa, pc) {
+                                        add(&mut krows, pa, pc, 0.25 * d * h * h * q[a][c] * va * vc);
+                                    }
                                 }
                             }
                         }
@@ -647,7 +666,7 @@ impl Body {
             }
         }
         let viscosity = if let Some((source, angle)) = viscosity {
-            let mut roots = vec![BTreeMap::new(); 3 * n];
+            let mut roots = vec![BTreeMap::new(); BENDING_ROOT_ROWS_PER_NODE * n];
             for &(i, j) in &curv_pts {
                 let r = ((i * i + j * j) as f64).sqrt() * h;
                 let d = source.bending_matrix_n_m_s((s.thickness)(r), angle)
@@ -656,17 +675,21 @@ impl Body {
                 let rows: Vec<BTreeMap<usize, f64>> = (0..3).map(|a|
                     (0..3).map(|b| (b, d[3*a+b])).collect()).collect();
                 let factor = Band::factor(&rows)?;
-                let b = stencil(i, j);
                 let node = at(i, j).expect("curvature point belongs to the plate");
-                // Engineering curvature is [w_xx,w_yy,2w_xy]. The square
-                // root includes sqrt(area)=h, so G'G has units N s/m.
-                for column in 0..3 {
-                    for a in column..3 {
-                        if a - column > factor.b { continue; }
-                        let l = factor.l[a * (factor.b + 1) + column + factor.b - a];
-                        let scale = h * l * if a == 2 { 2.0 } else { 1.0 };
-                        for &(p, value) in &b[a] {
-                            if let Some(p) = p { add(&mut roots, 3 * node + column, p, scale * value); }
+                // Engineering curvature is [w_xx,w_yy,2w_xy]. Each root
+                // includes sqrt(quarter area)=h/2, so G'G has units N s/m.
+                for (quadrant, (di, dj)) in [(-1, -1), (0, -1), (-1, 0), (0, 0)].into_iter().enumerate() {
+                    let b = stencil(i, j, di, dj);
+                    for column in 0..3 {
+                        for a in column..3 {
+                            if a - column > factor.b { continue; }
+                            let l = factor.l[a * (factor.b + 1) + column + factor.b - a];
+                            let scale = 0.5 * h * l * if a == 2 { 2.0 } else { 1.0 };
+                            for &(p, value) in &b[a] {
+                                if let Some(p) = p {
+                                    add(&mut roots, BENDING_ROOT_ROWS_PER_NODE * node + 3 * quadrant + column, p, scale * value);
+                                }
+                            }
                         }
                     }
                 }
@@ -685,7 +708,7 @@ impl Body {
                 .fold(0.0_f64, f64::max);
             if !rate_bound.is_finite() { return Err("bending-viscosity CFL bound is not representable".into()); }
             Some(ViscousBending { source: source.clone(), angle, c: Csr::from_rows(&rows),
-                root: Csr::from_rows(&roots), scratch: vec![0.0; 3*n], rate_bound,
+                root: Csr::from_rows(&roots), scratch: vec![0.0; BENDING_ROOT_ROWS_PER_NODE*n], rate_bound,
                 dissipated_j: 0.0, last_j: 0.0 })
         } else { None };
         // supports and muffling: springs/dashpots to ground per node
@@ -2616,8 +2639,9 @@ pub struct BodyImage {
     pub cf: Vec<[f64; 4]>,
     pub lap: CsrImage,
     pub stiff: CsrImage,
-    /// Source-retaining curvature-rate law, its C=G'G operator and three G rows
-    /// per node. The separate joule counter is physical centered-velocity loss.
+    /// Source-retaining curvature-rate law and its C=G'G operator. Each node
+    /// has `BENDING_ROOT_ROWS_PER_NODE` tensor-root rows. The separate joule
+    /// counter is physical centered-velocity loss.
     pub viscosity: Option<PlaneStressViscosity>,
     pub viscosity_angle_rad: f64,
     pub viscous: CsrImage,

@@ -488,7 +488,10 @@ pub fn ride() -> CymbalSpec {
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
     let (lam, who) = ins.admission_rate2();
     let structural = (lam - ins.gas_admission_rate2(ins.rate) - ins.viscosity_admission_rate2(ins.rate)).max(0.0);
-    for os in [1usize, 2, 3, 4, 6, 8] {
+    // Finer spatial meshes need smaller time steps (plate bending scales as
+    // h^-4). Extend the bounded clock search, retaining the same CFL margin
+    // and every previously admitted rate; never coarsen the physical grid.
+    for os in [1usize, 2, 3, 4, 6, 8, 12, 16, 24, 32] {
         let rate = OUT_RATE * os as f64;
         if rate < ins.rate { continue; }
         let k = 1.0 / rate;
@@ -501,7 +504,31 @@ fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String
             return Ok(os);
         }
     }
-    Err(format!("{who}: leapfrog unstable even at 8x oversampling"))
+    Err(format!("{who}: leapfrog unstable even at 32x oversampling"))
+}
+
+#[test]
+fn g0_clock_refinement_preserves_the_cfl_margin_and_bounded_refusal() {
+    // Two equal string masses have eigenvalues T and 3T when h=rho=1.
+    // Choose physical tensions whose exact highest frequency falls between
+    // ladder rungs; the oracle does not reuse the power-iteration estimate.
+    for (minimum, expected) in [(0.5_f64, Some(1)), (7.0, Some(8)),
+        (10.0, Some(12)), (14.0, Some(16)), (20.0, Some(24)),
+        (28.0, Some(32)), (40.0, None)] {
+        let lambda = 4.0 * 0.6 * (OUT_RATE * minimum).powi(2);
+        let mut ins = Instrument::new(OUT_RATE);
+        ins.add(Body::string("clock test", 2, 1.0, 1.0, lambda / 3.0,
+            f64::INFINITY, 0.0, 0.0));
+        let result = pick_oversample(&mut ins, 0.6);
+        if let Some(os) = expected {
+            assert_eq!(result.unwrap(), os);
+            assert_eq!(ins.rate, OUT_RATE * os as f64);
+            assert!(lambda / (4.0 * ins.rate.powi(2)) <= 0.6);
+        } else {
+            assert!(result.unwrap_err().contains("32x oversampling"));
+            assert_eq!(ins.rate, OUT_RATE);
+        }
+    }
 }
 
 /// A suspended cymbal struck once per hit: (time s, speed m/s, radius fraction, stick tip radius m).

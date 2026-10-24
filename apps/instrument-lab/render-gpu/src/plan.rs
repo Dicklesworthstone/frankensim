@@ -4,7 +4,7 @@
 //! dense inverse of each plate's Airy operator. Pure data; no device code. A batch of simulations shares
 //! everything here except the state and the strike lists.
 
-use fs_vkplate::{GasState, Instrument, InstrumentImage, Law, PlaneStressViscosity};
+use fs_vkplate::{GasState, Instrument, InstrumentImage, Law, PlaneStressViscosity, BENDING_ROOT_ROWS_PER_NODE};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use fs_vkplate::materials::KitMaterials;
@@ -375,7 +375,7 @@ impl Plan {
             if source != ins.bodies[bi].bending_viscosity() {
                 return Err(format!("{}: exported and live bending-viscosity sources differ", b.name));
             }
-            if source.is_some() && (b.viscous.ptr.len() != b.n + 1 || b.viscous_root.ptr.len() != 3*b.n + 1) {
+            if source.is_some() && (b.viscous.ptr.len() != b.n + 1 || b.viscous_root.ptr.len() != BENDING_ROOT_ROWS_PER_NODE*b.n + 1) {
                 return Err(format!("{}: incomplete bending-viscosity operators", b.name));
             }
             p.viscosity_sources.push(source.map(|(v, a)| (v.clone(), a)));
@@ -405,7 +405,7 @@ impl Plan {
                     }
                 }
                 p.visc_ptr.push(i32s(p.visc_col.len()));
-                for r in 3*i..3*i+3 {
+                for r in BENDING_ROOT_ROWS_PER_NODE*i..BENDING_ROOT_ROWS_PER_NODE*(i+1) {
                     if source.is_some() {
                         for q in b.viscous_root.ptr[r]..b.viscous_root.ptr[r + 1] {
                             p.vroot_col.push(i32s(o + b.viscous_root.col[q]));

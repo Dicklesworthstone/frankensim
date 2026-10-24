@@ -20,8 +20,12 @@ Node count alone does not establish audio-band fidelity.
   `D k^2 > T` (above roughly 0.7 kHz on the slack 2-ply kick and floor-tom batters, 5 kHz on the
   snare and rack tom). Berger tension modulation (the mean stretch raises the tension) gives the pitch drop of a
   hard-struck tom.
-- **Plates and shells**: bending energy summed over 3x3 curvature stencils with the full
-  `(1 - nu)` twist term; free edges are the natural boundary of that energy. Von Karman coupling
+- **Plates and shells**: bending energy averages four quarter-cell tensor energies with the full
+  `(1 - nu)` twist term. Squaring a node-centred average of mixed curvature instead loses
+  diagonal-wave stiffness. The quarter-cell form gives exactly `D Lap_h^2` in a uniform
+  interior, second-order continuum consistency and zero bending force for rigid tilts;
+  free edges are the natural boundary of that energy. Sourced bending-viscosity roots use
+  the same quadrature. Von Karman coupling
   through the Airy stress function with a rest shape `z0(r)`:
   `Lap^2 F = -E t [l(w + z0) - l(z0)]` for uniform thickness,
   `l(u) = u_xx u_yy - u_xy^2`. The outer rim fixes the affine Airy
@@ -320,7 +324,9 @@ between 0.5 and 1.5 within 2 s and the 8-16 kHz bands grew back after a second).
 back to `sqrt(2V)` at the half step: lowering it only removes energy, and raising it spends at most
 the energy the loss terms removed in the step before, so the discrete energy still never grows.
 Power iteration estimates the larger of the linear and full rest-shell tangent stiffnesses. The
-internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate;
+internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate
+(1, 2, 3, 4, 6, 8, 12, 16, 24 or 32 times); an insufficient maximum rate refuses the build.
+Finer meshes can therefore use smaller steps without relaxing the stability margin;
 this is not a contact or large-deflection convergence bound. Output uses a windowed-sinc filter.
 
 The Airy operator is factored once (banded Cholesky, row-major ordering); both triangular sweeps

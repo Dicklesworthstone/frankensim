@@ -818,9 +818,9 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         }
         if (viscous) {
           const ll base = (ll)s * NT;
-          // Same three curvature-root rows as the native solver: squares of
+          // Same quarter-cell tensor-root rows as the native solver: squares of
           // G(wn-wp), not a clipped signed matrix quadratic or preset T60.
-          for (int r = 3 * i; r < 3 * i + 3; r++) {
+          for (int r = BENDING_ROOT_ROWS_PER_NODE * i; r < BENDING_ROOT_ROWS_PER_NODE * (i + 1); r++) {
             double strain = 0.0;
             for (int q = __ldg(&p.vroot_ptr[r]); q < __ldg(&p.vroot_ptr[r + 1]); q++) {
               const int j = __ldg(&p.vroot_col[q]);

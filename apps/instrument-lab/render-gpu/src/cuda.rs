@@ -81,6 +81,7 @@ fn source(airy_f32: bool) -> String {
         gb(airy_f32), airy_f32 as i32,
         std::env::var("RENDER_GPU_SPIN_NS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
     );
+    s += &format!("#define BENDING_ROOT_ROWS_PER_NODE {}\n", fs_vkplate::BENDING_ROOT_ROWS_PER_NODE);
     s += include_str!("kernel.cu");
     s
 }
