@@ -4,6 +4,8 @@
 mod common;
 #[path = "../../fs-em/tests/winding_ohmic/common.rs"]
 mod field;
+#[path = "eddy_enthalpy/thermal.rs"]
+mod thermal;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
@@ -555,3 +557,4 @@ fn geometry_source_clock_budget_and_late_cancellation_preserve_both_histories() 
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(state.time_s(), 0.0);
 }
+

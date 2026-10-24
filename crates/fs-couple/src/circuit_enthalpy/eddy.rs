@@ -6,11 +6,14 @@
 //! source work, conduction, boundary heat and total enthalpy share one audit.
 //! Geometry and magnetic permeability remain fixed; no core-loss map is added.
 
+/// Reversible permeability/temperature feedback on these same native owners.
+pub mod thermal;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate, finite,
     magnetic::{
-        Error, MagneticThermalError, MagneticThermalNetwork, MagneticThermalSample, check, invalid,
+        Error, MagneticThermalError, MagneticThermalNetwork, MagneticThermalSample, MagneticRoutes, check, invalid,
         material, same_material,
     },
     material::{MaterialNetwork, MaterialNetworkSample},
@@ -18,7 +21,7 @@ use super::{
 use fs_em::planar::eddy::{
     EddyConductor, EddyControls, EddyError, EddyStep, PlanarEddy, PlanarEddyCandidate,
 };
-use fs_thermal::enthalpy::DepositionSimulation;
+use fs_thermal::enthalpy::{CellId,DepositionError,DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,7 +64,7 @@ impl<'m> ThermalDriver for PlanarEddyCandidate<'m> {
             resistors: &[],
             contacts: &[],
             heat_j: s.heat_j,
-            stored_change_j: s.stored_after_j - s.stored_before_j,
+            stored_change_j: s.stored_after_j - s.stored_before_j - s.parameter_work_j,
             supplied_j: s.supplied_work_j,
         }
     }
@@ -74,6 +77,34 @@ fn induction(e: EddyError) -> Error {
         EddyError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(MagneticThermalError::Induction(other)),
     }
+}
+
+// The fixed-mu and thermal-mu paths deposit exactly the same native sigma*E²
+// integrals. Neither owner may replace them with averaged-current heating.
+fn deposit_heat(
+    proposal:&PlanarEddyCandidate<'_>, routes:&MagneticRoutes, dt:f64,
+    checkpoint:&mut dyn FnMut()->Result<(),DepositionError>,
+)->Result<BTreeMap<CellId,f64>,Error> {
+    if proposal.step().cells.len()!=routes.conductors.len() {
+        return Err(invalid("native eddy heat changed triangle correspondence"));
+    }
+    let mut powers=BTreeMap::new();
+    for loss in &proposal.step().cells {
+        checkpoint()?;
+        let cell=routes.conductors.get(&loss.source.triangle)
+            .ok_or_else(||invalid("eddy heat lacks an original receiving cell"))?;
+        let power=finite(loss.heat_j/dt)?;
+        if loss.heat_j<0.0 || loss.heat_j!=0.0 && power==0.0 {
+            return Err(invalid("eddy heat disappeared in power conversion"));
+        }
+        let previous=*powers.get(cell).unwrap_or(&0.0);
+        let combined=finite(previous+power)?;
+        if power!=0.0 && combined==previous {
+            return Err(invalid("local eddy heat disappeared in receiving-cell sum"));
+        }
+        powers.insert(*cell,combined);
+    }
+    Ok(powers)
 }
 
 impl MagneticThermalNetwork<'_> {
@@ -204,28 +235,7 @@ impl MagneticThermalNetwork<'_> {
                 })
             },
             |proposal: &PlanarEddyCandidate<'_>, dt, checkpoint| {
-                if proposal.step().cells.len() != routes.conductors.len() {
-                    return Err(invalid("native eddy heat changed triangle correspondence"));
-                }
-                let mut powers = BTreeMap::new();
-                for loss in &proposal.step().cells {
-                    checkpoint()?;
-                    let cell = routes
-                        .conductors
-                        .get(&loss.source.triangle)
-                        .ok_or_else(|| invalid("eddy heat lacks an original receiving cell"))?;
-                    let power = finite(loss.heat_j / dt)?;
-                    if loss.heat_j < 0.0 || loss.heat_j != 0.0 && power == 0.0 {
-                        return Err(invalid("eddy heat disappeared in power conversion"));
-                    }
-                    let previous = *powers.get(cell).unwrap_or(&0.0);
-                    let combined = finite(previous + power)?;
-                    if power != 0.0 && combined == previous {
-                        return Err(invalid("local eddy heat disappeared in receiving-cell sum"));
-                    }
-                    powers.insert(*cell, combined);
-                }
-                Ok(powers)
+                deposit_heat(proposal,&routes,dt,checkpoint)
             },
             || (*cancel.borrow_mut())(),
         )?;
@@ -237,3 +247,4 @@ impl MagneticThermalNetwork<'_> {
         })
     }
 }
+

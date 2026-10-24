@@ -16,6 +16,7 @@ use fs_material::{
     conductor::{ConductorError, ResolvedConductorState},
     field_storage::{
         FieldStorageError, MAGNETIC_PERMEABILITY_PROPERTY, admit_fixed_magnetic_refresh,
+        admit_magnetic_temperature_refresh,
     },
     state_point::ResolvedMaterialStatePoint,
     thermal::source::ThermalMaterialError,
@@ -195,6 +196,34 @@ impl MagneticThermalNetwork<'_> {
         ),
         Error,
     > {
+        self.materials_at_impl(thermal,problem,conductors,sample,routes,cancelled,false)
+    }
+
+    // Used only by the thermal-permeability owner, which independently binds
+    // every changing triangle to its source derivative and caloric receiver.
+    pub(super) fn materials_at_thermal(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        problem: &PlanarMagnetostatics,
+        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        sample: &MaterialNetworkSample,
+        routes: &MagneticRoutes,
+        cancelled: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(Vec<(usize,ResolvedConductorState)>,Vec<MagneticThermalSample>),Error> {
+        self.materials_at_impl(thermal,problem,conductors,sample,routes,cancelled,true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materials_at_impl(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        problem: &PlanarMagnetostatics,
+        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        sample: &MaterialNetworkSample,
+        routes: &MagneticRoutes,
+        cancelled: &RefCell<impl FnMut() -> bool>,
+        thermal_permeability: bool,
+    ) -> Result<(Vec<(usize,ResolvedConductorState)>,Vec<MagneticThermalSample>),Error> {
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
         let mut result = Vec::with_capacity(conductors.len());
@@ -230,17 +259,20 @@ impl MagneticThermalNetwork<'_> {
                             ThermalMaterialError::Material(e),
                         ))
                     })?;
-                admit_fixed_magnetic_refresh(original, &snapshot).map_err(|e| match e {
+                let admission = if thermal_permeability {
+                    admit_magnetic_temperature_refresh(original,&snapshot)
+                } else { admit_fixed_magnetic_refresh(original,&snapshot) };
+                admission.map_err(|e| match e {
                     FieldStorageError::Invalid(message) => invalid(message),
                     other => CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(other)),
                 })?;
                 let property = snapshot
                     .property(MAGNETIC_PERMEABILITY_PROPERTY)
                     .expect("admitted permeability");
-                binding
-                    .point
-                    .admit_static(property)
-                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+                if !thermal_permeability {
+                    binding.point.admit_static(property)
+                        .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+                }
                 snapshot
             } else {
                 original.clone()
@@ -285,3 +317,4 @@ pub(super) fn same_material(
                 && p.value_si().to_bits() == q.value_si().to_bits()
         })
 }
+
