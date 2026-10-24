@@ -6,6 +6,8 @@ mod common;
 mod dynamics;
 #[path = "tribothermal/field_motion.rs"]
 mod field_motion;
+#[path = "tribothermal/partition.rs"]
+mod partition;
 
 use fs_couple::tribothermal::material::{KINETIC_FRICTION_PROPERTY, STATIC_FRICTION_PROPERTY};
 use fs_couple::tribothermal::*;
@@ -194,7 +196,7 @@ fn binding<'a>(
         accumulated_distance_axis: Some("distance"),
         tangent_frame_id: "fixed specimen tangent axes",
         selection: MaterialPropertySelection::SingleClaimOnly,
-        partition,
+        partition: SlidingHeatPartition::Prescribed(partition),
         outside_destination: Some("separately resolved external heat sink"),
     }
 }

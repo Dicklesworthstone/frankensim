@@ -353,3 +353,22 @@ partial contact.
 The rolling and contour rungs likewise do not establish deformation-loss
 dominance, coupon calibration validity, normal-contact admission, an error
 bound, or any apparatus-specific selection between their rival model forms.
+
+## Explicit semi-infinite heat allocation
+
+`HeatPartition::semi_infinite_surfaces` allocates an interface-generated heat
+pulse in proportion to `e = k / sqrt(alpha) = sqrt(k rho cp)`. It uses the
+existing checked surface properties and heat partition. The normalized ratio
+does not overflow when the sum of two finite effusivities would. This is the
+equal-exposure, homogeneous isotropic half-space approximation: the two
+incremental surface-temperature rises agree and the two fractions sum to one.
+The caller owns contact resistance, moving-source effects, finite thickness,
+material state and applicability. No third-body heat share is inferred.
+
+G1/G3 coverage in `tests/dry_baseline.rs` checks an independent effusivity
+ratio, equal incremental temperatures through the existing flash-temperature
+formula, ordered-surface reversal and extreme finite normalization. The
+semi-infinite boundary assumptions and finite-size limitations follow A. Jain,
+*International Journal of Heat and Mass Transfer* 202 (2023), 123721,
+<https://doi.org/10.1016/j.ijheatmasstransfer.2022.123721>. This is numerical
+verification of a selected model, not experimental material qualification.

@@ -13,13 +13,17 @@ use fs_qty::{Dims, Pressure, QuantitySpec};
 use fs_thermal::enthalpy::CellId;
 use fs_tribo::{FrictionLaw, HeatPartition, InputAuthority, WorkLedger};
 
+mod partition;
+pub use partition::{EffusivityPartitionSample, SemiInfiniteHeatPartition, SlidingHeatPartition};
+
 pub const STATIC_FRICTION_PROPERTY: &str = "static-friction-coefficient";
 pub const KINETIC_FRICTION_PROPERTY: &str = "kinetic-friction-coefficient";
 const SPEED_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const LENGTH_DIMS: Dims = Dims([1, 0, 0, 0, 0, 0]);
 
 /// A declared finite, dry nominal patch with independent surface temperatures.
-/// The heat split is caller data, not an inferred effusivity or flash model.
+/// Heat allocation is either declared data or an explicitly selected, bounded
+/// semi-infinite model driven by each original material/enthalpy state.
 #[derive(Clone)]
 pub struct SlidingInterface<'a> {
     pub point: ThermalInterfacePoint<'a>,
@@ -35,7 +39,7 @@ pub struct SlidingInterface<'a> {
     /// Fixed caller tangent frame for both relative displacement components.
     pub tangent_frame_id: &'a str,
     pub selection: MaterialPropertySelection,
-    pub partition: HeatPartition,
+    pub partition: SlidingHeatPartition<'a>,
     /// Required when the partition exports work outside these finite bodies.
     /// The destination's temperature/dynamics is not modeled by this reduction.
     pub outside_destination: Option<&'a str>,
@@ -50,6 +54,9 @@ pub struct MaterialSlidingContact<'a> {
     pub(super) work: WorkLedger,
     pub(super) distance_m: f64,
     pub(super) time_s: f64,
+    /// Original contact age, retained across accepted steps and cloned restarts.
+    partition_origin_s: f64,
+    pub(super) partition_maximum_diffusivity_m2_s: [f64; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +67,10 @@ pub struct SlidingMaterialSample {
     pub pressure_pa: f64,
     pub speed_mps: f64,
     pub accumulated_distance_m: f64,
+    /// Actual heat split used by this same nonlinear endpoint.
+    pub partition: HeatPartition,
+    /// Original conductivity sources and caloric response, if explicitly selected.
+    pub effusivity: Option<EffusivityPartitionSample>,
 }
 
 impl<'a> MaterialSlidingContact<'a> {
@@ -70,7 +81,7 @@ impl<'a> MaterialSlidingContact<'a> {
     /// contact rather than reconstructing its material/history binding.
     pub fn new(
         thermal: &DepositionSimulation<'_>,
-        data: SlidingInterface<'a>,
+        mut data: SlidingInterface<'a>,
         initial_normal_load_n: f64,
         initial_speed_mps: f64,
         authority: InputAuthority,
@@ -84,7 +95,10 @@ impl<'a> MaterialSlidingContact<'a> {
             initial_normal_load_n,
             initial_speed_mps,
             0.0,
+            0.0,
+            [0.0; 2],
         )?;
+        data.partition.pin(initial.effusivity.as_ref());
         let pins = MaterialPropertySelection::PinnedByProperty(
             initial
                 .resolved
@@ -99,6 +113,10 @@ impl<'a> MaterialSlidingContact<'a> {
                 .collect(),
         );
         let history = initial.law.initial_state();
+        let partition_maximum_diffusivity_m2_s = initial
+            .effusivity
+            .as_ref()
+            .map_or([0.0; 2], |sample| sample.maximum_diffusivity_m2_s);
         Ok(Self {
             data: SlidingInterface {
                 selection: pins,
@@ -109,6 +127,8 @@ impl<'a> MaterialSlidingContact<'a> {
             work: WorkLedger::default(),
             distance_m: 0.0,
             time_s: thermal.time_s(),
+            partition_origin_s: thermal.time_s(),
+            partition_maximum_diffusivity_m2_s,
         })
     }
     pub const fn binding(&self) -> &SlidingInterface<'a> {
@@ -137,7 +157,15 @@ impl<'a> MaterialSlidingContact<'a> {
         speed: f64,
         distance: f64,
     ) -> Result<SlidingMaterialSample, SlidingError<E>> {
-        sample(&self.data, thermal, normal_n, speed, distance)
+        sample(
+            &self.data,
+            thermal,
+            normal_n,
+            speed,
+            distance,
+            thermal.time_s() - self.partition_origin_s,
+            self.partition_maximum_diffusivity_m2_s,
+        )
     }
 }
 
@@ -200,6 +228,8 @@ fn sample<E>(
     normal_n: f64,
     speed: f64,
     distance: f64,
+    contact_age_s: f64,
+    previous_maximum_diffusivity: [f64; 2],
 ) -> Result<SlidingMaterialSample, SlidingError<E>> {
     if !normal_n.is_finite()
         || normal_n <= 0.0
@@ -236,6 +266,9 @@ fn sample<E>(
         })
         .collect::<Result<Vec<_>, SlidingError<E>>>()?;
     let phases = [phases[0], phases[1]];
+    let (partition, effusivity) =
+        data.partition
+            .resolve(data, phases, contact_age_s, previous_maximum_diffusivity)?;
     let pressure = number(normal_n / data.nominal_area_m2)?;
     if pressure <= 0.0 {
         return Err(SlidingError::Invalid("positive nominal pressure underflow"));
@@ -307,5 +340,7 @@ fn sample<E>(
         pressure_pa: pressure,
         speed_mps: speed,
         accumulated_distance_m: distance,
+        partition,
+        effusivity,
     })
 }

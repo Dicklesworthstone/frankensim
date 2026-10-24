@@ -1290,6 +1290,33 @@ impl HeatPartition {
         value.validate()?;
         Ok(value)
     }
+    /// Incremental heat split for two homogeneous semi-infinite solids in
+    /// perfect thermal contact: equal surface-temperature rise requires
+    /// `q_a/e_a = q_b/e_b`, where thermal effusivity `e = k/sqrt(alpha)`.
+    ///
+    /// This is an explicitly selected short-time, one-dimensional conduction
+    /// approximation, not a universal friction partition. The caller owns its
+    /// geometry/time envelope, local material states and any separate heat
+    /// exchange from unequal initial temperatures. No heat goes to a third body.
+    pub fn semi_infinite_surfaces(
+        surface_a: SurfaceThermalProperties,
+        surface_b: SurfaceThermalProperties,
+    ) -> Result<Self, TriboError> {
+        let a = surface_a.conductivity_w_per_m_k / surface_a.diffusivity_m2_per_s.sqrt();
+        let b = surface_b.conductivity_w_per_m_k / surface_b.diffusivity_m2_per_s.sqrt();
+        positive_finite(a, "surface_a_thermal_effusivity")?;
+        positive_finite(b, "surface_b_thermal_effusivity")?;
+        // Normalize by the larger effusivity: a+b need not be representable
+        // even when both input effusivities and their physical split are.
+        let ratio = a.min(b) / a.max(b);
+        positive_finite(ratio, "thermal_effusivity_ratio")?;
+        let small = ratio / (1.0 + ratio);
+        if a >= b {
+            Self::new(1.0 - small, small, 0.0)
+        } else {
+            Self::new(small, 1.0 - small, 0.0)
+        }
+    }
     /// Fraction of frictional heat routed to surface A.
     #[must_use]
     pub const fn surface_a(&self) -> f64 {

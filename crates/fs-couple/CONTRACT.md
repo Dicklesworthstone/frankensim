@@ -5353,3 +5353,39 @@ perform alignment. The original `new` constructor retains zero-source-delay
 behavior. Focused regression source compares independently filtered modal
 trajectories across callback partitions and covers exact zero-delay parity and
 invalid latency admission; native execution is still required.
+
+## Material-driven sliding heat allocation (MR20)
+
+`tribothermal::SlidingHeatPartition` makes the heat model explicit:
+`Prescribed` retains supplied fractions; `SemiInfiniteEffusivity` uses each
+surface's original material and accepted caloric state. Conductivity is queried
+at each body's own endpoint temperature, preserving its external coordinates
+and pinning the initially selected claim. Density and differential heat
+capacity are read from the same original enthalpy chart used by the thermal
+solver. There is no second Cp law, replacement material, constant heat split
+after a swap, or separate heat integrator.
+
+The selected split participates in every nonlinear endpoint trial, including
+the finite-body dynamics and field-driven motion paths. Friction work is still
+partitioned and deposited exactly once by the existing thermal owner. The
+report retains the conductivity bundles, original phase states, differential
+Cp, density, diffusivity, heat fractions and current contact age. Failure to
+resolve either material or to fit the model envelope returns no new thermal,
+slip, mechanical or work state.
+
+This is an explicit local half-space estimate for incremental friction heat:
+homogeneous isotropic media, equal exposure times, negligible thermal
+resistance at the generation plane. It does not predict flash temperatures or
+moving-source Peclet effects. Background heat exchange remains the separately
+declared thermal network. A caller-specified diffusion-depth envelope compares
+`2 sqrt(alpha_max age)` with the distance to competing boundaries (including
+footprint edges); age and the maximum sampled diffusivity survive accepted
+steps and cloned restarts. The envelope is an approximation guard, not a
+finite-domain error certificate or proof of property behavior between sampled
+states. Contact resistance, third-body layers, melting and inadequate spatial
+resolution require other models.
+
+Focused G1/G3 regressions in `tests/tribothermal/partition.rs` exercise changes
+to conductivity and Cp through actual finite heat stores, independently solve
+a temperature-dependent conductivity feedback case, and verify cumulative
+exposure refusal, ordered-source identity and unchanged accepted state.

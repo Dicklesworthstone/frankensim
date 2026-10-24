@@ -213,3 +213,42 @@ fn g3_flash_candidate_scales_with_power() {
     close(two.surface_a_rise_k(), 2.0 * one.surface_a_rise_k());
     close(two.surface_b_rise_k(), 2.0 * one.surface_b_rise_k());
 }
+
+#[test]
+fn g1_effusivity_partition_equalizes_incremental_half_space_temperature_rise() {
+    let a = SurfaceThermalProperties::new(12.0, 4e-6).unwrap();
+    let b = SurfaceThermalProperties::new(6.0, 1e-6).unwrap();
+    let equal = HeatPartition::semi_infinite_surfaces(a, b).unwrap();
+    close(equal.surface_a(), 0.5);
+    close(equal.surface_b(), 0.5);
+    let more_conductive = SurfaceThermalProperties::new(24.0, 4e-6).unwrap();
+    let partition = HeatPartition::semi_infinite_surfaces(more_conductive, b).unwrap();
+    close(partition.surface_a(), 2.0 / 3.0);
+    close(partition.surface_b(), 1.0 / 3.0);
+    let input = FlashTemperatureInput::new(
+        100.0,
+        partition,
+        0.01,
+        0.004,
+        1.0,
+        Some(more_conductive),
+        Some(b),
+    )
+    .unwrap();
+    let FlashTemperatureEstimate::Candidate(candidate) =
+        flash_temperature_candidate(&interface(), input).unwrap()
+    else {
+        panic!("complete properties");
+    };
+    close(candidate.surface_a_rise_k(), candidate.surface_b_rise_k());
+    let reversed = HeatPartition::semi_infinite_surfaces(b, more_conductive).unwrap();
+    close(reversed.surface_a(), partition.surface_b());
+    close(reversed.surface_b(), partition.surface_a());
+    assert_eq!(partition.other(), 0.0);
+    // Stable normalization must not form an overflowing e_a + e_b.
+    let huge = SurfaceThermalProperties::new(f64::MAX, 1.0).unwrap();
+    assert_eq!(
+        HeatPartition::semi_infinite_surfaces(huge, huge).unwrap(),
+        equal
+    );
+}
