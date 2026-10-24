@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { gasSourcePacket } from '../public/live/gas-sources.js';
 
 const url = new URL('../public/live/kit/worker.js', import.meta.url);
 const source = (await readFile(url, 'utf8'))
@@ -94,7 +95,7 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
     KitPiece.withMaterialBendingLossAndGasSources = undefined;
   }
   const self = { postMessage(message) { messages.push(message); } };
-  runInNewContext(source, { self, KitPiece, init: async () => {},
+  runInNewContext(source, { self, KitPiece, init: async () => {}, gasSourcePacket,
     createLane: () => { attached++; return { frame: 0 }; }, levelFix: () => { correctionCalls++; return 2; },
     Float32Array, Uint8Array, Uint32Array, URL,
     performance: { now() { clock += slowFirst && active === 1 ? 10 : 1; return clock; } },

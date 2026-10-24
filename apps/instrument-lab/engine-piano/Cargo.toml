@@ -39,6 +39,7 @@ fs-phs = { path = "../../../crates/fs-phs" }
 [dev-dependencies]
 fs-blake3 = { path = "../../../crates/fs-blake3" }
 fs-evidence = { path = "../../../crates/fs-evidence" }
+fs-thermochem = { path = "../../../crates/fs-thermochem" }
 
 # Native only: the complete reference engine (validation oracle) names fs-bem.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -14,14 +14,44 @@ pub const MAX_SCALE_BYTES: usize = 256 * 1024;
 /// Resolve the same bounded atmosphere declaration used by file-driven physics
 /// and the live drum: `T P RH` or `mixture T P mole|mass N SPECIES FRACTION…`.
 /// This cold ingress delegates every physical coefficient and domain check to
-/// fs-material; unsupported source registries and trailing text refuse.
+/// fs-material. Canonical thermochemical sources enter through
+/// [`resolve_atmosphere_sources`]; trailing text always refuses.
 pub fn resolve_atmosphere(text: &str) -> Result<fs_material::gas::GasState, String> {
+    resolve_atmosphere_record(text).map(|record| *record.state())
+}
+
+pub(crate) fn resolve_atmosphere_record(text: &str)
+    -> Result<fs_material::gas_species::input::GasRecord, String> {
     if text.len() > 8192 { return Err("gas declaration exceeds 8 KiB".into()); }
     let mut fields = text.split_ascii_whitespace();
-    let gas = fs_material::gas_species::input::read_gas_state(&mut fields, None)
+    let gas = fs_material::gas_species::input::read_gas_record(&mut fields, None, None)
         .map_err(|e| e.to_string())?;
     if fields.next().is_some() { return Err("unexpected fields after the gas declaration".into()); }
     Ok(gas)
+}
+
+/// Resolve an arbitrary gas from the same canonical source packet as the live
+/// drum and kit. Consecutive species/NASA-9/transport pack triples declare each
+/// species explicitly; no chemical name selects thermodynamics or transport.
+/// The shared reader owns byte limits, composition, source validity and phase
+/// admission. The returned record retains all original models and receipts.
+///
+/// `water_species` is empty only when no water identity is declared. `phase`
+/// must be `frozen` or `liquid-water`, including its original saturation checks.
+/// Sources may only accompany a complete `thermochemical ...` declaration;
+/// they cannot be silently ignored in favor of the built-in air/mixture path.
+pub fn resolve_atmosphere_sources(text: &str, bytes: &[u8], lengths: &[u32],
+    water_species: &str, phase: &str)
+    -> Result<fs_material::gas_species::input::GasRecord, String> {
+    use fs_material::gas_species::input::{ThermochemicalPhase, packs::read_source_packet};
+    let phase = match phase {
+        "frozen" => ThermochemicalPhase::FrozenGas,
+        "liquid-water" => ThermochemicalPhase::LiquidWaterLimit,
+        _ => return Err("gas source phase must be frozen or liquid-water".into()),
+    };
+    read_source_packet(text, bytes, lengths,
+        (!water_species.is_empty()).then_some(water_species), phase)
+        .map_err(|e| e.to_string())
 }
 
 /// One explicit preparation policy. The shared solver changes only tension;

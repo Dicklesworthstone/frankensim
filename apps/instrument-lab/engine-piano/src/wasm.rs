@@ -3,6 +3,7 @@
 use crate::{Config, Description, LivePiano, PianoAudio};
 use crate::preparation::{self, PreparationReport, Tuning};
 use crate::preparation::materials::{self, StringMaterials};
+use fs_material::gas_species::input::GasRecord;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -23,6 +24,9 @@ pub struct PianoEngine {
     piano: Playback,
     snap: Vec<f32>,
     preparation: Option<PreparationReport>,
+    // Keep the same source models and receipts through timed/playback copies.
+    // Physics consumes their frozen, coherently evaluated state at preparation.
+    atmosphere: Option<Arc<GasRecord>>,
 }
 
 // Keep the legacy single-rate path, including its recoverable note refusals.
@@ -106,9 +110,9 @@ fn config(sample_rate: u32, course_mode_budget: usize, max_dynamic_modes: usize,
 #[allow(clippy::too_many_arguments)]
 fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
     course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
-    substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+    substeps: usize, scale_csv: &str, tuning: &[f64], atmosphere: GasRecord,
     materials: Option<Arc<StringMaterials>>) -> Result<PianoEngine, JsError> {
-    let gas = preparation::resolve_atmosphere(gas_record).map_err(|e| JsError::new(&e))?;
+    let gas = *atmosphere.state();
     let policy = Tuning::from_values(tuning).map_err(|e| JsError::new(&e))?;
     if !board.is_empty() && board_coordinates != 0 {
         return Err(JsError::new("supplied board preparation requires board_coordinates = 0"));
@@ -133,7 +137,8 @@ fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
         (1, None) => LivePiano::new_with_gas(&desc, cfg, gas).map(Playback::Single),
         (_, None) => PianoAudio::new_with_gas(&desc, cfg, substeps, gas).map(Playback::Multirate),
     }.map_err(|e| JsError::new(&e))?;
-    Ok(PianoEngine { piano, snap: Vec::with_capacity(4096), preparation: Some(report) })
+    Ok(PianoEngine { piano, snap: Vec::with_capacity(4096), preparation: Some(report),
+        atmosphere: Some(Arc::new(atmosphere)) })
 }
 
 #[wasm_bindgen]
@@ -160,7 +165,7 @@ impl PianoEngine {
             desc = desc.truncated(board_coordinates).map_err(|e| JsError::new(&e))?;
         }
         let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
-        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None })
+        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None, atmosphere: None })
     }
 
     /// Original single-rate external-board constructor, unchanged arguments.
@@ -179,7 +184,7 @@ impl PianoEngine {
         let cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
         let desc = Description::from_board(board).map_err(|e| JsError::new(&e))?;
         let piano = Playback::new(&desc, cfg, substeps).map_err(|e| JsError::new(&e))?;
-        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None })
+        Ok(Self { piano, snap: Vec::with_capacity(4096), preparation: None, atmosphere: None })
     }
 
     /// Prepare physical courses BEFORE all live string/bridge/hammer lowering.
@@ -205,8 +210,27 @@ impl PianoEngine {
     pub fn with_atmosphere(sample_rate: u32, board: &[u8], board_coordinates: usize,
         course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
         substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str) -> Result<PianoEngine, JsError> {
+        let gas = preparation::resolve_atmosphere_record(gas_record).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
-            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas_record, None)
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None)
+    }
+
+    /// Source-backed thermochemical atmosphere for the same preparation and
+    /// receiver. Canonical species, NASA-9 and transport triples use the shared
+    /// material reader; water identity and phase policy are explicit. Source
+    /// models remain owned by the engine and its copies. This freezes the gas
+    /// at preparation; it does not introduce gas loading of an effective scale.
+    #[wasm_bindgen(js_name = withGasSources)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_gas_sources(sample_rate: u32, board: &[u8], board_coordinates: usize,
+        course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str)
+        -> Result<PianoEngine, JsError> {
+        let gas = preparation::resolve_atmosphere_sources(gas_record, gas_bytes, gas_lengths,
+            water_species, phase).map_err(|e| JsError::new(&e))?;
+        prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas, None)
     }
 
     /// Canonical material packs and explicit concentric geometry determine the
@@ -227,8 +251,34 @@ impl PianoEngine {
             frequency_axis, frequency_hz).map_err(|e| JsError::new(&e))?;
         let materials = StringMaterials::from_packed_bytes(pack_bytes, pack_lengths,
             geometry, &point, viscosity_property).map_err(|e| JsError::new(&e))?;
+        let gas = preparation::resolve_atmosphere_record(gas_record).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
-            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas_record,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas,
+            Some(Arc::new(materials)))
+    }
+
+    /// Bind source-backed strings and gas in one cold preparation. Source gas
+    /// transport drives each retained string mode's cylinder resistance, while
+    /// the exact same gas density and sound speed drive the Rayleigh receiver.
+    /// All original section, tensile-limit, gas and source-domain refusals apply.
+    #[wasm_bindgen(js_name = withStringMaterialsAndGasSources)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_string_materials_and_gas_sources(sample_rate: u32, board: &[u8], board_coordinates: usize,
+        course_mode_budget: usize, max_dynamic_modes: usize, full_scale_pa: f64,
+        substeps: usize, scale_csv: &str, tuning: &[f64], gas_record: &str,
+        pack_bytes: &[u8], pack_lengths: &[u32], geometry: &str,
+        temperature_axis: &str, temperature_k: f64, viscosity_property: &str,
+        frequency_axis: &str, frequency_hz: f64,
+        gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str)
+        -> Result<PianoEngine, JsError> {
+        let gas = preparation::resolve_atmosphere_sources(gas_record, gas_bytes, gas_lengths,
+            water_species, phase).map_err(|e| JsError::new(&e))?;
+        let point = materials::operating_point(temperature_axis, temperature_k,
+            frequency_axis, frequency_hz).map_err(|e| JsError::new(&e))?;
+        let materials = StringMaterials::from_packed_bytes(pack_bytes, pack_lengths,
+            geometry, &point, viscosity_property).map_err(|e| JsError::new(&e))?;
+        prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
+            max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas,
             Some(Arc::new(materials)))
     }
 
@@ -236,7 +286,7 @@ impl PianoEngine {
     /// an unplayed copy retain the same selected clock and quality policy.
     pub fn copy(&self) -> PianoEngine {
         PianoEngine { piano: self.piano.clone(), snap: Vec::with_capacity(self.snap.capacity()),
-            preparation: self.preparation.clone() }
+            preparation: self.preparation.clone(), atmosphere: self.atmosphere.clone() }
     }
 
     /// JSON includes output and mechanical rates and total output-frame latency.
@@ -248,6 +298,14 @@ impl PianoEngine {
             info.push_str(",\"scalePreparation\":");
             info.push_str(&report.json());
             info.push('}');
+        }
+        if let Some(GasRecord::Thermochemical(gas)) = self.atmosphere.as_deref() {
+            let packs = gas.source_packs().iter().map(|receipt| format!(
+                "{{\"species\":\"{}\",\"nasa9\":\"{}\",\"transport\":\"{}\"}}",
+                receipt.species_pack.to_hex(), receipt.nasa9_pack.to_hex(), receipt.transport_pack.to_hex()))
+                .collect::<Vec<_>>().join(",");
+            let _ = info.pop();
+            info.push_str(&format!(",\"gasSourcePacks\":[{packs}]}}"));
         }
         info
     }

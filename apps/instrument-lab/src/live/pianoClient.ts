@@ -44,6 +44,8 @@ export interface PianoInfo {
   boardProvenance: string;
   /** Exact shared material gas consumed by the Rayleigh receiver. */
   acousticGas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMS: number; gamma: number };
+  /** Original canonical source identities retained through preparation and playback copies. */
+  gasSourcePacks?: { species: string; nasa9: string; transport: string }[];
   /** Hammer felt law (engines built before it was reported omit it). */
   hammerLaw?: string;
   /** The loaded string-loss owner; source sections use source-kelvin-voigt. */
@@ -252,6 +254,14 @@ export interface PianoStringMaterials {
   frequencyHz: number;
 }
 
+/** Original canonical gas sources, explicitly associated without name lookup. */
+export interface GasSourceOptions {
+  components: { speciesPack: Uint8Array; nasa9Pack: Uint8Array; transportPack: Uint8Array }[];
+  /** null explicitly selects no water identity; never inferred from spelling. */
+  waterSpecies: string | null;
+  phase: 'frozen' | 'liquid-water';
+}
+
 /** Shared constructor options for standalone playback and scheduled PianoLane playback. */
 export interface PianoEngineOptions {
   /**
@@ -270,8 +280,10 @@ export interface PianoEngineOptions {
   /** Original physical SI scale CSV; omitted selects the embedded scale. */
   scaleCsv?: string;
   stretchTuning?: PianoStretchTuning;
-  /** T[K] P[Pa] RH, or mixture T P mole|mass N SPECIES FRACTION…; resolved in Rust. */
+  /** T[K] P[Pa] RH, mixture T P mole|mass N SPECIES FRACTION…, or thermochemical with gasSources; resolved in Rust. */
   gas?: string;
+  /** Canonical source triples for gas's thermochemical record; shared with kit atmosphere ingress. */
+  gasSources?: GasSourceOptions;
   /** Canonical source data and explicit concentric geometry; no material or radius guessing. */
   stringMaterials?: PianoStringMaterials;
 }

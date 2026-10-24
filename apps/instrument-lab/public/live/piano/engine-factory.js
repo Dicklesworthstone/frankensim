@@ -1,5 +1,7 @@
 // Shared by standalone and scheduled-lane playback, including their timing probes.
 // This chooses an existing WASM constructor, never a JavaScript audio resampler.
+import { gasSourcePacket } from '../gas-sources.js';
+
 export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null) {
   const substeps = options.substeps === undefined ? 1 : Number(options.substeps);
   if (![1, 2, 4].includes(substeps) || !Number.isInteger(sampleRate)
@@ -9,7 +11,7 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
   const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
   const coords = Number(options.boardCoordinates) || 0;
   if (options.scaleCsv !== undefined || options.stretchTuning !== undefined || options.gas !== undefined
-      || options.stringMaterials !== undefined) {
+      || options.stringMaterials !== undefined || options.gasSources !== undefined) {
     let scale = '';
     if (options.scaleCsv !== undefined) {
       if (typeof options.scaleCsv !== 'string' || !options.scaleCsv.trim()
@@ -25,14 +27,24 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
         throw new RangeError('gas must be a nonempty material atmosphere declaration of at most 8 KiB');
       }
     }
+    const sources = gasSourcePacket(options.gas, options.gasSources);
     if (options.stringMaterials !== undefined) {
       const materials = stringMaterialValues(options.stringMaterials);
-      if (typeof Engine.withStringMaterials !== 'function') {
-        throw new Error('selected string materials require rebuilding the piano WASM with withStringMaterials support');
+      const method = sources ? 'withStringMaterialsAndGasSources' : 'withStringMaterials';
+      if (typeof Engine[method] !== 'function') {
+        throw new Error(`selected string materials require rebuilding the piano WASM with ${method} support`);
       }
-      return Engine.withStringMaterials(sampleRate, bytes ?? new Uint8Array(),
+      return Engine[method](sampleRate, bytes ?? new Uint8Array(),
         bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
-        options.gas ?? '293.15 101325 0', ...materials);
+        options.gas ?? '293.15 101325 0', ...materials, ...(sources ?? []));
+    }
+    if (sources) {
+      if (typeof Engine.withGasSources !== 'function') {
+        throw new Error('selected atmosphere sources require rebuilding the piano WASM with withGasSources support');
+      }
+      return Engine.withGasSources(sampleRate, bytes ?? new Uint8Array(),
+        bytes ? 0 : (coords > 16 ? 0 : coords), ...limits, substeps, scale, tuning,
+        options.gas, ...sources);
     }
     if (options.gas !== undefined) {
       if (typeof Engine.withAtmosphere !== 'function') {
