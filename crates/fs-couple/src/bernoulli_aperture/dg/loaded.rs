@@ -50,7 +50,7 @@ impl ApertureDg<LoadedAperture> {
     /// terminal's signed exchange stays separate from its unmodeled storage.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.aperture.energy() + self.load.state().stored_energy_j()
+        self.aperture.energy() + self.load.stored_energy_j()
     }
 
     /// Continue all original mechanical, acoustic and material histories.

@@ -5738,3 +5738,14 @@ parsing and the thermal identities were checked by independent numerical
 reductions. Native compilation/tests and audio rendering/listening were not
 performed in this connector-only session. No measured instrument-fidelity claim
 is made by these synthetic constitutive tests.
+
+
+## Finite DG side branches
+
+`DgPortLoad::new_with_terminal_branches` joins original two-port `DgDuct` branches to distinct existing bore side ports. Each branch retains its actual geometry, material gas, viscothermal memory, original propagator and state. Junction mean pressure is common and held volume flows are opposite. The constant junction matrix is eliminated through the existing prepared LU; the resulting complete external mean-port response enters the unchanged terminal MIMO coupling with every cross term retained.
+
+External IDs remain the authored bore-side IDs, but terminal pressure, work and microphone flow belong to the actual branch outlets. `DgBranchFrame` separately exposes junction flow, both independently integrated pressure/work observations and the original branch step. Compressible branch storage permits different junction and outlet flows; neither is substituted for the other.
+
+Bore, branch and rational histories publish together only after every original candidate and signed junction/terminal work check accepts. Main `state()` retains its original meaning; `branches()` exposes the independent states. `stored_energy_j`, cumulative loss and coupled-source ledgers sum every original DG owner once. Rational terminal exchange is reported separately without fabricating a storage function.
+
+Cold admission requires complete terminal ownership, two-port branches without nested side ports, common equilibrium junction pressure, a common clock, resolved native wall bands and a combined acoustic-plus-memory DOF allowance before exponentials. Different coherent gas compositions at the junction are permitted. An empty branch list preserves existing scalar and multiport arithmetic. This is a finite one-dimensional duct attached at a zero-volume point junction: it does not add three-dimensional entrance/jet flow, moving pads, or a continuous-time joint exponential. Coupling-clock, spatial and wall-fit refinement remain separate qualifications.

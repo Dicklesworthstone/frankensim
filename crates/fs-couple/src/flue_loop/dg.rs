@@ -66,7 +66,7 @@ pub struct FlueDgFrame {
     pub terminals: Vec<DgTerminalFrame>,
     /// Original integrated DG INLET work minus mean pressure * volume [J].
     pub port_work_residual_j: f64,
-    /// Original propagator observation and ledger. Dense loss is still inferred
+    /// External ports and summed original bore/branch ledgers. Dense loss is still inferred
     /// where its balance_checked field is false.
     pub duct: DgStepOutput,
 }
@@ -94,7 +94,7 @@ impl FlueDg {
     }
 
     pub fn stored_energy_j(&self) -> f64 {
-        self.load.state().stored_energy_j()
+        self.load.stored_energy_j()
     }
 
     pub(super) fn boundary(&self) -> Result<WindBoundary, FlueError> {

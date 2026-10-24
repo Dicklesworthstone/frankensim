@@ -14,6 +14,10 @@ pub mod radiation;
 mod terminal;
 use terminal::{TerminalCoupling, TerminalRelation};
 
+mod branch;
+pub use branch::{DgBranch, DgBranchFrame, DgBranchLoad};
+use branch::BranchCoupling;
+
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use fs_duct::dg::{
@@ -30,7 +34,8 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 /// Work is SIGNED exchange, not a dissipation or rational-storage certificate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DgTerminalFrame {
-    /// The original outlet port; its DG input has the opposite flow sign.
+    /// Stable external channel ID. For a finite side branch this denotes its
+    /// actual outer outlet; its original bore-side ID is the internal junction.
     pub port: PortId,
     /// Held volume flow out of the duct and into the terminal [m³/s].
     pub outward_flow_m3_s: f64,
@@ -64,6 +69,9 @@ pub struct DgPortLoad {
     last_terminal_frame: Option<DgTerminalFrame>,
     last_terminal_frames: Vec<DgTerminalFrame>,
     radiation_record: Option<ComputedBaffledRecord>,
+    branches: Vec<DgBranchLoad>,
+    branch_coupling: Option<BranchCoupling>,
+    last_branch_frames: Vec<DgBranchFrame>,
 }
 
 impl DgPortLoad {
@@ -79,7 +87,7 @@ impl DgPortLoad {
         exponential_tolerance: f64,
         maximum_dofs: usize,
     ) -> Result<Self, AcousticRealizeError> {
-        Self::prepare(duct, time_step_s, exponential_tolerance, maximum_dofs, Vec::new(), None)
+        Self::prepare(duct, time_step_s, exponential_tolerance, maximum_dofs, Vec::new(), None, Vec::new())
     }
 
     /// Attach one admitted causal impedance to the declared outlet port.
@@ -137,7 +145,7 @@ impl DgPortLoad {
         terminal: PreparedMimoLoad,
     ) -> Result<Self, AcousticRealizeError> {
         Self::prepare(
-            duct, time_step_s, exponential_tolerance, maximum_dofs, ports, Some(terminal),
+            duct, time_step_s, exponential_tolerance, maximum_dofs, ports, Some(terminal), Vec::new(),
         )
     }
 
@@ -148,6 +156,7 @@ impl DgPortLoad {
         maximum_dofs: usize,
         terminal_ports: Vec<PortId>,
         terminal: Option<PreparedMimoLoad>,
+        branches: Vec<DgBranch>,
     ) -> Result<Self, AcousticRealizeError> {
         let DgBoundary::Port(inlet) = duct.inlet() else {
             return Err(invalid("DG load requires one declared inlet port"));
@@ -158,6 +167,9 @@ impl DgPortLoad {
             {
                 return Err(invalid("DG terminal requires quiescent original memory on the same clock"));
             }
+        }
+        if !branches.is_empty() {
+            branch::admit_sources(&duct, &branches, time_step_s, maximum_dofs)?;
         }
         if duct.total_dofs() > maximum_dofs {
             return Err(invalid("DG acoustic plus memory states exceed the declared DOF budget"));
@@ -173,6 +185,14 @@ impl DgPortLoad {
         let state = duct.zero_state();
         let response = propagator.multiport_response(&state)
             .map_err(AcousticRealizeError::Duct)?;
+        let branches: Vec<_> = branches.into_iter().map(|source|
+            DgBranchLoad::prepare(source, time_step_s, exponential_tolerance)).collect::<Result<_, _>>()?;
+        let branch_coupling = if branches.is_empty() { None }
+            else { Some(BranchCoupling::new(&response, &branches)?) };
+        let response = match &branch_coupling {
+            Some(coupling) => coupling.response(response, &branches)?,
+            None => response,
+        };
         let terminal_coupling = match &terminal {
             Some(load) => Some(TerminalCoupling::new(&response, inlet, terminal_ports, load)?),
             None => {
@@ -186,6 +206,7 @@ impl DgPortLoad {
             duct, propagator, state, inlet, impedance_pa_s_m3: 0.0,
             terminal, terminal_coupling, last_terminal_frame: None,
             last_terminal_frames: Vec::new(), radiation_record: None,
+            branches, branch_coupling, last_branch_frames: Vec::new(),
         };
         let impedance = load.port_response()?.impedance_pa_s_m3;
         if !impedance.is_finite() || impedance <= 0.0 {
@@ -207,7 +228,8 @@ impl DgPortLoad {
     #[must_use]
     pub const fn propagator(&self) -> &DgPropagator { &self.propagator }
 
-    /// Complete accepted DG state, including current physical nodal fields.
+    /// Accepted MAIN bore state, including current physical nodal fields.
+    /// Finite branches retain independent original states through branches().
     #[must_use]
     pub const fn state(&self) -> &DgState { &self.state }
 
@@ -248,8 +270,7 @@ impl DgPortLoad {
     fn terminal_relation(
         &self, terminal: &PreparedMimoLoad,
     ) -> Result<TerminalRelation, AcousticRealizeError> {
-        let response = self.propagator.multiport_response(&self.state)
-            .map_err(AcousticRealizeError::Duct)?;
+        let response = self.multiport_response()?;
         self.terminal_coupling.as_ref()
             .ok_or_else(|| invalid("DG terminal lost its admitted port group"))?
             .relation(response, terminal)
@@ -293,25 +314,16 @@ impl DgPortLoad {
                 inputs.push(PortInput { id: *id, effort: -*outward });
             }
         }
+        let (main_inputs, junction_flows) = self.branch_inputs(&inputs)?;
         let mut state = self.state.clone();
-        let output = self.propagator.step(&mut state, &inputs)
+        let mut output = self.propagator.step(&mut state, &main_inputs)
             .map_err(AcousticRealizeError::Duct)?;
         self.propagator.sync_nodal(&mut state).map_err(AcousticRealizeError::Duct)?;
+        branch::validate_candidate(&state, &output, inputs.len())?;
+        let (branch_states, branch_frames, original_pressure_scales) =
+            self.step_branches(&inputs, &main_inputs, &junction_flows, &mut output)?;
+        if !branch_frames.is_empty() { branch::validate_candidate(&state, &output, inputs.len())?; }
         let ledger = &output.ledger;
-        if output.port_outputs.len() != inputs.len()
-            || output.port_outputs.iter().any(|port|
-                !port.conjugate_rate.is_finite() || !port.delta_x.is_finite()
-                    || !port.end_conjugate.is_finite())
-            || ![
-                state.stored_energy_j(), ledger.stored_energy_j,
-                ledger.port_work_step_j, ledger.cumulative_port_work_j,
-                ledger.cumulative_dissipated_j, ledger.energy_balance_residual_j,
-                ledger.relative_energy_drift,
-            ].iter().all(|value| value.is_finite())
-            || state.pressure().iter().chain(state.volume_flow()).any(|x| !x.is_finite())
-        {
-            return Err(invalid("DG port candidate left the finite pressure/state/work domain"));
-        }
         let inlet_port = output.port_outputs.iter().find(|port| port.id == self.inlet)
             .ok_or_else(|| invalid("DG candidate omitted its original inlet"))?;
         let inlet_work_j = volume_flow_m3_s * inlet_port.delta_x;
@@ -330,6 +342,11 @@ impl DgPortLoad {
                     pressure_scale += (z[width * row + column] * outward_flows[j]).abs();
                 }
                 pressure_scale += load_pressure[i].abs();
+                // Branch condensation can cancel large internal terms. Keep the
+                // original owner terms in the same fixed relative work audit.
+                if let Some(&original_scale) = original_pressure_scales.get(row) {
+                    pressure_scale += original_scale;
+                }
                 let outward_flow = outward_flows[i];
                 let port_work_j = outward_flow * port.delta_x;
                 let load_work_j = load_pressure[i] * (outward_flow * self.propagator.dt());
@@ -359,13 +376,17 @@ impl DgPortLoad {
         let terminal_work = sum_terminal_work(&terminal_frames);
         let balance = ledger.port_work_step_j - (inlet_work_j - terminal_work);
         let terminal_work_scale = terminal_frames.iter().map(|frame| frame.port_work_j.abs()).sum::<f64>();
-        let scale = ledger.port_work_step_j.abs() + inlet_work_j.abs() + terminal_work_scale;
+        let mut scale = ledger.port_work_step_j.abs() + inlet_work_j.abs() + terminal_work_scale;
+        for frame in &branch_frames {
+            scale += frame.bore_work_j.abs() + frame.branch_work_j.abs();
+        }
         if ![inlet_work_j, balance, scale].iter().all(|value| value.is_finite())
             || balance.abs() > 1e-10 * scale.max(1e-300)
         {
             return Err(invalid("DG original net port work does not equal inlet minus terminal work"));
         }
-        Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, terminal_frames, inlet_work_j })
+        Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, terminal_frames,
+            inlet_work_j, branch_states, branch_frames })
     }
 }
 
@@ -378,12 +399,21 @@ pub(crate) struct DgPortTrial<'a> {
     terminal_frame: Option<DgTerminalFrame>,
     terminal_frames: Vec<DgTerminalFrame>,
     inlet_work_j: f64,
+    branch_states: Vec<DgState>,
+    branch_frames: Vec<DgBranchFrame>,
 }
 
 impl DgPortTrial<'_> {
     pub(crate) const fn previous_state(&self) -> &DgState { &self.owner.state }
     pub(crate) const fn state(&self) -> &DgState { &self.state }
+    /// External port observations and the sum of every original DG ledger.
+    /// Internal junction work remains visible in branch_frames().
     pub(crate) const fn output(&self) -> &DgStepOutput { &self.output }
+    pub(crate) fn previous_stored_energy_j(&self) -> f64 { self.owner.stored_energy_j() }
+    pub(crate) fn previous_cumulative_dissipated_j(&self) -> f64 {
+        self.owner.cumulative_dissipated_j()
+    }
+    pub(crate) fn branch_frames(&self) -> &[DgBranchFrame] { &self.branch_frames }
     pub(crate) const fn inlet_work_j(&self) -> f64 { self.inlet_work_j }
     pub(crate) const fn terminal_frame(&self) -> Option<&DgTerminalFrame> {
         self.terminal_frame.as_ref()
@@ -396,6 +426,10 @@ impl DgPortTrial<'_> {
         self.owner.terminal = self.terminal;
         self.owner.last_terminal_frame = self.terminal_frame;
         self.owner.last_terminal_frames = self.terminal_frames;
+        for (branch, state) in self.owner.branches.iter_mut().zip(self.branch_states) {
+            branch.state = state;
+        }
+        self.owner.last_branch_frames = self.branch_frames;
         self.output
     }
 }

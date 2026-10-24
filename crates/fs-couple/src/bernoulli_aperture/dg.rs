@@ -42,7 +42,7 @@ pub struct DgApertureFrame {
     /// Additional prescribed modal pressure ports. Their work is already in
     /// aperture.mechanical_work_j; it is not another acoustic source or loss.
     pub spatial_pressure: [MaterialPressureFrame; 2],
-    /// Original exact propagation observation; its port pressure is a step mean.
+    /// External mean ports and summed original bore/branch propagation ledgers.
     pub duct: DgStepOutput,
     /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
     pub stored_energy_j: f64,
@@ -130,7 +130,7 @@ impl ApertureDg {
     /// is reported separately; no rational storage function is fabricated.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.aperture.stored_energy_j() + self.load.state().stored_energy_j()
+        self.aperture.stored_energy_j() + self.load.stored_energy_j()
     }
 
     /// Increase the original aperture horizon without resetting either owner.
@@ -196,12 +196,12 @@ fn accept_acoustic_candidate(
             "DG and aperture disagree on same-step mean port pressure",
         ));
     }
-    let stored_energy_j = aperture.stored_energy_j + acoustic.state().stored_energy_j();
+    let stored_energy_j = aperture.stored_energy_j + duct.ledger.stored_energy_j;
     let duct_change =
-        acoustic.state().stored_energy_j() - acoustic.previous_state().stored_energy_j();
+        duct.ledger.stored_energy_j - acoustic.previous_stored_energy_j();
     let storage_change_j = aperture.storage_change_j + duct_change;
     let inferred_total_dissipation_j = aperture.dissipated_energy_j
-        + duct.ledger.cumulative_dissipated_j - acoustic.previous_state().cumulative_dissipated_j();
+        + duct.ledger.cumulative_dissipated_j - acoustic.previous_cumulative_dissipated_j();
     let upstream_work_j = drive.upstream_pressure_pa
         * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt);
     let body_work_j = aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt);

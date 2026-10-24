@@ -7,7 +7,7 @@ use fs_la::prepared_lu::LuWorkspace;
 const MAX_TERMINAL_CONDITION: f64 = 1e10;
 
 #[derive(Debug, Clone)]
-enum TerminalSolve {
+pub(super) enum TerminalSolve {
     // Preserve the original scalar division, rather than multiply by 1/Z.
     Scalar(f64),
     // Cold inverse columns come from the existing normalized prepared LU.
@@ -15,7 +15,7 @@ enum TerminalSolve {
 }
 
 impl TerminalSolve {
-    fn new(matrix: &[f64], dimension: usize) -> Result<Self, AcousticRealizeError> {
+    pub(super) fn new(matrix: &[f64], dimension: usize) -> Result<Self, AcousticRealizeError> {
         if dimension == 1 {
             let denominator = matrix[0];
             if !denominator.is_finite() || denominator <= 0.0 {
@@ -57,7 +57,7 @@ impl TerminalSolve {
         Ok(Self::Matrix { inverse, dimension })
     }
 
-    fn apply(&self, rhs: &[f64]) -> Result<Vec<f64>, AcousticRealizeError> {
+    pub(super) fn apply(&self, rhs: &[f64]) -> Result<Vec<f64>, AcousticRealizeError> {
         let values = match self {
             Self::Scalar(denominator) => vec![rhs[0] / denominator],
             Self::Matrix { inverse, dimension } => inverse.chunks_exact(*dimension)
