@@ -1,4 +1,4 @@
-//! Moving transverse forces, bending moments, and point probes on a flat plate.
+//! Moving transverse forces, bending moments, and finite-patch ports on a flat plate.
 //!
 //! A located stencil uses the containing triangle's P1 barycentric weights for
 //! all three nodal fields `(w, wx, wy)`. This is an explicit interface
@@ -25,7 +25,7 @@ pub struct PlateLoadBudget {
     pub max_triangles: usize,
 }
 
-/// A bounded point-transfer refusal.
+/// A bounded point- or patch-transfer refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlateLoadError {
     /// The caller's bound cannot cover admission and location work.
@@ -39,6 +39,8 @@ pub enum PlateLoadError {
     },
     /// Empty mesh, invalid connectivity, coordinates, or support mapping.
     InvalidMesh(&'static str),
+    /// Empty quadrature, nonpositive area, or an unrepresentable patch measure.
+    InvalidPatch(&'static str),
     /// Degenerate, inverted, or unrepresentably ill-conditioned triangle.
     InvalidTriangle {
         /// Index in `PlateMesh::tris`.
@@ -72,7 +74,8 @@ impl std::error::Error for PlateLoadError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlateAppliedLoad {
     /// `(full_global_dof, generalized_load)` pairs on fixed DOFs only.
-    /// At most nine entries; these are applied loads, not complete support
+    /// At most nine entries for a point; patches aggregate repeated DOFs.
+    /// These are applied loads, not complete support
     /// reactions (which also require inertia, damping, and internal forces).
     pub fixed_dof_loads: Vec<(usize, f64)>,
     /// Total Cartesian force `[0, 0, Fz]` in newtons, including fixed DOFs.
@@ -105,6 +108,246 @@ pub struct PlatePointStencil {
     point: [f64; 2],
     reduced: [[Option<usize>; 3]; 3],
     free: usize,
+}
+
+/// One physical area-quadrature point in the undeformed plate plane.
+/// The caller supplies the quadrature of its actual contact/load footprint;
+/// this is not a contact model or a patch-clipping algorithm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlatePatchPoint {
+    /// Undeformed global xy position, in metres.
+    pub point: [f64; 2],
+    /// Strictly positive physical quadrature measure, in square metres.
+    pub area_m2: f64,
+}
+
+/// Bounds on patch storage and each point's geometry/support-map search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatePatchBudget {
+    /// Maximum number of quadrature points; location work scales with this
+    /// bound times the node/triangle bounds, not just the number of triangles.
+    pub max_points: usize,
+    /// Bounds forwarded to each point location before its mesh scan.
+    pub location: PlateLoadBudget,
+}
+
+/// A finite footprint crossing any number of admitted triangles/supports.
+///
+/// Transpose loading and observation share the exact same P1 stencils and
+/// area weights. `add_load` distributes a total force/free couple uniformly
+/// over the supplied quadrature area; `sample` returns area-averaged material
+/// motion. Re-locate after moving the footprint, changing the mesh or changing
+/// supports. The velocity is material velocity, not the convective derivative
+/// of displacement along a moving load path. Eliminated DOFs remain at rest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlatePatchStencil {
+    points: Vec<(PlatePointStencil, f64)>,
+    area_m2: f64,
+    free: usize,
+}
+
+impl PlatePatchStencil {
+    /// Locate every physical quadrature point; an outside point refuses the
+    /// entire patch instead of silently clipping or renormalizing its area.
+    ///
+    /// # Errors
+    /// Refuses invalid quadrature, exceeded bounds, or any point-location error.
+    pub fn locate(
+        mesh: &PlateMesh,
+        model: &PlateModel,
+        quadrature: &[PlatePatchPoint],
+        budget: PlatePatchBudget,
+    ) -> Result<Self, PlateLoadError> {
+        if quadrature.len() > budget.max_points {
+            return Err(PlateLoadError::Budget {
+                what: "patch points",
+                required: quadrature.len(),
+                limit: budget.max_points,
+            });
+        }
+        if quadrature.is_empty() {
+            return Err(PlateLoadError::InvalidPatch("empty quadrature"));
+        }
+        let mut area_m2 = 0.0;
+        for point in quadrature {
+            if !(point.area_m2 > 0.0 && point.area_m2.is_finite()) {
+                return Err(PlateLoadError::InvalidPatch(
+                    "nonpositive or nonfinite area",
+                ));
+            }
+            area_m2 += point.area_m2;
+        }
+        if !area_m2.is_finite() {
+            return Err(PlateLoadError::InvalidPatch("total area overflows"));
+        }
+        let mut points = Vec::with_capacity(quadrature.len());
+        for point in quadrature {
+            let fraction = point.area_m2 / area_m2;
+            if fraction == 0.0 {
+                return Err(PlateLoadError::InvalidPatch("area fraction underflows"));
+            }
+            points.push((
+                PlatePointStencil::locate(mesh, model, point.point, budget.location)?,
+                point.area_m2,
+            ));
+        }
+        Ok(Self {
+            points,
+            area_m2,
+            free: model.free,
+        })
+    }
+
+    /// Total physical area represented by the caller's quadrature, in m².
+    #[must_use]
+    pub fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
+    /// Number of admitted quadrature points.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.points.len()
+    }
+
+    /// Distribute a total `[Fz, Mx, My]` uniformly over the patch area.
+    /// The moments are free couples; the returned origin moment also includes
+    /// the distributed transverse force's moment arm. The target is unchanged
+    /// on any refusal, including overflow at the last quadrature point.
+    ///
+    /// # Errors
+    /// Refuses invalid dimensions, nonfinite loads, or accumulation overflow.
+    pub fn add_load(
+        &self,
+        load: [f64; 3],
+        reduced: &mut [f64],
+    ) -> Result<PlateAppliedLoad, PlateLoadError> {
+        self.add_with(reduced, |_, area| {
+            load.map(|value| value * (area / self.area_m2))
+        })
+    }
+
+    /// Integrate spatially varying `[pressure_z, couple_x, couple_y]` at the
+    /// quadrature points. Units are N/m², N·m/m², N·m/m². Each area is applied
+    /// once. The target is unchanged if any point refuses.
+    ///
+    /// # Errors
+    /// Refuses wrong point/DOF counts, nonfinite tractions, or overflow.
+    pub fn add_tractions(
+        &self,
+        tractions: &[[f64; 3]],
+        reduced: &mut [f64],
+    ) -> Result<PlateAppliedLoad, PlateLoadError> {
+        if tractions.len() != self.points.len() {
+            return Err(PlateLoadError::Dimension {
+                expected: self.points.len(),
+                actual: tractions.len(),
+            });
+        }
+        self.add_with(reduced, |i, area| tractions[i].map(|value| value * area))
+    }
+
+    fn add_with(
+        &self,
+        reduced: &mut [f64],
+        point_load: impl Fn(usize, f64) -> [f64; 3],
+    ) -> Result<PlateAppliedLoad, PlateLoadError> {
+        if reduced.len() != self.free {
+            return Err(PlateLoadError::Dimension {
+                expected: self.free,
+                actual: reduced.len(),
+            });
+        }
+        let mut trial = reduced.to_vec();
+        let mut applied = PlateAppliedLoad {
+            fixed_dof_loads: Vec::new(),
+            force: [0.0; 3],
+            moment: [0.0; 3],
+        };
+        for (i, (stencil, area)) in self.points.iter().enumerate() {
+            let next = stencil.add_load(point_load(i, *area), &mut trial)?;
+            for axis in 0..3 {
+                applied.force[axis] += next.force[axis];
+                applied.moment[axis] += next.moment[axis];
+                if !applied.force[axis].is_finite() || !applied.moment[axis].is_finite() {
+                    return Err(PlateLoadError::NonFinite("patch resultant"));
+                }
+            }
+            applied.fixed_dof_loads.extend(next.fixed_dof_loads);
+        }
+        applied.fixed_dof_loads.sort_by_key(|entry| entry.0);
+        let mut count = 0;
+        for i in 0..applied.fixed_dof_loads.len() {
+            let (dof, value) = applied.fixed_dof_loads[i];
+            if count > 0 && applied.fixed_dof_loads[count - 1].0 == dof {
+                applied.fixed_dof_loads[count - 1].1 += value;
+                if !applied.fixed_dof_loads[count - 1].1.is_finite() {
+                    return Err(PlateLoadError::NonFinite("fixed patch load"));
+                }
+            } else {
+                applied.fixed_dof_loads[count] = (dof, value);
+                count += 1;
+            }
+        }
+        applied.fixed_dof_loads.truncate(count);
+        reduced.copy_from_slice(&trial);
+        Ok(applied)
+    }
+
+    fn interpolate(&self, field: &[f64]) -> Result<[f64; 3], PlateLoadError> {
+        let mut result = [0.0; 3];
+        for (stencil, area) in &self.points {
+            for (sum, value) in result.iter_mut().zip(stencil.interpolate(field)?) {
+                *sum += value * (area / self.area_m2);
+                if !sum.is_finite() {
+                    return Err(PlateLoadError::NonFinite("patch observation"));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Observe area-averaged displacement, slopes and material velocities.
+    ///
+    /// # Errors
+    /// Refuses dimension mismatch, nonfinite contributing values or overflow.
+    pub fn sample(&self, q: &[f64], v: &[f64]) -> Result<PlatePointSample, PlateLoadError> {
+        let q = self.interpolate(q)?;
+        let v = self.interpolate(v)?;
+        Ok(PlatePointSample {
+            displacement: q[0],
+            slopes: [q[1], q[2]],
+            velocity: v[0],
+            angular_velocity: [v[2], -v[1], 0.0],
+        })
+    }
+
+    /// Pull back a reduced-force seed to the total uniform patch load.
+    ///
+    /// # Errors
+    /// Refuses the same invalid fields as `sample`.
+    pub fn load_vjp(&self, seed: &[f64]) -> Result<[f64; 3], PlateLoadError> {
+        let field = self.interpolate(seed)?;
+        Ok([field[0], field[2], -field[1]])
+    }
+
+    /// Instantaneous mechanical power of a uniform total patch load, in W.
+    /// This does not integrate work or include prescribed support motion.
+    ///
+    /// # Errors
+    /// Refuses invalid fields/loads or an unrepresentable power.
+    pub fn power(&self, load: [f64; 3], velocity: &[f64]) -> Result<f64, PlateLoadError> {
+        let flow = self.load_vjp(velocity)?;
+        let power = load
+            .iter()
+            .zip(flow)
+            .map(|(effort, rate)| effort * rate)
+            .sum::<f64>();
+        if !power.is_finite() {
+            return Err(PlateLoadError::NonFinite("patch power"));
+        }
+        Ok(power)
+    }
 }
 
 /// A P1 transverse trace on the original planar mesh, without a solver's DOF map.
@@ -197,9 +440,9 @@ impl PlatePointStencil {
             nodes: trace.nodes,
             weights: trace.weights,
             point,
-            reduced: trace.nodes.map(|node| {
-                std::array::from_fn(|component| model.dof_map[3 * node + component])
-            }),
+            reduced: trace
+                .nodes
+                .map(|node| std::array::from_fn(|component| model.dof_map[3 * node + component])),
             free: model.free,
         })
     }
