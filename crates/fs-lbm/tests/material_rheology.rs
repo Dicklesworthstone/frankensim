@@ -4,6 +4,7 @@
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_lbm::material::transport::MaterialTransportError;
+use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 use fs_lbm::material::transport::rheology::{RheologyPoint, RheologySolve};
 use fs_lbm::material::{
     MaterialSlab, MaterialSlab3, MaterialThermalSlab, MaterialThermalSlab3,
@@ -1134,4 +1135,350 @@ fn unrepresentable_viscous_power_refuses_before_mutating_the_slab() {
     assert_eq!(slab.lattice.gpop, g);
     assert_eq!(slab.lattice.grid.tau, tau);
     assert_eq!(slab.lattice.grid.fext, forces);
+}
+
+#[test]
+fn g1_combined_buoyancy_and_viscous_heat_match_independent_force_and_power_in_both_dimensions() {
+    let gamma = 0.02;
+    let expected_power = (gamma / DT) * (gamma / DT); // mu = 1 Pa s
+    let material = FluidTransportState::try_new(990.0, 1000.0, 1000.0, 1.0).unwrap();
+    let mut prescribed = [0.0; 16];
+    prescribed[6] = expected_power;
+    let gate = CancelGate::new();
+    let config = BoussinesqConfig {
+        gravity_m_s2: [1.0, 2.0, -9.0],
+        max_relative_density_departure: 0.02,
+        max_relative_specific_heat_departure: 0.0,
+    };
+    let mut coupled = slab3();
+    let mut manual = slab3();
+    set_shear3(&mut coupled, gamma, [0.0; 3]);
+    set_shear3(&mut manual, gamma, [0.0; 3]);
+    // An independent background buoyancy must be replaced, not counted twice.
+    coupled.lattice.gbeta = 0.07;
+    let report = coupled
+        .step_with_boussinesq_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.5, -0.25, 0.75]; 16],
+            limits(),
+            controls(),
+            config,
+            &gate,
+            |_, _| Ok(material),
+        )
+        .unwrap();
+    // Independently calculate F = F_external + (990 - 1000) * gravity.
+    let expected = manual
+        .step_with_material_rheology(
+            &prescribed,
+            &[[-9.5, -20.25, 90.75]; 16],
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    assert_eq!(coupled.lattice.grid.f, manual.lattice.grid.f);
+    assert_eq!(coupled.lattice.grid.fext, manual.lattice.grid.fext);
+    for (a, b) in coupled
+        .lattice
+        .gpop
+        .iter()
+        .flatten()
+        .zip(manual.lattice.gpop.iter().flatten())
+    {
+        near(*a, *b, 2e-15);
+    }
+    near(
+        report.viscous.viscous_heat_j,
+        expected_power * DX * DX * DX * DT,
+        1e-18,
+    );
+    near(
+        report.transport.heat.stored_change_j,
+        expected.heat.stored_change_j,
+        1e-12,
+    );
+    near(
+        report.transport.heat.source_j,
+        expected.heat.source_j,
+        1e-18,
+    );
+    assert_eq!(coupled.lattice.gbeta, 0.07);
+
+    let config = BoussinesqConfig {
+        gravity_m_s2: [1.0, -9.0],
+        max_relative_density_departure: 0.02,
+        max_relative_specific_heat_departure: 0.0,
+    };
+    let mut coupled = slab2();
+    let mut manual = slab2();
+    set_shear2(&mut coupled, gamma, [0.0; 2]);
+    set_shear2(&mut manual, gamma, [0.0; 2]);
+    coupled.lattice.gbeta = 0.07;
+    let depth = 2.0 * DX;
+    let report = coupled
+        .step_with_boussinesq_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.5, -0.25]; 16],
+            depth,
+            limits(),
+            controls(),
+            config,
+            &gate,
+            |_, _| Ok(material),
+        )
+        .unwrap();
+    let expected = manual
+        .step_with_material_rheology(
+            &prescribed,
+            &[[-9.5, 89.75]; 16],
+            depth,
+            limits(),
+            controls(),
+            &gate,
+            |_, _| Ok(fluid(1.0)),
+        )
+        .unwrap();
+    assert_eq!(coupled.lattice.grid.f, manual.lattice.grid.f);
+    assert_eq!(coupled.lattice.grid.fext, manual.lattice.grid.fext);
+    for (a, b) in coupled
+        .lattice
+        .gpop
+        .iter()
+        .flatten()
+        .zip(manual.lattice.gpop.iter().flatten())
+    {
+        near(*a, *b, 2e-15);
+    }
+    near(
+        report.viscous.viscous_heat_j,
+        expected_power * DX * DX * depth * DT,
+        1e-18,
+    );
+    near(
+        report.transport.heat.stored_change_j,
+        expected.heat.stored_change_j,
+        1e-12,
+    );
+    near(
+        report.transport.heat.source_j,
+        expected.heat.source_j,
+        1e-18,
+    );
+    assert_eq!(coupled.lattice.gbeta, 0.07);
+}
+
+fn card_with_density(density_slope: f64, shear_slope: f64) -> MaterialCard {
+    let original = card_surface(0.02, shear_slope, 0.001);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in original.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        if claim.key.name() == "density" {
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![
+                    (290.0, 1000.0 + 10.0 * density_slope),
+                    (330.0, 1000.0 - 30.0 * density_slope),
+                ],
+                dims: Dims([-3, 1, 0, 0, 0, 0]),
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+
+#[test]
+fn g3_one_material_card_drives_buoyancy_rheology_and_heat_without_rebinding_mass() {
+    let config = BoussinesqConfig {
+        gravity_m_s2: [0.0, 0.0, -9.0],
+        max_relative_density_departure: 0.03,
+        max_relative_specific_heat_departure: 0.0,
+    };
+    let mut flows = Vec::new();
+    let mut heats = Vec::new();
+    for (density_slope, shear_slope) in [(0.0, 0.0), (0.5, 0.0), (0.5, 0.2)] {
+        let source = card_with_density(density_slope, shear_slope);
+        let reference = resolve_liquid_state(
+            &source,
+            &query(300.0, 0.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let mut slab = plan_scaling_from_material(&reference, DX, DT, 0.1)
+            .unwrap()
+            .thermal_slab3(MaterialThermalSlab3 {
+                nx: 2,
+                ny: 1,
+                nz: 6,
+                bottom_temperature_k: 310.0,
+                top_temperature_k: 300.0,
+                gravity_m_s2: 0.0,
+                expansion_per_k: 0.0,
+                max_cells: 16,
+            })
+            .unwrap();
+        set_shear3(&mut slab, 0.02, [0.0; 3]);
+        let report = slab
+            .step_with_boussinesq_material_rheology_and_viscous_heating(
+                &[0.0; 16],
+                &[[0.0; 3]; 16],
+                limits(),
+                controls(),
+                config,
+                &CancelGate::new(),
+                |point, _| resolve(&source, &reference, point),
+            )
+            .unwrap();
+        for sample in report
+            .transport
+            .applied
+            .iter()
+            .chain(&report.transport.endpoint)
+        {
+            let point = sample.material.point();
+            let original = sample.material.source().material();
+            assert_eq!(original.material().card_identity(), source.content_hash());
+            assert_eq!(
+                original.material().query(),
+                query(point.temperature_k, point.shear_rate_per_s)
+            );
+            near(
+                original.density_kg_m3(),
+                1000.0 - density_slope * (point.temperature_k - 300.0),
+                2e-12,
+            );
+            near(
+                sample.transport.dynamic_viscosity_pa_s(),
+                1.0 + 0.02 * (point.temperature_k - 300.0) + shear_slope * point.shear_rate_per_s,
+                2e-12,
+            );
+            // Inertia and sensible storage still belong to the same reference.
+            assert_eq!(sample.transport.density_kg_m3(), 1000.0);
+            assert_eq!(sample.transport.specific_heat_j_kg_k(), 1.0);
+        }
+        let mut expected_heat_j = 0.0;
+        for sample in &report.transport.applied {
+            let original = sample.material.source().material();
+            let rate = sample.material.point().shear_rate_per_s;
+            let power = original.dynamic_viscosity_pa_s() * rate * rate;
+            near(report.viscous.power_w_m3[sample.cell], power, 2e-12);
+            expected_heat_j += power * DX * DX * DX * DT;
+            near(
+                slab.lattice.grid.fext[sample.cell][2],
+                (original.density_kg_m3() - 1000.0) * -9.0 / 1000.0 * DT * DT / DX,
+                1e-16,
+            );
+        }
+        near(report.viscous.viscous_heat_j, expected_heat_j, 1e-18);
+        near(report.viscous.source_partition_defect_j, 0.0, 1e-18);
+        near(report.transport.heat.source_j, expected_heat_j, 1e-18);
+        // Repeated use samples the actually accepted heated state, rather than
+        // restarting temperature or copying the initial material snapshot.
+        let next = slab
+            .step_with_boussinesq_material_rheology_and_viscous_heating(
+                &[0.0; 16],
+                &[[0.0; 3]; 16],
+                limits(),
+                controls(),
+                config,
+                &CancelGate::new(),
+                |point, _| resolve(&source, &reference, point),
+            )
+            .unwrap();
+        for (previous, next) in report
+            .transport
+            .endpoint
+            .iter()
+            .zip(&next.transport.applied)
+        {
+            assert_eq!(previous.temperature_k, next.temperature_k);
+            assert_eq!(previous.material.source(), next.material.source());
+        }
+        flows.push(slab.lattice.grid.f);
+        heats.push(report.viscous.viscous_heat_j);
+    }
+    assert_ne!(
+        flows[0], flows[1],
+        "density data must alter the actual evolving flow"
+    );
+    assert_ne!(
+        flows[1], flows[2],
+        "shear-response data must alter the same flow"
+    );
+    assert_ne!(
+        heats[1], heats[2],
+        "the same viscosity change must alter physical heat"
+    );
+}
+
+#[test]
+fn combined_material_refusals_and_cancellation_preserve_all_accepted_state() {
+    let config = BoussinesqConfig {
+        gravity_m_s2: [0.0, 0.0, -9.0],
+        max_relative_density_departure: 0.02,
+        max_relative_specific_heat_departure: 0.0,
+    };
+    let mut slab = slab3();
+    set_shear3(&mut slab, 0.02, [0.0; 3]);
+    slab.lattice.gbeta = 0.17;
+    let (f, g, tau, force) = (
+        slab.lattice.grid.f.clone(),
+        slab.lattice.gpop.clone(),
+        slab.lattice.grid.tau.clone(),
+        slab.lattice.grid.fext.clone(),
+    );
+    for endpoint in [false, true] {
+        let mut calls = 0;
+        let result = slab.step_with_boussinesq_material_rheology_and_viscous_heating(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            config,
+            &CancelGate::new(),
+            |_, _| {
+                calls += 1;
+                let rho = if !endpoint || calls > 12 {
+                    900.0
+                } else {
+                    990.0
+                };
+                FluidTransportState::try_new(rho, 1000.0, 1000.0, 1.0)
+            },
+        );
+        assert!(matches!(result, Err(MaterialTransportError::State { .. })));
+        if endpoint {
+            assert!(calls > 12);
+        }
+        assert_eq!(slab.lattice.grid.f, f);
+        assert_eq!(slab.lattice.gpop, g);
+        assert_eq!(slab.lattice.grid.tau, tau);
+        assert_eq!(slab.lattice.grid.fext, force);
+        assert_eq!(slab.lattice.gbeta, 0.17);
+    }
+    let gate = CancelGate::new();
+    let result = slab.step_with_boussinesq_material_rheology_and_viscous_heating(
+        &[0.0; 16],
+        &[[0.0; 3]; 16],
+        limits(),
+        controls(),
+        config,
+        &gate,
+        |point, _| {
+            if point.cell == 6 {
+                gate.request();
+            }
+            FluidTransportState::try_new(990.0, 1000.0, 1000.0, 1.0)
+        },
+    );
+    assert_eq!(result, Err(MaterialTransportError::Cancelled));
+    assert_eq!(slab.lattice.grid.f, f);
+    assert_eq!(slab.lattice.gpop, g);
+    assert_eq!(slab.lattice.grid.tau, tau);
+    assert_eq!(slab.lattice.grid.fext, force);
+    assert_eq!(slab.lattice.gbeta, 0.17);
 }

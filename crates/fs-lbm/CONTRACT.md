@@ -205,6 +205,20 @@ changes on a latent plateau, equivalent electrical source bases and rollback.
   energy account is introduced. G1/G3 ideal-gas pressure/temperature checks,
   three-dimensional source/force ownership and G0/G4 refusal/retry coverage
   live in `tests/material_transport_feedback.rs`.
+- `MaterialSlab::step_with_boussinesq_material_rheology_and_viscous_heating`
+  composes those existing source owners in both dimensions. A single converged
+  material response at actual temperature/shear rate supplies density-derived
+  buoyancy, molecular viscosity/conductivity and `mu * rate^2` heat. The shared
+  sampler, heat partition, tentative transport step and endpoint admission
+  publish together. Original source receipts and unprojected density survive;
+  reference density/Cp still own mass and sensible storage, and the independent
+  background beta load is replaced for the step. The same explicit Boussinesq,
+  generalized-Newtonian and sensible-energy limits above apply; this does not
+  claim total mechanical/gravitational energy conservation. G1/G3 tests in
+  `tests/material_rheology.rs` compare both dimensions against independently
+  prescribed force and stress power, change density/shear source data in the
+  actual repeated flow, and verify initial/endpoint refusal and cancellation
+  rollback.
 - `freesurface::FreeSurface`, `ContactModel`, `dam_break`, and `surge_front`
   — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
   bookkeeping, conservative carry redistribution, contact-model bracketing,

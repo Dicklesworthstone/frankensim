@@ -247,6 +247,48 @@ fn advance_with_sampler_and_sources<
     depth_m: f64,
     limits: HeatSourceLimits,
     gate: &CancelGate,
+    sample: impl FnMut(
+        &MaterialSlab<S>,
+        &S,
+        usize,
+        usize,
+    ) -> Result<Vec<TransportSample<F>>, MaterialTransportError>,
+    sources: impl FnOnce(
+        &MaterialSlab<S>,
+        super::Inputs<D>,
+        &[TransportSample<F>],
+    ) -> Result<(super::Inputs<D>, A), MaterialTransportError>,
+) -> Result<(MaterialTransportStep<F>, A), MaterialTransportError> {
+    advance_with_sampler_sources_and_candidate::<S, F, A, D, Q>(
+        slab,
+        power,
+        forces,
+        depth_m,
+        limits,
+        gate,
+        sample,
+        sources,
+        |mapping, input, applied| candidate_with_input::<S, F, D, Q>(mapping, input, applied, gate),
+    )
+}
+
+// Composition seam for a force owner AND a physical heat owner. Both consume
+// the same resolved samples, and neither may bypass endpoint admission or
+// publish a partial step. The ordinary transport path uses the same driver.
+#[allow(clippy::too_many_arguments)]
+fn advance_with_sampler_sources_and_candidate<
+    S: Slab<D, Q>,
+    F: FluidTransport,
+    A,
+    const D: usize,
+    const Q: usize,
+>(
+    slab: &mut MaterialSlab<S>,
+    power: &[f64],
+    forces: &[[f64; D]],
+    depth_m: f64,
+    limits: HeatSourceLimits,
+    gate: &CancelGate,
     mut sample: impl FnMut(
         &MaterialSlab<S>,
         &S,
@@ -258,6 +300,11 @@ fn advance_with_sampler_and_sources<
         super::Inputs<D>,
         &[TransportSample<F>],
     ) -> Result<(super::Inputs<D>, A), MaterialTransportError>,
+    candidate: impl FnOnce(
+        &MaterialSlab<S>,
+        super::Inputs<D>,
+        &[TransportSample<F>],
+    ) -> Result<(S, HeatBalance), MaterialTransportError>,
 ) -> Result<(MaterialTransportStep<F>, A), MaterialTransportError> {
     poll(gate)?;
     let (cells, plane) = slab.lattice.layout()?;
@@ -276,7 +323,7 @@ fn advance_with_sampler_and_sources<
     }
     let applied = sample(slab, &slab.lattice, cells, plane)?;
     let (input, audit) = sources(slab, input, &applied)?;
-    let (trial, heat) = candidate_with_input::<S, F, D, Q>(slab, input, &applied, gate)?;
+    let (trial, heat) = candidate(slab, input, &applied)?;
     let endpoint = sample(slab, &trial, cells, plane)?;
     poll(gate)?;
     slab.lattice = trial;

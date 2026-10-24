@@ -7,7 +7,10 @@
 //! turbulence closure or elastic energy is relabelled as thermal power.
 
 use super::super::super::Inputs;
-use super::super::advance_with_sampler_and_sources;
+use super::super::boussinesq::{
+    BackgroundBuoyancy, BoussinesqConfig, BoussinesqMaterial, candidate_with_buoyancy,
+};
+use super::super::{advance_with_sampler_and_sources, advance_with_sampler_sources_and_candidate};
 use super::{
     FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
     MaterialTransportError, MaterialTransportStep, RheologyMaterial, RheologyPoint, RheologySolve,
@@ -150,6 +153,74 @@ fn advance<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
     Ok(ViscousRheologyStep { transport, viscous })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn advance_boussinesq<
+    S: StressSlab<D, Q> + BackgroundBuoyancy,
+    F: FluidTransport,
+    const D: usize,
+    const Q: usize,
+>(
+    slab: &mut MaterialSlab<S>,
+    power: &[f64],
+    forces: &[[f64; D]],
+    depth_m: f64,
+    limits: HeatSourceLimits,
+    solve: RheologySolve,
+    config: BoussinesqConfig<D>,
+    gate: &CancelGate,
+    mut resolve: impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
+) -> Result<ViscousRheologyStep<BoussinesqMaterial<F>>, MaterialTransportError> {
+    poll(gate)?;
+    solve.validate()?;
+    config.validate()?;
+    let mut bounded = |point, reference: &FluidTransportState| {
+        BoussinesqMaterial::try_new(resolve(point, reference)?, reference, config)
+    };
+    let (transport, viscous) = advance_with_sampler_sources_and_candidate::<
+        S,
+        RheologyMaterial<BoussinesqMaterial<F>>,
+        ViscousHeating,
+        D,
+        Q,
+    >(
+        slab,
+        power,
+        forces,
+        depth_m,
+        limits,
+        gate,
+        |mapping, state, cells, plane| {
+            sample::<S, BoussinesqMaterial<F>, D, Q>(
+                mapping,
+                state,
+                cells,
+                plane,
+                limits.temperature_range_k,
+                solve,
+                gate,
+                &mut bounded,
+            )
+        },
+        |mapping, original, applied| {
+            source_inputs(
+                mapping, power, forces, depth_m, limits, original, applied, gate,
+            )
+        },
+        |mapping, input, applied| {
+            candidate_with_buoyancy::<S, RheologyMaterial<BoussinesqMaterial<F>>, D, Q>(
+                mapping,
+                input,
+                forces,
+                applied,
+                config,
+                gate,
+                |material| material.source().resolved_transport().density_kg_m3(),
+            )
+        },
+    )?;
+    Ok(ViscousRheologyStep { transport, viscous })
+}
+
 impl MaterialSlab<ThermalLbm> {
     /// Advance with material viscosity AND its physical viscous heat.
     ///
@@ -189,6 +260,52 @@ impl MaterialSlab<ThermalLbm> {
             resolve,
         )
     }
+
+    /// Couple material buoyancy, shear-dependent viscosity and viscous heating.
+    ///
+    /// ONE source evaluation at each actual `(temperature, shear rate)` query
+    /// supplies density, viscosity and conductivity. The original bounded
+    /// constitutive solve resolves shear and viscosity together. Its converged
+    /// sample supplies both `mu * rate^2` heat and `(rho-rho0) * gravity` force,
+    /// replacing the slab's independent beta load for this step. Authored
+    /// external forces remain additive; authored power must exclude this
+    /// molecular viscous loss. Original source receipts, unprojected transport
+    /// and actual constitutive coordinates survive in the returned samples.
+    ///
+    /// Reference density/Cp retain mass and sensible storage. Both initial and
+    /// endpoint queries must satisfy the explicit Boussinesq departure bounds
+    /// and source domains. All owners use the same tentative step and publish
+    /// together after endpoint admission; any refusal or cancellation preserves
+    /// the accepted slab. Call this method every step to retain feedback.
+    ///
+    /// This is explicit, low-Mach, generalized-Newtonian Boussinesq evolution;
+    /// local constitutive convergence is not implicit time integration. The
+    /// sensible-heat account does not include gravitational potential, resolved
+    /// kinetic storage, compressible work or numerical momentum dissipation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boussinesq_material_rheology_and_viscous_heating<F: FluidTransport>(
+        &mut self,
+        power_w_m3: &[f64],
+        forces_n_m3: &[[f64; 2]],
+        depth_m: f64,
+        limits: HeatSourceLimits,
+        solve: RheologySolve,
+        config: BoussinesqConfig<2>,
+        gate: &CancelGate,
+        resolve: impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
+    ) -> Result<ViscousRheologyStep<BoussinesqMaterial<F>>, MaterialTransportError> {
+        advance_boussinesq::<ThermalLbm, F, 2, 5>(
+            self,
+            power_w_m3,
+            forces_n_m3,
+            depth_m,
+            limits,
+            solve,
+            config,
+            gate,
+            resolve,
+        )
+    }
 }
 
 impl MaterialSlab<ThermalLbm3> {
@@ -211,6 +328,34 @@ impl MaterialSlab<ThermalLbm3> {
             depth_m,
             limits,
             solve,
+            gate,
+            resolve,
+        )
+    }
+
+    /// Three-dimensional counterpart of the combined material-buoyancy,
+    /// rheology and viscous-heat step, with the retained `dx^3` cell volume.
+    /// The same source samples, balances and atomic publication are used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_boussinesq_material_rheology_and_viscous_heating<F: FluidTransport>(
+        &mut self,
+        power_w_m3: &[f64],
+        forces_n_m3: &[[f64; 3]],
+        limits: HeatSourceLimits,
+        solve: RheologySolve,
+        config: BoussinesqConfig<3>,
+        gate: &CancelGate,
+        resolve: impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
+    ) -> Result<ViscousRheologyStep<BoussinesqMaterial<F>>, MaterialTransportError> {
+        let depth_m = self.force_units.cell_size_m;
+        advance_boussinesq::<ThermalLbm3, F, 3, 7>(
+            self,
+            power_w_m3,
+            forces_n_m3,
+            depth_m,
+            limits,
+            solve,
+            config,
             gate,
             resolve,
         )
