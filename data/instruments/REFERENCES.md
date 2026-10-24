@@ -2,8 +2,8 @@
 
 `references-supplemental.json`, together with its `baseline_ids` from
 `references.json`, supplies actual recordings for all 22 instrument family
-cards, plus piano, organ, steel-string guitar, timpani and the nine drum-kit
-comparison states. Originals remain outside Git. The existing Iowa manifest has
+cards, plus piano, organ, steel-string guitar, timpani, splash cymbal and the nine
+drum-kit comparison states. Originals remain outside Git. The existing Iowa manifest has
 1,176 files (about 12.3 GB); its selected baseline requires 21 files
 (110,212,120 bytes), including an ambient-noise control.
 
@@ -36,7 +36,7 @@ bash data/instruments/fetch-references.sh \
 `--instrument` is case-insensitive and exact; both selectors are repeatable.
 Combining `--instrument` and `--id` intersects them. Unknown selectors and empty
 intersections fail before downloading. No selector means the entire chosen
-manifest: about 544 MB for the supplement, including the 388 MB drum-kit archive.
+manifest: about 550 MB for the supplement, including the 388 MB drum-kit archive.
 
 Fetch the smaller Iowa selection without copying its IDs:
 
@@ -54,9 +54,11 @@ PY
 
 The pan-flute, steel-string guitar and Salamander entries are archives. Each
 lists the exact selected member names, output paths, SHA-256 and byte length.
-Extract only those named members and check their hashes. The Salamander members
-are the ones already used by `apps/instrument-lab/tools/kitgrade.py`; point its
-Salamander argument at the extracted `Salamander` directory. An archive is a
+Extract only those named members and check their hashes. The 27 Salamander members
+supply every reference used by `apps/instrument-lab/tools/kitgrade.py`: a primary
+hit, a repeat at the same dynamic and a second dynamic for each of nine kit
+states. Point its `SALAMANDER_OH_DIR` argument at the extracted
+`Salamander/OH` directory. An archive is a
 source container, not an audio file.
 
 ## Coverage
@@ -94,13 +96,22 @@ every performed note.
 | Piano | Steinway B A4, pp/mf/ff | Iowa |
 | Organ flue pipe | Renaissance organ 8-foot register C3, Room microphone | VCSL |
 | Timpani / kettle | two Timpani 1 strikes, v2/v4 source layers, summed microphones | VCSL |
-| Kick, snare wires on/off, high/low toms, closed/open hi-hat, crash, ride | nine overhead-microphone samples matching `kitgrade.py` | Alexander Holm / Salamander |
+| Kick, snare wires on/off, high/low toms, closed/open hi-hat, crash, ride | all 27 overhead-microphone inputs to `kitgrade.py`, including repeat hits and second dynamics | Alexander Holm / Salamander |
+| Splash cymbal | normal stick strikes, pp/mf/ff | Iowa 2013 |
 
 On 2026-10-23, the selected existing pins matched, supplemental originals were
 hashed, and all **45 retained audio files (1,569.812 seconds)** passed a complete
 FFmpeg decode. The Salamander archive was fully hashed while streaming and only
 its nine selected members were retained. These checks establish availability
 and integrity, not acoustic fidelity.
+
+On 2026-10-24, the complete Salamander archive matched its existing digest and
+all **27 kit members** passed full FFmpeg decoding, including the 18 previously
+missing repeat-hit and second-dynamic inputs. The three original Iowa splash
+AIFFs also passed complete decoding: 24-bit, 44.1 kHz stereo. This adds 21
+checksum-pinned recordings to the selection. These 30 files were verified in
+memory because the current filesystem was full; the manifest records how to
+retrieve them and does not assert that an audio cache is present.
 
 ## Recording limits and attribution
 
@@ -111,7 +122,10 @@ recording-chain controls.
 - [Iowa](https://theremin.music.uiowa.edu/MIS.html) documents equipment and
   anechoic recording for many families, including vibraphone. The piano is a
   Steinway B recorded in room 2017 of Voxman, with microphones over bass/treble
-  strings; it is not a free-field Steinway D measurement.
+  strings; it is not a free-field Steinway D measurement. The
+  [splash recordings](https://theremin.music.uiowa.edu/MIScymbals.html) are
+  anechoic, but the source lists no cymbal model, diameter, thickness or alloy.
+  They do not establish equivalence to the simulator's eight-inch specimen.
 - [VCSL](https://github.com/sgossner/VCSL) is CC0 and supplies real recordings,
   but permits tuning, mild EQ and noise reduction. Its recorder, organ and
   timpani files do not establish measured specimen geometry or excitation.
