@@ -83,12 +83,24 @@ struct Stats {
 
 pub struct Piano {
     backend: Box<dyn Backend>,
+    required_backend: Option<String>,
     program: Program,
     damper_key: Option<(Vec<bool>, u64)>,
     positions: Vec<f64>,
     check: usize,
     stats: Stats,
     started: Instant,
+}
+
+/// Explicit GPU selection is a requirement and must not fall back to the CPU.
+/// The factory's Option API cannot return initialization errors to its caller.
+fn unavailable(choice: &str, reason: &str) -> Option<Box<dyn Accelerator>> {
+    if matches!(choice, "cuda" | "metal") {
+        eprintln!("render-gpu-piano: required {choice} backend unavailable: {reason}");
+        std::process::exit(2);
+    }
+    eprintln!("render-gpu-piano: {reason}; rendering on the CPU");
+    None
 }
 
 /// The accelerator for `instrument`, or None (with the reason on stderr) to render on the CPU. The
@@ -101,22 +113,16 @@ pub fn factory(instrument: &mut Instrument) -> Option<Box<dyn Accelerator>> {
         return None;
     }
     let Some((bank, dampers)) = instrument.gpu_images() else {
-        eprintln!(
-            "render-gpu-piano: this configuration uses physics the GPU path does not model (felt or point dampers, radiation, cavity, string stretching or hammer footprints); rendering on the CPU"
-        );
-        return None;
+        return unavailable(&choice,
+            "this configuration uses physics the GPU path does not model (felt or point dampers, radiation, cavity, string stretching or hammer footprints)");
     };
     let mut program = match Program::new(&bank, dampers.as_ref()) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("render-gpu-piano: {e}; rendering on the CPU");
-            return None;
-        }
+        Err(e) => return unavailable(&choice, &e),
     };
     let (lifted, sustain) = instrument.damper_controls();
     if let Err(e) = program.set_dampers(dampers.as_ref(), &lifted, sustain) {
-        eprintln!("render-gpu-piano: {e}; rendering on the CPU");
-        return None;
+        return unavailable(&choice, &e);
     }
     let mut backend = match select(&choice, &program) {
         Ok(b) => b,
@@ -184,6 +190,7 @@ pub fn factory(instrument: &mut Instrument) -> Option<Box<dyn Accelerator>> {
     }
     let mut piano = Piano {
         backend,
+        required_backend: matches!(choice.as_str(), "cuda" | "metal").then_some(choice.clone()),
         program,
         damper_key: Some((lifted, sustain.to_bits())),
         positions: Vec::new(),
@@ -192,8 +199,7 @@ pub fn factory(instrument: &mut Instrument) -> Option<Box<dyn Accelerator>> {
         started: Instant::now(),
     };
     if let Err(e) = piano.backend.load_dampers(&piano.program) {
-        eprintln!("render-gpu-piano: {e}");
-        return None;
+        return unavailable(&choice, &e);
     }
     Some(Box::new(piano))
 }
@@ -272,7 +278,8 @@ fn select(choice: &str, program: &Program) -> Result<Box<dyn Backend>, String> {
 
 impl Piano {
     /// One stretch on the backend. A backend failure changes nothing in the instrument, so the render
-    /// continues on the CPU phase emulator (same phases, exact) instead of failing.
+    /// may continue on the CPU phase emulator in automatic mode. Explicit GPU selection
+    /// propagates the failure; `advance` restores the instrument's complete frame state.
     fn run(
         &mut self,
         q: &mut [f64],
@@ -287,6 +294,11 @@ impl Piano {
         {
             Ok(losses) => Ok(losses),
             Err(e) => {
+                if let Some(required) = &self.required_backend {
+                    q.copy_from_slice(&q0);
+                    v.copy_from_slice(&v0);
+                    return Err(format!("required {required} backend failed: {e}"));
+                }
                 eprintln!(
                     "render-gpu-piano: {}: {e}; continuing on the CPU phase emulator",
                     self.backend.name()
