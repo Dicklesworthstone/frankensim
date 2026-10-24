@@ -25,9 +25,18 @@ use std::time::Instant;
 pub const PRESET_HEADS_REFUSAL: &str = "drum heads: the default refuses the card-free preset heads, whose T60 was fitted to recordings (.370); render the sourced heads natively (fs-vkplate examples), or pass --preset-heads to render the fitted heads on purpose";
 pub const PRESET_HEADS_RECEIPT: &str = "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss";
 
-fn piece(name: &str, hits: &[(f64, f64)], preset_heads: bool) -> Result<Piece, String> {
+fn piece(name: &str, hits: &[(f64, f64)], preset_heads: bool, grid_scale: f64) -> Result<Piece, String> {
+    // Bound this diagnostic knob before allocating/factoring a mesh. In
+    // particular, tiny finite scales can overflow the grid's integer extent.
+    if !grid_scale.is_finite() || !(0.5..=8.0).contains(&grid_scale) {
+        return Err("--grid-scale must be within 0.5..=8 (mesh resource bound)".into());
+    }
     let cym = |r: f64, tip: f64| hits.iter().map(|&(t, v)| (t, v, r, tip)).collect::<Vec<_>>();
+    let grid = |mut spec: kit::CymbalSpec| { spec.grid *= grid_scale; spec };
     let drum = |spec: kit::DrumSpec| {
+        if grid_scale != 1.0 {
+            return Err("--grid-scale currently supports hi-hat, crash and ride only".into());
+        }
         if !preset_heads {
             return Err(PRESET_HEADS_REFUSAL.to_string());
         }
@@ -41,10 +50,10 @@ fn piece(name: &str, hits: &[(f64, f64)], preset_heads: bool) -> Result<Piece, S
         "snare-off" => drum(kit::snare_wires_off()),
         "tom-12" => drum(kit::tom(12.0)),
         "tom-14" => drum(kit::tom(14.0)),
-        "hihat-closed" => kit::hihat(0.0, 80.0, hits),
-        "hihat-open" => kit::hihat(0.002, 0.0, hits),
-        "crash" => kit::cymbal(&kit::crash(), &cym(0.95, 0.008)),
-        "ride" => kit::cymbal(&kit::ride(), &cym(0.6, 0.004)),
+        "hihat-closed" => kit::hihat_scaled(0.0, 80.0, hits, grid_scale),
+        "hihat-open" => kit::hihat_scaled(0.002, 0.0, hits, grid_scale),
+        "crash" => kit::cymbal(&grid(kit::crash()), &cym(0.95, 0.008)),
+        "ride" => kit::cymbal(&grid(kit::ride()), &cym(0.6, 0.004)),
         other => Err(format!("unknown piece {other}")),
     }
 }
@@ -90,6 +99,7 @@ struct Opts {
     preroll: f64,
     exact_friction: bool,
     preset_heads: bool,
+    grid_scale: f64,
 }
 
 fn threads() -> usize {
@@ -297,7 +307,7 @@ fn render_chunked(name: &str, hits: &[(f64, f64)], secs: f64, o: &Opts) -> Vec<V
     }
     // building an instrument factors its operators: the chunks' builds run side by side
     std::thread::scope(|sc| {
-        let hs: Vec<_> = lists.iter().map(|l| sc.spawn(move || piece(name, l, o.preset_heads).unwrap_or_else(|e| die(&e)))).collect();
+        let hs: Vec<_> = lists.iter().map(|l| sc.spawn(move || piece(name, l, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e)))).collect();
         pieces.extend(hs.into_iter().map(|h| h.join().unwrap_or_else(|_| die("a build panicked"))));
     });
     let rate = pieces[0].instrument.rate;
@@ -454,8 +464,8 @@ fn check(name: &str, secs: f64, o: &Opts) {
     // the CPU's own friction order, so any difference is the arithmetic's
     let o = &Opts { exact_friction: true, ..*o };
     let hits = [(0.002, 3.0), (secs * 0.5, 2.0)];
-    let mut cpu = piece(name, &hits, o.preset_heads).unwrap_or_else(|e| die(&e));
-    let mut gpu = vec![piece(name, &hits, o.preset_heads).unwrap_or_else(|e| die(&e))];
+    let mut cpu = piece(name, &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e));
+    let mut gpu = vec![piece(name, &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e))];
     let rate = cpu.instrument.rate;
     let total = ((secs + cpu.settle) * rate).round() as usize;
     if !use_gpu(o) {
@@ -497,7 +507,7 @@ fn check(name: &str, secs: f64, o: &Opts) {
 
 fn main() {
     let mut pos = vec![];
-    let mut o = Opts { backend: Backend::Auto, airy_f32: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false, preset_heads: false };
+    let mut o = Opts { backend: Backend::Auto, airy_f32: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false, preset_heads: false, grid_scale: 1.0 };
     let (mut batch, mut chk) = (false, false);
     let mut a = std::env::args().skip(1);
     while let Some(x) = a.next() {
@@ -532,6 +542,9 @@ fn main() {
             }
             "--exact-friction-order" => o.exact_friction = true,
             "--preset-heads" => o.preset_heads = true,
+            "--grid-scale" => o.grid_scale = a.next().and_then(|s| s.parse::<f64>().ok())
+                .filter(|s| s.is_finite() && (0.5..=8.0).contains(s))
+                .unwrap_or_else(|| die("--grid-scale must be within 0.5..=8 (mesh resource bound)")),
             "--batch" => batch = true,
             "--check" => chk = true,
             _ => pos.push(x),
@@ -555,7 +568,7 @@ fn main() {
         for l in lists.iter_mut() {
             l.resize(most, (secs + 10.0, 1.0)); // same stroke count for every member (see render_chunked)
         }
-        let mut pieces: Vec<Piece> = lists.iter().map(|l| piece(&pos[0], l, o.preset_heads).unwrap_or_else(|e| die(&e))).collect();
+        let mut pieces: Vec<Piece> = lists.iter().map(|l| piece(&pos[0], l, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e))).collect();
         let rate = pieces[0].instrument.rate;
         let total = ((secs + pieces[0].settle) * rate).round() as usize;
         let skip = (pieces[0].settle * rate).round() as usize;
@@ -570,7 +583,7 @@ fn main() {
     }
     let hits = read_hits(&pos[1]);
     let secs: f64 = pos[3].parse().unwrap_or_else(|_| die("SECONDS"));
-    let mut p = piece(&pos[0], &hits, o.preset_heads).unwrap_or_else(|e| die(&e));
+    let mut p = piece(&pos[0], &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e));
     for n in &p.notes {
         eprintln!("{n}");
     }
