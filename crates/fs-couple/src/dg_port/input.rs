@@ -4,7 +4,7 @@
 //! resolution are data. All propagation and material evaluation remain with
 //! their original owners. This parser opens no files and creates no oscillator.
 
-use super::DgPortLoad;
+use super::{DgBranch, DgPortLoad};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
@@ -102,6 +102,7 @@ pub struct DgSourceInput {
     outlet: DgBoundary,
     radiation: Option<(ComputedBaffledInput, GasRecord)>,
     side_openings: Vec<(DgSidePort, CircularOpening)>,
+    chimneys: Vec<DgChimneyInput>,
     mesh: DgMesh,
     poles: usize,
     band_hz: [f64; 2],
@@ -110,6 +111,23 @@ pub struct DgSourceInput {
     maximum_dofs: usize,
     wall_quadrature: Option<usize>,
     line: usize,
+}
+
+/// A finite, uniformly filled cylindrical side branch. Its gas is an original
+/// shared material record; its wave and wall states belong to `fs_duct`.
+struct DgChimneyInput {
+    port: PortId,
+    radius_m: f64,
+    length_m: f64,
+    mesh: DgMesh,
+    gas: GasRecord,
+}
+
+impl DgChimneyInput {
+    fn state_dofs(&self, poles: usize) -> usize {
+        let nodes = self.mesh.elements * (self.mesh.order + 1);
+        nodes * (2 + poles + if self.gas.state().gamma == 1.0 { 0 } else { poles })
+    }
 }
 
 impl DgSourceInput {
@@ -140,8 +158,15 @@ impl DgSourceInput {
     /// dg_side_opening PORT_ID DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M
     /// Each selects an existing interior mesh face, a unique ID above 1, and
     /// independent physical opening geometry in the common rigid baffle. Its
-    /// radius is not inferred from bore area. These have zero internal neck
-    /// length; finite chimneys and moving tone-hole pads are not synthesized.
+    /// radius is not inferred from bore area. A flush row has zero internal
+    /// length. A finite cylindrical chimney instead uses:
+    /// dg_side_chimney PORT_ID DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M LENGTH_M K P
+    /// dg_chimney_gas followed by one complete shared material gas record.
+    /// It retains its own original DG propagation and viscothermal wall states,
+    /// using the parent wall poles/band/tolerance and common physical clock.
+    /// The total DOF allowance includes every branch. The exterior circle is
+    /// the actual chimney outlet; all terminal frames use its outward flow.
+    /// Moving pads, internal 3D junction corrections and mean flow are absent.
     /// The axial outlet is matrix channel zero, followed by the authored order.
     ///
     /// Error type E lets callers retain their existing line-aware row reader.
@@ -229,7 +254,7 @@ impl DgSourceInput {
         }
         let mut source = Self {
             geometry: Duct { segments }, field: None, outlet, radiation: None,
-            side_openings: Vec::new(), mesh, poles, band_hz,
+            side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature, line,
         };
         // Admission before collecting/evaluating a potentially large field.
@@ -279,8 +304,9 @@ impl DgSourceInput {
                     checkpoint(gate, radiation_line)?;
                     let (line, mut fields) = next_row()?;
                     let mut row = Row { line, fields: &mut fields };
-                    if row.word()? != "dg_side_opening" {
-                        return Err(bad(line, "expected a declared DG flush side opening").into());
+                    let opening_kind = row.word()?;
+                    if !matches!(opening_kind, "dg_side_opening" | "dg_side_chimney") {
+                        return Err(bad(line, "expected a DG flush opening or finite chimney").into());
                     }
                     let id = PortId(row.word()?.parse::<u32>()
                         .map_err(|_| bad(line, "DG side opening requires an unsigned port ID"))?);
@@ -288,6 +314,12 @@ impl DgSourceInput {
                     let aperture = CircularOpening {
                         center_m: [row.scalar()?, row.scalar()?], radius_m: row.positive()?,
                     };
+                    let chimney = if opening_kind == "dg_side_chimney" {
+                        Some((row.positive()?, DgMesh {
+                            elements: row.count(MAX_DG_ELEMENTS)?,
+                            order: row.count(MAX_DG_ORDER)?,
+                        }))
+                    } else { None };
                     row.finish()?;
                     if id.0 <= 1 || source.side_openings.iter().any(|(port, _)|
                         port.id == id || port.downstream_element == downstream_element)
@@ -295,6 +327,24 @@ impl DgSourceInput {
                         return Err(bad(line, "DG side openings require unique interior faces and unique port IDs above 1").into());
                     }
                     source.side_openings.push((DgSidePort { id, downstream_element }, aperture));
+                    if let Some((length_m, mesh)) = chimney {
+                        checkpoint(gate, line)?;
+                        let (gas_line, mut fields) = next_row()?;
+                        let mut row = Row { line: gas_line, fields: &mut fields };
+                        if row.word()? != "dg_chimney_gas" {
+                            return Err(bad(gas_line, "finite DG chimney requires its material gas record").into());
+                        }
+                        let gas = read_gas_record(row.fields, None, sources)
+                            .map_err(|error| gas_error(gas_line, error))?;
+                        row.finish()?;
+                        if gas.state().pressure.to_bits() != ambient.pressure.to_bits() {
+                            return Err(bad(gas_line, "DG chimney and bore require equal equilibrium pressures").into());
+                        }
+                        records.push(gas.clone());
+                        source.chimneys.push(DgChimneyInput {
+                            port: id, radius_m: aperture.radius_m, length_m, mesh, gas,
+                        });
+                    }
                 }
                 (radiation_line, fields) = next_row()?;
             }
@@ -321,6 +371,7 @@ impl DgSourceInput {
             records.push(exterior.clone());
             source.radiation = Some((controls, exterior));
         }
+        source.check_state_budget(ambient)?;
         Ok(source)
     }
 
@@ -334,10 +385,28 @@ impl DgSourceInput {
         } else {
             nodes * (self.poles + if ambient.gamma == 1.0 { 0 } else { self.poles })
         };
-        if 2 * nodes + memory > self.maximum_dofs {
-            return Err(bad(self.line, "DG acoustic and wall-memory extent exceeds the declared DOF allowance"));
+        let branch_dofs: usize = self.chimneys.iter()
+            .map(|chimney| chimney.state_dofs(self.poles)).sum();
+        if 2 * nodes + memory + branch_dofs > self.maximum_dofs {
+            return Err(bad(self.line, "complete DG bore and chimney state exceeds the declared DOF allowance"));
         }
         Ok(())
+    }
+
+    fn prepare_chimneys(&self, gate: &CancelGate) -> Result<Vec<DgBranch>, DgSourceError> {
+        self.chimneys.iter().map(|chimney| {
+            checkpoint(gate, self.line)?;
+            let geometry = Duct { segments: vec![Segment::Cylinder {
+                radius: chimney.radius_m, length: chimney.length_m,
+            }] };
+            let duct = DgDuct::new(
+                &geometry, chimney.gas.state(), chimney.mesh,
+                DgBoundary::Port(PortId(0)), DgBoundary::Port(PortId(1)),
+            ).and_then(|duct| duct.with_viscothermal(
+                self.poles, self.band_hz, self.maximum_relative_error,
+            )).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
+            Ok(DgBranch { port: chimney.port, duct })
+        }).collect()
     }
 
     /// Build once from the original geometry and field, then bind its exact
@@ -373,6 +442,7 @@ impl DgSourceInput {
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
+        let branches = self.prepare_chimneys(gate)?;
         let load = if let Some((controls, exterior)) = self.radiation {
             let rate = (1.0 / dt + 0.5) as u32;
             if rate == 0 || dt.to_bits() != (1.0 / f64::from(rate)).to_bits() {
@@ -384,9 +454,9 @@ impl DgSourceInput {
                 radius_m: fs_math::det::sqrt(owner.outlet_area_m2() / core::f64::consts::PI),
             }));
             openings.extend(self.side_openings.iter().map(|(port, aperture)| (port.id, *aperture)));
-            DgPortLoad::new_with_computed_baffled_ports(
+            DgPortLoad::new_with_computed_baffled_branches(
                 owner, rate, self.exponential_tolerance, self.maximum_dofs,
-                &exterior, controls, &openings, gate,
+                &exterior, controls, &openings, branches, gate,
             ).map_err(|source| DgSourceError::Radiation { line: self.line, source })?
         } else {
             DgPortLoad::new(owner, dt, self.exponential_tolerance, self.maximum_dofs)

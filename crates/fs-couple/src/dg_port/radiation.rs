@@ -4,7 +4,7 @@
 //! load admission. A circular outlet at the origin of an infinite rigid baffle
 //! is explicit source physics, not a free-field bell/body approximation.
 
-use super::{DgBoundary, DgDuct, DgPortLoad, invalid};
+use super::{DgBoundary, DgBranch, DgDuct, DgPortLoad, invalid};
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
 use crate::pcm_wav::baffled::openings::CircularOpening;
@@ -74,6 +74,29 @@ impl DgPortLoad {
         openings: &[(PortId, CircularOpening)],
         gate: &CancelGate,
     ) -> Result<Self, MimoRadiationInputError> {
+        Self::new_with_computed_baffled_branches(
+            duct, mechanics_rate_hz, exponential_tolerance, maximum_dofs,
+            exterior, source, openings, Vec::new(), gate,
+        )
+    }
+
+    /// Add finite original DG branches between declared bore side ports and
+    /// the same complete exterior matrix. Opening geometry and accepted flow
+    /// belong to each branch's physical OUTLET. The internal junction is never
+    /// substituted as a radiation source. Branch and bore gas may differ at
+    /// common equilibrium pressure; their original material states are retained.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_computed_baffled_branches(
+        duct: DgDuct,
+        mechanics_rate_hz: u32,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        exterior: &GasRecord,
+        source: ComputedBaffledInput,
+        openings: &[(PortId, CircularOpening)],
+        branches: Vec<DgBranch>,
+        gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         let dt = 1.0 / f64::from(mechanics_rate_hz);
         if mechanics_rate_hz == 0
@@ -86,7 +109,10 @@ impl DgPortLoad {
                 "computed DG radiation requires owned ports, a resolved clock/state budget and equal equilibrium pressures",
             )));
         }
-        admit_openings(&duct, exterior, openings).map_err(MimoRadiationInputError::Physics)?;
+        admit_branches(&duct, &branches, dt, maximum_dofs)
+            .map_err(MimoRadiationInputError::Physics)?;
+        admit_openings(&duct, &branches, exterior, openings)
+            .map_err(MimoRadiationInputError::Physics)?;
         let ports: Vec<_> = openings.iter().map(|(port, _)| *port).collect();
         let apertures: Vec<_> = openings.iter().map(|(_, aperture)| *aperture).collect();
         let (model, record) = source.build_apertures(
@@ -106,8 +132,8 @@ impl DgPortLoad {
             max_memory_bytes: limits.max_memory_bytes,
         }).map_err(|error| MimoRadiationInputError::Physics(invalid(error.0)))?;
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
-        let mut load = Self::new_with_terminal_ports(
-            duct, dt, exponential_tolerance, maximum_dofs, ports, terminal,
+        let mut load = Self::new_with_terminal_branches(
+            duct, dt, exponential_tolerance, maximum_dofs, ports, terminal, branches,
         ).map_err(MimoRadiationInputError::Physics)?;
         load.radiation_record = Some(record);
         if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
@@ -120,6 +146,7 @@ mod tests;
 
 fn admit_openings(
     duct: &DgDuct,
+    branches: &[DgBranch],
     exterior: &GasRecord,
     openings: &[(PortId, CircularOpening)],
 ) -> Result<(), AcousticRealizeError> {
@@ -139,13 +166,16 @@ fn admit_openings(
         {
             return Err(invalid("computed DG openings need distinct owned terminal IDs and finite positive geometry"));
         }
-        let gas = if duct.outlet() == DgBoundary::Port(*port) {
+        let endpoint = branches.iter().find(|branch| branch.port == *port)
+            .map(|branch| &branch.duct)
+            .or_else(|| (duct.outlet() == DgBoundary::Port(*port)).then_some(duct));
+        let gas = if let Some(endpoint) = endpoint {
             let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
-            let actual = duct.outlet_area_m2();
+            let actual = endpoint.outlet_area_m2();
             if !area.is_finite() || (area - actual).abs() > 64.0 * f64::EPSILON * actual {
-                return Err(invalid("computed DG axial opening must retain its actual bore outlet area"));
+                return Err(invalid("computed DG opening must retain its actual bore or chimney outlet area"));
             }
-            *duct.outlet_gas()
+            *endpoint.outlet_gas()
         } else {
             duct.side_port_source(*port).map_err(|error| match error {
                 GasFieldDuctError::Duct(source) => AcousticRealizeError::Duct(source),
@@ -157,6 +187,18 @@ fn admit_openings(
         }
     }
     Ok(())
+}
+
+// Cheap source admission precedes the original expensive radiation bake.
+// Runtime construction performs the same ownership/energy admission on the
+// exact prepared branches; this check does not build another propagator.
+fn admit_branches(
+    duct: &DgDuct,
+    branches: &[DgBranch],
+    dt: f64,
+    maximum_dofs: usize,
+) -> Result<(), AcousticRealizeError> {
+    super::branch::admit_sources(duct, branches, dt, maximum_dofs)
 }
 
 impl DgPortLoad {
@@ -194,8 +236,8 @@ impl DgPortLoad {
         // Converting its endpoint back to Hz can reject the identical endpoint
         // solely because multiplication and division round differently.
         if receiver.maximum_frequency_hz > source.band_hz()[1]
-            || self.duct().viscothermal_band_rad_s().is_some_and(|band|
-                receiver.maximum_frequency_hz * core::f64::consts::TAU > band[1])
+            || self.minimum_wall_band_upper_rad_s().is_some_and(|upper|
+                receiver.maximum_frequency_hz * core::f64::consts::TAU > upper)
         {
             return Err(invalid("baffled DG receiver exceeds its radiation or wall-loss band"));
         }

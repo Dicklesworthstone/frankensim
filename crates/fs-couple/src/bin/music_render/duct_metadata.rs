@@ -84,7 +84,17 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
                 port.id.0, port.downstream_element, source.station_m,
                 source.bore_area_m2, gas_state(&source.gas))
         }).collect::<Vec<_>>().join(",");
-        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"side_opening_scope\":\"zero-volume flush plane-wave junctions at original DG faces; independently declared circular opening areas; full computed mutual terminal radiation; no finite chimney or moving pad\""));
+        let chimneys = load.branches().iter().map(|branch| {
+            let duct = branch.duct();
+            let mesh = duct.mesh();
+            let band = duct.viscothermal_band_rad_s().map_or_else(|| "null".into(), |band|
+                format!("[{:e},{:e}]", band[0], band[1]));
+            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}}}",
+                branch.port().0, duct.operator_identity().to_hex(), duct.total_length(),
+                duct.inlet_area_m2(), duct.outlet_area_m2(), gas_state(duct.inlet_gas()),
+                gas_state(duct.outlet_gas()), mesh.elements, mesh.order, duct.total_dofs())
+        }).collect::<Vec<_>>().join(",");
+        output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"finite_chimneys\":[{chimneys}],\"side_opening_scope\":\"original DG face junctions and explicitly declared finite DG chimneys; branch outlets own exterior geometry and accepted radiated flow; complete mutual terminal radiation; no moving pad or three-dimensional junction correction\""));
     }
     output
 }
@@ -102,7 +112,7 @@ pub(super) fn dg_baffled_observation_provenance(
             format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
                 port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m)
         ).collect::<Vec<_>>().join(",");
-        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from every accepted held DG terminal flow in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback; no mouth, finite chimney, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from every accepted held DG terminal flow in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback through any declared finite DG chimney; no mouth, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
             receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
             receiver.radial_rings, receiver.angular_points, receiver.maximum_frequency_hz,
             microphone.delay_samples.0, microphone.delay_samples.1,

@@ -280,3 +280,6 @@ fn g0_baffled_input_refuses_missing_malformed_extra_fields_and_static_pressure_j
     let error = read_receipted(&valid.replace("101325", "90000"), None).err().unwrap();
     assert!(matches!(error, DgSourceError::Input { line: 3, .. }));
 }
+
+#[path = "tests/chimneys.rs"]
+mod chimneys;

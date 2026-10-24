@@ -5749,3 +5749,34 @@ External IDs remain the authored bore-side IDs, but terminal pressure, work and 
 Bore, branch and rational histories publish together only after every original candidate and signed junction/terminal work check accepts. Main `state()` retains its original meaning; `branches()` exposes the independent states. `stored_energy_j`, cumulative loss and coupled-source ledgers sum every original DG owner once. Rational terminal exchange is reported separately without fabricating a storage function.
 
 Cold admission requires complete terminal ownership, two-port branches without nested side ports, common equilibrium junction pressure, a common clock, resolved native wall bands and a combined acoustic-plus-memory DOF allowance before exponentials. Different coherent gas compositions at the junction are permitted. An empty branch list preserves existing scalar and multiport arithmetic. This is a finite one-dimensional duct attached at a zero-volume point junction: it does not add three-dimensional entrance/jet flow, moving pads, or a continuous-time joint exponential. Coupling-clock, spatial and wall-fit refinement remain separate qualifications.
+
+
+## Finite material-gas chimneys in authored DG instruments
+
+The shared DG source grammar now allows `dg_side_chimney PORT_ID
+DOWNSTREAM_ELEMENT X_M Y_M RADIUS_M LENGTH_M ELEMENTS ORDER` among the
+existing `dg_side_openings` rows, followed by `dg_chimney_gas` and one
+complete shared material gas record. The original uniform-cylinder DG and
+Bessel wall owners retain each chimney's physical propagation, storage,
+viscothermal memory and gas dependence. Parent wall poles, band and tolerance
+apply to each branch; the common state allowance covers the main bore and all
+chimneys before any propagator or radiation fit is constructed. Full
+thermochemical receipts remain in the existing source record collection.
+
+`new_with_computed_baffled_branches` binds the actual branch outlet area and
+gas to the original complete radiation matrix. The source retains every
+terminal in its authored order, with accepted OUTER flows feeding the existing
+microphone once. An internal junction is not a radiating aperture. Bore,
+chimney and exterior compositions may differ at common static pressure; a
+mean pressure jump refuses. The microphone band is limited by every retained
+wall owner. Empty branch lists preserve the existing flush-opening route.
+The same source input serves scalar and material-modal apertures and DG flues.
+
+The new flue and paired material-modal chimney performance inputs demonstrate
+data-only selection. Focused regressions check material receipts, original
+wall-operator identity, complete memory limits, actual outlet area, equilibrium
+admission and the original microphone driven by accepted branch outlet flows.
+Native Rust tests and audio rendering remain unexecuted here. This is a
+fixed plane-wave junction/finite cylindrical branch reduction, without moving
+pads, resolved three-dimensional junction corrections, mean flow, or empirical
+instrument qualification.
