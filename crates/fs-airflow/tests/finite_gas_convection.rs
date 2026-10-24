@@ -1,6 +1,8 @@
 //! G0/G1/G3: real material packs, original correlation and finite heat/motion solver.
 #[path = "finite_gas_convection/source.rs"]
 mod source;
+#[path = "finite_gas_convection/uniform.rs"]
+mod uniform;
 use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };

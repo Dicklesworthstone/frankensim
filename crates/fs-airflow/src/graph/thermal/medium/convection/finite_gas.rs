@@ -155,9 +155,12 @@ impl ForcedGasSurface {
     /// enclosure and the original body owner still admits conductivity and Biot.
     /// Bulk-endpoint property evaluation and prescribed relative speed retain the
     /// same correlation/domain assumptions as `resolve`; no film-temperature,
-    /// flow-field or fan-power solution is inferred. Dittus-Boelter is refused
-    /// here because its exponent needs the unknown wall endpoint. Constant-heat-
-    /// flux duct correlations are incompatible with this isothermal-body model.
+    /// flow-field or fan-power solution is inferred. The proposed heat selects
+    /// Dittus-Boelter's heating/cooling exponent. Its zero-heat seed uses the
+    /// smaller branch coefficient so an authored direction cannot cause a false
+    /// Biot refusal before the physical transfer is known. Every nonzero trial
+    /// uses its actual branch. Constant-heat-flux duct correlations remain
+    /// incompatible with this isothermal-body model.
     pub fn isochoric_body_candidate(
         self,
         cx: &Cx<'_>,
@@ -176,19 +179,32 @@ impl ForcedGasSurface {
             )));
         }
         if self.area_m2 > 0.0 && matches!(self.correlation,
-            CorrelationId::DittusBoelter | CorrelationId::CircularDuctLaminarChf
-                | CorrelationId::RectangularDuctLaminarChf)
+            CorrelationId::CircularDuctLaminarChf | CorrelationId::RectangularDuctLaminarChf)
         {
             return Err(ConvectionError::Convection(invalid(
                 "endpoint gas-only convection requires a wall-temperature-independent isothermal correlation",
             )));
         }
-        environment.advance_with_convection(cx, body, |gas| {
+        environment.advance_with_convection_feedback(cx, body, |gas, heat_into_gas_j| {
             if self.area_m2 == 0.0 {
                 return Ok(ConvectionCoefficient { coefficient_w_per_m2_k: 0.0, source: None });
             }
-            let evaluated = evaluate_forced_from_material(self.correlation, gas,
-                self.speed_m_s, self.characteristic_length, self.settings)?;
+            let mut settings = self.settings;
+            settings.direction = if heat_into_gas_j > 0.0 {
+                ThermalDirection::HeatingFluid
+            } else {
+                ThermalDirection::CoolingFluid
+            };
+            let mut evaluated = evaluate_forced_from_material(self.correlation, gas,
+                self.speed_m_s, self.characteristic_length, settings)?;
+            if heat_into_gas_j == 0.0 && self.correlation == CorrelationId::DittusBoelter {
+                settings.direction = ThermalDirection::HeatingFluid;
+                let heating = evaluate_forced_from_material(self.correlation, gas,
+                    self.speed_m_s, self.characteristic_length, settings)?;
+                if heating.coefficient().value.value() < evaluated.coefficient().value.value() {
+                    evaluated = heating;
+                }
+            }
             let (transport, nusselt, coefficient) = evaluated.into_parts();
             Ok(ConvectionCoefficient {
                 coefficient_w_per_m2_k: coefficient.value.value(),

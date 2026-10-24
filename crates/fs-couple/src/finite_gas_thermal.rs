@@ -187,6 +187,28 @@ impl FiniteGasThermalEnvironment<'_> {
         input: UniformEnthalpyStepInput<'_>,
         mut resolve: impl FnMut(&ResolvedThermochemicalGasState) -> Result<ConvectionCoefficient<S>, E>,
     ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S>>, ConvectionError<E>> {
+        self.advance_with_convection_feedback(cx, input, |gas, _| resolve(gas))
+    }
+
+    /// Resolve the same convection law with its proposed signed interface heat.
+    ///
+    /// `resolve(gas_endpoint, heat_into_gas_j)` may select heating/cooling
+    /// branches from the actual proposed exchange. At acceptance that sign must
+    /// agree with the original owner's endpoint temperature ordering. At zero
+    /// exchange a direction-dependent law must supply an admissible neutral
+    /// seed; either branch has zero flux at exact thermal equilibrium.
+    ///
+    /// All source, energy, Biot, radiation and transactional guarantees of
+    /// `advance_with_convection` apply. The wall endpoint remains with the
+    /// original body solver; this does not admit a film-temperature law or
+    /// arbitrary dependence on an unresolved wall state.
+    pub fn advance_with_convection_feedback<S, E>(
+        &self,
+        cx: &Cx<'_>,
+        input: UniformEnthalpyStepInput<'_>,
+        mut resolve: impl FnMut(&ResolvedThermochemicalGasState, f64)
+            -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S>>, ConvectionError<E>> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         self.gas_solve.validate().map_err(gas_error)?;
         feedback::admit::<ConductionError>(self.exchange)?;
@@ -218,12 +240,13 @@ impl FiniteGasThermalEnvironment<'_> {
                     .map_err(gas_error)?;
                 let mut environment = self.body.clone();
                 environment.temperature_k = next_gas.state().state().temperature;
-                let convection = resolve(next_gas.state()).map_err(ConvectionError::Convection)?;
+                let convection = resolve(next_gas.state(), q).map_err(ConvectionError::Convection)?;
                 if !convection.coefficient_w_per_m2_k.is_finite()
                     || convection.coefficient_w_per_m2_k < 0.0
                 {
                     return Err(Error::Invalid("convection coefficient must be finite and nonnegative").into());
                 }
+                cx.checkpoint().map_err(|_| Error::Cancelled)?;
                 environment.convection_w_per_m2_k = convection.coefficient_w_per_m2_k;
                 let body = environment.advance(cx, input).map_err(Error::Interface)?;
                 let endpoint = body.report.samples().last().ok_or(Error::Invalid(

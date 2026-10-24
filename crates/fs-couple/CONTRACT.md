@@ -4798,6 +4798,17 @@ finite gas inventory changing actual hereditary vibration, exact insulation
 parity, independent radiation ownership, measured combined energy and
 failed/cancelled proposals preserving both accepted owners.
 
+`advance_with_convection` uses the same bounded residual and enthalpy owner
+while resolving a new whole-surface film coefficient from the complete gas
+endpoint at each trial. `advance_with_convection_feedback` additionally supplies
+the signed proposed heat to select a correlation's heating/cooling branch;
+the accepted temperature ordering and energy gates still apply. The exact
+source sample accompanies the final gas and body
+reports. The declared-coefficient `advance` delegates to this path with a
+constant callback. This is a bulk-gas coefficient law, not a wall-temperature
+film iteration or resolved flow. The original Biot admission remains active;
+callers must not dilute a local coefficient by averaging partial coverage.
+
 ### Shared DG causal terminal boundary
 
 The source-bound DgPortLoad now also admits a separately prepared proper

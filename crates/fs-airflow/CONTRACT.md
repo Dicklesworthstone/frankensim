@@ -65,11 +65,17 @@ The original body solver retains conductivity, radiation, Biot admission and
 enthalpy, and the single exchanged heat cancels in the combined energy balance.
 A positive patch must cover the whole body surface; zero area explicitly
 insulates it. Bulk-gas property evaluation and prescribed relative flow retain
-their correlation limits. Dittus-Boelter's unknown endpoint direction and
-constant-heat-flux duct correlations refuse on this isothermal-body path.
+their correlation limits. Dittus-Boelter selects its heating/cooling branch
+from the proposed signed heat inside the same residual. Its neutral zero-heat
+seed uses the smaller branch coefficient, preventing an authored direction
+from falsely rejecting the physical branch at the Biot gate. Constant-heat-flux
+duct correlations refuse on this isothermal-body path.
 The explicit constant-h API remains available. `tests/finite_gas_convection.rs`
 checks endpoint coefficient re-evaluation, transport-only data substitution,
-energy closure, fixed-h identity and transactional refusals. No spatial flow,
+energy closure, fixed-h identity and transactional refusals. Additional tests in
+`tests/finite_gas_convection/uniform.rs` exercise pressure/composition changes,
+latent heat, both heat directions and late source-callback cancellation.
+No spatial flow,
 film-temperature solve or experimental fidelity claim is introduced.
 
 `solve_material_gas_transport` is a first-order steady reduced model with prescribed positive mass flow,
