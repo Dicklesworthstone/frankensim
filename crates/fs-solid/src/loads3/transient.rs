@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 /// Physical stress, inertia and support reactions at accepted endpoints.
 pub mod response;
-/// Explicit finite load discontinuities without artificial impulses.
+/// Finite load jumps and bounded material reconfiguration at accepted times.
 pub mod events;
 /// Discrete state and load pullbacks through the original inertial equations.
 pub mod adjoint;
@@ -85,6 +85,7 @@ pub enum TransientError3 {
     Loads(LoadError3),
     Budget,
     Solve { iterations: usize, residual_n: f64, allowance_n: f64 },
+    Momentum { residual_kg_m_s: f64, allowance_kg_m_s: f64 },
     Energy { defect_j: f64, allowance_j: f64 },
     Cancelled,
 }
@@ -229,16 +230,20 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]], config: TransientConfig3,
         cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
         self.begin_transient_impl(problem, thermal, time_s, displacement_m, velocity_m_s,
-            None, config, cx)
+            None, None, config, cx)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn begin_transient_impl<'p, 's>(&self, problem: &'p TetLinearElasticProblem<'s>,
         thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
-        prescribed_acceleration_m_s2: Option<&[[f64; 3]]>, config: TransientConfig3,
+        prescribed_acceleration_m_s2: Option<&[[f64; 3]]>,
+        initial_reduced_momentum: Option<&[f64]>, config: TransientConfig3,
         cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
         check(cx)?; config.validate()?; number(time_s)?;
+        if initial_reduced_momentum.is_some() && prescribed_acceleration_m_s2.is_some() {
+            return Err(TransientError3::Invalid("material reconfiguration requires stationary zero supports"));
+        }
         if problem.nodes_m != self.geometry.nodes || problem.tetrahedra != self.geometry.tets {
             return Err(TransientError3::Invalid("initial load belongs to a different reference mesh"));
         }
@@ -297,6 +302,34 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
                 acceleration: vec![0.0; n], kinetic_energy_j: 0.0, strain_energy_j: 0.0,
                 total_energy_j: 0.0 }, thermal, thermal_strains, force: vec![0.0; n],
             full_force: self.nodal_forces_n().to_vec(), config, prescribed };
+        if let Some(momentum) = initial_reduced_momentum {
+            if momentum.len() != n || momentum.iter().any(|v| !v.is_finite()) {
+                return Err(TransientError3::Invalid("one finite canonical momentum per free DOF required"));
+            }
+            let current = run.apply(1.0, 0.0, &run.state.velocity, cx)?;
+            // Identical mass preserves the accepted velocity bit-for-bit.
+            if current.iter().zip(momentum).any(|(a,b)| a != b) {
+                let scale = number(length(momentum))?;
+                run.state.velocity = if scale == 0.0 { vec![0.0; n] } else {
+                    let normalized: Vec<_> = momentum.iter().map(|v| v/scale).collect();
+                    // Solve a unit-norm equation: the primal force tolerance
+                    // has no units appropriate to a momentum conservation gate.
+                    let controls = TransientConfig3 {
+                        absolute_force_tolerance_n: f64::MIN_POSITIVE, ..config };
+                    let mut velocity = match solve(&run.operator(1.0, 0.0, cx), &normalized, controls) {
+                        Ok((velocity, _, _)) => velocity,
+                        Err(TransientError3::Solve { residual_n, allowance_n, .. }) => {
+                            return Err(TransientError3::Momentum {
+                                residual_kg_m_s: number(scale*residual_n)?,
+                                allowance_kg_m_s: number(scale*allowance_n)? });
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for value in &mut velocity { check(cx)?; *value = number(*value*scale)?; }
+                    velocity
+                };
+            }
+        }
         run.force = run.reduce_force(self, cx)?;
         let ku = run.apply(0.0, 1.0, &run.state.displacement, cx)?;
         let cv = run.apply(config.mass_damping_per_s, config.stiffness_damping_s, &run.state.velocity, cx)?;

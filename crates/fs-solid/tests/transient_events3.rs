@@ -12,6 +12,12 @@ use fs_solid::loads3::{SurfaceLoad3, TetLoadGeometry3, VolumeLoad3};
 use fs_solid::loads3::history::{SurfaceHistory3, TetLoadHistory3, VolumeHistory3, ACCELERATION_DIMS, TRACTION_DIMS};
 use fs_solid::loads3::history::dynamics::events::EventLoadHistory3;
 use fs_solid::loads3::transient::TransientConfig3;
+use fs_solid::loads3::transient::events::MaterialRebindConfig3;
+use fs_evidence::ValidityDomain;
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+use fs_material::state_point::{MaterialPropertySelection, resolve_isotropic_elastic_state_point};
+use fs_qty::{Density, Pressure};
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
@@ -154,5 +160,136 @@ fn g0_adjacent_knots_remain_distinct_and_continuous_knots_need_no_jump() {
         let second=run.advance_to(2.,2.,cx).unwrap(); assert_eq!(second.end_time_s,b); assert!(second.jump.is_none());
         let before=run.run().state().clone();
         for cap in [0.,f64::NAN,1e-300] { assert!(run.advance_to(2.,cap,cx).is_err()); assert_eq!(run.run().state(),&before); }
+    });
+}
+
+fn rebind_controls() -> MaterialRebindConfig3 {
+    MaterialRebindConfig3 { maximum_absolute_work_j:1.0,
+        absolute_momentum_tolerance_kg_m_s:1e-13, maximum_strain:0.1 }
+}
+fn source_material(density: f64, young: f64) -> TetElasticMaterial {
+    let mut claims=ClaimSet::new();
+    for (name,dims,value) in [("density",Density::DIMS,density),
+        ("young_modulus",Pressure::DIMS,young),("poisson_ratio",Dims::NONE,0.0)] {
+        claims.insert_claim(PropertyClaim { key:PropertyKey::new(name,dims),
+            value:PropertyValue::Scalar {value,dims},
+            validity:ValidityDomain::unconstrained(), interpolation:InterpolationPolicy::ConstantWithinValidity,
+            uncertainty:UncertaintyModel::Unstated, observations:vec![],
+            provenance:Provenance {source:"synthetic native material rebind".into(),
+                license:"test-only".into(),artifact:None} }).unwrap();
+    }
+    let card=MaterialCard::assemble(MaterialStateId {chemistry:"synthetic".into(),phase:"solid".into(),
+        process:"rebind regression".into(),revision:0},claims,vec![]).unwrap();
+    let point=QueryPoint::new().with("T",300.0).unwrap();
+    let resolved=resolve_isotropic_elastic_state_point(&card,&point,MaterialPropertySelection::SingleClaimOnly).unwrap();
+    TetElasticMaterial::from_resolved_elastic_state(&resolved)
+}
+
+#[test]
+fn g1_source_material_rebind_preserves_momentum_and_changes_native_motion_and_stress() {
+    with_cx(false,|cx| {
+        let original=source_material(6.0,60.0); let replacement=source_material(12.0,180.0);
+        let fixed:Vec<_>=(0..12).filter(|d| *d!=3).collect();
+        let before_problem=TetLinearElasticProblem {fixed_dofs:&fixed,..problem(&original)};
+        let after_problem=TetLinearElasticProblem {fixed_dofs:&fixed,..problem(&replacement)};
+        let geometry=TetLoadGeometry3::new(&NODES,&TETS,before_problem.budget,4,cx).unwrap();
+        let old_load=geometry.assemble(&[],VolumeLoad3::None,&[(3,0.1)],cx).unwrap();
+        let new_load=geometry.assemble(&[],VolumeLoad3::None,&[(3,0.25)],cx).unwrap();
+        let frame=fs_blake3::ContentHash([84;32]);
+        let strain=TetThermalStrainState::try_new(310.0,300.0,[0.001,0.0,0.0,0.0,0.0,0.0],
+            replacement.material_state_identity,frame,0.1).unwrap();
+        let mut u=ZERO; u[1][0]=0.01;
+        let mut v=ZERO; v[1][0]=0.2;
+        let cfg=TransientConfig3 {mass_damping_per_s:0.4,stiffness_damping_s:0.02,..config()};
+        let run=old_load.begin_transient(&before_problem,None,2.0,&u,&v,cfg,cx).unwrap();
+        let saved=run.state().clone();
+        let (mut replaced,report)=run.rebind_material_candidate(&after_problem,
+            Some(TetThermalStrainField::Uniform(&strain)),&new_load,frame,rebind_controls(),cx).unwrap();
+        // Independent one-DOF mechanics: (m,k) changes (.1,10) -> (.2,30).
+        // Momentum .02 is unchanged; new C=.4*.2+.02*30=.68.
+        assert_eq!(replaced.state().displacement,vec![0.01]);
+        assert!((replaced.state().velocity[0]-0.1).abs()<1e-14);
+        assert!((replaced.state().acceleration[0]+0.44).abs()<1e-12);
+        assert_eq!(replaced.state().time_s,2.0); assert_eq!(replaced.state().step,0);
+        assert!((report.kinetic_work_j+0.001).abs()<1e-14);
+        assert!((report.elastic_work_j-0.000715).abs()<1e-14);
+        assert!((report.supplied_work_j+0.000285).abs()<1e-14);
+        assert!((report.reference_mass_kg[0]-1.0).abs()<1e-14);
+        assert!((report.reference_mass_kg[1]-2.0).abs()<1e-14);
+        assert!(report.reduced_momentum_residual_kg_m_s<1e-13);
+        assert_eq!(report.material_state_identities,vec![[original.material_state_identity,
+            replacement.material_state_identity]]);
+        assert_eq!(report.thermal_state_identities,vec![[None,Some(strain.identity())]]);
+        let response=replaced.recover_response(frame,0.1,cx).unwrap();
+        assert!((response.stress.elements()[0].stress_mandel_pa()[0]-1.62).abs()<1e-12);
+        assert!(response.free_force_residual_n<1e-12);
+        assert_eq!(run.state(),&saved);
+
+        // The refreshed K/M, finite force and re-equilibrated a launch the next interval.
+        replaced.advance(&new_load,0.02,cx).unwrap();
+        let qp=0.01+0.02*0.1-0.0001*0.44;
+        let vp=0.1-0.01*0.44;
+        let acceleration=(0.25+0.03-30.0*qp-0.68*vp)/(0.2+0.01*0.68+0.0001*30.0);
+        assert!((replaced.state().displacement[0]-(qp+0.0001*acceleration)).abs()<1e-13);
+        let retained=replaced.state().clone();
+        let zero_work=MaterialRebindConfig3 {maximum_absolute_work_j:0.0,..rebind_controls()};
+        let (same,unchanged)=replaced.rebind_material_candidate(&after_problem,
+            Some(TetThermalStrainField::Uniform(&strain)),&new_load,frame,zero_work,cx).unwrap();
+        assert_eq!(same.state().displacement,retained.displacement);
+        assert_eq!(same.state().velocity,retained.velocity);
+        assert_eq!(same.state().time_s,retained.time_s); assert_eq!(same.state().step,1);
+        assert_eq!(unchanged.supplied_work_j,0.0);
+        assert_eq!(unchanged.step,1);
+
+        // A late work refusal, after the mass/acceleration/response solves,
+        // cannot replace the accepted source, history or motion.
+        assert!(replaced.rebind_material_candidate(&before_problem,None,&new_load,
+            frame,zero_work,cx).is_err());
+        let (back,reverse)=replaced.rebind_material_candidate(&before_problem,None,&new_load,
+            frame,rebind_controls(),cx).unwrap();
+        assert_eq!(back.state().time_s,retained.time_s); assert_eq!(back.state().step,1);
+        assert!((back.state().velocity[0]-2.0*retained.velocity[0]).abs()<1e-13);
+        assert!((reverse.kinetic_energy_j[1]-2.0*reverse.kinetic_energy_j[0]).abs()<1e-13);
+        let changed_supports=problem(&original);
+        assert!(replaced.rebind_material_candidate(&changed_supports,None,&new_load,
+            frame,rebind_controls(),cx).is_err());
+        with_cx(true,|cancelled| {
+            assert!(replaced.rebind_material_candidate(&before_problem,None,&new_load,
+                frame,rebind_controls(),cancelled).is_err());
+        });
+        assert_eq!(replaced.state(),&retained);
+        assert!(std::ptr::eq(replaced.material_problem(),&after_problem));
+    });
+}
+
+#[test]
+fn g1_clamped_material_rebind_accounts_eigenstrain_storage_without_motion() {
+    with_cx(false,|cx| {
+        let original=source_material(6.0,60.0); let replacement=source_material(12.0,180.0);
+        let fixed:Vec<_>=(0..12).collect();
+        let before_problem=TetLinearElasticProblem {fixed_dofs:&fixed,..problem(&original)};
+        let after_problem=TetLinearElasticProblem {fixed_dofs:&fixed,..problem(&replacement)};
+        let geometry=TetLoadGeometry3::new(&NODES,&TETS,before_problem.budget,4,cx).unwrap();
+        let load=geometry.assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let run=load.begin_transient(&before_problem,None,0.0,&ZERO,&ZERO,config(),cx).unwrap();
+        let frame=fs_blake3::ContentHash([84;32]);
+        let strain=TetThermalStrainState::try_new(310.0,300.0,[0.001,0.0,0.0,0.0,0.0,0.0],
+            replacement.material_state_identity,frame,0.1).unwrap();
+        let (next,report)=run.rebind_material_candidate(&after_problem,
+            Some(TetThermalStrainField::Uniform(&strain)),&load,frame,rebind_controls(),cx).unwrap();
+        assert_eq!(report.kinetic_work_j,0.0);
+        assert!((report.elastic_work_j-15e-6).abs()<1e-15);
+        assert!((report.supplied_work_j-15e-6).abs()<1e-15);
+        assert_eq!(report.reduced_momentum_residual_kg_m_s,0.0);
+        assert_eq!(next.nodal_motion(cx).unwrap(),[ZERO.to_vec(),ZERO.to_vec(),ZERO.to_vec()]);
+        let limited=MaterialRebindConfig3 {maximum_absolute_work_j:10e-6,..rebind_controls()};
+        assert!(run.rebind_material_candidate(&after_problem,Some(TetThermalStrainField::Uniform(&strain)),
+            &load,frame,limited,cx).is_err());
+        let excessive=TetThermalStrainState::try_new(310.0,300.0,[0.2,0.0,0.0,0.0,0.0,0.0],
+            replacement.material_state_identity,frame,0.3).unwrap();
+        assert!(run.rebind_material_candidate(&after_problem,Some(TetThermalStrainField::Uniform(&excessive)),
+            &load,frame,rebind_controls(),cx).is_err());
+        assert!(run.thermal_strain_field().is_none());
+        assert_eq!(run.state().time_s,0.0); assert_eq!(run.state().step,0);
     });
 }

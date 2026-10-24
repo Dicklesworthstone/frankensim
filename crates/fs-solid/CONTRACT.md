@@ -514,6 +514,40 @@ This is source-data covariance conditional on fixed orientation, not solved-fiel
 uncertainty, a confidence/domain bound, material/frame calibration, propagation
 of uncertain temperature/stiffness/orientation, or experimental validation.
 
+## Material replacement on an accepted P1 trajectory
+
+`loads3::transient::events::rebind_material_candidate` permits source-data
+changes to density, stiffness and stress-free strain on the same reference
+mesh and fixed-DOF set. It retains the accepted physical displacement, clock
+and step count, solves `M_after_ff v_after = M_before_ff v_before`, and uses
+the original initializer to rebuild operators and re-equilibrate acceleration
+under the explicitly supplied new load/thermal endpoint. Subsequent ordinary
+Newmark steps and stress recovery consume the actual retained new problem.
+The event does not consume a time-advancement slot.
+
+The conserved quantity is FREE canonical momentum. Stationary constraints
+may exchange full nodal or total physical momentum; this operation reports
+no support impulse. Moving-support trajectories and changed meshes/restraints
+refuse. This is externally supplied material reconfiguration, not mass
+transport or a continuous material transition.
+
+Required signed work is `Delta(1/2 v'Mv) + Delta(sum V/2 e'C e)`, where
+`e = strain - strain_free`. Kinetic and physical shifted-elastic changes
+remain separate. Positive work must be supplied by the reconfiguration owner,
+and negative work returned to it; neither is automatically caloric heat or
+dissipation. An explicit absolute work budget and independent SI momentum
+residual gate admit the candidate. Per-element old/new material and thermal
+identities and reference masses remain in its report. Failure of source,
+solve, momentum, strain, work or cancellation checks preserves the old run.
+
+`tests/transient_events3.rs` exercises immutable source-card substitution
+through the native solver: doubled density, tripled stiffness, changed
+eigenstrain, exact scalar momentum/acceleration/work, subsequent motion,
+zero-work equivalent replacement, retained nonzero clock/step history,
+fully clamped storage, and late work/strain or cancellation refusal.
+This does not differentiate the replacement map or validate a real material
+transition.
+
 ## Thermal material evolution in sparse P1 dynamics
 
 `loads3::transient::thermal::advance_thermal_candidate` refreshes the actual
