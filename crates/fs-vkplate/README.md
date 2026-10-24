@@ -9,8 +9,9 @@ equations, couplings and output stage (`src/kit.rs`).
 Why it exists: FrankenSim's modal percussion (`crates/fs-couple/examples/percussion`) keeps at
 most 63 head modes, admits audio only for head bands inside 40-1640 Hz, and caps a cymbal shell
 at 32 modes (an 18-inch crash stops near 400 Hz). A handful of lightly damped modes is a bell,
-and that is what those renders sounded like. A grid solver needs no mode list: an 18-inch crash
-on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
+and that is what those renders sounded like. A grid solver avoids a prescribed modal cutoff,
+but its usable bandwidth and dispersion still require spatial and temporal convergence checks.
+Node count alone does not establish audio-band fidelity.
 
 ## Physics
 
@@ -22,7 +23,13 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
 - **Plates and shells**: bending energy summed over 3x3 curvature stencils with the full
   `(1 - nu)` twist term; free edges are the natural boundary of that energy. Von Karman coupling
   through the Airy stress function with a rest shape `z0(r)`:
-  `Lap^2 F = -E t [l(w + z0) - l(z0)]`, `l(u) = u_xx u_yy - u_xy^2`, `F = dF/dn = 0` at the rim.
+  `Lap^2 F = -E t [l(w + z0) - l(z0)]` for uniform thickness,
+  `l(u) = u_xx u_yy - u_xy^2`, `F = dF/dn = 0` at the rim.
+  With varying thickness, the stress operator comes from the local complementary
+  membrane energy `(F_xx^2 + F_yy^2 - 2 nu F_xx F_yy + 2(1+nu) F_xy^2)/(2 E t)`.
+  Normal derivatives live at nodes and mixed derivatives at cell centres. This
+  preserves the uniform-thickness operator and retains thickness gradients in
+  the variable-coefficient compatibility equation; an average thickness cannot.
   The nonlinear force is the exact gradient of the discrete potential.
 - **Loss**: either `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points,
   or an explicitly selected source-bound plane-stress Kelvin–Voigt bending tensor.

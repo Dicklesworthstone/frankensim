@@ -746,23 +746,60 @@ impl Body {
             };
             let rest_curv: Vec<_> = nb.iter().map(|s9| curv(&z0, s9)).collect();
             let l0: Vec<f64> = rest_curv.iter().map(|&(a, b, c)| a * b - c * c).collect();
-            // Airy energy 1/2 sum (Lap_h F)^2 over every node where it is nonzero; F = 0 off the core
+            // Complementary membrane energy, with F=0 outside the core:
+            // 1/(2 E t) [Fxx^2 + Fyy^2 - 2 nu Fxx Fyy + 2(1+nu) Fxy^2].
+            // Keep the existing mean E*t normalization of q and V, but put
+            // the LOCAL reciprocal thickness inside the stress operator.
+            // Mixed derivatives live at cell centres. For constant thickness,
+            // sum Fxx Fyy = sum Fxy^2 (zero extension), so this reduces exactly
+            // to the former Laplacian-squared matrix, including its boundary.
             let nc = sorted.len();
             let mut arows = vec![BTreeMap::new(); nc];
             let h2 = h * h;
-            for (&(i, j), _) in &grid_index {
-                let mut row: Vec<(usize, f64)> = vec![];
-                if let Some(&c) = cidx.get(&(i, j)) {
-                    row.push((c, -4.0 / h2));
+            let compliance = |x: f64, y: f64| -> Result<f64, String> {
+                let t = (s.thickness)(x.hypot(y));
+                if !t.is_finite() || t <= 0.0 {
+                    return Err(format!("{name}: membrane thickness must be finite and positive"));
                 }
-                for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if let Some(&c) = cidx.get(&(i + di, j + dj)) {
-                        row.push((c, 1.0 / h2));
+                Ok(t_mean / t)
+            };
+            for &(i, j) in grid_index.keys() {
+                let mut rows = [Vec::new(), Vec::new()];
+                for (axis, offsets) in [[(-1, 0), (0, 0), (1, 0)], [(0, -1), (0, 0), (0, 1)]]
+                    .iter()
+                    .enumerate()
+                {
+                    for (&(di, dj), weight) in offsets.iter().zip([1.0, -2.0, 1.0]) {
+                        if let Some(&c) = cidx.get(&(i + di, j + dj)) {
+                            rows[axis].push((c, weight / h2));
+                        }
                     }
                 }
+                let weight = compliance(i as f64 * h, j as f64 * h)?;
+                for (a, ra) in rows.iter().enumerate() {
+                    for (b, rb) in rows.iter().enumerate() {
+                        let q = if a == b { 1.0 } else { -nu };
+                        for &(ia, va) in ra {
+                            for &(ib, vb) in rb {
+                                add(&mut arows, ia, ib, weight * q * va * vb);
+                            }
+                        }
+                    }
+                }
+            }
+            let cells: std::collections::BTreeSet<_> = sorted
+                .iter()
+                .flat_map(|&(i, j)| [(i - 1, j - 1), (i - 1, j), (i, j - 1), (i, j)])
+                .collect();
+            for (i, j) in cells {
+                let row: Vec<_> = [(0, 0, 1.0), (1, 0, -1.0), (0, 1, -1.0), (1, 1, 1.0)]
+                    .iter()
+                    .filter_map(|&(di, dj, v)| cidx.get(&(i + di, j + dj)).map(|&c| (c, v / h2)))
+                    .collect();
+                let weight = 2.0 * (1.0 + nu) * compliance((i as f64 + 0.5) * h, (j as f64 + 0.5) * h)?;
                 for &(a, va) in &row {
                     for &(b, vb) in &row {
-                        add(&mut arows, a, b, va * vb);
+                        add(&mut arows, a, b, weight * va * vb);
                     }
                 }
             }
@@ -2762,6 +2799,8 @@ pub fn wav_f32(channels: &[Vec<f64>], rate: u32) -> Vec<u8> {
 
 pub mod kit;
 pub mod live;
+#[cfg(test)]
+mod membrane_compliance_tests;
 
 #[cfg(test)]
 #[test]
