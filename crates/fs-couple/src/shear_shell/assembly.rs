@@ -372,9 +372,11 @@ impl MaterialShellAssembly {
             modes_shell(&tied.model, options.eigenvalue_window, &spectral).map_err(owner)?;
         poll(gate)?;
         if report.modes.len() < n {
-            return Err(invalid(
-                "assembled shell window has fewer modes than requested",
-            ));
+            // The count is only known after the whole window is solved: name it, so the next request can ask for it.
+            return Err(owner(format_args!(
+                "assembled shell window has fewer modes than requested: it holds {}, {n} requested",
+                report.modes.len()
+            )));
         }
         let modes = &report.modes[..n];
         let mut physical_modes = vec![Vec::with_capacity(n); self.components.len()];

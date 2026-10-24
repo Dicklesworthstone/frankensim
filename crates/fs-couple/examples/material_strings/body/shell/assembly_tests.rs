@@ -183,3 +183,38 @@ fn component_identity_fluid_roles_tie_addresses_and_bridge_extent_refuse_before_
         assert_eq!(calls, 0);
     });
 }
+
+/// The window's mode count is only known once the whole window is solved, so a request beyond it refuses naming the count
+/// it holds. Cut between the fixture's second and third modes, the window holds two, and asking for three says so.
+#[test]
+fn a_request_beyond_the_assembled_window_names_the_modes_it_holds() {
+    scoped(|cx, gate| {
+        let lambda = ready(cx, gate, ASSEMBLED, 1.0)
+            .performance
+            .bank()
+            .source()
+            .bank()
+            .material_shell_assembly_image()
+            .unwrap()
+            .eigenvalue_intervals()
+            .to_vec();
+        assert_eq!(lambda.len(), 3);
+        assert!(
+            lambda[1].1 < lambda[2].0,
+            "the second and third modes overlap: {lambda:?}"
+        );
+        let cut = (lambda[1].1 * lambda[2].0).sqrt();
+        let narrow = ASSEMBLED.replacen("window 1 100000000\n", &format!("window 1 {cut}\n"), 1);
+        let refusal = spec()
+            .compile_with_body(
+                cx,
+                gate,
+                Some(Profile::parse(narrow.as_bytes()).unwrap()),
+                |name| Ok(pack(name, 1.0, None)),
+            )
+            .err()
+            .expect("a two-mode window cannot hold three modes")
+            .to_string();
+        assert!(refusal.contains("it holds 2, 3 requested"), "{refusal}");
+    });
+}

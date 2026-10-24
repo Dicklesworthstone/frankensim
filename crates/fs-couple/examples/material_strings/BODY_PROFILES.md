@@ -683,6 +683,20 @@ performance's cavity record. The il Cannone violin body
 its frame has x across the body, y vertical and z along the strings, so its
 strings push their bridge nodes along x.
 
+With the two violin shell packs, both built by `xtask matdb-pack` from
+`data/matdb/seed-v1` (`packs/violin-spruce-norway-viala2020-shell.fsmatpk` as
+`@body` for the top, bass bar and soundpost,
+`packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk` for the back, ribs
+and bridge), the window from 15 Hz to the packs' 2 kHz validity holds 30
+assembled modes, 473.5 Hz to 1967.7 Hz. A request for more refuses once the
+window is solved and names the count it holds. The ignored rungs in
+`body/shell/tests.rs` bow the violin-sized G3 rung's synthetic steel strings
+(not violin strings) on this body: a quarter-second cost rung printing every
+body mode with its Q, the construction and render times and the pressure bits,
+and a 2 s render for listening. On trj the body constructs in 315-350 s and the
+coupled network (245 coordinates, 36 connections) renders at 100-125 s per
+audio second.
+
 ## Authored distributed interior air on the material shell
 
 An optional `interior-fe-v1` trailer follows every ordinary record of a v3

@@ -490,11 +490,117 @@ fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
     let one_more_tie = [&lines[..first + block], &lines[first..]].concat().join("\n")
         .replacen("edge-ties 119\n", "edge-ties 120\n", 1);
     assert!(refusal(&one_more_tie).contains("count exceeds its explicit range"));
+    profile.preflight(&cannone_inputs(96, 128).1).unwrap();
+}
+
+/// The violin-sized G3 rung's strings, bow and schedule (`violin_performance`: synthetic steel, NOT violin strings) on the
+/// il Cannone body (`cannone_profile`) with `modes` retained body modes and the table's own cavity row (2.061 L through
+/// one equivalent neck of the two f-holes, both ends flanged). Only the body and the cavity differ from that rung.
+fn cannone_inputs(samples: u64, modes: usize) -> (Profile, input::Spec) {
+    let (profile, converted) = cannone_profile();
     let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
-    let performance = violin_performance(96, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} \
-        {CANNONE_REFERENCE_THICKNESS_M} 128 1", converted.length_m, converted.width_m),
+    let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} \
+        {CANNONE_REFERENCE_THICKNESS_M} {modes} 1", converted.length_m, converted.width_m),
         &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"));
-    profile.preflight(&input::Spec::parse(performance.as_bytes()).unwrap()).unwrap();
+    (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+}
+
+/// Every assembled il Cannone mode between 15 Hz and 2 kHz: the window holds 30 (a request for 128 refuses, naming 30).
+const CANNONE_BODY_MODES: usize = 30;
+
+/// The two violin shell packs, built by `xtask matdb-pack` from data/matdb/seed-v1, and the synthetic steel elsewhere.
+fn cannone_pack(name: &str) -> NormalizedPack {
+    let bytes: &[u8] = match name {
+        "violin-spruce-norway-viala2020-shell.fsmatpk" =>
+            include_bytes!("../../packs/violin-spruce-norway-viala2020-shell.fsmatpk"),
+        "violin-maple-sycamore-sonderegger2013-shell.fsmatpk" =>
+            include_bytes!("../../packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk"),
+        _ => return pack(name, 1.0, None),
+    };
+    NormalizedPack::from_bytes(bytes).unwrap()
+}
+
+/// Each retained body mode as rendered: frequency [Hz], and its Q from the diagonal of the modal viscosity matrix. The packs'
+/// Kelvin-Voigt viscosities are eta x stiffness / (2 pi 200 rad/s), so this Q falls as 1/f; the Q of the packs' constant
+/// loss factors at the mode's own frequency is printed beside it (`Q_eta = Q x f / 200 Hz`).
+fn cannone_body_modes(r: &Ready) -> String {
+    let image = r.performance.bank().source().bank().material_shell_assembly_image().unwrap();
+    let damping = image.damping().matrix_per_s();
+    let n = image.eigenvalue_intervals().len();
+    image.eigenvalue_intervals().iter().enumerate().map(|(i, &(lo, hi))| {
+        let omega = (0.5 * (lo + hi)).sqrt();
+        let (f, q) = (omega / (2.0 * std::f64::consts::PI), omega / damping[i * n + i]);
+        format!("{f:.1} Hz Q {q:.1} (Q_eta {:.1})", q * f / 200.0)
+    }).collect::<Vec<_>>().join(", ")
+}
+
+/// The il Cannone G3 rung (`cannone_inputs`) for a quarter second: the wall time per audio second with what it was
+/// measured on, the time of construction (assembled shell modes, projection, prepared network) and render, every
+/// retained body mode, and the pressure bits.
+#[test]
+#[ignore = "il Cannone violin G3 cost rung: run with --ignored --nocapture"]
+fn the_cannone_violin_g3_rung_reports_its_body_modes_and_wall_time_per_audio_second() {
+    let (profile, spec) = cannone_inputs(12_000, CANNONE_BODY_MODES);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(cannone_pack(name))).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("il Cannone G3 rung: {}", cost_context(&r.spec));
+        eprintln!("il Cannone G3 rung: body modes {}", cannone_body_modes(&r));
+        let source = r.performance.bank().source().bank();
+        assert_eq!(source.material_shell_assembly_image().unwrap().eigenvalue_intervals().len(), CANNONE_BODY_MODES);
+        assert_eq!(source.strings().len(), 4);
+        assert!(source.material_cavity().is_some());
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 12_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        assert!(samples.iter().any(|p| p.abs() > 1e-14), "the bowed body radiated nothing");
+        let per_second = rendered.as_secs_f64() / (samples.len() as f64 / 48_000.0);
+        eprintln!("il Cannone G3 rung: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({per_second:.1} s render per audio second; a 2 s note with its construction takes {:.1} s per audio second)",
+            samples.len(), (built.as_secs_f64() + 2.0 * per_second) / 2.0);
+        eprintln!("il Cannone G3 rung: pressure bits fnv1a {:#018x}, peak {:.3e} Pa", pressure_bits(&samples),
+            samples.iter().fold(0.0_f64, |m, p| m.max(p.abs())));
+    });
+}
+
+/// The il Cannone G3 rung bowed for 2 s, for listening and for comparison with the violin-sized rung's 2 s render on the
+/// clamped plate (the same strings, bow and schedule). FRANKENSIM_CANNONE_RUNG_OUT names an existing directory, which
+/// receives `cannone-g3-rung-2s.f64le` (every pressure sample [Pa], exact) and `cannone-g3-rung-2s.wav` (PCM16 whose full
+/// scale is the smallest power of two in pascals above the peak; no normalization or mastering, no clip).
+#[test]
+#[ignore = "two-second il Cannone render for listening: set FRANKENSIM_CANNONE_RUNG_OUT, run with --ignored --nocapture"]
+fn the_cannone_violin_g3_rung_renders_two_seconds_for_listening() {
+    let out = std::path::PathBuf::from(std::env::var_os("FRANKENSIM_CANNONE_RUNG_OUT")
+        .expect("FRANKENSIM_CANNONE_RUNG_OUT names the output directory"));
+    let (profile, spec) = cannone_inputs(96_000, CANNONE_BODY_MODES);
+    scoped(|cx, gate| {
+        let constructing = std::time::Instant::now();
+        let mut r = spec.compile_with_body(cx, gate, Some(profile), |name| Ok(cannone_pack(name))).unwrap();
+        let built = constructing.elapsed();
+        eprintln!("il Cannone G3 2 s: body modes {}", cannone_body_modes(&r));
+        let rendering = std::time::Instant::now();
+        let samples = pressure(&mut r, 128);
+        let rendered = rendering.elapsed();
+        assert_eq!(samples.len(), 96_000);
+        assert!(samples.iter().all(|p| p.is_finite()));
+        let peak = samples.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        assert!(peak > 0.0, "the bowed body radiated nothing");
+        let full_scale = 2f64.powi(peak.log2().floor() as i32 + 1);
+        let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&samples, 48_000, full_scale).unwrap();
+        assert_eq!(clips, 0);
+        std::fs::write(out.join("cannone-g3-rung-2s.wav"), wav).unwrap();
+        std::fs::write(out.join("cannone-g3-rung-2s.f64le"),
+            samples.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        eprintln!("il Cannone G3 2 s: constructed in {built:.1?}, {} samples rendered in {rendered:.1?} \
+            ({:.1} s per audio second with construction)", samples.len(),
+            (built + rendered).as_secs_f64() / (samples.len() as f64 / 48_000.0));
+        eprintln!("il Cannone G3 2 s: {}", cost_context(&r.spec));
+        eprintln!("il Cannone G3 2 s: peak {peak:.4e} Pa, WAV full scale {full_scale:e} Pa, pressure bits fnv1a {:#018x} \
+            (first 12000 samples {:#018x})", pressure_bits(&samples), pressure_bits(&samples[..12_000]));
+    });
 }
 
 /// The violin-sized G3 rung (above) for a quarter second: the wall time per audio second with what it was measured on, the
