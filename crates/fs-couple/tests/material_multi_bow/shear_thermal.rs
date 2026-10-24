@@ -34,6 +34,15 @@ fn coating(
     variable_loss: bool,
     variable_modulus: bool,
 ) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    coating_law(variable_loss, variable_modulus.then(||
+        vec![(280.0, 8.4e6), (340.0, 7.2e6)]), None)
+}
+
+fn coating_law(
+    variable_loss: bool,
+    modulus_knots: Option<Vec<(f64, f64)>>,
+    elastic_yield_pa: Option<f64>,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let mut claims = ClaimSet::new();
     for (name, dims, cold, hot, varies) in [
         ("density", Density::DIMS, DENSITY, DENSITY, false),
@@ -41,15 +50,15 @@ fn coating(
             "shear_modulus",
             Pressure::DIMS,
             8e6,
-            if variable_modulus { 7e6 } else { 8e6 },
-            variable_modulus,
+            8e6,
+            modulus_knots.is_some(),
         ),
         (
             "shear_yield_stress",
             Pressure::DIMS,
-            if variable_loss { 120.0 } else { 100.0 },
-            if variable_loss { 60.0 } else { 100.0 },
-            variable_loss,
+            elastic_yield_pa.unwrap_or(if variable_loss { 120.0 } else { 100.0 }),
+            elastic_yield_pa.unwrap_or(if variable_loss { 60.0 } else { 100.0 }),
+            variable_loss && elastic_yield_pa.is_none(),
         ),
         (
             "plastic_shear_viscosity",
@@ -80,7 +89,9 @@ fn coating(
                     PropertyValue::Curve {
                         abscissa: "T".into(),
                         abscissa_dims: Temperature::DIMS,
-                        knots: vec![(280.0, cold), (340.0, hot)],
+                        knots: if name == "shear_modulus" {
+                            modulus_knots.clone().expect("variable modulus has its knots")
+                        } else { vec![(280.0, cold), (340.0, hot)] },
                         dims,
                     }
                 } else {
@@ -439,7 +450,7 @@ fn original_network_conducts_film_heat_without_repeating_mechanical_history() {
 #[test]
 fn thermal_and_contact_failures_preserve_all_accepted_instrument_and_heat_state() {
     with_cx(|cx, gate| {
-        let (card, caloric) = coating(true, false);
+        let (card, caloric) = coating(true, true);
         let mut bank = instrument(cx, gate, &card);
         let mut heat = thermal(caloric.curve(), false);
         let bound = binding(&card, caloric.curve());
@@ -557,9 +568,10 @@ fn thermal_and_contact_failures_preserve_all_accepted_instrument_and_heat_state(
 }
 
 #[test]
-fn thermal_continuation_refuses_variable_elastic_storage_and_inconsistent_caloric_density() {
+fn thermal_continuation_refuses_modulus_kinks_and_inconsistent_caloric_density() {
     with_cx(|cx, gate| {
-        let (card, caloric) = coating(false, true);
+        let (card, caloric) = coating_law(false,
+            Some(vec![(280.0, 8.4e6), (300.0, 8e6), (340.0, 7.6e6)]), None);
         let mut bank = instrument(cx, gate, &card);
         let mut heat = thermal(caloric.curve(), false);
         let forces = vec![0.0; bank.system().mode_count()];
@@ -622,5 +634,83 @@ fn thermal_continuation_refuses_variable_elastic_storage_and_inconsistent_calori
         );
         assert_eq!(bank.system().samples_rendered(), 0);
         assert_eq!(heat.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn affine_layer_softening_routes_reversible_exchange_through_the_same_instrument() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating(false, true);
+        let (constant_card, constant_caloric) = coating(false, false);
+        let mut bank = instrument(cx, gate, &card);
+        let mut reference = instrument(cx, gate, &constant_card);
+        let mut heat = thermal(caloric.curve(), false);
+        let mut reference_heat = thermal(constant_caloric.curve(), false);
+        let bound = binding(&card, caloric.curve());
+        let reference_bound = binding(&constant_card, constant_caloric.curve());
+        let original = bank.bow_shear_layer(0).unwrap().clone();
+        assert_eq!(original.stiffness_n_m(), reference.bow_shear_layer(0).unwrap().stiffness_n_m());
+        let forces = vec![0.0; bank.system().mode_count()];
+        let drives = [drive(0.001, 0.1), drive(0.0, 0.0)];
+        let (mut plastic, mut reversible, mut stored_internal,
+            mut pressure_difference) = (0.0, 0.0, 0.0, 0.0);
+        for _ in 0..256 {
+            let f = bank.step_with_layer_thermal_network(&mut heat, &bound,
+                controls(1), &[0.0], &forces, &drives, gate, other).unwrap();
+            let fixed = reference.step_with_layer_thermal_network(&mut reference_heat,
+                &reference_bound, controls(1), &[0.0], &forces, &drives, gate, other).unwrap();
+            plastic += f.routed_plastic_heat_j;
+            reversible += f.routed_reversible_heat_j;
+            stored_internal += f.layer_internal_energy_change_j;
+            pressure_difference += (f.mechanics.observer_pressure_pa
+                - fixed.mechanics.observer_pressure_pa).abs();
+            assert!(f.routed_plastic_heat_j >= 0.0);
+            assert!((f.routed_reversible_heat_j + f.coefficient_free_energy_change_j
+                +f.mechanical_entropy_energy_change_j).abs() < 1e-15);
+            assert!(f.total_energy_residual_j.abs() <= controls(1).total_energy_tolerance_j);
+            let layer = bank.bow_shear_layer(0).unwrap();
+            let t = heat.temperature_k(FILM).unwrap();
+            assert_eq!(layer.temperature_kelvin(), t);
+            let expected = AREA/THICKNESS*(8.4e6-2e4*(t-280.0));
+            assert!((layer.stiffness_n_m()-expected).abs() <= 1e-14*expected);
+            for (a, b) in layer.resolved().properties().iter()
+                .zip(original.resolved().properties()) {
+                assert_eq!(a.answer().receipt.selected, b.answer().receipt.selected);
+            }
+        }
+        let e = bank.system().material_shear_state(0).unwrap().elastic_slip_m();
+        // k(T)=(A/h)*(14e6-2e4*T), so the mechanical INTERNAL energy is
+        // (A/h)*14e6*|e|^2/2, independently of the endpoint T.
+        let expected_internal = 0.5*AREA/THICKNESS*14e6*(e[0]*e[0]+e[1]*e[1]);
+        assert!((stored_internal-expected_internal).abs() < 1e-14);
+        assert!((total_heat(&heat)-plastic-reversible).abs() < 1e-11);
+        assert!(plastic > 0.0 && reversible != 0.0);
+        assert!(bank.bow_shear_layer(0).unwrap().stiffness_n_m() < original.stiffness_n_m());
+        assert!(pressure_difference > 1e-14);
+    });
+}
+
+#[test]
+fn reversible_shear_cooling_is_not_clipped_or_relabelled_as_plastic_dissipation() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating_law(false,
+            Some(vec![(280.0, 8.4e6), (340.0, 7.2e6)]), Some(1e8));
+        let mut bank = instrument(cx, gate, &card);
+        let mut heat = thermal(caloric.curve(), false);
+        let forces = vec![0.0; bank.system().mode_count()];
+        let f = bank.step_with_layer_thermal_network(&mut heat,
+            &binding(&card, caloric.curve()), controls(1), &[0.0], &forces,
+            &[drive(0.001, 0.1), drive(0.0, 0.0)], gate, other).unwrap();
+        let e = bank.system().material_shear_state(0).unwrap().elastic_slip_m();
+        let e2 = e[0]*e[0]+e[1]*e[1];
+        let stiffness_slope = -2e4*AREA/THICKNESS;
+        let capacity = DENSITY*AREA*THICKNESS*CP;
+        let expected_t = 300.0/(1.0-stiffness_slope*e2/(2.0*capacity));
+        assert_eq!(f.routed_plastic_heat_j, 0.0);
+        assert!(f.routed_reversible_heat_j < 0.0 && f.deposited_heat_j < 0.0);
+        assert!(heat.temperature_k(FILM).unwrap() < 300.0);
+        assert!((heat.temperature_k(FILM).unwrap()-expected_t).abs() < 1e-8);
+        assert!((total_heat(&heat)-f.routed_reversible_heat_j).abs() < 1e-13);
+        assert!(f.total_energy_residual_j.abs() <= controls(1).total_energy_tolerance_j);
     });
 }

@@ -37,11 +37,13 @@ impl MultiBowStringBank {
     }
 
     /// Continue the original instrument and its retained-film thermal cells in
-    /// one transaction. Temperature-dependent yield/viscosity change the actual
+    /// one transaction. Temperature-dependent elasticity/yield/viscosity change the actual
     /// source traction, string/body/cavity motion and the SAME pressure observer.
     ///
     /// The original source bundle must include constant reference density and
-    /// modulus. Geometry/strain history remain fixed and the film must stay solid
+    /// constant or affine modulus. Reversible heat and mechanical entropy keep
+    /// their own account beside plastic loss. Geometry and the tangent frame
+    /// remain fixed, strain history is retained, and the film must stay solid
     /// and compressed. The existing network owns heat capacity and conductive
     /// partition; this adds neither an authored heat split nor a thermal store.
     /// See the shared modal adapter for endpoint accuracy and moving-grid limits.
