@@ -6,6 +6,8 @@
 
 /// Joint temperature/field/current-dependent conduction and actuator motion.
 pub mod conductivity;
+/// Live source-derived expansion and elastic response of the actuator's member.
+pub mod support;
 
 use super::*;
 use super::contacts::{ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};

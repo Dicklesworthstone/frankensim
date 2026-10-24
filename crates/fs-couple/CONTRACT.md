@@ -5637,3 +5637,50 @@ The open-shell-cavity profile/performance and focused actual-flow microphone
 regression are unexecuted integration inputs. Their 80-panel source may refuse
 at the unchanged dense-BEM reciprocity gate described above. No native test,
 render, material calibration or instrument-realism parity is claimed.
+
+## Thermally live layered supports in reciprocal field motion
+
+`circuit_enthalpy::motion::support` connects the original
+`MaterialFieldMotion` actuator to the shared
+`ConcentricThermoelasticLaw`. `AxialSupport::from_thermoelastic_law`
+retains the original source-bound section, reference gap/length and consistent
+inertia. `MaterialNetwork::field_motion_support_candidate` binds each layer to
+one whole finite caloric cell with the same card, state context, reference
+volume and mass. Independent layer temperatures update expansion, stiffness,
+restoring force and continuing charge/flux, gap and momentum.
+
+Every trial starts from the same accepted histories. At unchanged initial gap,
+the member is rebound to its proposed layer temperatures and the original
+field-motion descriptor advances once. Each layer receives
+`Q_rev = -delta(Psi_at_initial_gap) - delta(T*s)`; its source-backed Joule heat
+is deposited independently, once. The native mechanical potential remains
+Helmholtz energy. A second physical account closes the change in caloric,
+support `Psi+T*s`, field and kinetic energy against electrical/mechanical work
+and authored heat. Reversible transfer is removed from the reported external
+heat. The existing thermal network owns conduction, reservoirs, events and
+bounded nonlinear work; no new field, motion or thermal solver is introduced.
+
+Scalar reference density/expansion and globally affine modulus use the shared
+material admission. A conservative bound requires positive combined caloric
+and thermoelastic heat capacity over the caloric interval and declared elastic
+strain envelope. Original cards, selected claims, thermal references, geometry
+and inertia survive rebinding. Ordinary frozen-support stepping refuses a
+thermally live support. Enclosed electrical storage coefficients must remain
+source-constant because this lane does not supply their field entropy.
+Unsupported sources, inventory mismatches, cancellation and failed balances
+publish no partial physical history.
+
+This is the existing small-strain axial reduction with fixed reference geometry
+and electrical paths. It does not add radial work, interlayer slip, changing
+mass, strain-dependent resistance, distributed Lorentz forces, phase change,
+magnetic hysteresis or heating of the moving-gap medium. The endpoint thermal
+coupling is generally first order; nonlinear tolerances are not time-error
+bounds. Bulk electrical heat routes are supported here; source-bound electrical
+contact heating remains on the existing separate contact-aware motion path.
+
+Focused tests in `tests/circuit_enthalpy_motion/support.rs` cover unequal layer
+heating, a source-only expansion swap affecting actual gap/velocity, independently
+reconstructed internal energy, original inertia/flux, positive-capacity refusal,
+cancellation and exact retry. The changed Rust files passed syntax parsing;
+native compilation and these tests were not executed in the connector-only
+session because DSR, RCH, Cargo and rustc were unavailable.

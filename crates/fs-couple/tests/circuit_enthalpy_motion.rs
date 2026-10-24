@@ -5,6 +5,8 @@
 mod common;
 #[path = "electrical_contacts/source.rs"]
 mod source;
+#[path = "circuit_enthalpy_motion/support.rs"]
+mod support;
 
 use common::*;
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve};

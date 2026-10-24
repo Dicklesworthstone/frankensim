@@ -7,6 +7,7 @@
 //! elastic wave, bending/buckling, or temperature-evolution model.
 
 use fs_material::section::thermal::ConcentricThermoelasticSection;
+use fs_material::section_temperature::thermoelastic::ConcentricThermoelasticLaw;
 use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
 
 use super::{EvaluationDecision, MaterialCircuitError, invalid, positive};
@@ -21,6 +22,7 @@ pub struct AxialSupport {
     reference_gap_m: f64,
     linear_strain_limit: f64,
     modal_mass_kg: f64,
+    thermal: bool,
 }
 
 impl AxialSupport {
@@ -36,6 +38,25 @@ impl AxialSupport {
     pub fn try_new(section: ConcentricThermoelasticSection, length_m: f64,
         reference_gap_m: f64, linear_strain_limit: f64) -> Result<Self, MaterialCircuitError>
     {
+        Self::build(section, length_m, reference_gap_m, linear_strain_limit, false)
+    }
+
+    /// Construct a thermally live member from the shared constitutive law.
+    /// Its mechanical potential is Helmholtz energy; advancing it requires the
+    /// coupled support/enthalpy path, which accounts for reversible heat and
+    /// entropy. The ordinary frozen-support step refuses this mode.
+    pub fn from_thermoelastic_law(law: &ConcentricThermoelasticLaw<'_>,
+        temperatures_k: &[f64], length_m: f64, reference_gap_m: f64,
+        linear_strain_limit: f64) -> Result<Self, MaterialCircuitError>
+    {
+        let state = law.at_temperatures_k(temperatures_k, 0.0, linear_strain_limit)?;
+        Self::build(state.section, length_m, reference_gap_m, linear_strain_limit, true)
+    }
+
+    fn build(section: ConcentricThermoelasticSection, length_m: f64,
+        reference_gap_m: f64, linear_strain_limit: f64, thermal: bool)
+        -> Result<Self, MaterialCircuitError>
+    {
         if !positive(length_m) || !positive(reference_gap_m) {
             return Err(invalid("axial support requires positive finite length and reference gap"));
         }
@@ -43,7 +64,8 @@ impl AxialSupport {
             for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
                 let property = layer.material.property(name)
                     .ok_or_else(|| invalid("axial support layer is missing its original constitutive property"))?;
-                if property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity {
+                if (name == DENSITY_PROPERTY || !thermal)
+                    && property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity {
                     return Err(invalid("conservative axial support requires validity-wide constant modulus and reference density"));
                 }
             }
@@ -56,7 +78,45 @@ impl AxialSupport {
         // Validate the material's strain policy and all retained eigenstrains.
         // Initial actuator geometry is checked separately by its constructor.
         section.axial_force_and_energy_at_strain(0.0, linear_strain_limit)?;
-        Ok(Self { section, length_m, reference_gap_m, linear_strain_limit, modal_mass_kg })
+        Ok(Self { section, length_m, reference_gap_m, linear_strain_limit, modal_mass_kg, thermal })
+    }
+
+    /// Whether the member requires its reciprocal thermal owner when advanced.
+    pub const fn is_thermally_live(&self) -> bool { self.thermal }
+
+    /// Refresh only the same source-bound member. Coordinates and momentum stay
+    /// with MaterialFieldMotion; this does not attach a new member to live history.
+    pub(crate) fn with_thermal_section(&self, section: ConcentricThermoelasticSection)
+        -> Result<Self, MaterialCircuitError>
+    {
+        let old = self.section.section();
+        let new = section.section();
+        if !self.thermal || old.inner_radius_m() != new.inner_radius_m()
+            || old.layers().len() != new.layers().len()
+            || self.section.expansion_paths().iter().zip(section.expansion_paths())
+                .any(|(a, b)| a.reference() != b.reference() || a.selected_claim() != b.selected_claim())
+        {
+            return Err(invalid("thermal support must retain its original section and expansion reference"));
+        }
+        for (a, b) in old.layers().iter().zip(new.layers()) {
+            if a.outer_radius_m != b.outer_radius_m
+                || a.material.card_identity() != b.material.card_identity()
+                || a.material.axis_quantities() != b.material.axis_quantities()
+                || a.material.query_point().iter().filter(|(k, _)| k != "T")
+                    .ne(b.material.query_point().iter().filter(|(k, _)| k != "T"))
+                || a.material.properties().len() != b.material.properties().len()
+                || a.material.properties().iter().zip(b.material.properties()).any(|(p, q)|
+                    p.requirement() != q.requirement()
+                    || p.answer().receipt.selected != q.answer().receipt.selected)
+            {
+                return Err(invalid("thermal support refresh changed geometry, source or nonthermal context"));
+            }
+        }
+        let next = Self::build(section, self.length_m, self.reference_gap_m, self.linear_strain_limit, true)?;
+        if next.modal_mass_kg != self.modal_mass_kg {
+            return Err(invalid("thermal support refresh changed the original reference inertia"));
+        }
+        Ok(next)
     }
 
     /// Original layers, material states and integrated thermal expansion paths.
