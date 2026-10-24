@@ -211,7 +211,8 @@ impl AnnularMembrane {
         ))
     }
 
-    #[cfg(test)]
+    // CUDA plan construction also uses this unfused solve to export A^-1.
+    // Keep it available outside tests even though CPU timesteps fuse the load.
     pub(super) fn solve(&self, f: &mut [f64]) {
         let (interior, boundary) = f.split_at_mut(self.nc);
         self.core.solve(interior);
