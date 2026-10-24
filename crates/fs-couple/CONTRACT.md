@@ -5448,3 +5448,28 @@ Focused G1/G3 regressions in `tests/tribothermal/partition.rs` exercise changes
 to conductivity and Cp through actual finite heat stores, independently solve
 a temperature-dependent conductivity feedback case, and verify cumulative
 exposure refusal, ordered-source identity and unchanged accepted state.
+
+## Source-dependent internal transport in the spatial solid/finite-gas solve
+
+`solid_enthalpy::gas::step_with_isochoric_gas_transport` composes the original
+prepared material network with the same backward-Euler solid/gas residual as
+`step_with_isochoric_gas`. A resistor-free network pins each original cell's
+conductivity source once, refreshes it at the actual endpoint enthalpy/phase,
+and lowers existing two-layer links through their original conductance owner.
+No dummy circuit, alternate thermal state or additional heat integrator is
+introduced. Networks with resistor work refuse this thermal-only entry point.
+
+The structural and transport bindings must share their original material,
+borrowed caloric chart and complete physical condition point. Gas patches
+consume the network's existing material snapshot through the original layer
+adapter, including the exact conductivity key and reference source pin. The
+accepted report retains those cell/link source snapshots alongside local,
+gas and combined energy accounts. Failed source refresh, nonlinear admission,
+geometry or cancellation leaves both inventories intact. The original entry
+point retains authored internal coefficients; geometry and all original
+quasistatic, single-phase and fixed-volume limitations remain unchanged.
+
+Three nonlinear-transport regressions exercise different material cards,
+independent three-reservoir equations and compatible nonuniform displacement,
+subsequent source refresh, conductivity changes reaching gas/motion, and
+wrong-context/chart or failed-trial refusal.

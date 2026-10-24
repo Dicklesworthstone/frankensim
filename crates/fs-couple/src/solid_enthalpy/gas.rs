@@ -7,7 +7,8 @@
 //! endpoint. No thermal body is collapsed into a mean temperature.
 //!
 //! The gas is well mixed and its volume/composition stay fixed. Thermal geometry
-//! and internal link conductances stay authored and fixed over the interval.
+//! stays fixed. Internal links may retain authored conductances or resolve the
+//! original prepared material network at every proposed endpoint.
 //! The returned solid field is a sequential quasistatic thermal load: reciprocal
 //! thermoelastic heat, gas pressure loads, gas flow and moving surfaces require
 //! their own closures. The caloric account does not include elastic energy.
@@ -25,6 +26,11 @@ use fs_solver::{
 };
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use std::cell::Cell;
+
+mod transport;
+use crate::circuit_enthalpy::material::{
+    MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
+};
 
 /// A distinct exposed patch on an existing structural cell. Several disjoint
 /// patches may name one cell; their combined area must fit its exposed area.
@@ -64,6 +70,7 @@ pub enum SolidGasError {
     Thermal(DepositionError),
     Gas(GasEnergyError),
     Source(ThermalMaterialError),
+    Transport(MaterialNetworkError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
@@ -111,6 +118,14 @@ impl From<NewtonError> for SolidGasError {
         Self::Newton(error)
     }
 }
+impl From<MaterialNetworkError> for SolidGasError {
+    fn from(error: MaterialNetworkError) -> Self {
+        match error {
+            MaterialNetworkError::Thermal(DepositionError::Cancelled) => Self::Cancelled,
+            other => Self::Transport(other),
+        }
+    }
+}
 
 /// Exact endpoint material snapshot and reciprocal transfer of one patch.
 #[derive(Clone, Debug)]
@@ -130,6 +145,8 @@ pub struct SolidGasReport {
     pub thermal: EnergyAudit,
     pub gas: GasHeatStep,
     pub contacts: Vec<SolidGasContactSample>,
+    /// Exact accepted cell and internal-link transport sources, when supplied.
+    pub transport: Option<MaterialNetworkSample>,
     pub external_thermal_heat_j: f64,
     pub external_gas_heat_j: f64,
     pub solid_to_gas_heat_j: f64,
@@ -206,6 +223,25 @@ impl PreparedContact<'_> {
             body_distance_m: self.contact.geometry.cell_distance_m,
         }
     }
+
+    fn resolve(
+        &self,
+        source: &TetCellMaterial<'_>,
+        gas: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+        phase: EquilibriumPhaseState,
+        transport: Option<&MaterialNetworkSample>,
+    ) -> Result<
+        crate::cavity_phs::piston::thermal::ConductanceSample<ResolvedMaterialStatePoint>,
+        SolidGasError,
+    > {
+        let layers = self.layers(source);
+        Ok(
+            match transport::cell_material(transport, self.contact.cell)? {
+                Some(material) => layers.resolve_from_material(gas, phase, material.clone())?,
+                None => layers.resolve(gas, phase)?,
+            },
+        )
+    }
 }
 
 impl<'m> SolidEnthalpy<'m> {
@@ -241,6 +277,72 @@ impl<'m> SolidEnthalpy<'m> {
         initial_energy_increments_j: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SolidGasCandidate<'m, 't>, SolidGasError> {
+        self.step_gas_with_transport(
+            thermal,
+            gas,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            None,
+            controls,
+            initial_energy_increments_j,
+            cx,
+        )
+    }
+
+    /// The same joint gas/solid solve with temperature-dependent internal heat
+    /// transport from the original, resistor-free prepared material network.
+    ///
+    /// Prepare once and retain that source selection across intervals. Every
+    /// trial refreshes cell k(T, phase), lowers existing half-cell resistances
+    /// through the original owner, and resolves the gas patches at that same
+    /// endpoint. Structural cells must share the original material and physical
+    /// coordinates. A gas-facing property must use the same claim as the cell's
+    /// transport bundle when one is present. Resistors refuse instead of losing
+    /// their electrical work; use the circuit coupling owner for that case.
+    ///
+    /// All fixed-geometry, source-domain, cancellation and energy admission of
+    /// `step_with_isochoric_gas` remains active. The exact accepted transport
+    /// snapshots are retained in `report().transport`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_isochoric_gas_transport<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: &PreparedMaterialNetwork<'_, '_>,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SolidGasCandidate<'m, 't>, SolidGasError> {
+        self.step_gas_with_transport(
+            thermal,
+            gas,
+            target_s,
+            external_gas_heat_j,
+            contacts,
+            Some(transport),
+            controls,
+            initial_energy_increments_j,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_gas_with_transport<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: Option<&PreparedMaterialNetwork<'_, '_>>,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SolidGasCandidate<'m, 't>, SolidGasError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
         controls.newton.validate()?;
@@ -269,6 +371,7 @@ impl<'m> SolidEnthalpy<'m> {
             ));
         }
         let initial = self.resolve(thermal, cx)?;
+        let (_, initial_transport) = self.resolve_gas_transport(transport, thermal, cx)?;
         let initial_gas_temperature_k = gas.state().state().temperature;
         let mut ordered: Vec<_> = contacts.iter().collect();
         ordered.sort_by_key(|contact| contact.id);
@@ -327,9 +430,12 @@ impl<'m> SolidEnthalpy<'m> {
             )]);
             // The accepted start must still support the same source, even if
             // a supplied initial guess happens to return to an earlier domain.
-            entry
-                .layers(&bound.source)
-                .resolve(gas.state(), initial.samples()[element].phase)?;
+            entry.resolve(
+                &bound.source,
+                gas.state(),
+                initial.samples()[element].phase,
+                initial_transport.as_ref(),
+            )?;
             prepared.push(entry);
         }
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
@@ -353,12 +459,13 @@ impl<'m> SolidEnthalpy<'m> {
                 &x[..n],
                 |endpoint| {
                     let state = self.resolve(endpoint, cx)?;
+                    let (conductances, transport_sample) =
+                        self.resolve_gas_transport(transport, endpoint, cx)?;
                     let empty_sources = BTreeMap::new();
-                    let empty_links = BTreeMap::new();
                     let external = finite(
                         dt * endpoint.external_step_power_w(
                             &empty_sources,
-                            &empty_links,
+                            &conductances,
                             checkpoint,
                         )?,
                     )?;
@@ -368,9 +475,12 @@ impl<'m> SolidEnthalpy<'m> {
                     for entry in &prepared {
                         checkpoint()?;
                         let phase = state.samples()[entry.element].phase;
-                        let sample = entry
-                            .layers(&self.cells[entry.element].source)
-                            .resolve(next_gas.state(), phase)?;
+                        let sample = entry.resolve(
+                            &self.cells[entry.element].source,
+                            next_gas.state(),
+                            phase,
+                            transport_sample.as_ref(),
+                        )?;
                         let difference =
                             phase.temperature_k() - next_gas.state().state().temperature;
                         let power = finite(sample.conductance_w_k * difference)?;
@@ -418,7 +528,7 @@ impl<'m> SolidEnthalpy<'m> {
                         finite(gas_step.stored_energy_change_j - external_gas_heat_j - net)?;
                     Ok::<_, SolidGasError>(StepCoefficients {
                         sources_w: sources,
-                        conductances_w_k: empty_links,
+                        conductances_w_k: conductances,
                         payload: (
                             next_gas,
                             gas_step,
@@ -427,6 +537,7 @@ impl<'m> SolidEnthalpy<'m> {
                             net,
                             external,
                             gas_residual,
+                            transport_sample,
                         ),
                     })
                 },
@@ -468,7 +579,7 @@ impl<'m> SolidEnthalpy<'m> {
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
         let (
             thermal,
-            (gas, gas_step, state, contacts, net, external, gas_energy_residual_j),
+            (gas, gas_step, state, contacts, net, external, gas_energy_residual_j, transport),
             audit,
         ) = trial.accept(
             controls.cell_energy_tolerance_j,
@@ -499,6 +610,7 @@ impl<'m> SolidEnthalpy<'m> {
                 thermal: audit,
                 gas: gas_step,
                 contacts,
+                transport,
                 external_thermal_heat_j: external,
                 external_gas_heat_j,
                 solid_to_gas_heat_j: net,

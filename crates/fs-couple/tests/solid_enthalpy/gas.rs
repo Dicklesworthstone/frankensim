@@ -11,6 +11,9 @@ use fs_solver::NewtonKrylovConfig;
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{Composition, CompositionBasis};
 
+#[path = "gas/transport.rs"]
+mod transport;
+
 // Reuse the existing manufactured NASA9/transport fixture, not a new gas law.
 #[allow(dead_code)]
 #[path = "../material_exchange/gas.rs"]
