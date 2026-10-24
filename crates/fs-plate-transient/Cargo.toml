@@ -11,6 +11,8 @@ description = "Spatial DKT plate trajectories and physical-parameter adjoints th
 layer = "L3"
 
 [dependencies]
+fs-dcontact = { path = "../fs-dcontact" }
+fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-sparse = { path = "../fs-sparse" }
 fs-time = { path = "../fs-time" }

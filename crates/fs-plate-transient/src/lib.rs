@@ -16,3 +16,7 @@ pub mod moving_load;
 pub use moving_load::{
     MovingPlateLoad, MovingPlateLoadBudget, MovingPlateLoadError, PlateLoadKeyframe,
 };
+
+/// Reciprocal normal contact between a spatial plate footprint and a finite-mass body.
+pub mod impact;
+pub use impact::*;

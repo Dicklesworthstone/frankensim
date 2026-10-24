@@ -198,6 +198,41 @@ impl PlatePatchStencil {
         })
     }
 
+    /// Check that this patch still uses the supplied model's support indexing.
+    ///
+    /// This compares the dimension and every contributing nodal DOF snapshot,
+    /// so an equally sized model with different supports cannot silently receive
+    /// another model's forces. It does not compare mesh geometry: after moving
+    /// nodes or changing connectivity, locate a new patch from that mesh.
+    ///
+    /// # Errors
+    /// Refuses a changed dimension, node count, support set or reduced index.
+    pub fn validate_model(&self, model: &PlateModel) -> Result<(), PlateLoadError> {
+        if model.free != self.free {
+            return Err(PlateLoadError::Dimension {
+                expected: self.free,
+                actual: model.free,
+            });
+        }
+        for (stencil, _) in &self.points {
+            for (local, &node) in stencil.nodes.iter().enumerate() {
+                let start = node.checked_mul(3).ok_or(PlateLoadError::InvalidMesh(
+                    "patch node DOF index overflows",
+                ))?;
+                for component in 0..3 {
+                    if model.dof_map.get(start + component)
+                        != Some(&stencil.reduced[local][component])
+                    {
+                        return Err(PlateLoadError::InvalidMesh(
+                            "patch support/index snapshot differs from model",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Total physical area represented by the caller's quadrature, in m².
     #[must_use]
     pub fn area_m2(&self) -> f64 {

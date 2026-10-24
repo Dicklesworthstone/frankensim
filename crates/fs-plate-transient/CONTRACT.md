@@ -64,3 +64,42 @@ all knot-load VJPs, physical work, failed-query rollback and an independently
 assembled dense trajectory/gradient reference. These authored regressions
 require native execution for qualification; focused source type checks alone
 do not establish whole-trajectory behavior.
+
+## Reciprocal finite-mass impact
+
+`PlateImpact` appends one physical body translation to the complete reduced
+spatial plate state. A fixed `PlatePatchStencil` supplies a work-conjugate row
+`b`: closure is `z - b*q_plate`, and the same row applies the opposite
+contact force to the plate. Constructor admission checks the patch's support
+indexing against the bound model, including equally sized but differently
+indexed models. Mesh geometry and the fixed footprint remain caller-owned.
+
+The adapter reuses the admitted scalar `fs-dcontact::Obstacle` and its
+`ContactStorage` potential, Hunt–Crossley loss, non-attractive unloading cap,
+and analytic tangents. Original law gaps, quadrature weights, stiffness,
+exponent, internal loss and provenance remain unchanged. Footprint area
+distributes a **total** contact law; it does not multiply that law again.
+The contact-only inner storage is zero, so plate elastic energy is counted once.
+
+Displacement- and velocity-dependent resistance participates in the shared
+implicit generalized-alpha solve, consistent initial acceleration and discrete
+adjoints. There is no lagged force injection, modal truncation or second time
+integrator. Plate and applied-load parameters retain their original order;
+body mass, contact-law controls, footprint and geometry are fixed in these
+derivatives. Contact switching and unloading-cap corners use the original
+owner's selected one-sided derivatives.
+
+The probe reports plate/body kinetic energy, plate/contact potential energy,
+closure and relative velocity, penetration, normal force and separate physical
+contact/plate dissipation. These are instantaneous physical quantities.
+Generalized-alpha may also dissipate numerically and is not an exact discrete
+contact-energy ledger. The footprint is an averaged normal port: this does not
+claim local surface conformity, tangential friction, changing contact topology
+or rigid-body rotations.
+
+Run `cargo run -p fs-plate-transient --example plate_impact` for a clamped
+DKT plate and a moving body. The example prints CSV of both motions, contact
+force, penetration and energy/dissipation, using explicitly illustrative SI
+inputs. `tests/plate_impact.rs` covers reciprocal power, unchanged law measure,
+unloading/separation branches, tangent/transpose finite differences, momentum
+transfer and rebound, coupled step derivatives, and binding/budget refusals.
