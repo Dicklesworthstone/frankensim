@@ -313,3 +313,5 @@ fn g3_local_opening_gas_and_geometry_reach_modal_valve_and_microphone() {
     let (partitioned, _) = render(build(&text, 1));
     assert_eq!(pressure, partitioned);
 }
+
+mod dg;

@@ -38,6 +38,9 @@
 //! acoustic traction and swept volume, including full material-loss histories.
 //! Omission retains whole positive-side exposure; an explicit empty selection
 //! shelters a blade from this acoustic pressure port without removing mechanics.
+/// Material modal mechanics bound to the shared exact DG bore and source clock.
+pub mod dg;
+
 mod plate;
 mod boundaries;
 mod radiation;

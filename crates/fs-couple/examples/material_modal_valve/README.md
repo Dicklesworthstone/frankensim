@@ -651,3 +651,41 @@ and mutual-radiation memories, and exercise material, local-gas, force and
 reservoir substitutions in the same pressure and PCM path. The CLI regression
 retains the upstream typed-key example and separately renders the sampled
 example; malformed key programs refuse before either output is created.
+
+## Use the same material plates with the DG bore
+
+`paired-dg.performance` selects `frankensim-material-modal-dg-valve-v1`.
+It retains both original regional plates and all six requested modes, with
+the same material viscosity, slit flow and contact owners. The actual DG
+inlet gas and mean pressure/flow impedance enter that retained mechanical
+system. Change the material pack or gas record in the source data to rebuild
+the coupled physical properties.
+
+After the normalization steps above, render the supplied finite source with:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-dg.performance" "$modal_demo_dir/paired-dg.wav" \
+  --decimate --block 37
+```
+
+This fixture declares a 96 kHz mechanical/output source clock and observes
+**internal mean inlet pressure**. `--decimate` performs the existing explicit
+conversion to 48 kHz. The synthetic bore, plate and material data demonstrate
+integration; spatial, nonlinear-time and measured-instrument validation remain
+separate work.
+
+The DG schema starts with `audio RATE RATE SAMPLES FULL_SCALE_PA`, requires
+`propagator exact-zoh`, and uses `ambient` followed by the shared `dg_tube` or
+`dg_bore` records. After `slit_length`, select `observation inlet-pressure` or
+`observation baffled-outlet X Y Z RINGS ANGLES FMAX_HZ`. The latter requires
+the shared computed DG radiation declaration and uses that reaction source's
+original outlet geometry and exterior gas. It does not infer an exterior
+from the reed's inlet gas.
+
+`valve`, `limits`, `contact`, `loss`, `blades`, the complete plate blocks,
+optional wetted surfaces, pressure shapes, spatial closure, source forces,
+source pressures, and the canonical schedule keep the same record meanings
+shown above. This DG route has one explicit upstream pressure supply; it
+does not declare the separate upstream tract or moving graph boundaries of
+the two-sided schema. Every force/pressure event uses the mechanical clock.

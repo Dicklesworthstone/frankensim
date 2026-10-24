@@ -5238,3 +5238,22 @@ all retained modal/Maxwell coordinates, prescribed traction work, rollback and
 scheduled playback. These are coupling invariants, not measured
 clarinet/oboe fidelity or convergence certificates. Native test execution and
 instrument-specific time/space/material validation remain separate requirements.
+
+## Authored material-modal DG sources
+
+`frankensim-material-modal-dg-valve-v1` makes the loaded DG composition
+reachable through the existing material-card/mesh readers and `music_render
+wind`. One or two original regional plates retain all requested signed modes,
+selected tensor viscosity or Maxwell histories, wetted geometry, spatial
+pressure, contact closure and source-mesh force controls. The material source
+binds the actual DG inlet gas and mean impedance. Shared DG input owns local
+gas fields, wall memory and any computed exterior reaction; material inputs
+do not replace those owners with density-only tuning.
+
+The source declares equal mechanical/output clocks and ExactZoh; downstream
+PCM decimation is explicit. A named inlet trace remains internal pressure.
+Baffled output requires the original computed terminal and uses its exterior
+gas, outlet geometry and accepted outward flow. The supplied paired-DG
+fixture and regression sources are manufactured integration data, not an
+instrument qualification. Clock/structure, missing material claims, absent
+pressure ports and unbound exterior observations refuse without substitution.
