@@ -39,17 +39,22 @@ residual, physical heat defect and endpoint-temperature defect are all exposed.
 The scalar material tangent remains isothermal; it is not the derivative of the
 coupled thermal solve.
 
-With an admitted affine common modulus multiplier `S(T)=a+b*T`, the original
-retained branch strains define reference spring potential
+With an admitted affine common modulus multiplier `S(T)=a+b*T` and affine free
+thermal strain `f(T)` with slope `alpha`, the original retained branch strains
+define reference spring potential
 `Xi=(E_inf*e^2 + sum(E_j*q_j^2))/2`. Mechanical free energy is `psi=S*Xi`,
-mechanical entropy is `s=-b*Xi`, and mechanical internal energy is `U=psi+T*s`.
+mechanical entropy is `s=alpha*sigma-b*Xi`, and mechanical internal energy is
+`U=psi+T*s`. Native mechanical strain subtracts the actual free-strain change
+from the point's own birth temperature; retained branch strains follow that
+same strain increment. Positive, negative and zero expansion slopes are allowed.
 The original native mechanical update reports coefficient work
-`C_psi=(S_new-S_old)*Xi_old`; its branch state and time integration are unchanged.
+`C_psi=(S_new-S_old)*Xi_old` and thermal-eigenstrain work
+`W_th=-sigma_new*(f_new-f_old)`; its branch state and time integration are unchanged.
 The SAME caloric callback receives
 
-`Q_internal = volume*(D - C_psi) - delta(volume*T*s)`.
+`Q_internal = volume*(D - C_psi - W_th) - delta(volume*T*s)`.
 
-The second and third terms are reversible exchange and may cool the specimen.
+The coefficient-work and entropy terms are reversible exchange and may cool the specimen.
 Physical dashpot dissipation `D` stays nonnegative and numerical loss remains
 outside thermal storage. `FeedbackStep::applied_heat_j` is this signed total;
 `mechanical_energy.dissipated` remains the independent physical loss density.
@@ -59,20 +64,49 @@ The report additionally exposes `reversible_heat_j`,
 read the actual accepted endpoint contributions. Global balances use internal
 energy, whereas the original point's `stored_energy_j_m3()` is spring free energy.
 
-Every source/law knot participates in affine admission. A modulus kink refuses
-even if endpoint values alone suggest an affine line. Affine `S` contributes no
-fixed-strain heat-capacity correction. Endpoint integration remains first order
+Every source/law knot participates in affine admission. A modulus or free-strain
+kink refuses even if endpoint values alone suggest an affine line. Endpoint integration remains first order
 and need not conserve adiabatic entropy exactly; its error is not extra material
 heating. These quantities do not claim a measured constitutive law.
 
 All admissible dashpot dissipation is assumed to thermalize locally in this
 rung. The chart must be strictly increasing, single-solid-phase and
-constant-density; mass must match reference volume times that density. The common
-spring multiplier must be globally affine, and free strain remains constant.
-Relaxation and heat capacity may vary with temperature. Non-affine modulus,
-thermal eigenstrain, phase changes and volume work require additional terms and
+constant-reference-density; mass must match reference volume times that density.
+Both the common spring multiplier and free thermal strain must be globally affine.
+Relaxation and heat capacity may vary with temperature. Non-affine spring/free-strain
+laws, phase changes and finite-deformation volume work require additional terms and
 are refused. Independent model inputs are not automatically qualified
 as the same measured material. A material name never selects missing properties.
+
+### Thermal expansion and positive heat capacity
+
+Expansion changes the fixed-strain heat capacity. With the viscous strains held
+fixed, `e_T=q_j,T=-alpha`, so
+`psi_TT=alpha^2*S*K0-2*alpha*b*A0`, where `K0=E_inf+sum(E_j)` and
+`A0=E_inf*e+sum(E_j*q_j)`. The total volumetric capacity is
+`rho*dh/dT-T*psi_TT`. This follows the free-energy derivative convention in
+[Abeyaratne, Continuum Mechanics, Vol. II, §8.4](https://web.mit.edu/abeyaratne/Volumes/RCA_Vol_II.pdf);
+the present implementation is a bounded uniaxial hereditary model.
+
+Admission uses the minimum actual caloric-chart segment capacity and a sufficient
+full-range bound `T_max*(alpha^2*S_max*K0+2*abs(alpha*b)*A_max)`, with
+`A_max=strain_limit*(E_inf+2*sum(E_j))`. For native viscous strain `v=e-q`,
+backward Euler gives `v_new=(1-a)*e_new+a*v_old`. Birth at zero and bounded
+mechanical strain therefore bound every branch by `abs(q)<=2*strain_limit`;
+expansion-bearing endpoint histories check that envelope explicitly. The bound
+includes all instantaneous branch stiffness and the mixed expansion/modulus
+term even when the current material is stress-free. Insufficient capacity
+refuses before publishing a coupled state. Zero expansion retains the prior path.
+
+The existing compatible strip/beam solve turns uniform free heating into
+extension, constrained heating into stress, and unequal layer expansion into
+curvature. Finite capacitor energy can drive that response through the original
+Joule and conduction paths. The oscillator likewise responds through its native
+force and inertia; its finite-gas pressure is the original fixed-volume EOS,
+not a new acoustic or moving-wall pressure-work model. Focused regressions use
+independent free/constrained thermal solutions, cross-section equilibrium,
+retained Maxwell histories and complete energy balances. Native Rust execution
+of these new cases remains unrun in the editing environment.
 
 ## Runnable coupled example
 

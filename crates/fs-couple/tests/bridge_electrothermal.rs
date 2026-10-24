@@ -82,6 +82,106 @@ fn finite_capacitor_heat_matches_midpoint_rc_without_thermalizing_numerical_beam
 }
 
 #[test]
+fn finite_electrical_heat_bends_bonded_layers_from_expansion_data_alone() {
+    let run=|alpha:f64| {
+        let slope=-0.005;
+        let expansion=[alpha,0.0];
+        let materials=expansion.map(|a|material_with_affine_scale(5.0,0.0,1.0,40.0*a,
+            vec![(280.0,0.002),(320.0,0.002)],None,
+            vec![(280.0,0.1),(320.0,0.1)],slope));
+        let mut events:Vec<_>=CELLS.into_iter().enumerate().map(|(i,id)| {
+            let mut c=cell(id,i);c.segment_id=20;
+            TimedEvent {time_s:0.0,event:Event::Birth(c)}
+        }).collect();
+        events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {
+            id:5,a:CELLS[0],b:CELLS[1],area_m2:0.001,conductance_w_k:0.002})});
+        let heat=DepositionSimulation::new(events,&[
+            (MaterialId(0),materials[0].caloric.curve() as &dyn ThermalLaw),
+            (MaterialId(1),materials[1].caloric.curve() as &dyn ThermalLaw)],
+            DepositionBudget {max_cells:2,max_links:1,max_events:3,max_substeps:100}).unwrap()
+            .advance_to(0.0,StepConfig {max_dt_s:0.1,energy_tolerance_j:1e-9},||Ok(())).unwrap().0;
+        let mut beam=Bridge::new(&[(20,LENGTH)],Support::CantileverLeft,
+            solid::Budget {max_cells:1,max_layers_per_cell:2,max_branch_states:4}).unwrap();
+        for i in 0..2 {
+            beam=beam.deposit_bonded_material_layer(LAYERS[i],geometry(i),
+                &materials[i].mechanical,&materials[i].caloric,
+                &BTreeMap::from([(20,300.0)]),&mut ||false).unwrap();
+        }
+        let map=[0,1].map(|i|BridgeThermalBinding {axial_cell:20,
+            section:LayerThermalBinding {layer:LAYERS[i],cell:CELLS[i],
+                material:&materials[i].mechanical,caloric:&materials[i].caloric}});
+        let context=point(300.0);
+        let k=fs_matdb::PropertyKey::new("conductivity",fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS);
+        let cells=[0,1].map(|i|MaterialCell {cell:CELLS[i],material_id:MaterialId(i as u64),
+            curve:materials[i].caloric.curve(),point:ThermalMaterialPoint {
+                material:&materials[i].card,context:&context,temperature_axis:"T",liquid_fraction_axis:None},
+            conductivity:Some((&k,MaterialPropertySelection::SingleClaimOnly))});
+        let resistors=[CellResistor {destination:ResistorCell {branch:1,cell:CELLS[0]},
+            selection:MaterialPropertySelection::SingleClaimOnly,length_m:LENGTH,area_m2:AREA}];
+        let links=[fs_couple::circuit_enthalpy::material::ConductionLink {
+            link:5,distance_a_m:0.0005,distance_b_m:0.0005}];
+        let network=MaterialNetwork {cells:&cells,resistors:&resistors,links:&links};
+        let prepared=network.prepare(&heat,||false).unwrap();
+        let old=circuit(&prepared,&heat,CHARGE);
+        let next=step_candidate(&heat,&beam,&map,&old,&prepared,&[],0.2,0.0,&[0.0],
+            controls(),&[0.0;2],||false).unwrap();
+        let t=CELLS.map(|id|next.thermal().temperature_k(id).unwrap());
+        let s=t.map(|v|1.0+slope*(v-300.0));
+        let e=s.map(|v|1e8*v);
+        let f=[0,1].map(|i|expansion[i]*(t[i]-300.0));
+        let z=[0,1].map(|i|geometry(i).centroid_z_m);
+        let inertia=AREA*0.001_f64.powi(2)/12.0;
+        // Independent cross-section equilibrium: integrate E*(eps-z*kappa-f)
+        // and its moment through each rectangular layer, with zero applied load.
+        let k00=AREA*(e[0]+e[1]);let k01=-AREA*(e[0]*z[0]+e[1]*z[1]);
+        let k11=e[0]*(AREA*z[0]*z[0]+inertia)+e[1]*(AREA*z[1]*z[1]+inertia);
+        let r0=AREA*(e[0]*f[0]+e[1]*f[1]);
+        let r1=-AREA*(e[0]*z[0]*f[0]+e[1]*z[1]*f[1]);
+        let det=k00*k11-k01*k01;
+        let strain=(r0*k11-r1*k01)/det;let curvature=(k00*r1-k01*r0)/det;
+        let section=next.bridge().cells()[0].section();
+        near(section.axial_strain(),strain,1e-12);
+        near(section.curvature_per_m(),curvature,1e-9);
+        let tip=next.bridge().deformed_position_m(LENGTH,0.0).unwrap();
+        near(tip[0],LENGTH*(1.0+strain),1e-12);
+        near(tip[1],0.5*curvature*LENGTH*LENGTH,1e-11);
+        let eta=0.2/(2.0*1000.0*CAP);let charge=CHARGE*(1.0-eta)/(1.0+eta);
+        let joule=(CHARGE*CHARGE-charge*charge)/(2.0*CAP);
+        near(next.circuit().charges_c()[0],charge,1e-12);
+        let mut u=0.0;let mut entropy_energy=0.0;let mut psi_sum=0.0;let mut reversible=0.0;
+        for i in 0..2 {
+            let elastic=strain-z[i]*curvature-f[i];
+            let psi=0.5*e[i]*LENGTH*(AREA*elastic*elastic+inertia*curvature*curvature);
+            let integrated_stress=VOLUME*e[i]*elastic;
+            let entropy=expansion[i]*integrated_stress-slope*psi/s[i];
+            let rev=integrated_stress*f[i]-t[i]*entropy;
+            u+=psi+t[i]*entropy;entropy_energy+=t[i]*entropy;psi_sum+=psi;reversible+=rev;
+            let conduction=0.2*0.002*(t[1-i]-t[i]);
+            near(MASS*5.0*(t[i]-300.0),(if i==0 {joule}else{0.0})+conduction+rev,
+                config().cell_energy_tolerance_j);
+        }
+        let report=next.report();
+        near(report.mechanical_internal_energy_change_j,u,1e-11);
+        near(report.mechanical_entropy_energy_change_j,entropy_energy,1e-11);
+        near(report.reversible_heat_j,reversible,1e-11);
+        near(report.mechanical.energy_j.numerical_dissipation,psi_sum,1e-11);
+        assert_eq!(report.mechanical.energy_j.dissipated,0.0);
+        near(report.deposited_mechanical_heat_j,reversible,1e-11);
+        near(report.other_external_heat_j,0.0,1e-14);
+        near(u+next.thermal().energy_j()+report.electrical.stored_after_j+psi_sum,
+            CHARGE*CHARGE/(2.0*CAP),config().total_energy_tolerance_j);
+        assert_eq!(old.charges_c(),&[CHARGE]);assert_eq!(beam.time_s(),0.0);
+        (t,tip)
+    };
+    let fixed=run(0.0);let expanding=run(1e-4);let contracting=run(-1e-4);
+    near(fixed.1[1],0.0,1e-14);
+    assert!(expanding.1[1]>0.001 && expanding.1[0]>LENGTH);
+    near(expanding.1[1],-contracting.1[1],1e-10);
+    near(expanding.1[0]-LENGTH,LENGTH-contracting.1[0],1e-12);
+    for i in 0..2 {near(expanding.0[i],contracting.0[i],1e-7);}
+}
+
+#[test]
 fn electrical_resistivity_only_substitution_changes_current_temperature_and_sag() {
     let run=|rho| {
         let m=material_r(3e8,vec![(280.0,rho),(320.0,rho)]);let (heat,beam)=seed(&m,0.0);

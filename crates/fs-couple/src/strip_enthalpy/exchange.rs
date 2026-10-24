@@ -26,7 +26,7 @@ fn finite(value: f64) -> Result<f64, DepositionError> {
 
 /// Evaluate the same two equal Gauss weights as `LayeredStrip`. The native
 /// `energy` is already integrated over this layer's full reference volume.
-/// `CaloricPoint` owns admission of the affine modulus and constant free strain,
+/// `CaloricPoint` owns admission of affine modulus and free thermal strain,
 /// and its getters include the actual retained branch history at each point.
 pub(super) fn layer_exchange<E>(
     old: &Layer<'_>, next: &Layer<'_>, old_heat: &DepositedCell,
@@ -49,8 +49,8 @@ pub(super) fn layer_exchange<E>(
         return Err(StripEnthalpyError::Invalid("material heat uses the original layer reference volume"));
     }
     if !energy.dissipated.is_finite() || energy.dissipated < 0.0
-        || !energy.modulus_work.is_finite() || energy.thermal_strain_work != 0.0 {
-        return Err(StripEnthalpyError::Invalid("invalid material loss or unsupported thermal eigenstrain work"));
+        || !energy.modulus_work.is_finite() || !energy.thermal_strain_work.is_finite() {
+        return Err(StripEnthalpyError::Invalid("invalid material loss or thermal coefficient work"));
     }
     let mut internal_change = 0.0;
     let mut entropy_energy_change = 0.0;
@@ -71,9 +71,11 @@ pub(super) fn layer_exchange<E>(
         let next_ts = finite(after.mechanical().temperature_k()*after.mechanical_entropy_j_k())?;
         entropy_energy_change = finite(entropy_energy_change + finite(next_ts-old_ts)?)?;
     }
-    // Native identity: Δpsi + D + N = W + Cpsi. Hence Qrev=-Cpsi-Δ(T*s)
+    // Native identity: Δpsi + D + N = W + Cpsi + Wth, Wth=-sigma_new*Δf.
+    // Hence Qrev=-Cpsi-Wth-Δ(T*s), including the actual thermal eigenstrain work,
     // closes ΔU + ΔH + N = W + Qexternal without thermalizing numerical loss.
-    let reversible_heat = finite(-energy.modulus_work-entropy_energy_change)?;
+    let reversible_heat = finite(-energy.modulus_work-energy.thermal_strain_work
+        -entropy_energy_change)?;
     Ok(LayerThermalExchange {
         mechanical_internal_energy_change_j: internal_change,
         mechanical_entropy_energy_change_j: entropy_energy_change,

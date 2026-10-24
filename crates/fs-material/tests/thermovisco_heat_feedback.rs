@@ -151,7 +151,7 @@ fn foreign_states_heat_creation_and_transport_failures_cannot_publish() {
 
 #[test]
 fn cancellation_work_exhaustion_and_late_material_failure_leave_both_histories_intact() {
-    let material = affine_law(-0.005, vec![(3e8, 1.0)]);
+    let material = expanding_law(-0.005, 1e-5, vec![(3e8, 1.0)]);
     let curve = chart(5.0, 8);
     let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(), &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
     let saved = old.clone();
@@ -408,4 +408,141 @@ fn affine_hereditary_history_matches_independent_cooling_relaxation_and_unloadin
             + MASS*step.next.caloric_state().specific_enthalpy_j_kg() + numerical, work, 1e-9);
         q = next_q; strain = next_strain; temperature = next_t; old = step.next;
     }
+}
+
+fn expanding_law(slope: f64, alpha: f64, branches: Vec<(f64, f64)>) -> ThermoMaxwell {
+    ThermoMaxwell::new(1e8, branches, [280.0, 300.0, 320.0].into_iter()
+        .map(|t| ThermalKnot { temperature_k: t, modulus_scale: 1.0+slope*(t-300.0),
+            relaxation_scale: 1.0, free_strain: 0.007+alpha*(t-300.0) }).collect(),
+        Limits { max_strain: 0.04, max_strain_rate_s: 10.0 }).unwrap()
+}
+
+#[test]
+fn declared_free_strain_produces_free_expansion_or_constrained_stress_with_the_same_heat_owner() {
+    let curve = chart(100.0, 20);
+    for alpha in [-1e-4, 1e-4] {
+        let material = expanding_law(0.0, alpha, vec![]);
+        let old = CaloricPoint::try_new(material.birth(300.0, 0.003).unwrap(),
+            &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+        let thermostat = |input: UniformEnthalpyStepInput<'_>| {
+            Ok::<_, Infallible>(UniformEnthalpyStep {
+                state: input.curve.state_at_specific_enthalpy(1000.0).unwrap(),
+                external_heat_j: MASS*1000.0-input.internal_heat_j,
+                energy_residual_tolerance_j: 1e-10, report: (),
+            })
+        };
+        let free = old.advance_controlled(stress(0.0), 0.2, config(), thermostat, ||false).unwrap();
+        close(free.next.mechanical().total_strain(), 0.003+alpha*10.0, 1e-15);
+        close(free.next.mechanical().stress_pa(), 0.0, 1e-7);
+        close(free.next.mechanical_internal_energy_j(), 0.0, 1e-12);
+        close(free.reversible_heat_j, 0.0, 1e-12);
+        close(free.transport.external_heat_j, 1.0, 1e-12);
+        let fixed = old.advance(0.003, 0.2, config(), thermostat, ||false).unwrap();
+        let sigma = -1e8*alpha*10.0;
+        let entropy = VOLUME*alpha*sigma;
+        let psi = 0.5*VOLUME*1e8*(alpha*10.0).powi(2);
+        close(fixed.next.mechanical().stress_pa(), sigma, 1e-7);
+        close(fixed.next.mechanical_entropy_j_k(), entropy, 1e-15);
+        close(fixed.next.mechanical_internal_energy_j(), psi+310.0*entropy, 1e-12);
+        close(fixed.reversible_heat_j, -300.0*entropy, 1e-12);
+        close(fixed.mechanical_energy.thermal_strain_work*VOLUME, -sigma*alpha*10.0*VOLUME, 1e-12);
+        assert_eq!(fixed.external_mechanical_work_j, 0.0);
+        assert_eq!(fixed.mechanical_energy.dissipated, 0.0);
+        assert!(fixed.combined_residual_j.abs()<1e-10);
+        assert_eq!(old.mechanical().birth_strain(), 0.003);
+        assert_eq!(old.time_s(), 0.0);
+    }
+}
+
+#[test]
+fn affine_expansion_reproduces_signed_adiabatic_thermoelastic_cooling() {
+    let curve = chart(100.0, 21);
+    for alpha in [-1e-4, 1e-4] {
+        let material = expanding_law(0.0, alpha, vec![]);
+        let old = CaloricPoint::try_new(material.birth(300.0, 0.0).unwrap(),
+            &curve, 0.0, MASS, VOLUME, 0.001).unwrap();
+        let step = old.advance(0.01, 0.2, config(), adiabatic, ||false).unwrap();
+        // C*dT=-T0*alpha*V*E*(epsilon-alpha*dT), from the independent
+        // constant-E free-energy derivative and native endpoint work convention.
+        let delta_t = -300.0*alpha*VOLUME*1e8*0.01
+            /(MASS*100.0-300.0*alpha*alpha*VOLUME*1e8);
+        let e = 0.01-alpha*delta_t;
+        let entropy = alpha*VOLUME*1e8*e;
+        close(step.next.caloric_state().temperature_k(), 300.0+delta_t, 1e-9);
+        close(step.next.mechanical().stress_pa(), 1e8*e, 1e-6);
+        close(step.reversible_heat_j, -300.0*entropy, 1e-11);
+        close(step.applied_heat_j, MASS*100.0*delta_t, 1e-10);
+        close(step.next.mechanical_internal_energy_j(),
+            0.5*VOLUME*1e8*e*e+(300.0+delta_t)*entropy, 1e-11);
+        assert_eq!(step.mechanical_energy.dissipated, 0.0);
+        assert!(step.mechanical_energy.numerical_dissipation>0.0);
+        assert_eq!(step.reversible_heat_j.is_sign_negative(), alpha>0.0);
+        assert!(step.combined_residual_j.abs()<1e-10);
+    }
+}
+
+#[test]
+fn expansion_and_softening_preserve_branch_memory_and_close_an_independent_thermal_root() {
+    let (alpha, slope, dt) = (1e-4, -0.005, 0.2);
+    let curve = chart(100.0, 22);
+    let material = expanding_law(slope, alpha, vec![(3e8,1.0)]);
+    let mut old = CaloricPoint::try_new(material.birth(300.0,0.0).unwrap(),
+        &curve,0.0,MASS,VOLUME,0.001).unwrap();
+    let (mut e0,mut q0,mut t0,mut work,mut numerical) = (0.0,0.0,300.0,0.0,0.0);
+    for strain in [0.02,0.02,0.0,-0.01,0.0] {
+        let xi0=0.5*VOLUME*(1e8*e0*e0+3e8*q0*q0);
+        let s0=alpha*VOLUME*(1.0+slope*(t0-300.0))*(1e8*e0+3e8*q0)-slope*xi0;
+        let reference=|t:f64| {
+            let e=strain-alpha*(t-300.0);
+            let q=(q0+e-e0)/(1.0+dt);
+            let scale=1.0+slope*(t-300.0);
+            let xi=0.5*VOLUME*(1e8*e*e+3e8*q*q);
+            let sigma=scale*(1e8*e+3e8*q);
+            let entropy=alpha*VOLUME*sigma-slope*xi;
+            let reversible=VOLUME*sigma*alpha*(t-t0)-slope*(t-t0)*xi0-(t*entropy-t0*s0);
+            let loss=VOLUME*scale*3e8*dt*q*q;
+            (MASS*100.0*(t-t0)-loss-reversible,e,q,scale*xi+t*entropy,reversible)
+        };
+        let (mut lo,mut hi)=(280.0,320.0);
+        assert!(reference(lo).0<0.0 && reference(hi).0>0.0);
+        for _ in 0..60 {
+            let mid=0.5*(lo+hi);
+            if reference(mid).0>0.0 {hi=mid;} else {lo=mid;}
+        }
+        let temperature=0.5*(lo+hi);
+        let (_,e,q,internal,reversible)=reference(temperature);
+        let step=old.advance(strain,dt,config(),adiabatic,||false).unwrap();
+        close(step.next.caloric_state().temperature_k(),temperature,1e-9);
+        close(step.next.mechanical().branch_strains()[0],q,1e-13);
+        close(step.next.mechanical_internal_energy_j(),internal,1e-10);
+        close(step.reversible_heat_j,reversible,1e-10);
+        work+=step.external_mechanical_work_j;
+        numerical+=VOLUME*step.mechanical_energy.numerical_dissipation;
+        close(internal+MASS*100.0*(temperature-300.0)+numerical,work,1e-9);
+        assert!(step.combined_residual_j.abs()<1e-9);
+        e0=e;q0=q;t0=temperature;old=step.next;
+    }
+}
+
+#[test]
+fn expansion_capacity_admission_covers_all_chart_segments_branches_and_modulus_coupling() {
+    let material=expanding_law(0.0,1e-4,vec![(3e8,1.0)]);
+    // Initial Cp=100 would pass. The supported hot segment has Cp=.5;
+    // its 500 J/(m3 K) exceeds the equilibrium-spring term but not all springs.
+    let curve=EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([23;32]),
+        [(280.0,-2000.0),(300.0,0.0),(320.0,10.0)].into_iter()
+            .map(|(temperature_k,specific_enthalpy_j_kg)|EnthalpyPhaseKnot {
+                temperature_k,specific_enthalpy_j_kg,liquid_mass_fraction:0.0,
+                bulk_density_kg_m3:1000.0 }).collect()).unwrap();
+    assert!(matches!(CaloricPoint::try_new(material.birth(295.0,0.0).unwrap(),
+        &curve,-500.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
+    let coupled=expanding_law(-0.005,1e-4,vec![(3e8,1.0)]);
+    let low=chart(5.0,24);
+    let adequate=chart(20.0,25);
+    // The alpha² term alone would pass Cp=5. The mixed alpha*S' term must
+    // also cover previously loaded histories, even at this stress-free birth.
+    assert!(matches!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
+        &low,0.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
+    assert!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
+        &adequate,0.0,MASS,VOLUME,0.001).is_ok());
 }

@@ -371,7 +371,9 @@ fn source_binding_does_not_relax_caloric_physics_or_source_units() {
     ] {
         add(&mut c, name, dims, vec![(280.0, value), (320.0, value)]);
     }
-    add(&mut c, "free", ONE, vec![(280.0, 0.0), (320.0, 0.001)]);
+    // This affine expansion is mechanically admitted but exceeds the complete
+    // caloric capacity bound; source binding must retain that physical refusal.
+    add(&mut c, "free", ONE, vec![(280.0, 0.0), (320.0, 0.04)]);
     let c = card(c);
     let source = resolve(&c, &point(280.0), &point(320.0)).unwrap();
     let thermal = caloric(&c, 5.0, &point(280.0), &point(320.0));
@@ -467,6 +469,55 @@ fn cancellation_refuses_before_publication_and_zero_branches_still_need_declared
         )
         .unwrap();
     assert_eq!(step.next.caloric_state().temperature_k(), 300.0);
+}
+
+#[test]
+fn original_free_strain_claims_drive_signed_expansion_and_refuse_kinks_or_inadequate_capacity() {
+    for (alpha,middle_offset,cp,admissible) in [
+        (1e-4,0.0,5.0,true),(-1e-4,0.0,5.0,true),
+        (1e-4,1e-4,5.0,false),(1e-4,0.0,0.5,false),
+    ] {
+        let mut claims=ClaimSet::new();
+        for (name,dims,value) in [
+            ("E_inf",Pressure::DIMS,1e8),("E0",Pressure::DIMS,3e8),
+            ("tau0",Time::DIMS,1.0),("scale",ONE,1.0),("shift",ONE,1.0),
+            ("density",Density::DIMS,1000.0),("cp",Dims([2,0,-2,-1,0,0]),cp),
+        ] { add(&mut claims,name,dims,vec![(280.0,value),(320.0,value)]); }
+        add(&mut claims,"free",ONE,
+            vec![(280.0,-20.0*alpha),(300.0,middle_offset),(320.0,20.0*alpha)]);
+        let card=card(claims);
+        let source=resolve(&card,&point(280.0),&point(320.0)).unwrap();
+        let heat=caloric(&card,cp,&point(280.0),&point(320.0));
+        assert_eq!(source.samples().len(),3);
+        let old=source.caloric_point(&heat,300.0,0.002,1e-6,0.001);
+        if !admissible {
+            assert!(matches!(old,Err(SourceError::Feedback(_))));
+            continue;
+        }
+        let old=old.unwrap();
+        let step=old.advance_controlled(MechanicalControl::Stress {
+            stress_pa:0.0,tolerance_pa:1e-6 },0.2,FeedbackConfig {
+                max_iterations:10,temperature_tolerance_k:1e-10,
+                energy_tolerance_j:1e-9,relaxation:1.0 },|input| {
+            let target_h=15.0*cp;
+            Ok::<_,Infallible>(UniformEnthalpyStep {
+                state:input.curve.state_at_specific_enthalpy(target_h).unwrap(),
+                external_heat_j:input.mass_kg*(target_h-input.initial.specific_enthalpy_j_kg())
+                    -input.internal_heat_j,
+                energy_residual_tolerance_j:1e-10,report:(),
+            })
+        },||false).unwrap();
+        assert!((step.next.mechanical().total_strain()-(0.002+15.0*alpha)).abs()<1e-15);
+        assert!(step.next.mechanical().stress_pa().abs()<1e-7);
+        assert!(step.next.mechanical().branch_strains()[0].abs()<1e-15);
+        assert!(step.next.mechanical_internal_energy_j().abs()<1e-12);
+        assert!(step.reversible_heat_j.abs()<1e-12);
+        assert!(step.combined_residual_j.abs()<1e-10);
+        assert_eq!(step.next.caloric_curve().material_card_identity(),card.content_hash());
+        assert!(core::ptr::eq(step.next.mechanical().law(),source.law()));
+        assert_eq!(old.mechanical().total_strain(),0.002);
+        assert_eq!(old.time_s(),0.0);
+    }
 }
 
 fn static_quantity(kind: QuantityKind) -> QuantitySpec {

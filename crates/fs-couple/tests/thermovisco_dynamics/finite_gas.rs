@@ -178,7 +178,7 @@ fn g1_finite_source_gas_matches_two_capacity_solution_and_opposite_heat() {
 #[test]
 fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() {
     scope(|cx, gate| {
-        let source = sources_with_modulus_slope(0.02, 1000.0, true, true, None, -0.005);
+        let source = sources_with_thermal_slopes(0.02, 1000.0, true, true, None, -0.005, 0.0);
         let initial = Oscillator::try_new(&source.mechanical, &source.caloric,
             geometry(0.0), 300.0, 0.0, 0.5).unwrap();
         let mut states = [initial.clone(), initial.clone()];
@@ -247,6 +247,116 @@ fn g3_finite_inventory_changes_actual_hereditary_vibration_without_heat_leaks() 
 }
 
 #[test]
+fn g3_source_expansion_drives_motion_and_changes_the_retained_finite_gas() {
+    scope(|cx, gate| {
+        let slopes = [0.0, 1e-4];
+        let modulus_slope = -0.005;
+        let sources = slopes.map(|alpha|
+            sources_with_thermal_slopes(1.0, 1000.0, true, true, None, modulus_slope, alpha));
+        let g = geometry(0.0);
+        let initial = sources.each_ref().map(|source|
+            Oscillator::try_new(&source.mechanical, &source.caloric, g, 300.0, 0.0, 0.0).unwrap());
+        let mut states = initial.clone();
+        let initial_gas = gas(330.0, 1e-6);
+        let mut gases = [initial_gas.clone(), initial_gas.clone()];
+        let boundaries = sources.each_ref().map(|source| boundary(source, 100.0));
+        let dt = 0.00005;
+        let volume = g.length_m * g.cross_section_m2;
+        let mut numerical = [0.0; 2];
+        let mut maximum_motion_difference = 0.0_f64;
+        let mut maximum_pressure_difference = 0.0_f64;
+        let mut signed_exchange = [false; 2];
+        // Independent source potential, evaluated on the actual retained
+        // elastic branch strain. Gas pressure below is the isochoric EOS,
+        // not an acoustic microphone or moving-wall pressure-work model.
+        let account = |state: &Oscillator<'_>, alpha: f64| {
+            let point = state.point().mechanical();
+            let t = point.temperature_k();
+            let e = point.total_strain() - alpha * (t - 300.0);
+            let q = point.branch_strains()[0];
+            let xi = 0.5 * (1e6 * e * e + 3e6 * q * q);
+            let scale = 1.0 + modulus_slope * (t - 300.0);
+            let stress = scale * (1e6 * e + 3e6 * q);
+            let entropy = volume * (alpha * stress - modulus_slope * xi);
+            (e, xi, stress, entropy, volume * scale * xi + t * entropy)
+        };
+        for _ in 0..48 {
+            for index in 0..2 {
+                let old = &states[index];
+                let alpha = slopes[index];
+                let saved_gas = gases[index].clone();
+                let environment = FiniteGasThermalEnvironment {
+                    gas: &gases[index], body: &boundaries[index], gas_heat_j: 0.0,
+                    gas_solve: gas_solve(), exchange: exchange(8e-4),
+                    maximum_gas_temperature_increment_k: 100.0,
+                };
+                let step = old.step(0.0, dt, config(),
+                    |input| environment.advance(cx, input), gate).unwrap();
+                let old_t = old.point().mechanical().temperature_k();
+                let t = step.next.point().mechanical().temperature_k();
+                assert!((300.0..320.0).contains(&t));
+                let (old_e, old_xi, _, old_entropy, old_internal) = account(old, alpha);
+                let (e, _, stress, entropy, internal) = account(&step.next, alpha);
+                let tau = 0.005 * (1.0 - 0.0475 * (t - 300.0));
+                let branch = tau / (tau + dt)
+                    * (old.point().mechanical().branch_strains()[0] + e - old_e);
+                close(step.next.point().mechanical().branch_strains()[0], branch, 1e-13);
+                close(step.next.point().mechanical().stress_pa(), stress, 1e-7);
+                close(step.next.point().mechanical_entropy_j_k(), entropy, 1e-13);
+                close(step.material_internal_energy_change_j, internal - old_internal, 1e-11);
+                close(step.next.point().mechanical_internal_energy_j(), internal, 1e-11);
+                let thermal_work = -stress * alpha * (t - old_t);
+                let coefficient_work = modulus_slope * (t - old_t) * old_xi;
+                close(step.material_energy.thermal_strain_work, thermal_work, 1e-9);
+                close(step.reversible_material_heat_j,
+                    -volume * (coefficient_work + thermal_work)
+                        - (t * entropy - old_t * old_entropy), 1e-11);
+                close(step.applied_material_heat_j,
+                    step.material_heat_j + step.reversible_material_heat_j,
+                    config().feedback.energy_tolerance_j);
+                close(old.effective_mass_kg() * (step.next.velocity_m_s() - old.velocity_m_s()) / dt
+                    + g.cross_section_m2 * stress, 0.0, config().force_tolerance_n);
+                assert_eq!(step.external_work_j, 0.0);
+                assert_eq!(step.transport.external_heat_j, -step.transport.report.solid_to_gas_heat_j);
+                assert_eq!(gases[index], saved_gas, "thermal proposals cannot debit the accepted gas");
+                if index == 1 {
+                    signed_exchange[0] |= step.reversible_material_heat_j > 1e-12;
+                    signed_exchange[1] |= step.reversible_material_heat_j < -1e-12;
+                }
+                numerical[index] += step.numerical_loss_j;
+                gases[index] = step.transport.report.next_gas;
+                states[index] = step.next;
+                let medium = gases[index].state().state();
+                close(medium.pressure, 100000.0 * medium.temperature / 330.0, 1e-7);
+                close(gases[index].mass_kg(), initial_gas.mass_kg(), 1e-18);
+                let caloric_change = states[index].point().mass_kg()
+                    * (states[index].point().caloric_state().specific_enthalpy_j_kg()
+                        - initial[index].point().caloric_state().specific_enthalpy_j_kg());
+                let gas_change = gases[index].mass_kg()
+                    * (gases[index].state().specific_internal_energy_j_kg()
+                        - initial_gas.state().specific_internal_energy_j_kg());
+                close(states[index].kinetic_energy_j() + internal + caloric_change
+                    + gas_change + numerical[index], 0.0, 2e-8);
+            }
+            maximum_motion_difference = maximum_motion_difference
+                .max((states[1].velocity_m_s() - states[0].velocity_m_s()).abs());
+            maximum_pressure_difference = maximum_pressure_difference
+                .max((gases[1].state().state().pressure - gases[0].state().state().pressure).abs());
+        }
+        assert_eq!(states[0].extension_m(), 0.0);
+        assert_eq!(states[0].velocity_m_s(), 0.0);
+        assert!(states[1].extension_m() > 1e-6);
+        assert!(maximum_motion_difference > 1e-3);
+        assert!(maximum_pressure_difference > 0.01);
+        assert!(signed_exchange.into_iter().all(|present| present));
+        assert!(states[1].point().mechanical().branch_strains()[0].abs() > 1e-8);
+        assert_eq!(states[1].point().mass_kg(), states[0].point().mass_kg());
+        assert_eq!(states[1].effective_mass_kg(), states[0].effective_mass_kg());
+        assert_eq!(initial[1].point().time_s(), 0.0);
+    });
+}
+
+#[test]
 fn g3_insulation_preserves_original_motion_and_radiation_stays_external() {
     scope(|cx, gate| {
         let source = sources(2.0, 1000.0, true, false);
@@ -293,7 +403,7 @@ fn g3_insulation_preserves_original_motion_and_radiation_stays_external() {
 #[test]
 fn g4_failed_finite_gas_trials_and_late_cancellation_preserve_both_owners() {
     scope(|cx, gate| {
-        let source = sources_with_modulus_slope(0.02, 1000.0, true, true, None, -0.005);
+        let source = sources_with_thermal_slopes(0.02, 1000.0, true, true, None, -0.005, 1e-5);
         let initial = Oscillator::try_new(&source.mechanical, &source.caloric,
             geometry(0.0), 300.0, 0.0, 0.5).unwrap();
         let old = initial.step(0.0, 0.00005, config(), adiabatic, gate).unwrap().next;

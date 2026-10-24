@@ -2011,12 +2011,17 @@ concentration may describe fixed external conditions. Evolving mechanical
 coordinates and a second temperature coordinate cannot be frozen into a thermal
 law. Frequency-dependent values refuse; thermovisco frequency applicability
 alone must retain its static/relaxed endpoint. Caloric feedback admits a globally
-affine common modulus multiplier across the complete retained knot union. It
-uses mechanical entropy from the free-energy derivative and accounts for
+affine common modulus multiplier and free thermal strain across the complete
+retained knot union. It uses mechanical entropy `s=alpha*sigma-S_prime*Xi`
+from the free-energy derivative and accounts for
 internal energy separately from spring free energy. Physical dashpot loss and
-signed reversible exchange enter the original caloric transport owner; numerical
-loss remains separate. Changing free strain, density, phase, or modulus derivative
-still requires additional thermodynamic terms and refuses.
+signed reversible exchange, including the native thermal-eigenstrain work,
+enter the original caloric transport owner; numerical loss remains separate.
+Expansion requires positive total heat capacity over the complete chart and
+admitted strain/history range, including instantaneous branch stiffness and
+the mixed expansion/modulus derivative term. The native branch-strain envelope
+is enforced on expansion-bearing endpoints. Changing reference density, phase,
+or either affine derivative still requires additional terms and refuses.
 
 ### Shared phase-dependent conductivity
 

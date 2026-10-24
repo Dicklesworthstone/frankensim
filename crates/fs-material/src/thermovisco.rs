@@ -10,7 +10,7 @@
 //! The endpoint work audit separates mechanical work, thermal-eigenstrain work,
 //! modulus-change work, physical dashpot dissipation, and backward-Euler numerical
 //! dissipation. The mechanical update alone is a discrete free-energy balance;
-//! `thermal` supplies affine-modulus entropy and internal energy when explicitly
+//! `thermal` supplies affine-modulus/expansion entropy and internal energy when explicitly
 //! bound to a caloric owner. Mechanical loss is not implicitly deposited as heat.
 //! No glass-transition plateau, crystallization, plasticity, damage, finite-strain
 //! response, calibration, or three-dimensional constitutive law is inferred.

@@ -13,11 +13,13 @@
 //! reach that same thermal owner. Endpoint numerical losses in material and
 //! kinetic energy remain separate, nonthermal accounts.
 //!
-//! Source admission requires constant free strain/density, a single solid phase
-//! and a globally affine spring-modulus scale. The original material owner
-//! retains coefficient work and mechanical entropy when stiffness changes.
-//! Relaxation times and heat capacity can also depend on temperature. No expansion,
-//! phase change, spatial heat gradients, radiation of
+//! Source admission requires constant reference density, a single solid phase,
+//! globally affine spring-modulus and free-strain laws, and positive coupled
+//! caloric capacity over the admitted material range. The original material
+//! owner retains coefficient/eigenstrain work and mechanical entropy, so heating
+//! can drive expansion and inertial motion through the same force balance.
+//! Relaxation times and heat capacity can also depend on temperature. Reference
+//! transport geometry stays fixed; no phase change, spatial heat gradients, radiation of
 //! sound or high-frequency structural accuracy is inferred from this reduction.
 
 use core::{convert::Infallible, fmt};

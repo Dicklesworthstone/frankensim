@@ -5,14 +5,15 @@
 //! reversible thermoelastic exchange enter the SAME transport owner.
 //! Backward-Euler numerical dissipation remains a separate, nonthermal loss.
 //!
-//! This rung admits a globally affine common spring-modulus multiplier, fixed free strain,
+//! This rung admits globally affine common spring-modulus and free-strain laws,
 //! a strictly increasing single-solid-phase caloric chart, and constant density.
-//! With reference spring potential Xi, psi=S(T)*Xi, s=-S'*Xi and U=psi+T*s.
-//! Every original modulus knot participates in affine admission; derivative
-//! jumps refuse. Affine S adds no fixed-strain heat-capacity correction.
+//! With reference spring potential Xi, psi=S(T)*Xi,
+//! s=f'*sigma-S'*Xi and U=psi+T*s. Every original knot participates in affine
+//! admission; derivative jumps refuse. The actual caloric chart must exceed a
+//! conservative bound on the expansion contribution to fixed-strain heat capacity.
 //! Relaxation times and caloric heat capacity may depend on temperature.
 //! At fixed reference pressure/density, chart h changes are caloric internal
-//! energy changes. Thermal eigenstrain, phase changes and volume work remain
+//! energy changes. Phase changes and finite-deformation volume work remain
 //! unsupported. Endpoint integration can create numerical entropy; it is not
 //! physical dashpot heating or a proof of exact adiabatic entropy conservation.
 
@@ -180,6 +181,7 @@ pub struct CaloricPoint<'a> {
     surface_area_m2: f64,
     time_s: f64,
     modulus_slope_per_k: f64,
+    free_strain_slope_per_k: f64,
     mechanical_entropy_j_k: f64,
     mechanical_internal_energy_j: f64,
 }
@@ -226,8 +228,10 @@ impl<'a> CaloricPoint<'a> {
     /// Its temperature must exactly match the supplied caloric coordinate.
     ///
     /// # Errors
-    /// Refuses non-solid/variable-density caloric charts, non-affine spring
-    /// multipliers, changing free strain, inconsistent mass/volume, and invalid state.
+    /// Refuses non-solid/variable-density caloric charts, non-affine spring or
+    /// free-strain laws, inadequate total heat capacity, inconsistent mass/volume,
+    /// and invalid state. Expansion is a reference eigenstrain, not changing mass
+    /// or finite-volume kinematics.
     pub fn try_new(point: Point<'a>, curve: &'a EquilibriumEnthalpyPhaseCurve,
         specific_enthalpy_j_kg: f64, mass_kg: f64, volume_m3: f64,
         surface_area_m2: f64) -> Result<Self, FeedbackError> {
@@ -239,14 +243,16 @@ impl<'a> CaloricPoint<'a> {
         }
         let knots = &point.law.knots;
         let reference = knots[0];
-        if knots.iter().any(|k| k.free_strain != reference.free_strain) {
-            return Err(FeedbackError::Invalid("thermal eigenstrain needs its own coupled caloric law"));
-        }
         let modulus_knots: Vec<_> = knots.iter()
             .map(|k| (k.temperature_k, k.modulus_scale)).collect();
         let modulus_slope_per_k = crate::state_point::affine_temperature_slope(
             &modulus_knots, reference.temperature_k, reference.modulus_scale)
             .map_err(FeedbackError::Invalid)?;
+        let free_strain_knots: Vec<_> = knots.iter()
+            .map(|k| (k.temperature_k, k.free_strain)).collect();
+        let free_strain_slope_per_k = crate::state_point::affine_temperature_slope(
+            &free_strain_knots, reference.temperature_k, reference.free_strain)
+            .map_err(|_| FeedbackError::Invalid("free thermal strain must be globally affine over every original knot"))?;
         let density = curve.knots()[0].bulk_density_kg_m3;
         let represented_mass = product(volume_m3, density)?;
         if (represented_mass / mass_kg - 1.0).abs() > 32.0 * f64::EPSILON
@@ -261,10 +267,12 @@ impl<'a> CaloricPoint<'a> {
             || !point.stored_energy_j_m3().is_finite() {
             return Err(FeedbackError::Invalid("mechanical history and caloric temperature must match"));
         }
+        admit_expansion_capacity(&point, curve, modulus_slope_per_k, free_strain_slope_per_k)?;
         let (mechanical_entropy_j_k, mechanical_internal_energy_j) =
-            thermodynamics(&point, modulus_slope_per_k, volume_m3)?;
+            thermodynamics(&point, modulus_slope_per_k, free_strain_slope_per_k, volume_m3)?;
         Ok(Self { point, curve, state, mass_kg, volume_m3, surface_area_m2, time_s: 0.0,
-            modulus_slope_per_k, mechanical_entropy_j_k, mechanical_internal_energy_j })
+            modulus_slope_per_k, free_strain_slope_per_k,
+            mechanical_entropy_j_k, mechanical_internal_energy_j })
     }
 
     #[must_use]
@@ -279,7 +287,7 @@ impl<'a> CaloricPoint<'a> {
     pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
     #[must_use]
     pub const fn time_s(&self) -> f64 { self.time_s }
-    /// Mechanical entropy from the admitted affine free energy, excluding the
+    /// Mechanical entropy from the admitted spring and expansion free energy, excluding the
     /// independent caloric chart [J/K]. This is a constitutive contribution,
     /// not the total specimen entropy or an entropy-production receipt.
     #[must_use]
@@ -391,6 +399,7 @@ impl<'a> CaloricPoint<'a> {
                     mass_kg: self.mass_kg, volume_m3: self.volume_m3,
                     surface_area_m2: self.surface_area_m2, time_s: final_time,
                     modulus_slope_per_k: self.modulus_slope_per_k,
+                    free_strain_slope_per_k: self.free_strain_slope_per_k,
                     mechanical_entropy_j_k: exchange.entropy_j_k,
                     mechanical_internal_energy_j: exchange.internal_energy_j };
                 return Ok(FeedbackStep { next, control, stress_residual_pa, external_mechanical_work_j,
@@ -411,15 +420,18 @@ impl<'a> CaloricPoint<'a> {
 
     fn transfer<E>(&self, step: &super::Step<'_>) -> Result<ThermalExchange, FeedbackError<E>> {
         let (entropy_j_k, internal_energy_j) = thermodynamics(&step.point,
-            self.modulus_slope_per_k, self.volume_m3)?;
-        let entropy_energy_change_j = if self.modulus_slope_per_k == 0.0 { 0.0 } else {
+            self.modulus_slope_per_k, self.free_strain_slope_per_k, self.volume_m3)?;
+        let entropy_energy_change_j = if self.modulus_slope_per_k == 0.0
+            && self.free_strain_slope_per_k == 0.0 { 0.0 } else {
             finite(product(step.point.temperature_k(), entropy_j_k)?
                 - product(self.point.temperature_k(), self.mechanical_entropy_j_k)?)?
         };
-        // The original native balance is delta(psi)+D+N=W+C_psi.
+        // The original native balance is delta(psi)+D+N=W+C_psi+W_thermal,
+        // with W_thermal=-sigma_new*delta(f) from the original eigenstrain.
         // Adding delta(T*s) gives internal energy; caloric exchange cancels
-        // C_psi+delta(T*s), with numerical loss N never supplied to transport.
+        // C_psi+W_thermal+delta(T*s), with N never supplied to transport.
         let reversible_heat_j = finite(-product(self.volume_m3, step.energy.modulus_work)?
+            - product(self.volume_m3, step.energy.thermal_strain_work)?
             - entropy_energy_change_j)?;
         let dissipated_j = product(self.volume_m3, step.energy.dissipated)?;
         if dissipated_j < 0.0 {
@@ -441,14 +453,59 @@ struct ThermalExchange {
     heat_j: f64,
 }
 
-fn thermodynamics<E>(point: &Point<'_>, slope_per_k: f64, volume_m3: f64)
+fn thermodynamics<E>(point: &Point<'_>, slope_per_k: f64, expansion_per_k: f64, volume_m3: f64)
     -> Result<(f64, f64), FeedbackError<E>> {
-    let entropy_j_k = if slope_per_k == 0.0 { 0.0 } else {
+    let modulus_entropy_j_k = if slope_per_k == 0.0 { 0.0 } else {
         product(volume_m3, product(-slope_per_k, point.unscaled_storage())?)?
+    };
+    let entropy_j_k = if expansion_per_k == 0.0 { modulus_entropy_j_k } else {
+        // With v_j=e-q_j, native BE gives v_new=(1-a)*e_new+a*v_old.
+        // Born v=0 and admitted |e|<=limit therefore imply |q|<=2*limit.
+        // Enforce that envelope on the actual history as well: the conservative
+        // heat-capacity admission must never silently cover a larger state.
+        let bound = product(2.0, point.law.limits.max_strain)?;
+        if point.q.iter().any(|q| !q.is_finite() || q.abs() > bound) {
+            return Err(FeedbackError::Invalid("thermal expansion exceeds the admitted branch-strain capacity envelope"));
+        }
+        finite(modulus_entropy_j_k
+            + product(volume_m3, product(expansion_per_k, point.stress_pa())?)?)?
     };
     let internal_energy_j = finite(product(volume_m3, point.stored_energy_j_m3())?
         + product(point.temperature_k(), entropy_j_k)?)?;
     Ok((entropy_j_k, internal_energy_j))
+}
+
+fn admit_expansion_capacity<E>(point: &Point<'_>, curve: &EquilibriumEnthalpyPhaseCurve,
+    modulus_slope: f64, expansion: f64) -> Result<(), FeedbackError<E>> {
+    if expansion == 0.0 { return Ok(()); }
+    // At fixed total strain and viscous strains, psi_TT=alpha²*S*K0-2*alpha*b*A0,
+    // K0=E_inf+sum(E_j), A0=E_inf*e+sum(E_j*q_j). Total volumetric capacity is
+    // rho*dh/dT-T*psi_TT. Bound every admitted strain/history over the complete
+    // shared temperature range, not merely the currently stress-free endpoint.
+    let law = point.law;
+    let branch_modulus = law.branches.iter().try_fold(0.0,
+        |sum, &(e, _)| finite::<E>(sum+e))?;
+    let instantaneous = finite(law.equilibrium_pa+branch_modulus)?;
+    let stress_bound = product(law.limits.max_strain,
+        finite(law.equilibrium_pa+product(2.0, branch_modulus)?)?)?;
+    let scale = law.knots.iter().map(|k| k.modulus_scale).fold(0.0, f64::max);
+    let temperature = law.knots.last().expect("bounded law").temperature_k
+        .min(curve.knots().last().expect("bounded caloric chart").temperature_k);
+    let expansion_term = product(product(expansion, expansion)?, product(scale, instantaneous)?)?;
+    let mixed_term = product(product(2.0, product(expansion, modulus_slope)?.abs())?, stress_bound)?;
+    let capacity_bound = product(temperature, finite(expansion_term+mixed_term)?)?;
+    let mut caloric_capacity = f64::INFINITY;
+    for pair in curve.knots().windows(2) {
+        let dh = finite(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)?;
+        let dt = finite(pair[1].temperature_k-pair[0].temperature_k)?;
+        let cp = finite(dh/dt)?;
+        if !positive(cp) { return Err(FeedbackError::Invalid("positive caloric segment capacity required")); }
+        caloric_capacity = caloric_capacity.min(product(pair[0].bulk_density_kg_m3, cp)?);
+    }
+    if !caloric_capacity.is_finite() || caloric_capacity <= capacity_bound {
+        return Err(FeedbackError::Invalid("caloric capacity does not exceed the full thermal-expansion coupling bound"));
+    }
+    Ok(())
 }
 
 fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
