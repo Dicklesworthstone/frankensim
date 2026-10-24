@@ -195,7 +195,7 @@ fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
     let mut raw = vec![];
     for (r, run) in results {
         eprintln!(
-            "\r{} on {} blocks: {} x {:.2} s simulated in {:.2} s ({:.1} us/step, {:.2}x real time per simulation, {:.2}x for its batch; kernel {:.0} ms)",
+            "\r{} on {} blocks: {} x {:.2} s simulated in {:.2} s ({:.1} us/step, {:.2}x real time per simulation, {:.2}x for its batch; kernel compilation {:.0} ms)",
             run.device_name,
             run.blocks,
             r.len(),
