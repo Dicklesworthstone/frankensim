@@ -2357,3 +2357,76 @@ substance data or a spatially converged benchmark. The example retains the
 closed single-phase Boussinesq/Stokes restrictions and introduces no additional
 solver, state clock or gravitational-potential reservoir. Its actual entry tests
 cover material source identity, bounded support and data-only coupled response.
+
+
+
+
+### Open NSF axis with source-bound local linear characteristics
+
+`NsfGrid3::with_characteristic_axis` opens two opposed faces of the original
+NSF owner. One non-periodic axis (at least four cells), periodic transverse
+axes and a two-cell all-fluid collar are required. Interior stationary
+obstacles remain supported. Topology binds before stepping; manufactured body
+sources and moving edge walls are excluded. This supersedes the original
+closed-grid "no open boundary" limitation only within this narrow domain.
+
+Each face prescribes one incoming outward-normal acoustic characteristic
+`J- = delta u_n - delta p/(rho_ref*c_ref)`; the outgoing `J+` comes from the
+adjacent live cell. Entropy and tangential velocity use the inflow reference or
+the actual outflow donor. The reference density, impedance and caloric tangent
+come from the SAME retained `NsfGasMedium`. Reconstructed pressure and temperature
+query its actual NASA9 caloric energy and local transport, or the original
+GasSpec path; no independent reservoir gamma, density, sound speed, viscosity
+or conductivity is accepted. The declared bound on pressure, temperature and
+velocity perturbations must lie in (0, 0.1], with the original material support,
+Mach, temperature-window and viscosity refusals still active. Composition stays
+frozen. The entropy/acoustic boundary reconstruction is explicitly linearized
+about the authored reference; NASA9 energy inversion inside the grid remains
+nonlinear and source-owned.
+
+The same reconstructed face supplies incoming populations (adjacent
+post-collision non-equilibrium extrapolation), the conservative thermal-pressure
+force and the original FV enthalpy/conduction/viscous-work flux. Face energy is
+not injected as a manufactured source and boundary cells are not overwritten.
+The two-ended exchange reports actual streamed mass, streamed momentum plus the
+trapezoidal thermal-pressure impulse, FV total energy, the integral of normal
+volume flow and the actual pressure-work integral. Positive exchange leaves the
+grid. Area-averaged pressure times total flow is not substituted for integrated
+pressure work on a nonuniform face. Per-cell pressure/velocity/area traces remain
+available for a later explicit spatial projection. Lattice mass flux and
+continuum volume flow remain distinct, exposing their discretization difference.
+
+`set_incoming_characteristics` changes the two incoming acoustic data only at an
+accepted time boundary. It preserves physical density, velocity and total energy
+and rebases the full Guo half-source, including its second moment, together with
+the current face-flux history. A refusal publishes nothing. Every accepted step
+publishes face exchange with the existing fluid/material state; failed predictor
+passes publish neither. The optional boundary has no effect on the closed-grid
+population/energy arithmetic. Fixed cell-order reductions retain worker-count
+determinism. Face storage is proportional to face cells, not volume cells.
+
+`EnergyLedger::open_boundary_energy_j` is signed total energy entering these
+faces; its residual now subtracts this term separately from wall heat. The
+viscous-heating bookkeeping subtracts open internal-energy advection and heat,
+not the enthalpy/kinetic flux. Its remainder still is not independent evidence
+of physical dissipation. Momentum exchange closes the no-obstacle domain;
+stationary internal obstacle reactions are additional wall impulses.
+
+Focused tests in `nsf3_open_boundaries.rs` exercise analytic uniform throughflow
+on all axes, separately summed mass/momentum/energy budgets, incoming-wave work,
+outgoing-pulse refinement, NASA9 formation-offset invariance and source support,
+atomic refusals and workers. `nsf_open_channel` is an executable throughflow and
+incoming-pulse example with pressure/temperature/speed inputs; dry-air GasSpec
+owns its thermodynamics and transport. NASA9 source replacement is exercised
+through the same API in the focused tests. These tests/example have not been
+executed natively in the authoring environment.
+
+**No-claim boundary.** This is a first-order normal-face, local linear acoustic
+characteristic rung, not full nonlinear NSCBC, a qualified obliquely transparent
+boundary, moving interfaces, a DG/flow multirate mortar, a resolved flute jet or
+instrument-accuracy evidence. An independent NumPy plane-wave calculation of
+these formulas (not Rust execution) gave returned/residual pressure L2 ratios
+0.08120, 0.04191 and 0.01920 for 64/128/256 cells. That is a refinement check;
+it does not meet or establish the plan's -40 dB interface target. Native and
+multidimensional qualification remain necessary before stronger claims.
+

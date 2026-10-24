@@ -1,0 +1,450 @@
+//! Local linear acoustic characteristics on an open NSF axis.
+//!
+//! For the outward normal, J+ = du_n + dp/(rho_ref c_ref) leaves the
+//! domain and J- = du_n - dp/(rho_ref c_ref) enters it. Only J- is
+//! prescribed. The entropy and tangential characteristics use their upwind
+//! donor. This is the local linear, plane-normal rung of characteristic
+//! boundaries (Poinsot & Lele, JCP 101 (1992), 104-129,
+//! doi:10.1016/0021-9991(92)90046-2), not the full nonlinear NSCBC scheme.
+//!
+//! One reconstructed physical face state supplies the incoming lattice
+//! populations, thermal-pressure force and total-energy flux. The incoming
+//! populations extrapolate the adjacent post-collision non-equilibrium part;
+//! no cell is overwritten with a reservoir and no sponge absorbs its energy.
+//! The normal boundary stencil is first order. Oblique transparency, a
+//! <-40 dB reflection bound and resolved instrument accuracy are unqualified.
+
+use super::{NsfError, NsfGrid3, Q, THETA0, check_state, equilibrium};
+use crate::lattice3::Lattice3;
+
+/// Source-bound reference and one incoming plane-normal acoustic characteristic.
+/// Both faces use their own outward normal; low is negative, high positive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfCharacteristicBoundary {
+    pub reference_pressure_pa: f64,
+    pub reference_temperature_k: f64,
+    /// Cartesian velocity of the uniform exterior reference [m/s].
+    pub reference_velocity_m_s: [f64; 3],
+    /// `delta u_n - delta p / (rho_ref*c_ref)` [m/s]. Zero is the
+    /// unperturbed incoming acoustic characteristic, not zero throughflow.
+    pub incoming_characteristic_m_s: f64,
+}
+
+/// Two open faces on one axis of the original NSF grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfCharacteristicAxis {
+    pub axis: usize,
+    /// Low face followed by high face.
+    pub faces: [NsfCharacteristicBoundary; 2],
+    /// Bound on |delta p|/p_ref, |delta T|/T_ref and |delta u|/c_ref
+    /// at both the adjacent cells and reconstructed faces, in (0, 0.1].
+    /// This admission bound limits the linearization domain; it is not an
+    /// error estimate or a measured reflection guarantee.
+    pub maximum_relative_perturbation: f64,
+}
+
+/// One accepted boundary quadrature cell, suitable for an explicit mortar.
+/// Pressure and velocity are the actual common boundary state of the last
+/// accepted predictor, including the original solver's finite coupling error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NsfBoundaryTrace {
+    pub cell: [usize; 3],
+    pub area_m2: f64,
+    pub pressure_pa: f64,
+    pub temperature_k: f64,
+    pub density_kg_m3: f64,
+    pub outward_normal_velocity_m_s: f64,
+}
+
+/// Exchange during one accepted lattice step. Positive means OUT of the grid.
+/// The actual lattice mass flux is intentionally separate from the continuum
+/// characteristic volume flow; their discretization defect is not hidden.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NsfBoundaryExchange {
+    pub mass_out_kg: f64,
+    /// Streamed momentum plus the trapezoidal thermal-pressure impulse.
+    /// This includes pressure traction, not just advected momentum.
+    pub momentum_out_kg_m_s: [f64; 3],
+    /// Original FV enthalpy, conduction and viscous-work flux in the fixed
+    /// sensible-energy chart of this grid's retained gas owner.
+    pub total_energy_out_j: f64,
+    /// Time-and-area averaged pressure of this face.
+    pub mean_pressure_pa: f64,
+    /// Time-averaged integral of the reconstructed normal velocity [m^3/s].
+    pub normal_volume_flow_m3_s: f64,
+    /// Integral of p*u_n over area and this step [J]. This is not generally
+    /// mean_pressure_pa * normal_volume_flow_m3_s * dt for a nonuniform face.
+    pub pressure_work_out_j: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BoundaryFlux {
+    pub total_out: [f64; 2],
+    pub internal_out: [f64; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OpenFace {
+    pub rho: f64,
+    pub theta: f64,
+    pub u: [f64; 3],
+    internal: f64,
+    pressure_pa: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct OpenFaces {
+    axis: usize,
+    values: [Vec<OpenFace>; 2],
+}
+
+pub(super) struct IncomingPopulations {
+    axis: usize,
+    values: [Vec<[f64; Q]>; 2],
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct LinkExchange {
+    mass: f64,
+    momentum: [f64; 3],
+}
+
+fn plane_index(x: [usize; 3], dims: [usize; 3], axis: usize) -> usize {
+    match axis {
+        0 => x[1] + dims[1] * x[2],
+        1 => x[0] + dims[0] * x[2],
+        _ => x[0] + dims[0] * x[1],
+    }
+}
+
+impl IncomingPopulations {
+    pub(super) fn at(&self, x: [usize; 3], dims: [usize; 3], side: usize) -> &[f64; Q] {
+        &self.values[side][plane_index(x, dims, self.axis)]
+    }
+}
+
+fn norm(u: [f64; 3]) -> f64 {
+    (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt()
+}
+
+impl<L: Lattice3<27>> NsfGrid3<L> {
+    /// Open both faces of one non-periodic axis before the first step.
+    /// Transverse axes must be periodic and two complete layers next to each
+    /// open face must be fluid. Interior stationary obstacles remain allowed.
+    /// The collar removes ambiguous wall/open diagonal links. No extra cells,
+    /// damping or second flow owner are introduced.
+    ///
+    /// Reference and face thermodynamics/transport query the SAME gas source
+    /// as the interior. Frozen composition and the original source support,
+    /// temperature, viscosity and Mach refusals all still apply.
+    pub fn with_characteristic_axis(mut self, open: NsfCharacteristicAxis) -> Result<Self, NsfError> {
+        if self.steps != 0 || self.open.is_some() || self.sources.is_some() {
+            return Err(NsfError::Input(
+                "characteristic topology is cold-only and excludes manufactured body sources",
+            ));
+        }
+        let axis = open.axis;
+        if axis >= 3 || self.spec.periodic[axis] || self.spec.dims[axis] < 4
+            || (0..3).any(|a| a != axis && !self.spec.periodic[a])
+            || self.moving_walls
+        {
+            return Err(NsfError::Input(
+                "one non-periodic open axis needs >=4 cells and periodic transverse axes",
+            ));
+        }
+        for i in 0..self.n {
+            let x = self.at(i)[axis];
+            if (x < 2 || x >= self.spec.dims[axis] - 2) && self.solid[i] {
+                return Err(NsfError::Input("open faces require a two-cell all-fluid collar"));
+            }
+        }
+        self.rebind_characteristics(open)?;
+        Ok(self)
+    }
+
+    /// Change only the incoming acoustic data at an accepted time boundary.
+    /// Physical density, velocity and total energy are preserved. The Guo
+    /// half-force population chart and current face-flux history are rebased
+    /// together, so the next trapezoid uses the new data on both time levels.
+    /// Failure publishes neither data nor partial boundary state.
+    pub fn set_incoming_characteristics(&mut self, incoming_m_s: [f64; 2]) -> Result<(), NsfError> {
+        let mut open = self.open.ok_or(NsfError::Input("no characteristic axis is attached"))?;
+        for (face, value) in open.faces.iter_mut().zip(incoming_m_s) {
+            face.incoming_characteristic_m_s = value;
+        }
+        self.rebind_characteristics(open)
+    }
+
+    #[must_use]
+    pub const fn characteristic_axis(&self) -> Option<&NsfCharacteristicAxis> {
+        self.open.as_ref()
+    }
+
+    /// The two face exchanges of the last accepted step, low then high.
+    #[must_use]
+    pub const fn last_boundary_exchange(&self) -> Option<&[NsfBoundaryExchange; 2]> {
+        self.last_boundary_exchange.as_ref()
+    }
+
+    /// Quadrature traces in increasing original cell-index order.
+    #[must_use]
+    pub fn open_boundary_traces(&self, high: bool) -> Option<Vec<NsfBoundaryTrace>> {
+        let faces = self.open_faces.as_ref()?;
+        let side = usize::from(high);
+        let sign = if high { 1.0 } else { -1.0 };
+        let edge = if high { self.spec.dims[faces.axis] - 1 } else { 0 };
+        let mut traces = Vec::with_capacity(faces.values[side].len());
+        for i in 0..self.n {
+            let x = self.at(i);
+            if x[faces.axis] != edge { continue; }
+            let face = faces.values[side][plane_index(x, self.spec.dims, faces.axis)];
+            traces.push(NsfBoundaryTrace {
+                cell: x,
+                area_m2: self.law.dx_m * self.law.dx_m,
+                pressure_pa: face.pressure_pa,
+                temperature_k: self.law.kelvin_of_theta(face.theta),
+                density_kg_m3: face.rho * self.law.rho_ref_kg_m3,
+                outward_normal_velocity_m_s: sign * face.u[faces.axis] * self.law.dx_m / self.law.dt_s,
+            });
+        }
+        Some(traces)
+    }
+
+    /// Fluid mass [kg], independent of the face bookkeeping.
+    #[must_use]
+    pub fn total_mass_kg(&self) -> f64 {
+        let (rho, _) = self.macro_fields(&self.f);
+        rho.iter().zip(&self.solid).filter_map(|(&r, &solid)| (!solid).then_some(r))
+            .sum::<f64>() * self.law.rho_ref_kg_m3 * self.law.dx_m.powi(3)
+    }
+
+    /// Physical, half-force-corrected fluid momentum [kg m/s].
+    #[must_use]
+    pub fn total_momentum_kg_m_s(&self) -> [f64; 3] {
+        let (_, mom) = self.macro_fields(&self.f);
+        let mut total = [0.0; 3];
+        for i in 0..self.n {
+            if self.solid[i] { continue; }
+            for a in 0..3 { total[a] += mom[i][a] + 0.5 * self.force[i][a]; }
+        }
+        let unit = self.law.rho_ref_kg_m3 * self.law.dx_m.powi(4) / self.law.dt_s;
+        total.map(|p| p * unit)
+    }
+
+    fn rebind_characteristics(&mut self, open: NsfCharacteristicAxis) -> Result<(), NsfError> {
+        let bound = open.maximum_relative_perturbation;
+        if !bound.is_finite() || bound <= 0.0 || bound > 0.1 {
+            return Err(NsfError::Input("linear characteristic perturbation bound must lie in (0, 0.1]"));
+        }
+        let (rho, mom) = self.macro_fields(&self.f);
+        let u = self.velocity_field(&rho, &mom, &self.force);
+        let faces = self.resolve_open_faces(Some(&open), &rho, &u, &self.theta)?;
+        let force = self.force_field(&rho, &self.theta, faces.as_ref());
+        let mut f = self.f.clone();
+        for i in 0..self.n {
+            if self.solid[i] { continue; }
+            for q in 0..Q {
+                let c = L::E[q];
+                let difference: [f64; 3] = std::array::from_fn(|a| self.force[i][a] - force[i][a]);
+                let cf = (0..3).map(|a| f64::from(c[a]) * difference[a]).sum::<f64>();
+                let uf = (0..3).map(|a| u[i][a] * difference[a]).sum::<f64>();
+                let cu = (0..3).map(|a| f64::from(c[a]) * u[i][a]).sum::<f64>();
+                // Rebase the WHOLE Guo half source, including its second
+                // moment, so a data change cannot masquerade as viscous stress.
+                f[i][q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
+            }
+        }
+        let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material);
+        let (div, wall, flux) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, faces.as_ref())?;
+        self.open = Some(open);
+        self.open_faces = faces;
+        self.f = f;
+        self.force = force;
+        self.div = div;
+        self.wall_out = wall;
+        self.open_out = flux;
+        self.last_boundary_exchange = None;
+        Ok(())
+    }
+
+    pub(super) fn resolve_open_faces(
+        &self, open: Option<&NsfCharacteristicAxis>, rho: &[f64], u: &[[f64; 3]], theta: &[f64],
+    ) -> Result<Option<OpenFaces>, NsfError> {
+        let Some(open) = open else { return Ok(None); };
+        let count = self.n / self.spec.dims[open.axis];
+        let mut values = [Vec::with_capacity(count), Vec::with_capacity(count)];
+        let velocity_unit = self.law.dx_m / self.law.dt_s;
+        for (side, output) in values.iter_mut().enumerate() {
+            let boundary = open.faces[side];
+            let sign = if side == 0 { -1.0 } else { 1.0 };
+            let edge = if side == 0 { 0 } else { self.spec.dims[open.axis] - 1 };
+            let reference = self.spec.gas.at(boundary.reference_temperature_k, boundary.reference_pressure_pa)?;
+            if !boundary.incoming_characteristic_m_s.is_finite()
+                || !boundary.reference_velocity_m_s.iter().all(|v| v.is_finite())
+                || boundary.reference_temperature_k < self.spec.temperature_window_k[0]
+                || boundary.reference_temperature_k > self.spec.temperature_window_k[1]
+                || norm(boundary.reference_velocity_m_s) / reference.sound_speed > self.spec.maximum_mach
+            {
+                return Err(NsfError::Input("characteristic reference or incoming data outside the NSF domain"));
+            }
+            let impedance = reference.density * reference.sound_speed;
+            let alpha = (reference.gamma - 1.0) / reference.gamma
+                * reference.temperature / reference.pressure;
+            let normal_reference = sign * boundary.reference_velocity_m_s[open.axis];
+            for i in 0..self.n {
+                let x = self.at(i);
+                if x[open.axis] != edge { continue; }
+                let pi = self.law.pressure_pa(rho[i], theta[i]);
+                let ti = self.law.kelvin_of_theta(theta[i]);
+                let ui = u[i].map(|v| v * velocity_unit);
+                let outgoing = sign * ui[open.axis] - normal_reference
+                    + (pi - reference.pressure) / impedance;
+                let normal = normal_reference + 0.5 * (outgoing + boundary.incoming_characteristic_m_s);
+                let pressure = reference.pressure + 0.5 * impedance
+                    * (outgoing - boundary.incoming_characteristic_m_s);
+                let entropy_temperature = if normal >= 0.0 {
+                    ti - reference.temperature - alpha * (pi - reference.pressure)
+                } else { 0.0 };
+                let temperature = reference.temperature + alpha * (pressure - reference.pressure)
+                    + entropy_temperature;
+                let mut velocity = if normal >= 0.0 { ui } else { boundary.reference_velocity_m_s };
+                velocity[open.axis] = sign * normal;
+                let du_i = std::array::from_fn(|a| ui[a] - boundary.reference_velocity_m_s[a]);
+                let du_f = std::array::from_fn(|a| velocity[a] - boundary.reference_velocity_m_s[a]);
+                let perturbation = ((pi / reference.pressure) - 1.0).abs()
+                    .max((ti / reference.temperature - 1.0).abs())
+                    .max(norm(du_i) / reference.sound_speed)
+                    .max((pressure / reference.pressure - 1.0).abs())
+                    .max((temperature / reference.temperature - 1.0).abs())
+                    .max(norm(du_f) / reference.sound_speed);
+                if !perturbation.is_finite() || perturbation > open.maximum_relative_perturbation {
+                    return Err(NsfError::Input("characteristic cell or face leaves its declared linearization domain"));
+                }
+                let face_rho = pressure / (self.law.gas_constant * temperature * self.law.rho_ref_kg_m3);
+                let face_theta = self.law.theta_of_kelvin(temperature);
+                let face_u = velocity.map(|v| v / velocity_unit);
+                let material = self.spec.gas.resolve(&self.law, face_rho, face_theta)?;
+                let gamma = match &material {
+                    Some(m) => m.state.gamma,
+                    None => self.spec.gas.at(temperature, pressure)?.gamma,
+                };
+                check_state(&self.spec, gamma, i, face_rho, face_u, face_theta)?;
+                if temperature < self.spec.temperature_window_k[0] || temperature > self.spec.temperature_window_k[1] {
+                    return Err(NsfError::Window { cell: i, temperature_k: temperature,
+                        low_k: self.spec.temperature_window_k[0], high_k: self.spec.temperature_window_k[1] });
+                }
+                let internal = material.as_ref().map_or(face_theta / (self.law.gamma - 1.0),
+                    |m| m.sensible_energy_lattice);
+                output.push(OpenFace { rho: face_rho, theta: face_theta, u: face_u, internal, pressure_pa: pressure });
+            }
+        }
+        Ok(Some(OpenFaces { axis: open.axis, values }))
+    }
+
+    pub(super) fn characteristic_face<'a>(
+        &self, faces: Option<&'a OpenFaces>, i: usize, axis: usize, direction: i64,
+    ) -> Option<&'a OpenFace> {
+        let faces = faces?;
+        if axis != faces.axis { return None; }
+        let side = usize::from(direction > 0);
+        let x = self.at(i);
+        let edge = if side == 0 { 0 } else { self.spec.dims[axis] - 1 };
+        if x[axis] != edge { return None; }
+        Some(&faces.values[side][plane_index(x, self.spec.dims, axis)])
+    }
+
+    pub(super) fn open_energy_flux(
+        &self, face: &OpenFace, i: usize, axis: usize, direction: i64,
+        rho: &[f64], theta: &[f64], sig: &[[f64; 6]],
+    ) -> Result<(f64, f64), NsfError> {
+        let k = self.spec.gas.face_conductivity(&self.law,
+            0.5 * (theta[i] + face.theta),
+            0.5 * (self.law.pressure_pa(rho[i], theta[i]) + face.pressure_pa))?;
+        let heat = -2.0 * k * direction as f64 * (face.theta - theta[i]);
+        let s = sig[i];
+        let row = match axis { 0 => [s[0], s[3], s[4]], 1 => [s[3], s[1], s[5]], _ => [s[4], s[5], s[2]] };
+        let viscous_work = row[0] * face.u[0] + row[1] * face.u[1] + row[2] * face.u[2];
+        let kinetic = 0.5 * (face.u[0] * face.u[0] + face.u[1] * face.u[1] + face.u[2] * face.u[2]);
+        let total = face.rho * (face.internal + kinetic + face.theta) * face.u[axis]
+            - viscous_work + heat;
+        let internal = face.rho * face.internal * face.u[axis] + heat;
+        Ok((total, internal))
+    }
+
+    pub(super) fn open_incoming_populations(
+        &self, post: &[[f64; Q]], rho: &[f64], u: &[[f64; 3]],
+    ) -> Option<IncomingPopulations> {
+        let faces = self.open_faces.as_ref()?;
+        let mut values = [Vec::with_capacity(faces.values[0].len()), Vec::with_capacity(faces.values[1].len())];
+        for (side, output) in values.iter_mut().enumerate() {
+            let edge = if side == 0 { 0 } else { self.spec.dims[faces.axis] - 1 };
+            for i in 0..self.n {
+                let x = self.at(i);
+                if x[faces.axis] != edge { continue; }
+                let face = faces.values[side][plane_index(x, self.spec.dims, faces.axis)];
+                let target = equilibrium::<L>(face.rho, face.u, THETA0);
+                let interior = equilibrium::<L>(rho[i], u[i], THETA0);
+                output.push(std::array::from_fn(|q| target[q] + (post[i][q] - interior[q])));
+            }
+        }
+        Some(IncomingPopulations { axis: faces.axis, values })
+    }
+
+    pub(super) fn open_link_exchange(
+        &self, post: &[[f64; Q]], incoming: Option<&IncomingPopulations>,
+    ) -> Option<[LinkExchange; 2]> {
+        let incoming = incoming?;
+        let axis = incoming.axis;
+        let mut result = [LinkExchange::default(); 2];
+        for (side, output) in result.iter_mut().enumerate() {
+            let sign = if side == 0 { -1 } else { 1 };
+            let edge = if side == 0 { 0 } else { self.spec.dims[axis] - 1 };
+            for i in 0..self.n {
+                let x = self.at(i);
+                if x[axis] != edge { continue; }
+                let ghost = incoming.at(x, self.spec.dims, side);
+                for q in 0..Q {
+                    let c = L::E[q];
+                    let normal = i32::from(c[axis]) * sign;
+                    let exchanged = if normal > 0 { post[i][q] } else if normal < 0 { -ghost[q] } else { continue; };
+                    output.mass += exchanged;
+                    for a in 0..3 { output.momentum[a] += f64::from(c[a]) * exchanged; }
+                }
+            }
+        }
+        Some(result)
+    }
+
+    pub(super) fn finish_boundary_exchange(
+        &self, links: Option<[LinkExchange; 2]>, before: Option<&OpenFaces>,
+        after: Option<&OpenFaces>, flux_after: BoundaryFlux,
+    ) -> Option<[NsfBoundaryExchange; 2]> {
+        let links = links?;
+        let (before, after) = (before?, after?);
+        let axis = before.axis;
+        let mass_unit = self.law.rho_ref_kg_m3 * self.law.dx_m.powi(3);
+        let velocity_unit = self.law.dx_m / self.law.dt_s;
+        let area = self.law.dx_m * self.law.dx_m;
+        let mut result = [NsfBoundaryExchange::default(); 2];
+        for side in 0..2 {
+            let sign = if side == 0 { -1.0 } else { 1.0 };
+            let out = &mut result[side];
+            out.mass_out_kg = links[side].mass * mass_unit;
+            out.momentum_out_kg_m_s = links[side].momentum.map(|p| p * mass_unit * velocity_unit);
+            out.total_energy_out_j = 0.5 * (self.open_out.total_out[side] + flux_after.total_out[side])
+                * self.law.energy_unit_j();
+            for (old, new) in before.values[side].iter().zip(&after.values[side]) {
+                out.momentum_out_kg_m_s[axis] += 0.5 * sign
+                    * (old.rho * (old.theta - THETA0) + new.rho * (new.theta - THETA0))
+                    * mass_unit * velocity_unit;
+                out.mean_pressure_pa += 0.5 * (old.pressure_pa + new.pressure_pa);
+                out.normal_volume_flow_m3_s += 0.5 * sign * (old.u[axis] + new.u[axis]) * velocity_unit * area;
+                out.pressure_work_out_j += 0.5 * sign
+                    * (old.pressure_pa * old.u[axis] + new.pressure_pa * new.u[axis])
+                    * velocity_unit * area * self.law.dt_s;
+            }
+            out.mean_pressure_pa /= before.values[side].len() as f64;
+        }
+        Some(result)
+    }
+}
