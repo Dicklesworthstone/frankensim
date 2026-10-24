@@ -114,14 +114,29 @@ impl ComputedBaffledInput {
             }
             apertures.push(CircularOpening { center_m: opening.center_m, radius_m: section.radius_m });
         }
-        let rate = radiation.reconstruction.mechanics_rate_hz();
-        let band_hz = [self.minimum_frequency_hz, 0.5 * f64::from(rate)];
-        let (model, report) = bake_baffled_mimo(*exterior.state(), &apertures, rate,
+        self.build_apertures(exterior, &apertures,
+            radiation.reconstruction.mechanics_rate_hz(), gate)
+    }
+
+    /// Build the same physical baffled operator from original circular openings,
+    /// independent of the propagation owner. Geometry and exterior gas are
+    /// explicit; the original BEM/VF bake retains its full-band accuracy and
+    /// passivity admissions. No waveguide surrogate or observer is constructed.
+    pub fn build_apertures(
+        &self,
+        exterior: &GasRecord,
+        apertures: &[CircularOpening],
+        mechanics_rate_hz: u32,
+        gate: &CancelGate,
+    ) -> Result<(MimoRadiationModel, ComputedBaffledRecord), MimoRadiationInputError> {
+        if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
+        let band_hz = [self.minimum_frequency_hz, 0.5 * f64::from(mechanics_rate_hz)];
+        let (model, report) = bake_baffled_mimo(*exterior.state(), apertures, mechanics_rate_hz,
             band_hz, self.options, self.limits, gate).map_err(MimoRadiationInputError::Bake)?;
         let record = ComputedBaffledRecord {
             declaration_identity: model.declaration_identity,
             realization_identity: model.realization_identity,
-            gas_record: exterior.clone(), apertures, band_hz,
+            gas_record: exterior.clone(), apertures: apertures.to_vec(), band_hz,
             options: self.options, limits: self.limits, report,
         };
         Ok((model, record))

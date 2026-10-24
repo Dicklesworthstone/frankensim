@@ -6,6 +6,8 @@
 
 use super::DgPortLoad;
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationInputError;
+use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
 use fs_duct::dg::{
     DgBoundary, DgDuct, DgMesh, DgWallResolution, MAX_DG_ELEMENTS, MAX_DG_ORDER,
     MAX_DG_PROPAGATOR_DOFS, PortId,
@@ -17,7 +19,7 @@ use fs_matdb::QueryPoint;
 use fs_material::gas::GasState;
 use fs_material::gas_field::{AxialGasField, MAX_FIELD_STATIONS};
 use fs_material::gas_field::input::PrimitiveGasColumns;
-use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources};
+use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use std::str::SplitAsciiWhitespace;
 
 /// Keep source-line errors distinct from the original material and solver error.
@@ -26,6 +28,7 @@ pub enum DgSourceError {
     Input { line: usize, what: &'static str },
     Gas { line: usize, source: fs_material::MaterialError },
     Physics(AcousticRealizeError),
+    Radiation { line: usize, source: MimoRadiationInputError },
 }
 impl core::fmt::Display for DgSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -33,6 +36,7 @@ impl core::fmt::Display for DgSourceError {
             Self::Input { line, what } => write!(f, "DG source line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "DG material line {line}: {source}"),
             Self::Physics(source) => write!(f, "DG source physics: {source}"),
+            Self::Radiation { line, source } => write!(f, "DG radiation line {line}: {source}"),
         }
     }
 }
@@ -94,6 +98,7 @@ pub struct DgSourceInput {
     geometry: Duct,
     field: Option<AxialGasField>,
     outlet: DgBoundary,
+    radiation: Option<(ComputedBaffledInput, GasRecord)>,
     mesh: DgMesh,
     poles: usize,
     band_hz: [f64; 2],
@@ -119,6 +124,13 @@ impl DgSourceInput {
     /// Its station rows follow the geometry: gas_station X T FRACTION...
     /// The already declared ambient supplies common static pressure. Every
     /// local acoustic/slit coefficient comes from the bound inlet/field.
+    ///
+    /// OUTLET may also be baffled, followed after geometry and any gas stations
+    /// by dg_radiation computed-baffled plus the original fourteen bake fields,
+    /// then dg_exterior plus one complete shared gas record. The actual outlet
+    /// area supplies its circle; the exterior record retains its own material
+    /// sources. Bore/exterior equilibrium pressures must agree. The original
+    /// bake covers mechanical Nyquist, independent of the microphone band.
     ///
     /// Error type E lets callers retain their existing line-aware row reader.
     #[allow(clippy::too_many_arguments)]
@@ -147,7 +159,8 @@ impl DgSourceInput {
             "open" => DgBoundary::IdealOpen,
             "closed" => DgBoundary::Closed,
             "matched" => DgBoundary::Matched,
-            _ => return Err(bad(line, "DG outlet must be open, closed or matched").into()),
+            "baffled" => DgBoundary::Port(PortId(1)),
+            _ => return Err(bad(line, "DG outlet must be open, closed, matched or baffled").into()),
         };
         let mesh = DgMesh {
             elements: row.count(MAX_DG_ELEMENTS)?,
@@ -203,7 +216,7 @@ impl DgSourceInput {
             }
         }
         let mut source = Self {
-            geometry: Duct { segments }, field: None, outlet, mesh, poles, band_hz,
+            geometry: Duct { segments }, field: None, outlet, radiation: None, mesh, poles, band_hz,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature, line,
         };
         // Admission before collecting/evaluating a potentially large field.
@@ -239,6 +252,32 @@ impl DgSourceInput {
                 records.push(GasRecord::Thermochemical(state));
             }
             source.field = Some(field);
+        }
+        if matches!(outlet, DgBoundary::Port(_)) {
+            checkpoint(gate, line)?;
+            let (radiation_line, mut fields) = next_row()?;
+            let mut row = Row { line: radiation_line, fields: &mut fields };
+            if row.word()? != "dg_radiation" || row.word()? != "computed-baffled" {
+                return Err(bad(radiation_line, "baffled DG outlet requires its computed radiation declaration").into());
+            }
+            let declaration = row.fields.by_ref().take(ComputedBaffledInput::FIELDS + 1)
+                .collect::<Vec<_>>().join(" ");
+            let controls = ComputedBaffledInput::parse(&declaration)
+                .map_err(|source| DgSourceError::Radiation { line: radiation_line, source })?;
+            row.finish()?;
+            let (exterior_line, mut fields) = next_row()?;
+            let mut row = Row { line: exterior_line, fields: &mut fields };
+            if row.word()? != "dg_exterior" {
+                return Err(bad(exterior_line, "computed DG radiation requires an explicit exterior gas record").into());
+            }
+            let exterior = read_gas_record(row.fields, None, sources)
+                .map_err(|error| gas_error(exterior_line, error))?;
+            row.finish()?;
+            if exterior.state().pressure.to_bits() != ambient.pressure.to_bits() {
+                return Err(bad(exterior_line, "quiescent DG bore and exterior require equal static pressures").into());
+            }
+            records.push(exterior.clone());
+            source.radiation = Some((controls, exterior));
         }
         Ok(source)
     }
@@ -289,8 +328,19 @@ impl DgSourceInput {
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
-        let load = DgPortLoad::new(owner, dt, self.exponential_tolerance, self.maximum_dofs)
-            .map_err(DgSourceError::Physics)?;
+        let load = if let Some((controls, exterior)) = self.radiation {
+            let rate = (1.0 / dt + 0.5) as u32;
+            if rate == 0 || dt.to_bits() != (1.0 / f64::from(rate)).to_bits() {
+                return Err(bad(self.line, "computed DG radiation requires an exact whole-Hz mechanics clock"));
+            }
+            DgPortLoad::new_with_computed_baffled(
+                owner, rate, self.exponential_tolerance, self.maximum_dofs,
+                &exterior, controls, gate,
+            ).map_err(|source| DgSourceError::Radiation { line: self.line, source })?
+        } else {
+            DgPortLoad::new(owner, dt, self.exponential_tolerance, self.maximum_dofs)
+                .map_err(DgSourceError::Physics)?
+        };
         checkpoint(gate, self.line)?;
         Ok(load)
     }

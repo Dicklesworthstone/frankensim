@@ -8,7 +8,11 @@
 /// Authored geometry, material gas and numerical declarations for this load.
 pub mod input;
 
+/// Computed exterior radiation from the actual endpoint geometry and gas.
+pub mod radiation;
+
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use fs_duct::dg::{
     DgBoundary, DgDuct, DgMultiportResponse, DgPortResponse, DgPropagator, DgState,
     DgStepOutput, PortId, PortInput,
@@ -48,6 +52,7 @@ pub struct DgPortLoad {
     impedance_pa_s_m3: f64,
     terminal: Option<PreparedMimoLoad>,
     last_terminal_frame: Option<DgTerminalFrame>,
+    radiation_record: Option<ComputedBaffledRecord>,
 }
 
 // This is only the algebraic elimination of the outlet's same-step mean law.
@@ -144,7 +149,7 @@ impl DgPortLoad {
         let state = duct.zero_state();
         let mut load = Self {
             duct, propagator, state, inlet, impedance_pa_s_m3: 0.0,
-            terminal, last_terminal_frame: None,
+            terminal, last_terminal_frame: None, radiation_record: None,
         };
         let impedance = load.port_response()?.impedance_pa_s_m3;
         if !impedance.is_finite() || impedance <= 0.0 {
@@ -177,6 +182,13 @@ impl DgPortLoad {
     /// Original admitted terminal, source matrices, pole history and reports.
     #[must_use]
     pub fn terminal(&self) -> Option<&PreparedMimoLoad> { self.terminal.as_ref() }
+
+    /// Physical geometry, exterior material and original computed-load reports.
+    /// Generic authored terminals do not manufacture a radiation source record.
+    #[must_use]
+    pub fn radiation_record(&self) -> Option<&ComputedBaffledRecord> {
+        self.radiation_record.as_ref()
+    }
 
     /// Last accepted outlet exchange; absent before the first step or without
     /// an explicit rational outlet. This flow is suitable for its bound observer.

@@ -97,3 +97,154 @@ fn g0_source_refuses_incomplete_geometry_unbounded_memory_and_unresolved_band() 
     gate.request();
     assert!(source.prepare(&ambient(), 1.0 / 96000.0, &gate).is_err());
 }
+
+#[path = "../../render/schedule/reed/field_input/tests/support.rs"]
+mod radiation_gas_support;
+
+// Collect the exact source receipts without preparing any DG propagator or
+// fitting a radiation operator. Full-source tests reject an unconsumed row.
+fn read_receipted(
+    text: &str,
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(DgSourceInput, Vec<GasRecord>), DgSourceError> {
+    let mut lines = text.lines().enumerate();
+    let (line, header) = lines.next().ok_or_else(|| bad(1, "missing source header"))?;
+    let mut fields = header.split_ascii_whitespace();
+    let kind = fields.next().ok_or_else(|| bad(line + 1, "missing source kind"))?;
+    let mut records = Vec::new();
+    let source = DgSourceInput::read(
+        kind, line + 1, &mut fields,
+        &mut || {
+            let (line, text) = lines.next().ok_or_else(|| bad(0, "missing source row"))?;
+            Ok((line + 1, text.split_ascii_whitespace()))
+        },
+        &ambient(), sources, &mut records, &CancelGate::new_clock_free(),
+    )?;
+    if let Some((line, _)) = lines.next() {
+        return Err(bad(line + 1, "unexpected source test row"));
+    }
+    Ok((source, records))
+}
+
+const COMPUTED_CONTROLS: &str =
+    "20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257";
+const RADIATION_EXTERIOR: &str = "mixture 293.15 101325 mole 2 N2 0.8 CO2 0.2";
+
+fn baffled_tube_input(exterior: &str) -> String {
+    format!("{}\ndg_radiation computed-baffled {COMPUTED_CONTROLS}\ndg_exterior {exterior}",
+        TUBE.replace(" open ", " baffled "))
+}
+
+#[test]
+fn g0_baffled_input_retains_exact_geometry_controls_and_original_gas_records() {
+    for exterior in ["293.15 101325 0", RADIATION_EXTERIOR] {
+        let mut fields = exterior.split_ascii_whitespace();
+        let expected = fs_material::gas_species::input::read_gas_record(
+            &mut fields, None, None,
+        ).unwrap();
+        assert!(fields.next().is_none());
+        let (source, records) = read_receipted(&baffled_tube_input(exterior), None).unwrap();
+        assert!(matches!(source.outlet, DgBoundary::Port(PortId(1))));
+        assert!(source.field.is_none());
+        assert!(matches!(source.geometry.segments.as_slice(),
+            [Segment::Cylinder { radius, length }] if *radius == 0.001 && *length == 0.05));
+        let (input, actual) = source.radiation.as_ref().unwrap();
+        assert_eq!(actual, &expected);
+        assert_eq!(records, vec![expected]);
+        assert_eq!(actual.state().pressure.to_bits(), ambient().pressure.to_bits());
+        if exterior == RADIATION_EXTERIOR {
+            assert_ne!(actual.state().sound_speed.to_bits(), ambient().sound_speed.to_bits());
+        }
+        assert_eq!(input.minimum_frequency_hz(), 20.0);
+        let options = input.options();
+        assert_eq!(options.frequency_samples, 65);
+        assert_eq!(options.orders, [4, 8, 12]);
+        assert_eq!(options.fit_iterations, 20);
+        assert_eq!(options.maximum_relative_error, 0.1);
+        assert_eq!(options.max_fit_memory_bytes, 67_108_864);
+        assert_eq!(options.causality.subtractions, 2);
+        assert_eq!(options.causality.tail_bound_ratio, 100.0);
+        assert_eq!(options.causality.relative_data_tolerance, 1e-8);
+        let limits = input.limits();
+        assert_eq!(limits.max_states, 64);
+        assert_eq!(limits.max_memory_bytes, 1_048_576);
+        assert_eq!(limits.sampled_passivity_points, 257);
+    }
+}
+
+#[test]
+fn g0_baffled_records_follow_geometry_and_field_and_keep_thermochemical_receipts() {
+    use fs_material::gas_species::input::{ThermochemicalPhase, read_gas_record};
+    let a = radiation_gas_support::packs("dga", 0.028, 3.5, 200.0);
+    let b = radiation_gas_support::packs("dgb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let (header, geometry) = BORE.split_once('\n').unwrap();
+    let header = format!("{} gas_field 2 mole 2 dgb dga",
+        header.replace(" open ", " baffled "));
+    let stations = "gas_station 0 293.15 0.25 0.75\ngas_station 0.05 303.15 0.5 0.5";
+    let radiation = format!("dg_radiation computed-baffled {COMPUTED_CONTROLS}");
+    let exterior = "thermochemical 298.15 101325 mole 2 dga 0.2 dgb 0.8";
+    let text = format!("{header}\n{geometry}\n{stations}\n{radiation}\ndg_exterior {exterior}");
+    let (source, records) = read_receipted(&text, Some(&sources)).unwrap();
+    assert!(matches!(source.geometry.segments.as_slice(),
+        [Segment::Cylinder { radius, length: first },
+         Segment::Cone { inlet_radius, outlet_radius, length: last }]
+            if *radius == 0.001 && *first == 0.025 && *inlet_radius == 0.001
+                && *outlet_radius == 0.002 && *last == 0.025));
+    assert!(matches!(source.outlet, DgBoundary::Port(PortId(1))));
+    let field = source.field.as_ref().unwrap();
+    assert_eq!(field.stations_m(), &[0.0, 0.05]);
+    assert_eq!(records.len(), 3);
+    for (index, position) in [0.0, 0.05].into_iter().enumerate() {
+        assert_eq!(records[index], GasRecord::Thermochemical(field.state_at(position).unwrap()));
+    }
+    let mut fields = exterior.split_ascii_whitespace();
+    let expected = read_gas_record(&mut fields, None, Some(&sources)).unwrap();
+    assert!(fields.next().is_none());
+    assert!(matches!(&expected, GasRecord::Thermochemical(_)));
+    assert_eq!(&records[2], &expected);
+    let (_, actual) = source.radiation.as_ref().unwrap();
+    assert_eq!(actual, &expected);
+    assert_ne!(actual.state().sound_speed.to_bits(),
+        field.state_at(0.05).unwrap().state().sound_speed.to_bits());
+    for wrong_order in [
+        format!("{header}\n{radiation}\n{geometry}\n{stations}\ndg_exterior {exterior}"),
+        format!("{header}\n{geometry}\n{radiation}\n{stations}\ndg_exterior {exterior}"),
+        format!("{header}\n{geometry}\n{stations}\ndg_exterior {exterior}\n{radiation}"),
+    ] {
+        assert!(read_receipted(&wrong_order, Some(&sources)).is_err(), "{wrong_order}");
+    }
+}
+
+#[test]
+fn g0_baffled_input_refuses_missing_malformed_extra_fields_and_static_pressure_jumps() {
+    let valid = baffled_tube_input(RADIATION_EXTERIOR);
+    for text in [
+        valid.split_once("\ndg_radiation").unwrap().0.to_owned(),
+        valid.split_once("\ndg_exterior").unwrap().0.to_owned(),
+        valid.replace("dg_radiation", "radiation"),
+        valid.replace("computed-baffled", "artifact"),
+        valid.replace("computed-baffled 20", "computed-baffled NaN"),
+        valid.replace(" 257\n", "\n"),
+        valid.replace(" 257\n", " 257 999\n"),
+        valid.replace(" 4 8 12 ", " 4 4 12 "),
+        valid.replace("dg_exterior", "exterior"),
+        valid.replace(RADIATION_EXTERIOR, "293.15 101325"),
+        valid.replace("mole 2", "volume 2"),
+        valid.replace("CO2 0.2", "missing 0.2"),
+        valid.replace(RADIATION_EXTERIOR, "thermochemical 293.15 101325 mole 1 missing 1"),
+        format!("{valid} extra"),
+        valid.replace("101325", "90000"),
+    ] {
+        assert!(read_receipted(&text, None).is_err(), "admitted {text}");
+    }
+    let error = read_receipted(
+        &valid.replace("computed-baffled 20", "computed-baffled NaN"), None,
+    ).err().unwrap();
+    assert!(matches!(error, DgSourceError::Radiation { line: 2, .. }));
+    let error = read_receipted(&valid.replace("101325", "90000"), None).err().unwrap();
+    assert!(matches!(error, DgSourceError::Input { line: 3, .. }));
+}
