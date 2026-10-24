@@ -649,6 +649,11 @@ impl<'m> PlanarEddy<'m> {
             ));
         }
         let problem = initial.problem;
+        if problem.has_permanent_magnets() {
+            return Err(EddyError::Invalid(
+                "permanent-magnet induction requires explicit remanence source and parameter-work ownership",
+            ));
+        }
         let prescribed = problem.admit_boundary(boundary, cancelled)?;
         for (i, value) in prescribed.iter().enumerate() {
             if value.is_some_and(|a| a.to_bits() != initial.potential_wb_m[i].to_bits()) {

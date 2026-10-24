@@ -1,4 +1,4 @@
-//! Linear planar magnetic vector potential with source-resolved permeability.
+//! Planar magnetic vector potential with source-resolved linear material laws.
 //!
 //! A_z is in Wb/m, J_z in A/m2, coordinates/thickness in metres. Prescribed
 //! boundary vertices fix A_z; unprescribed boundary edges carry the natural
@@ -8,6 +8,8 @@
 
 /// Retained planar induction and material eddy-current heat on this same mesh.
 pub mod eddy;
+/// Source-backed, bounded reversible permanent magnets on the same field owner.
+pub mod permanent;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -15,13 +17,16 @@ use fs_feec::{
     weighted2::{CellWeight2, weighted_mass_matrix_2d},
 };
 use fs_material::{
-    field_storage::{FieldStorageError, linear_magnetic_permeability},
+    field_storage::{
+        FieldStorageError, linear_magnetic_permeability, permanent::RecoilOperatingPoint,
+    },
     state_point::ResolvedMaterialStatePoint,
 };
 use fs_qty::Dims;
 use fs_rep_mesh::{Metric2, TriComplex2};
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, SolveReport, checked_cg};
 use fs_sparse::{Csr, precond::IdentityPrecond};
+use permanent::{MagneticEnergyReference, PlanarMagneticMaterial, PlanarRecoilMaterial};
 
 /// Source, geometry, work, cancellation or actual residual refusal.
 #[derive(Debug)]
@@ -68,6 +73,7 @@ pub struct PlanarMagnetostatics {
     mesh: TriComplex2,
     materials: Vec<ResolvedMaterialStatePoint>,
     permeability_h_m: Vec<f64>,
+    recoil_materials: Vec<Option<PlanarRecoilMaterial>>,
     stiffness: Csr,
     thickness_m: f64,
 }
@@ -79,6 +85,34 @@ impl PlanarMagnetostatics {
     pub fn new(
         mesh: TriComplex2,
         materials: Vec<ResolvedMaterialStatePoint>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MagneticError> {
+        Self::from_material_models(
+            mesh,
+            materials.into_iter().map(PlanarMagneticMaterial::Linear),
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Assemble the same operator from explicit per-cell constitutive choices.
+    /// Recoil cells use their source-declared absolute recoil slope and retain
+    /// Br, specimen direction and operating limits for every solve/recovery.
+    /// Current density and remanence are independent sources. No coercivity or
+    /// generic permeability is promoted to a reversible recoil coefficient.
+    pub fn new_with_material_models(
+        mesh: TriComplex2,
+        models: Vec<PlanarMagneticMaterial>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, MagneticError> {
+        Self::from_material_models(mesh, models.into_iter(), limits, cancelled)
+    }
+
+    fn from_material_models(
+        mesh: TriComplex2,
+        models: impl ExactSizeIterator<Item = PlanarMagneticMaterial>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MagneticError> {
@@ -102,16 +136,28 @@ impl PlanarMagnetostatics {
                 "mesh exceeds declared assembly limits",
             ));
         }
-        if materials.len() != mesh.faces().len() {
+        if models.len() != mesh.faces().len() {
             return Err(MagneticError::Invalid(
                 "one source material is required per triangle",
             ));
         }
-        let mut permeability_h_m = Vec::with_capacity(materials.len());
-        let mut weights = Vec::with_capacity(materials.len());
-        for material in &materials {
+        let mut materials = Vec::with_capacity(models.len());
+        let mut recoil_materials = Vec::with_capacity(models.len());
+        let mut permeability_h_m = Vec::with_capacity(models.len());
+        let mut weights = Vec::with_capacity(models.len());
+        for model in models {
             poll(cancelled)?;
-            let mu = linear_magnetic_permeability(material).map_err(MagneticError::Material)?;
+            let (material, recoil, mu) = match model {
+                PlanarMagneticMaterial::Linear(material) => {
+                    let mu =
+                        linear_magnetic_permeability(&material).map_err(MagneticError::Material)?;
+                    (material, None, mu)
+                }
+                PlanarMagneticMaterial::Recoil(recoil) => {
+                    let mu = recoil.material().permeability_h_m();
+                    (recoil.material().material().clone(), Some(recoil), mu)
+                }
+            };
             let nu = mu.recip();
             if !nu.is_finite() || nu <= 0.0 {
                 return Err(MagneticError::Invalid(
@@ -119,6 +165,8 @@ impl PlanarMagnetostatics {
                 ));
             }
             permeability_h_m.push(mu);
+            materials.push(material);
+            recoil_materials.push(recoil);
             weights.push(CellWeight2::Scalar(nu));
         }
         let mass = weighted_mass_matrix_2d(
@@ -149,6 +197,7 @@ impl PlanarMagnetostatics {
             mesh,
             materials,
             permeability_h_m,
+            recoil_materials,
             stiffness,
             thickness_m,
         })
@@ -165,8 +214,20 @@ impl PlanarMagnetostatics {
     pub fn permeability_h_m(&self) -> &[f64] {
         &self.permeability_h_m
     }
+    /// Original source law and orientation for every magnet cell; None marks
+    /// induced-linear cells. Storage order is the original triangle order.
+    pub fn recoil_materials(&self) -> &[Option<PlanarRecoilMaterial>] {
+        &self.recoil_materials
+    }
+    /// Whether this owner carries an affine remanence source. Consumers using
+    /// homogeneous inductance/induction energy must explicitly account for it.
+    pub fn has_permanent_magnets(&self) -> bool {
+        self.recoil_materials.iter().any(Option::is_some)
+    }
 
-    /// Solve for cellwise impressed winding current density and prescribed A_z.
+    /// Solve for cellwise impressed winding current density, retained material
+    /// remanence and prescribed A_z. Every magnet's resulting H must remain in
+    /// its complete source-backed recoil envelope before a field is returned.
     /// Boundary entries are unique (vertex, Wb/m) pairs and must form complete
     /// exterior edges: isolated point constraints are refused. Unspecified
     /// exterior edges have zero natural tangential H; no open-boundary/infinite-domain
@@ -200,6 +261,24 @@ impl PlanarMagnetostatics {
             let load = finite(current_density_a_m2[cell] * (volume / 3.0))?;
             for &vertex in face {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + load)?;
+            }
+            if let Some(recoil) = &self.recoil_materials[cell] {
+                let br = recoil.remanence_t();
+                let source_h = [
+                    finite(br[0] / self.permeability_h_m[cell])?,
+                    finite(br[1] / self.permeability_h_m[cell])?,
+                ];
+                let gradients = gradients(face.map(|v| self.mesh.vertices()[v as usize]))?;
+                // Exact weak load ∫(Br/mu)·(d_y phi,-d_x phi) dV. Keeping the
+                // whole P1 moment preserves both interface and exterior terms:
+                // a constant Br has zero volume curl but a nonzero boundary load.
+                for (local, &vertex) in face.iter().enumerate() {
+                    let moment = finite(
+                        source_h[0]
+                            .mul_add(gradients[local][1], -source_h[1] * gradients[local][0]),
+                    )?;
+                    rhs[vertex as usize] = finite(volume.mul_add(moment, rhs[vertex as usize]))?;
+                }
             }
         }
         let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
@@ -314,6 +393,7 @@ impl PlanarMagnetostatics {
         let mut magnetic_flux_density_t = Vec::with_capacity(self.mesh.faces().len());
         let mut magnetic_field_a_m = Vec::with_capacity(self.mesh.faces().len());
         let mut cell_energy_j = Vec::with_capacity(self.mesh.faces().len());
+        let mut recoil_operating_points = Vec::with_capacity(self.mesh.faces().len());
         let mut energy_j = 0.0;
         for (cell, face) in self.mesh.faces().iter().enumerate() {
             poll(cancelled)?;
@@ -329,16 +409,33 @@ impl PlanarMagnetostatics {
                 }
             }
             let b = [grad[1], -grad[0]];
+            let br = self.recoil_materials[cell]
+                .as_ref()
+                .map_or([0.0; 2], PlanarRecoilMaterial::remanence_t);
+            let induced_b = [finite(b[0] - br[0])?, finite(b[1] - br[1])?];
             let h = [
-                finite(b[0] / self.permeability_h_m[cell])?,
-                finite(b[1] / self.permeability_h_m[cell])?,
+                finite(induced_b[0] / self.permeability_h_m[cell])?,
+                finite(induced_b[1] / self.permeability_h_m[cell])?,
             ];
+            let operating_point = if let Some(recoil) = &self.recoil_materials[cell] {
+                let n = recoil.direction();
+                let parallel = finite(n[0].mul_add(h[0], n[1] * h[1]))?;
+                let transverse = finite(n[0].mul_add(h[1], -n[1] * h[0]))?.abs();
+                Some(
+                    recoil
+                        .material()
+                        .admit_operating_point(parallel, transverse)
+                        .map_err(MagneticError::Material)?,
+                )
+            } else {
+                None
+            };
             let volume = self
                 .mesh
                 .face_measure(cell)
                 .ok_or(MagneticError::Invalid("missing triangle measure"))?;
-            let energy = finite(0.5 * volume * b[0].mul_add(h[0], b[1] * h[1]))?;
-            if energy < 0.0 || (b != [0.0; 2] && energy == 0.0) {
+            let energy = finite(0.5 * volume * induced_b[0].mul_add(h[0], induced_b[1] * h[1]))?;
+            if energy < 0.0 || (induced_b != [0.0; 2] && energy == 0.0) {
                 return Err(MagneticError::Invalid(
                     "field energy is not representably positive",
                 ));
@@ -347,6 +444,7 @@ impl PlanarMagnetostatics {
             magnetic_flux_density_t.push(b);
             magnetic_field_a_m.push(h);
             cell_energy_j.push(energy);
+            recoil_operating_points.push(operating_point);
         }
         poll(cancelled)?;
         Ok(PlanarField {
@@ -355,6 +453,7 @@ impl PlanarMagnetostatics {
             magnetic_flux_density_t,
             magnetic_field_a_m,
             cell_energy_j,
+            recoil_operating_points,
             energy_j,
             report,
         })
@@ -421,13 +520,15 @@ pub(crate) fn gradients(points: [[f64; 2]; 3]) -> Result<[[f64; 2]; 3], Magnetic
 
 /// A computed field tied to the exact immutable geometry and source states.
 /// Cell fields are constant within each P1 triangle, not averaged across a
-/// material interface. Energy is the discrete integral B.H/2 at fixed state.
+/// material interface. Energy is the discrete integral (B-Br).H/2 at fixed
+/// state, where Br is zero for induced cells. The reference is explicit.
 pub struct PlanarField<'a> {
     pub(crate) problem: &'a PlanarMagnetostatics,
     potential_wb_m: Vec<f64>,
     magnetic_flux_density_t: Vec<[f64; 2]>,
     magnetic_field_a_m: Vec<[f64; 2]>,
     cell_energy_j: Vec<f64>,
+    recoil_operating_points: Vec<Option<RecoilOperatingPoint>>,
     energy_j: f64,
     report: Option<SolveReport>,
 }
@@ -444,7 +545,8 @@ impl PlanarField<'_> {
     pub fn magnetic_flux_density_t(&self) -> &[[f64; 2]] {
         &self.magnetic_flux_density_t
     }
-    /// Cell H=B/mu [A/m], from the same per-cell material.
+    /// Actual cell H=(B-Br)/mu [A/m], from the same per-cell material. Br is
+    /// zero for induced-linear cells, with its original source retained above.
     pub fn magnetic_field_a_m(&self) -> &[[f64; 2]] {
         &self.magnetic_field_a_m
     }
@@ -455,6 +557,20 @@ impl PlanarField<'_> {
     /// Sum of stored field energy [J]. No mechanical force is inferred from it.
     pub fn energy_j(&self) -> f64 {
         self.energy_j
+    }
+    /// Reference of this field's constitutive storage. Remanence is held fixed;
+    /// changing temperature or magnetization requires separate parameter work.
+    pub fn energy_reference(&self) -> MagneticEnergyReference {
+        if self.problem.has_permanent_magnets() {
+            MagneticEnergyReference::FixedRemanence
+        } else {
+            MagneticEnergyReference::ZeroFlux
+        }
+    }
+    /// Admitted physical H components and remaining source-envelope margins
+    /// per original triangle. These are numerical estimates, not field bounds.
+    pub fn recoil_operating_points(&self) -> &[Option<RecoilOperatingPoint>] {
+        &self.recoil_operating_points
     }
     /// Recomputed free-DOF residual report; absent when all DOFs are prescribed.
     pub fn report(&self) -> Option<&SolveReport> {

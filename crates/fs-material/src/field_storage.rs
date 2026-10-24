@@ -14,6 +14,8 @@
 //! storage. These are snapshots; evolving a coefficient requires its parameter
 //! work and, where relevant, thermal entropy to be accounted by the caller.
 
+/// Source-bound reversible permanent-magnet recoil at a fixed material state.
+pub mod permanent;
 /// Source-bound reversible thermal field energy and entropy at fixed geometry.
 pub mod thermal;
 

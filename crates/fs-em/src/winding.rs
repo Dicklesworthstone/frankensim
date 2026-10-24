@@ -139,6 +139,11 @@ impl<'a> PlanarWindingBasis<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, WindingError> {
         poll(cancelled)?;
+        if problem.has_permanent_magnets() {
+            return Err(WindingError::Invalid(
+                "permanent-magnet bias cannot enter a homogeneous unit-current inductance basis",
+            ));
+        }
         let count = profiles_per_m2.len();
         let cells = problem.mesh().faces().len();
         let vertices = problem.mesh().vertices().len();
