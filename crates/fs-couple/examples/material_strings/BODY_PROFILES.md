@@ -702,7 +702,8 @@ the adapter neither welds nearby points nor closes gaps. Every tetrahedron
 needs four distinct valid vertices and nonzero physical volume, every volume
 vertex must be used, and repeated tetrahedra are refused. The volume must be
 connected and conforming, and every boundary triangle must match one explicitly
-selected original `cavity-facet`, oriented outward from the gas. A profile
+selected original `cavity-facet` or a declared compact opening below. Solid
+pressure facets are oriented outward from the gas. A profile
 without an explicit `pressure-surfaces` block cannot bind a distributed
 interior. Exterior pressure roles remain independent.
 
@@ -718,8 +719,10 @@ face and interior degrees of freedom; `MAX_DOFS` bounds the complete FE
 space, not only its vertices.
 
 The network reserves up to `min(MAX_PRESSURE_MODES, actual FE DOFs)-1`
-additional air coordinates and one compression connection per pressure mode
-before material-pack reads. The exact uniform pressure mode contributes
+additional standing-wave coordinates and one compression connection per
+pressure mode before material-pack reads. Each declared opening also reserves
+one fluid-inertia coordinate and one possible internal-damping connection,
+including when its declared resistance is zero. The exact uniform pressure mode contributes
 compression storage without an invented moving air mass. These reservations
 share the existing complete mode, connection, setup-work and optional
 `prepared-linear` budgets with string polarizations, torsion, interfaces and
@@ -771,9 +774,83 @@ load and finite-distance shell observer can still be selected through their
 existing performance records; their frequency bands, spatial resolution and
 error budgets need to cover the desired observation.
 
-This interior path currently represents a closed, frozen, homogeneous gas with
-lossless linear acoustics on straight-sided tetrahedra and the original linear
-shell kinematics. Viscothermal interior-wall loss, nonconforming volume/shell
-interfaces and open f-hole transmission need their own physical operators.
-Missing wall facets and apertures are refused; no fictitious closure surface
-is added.
+This interior path represents frozen, homogeneous gas with lossless linear
+acoustics on straight-sided tetrahedra and the original linear shell kinematics.
+Viscothermal interior-wall loss and nonconforming volume/shell interfaces need
+their own physical operators. Missing boundary assignments are refused; no
+fictitious solid closure surface is added.
+
+### Explicit compact openings through the original volume and exterior
+
+After the last `air-tet`, an optional opening section names original volume
+faces and internal neck data:
+
+```text
+air-openings COUNT
+air-opening INTERNAL_LENGTH_M INTERNAL_RESISTANCE_PA_S_M3 FACE_COUNT
+air-opening-face A B C
+... exactly FACE_COUNT rows, then the next opening ...
+```
+
+There may be one to eight openings. Indices are the original `air-node` IDs;
+they are never inferred from the shell's triangle row numbers. Faces must be
+distinct across all openings. The shared physical owner checks that each face
+is on the volume boundary, has no remaining solid shell triangle over it, and
+belongs to one connected planar patch with a single boundary loop. Every rim
+translation must be fixed in every retained shell mode. Remove the actual
+solid triangle and its exterior/cavity pressure-role references when declaring
+a hole; retaining a solid triangle with zero pressure weight does not make it
+an opening.
+
+`INTERNAL_LENGTH_M` is positive and contains only the internal duct length and
+any explicitly included interior correction. The nonnegative resistance is
+only internal loss. The original shell BEM supplies exterior reaction once,
+including its cross-coupling between the structural surface and opening flow.
+No exterior end correction, radiation resistance, assigned resonance or
+instrument-specific sound calibration is added by the file adapter.
+
+Opening-bearing profiles require `body-radiation bem ...` before material-pack
+reads. That band's upper endpoint must cover the selected interior pressure
+window, and the original joint owner additionally checks the reference neck
+frequencies and its compactness bound. The cavity binds before cylinder-fluid,
+torsional, nonlinear axial and material-memory attachments. The complete
+performance is returned only after the original exterior owner has bound the
+joint structural and opening load. Existing sealed files keep their previous
+grammar and construction path.
+
+The existing `shell_observer` record selects the actual external pressure
+output. Its shared BEM transfer takes original body modal velocities and each
+accepted physical opening volume flow. It preserves their interference and
+the observer's explicit numerical latency; no separately driven opening tone
+or output normalization is introduced.
+
+`open-shell-cavity.body` is a manufactured variant of the closed-shell fixture.
+It removes solid triangle `[0,12,14]`, whose three vertices are fully constrained,
+and retains that exact face in the original 80-tetrahedron volume. The explicit
+opening has a 0.04 m internal length and zero internal resistance. Its order-two
+interior selects the complete 0–180 Hz window with one pressure-mode allowance;
+the same eigensolver refuses if that allowance cannot retain the full window.
+The paired performance declares BEM loading over 0.5–180 Hz and an 8 kHz
+microphone with a 60 Hz pass-band endpoint and a 180 Hz taper stop. The nominal
+uniform-neck resonance lies within that declared taper, so this example is a
+finite-band source/observer integration, not full-passband instrument audio or
+a measured violin, cello or bass. Frequency, panel and FIR error gates remain
+those of the original owners.
+
+The two `open-shell-cavity` files are unexecuted integration inputs. The command
+below is pending native validation and may currently refuse at the unchanged
+dense-BEM reciprocity gate: generic collocation traces do not guarantee the
+fitter's `1e-12` reciprocity bound for independent shell and opening sources.
+The corresponding integration test retains all construction and numerical
+assertions as hard gates.
+
+After generating the two material packs using the commands above, the pending
+integration command is:
+
+```bash
+cp crates/fs-couple/examples/material_strings/open-shell-cavity.material-strings "$demo/"
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/open-shell-cavity.material-strings" "$demo/open-shell-cavity.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/open-shell-cavity.body
+```
+

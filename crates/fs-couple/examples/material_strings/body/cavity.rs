@@ -1,8 +1,13 @@
 //! Authored tetrahedral interior geometry, lowered through the original FE and
 //! reciprocal material-shell owners. No frequency, overlap or gas coefficient
 //! is inferred from an instrument name or accepted as a replacement for geometry.
+//! Optional compact openings retain the original FE face IDs. Their cavity
+//! coordinates bind before nonlinear attachments; the mandatory later shell
+//! BEM stage supplies their joint exterior reaction before any render escapes.
 use super::*;
-use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityOptions;
+use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::{
+    ShellCavityOpening, ShellCavityOptions, MAX_SHELL_CAVITY_OPENINGS,
+};
 use fs_couple::render::plate::impact::cavity::MAX_CAVITY_PRESSURE_MODES;
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium, MAX_ORDER};
 use fs_rep_mesh::TetComplex;
@@ -15,6 +20,7 @@ pub(super) struct Spec {
     order: usize,
     options: ShellCavityOptions,
     pressure_allowance: usize,
+    openings: Vec<ShellCavityOpening>,
 }
 
 /// The optional volume follows a complete v3/v4 body. Existing body readers
@@ -87,8 +93,47 @@ impl Spec {
             }
             tets.push(tet);
         }
-        if used.contains(&false) || r.lines.next().is_some() {
-            return Err("interior FE must use every declared vertex and consume every record".into());
+        if used.contains(&false) {
+            return Err("interior FE must use every declared vertex".into());
+        }
+        let mut openings = Vec::new();
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+            == Some("air-openings")
+        {
+            let n = count(r.row("air-openings", 1)?[0], 1, MAX_SHELL_CAVITY_OPENINGS)?;
+            let mut selected = BTreeSet::new();
+            for _ in 0..n {
+                let v = r.row("air-opening", 3)?;
+                let internal_length_m = scalar(v[0])?;
+                let internal_resistance_pa_s_m3 = scalar(v[1])?;
+                let faces = count(v[2], 1, maximum_boundary_faces)?;
+                if internal_length_m <= 0.0 || internal_resistance_pa_s_m3 < 0.0 {
+                    return Err("air opening requires positive internal length and nonnegative internal resistance".into());
+                }
+                if faces > maximum_boundary_faces - selected.len() {
+                    return Err("air openings exceed the original boundary-face allowance".into());
+                }
+                let mut boundary_faces = Vec::with_capacity(faces);
+                for _ in 0..faces {
+                    let v = r.row("air-opening-face", 3)?;
+                    let face = [count(v[0], 0, positions.len()-1)? as u32,
+                        count(v[1], 0, positions.len()-1)? as u32,
+                        count(v[2], 0, positions.len()-1)? as u32];
+                    let mut key = face;
+                    key.sort_unstable();
+                    if key.windows(2).any(|v| v[0] == v[1]) || !selected.insert(key) {
+                        return Err("air openings need distinct original vertices and disjoint boundary faces".into());
+                    }
+                    // Canonical keys detect repetition only. Preserve authored
+                    // FE indices/order for the original geometry/trace owner.
+                    boundary_faces.push(face);
+                }
+                openings.push(ShellCavityOpening { boundary_faces, internal_length_m,
+                    internal_resistance_pa_s_m3 });
+            }
+        }
+        if r.lines.next().is_some() {
+            return Err("interior FE must consume every record".into());
         }
         let complex = TetComplex::from_tets(positions.len(), tets);
         let dofs = fs_feec::SimplexSpace::new(&complex, order).ndof;
@@ -96,10 +141,11 @@ impl Spec {
             return Err("complete pressure FE space exceeds the authored degree-of-freedom allowance".into());
         }
         Ok(Self { positions, complex, order, options,
-            pressure_allowance: maximum_pressure_modes.min(dofs) })
+            pressure_allowance: maximum_pressure_modes.min(dofs), openings })
     }
 
     pub(super) fn pressure_allowance(&self) -> usize { self.pressure_allowance }
+    pub(super) fn opening_count(&self) -> usize { self.openings.len() }
 
     fn physical_positions(&self, spec: &input::Spec) -> Vec<[f64; 3]> {
         self.positions.iter().map(|p|
@@ -112,6 +158,14 @@ impl Spec {
         }
         if self.options.maximum_hz >= 0.45 * f64::from(spec.rate) {
             return Err("interior pressure window exceeds the original acoustic Nyquist guard".into());
+        }
+        if !self.openings.is_empty() {
+            let Some(input::BodyRadiation::ShellBem(radiation)) = spec.body_radiation else {
+                return Err("interior air openings require the original shell BEM radiation owner".into());
+            };
+            if radiation.maximum_hz < self.options.maximum_hz {
+                return Err("shell BEM band must cover the complete selected interior pressure window".into());
+            }
         }
         let positions = self.physical_positions(spec);
         if positions.iter().flatten().any(|v| !v.is_finite()) {
@@ -143,9 +197,15 @@ impl Spec {
             sound_speed_m_s: spec.gas.sound_speed,
         })?;
         poll(gate)?;
-        // This owner verifies every wall facet and its outward pressure role,
-        // retains the complete eigenwindow, and installs the reciprocal load.
-        // It refuses missing walls or apertures; no closure surface is invented.
-        Ok(bank.with_material_shell_cavity(&fe, self.options, gate)?)
+        // The original owner verifies every wall and opening and constructs
+        // the reciprocal ports before subsequent nonlinear attachments. The
+        // authored source cannot return until its mandatory BEM stage binds
+        // the complete body/opening exterior load.
+        Ok(if self.openings.is_empty() {
+            bank.with_material_shell_cavity(&fe, self.options, gate)?
+        } else {
+            bank.with_material_shell_cavity_openings(&fe, self.options, self.openings.clone(), gate)?
+        })
     }
 }
+

@@ -2,6 +2,8 @@
 //! mechanical performance. This manufactured closed shell is not an instrument.
 use super::*;
 
+mod openings;
+
 const BODY: &str = include_str!("../closed-shell-cavity.body");
 const PERFORMANCE: &str = include_str!("../closed-shell-cavity.material-strings");
 const RESOLUTION: &str = "interior-fe-v1 2 1100 24 256 80 10000000 1e-8";
@@ -196,3 +198,4 @@ fn strict_volume_and_whole_network_admission_precede_material_reads() {
         assert!(error.to_string().contains("material shell cavity"));
     });
 }
+

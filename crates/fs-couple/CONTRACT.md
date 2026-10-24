@@ -5620,3 +5620,20 @@ The direct FE/neck/passive-network tests cover original normalization, pressure
 reaction and work, atmosphere substitution, geometry refusal and retained source
 maps. This is a fixed compact-mouth model, not distributed f-hole flow, interior
 thermoviscous loss, moving aperture rims or measured violin/cello/bass accuracy.
+
+
+The material-string v3/v4 body profile exposes these same cavity mouths after
+its `interior-fe-v1` tetrahedra with `air-openings COUNT`, then
+`air-opening INTERNAL_LENGTH_M INTERNAL_RESISTANCE_PA_S_M3 FACE_COUNT` and
+that many `air-opening-face A B C` records. Original FE indices and geometry
+are retained. Each opening reserves one fluid mode and one possible internal
+damper connection before material-pack reads. Opening-bearing profiles require
+BEM and a covering band at preflight. The cavity binds at the original early
+assembly point; mandatory joint BEM binds later, preserving existing nonlinear
+attachments. No incomplete performance is returned if exterior preparation
+refuses. Sealed source grammar is unchanged.
+
+The open-shell-cavity profile/performance and focused actual-flow microphone
+regression are unexecuted integration inputs. Their 80-panel source may refuse
+at the unchanged dense-BEM reciprocity gate described above. No native test,
+render, material calibration or instrument-realism parity is claimed.

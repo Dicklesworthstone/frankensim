@@ -75,19 +75,23 @@ impl Profile {
             self.additional_body_modes())?;
         Ok(())
     }
-    /// Conservative source-declared viscous channel allowance before pack I/O.
+    /// Conservative interface, pressure and internal-loss connection allowance
+    /// before material-pack I/O.
     pub fn additional_body_connections(&self) -> usize {
         let structural = match &self.model {
             BodyModel::Plate(_) => 0,
             BodyModel::Shell(shell) => shell.additional_body_connections(),
             BodyModel::Assembly(assembly) => assembly.additional_body_connections(),
         };
-        structural + self.interior.as_ref().map_or(0, cavity::Spec::pressure_allowance)
+        structural + self.interior.as_ref().map_or(0, |air|
+            air.pressure_allowance() + air.opening_count())
     }
     /// Every possible positive-frequency pressure mode has an air inertia;
-    /// the exact uniform mode has only its compression spring.
+    /// the exact uniform mode has only its compression spring. Each declared
+    /// opening contributes one original compact-neck fluid inertia.
     pub fn additional_body_modes(&self) -> usize {
-        self.interior.as_ref().map_or(0, |air| air.pressure_allowance() - 1)
+        self.interior.as_ref().map_or(0, |air|
+            air.pressure_allowance() - 1 + air.opening_count())
     }
     /// Load original ordered interface packs before the ordinary bulk loader.
     /// Geometry and complete-network admission precede the first source read.
@@ -399,3 +403,4 @@ impl<'a> Records<'a> {
 #[cfg(test)]
 #[path="body/tests.rs"]
 mod tests;
+
