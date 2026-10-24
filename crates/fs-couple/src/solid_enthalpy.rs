@@ -17,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
+/// One finite source gas exchanges heat with distinct spatial solid cells.
+pub mod gas;
 /// Accepted local heat histories drive the existing pressure-valve reduction.
 pub mod valve;
 

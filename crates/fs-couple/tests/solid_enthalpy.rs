@@ -18,6 +18,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "solid_enthalpy/directional.rs"]
 mod directional;
+#[path = "solid_enthalpy/gas.rs"]
+mod gas;
 #[path = "solid_enthalpy/valve.rs"]
 mod valve;
 

@@ -5096,3 +5096,32 @@ All fixture coefficients are authored verification data, not wood validation.
 Every original enthalpy/Newton trial starts from the same accepted A/H, resolves local sigma(T), mu(T) and thermal conduction, rebuilds the original planar operator, and calls the original endpoint-effort induction solve. Its native per-triangle sigma E² integral is deposited once through the same heat router as the fixed-mu path. Separately, Q_rev=−P−delta(T S_field) enters that triangle receiving cell. Native magnetic parameter work P and signed reversible heat remain distinct from Ohmic heat. The returned report independently reconstructs delta U_field+delta U_caloric−impressed work−external heat, with U_field=psi+T S; reversible heat is internal, not external supply. Both retained histories publish together, and cancellation/source/budget/nonlinear failures publish neither.
 
 Focused synthetic tests cover both permeability-temperature slope signs, the zero-slope existing limit, independent scalar elimination/root references, repeated accepted-history evolution and replay, spatially unequal permeability/conductivity with local temperatures, summed capacity bounds, missing/duplicate/foreign sources, field bounds, and interrupted/budget-exhausted proposals. This is a fixed-geometry linear reversible affine-permeability rung with first-order thermal endpoint coupling, not saturation, hysteresis, phase evolution, a time-error certificate, unconditional entropy/passivity, or measured magnetic-material qualification.
+
+## Spatial solid cells exchanging heat with one finite source gas
+
+`solid_enthalpy::gas::step_with_isochoric_gas` closes the existing thermal
+backward-Euler cell balances and the existing fixed-volume NASA-9 gas energy
+balance in one bounded Newton--Krylov solve. Every exposed patch resolves the
+original gas and solid conductivity at the common trial endpoint. Its signed
+heat is removed from its own cell and added to the single gas inventory;
+opposite patch transfers remain distinct even when their net gas heat is zero.
+Existing internal links and authored external heat remain on the original
+thermal owner. No mean solid temperature or substitute heat capacity is used.
+
+The source-bound structural field is resolved at every trial and at admission.
+Conductivity selection is pinned at the original stress-free reference, and
+the accepted start must still support it. Local cell, gas and combined caloric
+energy allowances are independent of the nonlinear stopping rule. Contact
+IDs, aggregate exposed area, cell/patch/trial budgets, source domains and
+cancellation are admitted before any endpoint can be returned. The immutable
+candidate owns thermal, gas, material-field and transfer reports together;
+callers perform any required equilibrium/valve admission before publishing it.
+
+This slice assumes a well-mixed gas at fixed volume and composition, fixed
+thermal geometry and authored internal conductances. It is sequential
+quasistatic thermoelastic loading: reciprocal elastic heat, pressure work,
+gas flow, moving surfaces and phase change are not supplied by this coupling.
+Numerical Jacobian probes must remain inside the declared material domains.
+Independent three-reservoir regressions cover local heat, source conductivity
+and gas-volume changes reaching displacement, zero-net spatial exchange,
+source continuity, cancellation and transactional refusal.
