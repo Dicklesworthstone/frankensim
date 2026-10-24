@@ -5,9 +5,12 @@
 //! a stationary, pressure-matched acoustic interface, not an advective mixing
 //! layer, thermal equilibration or live replacement of an acoustic state.
 
-use super::{DuctError, DuctResponse, GasState, HoleState, LossModel, Region,
-    RegionalDuct, Segment, Termination, WallModel, input_impedance_load_with_wall,
-    input_impedance_with_wall, invalid};
+use super::{
+    DuctError, DuctResponse, GasState, HoleState, LossModel, OpenHoleFlow, Region, RegionalDuct,
+    Segment, Termination, WallModel, input_impedance_load_with_wall,
+    input_impedance_load_with_wall_and_holes, input_impedance_with_wall,
+    input_impedance_with_wall_and_holes, invalid,
+};
 
 impl RegionalDuct {
     /// Bind the homogeneous exterior independently of the internal terminal gas.
@@ -77,6 +80,46 @@ impl RegionalDuct {
             omega, loss, load, wall)?;
         response.mouth_ka = omega / exterior.sound_speed * radius;
         Ok(response)
+    }
+
+    pub(super) fn terminal_response_with_holes(
+        &self,
+        terminal: &Region,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        wall: WallModel<'_>,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+        let exterior = self.exterior_gas();
+        if *exterior == terminal.gas
+            || matches!(termination, Termination::Closed | Termination::IdealOpen)
+        {
+            return input_impedance_with_wall_and_holes(
+                &terminal.duct,
+                &terminal.gas,
+                omega,
+                loss,
+                termination,
+                wall,
+            );
+        }
+        let radius = terminal
+            .duct
+            .segments
+            .last()
+            .expect("admitted axial outlet")
+            .outlet_radius();
+        let load = fs_duct::compact_radiation_impedance(termination, exterior, radius, omega)?;
+        let (mut response, holes) = input_impedance_load_with_wall_and_holes(
+            &terminal.duct,
+            &terminal.gas,
+            omega,
+            loss,
+            load,
+            wall,
+        )?;
+        response.mouth_ka = omega / exterior.sound_speed * radius;
+        Ok((response, holes))
     }
 }
 

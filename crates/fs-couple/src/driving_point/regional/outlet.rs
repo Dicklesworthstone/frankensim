@@ -10,7 +10,9 @@
 use super::RegionalDuct;
 use crate::driving_point::DrivingPointError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
-use fs_duct::{DuctError, DuctResponse, LossModel, Termination, WallModel};
+use fs_duct::{
+    DuctError, DuctResponse, HoleState, LossModel, OpenHoleFlow, Segment, Termination, WallModel,
+};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
@@ -169,6 +171,172 @@ impl RegionalDuct {
             info: OutletReceiverInfo { gas, radius_m, receiver, sample_rate_hz,
                 fft_samples, axial_delay_samples, exterior_delay_samples } })
     }
+
+    /// [`Self::baffled_outlet_delayed_at`] plus one baffled circular-disk observer
+    /// per open or vented tone hole in the chain, evaluated in a single frequency
+    /// sweep and positioned at `[receiver.x + (L - x_hole), receiver.y, receiver.z]`.
+    pub fn baffled_outlet_and_open_holes_delayed_at(
+        &self,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        receiver: CircularOutletReceiver,
+        wall: WallModel<'_>,
+        delay_speed_m_s: f64,
+    ) -> Result<(OutletPressure, Vec<OutletPressure>), OutletError> {
+        let sites = self.open_hole_sites();
+        if sites.is_empty() {
+            let bell = self.baffled_outlet_delayed_at(
+                sample_rate_hz,
+                fft_samples,
+                receiver,
+                wall,
+                delay_speed_m_s,
+            )?;
+            return Ok((bell, Vec::new()));
+        }
+        let terminal = self.regions.last().expect("admitted nonempty regional duct");
+        let radius_m = terminal
+            .duct
+            .segments
+            .last()
+            .expect("admitted axial terminal")
+            .outlet_radius();
+        let gas = *self.exterior_gas();
+        let medium = RayleighMedium {
+            density: gas.density,
+            sound_speed: delay_speed_m_s,
+        };
+        let bell_mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver, medium)
+            .map_err(OutletError::Receiver)?;
+        let bell_exterior_delay = bell_mic.delay_samples;
+        let total_length_m = self.total_axial_length_m();
+        let mut hole_mics = Vec::with_capacity(sites.len());
+        for site in &sites {
+            let mut hole_receiver = receiver;
+            hole_receiver.position_m[0] =
+                receiver.position_m[0] + (total_length_m - site.axial_position_m);
+            let mic = BaffledPressure::circular_outlet(
+                site.effective_radius_m,
+                sample_rate_hz,
+                hole_receiver,
+                medium,
+            )
+            .map_err(OutletError::Receiver)?;
+            hole_mics.push((mic, hole_receiver));
+        }
+        let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
+        let ((bell_kernel, bell_delay), hole_kernels) = acceleration_kernels_with_holes(
+            sample_rate_hz,
+            fft_samples,
+            self.one_way_time_s(),
+            &hole_times,
+            self.inlet_impedance(),
+            |omega| {
+                self.response_with_wall_and_holes(
+                    omega,
+                    LossModel::Bessel,
+                    Termination::FlangedOpen,
+                    wall,
+                )
+            },
+        )?;
+        let dt = 1.0 / f64::from(sample_rate_hz);
+        let bell_acc = DelayedFilter::from_impulse_response(dt, bell_kernel)
+            .map_err(DrivingPointError::Discrete)?;
+        let bell_rad = rayleigh_acceleration_filter(bell_mic, sample_rate_hz)?;
+        let bell = OutletPressure {
+            acceleration: bell_acc,
+            radiation: bell_rad,
+            poisoned: false,
+            info: OutletReceiverInfo {
+                gas,
+                radius_m,
+                receiver,
+                sample_rate_hz,
+                fft_samples,
+                axial_delay_samples: bell_delay,
+                exterior_delay_samples: bell_exterior_delay,
+            },
+        };
+        let mut holes = Vec::with_capacity(sites.len());
+        for ((site, (mic, hole_receiver)), (kernel, axial_delay_samples)) in
+            sites.iter().zip(hole_mics).zip(hole_kernels)
+        {
+            let exterior_delay_samples = mic.delay_samples;
+            let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
+                .map_err(DrivingPointError::Discrete)?;
+            let radiation = rayleigh_acceleration_filter(mic, sample_rate_hz)?;
+            holes.push(OutletPressure {
+                acceleration,
+                radiation,
+                poisoned: false,
+                info: OutletReceiverInfo {
+                    gas,
+                    radius_m: site.effective_radius_m,
+                    receiver: hole_receiver,
+                    sample_rate_hz,
+                    fft_samples,
+                    axial_delay_samples,
+                    exterior_delay_samples,
+                },
+            });
+        }
+        Ok((bell, holes))
+    }
+
+    fn total_axial_length_m(&self) -> f64 {
+        self.regions
+            .iter()
+            .flat_map(|region| &region.duct.segments)
+            .map(Segment::axial_length)
+            .sum()
+    }
+
+    fn open_hole_sites(&self) -> Vec<OpenHoleSite> {
+        if self.continuous.is_some() {
+            return Vec::new();
+        }
+        let mut sites = Vec::new();
+        let mut axial_x = 0.0_f64;
+        let mut axial_time_s = 0.0_f64;
+        for region in &self.regions {
+            for segment in &region.duct.segments {
+                if let Segment::ToneHole {
+                    hole_radius,
+                    chimney_height,
+                    bore_radius,
+                    state,
+                } = *segment
+                {
+                    let sigma = match state {
+                        HoleState::Open => 1.0,
+                        HoleState::Closed => 0.0,
+                        HoleState::Vent(s) => s.clamp(0.0, 1.0),
+                    };
+                    if sigma > 0.0 {
+                        let inner = fs_phs::side_hole_inner_length(hole_radius, bore_radius);
+                        sites.push(OpenHoleSite {
+                            axial_position_m: axial_x,
+                            effective_radius_m: hole_radius * sigma.sqrt(),
+                            one_way_time_s: axial_time_s
+                                + (chimney_height + inner) / region.gas.sound_speed,
+                        });
+                    }
+                } else {
+                    let length = segment.axial_length();
+                    axial_x += length;
+                    axial_time_s += length / region.gas.sound_speed;
+                }
+            }
+        }
+        sites
+    }
+}
+
+struct OpenHoleSite {
+    axial_position_m: f64,
+    effective_radius_m: f64,
+    one_way_time_s: f64,
 }
 
 fn invalid(what: &'static str) -> DrivingPointError { DrivingPointError::Invalid { what } }
@@ -215,6 +383,94 @@ fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64, zc: f
     let mut kernel = vec![0.0; delay];
     kernel.extend(spectrum.iter().map(|value| value.re));
     Ok((kernel, delay))
+}
+
+#[allow(clippy::type_complexity)]
+fn acceleration_kernels_with_holes(
+    sample_rate_hz: u32,
+    n: usize,
+    bell_time_s: f64,
+    hole_times_s: &[f64],
+    zc: f64,
+    mut response: impl FnMut(f64) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError>,
+) -> Result<((Vec<f64>, usize), Vec<(Vec<f64>, usize)>), DrivingPointError> {
+    if sample_rate_hz == 0
+        || !(256..=MAX_OUTLET_FFT_SAMPLES).contains(&n)
+        || !n.is_power_of_two()
+        || !zc.is_finite()
+        || zc <= 0.0
+        || !bell_time_s.is_finite()
+        || bell_time_s <= 0.0
+    {
+        return Err(invalid(
+            "outlet transfer requires physical clock, impedance, travel time and a power-of-two grid in 256..=65536",
+        ));
+    }
+    let rate = f64::from(sample_rate_hz);
+    let max_delay = (MAX_OUTLET_TRANSFER_SAMPLES - n) as f64;
+    let check_delay = |time_s: f64| -> Result<usize, DrivingPointError> {
+        let delay = (time_s * rate).floor();
+        if !delay.is_finite() || delay < 1.0 || delay > max_delay {
+            return Err(invalid(
+                "axial delay and response exceed the outlet transfer history budget",
+            ));
+        }
+        Ok(delay as usize)
+    };
+    let bell_delay = check_delay(bell_time_s)?;
+    let mut hole_delays = Vec::with_capacity(hole_times_s.len());
+    for &time_s in hole_times_s {
+        hole_delays.push(check_delay(time_s)?);
+    }
+    let fft = Fft::new(n);
+    let mut bell_spectrum = vec![FftC64::new(0.0, 0.0); n];
+    let mut hole_spectra = vec![vec![FftC64::new(0.0, 0.0); n]; hole_times_s.len()];
+    let store_bin = |spectrum: &mut [FftC64], k: usize, theta: f64, delay: usize, acc: C64| -> Result<(), DrivingPointError> {
+        let phase = theta * delay as f64;
+        let residual =
+            C64::new(acc.re, -acc.im) * C64::new(det::cos(phase), det::sin(phase));
+        if !residual.re.is_finite() || !residual.im.is_finite() {
+            return Err(invalid("nonfinite terminal acceleration transfer"));
+        }
+        spectrum[k] = FftC64::new(residual.re, if k == n / 2 { 0.0 } else { residual.im });
+        if k != n / 2 {
+            spectrum[n - k] = FftC64::new(residual.re, -residual.im);
+        }
+        Ok(())
+    };
+    for k in 1..=n / 2 {
+        let theta = core::f64::consts::TAU * k as f64 / n as f64;
+        let (r, hole_flows) = response(theta * rate).map_err(DrivingPointError::Duct)?;
+        if hole_flows.len() != hole_times_s.len() {
+            return Err(invalid("open-hole transfer count mismatch across frequencies"));
+        }
+        let denominator = C64::new(r.impedance.re + zc, r.impedance.im);
+        let two_over_denom = denominator.recip().scale(2.0);
+        let derivative = C64::new(rate * (1.0 - det::cos(theta)), -rate * det::sin(theta));
+        let bell_flow = C64::new(r.u_mouth_over_u_in.re, r.u_mouth_over_u_in.im) * two_over_denom;
+        store_bin(&mut bell_spectrum, k, theta, bell_delay, bell_flow * derivative)?;
+        for ((spectrum, &delay), hole) in hole_spectra
+            .iter_mut()
+            .zip(&hole_delays)
+            .zip(&hole_flows)
+        {
+            let hole_flow =
+                C64::new(hole.u_hole_over_u_in.re, hole.u_hole_over_u_in.im) * two_over_denom;
+            store_bin(spectrum, k, theta, delay, hole_flow * derivative)?;
+        }
+    }
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n];
+    fft.inverse(&mut bell_spectrum, &mut scratch);
+    let mut bell_kernel = vec![0.0; bell_delay];
+    bell_kernel.extend(bell_spectrum.iter().map(|value| value.re));
+    let mut hole_kernels = Vec::with_capacity(hole_spectra.len());
+    for (mut spectrum, delay) in hole_spectra.into_iter().zip(hole_delays) {
+        fft.inverse(&mut spectrum, &mut scratch);
+        let mut kernel = vec![0.0; delay];
+        kernel.extend(spectrum.iter().map(|value| value.re));
+        hole_kernels.push((kernel, delay));
+    }
+    Ok(((bell_kernel, bell_delay), hole_kernels))
 }
 
 // Identify the existing linear Rayleigh operator using a unit volume-flow step.

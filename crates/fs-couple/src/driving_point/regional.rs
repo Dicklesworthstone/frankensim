@@ -23,8 +23,12 @@ use super::{
     characteristic_line_response_with_poles, duct_reflectance, impedance_reflectance,
     sealed_volume_compliance_gain,
 };
-use fs_duct::{Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, Segment, Termination,
-    WallModel, input_impedance_load_with_wall, input_impedance_with_wall};
+use fs_duct::{
+    Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, OpenHoleFlow, Segment,
+    Termination, WallModel, input_impedance_load_with_wall,
+    input_impedance_load_with_wall_and_holes, input_impedance_with_wall,
+    input_impedance_with_wall_and_holes,
+};
 use fs_material::gas::GasState;
 use fs_phs::WallPin;
 use fs_vfit::discretize::DelayedFilter;
@@ -189,6 +193,75 @@ impl RegionalDuct {
             response.min_shear_number = response.min_shear_number.min(upstream.min_shear_number);
         }
         Ok(response)
+    }
+
+    /// [`Self::response_with_wall`] plus outward volume-velocity transfers at every
+    /// open or vented tone hole's flanged mouth, solved from the same regional chain.
+    pub fn response_with_wall_and_holes(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        wall: WallModel<'_>,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(invalid("frequency must be positive and finite"));
+        }
+        if let Some(field) = &self.continuous {
+            return Ok((
+                field.response_with_wall(
+                    omega,
+                    loss,
+                    termination,
+                    Some(self.exterior_gas()),
+                    wall,
+                )?,
+                Vec::new(),
+            ));
+        }
+        let mut offsets = Vec::with_capacity(self.regions.len());
+        let mut axial_x = 0.0;
+        for region in &self.regions {
+            offsets.push(axial_x);
+            axial_x += region
+                .duct
+                .segments
+                .iter()
+                .map(Segment::axial_length)
+                .sum::<f64>();
+        }
+        let mut runs = self.regions.iter().enumerate().rev();
+        let (terminal_idx, terminal) = runs.next().expect("nonempty binding");
+        let (mut response, mut holes) =
+            self.terminal_response_with_holes(terminal, omega, loss, termination, wall)?;
+        for hole in &mut holes {
+            hole.axial_position_m += offsets[terminal_idx];
+        }
+        for (region_idx, region) in runs {
+            let (upstream, mut upstream_holes) = input_impedance_load_with_wall_and_holes(
+                &region.duct,
+                &region.gas,
+                omega,
+                loss,
+                response.impedance,
+                wall,
+            )?;
+            for hole in &mut holes {
+                hole.u_hole_over_u_in = hole.u_hole_over_u_in * upstream.u_mouth_over_u_in;
+            }
+            if !upstream_holes.is_empty() {
+                for hole in &mut upstream_holes {
+                    hole.axial_position_m += offsets[region_idx];
+                }
+                upstream_holes.extend(holes);
+                holes = upstream_holes;
+            }
+            response.u_mouth_over_u_in = response.u_mouth_over_u_in * upstream.u_mouth_over_u_in;
+            response.p_mouth_over_u_in = response.p_mouth_over_u_in * upstream.u_mouth_over_u_in;
+            response.impedance = upstream.impedance;
+            response.min_shear_number = response.min_shear_number.min(upstream.min_shear_number);
+        }
+        Ok((response, holes))
     }
 
     /// Reflection at the original inlet port, with the complete local wall.

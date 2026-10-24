@@ -455,6 +455,19 @@ pub struct DuctResponse {
     pub composition:compose::CompositionMode,
 }
 
+/// Outward volume-velocity transfer at an open or vented tone hole's flanged mouth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenHoleFlow {
+    /// Axial coordinate of the tone-hole centre from the duct inlet [m].
+    pub axial_position_m: f64,
+    /// Effective radiating radius `b sqrt(sigma)` at the chimney mouth [m].
+    pub effective_radius_m: f64,
+    /// Physical plus inner-matching chimney length `h + t_i` [m].
+    pub chimney_length_m: f64,
+    /// Outward volume velocity at the flanged chimney mouth over inlet volume velocity.
+    pub u_hole_over_u_in: C64,
+}
+
 /// Viscothermal wavenumber and characteristic impedance for a tube of
 /// the given radius: the Zwikker–Kosten wide-tube first order, derived
 /// entirely from the first-principles [`GasState`].
@@ -917,6 +930,51 @@ fn chimney_line_impedance_with_wall(
     Ok(input_impedance_with_wall(&duct, state, omega, chimney_loss, termination, wall)?.impedance)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chimney_open_response_with_wall(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    bore_radius: f64,
+    omega: f64,
+    loss: LossModel,
+    compact_corrections: bool,
+    wall: WallModel<'_>,
+) -> Result<(DuctResponse, f64), DuctError> {
+    let inner = if compact_corrections {
+        side_hole_inner_length(hole_radius, bore_radius)
+    } else {
+        0.0
+    };
+    let length = chimney_height + inner;
+    if !(hole_radius > 0.0 && length > 0.0 && hole_radius.is_finite() && length.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "chimney radius and length must be positive and finite",
+        });
+    }
+    let chimney_loss = match loss {
+        LossModel::WideTube => LossModel::Bessel,
+        other => other,
+    };
+    let duct = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: hole_radius,
+            length,
+        }],
+    };
+    Ok((
+        input_impedance_with_wall(
+            &duct,
+            state,
+            omega,
+            chimney_loss,
+            Termination::FlangedOpen,
+            wall,
+        )?,
+        length,
+    ))
+}
+
 fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
     [
         a[0] * b[0] + a[1] * b[2],
@@ -1276,6 +1334,26 @@ pub fn input_impedance_with_wall(
     compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Analytic(termination), wall)
 }
 
+/// [`input_impedance_with_wall`] plus outward volume-velocity transfers at every
+/// open or vented tone hole's flanged mouth, solved from the same chain.
+pub fn input_impedance_with_wall_and_holes(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    compose::evaluate_with_wall_and_holes(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Analytic(termination),
+        wall,
+    )
+}
+
 /// How the mouth load is supplied to the chain.
 #[derive(Clone,Copy)]
 enum LoadSpec {
@@ -1323,6 +1401,24 @@ pub fn input_impedance_load_with_wall(
         return Err(DuctError::BadParameter { what: "tabulated load must be finite" });
     }
     compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
+}
+
+/// [`input_impedance_load_with_wall`] plus outward volume-velocity transfers at
+/// every open or vented tone hole's flanged mouth, solved from the same chain.
+pub fn input_impedance_load_with_wall_and_holes(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: WallModel<'_>,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    if !z_load.re.is_finite() || !z_load.im.is_finite() {
+        return Err(DuctError::BadParameter {
+            what: "tabulated load must be finite",
+        });
+    }
+    compose::evaluate_with_wall_and_holes(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
 }
 
 #[allow(clippy::too_many_lines)] // one coherent physics stage

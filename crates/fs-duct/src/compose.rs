@@ -5,8 +5,8 @@
 //! Condition estimates describe feedback cancellation, not global ABCD growth:
 //! a perfectly matched arbitrarily attenuating line must remain admissible.
 use crate::{
-    Duct, DuctError, DuctResponse, HoleState, LoadSpec, LossModel, Segment, SegmentWave,
-    Termination,
+    Duct, DuctError, DuctResponse, HoleState, LoadSpec, LossModel, OpenHoleFlow, Segment,
+    SegmentWave, Termination,
 };
 use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
@@ -300,6 +300,7 @@ pub struct ChainResult {
 // Log magnitude avoids underflow followed by a later resonant gain. Phases
 // are fixed-order products of unit complex numbers; only final output rounds
 // to zero below the representable range. No exponential of +alpha*L occurs.
+#[derive(Clone, Copy)]
 struct Product {
     log_abs: f64,
     phase: C64,
@@ -787,6 +788,17 @@ pub struct PreparedChain {
     pub reference_impedance: f64,
     pub min_shear_number: f64,
 }
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreparedOpenHole {
+    pub block_index: usize,
+    pub axial_position_m: f64,
+    pub effective_radius_m: f64,
+    pub chimney_length_m: f64,
+    pub sigma: f64,
+    pub half_series_impedance: C64,
+    pub open_chimney_impedance: C64,
+    pub chimney_u_mouth_over_u_in: C64,
+}
 fn push_block(blocks: &mut Vec<TwoPort>, limit: usize, block: TwoPort) -> Result<(), DuctError> {
     if blocks.len() >= limit {
         return Err(bad("composition block work cap exceeded"));
@@ -813,8 +825,32 @@ pub fn duct_chain(
 pub fn duct_chain_with_wall(
     duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
     wall: WallModel<'_>, options: ComposeOptions, compact_corrections: bool,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedChain, DuctError> {
+    duct_chain_with_wall_and_holes(
+        duct,
+        state,
+        omega,
+        loss,
+        wall,
+        options,
+        compact_corrections,
+        cancelled,
+    )
+    .map(|(chain, _)| chain)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn duct_chain_with_wall_and_holes(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+    compact_corrections: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
     options.validate()?;
     poll(&mut cancelled, 0)?;
     let first = duct.segments.first().ok_or(DuctError::EmptyDuct)?;
@@ -830,6 +866,7 @@ pub fn duct_chain_with_wall(
     let inlet = first.inlet_radius();
     let reference = state.density * state.sound_speed / (core::f64::consts::PI * inlet * inlet);
     let mut blocks = Vec::new();
+    let mut open_holes = Vec::new();
     let mut min_shear = f64::INFINITY;
     let mut sites = Vec::new();
     let mut x = 0.0;
@@ -886,13 +923,44 @@ pub fn duct_chain_with_wall(
                         hole_radius * (state.density * omega / state.dynamic_viscosity).sqrt(),
                     );
                 }
+                let sigma = crate::hole_sigma(hs);
+                let block_index = blocks.len();
                 let m = if compact_corrections {
                     let mut extra = 0.0;
-                    if crate::hole_sigma(hs) > 0.0 {
+                    if sigma > 0.0 {
                         let (xi, bi, ai) = sites[hole_index];
                         for &(xj, bj, _) in &sites {
                             extra += fs_phs::side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
                         }
+                        let (open_resp, chimney_length_m) = crate::chimney_open_response_with_wall(
+                            state,
+                            hole_radius,
+                            chimney_height,
+                            bore_radius,
+                            omega,
+                            loss,
+                            true,
+                            wall,
+                        )?;
+                        let ts =
+                            fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma
+                                + extra;
+                        let half = if ts == 0.0 {
+                            C64::ZERO
+                        } else {
+                            let area = core::f64::consts::PI * bore_radius * bore_radius;
+                            C64::new(0.0, -omega * state.density * ts / area).scale(0.5)
+                        };
+                        open_holes.push(PreparedOpenHole {
+                            block_index,
+                            axial_position_m: xi,
+                            effective_radius_m: bi,
+                            chimney_length_m,
+                            sigma,
+                            half_series_impedance: half,
+                            open_chimney_impedance: open_resp.impedance,
+                            chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
+                        });
                         hole_index += 1;
                     }
                     crate::tone_hole_t_junction_with_wall(
@@ -907,6 +975,30 @@ pub fn duct_chain_with_wall(
                         wall,
                     )?
                 } else {
+                    if sigma > 0.0 {
+                        let (xi, bi, _) = sites[hole_index];
+                        let (open_resp, chimney_length_m) = crate::chimney_open_response_with_wall(
+                            state,
+                            hole_radius,
+                            chimney_height,
+                            bore_radius,
+                            omega,
+                            loss,
+                            false,
+                            wall,
+                        )?;
+                        open_holes.push(PreparedOpenHole {
+                            block_index,
+                            axial_position_m: xi,
+                            effective_radius_m: bi,
+                            chimney_length_m,
+                            sigma,
+                            half_series_impedance: C64::ZERO,
+                            open_chimney_impedance: open_resp.impedance,
+                            chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
+                        });
+                        hole_index += 1;
+                    }
                     let loss = if loss == LossModel::WideTube {
                         LossModel::Bessel
                     } else {
@@ -989,11 +1081,79 @@ pub fn duct_chain_with_wall(
             }
         }
     }
-    Ok(PreparedChain {
-        blocks,
-        reference_impedance: reference,
-        min_shear_number: min_shear,
-    })
+    Ok((
+        PreparedChain {
+            blocks,
+            reference_impedance: reference,
+            min_shear_number: min_shear,
+        },
+        open_holes,
+    ))
+}
+
+fn open_hole_flows(
+    chain: &PreparedChain,
+    open_holes: &[PreparedOpenHole],
+    z_load: Option<C64>,
+    options: ComposeOptions,
+) -> Result<Vec<OpenHoleFlow>, DuctError> {
+    if open_holes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reference = chain.reference_impedance;
+    let LoadReflection::Finite(r_load) = load_reflection(z_load, reference)? else {
+        return Err(DuctError::Singular);
+    };
+    let n = chain.blocks.len();
+    let mut r_after = vec![C64::ZERO; n];
+    let mut t_step = vec![C64::ZERO; n];
+    let mut r = r_load;
+    let mut condition = 1.0_f64;
+    for (i, block) in chain.blocks.iter().enumerate().rev() {
+        r_after[i] = r;
+        let s = block.scattering;
+        let (d, c) = feedback(s[3], r);
+        condition = condition.max(c);
+        bound(condition, options.maximum_condition)?;
+        let t = s[2] / d;
+        t_step[i] = t;
+        r = s[0] + s[1] * r * t;
+    }
+    let denom = C64::ONE - r;
+    condition = condition.max((1.0 + r.abs()) / denom.abs());
+    bound(condition, options.maximum_condition)?;
+    let mut prefix = Product::new();
+    let mut next_block = 0usize;
+    let mut flows = Vec::with_capacity(open_holes.len());
+    for hole in open_holes {
+        while next_block <= hole.block_index {
+            prefix.multiply(t_step[next_block])?;
+            next_block += 1;
+        }
+        let a_right_over_a_in = prefix.value()?;
+        let r_right = r_after[hole.block_index];
+        let p_mid_over_r0_u_in = a_right_over_a_in
+            * ((C64::ONE + r_right)
+                + hole
+                    .half_series_impedance
+                    .scale(1.0 / reference)
+                    * (C64::ONE - r_right))
+            / denom;
+        let u_chimney_in_over_u_in = p_mid_over_r0_u_in
+            .scale(hole.sigma * reference)
+            / hole.open_chimney_impedance;
+        let u_hole_over_u_in = u_chimney_in_over_u_in * hole.chimney_u_mouth_over_u_in;
+        if !finite(u_hole_over_u_in) {
+            return Err(DuctError::Singular);
+        }
+        flows.push(OpenHoleFlow {
+            axial_position_m: hole.axial_position_m,
+            effective_radius_m: hole.effective_radius_m,
+            chimney_length_m: hole.chimney_length_m,
+            u_hole_over_u_in,
+        });
+    }
+    Ok(flows)
 }
 
 pub(crate) fn evaluate(
@@ -1013,6 +1173,45 @@ pub(crate) fn evaluate_with_wall(
 ) -> Result<DuctResponse, DuctError> {
     let options = ComposeOptions::default();
     let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
+    evaluate_prepared_chain(duct, state, omega, loss, load, wall, options, &chain)
+}
+
+pub(crate) fn evaluate_with_wall_and_holes(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    let options = ComposeOptions::default();
+    let (chain, open_holes) =
+        duct_chain_with_wall_and_holes(duct, state, omega, loss, wall, options, true, || false)?;
+    let radius = duct
+        .segments
+        .last()
+        .ok_or(DuctError::EmptyDuct)?
+        .outlet_radius();
+    let (z_load, _) = match load {
+        LoadSpec::Analytic(t) => crate::termination_impedance(t, state, radius, omega)?,
+        LoadSpec::Fixed(z) => (Some(z), omega * radius / state.sound_speed),
+    };
+    let response = evaluate_prepared_chain(duct, state, omega, loss, load, wall, options, &chain)?;
+    let flows = open_hole_flows(&chain, &open_holes, z_load, options)?;
+    Ok((response, flows))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_prepared_chain(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+    chain: &PreparedChain,
+) -> Result<DuctResponse, DuctError> {
     let radius = duct
         .segments
         .last()
