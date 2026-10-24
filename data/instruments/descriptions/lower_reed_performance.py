@@ -223,24 +223,32 @@ def reed_record(desc, pressure):
     """The `reed` header values: literal keys, or per-area quantities with a lip-force rule.
 
     Per-area mode (reed.stiffness_per_area_pa_m present): the closing pressure is the blowing
-    pressure over the published operating ratio p_m / (K_a y_m), the stiffness is the closing
-    pressure times the effective area over y_m (the reed owner's face rule k H = P_c A), the
-    mass is the mass per area times the effective area, and the damping ratio follows from the
-    damping rate g as g / (2 omega) with omega = sqrt(k / m).
+    pressure over the published operating ratio p_m / (K_a y_{m,0}), K_a, m_a, and g are held
+    at their published per-area values (Chatziioannou and van Walstijn 2009 Table 1), the
+    equilibrium rest opening is y_m = P_M / K_a (checked against reed.tip_opening_cap_m when
+    present, satisfying the reed owner's face rule k y_m = P_M S_r with k = K_a S_r), the
+    mass is m = m_a S_r, and the damping ratio follows from g / (2 omega_r) with
+    omega_r = sqrt(K_a / m_a) = sqrt(k / m).
     """
     height = need(desc, "reed.rest_opening_m")
     width = need(desc, "reed.width_m")
     if "reed.stiffness_per_area_pa_m" not in desc:
         keys = ("reed.closing_pressure_pa", "reed.mass_kg", "reed.stiffness_n_m", "reed.damping_ratio")
         return " ".join([height, width] + [need(desc, key) for key in keys])
-    h = float(height)
+    h0 = float(height)
     area = float(need(desc, "reed.effective_area_m2"))
-    ratio = float(need(desc, "reed.operating_blowing_pa")) / (float(need(desc, "reed.stiffness_per_area_pa_m")) * h)
+    k_a = float(need(desc, "reed.stiffness_per_area_pa_m"))
+    m_a = float(need(desc, "reed.mass_per_area_kg_m2"))
+    g = float(need(desc, "reed.damping_rate_1_s"))
+    ratio = float(need(desc, "reed.operating_blowing_pa")) / (k_a * h0)
     closing = pressure / ratio
-    stiffness = closing * area / h
-    mass = float(need(desc, "reed.mass_per_area_kg_m2")) * area
-    zeta = float(need(desc, "reed.damping_rate_1_s")) / (2.0 * math.sqrt(stiffness / mass))
-    return f"{height} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
+    y_m = closing / k_a
+    if "reed.tip_opening_cap_m" in desc and y_m > float(desc["reed.tip_opening_cap_m"]):
+        refuse(f"equilibrium reed opening {y_m} m exceeds tip opening cap {desc['reed.tip_opening_cap_m']} m")
+    stiffness = k_a * area
+    mass = m_a * area
+    zeta = g / (2.0 * math.sqrt(k_a / m_a))
+    return f"{num(y_m)} {width} {num(closing)} {mass!r} {stiffness!r} {zeta!r}"
 
 
 def performance(desc, records, pressure):
