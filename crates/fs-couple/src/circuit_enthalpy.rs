@@ -19,6 +19,10 @@ pub mod thermoelectric;
 pub mod motion;
 /// Distributed sourced winding loss on the same native thermal residual.
 pub mod winding;
+/// Shared original material/volume correspondence for magnetic heat consumers.
+pub mod magnetic;
+/// Retained spatial induction and Joule heat on the original enthalpy timeline.
+pub mod eddy;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
