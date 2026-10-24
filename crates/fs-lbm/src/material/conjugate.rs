@@ -4,8 +4,12 @@
 //! are evaluated by the original `FluidTransport` owner. This adapter neither
 //! chooses a fluid by name nor invents another equation of state. Momentum,
 //! heat-capacity flux and molecular/eddy conductivity use that SAME snapshot.
-//! Properties remain frozen during the solve: heating does not silently become
-//! a compressible, reacting, phase-changing or buoyancy-coupled calculation.
+//! The forced-flow entry point freezes properties. [`buoyant`] explicitly closes
+//! source-resolved steady temperature feedback through these same numerical
+//! owners; neither path infers compressibility, chemistry or phase change.
+
+/// Closed, source-resolved steady buoyancy, viscosity and conductivity feedback.
+pub mod buoyant;
 
 use fs_exec::CancelGate;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

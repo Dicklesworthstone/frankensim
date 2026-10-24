@@ -2043,6 +2043,31 @@ contact resistance, phase mobility, pressure/viscous heat or moving surface.
 
 ### Material-density natural convection on the enthalpy timeline
 
+`material::conjugate::MaterialChtFluid::solve_natural_convection` also exposes
+the shared source-driven Boussinesq projection directly to steady CHT consumers,
+without requiring a transient enthalpy timeline. One local source query supplies
+`(rho(T)-rho0)*g`, dynamic viscosity and molecular conductivity. The existing
+full-symmetric-stress SIMPLEC owner and conductivity-field energy owner solve
+on the same original domain and conservative volume fluxes. Reference rho/Cp
+stay in inertia, continuity and sensible heat-capacity advection; the supplied
+density/Cp departure bounds apply at every trial and proposed endpoint.
+
+Acceptance requires converged native flow/heat solves plus independent
+unrelaxed temperature, relative mu/k and absolute force-defect tolerances.
+Underrelaxation cannot shrink the defect used for acceptance. Returned fields
+retain both the actual applied samples and fresh endpoint samples. Negative or
+nonmonotone thermal expansion follows the source density law without an
+independent beta. Fixed solid conductivities, ordinary contacts and authored
+thermal boundaries are retained; stateful solid tables, LVEL and independent
+eddy-conductivity fields refuse. This is a numerical steady Boussinesq model,
+not variable-density mass transport, transient dynamics or experimental
+validation. Source queries must be repeatable; budget, domain or cancellation
+failure publishes no partial solution. Focused G1/G3/G4 cases in
+`tests/material_conjugate.rs` cover nonlinear heat balance, Darcy material swaps,
+negative expansion, endpoint source refusal and independent force convergence.
+Low-conductivity warm and fan-driven starts keep the caller's initial field;
+conductive initialization is reserved for unanchored, exactly zero-flow startup.
+
 `LiquidFlowEnthalpyInput::feedback_boussinesq` admits the same pinned liquid
 and caloric sources for bounded density variation. It delegates to
 `MaterialFlowFeedback::try_new_boussinesq` and the existing `BoussinesqMaterial`
