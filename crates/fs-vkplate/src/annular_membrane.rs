@@ -113,10 +113,25 @@ impl AnnularMembrane {
             outer(&mut matrix, &yy, &yy, weight);
             outer(&mut matrix, &xx, &yy, -nu * weight);
             outer(&mut matrix, &yy, &xx, -nu * weight);
-            let dx = gradient(i, j, 1, 0)?;
-            let dy = gradient(i, j, 0, 1)?;
-            quadratic(&mut load, &xx, &dy, &dy, 0.5);
-            quadratic(&mut load, &yy, &dx, &dx, 0.5);
+            for (stress, di, dj) in [(&yy, 1, 0), (&xx, 0, 1)] {
+                // Integrate the squared slope on both halves of the nodal
+                // control interval. Squaring the centered average instead
+                // erases alternating slopes before computing their strain.
+                // With piecewise-linear displacement these are the exact
+                // half-interval integrals, not an added stiffness or filter.
+                let sides = (grid.get(&(i - di, j - dj)), grid.get(&(i + di, j + dj)));
+                if let (Some(&a), Some(&b)) = sides {
+                    let c = grid[&(i, j)];
+                    let backward = vec![(a, -1.0 / h), (c, 1.0 / h)];
+                    let forward = vec![(c, -1.0 / h), (b, 1.0 / h)];
+                    quadratic(&mut load, stress, &backward, &backward, 0.25);
+                    quadratic(&mut load, stress, &forward, &forward, 0.25);
+                } else {
+                    // Preserve the one-sided boundary reconstruction.
+                    let slope = gradient(i, j, di, dj)?;
+                    quadratic(&mut load, stress, &slope, &slope, 0.5);
+                }
+            }
         }
         let cells: BTreeSet<_> = sorted
             .iter()
@@ -283,6 +298,41 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn alternating_slopes_with_a_transverse_envelope_retain_strain() {
+        // Alternating x slopes have nonzero squared strain. Its y envelope
+        // makes it incompatible with an in-plane displacement, so it must
+        // load the Airy problem even at an interior point. Averaging the two
+        // slopes before squaring incorrectly makes this load vanish.
+        let h = 0.02;
+        let amplitude = 0.001;
+        let transverse = 4.0;
+        let body = plate(h, 0.1, false);
+        let w: Vec<_> = body
+            .xy
+            .iter()
+            .map(|[x, y]| {
+                let sign = if (x / h).round() as i64 % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                amplitude * sign * (transverse * y).cos()
+            })
+            .collect();
+        let node = body.node_at(0.2, 0.0).unwrap();
+        let vk = body.vk.as_ref().unwrap();
+        let c = vk.nb.iter().position(|row| row[0] == Some(node)).unwrap();
+        let mut q = vk.q.clone();
+        vk.annulus.as_ref().unwrap().load(&w, &vk.z0, vk.eh, &mut q);
+        let scale = vk.eh * amplitude * amplitude * transverse * transverse / (h * h);
+        assert!(
+            q[c].abs() > 0.1 * scale,
+            "incompatible alternating-slope strain vanished: {} / {scale}",
+            q[c]
+        );
     }
 
     #[test]
