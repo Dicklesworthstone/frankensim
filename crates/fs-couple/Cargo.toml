@@ -51,6 +51,7 @@ fs-plate = { path = "../fs-plate" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rand = { path = "../fs-rand" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
@@ -61,7 +62,6 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
-fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-mbd = { path = "../fs-mbd" }
@@ -79,4 +79,3 @@ fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
 [lints]
 workspace = true
-

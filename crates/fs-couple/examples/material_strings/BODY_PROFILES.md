@@ -8,6 +8,11 @@ The performance's `body` record still supplies its pack, dimensions, thickness,
 mode count and observer distance. String layers, support prescriptions, torsion,
 loads, plucks, bow tracks, shared gas and optional cavity are unchanged.
 
+V3/v4 profiles can also supply an explicit tetrahedral interior with the
+`interior-fe-v1` trailer below. Its gas is the performance's original resolved
+atmosphere; its standing waves and uniform compression load the same material
+body before the existing force, bow, fluid and radiation attachments.
+
 The rectangular profiles normally use `from_viscous_material_plate_chart`; an
 explicit regional-Maxwell selection uses the original elastic chart plus the
 shared coupled material-memory owner described below. The curved
@@ -672,3 +677,103 @@ midsurface. What the table does not carry is explicit: the window, projection
 work, which wood is `@body`, the reference thickness, and one bridge per string
 at the nearest node of a declared point (the snap distance is reported). The
 table's cavity row supplies the performance's cavity record.
+
+## Authored distributed interior air on the material shell
+
+An optional `interior-fe-v1` trailer follows every ordinary record of a v3
+shell or v4 assembled body profile. It gives the original Helmholtz finite
+element owner the actual volume mesh. No material-specific cavity preset,
+assigned resonance, frequency tuning or independent pressure filter is used.
+
+```text
+interior-fe-v1 ORDER MAX_HZ MAX_PRESSURE_MODES MAX_DOFS MAX_BOUNDARY_FACES MAX_PROJECTION_TERMS RITZ_TOL
+air-nodes N
+air-node X_FRACTION Y_FRACTION Z_METRES
+... exactly N rows ...
+air-tets T
+air-tet A B C D
+... exactly T rows ...
+```
+
+Every node index is zero based. X and Y use exactly the shell's existing
+fractional convention: multiply by the performance body's length and width.
+Z is already in metres. Reuse the exact original boundary coordinate values;
+the adapter neither welds nearby points nor closes gaps. Every tetrahedron
+needs four distinct valid vertices and nonzero physical volume, every volume
+vertex must be used, and repeated tetrahedra are refused. The volume must be
+connected and conforming, and every boundary triangle must match one explicitly
+selected original `cavity-facet`, oriented outward from the gas. A profile
+without an explicit `pressure-surfaces` block cannot bind a distributed
+interior. Exterior pressure roles remain independent.
+
+The order is 1–4. The positive frequency ceiling must stay below 0.45 times
+the mechanical sample rate. The original inertia-counted eigensolver retains
+the **entire** Neumann eigenwindow, including uniform pressure; exceeding
+`MAX_PRESSURE_MODES` refuses instead of dropping modes. `RITZ_TOL` is the
+relative eigen residual tolerance and must lie strictly between zero and one.
+The source admits at most 256 pressure modes, 8192 pressure degrees of freedom,
+8192 boundary faces, 32768 tetrahedra and one billion projection terms. It also
+retains the complete profile's 4 MiB byte ceiling. Higher order contributes edge,
+face and interior degrees of freedom; `MAX_DOFS` bounds the complete FE
+space, not only its vertices.
+
+The network reserves up to `min(MAX_PRESSURE_MODES, actual FE DOFs)-1`
+additional air coordinates and one compression connection per pressure mode
+before material-pack reads. The exact uniform pressure mode contributes
+compression storage without an invented moving air mass. These reservations
+share the existing complete mode, connection, setup-work and optional
+`prepared-linear` budgets with string polarizations, torsion, interfaces and
+cylinder-fluid memory. The original exact owner still applies its connected
+block limit. Structural modes, the pressure frequency window, element order
+and mesh resolution remain explicit convergence axes.
+
+The performance must select `cavity none`: a simultaneous lumped neck cavity
+would duplicate the same gas storage. Its existing `gas` record supplies the
+same density and sound speed to strings and the original pressure FE, including
+source-backed thermochemical records when supplied. A change to pressure,
+composition or temperature rebuilds air storage and standing-wave frequencies.
+A replacement solid material rebuilds the original shell basis and integrates
+the same pressure geometry against its new displacement fields. The existing
+work-conjugate coupling supplies both air reaction on the shell and shell work
+on the air inside the complete friction solve.
+
+### Run the closed-shell interior fixture
+
+`closed-shell-cavity.body` extends the existing synthetic 42-node,
+80-triangle shell with all 80 explicit pressure facets and a center-star
+tetrahedral volume. It retains the identical boundary coordinates and material
+pack. Its order-two FE has 205 pressure degrees of freedom; the authored
+1100 Hz window has a 24-mode allowance. One constrained-shell structural
+coordinate and the original four-mode string keep the integration fixture
+small. The fixture is a manufactured source-to-performance example, not a
+measured violin, cello or bass.
+
+From the repository root:
+
+```bash
+demo="$(mktemp -d)"
+cp crates/fs-couple/examples/material_strings/*.tsv "$demo/"
+cp crates/fs-couple/examples/material_strings/closed-shell-cavity.material-strings "$demo/"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/wire-manifest.tsv" --out "$demo/wire.fsmatpk"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/closed-shell-manifest.tsv" --out "$demo/closed-shell.fsmatpk"
+cargo run --release -p fs-couple --bin material_strings -- \
+  "$demo/closed-shell-cavity.material-strings" "$demo/closed-shell-cavity.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/closed-shell-cavity.body
+```
+
+The sample retains the existing compact body-pressure observer, so its WAV is
+an integration diagnostic rather than a converged full-band external sound
+field. It does not reuse the older example's 120 Hz BEM band for a distributed
+air window extending to 1100 Hz. An independently admitted closed-shell BEM
+load and finite-distance shell observer can still be selected through their
+existing performance records; their frequency bands, spatial resolution and
+error budgets need to cover the desired observation.
+
+This interior path currently represents a closed, frozen, homogeneous gas with
+lossless linear acoustics on straight-sided tetrahedra and the original linear
+shell kinematics. Viscothermal interior-wall loss, nonconforming volume/shell
+interfaces and open f-hole transmission need their own physical operators.
+Missing wall facets and apertures are refused; no fictitious closure surface
+is added.

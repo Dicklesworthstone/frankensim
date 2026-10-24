@@ -5257,3 +5257,30 @@ gas, outlet geometry and accepted outward flow. The supplied paired-DG
 fixture and regression sources are manufactured integration data, not an
 instrument qualification. Clock/structure, missing material claims, absent
 pressure ports and unbound exterior observations refuse without substitution.
+
+## Authored distributed interior for material strings
+
+An optional `interior-fe-v1` trailer on v3/v4 body profiles supplies the
+original tetrahedral volume, pressure FE order, complete frequency window and
+explicit numerical allowances to the existing Helmholtz and
+`with_material_shell_cavity` owners. Gas properties come only from the
+performance's coherent material gas. The declared volume must conform to the
+original shell's complete cavity surface; missing walls and open apertures
+refuse rather than acquire invented closing faces. A separate lumped cavity
+cannot be supplied simultaneously.
+
+Preparation installs this reciprocal air load before subsequent cylinder-fluid,
+torsional, nonlinear, material-memory, radiation and bow/performance attachment.
+Whole-network admission reserves every possible pressure inertia and compression
+connection before material reads. The exact uniform pressure mode contributes
+compression but no fictitious air inertia. Body radiation keeps its original
+structural basis while the same accepted solve carries strings, shell and air.
+
+The supplied closed-shell-cavity source contains its exact shared surface and
+P2 tetrahedral geometry. Its compact body observation is an integration
+diagnostic; the fixture does not claim open violin/cello/bass geometry,
+aperture radiation, interior viscothermal loss or measured-instrument fidelity.
+Regression source covers physical motion/PCM propagation, pressure/composition
+and solid-material substitutions, retained fluid augmentation, zero-inertia
+uniform compression and strict resource/geometry admission. Fixture topology
+was checked independently; native Rust execution remains required.

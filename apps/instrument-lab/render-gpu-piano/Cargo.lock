@@ -726,6 +726,7 @@ dependencies = [
  "fs-ports",
  "fs-qty",
  "fs-rand",
+ "fs-rep-mesh",
  "fs-scenario",
  "fs-solid",
  "fs-solver",

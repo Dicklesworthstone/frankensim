@@ -760,9 +760,20 @@ impl Spec {
     pub fn network_dimensions_with_body_connections(&self, tensor_body: bool,
         additional_body_connections: usize) -> Result<(usize, usize, usize)>
     {
+        self.network_dimensions_with_body_modes(tensor_body, additional_body_connections, 0)
+    }
+
+    /// Include every source-declared interior-air coordinate and compression
+    /// column in the same complete mechanical allocation. Uniform compression
+    /// contributes a connection but no fictitious inertia.
+    pub fn network_dimensions_with_body_modes(&self, tensor_body: bool,
+        additional_body_connections: usize, additional_body_modes: usize)
+        -> Result<(usize, usize, usize)>
+    {
         self.string_memory_states()?;
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
+            .and_then(|n| n.checked_add(additional_body_modes))
             .ok_or("complete mode count overflow")?;
         if let Some(fibers) = &self.bow_fibers {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;

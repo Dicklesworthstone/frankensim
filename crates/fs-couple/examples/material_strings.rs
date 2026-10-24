@@ -68,9 +68,9 @@ const SHEAR_ETA: &str = "kelvin_voigt_shear_viscosity";
 fn modal_budget() -> ModalAcousticTimeBudget { ModalAcousticTimeBudget::audible_reference() }
 fn poll(gate: &CancelGate) -> Result<()> { if gate.is_requested() { Err("material-string construction cancelled".into()) } else { Ok(()) } }
 fn options(spec:&input::Spec,bow:StringBowLocation,tensor_body:bool,
-    additional_body_connections:usize) -> Result<StringBankOptions> {
+    additional_body_connections:usize,additional_body_modes:usize) -> Result<StringBankOptions> {
     let (max_modes,max_connections,max_setup_terms)=spec
-        .network_dimensions_with_body_connections(tensor_body,additional_body_connections)?;
+        .network_dimensions_with_body_modes(tensor_body,additional_body_connections,additional_body_modes)?;
     // The N*(L+1)^2 screen leaves no room for a zero-stiffness coordinate (a cavity neck
     // plug) in a static preload: its free-block solve costs free*L^2 + free^2*L + free^3
     // with free <= L, so a full-rank viscous body plus a cavity was refused by construction.
@@ -217,7 +217,10 @@ impl input::Spec {
         // The exact owner still applies its stricter connected-island bound.
         let additional_body_connections = profile.as_ref()
             .map_or(0, body::Profile::additional_body_connections);
-        self.network_dimensions_with_body_connections(profile.is_some(), additional_body_connections)?;
+        let additional_body_modes = profile.as_ref()
+            .map_or(0, body::Profile::additional_body_modes);
+        self.network_dimensions_with_body_modes(profile.is_some(), additional_body_connections,
+            additional_body_modes)?;
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
             let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
@@ -229,7 +232,8 @@ impl input::Spec {
             let GestureValue::Bow { station,.. }=track.initial else { return Err("non-bow value".into()); };
             contacts.push(StringBowLocation { string:usize::from(string),station_fraction:station });
         }
-        let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections)?;
+        let mut settings=options(&self,contacts[0],profile.is_some(),additional_body_connections,
+            additional_body_modes)?;
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
@@ -507,8 +511,10 @@ fn main()->Result<()> {
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
         let additional = ready.body_profile.as_ref()
             .map_or(0, body::Profile::additional_body_connections);
+        let air_modes = ready.body_profile.as_ref()
+            .map_or(0, body::Profile::additional_body_modes);
         let (modes,links,terms)=ready.spec
-            .network_dimensions_with_body_connections(ready.body_profile.is_some(),additional)?;
+            .network_dimensions_with_body_modes(ready.body_profile.is_some(),additional,air_modes)?;
         eprintln!("cylinder_gas_loading={:?}; complete_modes={modes}; connection_allowance={links}; setup_terms_allowance={terms}",
             loading.resolution());
     }
