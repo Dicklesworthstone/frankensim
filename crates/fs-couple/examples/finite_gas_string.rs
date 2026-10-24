@@ -7,6 +7,8 @@
 
 #[path = "finite_gas_string/input.rs"]
 mod input;
+#[path = "finite_gas_string/layered.rs"]
+mod layered;
 #[allow(dead_code)]
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
@@ -95,6 +97,46 @@ fn context(temperature_k: f64, omega_rad_s: f64) -> Result<QueryPoint> {
         .with("omega", omega_rad_s)?)
 }
 
+fn string_template(spec: &input::Spec) -> PrestressedString {
+    PrestressedString {
+        length_m: spec.length_m,
+        // The material/prestress binding replaces all template properties.
+        tension_n: 0.0,
+        lin_density_kg_m: 1.0,
+        axial_stiffness_n: 0.0,
+        width_m: 1.0,
+        n_modes: spec.modes,
+        damping_ratio: 0.0,
+        rayleigh: None,
+        bending_stiffness_n_m2: 0.0,
+        kelvin_voigt_bending: None,
+        relaxation_bending: None,
+        polarization_detune: 0.0,
+        moving_end: false,
+    }
+}
+
+fn caloric_curve(spec: &input::Spec, card: &MaterialCard) -> Result<ResolvedHeatCapacityCurve> {
+    let lower = context(spec.solid_minimum_k, spec.query_omega_rad_s)?;
+    let upper = context(spec.solid_maximum_k, spec.query_omega_rad_s)?;
+    let heat_capacity = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let density = PropertyKey::new("density", Density::DIMS);
+    Ok(ResolvedHeatCapacityCurve::try_new(
+        card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &heat_capacity,
+            density: &density,
+            temperature_axis: "T",
+            lower: &lower,
+            upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        spec.enthalpy_interpolation_j_kg,
+    )?)
+}
+
 fn build(
     cx: &Cx<'_>,
     spec: &input::Spec,
@@ -138,22 +180,7 @@ fn build(
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )?;
-    let template = PrestressedString {
-            length_m: spec.length_m,
-            // The material/prestress binding replaces all template properties.
-            tension_n: 0.0,
-            lin_density_kg_m: 1.0,
-            axial_stiffness_n: 0.0,
-            width_m: 1.0,
-            n_modes: spec.modes,
-            damping_ratio: 0.0,
-            rayleigh: None,
-            bending_stiffness_n_m2: 0.0,
-            kelvin_voigt_bending: None,
-            relaxation_bending: None,
-            polarization_detune: 0.0,
-            moving_end: false,
-        };
+    let template = string_template(spec);
     let geometry = StringGeometryConstraint::FixedRadius(spec.radius_m);
     let specimen = match (spec.prestress, spec.thermoelastic) {
         (input::Prestress::FixedTension(tension), None) =>
@@ -183,24 +210,7 @@ fn build(
             force_n: spec.force_n,
         }],
     )?;
-    let lower = context(spec.solid_minimum_k, spec.query_omega_rad_s)?;
-    let upper = context(spec.solid_maximum_k, spec.query_omega_rad_s)?;
-    let heat_capacity = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
-    let density = PropertyKey::new("density", Density::DIMS);
-    let caloric = ResolvedHeatCapacityCurve::try_new(
-        card,
-        HeatCapacitySourceQuery {
-            heat_capacity: &heat_capacity,
-            density: &density,
-            temperature_axis: "T",
-            lower: &lower,
-            upper: &upper,
-            selection: SelectionPolicy::SingleClaimOnly,
-        },
-        SolidLiquidPhase::Solid,
-        0.0,
-        spec.enthalpy_interpolation_j_kg,
-    )?;
+    let caloric = caloric_curve(spec, card)?;
     let initial = caloric.state_at_temperature(spec.solid_temperature_k)?;
     Ok(if let Some(thermal) = spec.thermoelastic {
         ThermalMaterialStringRuntime::try_new_thermoelastic(cx, mechanical, card.clone(),
@@ -217,6 +227,7 @@ struct History {
     description: String,
     pressure_pa: Vec<f64>,
     records: Vec<[f64; 27]>,
+    layer_temperatures: Vec<Vec<f64>>,
 }
 
 fn simulate(
@@ -418,6 +429,7 @@ fn simulate(
         description,
         pressure_pa,
         records,
+        layer_temperatures: Vec::new(),
     })
 }
 
@@ -429,7 +441,14 @@ fn run(args: &[String]) -> Result<()> {
     let bytes = bounded_read(Path::new(&args[0]), input::MAX_INPUT_BYTES)?;
     let spec = input::parse(std::str::from_utf8(&bytes)?)?;
     let pack = NormalizedPack::from_bytes(&bounded_read(Path::new(&args[1]), 16 << 20)?)?;
-    let card = material(&pack)?;
+    let mut cards = vec![material(&pack)?];
+    if let Some(bonded) = &spec.bonded {
+        let directory = Path::new(&args[0]).parent().unwrap_or_else(|| Path::new("."));
+        for sleeve in &bonded.sleeves {
+            let bytes = bounded_read(&directory.join(&sleeve.pack), 16 << 20)?;
+            cards.push(material(&NormalizedPack::from_bytes(&bytes)?)?);
+        }
+    }
     let gas = load_gas(&gas_options, spec.gas_volume_m3)?;
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -446,7 +465,11 @@ fn run(args: &[String]) -> Result<()> {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        simulate(&cx, &spec, &card, gas)
+        if spec.bonded.is_some() {
+            layered::simulate(&cx, &spec, &cards, gas)
+        } else {
+            simulate(&cx, &spec, &cards[0], gas)
+        }
     })?;
     let (wav, clips) = encode_pcm16_wav(
         &history.pressure_pa,
@@ -466,16 +489,25 @@ fn run(args: &[String]) -> Result<()> {
         history.description, spec.sample_rate_hz, spec.full_scale_pa
     );
     let mut output = std::io::BufWriter::new(std::io::stdout().lock());
-    writeln!(
+    write!(
         output,
         "time_s,pressure_pa,displacement_m,velocity_m_s,solid_temperature_k,gas_temperature_k,gas_pressure_pa,material_heat_j,drag_heat_j,solid_to_gas_heat_j,joule_heat_j,prescribed_solid_heat_j,prescribed_gas_heat_j,mechanical_work_j,storage_change_j,energy_defect_j,energy_tolerance_j,current_a,endpoint_current_a,resistance_ohm,endpoint_resistance_ohm,first_mode_damping_ratio,tension_n,first_mode_frequency_hz,reversible_heat_j,axial_free_energy_change_j,mechanical_entropy_energy_change_j"
     )?;
-    for record in &history.records {
+    if let Some(temperatures) = history.layer_temperatures.first() {
+        for layer in 0..temperatures.len() {
+            write!(output, ",layer_{layer}_temperature_k")?;
+        }
+    }
+    writeln!(output)?;
+    for (sample, record) in history.records.iter().enumerate() {
         for (i, value) in record.iter().enumerate() {
             if i != 0 {
                 write!(output, ",")?;
             }
             write!(output, "{value:.17e}")?;
+        }
+        if let Some(temperatures) = history.layer_temperatures.get(sample) {
+            for temperature in temperatures { write!(output, ",{temperature:.17e}")?; }
         }
         writeln!(output)?;
     }

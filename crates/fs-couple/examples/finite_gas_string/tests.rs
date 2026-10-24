@@ -409,3 +409,93 @@ fn source_exit_excess_heat_and_cancellation_return_no_partial_history() {
         assert!(simulate(cx, &spec, &card, gas).is_err());
     });
 }
+
+#[test]
+fn bonded_input_preserves_layer_order_and_rejects_ignored_geometry() {
+    let text = include_str!("bonded.string");
+    let spec = input::parse(text).unwrap();
+    let bonded = spec.bonded.as_ref().unwrap();
+    assert!(spec.thermoelastic.is_none());
+    assert_eq!(bonded.sleeves[0].pack, "sleeve.pack");
+    assert_eq!(bonded.sleeves[0].outer_radius_m, spec.radius_m);
+    for bad in [
+        text.replace("fixed_support", "20"),
+        text.replace("bonded 0.00015 1", "bonded 0.00015 0"),
+        text.replace("bonded 0.00015 1", "bonded 0.00015 16"),
+        text.replace("sleeve.pack", "../sleeve.pack"),
+        text.replace("sleeve.pack", "/sleeve.pack"),
+        text.replace("layer sleeve.pack 0.00025", "layer sleeve.pack 0.00024"),
+        text.replace("layered_solve 4096", "layered_solve 0"),
+        format!("{text}\nthermoelastic 0.648 300 0.01 0.00001 0.000000000001 64"),
+    ] { assert!(input::parse(&bad).is_err()); }
+}
+
+#[test]
+fn bonded_cards_drive_layer_heat_parallel_current_pitch_and_continuing_pressure() {
+    scoped(|cx, gate| {
+        let mut spec = input::parse(include_str!("bonded.string")).unwrap();
+        spec.samples = 32;
+        spec.modes = 1;
+        let cards = [source_law(1.0, Some(2e-5)), source_law(2.0, Some(4e-5))];
+        let gas = parcel("surroundings", 0.028, 3.5, spec.gas_volume_m3);
+        let a = layered::simulate(cx, &spec, &cards, gas.clone()).unwrap();
+        let b = layered::simulate(cx, &spec, &cards, gas.clone()).unwrap();
+        assert_eq!(a.records, b.records);
+        assert_eq!(a.pressure_pa, b.pressure_pa);
+        assert_eq!(a.layer_temperatures, b.layer_temperatures);
+        assert_eq!(a.layer_temperatures.len(), spec.samples);
+        let bonded = spec.bonded.as_ref().unwrap();
+        let radii = [bonded.core_radius_m, spec.radius_m];
+        let pi = std::f64::consts::PI;
+        let k = pi/spec.length_m;
+        let mut previous_joule = 0.0;
+        for (row, temperatures) in a.records.iter().zip(&a.layer_temperatures) {
+            assert_eq!(temperatures.len(), 2);
+            let (mut tension, mut bending, mut conductance) = (0.0, 0.0, 0.0);
+            let mut inner = 0.0_f64;
+            for (i, (&outer, &t)) in radii.iter().zip(temperatures).enumerate() {
+                let area = pi*(outer.powi(2)-inner.powi(2));
+                let moment = pi/4.0*(outer.powi(4)-inner.powi(4));
+                let young = 2e9-1e6*(t-300.0);
+                let strain = (spec.length_m-bonded.reference_length_m)/bonded.reference_length_m
+                    -[2e-5, 4e-5][i]*(t-bonded.reference_temperature_k);
+                tension += young*area*strain;
+                bending += young*moment;
+                let resistivity = 8e-7+(2e-6-8e-7)*(t-280.0)/120.0;
+                conductance += area/(spec.length_m*resistivity);
+                inner = outer;
+            }
+            let frequency = ((tension*k*k+bending*k.powi(4))/(1000.0*pi*spec.radius_m.powi(2)))
+                .sqrt()/(2.0*pi);
+            assert!((row[22]-tension).abs() < 1e-11);
+            assert!((row[23]-frequency).abs() < 1e-10);
+            assert!((row[20]*conductance-1.0).abs() < 1e-12);
+            let joule = row[18].powi(2)*row[20]/f64::from(spec.sample_rate_hz);
+            assert!((row[10]-previous_joule-joule).abs() < 1e-13);
+            previous_joule = row[10];
+            assert!(row[15].abs() <= row[16]);
+        }
+        assert!(a.layer_temperatures.iter().any(|t| t[0] != t[1]));
+        assert!(a.pressure_pa[spec.release_sample..].iter().any(|p| p.abs() > 1e-12));
+        let swapped = [cards[0].clone(), source_law(4.0, Some(0.0))];
+        let other = layered::simulate(cx, &spec, &swapped, gas.clone()).unwrap();
+        assert_ne!(a.pressure_pa, other.pressure_pa);
+        assert_ne!(a.records.last().unwrap()[22], other.records.last().unwrap()[22]);
+        let other_gas = layered::simulate(cx, &spec, &cards,
+            parcel("light-source", 0.004, 2.5, spec.gas_volume_m3)).unwrap();
+        assert_ne!(a.pressure_pa, other_gas.pressure_pa);
+        let mut cold = spec.clone();
+        cold.drive = None;
+        cold.solid_power_w = 0.0;
+        let unpowered = layered::simulate(cx, &cold, &cards, gas.clone()).unwrap();
+        assert!(unpowered.records.iter().all(|row| row[10] == 0.0));
+        assert!(a.records.last().unwrap()[4] > unpowered.records.last().unwrap()[4]);
+        assert!(layered::simulate(cx, &spec, &cards[..1], gas.clone()).is_err());
+        assert!(layered::simulate(cx, &spec, &[source(1.0), cards[1].clone()], gas.clone()).is_err());
+        let mut excess = spec.clone();
+        excess.solid_power_w = 1e12;
+        assert!(layered::simulate(cx, &excess, &cards, gas.clone()).is_err());
+        gate.request();
+        assert!(layered::simulate(cx, &spec, &cards, gas).is_err());
+    });
+}

@@ -115,6 +115,64 @@ The CSV exposes the actual evolving tension and fundamental frequency alongside
 the signed reversible heat and stored-energy changes. The waveform remains the
 observer of the continuing physical state; there is no fitted pitch envelope.
 
+## Bonded layers with independent materials and heat
+
+`bonded.string` uses the same executable for a core and one or more circular
+sleeves. Each layer retains its own card, mass, caloric cell, temperature,
+electrical response, thermal strain, elastic storage and bending loss. The
+native layered section integrates mass, axial stiffness and bending stiffness;
+the native conductor divides the total drive current between the layers.
+Changing a sleeve pack changes these coupled properties without changing code.
+
+Compile the existing expanding pack for the core and the new manufactured
+sleeve pack, and place the scenario beside its relative sleeve pack path:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/expanding-manifest.tsv" --out "$run_dir/core.pack"
+cargo run -p xtask -- matdb-pack \
+  --manifest "$demo/sleeve-manifest.tsv" --out "$run_dir/sleeve.pack"
+cp "$demo/bonded.string" "$run_dir/bonded.string"
+cargo run --release -p fs-couple --bin finite_gas_string -- \
+  "$run_dir/bonded.string" "$run_dir/core.pack" "$run_dir/bonded.wav" \
+  --gas-record crates/fs-couple/examples/self_heating_vibration/nitrogen.gas \
+  --gas-component "$run_dir/nitrogen.species" "$run_dir/nitrogen.nasa9" "$run_dir/nitrogen.transport" \
+  --gas-water none --gas-phase frozen > "$run_dir/bonded.csv"
+```
+
+Both solid packs are manufactured integration fixtures. The sleeve doubles the
+core fixture's density, expansion coefficient, resistivity and bending viscosity.
+These choices demonstrate material substitution, not measured instrument
+construction. The geometry is a perfectly bonded core and annular sleeve;
+it does not represent a sliding helical winding or a wound piano string.
+
+In bonded mode, `heat` applies its solid power to the outer cell. Neighboring
+cells exchange equal and opposite Fourier heat through their original source
+conductivities. The two authored resistance geometry factors are distance/area
+[inverse metres]; the interface conductance is
+`G = 1 / (shape_inner/k_inner + shape_outer/k_outer)`.
+The fixture uses logarithmic radial resistances between mid-area representative
+radii, with full cylindrical interface coverage and no extra contact resistance.
+Those factors and the interface area are geometric discretization data. Add
+annuli and refine them when a single temperature per material cannot resolve the
+radial gradient; this executable does not automatically generate a radial mesh.
+
+Only the outer lateral surface exchanges heat with the finite gas. Source
+conductivity pins, exposed area and the native lumped Biot bound are checked;
+there is no additional ambient convection reservoir. Gas drag heats that same
+parcel. Thermal strain, tension, modulus, layer loss and gas properties feed
+the continuing motion and physical pressure. Axial and transverse reversible
+heat returns to the specific layer that supplied it.
+
+The first 27 CSV columns retain their order. `solid_temperature_k` is the
+mass-weighted layer temperature in bonded mode; appended
+`layer_0_temperature_k`, `layer_1_temperature_k`, ... expose the individual
+cells, from core outward. Initial and endpoint electrical columns retain their
+time meanings. Bonded Joule heating uses the accepted endpoint current and
+resistance, so its per-sample work is `endpoint_current_a² * endpoint_resistance_ohm * dt`.
+The original uniform path keeps its initial-state electrical quadrature.
+The joint accepted-state energy balance includes every layer and the finite gas.
+
 ## Explicit scenario
 
 `heated.string` is a bounded, whitespace-delimited input. Records must appear in
@@ -133,11 +191,29 @@ records are refused. All physical values use SI units.
 | `exchange` | maximum absolute transfer per sample [J], source residual tolerance [J], energy tolerance [J], maximum iterations |
 | `drive` | `none`, `current A`, or `voltage V` |
 | `heat` | signed external solid power [W], signed external gas power [W] |
-| `thermoelastic` (optional, last) | reference stress-free length [m], reference temperature [K], linear strain limit, maximum absolute reversible heat per sample [J], energy residual tolerance [J], maximum iterations |
+| `thermoelastic` (optional alternative) | reference stress-free length [m], reference temperature [K], linear strain limit, maximum absolute reversible heat per sample [J], energy residual tolerance [J], maximum iterations |
 
-`fixed_support` requires the `thermoelastic` record. A numeric fixed tension
-forbids that record: the input cannot silently discard one loading prescription
-in favor of another. The original numeric-tension scenarios remain valid.
+After `heat`, `fixed_support` requires exactly one of the uniform
+`thermoelastic` record or this bonded block:
+
+| Record | Fields, in order |
+| --- | --- |
+| `bonded` | core radius [m], sleeve count (1–15), common stress-free reference length [m], reference temperature [K], linear strain limit |
+| `layer` (one per sleeve, core outward) | source pack path relative to this scenario's directory, outer radius [m], contact area with preceding layer [m²], inner and outer half-path resistance geometry [1/m] |
+| `layered_solve` | maximum thermal evaluations per inner solve, maximum Newton iterations, finite-difference energy step [J], maximum cell energy residual [J], thermal balance tolerance [J], combined mechanical/thermal tolerance [J], Newton absolute residual tolerance [J] |
+
+The primary solid CLI argument is always the core. Sleeve paths cannot be
+absolute or contain parent-directory components. Radii must increase, and the
+last must equal the `string` radius; interface and gas areas must fit their
+physical cylindrical surfaces. Each layer uses the declared solid temperature
+range and maximum temperature increment. `exchange` still controls the outer
+solid/gas solve; `layered_solve` bounds each native nonlinear thermal solve
+within it. Up to `exchange.maximum_iterations + 2` inner proposals may be
+needed. No uniform reversible-heat bracket is silently ignored: the bonded
+block replaces the entire uniform `thermoelastic` record.
+
+Numeric fixed tension forbids both thermal-support blocks. The original
+numeric-tension and uniform fixed-support scenarios remain valid.
 
 The parser admits 8,000–192,000 Hz, 1–262,144 samples and 1–32 modes. Input is
 limited to 8 KiB. The exchange area may be zero for an insulated interface and
@@ -162,8 +238,9 @@ probe even when the initial state is supported.
 Copy the scenario and change `drive current 0.1` to `drive none` to compare the
 same mechanical release without Joule heating. `drive voltage 0.3` instead
 exercises the changing current of a fixed-voltage source as resistance evolves.
-Drive values are held over the run; each sample evaluates electrical work from
-its initial resistance and reports the accepted endpoint resistance and current.
+Drive values are held over the run. The uniform path evaluates electrical work
+from initial resistance; the bonded path uses accepted endpoint resistance.
+Both report initial and endpoint electrical response.
 
 Increase the first `gas` value from `0.000001` to `0.0001` m³ to enlarge the
 thermal inventory while retaining initial temperature, pressure and composition.
@@ -187,8 +264,8 @@ initial and endpoint current, initial and endpoint resistance, and first-mode
 damping ratio. Five appended columns report actual tension, first-mode frequency,
 cumulative signed reversible heat, axial free-energy change and mechanical
 entropy-energy change. With `drive none`, the four electrical response columns
-and Joule heat are zero. The last three columns are zero for the original
-fixed-tension model.
+and Joule heat are zero. The three reversible-storage columns are zero for the
+original fixed-tension model.
 
 Stored energy is measured directly from accepted modal states, source-resolved
 axial storage and mechanical entropy, solid specific enthalpy, and gas specific
@@ -207,7 +284,8 @@ pressure before PCM scaling or clipping, so amplitude comparisons across runs
 remain meaningful.
 
 This is a first-order, frozen-law-per-sample, small-displacement string model
-with uniform solid temperature and fixed geometry/density. The original
+with fixed geometry/density and either one uniform temperature or one temperature
+per declared bonded annulus. The original
 fixed-tension path keeps Young's modulus constant. The fixed-support path
 admits scalar thermal expansion and globally affine Young's modulus with the
 corresponding reversible heat. Slack/compression, large strain, moving supports,
@@ -220,7 +298,10 @@ Focused tests in `tests.rs` cover strict signed inputs, continuous motion
 and deterministic pressure, an independent three-storage energy integral,
 material/species/inventory/drive changes reaching the same output, sourced
 thermal expansion reaching tension, pitch and continuing pressure, and source,
-excess-heat and cancellation refusal. Run them through the example target:
+excess-heat and cancellation refusal. Bonded tests additionally check the same source-driven
+trajectory, independent section tension/frequency and parallel resistance,
+endpoint Joule work, per-layer temperatures, and data-only sleeve/gas swaps.
+Run them through the example target:
 
 ```bash
 cargo test -p fs-couple --example finite_gas_string
