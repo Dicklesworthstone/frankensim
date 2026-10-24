@@ -23,8 +23,13 @@
 //! The homogeneous winding and induction owners refuse permanent-magnet bias
 //! until their source/storage trajectories account for it explicitly. There is
 //! no nonlinear ferromagnetism, hysteresis, irreversible demagnetization, moving
-//! conductor induction feedback or magnetization-force claim.
+//! conductor induction feedback or distributed magnetostriction claim.
+//! [`force`] transfers a static field's closed exterior Maxwell-stress integral
+//! to the existing mechanical wrench owner, including admitted enclosed recoil
+//! magnets. Its contour remains in an induced-linear exterior medium; it does
+//! not evolve geometry or magnetic work.
 
+pub mod force;
 pub mod planar;
 pub mod transfer;
 pub mod winding;

@@ -329,7 +329,10 @@ impl PlanarMagnetostatics {
             }
             Some(result.report)
         };
-        self.recover(potential, report, cancelled)
+        let mut field = self.recover(potential, report, cancelled)?;
+        field.impressed_current_density_a_m2 = Some(current_density_a_m2.to_vec());
+        poll(cancelled)?;
+        Ok(field)
     }
 
     fn admit_boundary(
@@ -449,6 +452,7 @@ impl PlanarMagnetostatics {
         poll(cancelled)?;
         Ok(PlanarField {
             problem: self,
+            impressed_current_density_a_m2: None,
             potential_wb_m: potential,
             magnetic_flux_density_t,
             magnetic_field_a_m,
@@ -524,6 +528,9 @@ pub(crate) fn gradients(points: [[f64; 2]; 3]) -> Result<[[f64; 2]; 3], Magnetic
 /// state, where Br is zero for induced cells. The reference is explicit.
 pub struct PlanarField<'a> {
     pub(crate) problem: &'a PlanarMagnetostatics,
+    // Present only after a static solve. Induction recovery alone cannot
+    // establish a current-free integration contour for static Maxwell force.
+    impressed_current_density_a_m2: Option<Vec<f64>>,
     potential_wb_m: Vec<f64>,
     magnetic_flux_density_t: Vec<[f64; 2]>,
     magnetic_field_a_m: Vec<[f64; 2]>,
@@ -549,6 +556,15 @@ impl PlanarField<'_> {
     /// zero for induced-linear cells, with its original source retained above.
     pub fn magnetic_field_a_m(&self) -> &[[f64; 2]] {
         &self.magnetic_field_a_m
+    }
+    /// Actual impressed J_z [A/m2] used by the static solve, in triangle order.
+    /// The same static provenance includes any retained, operating-admitted
+    /// recoil sources available through the original problem; zero J does
+    /// not imply absence of permanent magnetization.
+    /// Absent for fields recovered from induction history; that history does
+    /// not establish the static, current-free exterior used by Maxwell force.
+    pub fn impressed_current_density_a_m2(&self) -> Option<&[f64]> {
+        self.impressed_current_density_a_m2.as_deref()
     }
     /// Per-cell stored field energy [J] over actual planar thickness.
     pub fn cell_energy_j(&self) -> &[f64] {

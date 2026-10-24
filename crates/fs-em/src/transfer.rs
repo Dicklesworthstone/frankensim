@@ -47,6 +47,20 @@ impl PlanarFrame {
             axes: [x_direction, y_direction, normal],
         })
     }
+
+    pub(crate) fn vector_to_global(&self, local: [f64; 3]) -> [f64; 3] {
+        [0, 1, 2].map(|a| {
+            local[0].mul_add(
+                self.axes[0][a],
+                local[1].mul_add(self.axes[1][a], local[2] * self.axes[2][a]),
+            )
+        })
+    }
+
+    pub(crate) fn point_to_global(&self, local: [f64; 3]) -> [f64; 3] {
+        let vector = self.vector_to_global(local);
+        [0, 1, 2].map(|a| self.origin_m[a] + vector[a])
+    }
 }
 
 /// Caller-owned correspondence between a consumer point and source triangle.

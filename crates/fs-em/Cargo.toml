@@ -12,6 +12,7 @@ layer = "L3"
 
 [dependencies]
 fs-feec = { path = "../fs-feec" }
+fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-phs = { path = "../fs-phs" }
@@ -25,6 +26,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-lbm = { path = "../fs-lbm" }
 fs-matdb = { path = "../fs-matdb" }
+fs-mbd = { path = "../fs-mbd" }
 
 [lints]
 workspace = true

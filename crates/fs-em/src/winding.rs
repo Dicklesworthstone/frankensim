@@ -37,7 +37,8 @@ pub const MAX_WINDINGS: usize = 16;
 pub struct WindingConfig {
     /// Maximum profiles, in 1..=MAX_WINDINGS.
     pub max_windings: usize,
-    /// Ceiling on retained scalar basis values: windings*(2*vertices+6*cells).
+    /// Ceiling on retained scalar basis values: windings*(2*vertices+7*cells),
+    /// including each solved field's original impressed-current snapshot.
     pub max_basis_values: usize,
     /// Absolute source/energy flux-pairing agreement tolerance [H].
     pub pairing_tolerance_h: f64,
@@ -152,7 +153,7 @@ impl<'a> PlanarWindingBasis<'a> {
             fs_rep_mesh::Metric2::Axisymmetric { .. } => unreachable!("admitted planar problem"),
         };
         let values = cells
-            .checked_mul(6)
+            .checked_mul(7)
             .and_then(|n| vertices.checked_mul(2).and_then(|v| n.checked_add(v)))
             .and_then(|n| n.checked_mul(count));
         if count == 0

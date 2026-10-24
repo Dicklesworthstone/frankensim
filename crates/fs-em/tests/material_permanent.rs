@@ -3,6 +3,7 @@
 mod common;
 use common::*;
 use fs_em::{
+    force::MaxwellForceLimits,
     planar::{
         MagneticError, PlanarMagnetostatics,
         eddy::{EddyControls, EddyError, PlanarEddy},
@@ -116,6 +117,115 @@ fn layered_problem(law: ResolvedRecoilMaterial, direction: [f64; 2]) -> PlanarMa
         &mut || false,
     )
     .unwrap()
+}
+
+#[test]
+fn enclosed_recoil_magnets_drive_static_wrenches_but_remanence_on_the_contour_refuses() {
+    let n = 16;
+    let depth = 0.2;
+    let mu = 1e-6;
+    let br = 0.01;
+    for (direction, magnetized_exterior) in [
+        ([1.0, 0.0], false),
+        ([-1.0, 0.0], false),
+        ([1.0, 0.0], true),
+    ] {
+        let mut vertices = Vec::new();
+        for y in 0..=n {
+            for x in 0..=n {
+                vertices.push([
+                    -1.0 + 2.0 * x as f64 / n as f64,
+                    -1.0 + 2.0 * y as f64 / n as f64,
+                ]);
+            }
+        }
+        let mut faces = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                let a = (y * (n + 1) + x) as u32;
+                let b = a + 1;
+                let d = a + (n + 1) as u32;
+                faces.extend([[a, b, d + 1], [a, d + 1, d]]);
+            }
+        }
+        let ambient = PlanarMagneticMaterial::Linear(material(mu));
+        let permanent = magnet(recoil(mu, br), direction);
+        let mut models = Vec::new();
+        let mut enclosed = Vec::new();
+        for (cell, face) in faces.iter().enumerate() {
+            let center: [f64; 2] = [0, 1].map(|axis| {
+                face.iter()
+                    .map(|&v| vertices[v as usize][axis])
+                    .sum::<f64>()
+                    / 3.0
+            });
+            let radius = center[0].abs().max(center[1].abs());
+            if radius < 0.5 {
+                enclosed.push(cell);
+            }
+            models.push(if magnetized_exterior || radius < 0.25 {
+                permanent.clone()
+            } else {
+                ambient.clone()
+            });
+        }
+        let mesh = TriComplex2::from_indexed_triangles(
+            "recoil-exterior-force",
+            vertices,
+            faces,
+            Metric2::planar(depth).unwrap(),
+        )
+        .unwrap();
+        let boundary: Vec<_> = mesh
+            .boundary_trace()
+            .unwrap()
+            .vertices
+            .into_iter()
+            .map(|v| (v as usize, 1e-3 * mesh.vertices()[v as usize][0]))
+            .collect();
+        let problem =
+            PlanarMagnetostatics::new_with_material_models(mesh, models, limits(), &mut || false)
+                .unwrap();
+        let currents = vec![0.0; problem.mesh().faces().len()];
+        let field = problem
+            .solve(&currents, &boundary, config(), &mut || false)
+            .unwrap();
+        assert!(field.problem().has_permanent_magnets());
+        assert_eq!(
+            field.impressed_current_density_a_m2(),
+            Some(currents.as_slice())
+        );
+        let frame = PlanarFrame::new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        let load = field.maxwell_wrench(
+            &enclosed,
+            &frame,
+            [0.0, 0.0, depth / 2.0],
+            MaxwellForceLimits {
+                max_cells: 10000,
+                max_edges: 20000,
+            },
+            &mut || false,
+        );
+        if magnetized_exterior {
+            assert!(matches!(
+                load,
+                Err(MagneticError::Invalid(
+                    "Maxwell force contour requires an induced-linear exterior without remanence"
+                ))
+            ));
+        } else {
+            let load = load.unwrap();
+            // With equal recoil/ambient slopes, M=Br/mu. The uniform applied
+            // B=(0,-0.001,0) gives torque_z=(M cross B)_z * magnet volume.
+            // The original P1 exterior stress remains a finite-mesh estimate.
+            let exact_torque = -direction[0] * (br / mu) * 0.25 * depth * 1e-3;
+            assert!(
+                (load.torque.z - exact_torque).abs() < 0.2 * exact_torque.abs(),
+                "load={load:?}, exact torque={exact_torque}"
+            );
+            assert!(load.force.x.abs() < 1e-8 && load.force.y.abs() < 1e-8);
+        }
+    }
 }
 
 #[test]

@@ -25,7 +25,8 @@ The existing checked CG owner supplies the recurrence and a recomputed true
 Euclidean residual; exhausted convergence never publishes a field.
 
 `PlanarField` borrows its exact prepared owner and retains nodal potential,
-cell B/H, volume-integrated B.H/2 energy and the solver report. Fields remain
+cell B/H, volume-integrated constitutive energy and the solver report. Induced
+cells use B.H/2; recoil cells retain the fixed-remanence reference below. Fields remain
 separate on each side of a material interface. Constant local gauge offsets
 are subtracted before differentiation.
 
@@ -61,13 +62,64 @@ regression execution remain separate verification requirements.
 
 This is a discrete P1 estimate on a finite planar domain with fixed linear
 material state. It does not model axisymmetry, open/infinite boundaries,
-permanent magnets, nonlinear or hysteretic ferromagnetism, magnetic loss,
-spatial eddy-current/flow induction feedback, magnetization forces or thermal
-field-work coupling.
+nonlinear or hysteretic ferromagnetism, irreversible demagnetization, magnetic loss,
+spatial eddy-current/flow induction feedback, distributed magnetostriction or
+moving-geometry field-work coupling. The bounded static net-force connection
+is described below; it is not a dynamic electromechanical energy integrator.
 The existing flow connection treats the solved field as imposed in its
 low-induction regime. Point transfer is not a conservative remap and does not
 certify an arbitrary target grid's discrete magnetic divergence. Numerical
 fixtures are not empirical material or device validation.
+
+## Static magnetic load to native mechanics
+
+`PlanarField::maxwell_wrench` integrates the computed Maxwell stress
+`T = B tensor H - (B.H) I/2` over the closed boundary of explicitly selected
+mesh triangles. Those triangles include the target and an exterior collar.
+`TriComplex2::trace_for_faces` remains the topology owner. Both cells incident
+on every contour edge must share one complete resolved exterior material
+snapshot, use an induced-linear law without remanence, and have zero original
+impressed current. Enclosed recoil magnets remain supported by the original
+field solve and its source-envelope operating checks. The contour cannot touch
+the outer mesh boundary or run along a material interface; incident triangles
+must also lie on opposite geometric sides rather than form a folded embedding.
+The original static solve retains its actual cell-current field for this admission;
+induction-history recovery alone cannot satisfy it.
+
+The model assumes a homogeneous linear exterior medium without mechanical
+pressure response or magnetostriction. Its permeability comes from the same
+material query as the field. No material name selects a constant or force law.
+Contrasting enclosed permeability changes the actual field and thus the load.
+The contour's exterior-side P1 B/H values remain piecewise constant: edge
+force and first moment are exact for those discrete values, while the physical
+force remains a mesh- and contour-dependent numerical estimate. No gradient
+recovery, interfacial averaging or error certificate is implied.
+
+Actual extrusion thickness multiplies the surface load. Geometric triangle
+orientation determines outward normals for either clockwise or
+counterclockwise complexes. Force and torque use the caller's `PlanarFrame`;
+the torque origin is explicit in that same frame. The returned `fs_ga::Wrench`
+is the canonical native articulated-dynamics input, not another force type or
+mechanical integrator. End-face contributions cancel in the invariant planar
+model. End fringing, electric stress and distributed magnetostriction remain
+unsupported. The fictitious integration contour is not a physical body
+surface, so its traction must not be used as an inferred local solid load.
+
+This is an instantaneous static connection. Motion requires updated geometry
+and field solves with explicit source, field and mechanical work accounting;
+it cannot reuse a frozen field as a complete energy-conserving actuator. An
+overlapping J-cross-B load must not also be applied to the enclosed body.
+Original mesh-cell and edge limits bound contour traversal/allocation. Fixed
+edge order and compensated summation preserve deterministic selection-order
+behavior. Cancellation and admission failures leave the original field intact.
+
+Focused G1/G3/G4 regressions exercise zero force in a uniform field, refinement
+toward an independent Lorentz-force integral, thickness and source scaling,
+source-only permeability changes propagated through native free-body
+acceleration, frame/origin transformations, and unsupported contour/history
+refusals. These synthetic calculations do not validate an empirical material
+or device. The stress convention follows J. L. Kirtley, MIT 6.685, Class Notes 1,
+section 4.2: https://web.mit.edu/6.685/www/chapter1.pdf.
 
 ## Distributed winding and circuit connection
 
