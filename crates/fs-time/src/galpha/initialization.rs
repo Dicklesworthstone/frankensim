@@ -269,7 +269,7 @@ where
     )
 }
 
-/// Solve `M acceleration = forcing - C velocity - r(displacement)` before
+/// Solve `M acceleration = forcing - R(displacement, velocity)` before
 /// structural stepping. The force is supplied at the initial physical time,
 /// rather than at the generalized-alpha step's intermediate load time.
 #[allow(clippy::too_many_arguments)]
@@ -297,16 +297,13 @@ where
         max_workspace_components,
     )?;
     let mut rhs = vec![f64::NAN; displacement.len()];
-    let mut damping = vec![f64::NAN; displacement.len()];
-    model.internal_force(displacement, &mut rhs);
+    model.resistance(displacement, velocity, &mut rhs);
     poll(cancelled)?;
-    model.damping_apply(velocity, &mut damping);
-    poll(cancelled)?;
-    if !finite(&rhs) || !finite(&damping) {
+    if !finite(&rhs) {
         return Err(InitialSolveError::NonFiniteOutput);
     }
-    for ((value, load), loss) in rhs.iter_mut().zip(forcing).zip(damping) {
-        *value = *load - loss - *value;
+    for (value, load) in rhs.iter_mut().zip(forcing) {
+        *value = *load - *value;
     }
     solve(
         &rhs,
@@ -455,10 +452,20 @@ where
     let mut initial_v = vec![f64::NAN; displacement.len()];
     let mut parameters = vec![f64::NAN; p];
     poll(cancelled)?;
-    let result = model.tangent_transpose_apply(displacement, &adjoint.value, &mut initial_q);
+    let result = model.resistance_displacement_transpose_apply(
+        displacement,
+        velocity,
+        &adjoint.value,
+        &mut initial_q,
+    );
     poll(cancelled)?;
     result.map_err(InitialSolveError::Derivative)?;
-    let result = model.damping_transpose_apply(&adjoint.value, &mut initial_v);
+    let result = model.resistance_velocity_transpose_apply(
+        displacement,
+        velocity,
+        &adjoint.value,
+        &mut initial_v,
+    );
     poll(cancelled)?;
     result.map_err(InitialSolveError::Derivative)?;
     let result = model.residual_parameter_vjp(

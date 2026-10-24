@@ -337,7 +337,7 @@ fn checked_time_advance(t: f64, h: f64) -> Result<f64, TimeSolveError> {
 }
 
 /// Coefficients of the structural step's effective Jacobian
-/// `mass*M + damping*C + tangent*Dr(q)`.
+/// `mass*M + damping*R_v(q,v) + tangent*R_q(q,v)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SecondOrderOperatorWeights {
     /// `(1 - alpha_m) / (beta*h*h)`.
@@ -348,9 +348,11 @@ pub struct SecondOrderOperatorWeights {
     pub tangent: f64,
 }
 
-/// Structural residual `M a + C v + r(q) = f` used by the generalized-alpha
-/// driver. The tangent action must differentiate the exact `internal_force`
-/// implementation at the supplied state.
+/// Structural residual `M a + R(q, v) = f` used by generalized-alpha.
+/// Mass is state independent. By default `R(q,v) = C v + r(q)`, preserving
+/// existing implementations. State-dependent resistance must override both
+/// partial actions together with `resistance`; all callbacks are pure and
+/// differentiate the same force evaluated at the supplied stage state.
 pub trait SecondOrderProblem {
     /// State dimension.
     fn dimension(&self) -> usize;
@@ -363,7 +365,40 @@ pub trait SecondOrderProblem {
     /// Overwrite `output` with `Dr(q) direction`.
     fn tangent_apply(&self, q: &[f64], direction: &[f64], output: &mut [f64]);
 
-    /// Approximately solve the effective Jacobian system for `residual`.
+    /// Overwrite with the complete resisting force R(q,v).
+    /// The default combines the legacy linear damping and internal force.
+    fn resistance(&self, q: &[f64], v: &[f64], output: &mut [f64]) {
+        let mut internal = vec![f64::NAN; self.dimension()];
+        self.internal_force(q, &mut internal);
+        self.damping_apply(v, output);
+        for (value, force) in output.iter_mut().zip(internal) {
+            *value += force;
+        }
+    }
+
+    /// Overwrite with the partial R_q(q,v) direction, holding velocity fixed.
+    fn resistance_displacement_apply(
+        &self,
+        q: &[f64],
+        _v: &[f64],
+        direction: &[f64],
+        output: &mut [f64],
+    ) {
+        self.tangent_apply(q, direction, output);
+    }
+
+    /// Overwrite with the partial R_v(q,v) direction, holding displacement fixed.
+    fn resistance_velocity_apply(
+        &self,
+        _q: &[f64],
+        _v: &[f64],
+        direction: &[f64],
+        output: &mut [f64],
+    ) {
+        self.damping_apply(direction, output);
+    }
+
+    /// Approximately solve the effective Jacobian system for the residual.
     ///
     /// `q` is the same interpolated stage displacement used by `tangent_apply`,
     /// and `weights` give the exact effective mass, damping, and tangent
@@ -376,6 +411,8 @@ pub trait SecondOrderProblem {
     /// their own work and reproduce their results during checkpoint replay.
     /// This hook changes only the forward implicit solve; adjoints continue
     /// to use their separately supplied transpose-solve preconditioner.
+    /// It is an approximation: nonlinear resistance may add velocity-dependent
+    /// terms beyond the legacy mass/damping/tangent weights.
     fn preconditioner_apply(
         &self,
         _q: &[f64],
@@ -661,13 +698,11 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
             a_eval[i] = (1.0 - method.alpha_m).mul_add(a_new[i], method.alpha_m * self.a0[i]);
         }
         let mut mass = vec![0.0; method.n];
-        let mut damping = vec![0.0; method.n];
-        let mut internal = vec![0.0; method.n];
+        let mut resistance = vec![0.0; method.n];
         self.problem.mass_apply(&a_eval, &mut mass);
-        self.problem.damping_apply(&v_eval, &mut damping);
-        self.problem.internal_force(&q_eval, &mut internal);
+        self.problem.resistance(&q_eval, &v_eval, &mut resistance);
         for i in 0..method.n {
-            output[i] = mass[i] + damping[i] + internal[i] - self.forcing[i];
+            output[i] = mass[i] + resistance[i] - self.forcing[i];
         }
     }
 
@@ -678,16 +713,24 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
         let mut mass = vec![0.0; method.n];
         let mut damping = vec![0.0; method.n];
         self.problem.mass_apply(direction, &mut mass);
-        self.problem.damping_apply(direction, &mut damping);
+        let (v_new, _) = structural_kinematics(method, self.q0, self.v0, self.a0, q_new);
         let mut q_eval = vec![0.0; method.n];
+        let mut v_eval = vec![0.0; method.n];
         let mut tangent_direction = vec![0.0; method.n];
         for i in 0..method.n {
             q_eval[i] = (1.0 - method.alpha_f).mul_add(q_new[i], method.alpha_f * self.q0[i]);
+            v_eval[i] = (1.0 - method.alpha_f).mul_add(v_new[i], method.alpha_f * self.v0[i]);
             tangent_direction[i] = (1.0 - method.alpha_f) * direction[i];
         }
-        let mut tangent = vec![0.0; method.n];
         self.problem
-            .tangent_apply(&q_eval, &tangent_direction, &mut tangent);
+            .resistance_velocity_apply(&q_eval, &v_eval, direction, &mut damping);
+        let mut tangent = vec![0.0; method.n];
+        self.problem.resistance_displacement_apply(
+            &q_eval,
+            &v_eval,
+            &tangent_direction,
+            &mut tangent,
+        );
         for i in 0..method.n {
             output[i] = mass_scale.mul_add(mass[i], damping_scale.mul_add(damping[i], tangent[i]));
         }

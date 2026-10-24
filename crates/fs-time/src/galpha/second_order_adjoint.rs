@@ -1,4 +1,4 @@
-//! Structural generalized-alpha pullbacks for `M(p) a + C(p) v + r(q,p) = f`.
+//! Structural generalized-alpha pullbacks for `M(p) a + R(q,v,p) = f`.
 //!
 //! Differentiate the converged Chung--Hulbert residual and the Newmark
 //! correctors, including all displacement, velocity and acceleration seeds.
@@ -18,8 +18,10 @@ pub mod trajectory;
 
 /// A fixed structural parameter point with explicit transposed actions.
 /// Implementations must be pure during a call and overwrite every output.
-/// Mass and damping may depend on parameters, but not on state/time as in
-/// [`SecondOrderProblem`]. No symmetry is assumed for M, C, or the tangent.
+/// Mass may depend on parameters but is state independent. Resistance may
+/// depend on q/v/parameters as in [`SecondOrderProblem`]. Override both
+/// resistance transpose actions when overriding the complete resistance.
+/// No symmetry is assumed for M or either resistance partial.
 pub trait SecondOrderVjp: SecondOrderProblem {
     /// Number of model parameters, which may be zero.
     fn parameter_count(&self) -> usize;
@@ -34,8 +36,30 @@ pub trait SecondOrderVjp: SecondOrderProblem {
         seed: &[f64],
         output: &mut [f64],
     ) -> Result<(), String>;
-    /// Overwrite `parameters` with
-    /// `(d[M(p) a + C(p) v + r(q,p)]/dp)^T seed`, holding q/v/a fixed.
+    /// Overwrite with R_q(q,v,p)^T seed, holding velocity fixed.
+    fn resistance_displacement_transpose_apply(
+        &self,
+        q: &[f64],
+        _v: &[f64],
+        seed: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), String> {
+        self.tangent_transpose_apply(q, seed, output)
+    }
+
+    /// Overwrite with R_v(q,v,p)^T seed, holding displacement fixed.
+    fn resistance_velocity_transpose_apply(
+        &self,
+        _q: &[f64],
+        _v: &[f64],
+        seed: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), String> {
+        self.damping_transpose_apply(seed, output)
+    }
+
+    /// Overwrite parameters with the parameter derivative
+    /// (d[M(p) a + R(q,v,p)]/dp)^T seed, holding q/v/a fixed.
     /// Both parameter-dependent mass and damping are part of this derivative.
     /// An independent model explicitly writes zeros. External forcing is
     /// excluded; its owner can chain the separately returned forcing seed.
@@ -138,6 +162,7 @@ fn finite(values: &[f64]) -> bool {
 struct StructuralTranspose<'a, M: ?Sized> {
     model: &'a M,
     q: &'a [f64],
+    v: &'a [f64],
     mass_scale: f64,
     damping_scale: f64,
     tangent_scale: f64,
@@ -159,8 +184,14 @@ impl<M: SecondOrderVjp + ?Sized> LinearOp for StructuralTranspose<'_, M> {
         let result = self
             .model
             .mass_transpose_apply(seed, &mut mass)
-            .and_then(|()| self.model.damping_transpose_apply(seed, &mut damping))
-            .and_then(|()| self.model.tangent_transpose_apply(self.q, seed, output));
+            .and_then(|()| {
+                self.model
+                    .resistance_velocity_transpose_apply(self.q, self.v, seed, &mut damping)
+            })
+            .and_then(|()| {
+                self.model
+                    .resistance_displacement_transpose_apply(self.q, self.v, seed, output)
+            });
         if let Err(error) = result {
             *self.error.borrow_mut() = Some(SecondOrderAdjointError::Derivative(error));
             output.fill(f64::NAN);
@@ -219,7 +250,7 @@ impl OperatorGeneralizedAlpha {
         let restarts = primal_restart.checked_add(config.restart)?;
         restarts
             .checked_mul(2)?
-            .checked_add(52)?
+            .checked_add(56)?
             .checked_mul(self.n)?
             .checked_add(primal_restart.checked_add(1)?.checked_mul(primal_restart)?)?
             .checked_add(config.restart.checked_add(1)?.checked_mul(config.restart)?)?
@@ -380,6 +411,7 @@ impl OperatorGeneralizedAlpha {
         let operator = StructuralTranspose {
             model,
             q: &q_eval,
+            v: &v_eval,
             mass_scale: (1.0 - self.alpha_m) / (self.beta * self.h * self.h),
             damping_scale: (1.0 - self.alpha_f) * self.gamma / (self.beta * self.h),
             tangent_scale: 1.0 - self.alpha_f,
@@ -414,10 +446,16 @@ impl OperatorGeneralizedAlpha {
         let result = model.mass_transpose_apply(&lambda, &mut mass_bar);
         structural_poll(cancelled)?;
         result.map_err(SecondOrderAdjointError::Derivative)?;
-        let result = model.damping_transpose_apply(&lambda, &mut damping_bar);
+        let result =
+            model.resistance_velocity_transpose_apply(&q_eval, &v_eval, &lambda, &mut damping_bar);
         structural_poll(cancelled)?;
         result.map_err(SecondOrderAdjointError::Derivative)?;
-        let result = model.tangent_transpose_apply(&q_eval, &lambda, &mut internal_bar);
+        let result = model.resistance_displacement_transpose_apply(
+            &q_eval,
+            &v_eval,
+            &lambda,
+            &mut internal_bar,
+        );
         structural_poll(cancelled)?;
         result.map_err(SecondOrderAdjointError::Derivative)?;
         let result =
