@@ -20,6 +20,12 @@ mod branch;
 pub use branch::{DgBranch, DgBranchFrame, DgBranchLoad};
 use branch::BranchCoupling;
 
+mod channel;
+pub use channel::{
+    DgTerminalChannelFrame, DgTerminalChannelInput, DgTerminalChannelKind,
+    DgTerminalChannelLoad, MAX_DG_TERMINAL_TRANSVERSE_CELLS,
+};
+
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use fs_duct::dg::{
@@ -47,14 +53,18 @@ pub struct DgTerminalFrame {
     pub port_work_j: f64,
     /// Original rational mean pressure times held flow and duration [J].
     pub load_work_j: f64,
-    /// Difference of the independently evaluated port works [J].
+    /// Work into the optional original finite gap channel [J]. This contains
+    /// kinetic storage and is not all heat. Zero on a direct or closed port.
+    pub channel_work_j: f64,
+    /// DG work minus original channel work and original exterior work [J].
     pub port_work_residual_j: f64,
 }
 
 // Preserve a scalar exchange's original value and sum groups in declared order.
 pub(crate) fn sum_terminal_work(frames: &[DgTerminalFrame]) -> f64 {
     frames.split_first().map_or(0.0, |(first, rest)|
-        rest.iter().fold(first.port_work_j, |sum, frame| sum + frame.port_work_j))
+        rest.iter().fold(first.port_work_j - first.channel_work_j,
+            |sum, frame| sum + (frame.port_work_j - frame.channel_work_j)))
 }
 
 /// One declared inlet, one original propagator and one accepted physical history.
@@ -75,6 +85,8 @@ pub struct DgPortLoad {
     branches: Vec<DgBranchLoad>,
     branch_coupling: Option<BranchCoupling>,
     last_branch_frames: Vec<DgBranchFrame>,
+    terminal_channels: Vec<DgTerminalChannelLoad>,
+    last_terminal_channel_frames: Vec<DgTerminalChannelFrame>,
 }
 
 impl DgPortLoad {
@@ -210,6 +222,7 @@ impl DgPortLoad {
             terminal, terminal_coupling, last_terminal_frame: None,
             last_terminal_frames: Vec::new(), last_driven_mouth_frame: None, radiation_record: None,
             branches, branch_coupling, last_branch_frames: Vec::new(),
+            terminal_channels: Vec::new(), last_terminal_channel_frames: Vec::new(),
         };
         let impedance = load.port_response()?.impedance_pa_s_m3;
         if !impedance.is_finite() || impedance <= 0.0 {
@@ -278,7 +291,7 @@ impl DgPortLoad {
         let response = self.multiport_response()?;
         self.terminal_coupling.as_ref()
             .ok_or_else(|| invalid("DG terminal lost its admitted port group"))?
-            .relation(response, terminal)
+            .relation(response, terminal, &self.terminal_channels)
     }
 
     /// Affine source effort from all accepted acoustic, wall and load histories.
@@ -335,7 +348,6 @@ impl DgPortLoad {
         let (branch_states, branch_frames, original_pressure_scales) =
             self.step_branches(&inputs, &main_inputs, &junction_flows, &mut output)?;
         if !branch_frames.is_empty() { branch::validate_candidate(&state, &output, inputs.len())?; }
-        let ledger = &output.ledger;
         let inlet_port = output.port_outputs.iter().find(|port| port.id == self.inlet)
             .ok_or_else(|| invalid("DG candidate omitted its original inlet"))?;
         let inlet_work_j = volume_flow_m3_s * inlet_port.delta_x;
@@ -346,6 +358,8 @@ impl DgPortLoad {
         } else { None };
         let source_work_j = driven_mouth_frame.as_ref()
             .map_or(inlet_work_j, |frame| frame.source_work_j);
+        let (terminal_channels, terminal_channel_frames) = self.step_terminal_channels(
+            &output, &outward_flows, &load_pressure, load_offset)?;
         let mut terminal_frames = Vec::with_capacity(count);
         if let (Some(relation), Some(coupling)) = (relation, &self.terminal_coupling) {
             let h = &relation.response.history_pressure_pa;
@@ -362,6 +376,11 @@ impl DgPortLoad {
                 }
                 let terminal_pressure = load_pressure[i + load_offset];
                 pressure_scale += terminal_pressure.abs();
+                let channel = terminal_channel_frames.iter().find(|frame| frame.port == id);
+                let channel_pressure = channel.map_or(0.0, |frame| frame.constitutive_pressure_drop_pa);
+                let channel_work_j = channel.map_or(0.0, |frame| frame.pressure_work_j);
+                let closed = channel.is_some_and(|frame| frame.step.is_none());
+                pressure_scale += channel_pressure.abs();
                 // Branch condensation can cancel large internal terms. Keep the
                 // original owner terms in the same fixed relative work audit.
                 if let Some(&original_scale) = original_pressure_scales.get(row) {
@@ -370,14 +389,15 @@ impl DgPortLoad {
                 let outward_flow = outward_flows[i];
                 let port_work_j = outward_flow * port.delta_x;
                 let load_work_j = terminal_pressure * (outward_flow * self.propagator.dt());
-                let port_work_residual_j = port_work_j - load_work_j;
-                let work_scale = pressure_scale * outward_flow.abs() * self.propagator.dt();
+                let port_work_residual_j = (port_work_j - channel_work_j) - load_work_j;
+                let work_scale = pressure_scale * outward_flow.abs() * self.propagator.dt()
+                    + channel.map_or(0.0, DgTerminalChannelFrame::work_scale_j);
                 if ![
                     outward_flow, terminal_pressure, pressure_scale, port_work_j,
-                    load_work_j, port_work_residual_j, work_scale,
+                    load_work_j, channel_work_j, port_work_residual_j, work_scale,
                 ].iter().all(|value| value.is_finite())
-                    || (port.conjugate_rate - terminal_pressure).abs()
-                        > 1e-10 * pressure_scale.max(1e-300)
+                    || (!closed && ((port.conjugate_rate - terminal_pressure) - channel_pressure).abs()
+                        > 1e-10 * pressure_scale.max(1e-300))
                     || port_work_residual_j.abs() > 1e-10 * work_scale.max(1e-300)
                 {
                     return Err(invalid("DG and rational terminal disagree on same-step pressure or work"));
@@ -385,7 +405,7 @@ impl DgPortLoad {
                 terminal_frames.push(DgTerminalFrame {
                     port: id, outward_flow_m3_s: outward_flow,
                     mean_pressure_pa: port.conjugate_rate,
-                    port_work_j, load_work_j, port_work_residual_j,
+                    port_work_j, load_work_j, channel_work_j, port_work_residual_j,
                 });
             }
         }
@@ -394,19 +414,23 @@ impl DgPortLoad {
             _ => None,
         };
         let terminal_work = sum_terminal_work(&terminal_frames);
+        channel::include_channel_ledgers(&mut output, &terminal_channels)?;
+        let ledger = &output.ledger;
         let balance = ledger.port_work_step_j - (inlet_work_j - terminal_work);
         let terminal_work_scale = terminal_frames.iter().map(|frame| frame.port_work_j.abs()).sum::<f64>();
         let mut scale = ledger.port_work_step_j.abs() + inlet_work_j.abs() + terminal_work_scale;
         for frame in &branch_frames {
             scale += frame.bore_work_j.abs() + frame.branch_work_j.abs();
         }
+        for frame in &terminal_channel_frames { scale += frame.work_scale_j(); }
         if ![inlet_work_j, balance, scale].iter().all(|value| value.is_finite())
             || balance.abs() > 1e-10 * scale.max(1e-300)
         {
-            return Err(invalid("DG original net port work does not equal inlet minus terminal work"));
+            return Err(invalid("aggregate DG/channel port work does not equal inlet minus exterior work"));
         }
         Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, terminal_frames,
-            inlet_work_j, source_work_j, driven_mouth_frame, branch_states, branch_frames })
+            inlet_work_j, source_work_j, driven_mouth_frame, branch_states, branch_frames,
+            terminal_channels, terminal_channel_frames })
     }
 }
 
@@ -423,12 +447,16 @@ pub(crate) struct DgPortTrial<'a> {
     driven_mouth_frame: Option<DgDrivenMouthFrame>,
     branch_states: Vec<DgState>,
     branch_frames: Vec<DgBranchFrame>,
+    terminal_channels: Vec<DgTerminalChannelLoad>,
+    terminal_channel_frames: Vec<DgTerminalChannelFrame>,
 }
 
 impl DgPortTrial<'_> {
     pub(crate) const fn previous_state(&self) -> &DgState { &self.owner.state }
     pub(crate) const fn state(&self) -> &DgState { &self.state }
-    /// External port observations and the sum of every original DG ledger.
+    /// Actual external DG pressure observations and the aggregate bore, branch
+    /// and gap ledger. With finite terminal gaps, these are the duct-side
+    /// pressures; terminal/channel frames retain the exterior pressure/work.
     /// Internal junction work remains visible in branch_frames().
     pub(crate) const fn output(&self) -> &DgStepOutput { &self.output }
     pub(crate) fn previous_stored_energy_j(&self) -> f64 { self.owner.stored_energy_j() }
@@ -445,6 +473,9 @@ impl DgPortTrial<'_> {
         self.terminal_frame.as_ref()
     }
     pub(crate) fn terminal_frames(&self) -> &[DgTerminalFrame] { &self.terminal_frames }
+    pub(crate) fn terminal_channel_frames(&self) -> &[DgTerminalChannelFrame] {
+        &self.terminal_channel_frames
+    }
 
     /// Publish every already validated candidate; all fallible checks precede this.
     pub(crate) fn accept(self) -> DgStepOutput {
@@ -457,6 +488,8 @@ impl DgPortTrial<'_> {
             branch.state = state;
         }
         self.owner.last_branch_frames = self.branch_frames;
+        self.owner.terminal_channels = self.terminal_channels;
+        self.owner.last_terminal_channel_frames = self.terminal_channel_frames;
         self.output
     }
 }
@@ -467,3 +500,4 @@ mod tests;
 mod terminal_tests;
 #[cfg(test)]
 mod terminal_group_tests;
+

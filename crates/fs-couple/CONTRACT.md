@@ -5971,3 +5971,49 @@ pressure changes at identical geometry; and check late refusal, cancellation
 and exact retry. Production and regression source passed Rust syntax parsing.
 Native compilation, numerical execution and audio rendering/listening were not
 available in this session; these tests do not establish instrument fidelity.
+
+
+## Original finite gap channels on complete DG exterior groups
+
+`DgPortLoad::with_terminal_channels` binds explicit fixed planar slit channels
+or rigid closures to actual external ports, including finite chimney outlets.
+Each slit is the existing `SlitChannel` transverse no-slip momentum owner with
+the original local `GasState` and common clock. Density, viscosity, inertial
+history and resolved wall layers enter the simultaneous mean-pressure solve;
+geometry or material substitution changes the physical source feedback.
+The admitted source remains affine. All exterior mutual entries and rational
+histories remain intact. A closed channel has exactly zero held flow and an
+unconstrained pressure reaction, including when every terminal is closed;
+there is no infinite resistance, deleted exterior channel or reset history.
+
+Each original gap owner advances privately at the shared held flow. Its actual
+FV flow, constitutive pressure, storage, viscous heat and backward-Euler
+numerical dissipation participate in the unchanged relative work gates before
+bore, branch, gap and rational states publish together. Channel kinetic
+storage and both explicitly distinguished losses join the aggregate source
+ledger once. `DgTerminalFrame::channel_work_j` is signed exchange into that
+owner; exterior work subtracts it from the independently integrated DG work.
+Negative channel work is permitted when stored fluid energy returns.
+`last_terminal_channel_frames` retains the complete original channel step;
+numerical dissipation is never relabeled as physical heat. Existing actual
+outer flow drives the exterior observer once. Cold joint-mouth attachment
+retains and recomputes the same gap condensation.
+
+Admission checks fixed thin geometry, unique declared terminal ownership,
+local duct area, the complete explicitly budgeted transverse field count
+(hard limit 4096), and a supplied resolved-cell Mach ceiling in `(0,0.3]`.
+Runtime Mach refusal or any late work/flow failure leaves all accepted
+histories and observations intact. Empty channel declarations retain the
+original direct-terminal path. This is a fixed, laminar, incompressible planar
+port reduction with original backward-Euler channel stepping; it does not
+resolve axial entrance/exit jets, lateral walls, annular pad radiation,
+turbulence, moving-pad swept volume/contact or full instrument qualification.
+The exterior surface geometry is unchanged and remains independently explicit.
+
+Focused regression definitions compare one/two finite gaps, both original DG
+kernels, a finite material-gas chimney and the full exterior history against
+independently assembled uncondensed pressure equations. They also cover exact
+closure, all-closed source response, signed kinetic-energy return, material
+and gap substitutions, joint-mouth construction order, aggregate source work,
+late refusal and exact retry. Rust syntax parsing passed; native compilation,
+numerical test execution and acoustic qualification remain pending.

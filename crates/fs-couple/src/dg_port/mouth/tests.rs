@@ -158,3 +158,43 @@ fn abandoned_joint_trials_preserve_bore_branch_rational_and_published_frames() {
     assert!(load.last_driven_mouth_frame().is_some());
     assert!(load.install_driven_mouth(prepared(&model)).is_err());
 }
+
+#[test]
+fn joint_mouth_and_fixed_gap_channels_commute_at_construction_and_share_signed_work() {
+    use crate::dg_port::{DgTerminalChannelInput, DgTerminalChannelKind};
+    let controls = vec![
+        DgTerminalChannelInput { port: SIDE, kind: DgTerminalChannelKind::Slit {
+            width_m: 0.002, height_m: 4e-5, length_m: 0.001,
+            transverse_cells: 16, maximum_mach: 0.2,
+        } },
+        DgTerminalChannelInput { port: OUTLET, kind: DgTerminalChannelKind::Closed },
+    ];
+    let (original, joint_model) = load(true);
+    let mut mouth_first = original.with_terminal_channels(controls.clone(), 16).unwrap();
+    let main = duct(0.05, 2, INLET, OUTLET)
+        .with_side_ports(&[DgSidePort { id: SIDE, downstream_element: 1 }]).unwrap();
+    let mut channel_first = DgPortLoad::new_with_terminal_branches(main, DT, 1e-11,
+        MAX_DG_PROPAGATOR_DOFS, vec![SIDE, OUTLET], prepared(&model(2)),
+        vec![DgBranch { port: SIDE, duct: duct(0.015, 1, PortId(0), PortId(1)) }])
+        .unwrap().with_terminal_channels(controls, 16).unwrap();
+    channel_first.install_driven_mouth(prepared(&joint_model)).unwrap();
+    let mut rational = joint_model.zoh(DT).unwrap();
+    for sample in 0..32 {
+        let q = if sample < 13 { (f64::from(sample % 5) - 2.0) * 1e-9 } else { 0.0 };
+        assert_eq!(mouth_first.port_response().unwrap(), channel_first.port_response().unwrap());
+        let trial = mouth_first.preview_step(q).unwrap();
+        let flows = [-q, trial.terminal_frames()[0].outward_flow_m3_s, 0.0];
+        assert_eq!(trial.terminal_frames()[1].outward_flow_m3_s, 0.0);
+        let pressure = rational.step_mean(&flows);
+        let exterior_work: f64 = pressure.iter().zip(flows).map(|(p, q)| p * (q * DT)).sum();
+        let aggregate_work = trial.output().ledger.port_work_step_j;
+        near(trial.source_work_j(), aggregate_work + exterior_work,
+            trial.source_work_j().abs() + aggregate_work.abs() + exterior_work.abs());
+        assert_eq!(trial.driven_mouth_frame().unwrap().mean_pressure_pa, pressure[0]);
+        let actual = trial.accept();
+        assert_eq!(actual, channel_first.preview_step(q).unwrap().accept());
+        assert_eq!(mouth_first.last_terminal_channel_frames(), channel_first.last_terminal_channel_frames());
+        assert_eq!(mouth_first.terminal().unwrap().pole_states(), rational.pole_states());
+    }
+}
+

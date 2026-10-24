@@ -107,19 +107,22 @@ impl DgPortLoad {
     #[must_use]
     pub fn last_branch_frames(&self) -> &[DgBranchFrame] { &self.last_branch_frames }
 
-    /// Complete bore plus branch acoustic and wall-memory storage [J].
+    /// Complete bore/branch acoustic, wall-memory and finite gap kinetic storage [J].
     /// Original rational terminal storage is not fabricated by this sum.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.branches.iter().fold(self.state.stored_energy_j(),
-            |sum, branch| sum + branch.state.stored_energy_j())
+        let ducts = self.branches.iter().fold(self.state.stored_energy_j(),
+            |sum, branch| sum + branch.state.stored_energy_j());
+        self.terminal_channels.iter().fold(ducts, |sum, channel| sum + channel.stored_energy_j())
     }
 
-    /// Sum of the original owners' inferred wall/boundary loss [J].
+    /// Original inferred duct loss plus gap wall heat and BE numerical loss [J].
+    /// Gap frames/cumulative getters retain those two distinct contributions.
     #[must_use]
     pub fn cumulative_dissipated_j(&self) -> f64 {
-        self.branches.iter().fold(self.state.cumulative_dissipated_j(),
-            |sum, branch| sum + branch.state.cumulative_dissipated_j())
+        let ducts = self.branches.iter().fold(self.state.cumulative_dissipated_j(),
+            |sum, branch| sum + branch.state.cumulative_dissipated_j());
+        self.terminal_channels.iter().fold(ducts, |sum, channel| sum + channel.cumulative_dissipated_j())
     }
 
     /// Tightest declared viscothermal upper frequency across every actual duct.
@@ -331,3 +334,4 @@ pub(super) fn validate_candidate(
 
 #[cfg(test)]
 mod tests;
+

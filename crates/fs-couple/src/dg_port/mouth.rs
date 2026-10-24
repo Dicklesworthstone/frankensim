@@ -89,8 +89,8 @@ impl DgPortLoad {
         }
         let response = self.multiport_response()?;
         let coupling = TerminalCoupling::with_driven_mouth(&response, self.inlet,
-            self.terminal_ports().to_vec(), &terminal)?;
-        let impedance = coupling.relation(response, &terminal)?.inlet.impedance_pa_s_m3;
+            self.terminal_ports().to_vec(), &terminal, &self.terminal_channels)?;
+        let impedance = coupling.relation(response, &terminal, &self.terminal_channels)?.inlet.impedance_pa_s_m3;
         // All construction and physical checks precede publication. Original
         // bore and branch owners/states remain exactly where they were.
         self.terminal = Some(terminal);
@@ -127,3 +127,4 @@ impl DgPortLoad {
 
 #[cfg(test)]
 mod tests;
+

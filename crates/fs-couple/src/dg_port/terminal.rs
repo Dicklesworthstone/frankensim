@@ -79,7 +79,8 @@ pub(super) struct TerminalCoupling {
     pub(super) outward_per_inlet: Vec<f64>,
     pub(super) driven_mouth: bool,
     impedance_pa_s_m3: f64,
-    solve: TerminalSolve,
+    active: Vec<usize>,
+    solve: Option<TerminalSolve>,
 }
 
 pub(super) struct TerminalRelation {
@@ -95,21 +96,22 @@ impl TerminalCoupling {
         ports: Vec<PortId>,
         terminal: &PreparedMimoLoad,
     ) -> Result<Self, AcousticRealizeError> {
-        Self::prepare(response, inlet, ports, terminal, false)
+        Self::with_channels(response, inlet, ports, terminal, false, &[])
     }
 
     /// Channel zero is a driven exterior mouth with outward flow -Qin.
     /// Terminal channel order and original external DG port identities survive.
     pub(super) fn with_driven_mouth(
         response: &DgMultiportResponse, inlet: PortId, ports: Vec<PortId>,
-        terminal: &PreparedMimoLoad,
+        terminal: &PreparedMimoLoad, channels: &[DgTerminalChannelLoad],
     ) -> Result<Self, AcousticRealizeError> {
-        Self::prepare(response, inlet, ports, terminal, true)
+        Self::with_channels(response, inlet, ports, terminal, true, channels)
     }
 
-    fn prepare(
+    pub(super) fn with_channels(
         response: &DgMultiportResponse, inlet: PortId, ports: Vec<PortId>,
         terminal: &PreparedMimoLoad, driven_mouth: bool,
+        terminal_channels: &[DgTerminalChannelLoad],
     ) -> Result<Self, AcousticRealizeError> {
         let count = response.ports.len();
         let n = ports.len();
@@ -128,22 +130,43 @@ impl TerminalCoupling {
             indices.push(response.ports.iter().position(|port| port == id)
                 .ok_or_else(|| invalid("DG terminal group references an undeclared port"))?);
         }
-        let z = &response.impedance_pa_s_m3;
-        let direct = terminal.mean_direct_term();
-        let mut matrix = vec![0.0; n * n];
-        for row in 0..n {
-            for col in 0..n {
-                matrix[row * n + col] = z[count * indices[row] + indices[col]]
-                    + direct[(row + offset) * channels + col + offset];
+        let mut series = vec![0.0; n];
+        let mut open = vec![true; n];
+        for channel in terminal_channels {
+            let index = ports.iter().position(|port| *port == channel.input().port)
+                .ok_or_else(|| invalid("DG terminal channel has no original exterior row"))?;
+            match channel.pressure_load()? {
+                Some(load) => series[index] = load.impedance_pa_s_m3,
+                None => open[index] = false,
             }
         }
-        let solve = TerminalSolve::new(&matrix, n)?;
-        let rhs: Vec<_> = indices.iter().enumerate().map(|(i, &row)| {
-            let mut value = z[count * row + inlet_index];
+        let active: Vec<_> = (0..n).filter(|index| open[*index]).collect();
+        let dimension = active.len();
+        let z = &response.impedance_pa_s_m3;
+        let direct = terminal.mean_direct_term();
+        let mut matrix = vec![0.0; dimension * dimension];
+        for (row, &original_row) in active.iter().enumerate() {
+            for (col, &original_col) in active.iter().enumerate() {
+                let value = z[count * indices[original_row] + indices[original_col]]
+                    + direct[(original_row + offset) * channels + original_col + offset];
+                matrix[row * dimension + col] = if row == col && series[original_row] != 0.0 {
+                    value + series[original_row]
+                } else { value };
+            }
+        }
+        let solve = if dimension == 0 { None }
+            else { Some(TerminalSolve::new(&matrix, dimension)?) };
+        let rhs: Vec<_> = active.iter().map(|&i| {
+            let mut value = z[count * indices[i] + inlet_index];
             if driven_mouth { value += direct[(i + 1) * channels]; }
             value
         }).collect();
-        let outward_per_inlet = solve.apply(&rhs)?;
+        let mut outward_per_inlet = vec![0.0; n];
+        if let Some(solve) = &solve {
+            for (&index, value) in active.iter().zip(solve.apply(&rhs)?) {
+                outward_per_inlet[index] = value;
+            }
+        }
         let mut impedance_pa_s_m3 = z[count * inlet_index + inlet_index];
         if driven_mouth { impedance_pa_s_m3 += direct[0]; }
         for (i, &column) in indices.iter().enumerate() {
@@ -154,22 +177,35 @@ impl TerminalCoupling {
         if !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 {
             return Err(invalid("DG terminal elimination left the finite positive inlet-load domain"));
         }
-        Ok(Self { ports, inlet_index, indices, outward_per_inlet, driven_mouth, impedance_pa_s_m3, solve })
+        Ok(Self { ports, inlet_index, indices, outward_per_inlet, driven_mouth,
+            impedance_pa_s_m3, active, solve })
     }
 
     pub(super) fn relation(
         &self, response: DgMultiportResponse, terminal: &PreparedMimoLoad,
+        channels: &[DgTerminalChannelLoad],
     ) -> Result<TerminalRelation, AcousticRealizeError> {
         let count = response.ports.len();
         let offset = usize::from(self.driven_mouth);
         let mut load_history = vec![0.0; self.ports.len() + offset];
         terminal.mean_history_output_into(&mut load_history)
             .map_err(|_| invalid("DG terminal mean history is outside its admitted finite domain"))?;
-        let mut rhs = vec![0.0; self.ports.len()];
-        for (i, &row) in self.indices.iter().enumerate() {
-            rhs[i] = response.history_pressure_pa[row] - load_history[i + offset];
+        let mut rhs = Vec::with_capacity(self.active.len());
+        for &index in &self.active {
+            let mut value = response.history_pressure_pa[self.indices[index]] - load_history[index + offset];
+            if let Some(channel) = channels.iter().find(|channel| channel.input().port == self.ports[index]) {
+                let load = channel.pressure_load()?
+                    .ok_or_else(|| invalid("closed DG channel appeared in the active flow solve"))?;
+                value += load.history_pressure_pa;
+            }
+            rhs.push(value);
         }
-        let outward_history_m3_s = self.solve.apply(&rhs)?;
+        let mut outward_history_m3_s = vec![0.0; self.ports.len()];
+        if let Some(solve) = &self.solve {
+            for (&index, value) in self.active.iter().zip(solve.apply(&rhs)?) {
+                outward_history_m3_s[index] = value;
+            }
+        }
         let mut history_pressure_pa = response.history_pressure_pa[self.inlet_index];
         if self.driven_mouth { history_pressure_pa -= load_history[0]; }
         let direct = terminal.mean_direct_term();
@@ -187,3 +223,4 @@ impl TerminalCoupling {
         })
     }
 }
+
