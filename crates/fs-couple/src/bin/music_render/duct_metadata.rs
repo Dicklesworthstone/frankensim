@@ -11,10 +11,17 @@ pub(super) fn computed_baffled_provenance(
     let limits = record.limits();
     let band = record.band_hz();
     let report = record.report();
-    let apertures = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
-        "{{\"port\":{port},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
-        aperture.center_m[0], aperture.center_m[1], aperture.radius_m
+    let driven_mouth = record.driven_mouth();
+    let offset = usize::from(driven_mouth.is_some());
+    let terminals = record.apertures().iter().enumerate().map(|(port, aperture)| format!(
+        "{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
+        port + offset, aperture.center_m[0], aperture.center_m[1], aperture.radius_m
     )).collect::<Vec<_>>().join(",");
+    let apertures = driven_mouth.map_or_else(|| terminals.clone(), |mouth| format!(
+        "{{\"port\":0,\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"outward_flow\":\"negative driven inlet flow\",\"terminal_radial_rings\":{},\"terminal_angular_points\":{}}},{terminals}",
+        mouth.center_m[0], mouth.center_m[1], mouth.size_m[0], mouth.size_m[1],
+        mouth.cells[0], mouth.cells[1], mouth.terminal_radial_rings, mouth.terminal_angular_points
+    ));
     let number = |value: Option<f64>| value.filter(|v| v.is_finite())
         .map_or_else(|| "null".into(), |value| format!("{value:e}"));
     let rungs = report.rungs.iter().map(|rung| format!(
@@ -24,7 +31,13 @@ pub(super) fn computed_baffled_provenance(
         rung.refusal.as_ref().map_or_else(|| "null".into(), |text| super::json_string(text))
     )).collect::<Vec<_>>().join(",");
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(record.gas_record()));
-    format!("{{\"source\":\"computed-baffled\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"frequency_samples\":{},\"orders\":[{},{},{}],\"fit_iterations\":{},\"maximum_relative_error\":{:e},\"max_fit_memory_bytes\":{},\"causality_subtractions\":{},\"causality_tail_bound_ratio\":{:e},\"causality_data_tolerance\":{:e},\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"selected_order\":{},\"held_out_samples\":{},\"fit_relative_error\":{:e},\"held_out_relative_error\":{:e},\"maximum_causality_ratio\":{:e},\"continuous_passivity_class\":\"{:?}\",\"sampled_passivity_class\":\"{:?}\",\"rungs\":[{rungs}],\"scope\":\"actual coplanar circular openings and resolved exterior; shared closed-form piston and Rayleigh mutual operator; proper undelayed rational approximation over full mechanical Nyquist band; no passivity repair, delayed realization or measured-instrument qualification; sampled GridOnly is not a storage certificate\"{gas_sources}}}",
+    let source = if driven_mouth.is_some() { "computed-mixed-baffled" } else { "computed-baffled" };
+    let scope = if driven_mouth.is_some() {
+        "actual coplanar rectangular mouth and circular terminals in the bound exterior; complete shared power-consistent Rayleigh surface matrix and mutual source feedback; proper rational approximation over full mechanical Nyquist band; no passivity repair or measured-instrument qualification; finite surface/frequency checks and sampled GridOnly are not continuum or storage certificates"
+    } else {
+        "actual coplanar circular openings and resolved exterior; shared closed-form piston and Rayleigh mutual operator; proper undelayed rational approximation over full mechanical Nyquist band; no passivity repair, delayed realization or measured-instrument qualification; sampled GridOnly is not a storage certificate"
+    };
+    format!("{{\"source\":\"{source}\",\"declaration_identity\":\"{}\",\"realization_identity\":\"{}\",\"exterior_gas\":{},\"band_hz\":[{:e},{:e}],\"ordered_apertures\":[{apertures}],\"frequency_samples\":{},\"orders\":[{},{},{}],\"fit_iterations\":{},\"maximum_relative_error\":{:e},\"max_fit_memory_bytes\":{},\"causality_subtractions\":{},\"causality_tail_bound_ratio\":{:e},\"causality_data_tolerance\":{:e},\"max_states\":{},\"max_memory_bytes\":{},\"sampled_passivity_points\":{},\"selected_order\":{},\"held_out_samples\":{},\"fit_relative_error\":{:e},\"held_out_relative_error\":{:e},\"maximum_causality_ratio\":{:e},\"continuous_passivity_class\":\"{:?}\",\"sampled_passivity_class\":\"{:?}\",\"rungs\":[{rungs}],\"scope\":\"{scope}\"{gas_sources}}}",
         fs_blake3::ContentHash(record.declaration_identity()).to_hex(),
         fs_blake3::ContentHash(record.realization_identity()).to_hex(),
         gas_state(record.gas_record().state()), band[0], band[1],

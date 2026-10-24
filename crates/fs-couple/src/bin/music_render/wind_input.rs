@@ -582,6 +582,7 @@ fn load_with_all_sources(
                     let microphone = p.renderer().mouth_receiver().expect("admitted DG mouth");
                     let support = p.renderer().propagation_delay_samples().expect("exterior kernels");
                     let mouth_reaction = voice.mouth_radiation_load();
+                    let mutual_mouth = load.has_driven_mouth();
                     let terminal_json = if source.apertures().len() == 1 {
                         let aperture = &source.apertures()[0];
                         format!(",\"outlet_receiver\":{{\"radius_m\":{:e},\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
@@ -599,19 +600,27 @@ fn load_with_all_sources(
                     let mouth_json = format!(",\"mouth_receiver\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"negative accepted DG inlet volume flow\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"reaction_added\":{}}}",
                         mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
                         mouth.cells[0], mouth.cells[1], microphone.delay_samples.0,
-                        microphone.delay_samples.1, microphone.filter_delay_samples(), mouth_reaction.is_some());
-                    let reaction_json = mouth_reaction.map_or_else(|| ",\"mouth_reaction\":null".to_owned(), |reaction| {
-                        let spec = reaction.load();
-                        let term = spec.terms()[0];
-                        format!(",\"mouth_reaction\":{{\"model\":\"compact-rectangular-baffled-v1\",\"legacy_load_replaced\":true,\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e},\"static_quadrature_relative_error\":{:e},\"max_complex_relative_error\":{:e},\"max_resistance_relative_error\":{:e},\"memory\":\"shared passive midpoint relaxation\",\"mutual_mouth_terminal_reaction\":false}}",
-                            reaction.maximum_frequency_hz(), term.resistance_pa_s_m3, term.rate_per_s,
-                            reaction.static_quadrature_relative_error(), reaction.max_complex_relative_error(),
-                            reaction.max_resistance_relative_error())
-                    });
-                    let (point, scope) = if source.apertures().len() == 1 {
-                        ("baffled-mouth-and-outlet", "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation")
+                        microphone.delay_samples.1, microphone.filter_delay_samples(), mouth_reaction.is_some() || mutual_mouth);
+                    let reaction_json = if mutual_mouth {
+                        ",\"mouth_reaction\":{\"model\":\"joint-mixed-baffled-v1\",\"legacy_load_replaced\":true,\"memory\":\"one original MIMO mean-output ZOH\",\"mutual_mouth_terminal_reaction\":true,\"source_effort\":\"actual inlet pressure minus exterior mouth pressure\",\"work\":\"signed original joint-mouth exchange; not heat or certified rational storage\"}".to_owned()
                     } else {
-                        ("baffled-mouth-and-terminals", "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular terminals in one material exterior and infinite rigid baffle; no mutual reaction between mouth and terminals, resolved jet, free-field body or room radiation")
+                        mouth_reaction.map_or_else(|| ",\"mouth_reaction\":null".to_owned(), |reaction| {
+                            let spec = reaction.load();
+                            let term = spec.terms()[0];
+                            format!(",\"mouth_reaction\":{{\"model\":\"compact-rectangular-baffled-v1\",\"legacy_load_replaced\":true,\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e},\"static_quadrature_relative_error\":{:e},\"max_complex_relative_error\":{:e},\"max_resistance_relative_error\":{:e},\"memory\":\"shared passive midpoint relaxation\",\"mutual_mouth_terminal_reaction\":false}}",
+                                reaction.maximum_frequency_hz(), term.resistance_pa_s_m3, term.rate_per_s,
+                                reaction.static_quadrature_relative_error(), reaction.max_complex_relative_error(),
+                                reaction.max_resistance_relative_error())
+                        })
+                    };
+                    let point = if source.apertures().len() == 1 { "baffled-mouth-and-outlet" }
+                        else { "baffled-mouth-and-terminals" };
+                    let scope = if mutual_mouth {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and circular terminals in one bound material exterior and infinite rigid baffle; complete same-step mutual mouth/terminal reaction; no resolved jet, free-field body or room radiation"
+                    } else if source.apertures().len() == 1 {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation"
+                    } else {
+                        "signed Rayleigh pressure sum of the actual rectangular mouth and computed circular terminals in one material exterior and infinite rigid baffle; no mutual reaction between mouth and terminals, resolved jet, free-field body or room radiation"
                     };
                     (point, format!(",\"observation_scope\":\"{scope}\",\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"exterior_gas\":{exterior},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"delay_compensated\":false{terminal_json}{mouth_json}{reaction_json}",
                         receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],

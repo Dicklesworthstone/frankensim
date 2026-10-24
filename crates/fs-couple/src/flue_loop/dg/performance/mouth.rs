@@ -31,10 +31,10 @@ impl FlueDgPerformance {
     /// filter delay; no gain or duplicate pressure source is introduced.
     ///
     /// This explicitly describes disjoint openings in one infinite rigid baffle.
-    /// Selecting observation alone retains the existing mouth reaction. Call
-    /// `with_mouth_reaction` to select the same rectangle's compact self load.
-    /// Neither choice resolves a jet, mutual mouth/outlet reaction or free-field
-    /// scattering by an instrument body.
+    /// Selecting observation alone retains the existing mouth reaction. The
+    /// compact self load and complete mutual load are explicit separate choices
+    /// through with_mouth_reaction and with_mutual_mouth_reaction. None resolves
+    /// a jet or free-field scattering by an instrument body.
     pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
         -> Result<Self, GestureCompileError>
     {
@@ -45,6 +45,11 @@ impl FlueDgPerformance {
             .ok_or_else(|| invalid("DG mouth observation requires the bound baffled outlet microphone"))?;
         let source = self.voice.dg().expect("admitted original DG voice").load()
             .radiation_record().expect("admitted computed DG microphone source");
+        if source.driven_mouth().is_some_and(|mouth|
+            mouth.center_m != input.center_m || mouth.cells != input.cells)
+        {
+            return Err(invalid("joint DG mouth observation must retain its bound rectangular source"));
+        }
         let exterior = source.gas_record().state();
         if self.voice.gas().pressure.to_bits() != exterior.pressure.to_bits() {
             return Err(invalid("DG mouth and exterior require equal static pressure"));
@@ -97,6 +102,36 @@ impl FlueDgPerformance {
             outlet.config.maximum_frequency_hz, gate,
         ).map_err(|error| GestureCompileError::Render(source_error(error)))?;
         self.voice.attach_mouth_radiation(model)
+            .map_err(|error| GestureCompileError::Render(source_error(error)))?;
+        Ok(self)
+    }
+
+    /// Bind one reciprocal mouth/terminal exterior to the current source solve.
+    /// Every source pressure and flow uses the original mixed Rayleigh matrix
+    /// and one causal rational memory. Both directions of the mutual coupling
+    /// act in this sample; the original signed mouth flow is -Qin.
+    ///
+    /// The shared geometry resolution must cover the full mechanical Nyquist
+    /// band even when the microphone observes a narrower band. The original
+    /// jet remains an exploration model, and the baffle is not a free-field
+    /// instrument body. Independent compact mouth reaction cannot also attach.
+    pub fn with_mutual_mouth_reaction(mut self, gate: &CancelGate)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.voice.samples_rendered() != 0 {
+            return Err(invalid("joint DG mouth reaction requires a cold performance"));
+        }
+        let mouth = self.mouth.as_ref()
+            .ok_or_else(|| invalid("joint DG mouth reaction requires its actual rectangular receiver"))?;
+        let outlet = self.outlet.as_ref().expect("mouth requires the original outlet observer");
+        let surface = crate::bernoulli_aperture::radiation::environment::multiport::bake::mixed::DrivenMouthSurface {
+            center_m: mouth.input.center_m,
+            size_m: [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+            cells: mouth.input.cells,
+            terminal_radial_rings: outlet.config.radial_rings,
+            terminal_angular_points: outlet.config.angular_points,
+        };
+        self.voice.attach_joint_mouth_radiation(surface, self.config.sample_rate_hz, gate)
             .map_err(|error| GestureCompileError::Render(source_error(error)))?;
         Ok(self)
     }

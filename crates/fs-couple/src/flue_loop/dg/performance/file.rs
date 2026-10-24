@@ -7,8 +7,10 @@
 //! card remains an exploration source, never a resolved-flow qualification.
 //! After a baffled observation, optional `mouth_radiation X Y WIDTH_CELLS
 //! CUT_UP_CELLS` adds the actual rectangular mouth to that same microphone.
-//! Optional `mouth_reaction none|compact-baffled` then selects its original
-//! compact self reaction; mutual mouth/outlet loading is not included.
+//! Optional `mouth_reaction none|compact-baffled|mutual-baffled` selects no
+//! replacement, the original compact self reaction, or one complete shared
+//! rectangular-mouth/circular-terminal reaction. The latter includes all
+//! reciprocal cross terms and requires source quadrature over mechanical Nyquist.
 
 use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
@@ -71,8 +73,11 @@ fn read_observation(rows: &mut Rows<'_>) -> Result<Option<CircularOutletReceiver
     Ok(receiver)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouthReaction { None, CompactBaffled, MutualBaffled }
+
 fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
-    -> Result<(Option<FlueMouthRadiation>, bool), FlueDgInputError>
+    -> Result<(Option<FlueMouthRadiation>, MouthReaction), FlueDgInputError>
 {
     let mouth = if rows.next_is("mouth_radiation") {
         let mut row = rows.row("mouth_radiation")?;
@@ -88,17 +93,18 @@ fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
     } else { None };
     let reaction = if rows.next_is("mouth_reaction") {
         let mut row = rows.row("mouth_reaction")?;
-        let enabled = match row.fields.next() {
-            Some("none") => false,
-            Some("compact-baffled") => true,
-            _ => return Err(bad(row.line, "mouth_reaction requires none or compact-baffled")),
+        let selected = match row.fields.next() {
+            Some("none") => MouthReaction::None,
+            Some("compact-baffled") => MouthReaction::CompactBaffled,
+            Some("mutual-baffled") => MouthReaction::MutualBaffled,
+            _ => return Err(bad(row.line, "mouth_reaction requires none, compact-baffled or mutual-baffled")),
         };
         row.end()?;
-        if enabled && mouth.is_none() {
+        if selected != MouthReaction::None && mouth.is_none() {
             return Err(bad(rows.line, "DG mouth reaction requires an explicit mouth_radiation rectangle"));
         }
-        enabled
-    } else { false };
+        selected
+    } else { MouthReaction::None };
     Ok((mouth, reaction))
 }
 
@@ -265,10 +271,13 @@ impl FlueDgFilePerformance {
             renderer = renderer.with_mouth_radiation(mouth)
                 .map_err(FlueInputError::Performance)?;
         }
-        if mouth_reaction {
-            renderer = renderer.with_mouth_reaction(gate)
-                .map_err(FlueInputError::Performance)?;
-        }
+        renderer = match mouth_reaction {
+            MouthReaction::None => renderer,
+            MouthReaction::CompactBaffled => renderer.with_mouth_reaction(gate)
+                .map_err(FlueInputError::Performance)?,
+            MouthReaction::MutualBaffled => renderer.with_mutual_mouth_reaction(gate)
+                .map_err(FlueInputError::Performance)?,
+        };
         poll(gate)?;
         let info = FluePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.flue-dg-performance.v1", bytes),

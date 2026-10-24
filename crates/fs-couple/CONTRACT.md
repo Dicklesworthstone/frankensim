@@ -5856,3 +5856,24 @@ flow field or interior viscothermal losses. Native compilation and the new
 integration regressions were unavailable in the implementation environment;
 the source-defined gates remain required before qualification of these
 manufactured examples.
+
+
+### Joint DG mouth and terminal exterior
+
+The explicit DG flue mutual-mouth route replaces independent mouth and terminal loads with one original rational MIMO owner. Its rectangular mouth is channel zero with outward flow exactly minus accepted inlet flow; all circular terminal channels retain their physical order, including finite branch outlets. The same-step source effort is inlet pressure minus exterior mouth pressure. The existing Schur solve retains every mutual term, and bore, branch and original rational candidates publish together only after their independent pressure/work checks.
+
+Source preparation reuses the original receiver surface quadratures and power-consistent Rayleigh matrix in one infinite rigid baffle, with the complete retained exterior GasRecord. It keeps the common full-mechanical-band fit, withheld errors, source causality assumptions and continuous/sampled passivity admissions. Sampled admission remains GridOnly; finite surface/frequency checks are not continuum or rational-storage certificates. Signed joint mouth work is distinct from heat. This does not resolve the jet or free-field scattering by an instrument body. Cold source reuse preserves the joint load and does not restore legacy mouth inertia.
+
+The shared DG flute file grammar selects this path with
+`mouth_reaction mutual-baffled` after its explicit `mouth_radiation`
+rectangle. Existing `none` and `compact-baffled` selections remain distinct.
+The same joint load composes with the original finite DG chimney states;
+`flue-dg-mutual-chimney.performance` supplies the combined data-only selection.
+The receiver retains the source's actual surface quadratures on cold reuse.
+Generic aperture adapters refuse this pressure-jump load at construction,
+because their existing source law requires absolute bore inlet pressure.
+
+Source syntax parsing and an independent 90-case numerical elimination/work
+oracle passed during integration; neither executes the Rust implementation.
+Native tests and example audio remain pending. The declared geometry, source
+fit and material validity gates remain mandatory.

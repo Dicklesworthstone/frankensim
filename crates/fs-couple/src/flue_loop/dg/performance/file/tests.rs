@@ -51,11 +51,11 @@ fn mouth_records_reuse_explicit_geometry_and_preserve_the_following_record() {
     let mouth = mouth.unwrap();
     assert_eq!(mouth.center_m, [-0.03, 0.01]);
     assert_eq!(mouth.cells, [16, 8]);
-    assert!(reaction);
+    assert_eq!(reaction, MouthReaction::CompactBaffled);
     assert_eq!(rows.lines.next(), Some("next-owner-record"));
 
     let mut rows = Rows { lines: "next-owner-record".lines(), line: 0 };
-    assert_eq!(read_mouth(&mut rows, false).unwrap(), (None, false));
+    assert_eq!(read_mouth(&mut rows, false).unwrap(), (None, MouthReaction::None));
     assert_eq!(rows.lines.next(), Some("next-owner-record"));
 }
 
@@ -64,15 +64,33 @@ fn mouth_records_refuse_missing_exterior_missing_rectangle_and_ambiguous_fields(
     for (text, exterior) in [
         ("mouth_radiation -0.03 0 16 8", false),
         ("mouth_reaction compact-baffled", true),
+        ("mouth_reaction mutual-baffled", true),
         ("mouth_radiation -0.03 0 16", true),
         ("mouth_radiation -0.03 0 16 8 extra", true),
         ("mouth_radiation NaN 0 16 8", true),
         ("mouth_radiation -0.03 0 -1 8", true),
         ("mouth_radiation -0.03 0 16 8\nmouth_reaction unknown", true),
         ("mouth_radiation -0.03 0 16 8\nmouth_reaction compact-baffled extra", true),
+        ("mouth_radiation -0.03 0 16 8\nmouth_reaction mutual-baffled extra", true),
     ] {
         let mut rows = Rows { lines: text.lines(), line: 0 };
         assert!(read_mouth(&mut rows, exterior).is_err(), "admitted {text}");
     }
 }
 
+
+#[test]
+fn shared_mouth_selector_distinguishes_joint_feedback_from_compact_and_observation_only() {
+    for (token, expected) in [
+        ("none", MouthReaction::None),
+        ("compact-baffled", MouthReaction::CompactBaffled),
+        ("mutual-baffled", MouthReaction::MutualBaffled),
+    ] {
+        let text = format!("mouth_radiation -0.003 0 8 8\nmouth_reaction {token}\nnext-owner-record");
+        let mut rows = Rows { lines: text.lines(), line: 0 };
+        let (mouth, reaction) = read_mouth(&mut rows, true).unwrap();
+        assert_eq!(mouth.unwrap().cells, [8, 8]);
+        assert_eq!(reaction, expected);
+        assert_eq!(rows.lines.next(), Some("next-owner-record"));
+    }
+}

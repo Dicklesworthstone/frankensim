@@ -223,6 +223,12 @@ impl DgPortLoad {
         ))?;
         // The private source record and ordered terminal basis were bound
         // together at construction; observation cannot substitute geometry.
+        if source.driven_mouth().is_some_and(|mouth|
+            receiver.radial_rings != mouth.terminal_radial_rings
+                || receiver.angular_points != mouth.terminal_angular_points)
+        {
+            return Err(invalid("joint DG receiver must retain the original terminal surface quadrature"));
+        }
         if source.apertures().is_empty()
             || source.apertures().len() != self.terminal_ports().len()
             || source.band_hz()[1].to_bits()

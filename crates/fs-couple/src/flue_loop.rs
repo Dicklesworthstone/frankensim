@@ -509,6 +509,9 @@ pub struct FlueBlockDiag {
     /// Radiation loss at the mouth [J]. With a rectangular load this is escaped
     /// branch energy, separate from its retained near-field storage.
     pub radiation_loss_j: f64,
+    /// Signed exchange into a joint mouth/terminal exterior's mouth channel [J].
+    /// Zero on independent self-load paths; this is not dissipated heat.
+    pub joint_mouth_work_j: f64,
     /// Irreversible quasi-steady separated-flow loss [J], not radiation.
     /// Zero when the optional mouth contraction is absent.
     pub separation_loss_j: f64,
@@ -517,8 +520,8 @@ pub struct FlueBlockDiag {
     pub stored_delta_j: f64,
     /// Numerical dissipation of the implicit mouth step [J].
     pub numerical_dissipation_j: f64,
-    /// Ledger closure `source - (stored + numerical + radiation + pipe + separation)`
-    /// [J]; roundoff by construction.
+    /// Ledger closure including the signed joint-mouth exchange [J].
+    /// A joint source uses independently checked original DG and MIMO work.
     pub ledger_defect_j: f64,
     /// Total source work into the optional resolved windway [J].
     pub windway_work_j: f64,
@@ -1109,6 +1112,7 @@ impl FlueVoice {
         let mut source_work = 0.0;
         let mut pipe_work = 0.0;
         let mut radiation = 0.0;
+        let mut joint_mouth_work = 0.0;
         let mut separation = 0.0;
         let mut stored_delta = 0.0;
         let mut numerical = 0.0;
@@ -1246,7 +1250,16 @@ impl FlueVoice {
             separation = next_separation;
             // Ledger terms of the implicit step (exact identity).
             source_work += p_source * q * dt;
-            pipe_work += p_in * q * dt;
+            if let FlueResonator::Dg(duct) = &self.line {
+                if let Some(frame) = duct.last_frame().filter(|frame| frame.driven_mouth.is_some()) {
+                    pipe_work += frame.inlet_work_j;
+                    joint_mouth_work += frame.driven_mouth.as_ref().expect("selected joint mouth").load_work_j;
+                } else {
+                    pipe_work += p_in * q * dt;
+                }
+            } else {
+                pipe_work += p_in * q * dt;
+            }
             radiation += r * q * q * dt;
             stored_delta += 0.5 * l * (q * q - self.q_prev * self.q_prev);
             numerical += 0.5 * l * (q - self.q_prev) * (q - self.q_prev);
@@ -1262,7 +1275,11 @@ impl FlueVoice {
             // The observable is the wave launched into the pipe: the mouth
             // plane is the pipe's pressure node, so the total pressure
             // there says little about the standing wave the pipe carries.
-            *slot = p_plus;
+            *slot = match &self.line {
+                FlueResonator::Dg(duct) => duct.last_frame()
+                    .map_or(p_plus, |frame| frame.outgoing_pressure_pa),
+                _ => p_plus,
+            };
             self.samples += 1;
             observe(&self.line)?;
         }
@@ -1301,10 +1318,11 @@ impl FlueVoice {
             source_work_j: source_work,
             pipe_work_j: pipe_work,
             radiation_loss_j: radiation,
+            joint_mouth_work_j: joint_mouth_work,
             separation_loss_j: separation,
             stored_delta_j: stored_delta,
             numerical_dissipation_j: numerical,
-            ledger_defect_j: source_work - (stored_delta + numerical + radiation + pipe_work) - separation,
+            ledger_defect_j: source_work - (stored_delta + numerical + radiation + pipe_work) - separation - joint_mouth_work,
             windway_work_j: windway_work,
             windway_stored_delta_j: windway_stored_delta,
             windway_viscous_loss_j: windway_viscous,

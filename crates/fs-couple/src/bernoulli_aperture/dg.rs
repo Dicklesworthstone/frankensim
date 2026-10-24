@@ -112,7 +112,8 @@ impl ApertureDg {
         load: ApertureDgLoad,
     ) -> Result<Self, AcousticRealizeError> {
         let spec = aperture.spec();
-        if aperture.accepted_steps() != 0
+        if load.has_driven_mouth()
+            || aperture.accepted_steps() != 0
             || load.state().step_count() != 0
             || aperture.blade_propagator() != BladePropagator::ExactZoh
             || spec.time_step_s.to_bits() != load.propagator().dt().to_bits()
@@ -120,7 +121,7 @@ impl ApertureDg {
             || spec.impedance_pa_s_m3.to_bits() != load.impedance_pa_s_m3().to_bits()
         {
             return Err(invalid(
-                "DG coupling requires a new ExactZoh aperture bound to its mean impedance, gas density and clock",
+                "DG coupling requires a new ExactZoh aperture bound to its mean inlet-pressure impedance, gas density and clock; driven exterior mouth effort is unsupported",
             ));
         }
         Ok(Self { aperture, load })

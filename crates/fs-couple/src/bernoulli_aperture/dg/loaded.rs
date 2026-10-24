@@ -30,7 +30,8 @@ impl ApertureDg<LoadedAperture> {
         let aperture = aperture.into();
         let (density, impedance) = aperture.load();
         let gas = load.duct().inlet_gas();
-        if aperture.accepted_steps() != 0
+        if load.has_driven_mouth()
+            || aperture.accepted_steps() != 0
             || load.state().step_count() != 0
             || aperture.blade_propagator() != BladePropagator::ExactZoh
             || aperture.time_step_s().to_bits() != load.propagator().dt().to_bits()
@@ -40,7 +41,7 @@ impl ApertureDg<LoadedAperture> {
             || matches!(&aperture, LoadedAperture::Modal(a) if a.gas().is_some_and(|g| g != gas))
         {
             return Err(invalid(
-                "loaded DG coupling requires cold ExactZoh mechanics bound to its inlet gas, mean impedance and clock",
+                "loaded DG coupling requires cold ExactZoh mechanics bound to its inlet gas, mean inlet-pressure impedance and clock; driven exterior mouth effort is unsupported",
             ));
         }
         Ok(Self { aperture, load })
