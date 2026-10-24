@@ -23,10 +23,12 @@
 //! falls below the authored floor REFUSES rather than shipping a stiff
 //! lie.
 //!
-//! DAMPING HONESTY: tissue loss enters as a CARD FIELD (a loss factor,
-//! measured when a tissue pack exists, authored + Estimate-labeled until
-//! then; `c = eta sqrt(k m)` at resonance). The lab does not invent Q
-//! values.
+//! DAMPING HONESTY: compatibility reduction uses an explicitly authored loss
+//! factor, with `c = eta sqrt(k m)`. The [`visco`] path projects a selected
+//! tensor-Prony/Kelvin-Voigt material law on the SAME modes, with explicit
+//! frozen-frequency and coupled-damping admission. The per-mode damping
+//! coefficient is authoritative for runtime lowering and survives the codec.
+//! No measured quality factor is inferred from a material name.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -43,6 +45,8 @@ use crate::linear3::{
 pub mod material_field;
 /// Thermal equilibrium and prestress through the same pressure-loaded reducer.
 pub mod thermal;
+/// Source tensor-Prony/Kelvin-Voigt loss through the common valve reduction.
+pub mod visco;
 mod pressure_compliance;
 pub use pressure_compliance::{PressureCompliance, SingleModeValveAdmission};
 
@@ -94,6 +98,8 @@ pub enum ReduceError {
     },
     /// The elasticity assembly refused.
     Assembly(crate::linear3::TetElasticError),
+    /// The source-bound viscoelastic element or frequency query refused.
+    Visco(crate::linear3::visco::ViscoElementError),
     /// The modal solve refused.
     Modal(fs_modal::ModalError),
     /// The static-compliance factorization refused.
@@ -117,6 +123,7 @@ impl core::fmt::Display for ReduceError {
         match self {
             ReduceError::Invalid { what } => write!(f, "FS-SOLID-REDUCE: {what}"),
             ReduceError::Assembly(e) => write!(f, "FS-SOLID-REDUCE assembly: {e:?}"),
+            ReduceError::Visco(e) => write!(f, "FS-SOLID-REDUCE visco: {e}"),
             ReduceError::Modal(e) => write!(f, "FS-SOLID-REDUCE modal: {e:?}"),
             ReduceError::Factor(e) => write!(f, "FS-SOLID-REDUCE factor: {e:?}"),
             ReduceError::RetainedComplianceTooLow { fraction, floor } => write!(
@@ -135,6 +142,12 @@ impl core::error::Error for ReduceError {}
 impl From<crate::linear3::TetElasticError> for ReduceError {
     fn from(e: crate::linear3::TetElasticError) -> Self {
         ReduceError::Assembly(e)
+    }
+}
+
+impl From<crate::linear3::visco::ViscoElementError> for ReduceError {
+    fn from(e: crate::linear3::visco::ViscoElementError) -> Self {
+        Self::Visco(e)
     }
 }
 
@@ -208,7 +221,8 @@ pub struct ReducedMode {
     pub mass_kg: f64,
     /// `lambda * mass` [N/m].
     pub stiffness_n_m: f64,
-    /// `eta * sqrt(k m)` [N s/m] from the card's authored loss factor.
+    /// Modal damping [N s/m]. The legacy path uses `eta * sqrt(k m)`;
+    /// the material-loss path projects the source viscosity on this same mode.
     pub damping_n_s_m: f64,
     /// Opening-force projection `Gamma = phi^T r` for the unit face
     /// force pattern (phi M-normalized; N/kg^(1/2) per unit pattern).
@@ -239,7 +253,9 @@ pub struct ValveCard {
     pub effective_thickness_m: f64,
     /// Retained modal compliance / exact static compliance.
     pub retained_compliance_fraction: f64,
-    /// The authored loss factor (Estimate until measured).
+    /// Authored loss factor on the compatibility path; zero when modal
+    /// damping is supplied entirely by the selected source material law.
+    /// Runtime lowering always reads each mode's actual `damping_n_s_m`.
     pub loss_factor: f64,
     /// Total leaflet mass [kg].
     pub total_mass_kg: f64,
@@ -376,7 +392,7 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
     let material = TetElasticMaterial::from_resolved_elastic_state(request.material);
     reduce_valve_impl(
         request,
-        TetMaterialField::Uniform(&material),
+        Some(TetMaterialField::Uniform(&material)),
         request.material.resolved().identity(),
         cx,
         None,
@@ -429,12 +445,19 @@ fn reduce_pressure_loaded_valve_impl<M>(
     }
     let reduced = reduce_valve_impl(
         request,
-        materials,
+        Some(materials),
         material_identity,
         cx,
         Some(nodal_load_per_pa_m2),
         prepared,
     )?;
+    pressure_loaded_from_reduction(reduced, nodal_load_per_pa_m2)
+}
+
+fn pressure_loaded_from_reduction(
+    reduced: ReducedValve,
+    nodal_load_per_pa_m2: &[[f64; 3]],
+) -> Result<PressureLoadedValve, ReduceError> {
     let card = reduced.card;
     let effective_areas_m2 = reduced.effective_areas_m2;
     let pressure_compliance = reduced.pressure_compliance.ok_or(ReduceError::Invalid {
@@ -486,22 +509,26 @@ fn pressure_area(phi: &[f64], free_dofs: &[usize], load: &[[f64; 3]], mean_openi
         / mean_opening
 }
 
-// Only the thermal owner can supply this internally: its pencil and accepted
-// observation geometry come from the SAME source-bound equilibrium.
+// Prepared operators stay with their source owner. Thermal observation geometry
+// and viscoelastic material loss reuse this reducer's modes and pressure ports.
 struct PreparedValve<'a> {
     assembly: &'a TetElasticAssembly,
     observation_nodes_m: &'a [[f64; 3]],
+    /// Equilibrium K for static compliance when the modal pencil is frozen K'(omega).
+    static_stiffness: Option<&'a fs_sparse::Csr>,
+    material_loss: Option<&'a visco::Projection<'a>>,
 }
 
 struct ReducedValve {
     card: ValveCard,
     effective_areas_m2: Vec<f64>,
     pressure_compliance: Option<PressureCompliance>,
+    material_loss: Option<visco::Approximation>,
 }
 
 fn reduce_valve_impl<M>(
     request: &ValveCardRequest<'_, M>,
-    materials: TetMaterialField<'_>,
+    materials: Option<TetMaterialField<'_>>,
     material_identity: ContentHash,
     cx: &Cx<'_>,
     pressure_load: Option<&[[f64; 3]]>,
@@ -542,11 +569,20 @@ fn reduce_valve_impl<M>(
     }
 
     validate_element_topology(request)?;
-    let thermal_tangent = prepared.is_some();
+    let thermal_tangent = prepared.as_ref().is_some_and(|p| p.material_loss.is_none());
+    let prepared_pencil = prepared.is_some();
     let assembled;
-    let (assembly, observation_nodes_m) = if let Some(prepared) = prepared {
-        (prepared.assembly, prepared.observation_nodes_m)
+    let (assembly, observation_nodes_m, static_stiffness, material_loss) = if let Some(prepared) = prepared {
+        (
+            prepared.assembly,
+            prepared.observation_nodes_m,
+            prepared.static_stiffness.unwrap_or(&prepared.assembly.stiffness),
+            prepared.material_loss,
+        )
     } else {
+        let materials = materials.ok_or(ReduceError::Invalid {
+            what: "unprepared valve reduction requires an elastic material field",
+        })?;
         // The original unheated path retains its assembly and arithmetic.
         assembled = match request.element_order {
             ValveElementOrder::Tet4 => TetLinearElasticProblem {
@@ -567,7 +603,7 @@ fn reduce_valve_impl<M>(
             }
             .assemble(cx)?,
         };
-        (&assembled, request.nodes_m)
+        (&assembled, request.nodes_m, &assembled.stiffness, None)
     };
 
     // 2. Certified low modes.
@@ -587,6 +623,10 @@ fn reduce_valve_impl<M>(
             what: "no modes in the requested window",
         });
     }
+
+    let material_loss = material_loss
+        .map(|projection| projection.project(&report.modes, cx))
+        .transpose()?;
 
     // 3. Opening-direction load pattern on the reduced DOFs: the unit
     //    translation of the FACE nodes along the opening axis.
@@ -609,15 +649,19 @@ fn reduce_valve_impl<M>(
 
     // 4. Exact static compliance r^T K^{-1} r (sparse LDLT).
     let symbolic =
-        fs_sparse::SymbolicLdlt::analyze(&assembly.stiffness, fs_sparse::DirectOrdering::Amd)?;
-    let factor = symbolic.factor(&assembly.stiffness, &fs_sparse::LdltOptions::default())?;
+        fs_sparse::SymbolicLdlt::analyze(static_stiffness, fs_sparse::DirectOrdering::Amd)?;
+    let factor = symbolic.factor(static_stiffness, &fs_sparse::LdltOptions::default())?;
     // A positive modal window cannot hide an unstable direction elsewhere.
     // Singular tangents already refuse in the existing factorization owner.
-    if thermal_tangent
+    if prepared_pencil
         && (factor.inertia().negative != 0 || factor.inertia().positive != n_red)
     {
         return Err(ReduceError::Invalid {
-            what: "thermal prestress tangent must be positive definite before valve reduction",
+            what: if thermal_tangent {
+                "thermal prestress tangent must be positive definite before valve reduction"
+            } else {
+                "material valve equilibrium stiffness must be positive definite before reduction"
+            },
         });
     }
     let k_inv_r = factor.solve(&r);
@@ -654,15 +698,17 @@ fn reduce_valve_impl<M>(
     });
 
     // 5. Participations + retained-compliance fraction. For M-orthonormal
-    //    modes, K^{-1} = sum phi phi^T / lambda, so the modal compliance
-    //    of the FORCE pattern r is sum (phi^T r)^2 / lambda — the
-    //    projection is phi^T r directly (phi^T M r is the
+    //    modes, the EXPORTED image compliance of the FORCE pattern r is
+    //    sum (phi^T r)^2 / lambda. For the material-visco path its frozen
+    //    K differs from the equilibrium K used above: this remains the actual
+    //    image/source comparison, not an exact equilibrium spectral partition.
+    //    The projection is phi^T r directly (phi^T M r is the
     //    base-excitation participation, a different animal; the first
     //    build used it and retained 1e-11 of the compliance).
     let mut modes = Vec::new();
     let mut effective_areas_m2 = Vec::new();
     let mut retained = 0.0f64;
-    for pair in &report.modes {
+    for (mode_index, pair) in report.modes.iter().enumerate() {
         let gamma: f64 = pair.phi.iter().zip(&r).map(|(a, b)| a * b).sum();
         retained += gamma * gamma / pair.lambda;
         let u_face = mean_face_translation(
@@ -681,7 +727,11 @@ fn reduce_valve_impl<M>(
         // (solver convention phi^T M phi = 1).
         let mass_kg = scale * scale;
         let stiffness_n_m = pair.lambda * mass_kg;
-        let damping_n_s_m = request.loss_factor * (stiffness_n_m * mass_kg).sqrt();
+        let damping_n_s_m = if let Some(loss) = &material_loss {
+            loss.modal_damping_per_s[mode_index] * mass_kg
+        } else {
+            request.loss_factor * (stiffness_n_m * mass_kg).sqrt()
+        };
         if let Some(load) = pressure_load {
             let area = pressure_area(&pair.phi, &assembly.free_dofs, load, u_face);
             if !area.is_finite() {
@@ -789,6 +839,7 @@ fn reduce_valve_impl<M>(
         card,
         effective_areas_m2,
         pressure_compliance,
+        material_loss,
     })
 }
 
@@ -1084,7 +1135,7 @@ impl ValveCard {
         ]
         .iter()
         .all(|v| v.is_finite() && *v > 0.0)
-            || ![self.loss_factor, blowing_pressure_pa, attack_s]
+            || ![self.loss_factor, m0.damping_n_s_m, blowing_pressure_pa, attack_s]
                 .iter()
                 .all(|v| v.is_finite() && *v >= 0.0)
         {
@@ -1093,7 +1144,19 @@ impl ValveCard {
             });
         }
         let closing_pressure_pa = m0.stiffness_n_m * self.rest_gap_m / effective_pressure_area_m2;
-        if !closing_pressure_pa.is_finite() || closing_pressure_pa <= 0.0 {
+        // Retain the legacy bit pattern only when its authored coefficient
+        // reproduces this mode's ACTUAL damping exactly. Source-derived or
+        // independently edited modal damping always determines the ratio.
+        let damping_ratio = if m0.damping_n_s_m
+            == self.loss_factor * (m0.stiffness_n_m * m0.mass_kg).sqrt()
+        {
+            0.5 * self.loss_factor
+        } else {
+            0.5 * (m0.damping_n_s_m / m0.stiffness_n_m.sqrt()) / m0.mass_kg.sqrt()
+        };
+        if !closing_pressure_pa.is_finite() || closing_pressure_pa <= 0.0
+            || !damping_ratio.is_finite()
+        {
             return Err(ReduceError::Card {
                 what: "reed closing pressure is not positive finite",
             });
@@ -1106,12 +1169,13 @@ impl ValveCard {
             attack_s,
             mass_kg: m0.mass_kg,
             stiffness_n_m: m0.stiffness_n_m,
-            damping_ratio: 0.5 * self.loss_factor,
+            damping_ratio,
         })
     }
 
     /// JSON-lines log rows: the modal ladder with participations and the
-    /// retained-compliance disclosure.
+    /// retained-compliance disclosure. The legacy `loss_factor` field is the
+    /// authored contribution only; each mode's `damping_n_s_m` is authoritative.
     #[must_use]
     pub fn debug_lines(&self) -> Vec<String> {
         let mut out = vec![format!(

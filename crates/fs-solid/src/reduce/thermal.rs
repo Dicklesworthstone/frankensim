@@ -252,6 +252,8 @@ pub fn reduce_pressure_loaded_valve(
         Some(PreparedValve {
             assembly: equilibrium.pencil(),
             observation_nodes_m: &observation_nodes_m,
+            static_stiffness: None,
+            material_loss: None,
         }),
     )?;
     let mut identity =

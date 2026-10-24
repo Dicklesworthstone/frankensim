@@ -1526,3 +1526,49 @@ or post-buckling theory. Input source work is external to this mechanical energy
 account; no combined chemo/thermo-mechanical passivity claim is added. G1 tests
 cover free directional deformation, constrained stress and energy, thermal/generic
 numerical equivalence, frame rotation, stale input and cancellation.
+
+
+## Source viscoelastic pressure-valve dynamics
+
+The material-valve path in fs-solid::reduce::visco connects the existing
+TetViscoField / TensorProny owner to the ordinary valve reduction, pressure
+ports and BeatingReedSource interface. Uniform or per-element anisotropic
+Kelvin-Voigt/Prony data supplies density, storage and loss. The same TET4 or
+explicit-quadrature TET10 mesh, constraints, modal shapes, face normalization
+and pressure work projection are used throughout. No material-name branch or
+independent damping constant is inserted.
+
+This is an explicitly admitted frozen-frequency reduction:
+K = K'(omega_ref), C = K''(omega_ref)/omega_ref. All modes share ONE storage
+pencil and its mass-orthogonal basis. The existing fs-modal damping certifier
+examines the full projected symmetric C; a required coupled block refuses
+instead of being exported as independent decay rates. Full retained storage
+and loss matrices are also compared with the frozen model at EVERY retained
+modal frequency. Controls explicitly bound the resulting storage-energy and
+absolute loss-factor operator errors, the modal loss factor and allocation.
+These are finite-subspace, discrete-frequency checks. They do not establish
+broadband/hereditary accuracy, coupling to omitted modes, nonlinear mechanics,
+or a thermally coupled constitutive history.
+
+The static opening and pressure comparisons still use the source EQUILIBRIUM
+stiffness, not K'(omega_ref). Thus even a complete retained frozen model must
+disclose any lost equilibrium compliance and pass the existing playing-mode
+admission. Every law must admit DC, the reference frequency and each modal
+sample. The wrapper retains the original field and approximation report;
+identities bind constitutive tensors, branch times, density, source identities,
+field ordering and the selected reference frequency.
+
+Authored loss must be zero on this source-material path. The existing card
+codec preserves each mode's actual damping_n_s_m, and reed lowering reads that
+coefficient as c/(2*sqrt(k*m)). The legacy loss_factor field denotes only the
+authored contribution; it is not total material loss. Exact legacy eta/2
+rounding is retained only when the authored formula reproduces that mode's c.
+The same source loss consequently changes the existing mechanical runtime's
+energy decay after serialization, rather than merely changing metadata.
+
+The focused visco_valve integration target covers analytic single-coordinate
+mass/stiffness/pressure normalization, source-viscosity changes to actual
+port-Hamiltonian decay, Prony changes to frequency and damping, equilibrium
+compliance disclosure, codec-to-reed continuity, uniform/per-element identity,
+and refusal of incompatible bands, double-counted loss, excessive dispersion
+or modal loss requiring a coupled runtime.
