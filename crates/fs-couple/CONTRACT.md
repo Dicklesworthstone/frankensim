@@ -5780,3 +5780,26 @@ Native Rust tests and audio rendering remain unexecuted here. This is a
 fixed plane-wave junction/finite cylindrical branch reduction, without moving
 pads, resolved three-dimensional junction corrections, mean flow, or empirical
 instrument qualification.
+
+
+## One physical Rayleigh source for rectangular mouths and circular terminals
+
+The computed baffled source can now prepare a complete mixed opening image
+through `ComputedBaffledRecord::with_driven_mouth`. Channel zero is the actual
+rectangular mouth; following channels retain the original circular-terminal
+order. Shared receiver surface quadratures provide normal velocity per SI
+volume flow to the existing power-consistent Rayleigh owner. Full signed
+mutual entries pass unchanged through the original causal fitting ladder,
+withheld errors, continuous passivity and interval-mean sampled passivity.
+The bound full gas record, mechanical clock, complete band, opening geometry
+and source quadrature accompany the actual replacement fit and identities.
+
+Original rectangular and circular static-inertia references independently
+refuse insufficient source quadrature without replacing computed entries.
+The rectangular reference formula is now shared from the BEM owner.
+Complete source-sweep work and coexisting source/fit memory are admitted
+before surface allocation. Circular-only inputs retain their original path.
+Focused tests cover physical flow normalization, compact mutual phase,
+signed interference, gas changes and source refusal; native execution remains
+pending. This is a declared infinite-baffle surface reduction, without resolved
+jet flow, free-field instrument scattering or empirical acoustic qualification.

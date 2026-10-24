@@ -271,6 +271,38 @@ impl PreparedSurface {
     }
 }
 
+/// Exact static pressure/volume-flow inertance of a uniform rectangular opening.
+/// The same double Rayleigh integral supplies the independent shape check for
+/// shared surface quadrature. The actual rectangle shape is retained without
+/// an equivalent circular end correction. The stable slender-aspect arithmetic is unchanged
+/// from the original compact-mouth owner.
+pub fn rectangular_static_inertance(size: [f64; 2], density: f64) -> Result<f64, HelmholtzError> {
+    if size.iter().any(|value| !value.is_finite() || *value <= 0.0)
+        || !density.is_finite() || density <= 0.0 {
+        return Err(invalid("rectangular inertia requires positive finite geometry and density"));
+    }
+    let length = size[0].max(size[1]);
+    let t = size[0].min(size[1]) / length;
+    if !t.is_finite() || t <= 0.0 {
+        return Err(invalid("rectangular aspect ratio is unrepresentable"));
+    }
+    let root = fs_math::det::sqrt(1.0 + t * t);
+    // asinh(t)/t near zero; first omitted term <3.1e-18 on this interval.
+    let asinh_ratio = if t < 0.01 {
+        let t2 = t * t;
+        1.0 + t2 * (-1.0 / 6.0 + t2 * (3.0 / 40.0 - t2 * (5.0 / 112.0)))
+    } else {
+        fs_math::det::ln(t + root) / t
+    };
+    let inverse_asinh = fs_math::det::ln(1.0 + root) - fs_math::det::ln(t);
+    let shape = asinh_ratio + inverse_asinh + (t - (root * root + root + 1.0) / (root + 1.0)) / 3.0;
+    let inertia = (density / length) * (shape / core::f64::consts::PI);
+    if !inertia.is_finite() || inertia <= 0.0 {
+        return Err(invalid("rectangular inertia is unrepresentable"));
+    }
+    Ok(inertia)
+}
+
 #[cfg(test)]
 #[path = "rayleigh_modal_tests.rs"]
 mod tests;

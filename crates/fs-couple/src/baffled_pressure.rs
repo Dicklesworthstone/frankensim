@@ -254,7 +254,7 @@ impl BaffledPressure {
 
     // The same physical quadrature for every circular-outlet observation image.
     // Temporal admission belongs to its selected reconstruction, not the mesh.
-    fn circular_surface(radius_m: f64, receiver: CircularOutletReceiver,
+    pub(crate) fn circular_surface(radius_m: f64, receiver: CircularOutletReceiver,
         medium: RayleighMedium) -> Result<Vec<SurfaceSample>, String>
     {
         if !radius_m.is_finite() || radius_m<=0.0

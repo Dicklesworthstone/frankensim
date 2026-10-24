@@ -6,6 +6,7 @@
 
 use super::{MimoRadiationLimits, MimoRadiationModel};
 use super::bake::{BaffledMimoBakeOptions, BaffledMimoBakeReport, bake_baffled_mimo};
+use super::bake::mixed::{DrivenMouthSurface, bake_driven_mouth};
 use super::input::{MimoRadiationInput, MimoRadiationInputError, MimoRadiationRecord};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
@@ -137,7 +138,7 @@ impl ComputedBaffledInput {
             declaration_identity: model.declaration_identity,
             realization_identity: model.realization_identity,
             gas_record: exterior.clone(), apertures: apertures.to_vec(), band_hz,
-            options: self.options, limits: self.limits, report,
+            options: self.options, limits: self.limits, report, driven_mouth: None,
         };
         Ok((model, record))
     }
@@ -155,6 +156,7 @@ pub struct ComputedBaffledRecord {
     options: BaffledMimoBakeOptions,
     limits: MimoRadiationLimits,
     report: BaffledMimoBakeReport,
+    driven_mouth: Option<DrivenMouthSurface>,
 }
 impl ComputedBaffledRecord {
     /// Identity of actual source geometry, atmosphere and numerical declaration.
@@ -163,8 +165,35 @@ impl ComputedBaffledRecord {
     pub const fn realization_identity(&self) -> [u8; 32] { self.realization_identity }
     /// Original resolved exterior, including thermochemical source receipts.
     pub const fn gas_record(&self) -> &GasRecord { &self.gas_record }
-    /// Actual physical openings in matrix and observer order.
+    /// Actual circular terminals in their original observer/terminal order.
+    /// A driven mouth, when present, is channel zero of the joint matrix and
+    /// is followed by these same circular channels without reordering.
     pub fn apertures(&self) -> &[CircularOpening] { &self.apertures }
+    /// Optional physical mouth and complete mixed-source surface resolution.
+    pub const fn driven_mouth(&self) -> Option<DrivenMouthSurface> { self.driven_mouth }
+
+    /// Replace this cold circular image with one joint rectangle/terminal fit.
+    /// The original full gas record, complete mechanical band and numerical
+    /// allowances are retained. Identities and reports describe the new joint
+    /// model; no independent old load remains in parallel or masquerades as its
+    /// source. The returned model has mouth-first pressure/volume-flow channels.
+    pub fn with_driven_mouth(
+        &self, mouth: DrivenMouthSurface, mechanics_rate_hz: u32, gate: &CancelGate,
+    ) -> Result<(fs_vfit::mimo::MimoModel, Self), MimoRadiationInputError> {
+        if self.driven_mouth.is_some()
+            || self.band_hz[1].to_bits() != (0.5 * f64::from(mechanics_rate_hz)).to_bits()
+        {
+            return Err(bad("joint mouth replacement requires the original clock and one unmodified circular source"));
+        }
+        let (model, report, declaration_identity, realization_identity) = bake_driven_mouth(
+            self.gas_record.state(), mouth, &self.apertures, mechanics_rate_hz,
+            self.band_hz, self.options, self.limits, gate,
+        ).map_err(MimoRadiationInputError::Bake)?;
+        Ok((model, Self { declaration_identity, realization_identity,
+            gas_record: self.gas_record.clone(), apertures: self.apertures.clone(),
+            band_hz: self.band_hz, options: self.options, limits: self.limits,
+            report, driven_mouth: Some(mouth) }))
+    }
     /// Full admitted physical band, ending at mechanical Nyquist.
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
     /// Original fitting and source-data assumptions.
