@@ -4195,6 +4195,20 @@ mechanical solve. Original six-DOF force/moment rows and actual facet-normal
 volume integrals are projected on those same mass-normalized modes. Independent
 assembly, projection, modal and complete-network budgets remain explicit.
 
+A source that also states `constant_loss_reference_omega` [rad/s] declares that
+its viscosities are its loss factors at that angular frequency (viscosity =
+loss factor x modulus / omega_ref). Its elements are projected on their own and
+read at every retained mode's own frequency: the projected matrix C becomes
+S C S with s_a = sqrt(omega_ref G(omega_a) / omega_a), where G is a fixed
+five-branch Debye (generalized Maxwell) spectrum fitted to unit loss over
+50 Hz-10 kHz (`shear_shell::constant_loss`; flat to 0.990-1.013 over
+100 Hz-2 kHz). Each mode's damping then carries the source's loss factors at its
+own frequency instead of growing with it. The anchor's claim domain and that
+band clip the region's frequency support. Sources without the anchor keep the
+single unchanged Kelvin-Voigt projection, bit for bit. This is a per-mode loss
+law: the stiffness dispersion that a causal constant-loss solid implies is not
+applied.
+
 `SharedMaterialShellBody` and
 `ReciprocalStringBank::from_material_shear_shell` connect that image to every
 original material string, its own physical bridge map, shared gas and optional

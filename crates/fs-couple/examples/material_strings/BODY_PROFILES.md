@@ -367,6 +367,15 @@ physical eigenvectors as stiffness, force and volume response. It retains the
 full modal damping matrix. Missing shear or viscosity data never means borrowing
 another material's coefficients.
 
+A pack may also state `constant_loss_reference_omega` in rad/s: the angular
+frequency at which its viscosities are its loss factors (viscosity = loss
+factor x modulus / omega_ref). That region's viscosity is then projected on its
+own elements and read at every retained mode's own frequency, so each mode's
+damping carries the pack's loss factors instead of growing with frequency
+(`fs_couple::shear_shell::constant_loss`). The anchor's claim domain and the
+law's 50 Hz-10 kHz band clip the region's frequency support. A pack without it
+is Kelvin-Voigt exactly as before.
+
 Node x/y fractions lie in `[0,1]` and scale with the performance's body length
 and width; z is in metres. Directors and force directions must already be unit
 vectors; the parser does not normalize or smooth them. The shared midsurface and
@@ -689,7 +698,10 @@ With the two violin shell packs, both built by `xtask matdb-pack` from
 `packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk` for the back, ribs
 and bridge), the window from 15 Hz to the packs' 2 kHz validity holds 30
 assembled modes, 473.5 Hz to 1967.7 Hz. A request for more refuses once the
-window is solved and names the count it holds. The ignored rungs in
+window is solved and names the count it holds. Both packs state
+`constant_loss_reference_omega` (2 pi 200 rad/s), so the body modes' Q is
+68.3-80.3 across the window; without it the same packs gave a Kelvin-Voigt Q
+falling from 31.0 at 473.5 Hz to 7.2 at 1915.7 Hz. The ignored rungs in
 `body/shell/tests.rs` bow the violin-sized G3 rung's synthetic steel strings
 (not violin strings) on this body: a quarter-second cost rung printing every
 body mode with its Q, the construction and render times and the pressure bits,

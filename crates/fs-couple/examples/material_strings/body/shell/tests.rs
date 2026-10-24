@@ -520,9 +520,9 @@ fn cannone_pack(name: &str) -> NormalizedPack {
     NormalizedPack::from_bytes(bytes).unwrap()
 }
 
-/// Each retained body mode as rendered: frequency [Hz], and its Q from the diagonal of the modal viscosity matrix. The packs'
-/// Kelvin-Voigt viscosities are eta x stiffness / (2 pi 200 rad/s), so this Q falls as 1/f; the Q of the packs' constant
-/// loss factors at the mode's own frequency is printed beside it (`Q_eta = Q x f / 200 Hz`).
+/// Each retained body mode as rendered: frequency [Hz], and its Q from the diagonal of the modal viscosity matrix. Both
+/// packs state their Kelvin-Voigt reference (`constant_loss_reference_omega`, 2 pi 200 rad/s), so every mode's damping
+/// carries their loss factors at its own frequency: Q is about one over the loss factor of the mode's material mix.
 fn cannone_body_modes(r: &Ready) -> String {
     let image = r.performance.bank().source().bank().material_shell_assembly_image().unwrap();
     let damping = image.damping().matrix_per_s();
@@ -530,7 +530,7 @@ fn cannone_body_modes(r: &Ready) -> String {
     image.eigenvalue_intervals().iter().enumerate().map(|(i, &(lo, hi))| {
         let omega = (0.5 * (lo + hi)).sqrt();
         let (f, q) = (omega / (2.0 * std::f64::consts::PI), omega / damping[i * n + i]);
-        format!("{f:.1} Hz Q {q:.1} (Q_eta {:.1})", q * f / 200.0)
+        format!("{f:.1} Hz Q {q:.1}")
     }).collect::<Vec<_>>().join(", ")
 }
 

@@ -443,6 +443,7 @@ impl MaterialShellAssembly {
         let mut volume_shapes = vec![0.0; n];
         let mut cavity_volume_shapes = vec![0.0; n];
         let mut matrix = vec![0.0; n * n];
+        let spectrum = super::constant_loss::ConstantLossSpectrum::fit();
         let mut interface_columns = Vec::with_capacity(self.components.len());
         let mut exterior_area = 0.0;
         for (i, part) in self.components.iter().enumerate() {
@@ -468,20 +469,25 @@ impl MaterialShellAssembly {
                     .map_err(owner)?,
             )?;
             exterior_area += pressure.exterior.area_m2();
-            add(
-                &mut matrix,
-                &project_viscosity(
+            // Each material loss law projects on its own elements; an anchored one is then read at every retained
+            // mode's own frequency (constant loss factors). A Kelvin-Voigt component is the single original projection.
+            for (law, viscosity) in source.loss_groups()? {
+                let mut projected = project_viscosity(
                     &source.mesh,
                     &part.directors,
                     &source.sections,
-                    &source.viscosity,
+                    &viscosity,
                     &physical_modes[i],
                     part.assembly_budget,
                     budget.max_projection_terms,
                     || gate.is_requested(),
                 )
-                .map_err(owner)?,
-            )?;
+                .map_err(owner)?;
+                if let Some(reference) = law {
+                    super::constant_loss::rescale(&mut projected, &omega, reference, &spectrum);
+                }
+                add(&mut matrix, &projected)?;
+            }
             let laws: Vec<_> = source.interfaces.iter().map(|i| i.law().clone()).collect();
             interface_columns.push(
                 models[i]

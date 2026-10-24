@@ -5,7 +5,7 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellBody;
 use fs_couple::shear_shell::{
     compile_material_shear_shell, ShellProjectionBudget, ShellRegionMaterial,
-    TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES,
+    CONSTANT_LOSS_REFERENCE_OMEGA, CONSTANT_LOSS_REFERENCE_OMEGA_DIMS, TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES,
 };
 use fs_plate::shell::ShellMesh;
 use fs_plate::shell::mitc::{
@@ -301,7 +301,13 @@ impl Spec {
             for key in TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES {
                 requested.push(Requirement::try_new(key, DynViscosity::DIMS, Admit::Finite)?);
             }
-            let material = resolve_properties(pack, catalog, loader, spec, &requested)?;
+            let mut material = resolve_properties(pack, catalog, loader, spec, &requested)?;
+            // A pack that states its viscosities' constant-loss anchor is read with it; it is never assumed.
+            if !catalog[pack.as_str()].pack.claims().claims_for(CONSTANT_LOSS_REFERENCE_OMEGA).is_empty() {
+                requested.push(Requirement::try_new(CONSTANT_LOSS_REFERENCE_OMEGA,
+                    CONSTANT_LOSS_REFERENCE_OMEGA_DIMS, Admit::StrictlyPositive)?);
+                material = resolve_properties(pack, catalog, loader, spec, &requested)?;
+            }
             let thickness = spec.body.thickness * region.thickness_ratio;
             if !thickness.is_finite() || thickness <= 0.0 {
                 return Err("shell material thickness is unrepresentable".into());

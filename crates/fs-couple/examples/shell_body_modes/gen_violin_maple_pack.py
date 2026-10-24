@@ -5,8 +5,9 @@ nu_LR = the mean Poisson ratio, G_LT and G_RT = the ULTRASONIC shear moduli (1 M
 shear modulus of Laemmlein's 30 violin-back maple plates (maple-sycamore-lammlein2020-plates; plate modes near 0.7 kHz), replacing the ultrasonic value (orchestrator ruling, mail 6065).
 Loss: eta_L and eta_LR are Laemmlein's violin-back maple plates; eta_R, eta_LT and eta_RT are UNKNOWN for maple and are set equal to eta_LR as a declared surrogate (mail 5280 of the
 orchestrator: T and RT/LT shear loss are unknown in every open source). The nine Kelvin-Voigt viscosities the shell owner consumes are V = D^(1/2) Q D^(1/2) / omega_ref with
-omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. A constant loss factor per mode is recovered by the example as
-C_hyst(omega) = (omega_ref / omega) C_KV, and the packs of the wood-loss lane replace these numbers.
+omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. The pack states omega_ref as
+constant_loss_reference_omega, so the shell reduction reads each loss factor at every mode's own frequency (fs_couple::shear_shell::constant_loss), and the
+packs of the wood-loss lane replace these numbers.
 
 usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]
 Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates}/properties.tsv and writes
@@ -109,8 +110,8 @@ OBS = [
     ("laemmlein-maple-loss", "Sycamore maple violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished",
      "Laemmlein et al. (2020) Holzforschung 74:765-776 as committed in the pack maple-sycamore-loss-lammlein2020: loss_factor_longitudinal %.4f and loss_factor_shear_lr %.4f; eta_L = %.4f, eta_LR = %.4f; "
      "eta_R, eta_LT and eta_RT are UNKNOWN for maple and set equal to eta_LR" % (la["loss_factor_longitudinal"], la["loss_factor_shear_lr"], eta["L"], eta["LR"]),
-     "SURROGATE for three of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the example "
-     "recovers a constant loss factor per mode by omega_ref / omega. They do not enter any frequency."),
+     "SURROGATE for three of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack "
+     "states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency. They do not enter any frequency."),
 ]
 
 
@@ -128,6 +129,11 @@ for k, u in BASE:
 for k in VISC_ORDER:
     for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
+# The angular frequency at which the nine viscosities above were written: a reader applies each loss factor at every
+# mode's own frequency with it (fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA); without it they are Kelvin-Voigt.
+k = "constant_loss_reference_omega"
+for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(OMEGA_REF), "rad/s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
        "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates and maple-sycamore-loss-lammlein2020 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)",

@@ -218,3 +218,134 @@ fn a_request_beyond_the_assembled_window_names_the_modes_it_holds() {
         assert!(refusal.contains("it holds 2, 3 requested"), "{refusal}");
     });
 }
+
+/// The body pack with its constant-loss anchor: `constant_loss_reference_omega` [rad/s], the angular frequency at which
+/// its Kelvin-Voigt viscosities are its loss factors. Every other claim is the synthetic pack's own.
+fn anchored(plain: &NormalizedPack, reference: f64) -> NormalizedPack {
+    use fs_couple::shear_shell::{
+        CONSTANT_LOSS_REFERENCE_OMEGA, CONSTANT_LOSS_REFERENCE_OMEGA_DIMS,
+    };
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        InterpolationPolicy, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
+        Provenance, UncertaintyModel,
+    };
+    let artifact = plain.source_artifact();
+    let provenance = Provenance {
+        source: "synthetic constant-loss anchor".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(artifact),
+    };
+    let mut claims = plain.claims().clone();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic".into(),
+            method: "declared Kelvin-Voigt reference frequency".into(),
+            artifact,
+            caveats: "not measured".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                CONSTANT_LOSS_REFERENCE_OMEGA,
+                CONSTANT_LOSS_REFERENCE_OMEGA_DIMS,
+            ),
+            value: PropertyValue::Scalar {
+                value: reference,
+                dims: CONSTANT_LOSS_REFERENCE_OMEGA_DIMS,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with("T", 280.0, 320.0)
+                .with("omega", 0.0, 200_000.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance,
+        })
+        .unwrap();
+    let pack = NormalizedPack::new(
+        plain.pack_id(),
+        plain.compiler(),
+        artifact,
+        plain.redistribution_terms(),
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
+}
+
+/// An anchored pack reads every retained mode's damping at the mode's own frequency (constant loss factors) instead of
+/// letting the Kelvin-Voigt loss grow with frequency. Both components take the anchored body pack, so the modal damping
+/// is the Kelvin-Voigt matrix congruent to s_a = sqrt(omega_ref G(omega_a) / omega_a), G the fitted five-branch
+/// spectrum. The window is the spectrum's own band, 50 Hz to 10 kHz.
+#[test]
+fn an_anchored_loss_law_reads_every_modes_damping_at_its_own_frequency() {
+    use fs_couple::shear_shell::constant_loss::{ConstantLossSpectrum, SPECTRUM_BAND_RAD_S};
+    let reference = 2.0 * std::f64::consts::PI * 200.0;
+    let (lo, hi) = SPECTRUM_BAND_RAD_S;
+    let text = ASSEMBLED.replacen(
+        "window 1 100000000\n",
+        &format!("window {} {}\n", lo * lo, hi * hi),
+        1,
+    );
+    scoped(|cx, gate| {
+        let compile = |anchor: bool| {
+            spec()
+                .compile_with_body(
+                    cx,
+                    gate,
+                    Some(Profile::parse(text.as_bytes()).unwrap()),
+                    |name| {
+                        let plain = pack(name, 1.0, None);
+                        Ok(if anchor && name == "body.fsmatpk" {
+                            anchored(&plain, reference)
+                        } else {
+                            plain
+                        })
+                    },
+                )
+                .unwrap()
+        };
+        let (mut kelvin_voigt, mut constant) = (compile(false), compile(true));
+        let image = |r: &Ready| {
+            let image = r
+                .performance
+                .bank()
+                .source()
+                .bank()
+                .material_shell_assembly_image()
+                .unwrap();
+            (
+                image.eigenvalue_intervals().to_vec(),
+                image.damping().matrix_per_s().to_vec(),
+            )
+        };
+        let ((intervals, viscous), (same, rescaled)) = (image(&kelvin_voigt), image(&constant));
+        assert_eq!(intervals, same, "the loss law moved the conservative modes");
+        let spectrum = ConstantLossSpectrum::fit();
+        let squared = |lambda: f64| reference * spectrum.shape(lambda.sqrt()) / lambda.sqrt();
+        // Across the flat spectrum s^2 falls with omega, so each mode's eigenvalue interval brackets its ratio. The
+        // margin is a few dozen roundings (the spectrum, the square root, the rescale and the two components' sum).
+        let rounding = 64.0 * f64::EPSILON;
+        let n = intervals.len();
+        for (a, &(low, high)) in intervals.iter().enumerate() {
+            let ratio = rescaled[a * n + a] / viscous[a * n + a];
+            assert!(
+                squared(high) * (1.0 - rounding) <= ratio
+                    && ratio <= squared(low) * (1.0 + rounding),
+                "mode {a}: {ratio} outside [{}, {}]",
+                squared(high),
+                squared(low)
+            );
+        }
+        let (p, q) = (
+            pressure(&mut kelvin_voigt, 128),
+            pressure(&mut constant, 128),
+        );
+        assert!(p.iter().zip(&q).any(|(a, b)| (a - b).abs() > 1e-12));
+    });
+}
