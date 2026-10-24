@@ -4938,3 +4938,59 @@ backward-Euler limit and exponential relaxation, actual temperature-dependent
 source kinetics, formation-energy pressure/sound response, material piston
 motion, absent reagents, source/work limits and cancellation rollback. Native
 workspace execution and experimental mechanism qualification remain separate.
+
+## Finite moisture transport into native plate mechanics
+
+The material-reality MR46 slice in `moisture` keeps local water inventory
+separate from ambient relative humidity. `MoistureSlab` is a homogeneous,
+isothermal, one-dimensional fixed-reference specimen with kg water/kg dry solid
+as its sole evolving field. Its source query explicitly distinguishes absolute
+temperature and dry-basis moisture. Reference density at the declared reference
+moisture gives conserved dry skeleton mass; later density queries never create
+or destroy that inventory. Every interval measures the water received at each
+end and checks total water change against those signed transfers.
+
+The effective diffusivity is required material data; no wood/material name
+selects a number. Its original claim is pinned and re-evaluated locally.
+Backward Euler uses harmonic interior-face diffusivities evaluated at the
+accepted start and half-cell resistance at prescribed surfaces. This lagged
+nonlinear coefficient is a first-order approximation, with explicit interval,
+content-increment, true-residual, conservation and work limits. The tridiagonal
+SPD operator uses the original `fs-solver::checked_cg` and original
+`fs-sparse::Precond` interface, not a second linear solver. Its identity
+term and nonnegative graph conductances establish SPD. Source, numerical
+maximum-principle, increment and water balance admissions precede publication.
+No water is clipped or silently renormalized. Sealed ends carry zero transfer;
+prescribed dry-basis values are infinite reservoirs. The explicit FPL wood
+sorption boundary calls the existing coefficient-card owner at matching
+temperature and actual RH; it changes the surface condition, never every
+interior cell at once.
+
+`moisture::plate::MoisturePlate` maps that same inventory to the existing
+rectangular DKT mesh: diffusion is along in-plane x, while width and thickness
+are well mixed and their exterior faces are sealed in the transport reduction.
+Each x strip re-resolves its original isotropic or orthotropic elastic claims at
+its actual local moisture. The existing plane-stress/axis lowering and native
+DKT assembler rebuild stiffness and translational/rotary inertia. Reference
+dry density times (1+M) supplies wet mass on this fixed geometry. The assembled
+mass is independently compared with conserved dry mass plus transported water.
+Ordinary modal/force/pressure consumers receive the native pencil; no modal
+frequency multiplier or instrument preset is introduced. Coupled advance
+returns transport and mechanical endpoints together only after both admit.
+
+This rung does not model hygroscopic swelling, humidity prestress, sorption
+heat, finite vapor-reservoir depletion, hysteresis, free liquid, stress-assisted
+diffusion, changing porosity/geometry, dynamic modal-state remapping, or
+moisture-dependent damping. It makes no complete thermodynamic energy or
+chemical-entropy claim. Its no-swelling/fixed-geometry approximation must be
+admitted by the caller; it is not the full MR46 completion. Drying/wetting
+response is memory through the diffusion field, not a sorption scanning law.
+No physical wood diffusivity or validation is inferred from authored fixtures.
+
+Focused tests cover a closed-form one-cell update, sealed water conservation,
+Fourier-series slab refinement, squared-length/time scaling, data-only
+diffusivity changes, local nonlinear source refresh, the shipped FPL sorption
+pack, native modal stiffness/inertia scaling, spatial anisotropic material
+consumption, complete mechanical-source refusal, budgets, quantity-basis
+refusal and cancellation. Native Cargo execution is a separate gate; parsing
+and independent numerical oracles do not establish executed native test results.
