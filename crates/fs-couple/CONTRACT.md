@@ -4659,6 +4659,25 @@ small-strain, fully-solid, one-way quasistatic approximation remains explicit;
 caloric and elastic energy are reported separately, with no reciprocal
 thermoelastic heat, changing transport geometry or experimental claim.
 
+`SolidEnthalpyState::advance_transient_candidate` also feeds those same local
+material/thermal arrays into the existing sparse 3-D Newmark trajectory. The
+previous state must match the run's exact material and thermal fields and
+clock. Both endpoints retain the same source-pinned reference records, cell
+inventory, axes, frames and strain bounds. The next problem is checked against
+the resolved endpoint before its source identities are borrowed by the native
+candidate. Density/stiffness changes refuse this eigenstrain-only lane rather
+than reuse a stale mass/stiffness operator.
+
+The returned thermal work is the independently integrated native material work,
+including clamped thermal storage, and is kept separate from caloric heat.
+This is sequential one-way thermal-to-inertial loading; no reciprocal heat
+correction or whole caloric/mechanical energy closure is claimed. Tests in
+`tests/solid_enthalpy.rs` change material expansion, modulus and heat capacity
+as source data, compare actual heated inertial endpoints with a one-DOF
+reference, continue the same motion, and refuse missing source/clock bindings
+or temperature-dependent softening. Existing source and phase-domain admission
+remains mandatory and heating events require resolved time steps.
+
 ### Finite source gas on uniform thermal feedback
 
 `finite_gas_thermal::FiniteGasThermalEnvironment` adapts the original

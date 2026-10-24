@@ -125,6 +125,111 @@ fn g3_frozen_thermal_load_and_external_load_have_separate_work_accounts() {
 }
 
 #[test]
+fn g1_thermal_eigenstrain_ramp_drives_the_same_inertial_motion_and_refreshed_stress() {
+    with_cx(false, |cx| {
+        let original = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
+        let refreshed = TetElasticMaterial::try_new(6.0,60.0,0.0,[75;32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let initial_problem = problem(&original,&fixed);
+        let next_problem = problem(&refreshed,&fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let frame = fs_blake3::ContentHash([74;32]);
+        let mut errors = Vec::new();
+        for count in [50,100] {
+            let mut run = load.begin_transient(&initial_problem,None,0.0,&ZERO,&ZERO,config(),cx).unwrap();
+            let mut material_work = 0.0;
+            for i in 1..=count {
+                let time = i as f64/count as f64;
+                let strain = TetThermalStrainState::try_new(300.0+time,300.0,
+                    [0.001*time,0.0,0.0,0.0,0.0,0.0],refreshed.material_state_identity,frame,0.01).unwrap();
+                let (next, report) = run.advance_thermal_candidate(&next_problem,
+                    TetThermalStrainField::Uniform(&strain),&load,1.0/count as f64,frame,0.01,cx).unwrap();
+                assert!(report.physical_balance_error_j.abs() < 1e-13);
+                assert!(report.native.balance_error_j.abs() < 1e-13);
+                material_work += report.thermal_material_work_j;
+                run = next;
+            }
+            // m=.1 kg, k=10 N/m, free length grows at s=.001 m/s:
+            // q(t)=s*(t-sin(10*t)/10), with zero initial q and velocity.
+            let expected = 0.001*(1.0-10.0_f64.sin()/10.0);
+            errors.push((run.state().displacement[0]-expected).abs());
+            let response = run.recover_response(frame,0.01,cx).unwrap();
+            let stress = 60.0*(run.state().displacement[0]-0.001);
+            assert!((response.stress.elements()[0].stress_mandel_pa()[0]-stress).abs() < 1e-12);
+            assert!((response.kinetic_plus_elastic_energy_j-material_work).abs() < 1e-13);
+            let TetMaterialField::Uniform(material) = run.material_problem().materials else { panic!("uniform source expected") };
+            assert_eq!(material.material_state_identity,refreshed.material_state_identity);
+        }
+        assert!((3.5..4.5).contains(&(errors[0]/errors[1])), "{errors:?}");
+    });
+}
+
+#[test]
+fn g1_fully_clamped_heating_and_cooling_account_for_elastic_storage_without_motion() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
+        let fixed: Vec<_> = (0..12).collect();
+        let problem = problem(&material,&fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let frame = fs_blake3::ContentHash([74;32]);
+        let cold = load.begin_transient(&problem,None,0.0,&ZERO,&ZERO,config(),cx).unwrap();
+        let hot_strain = TetThermalStrainState::try_new(310.0,300.0,[0.001,0.0,0.0,0.0,0.0,0.0],
+            material.material_state_identity,frame,0.01).unwrap();
+        let (hot, report) = cold.advance_thermal_candidate(&problem,
+            TetThermalStrainField::Uniform(&hot_strain),&load,0.01,frame,0.01,cx).unwrap();
+        let stored = 0.5*(1.0/6.0)*60.0*0.001_f64.powi(2);
+        assert_eq!(report.native.thermal_equivalent_work_j,0.0);
+        assert_eq!(report.native.quadratic_energy_j,0.0);
+        assert!((report.thermal_material_work_j-stored).abs() < 1e-15);
+        assert!((report.kinetic_plus_elastic_after_j-stored).abs() < 1e-15);
+        assert!(report.physical_balance_error_j.abs() < 1e-15);
+        assert_eq!(hot.nodal_motion(cx).unwrap(),[ZERO.to_vec(),ZERO.to_vec(),ZERO.to_vec()]);
+        let response = hot.recover_response(frame,0.01,cx).unwrap();
+        assert!((response.stress.elements()[0].stress_mandel_pa()[0]+0.06).abs() < 1e-14);
+        let zero = TetThermalStrainState::try_new(300.0,300.0,[0.0;6],
+            material.material_state_identity,frame,0.01).unwrap();
+        let (cooled, cooling) = hot.advance_thermal_candidate(&problem,
+            TetThermalStrainField::Uniform(&zero),&load,0.01,frame,0.01,cx).unwrap();
+        assert!((cooling.thermal_material_work_j+stored).abs() < 1e-15);
+        assert_eq!(cooling.kinetic_plus_elastic_after_j,0.0);
+        assert!(cooled.recover_response(frame,0.01,cx).unwrap().stress.elements()[0]
+            .stress_mandel_pa().iter().all(|s| *s == 0.0));
+        assert_eq!(cold.state().time_s,0.0);
+    });
+}
+
+#[test]
+fn g4_thermal_refresh_refuses_changed_operators_and_late_strain_without_mutating_history() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
+        let changed = TetElasticMaterial::try_new(6.0,61.0,0.0,[75;32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let original = problem(&material,&fixed); let wrong = problem(&changed,&fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let run = load.begin_transient(&original,None,0.0,&ZERO,&ZERO,config(),cx).unwrap();
+        let saved = run.state().clone();
+        let frame = fs_blake3::ContentHash([74;32]);
+        let strain = TetThermalStrainState::try_new(310.0,300.0,[0.01,0.0,0.0,0.0,0.0,0.0],
+            material.material_state_identity,frame,0.1).unwrap();
+        assert!(matches!(run.advance_thermal_candidate(&wrong,TetThermalStrainField::Uniform(&strain),
+            &load,0.01,frame,0.1,cx),Err(TransientError3::Invalid(_))));
+        // The native inertial candidate is computed, then physical stress
+        // recovery refuses an over-limit elastic strain. Accepted history stays.
+        assert!(run.advance_thermal_candidate(&original,TetThermalStrainField::Uniform(&strain),
+            &load,0.01,frame,0.001,cx).is_err());
+        with_cx(true, |cancelled| {
+            assert!(matches!(run.advance_thermal_candidate(&original,TetThermalStrainField::Uniform(&strain),
+                &load,0.01,frame,0.1,cancelled),Err(TransientError3::Cancelled)));
+        });
+        assert_eq!(run.state(),&saved);
+        assert!(run.thermal_strain_field().is_none());
+    });
+}
+
+#[test]
 fn g4_checkpoint_resume_limits_and_cancellation_never_publish_a_partial_step() {
     with_cx(false, |cx| {
         let material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();

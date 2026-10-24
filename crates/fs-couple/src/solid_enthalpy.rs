@@ -5,7 +5,9 @@
 //! source-pinned elasticity and integrated expansion supply the native material
 //! and eigenstrain fields. The reference mesh and delivered mass stay fixed.
 //!
-//! This is a sequential, quasistatic thermal-loading approximation. The thermal
+//! This is a sequential thermal-loading approximation. The default solve is
+//! quasistatic; resolved states also drive the existing inertial Newmark owner
+//! through `advance_transient_candidate` when density/stiffness stay fixed. The thermal
 //! audit covers caloric storage and heat; it does not include elastic energy or
 //! infer reciprocal thermoelastic heat, plastic flow, phase-support laws, or
 //! deformation-dependent thermal conductances. Those require their own closures.
@@ -41,6 +43,8 @@ use fs_solid::linear3::{
 pub use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSource, ThermalStiffnessModel};
 use fs_solid::linear3::source::SolidMaterialError;
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3, TetLoadSolution3};
+use fs_solid::loads3::transient::{TetTransientRun3, TransientError3};
+use fs_solid::loads3::transient::thermal::ThermalTransientStep3;
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation,
     EnergyAudit, Event, StepConfig, ThermalLaw,
@@ -55,6 +59,7 @@ pub enum SolidEnthalpyError {
     Source(ThermalMaterialError),
     Solid(TetElasticError),
     Loads(LoadError3),
+    Transient(TransientError3),
     Cancelled,
 }
 impl std::fmt::Display for SolidEnthalpyError {
@@ -88,6 +93,11 @@ impl From<SolidMaterialError> for SolidEnthalpyError {
 }
 impl From<LoadError3> for SolidEnthalpyError {
     fn from(e: LoadError3) -> Self { Self::Loads(e) }
+}
+impl From<TransientError3> for SolidEnthalpyError {
+    fn from(e: TransientError3) -> Self {
+        if e == TransientError3::Cancelled { Self::Cancelled } else { Self::Transient(e) }
+    }
 }
 fn poll(cx: &Cx<'_>) -> Result<(), SolidEnthalpyError> {
     cx.checkpoint().map_err(|_| SolidEnthalpyError::Cancelled)
@@ -397,6 +407,65 @@ impl SolidEnthalpyState<'_> {
             materials: TetMaterialField::PerElement(&self.materials),
             fixed_dofs, budget: self.budget }
     }
+
+    fn matches_problem(&self, problem: &TetLinearElasticProblem<'_>) -> bool {
+        self.nodes_m == problem.nodes_m && self.tetrahedra == problem.tetrahedra
+            && match problem.materials {
+                TetMaterialField::Uniform(material) => self.materials.iter().all(|m| m == material),
+                TetMaterialField::PerElement(materials) => materials == self.materials,
+            }
+    }
+
+    /// Use actual local enthalpy temperatures to drive the SAME inertial state.
+    /// `previous` must exactly match the accepted run's material/thermal fields
+    /// and clock. `problem` must come from this endpoint's `problem()`; it is
+    /// borrowed by the returned run so refreshed source identities remain alive.
+    /// Keep both resolved states and their problems until the candidate is accepted.
+    ///
+    /// The native owner admits unchanged density/stiffness, mesh and zero
+    /// supports, preserves motion/history, and audits physical thermal input
+    /// work even in fully clamped elements. This is prescribed one-way thermal
+    /// loading: its signed material work is NOT subtracted from caloric storage.
+    /// Thermal gradients, expansion and their source domains are resolved here;
+    /// softening and reciprocal thermoelastic heat require a different closure.
+    /// Resolve heating events and verify temporal refinement explicitly.
+    pub fn advance_transient_candidate<'g, 'm, 'p, 's>(
+        &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>, cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SolidEnthalpyError> {
+        poll(cx)?;
+        let thermal_matches = match run.thermal_strain_field() {
+            Some(TetThermalStrainField::Uniform(state)) => previous.strains.iter().all(|s| s == state),
+            Some(TetThermalStrainField::PerElement(states)) => states == previous.strains,
+            None => false,
+        };
+        if run.state().time_s.to_bits() != previous.time_s.to_bits()
+            || !previous.matches_problem(run.material_problem()) || !thermal_matches
+            || !self.matches_problem(problem) || self.mesh_frame != previous.mesh_frame
+            || self.maximum_absolute_mandel_strain.to_bits()
+                != previous.maximum_absolute_mandel_strain.to_bits()
+            || self.samples.len() != previous.samples.len() {
+            return Err(SolidEnthalpyError::Invalid("transient endpoints must retain their exact material, thermal, frame and clock bindings"));
+        }
+        for (old, next) in previous.samples.iter().zip(&self.samples) {
+            poll(cx)?;
+            if old.cell != next.cell || old.reference_elastic != next.reference_elastic
+                || old.expansion.reference() != next.expansion.reference()
+                || old.stiffness_model != next.stiffness_model || old.expansion_model != next.expansion_model
+                || old.reference_mass_kg.to_bits() != next.reference_mass_kg.to_bits()
+                || old.reference_volume_m3.to_bits() != next.reference_volume_m3.to_bits() {
+                return Err(SolidEnthalpyError::Invalid("transient heating must preserve the original specimen, sources and reference inventory"));
+            }
+        }
+        let h_s = self.time_s - previous.time_s;
+        if !h_s.is_finite() || h_s <= 0.0
+            || (run.state().time_s + h_s).to_bits() != self.time_s.to_bits() {
+            return Err(SolidEnthalpyError::Invalid("thermal and mechanical endpoints must share one distinct representable clock"));
+        }
+        Ok(run.advance_thermal_candidate(problem, self.thermal_strains(), loads, h_s,
+            self.mesh_frame, self.maximum_absolute_mandel_strain, cx)?)
+    }
+
     pub fn solve(
         &self, loads: &TetLoadCase3<'_, '_>, fixed_dofs: &[usize],
         config: SolidEquilibriumConfig, cx: &Cx<'_>,
