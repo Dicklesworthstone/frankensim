@@ -18,6 +18,9 @@ use fs_qty::{
 };
 use fs_solver::CheckedCgConfig;
 
+#[path = "moisture/solid.rs"]
+mod solid;
+
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
@@ -54,6 +57,9 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     })
 }
 fn card(diffusivity: [f64; 2], elastic_upper: f64) -> MaterialCard {
+    card_with_swelling(diffusivity, elastic_upper, [0.01, 0.04, 0.02])
+}
+fn card_with_swelling(diffusivity: [f64; 2], elastic_upper: f64, beta: [f64; 3]) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims: Dims, a: f64, b: f64, lower: f64, upper: f64| {
         claims
@@ -134,6 +140,25 @@ fn card(diffusivity: [f64; 2], elastic_upper: f64) -> MaterialCard {
         0.0,
         elastic_upper,
     );
+    add("young_modulus_3", Pressure::DIMS, 0.4e9, 0.28e9, 0.0, elastic_upper);
+    add("poisson_ratio_13", Dims::NONE, 0.1, 0.1, 0.0, elastic_upper);
+    add("poisson_ratio_23", Dims::NONE, 0.2, 0.2, 0.0, elastic_upper);
+    add("shear_modulus_23", Pressure::DIMS, 0.2e9, 0.14e9, 0.0, elastic_upper);
+    add("shear_modulus_31", Pressure::DIMS, 0.25e9, 0.175e9, 0.0, elastic_upper);
+    for (key,value) in fs_material::state_point::ORTHOTROPIC_HYGROSCOPIC_EXPANSION_PROPERTIES.into_iter().zip(beta) {
+        add(key, Dims::NONE, value, value, 0.0, 0.3);
+    }
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::with_quantity(fs_material::state_point::HYGROSCOPIC_REFERENCE_MOISTURE_PROPERTY,
+            qty(QuantityKind::Moisture(MoistureBasis::DryMass))),
+        value: PropertyValue::Scalar { value: 0.1, dims: Dims::NONE },
+        validity: ValidityDomain::unconstrained().with_quantity("moisture_content",
+            qty(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.3)
+            .with_quantity("temperature", qty(QuantityKind::AbsoluteTemperature),293.15,293.15),
+        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![], provenance: Provenance { source: "authored stress-free moisture datum".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
     MaterialCard::assemble(
         MaterialStateId {
             chemistry: "authored sorbing solid".into(),
@@ -476,3 +501,4 @@ fn cancelled_transport_cannot_publish_a_moisture_or_mechanical_endpoint() {
         assert_eq!(old.moisture(), &[0.1; 4]);
     });
 }
+

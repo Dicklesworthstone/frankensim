@@ -5054,3 +5054,37 @@ inactive species, source/budget/cancellation refusals, native piston energy,
 replay and actual subcycling. Native Cargo/DSR execution was unavailable in this
 environment; source parsing and independent numerical references do not replace
 those gates.
+
+
+## Transported moisture to compatible solid deformation and prestress
+
+`moisture::solid::MoistureSolid` maps each original dry-basis finite-volume cell
+to a reference rectangular-prism strip with six native P1 tetrahedra. Tetrahedra
+never straddle moisture cells; the well-mixed transverse faces remain sealed.
+The source-bound solid independently selects isotropic or oriented orthotropic
+elasticity and fixed principal hygroscopic directions. Every accepted moisture
+cell re-evaluates the pinned elastic bundle and integrates its three hygroscopic
+strain coefficients from the original explicit source length/moisture datum.
+
+The existing solid owner solves compatible quasistatic displacement, recovers
+actual stress/support reactions/elastic energy, admits the deformed geometry,
+and assembles the original signed reference-configuration initial-stress pencil.
+Dry skeleton and transported water own inertia. Reference element density is
+wet cell mass/reference strip volume, with current density obtained from wet
+element mass/admitted deformed volume; no fresh density curve creates matter.
+Native mass and transported inventory must agree under an explicit tolerance.
+Fully prescribed bodies retain stress and reactions and have no modal pencil.
+
+`advance` returns proposed transport, geometry and all mechanical projections
+together after source/domain, equilibrium, strain, geometry, mass and cancellation
+gates. Failure retains the original accepted slab and does not debit reservoir
+water. The source-driven outputs expose the native modal/stability pencil;
+negative eigenvalues remain instability, never converted to audible frequencies.
+Diffusion stays on its original reference chart. This is slow isothermal open-
+reservoir hygroscopic mechanics: chemical reservoir work and sorption heat are
+not closed by the mechanical energy report. Stress-assisted diffusion, hysteresis,
+finite deformation, a deformed-configuration tangent and dynamic mode-state
+transfer remain separate models. Analytic fixtures verify transport-to-free
+swelling, constrained stress/energy, rotated directions, orthotropic data swaps,
+spatial variation, native wet inertia, changed modal pencil and atomic refusal.
+All fixture coefficients are authored verification data, not wood validation.

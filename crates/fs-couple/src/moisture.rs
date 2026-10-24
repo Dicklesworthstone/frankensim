@@ -7,13 +7,16 @@
 //! every proposed endpoint. No clipped water, inferred wood diffusivity,
 //! instantaneous bulk equilibration or second material evaluator is used.
 //!
-//! This bounded rung assumes a fixed dry skeleton and dilute bound moisture.
-//! Sorption heat, swelling, stress-assisted diffusion, free liquid, hysteresis,
+//! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
+//! The solid consumer resolves quasistatic swelling in that reference chart.
+//! Sorption heat, stress-assisted diffusion, free liquid, hysteresis,
 //! transverse transport and a finite external vapor inventory are not modeled.
 //! Its surface conditions are infinite reservoirs. The plate consumer retains
 //! this fixed-geometry assumption and rebuilds actual stiffness AND wet inertia.
 
 pub mod plate;
+/// Directional swelling, compatible shape, stress and native vibration tangent.
+pub mod solid;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -40,6 +43,10 @@ pub const MAX_MOISTURE_CELLS: usize = 65_536;
 /// Original source/solver/consumer refusal. Failed proposals publish no state.
 #[derive(Debug)]
 pub enum MoistureError {
+    /// Native source-backed stiffness or solid material admission refused.
+    SolidMaterial(fs_solid::linear3::source::SolidMaterialError),
+    /// Native eigenstrain, equilibrium, geometry or prestress admission refused.
+    Solid(fs_solid::linear3::TetElasticError),
     /// Malformed geometry, quantities, source applicability or limits.
     Invalid(&'static str),
     /// Shared material resolver refused.
@@ -71,6 +78,22 @@ impl From<MaterialStatePointError> for MoistureError {
 impl From<MaterialError> for MoistureError {
     fn from(e: MaterialError) -> Self {
         Self::Constitutive(e)
+    }
+}
+impl From<fs_solid::linear3::source::SolidMaterialError> for MoistureError {
+    fn from(e: fs_solid::linear3::source::SolidMaterialError) -> Self {
+        match e {
+            fs_solid::linear3::source::SolidMaterialError::Solid(fs_solid::linear3::TetElasticError::Cancelled) => Self::Cancelled,
+            e => Self::SolidMaterial(e),
+        }
+    }
+}
+impl From<fs_solid::linear3::TetElasticError> for MoistureError {
+    fn from(e: fs_solid::linear3::TetElasticError) -> Self {
+        match e {
+            fs_solid::linear3::TetElasticError::Cancelled => Self::Cancelled,
+            e => Self::Solid(e),
+        }
     }
 }
 impl From<fs_plate::PlateError> for MoistureError {
@@ -635,3 +658,4 @@ impl Precond for DiffusionStep {
         }
     }
 }
+
