@@ -5518,3 +5518,26 @@ Focused tests compare the pressure against the original Rayleigh owners fed
 with accepted signed flows, source-state change under mouth reaction, block
 partition equality and physical admission. Native execution and measured flute
 qualification remain pending.
+
+
+## Complete DG terminal groups
+
+`DgPortLoad::new_with_terminal_ports` binds every non-inlet port exactly once
+in explicit MIMO channel order. The complete mean relation is
+`(Zdd + L) u = Hd - Hl + Zd0 Qin`, with outward flow into the original
+`PreparedMimoLoad`. Its full cross entries and signed exchanges are retained.
+The one-channel branch preserves the original divide; larger constant systems
+use the existing normalized prepared LU with infinity-norm condition <=1e10.
+No terminal pressure, work or accepted memory is published until every original
+DG/load candidate and the nonlinear source accept. An abandoned trial advances
+nothing. The coupling is exact for each owner's held-flow image, not the joint
+continuous exponential; coupling-clock refinement remains separate.
+
+`terminal_ports` and `last_terminal_frames` retain declared matrix order.
+`last_terminal_frame` remains only the actual axial-outlet convenience, including
+None for side-only groups. Aperture and flue frames carry every terminal;
+aperture balance credits their signed work once, with absolute per-port scales
+for numerical cancellation checks. Tests cover independent 2x2 elimination,
+raw original DG/MimoZoh state and work, both kernels, wall memory, rollback,
+side-only ownership and bitwise legacy scalar arithmetic. These regressions
+are authored; native execution remains pending.

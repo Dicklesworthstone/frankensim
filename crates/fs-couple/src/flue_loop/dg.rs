@@ -58,9 +58,12 @@ pub struct FlueDgFrame {
     pub inlet_flow_m3_s: f64,
     pub outgoing_pressure_pa: f64,
     pub incoming_pressure_pa: f64,
-    /// Signed exchange with the optional original rational outlet. It is not
-    /// inferred terminal heat or a fabricated terminal storage certificate.
+    /// Actual axial outlet exchange, when loaded. Also included in terminals;
+    /// it is a convenience observation, not another energy contribution.
     pub terminal: Option<DgTerminalFrame>,
+    /// Every signed exchange in the original MIMO load's channel order. These
+    /// are neither inferred heat nor fabricated terminal storage certificates.
+    pub terminals: Vec<DgTerminalFrame>,
     /// Original integrated DG INLET work minus mean pressure * volume [J].
     pub port_work_residual_j: f64,
     /// Original propagator observation and ledger. Dense loss is still inferred
@@ -157,6 +160,7 @@ impl FlueDg {
         }
         // All fallible checks precede the common owner's atomic publication.
         let terminal = trial.terminal_frame().copied();
+        let terminals = trial.terminal_frames().to_vec();
         let duct = trial.accept();
         self.last = Some(FlueDgFrame {
             inlet_pressure_pa,
@@ -165,6 +169,7 @@ impl FlueDg {
             incoming_pressure_pa,
             port_work_residual_j,
             terminal,
+            terminals,
             duct,
         });
         Ok(incoming_pressure_pa)

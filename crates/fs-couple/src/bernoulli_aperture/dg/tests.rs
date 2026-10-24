@@ -188,24 +188,41 @@ fn moving_aperture_retains_causal_terminal_history_and_signed_energy_exchange() 
     use fs_vfit::mimo::MimoModel;
     use fs_vfit::mimo::load::{MimoLoadLimits, PreparedMimoLoad};
     use fs_vfit::model::PoleTerm;
+    for with_side in [false, true] {
     let dt = 1.0 / 96000.0;
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap();
     let duct = DgDuct::new(
         &Duct { segments: vec![Segment::Cylinder { radius: 0.001, length: 0.05 }] },
-        &gas, DgMesh { elements: 1, order: 2 },
+        &gas, DgMesh { elements: if with_side { 2 } else { 1 }, order: 2 },
         DgBoundary::Port(PortId(0)), DgBoundary::Port(PortId(1)),
     ).unwrap().with_viscothermal(8, [50.0, 2000.0], 0.01).unwrap();
-    let terminal = PreparedMimoLoad::new(&MimoModel {
+    let duct = if with_side {
+        duct.with_side_ports(&[fs_duct::dg::DgSidePort {
+            id: PortId(2), downstream_element: 1,
+        }]).unwrap()
+    } else { duct };
+    let mut model = MimoModel {
         ports: 1, poles: vec![PoleTerm::Real { pole: -2000.0, residue: 0.0 }],
         residues: vec![vec![C64::from_re(2e11)]], d: vec![1e8], e: vec![0.0],
         reciprocal: true,
-    }, dt, MimoLoadLimits {
+    };
+    if with_side {
+        model.ports = 2;
+        model.residues = vec![vec![C64::from_re(2e11), C64::from_re(4e10),
+            C64::from_re(4e10), C64::from_re(1.5e11)]];
+        model.d = vec![1e8, 2e7, 2e7, 1.2e8];
+        model.e = vec![0.0; 4];
+    }
+    let terminal = PreparedMimoLoad::new(&model, dt, MimoLoadLimits {
         band_rad_s: [1.0, core::f64::consts::PI / dt],
         sampled_passivity_points: 257, max_states: 4, max_memory_bytes: 1 << 20,
     }).unwrap();
-    let load = ApertureDgLoad::new_with_terminal(
-        duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS, terminal,
-    ).unwrap();
+    let load = if with_side {
+        ApertureDgLoad::new_with_terminal_ports(duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS,
+            vec![PortId(2), PortId(1)], terminal)
+    } else {
+        ApertureDgLoad::new_with_terminal(duct, dt, 1e-11, MAX_DG_PROPAGATOR_DOFS, terminal)
+    }.unwrap();
     let mut model = ApertureDg::new(
         aperture(&load, BladePropagator::ExactZoh, 500.0), load,
     ).unwrap();
@@ -218,21 +235,26 @@ fn moving_aperture_retains_causal_terminal_history_and_signed_energy_exchange() 
         let terminal = frame.terminal.as_ref().unwrap();
         let scale = frame.storage_change_j.abs() + frame.inferred_total_dissipation_j.abs()
             + frame.upstream_work_j.abs() + frame.aperture.mechanical_work_j.abs()
-            + terminal.port_work_j.abs();
+            + frame.terminals.iter().map(|port| port.port_work_j.abs()).sum::<f64>();
         assert!(frame.balance_residual_j().abs() <= 1e-8 * scale.max(1e-25));
         assert!(frame.port_work_residual_j.abs() <= 1e-10 * scale.max(1e-25));
         assert!(terminal.port_work_residual_j.abs() <= 1e-10 * scale.max(1e-25));
+        assert_eq!(frame.terminals.len(), if with_side { 2 } else { 1 });
+        assert_eq!(model.load().last_terminal_frames(), frame.terminals);
         assert_eq!(model.load().last_terminal_frame(), frame.terminal.as_ref());
-        transferred += terminal.port_work_j;
+        transferred += sum_terminal_work(&frame.terminals);
     }
     assert!(transferred > 0.0);
     let state = model.duct_state().clone();
     let poles = model.load().terminal().unwrap().pole_states().to_vec();
+    let terminals = model.load().last_terminal_frames().to_vec();
     let opening = model.aperture().state();
     assert!(model.step(TubeDrive {
         upstream_pressure_pa: f64::NAN, body_flow_m3_s: 0.0,
     }).is_err());
     assert_eq!(model.duct_state(), &state);
     assert_eq!(model.load().terminal().unwrap().pole_states(), poles);
+    assert_eq!(model.load().last_terminal_frames(), terminals);
     assert_eq!(model.aperture().state(), opening);
+    }
 }

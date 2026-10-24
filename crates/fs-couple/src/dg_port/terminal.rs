@@ -1,0 +1,157 @@
+//! Algebraic elimination of one explicit same-clock terminal port group.
+//! Propagation, rational memory and port work stay with their original owners.
+
+use super::*;
+use fs_la::prepared_lu::LuWorkspace;
+
+const MAX_TERMINAL_CONDITION: f64 = 1e10;
+
+#[derive(Debug, Clone)]
+enum TerminalSolve {
+    // Preserve the original scalar division, rather than multiply by 1/Z.
+    Scalar(f64),
+    // Cold inverse columns come from the existing normalized prepared LU.
+    Matrix { inverse: Vec<f64>, dimension: usize },
+}
+
+impl TerminalSolve {
+    fn new(matrix: &[f64], dimension: usize) -> Result<Self, AcousticRealizeError> {
+        if dimension == 1 {
+            let denominator = matrix[0];
+            if !denominator.is_finite() || denominator <= 0.0 {
+                return Err(invalid("DG terminal mean solve requires positive finite combined outlet impedance"));
+            }
+            return Ok(Self::Scalar(denominator));
+        }
+        let norm = matrix.chunks_exact(dimension)
+            .map(|row| row.iter().map(|value| value.abs()).sum::<f64>()).fold(0.0, f64::max);
+        if !norm.is_finite() || norm <= 0.0 || matrix.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("DG terminal group matrix must be finite and nonzero"));
+        }
+        let normalized: Vec<_> = matrix.iter().map(|value| value / norm).collect();
+        let mut lu = LuWorkspace::new(dimension)
+            .map_err(|_| invalid("DG terminal group solve storage refused"))?;
+        lu.factor(&normalized).map_err(|_| invalid("DG terminal group matrix is singular or nonfinite"))?;
+        let mut inverse = vec![0.0; dimension * dimension];
+        let mut rhs = vec![0.0; dimension];
+        let mut column = vec![0.0; dimension];
+        for col in 0..dimension {
+            rhs.fill(0.0);
+            rhs[col] = 1.0;
+            lu.solve_factored_into(&rhs, &mut column)
+                .map_err(|_| invalid("DG terminal group inverse solve left the finite domain"))?;
+            for row in 0..dimension { inverse[row * dimension + col] = column[row]; }
+        }
+        let inverse_norm = inverse.chunks_exact(dimension)
+            .map(|row| row.iter().map(|value| value.abs()).sum::<f64>()).fold(0.0, f64::max);
+        let normalized_norm = normalized.chunks_exact(dimension)
+            .map(|row| row.iter().map(|value| value.abs()).sum::<f64>()).fold(0.0, f64::max);
+        let condition = normalized_norm * inverse_norm;
+        if !condition.is_finite() || condition > MAX_TERMINAL_CONDITION {
+            return Err(invalid("DG terminal group infinity-norm condition exceeds 1e10"));
+        }
+        for value in &mut inverse { *value /= norm; }
+        if inverse.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("DG terminal group inverse is not representable"));
+        }
+        Ok(Self::Matrix { inverse, dimension })
+    }
+
+    fn apply(&self, rhs: &[f64]) -> Result<Vec<f64>, AcousticRealizeError> {
+        let values = match self {
+            Self::Scalar(denominator) => vec![rhs[0] / denominator],
+            Self::Matrix { inverse, dimension } => inverse.chunks_exact(*dimension)
+                .map(|row| row.iter().zip(rhs).map(|(a, b)| a * b).sum()).collect(),
+        };
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("DG terminal group mean solve left the finite flow domain"));
+        }
+        Ok(values)
+    }
+}
+
+/// Constant coupling matrices; no accepted physical history is stored here.
+#[derive(Debug, Clone)]
+pub(super) struct TerminalCoupling {
+    pub(super) ports: Vec<PortId>,
+    pub(super) inlet_index: usize,
+    pub(super) indices: Vec<usize>,
+    pub(super) outward_per_inlet: Vec<f64>,
+    impedance_pa_s_m3: f64,
+    solve: TerminalSolve,
+}
+
+pub(super) struct TerminalRelation {
+    pub(super) inlet: DgPortResponse,
+    pub(super) outward_history_m3_s: Vec<f64>,
+    pub(super) response: DgMultiportResponse,
+}
+
+impl TerminalCoupling {
+    pub(super) fn new(
+        response: &DgMultiportResponse,
+        inlet: PortId,
+        ports: Vec<PortId>,
+        terminal: &PreparedMimoLoad,
+    ) -> Result<Self, AcousticRealizeError> {
+        let count = response.ports.len();
+        let n = ports.len();
+        if n == 0 || n != terminal.ports() || count != n + 1 {
+            return Err(invalid("DG terminal group must own every non-inlet port with exactly one load channel"));
+        }
+        let inlet_index = response.ports.iter().position(|id| *id == inlet)
+            .ok_or_else(|| invalid("DG inlet missing from its original port basis"))?;
+        let mut indices = Vec::with_capacity(n);
+        for (i, id) in ports.iter().enumerate() {
+            if *id == inlet || ports[..i].contains(id) {
+                return Err(invalid("DG terminal ports must be distinct and exclude the source inlet"));
+            }
+            indices.push(response.ports.iter().position(|port| port == id)
+                .ok_or_else(|| invalid("DG terminal group references an undeclared port"))?);
+        }
+        let z = &response.impedance_pa_s_m3;
+        let direct = terminal.mean_direct_term();
+        let mut matrix = vec![0.0; n * n];
+        for row in 0..n {
+            for col in 0..n {
+                matrix[row * n + col] = z[count * indices[row] + indices[col]] + direct[row * n + col];
+            }
+        }
+        let solve = TerminalSolve::new(&matrix, n)?;
+        let rhs: Vec<_> = indices.iter().map(|&row| z[count * row + inlet_index]).collect();
+        let outward_per_inlet = solve.apply(&rhs)?;
+        let mut impedance_pa_s_m3 = z[count * inlet_index + inlet_index];
+        for (i, &column) in indices.iter().enumerate() {
+            impedance_pa_s_m3 -= z[count * inlet_index + column] * outward_per_inlet[i];
+        }
+        if !impedance_pa_s_m3.is_finite() || impedance_pa_s_m3 <= 0.0 {
+            return Err(invalid("DG terminal elimination left the finite positive inlet-load domain"));
+        }
+        Ok(Self { ports, inlet_index, indices, outward_per_inlet, impedance_pa_s_m3, solve })
+    }
+
+    pub(super) fn relation(
+        &self, response: DgMultiportResponse, terminal: &PreparedMimoLoad,
+    ) -> Result<TerminalRelation, AcousticRealizeError> {
+        let count = response.ports.len();
+        let mut rhs = vec![0.0; self.ports.len()];
+        terminal.mean_history_output_into(&mut rhs)
+            .map_err(|_| invalid("DG terminal mean history is outside its admitted finite domain"))?;
+        for (i, &row) in self.indices.iter().enumerate() {
+            rhs[i] = response.history_pressure_pa[row] - rhs[i];
+        }
+        let outward_history_m3_s = self.solve.apply(&rhs)?;
+        let mut history_pressure_pa = response.history_pressure_pa[self.inlet_index];
+        for (i, &column) in self.indices.iter().enumerate() {
+            history_pressure_pa -= response.impedance_pa_s_m3[count * self.inlet_index + column]
+                * outward_history_m3_s[i];
+        }
+        if !history_pressure_pa.is_finite() {
+            return Err(invalid("DG terminal elimination left the finite inlet-pressure domain"));
+        }
+        Ok(TerminalRelation {
+            inlet: DgPortResponse { history_pressure_pa, impedance_pa_s_m3: self.impedance_pa_s_m3 },
+            outward_history_m3_s, response,
+        })
+    }
+}

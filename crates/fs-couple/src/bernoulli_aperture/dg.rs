@@ -20,7 +20,7 @@ use super::paired::BladePropagator;
 use super::tube::TubeDrive;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_duct::dg::{DgPortResponse, DgState, DgStepOutput};
-use crate::dg_port::DgTerminalFrame;
+use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 
 /// Original single, paired and material-modal sources on the shared DG load.
 pub mod loaded;
@@ -46,9 +46,12 @@ pub struct DgApertureFrame {
     pub duct: DgStepOutput,
     /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
     pub stored_energy_j: f64,
-    /// Signed outlet exchange with an optional admitted rational load. This is
-    /// neither terminal heat nor a certificate of its internal stored energy.
+    /// Actual axial outlet exchange, when loaded. This convenience is also in
+    /// terminals and must not be credited a second time.
     pub terminal: Option<DgTerminalFrame>,
+    /// Every signed terminal exchange in the original load's channel order.
+    /// This is neither heat nor a certificate of rational internal storage.
+    pub terminals: Vec<DgTerminalFrame>,
     /// Change in the aperture and DG storage [J].
     pub storage_change_j: f64,
     /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
@@ -69,7 +72,7 @@ impl DgApertureFrame {
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
         self.storage_change_j + self.inferred_total_dissipation_j
-            + self.terminal.as_ref().map_or(0.0, |frame| frame.port_work_j)
+            + sum_terminal_work(&self.terminals)
             - self.upstream_work_j
             - self.body_work_j
             - self.aperture.mechanical_work_j
@@ -205,7 +208,8 @@ fn accept_acoustic_candidate(
     let port_work_residual_j = acoustic.inlet_work_j()
         - aperture.bore_pressure_pa * (aperture.bore_flow_m3_s * dt);
     let terminal = acoustic.terminal_frame().copied();
-    let terminal_work_j = terminal.as_ref().map_or(0.0, |frame| frame.port_work_j);
+    let terminals = acoustic.terminal_frames().to_vec();
+    let terminal_work_j = sum_terminal_work(&terminals);
     let balance_residual_j = storage_change_j + inferred_total_dissipation_j + terminal_work_j
         - upstream_work_j - body_work_j - aperture.mechanical_work_j;
     if ![
@@ -218,7 +222,7 @@ fn accept_acoustic_candidate(
     }
     let duct = acoustic.accept();
     Ok(DgApertureFrame {
-        aperture, spatial_pressure, duct, terminal, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+        aperture, spatial_pressure, duct, terminal, terminals, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
     })
 }

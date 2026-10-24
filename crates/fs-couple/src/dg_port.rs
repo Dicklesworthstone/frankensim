@@ -1,8 +1,8 @@
 //! Source-bound exact mean-port loads shared by nonlinear acoustic couplers.
 //!
 //! The original DG owner retains geometry, material gas, wall memory, storage
-//! and propagation. An optional admitted rational outlet exchanges same-step
-//! mean pressure and opposite volume flow through its original MIMO ZOH owner.
+//! and propagation. An optional admitted rational port group exchanges same-step
+//! mean pressures and opposite volume flows through its original MIMO ZOH owner.
 //! Candidates remain private until every participant accepts the shared work.
 
 /// Authored geometry, material gas and numerical declarations for this load.
@@ -10,6 +10,9 @@ pub mod input;
 
 /// Computed exterior radiation from the actual endpoint geometry and gas.
 pub mod radiation;
+
+mod terminal;
+use terminal::{TerminalCoupling, TerminalRelation};
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
@@ -41,6 +44,12 @@ pub struct DgTerminalFrame {
     pub port_work_residual_j: f64,
 }
 
+// Preserve a scalar exchange's original value and sum groups in declared order.
+pub(crate) fn sum_terminal_work(frames: &[DgTerminalFrame]) -> f64 {
+    frames.split_first().map_or(0.0, |(first, rest)|
+        rest.iter().fold(first.port_work_j, |sum, frame| sum + frame.port_work_j))
+}
+
 /// One declared inlet, one original propagator and one accepted physical history.
 /// Read its effective mean impedance before constructing a nonlinear source.
 #[derive(Debug, Clone)]
@@ -51,20 +60,10 @@ pub struct DgPortLoad {
     inlet: PortId,
     impedance_pa_s_m3: f64,
     terminal: Option<PreparedMimoLoad>,
+    terminal_coupling: Option<TerminalCoupling>,
     last_terminal_frame: Option<DgTerminalFrame>,
+    last_terminal_frames: Vec<DgTerminalFrame>,
     radiation_record: Option<ComputedBaffledRecord>,
-}
-
-// This is only the algebraic elimination of the outlet's same-step mean law.
-// The two existing owners still advance their complete original coordinates.
-struct TerminalRelation {
-    inlet: DgPortResponse,
-    outlet: PortId,
-    outward_history_m3_s: f64,
-    outward_per_inlet: f64,
-    response: DgMultiportResponse,
-    inlet_index: usize,
-    outlet_index: usize,
 }
 
 impl DgPortLoad {
@@ -80,7 +79,7 @@ impl DgPortLoad {
         exponential_tolerance: f64,
         maximum_dofs: usize,
     ) -> Result<Self, AcousticRealizeError> {
-        Self::prepare(duct, time_step_s, exponential_tolerance, maximum_dofs, None)
+        Self::prepare(duct, time_step_s, exponential_tolerance, maximum_dofs, Vec::new(), None)
     }
 
     /// Attach one admitted causal impedance to the declared outlet port.
@@ -107,8 +106,38 @@ impl DgPortLoad {
         maximum_dofs: usize,
         terminal: PreparedMimoLoad,
     ) -> Result<Self, AcousticRealizeError> {
+        let DgBoundary::Port(outlet) = duct.outlet() else {
+            return Err(invalid("DG terminal requires a declared axial outlet port"));
+        };
+        Self::new_with_terminal_ports(
+            duct, time_step_s, exponential_tolerance, maximum_dofs, vec![outlet], terminal,
+        )
+    }
+
+    /// Attach one original MIMO impedance to an explicit ordered terminal group.
+    /// Every declared DG port except the source inlet must appear exactly once;
+    /// no omitted side port or outlet silently receives zero flow. Load rows,
+    /// columns, pole histories and returned frames use this exact channel order.
+    ///
+    /// The complete same-step relation is `(Zdd + L) u = Hd - Hl + Zd0 Qin`,
+    /// where `u` flows OUT of DG and into the load. Cross terms are preserved.
+    /// The scalar case keeps the original divide arithmetic. Larger constant
+    /// systems use the existing prepared LU once at construction, with a finite
+    /// infinity-norm condition bound of 1e10; runtime histories use that solve.
+    ///
+    /// Each original owner integrates exactly under held flows. As with the
+    /// scalar outlet, this is a work-conjugate mean connection, not a claim of
+    /// the joint continuous exponential. Refine the coupling clock separately.
+    pub fn new_with_terminal_ports(
+        duct: DgDuct,
+        time_step_s: f64,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        ports: Vec<PortId>,
+        terminal: PreparedMimoLoad,
+    ) -> Result<Self, AcousticRealizeError> {
         Self::prepare(
-            duct, time_step_s, exponential_tolerance, maximum_dofs, Some(terminal),
+            duct, time_step_s, exponential_tolerance, maximum_dofs, ports, Some(terminal),
         )
     }
 
@@ -117,23 +146,18 @@ impl DgPortLoad {
         time_step_s: f64,
         exponential_tolerance: f64,
         maximum_dofs: usize,
+        terminal_ports: Vec<PortId>,
         terminal: Option<PreparedMimoLoad>,
     ) -> Result<Self, AcousticRealizeError> {
         let DgBoundary::Port(inlet) = duct.inlet() else {
             return Err(invalid("DG load requires one declared inlet port"));
         };
-        match (&terminal, duct.outlet()) {
-            (None, DgBoundary::Port(_)) => {
-                return Err(invalid("DG load requires an owner for its second unknown port"));
+        if let Some(load) = &terminal {
+            if load.time_step_s().to_bits() != time_step_s.to_bits()
+                || load.pole_states().iter().any(|z| z.re != 0.0 || z.im != 0.0)
+            {
+                return Err(invalid("DG terminal requires quiescent original memory on the same clock"));
             }
-            (Some(load), DgBoundary::Port(outlet))
-                if outlet != inlet && load.ports() == 1
-                    && load.time_step_s().to_bits() == time_step_s.to_bits()
-                    && load.pole_states().iter().all(|z| z.re == 0.0 && z.im == 0.0) => {}
-            (Some(_), _) => {
-                return Err(invalid("DG terminal requires a distinct outlet and one quiescent channel on the same clock"));
-            }
-            (None, _) => {}
         }
         if duct.total_dofs() > maximum_dofs {
             return Err(invalid("DG acoustic plus memory states exceed the declared DOF budget"));
@@ -147,9 +171,21 @@ impl DgPortLoad {
             .propagator(time_step_s, exponential_tolerance)
             .map_err(AcousticRealizeError::Duct)?;
         let state = duct.zero_state();
+        let response = propagator.multiport_response(&state)
+            .map_err(AcousticRealizeError::Duct)?;
+        let terminal_coupling = match &terminal {
+            Some(load) => Some(TerminalCoupling::new(&response, inlet, terminal_ports, load)?),
+            None => {
+                if response.ports != [inlet] {
+                    return Err(invalid("DG load requires an explicit owner for every non-inlet flow port"));
+                }
+                None
+            }
+        };
         let mut load = Self {
             duct, propagator, state, inlet, impedance_pa_s_m3: 0.0,
-            terminal, last_terminal_frame: None, radiation_record: None,
+            terminal, terminal_coupling, last_terminal_frame: None,
+            last_terminal_frames: Vec::new(), radiation_record: None,
         };
         let impedance = load.port_response()?.impedance_pa_s_m3;
         if !impedance.is_finite() || impedance <= 0.0 {
@@ -183,6 +219,12 @@ impl DgPortLoad {
     #[must_use]
     pub fn terminal(&self) -> Option<&PreparedMimoLoad> { self.terminal.as_ref() }
 
+    /// Bound DG ports in the exact original MIMO load's channel order.
+    #[must_use]
+    pub fn terminal_ports(&self) -> &[PortId] {
+        self.terminal_coupling.as_ref().map_or(&[], |coupling| coupling.ports.as_slice())
+    }
+
     /// Physical geometry, exterior material and original computed-load reports.
     /// Generic authored terminals do not manufacture a radiation source record.
     #[must_use]
@@ -190,58 +232,27 @@ impl DgPortLoad {
         self.radiation_record.as_ref()
     }
 
-    /// Last accepted outlet exchange; absent before the first step or without
-    /// an explicit rational outlet. This flow is suitable for its bound observer.
+    /// Last accepted AXIAL outlet exchange; absent before the first step or
+    /// when that actual outlet is not loaded. Side-only groups do not pretend
+    /// that their first channel is the axial outlet.
     #[must_use]
     pub const fn last_terminal_frame(&self) -> Option<&DgTerminalFrame> {
         self.last_terminal_frame.as_ref()
     }
 
+    /// All accepted exchanges in terminal_ports order. Empty before the first
+    /// accepted step; a failed or abandoned trial preserves the complete slice.
+    #[must_use]
+    pub fn last_terminal_frames(&self) -> &[DgTerminalFrame] { &self.last_terminal_frames }
+
     fn terminal_relation(
         &self, terminal: &PreparedMimoLoad,
     ) -> Result<TerminalRelation, AcousticRealizeError> {
-        let DgBoundary::Port(outlet) = self.duct.outlet() else {
-            return Err(invalid("DG terminal lost its declared outlet"));
-        };
         let response = self.propagator.multiport_response(&self.state)
             .map_err(AcousticRealizeError::Duct)?;
-        if response.ports.len() != 2 {
-            return Err(invalid("DG terminal needs exactly its original inlet and outlet"));
-        }
-        let inlet_index = response.ports.iter().position(|id| *id == self.inlet)
-            .ok_or_else(|| invalid("DG inlet missing from its original port basis"))?;
-        let outlet_index = response.ports.iter().position(|id| *id == outlet)
-            .ok_or_else(|| invalid("DG outlet missing from its original port basis"))?;
-        let z = &response.impedance_pa_s_m3;
-        let h = &response.history_pressure_pa;
-        let mut load_history = [0.0];
-        terminal.mean_history_output_into(&mut load_history)
-            .map_err(|_| invalid("DG terminal mean history is outside its admitted finite domain"))?;
-        let denominator = z[2 * outlet_index + outlet_index] + terminal.mean_direct_term()[0];
-        if !denominator.is_finite() || denominator <= 0.0 {
-            return Err(invalid("DG terminal mean solve requires positive finite combined outlet impedance"));
-        }
-        // Both DG inputs are inward; the terminal input is outward.
-        // u = (Ho - Hl + Zoi Qi)/(Zoo + Zl)
-        // Pi = Hi + Zii Qi - Zio u. Cross terms need not be symmetric.
-        let outward_history_m3_s = (h[outlet_index] - load_history[0]) / denominator;
-        let outward_per_inlet = z[2 * outlet_index + inlet_index] / denominator;
-        let inlet = DgPortResponse {
-            history_pressure_pa: h[inlet_index]
-                - z[2 * inlet_index + outlet_index] * outward_history_m3_s,
-            impedance_pa_s_m3: z[2 * inlet_index + inlet_index]
-                - z[2 * inlet_index + outlet_index] * outward_per_inlet,
-        };
-        if ![
-            outward_history_m3_s, outward_per_inlet,
-            inlet.history_pressure_pa, inlet.impedance_pa_s_m3,
-        ].iter().all(|value| value.is_finite()) || inlet.impedance_pa_s_m3 <= 0.0 {
-            return Err(invalid("DG terminal elimination left the finite positive inlet-load domain"));
-        }
-        Ok(TerminalRelation {
-            inlet, outlet, outward_history_m3_s, outward_per_inlet,
-            response, inlet_index, outlet_index,
-        })
+        self.terminal_coupling.as_ref()
+            .ok_or_else(|| invalid("DG terminal lost its admitted port group"))?
+            .relation(response, terminal)
     }
 
     /// Affine inlet pressure from all accepted acoustic, wall and terminal
@@ -266,14 +277,21 @@ impl DgPortLoad {
             .map(|terminal| self.terminal_relation(terminal)).transpose()?;
         let mut terminal = self.terminal.clone();
         let mut inputs = vec![PortInput { id: self.inlet, effort: volume_flow_m3_s }];
-        let mut outward_flow = 0.0;
-        let mut load_pressure = [0.0];
-        if let (Some(relation), Some(candidate)) = (&relation, &mut terminal) {
-            outward_flow = relation.outward_history_m3_s
-                + relation.outward_per_inlet * volume_flow_m3_s;
-            candidate.step_mean_into(&[outward_flow], &mut load_pressure)
-                .map_err(|_| invalid("DG rational outlet candidate left the finite pressure/state domain"))?;
-            inputs.push(PortInput { id: relation.outlet, effort: -outward_flow });
+        let count = self.terminal_ports().len();
+        let mut outward_flows = vec![0.0; count];
+        let mut load_pressure = vec![0.0; count];
+        if let (Some(relation), Some(candidate), Some(coupling)) =
+            (&relation, &mut terminal, &self.terminal_coupling)
+        {
+            for (i, outward) in outward_flows.iter_mut().enumerate() {
+                *outward = relation.outward_history_m3_s[i]
+                    + coupling.outward_per_inlet[i] * volume_flow_m3_s;
+            }
+            candidate.step_mean_into(&outward_flows, &mut load_pressure)
+                .map_err(|_| invalid("DG rational terminal candidate left the finite pressure/state domain"))?;
+            for (id, outward) in coupling.ports.iter().zip(&outward_flows) {
+                inputs.push(PortInput { id: *id, effort: -*outward });
+            }
         }
         let mut state = self.state.clone();
         let output = self.propagator.step(&mut state, &inputs)
@@ -297,44 +315,57 @@ impl DgPortLoad {
         let inlet_port = output.port_outputs.iter().find(|port| port.id == self.inlet)
             .ok_or_else(|| invalid("DG candidate omitted its original inlet"))?;
         let inlet_work_j = volume_flow_m3_s * inlet_port.delta_x;
-        let terminal_frame = if let Some(relation) = relation {
-            let outlet_port = output.port_outputs.iter().find(|port| port.id == relation.outlet)
-                .ok_or_else(|| invalid("DG candidate omitted its original outlet"))?;
+        let mut terminal_frames = Vec::with_capacity(count);
+        if let (Some(relation), Some(coupling)) = (relation, &self.terminal_coupling) {
             let h = &relation.response.history_pressure_pa;
             let z = &relation.response.impedance_pa_s_m3;
-            let row = relation.outlet_index;
-            let pressure_scale = h[row].abs()
-                + (z[2 * row + relation.inlet_index] * volume_flow_m3_s).abs()
-                + (z[2 * row + row] * outward_flow).abs() + load_pressure[0].abs();
-            let port_work_j = outward_flow * outlet_port.delta_x;
-            let load_work_j = load_pressure[0] * (outward_flow * self.propagator.dt());
-            let port_work_residual_j = port_work_j - load_work_j;
-            let work_scale = pressure_scale * outward_flow.abs() * self.propagator.dt();
-            if ![
-                outward_flow, load_pressure[0], pressure_scale, port_work_j,
-                load_work_j, port_work_residual_j, work_scale,
-            ].iter().all(|value| value.is_finite())
-                || (outlet_port.conjugate_rate - load_pressure[0]).abs()
-                    > 1e-10 * pressure_scale.max(1e-300)
-                || port_work_residual_j.abs() > 1e-10 * work_scale.max(1e-300)
-            {
-                return Err(invalid("DG and rational outlet disagree on same-step pressure or work"));
+            let width = relation.response.ports.len();
+            for (i, &id) in coupling.ports.iter().enumerate() {
+                let port = output.port_outputs.iter().find(|port| port.id == id)
+                    .ok_or_else(|| invalid("DG candidate omitted an owned terminal port"))?;
+                let row = coupling.indices[i];
+                let mut pressure_scale = h[row].abs()
+                    + (z[width * row + coupling.inlet_index] * volume_flow_m3_s).abs();
+                for (j, &column) in coupling.indices.iter().enumerate() {
+                    pressure_scale += (z[width * row + column] * outward_flows[j]).abs();
+                }
+                pressure_scale += load_pressure[i].abs();
+                let outward_flow = outward_flows[i];
+                let port_work_j = outward_flow * port.delta_x;
+                let load_work_j = load_pressure[i] * (outward_flow * self.propagator.dt());
+                let port_work_residual_j = port_work_j - load_work_j;
+                let work_scale = pressure_scale * outward_flow.abs() * self.propagator.dt();
+                if ![
+                    outward_flow, load_pressure[i], pressure_scale, port_work_j,
+                    load_work_j, port_work_residual_j, work_scale,
+                ].iter().all(|value| value.is_finite())
+                    || (port.conjugate_rate - load_pressure[i]).abs()
+                        > 1e-10 * pressure_scale.max(1e-300)
+                    || port_work_residual_j.abs() > 1e-10 * work_scale.max(1e-300)
+                {
+                    return Err(invalid("DG and rational terminal disagree on same-step pressure or work"));
+                }
+                terminal_frames.push(DgTerminalFrame {
+                    port: id, outward_flow_m3_s: outward_flow,
+                    mean_pressure_pa: port.conjugate_rate,
+                    port_work_j, load_work_j, port_work_residual_j,
+                });
             }
-            Some(DgTerminalFrame {
-                port: relation.outlet, outward_flow_m3_s: outward_flow,
-                mean_pressure_pa: outlet_port.conjugate_rate,
-                port_work_j, load_work_j, port_work_residual_j,
-            })
-        } else { None };
-        let terminal_work = terminal_frame.as_ref().map_or(0.0, |frame| frame.port_work_j);
+        }
+        let terminal_frame = match self.duct.outlet() {
+            DgBoundary::Port(outlet) => terminal_frames.iter().find(|frame| frame.port == outlet).copied(),
+            _ => None,
+        };
+        let terminal_work = sum_terminal_work(&terminal_frames);
         let balance = ledger.port_work_step_j - (inlet_work_j - terminal_work);
-        let scale = ledger.port_work_step_j.abs() + inlet_work_j.abs() + terminal_work.abs();
+        let terminal_work_scale = terminal_frames.iter().map(|frame| frame.port_work_j.abs()).sum::<f64>();
+        let scale = ledger.port_work_step_j.abs() + inlet_work_j.abs() + terminal_work_scale;
         if ![inlet_work_j, balance, scale].iter().all(|value| value.is_finite())
             || balance.abs() > 1e-10 * scale.max(1e-300)
         {
             return Err(invalid("DG original net port work does not equal inlet minus terminal work"));
         }
-        Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, inlet_work_j })
+        Ok(DgPortTrial { owner: self, state, output, terminal, terminal_frame, terminal_frames, inlet_work_j })
     }
 }
 
@@ -345,6 +376,7 @@ pub(crate) struct DgPortTrial<'a> {
     output: DgStepOutput,
     terminal: Option<PreparedMimoLoad>,
     terminal_frame: Option<DgTerminalFrame>,
+    terminal_frames: Vec<DgTerminalFrame>,
     inlet_work_j: f64,
 }
 
@@ -356,12 +388,14 @@ impl DgPortTrial<'_> {
     pub(crate) const fn terminal_frame(&self) -> Option<&DgTerminalFrame> {
         self.terminal_frame.as_ref()
     }
+    pub(crate) fn terminal_frames(&self) -> &[DgTerminalFrame] { &self.terminal_frames }
 
     /// Publish every already validated candidate; all fallible checks precede this.
     pub(crate) fn accept(self) -> DgStepOutput {
         self.owner.state = self.state;
         self.owner.terminal = self.terminal;
         self.owner.last_terminal_frame = self.terminal_frame;
+        self.owner.last_terminal_frames = self.terminal_frames;
         self.output
     }
 }
@@ -370,3 +404,5 @@ impl DgPortTrial<'_> {
 mod tests;
 #[cfg(test)]
 mod terminal_tests;
+#[cfg(test)]
+mod terminal_group_tests;
