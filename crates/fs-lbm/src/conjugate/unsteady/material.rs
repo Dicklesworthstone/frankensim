@@ -250,6 +250,7 @@ impl MaterialMomentum {
         end_s: f64,
         darcy: bool,
         body: bool,
+        buoyancy: bool,
         gate: &CancelGate,
     ) -> Result<(), ChtError> {
         self.admit_interval(start_s, dt_s, end_s)?;
@@ -261,7 +262,9 @@ impl MaterialMomentum {
             start_s,
             duration_s: dt_s,
             end_s,
-            power: ViscousPower::stationary(domain, darcy, body),
+            power: ViscousPower::stationary(domain, darcy, body || buoyancy),
+            cell_buoyancy_power_w: buoyancy.then(|| vec![0.0; domain.cell_count()]),
+            supplied_buoyancy_power_w: 0.0,
             initial_kinetic_energy_j: 0.0,
             final_kinetic_energy_j: 0.0,
             backward_euler_loss_j: 0.0,
@@ -294,6 +297,7 @@ impl MaterialMomentum {
         config: &SimpleConfig,
         viscosity_pa_s: &[f64],
         force_n_m3: Option<&[[f64; 3]]>,
+        buoyancy_force_n_m3: Option<&[[f64; 3]]>,
         drag_pa_s_m2: Option<&[f64]>,
         start_s: f64,
         dt_s: f64,
@@ -324,7 +328,15 @@ impl MaterialMomentum {
         let mechanical_step = self
             .heating
             .as_ref()
-            .map(|heating| solver.unsteady_mechanical_step(start_s, end_s, heating.controls, gate))
+            .map(|heating| {
+                solver.unsteady_mechanical_step(
+                    start_s,
+                    end_s,
+                    buoyancy_force_n_m3,
+                    heating.controls,
+                    gate,
+                )
+            })
             .transpose()?;
         let mut kinetic_energy_j = 0.0;
         for c in 0..domain.cell_count() {

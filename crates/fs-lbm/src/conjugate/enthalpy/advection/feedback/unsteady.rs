@@ -9,6 +9,7 @@ use crate::conjugate::{
     FlowStepRecord, FvFlow, UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls,
 };
 use fs_conduction::transient::deposition::CellId;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 impl<F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
@@ -96,10 +97,16 @@ where
     /// kinetic change, physical heat and that numerical loss to the declared
     /// power allowance. Refine time and space for accuracy.
     ///
-    /// Phase locking of a moving face, openings, fans, configured resistance,
-    /// turbulence and Boussinesq forcing refuse. A stationary Darcy skeleton must share
-    /// the mapped bulk enthalpy at local thermal equilibrium. This mode does
-    /// not debit a finite actuator reservoir, nor model gravitational energy,
+    /// Material Boussinesq force uses density from the same starting epoch and
+    /// adds to any external force in the native momentum RHS. Its signed work
+    /// is a separately reported subset of total body work, never a second heat
+    /// source. Only molecular and Darcy dissipation enter the thermal owner.
+    /// The reference-density inertia and fixed cell masses remain unchanged.
+    ///
+    /// Phase locking of a moving face, openings, fans, configured resistance
+    /// and turbulence refuse. A stationary Darcy skeleton must share the
+    /// mapped bulk enthalpy at local thermal equilibrium. This mode does not
+    /// debit a finite actuator or gravitational-potential reservoir, nor model
     /// pressure compressibility, moving solid work or phase-density changes.
     ///
     /// Attach before the first momentum advance. Reattaching controls to an
@@ -110,9 +117,9 @@ where
         controls: ViscousHeatControls,
     ) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
-        if self.buoyancy.is_some() || self.viscous_heating.is_some() {
+        if self.viscous_heating.is_some() {
             return Err(invalid(
-                "unsteady mechanical heating requires explicit actuator work, without Boussinesq or steady heating",
+                "unsteady mechanical heating cannot be combined with steady heating",
             ).into());
         }
         crate::conjugate::simple::viscous_heat::admit_heating(self.domain, self.config, controls)?;
@@ -131,6 +138,9 @@ where
     /// One vector [N/m3] per native voxel; fixed solid entries must be zero.
     /// Work is evaluated on the SAME endpoint faces as inertia/dissipation;
     /// negative work is permitted. Only physical losses heat material.
+    /// This force adds to material buoyancy. The mechanical receipt keeps
+    /// total body work and its signed buoyancy subset; their difference is
+    /// actuator work. Neither work account is an additional thermal source.
     /// Updating this drive between accepted advances preserves face momentum,
     /// so turning it off permits actual kinetic decay rather than a restart.
     pub fn with_unsteady_body_force_heating(
@@ -344,6 +354,7 @@ where
                 end_s,
                 applied.mushy_drag_pa_s_m2.is_some(),
                 applied.external_force_n_m3.is_some(),
+                applied.buoyancy_force_n_m3.is_some(),
                 self.gate,
             )?;
             return check_gate(self.gate, check).map_err(Into::into);
@@ -359,6 +370,27 @@ where
                 viscosity[sample.voxel] = transport.dynamic_viscosity_pa_s();
             }
         }
+        // Preserve both signed drives. The source fields remain separate in
+        // the applied epoch, while the native RHS receives their actual sum.
+        let force_n_m3: Option<Cow<'_, [[f64; 3]]>> = match (
+            applied.external_force_n_m3.as_deref(),
+            applied.buoyancy_force_n_m3.as_deref(),
+        ) {
+            (Some(external), Some(buoyancy)) => {
+                let mut total = Vec::with_capacity(domain.cell_count());
+                for (external, buoyancy) in external.iter().zip(buoyancy) {
+                    check_gate(self.gate, check)?;
+                    let force = std::array::from_fn(|a| external[a] + buoyancy[a]);
+                    if force.iter().any(|f| !f.is_finite()) {
+                        return Err(invalid("combined material body force must remain finite").into());
+                    }
+                    total.push(force);
+                }
+                Some(Cow::Owned(total))
+            }
+            (Some(force), None) | (None, Some(force)) => Some(Cow::Borrowed(force)),
+            (None, None) => None,
+        };
         self.unsteady
             .as_mut()
             .expect("checked retained momentum")
@@ -367,10 +399,8 @@ where
                 &fluid,
                 self.config,
                 &viscosity,
-                applied
-                    .external_force_n_m3
-                    .as_deref()
-                    .or(applied.buoyancy_force_n_m3.as_deref()),
+                force_n_m3.as_deref(),
+                applied.buoyancy_force_n_m3.as_deref(),
                 applied.mushy_drag_pa_s_m2.as_deref(),
                 start_s,
                 dt_s,

@@ -5,6 +5,8 @@
 //! with K = sum(M*u^2)/2 and N_BE = sum(M*(u1-u0)^2)/2.
 //! M uses the SAME staggered half-cell volumes as momentum(), including graded
 //! grids. N_BE is numerical loss; it is reported and NEVER deposited into h.
+//! W_body includes material buoyancy and external forces. Buoyancy's signed
+//! subset is attributed separately, without a gravitational-potential store.
 
 use super::*;
 
@@ -19,7 +21,16 @@ pub struct UnsteadyMechanicalStep {
     pub start_s: f64,
     pub duration_s: f64,
     pub end_s: f64,
+    /// Body power in this receipt is the TOTAL of buoyancy and external force.
     pub power: ViscousPower,
+    /// Signed buoyancy work rate per original voxel [W], zero on fixed solids.
+    /// This is a subset of power.cell_body_power_w, NEVER additional heat.
+    /// None when no material buoyancy law is attached.
+    pub cell_buoyancy_power_w: Option<Vec<f64>>,
+    /// Signed subset of power.supplied_body_power_w on the same native faces.
+    /// External actuator power is total body power minus this value. There is
+    /// no resolved gravitational-potential reservoir debited by this account.
+    pub supplied_buoyancy_power_w: f64,
     pub initial_kinetic_energy_j: f64,
     pub final_kinetic_energy_j: f64,
     /// Nonnegative backward-Euler loss, outside physical heat.
@@ -39,7 +50,11 @@ pub struct UnsteadyHeatingAudit {
     pub final_kinetic_energy_j: f64,
     pub wall_work_j: [f64; 6],
     pub supplied_wall_work_j: f64,
+    /// TOTAL signed work of buoyancy and external body forces.
     pub supplied_body_work_j: f64,
+    /// Signed buoyancy subset of supplied_body_work_j, not additional supply
+    /// or heat. Subtract it from total body work to recover actuator work.
+    pub supplied_buoyancy_work_j: f64,
     pub generated_heat_j: f64,
     pub molecular_heat_j: f64,
     pub darcy_heat_j: f64,
@@ -90,6 +105,10 @@ impl UnsteadyHeatingAudit {
             (
                 &mut next.supplied_body_work_j,
                 step.power.supplied_body_power_w,
+            ),
+            (
+                &mut next.supplied_buoyancy_work_j,
+                step.supplied_buoyancy_power_w,
             ),
             (&mut next.generated_heat_j, step.power.heat_w),
             (&mut next.molecular_heat_j, step.power.molecular_heat_w),
@@ -144,6 +163,7 @@ impl Solver<'_> {
         &self,
         start_s: f64,
         end_s: f64,
+        buoyancy_force_n_m3: Option<&[[f64; 3]]>,
         controls: ViscousHeatControls,
         gate: &CancelGate,
     ) -> Result<UnsteadyMechanicalStep, ChtError> {
@@ -157,6 +177,13 @@ impl Solver<'_> {
             ));
         }
         let mut power = self.sample_viscous_power(&self.field(), &self.pressure, controls, gate)?;
+        let (cell_buoyancy_power_w, supplied_buoyancy_power_w) = match buoyancy_force_n_m3 {
+            Some(force) => {
+                let (cells, power) = self.body_force_power(force, controls, gate)?;
+                (Some(cells), power)
+            }
+            None => (None, 0.0),
+        };
         power.reynolds = power.reynolds.max(self.source_reynolds(&time.previous)?);
         if power.reynolds > controls.maximum_reynolds {
             return Err(invalid_power(
@@ -212,6 +239,8 @@ impl Solver<'_> {
             duration_s: time.dt,
             end_s,
             power,
+            cell_buoyancy_power_w,
+            supplied_buoyancy_power_w,
             initial_kinetic_energy_j: initial,
             final_kinetic_energy_j: final_energy,
             backward_euler_loss_j: numerical_loss,

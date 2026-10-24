@@ -102,10 +102,13 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub flow: FvFlow,
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
     /// None on the original fixed-density path; never an additional heat input.
+    /// With unsteady heating, its signed native-face work is retained as a
+    /// subset of total body work in unsteady_mechanical_step.
     pub buoyancy_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Explicit externally powered force density at this epoch, separate from
-    /// buoyancy. Its signed work is in viscous_power for quasisteady heating
-    /// or unsteady_mechanical_step for transient heating, never added as heat again.
+    /// buoyancy. Its signed work is in viscous_power for quasisteady heating;
+    /// in unsteady_mechanical_step it is total body work minus the buoyancy
+    /// subset. Work is never added as heat again.
     pub external_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.
@@ -265,8 +268,12 @@ where
     /// make latent-heat cells mobile or infer a melt permeability. Source
     /// departures are checked again at thermal endpoints before publication.
     /// The caller must justify the small-density approximation and the selected
-    /// quasisteady or first-order transient momentum approximation. Gravity/pressure/viscous work is not added to the thermal audit;
-    /// this is not a closed total mechanical-plus-thermal energy model.
+    /// quasisteady or first-order transient momentum approximation. By default,
+    /// mechanical dissipation does not enter the thermal audit. Selecting
+    /// `Self::with_unsteady_viscous_heating` deposits physical molecular/Darcy
+    /// losses once and separately accounts signed buoyancy work, native kinetic
+    /// storage and numerical time loss. Gravity and pressure work are never
+    /// additional heat sources; no gravitational-potential store is resolved.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn try_new_boussinesq(
         thermal: &DepositionSimulation<'_>,
@@ -284,7 +291,8 @@ where
             'a,
             BoussinesqMaterial<F>,
             impl Clone
-            + FnMut(usize, &DepositedCell, f64) -> Result<BoussinesqMaterial<F>, MaterialError>,
+            + FnMut(usize, &DepositedCell, f64) -> Result<BoussinesqMaterial<F>, MaterialError>
+            + use<F, R, O>,
             O,
         >,
         MaterialFlowError<O::Error>,

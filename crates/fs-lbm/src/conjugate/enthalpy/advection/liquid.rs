@@ -102,7 +102,9 @@ impl<'a> LiquidFlowEnthalpyInput<'a> {
         MaterialFlowFeedback<
             'a,
             ResolvedLiquidState,
-            impl Clone + FnMut(usize, &DepositedCell, f64) -> Result<ResolvedLiquidState, MaterialError>,
+            impl Clone
+            + FnMut(usize, &DepositedCell, f64) -> Result<ResolvedLiquidState, MaterialError>
+            + use<'a, O>,
             O,
         >,
         LiquidEnthalpyObserverError<MaterialFlowError<O::Error>>,
@@ -156,7 +158,8 @@ impl<'a> LiquidFlowEnthalpyInput<'a> {
                 usize,
                 &DepositedCell,
                 f64,
-            ) -> Result<BoussinesqMaterial<ResolvedLiquidState>, MaterialError>,
+            ) -> Result<BoussinesqMaterial<ResolvedLiquidState>, MaterialError>
+            + use<'a, O>,
             O,
         >,
         LiquidEnthalpyObserverError<MaterialFlowError<O::Error>>,

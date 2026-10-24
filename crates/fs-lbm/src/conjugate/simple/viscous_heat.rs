@@ -60,9 +60,11 @@ pub struct ViscousPower {
     /// pressure reactions are not included and do no work in this fixed box.
     pub wall_tangential_force_n: [[f64; 3]; 6],
     pub supplied_wall_power_w: f64,
-    /// Signed external actuator work, partitioned with the original MAC half
+    /// Signed total body-force work, partitioned with the original MAC half
     /// cells. This is supply, not an additional heat source. None without forcing.
+    /// A material unsteady receipt separately reports its buoyancy subset.
     pub cell_body_power_w: Option<Vec<f64>>,
+    /// Total signed body-force power, including any material buoyancy [W].
     pub supplied_body_power_w: f64,
     /// Discrete sum p div(u) V [W]; independently required to be negligible.
     pub pressure_constraint_power_w: f64,
@@ -353,6 +355,74 @@ impl Solver<'_> {
         Ok(power)
     }
 
+    // Work of a total force or an explicitly retained force component on the
+    // SAME endpoint faces and half-cell volumes used by momentum(). Keeping
+    // this operator shared makes signed buoyancy attribution independent of
+    // the physical stress/drag heat partition and cell-centred diagnostics.
+    fn body_force_power(
+        &self,
+        force_n_m3: &[[f64; 3]],
+        controls: ViscousHeatControls,
+        gate: &CancelGate,
+    ) -> Result<(Vec<f64>, f64), ChtError> {
+        let domain = self.domain;
+        if force_n_m3.len() != domain.cell_count() {
+            return Err(invalid_power("body-force work needs one vector per voxel"));
+        }
+        let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
+            *value = finite_value("viscous_heat.power", *value + amount)?;
+            Ok(())
+        };
+        let mut body_work = vec![0.0; domain.cell_count()];
+        for (c, work) in body_work.iter_mut().enumerate() {
+            poll(gate)?;
+            if force_n_m3[c]
+                .iter()
+                .any(|f| !f.is_finite() || (!domain.is_fluid(c) && *f != 0.0))
+            {
+                return Err(invalid_power("body-force work needs finite, zero-solid forces"));
+            }
+            if !domain.is_fluid(c) {
+                continue;
+            }
+            let at = domain.coords(c);
+            for a in 0..3 {
+                for plus in [false, true] {
+                    add(
+                        work,
+                        0.5 * domain.volume(c)
+                            * force_n_m3[c][a]
+                            * self.vel[a][self.cell_face(a, at, plus)],
+                    )?;
+                }
+            }
+        }
+        // Independently traverse the exact RHS assembled in momentum(), on
+        // its unknown faces. Fixed normal walls have zero velocity.
+        let mut staggered_work = 0.0;
+        for a in 0..3 {
+            for &index in &self.comps[a].unknowns {
+                poll(gate)?;
+                let plus = self.comps[a].coords(index);
+                let mut minus = plus;
+                minus[a] -= 1;
+                let fm = force_n_m3[cell_of(self.n, minus)][a];
+                let fp = force_n_m3[cell_of(self.n, plus)][a];
+                let force = self.comp_face_area(a, index)
+                    * (0.5 * domain.width(a, minus[a]))
+                        .mul_add(fm, 0.5 * domain.width(a, plus[a]) * fp);
+                add(&mut staggered_work, force * self.vel[a][index])?;
+            }
+        }
+        let total = finite_value("viscous_heat.body_supply", body_work.iter().sum())?;
+        if (total - staggered_work).abs() > controls.power_tolerance_w {
+            return Err(invalid_power(
+                "body-force work and original-cell partition disagree",
+            ));
+        }
+        Ok((body_work, staggered_work))
+    }
+
     // The stress/drag quadratures are shared by steady and inertial Stokes.
     // Only the caller owns the storage/time balance; no steady power equality
     // is imposed on an accelerating field.
@@ -571,47 +641,7 @@ impl Solver<'_> {
         let (cell_body_power_w, supplied_body_power_w) = if self.force.is_empty() {
             (None, 0.0)
         } else {
-            let mut body_work = vec![0.0; domain.cell_count()];
-            for (c, work) in body_work.iter_mut().enumerate() {
-                poll(gate)?;
-                if !domain.is_fluid(c) {
-                    continue;
-                }
-                let at = domain.coords(c);
-                for a in 0..3 {
-                    for plus in [false, true] {
-                        add(
-                            work,
-                            0.5 * domain.volume(c)
-                                * self.force[c][a]
-                                * self.vel[a][self.cell_face(a, at, plus)],
-                        )?;
-                    }
-                }
-            }
-            // Independent work of the exact RHS assembled in momentum(), on
-            // the same unknown faces. Fixed normal walls have zero velocity.
-            let mut staggered_work = 0.0;
-            for a in 0..3 {
-                for &index in &self.comps[a].unknowns {
-                    poll(gate)?;
-                    let plus = self.comps[a].coords(index);
-                    let mut minus = plus;
-                    minus[a] -= 1;
-                    let fm = self.force[cell_of(self.n, minus)][a];
-                    let fp = self.force[cell_of(self.n, plus)][a];
-                    let force = self.comp_face_area(a, index)
-                        * (0.5 * domain.width(a, minus[a]))
-                            .mul_add(fm, 0.5 * domain.width(a, plus[a]) * fp);
-                    add(&mut staggered_work, force * self.vel[a][index])?;
-                }
-            }
-            let total = finite_value("viscous_heat.body_supply", body_work.iter().sum())?;
-            if (total - staggered_work).abs() > controls.power_tolerance_w {
-                return Err(invalid_power(
-                    "body-force work and original-cell partition disagree",
-                ));
-            }
+            let (body_work, staggered_work) = self.body_force_power(&self.force, controls, gate)?;
             (Some(body_work), staggered_work)
         };
         let mut pressure_constraint_power_w = 0.0;
