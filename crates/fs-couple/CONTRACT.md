@@ -58,18 +58,22 @@ gas for its vanishing-load limit.
 `tribothermal::dynamics::SlidingPair` adds force-driven tangent inertia to the
 original material sliding contact and finite enthalpy network. Each complete
 uniform body's original thermal-cell mass also supplies its inertial mass.
-Centre-of-mass momentum and one Newton--Krylov relative-speed residual determine
-both velocities; every trial restarts the original contact/thermal candidate,
+Both velocities and applied forces have two components in the original fixed
+tangent frame, ordered by body A then body B. Centre-of-mass momentum and two
+Newton--Krylov relative-velocity residuals determine the complete planar motion;
+every trial restarts the original contact/thermal candidate,
 including its actual endpoint temperature, pressure, speed and slip-history
 source queries. Separate impulse and whole-system energy gates precede joint
 publication of velocities, original slip/work history and finite temperatures.
 Original friction work is an internal transfer; external force work is measured
-on each body's endpoint displacement. Physical friction alone is partitioned
+as the dot product with each body's endpoint displacement. Physical friction alone is partitioned
 as heat, while backward-Euler kinetic loss remains an explicit numerical account.
 The fixed patch/normal-load reduction passes released motion and inertial
 compliance `dt²(1/mA + 1/mB)` to the original tangential return map. That owner
-selects exact sticking or signed sliding; the source speed and accumulated
-distance converge to its solved slip. A stuck branch queries exact zero speed
+selects exact sticking or vector sliding; the material source queries the
+Euclidean speed, and accumulated distance follows actual slip arc length.
+The source motion converges to that same two-component native slip. A stuck
+branch queries exact zero speed
 and leaves slip/work history unchanged. Bodies can accelerate together, stop
 and restart in the opposite direction, under the native endpoint static-first
 convention. It does not locate the physical stopping instant within a coarse
@@ -77,7 +81,8 @@ interval: a backward-Euler stop may have numerical kinetic loss and zero endpoin
 friction heat. Refine time to resolve stopping heat; numerical loss is never
 thermalized. Zero-speed material support is required. No normal, rotational or
 contact-geometry evolution is added. Focused synthetic regressions cover static
-capacity, signed source feedback, stopping/restart, continuation and rollback;
+capacity, signed source feedback, oblique motion, rotation of the tangent frame,
+stopping/restart, continuation and rollback;
 native execution remains required for qualification. The internal same-trial
 friction callback allows other energy owners to share this original solve;
 compliant consumers must gate queried motion against the native solved slip.
