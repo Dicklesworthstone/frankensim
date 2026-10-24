@@ -3,6 +3,7 @@ audio 48000 4801 2
 ambient mixture 293.15 100000 mole 2 N2 0.7 O2 0.3
 reed 0.0004 0.013 6000 0 0 0.35
 baffled_outlet 0 0 0.5 4 16 1000
+observer_law stokes-kirchhoff
 termination flanged
 segments 2
 cylinder 0.0015 0.2

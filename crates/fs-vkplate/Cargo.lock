@@ -664,6 +664,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-la",
  "fs-matdb",
  "fs-material",
  "fs-math",

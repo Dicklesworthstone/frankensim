@@ -7,6 +7,33 @@ use super::ambient::Ambient;
 
 pub const HEADER: &str = "frankensim-drum-spec-v1";
 const MAX_BYTES: usize = 65_536;
+/// A file's head loss field: no citable film or edge loss, entered as zero drag.
+pub const STATED_UNKNOWN_HEAD_LOSS: &str = "stated-unknown";
+/// A file's head loss field: the `--head-relaxation` material law supplies it.
+pub const RELAXATION_HEAD_LOSS: &str = "relaxation";
+const UNSOURCED_HEAD_DAMPING: &str = "an authored head damping ratio has no source; declare stated-unknown (zero modal drag, with a receipt) or relaxation (with --head-relaxation)";
+
+/// Where a head's loss comes from. A file states it with a token and never
+/// carries an authored damping ratio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HeadLoss {
+    /// No citable film or edge loss: zero modal drag, printed as a stated unknown.
+    StatedUnknown,
+    /// The head's loss is the `--head-relaxation` material law: zero modal drag.
+    Relaxation,
+    /// `Spec::reference()`'s authored ratio: a library fixture, which no file can declare.
+    Fixture,
+}
+impl HeadLoss {
+    /// The receipt a render prints for this head.
+    pub fn receipt(self, head: &str, damping_ratio: f64) -> String {
+        match self {
+            Self::StatedUnknown => format!("head {head} film and edge loss: STATED UNKNOWN, entered as 0; its decays are upper bounds"),
+            Self::Relaxation => format!("head {head} loss: the --head-relaxation material law; no modal drag"),
+            Self::Fixture => format!("head {head} loss: library fixture damping ratio {damping_ratio} (Spec::reference(), not a file)"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Head {
@@ -25,6 +52,8 @@ pub struct Spec {
     pub outer_radius_m: f64,
     /// Batter then resonant head; both use the same geometric mesh.
     pub heads: [Head; 2],
+    /// Where each head's loss comes from; only a Fixture carries a nonzero ratio.
+    pub head_loss: [HeadLoss; 2],
     /// Equilibrated installed tensor variations; zero preserves uniform heads.
     pub tension_variation: [TensionVariation; 2],
     pub radial_intervals: usize,
@@ -41,6 +70,7 @@ impl Spec {
             density_kg_m3: 1390.0, tension_n_m: 3000.0, damping_ratio: 0.001 };
         Self { radius_m: 0.1778-0.0075, depth_m: 0.1651, outer_radius_m: 0.1778,
             heads: [batter, Head { thickness_m: 0.0000762, tension_n_m: 1500.0, ..batter }],
+            head_loss: [HeadLoss::Fixture; 2],
             tension_variation: [TensionVariation::default(); 2],
             radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0],
             ambient: Ambient::reference() }
@@ -57,6 +87,11 @@ impl Spec {
             return Err("drum needs 1..32 radial intervals, 8..128 azimuths and a finite increasing nonnegative frequency window".into());
         }
         for field in self.tension_variation { field.validate()?; }
+        for (head,loss) in self.heads.iter().zip(self.head_loss) {
+            if loss!=HeadLoss::Fixture && head.damping_ratio!=0.0 {
+                return Err("a stated-unknown or relaxation head has zero modal drag".into());
+            }
+        }
         for head in self.heads {
             if [head.thickness_m,head.young_pa,head.poisson,head.density_kg_m3,
                 head.tension_n_m,head.damping_ratio].iter().any(|v| !v.is_finite())
@@ -66,6 +101,13 @@ impl Spec {
             // The existing section owner remains the authority on E, nu, h, rho.
             fs_plate::PlateSection::isotropic(head.young_pa,head.poisson,
                 head.thickness_m,head.density_kg_m3)?;
+        }
+        Ok(())
+    }
+    /// A `relaxation` head needs the `--head-relaxation` law that supplies its loss.
+    pub fn admit_head_loss(&self, relaxation_supplied: bool) -> Result<(), Error> {
+        if !relaxation_supplied && self.head_loss.contains(&HeadLoss::Relaxation) {
+            return Err("a head declaring loss relaxation needs --head-relaxation FILE, the law that supplies it".into());
         }
         Ok(())
     }
@@ -129,11 +171,13 @@ impl Spec {
     /// Geometry, both heads, mesh, band and the `ambient,<gas record>` row are
     /// mandatory: an imported drum declares its own air. Optional per-head
     /// tension_variation and tension_harmonic rows add a physical equilibrated tensor, not pitches.
+    /// Each head states its loss as stated-unknown or relaxation; an authored damping ratio refuses.
     /// Order is free and comments start with #.
     pub fn read(text: &str) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band,mut ambient) = (false,None,None,None,None);
         let mut heads = [None,None];
+        let mut head_loss = [HeadLoss::StatedUnknown; 2];
         let mut variations = [None,None];
         let mut variation_seen = [false; 2];
         let mut harmonic_seen = [[false; fs_plate::shell::head::tension::TENSION_HARMONIC_COUNT];2];
@@ -162,8 +206,14 @@ impl Spec {
                 "head" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown head"))};
                     if heads[i].is_some() { return Err(error("duplicate head")); }
+                    head_loss[i]=match fields[7] {
+                        STATED_UNKNOWN_HEAD_LOSS=>HeadLoss::StatedUnknown,
+                        RELAXATION_HEAD_LOSS=>HeadLoss::Relaxation,
+                        other if other.parse::<f64>().is_ok() => return Err(error(UNSOURCED_HEAD_DAMPING)),
+                        _=>return Err(error("unknown head loss; declare stated-unknown or relaxation")),
+                    };
                     heads[i]=Some(Head {thickness_m:value(2)?,young_pa:value(3)?,poisson:value(4)?,
-                        density_kg_m3:value(5)?,tension_n_m:value(6)?,damping_ratio:value(7)?});
+                        density_kg_m3:value(5)?,tension_n_m:value(6)?,damping_ratio:0.0});
                 }
                 "tension_variation" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-variation head"))};
@@ -210,6 +260,7 @@ impl Spec {
             band_hz:band.ok_or("missing head frequency window")?,
             tension_variation:variations.map(Option::unwrap_or_default),
             heads:[heads[0].ok_or("missing batter head")?,heads[1].ok_or("missing resonant head")?],
+            head_loss,
             ambient:ambient.ok_or("missing drum ambient row: an imported drum must declare its air")?};
         result.validate()?; Ok(result)
     }

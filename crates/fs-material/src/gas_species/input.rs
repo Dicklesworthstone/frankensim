@@ -43,8 +43,12 @@ pub struct ThermochemicalSources<'a> {
 pub enum GasRecord {
     /// The unchanged legacy (T,p,RH) owner.
     Legacy(GasState),
-    /// The unchanged bounded, calorically perfect named-species owner.
-    Mixture(GasState),
+    /// The unchanged bounded, calorically perfect named-species owner, with
+    /// the record's species and their mole fractions in record order (a mass
+    /// record is converted by the species' own molar masses). A consumer that
+    /// needs the composition, such as an observer law, reads it here; it is
+    /// never inferred from the state's gamma or molar mass.
+    Mixture(GasState, Vec<(GasSpecies, f64)>),
     /// NASA-9 evaluation, composition, transport and original pack identities.
     Thermochemical(ResolvedThermochemicalGasState),
 }
@@ -53,7 +57,7 @@ impl GasRecord {
     #[must_use]
     pub fn state(&self) -> &GasState {
         match self {
-            Self::Legacy(gas) | Self::Mixture(gas) => gas,
+            Self::Legacy(gas) | Self::Mixture(gas, _) => gas,
             Self::Thermochemical(resolved) => resolved.state(),
         }
     }
@@ -203,11 +207,9 @@ pub fn read_gas_record(
         .map_err(GasInputError::Material)?;
         GasRecord::Thermochemical(resolved)
     } else {
-        let gas = read(&mut remaining, inherited_pressure_pa)?;
-        if kind == Some("mixture") {
-            GasRecord::Mixture(gas)
-        } else {
-            GasRecord::Legacy(gas)
+        match read(&mut remaining, inherited_pressure_pa)? {
+            (gas, Some(composition)) => GasRecord::Mixture(gas, composition),
+            (gas, None) => GasRecord::Legacy(gas),
         }
     };
     *fields = remaining;
@@ -307,12 +309,17 @@ fn scalar(fields: &mut SplitAsciiWhitespace<'_>) -> Result<f64, GasInputError> {
     if !value.is_finite() { return Err(GasInputError::Input("gas scalars must be finite")); }
     Ok(value)
 }
-fn read(fields: &mut SplitAsciiWhitespace<'_>, inherited: Option<f64>) -> Result<GasState, GasInputError> {
+/// A legacy record's state, or a mixture record's state with its species and
+/// mole fractions.
+type ReadGas = (GasState, Option<Vec<(GasSpecies, f64)>>);
+
+fn read(fields: &mut SplitAsciiWhitespace<'_>, inherited: Option<f64>) -> Result<ReadGas, GasInputError> {
     if fields.clone().next() != Some("mixture") {
         let temperature = scalar(fields)?;
         let pressure = match inherited { Some(p) => p, None => scalar(fields)? };
         let humidity = scalar(fields)?;
         return GasState::try_new_moist_air(temperature, pressure, humidity)
+            .map(|gas| (gas, None))
             .map_err(GasInputError::Material);
     }
     word(fields)?;
@@ -336,7 +343,11 @@ fn read(fields: &mut SplitAsciiWhitespace<'_>, inherited: Option<f64>) -> Result
     }
     let composition = Composition::new(basis, fractions).map_err(|error|
         GasInputError::Material(MaterialError::Parameters { what: format!("gas composition: {error}") }))?;
-    resolve_gas_mixture(&species, &composition, temperature, pressure).map_err(GasInputError::Material)
+    let gas = resolve_gas_mixture(&species, &composition, temperature, pressure).map_err(GasInputError::Material)?;
+    let masses: Vec<_> = species.iter().map(|s| fs_qty::MolarMass::new(s.spec().molar_mass)).collect();
+    let moles = composition.to_mole_fractions(&masses).map_err(|error|
+        GasInputError::Material(MaterialError::Parameters { what: format!("gas composition: {error}") }))?;
+    Ok((gas, Some(species.into_iter().zip(moles.fractions().iter().copied()).collect())))
 }
 
 #[cfg(test)]

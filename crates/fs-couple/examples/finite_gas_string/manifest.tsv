@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	manufactured-finite-gas-string
+redistribution	permitted	Manufactured coupling fixture; no measured material authority
+citation	Declared constant elastic/density and temperature-dependent dissipative/caloric conductor fixture
+license	CC0-1.0
+source	fixture	properties.tsv	material-tsv-v1

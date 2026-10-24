@@ -1,7 +1,12 @@
 use super::*;
 use crate::driving_point::regional::field::tests::field;
 
-const INPUT: &str = include_str!("../../../../examples/reed-flanged-baffled.performance");
+const INPUT_FIXTURE: &str = include_str!("../../../../examples/reed-flanged-baffled.performance");
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
+static INPUT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| INPUT_FIXTURE.replace("observer_law stokes-kirchhoff\n", ""));
 
 fn source() -> String {
     INPUT
@@ -77,12 +82,15 @@ fn scheduled_field_keeps_original_compact_voice_at_every_sample() {
         reed, Termination::FlangedOpen, PlateBank::default(), 1.0, 48000, 4801, None).unwrap();
     let schedule = GestureSchedule::from_canonical_bytes(
         text.split_once("\nschedule\n").unwrap().1.as_bytes()).unwrap();
+    let ambient = *p.ambient_gas();
+    let mut observer = p.reference_observer(&ambient);
     for n in 0..4801 {
         direct.set_blowing_pressure(schedule.sample("blow", n*700/48000).unwrap());
         let mut a = [0.0]; let mut b = [0.0];
         p.block(&mut a).unwrap();
         direct.step_block(&mut b).unwrap();
-        assert_eq!(a[0].to_bits(), b[0].to_bits());
+        let parts = direct.last_observer_parts();
+        assert_eq!(a[0].to_bits(), (parts.internal_pa + observer.process(parts.radiated_pa)).to_bits());
         assert_eq!(voice(&p).reed_y.to_bits(), direct.reed_y.to_bits());
         assert_eq!(voice(&p).reed_v.to_bits(), direct.reed_v.to_bits());
     }

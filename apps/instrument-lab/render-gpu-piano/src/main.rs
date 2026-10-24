@@ -34,6 +34,15 @@ fn main() {
         }
         return;
     }
+    let requested = std::env::var("FS_PIANO_GPU").unwrap_or_else(|_| "auto".into());
+    if matches!(requested.as_str(), "cuda" | "metal")
+        && args.iter().any(|arg| {
+            matches!(arg.as_str(), "--diagnostic-volume" | "--bridge-trace-csv")
+        })
+    {
+        eprintln!("render-gpu-piano: required {requested} backend cannot render CPU-only diagnostic volume or bridge tracing");
+        std::process::exit(2);
+    }
     if let Err(error) = grand_piano::cli_main(&args) {
         eprintln!("render-gpu-piano: {error}");
         std::process::exit(1);

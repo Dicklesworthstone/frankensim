@@ -19,13 +19,19 @@ One fs-material gas state supplies the cavity bulk modulus, receiver density and
 Frequencies follow the declared heads and gas spring; pressure follows their driven motion and the \
 declared observation geometry and atmosphere, with fixed full-scale pressure.";
 
-/// What this engine does NOT establish, verbatim.
+/// The heads' loss is the editable damping ratio, a fitted estimate. The offline
+/// drum states a STATED UNKNOWN here instead; the live drum keeps the fitted
+/// value until a sourced film or edge loss exists (ruling 6533).
+pub const HEAD_LOSS_RECEIPT: &str = "head loss: FITTED (declared estimate; film and edge loss not yet sourced)";
+
+/// What this engine does NOT establish, verbatim. It contains HEAD_LOSS_RECEIPT.
 pub const NO_CLAIM: &str = "Not the offline reference and not a calibrated instrument. Omitted here: \
 boundary-element radiation of the closed drum (replaced by two independent infinite-baffle half-spaces, \
 one per head), radiation loading on the heads, geometric head stretching (pitch glide), snare wires, \
 shell flexibility (rigid shell and hoops), internal air modes (uniform-pressure spring only), vents, \
 stick flexure and hand mechanics. Head material, tension, damping ratio, stick profile and Hertz tip \
-are editable estimates, not measurements of a specific drum. Only the declared head eigen-window is \
+are editable estimates, not measurements of a specific drum; head loss: FITTED (declared estimate; film \
+and edge loss not yet sourced), entered as that damping ratio. Only the declared head eigen-window is \
 retained; partials above it are absent, not approximated. No samples, noise, normalization, automatic \
 gain or pitch control is applied anywhere. The atmosphere is a prescribed, uniform, nonreacting \
 ideal gas shared by the cavity and exterior, with the material owner's composition and phase limits; \
@@ -47,7 +53,25 @@ impl LiveDrumCore {
     /// # Errors
     /// Any typed refusal of parameters, geometry, eigen-solve or owners.
     pub fn new(params_json: &str) -> Result<Self, Refusal> {
-        let params = DrumParams::default().overlay_json(params_json)?;
+        Self::from_params(DrumParams::default().overlay_json(params_json)?)
+    }
+
+    /// As `new`, with the atmosphere resolved from `gas_record` through its
+    /// source packet ([`crate::params::Atmosphere::from_source_packet`]). A
+    /// later `rebuild` without a `gas` key keeps this atmosphere.
+    ///
+    /// # Errors
+    /// Any typed refusal, including `gas_refused` for the record or packet.
+    pub fn with_gas_sources(params_json: &str, gas_record: &str, bytes: &[u8], lengths: &[u32],
+        water_species: &str, phase: &str) -> Result<Self, Refusal> {
+        let mut params = DrumParams::default().overlay_json(params_json)?;
+        params.atmosphere = crate::params::Atmosphere::from_source_packet(
+            gas_record, bytes, lengths, water_species, phase)?;
+        params.validate()?;
+        Self::from_params(params)
+    }
+
+    fn from_params(params: DrumParams) -> Result<Self, Refusal> {
         let inst = Instrument::build(params)?;
         let voice = Voice::new(&inst, inst.params.substeps)?;
         Ok(Self { inst, voice, batter: Vec::new(), resonant: Vec::new(), refusal: None, builds: 1 })

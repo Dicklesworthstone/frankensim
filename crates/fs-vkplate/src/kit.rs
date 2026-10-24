@@ -19,8 +19,8 @@ pub const HIHAT_STICK_TIP_RADIUS_M: f64 = 0.004;
 
 /// Polyester (Mylar) film.
 const MYLAR: (f64, f64, f64) = (4.0e9, 0.38, 1390.0);
-/// B20 cymbal bronze.
-pub(crate) const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
+/// B20 cymbal bronze (E Pa, nu, rho kg/m^3): handbook values, not a measured specimen.
+pub const BRONZE: (f64, f64, f64) = (1.05e11, 0.33, 8600.0);
 
 pub struct Piece {
     pub instrument: Instrument,
@@ -426,6 +426,22 @@ fn bow_thickness(c: &CymbalSpec, x: f64) -> f64 {
     c.bow_thickness * (1.15 - 0.15 * x / c.radius)
 }
 
+/// The felt washers' support of a stand-mounted cymbal: (r0, r1, stiffness N/m per m^2,
+/// damping N s/m per m^2) over the annulus round the 13 mm centre hole. Authored estimates
+/// (~1e5 N/m and ~3 N s/m in all), not felt data.
+pub fn felt_support(c: &CymbalSpec) -> (f64, f64, f64, f64) {
+    // felt washers clamp the annulus round the 13 mm centre hole
+    let (r1, n) = ring_nodes(c.grid, 0.0065, 0.02);
+    let mount_scale = if c.radius < 0.15 { 0.25 } else { 1.0 };
+    let (ks, cs) = if r1 > 0.02 {
+        let per = PI * (0.02f64.powi(2) - 0.0065f64.powi(2)) / (n as f64 * c.grid * c.grid);
+        (9.0e7 * per * mount_scale, 2.7e3 * per * mount_scale)
+    } else {
+        (9.0e7 * mount_scale, 2.7e3 * mount_scale)
+    };
+    (0.0065, r1, ks, cs)
+}
+
 /// A cymbal shell; `felt` puts it on a stand's felt washers (a hi-hat's top shell hangs from the
 /// clutch on the pull rod instead, so all the pedal force reaches the rims).
 fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64), viscosity: Option<(&PlaneStressViscosity, f64)>) -> Result<Body, String> {
@@ -443,21 +459,13 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)
         let bell = if x < rb { al * 0.5 * (1.0 + (PI * x / rb).cos()) } else { 0.0 };
         bow + bell
     };
-    // felt washers clamp the annulus round the 13 mm centre hole
-    let (r1, n) = ring_nodes(c.grid, 0.0065, 0.02);
-    let mount_scale = if r < 0.15 { 0.25 } else { 1.0 };
-    let (ks, cs) = if r1 > 0.02 {
-        let per = PI * (0.02f64.powi(2) - 0.0065f64.powi(2)) / (n as f64 * c.grid * c.grid);
-        (9.0e7 * per * mount_scale, 2.7e3 * per * mount_scale)
-    } else {
-        (9.0e7 * mount_scale, 2.7e3 * mount_scale)
-    };
+    let (r0, r1, ks, cs) = felt_support(c);
     let spec = PlateSpec {
         radius: r, hole: 0.0065, grid: c.grid, edge: Edge::Free, thickness: &th, rest_height: &z,
         young: elastic.0, poisson: elastic.1, density: elastic.2, tension: 0.0, bending: true,
         nonlinear: Nonlinear::VonKarman, t60: c.t60,
         // felt washers: ~1e5 N/m and ~3 N s/m in all, spread over the clamped annulus
-        support: if felt { Some((0.0065, r1, ks, cs)) } else { None }, muffle: None,
+        support: if felt { Some((r0, r1, ks, cs)) } else { None }, muffle: None,
     };
     match viscosity {
         Some((law, angle)) => Body::plate_with_viscosity(name, &spec, law, angle),

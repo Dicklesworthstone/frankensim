@@ -73,6 +73,28 @@ pub struct ViscousPower {
     pub reynolds: f64,
 }
 
+#[cfg(feature = "enthalpy-coupling")]
+impl ViscousPower {
+    /// The exactly constrained, zero-drive system has no mechanical power.
+    pub(in crate::conjugate) fn stationary(domain: &VoxelDomain, darcy: bool, body: bool) -> Self {
+        Self {
+            cell_heat_w: vec![0.0; domain.cell_count()],
+            heat_w: 0.0,
+            molecular_heat_w: 0.0,
+            darcy_heat_w: 0.0,
+            cell_darcy_heat_w: darcy.then(|| vec![0.0; domain.cell_count()]),
+            wall_power_w: [0.0; 6],
+            wall_tangential_force_n: [[0.0; 3]; 6],
+            supplied_wall_power_w: 0.0,
+            cell_body_power_w: body.then(|| vec![0.0; domain.cell_count()]),
+            supplied_body_power_w: 0.0,
+            pressure_constraint_power_w: 0.0,
+            residual_w: 0.0,
+            reynolds: 0.0,
+        }
+    }
+}
+
 fn invalid_power(reason: &str) -> ChtError {
     ChtError::InvalidInput {
         field: "simple.viscous_heat",

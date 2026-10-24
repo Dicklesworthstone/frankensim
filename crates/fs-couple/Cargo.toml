@@ -14,6 +14,13 @@ path = "examples/material_strings.rs"
 test = false
 bench = false
 
+# The native evolving material/gas journey uses the same public physical owners.
+[[bin]]
+name = "finite_gas_string"
+path = "examples/finite_gas_string.rs"
+test = false
+bench = false
+
 [package.metadata.frankensim]
 layer = "L3"
 
@@ -47,6 +54,7 @@ fs-rand = { path = "../fs-rand" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solid = { path = "../fs-solid" }
 fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
 fs-tribo = { path = "../fs-tribo" }
@@ -69,8 +77,6 @@ fs-plate = { path = "../fs-plate" }
 fs-query = { path = "../fs-query" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
-# Nested-dissection ordering for the TET10 factorizations in shell_solid_crosscheck.
-fs-sparse = { path = "../fs-sparse" }
 [lints]
 workspace = true
 

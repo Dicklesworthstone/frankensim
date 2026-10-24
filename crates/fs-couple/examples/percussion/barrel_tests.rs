@@ -133,7 +133,12 @@ fn rotating_grain_changes_wall_modes_and_real_sidewall_compliance_without_changi
 
 #[test]
 fn inner_skin_pressure_excites_the_barrel_through_both_existing_cavity_images() {
-    let spec = drum(); let barrel = Spec::read(CARD).unwrap().prepare(&spec, DT, false).unwrap();
+    // The exact prepared image propagates the whole coupled network in one dense exponential
+    // (at most 42 fully forced modes, .168). The card's full window holds 48 shell modes, up to
+    // 668 Hz, beside 1 free mass, 2 head modes and 6 air modes. Keeping the shell to 460 Hz
+    // retains 32 modes, including its breathing modes, and cuts below the 481.5 Hz degenerate pair.
+    let spec = drum(); let card = CARD.replace("band_hz,0,100000", "band_hz,0,460");
+    let barrel = Spec::read(&card).unwrap().prepare(&spec, DT, false).unwrap();
     let gate = CancelGate::new_clock_free();
     let air = CylindricalCavity::new(CylinderSpec { radius_m: spec.radius_m, depth_m: spec.depth_m,
         radial_intervals: 32, maximum_azimuthal_order: 4, maximum_axial_order: 2,

@@ -92,6 +92,27 @@ pub enum ModalFrictionError {
     Sticking { /// Signed mismatch [m].
         residual_m: f64, /// Explicit tolerance [m].
         tolerance_m: f64 },
+    /// The active-set rescue (frankensim-o7qbp) could not resolve a consistent
+    /// joint stick/slip partition within its pivot budget. Carries the pivots
+    /// spent against the budget, the last active set tried (S/+/- per port) and
+    /// the worst Karush-Kuhn-Tucker violation (port, condition, size).
+    ActiveSetExhausted {
+        /// Pivots the active-set walk spent.
+        pivots: usize,
+        /// Pivot budget it was allowed.
+        budget: usize,
+        /// Last active set tried, one char per port (S stuck, + slide+, - slide-).
+        last_active_set: String,
+        /// Port of the worst remaining KKT violation.
+        worst_port: usize,
+        /// Which friction condition that port broke.
+        worst_condition: &'static str,
+        /// Magnitude of that violation.
+        worst_size: f64,
+    },
+    /// The active-set rescue was not attempted because an obstacle or shear layer
+    /// is present on a port; the joint solve refused on its original terms.
+    ActiveSetDeclined,
 }
 impl From<ModalCouplingError> for ModalFrictionError {
     fn from(value: ModalCouplingError) -> Self { Self::Network(value) }
@@ -106,6 +127,11 @@ impl core::fmt::Display for ModalFrictionError {
             Self::Law(e) => write!(f, "friction law: {e}"),
             Self::Sticking { residual_m, tolerance_m } => write!(f,
                 "sticking mismatch {residual_m:e} m exceeds {tolerance_m:e} m"),
+            Self::ActiveSetExhausted { pivots, budget, last_active_set, worst_port, worst_condition, worst_size } => write!(f,
+                "active-set rescue exhausted: {pivots}/{budget} pivots, last active set {last_active_set}, \
+                 worst KKT violation at port {worst_port} ({worst_condition}) size {worst_size:e}"),
+            Self::ActiveSetDeclined => write!(f,
+                "active-set rescue not attempted: an obstacle or shear layer is present on a port"),
         }
     }
 }

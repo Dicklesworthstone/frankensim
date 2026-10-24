@@ -3,10 +3,35 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_material::gas_species::input::ThermochemicalSources;
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_couple::render::plate::file::{
     MAX_PLATE_PERFORMANCE_BYTES, PLATE_PERFORMANCE_SCHEMA, PlatePerformance,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
+
+/// Upper bound on one material-card pack a performance section names.
+const MAX_SECTION_PACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read each material-card pack a `section material` record names, relative
+/// to the directory of the input that names it (pexfp.32).
+pub(super) fn section_pack_loader(parent: &Path) -> impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String> + '_ {
+    move |name| {
+        let file = std::fs::File::open(parent.join(name))
+            .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
+        let mut bytes = Vec::new();
+        file.take((MAX_SECTION_PACK_BYTES + 1) as u64).read_to_end(&mut bytes)
+            .map_err(|e| format!("material-card pack {name:?} read failed: {e}"))?;
+        if bytes.len() > MAX_SECTION_PACK_BYTES {
+            return Err("material-card pack exceeds 8 MiB".into());
+        }
+        NormalizedMaterialCardPack::from_bytes(&bytes).map_err(|e| format!("material-card pack {name:?}: {e}"))
+    }
+}
+
+/// `,"section_sources":[...]`: each section's pack, hash, state and point, or its fixture label.
+pub(super) fn section_sources_json(sources: &[String]) -> String {
+    format!(",\"section_sources\":[{}]", sources.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(","))
+}
 
 fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     let mut paths = Vec::new();
@@ -46,8 +71,10 @@ pub(super) fn run_with_gas_sources(
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("plate input read failed: {e}"))?;
-    let performance = PlatePerformance::from_bytes_with_gas_sources(&bytes, block, sources)
+    let parent = Path::new(input).parent().unwrap_or(Path::new("."));
+    let performance = PlatePerformance::from_bytes_with_all_sources(&bytes, block, sources, section_pack_loader(parent))
         .map_err(|e| e.to_string())?;
+    let section_sources = section_sources_json(performance.section_provenance());
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(performance.gas_record()));
     let info = performance.info();
     if info.sample_rate_hz != RATE {
@@ -72,8 +99,8 @@ pub(super) fn run_with_gas_sources(
          \"retained_modes\":{},\"force_events\":{},\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
-         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\
-         \"model_scope\":\"linear flat DKT plate; authored sections; compact baffled observer retarded by r/c in the declared gas; no radiation loading or physical-validation claim\"}}{gas_sources}}}",
+         \"listener_m\":{:e},\"propagation_delay_s\":{:e}{section_sources},\
+         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer retarded by r/c in the declared gas; no radiation loading or physical-validation claim\"}}{gas_sources}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.nodes, info.triangles, info.sections, info.requested_modes, info.retained_modes,
         info.force_events, info.gas.temperature, info.gas.pressure, info.gas.density,

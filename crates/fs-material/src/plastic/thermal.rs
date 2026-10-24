@@ -29,7 +29,8 @@ use crate::phase::{
 };
 use crate::state_point::{
     MaterialPropertySelection, POISSON_RATIO_PROPERTY, ScalarAdmissibility,
-    ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY, resolve_material_state_point,
+    ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY, affine_temperature_slope,
+    resolve_material_state_point,
 };
 use crate::{SmallStrainLaw, Voigt};
 use core::{convert::Infallible, fmt};
@@ -479,12 +480,12 @@ impl<'a> ThermoplasticSource<'a> {
             &youngs_knots,
             state.temperature_k(),
             source.law().elastic.youngs,
-        )?;
+        ).map_err(FeedbackError::Invalid)?;
         let hardening_source_slope = affine_temperature_slope(
             &hardening_knots,
             state.temperature_k(),
             source.hardening_source().value_si(),
-        )?;
+        ).map_err(FeedbackError::Invalid)?;
         let hardening_temperature_slope_pa_k = match query.hardening_basis {
             HardeningPropertyBasis::PlasticStrainModulus => hardening_source_slope,
             HardeningPropertyBasis::UniaxialTangentModulus => {
@@ -910,57 +911,6 @@ impl<'a> CaloricPoint<'a> {
             tolerances,
         )
     }
-}
-
-/// Admit one differentiable affine source path, including every surface-cell cut.
-/// Only floating-point slope roundoff is tolerated; a resolved derivative jump
-/// would create mechanical entropy/energy discontinuities absent from this chart.
-fn affine_temperature_slope(
-    knots: &[(f64, f64)],
-    reference_k: f64,
-    reference_value: f64,
-) -> Result<f64, FeedbackError> {
-    if knots.len() < 2 {
-        return Err(FeedbackError::Invalid(
-            "affine modulus needs a complete temperature path",
-        ));
-    }
-    if knots.iter().all(|(_, value)| *value == reference_value) {
-        return Ok(0.0);
-    }
-    let first = knots[0];
-    let last = knots[knots.len() - 1];
-    let width = last.0 - first.0;
-    if !positive(width) {
-        return Err(FeedbackError::Invalid(
-            "modulus temperature span is invalid",
-        ));
-    }
-    let slope = finite((last.1 - first.1) / width)?;
-    for pair in knots.windows(2) {
-        let width = pair[1].0 - pair[0].0;
-        if !positive(width) {
-            return Err(FeedbackError::Invalid(
-                "modulus source temperatures must increase",
-            ));
-        }
-        let local = finite((pair[1].1 - pair[0].1) / width)?;
-        let scale = local.abs().max(slope.abs());
-        if (local - slope).abs() > 128.0 * f64::EPSILON * scale {
-            return Err(FeedbackError::Invalid(
-                "elastic and hardening moduli must be globally affine; derivative jumps need a different caloric model",
-            ));
-        }
-    }
-    let expected = finite(slope.mul_add(reference_k - first.0, first.1))?;
-    if (expected - reference_value).abs()
-        > 128.0 * f64::EPSILON * expected.abs().max(reference_value.abs())
-    {
-        return Err(FeedbackError::Invalid(
-            "reference modulus differs from its admitted affine path",
-        ));
-    }
-    Ok(slope)
 }
 
 fn admit_rate_independent_property<E>(

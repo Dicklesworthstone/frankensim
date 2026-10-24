@@ -8,12 +8,16 @@
 //! is edited here. `drive` records name the node nearest a point on a part and the global direction of a unit force there.
 //!
 //!   shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]
-//!                    [--node-shapes PATH]
+//!                    [--node-shapes PATH] [--fholes RASTER.tsv]
 //!
 //! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table. `--shapes` writes the displacement of the top and back
 //! nodes along their directors; `--node-shapes` writes the three displacement components of every node of every part.
+//! `--fholes` computes the sound holes' conductance from their raster (`frankensim.specimen-raster-runs.v1`) with
+//! `fs_bem::plate_aperture` at the table's neck length, and the neck becomes the circular flanged neck of that conductance
+//! instead of the table's equivalent-ellipse estimate.
 use std::{collections::BTreeMap, error::Error, fs, io::Write, path::Path};
 
+use fs_bem::plate_aperture::{ApertureRaster, PlateApertureOptions, plate_aperture_conductance};
 use fs_couple::cavity_modal::{CavityNeckLoss, HelmholtzModalCavity};
 use fs_couple::shear_shell::assembly::{
     MaterialShellAssembly, MaterialShellComponent, ShellAssemblyForcePort,
@@ -200,6 +204,142 @@ fn parse(text: &str) -> Result<Table> {
     Ok(table)
 }
 
+/// Every open cell of a `frankensim.specimen-raster-runs.v1` hole table as one raster of 0.5 mm cells (all the holes
+/// together, so their mutual flow coupling is in the conductance). A row is `hole z_mm x_start_mm x_end_mm`: the row centre
+/// and the run `[x_start, x_end)`; a value off the 0.5 mm grid refuses.
+fn read_raster_runs(text: &str) -> Result<ApertureRaster> {
+    const CELL_MM: f64 = 0.5;
+    let mut lines = text.lines();
+    if lines.next() != Some("frankensim.specimen-raster-runs.v1")
+        || lines.next() != Some("hole\tz_mm\tx_start_mm\tx_end_mm")
+    {
+        return Err("not a frankensim.specimen-raster-runs.v1 hole table".into());
+    }
+    let grid = |v: f64| -> Result<i64> {
+        let k = (v / CELL_MM).round();
+        if (k * CELL_MM - v).abs() > 1e-9 {
+            return Err(format!("{v} mm is off the 0.5 mm raster").into());
+        }
+        Ok(k as i64)
+    };
+    let mut open = Vec::new();
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let v = floats(&line.split('\t').collect::<Vec<_>>())?;
+        if v.len() != 4 {
+            return Err(format!("raster run needs 4 fields: {line}").into());
+        }
+        let row = grid(v[1] - 0.5 * CELL_MM)?;
+        for column in grid(v[2])?..grid(v[3])? {
+            open.push((column, row));
+        }
+    }
+    if open.is_empty() {
+        return Err("the raster has no open cell".into());
+    }
+    Ok(ApertureRaster {
+        cell: CELL_MM * 1e-3,
+        open,
+    })
+}
+
+/// Potential-flow conductance [m] of the raster through a rigid plate of `thickness_m` in an infinite baffle: subdivisions
+/// 1, 2, 4 and 8 of the raster cell and the Richardson limit of the last three. It refuses a ladder that is not monotone,
+/// an observed order below 0.5 on either triple, or top and bottom fluxes that differ by more than 1e-8.
+fn raster_conductance_m(raster: &ApertureRaster, thickness_m: f64) -> Result<f64> {
+    let mut k = Vec::new();
+    for subdivision in [1, 2, 4, 8] {
+        let options = PlateApertureOptions {
+            thickness: thickness_m,
+            subdivision,
+            tolerance: 1e-10,
+            max_cells: 1 << 22,
+            max_fft_points: 1 << 25,
+            max_voxels: 1 << 25,
+            workers: 16,
+            ..PlateApertureOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let r = plate_aperture_conductance(raster, &options).map_err(|e| {
+            format!("sound-hole conductance refused at subdivision {subdivision}: {e:?}")
+        })?;
+        let flux = (r.top_flux - r.conductance).abs() / r.conductance;
+        if flux > 1e-8 {
+            return Err(format!("sound-hole top and bottom fluxes differ by {flux:e}").into());
+        }
+        println!(
+            "sound holes: subdivision {subdivision}, cell {:.4} mm, {} cells, {} layers, K {:.6} mm, residual {:.2e}, {:.1} s",
+            r.cell_side * 1e3,
+            r.cells,
+            r.layers,
+            r.conductance * 1e3,
+            r.residual,
+            started.elapsed().as_secs_f64()
+        );
+        k.push(r.conductance);
+    }
+    let order = |a: f64, b: f64, c: f64| ((b - a) / (c - b)).log2();
+    let (p_first, p) = (order(k[0], k[1], k[2]), order(k[1], k[2], k[3]));
+    if !k.windows(2).all(|w| w[1] > w[0]) || !(p_first >= 0.5 && p >= 0.5) {
+        return Err(
+            format!("sound-hole ladder not converging: K {k:?}, orders {p_first} {p}").into(),
+        );
+    }
+    let step = (k[3] - k[2]) / (2f64.powf(p) - 1.0);
+    println!(
+        "sound holes: observed orders {p_first:.3} {p:.3}; Richardson limit K {:.4} mm (extrapolation step {:.4} mm)",
+        (k[3] + step) * 1e3,
+        step * 1e3
+    );
+    Ok(k[3] + step)
+}
+
+/// Conductance [m] of the circular flanged neck the library builds: S / L_eff = rho S^2 / (neck mass).
+fn neck_conductance_m(volume_m3: f64, radius_m: f64, length_m: f64, gas: &GasState) -> Result<f64> {
+    let cavity = HelmholtzModalCavity::new(
+        HelmholtzCavity {
+            volume_m3,
+            neck_radius_m: radius_m,
+            neck_length_m: length_m,
+            inner_end: NeckEnd::Flanged,
+            outer_end: NeckEnd::Flanged,
+        },
+        *gas,
+        CavityNeckLoss::Resistance(0.0),
+    )?;
+    let area = cavity.neck_area_m2();
+    Ok(gas.density * area * area / cavity.neck_mass_kg())
+}
+
+/// The radius of the circular flanged neck of `length_m` whose built cavity has conductance `k_m`, by bisection on the
+/// library's own neck (its conductance grows with the radius); it refuses a residual above 1e-12 relative.
+fn neck_radius_for_conductance(
+    volume_m3: f64,
+    length_m: f64,
+    k_m: f64,
+    gas: &GasState,
+) -> Result<f64> {
+    let (mut lo, mut hi) = (1e-3 * k_m, k_m);
+    if neck_conductance_m(volume_m3, lo, length_m, gas)? >= k_m
+        || neck_conductance_m(volume_m3, hi, length_m, gas)? <= k_m
+    {
+        return Err("the neck conductance is not bracketed".into());
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if neck_conductance_m(volume_m3, mid, length_m, gas)? < k_m {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let radius = 0.5 * (lo + hi);
+    let residual = (neck_conductance_m(volume_m3, radius, length_m, gas)? - k_m).abs() / k_m;
+    if residual > 1e-12 {
+        return Err(format!("neck radius residual {residual:e}").into());
+    }
+    Ok(radius)
+}
+
 fn load_pack(dir: &Path, name: &str) -> Result<(NormalizedPack, MaterialCard)> {
     let bytes = fs::read(dir.join(format!("{name}.fsmatpk")))?;
     let pack = NormalizedPack::from_bytes(&bytes)?;
@@ -370,7 +510,7 @@ fn jacobi(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH] [--node-shapes PATH]".into());
+        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH] [--node-shapes PATH] [--fholes RASTER.tsv]".into());
     }
     let (mut n_modes, mut fmin, mut fmax, mut omega) = (
         10usize,
@@ -380,6 +520,7 @@ fn main() -> Result<()> {
     );
     let mut shapes: Option<String> = None;
     let mut node_shapes: Option<String> = None;
+    let mut fholes: Option<String> = None;
     let mut drilling_alpha = DRILLING_ALPHA;
     let mut it = args[3..].iter();
     while let Some(flag) = it.next() {
@@ -392,6 +533,7 @@ fn main() -> Result<()> {
             "--drilling-alpha" => drilling_alpha = value.parse()?,
             "--shapes" => shapes = Some(value.clone()),
             "--node-shapes" => node_shapes = Some(value.clone()),
+            "--fholes" => fholes = Some(value.clone()),
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
@@ -594,10 +736,41 @@ fn main() -> Result<()> {
     }
     // Enclosed air on the same modes: U = sum(w_i^2 q_i^2)/2 + (sum s_j q_j + a z)^2 k_c / 2, z = sqrt(M_neck) x.
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), TEMPERATURE_K, 101_325.0)?;
+    // The table's neck is its generator's equivalent-ellipse estimate; `--fholes` replaces it by the neck of the conductance
+    // computed on the hole raster, at the same length (the top thickness at the holes).
+    let neck_radius_m = match &fholes {
+        None => table.neck_radius_m,
+        Some(path) => {
+            let raster = read_raster_runs(&fs::read_to_string(path)?)?;
+            let k_holes = raster_conductance_m(&raster, table.neck_length_m)?;
+            let k_table = neck_conductance_m(
+                table.cavity_volume_m3,
+                table.neck_radius_m,
+                table.neck_length_m,
+                &gas,
+            )?;
+            let radius = neck_radius_for_conductance(
+                table.cavity_volume_m3,
+                table.neck_length_m,
+                k_holes,
+                &gas,
+            )?;
+            println!(
+                "neck: the {} raster cells' conductance K {:.4} mm replaces the table neck's K {:.4} mm (ratio {:.5}); neck radius {:.3} -> {:.3} mm",
+                raster.open.len(),
+                k_holes * 1e3,
+                k_table * 1e3,
+                k_holes / k_table,
+                table.neck_radius_m * 1e3,
+                radius * 1e3
+            );
+            radius
+        }
+    };
     let cavity = HelmholtzModalCavity::new(
         HelmholtzCavity {
             volume_m3: table.cavity_volume_m3,
-            neck_radius_m: table.neck_radius_m,
+            neck_radius_m,
             neck_length_m: table.neck_length_m,
             inner_end: NeckEnd::Flanged,
             outer_end: NeckEnd::Flanged,
@@ -611,7 +784,7 @@ fn main() -> Result<()> {
     println!(
         "cavity: V = {:.4} L, neck radius {:.3} mm, length {:.3} mm, isolated Helmholtz {:.2} Hz (rigid walls)",
         table.cavity_volume_m3 * 1e3,
-        table.neck_radius_m * 1e3,
+        neck_radius_m * 1e3,
         table.neck_length_m * 1e3,
         cavity.isolated_omega_rad_s() / two_pi
     );

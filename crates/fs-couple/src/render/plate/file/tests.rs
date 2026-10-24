@@ -173,7 +173,7 @@ fn an_unresolvable_gas_record_refuses_by_name_and_never_becomes_air() {
     }
     let co2 = text.replace(ambient, "ambient mixture 293.15 101325 mole 1 CO2 1");
     let parsed = Parsed::read(co2.as_bytes(), 64, None).unwrap();
-    assert!(matches!(parsed.gas_record, GasRecord::Mixture(_)));
+    assert!(matches!(parsed.gas_record, GasRecord::Mixture(..)));
     assert!(parsed.config.gas.sound_speed < 0.8 * source_air().sound_speed);
 }
 

@@ -1,9 +1,9 @@
 frankensim-drum-spec-v1
-# Same estimated reference geometry and equilibrium elasticity; no modal loss.
+# Same estimated reference geometry and equilibrium elasticity; the heads' loss is the relaxation law.
 # Pair with an explicit head-relaxation file. These are not specimen measurements.
 geometry,0.1703,0.1651,0.1778
-head,batter,0.000254,4000000000,0.38,1390,3000,0
-head,resonant,0.0000762,4000000000,0.38,1390,1500,0
+head,batter,0.000254,4000000000,0.38,1390,3000,relaxation
+head,resonant,0.0000762,4000000000,0.38,1390,1500,relaxation
 mesh,5,32
 band_hz,80,500
 # ambient: the air inside and around the instrument, one shared gas declaration

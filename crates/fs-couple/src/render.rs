@@ -252,6 +252,17 @@ pub(crate) struct ReedLay {
     pub(crate) loss_s_per_m: f64,
 }
 
+/// The two parts of one [`ReedBoreVoice`] observer sample. The voice writes
+/// `internal_pa + plate + jet` as one number; an observer law must act on the
+/// radiated part only, because the bore pressure travels no distance.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ReedObserverParts {
+    /// Bore pressure at the reed: an internal observation, never propagated.
+    pub internal_pa: f64,
+    /// Plate radiation plus the jet monopole, both evaluated at `listener_m`.
+    pub radiated_pa: f64,
+}
+
 /// One reed-on-a-characteristic-line voice: the `realize_reed_bore`
 /// physics, restructured so a caller can advance it block by block. The
 /// one-shot realizer is now a thin wrapper over this type, so the two
@@ -274,6 +285,7 @@ pub struct ReedBoreVoice {
     reed_v: f64,
     p_plus_prev: f64,
     f_jet_prev: f64,
+    last_parts: ReedObserverParts,
     sample_index: u64,
     /// Aperture-junction solver mode. `Strict` is the certification
     /// default; `FastNewton` is an explicit opt-in declared fast mode
@@ -597,6 +609,7 @@ impl ReedBoreVoice {
             reed_v: 0.0,
             p_plus_prev,
             f_jet_prev: 0.0,
+            last_parts: ReedObserverParts::default(),
             sample_index: 0,
             solver_mode: ReedSolverMode::Strict,
             fast_stats: FastSolveStats::default(),
@@ -704,6 +717,15 @@ impl ReedBoreVoice {
         self.fast_stats
     }
 
+    /// The internal and radiated parts of the last sample `step_block` wrote.
+    /// Their sum in the order `(internal + plate) + jet` is that sample's
+    /// bits; `radiated_pa` is `plate + jet`, so a caller that recombines them
+    /// rounds once more.
+    #[must_use]
+    pub const fn last_observer_parts(&self) -> ReedObserverParts {
+        self.last_parts
+    }
+
     /// Advance exactly `out.len()` samples, writing observer pascals.
     ///
     /// Source pressure, flow and reflected wave use the same sample of the
@@ -783,13 +805,14 @@ impl ReedBoreVoice {
                     what: "characteristic line left the finite set",
                 })?;
             let p_bore = p_plus + p_minus_now;
-            let mut p_obs = p_bore;
-            p_obs += self.plates.drive_and_radiate(
+            let plate_pa = self.plates.drive_and_radiate(
                 p_bore * self.area_bore,
                 self.dt,
                 self.rho,
                 self.listener_m,
             )?;
+            let mut p_obs = p_bore;
+            p_obs += plate_pa;
             let opening = if self.reed.mass_kg > 0.0 {
                 self.reed_y.max(0.0)
             } else {
@@ -800,9 +823,11 @@ impl ReedBoreVoice {
             let f_jet = (p_m - p_bore) * self.reed.width_m * opening;
             let dfdt = (f_jet - self.f_jet_prev) / self.dt;
             self.f_jet_prev = f_jet;
-            p_obs += self.rho * dfdt
+            let jet_pa = self.rho * dfdt
                 / (4.0 * core::f64::consts::PI * self.listener_m * self.sound_speed);
+            p_obs += jet_pa;
             *slot = p_obs;
+            self.last_parts = ReedObserverParts { internal_pa: p_bore, radiated_pa: plate_pa + jet_pa };
             self.sample_index += 1;
             // Current accepted incoming wave, matching the affine boundary used
             // by the source up to convolution summation roundoff. This is port

@@ -1,0 +1,637 @@
+//! Dry-basis moisture transport and source-bound mechanical consumers.
+//!
+//! A homogeneous, isothermal slab stores kg water/kg dry solid in reference
+//! finite volumes. Fick transport uses the selected material diffusivity;
+//! backward Euler uses the existing checked-CG owner. Nonlinear diffusivity is
+//! lagged at the accepted start (first-order accuracy), then re-evaluated at
+//! every proposed endpoint. No clipped water, inferred wood diffusivity,
+//! instantaneous bulk equilibration or second material evaluator is used.
+//!
+//! This bounded rung assumes a fixed dry skeleton and dilute bound moisture.
+//! Sorption heat, swelling, stress-assisted diffusion, free liquid, hysteresis,
+//! transverse transport and a finite external vapor inventory are not modeled.
+//! Its surface conditions are infinite reservoirs. The plate consumer retains
+//! this fixed-geometry assumption and rebuilds actual stiffness AND wet inertia.
+
+pub mod plate;
+
+use fs_blake3::{ContentHash, DomainHasher};
+use fs_exec::Cx;
+use fs_matdb::{MaterialCard, QueryPoint};
+use fs_material::{
+    MaterialError,
+    state_point::{
+        MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
+        ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+    },
+};
+use fs_qty::{
+    Density, Dims, QuantitySpec,
+    semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm},
+};
+use fs_solver::{CheckedCgConfig, CheckedCgError, LinearOp, SolveReport, checked_cg};
+use fs_sparse::precond::Precond;
+
+/// Dimensions of effective moisture diffusivity [m²/s].
+pub const MOISTURE_DIFFUSIVITY_DIMS: Dims = Dims([2, 0, -1, 0, 0, 0]);
+/// Hard per-solve bound, additionally narrowed by the caller's budget.
+pub const MAX_MOISTURE_CELLS: usize = 65_536;
+
+/// Original source/solver/consumer refusal. Failed proposals publish no state.
+#[derive(Debug)]
+pub enum MoistureError {
+    /// Malformed geometry, quantities, source applicability or limits.
+    Invalid(&'static str),
+    /// Shared material resolver refused.
+    Material(MaterialStatePointError),
+    /// Shared constitutive source refused.
+    Constitutive(MaterialError),
+    /// Native DKT admission failed.
+    Plate(fs_plate::PlateError),
+    /// Existing plate material lowering refused.
+    Consumer(crate::acoustic_realize::AcousticRealizeError),
+    /// Native linear solver did not converge.
+    NotConverged(SolveReport),
+    /// Sum of stored water did not match the two measured boundary transfers.
+    MassBalance { residual_kg: f64, tolerance_kg: f64 },
+    /// No endpoint is published after cancellation.
+    Cancelled,
+}
+impl core::fmt::Display for MoistureError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "moisture transport: {self:?}")
+    }
+}
+impl std::error::Error for MoistureError {}
+impl From<MaterialStatePointError> for MoistureError {
+    fn from(e: MaterialStatePointError) -> Self {
+        Self::Material(e)
+    }
+}
+impl From<MaterialError> for MoistureError {
+    fn from(e: MaterialError) -> Self {
+        Self::Constitutive(e)
+    }
+}
+impl From<fs_plate::PlateError> for MoistureError {
+    fn from(e: fs_plate::PlateError) -> Self {
+        Self::Plate(e)
+    }
+}
+impl From<crate::acoustic_realize::AcousticRealizeError> for MoistureError {
+    fn from(e: crate::acoustic_realize::AcousticRealizeError) -> Self {
+        Self::Consumer(e)
+    }
+}
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
+fn poll(cx: &Cx<'_>) -> Result<(), MoistureError> {
+    cx.checkpoint().map_err(|_| MoistureError::Cancelled)
+}
+fn quantity(kind: QuantityKind) -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+
+/// Surface moisture is distinct from ambient RH and from interior moisture.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MoistureFace {
+    /// Zero normal water flux.
+    Sealed,
+    /// Explicit reservoir value in kg water/kg dry solid.
+    PrescribedDryBasis(f64),
+    /// Source-evaluated FPL sorption boundary at a declared T and RH.
+    WoodEquilibrium {
+        /// Immutable coefficient card consumed by the original FPL law.
+        card: MaterialCard,
+        /// Absolute environment temperature [K]; must match the slab.
+        temperature_k: f64,
+        /// Vapor partial-pressure ratio, never specimen mass fraction.
+        relative_humidity: f64,
+    },
+}
+impl MoistureFace {
+    fn content(&self, temperature: f64) -> Result<Option<f64>, MoistureError> {
+        let value = match self {
+            Self::Sealed => return Ok(None),
+            Self::PrescribedDryBasis(value) => *value,
+            Self::WoodEquilibrium {
+                card,
+                temperature_k,
+                relative_humidity,
+            } => {
+                if temperature_k.to_bits() != temperature.to_bits()
+                    || !relative_humidity.is_finite()
+                    || !(0.0..=1.0).contains(relative_humidity)
+                {
+                    return Err(MoistureError::Invalid(
+                        "isothermal source boundary needs matching T and RH in [0,1]",
+                    ));
+                }
+                fs_material::wood_moisture::equilibrium_moisture_content(
+                    card,
+                    *temperature_k,
+                    *relative_humidity,
+                )?
+            }
+        };
+        if !value.is_finite() || value < 0.0 {
+            return Err(MoistureError::Invalid(
+                "surface moisture must be finite nonnegative dry-basis content",
+            ));
+        }
+        Ok(Some(value))
+    }
+}
+
+/// Geometry and physical applicability of the fixed dry skeleton.
+#[derive(Clone, Copy, Debug)]
+pub struct MoistureSlabGeometry {
+    /// Diffusion length [m]; plate consumption maps it to the in-plane x axis.
+    pub length_m: f64,
+    /// Cross-sectional area normal to transport [m²].
+    pub cross_section_m2: f64,
+    /// Maximum supported bound-water content, kg water/kg dry solid.
+    /// This is an authored applicability limit, not an inferred saturation law.
+    pub maximum_moisture: f64,
+    /// Allocation and per-operator work limit.
+    pub maximum_cells: usize,
+}
+
+/// Explicit linear work, conservation and step-admission limits.
+#[derive(Clone, Copy, Debug)]
+pub struct MoistureStepConfig {
+    /// Native checked-CG controls, including its total iteration budget.
+    pub linear: CheckedCgConfig,
+    /// Absolute allowed water balance residual [kg].
+    pub water_balance_tolerance_kg: f64,
+    /// Largest accepted cell-content change [kg water/kg dry solid].
+    /// This bounds a proposal; it is not an estimated time-discretization error.
+    pub maximum_content_increment: f64,
+}
+
+/// One accepted moisture field. Clone is a complete physical checkpoint.
+#[derive(Clone, Debug)]
+pub struct MoistureSlab {
+    card: MaterialCard,
+    reference: ResolvedMaterialStatePoint,
+    transport: ResolvedMaterialStatePoint,
+    diffusivity_property: String,
+    geometry: MoistureSlabGeometry,
+    dry_density_kg_m3: f64,
+    dry_mass_per_cell_kg: f64,
+    moisture: Vec<f64>,
+    time_s: f64,
+    identity: ContentHash,
+}
+
+/// Actual source evaluations and the water transferred over one interval.
+#[derive(Clone, Debug)]
+pub struct MoistureStepReport {
+    /// Start and accepted endpoint time [s].
+    pub interval_s: [f64; 2],
+    /// Signed water received from the left and right infinite reservoirs [kg].
+    pub boundary_water_kg: [f64; 2],
+    /// Resolved surface dry-basis values; None denotes a sealed face.
+    pub surface_moisture: [Option<f64>; 2],
+    /// Water stored before and after [kg].
+    pub stored_water_kg: [f64; 2],
+    /// Stored change minus external transfer [kg].
+    pub water_balance_residual_kg: f64,
+    /// Complete accepted-start material evaluations used by the lagged operator.
+    pub transport_start: Vec<ResolvedMaterialStatePoint>,
+    /// All endpoint sources re-admitted before publication.
+    pub transport_end: Vec<ResolvedMaterialStatePoint>,
+    /// Original true-residual solver report.
+    pub linear: SolveReport,
+}
+
+impl MoistureSlab {
+    /// Bind a homogeneous source and a finite, possibly nonuniform initial field.
+    ///
+    /// The reference query must explicitly type temperature as absolute K and
+    /// moisture_content as dry-mass moisture. Reference density is measured per
+    /// reference volume at that moisture; rho_dry = rho_ref/(1+M_ref). The density
+    /// claim is never re-queried to create/destroy dry skeleton or water.
+    /// Diffusivity may depend on the actual local moisture and fixed environment.
+    /// Selection pins density and the named diffusivity at the reference state.
+    pub fn new(
+        card: MaterialCard,
+        reference_point: QueryPoint,
+        diffusivity_property: &str,
+        selection: MaterialPropertySelection,
+        geometry: MoistureSlabGeometry,
+        initial_moisture: Vec<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        poll(cx)?;
+        let n = initial_moisture.len();
+        if n == 0
+            || n > geometry.maximum_cells
+            || n > MAX_MOISTURE_CELLS
+            || !positive(geometry.length_m)
+            || !positive(geometry.cross_section_m2)
+            || !positive(geometry.maximum_moisture)
+            || diffusivity_property == "density"
+        {
+            return Err(MoistureError::Invalid(
+                "bounded nonempty cells, positive geometry/domain and a distinct diffusivity key required",
+            ));
+        }
+        if reference_point.axis_quantities().get("temperature")
+            != Some(&quantity(QuantityKind::AbsoluteTemperature))
+            || reference_point.axis_quantities().get("moisture_content")
+                != Some(&quantity(QuantityKind::Moisture(MoistureBasis::DryMass)))
+        {
+            return Err(MoistureError::Invalid(
+                "absolute temperature and dry-mass moisture coordinates required",
+            ));
+        }
+        let temperature = reference_point
+            .axes()
+            .get("temperature")
+            .copied()
+            .unwrap_or(f64::NAN);
+        let reference_content = reference_point
+            .axes()
+            .get("moisture_content")
+            .copied()
+            .unwrap_or(f64::NAN);
+        if reference_point.axes().contains_key("T")
+            || reference_point.axis_quantities().iter().any(|(axis, q)| {
+                (axis != "temperature" && *q == quantity(QuantityKind::AbsoluteTemperature))
+                    || (axis != "moisture_content"
+                        && *q == quantity(QuantityKind::Moisture(MoistureBasis::DryMass)))
+            })
+        {
+            return Err(MoistureError::Invalid(
+                "duplicate physical temperature/moisture coordinates are unsupported",
+            ));
+        }
+        if !positive(temperature)
+            || !reference_content.is_finite()
+            || reference_content < 0.0
+            || reference_content > geometry.maximum_moisture
+            || initial_moisture
+                .iter()
+                .any(|m| !m.is_finite() || *m < 0.0 || *m > geometry.maximum_moisture)
+        {
+            return Err(MoistureError::Invalid(
+                "initial/reference moisture outside declared bound-water domain",
+            ));
+        }
+        let d = ScalarPropertyRequirement::try_new(
+            diffusivity_property,
+            MOISTURE_DIFFUSIVITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?;
+        let density = ScalarPropertyRequirement::try_new(
+            "density",
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?;
+        let reference = resolve_material_state_point(
+            &card,
+            &reference_point,
+            &[density, d.clone()],
+            selection,
+        )?;
+        if reference
+            .properties()
+            .iter()
+            .any(|p| !p.is_static_at_fixed_external_conditions())
+        {
+            return Err(MoistureError::Invalid(
+                "transport and reference density need static environmental sources",
+            ));
+        }
+        let selected = reference
+            .property(diffusivity_property)
+            .expect("required diffusivity")
+            .answer()
+            .receipt
+            .selected;
+        let transport = resolve_material_state_point(
+            &card,
+            &reference_point,
+            &[d],
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                diffusivity_property.into(),
+                selected,
+            )]),
+        )?;
+        let dry_density_kg_m3 = reference
+            .property("density")
+            .expect("required density")
+            .value_si()
+            / (1.0 + reference_content);
+        let dry_mass_per_cell_kg =
+            dry_density_kg_m3 * geometry.cross_section_m2 * (geometry.length_m / n as f64);
+        if !positive(dry_density_kg_m3)
+            || !positive(dry_mass_per_cell_kg)
+            || !positive(dry_mass_per_cell_kg * n as f64)
+        {
+            return Err(MoistureError::Invalid(
+                "dry reference inventory is unrepresentable",
+            ));
+        }
+        let mut hash = DomainHasher::new("org.frankensim.fs-couple.moisture-slab.v1");
+        hash.update(reference.identity().as_bytes());
+        for v in [
+            geometry.length_m,
+            geometry.cross_section_m2,
+            geometry.maximum_moisture,
+            dry_mass_per_cell_kg,
+        ] {
+            hash.update(&v.to_bits().to_le_bytes());
+        }
+        hash.update(&(n as u64).to_le_bytes());
+        let slab = Self {
+            card,
+            reference,
+            transport,
+            diffusivity_property: diffusivity_property.into(),
+            geometry,
+            dry_density_kg_m3,
+            dry_mass_per_cell_kg,
+            moisture: initial_moisture,
+            time_s: 0.0,
+            identity: hash.finalize(),
+        };
+        if !positive(slab.wet_mass_kg()) || !slab.water_mass_kg().is_finite() {
+            return Err(MoistureError::Invalid(
+                "initial wet inventory is unrepresentable",
+            ));
+        }
+        slab.transport_states(&slab.moisture, cx)?;
+        Ok(slab)
+    }
+
+    /// Immutable material/geometry/reference-inventory identity.
+    pub const fn definition_identity(&self) -> ContentHash {
+        self.identity
+    }
+    /// Accepted local kg water/kg dry solid.
+    pub fn moisture(&self) -> &[f64] {
+        &self.moisture
+    }
+    /// Accepted physical time [s].
+    pub const fn time_s(&self) -> f64 {
+        self.time_s
+    }
+    /// Conserved dry skeleton mass [kg].
+    pub fn dry_mass_kg(&self) -> f64 {
+        self.dry_mass_per_cell_kg * self.moisture.len() as f64
+    }
+    /// Actual water inventory [kg].
+    pub fn water_mass_kg(&self) -> f64 {
+        self.moisture
+            .iter()
+            .map(|m| m * self.dry_mass_per_cell_kg)
+            .sum()
+    }
+    /// Wet physical mass = dry skeleton plus explicitly transported water [kg].
+    pub fn wet_mass_kg(&self) -> f64 {
+        self.dry_mass_kg() + self.water_mass_kg()
+    }
+    /// Immutable shared material source.
+    pub const fn card(&self) -> &MaterialCard {
+        &self.card
+    }
+    /// Reference material resolution, including the actual reference wet density.
+    pub const fn reference(&self) -> &ResolvedMaterialStatePoint {
+        &self.reference
+    }
+
+    fn point_at(&self, moisture: f64) -> Result<QueryPoint, MoistureError> {
+        self.transport
+            .query()
+            .with("moisture_content", moisture)
+            .map_err(|_| MoistureError::Invalid("unrepresentable dry-basis moisture coordinate"))
+    }
+    fn transport_states(
+        &self,
+        moisture: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<ResolvedMaterialStatePoint>, MoistureError> {
+        moisture
+            .iter()
+            .map(|&m| {
+                poll(cx)?;
+                Ok(self
+                    .transport
+                    .at_query_point(&self.card, &self.point_at(m)?)?)
+            })
+            .collect()
+    }
+
+    /// Propose one conservative interval without mutating the accepted slab.
+    /// Face values are constant over this interval; cut intervals at RH events.
+    /// Interior face diffusivity is the harmonic mean of the two accepted-start
+    /// values. The boundary lies half a cell from its cell center. Numerical
+    /// coefficients are refreshed on EVERY call; no stale material operator is reused.
+    pub fn advance(
+        &self,
+        dt_s: f64,
+        faces: &[MoistureFace; 2],
+        config: MoistureStepConfig,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureStepReport), MoistureError> {
+        poll(cx)?;
+        let end = self.time_s + dt_s;
+        if !positive(dt_s)
+            || !end.is_finite()
+            || end <= self.time_s
+            || !positive(config.water_balance_tolerance_kg)
+            || !positive(config.maximum_content_increment)
+        {
+            return Err(MoistureError::Invalid(
+                "representable forward interval and positive admission tolerances required",
+            ));
+        }
+        let temperature = self
+            .reference
+            .query_point()
+            .iter()
+            .find(|(name, _)| name == "temperature")
+            .expect("admitted temperature")
+            .1;
+        let surface = [
+            faces[0].content(temperature)?,
+            faces[1].content(temperature)?,
+        ];
+        for m in surface.into_iter().flatten() {
+            if m > self.geometry.maximum_moisture {
+                return Err(MoistureError::Invalid(
+                    "surface exceeds the bound-water applicability domain",
+                ));
+            }
+            // Admission at the actual interface state, not just the interior.
+            self.transport
+                .at_query_point(&self.card, &self.point_at(m)?)?;
+        }
+        let start = self.transport_states(&self.moisture, cx)?;
+        let d: Vec<_> = start
+            .iter()
+            .map(|s| {
+                s.property(&self.diffusivity_property)
+                    .expect("pinned diffusivity")
+                    .value_si()
+            })
+            .collect();
+        let n = d.len();
+        let dx = self.geometry.length_m / n as f64;
+        let scale = dt_s / dx / dx;
+        if !positive(scale) {
+            return Err(MoistureError::Invalid(
+                "diffusion interval/length scale is unrepresentable",
+            ));
+        }
+        let mut operator = DiffusionStep {
+            diagonal: vec![1.0; n],
+            off: Vec::with_capacity(n - 1),
+        };
+        for pair in d.windows(2) {
+            // Stable harmonic mean avoids D_i*D_j overflow.
+            let lo = pair[0].min(pair[1]);
+            let hi = pair[0].max(pair[1]);
+            operator.off.push(scale * (2.0 * lo / (1.0 + lo / hi)));
+        }
+        for (i, &a) in operator.off.iter().enumerate() {
+            operator.diagonal[i] += a;
+            operator.diagonal[i + 1] += a;
+        }
+        let boundary = [
+            if surface[0].is_some() {
+                2.0 * scale * d[0]
+            } else {
+                0.0
+            },
+            if surface[1].is_some() {
+                2.0 * scale * d[n - 1]
+            } else {
+                0.0
+            },
+        ];
+        let mut rhs = self.moisture.clone();
+        for (side, i) in [0, n - 1].into_iter().enumerate() {
+            if let Some(m) = surface[side] {
+                operator.diagonal[i] += boundary[side];
+                rhs[i] += boundary[side] * m;
+            }
+        }
+        if operator.diagonal.iter().any(|v| !positive(*v))
+            || operator.off.iter().any(|v| !positive(*v))
+            || rhs.iter().any(|v| !v.is_finite())
+            || boundary.iter().any(|v| !v.is_finite())
+            || (surface[0].is_some() && !positive(boundary[0]))
+            || (surface[1].is_some() && !positive(boundary[1]))
+        {
+            return Err(MoistureError::Invalid(
+                "diffusion coefficients overflow or underflow",
+            ));
+        }
+        let solution = checked_cg(&operator, &operator, &rhs, config.linear, |_| poll(cx))
+            .map_err(|e| match e {
+                CheckedCgError::Interrupted(error) => error,
+                CheckedCgError::InvalidInput(what) => MoistureError::Invalid(what),
+            })?;
+        if !solution.report.converged_euclidean() {
+            return Err(MoistureError::NotConverged(solution.report));
+        }
+        let lower = self
+            .moisture
+            .iter()
+            .copied()
+            .chain(surface.into_iter().flatten())
+            .fold(f64::INFINITY, f64::min);
+        let upper = self
+            .moisture
+            .iter()
+            .copied()
+            .chain(surface.into_iter().flatten())
+            .fold(0.0, f64::max);
+        let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
+        for (&old, &new) in self.moisture.iter().zip(&solution.x) {
+            if !new.is_finite()
+                || new < 0.0
+                || new > self.geometry.maximum_moisture
+                || new < lower - roundoff
+                || new > upper + roundoff
+                || (new - old).abs() > config.maximum_content_increment
+            {
+                return Err(MoistureError::Invalid(
+                    "candidate violates moisture maximum principle, domain or increment bound",
+                ));
+            }
+        }
+        let endpoint = self.transport_states(&solution.x, cx)?;
+        let transfer = [
+            self.dry_mass_per_cell_kg
+                * boundary[0]
+                * (surface[0].unwrap_or(solution.x[0]) - solution.x[0]),
+            self.dry_mass_per_cell_kg
+                * boundary[1]
+                * (surface[1].unwrap_or(solution.x[n - 1]) - solution.x[n - 1]),
+        ];
+        let water_before = self.water_mass_kg();
+        let water_after: f64 = solution
+            .x
+            .iter()
+            .map(|m| self.dry_mass_per_cell_kg * m)
+            .sum();
+        if !positive(self.dry_mass_kg() + water_after) {
+            return Err(MoistureError::Invalid(
+                "proposed wet inventory is unrepresentable",
+            ));
+        }
+        let residual = water_after - water_before - transfer[0] - transfer[1];
+        if !residual.is_finite() || residual.abs() > config.water_balance_tolerance_kg {
+            return Err(MoistureError::MassBalance {
+                residual_kg: residual,
+                tolerance_kg: config.water_balance_tolerance_kg,
+            });
+        }
+        let report = MoistureStepReport {
+            interval_s: [self.time_s, end],
+            boundary_water_kg: transfer,
+            surface_moisture: surface,
+            stored_water_kg: [water_before, water_after],
+            water_balance_residual_kg: residual,
+            transport_start: start,
+            transport_end: endpoint,
+            linear: solution.report,
+        };
+        let mut next = self.clone();
+        next.time_s = end;
+        next.moisture = solution.x;
+        poll(cx)?;
+        Ok((next, report))
+    }
+}
+
+struct DiffusionStep {
+    diagonal: Vec<f64>,
+    off: Vec<f64>,
+}
+impl LinearOp for DiffusionStep {
+    fn n(&self) -> usize {
+        self.diagonal.len()
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        for ((y, &a), &x) in y.iter_mut().zip(&self.diagonal).zip(x) {
+            *y = a * x;
+        }
+        for (i, &a) in self.off.iter().enumerate() {
+            y[i] -= a * x[i + 1];
+            y[i + 1] -= a * x[i];
+        }
+    }
+}
+impl Precond for DiffusionStep {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        for ((z, &r), &a) in z.iter_mut().zip(r).zip(&self.diagonal) {
+            *z = r / a;
+        }
+    }
+}

@@ -3,6 +3,7 @@ audio 48000 12000 2
 ambient 300 100000 0
 reed 0.0004 0.013 6000 0.00001 100 0.35
 baffled_outlet 0 0 0.5 4 16 1000
+observer_law stokes-kirchhoff
 termination flanged
 segments 1
 cylinder 0.0015 0.57

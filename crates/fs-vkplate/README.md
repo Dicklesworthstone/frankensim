@@ -125,8 +125,12 @@ card, compiled with `xtask matdb-pack` from
 1390 kg/m³, Young's modulus 4.90 GPa (the mean of the datasheet's machine and
 transverse directions) and Poisson ratio 0.38 for biaxially oriented PET, admitted
 from 293.15 to 296.15 K, with material state
-`polyethylene-terephthalate solid biaxially-oriented-film 0`. It makes no loss
-claim: no citable audio-band loss of this film was found.
+`polyethylene-terephthalate solid biaxially-oriented-film 0`. It makes no
+audio-band loss claim, because no citable audio-band loss of this film was found. It carries one
+composition-proxy reading for reference: Kunugi et al. (1992) measured uniaxially
+drawn PET at 110 Hz and 25 C, giving a loss tangent of 0.022 along the draw and 0.029 across it
+(read off a figure). The kit does not consume it. Using it above 110 Hz would be an
+extrapolation that the card does not support.
 
 `packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk` is a sourced stick card,
 compiled from `data/matdb/seed-v1/stick-hickory-shagbark-fpl-gtr282` with

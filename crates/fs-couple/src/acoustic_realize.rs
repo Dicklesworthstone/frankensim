@@ -75,6 +75,26 @@ pub enum AcousticRealizeError {
     /// ISO 9613-1 was asked of a gas not admitted as terrestrial air; the
     /// refusal names the species.
     NonTerrestrialAir(fs_material::iso9613::Iso9613Refusal),
+    /// A receiver too close for its observer filter. Its own propagation delay
+    /// at the nearest outlet element cannot absorb the filter's low-frequency
+    /// delay (dispersion plus declared latency) and keep the receiver's
+    /// one-sample minimum.
+    ObserverLatency {
+        /// Receiver distance from the outlet centre [m].
+        range_m: f64,
+        /// Propagation delay at the nearest outlet element at `c_0` [samples].
+        available_samples: f64,
+        /// Delay the filter and the receiver need there [samples].
+        needed_samples: f64,
+        /// The certificate the filter was designed to: `min(1e-9, 1e-3 x`
+        /// what ISO 9613-1's +-10 % on alpha is in response energy).
+        budget_energy: f64,
+    },
+    /// A render that applies no observer law, or Stokes-Kirchhoff only, would
+    /// leave out more absorption than the tolerance, or an unbounded amount
+    /// (a polyatomic listener gas without sourced relaxation rates), without
+    /// declaring a law. The receipt carries the figure.
+    ObserverOmission(Box<crate::air_path::ObserverOmission>),
     /// Modal time-stepper refusal.
     Modal(ModalAcousticTimeError),
     /// Plate mesh, section, or eigenproblem refusal, retaining the owner diagnostic.
@@ -128,6 +148,20 @@ impl core::fmt::Display for AcousticRealizeError {
             }
             Self::Ambient(what) => write!(f, "FS-COUPLE-ASSEMBLY-GAS: {what}"),
             Self::NonTerrestrialAir(refusal) => write!(f, "FS-COUPLE-ASSEMBLY-ISO9613: {refusal}"),
+            Self::ObserverLatency { range_m, available_samples, needed_samples, budget_energy } => write!(
+                f,
+                "FS-COUPLE-ASSEMBLY-OBSERVER-LATENCY: a receiver at {range_m} m has \
+                 {available_samples:.3} samples of propagation delay; its observer filter, \
+                 certified to {budget_energy:e} of its response energy, and the receiver \
+                 need {needed_samples:.3}. This law's dispersion cannot be certified this \
+                 close: declare observer_law none or move the receiver farther"
+            ),
+            Self::ObserverOmission(omission) => write!(
+                f,
+                "FS-COUPLE-ASSEMBLY-OBSERVER-OMISSION: {omission}. Declare the observer law \
+                 (observer_law none or stokes-kirchhoff) to accept the omission, or move the \
+                 listener closer"
+            ),
             Self::Modal(e) => write!(f, "{e}"),
             Self::Plate(e) => write!(f, "{e}"),
             Self::PlateAssignment {
@@ -1342,7 +1376,7 @@ fn finish_observer(
     });
     let relaxation_omitted = match law {
         GasAbsorptionModel::Iso9613Air { .. } | GasAbsorptionModel::MolecularRelaxation => None,
-        GasAbsorptionModel::StokesKirchhoff => Some(relaxation_omission(
+        GasAbsorptionModel::StokesKirchhoff | GasAbsorptionModel::Lossless => Some(relaxation_omission(
             assembly.listener.distance_m,
             0.5 * f64::from(assembly.sample_rate_hz),
         )?),

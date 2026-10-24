@@ -6,10 +6,15 @@ use fs_material::gas_species::input::ThermochemicalPhase;
 mod support;
 use support::packs;
 
-const INPUT: &str = include_str!(concat!(
+const INPUT_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/reed-steady-gas.performance"
 ));
+/// The fixture's physics without its sidecar declaration: these library tests
+/// add their own observation records, and the library never refuses an
+/// undeclared law (ruling 6532 puts that in the sidecar writer).
+static INPUT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| INPUT_FIXTURE.replace("observer_law stokes-kirchhoff\n", ""));
 
 fn load(input: &str, sources: &ThermochemicalSources<'_>, block: usize) -> ReedPerformance {
     ReedPerformance::from_bytes_with_gas_sources(
@@ -58,7 +63,7 @@ fn generated_field_and_original_pressure_path_agree_with_direct_owner_binding() 
         water_species: None,
         phase: ThermochemicalPhase::FrozenGas,
     };
-    let performance = load(INPUT, &sources, 37);
+    let performance = load(&INPUT, &sources, 37);
     let generated = performance.steady_gas().unwrap();
     let problem = generated.problem();
     let solution = generated.solution();
@@ -100,7 +105,7 @@ fn generated_field_and_original_pressure_path_agree_with_direct_owner_binding() 
     assert_eq!(*outlet.state(), performance.outlet_receiver().unwrap().gas);
     assert_eq!(field.model().source_packs().len(), 2);
     let direct = ReedPerformance::from_bytes_with_field_resolution(
-        without_steady(INPUT).as_bytes(),
+        without_steady(&INPUT).as_bytes(),
         37,
         ObservationPolicy::Diagnostic,
         Some(&sources),
@@ -111,7 +116,7 @@ fn generated_field_and_original_pressure_path_agree_with_direct_owner_binding() 
     assert!(direct.steady_gas().is_none());
     let expected = render(performance, 37);
     assert_eq!(expected, render(direct, 37));
-    assert_eq!(expected, render(load(INPUT, &sources, 113), 113));
+    assert_eq!(expected, render(load(&INPUT, &sources, 113), 113));
 }
 
 #[test]
@@ -131,7 +136,7 @@ fn species_columns_and_data_only_heat_injection_changes_reach_actual_reed_motion
         .replace("330 1 0", "330 0 1")
         .replace("295 0 1", "295 1 0");
     assert_eq!(
-        render(load(INPUT, &sources, 37), 37),
+        render(load(&INPUT, &sources, 37), 37),
         render(load(&permuted, &sources, 37), 37)
     );
     // Fix the exterior and inlet. Only the downstream injection/wall data change.
@@ -230,7 +235,7 @@ fn conflicts_unbalanced_flow_and_exhausted_work_refuse_before_rendering() {
         );
     }
     assert!(ReedPerformance::from_bytes(INPUT.as_bytes(), 37).is_err());
-    let field = load(INPUT, &sources, 37).gas_field().unwrap().0.clone();
+    let field = load(&INPUT, &sources, 37).gas_field().unwrap().0.clone();
     assert!(
         ReedPerformance::from_bytes_with_gas_field(
             INPUT.as_bytes(),

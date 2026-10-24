@@ -2,8 +2,8 @@
 //!
 //! Compare complete N and 2N step trajectories from one immutable initial gas.
 //! Accept the finer actual trajectory, never an extrapolated mixture. This is
-//! uniform dyadic refinement of the existing first-order update, not a second
-//! rate law, RK/BDF solver or guarantee of stiffness-independent performance.
+//! uniform dyadic refinement of the selected first-order explicit or implicit
+//! update, not a second rate law or guarantee of stiffness-independent performance.
 //! Chemistry completes once before the existing coupled motion/heat solve.
 
 use super::*;
@@ -26,6 +26,7 @@ pub struct ReactionSubcycling {
     /// Power of two in 2..=256. The coarse comparison uses half this count.
     pub maximum_substeps: usize,
     /// All attempted original chemical steps, including rejected meshes, 1..=511.
+    /// An implicit step additionally retains its own bounded nonlinear work.
     pub maximum_evaluations: usize,
 }
 impl ReactionSubcycling {
@@ -69,7 +70,8 @@ impl GasReaction {
     /// Select temporal refinement once for all existing parcel, piston, flow,
     /// material-inertia and electrical/thermal reaction consumers. Combine
     /// channels first: there is ONE time policy for the shared inventory.
-    /// The default remains the original single explicit chemical step.
+    /// The default remains the original single explicit chemical step; an
+    /// implicit policy, if selected, supplies each original substep instead.
     pub fn with_subcycling(mut self, policy: ReactionSubcycling) -> Result<Self, GasReactionError> {
         policy.validate()?;
         if self.subcycling.is_some() {
@@ -111,8 +113,8 @@ fn limit(evaluations: usize, substeps: usize, ratio: Option<f64>) -> GasReaction
 }
 
 /// Replay every candidate mesh from the caller's original state. Only a
-/// consumption or entropy-step refusal can request refinement. Source-domain,
-/// caloric, arithmetic and cancellation errors remain hard failures.
+/// consumption, entropy-step or implicit-root refusal can request refinement.
+/// Source-domain, caloric, arithmetic and cancellation errors remain hard failures.
 pub(super) fn candidate(
     law: &GasReaction, initial: &ClosedGasParcel, duration_s: f64,
     controls: GasReactionSolve, policy: ReactionSubcycling,
@@ -151,7 +153,9 @@ pub(super) fn candidate(
                 fine.steps = Vec::new();
                 coarse = Some(fine);
             }
-            Err(GasReactionError::ConsumptionLimit { .. } | GasReactionError::EntropyDecrease { .. }) => {
+            Err(GasReactionError::ConsumptionLimit { .. } | GasReactionError::EntropyDecrease { .. }
+                | GasReactionError::ImplicitOutsideBracket { .. }
+                | GasReactionError::ImplicitNotConverged { .. }) => {
                 coarse = None;
                 last_ratio = None;
             }
@@ -205,6 +209,9 @@ fn summarize(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GasReactionStep, GasReactionError> {
     let mut report = steps[0].reaction.clone();
+    // An aggregate extent is not the root of one endpoint equation. Preserve
+    // each actual implicit residual only in its corresponding substep.
+    report.implicit = None;
     let mut extents = vec![Sum::default(); 1 + report.additional_reactions.len()];
     let mut changes = vec![Sum::default(); report.species.len()];
     let before = law.inventory(initial)?;
@@ -284,3 +291,4 @@ fn compare(a: &Trajectory, b: &Trajectory, policy: ReactionSubcycling) -> Result
     }
     Ok(error)
 }
+

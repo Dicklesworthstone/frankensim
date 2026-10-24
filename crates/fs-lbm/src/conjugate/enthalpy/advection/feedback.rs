@@ -786,7 +786,8 @@ where
             // Thermal CFL and advection use the accepted old momentum. Its
             // native update waits for the accepted-duration hook when heating
             // is enabled, otherwise for step(). Both use the actual thermal dt.
-            // Exact phase locking is refused before retained momentum starts.
+            // The accepted phase endpoint already admitted every newly fixed
+            // face against the retained native velocities, with no clipping.
             (owner.flow.clone(), None)
         } else if !native_solve {
             // All constraints have zero velocity and every admitted drive does
@@ -900,6 +901,7 @@ where
             }
         }
         self.advected = Some(advected);
+        self.reference = reference;
         self.applied = Some(MaterialFlowEpoch {
             time_s: thermal.time_s(),
             samples,
@@ -1063,6 +1065,15 @@ where
             .map_err(MaterialFlowError::Inner)?;
         add_audit(&mut self.audit, advected.audit())?;
         self.advance_unsteady(start_s, dt, old, thermal, check)?;
+        if self.exact_phase {
+            if let Some(owner) = &mut self.unsteady {
+                // Admit the ENDPOINT constraints against the actual native
+                // endpoint velocities, never against a cell-centre average
+                // or flux rounded to zero. Melting adds zero-speed faces;
+                // freezing must remove only zero-energy momentum entries.
+                owner.accept_phase_domain(domain.as_ref().unwrap_or(self.domain), self.gate)?;
+            }
+        }
         if let Some(owner) = &mut self.viscous_heating {
             let applied = self
                 .applied

@@ -129,6 +129,9 @@ impl MultiBowStringBank {
     /// Read-only state, physical pressure weights and per-contact work reports.
     #[must_use]
     pub const fn system(&self) -> &MultiFrictionModalSystem { &self.system }
+    /// Override the active-set rescue pivot budget (frankensim-o7qbp) so a test
+    /// can plant a budget-exhaustion negative; production uses the default.
+    pub fn force_active_set_budget(&mut self, budget: usize) { self.system.force_active_set_budget(budget); }
     /// One physical sample for ALL strings, bodies and contacts. The drive slice
     /// must match `source().bows()` exactly. A prescribed zero load releases its
     /// bow unless a retained material shear layer is bound (opening then refuses).

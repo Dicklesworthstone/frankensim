@@ -450,3 +450,5 @@ fn g4_finite_gas_late_refusal_epoch_and_cancellation_preserve_both_owners() {
 
 #[path = "finite_gas/exchange.rs"]
 mod exchange;
+#[path = "finite_gas/electrical.rs"]
+mod electrical;

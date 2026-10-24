@@ -69,7 +69,8 @@ fn main() {
         let receipt = receipt.expect("a damping,material board returns its loss receipt");
         print!("{}", receipt.tsv());
         for b in receipt.band_summary(&[0.0, 200.0, 400.0, 800.0, 1600.0, band]) {
-            println!("band {:.0}-{:.0} Hz: {} source modes, damping ratio mean {:.5} (min {:.5}, max {:.5}) = {:.3} x the authored 0.015",
+            let bracket = b.proxy_mean_ratio.map_or_else(String::new, |(lo, hi)| format!("; composition-proxy bracket {lo:.5}-{hi:.5}"));
+            println!("band {:.0}-{:.0} Hz: {} source modes, damping ratio mean {:.5} (min {:.5}, max {:.5}) = {:.3} x the authored 0.015{bracket}",
                 b.band_hz.0, b.band_hz.1, b.modes, b.mean_ratio, b.min_ratio, b.max_ratio, b.mean_ratio / 0.015);
         }
         for caveat in &receipt.caveats { println!("caveat: {caveat}"); }

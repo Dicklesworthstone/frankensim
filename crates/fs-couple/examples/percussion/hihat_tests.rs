@@ -82,7 +82,9 @@ fn paired_scene_and_two_sticks_keep_source_addresses_and_no_phantom_radiation() 
 }
 #[test]
 fn pedal_closes_contacts_and_retracts_with_one_energy_and_force_clock() {
-    let s=spec();let a=shell();let b=shell();let dt=1e-5;let steps=2400;
+    // 24 ms at a clock that resolves every retained shell rate (one-cent band, .168):
+    // 7726 rad/s needs dt of at most 0.04 / 7726 = 5.2e-6 s.
+    let s=spec();let a=shell();let b=shell();let dt=5e-6;let steps=4800;
     let pair=build(&s,&a,&b,Stroke{speed_m_s:0.,position_m:None},None,steps,dt,false).unwrap();
     assert!(pair.upper_modes.len()>1);assert!(pair.lower_modes.len()>1);
     let mut e=pair.experiment;let n=e.force.len();let initial=e.system.state().to_vec();

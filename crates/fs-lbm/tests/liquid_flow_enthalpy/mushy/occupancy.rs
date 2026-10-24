@@ -4,6 +4,9 @@ use super::*;
 use fs_lbm::conjugate::ViscousHeatControls;
 use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
 
+#[path = "occupancy/unsteady.rs"]
+mod unsteady;
+
 fn geometry<'a>(
     domain: &VoxelDomain,
     curve: &'a EquilibriumEnthalpyPhaseCurve,

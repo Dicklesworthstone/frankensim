@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	vh-vacuum	Four bells cast by the Royal Eijsbouts bell foundry: A minor-third (hum 261 Hz, lip radius 38.8 cm), B frequency-optimized major-third (hum 220 Hz, 44.9 cm), C damping-optimized major-third (hum 440 Hz, 22.4 cm), D prototype major-third (hum 417 Hz, 27.4 cm); each fixed at the crown and isolated with rubbers	Each partial driven at its eigenfrequency by an electromagnetic shaker, the shaker removed, and the slope of ln|acceleration| against time giving epsilon*omega; three runs per partial averaged (standard deviations 1-6 %); MATERIAL damping measured in a vacuum compartment for bells up to 1 m diameter, so no air or radiation loss; loss factor eta = 2 epsilon (the paper's definition)	Bronze composition not stated; the paper says the bells were cast months apart so the alloy probably differed. Laboratory temperature not stated. The paper finds material damping independent of eigenfrequency and mode shape; the printed value is each bell's mean over its partials, with its standard deviation; validity per bell is its hum frequency up to 3000 Hz, above which the paper states its results are less accurate. Crown suspension loss is taken as negligible by the authors because the modes have a node at the crown
+scalar	bell-a	vh-vacuum	material_loss_factor_bell_a	1.4e-4	1	constant
+uncertainty	bell-a	unstated	-	-	-	-
+validity	bell-a	frequency	261	3000	Hz
+scalar	bell-a-standard-deviation	vh-vacuum	material_loss_factor_bell_a_printed_standard_deviation	0.2e-4	1	constant
+uncertainty	bell-a-standard-deviation	unstated	-	-	-	-
+validity	bell-a-standard-deviation	frequency	261	3000	Hz
+scalar	bell-b	vh-vacuum	material_loss_factor_bell_b	1.3e-4	1	constant
+uncertainty	bell-b	unstated	-	-	-	-
+validity	bell-b	frequency	220	3000	Hz
+scalar	bell-b-standard-deviation	vh-vacuum	material_loss_factor_bell_b_printed_standard_deviation	0.1e-4	1	constant
+uncertainty	bell-b-standard-deviation	unstated	-	-	-	-
+validity	bell-b-standard-deviation	frequency	220	3000	Hz
+scalar	bell-c	vh-vacuum	material_loss_factor_bell_c	2.6e-4	1	constant
+uncertainty	bell-c	unstated	-	-	-	-
+validity	bell-c	frequency	440	3000	Hz
+scalar	bell-c-standard-deviation	vh-vacuum	material_loss_factor_bell_c_printed_standard_deviation	1.0e-4	1	constant
+uncertainty	bell-c-standard-deviation	unstated	-	-	-	-
+validity	bell-c-standard-deviation	frequency	440	3000	Hz
+scalar	bell-d	vh-vacuum	material_loss_factor_bell_d	1.6e-4	1	constant
+uncertainty	bell-d	unstated	-	-	-	-
+validity	bell-d	frequency	417	3000	Hz
+scalar	bell-d-standard-deviation	vh-vacuum	material_loss_factor_bell_d_printed_standard_deviation	0.2e-4	1	constant
+uncertainty	bell-d-standard-deviation	unstated	-	-	-	-
+validity	bell-d-standard-deviation	frequency	417	3000	Hz

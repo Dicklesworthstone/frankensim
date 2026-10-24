@@ -383,6 +383,75 @@ impl RelaxationAbsorption {
         ])
     }
 
+    /// The law for a dry-air-like gas off ISO 9613-1's fractions, evaluated
+    /// with ISO's O2 and N2 relaxation frequencies at the medium's own T, p
+    /// and water fraction HELD as a declared assumption. The gas may hold N2
+    /// and O2 in any proportion (either may be absent), with Ar, H2O, and CO2
+    /// at or below ISO's dry-basis ceiling. ISO's frequencies are fits for
+    /// terrestrial air; the O2-O2, O2-N2 and water partner rates of any other
+    /// proportion are not sourced. Strengths follow the medium's own mole
+    /// fractions and heat capacities.
+    ///
+    /// # Errors
+    /// [`MaterialError::Parameters`] naming any other species present, CO2
+    /// above the ceiling, a gas without N2, O2 or Ar, a state outside ISO's
+    /// frequency window, and each refusal of [`Self::evaluate`].
+    pub fn evaluate_iso9613_rates_held(medium: &RelaxingMedium) -> Result<RelaxationState, MaterialError> {
+        let (mut dry, mut co2, mut water) = (0.0, 0.0, 0.0);
+        for (species, fraction) in medium.components() {
+            match species.as_str() {
+                "N2" | "O2" | "Ar" => dry += fraction,
+                "CO2" => {
+                    dry += fraction;
+                    co2 = *fraction;
+                }
+                "H2O" => water = *fraction,
+                _ if *fraction == 0.0 => {}
+                other => {
+                    return Err(parameters(format!(
+                        "ISO 9613 rates cannot be held for a gas containing {other}"
+                    )));
+                }
+            }
+        }
+        if dry <= 0.0 {
+            return Err(parameters("ISO 9613 rates cannot be held for a gas without dry air"));
+        }
+        if co2 / dry > ISO9613_MAX_DRY_CO2 {
+            return Err(parameters(format!(
+                "ISO 9613 rates cannot be held for CO2 at dry-basis {} above {ISO9613_MAX_DRY_CO2}",
+                co2 / dry
+            )));
+        }
+        let gas = medium.state();
+        let (fr_o, fr_n) =
+            iso9613_relaxation_frequencies_hz(gas.temperature, gas.pressure, 100.0 * water)?;
+        let id = |name: &str| {
+            SpeciesId::new(name).map_err(|error| parameters(format!("species id {name}: {error}")))
+        };
+        let vibration = |theta_k: f64, fr_hz: f64| RelaxationProcess {
+            reservoir: InternalReservoir::Vibrational(vec![VibrationalMode {
+                theta_k,
+                degeneracy: 1,
+            }]),
+            rate: RelaxationRateLaw::PartnerIndependent {
+                p_tau_ref_pa_s: gas.pressure / (core::f64::consts::TAU * fr_hz),
+                t_ref_k: gas.temperature,
+                exponent: 0.0,
+                t_min_k: gas.temperature - 1.0,
+                t_max_k: gas.temperature + 1.0,
+            },
+        };
+        Self::new(vec![
+            SpeciesRelaxation { species: id("O2")?, processes: vec![vibration(2239.1, fr_o)] },
+            SpeciesRelaxation { species: id("N2")?, processes: vec![vibration(3352.0, fr_n)] },
+            SpeciesRelaxation { species: id("Ar")?, processes: Vec::new() },
+            SpeciesRelaxation { species: id("CO2")?, processes: Vec::new() },
+            SpeciesRelaxation { species: id("H2O")?, processes: Vec::new() },
+        ])?
+        .evaluate(medium)
+    }
+
     /// Canonical species data.
     #[must_use]
     pub fn species(&self) -> &[SpeciesRelaxation] {

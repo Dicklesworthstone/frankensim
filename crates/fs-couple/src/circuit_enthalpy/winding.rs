@@ -11,47 +11,19 @@ use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ResistorCell, ThermalDriver, cell_driver_candidate, finite,
     material::{
-        ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
+        ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkSample,
     },
 };
 use fs_em::winding::ohmic::{
     OhmicWindingCandidate, OhmicWindingCircuit, OhmicWindingControls, OhmicWindingError,
     OhmicWindingStep, WindingConductor,
 };
-use fs_material::{
-    conductor::{ConductorError, ResolvedConductorState},
-    thermal::source::ThermalMaterialError,
-};
+use super::magnetic::{MagneticRoutes, MagneticThermalNetwork, check, invalid, material, same_material};
 use fs_phs::circuit::Branch;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
-/// Complete correspondence for one ORIGINAL magnetic triangle. Conducting
-/// triangles must use a thermal Cell; their loss is deposited there. Fixed
-/// explicitly holds an unheated magnetic region at its prepared material state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MagneticRegion {
-    /// Existing thermal control volume owns this region's temperature.
-    Cell { triangle: usize, cell: CellId },
-    /// Explicit isothermal exterior/core region outside the thermal model.
-    Fixed { triangle: usize },
-}
-impl MagneticRegion {
-    fn triangle(self) -> usize {
-        match self {
-            Self::Cell { triangle, .. } | Self::Fixed { triangle } => triangle,
-        }
-    }
-}
-
-/// The complete exact magnetic source used/admitted at the thermal endpoint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MagneticThermalSample {
-    pub triangle: usize,
-    /// None retains the explicitly fixed prepared source; no heat is sent there.
-    pub cell: Option<CellId>,
-    pub material: fs_material::state_point::ResolvedMaterialStatePoint,
-}
+pub use super::magnetic::{MagneticRegion, MagneticThermalSample, MagneticThermalError as WindingThermalError};
 
 /// Original caloric/conductive samples and every magnetic region's source.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,47 +55,13 @@ pub struct WindingThermalNetwork<'a> {
     pub volume_tolerance_m3: f64,
 }
 
-/// Source and topology refusals remain distinct from nonlinear/energy failures.
-#[derive(Debug)]
-pub enum WindingThermalError {
-    Material(MaterialNetworkError),
-    Conductor(ConductorError),
-    Winding(OhmicWindingError),
-    Magnetic(fs_material::field_storage::FieldStorageError),
-    Invalid(&'static str),
-}
-impl core::fmt::Display for WindingThermalError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "material winding/enthalpy: {self:?}")
-    }
-}
-impl std::error::Error for WindingThermalError {}
 type Error = CircuitEnthalpyError<WindingThermalError>;
-fn invalid(what: &'static str) -> Error {
-    CircuitEnthalpyError::Source(WindingThermalError::Invalid(what))
-}
-fn material(error: MaterialNetworkError) -> Error {
-    match error {
-        MaterialNetworkError::Thermal(DepositionError::Cancelled) => {
-            CircuitEnthalpyError::Cancelled
-        }
-        other => CircuitEnthalpyError::Source(WindingThermalError::Material(other)),
-    }
-}
 fn electrical(error: OhmicWindingError) -> Error {
     match error {
         OhmicWindingError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(WindingThermalError::Winding(other)),
     }
 }
-fn check(cancelled: &RefCell<impl FnMut() -> bool>) -> Result<(), Error> {
-    if (*cancelled.borrow_mut())() {
-        Err(CircuitEnthalpyError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
 /// Both accepted candidates belong to the same interval and include all heat.
 /// Original inputs remain unchanged through every Newton/Jacobian trial.
 pub struct WindingEnthalpyCandidate<'t, 'c, 'm> {
@@ -170,7 +108,7 @@ impl<'c, 'm> ThermalDriver for OhmicWindingCandidate<'c, 'm> {
 }
 
 struct Routes {
-    magnetic: BTreeMap<usize, Option<CellId>>,
+    magnetic: MagneticRoutes,
     windings: BTreeMap<usize, CellId>,
     graph: BTreeMap<usize, CellId>,
 }
@@ -284,113 +222,37 @@ impl WindingThermalNetwork<'_> {
         })
     }
 
+    fn magnetic_layout(&self) -> MagneticThermalNetwork<'_> {
+        MagneticThermalNetwork { cells: self.cells, links: self.links,
+            magnetic_regions: self.magnetic_regions, volume_tolerance_m3: self.volume_tolerance_m3 }
+    }
+
     fn admit_routes(
         &self,
         thermal: &DepositionSimulation<'_>,
         circuit: &OhmicWindingCircuit<'_, '_>,
         cancelled: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Routes, Error> {
-        let problem = circuit.magnetic().basis().problem();
-        if self.magnetic_regions.len() != problem.mesh().faces().len()
-            || self.graph_resistors.len()
-                != circuit
-                    .magnetic()
-                    .graph()
-                    .branches
-                    .iter()
-                    .filter(|(_, _, b)| matches!(b, Branch::Resistor { .. }))
-                    .count()
-        {
-            return Err(invalid(
-                "every magnetic triangle needs an explicit thermal/fixed region, and every graph resistor needs one heat destination",
-            ));
+        let triangles: Vec<_> = circuit.conductors().iter().map(|s| s.triangle).collect();
+        let magnetic = self.magnetic_layout().routes(
+            thermal, circuit.magnetic().basis().problem(), &triangles, cancelled,
+        )?;
+        if self.graph_resistors.len() != circuit.magnetic().graph().branches.iter()
+            .filter(|(_, _, b)| matches!(b, Branch::Resistor { .. })).count() {
+            return Err(invalid("every graph resistor needs one heat destination"));
         }
-        let mut magnetic = BTreeMap::new();
         let mut graph = BTreeMap::new();
-        let mut volumes = BTreeMap::new();
-        for &region in self.magnetic_regions {
-            check(cancelled)?;
-            let triangle = region.triangle();
-            let cell = match region {
-                MagneticRegion::Cell { cell, .. } => Some(cell),
-                MagneticRegion::Fixed { .. } => None,
-            };
-            if triangle >= problem.mesh().faces().len()
-                || cell.is_some_and(|id| !thermal.cells().contains_key(&id))
-                || magnetic.insert(triangle, cell).is_some()
-            {
-                return Err(invalid(
-                    "duplicate, foreign or inactive magnetic region correspondence",
-                ));
-            }
-            if let Some(cell) = cell {
-                let volume = problem
-                    .mesh()
-                    .face_measure(triangle)
-                    .ok_or_else(|| invalid("missing original magnetic triangle geometry"))?;
-                let sum = volumes.entry(cell).or_insert(0.0);
-                *sum = finite(*sum + volume)?;
-            }
-        }
-        let mut windings = BTreeMap::new();
-        for source in circuit.conductors() {
-            check(cancelled)?;
-            let cell = magnetic
-                .get(&source.triangle)
-                .copied()
-                .flatten()
-                .ok_or_else(|| {
-                    invalid(
-                        "every conducting triangle must have an actual thermal heat destination",
-                    )
-                })?;
-            windings.insert(source.triangle, cell);
-        }
-        for (id, volume) in volumes {
-            check(cancelled)?;
-            let cell = &thermal.cells()[&id];
-            if (volume - cell.geometry.volume_m3).abs() > self.volume_tolerance_m3 {
-                return Err(invalid(
-                    "mapped magnetic triangle volumes must cover the whole receiving thermal cell",
-                ));
-            }
-            let binding = self
-                .cells
-                .iter()
-                .find(|s| s.cell == id)
-                .ok_or_else(|| invalid("magnetic thermal cell lacks caloric binding"))?;
-            for knot in binding.curve.knots() {
-                check(cancelled)?;
-                let density_volume = finite(cell.mass_kg / knot.bulk_density_kg_m3)?;
-                if knot.liquid_mass_fraction != 0.0
-                    || (density_volume - cell.geometry.volume_m3).abs() > self.volume_tolerance_m3
-                {
-                    return Err(invalid(
-                        "fixed magnetic geometry requires a fully solid caloric chart with matching constant density",
-                    ));
-                }
-            }
-        }
         for route in self.graph_resistors {
             check(cancelled)?;
             if !thermal.cells().contains_key(&route.cell)
                 || graph.insert(route.branch, route.cell).is_some()
-                || !matches!(
-                    circuit.magnetic().graph().branches.get(route.branch),
-                    Some((_, _, Branch::Resistor { .. }))
-                )
-            {
-                return Err(invalid(
-                    "duplicate, foreign or inactive graph-resistor heat destination",
-                ));
+                || !matches!(circuit.magnetic().graph().branches.get(route.branch),
+                    Some((_, _, Branch::Resistor { .. }))) {
+                return Err(invalid("duplicate, foreign or inactive graph-resistor heat destination"));
             }
         }
         check(cancelled)?;
-        Ok(Routes {
-            magnetic,
-            windings,
-            graph,
-        })
+        Ok(Routes { windings: magnetic.conductors.clone(), magnetic, graph })
     }
 
     fn materials_at(
@@ -401,144 +263,24 @@ impl WindingThermalNetwork<'_> {
         routes: &Routes,
         cancelled: &RefCell<impl FnMut() -> bool>,
     ) -> Result<(Vec<WindingConductor>, Vec<MagneticThermalSample>), Error> {
-        use fs_material::field_storage::{
-            MAGNETIC_PERMEABILITY_PROPERTY, linear_magnetic_permeability,
-        };
-        let bindings = self
-            .cells
-            .iter()
-            .map(|c| (c.cell, c))
-            .collect::<BTreeMap<_, _>>();
-        let phases = sample
-            .cells
-            .iter()
-            .map(|c| (c.cell, c.phase))
-            .collect::<BTreeMap<_, _>>();
-        let conductors = circuit
-            .conductors()
-            .iter()
-            .map(|c| (c.triangle, c))
-            .collect::<BTreeMap<_, _>>();
-        let problem = circuit.magnetic().basis().problem();
-        let mut result = Vec::with_capacity(conductors.len());
-        let mut magnetic = Vec::with_capacity(routes.magnetic.len());
-        for (&triangle, &cell) in &routes.magnetic {
-            check(cancelled)?;
-            let original = &problem.materials()[triangle];
-            let source = conductors.get(&triangle);
-            let snapshot = if let Some(id) = cell {
-                let binding = bindings
-                    .get(&id)
-                    .ok_or_else(|| invalid("magnetic cell lacks original material binding"))?;
-                let phase = *phases
-                    .get(&id)
-                    .ok_or_else(|| invalid("magnetic cell lacks actual endpoint phase"))?;
-                if !phase.is_fully_solid()
-                    || (finite(thermal.cells()[&id].mass_kg / phase.bulk_density_kg_m3())?
-                        - thermal.cells()[&id].geometry.volume_m3)
-                        .abs()
-                        > self.volume_tolerance_m3
-                {
-                    return Err(invalid("fixed solid magnetic density/geometry changed"));
-                }
-                let query = binding
-                    .point
-                    .at(phase)
-                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-                let base = source.map_or(original, |s| s.conductor.material());
-                let snapshot = base
-                    .at_query_point(binding.point.material, &query)
-                    .map_err(|e| {
-                        material(MaterialNetworkError::Material(
-                            ThermalMaterialError::Material(e),
-                        ))
-                    })?;
-                let mut changed_temperature = false;
-                for ((name, value), (original_name, original_value)) in
-                    snapshot.query_point().iter().zip(original.query_point())
-                {
-                    if name != original_name {
-                        return Err(invalid("magnetic coordinate correspondence changed"));
-                    }
-                    if value.to_bits() != original_value.to_bits() {
-                        if name != binding.point.temperature_axis {
-                            return Err(invalid(
-                                "only the owned magnetic-region temperature may change",
-                            ));
-                        }
-                        changed_temperature = true;
-                    }
-                }
-                let mu = linear_magnetic_permeability(&snapshot)
-                    .map_err(|e| CircuitEnthalpyError::Source(WindingThermalError::Magnetic(e)))?;
-                let property = snapshot
-                    .property(MAGNETIC_PERMEABILITY_PROPERTY)
-                    .expect("admitted permeability");
-                binding
-                    .point
-                    .admit_static(property)
-                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-                if mu.to_bits() != problem.permeability_h_m()[triangle].to_bits()
-                    || changed_temperature
-                        && property.source_axes().iter().any(|(axis, _)| {
-                            axis == binding.point.temperature_axis
-                        })
-                {
-                    return Err(invalid(
-                        "heated magnetic region changes prepared storage; new extraction and magnetic parameter work required",
-                    ));
-                }
-                snapshot
-            } else {
-                original.clone()
-            };
-            if let Some(source) = source {
-                let conductor = ResolvedConductorState::try_from_material_with_basis(
-                    snapshot.clone(),
-                    source.conductor.source_basis(),
-                )
-                .map_err(|e| CircuitEnthalpyError::Source(WindingThermalError::Conductor(e)))?;
-                result.push(WindingConductor {
-                    triangle,
-                    conductor,
-                });
-            }
-            magnetic.push(MagneticThermalSample {
-                triangle,
-                cell,
-                material: snapshot,
-            });
-        }
-        check(cancelled)?;
-        Ok((result, magnetic))
+        let conductors = circuit.conductors().iter().map(|s| (s.triangle, &s.conductor)).collect();
+        let (sources, samples) = self.magnetic_layout().materials_at(
+            thermal, circuit.magnetic().basis().problem(), &conductors, sample,
+            &routes.magnetic, cancelled,
+        )?;
+        Ok((sources.into_iter().map(|(triangle, conductor)| WindingConductor { triangle, conductor }).collect(), samples))
     }
+
 }
 
 // Refresh pins the exact selected claims. Its honest usage receipt therefore
 // changes policy even at an unchanged physical state; receipt identity is not
 // an equality test for accepted temperature. Keep both full receipts intact.
 fn same_conductor_state(a: &WindingConductor, b: &WindingConductor) -> bool {
-    let x = a.conductor.material();
-    let y = b.conductor.material();
     a.triangle == b.triangle
         && a.conductor.source_basis() == b.conductor.source_basis()
         && a.conductor.resistivity_ohm_m().to_bits() == b.conductor.resistivity_ohm_m().to_bits()
-        && x.card_identity() == y.card_identity()
-        && x.material() == y.material()
-        && x.axis_quantities() == y.axis_quantities()
-        && x.query_point().len() == y.query_point().len()
-        && x.query_point().iter().zip(y.query_point()).all(
-            |((name, value), (other_name, other_value))| {
-                name == other_name && value.to_bits() == other_value.to_bits()
-            },
-        )
-        && x.properties().len() == y.properties().len()
-        && x.properties().iter().zip(y.properties()).all(|(p, q)| {
-            p.requirement() == q.requirement()
-                && p.source_axes() == q.source_axes()
-                && p.answer().receipt.selected == q.answer().receipt.selected
-                && p.value_si().to_bits() == q.value_si().to_bits()
-        })
+        && same_material(a.conductor.material(), b.conductor.material())
 }
 
 impl Routes {

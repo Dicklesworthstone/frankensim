@@ -108,7 +108,17 @@ pub struct KitMaterials {
     in_plane_moduli: [Option<(f64, f64)>; 2],
     /// The striker card's TIP_ANISOTROPY values at the same state point.
     tip_anisotropy: Option<[f64; 4]>,
+    /// Held film loss tangent of each head's card and the temperature it was
+    /// read at [K] (`with_held_film_loss`).
+    held_film: Option<([f64; 2], f64)>,
 }
+
+/// The film rows a held film loss reads: one loss tangent along and one
+/// across the draw, each at a single frequency (Kunugi 1992, 110 Hz).
+pub const HELD_FILM_LOSS_TANGENTS: [&str; 2] = [
+    "loss_tangent_tensile_draw_direction_110hz",
+    "loss_tangent_tensile_cross_direction_110hz",
+];
 
 impl KitMaterials {
     /// Bind already-resolved canonical material data. The striker's effective
@@ -150,6 +160,7 @@ impl KitMaterials {
             film_loss_stated_unknown: false,
             in_plane_moduli: [None, None],
             tip_anisotropy: None,
+            held_film: None,
         };
         // Refuse a nonrepresentable contact before building any operators.
         let crate::Law::Power { k, .. } = result.impact_law();
@@ -302,6 +313,73 @@ impl KitMaterials {
     }
     pub const fn film_loss_is_stated_unknown(&self) -> bool {
         self.film_loss_stated_unknown
+    }
+
+    /// Declare the head films' loss a hysteretic loss tangent HELD at the
+    /// cards' single-frequency reading: the mean of `HELD_FILM_LOSS_TANGENTS`
+    /// on each head's card, read at `reading_temperature_k` on the cards'
+    /// `temperature_axis` (where the rows are valid, which need not be the
+    /// kit's temperature). The head modes take it through the radiation
+    /// branch (`radiation::ModalAirLoad::new_with_film`); the edge loss stays a
+    /// stated unknown entered as zero. Only card-imported materials carry the
+    /// rows; a card without them refuses.
+    pub fn with_held_film_loss(
+        mut self,
+        temperature_axis: &str,
+        reading_temperature_k: f64,
+    ) -> Result<Self, String> {
+        if self.bending_loss.is_some() {
+            return Err("a sourced bending loss and a held film loss are exclusive".into());
+        }
+        if self.packs.len() < 2 {
+            return Err("a held film loss reads the head cards; these materials have none".into());
+        }
+        let point = temperature_point(temperature_axis, reading_temperature_k)?;
+        let mut tangents = [0.0; 2];
+        for (slot, pack) in tangents.iter_mut().zip(&self.packs[..2]) {
+            let requirements = HELD_FILM_LOSS_TANGENTS
+                .iter()
+                .map(|name| {
+                    ScalarPropertyRequirement::try_new(
+                        *name,
+                        Dims::NONE,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            let resolved = resolve_material_state_point(
+                pack.card(),
+                &point,
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .map_err(|e| {
+                format!("held film loss: the head card does not resolve its loss tangents: {e}")
+            })?;
+            let values = HELD_FILM_LOSS_TANGENTS
+                .iter()
+                .map(|name| resolved.property(name).map(|p| p.value_si()))
+                .collect::<Option<Vec<f64>>>()
+                .ok_or("held film loss: a loss tangent did not resolve")?;
+            *slot = values.iter().sum::<f64>() / values.len() as f64;
+        }
+        self.film_loss_stated_unknown = true;
+        self.held_film = Some((tangents, reading_temperature_k));
+        Ok(self)
+    }
+
+    /// The held film loss tangent of the batter (0) or resonant (1) head.
+    pub fn held_film_tan_delta(&self, head: usize) -> Option<f64> {
+        self.held_film.map(|(t, _)| t[head.min(1)])
+    }
+
+    /// A drum's film-loss receipt when the film loss is held; it replaces
+    /// FILM_LOSS_STATED_UNKNOWN_RECEIPT, whose edge-loss half it keeps.
+    pub fn held_film_note(&self) -> Option<String> {
+        self.held_film.map(|([batter, resonant], read_k)| format!(
+            "head film loss: hysteretic, tan delta held at the 110 Hz reading (batter {batter:.4}, resonant {resonant:.4}: the mean of the draw and cross readings; extrapolate-frequency, composition-proxy uniaxial; read at {read_k} K); at 25 C the audio band lies on the low-frequency flank of PET's beta relaxation, so the real loss most likely rises with frequency and a held constant is the conservative side; edge loss: STATED UNKNOWN, entered as 0"
+        ))
     }
 
     /// Broadband time stepping cannot use a source characterized only at its

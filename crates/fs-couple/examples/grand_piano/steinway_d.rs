@@ -304,6 +304,9 @@ pub const HARD_MAPLE_LOSS: &[u8] = include_bytes!("packs/maple-sugar-loss-ono199
 pub const NORWAY_SPRUCE_LOSS_SPYCHER: &[u8] = include_bytes!("packs/spruce-norway-loss-frequency-spycher2008.fsmatpk");
 pub const NORWAY_SPRUCE_LOSS_MERHAR: &[u8] =
     include_bytes!("packs/spruce-norway-loss-frequency-moisture-merhar2025.fsmatpk");
+/// Along-grain loss of five Pinus species (not sugar pine): the printed
+/// composition-proxy bracket of the ribs' and cut-off bar's bending loss only.
+pub const PINE_LOSS_PROXY: &[u8] = include_bytes!("packs/pine-loss-longitudinal-bremaud2012.fsmatpk");
 
 /// What a material-damping board declares beyond its loss packs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,8 +320,9 @@ pub struct LossPolicy {
 }
 
 /// What the sugar pine hunt tried (pexfp.373); printed in every refusal and receipt.
-const SUGAR_PINE_SEARCHED: &str = "no sugar pine loss source: Bremaud et al. 2012's 98 woods (five Pinus species, \
-    not lambertiana), the FPL Wood Handbook and softwood tech sheet, Wegst 2006 (not reachable) and web searches";
+const SUGAR_PINE_SEARCHED: &str = "no sugar pine loss source: Bremaud et al. 2012's 98 woods and Bremaud's 2006 \
+    thesis (five Pinus species, not lambertiana: a printed composition-proxy bracket only), the FPL Wood Handbook and \
+    softwood tech sheet, Wegst 2006 (not reachable), Bremaud's 2011-2021 reviews, Aizawa 1998, Obataya 2016 and web searches";
 
 fn claim_at<'a>(pack: &'a NormalizedPack, property: &str, frequency_hz: f64)
     -> Result<(fs_matdb::ClaimId, &'a fs_matdb::PropertyClaim), String> {
@@ -401,6 +405,38 @@ pub fn model_d_loss_rows(environment: &BoardEnvironment, policy: LossPolicy) -> 
         for part in ["bending", "torsion"] {
             writeln!(rows, "loss-unknown,{group}-{part},sugar pine, {SUGAR_PINE_SEARCHED}").unwrap();
         }
+    }
+    // Ruling 6431: the bending (along-grain) loss of the sugar pine members is
+    // bracketed, printed only, by every Pinus species of the proxy pack, each
+    // claim pinned at its own measured state.
+    let pine = load_pack(PINE_LOSS_PROXY)?;
+    let mut bracket: Option<((f64, f64), (f64, f64), (f64, f64))> = None; // (eta, frequency domain, moisture range)
+    let claims = pine.claims().claims_for("loss_factor_longitudinal");
+    for (id, claim) in &claims {
+        let bounds = claim.validity.bounds();
+        let (Some(&domain), Some(&(mc, mc_hi))) = (bounds.get("frequency"), bounds.get("moisture_content")) else {
+            return Err("Pinus loss pack: every claim needs its frequency domain and one moisture content".into());
+        };
+        if mc != mc_hi || bracket.is_some_and(|b| b.1 != domain) {
+            return Err("Pinus loss pack: the bracket's claims need one measured moisture content each and one frequency domain".into());
+        }
+        let point = QueryPoint::new()
+            .with_quantity("moisture_content", QuantitySpec::dimensional(Dims::NONE), mc)
+            .and_then(|p| p.with_quantity("frequency", typed(QuantityKind::Frequency(FrequencyConvention::Cyclic)), domain.0))
+            .map_err(|e| e.to_string())?;
+        let eta = pine.claims().query_pinned("loss_factor_longitudinal", &point, *id)
+            .map_err(|e| format!("Pinus loss pack: {e}"))?.evidence.value.value;
+        bracket = Some(match bracket {
+            None => ((eta, eta), domain, (mc, mc)),
+            Some((e, d, m)) => ((e.0.min(eta), e.1.max(eta)), d, (m.0.min(mc), m.1.max(mc))),
+        });
+    }
+    let Some(((lo, hi), (f_lo, f_hi), (mc_lo, mc_hi))) = bracket else { return Err("Pinus loss pack: no along-grain claims".into()) };
+    for group in ["ribs", "cutoff-bar"] {
+        writeln!(rows, "loss-proxy,{group}-bending,{lo:.17e},{hi:.17e},{f_lo:.17e},{f_hi:.17e},composition-proxy,{} {} \
+            loss_factor_longitudinal of {} Pinus species at EMC {:.1}-{:.1} percent (20 C, 60-65 percent RH), not Pinus \
+            lambertiana; along the grain only, so {group}-torsion stays unknown", pine.pack_id(), pine.content_hash().to_hex(),
+            claims.len(), 100.0 * mc_lo, 100.0 * mc_hi).unwrap();
     }
     // Printed sensitivity: Spycher 2008's Norway spruce rise (first to last
     // point) and Merhar 2025's LR-plane rise at the EMC nearest the board's.

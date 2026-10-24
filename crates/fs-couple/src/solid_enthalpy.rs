@@ -17,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
+/// Accepted local heat histories drive the existing pressure-valve reduction.
+pub mod valve;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;

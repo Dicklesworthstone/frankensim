@@ -2,6 +2,7 @@
 //! owners. No empirical combustion-rate or engine validation claim is made.
 mod thermal;
 mod network;
+mod implicit;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;
@@ -614,3 +615,4 @@ fn material_bound_fixed_reactor_changes_sound_and_transport_without_wall_work() 
     assert!(energetic.gas().state().state().temperature > base.gas().state().state().temperature);
     assert!(energetic.gas().state().state().sound_speed > base.gas().state().state().sound_speed);
 }
+

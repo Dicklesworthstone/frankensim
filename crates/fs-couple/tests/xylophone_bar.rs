@@ -14,10 +14,11 @@
 //! `fs_nlmodal::prestressed_beam_omega` boundary conditions) measures
 //! `f2/f1 = 4` and FAILS the same gate.
 //!
-//! Material: the Indian-rosewood matdb pack (FPL-GTR-282: E_L = 13530
-//! MPa; specific gravity 0.75 — density is the authored Estimate
-//! SG*1000 since the pack derives no 12-percent density, disclosed).
-//! Bar geometry is an authored chart. The UNDERCUT successor is named:
+//! Material: E_L from the Indian-rosewood pack `rosewood-indian-fpl-gtr282`
+//! (FPL-GTR-282, 13530 MPa at 12 % MC). The pack states specific gravity
+//! 0.75 but no 12-percent density, and refuses one by name; the density is
+//! the labelled authored fixture `rosewood-indian-bar-authored-fixture`
+//! (SG*1000). Bar geometry is an authored chart. The UNDERCUT successor is named:
 //! real bars are arched to tune f2/f1 toward 3-4; v1 claims the
 //! uniform PRISMATIC bar exactly and only that.
 
@@ -26,11 +27,28 @@ use fs_couple::modal_acoustic_time::{
 };
 use fs_math::det;
 
+#[path = "support/material_packs.rs"]
+mod material_packs;
+use material_packs::{
+    FPL_MOISTURE_CONTENT, MaterialPack, ROSEWOOD_BAR_FIXTURE, ROSEWOOD_INDIAN, at_moisture_content,
+};
+
 const RATE: u32 = 48_000;
 
-/// Authored bar chart + the rosewood pack numbers.
-const E_PA: f64 = 13.53e9;
-const DENSITY: f64 = 750.0;
+/// The bar's Young's modulus [Pa] and density [kg/m^3]: E_L from the
+/// rosewood pack, the density from the labelled authored fixture.
+fn rosewood() -> (f64, f64) {
+    let at = at_moisture_content(FPL_MOISTURE_CONTENT);
+    let e_l = MaterialPack::seed(ROSEWOOD_INDIAN)
+        .scalar("young_modulus_longitudinal", fs_qty::Pressure::DIMS, &at)
+        .expect("rosewood E_L");
+    let density = MaterialPack::fixture(ROSEWOOD_BAR_FIXTURE)
+        .scalar("density", fs_qty::Density::DIMS, &at)
+        .expect("authored bar density");
+    (e_l, density)
+}
+
+/// Authored bar chart.
 const BAR_L: f64 = 0.38;
 const BAR_W: f64 = 0.038;
 const BAR_T: f64 = 0.018;
@@ -244,16 +262,17 @@ fn xb_001_roots_self_verify_and_match_the_tabulated_values() {
         );
     }
     // Refusals by name.
+    let (e_pa, density) = rosewood();
     for (result, expected) in [
         (
-            bar_modes(-1.0, DENSITY, BAR_L, BAR_W, BAR_T, 4),
+            bar_modes(-1.0, density, BAR_L, BAR_W, BAR_T, 4),
             "young modulus",
         ),
         (
-            bar_modes(E_PA, DENSITY, f64::NAN, BAR_W, BAR_T, 4),
+            bar_modes(e_pa, density, f64::NAN, BAR_W, BAR_T, 4),
             "length",
         ),
-        (bar_modes(E_PA, DENSITY, BAR_L, BAR_W, 0.0, 4), "thickness"),
+        (bar_modes(e_pa, density, BAR_L, BAR_W, 0.0, 4), "thickness"),
     ] {
         match result {
             Err(what) => assert_eq!(what, expected),
@@ -267,6 +286,20 @@ fn xb_001_roots_self_verify_and_match_the_tabulated_values() {
     );
 }
 
+// G0 (pexfp.32): the rosewood pack states no 12-percent density, so it
+// refuses one by name; the bar's density exists only as the labelled
+// authored fixture, whose card is an authored-fixture state.
+#[test]
+fn xb_000_the_rosewood_pack_refuses_a_density_it_does_not_state() {
+    let at = at_moisture_content(FPL_MOISTURE_CONTENT);
+    let error = MaterialPack::seed(ROSEWOOD_INDIAN)
+        .scalar("density", fs_qty::Density::DIMS, &at)
+        .unwrap_err();
+    assert!(error.contains("rosewood-indian-fpl-gtr282") && error.contains("'density'"), "{error}");
+    let fixture = MaterialPack::fixture(ROSEWOOD_BAR_FIXTURE);
+    assert_eq!(fixture.card().id().process, material_packs::AUTHORED_FIXTURE);
+}
+
 #[test]
 fn xb_002_ratio_gate_holds_and_the_pinned_falsifier_fails_it() {
     // THE GATE THAT MATTERS: the rendered strike's partial ratios must
@@ -275,7 +308,8 @@ fn xb_002_ratio_gate_holds_and_the_pinned_falsifier_fails_it() {
     // prestressed_beam_omega boundary conditions) must FAIL the same
     // gate decisively — the gate provably discriminates the boundary
     // conditions.
-    let modes = bar_modes(E_PA, DENSITY, BAR_L, BAR_W, BAR_T, 4).expect("bar");
+    let (e_pa, density) = rosewood();
+    let modes = bar_modes(e_pa, density, BAR_L, BAR_W, BAR_T, 4).expect("bar");
     let audio = strike(&modes, 0.30, 1.0);
     let spec = spectrum_of(&audio);
     let (f1, _) = partial_peak(&spec, modes.frequencies_hz[0]);
@@ -321,7 +355,8 @@ fn xb_003_striking_a_node_suppresses_the_partial() {
     // a node at the center, and mode 1 at xi ~ 0.224 (the cord-mount
     // point on a real bar) — both computed in-fixture from the mode
     // shapes, both suppressing their partial when struck.
-    let modes = bar_modes(E_PA, DENSITY, BAR_L, BAR_W, BAR_T, 4).expect("bar");
+    let (e_pa, density) = rosewood();
+    let modes = bar_modes(e_pa, density, BAR_L, BAR_W, BAR_T, 4).expect("bar");
     // Mode-1 node by bisection on the in-fixture shape.
     let x1 = modes.roots[0];
     let (mut lo, mut hi) = (0.05f64, 0.45f64);
@@ -410,7 +445,8 @@ fn mint_xylophone_strike_artifact() {
     // Three strikes: generic station (full ladder), center (partial 2
     // suppressed), mode-1 node (fundamental suppressed) — the
     // strike-position physics audible, not asserted.
-    let modes = bar_modes(E_PA, DENSITY, BAR_L, BAR_W, BAR_T, 4).expect("bar");
+    let (e_pa, density) = rosewood();
+    let modes = bar_modes(e_pa, density, BAR_L, BAR_W, BAR_T, 4).expect("bar");
     let mut signal = Vec::new();
     for &xi in &[0.30f64, 0.5, 0.2242] {
         signal.extend(strike(&modes, xi, 0.9));

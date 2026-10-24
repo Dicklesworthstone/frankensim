@@ -352,6 +352,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
         if !distributed_cavity {return Err("a chamber profile requires distributed air".into());}
         chamber.admit(&spec,dt_s,neck.is_some(),barrel_spec.is_some())?;
     }
+    spec.admit_head_loss(relaxation.is_some())?;
     if let Some(material)=relaxation {material.admit(&spec)?;}
     if let Some(wires)=snares {spec.admit_snare(wires)?;}
     if let Some(mute)=mute {mute.admit_drum_geometry(spec.radius_m,snares)?;}
@@ -429,6 +430,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}, tension_n_m={}, damping_ratio={}; material authority belongs to the input, not a brand name",
             film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>(),
             spec.heads[head].tension_n_m,spec.heads[head].damping_ratio);
+        eprintln!("{}",spec.head_loss[head].receipt(["batter","resonant"][head],spec.heads[head].damping_ratio));
     }
     if let Some(port)=&wall_strike {
         // Inward tip travel and outward wall motion both close the exterior

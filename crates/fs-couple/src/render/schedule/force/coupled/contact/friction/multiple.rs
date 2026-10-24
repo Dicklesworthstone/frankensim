@@ -66,6 +66,9 @@ pub struct FrictionPortFrame {
     pub drive_work_j: f64,
     /// Nonnegative dissipation [J]: dry sliding work or physical layer plastic loss.
     pub dissipation_j: f64,
+    /// Physical loss in this port's series-drive dashpot [J], separately from
+    /// interface loss. Already included in `friction_dissipation_j`.
+    pub series_drive_dissipation_j: f64,
     /// Actual signed kinetic force residual [N], zero on other branches.
     pub constitutive_residual_n: f64,
     /// Dry contact branch, or explicitly resolved elastic/plastic material shear.
@@ -79,7 +82,8 @@ pub struct FrictionPortFrame {
 impl Default for FrictionPortFrame {
     fn default() -> Self {
         Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
-            dissipation_j: 0.0, constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
+            dissipation_j: 0.0, series_drive_dissipation_j: 0.0,
+            constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
             roots: None, shear_layer: None }
     }
 }
@@ -164,6 +168,9 @@ pub struct MultiFrictionModalSystem {
     // Constitutive candidates never replace accepted history until the complete
     // coupled network, all contacts and the energy ledger accept the step.
     shear_layers: Vec<Option<layer::MaterialShearLayer>>,
+    // Pivot budget for the active-set rescue (frankensim-o7qbp). Set at
+    // construction; a test may lower it to plant a budget-exhaustion negative.
+    active_set_budget: usize,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -226,7 +233,7 @@ impl MultiFrictionModalSystem {
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
             accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
-            shear_layers: vec![None; p] })
+            shear_layers: vec![None; p], active_set_budget: 4 * p + 16 })
     }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
@@ -375,6 +382,7 @@ impl MultiFrictionModalSystem {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
+                series_drive_dissipation_j: 0.0,
                 constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None };
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
             self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
@@ -506,12 +514,18 @@ impl MultiFrictionModalSystem {
     /// Restricted to the plain friction case: when any port carries a unilateral
     /// obstacle or a material shear layer the rescue declines (Ok(false)) and the
     /// caller refuses exactly as before, so no existing path changes behaviour.
-    fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>,
-        budget: usize) -> Result<bool, ModalFrictionError>
+    /// Override the active-set pivot budget (frankensim-o7qbp). For tests that
+    /// plant a budget-exhaustion negative; production uses the construction default.
+    pub fn force_active_set_budget(&mut self, budget: usize) { self.active_set_budget = budget; }
+
+    fn active_set_rescue(&mut self, drives: &[FrictionDrive], gate: Option<&CancelGate>)
+        -> Result<(), ModalFrictionError>
     {
         let p = self.points.len();
         if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some) {
-            return Ok(false);
+            // Not attempted: the active-set model covers only the plain friction
+            // ports. Name it a decline, never the original Gauss-Seidel error.
+            return Err(ModalFrictionError::ActiveSetDeclined);
         }
         let dt = self.sample_period_s();
         let mut a = self.compliance.clone();
@@ -529,15 +543,24 @@ impl MultiFrictionModalSystem {
         let laws: Vec<FrictionLaw> = (0..p).map(|i| self.points[i].port.law.clone()).collect();
         let lawrefs: Vec<&FrictionLaw> = laws.iter().collect();
         let seed = self.regimes.clone();
-        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, budget)? {
-            Some((tractions, regimes)) => {
+        match active_set::solve_active_set(&a, &f, &normal, &lawrefs, dt, &seed, self.active_set_budget)? {
+            active_set::Resolution::Solved(tractions, regimes) => {
                 poll(gate)?;
                 self.tractions.copy_from_slice(&tractions);
                 self.regimes.copy_from_slice(&regimes);
                 for b in &mut self.staged_branches { *b = ContactBranch::Fresh; }
-                Ok(true)
+                Ok(())
             }
-            None => Ok(false),
+            active_set::Resolution::Exhausted { pivots, last_set, worst } => {
+                Err(ModalFrictionError::ActiveSetExhausted {
+                    pivots,
+                    budget: self.active_set_budget,
+                    last_active_set: last_set,
+                    worst_port: worst.port,
+                    worst_condition: worst.condition,
+                    worst_size: worst.size,
+                })
+            }
         }
     }
 
@@ -612,18 +635,19 @@ impl MultiFrictionModalSystem {
             }
             match failure {
                 None => { sweeps = sweep; break; },
-                Some(error) if sweep == self.config.max_sweeps => {
+                Some(_) if sweep == self.config.max_sweeps => {
                     // The Gauss-Seidel sweep could not converge this step
                     // (frankensim-o7qbp). For a well-posed step the consistent
                     // stick/slip partition is unique; solve it directly with the
                     // active-set rescue. If it finds and verifies that partition,
                     // adopt it and accept; otherwise refuse on budget as before.
-                    if self.active_set_rescue(drives, gate, 4 * p + 16)? {
-                        rescues = 1;
-                        sweeps = sweep;
-                        break;
-                    }
-                    return Err(error);
+                    // Adopts the unique partition and continues, or returns a
+                    // NAMED active-set error (exhausted with payload, or declined)
+                    // -- never the original Gauss-Seidel error.
+                    self.active_set_rescue(drives, gate)?;
+                    rescues = 1;
+                    sweeps = sweep;
+                    break;
                 },
                 _ => {},
             }
@@ -679,7 +703,8 @@ impl MultiFrictionModalSystem {
             absolute_work = finite(absolute_work+supply.abs())?;
             self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
                 traction_n: self.tractions[i], slip_distance_m: slip,
-                drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual,
+                drive_work_j: supply, dissipation_j: dissipation,
+                series_drive_dissipation_j: hair_loss, constitutive_residual_n: residual,
                 regime: self.regimes[i], roots: self.port_roots[i], shear_layer };
         }
         let mut pressure = self.core.staged_observer_pressure(gate)?;

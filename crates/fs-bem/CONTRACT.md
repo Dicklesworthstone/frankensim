@@ -1011,6 +1011,13 @@ dynamic facet-pair moments, the outgoing Gram form, and the LU (through
 - Zero workers refuse. `open_screen_workers_are_bitwise` checks 2, 3 and 7
   workers at a real and a damped frequency.
 
+`PreparedScreen::solve_many` solves several real-frequency drives against one
+assembly and LU, and is bitwise that many separate `solve` calls
+(`open_screen_many.rs`, workers 1, 2, 3 and 7, rigid and local admittance).
+Each drive passes the single solve's backward-residual and passive-work
+checks; one failure, a drive count above the declared ceiling, or a
+cancellation (also polled between back-substitutions) refuses the whole call.
+
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own
 geometry.

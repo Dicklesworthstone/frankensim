@@ -6,6 +6,9 @@
 //! complete prescribed exterior edge. The solution is a discrete P1 Galerkin estimate,
 //! with a recomputed algebraic residual, not an error enclosure.
 
+/// Retained planar induction and material eddy-current heat on this same mesh.
+pub mod eddy;
+
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
     weighted::{WeightedAssemblyLimits, WeightedError},
@@ -186,49 +189,7 @@ impl PlanarMagnetostatics {
             ));
         }
         let n = self.mesh.vertices().len();
-        let trace = self
-            .mesh
-            .boundary_trace()
-            .map_err(|_| MagneticError::Invalid("mesh boundary trace is invalid"))?;
-        let mut on_boundary = vec![false; n];
-        for &vertex in &trace.vertices {
-            on_boundary[vertex as usize] = true;
-        }
-        let mut prescribed = vec![None; n];
-        for &(vertex, value) in boundary_potential_wb_m {
-            poll(cancelled)?;
-            if vertex >= n
-                || !on_boundary[vertex]
-                || !value.is_finite()
-                || prescribed[vertex].is_some()
-            {
-                return Err(MagneticError::Invalid(
-                    "boundary vertex/value is invalid or repeated",
-                ));
-            }
-            prescribed[vertex] = Some(value);
-        }
-        // A point pin alone fixes a matrix gauge but cannot supply the
-        // positive-length Dirichlet boundary of this physical model.
-        let mut prescribed_edge = vec![false; n];
-        for edge in &trace.edges {
-            poll(cancelled)?;
-            let [a, b] = edge.oriented_vertices.map(|v| v as usize);
-            if prescribed[a].is_some() && prescribed[b].is_some() {
-                prescribed_edge[a] = true;
-                prescribed_edge[b] = true;
-            }
-        }
-        if prescribed
-            .iter()
-            .zip(&prescribed_edge)
-            .any(|(value, &on_edge)| value.is_some() && !on_edge)
-        {
-            return Err(MagneticError::Invalid(
-                "prescribed potentials must cover exterior edges, not isolated points",
-            ));
-        }
-        self.admit_gauges(&prescribed, cancelled)?;
+        let prescribed = self.admit_boundary(boundary_potential_wb_m, cancelled)?;
         let mut rhs = vec![0.0; n];
         for (cell, face) in self.mesh.faces().iter().enumerate() {
             poll(cancelled)?;
@@ -289,6 +250,67 @@ impl PlanarMagnetostatics {
             }
             Some(result.report)
         };
+        self.recover(potential, report, cancelled)
+    }
+
+    fn admit_boundary(
+        &self,
+        boundary_potential_wb_m: &[(usize, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Option<f64>>, MagneticError> {
+        let n = self.mesh.vertices().len();
+        let trace = self
+            .mesh
+            .boundary_trace()
+            .map_err(|_| MagneticError::Invalid("mesh boundary trace is invalid"))?;
+        let mut on_boundary = vec![false; n];
+        for &vertex in &trace.vertices {
+            on_boundary[vertex as usize] = true;
+        }
+        let mut prescribed = vec![None; n];
+        for &(vertex, value) in boundary_potential_wb_m {
+            poll(cancelled)?;
+            if vertex >= n
+                || !on_boundary[vertex]
+                || !value.is_finite()
+                || prescribed[vertex].is_some()
+            {
+                return Err(MagneticError::Invalid(
+                    "boundary vertex/value is invalid or repeated",
+                ));
+            }
+            prescribed[vertex] = Some(value);
+        }
+        // A point pin alone fixes a matrix gauge but cannot supply the
+        // positive-length Dirichlet boundary of this physical model.
+        let mut prescribed_edge = vec![false; n];
+        for edge in &trace.edges {
+            poll(cancelled)?;
+            let [a, b] = edge.oriented_vertices.map(|v| v as usize);
+            if prescribed[a].is_some() && prescribed[b].is_some() {
+                prescribed_edge[a] = true;
+                prescribed_edge[b] = true;
+            }
+        }
+        if prescribed
+            .iter()
+            .zip(&prescribed_edge)
+            .any(|(value, &on_edge)| value.is_some() && !on_edge)
+        {
+            return Err(MagneticError::Invalid(
+                "prescribed potentials must cover exterior edges, not isolated points",
+            ));
+        }
+        self.admit_gauges(&prescribed, cancelled)?;
+        Ok(prescribed)
+    }
+
+    fn recover(
+        &self,
+        potential: Vec<f64>,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarField<'_>, MagneticError> {
         let mut magnetic_flux_density_t = Vec::with_capacity(self.mesh.faces().len());
         let mut magnetic_field_a_m = Vec::with_capacity(self.mesh.faces().len());
         let mut cell_energy_j = Vec::with_capacity(self.mesh.faces().len());

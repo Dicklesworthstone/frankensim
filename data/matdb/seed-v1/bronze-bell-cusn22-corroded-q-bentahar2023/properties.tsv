@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	bt-fig10	Sand-cast bell bronze Cu 78.254 +- 1.171, Sn 21.744 +- 0.241 wt% (Table 1, five specimens), beams 120 x 12.5 x 5 mm, surface-corroded in the CIME chamber for 1, 2 and 3 months (cycles 1-3, two specimens each); one 120 x 12.5 mm face mirror polished	Each beam cantilevered in a bolted steel clamp block on an electrodynamic shaker (base excitation, Figs. 2 and 3a), velocity by laser vibrometer; Q = f0 / (3 dB width) from the resonance curve (Fig. 4a) of the 4th bending mode, plotted against the shaker drive voltage 0.1-1.0 V (Fig. 10); the reading here is each cycle's lowest drive, 0.1 V	TOTAL specimen loss 1/Q, including the clamp and the corrosion layer; the intact specimens' Q is not given in the text or figures. The drive axis is volts, not strain. Laboratory temperature not stated. As a material loss factor this is only an upper bound (eta_material <= 1/Q - eta_air - eta_radiation) for corroded Cu-21.7Sn at about 11.3-11.4 kHz
+scalar	q-cycle1	bt-fig10	quality_factor_4th_bending_cycle1_drive_0p1v	99.00	1	constant
+uncertainty	q-cycle1	unstated	-	-	-	-
+validity	q-cycle1	frequency	11295	11321	Hz
+scalar	q-cycle1-reading-half-width	bt-fig10	quality_factor_4th_bending_cycle1_drive_0p1v_reading_half_width	1.25	1	constant
+uncertainty	q-cycle1-reading-half-width	unstated	-	-	-	-
+validity	q-cycle1-reading-half-width	frequency	11295	11321	Hz
+scalar	q-cycle2	bt-fig10	quality_factor_4th_bending_cycle2_drive_0p1v	95.42	1	constant
+uncertainty	q-cycle2	unstated	-	-	-	-
+validity	q-cycle2	frequency	11419	11441	Hz
+scalar	q-cycle2-reading-half-width	bt-fig10	quality_factor_4th_bending_cycle2_drive_0p1v_reading_half_width	0.97	1	constant
+uncertainty	q-cycle2-reading-half-width	unstated	-	-	-	-
+validity	q-cycle2-reading-half-width	frequency	11419	11441	Hz
+scalar	q-cycle3	bt-fig10	quality_factor_4th_bending_cycle3_drive_0p1v	101.49	1	constant
+uncertainty	q-cycle3	unstated	-	-	-	-
+validity	q-cycle3	frequency	11394	11420	Hz
+scalar	q-cycle3-reading-half-width	bt-fig10	quality_factor_4th_bending_cycle3_drive_0p1v_reading_half_width	1.25	1	constant
+uncertainty	q-cycle3-reading-half-width	unstated	-	-	-	-
+validity	q-cycle3-reading-half-width	frequency	11394	11420	Hz

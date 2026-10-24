@@ -18,6 +18,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "solid_enthalpy/directional.rs"]
 mod directional;
+#[path = "solid_enthalpy/valve.rs"]
+mod valve;
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];

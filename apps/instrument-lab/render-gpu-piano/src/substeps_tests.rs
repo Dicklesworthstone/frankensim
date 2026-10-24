@@ -20,6 +20,7 @@ fn piano(instrument: &mut Instrument) -> Piano {
         .unwrap();
     Piano {
         backend: Box::new(Cpu(Emulator::new(&program))),
+        required_backend: None,
         program,
         damper_key: Some((lifted, sustain.to_bits())),
         positions: Vec::new(),
@@ -234,6 +235,7 @@ struct FaultBackend {
     cpu: Cpu,
     refuse_step: Option<usize>,
     bad_loss: bool,
+    backend_error: bool,
     calls: Rc<RefCell<Vec<usize>>>,
 }
 impl Backend for FaultBackend {
@@ -262,6 +264,9 @@ impl Backend for FaultBackend {
             if self.bad_loss {
                 losses.0 += 1.0;
             }
+            if self.backend_error {
+                return Err("injected failure after real emulator work".into());
+            }
         }
         Ok(losses)
     }
@@ -282,6 +287,7 @@ fn contact_refusal_at_every_substep_restores_whole_frame_and_only_reruns_complet
                 cpu: Cpu(Emulator::new(&accelerator.program)),
                 refuse_step: Some(frame * 4 + offset),
                 bad_loss: false,
+                backend_error: false,
                 calls: calls.clone(),
             });
             let mut traces = vec![0.0; 8 * actual.instrument().board_trace_len()];
@@ -334,6 +340,7 @@ fn ledger_refusal_restores_the_entire_unpublished_stretch() {
         cpu: Cpu(Emulator::new(&accelerator.program)),
         refuse_step: None,
         bad_loss: true,
+        backend_error: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     });
     let mut traces = vec![0.0; 8 * actual.instrument().board_trace_len()];
@@ -353,6 +360,74 @@ fn ledger_refusal_restores_the_entire_unpublished_stretch() {
     for _ in 0..64 {
         actual.instrument_mut().step().unwrap();
         reference.instrument_mut().step().unwrap();
+    }
+    state_near(actual.instrument(), reference.instrument());
+}
+
+/// G1/G3: a device can fail after partially writing the returned state. Execute
+/// actual emulator work before injecting that error, then compare whole-frame
+/// state/accounting with the independent CPU instrument.
+#[test]
+fn required_gpu_failure_restores_the_frame_without_cpu_fallback() {
+    for required in ["cuda", "metal"] {
+        let mut actual = stream(4, EMPTY_SCORE, 1000);
+        let mut reference = stream(4, EMPTY_SCORE, 1000);
+        actual.instrument_mut().jack_on(69, 10.0, 0.007).unwrap();
+        reference.instrument_mut().jack_on(69, 10.0, 0.007).unwrap();
+        let before = format!("{:?}", actual.instrument().checkpoint_external_hammers());
+        let q = actual.instrument().bank.q.clone();
+        let v = actual.instrument().bank.v.clone();
+        let mut accelerator = piano(actual.instrument_mut());
+        accelerator.required_backend = Some(required.into());
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        accelerator.backend = Box::new(FaultBackend {
+            cpu: Cpu(Emulator::new(&accelerator.program)),
+            refuse_step: None,
+            bad_loss: false,
+            backend_error: true,
+            calls: calls.clone(),
+        });
+        let mut traces = vec![0.0; 8 * actual.instrument().board_trace_len()];
+        let error = accelerator.advance(actual.instrument_mut(), 8, &mut traces).unwrap_err();
+        assert!(error.contains(&format!("required {required} backend failed")), "{error}");
+        assert_eq!(*calls.borrow(), vec![32]);
+        assert_eq!(accelerator.backend.name(), "CPU emulator with injected refusal");
+        assert_eq!(accelerator.stats.steps, 0);
+        assert_eq!(q, actual.instrument().bank.q);
+        assert_eq!(v, actual.instrument().bank.v);
+        assert_eq!(before, format!("{:?}", actual.instrument().checkpoint_external_hammers()));
+        state_near(actual.instrument(), reference.instrument());
+        for _ in 0..64 {
+            actual.instrument_mut().step().unwrap();
+            reference.instrument_mut().step().unwrap();
+        }
+        state_near(actual.instrument(), reference.instrument());
+    }
+}
+
+#[test]
+fn automatic_backend_failure_keeps_the_real_cpu_trajectory() {
+    let mut actual = stream(4, EMPTY_SCORE, 1000);
+    let mut reference = stream(4, EMPTY_SCORE, 1000);
+    actual.instrument_mut().jack_on(69, 10.0, 0.007).unwrap();
+    reference.instrument_mut().jack_on(69, 10.0, 0.007).unwrap();
+    let mut accelerator = piano(actual.instrument_mut());
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    accelerator.backend = Box::new(FaultBackend {
+        cpu: Cpu(Emulator::new(&accelerator.program)),
+        refuse_step: None,
+        bad_loss: false,
+        backend_error: true,
+        calls: calls.clone(),
+    });
+    let len = actual.instrument().board_trace_len();
+    let mut traces = vec![0.0; 8 * len];
+    assert_eq!(accelerator.advance(actual.instrument_mut(), 8, &mut traces).unwrap(), 8);
+    assert_eq!(*calls.borrow(), vec![32]);
+    for frame in 0..8 {
+        let mut trace = vec![0.0; len];
+        reference.instrument_mut().step_with_board_trace(&mut trace).unwrap();
+        near(&traces[frame * len..(frame + 1) * len], &trace);
     }
     state_near(actual.instrument(), reference.instrument());
 }

@@ -9,7 +9,10 @@
 //! run this compiler). Each fixture must be byte-for-byte this compiler's output for its committed seed,
 //! so a seed edit without a refreshed fixture fails here. The grand piano board's loss packs
 //! (`crates/fs-couple/examples/grand_piano/packs`, pexfp.373) are guarded the same way; they are plain
-//! claim packs, compiled without a material state, as the board source loads them.
+//! claim packs, compiled without a material state, as the board source loads them. So are the plain
+//! packs the fs-couple literature tests resolve their materials from
+//! (`crates/fs-couple/tests/fixtures/matdb`, pexfp.32): seeds, and labelled authored fixtures whose
+//! sources live beside them.
 
 #![deny(unsafe_code)]
 
@@ -58,12 +61,31 @@ const PIANO_FIXTURES: [(&str, [&str; 4]); 6] = [
 ];
 
 /// Loss packs the grand piano's material-damping board loads (plain claim packs).
-const BOARD_LOSS_FIXTURES: [&str; 5] = [
+const BOARD_LOSS_FIXTURES: [&str; 6] = [
     "spruce-sitka-loss-moisture-qiu2026",
     "spruce-sitka-loss-ono1996",
     "maple-sugar-loss-ono1996",
     "spruce-norway-loss-frequency-spycher2008",
     "spruce-norway-loss-frequency-moisture-merhar2025",
+    "pine-loss-longitudinal-bremaud2012",
+];
+
+/// Plain packs the fs-couple literature tests load, by source manifest (pexfp.32): seed packs, then
+/// the authored test fixtures that carry values no source pack does.
+const COUPLE_TEST_FIXTURES: [&str; 13] = [
+    "data/matdb/seed-v1/spruce-sitka-fpl-gtr282/manifest.tsv",
+    "data/matdb/seed-v1/spruce-sitka-loss-qiu2026/manifest.tsv",
+    "data/matdb/seed-v1/rosewood-brazilian-fpl-gtr282/manifest.tsv",
+    "data/matdb/seed-v1/rosewood-indian-fpl-gtr282/manifest.tsv",
+    "data/matdb/seed-v1/aluminum-2024-t3-nasa-tn-d6448/manifest.tsv",
+    "data/matdb/seed-v1/music-wire-nbs-c447/manifest.tsv",
+    "data/matdb/seed-v1/music-wire-spring-moduli-fuchs-1968/manifest.tsv",
+    "data/matdb/seed-v1/cane-arundo-reedheel-mdpi-ma13204566/manifest.tsv",
+    "data/matdb/seed-v1/cane-arundo-reedblank-mdpi-ma18122759/manifest.tsv",
+    "data/matdb/seed-v1/cane-arundo-damping-scielo-mr20170795/manifest.tsv",
+    "crates/fs-couple/tests/fixtures/matdb/rosewood-brazilian-back-authored-fixture/manifest.tsv",
+    "crates/fs-couple/tests/fixtures/matdb/rosewood-indian-bar-authored-fixture/manifest.tsv",
+    "crates/fs-couple/tests/fixtures/matdb/cane-reed-authored-fixture/manifest.tsv",
 ];
 
 /// Compile one committed seed manifest as a material-state pack, exactly as the piano tools do.
@@ -148,6 +170,33 @@ fn grand_piano_loss_pack_fixtures_are_the_compiled_committed_seeds() {
     assert!(
         stale.is_empty(),
         "stale or missing grand piano loss pack fixtures; commit the fresh compiler output:\n{}",
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn couple_test_pack_fixtures_are_the_compiled_committed_sources() {
+    let fixtures = workspace().join("crates/fs-couple/tests/fixtures/matdb");
+    let mut stale = Vec::new();
+    for manifest in COUPLE_TEST_FIXTURES {
+        let id = Path::new(manifest)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .expect("a pack directory");
+        let (fresh, bytes) = compile_bytes(manifest, None, &format!("couple-{id}"));
+        let committed = fixtures.join(format!("{id}.fsmatpk"));
+        if std::fs::read(&committed).ok().as_deref() != Some(bytes.as_slice()) {
+            stale.push(format!(
+                "{} (fresh: {})",
+                committed.display(),
+                fresh.display()
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale or missing fs-couple test pack fixtures; commit the fresh compiler output:\n{}",
         stale.join("\n")
     );
 }

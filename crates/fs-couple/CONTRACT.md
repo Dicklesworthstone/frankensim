@@ -1925,6 +1925,23 @@ clarinet is one filling of those objects.
   `OmissionBound::StandardAirConvention`: standard air's worst ISO absorption.
   It is a convention and not a bound for a gas that relaxes more strongly than
   air (CO2-rich, for example).
+  `air_path::omitted_observer_absorption(record, range, band_top)` is the
+  figure a render that applies no law (or Stokes-Kirchhoff only) leaves out,
+  read from the listener gas's record, never inferred from its state: ISO
+  9613-1 for a legacy record or terrestrial-air composition; Stokes-Kirchhoff,
+  complete, for monatomic species only; the relaxation law with ISO's rates
+  held (declared) for N2 and O2 off ISO's fractions; otherwise `Unbounded`,
+  naming the species (heliox's He, CO2 above ISO's ceiling, SF6). The band top
+  is `observer_band_top_hz`: the declared band, Nyquist and 20 kHz
+  (`OBSERVER_BAND_TOP_CAP_HZ`), whichever is lowest.
+  `ObserverOmission::admit` refuses with
+  `AcousticRealizeError::ObserverOmission` when the omitted figure exceeds
+  `OBSERVER_OMISSION_TOLERANCE_DB` (1.0 dB) or is unbounded, unless the input
+  declares a law (`observer_law none` or `stokes-kirchhoff`), which accepts the
+  omission with its receipt. In air at 20 °C, 50 % RH and 1 atm, at 20 kHz, a
+  1 m listener omits 0.524 dB and passes; a 2 m listener omits 1.048 dB and
+  refuses. A gas without a record naming its composition (a resolved field
+  cell) is `Unrecorded` and is treated like `Unbounded`.
   `GasAbsorptionModel::MolecularRelaxation` applies the gas's own relaxation
   law (`fs_material::relaxation`). It is evaluated from the gas's composition
   and its species' data, and supplied as `RealizeOptions::observer_relaxation`
@@ -1939,6 +1956,86 @@ clarinet is one filling of those objects.
   `xtask/tests/observer_relaxation_amount.rs` gates the amount on a rendered
   plucked string at 100 m. The humidity change is gated against ISO 9613-1,
   and the oxygen change against the law with declared rates.
+  Streaming renderers apply the same laws through `air_path::ObserverFilter`,
+  a causal FIR built once per law, range and clock. The reed performance
+  (`render::schedule::reed`) applies it to both observers, the legacy
+  `listener_m` proxy and the `baffled_outlet` receiver. It chooses as above:
+  ISO 9613-1 for a legacy (T, p, RH) medium, Stokes-Kirchhoff (with the
+  omission receipted) for a supplied mixture or thermochemical medium, or the
+  `observer_law none|iso9613|stokes-kirchhoff|relaxation
+  iso9613-terrestrial-air` record. `none` (`GasAbsorptionModel::Lossless`) is
+  a receipted lossless choice for comparisons with lossless analytic oracles,
+  never a default. `ReedPerformance::observer` returns the receipt.
+  How each law is made causal:
+  - Molecular relaxation: its own causal transfer.
+  - ISO 9613-1: each O2 and N2 term by its exact complex Debye
+    (Kramers-Kronig) pair, so the magnitude is ISO's exactly and the dispersion
+    is its own. The classical term is the in-band minimum phase.
+  - Stokes-Kirchhoff: the in-band minimum phase. The receipt names the band
+    where `omega tau_v << 1` fails.
+  A minimum phase built from the in-band magnitude is not used where
+  dispersion exists, because it cannot see absorption above Nyquist. For air
+  at RH 50 % and 30 m, against the direct causal relaxation transfer:
+
+  | Grid Nyquist | Worst in-band complex error | LF delay (physical 34.5 us) |
+  |---|---|---|
+  | 24 kHz | 2.0 | 20.2 us |
+  | 48 kHz | 1.07 | 27.4 us |
+  | 192 kHz | 0.11 | 33.8 us |
+
+  A dispersive transfer sampled only to Nyquist rings before `t = 0`. Its
+  excess phase at Nyquist is nonzero, so the periodic DFT spectrum jumps there,
+  and no zero-latency causal FIR drops the precursor below a fixed fraction.
+  That is a property of band-limited dispersive transfers, not of one law. Its
+  FIR is therefore delayed by a sub-sample alignment `d` (making the Nyquist
+  bin real) plus the fewest whole samples `D` for the precursor to meet the
+  certificate. Each receipt's certificate (`budget_energy`) is
+  `min(OBSERVER_TRUNCATION_ENERGY = 1e-9, OBSERVER_UNCERTAINTY_MARGIN = 1e-3 x
+  alpha_uncertainty_energy)` of the response energy. `alpha_uncertainty_energy`
+  is what ISO 9613-1's stated +-10 % on alpha is in the same measure. The
+  dropped energy therefore sits three orders below the law's own uncertainty
+  at every range, and short ranges pay more padding. The receipt prints `d`,
+  `D`, the budget, the latency and the realized dropped energy. There is no
+  fixed range floor: a baffled receiver whose own delay cannot absorb the
+  filter's refuses (`ObserverLatency`, naming `observer_law none`), wherever the
+  physics puts that for its law, gas, clock and range. A 5 cm receiver at
+  48 kHz in air refuses.
+  Precursor energy left before `-D`, ISO companion, air, 48 kHz (prototype):
+
+  | Range | Alignment | D = 16 | D = 64 | D = 256 | D = 1024 |
+  |---|---|---|---|---|---|
+  | 0.5 m | none | 3.1e-5 | 8.0e-6 | 1.9e-6 | 3.7e-7 |
+  | 0.5 m | d | 1.7e-9 | 3.3e-11 | 5.5e-13 | 9.4e-15 |
+  | 30 m | none | 2.7e-4 | 7.1e-5 | 1.7e-5 | 3.4e-6 |
+  | 30 m | d | 3.0e-7 | 6.3e-9 | 1.1e-10 | 1.8e-12 |
+  The filter is referenced to its front. The baffled receiver's propagation
+  delays use the receipt's `delay_speed_m_s`
+  (`RegionalDuct::baffled_outlet_delayed_at`), so receiver delay plus the
+  filter's low-frequency delay (dispersion and latency) is `r / c_0` exactly
+  once. A receiver too close to absorb it refuses with
+  `AcousticRealizeError::ObserverLatency` (range, available and needed
+  samples). The law is applied at the receiver's distance from the outlet
+  centre; `range_spread_m` bounds the difference over the Rayleigh elements.
+  The proxy has no propagation delay, so its filter delay is uncompensated.
+  `ReedObserverReceipt::consumer_delay_s` is the delay a consumer must apply
+  to place the proxy's radiated part as the baffled path is placed: both
+  total `r / c_0`. The proxy's sample is bore pressure plus radiation (plates
+  and jet at `listener_m`). The law acts on the radiation only
+  (`ReedBoreVoice::last_observer_parts`); the bore pressure travels no
+  distance and passes unfiltered and undelayed
+  (`internal_part_unpropagated`). Under `observer_law none` the proxy is the
+  voice's own sum, bit for bit.
+  `ReedPerformance::observer_admission` reports the listener gas's figure
+  (`air_path::omitted_observer_absorption`, from its record; a field cell is
+  unrecorded) at the observer's range and band top (the receiver's declared
+  band, or Nyquist for the proxy, capped at 20 kHz), and what the applied law
+  leaves out: nothing under ISO or the relaxation law, the relaxation part
+  under Stokes-Kirchhoff, everything under `none`. It refuses an undeclared
+  Stokes-Kirchhoff law whose omission is unbounded, unrecorded or above
+  1.0 dB. The library builds regardless; `music_render wind` calls it before
+  any output exists and writes the receipt as `reed_input.observer`. The five
+  reed CO2 fixtures declare `observer_law stokes-kirchhoff`, the law they
+  already had by default, so their sound is unchanged.
   Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
   is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a
@@ -4703,3 +4800,197 @@ conduction, all graph/coil heat, caloric/geometry identity, complete passive-cor
 mapping and fixed-state/source refusals, native budgets/events and late
 cancellation. Independent numerical energy checks supplement source review;
 native build/regression execution remains a separate requirement.
+
+## Electrical heating of a live string in finite surrounding gas
+
+`acoustic_realize::finite_gas::electrical` connects the existing source-bound
+Ohmic drive to both finite-gas string steps. The original conductor resolves
+initial resistance, current and Joule work; that work enters prescribed solid
+heat exactly once. The existing owners advance vibration, material loss,
+aerodynamic drag, solid enthalpy, gas energy/EOS, optional reciprocal layer
+conduction and the compact pressure observer. Endpoint resistance and current
+must also resolve before either accepted owner publishes. Late source refusal,
+stale epoch or cancellation preserves both states and acoustic history.
+
+`FiniteGasElectrothermalStringFrame` retains both source-resolved conductors,
+initial and endpoint currents, Joule work and separately prescribed solid heat.
+Its nested combined energy account already includes Joule work; callers must
+not add it again. Material viscous loss heats the solid, aerodynamic drag heats
+the finite gas, and signed interfacial heat cancels between their inventories.
+Numerical loss and diagnostic radiation are not converted to extra heat.
+
+The existing first-order frozen-coefficient split, fixed tension and geometry,
+constant elastic modulus/density, fully solid caloric state, source validity,
+layer geometry and Biot restrictions remain in force. This supplies no circuit
+dynamics, contact/skin effects, Lorentz force, thermoelastic work, gas pressure
+work or radiation loading. Gas volume specifies a thermal inventory, not an
+acoustic chamber geometry.
+
+The three focused `string_specimen::finite_gas::electrical` regressions exercise
+independent current/voltage work and signed-drive parity, source resistance and
+damping feedback into actual pressure, cumulative mechanical/solid/gas storage,
+and late refusal with deterministic retry and cancellation. Their manufactured
+coefficients establish integration behavior, not measured material validation.
+
+## Finite enthalpy heating through a pressure-loaded solid valve
+
+`solid_enthalpy::valve` binds each accepted P1 material/caloric state to the
+existing thermal pressure-valve reducer. `advance_pressure_valve_to` advances
+the original source-observed thermal timeline, refreshes pinned elastic and
+expansion claims, solves compatible equilibrium once, then admits displaced
+aperture geometry, complete tangent stability and pressure/modal compliance.
+It returns the thermal state, caloric audit, resolved source state and valve as
+one candidate. Reference mass, mesh frame and the original dead-pressure
+footprint remain fixed. Source, phase, geometry, reduction or cancellation
+refusal leaves the accepted input intact.
+
+`examples/heated_valve_sound` accepts normalized material packs or explicitly
+manufactured coefficients and carries finite heat through ordinary material
+acoustic assembly to physical-pressure CSV and stereo WAV. The caller declares
+a fully solid temperature interval; the example does not infer a melting law
+from heat capacity. Its cold and heated outputs are frozen-state experiments.
+They do not claim live modal-state transfer, reciprocal thermoelastic heat,
+moving load geometry, measured damping or instrument validation. The thermal
+audit remains caloric rather than a claim of reciprocal thermomechanical work.
+
+Three core regressions compare an independent six-tetrahedron tangent and
+pressure compliance, source/aperture refusal and cancellation. Two native
+example regressions check finite-energy temperature, fixed reference mass,
+data-only heat-capacity changes reaching actual microphone pressure,
+deterministic replay and refusal without a sound comparison.
+
+## Native continuously heated string and finite-gas journey
+
+The `finite_gas_string` binary and example share one implementation. A bounded
+scenario declares geometry, force/release, observation, current or voltage,
+prescribed heat, thermal inventory and solve controls. A normalized solid claim
+pack supplies constant density/modulus, temperature-dependent Kelvin-Voigt loss,
+heat capacity, conductivity and optional electrical resistivity. The shared
+native gas loader retains explicit species, NASA-9 and transport associations;
+the finite parcel requires a declared frozen-gas policy.
+
+The same modal state and acceleration history continue through all accepted
+samples. Material loss heats the solid, drag heats the gas, and source-bound
+layer conduction exchanges equal and opposite heat. Resistance, damping, gas
+EOS and the compact pressure observer follow their accepted material states.
+Every CSV row measures the cumulative mechanical/solid/gas storage change from
+actual endpoints and checks it against source work and explicitly accounted
+loss. Metadata retains card/curve/source identities and initial mechanical
+energy. The whole physical trajectory is admitted before output; WAV creation
+requires a new destination and uses the declared pressure scale without peak
+normalization. Clipping is reported. I/O errors are not transactional rollback.
+
+The single-phase interval is a caller declaration, not discovered melting
+physics. All original fixed-geometry/tension, constant-E/density, first-order,
+well-mixed gas and diagnostic-radiation limitations remain. The supplied solid
+fixture is manufactured. Native regressions cover replay, independent storage
+integrals, data-only material/gas/volume changes, strict input and source or
+cancellation refusal; they do not establish measured instrument accuracy.
+
+## Thermal material field storage
+
+`circuit_enthalpy::field_storage::step_candidate` closes sourced C(T) and L(T), native Kirchhoff charge/flux, resistor heating and the original finite enthalpy/Newton residual on one candidate interval. Every field branch maps to one whole material cell with the same immutable card, source context, caloric law and geometry. The prepared material network keeps resistor/conduction source choices pinned. Field coefficients are refreshed at each proposed temperature through `fs-material::field_storage::thermal`; the original circuit owns rebinding and midpoint evolution. No replacement circuit or heat integrator is introduced.
+
+For each field, the source law supplies psi=z²/(2K), s=-partial_T psi and U=psi+Ts. The frozen-initial-coordinate coefficient change supplies explicit parameter work to the native electrical step. Its negative, together with minus delta(Ts), becomes signed reversible transfer into the same material's caloric store; Joule dissipation is routed separately, exactly once. The final independent enclosing balance uses actual U at both endpoints plus caloric storage, against only authored electrical work and external heat. Original native reports retain their isothermal free-energy convention and expose the separate physical account explicitly.
+
+The bounded reduction requires fixed geometry, complete storage mapping, one field branch per thermal material cell, fully solid constant-density caloric charts for mapped fields, positive affine coefficients and positive total caloric plus field heat capacity across each declared temperature/coordinate envelope. Both endpoint charges/fluxes must satisfy that envelope. Other thermal cells keep their original phase and boundary behavior. Source constraints, material-domain errors, unresolved thermal events, failed residuals, budget exhaustion and cancellation return no live-state mutation. Ideal-source constraint incompatibilities during frozen-coordinate rebinding refuse; no impulsive source exchange is inferred. Hysteresis, dielectric relaxation, moving geometry, field-dependent constitutive response, spatial field reassembly and phase transitions of mapped fields are separate owners. This first-order endpoint-temperature split does not claim unconditional passivity or temporal accuracy.
+
+Focused authored RC/RL fixtures cover both thermal coefficient signs, exact constant-coefficient recovery, independent total-U scalar roots, repeated accepted history, Joule versus reversible versus external heat, positive closed-system entropy, source/volume mismatch, capacity envelope, budget and late cancellation. These are numerical regressions, not measured material validation. Native Cargo/DSR execution was unavailable for this increment.
+
+### Implicit conservative homogeneous reaction extent
+
+`cavity_phs::piston::reactive::implicit::ImplicitReactionSolve` selects
+backward Euler for one reversible source-bound reaction, including inerts and
+initially absent products. It solves `xi - dt V r_end = 0` in moles with the
+same bounded scalar feedback algorithm used by thermal exchange. Each trial
+starts from the same accepted gas mass, volume and TOTAL internal energy,
+reconstructs the original NASA-9 mixture, and re-evaluates canonical partial
+activities, the actual temperature-dependent material rate and thermodynamic
+reverse closure. No formation-energy heat is added. Source/model identities
+and explicit/implicit paths share the original inventory reconstruction and
+final species, mass, energy and entropy admission.
+
+The caller's signed molar bracket is intersected with current donor allowances;
+accepted species are never clipped. Search endpoints retain strictly positive
+donors. Zero-rate states accept before querying the nonzero edge. Every queried
+state must remain inside the declared caloric/transport/kinetic source domain.
+Rejected bracket samples need not pass the accepted-trajectory entropy gate;
+the converged physical endpoint must. Reports retain endpoint rates, actual
+nonlinear residual, admitted extent bracket and bounded trial count. Thermal
+feedback's joule API and numerical operation order remain unchanged; the shared
+internal scalar core attaches units only in its physical wrappers.
+
+Existing parcel, piston, flow/diffusion and finite electrical/thermal consumers
+select this method through the same `GasReaction` value. Existing dyadic
+subcycling also refines implicit trajectories and may retry donor, entropy or
+nonlinear-root failures, while source, arithmetic and cancellation errors
+remain hard refusals. The root cap is at most 128 interior trials plus two
+endpoints per attempted substep; every gas inversion retains its separate cap.
+An aggregate subcycling report does not mislabel its summed extent as one root:
+individual endpoint equations remain in the actual accepted substeps.
+
+This is a first-order homogeneous reaction-then-motion/heat split, not a
+multi-reaction implicit mechanism, chemical-equilibrium acoustic derivative or
+validated ignition/engine model. Multi-channel implicit construction refuses.
+Temporal refinement and nonlinear-source branch admission remain necessary.
+Focused regressions use synthetic balanced isomers with an independent analytic
+backward-Euler limit and exponential relaxation, actual temperature-dependent
+source kinetics, formation-energy pressure/sound response, material piston
+motion, absent reagents, source/work limits and cancellation rollback. Native
+workspace execution and experimental mechanism qualification remain separate.
+
+## Finite moisture transport into native plate mechanics
+
+The material-reality MR46 slice in `moisture` keeps local water inventory
+separate from ambient relative humidity. `MoistureSlab` is a homogeneous,
+isothermal, one-dimensional fixed-reference specimen with kg water/kg dry solid
+as its sole evolving field. Its source query explicitly distinguishes absolute
+temperature and dry-basis moisture. Reference density at the declared reference
+moisture gives conserved dry skeleton mass; later density queries never create
+or destroy that inventory. Every interval measures the water received at each
+end and checks total water change against those signed transfers.
+
+The effective diffusivity is required material data; no wood/material name
+selects a number. Its original claim is pinned and re-evaluated locally.
+Backward Euler uses harmonic interior-face diffusivities evaluated at the
+accepted start and half-cell resistance at prescribed surfaces. This lagged
+nonlinear coefficient is a first-order approximation, with explicit interval,
+content-increment, true-residual, conservation and work limits. The tridiagonal
+SPD operator uses the original `fs-solver::checked_cg` and original
+`fs-sparse::Precond` interface, not a second linear solver. Its identity
+term and nonnegative graph conductances establish SPD. Source, numerical
+maximum-principle, increment and water balance admissions precede publication.
+No water is clipped or silently renormalized. Sealed ends carry zero transfer;
+prescribed dry-basis values are infinite reservoirs. The explicit FPL wood
+sorption boundary calls the existing coefficient-card owner at matching
+temperature and actual RH; it changes the surface condition, never every
+interior cell at once.
+
+`moisture::plate::MoisturePlate` maps that same inventory to the existing
+rectangular DKT mesh: diffusion is along in-plane x, while width and thickness
+are well mixed and their exterior faces are sealed in the transport reduction.
+Each x strip re-resolves its original isotropic or orthotropic elastic claims at
+its actual local moisture. The existing plane-stress/axis lowering and native
+DKT assembler rebuild stiffness and translational/rotary inertia. Reference
+dry density times (1+M) supplies wet mass on this fixed geometry. The assembled
+mass is independently compared with conserved dry mass plus transported water.
+Ordinary modal/force/pressure consumers receive the native pencil; no modal
+frequency multiplier or instrument preset is introduced. Coupled advance
+returns transport and mechanical endpoints together only after both admit.
+
+This rung does not model hygroscopic swelling, humidity prestress, sorption
+heat, finite vapor-reservoir depletion, hysteresis, free liquid, stress-assisted
+diffusion, changing porosity/geometry, dynamic modal-state remapping, or
+moisture-dependent damping. It makes no complete thermodynamic energy or
+chemical-entropy claim. Its no-swelling/fixed-geometry approximation must be
+admitted by the caller; it is not the full MR46 completion. Drying/wetting
+response is memory through the diffusion field, not a sorption scanning law.
+No physical wood diffusivity or validation is inferred from authored fixtures.
+
+Focused tests cover a closed-form one-cell update, sealed water conservation,
+Fourier-series slab refinement, squared-length/time scaling, data-only
+diffusivity changes, local nonlinear source refresh, the shipped FPL sorption
+pack, native modal stiffness/inertia scaling, spatial anisotropic material
+consumption, complete mechanical-source refusal, budgets, quantity-basis
+refusal and cancellation. Native Cargo execution is a separate gate; parsing
+and independent numerical oracles do not establish executed native test results.

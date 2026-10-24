@@ -25,7 +25,8 @@ fn baked(channels:usize)->Baked {
             c:vec![sign*(mode+1) as f64*0.03],d:sign*0.001,
             e_leftover:0.,t_s:1./f64::from(RATE)}
     }).collect()).collect(),delays_s:(0..channels).map(|c|0.002+0.00101*c as f64).collect(),
-        maximum_error:0.,worst_rms_error:0.}
+        // Analytic receivers are exact at every frequency: the whole band to Nyquist.
+        maximum_error:0.,worst_rms_error:0.,band_hz:(0.,f64::from(RATE)/2.)}
 }
 
 #[test]
@@ -192,7 +193,7 @@ fn continuous_acceleration_reaches_exterior_pressure_without_high_partial_droop(
     let baked=Baked {filters:gains.iter().map(|&gain|vec![DiscreteStateSpace {
         n:0,a:vec![],b:vec![],c:vec![],d:gain,e_leftover:0.0,t_s:1.0/f64::from(RATE),
     }]).collect(),delays_s:travel.iter().map(|delay|delay/f64::from(RATE)).collect(),
-        maximum_error:0.0,worst_rms_error:0.0};
+        maximum_error:0.0,worst_rms_error:0.0,band_hz:(0.0,f64::from(RATE)/2.0)};
     for ratio in [1,3,4,16] {
         for frequency in [440.0,4800.0,15000.0,21600.0] {
             let mut decimator=Decimator::new_differentiating(ratio,1,RATE).unwrap();

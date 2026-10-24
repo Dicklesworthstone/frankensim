@@ -13,6 +13,8 @@ use std::process::Command;
 
 use fs_couple::acoustic_realize::{RealizeOptions, realize_assembly_with_options};
 use fs_couple::air_path::GasAbsorptionModel;
+use fs_couple::pcm_wav::observation::{ObservationPolicy, PressureRenderer};
+use fs_couple::render::schedule::reed::ReedPerformance;
 use fs_matdb::{
     MaterialStateId, NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack,
     NormalizedSpeciesPack,
@@ -48,6 +50,16 @@ const OXYGEN_ARM_BAND_DB: f64 = 0.03;
 /// estimate), so it is printed as an ungated FAILED row, an open finding on
 /// pexfp.18. The declared oxygen-arm band includes it and stays gated.
 const DRY_TERM_SENSITIVITY_DB: f64 = 0.008;
+
+/// Declared before the first run (ruling 6283, wind observer): a reed
+/// render's 2-8 kHz level under each lossy observer law, against the same
+/// render under `observer_law none`, matches the law's own per-bin prediction
+/// within this band [dB]. The FIR certificate (1e-9 of the response energy)
+/// bounds the per-bin transfer error near 1e-3, about 0.02 dB at |H| >= 0.5.
+const REED_LAW_BAND_DB: f64 = 0.02;
+/// Stated listener distance of the reed amount test [m].
+const REED_RANGE_M: f64 = 30.0;
+const D3: &str = "data/instruments/descriptions/clarinet/performances/BbClar.mf.D3.performance";
 
 const T_K: f64 = 293.15;
 const P_PA: f64 = 101_325.0;
@@ -193,15 +205,21 @@ fn balanced(parts: &[(&'static str, f64)]) -> Vec<(&'static str, f64)> {
     panic!("no exactly normalized composition near {parts:?}");
 }
 
-fn resolve(
-    registry: &ThermochemicalSources<'_>,
-    parts: &[(&'static str, f64)],
-) -> ResolvedThermochemicalGasState {
+/// The thermochemical gas record of `parts`, exactly normalized.
+fn record_text(parts: &[(&'static str, f64)]) -> String {
     let parts = balanced(parts);
     let mut text = format!("thermochemical {T_K:e} {P_PA:e} mole {}", parts.len());
     for (species, fraction) in parts {
         text.push_str(&format!(" {species} {fraction:e}"));
     }
+    text
+}
+
+fn resolve(
+    registry: &ThermochemicalSources<'_>,
+    parts: &[(&'static str, f64)],
+) -> ResolvedThermochemicalGasState {
+    let text = record_text(parts);
     match read_gas_record(&mut text.split_ascii_whitespace(), None, Some(registry)).unwrap() {
         GasRecord::Thermochemical(resolved) => resolved,
         other => panic!("{text} resolved to {other:?}"),
@@ -307,6 +325,11 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
 /// `(frequency [Hz], |P|^2)` of every bin inside the band, zero-padded to a
 /// power of two.
 fn band_spectrum(pressure: &[f64]) -> Vec<(f64, f64)> {
+    band_spectrum_at(pressure, RATE_HZ)
+}
+
+/// [`band_spectrum`] of a history sampled at `rate_hz`.
+fn band_spectrum_at(pressure: &[f64], rate_hz: u32) -> Vec<(f64, f64)> {
     let n = pressure.len().next_power_of_two();
     let mut re: Vec<f64> = pressure
         .iter()
@@ -319,7 +342,7 @@ fn band_spectrum(pressure: &[f64]) -> Vec<(f64, f64)> {
     (1..n / 2)
         .map(|k| {
             (
-                f64::from(RATE_HZ) * k as f64 / n as f64,
+                f64::from(rate_hz) * k as f64 / n as f64,
                 re[k] * re[k] + im[k] * im[k],
             )
         })
@@ -544,4 +567,151 @@ fn composition_changes_the_band_level_at_100_m_as_the_relaxation_law_predicts() 
         }
     );
     assert!((measured - predicted).abs() + sensitivity <= OXYGEN_ARM_BAND_DB);
+}
+
+/// The wind observer (rulings 6283, 6498): the D3 clarinet heard through its
+/// legacy proxy at 30 m, in thermochemical terrestrial air at RH 20 % and
+/// 80 %, under every observer law the file can declare. The proxy's sample is
+/// bore pressure plus radiation; the law acts on the radiation only, after the
+/// mechanics, and the bore pressure passes unfiltered. So the radiated part
+/// (the proxy minus the voice's own bore pressure) of each lossy law's render,
+/// against that of the `none` render of the SAME performance, is exactly the
+/// law's own transfer: it must match the law's per-bin prediction (ISO 9613-1's
+/// formula, Stokes-Kirchhoff, or the relaxation law's causal wavenumber)
+/// within the declared band. Wetter air must raise the ISO band level. The
+/// proxy has no propagation delay, so the laws' different delay references
+/// cannot enter.
+#[test]
+fn reed_observer_laws_change_the_band_level_as_each_law_predicts() {
+    let sources = [
+        source("nitrogen", "nitrogen-transport-lemmon2004"),
+        source("oxygen", "oxygen-transport-lemmon2004"),
+        source("argon", "argon-transport-lemmon2004"),
+        source(
+            "carbon-dioxide",
+            "carbon-dioxide-transport-laesecke2017-huber2016",
+        ),
+        source("water-vapor", "water-vapor-transport-iapws2008-2011"),
+    ];
+    let bindings: Vec<SpeciesPackRef<'_>> = sources.iter().map(binding).collect();
+    let water = id("H2O");
+    let registry = ThermochemicalSources {
+        species: &bindings,
+        water_species: Some(&water),
+        phase: ThermochemicalPhase::LiquidWaterLimit,
+    };
+    let original = std::fs::read_to_string(workspace_path(D3)).unwrap();
+    let (ambient_line, observer_line) = (
+        "\nambient 293.15 101325 0\n",
+        "\nbaffled_outlet 0 0 0.5 32 128 4800\n",
+    );
+    assert_eq!(original.matches(ambient_line).count(), 1);
+    assert_eq!(original.matches(observer_line).count(), 1);
+    let rate = 48_000u32;
+    let mut iso_levels = Vec::new();
+    for rh in [0.2, 0.8] {
+        let parts = composition(None, rh);
+        let resolved = resolve(&registry, &parts);
+        let state = RelaxationAbsorption::iso9613_terrestrial_air()
+            .unwrap()
+            .evaluate(&RelaxingMedium::from_thermochemical(&resolved).unwrap())
+            .unwrap();
+        let mut renders = Vec::new();
+        for law in [
+            "none",
+            "stokes-kirchhoff",
+            "iso9613",
+            "relaxation iso9613-terrestrial-air",
+        ] {
+            let text = original
+                .replace(
+                    ambient_line,
+                    &format!("\nambient {}\n", record_text(&parts)),
+                )
+                .replace(
+                    observer_line,
+                    &format!("\nlistener_m {REED_RANGE_M}\nobserver_law {law}\n"),
+                );
+            let mut performance = ReedPerformance::from_bytes_with_gas_sources(
+                text.as_bytes(),
+                4800,
+                ObservationPolicy::Diagnostic,
+                Some(&registry),
+            )
+            .unwrap();
+            assert_eq!(performance.info().sample_rate_hz, rate);
+            let receipt = performance.observer();
+            assert_eq!(receipt.filter.range_m, REED_RANGE_M);
+            assert_eq!(
+                receipt.range_spread_m, None,
+                "the proxy has no Rayleigh elements"
+            );
+            // One sample per callback, so the voice's own bore pressure can be
+            // read beside each emitted sample and removed: what remains is the
+            // radiated part as the law left it.
+            let mut pressure = Vec::with_capacity(performance.info().samples as usize);
+            for _ in 0..performance.info().samples {
+                let mut sample = [0.0];
+                performance.block(&mut sample).unwrap();
+                let voice = performance.renderer().context().reed_voice(0).unwrap();
+                pressure.push(sample[0] - voice.last_observer_parts().internal_pa);
+            }
+            assert!(pressure.iter().all(|p| p.is_finite()));
+            assert!(receipt.internal_part_unpropagated);
+            println!(
+                "{{\"bead\":\"pexfp.18\",\"test\":\"reed_observer_laws\",\"rh\":{rh},\"law\":\"{law}\",\"taps\":{},\"latency_s\":{:e},\"truncated_energy\":{:e},\"omitted\":{}}}",
+                receipt.filter.taps,
+                receipt.filter.latency_s,
+                receipt.filter.truncated_energy,
+                receipt.filter.absorption.relaxation_omitted.is_some()
+            );
+            renders.push((law, receipt, *performance.ambient_gas(), pressure));
+        }
+        let none = &renders[0].3;
+        let reference = band_spectrum_at(none, rate);
+        let reference_energy = energy(&reference);
+        for (law, receipt, gas, pressure) in &renders[1..] {
+            let alpha = |omega: f64| match receipt.filter.absorption.law {
+                GasAbsorptionModel::StokesKirchhoff => gas.stokes_kirchhoff_absorption(omega),
+                GasAbsorptionModel::Iso9613Air {
+                    relative_humidity, ..
+                } => iso9613_absorption_neper_per_m(
+                    gas.temperature,
+                    gas.pressure,
+                    relative_humidity,
+                    omega,
+                )
+                .unwrap(),
+                GasAbsorptionModel::MolecularRelaxation => {
+                    state.causal_wavenumber(omega).unwrap().im
+                }
+                other => panic!("{law} selected {other:?}"),
+            };
+            let predicted = 10.0
+                * (reference
+                    .iter()
+                    .map(|(f, power)| {
+                        power * (-2.0 * alpha(core::f64::consts::TAU * f) * REED_RANGE_M).exp()
+                    })
+                    .sum::<f64>()
+                    / reference_energy)
+                    .log10();
+            let measured =
+                10.0 * (energy(&band_spectrum_at(pressure, rate)) / reference_energy).log10();
+            println!(
+                "{{\"bead\":\"pexfp.18\",\"test\":\"reed_observer_laws\",\"rh\":{rh},\"law\":\"{law}\",\"band_level_vs_none_db\":{{\"measured\":{measured},\"predicted\":{predicted},\"declared_band\":{REED_LAW_BAND_DB}}}}}"
+            );
+            assert!(
+                (measured - predicted).abs() <= REED_LAW_BAND_DB,
+                "RH {rh} {law}: rendered {measured} dB against predicted {predicted} dB"
+            );
+            if *law == "iso9613" {
+                iso_levels.push(measured);
+            }
+        }
+    }
+    assert!(
+        iso_levels[1] > iso_levels[0],
+        "wetter air must raise the 2-8 kHz band level at 30 m: {iso_levels:?}"
+    );
 }

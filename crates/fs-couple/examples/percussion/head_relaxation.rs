@@ -71,12 +71,14 @@ impl Spec {
     }
     pub fn admit(&self,drum:&drum_spec::Spec)->Result<(),Error> {
         drum.validate()?;
-        for (head,law) in drum.heads.iter().zip(&self.heads) {
+        for ((head,law),loss) in drum.heads.iter().zip(&self.heads).zip(drum.head_loss) {
             if head.young_pa!=law.e_inf {
                 return Err("head Young modulus must equal its supplied equilibrium Maxwell modulus; no retuning is inferred".into());
             }
-            if head.damping_ratio!=0.0 {
-                return Err("head relaxation requires zero head damping ratios in --drum-spec; material loss is not added twice".into());
+            // A file's heads declare loss `relaxation`; a library fixture zeroes its own ratio.
+            let fixture_without_drag=loss==drum_spec::HeadLoss::Fixture && head.damping_ratio==0.0;
+            if loss!=drum_spec::HeadLoss::Relaxation && !fixture_without_drag {
+                return Err("head relaxation requires every --drum-spec head to declare loss relaxation; material loss is not added twice".into());
             }
         }
         if drum.band_hz[0]<self.band_hz[0] || drum.band_hz[1]>self.band_hz[1] {

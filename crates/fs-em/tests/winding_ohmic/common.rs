@@ -79,6 +79,18 @@ pub fn magnetic_curve_card(rho: f64, mu: f64, basis: ElectricalPropertyBasis) ->
         dims: MAGNETIC_PERMEABILITY_DIMS,
     }, basis)
 }
+pub fn affine_magnetic_card(rho:f64, alpha:f64, mu:f64, slope:f64,
+    basis:ElectricalPropertyBasis)->MaterialCard {
+    assemble(rho,alpha,PropertyValue::Curve {
+        abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
+        knots:[200.0,300.0,2000.0].map(|t|(t,mu+slope*(t-300.0))).to_vec(),
+        dims:MAGNETIC_PERMEABILITY_DIMS,
+    },basis)
+}
+pub fn absolute_point(t:f64)->QueryPoint {
+    QueryPoint::new().with_quantity("T",QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,ValueForm::Static)),t).unwrap()
+}
 pub fn pressure_magnetic_card(rho: f64, mu: f64, basis: ElectricalPropertyBasis) -> MaterialCard {
     assemble(rho, 0.001, PropertyValue::Curve {
         abscissa: "pressure".into(), abscissa_dims: fs_qty::Dims([-1, 1, -2, 0, 0, 0]),
@@ -218,3 +230,4 @@ pub fn refreshed(circuit: &fs_em::winding::ohmic::OhmicWindingCircuit<'_, '_>,
             conductor: ResolvedConductorState::try_from_material_with_basis(snapshot, source.conductor.source_basis()).unwrap() }
     }).collect()
 }
+

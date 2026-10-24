@@ -80,6 +80,16 @@ mod wasm {
             LiveDrumCore::new(params_json).map(|core| Self { core }).map_err(|r| refuse(&r))
         }
 
+        /// The same, with the atmosphere resolved from `gas_record` through
+        /// its source packet: the live kit's `withGasSources` framing. A
+        /// `thermochemical ...` record needs it.
+        #[wasm_bindgen(js_name = withGasSources)]
+        pub fn with_gas_sources(params_json: &str, gas_record: &str, bytes: &[u8], lengths: &[u32],
+            water_species: &str, phase: &str) -> Result<LiveDrum, JsValue> {
+            LiveDrumCore::with_gas_sources(params_json, gas_record, bytes, lengths, water_species, phase)
+                .map(|core| Self { core }).map_err(|r| refuse(&r))
+        }
+
         /// Rebuild from the current parameters overlaid with a flat JSON
         /// object. Returns true when the heads were re-meshed and re-solved.
         /// The new instrument starts at rest and silent. On refusal the old

@@ -141,7 +141,8 @@ pub enum TieKind {
 pub struct EdgeTie {
     /// Master component and ordered edge polyline.
     pub a: TieSide,
-    /// Slave component and ordered edge polyline.
+    /// Slave component and ordered edge polyline. Every slave node lies on a
+    /// free edge of its component; the master polyline may be interior.
     pub b: TieSide,
     /// Midsurface or $\pm h_m / 2$ skin offset on the master surface.
     pub offset: TieOffset,
@@ -965,12 +966,28 @@ fn compute_component_normals(mesh: &ShellMesh) -> Result<Vec<[f64; 3]>, PlateErr
     Ok(normals)
 }
 
+/// Nodes on a free edge of `mesh`: an edge with exactly one incident facet.
+fn mesh_free_edge_nodes(mesh: &ShellMesh) -> BTreeSet<usize> {
+    let mut uses = BTreeMap::<(usize, usize), usize>::new();
+    for tri in &mesh.tris {
+        for a in 0..3 {
+            let (i, k) = (tri[a], tri[(a + 1) % 3]);
+            *uses.entry((i.min(k), i.max(k))).or_default() += 1;
+        }
+    }
+    uses.into_iter()
+        .filter(|&(_, count)| count == 1)
+        .flat_map(|((i, k), _)| [i, k])
+        .collect()
+}
+
 /// Tie multiple [`ShellComponent`] models along 1-D [`EdgeTie`] seams using work-conjugate
 /// dual-mortar master-slave elimination ($K_r = T^T K T,\ M_r = T^T M T$).
 ///
 /// # Errors
 /// Returns [`PlateError::BadConstraint`] on invalid component/node references, cross-point
 /// double constraints, `TieKind::Compliant`, or gap/angle tolerance violations;
+/// [`PlateError::InteriorTieNode`] when an EdgeTie slave node is off its component's free edges;
 /// [`PlateError::Budget`] when mortar segments or slave DOFs exceed `budget`; and
 /// [`PlateError::Cancelled`] on cooperative cancellation.
 pub fn tie_shells(
@@ -1093,6 +1110,7 @@ pub fn tie_shells_with_faces(
     let mut segments_used = 0usize;
     let mut max_gap_m = 0.0_f64;
     let mut max_angle_rad = 0.0_f64;
+    let mut free_edge_nodes: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
 
     // Process 1-D EdgeTies.
     for tie in edge_ties {
@@ -1145,6 +1163,17 @@ pub fn tie_shells_with_faces(
                     what: "EdgeTie slave node out of range or duplicated within tie",
                 });
             }
+        }
+        // The slave polyline is the edge being joined: every slave node lies on a
+        // free edge of its own mesh. The master may run along an interior line.
+        let free = free_edge_nodes
+            .entry(c_s)
+            .or_insert_with(|| mesh_free_edge_nodes(components[c_s].mesh));
+        if let Some(&node) = tie.b.nodes.iter().find(|&&sn| !free.contains(&sn)) {
+            return Err(PlateError::InteriorTieNode {
+                component: c_s,
+                node,
+            });
         }
 
         let s_first = tie.b.nodes[0];
@@ -3117,7 +3146,12 @@ mod tests {
             angle_tolerance_rad: 1e-4,
         };
         let err = tie_shells(&comps, &ties, budget, || false).unwrap_err();
-        assert!(matches!(err, PlateError::BadConstraint { .. }));
+        assert_eq!(
+            err,
+            PlateError::BadConstraint {
+                what: "cross-point double constraint: duplicate slave edge span on component",
+            }
+        );
     }
 
     #[test]
@@ -3547,6 +3581,226 @@ mod tests {
             angle_tolerance_rad: 1e-4,
         };
         let err = tie_shells(&comps, &ties, budget, || false).unwrap_err();
-        assert!(matches!(err, PlateError::BadConstraint { .. }));
+        assert_eq!(
+            err,
+            PlateError::BadConstraint {
+                what: "tie geometric gap exceeds budget.gap_tolerance_m",
+            }
+        );
+    }
+
+    /// Free CST/DKT models (3 mm, 10 GPa) and nodal thicknesses for `meshes`.
+    fn free_models(meshes: &[&ShellMesh]) -> (Vec<ShellModel>, Vec<Vec<f64>>) {
+        let sec = PlateSection::isotropic(10e9, 0.3, 0.003, 500.0).unwrap();
+        let models = meshes
+            .iter()
+            .map(|m| assemble_shell(m, &sec, &[], ShellSupport::Free).unwrap())
+            .collect();
+        let thickness = meshes.iter().map(|m| vec![0.003; m.nodes.len()]).collect();
+        (models, thickness)
+    }
+
+    fn components<'a>(
+        meshes: &[&'a ShellMesh],
+        models: &'a [ShellModel],
+        thickness: &'a [Vec<f64>],
+    ) -> Vec<ShellComponent<'a>> {
+        (0..meshes.len())
+            .map(|c| ShellComponent {
+                id: c,
+                mesh: meshes[c],
+                model: &models[c],
+                nodal_thickness_m: &thickness[c],
+            })
+            .collect()
+    }
+
+    fn rigid_edge(a: (usize, Vec<usize>), b: (usize, Vec<usize>)) -> EdgeTie {
+        EdgeTie {
+            a: TieSide {
+                component: a.0,
+                nodes: a.1,
+            },
+            b: TieSide {
+                component: b.0,
+                nodes: b.1,
+            },
+            offset: TieOffset::Midsurface,
+            rotations: RotationCoupling::Full,
+            kind: TieKind::Rigid,
+        }
+    }
+
+    fn refusal_budget(gap_tolerance_m: f64) -> TieBudget {
+        TieBudget {
+            max_segments: 16,
+            max_slave_dofs: 64,
+            gap_tolerance_m,
+            angle_tolerance_rad: 1e-4,
+        }
+    }
+
+    /// `mesh` rotated by `angle` about the z axis through `pivot`.
+    fn rotated_about_z(mesh: &ShellMesh, pivot: [f64; 2], angle: f64) -> ShellMesh {
+        let (s, c) = angle.sin_cos();
+        let nodes = mesh
+            .nodes
+            .iter()
+            .map(|p| {
+                let (x, y) = (p[0] - pivot[0], p[1] - pivot[1]);
+                [pivot[0] + c * x - s * y, pivot[1] + s * x + c * y, p[2]]
+            })
+            .collect();
+        ShellMesh::new(nodes, mesh.tris.clone()).expect("rotated mesh")
+    }
+
+    #[test]
+    fn g0_edge_tie_angle_mismatch_refuses() {
+        // The slave half turned 1e-3 rad about the seam's midpoint: its seam ends
+        // move 1e-4 m, inside the 1e-3 m gap tolerance, so only the 1e-4 rad
+        // angle tolerance can refuse it, and it must say so.
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let m1 = rotated_about_z(
+            &sample_rect_shell(0.2, 0.4, 0.0, 0.2, 2, 2, 0.0),
+            [0.2, 0.1],
+            1e-3,
+        );
+        let meshes = [&m0, &m1];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        let ties = [rigid_edge((0, vec![2, 5, 8]), (1, vec![0, 3, 6]))];
+        let err = tie_shells(&comps, &ties, refusal_budget(1e-3), || false).unwrap_err();
+        assert_eq!(
+            err,
+            PlateError::BadConstraint {
+                what: "tie tangent-frame angle mismatch exceeds budget.angle_tolerance_rad",
+            }
+        );
+        // The unturned half passes the same budget.
+        let m1_flat = sample_rect_shell(0.2, 0.4, 0.0, 0.2, 2, 2, 0.0);
+        let meshes = [&m0, &m1_flat];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        assert!(tie_shells(&comps, &ties, refusal_budget(1e-3), || false).is_ok());
+    }
+
+    #[test]
+    fn g0_face_tie_normal_angle_mismatch_refuses() {
+        // A lap joint whose slave sheet is tilted 2e-3 rad, against a 1e-4 rad
+        // angle tolerance and a 1e-3 m gap tolerance.
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let flat = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0015);
+        let tilt = 2e-3_f64.tan();
+        let tilted_nodes = flat
+            .nodes
+            .iter()
+            .map(|p| [p[0], p[1], p[2] + tilt * (p[0] - 0.1)])
+            .collect();
+        let m1 = ShellMesh::new(tilted_nodes, flat.tris.clone()).expect("tilted mesh");
+        let face = |slave: usize| FaceTie {
+            master_component: 0,
+            master_tris: (0..m0.tris.len()).collect(),
+            slave_component: slave,
+            slave_tris: (0..m1.tris.len()).collect(),
+            offset: TieOffset::Skin { side: 1 },
+            rotations: RotationCoupling::Full,
+            kind: TieKind::Rigid,
+        };
+        let meshes = [&m0, &m1];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        let err = tie_shells_with_faces(&comps, &[], &[face(1)], refusal_budget(1e-3), || false)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PlateError::BadConstraint {
+                what: "FaceTie normal angle mismatch exceeds budget.angle_tolerance_rad",
+            }
+        );
+        // The same sheet without the tilt is admitted.
+        let meshes = [&m0, &flat];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        assert!(
+            tie_shells_with_faces(&comps, &[], &[face(1)], refusal_budget(1e-3), || false).is_ok()
+        );
+    }
+
+    #[test]
+    fn g0_edge_tie_node_out_of_range_and_duplicate_refuse() {
+        let m0 = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let m1 = sample_rect_shell(0.2, 0.4, 0.0, 0.2, 2, 2, 0.0);
+        let meshes = [&m0, &m1];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        let budget = refusal_budget(1e-6);
+        // m0 has nodes 0..=8, so 9 is one past the end.
+        let out_of_range = [rigid_edge((0, vec![2, 5, 9]), (1, vec![0, 3, 6]))];
+        assert_eq!(
+            tie_shells(&comps, &out_of_range, budget, || false).unwrap_err(),
+            PlateError::BadConstraint {
+                what: "EdgeTie master node out of range or duplicated within tie",
+            }
+        );
+        let duplicated = [rigid_edge((0, vec![2, 5, 8]), (1, vec![0, 3, 3]))];
+        assert_eq!(
+            tie_shells(&comps, &duplicated, budget, || false).unwrap_err(),
+            PlateError::BadConstraint {
+                what: "EdgeTie slave node out of range or duplicated within tie",
+            }
+        );
+    }
+
+    /// A sheet in the plane x = `x` over y in [0, 0.2], z in [z0, 0], whose top
+    /// row (z = 0) is nodes `nz * (ny + 1) ..= nz * (ny + 1) + ny`.
+    fn web_yz(x: f64, z0: f64, ny: usize, nz: usize) -> ShellMesh {
+        let mut nodes = Vec::new();
+        for k in 0..=nz {
+            for j in 0..=ny {
+                nodes.push([
+                    x,
+                    0.2 * j as f64 / ny as f64,
+                    z0 * (1.0 - k as f64 / nz as f64),
+                ]);
+            }
+        }
+        let idx = |j: usize, k: usize| k * (ny + 1) + j;
+        let mut tris = Vec::new();
+        for k in 0..nz {
+            for j in 0..ny {
+                tris.push([idx(j, k), idx(j + 1, k), idx(j + 1, k + 1)]);
+                tris.push([idx(j, k), idx(j + 1, k + 1), idx(j, k + 1)]);
+            }
+        }
+        ShellMesh::new(nodes, tris).expect("web mesh")
+    }
+
+    #[test]
+    fn g0_interior_slave_node_refuses_and_an_interior_master_line_is_admitted() {
+        // A web's free top edge on the plate's interior line x = 0.1 (nodes 1, 4,
+        // 7) is a T-junction: the master line may be interior. Swapping the roles
+        // puts the plate's interior node 4 on the slave side, which refuses by name.
+        let plate = sample_rect_shell(0.0, 0.2, 0.0, 0.2, 2, 2, 0.0);
+        let web = web_yz(0.1, -0.1, 2, 2);
+        let meshes = [&plate, &web];
+        let (models, thickness) = free_models(&meshes);
+        let comps = components(&meshes, &models, &thickness);
+        let budget = refusal_budget(1e-6);
+        let web_top: Vec<usize> = (0..=2).map(|j| 2 * 3 + j).collect();
+        let t_junction = [rigid_edge((0, vec![1, 4, 7]), (1, web_top.clone()))];
+        assert!(tie_shells(&comps, &t_junction, budget, || false).is_ok());
+        let swapped = [rigid_edge((1, web_top), (0, vec![1, 4, 7]))];
+        let err = tie_shells(&comps, &swapped, budget, || false).unwrap_err();
+        assert_eq!(
+            err,
+            PlateError::InteriorTieNode {
+                component: 0,
+                node: 4,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "FS-PLATE-INTERIOR-TIE-NODE: slave node 4 of component 0 is not on a free edge"
+        );
     }
 }

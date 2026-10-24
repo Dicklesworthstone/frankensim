@@ -103,7 +103,11 @@ fn source_hammer_directional_stereo_retains_one_clock_and_identical_reacted_mech
         let (_,reference,_)=super::super::bake(&mut manual,feedback).unwrap();
         assert_eq!(samples.delays_s,reference.delays_s);
         assert_ne!(samples.values,reference.values);
-        let audio=exterior_audio::render(&mut selected.piano,score(),2400,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
+        // The struck A4 lies above this fixture's sampled band, so much of the directional
+        // receivers' pressure (its 11.30 Pa peak included) is extrapolated, not a physical level.
+        // 16 Pa only encodes it unclipped; the publication gate refuses it.
+        let audio=exterior_audio::render(&mut selected.piano,score(),2400,&baked,16.,crate::wav_output::Format::Pcm16).unwrap();
+        assert!(audio.require_in_band().unwrap_err().contains("outside the sampled"),"{:?}",audio.out_of_band_share);
         let mut schedule=score();
         for frame in 0..2400 {schedule.dispatch(frame,&mut manual.piano).unwrap();manual.piano.step().unwrap();}
         assert_eq!(selected.piano.bank.q,manual.piano.bank.q);assert_eq!(selected.piano.bank.v,manual.piano.bank.v);

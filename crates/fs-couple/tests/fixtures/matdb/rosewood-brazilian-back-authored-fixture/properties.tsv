@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	authored-back	authored test fixture; not data	Declared-typical hardwood elastic ratios and Poisson ratio for a compliance-surrogate guitar back, with density as specific gravity 0.8 x 1000 kg/m^3	rosewood-brazilian-fpl-gtr282 carries E_L 14300 MPa and specific gravity 0.8 only (ovendry weight over volume at 12 percent moisture content), so it states no density at 12 percent and no elastic ratios; these values are authored, not measured, and nu_LR is the Sitka spruce value
+scalar	er-over-el	authored-back	er_over_el	0.10	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	moisture_content	12	12	%
+scalar	glr-over-el	authored-back	glr_over_el	0.07	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	moisture_content	12	12	%
+scalar	nu-lr	authored-back	nu_lr	0.372	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	moisture_content	12	12	%
+scalar	density	authored-back	density	800.0	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content	12	12	%

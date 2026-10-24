@@ -28,7 +28,7 @@ observer DISTANCE_M
 limits MAX_MODES NYQUIST_FRACTION MAX_ABS_FORCE_N MAX_ABS_PRESSURE_PA MAX_EVENTS
 mechanics SUPPORT PRETENSION_N_M DAMPING_RATIO LOW_HZ HIGH_HZ RETAINED_MODES
 sections COUNT
-section THICKNESS_M DENSITY_KG_M3 E1_PA E2_PA NU12 G12_PA ANGLE_RAD
+section THICKNESS_M DENSITY_KG_M3 E1_PA E2_PA NU12 G12_PA ANGLE_RAD fixture LABEL
 nodes COUNT
 node X_M Y_M
 triangles COUNT
@@ -60,6 +60,20 @@ section is homogeneous through its centered thickness. Its material axis 1 is
 rotated counterclockwise from mesh x by `ANGLE_RAD`. No out-of-plane constants,
 laminate offsets, interfacial slip, geometric nonlinearity or thermal evolution
 are inferred. Use equal E1/E2 and G12 = E/(2(1+NU12)) for isotropic elasticity.
+
+Every section names where its material comes from (bead pexfp.32). Bare numbers
+must end in an explicit `fixture LABEL`, or the file refuses; the example's two
+regions are labelled `fixture authored-illustrative-plate-not-measured`. A
+pack-backed section instead reads `section material isotropic THICKNESS_M PACK
+STATE [AXIS=VALUE ...]` or `section material orthotropic12|orthotropic21
+THICKNESS_M ANGLE_RAD PACK STATE [AXIS=VALUE ...]`. PACK is a compiled
+material-card pack relative to this file, STATE the state its card was compiled at
+(its `MaterialStateId` process), and the axes are the query point in the card's
+normalized units. The section's density and elasticity resolve through
+`fs_material::state_point` (`young_modulus`/`poisson_ratio`, or `young_modulus_1`,
+`young_modulus_2`, `shear_modulus_12`, `poisson_ratio_12`). Another state or a
+missing property refuses by name. The sidecar's `section_sources` lists each
+section's pack, hash, state and point, or its fixture label.
 
 `LOW_HZ`/`HIGH_HZ` define a search window, not imposed frequencies. The existing
 solver returns the positive eigenmodes in that window; at most `RETAINED_MODES`

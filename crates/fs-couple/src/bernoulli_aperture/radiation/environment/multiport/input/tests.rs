@@ -35,7 +35,7 @@ fn shared_gas_decoder_retains_an_independently_authored_mixture() {
     let text = SOURCE.replace("exterior 293.15 101325 0",
         "exterior mixture 303.15 65000 mole 3 N2 0.70 O2 0.20 He 0.10");
     let artifact = decode(&text).unwrap();
-    assert!(matches!(artifact.gas_record(), GasRecord::Mixture(_)));
+    assert!(matches!(artifact.gas_record(), GasRecord::Mixture(..)));
     assert_eq!(artifact.source().exterior.pressure, 65000.0);
     assert_eq!(artifact.source().exterior.temperature, 303.15);
     assert_ne!(artifact.source().exterior, decode(SOURCE).unwrap().source().exterior);

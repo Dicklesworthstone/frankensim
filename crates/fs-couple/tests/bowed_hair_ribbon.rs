@@ -8,7 +8,6 @@
 //! material/body coefficients here are wiring fixtures; the HAIR numbers are
 //! the measured pack values. This file grows the width ladder, point-bow limit
 //! and the Pitteroff-Woodhouse trend as those gates land.
-use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MultiBowStringBank;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::compliant_ribbon::{
     CompliantBowRibbon, HairRibbonProperties,
 };
@@ -193,16 +192,73 @@ fn ribbon_limits() -> MultiFrictionConfig {
     }
 }
 
-/// Measured horse bow-hair, Pitteroff & Woodhouse 1998 model violin bow.
+/// The Pitteroff & Woodhouse 1998 horse bow-hair matdb pack scalars, keyed by
+/// property_key. Same seed-v1 source `bow_hair_pack.rs` gates for physicality;
+/// here we READ the measured hair numbers so `violin_hair()` is data, not a
+/// hand-typed fixture (pexfp.154 DONE-WHEN 2 provenance; MagentaBadger 6545/6556).
+fn bow_hair_pack() -> std::collections::BTreeMap<String, f64> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repo root")
+        .to_path_buf();
+    let text = std::fs::read_to_string(root.join(
+        "data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/properties.tsv",
+    ))
+    .expect("bow-hair properties.tsv");
+    assert!(text.starts_with("frankensim.matdb-source.v1"));
+    let mut m = std::collections::BTreeMap::new();
+    for line in text.lines().skip(1) {
+        let c: Vec<&str> = line.split('\t').collect();
+        if c[0] == "scalar" {
+            m.insert(c[3].to_string(), c[4].parse::<f64>().expect("scalar value"));
+        }
+    }
+    m
+}
+
+/// The stated lumped tangential ribbon damping [kg/s] at the stated reference
+/// width, for the violin bow (pexfp.154 DONE-WHEN 2, MagentaBadger 6556 item 1).
+///
+/// Provenance (b, else c). P&W state NO single lumped dashpot; their damping
+/// statement is the loss factor "of order 0.02 to 0.05, rising with frequency".
+/// A 2 M alpha derivation needs a matched (attached mass, decay rate,
+/// eigenfrequency) triple; the pack carries decay rate 1..14 /s as scalars and
+/// the attached mass (11..62 g) and eigenfrequency (10..100 Hz) only in the
+/// pw98-dynamic observation text, as broad ranges that are not paired per
+/// measurement. The derivation therefore does not close on the pack to a single
+/// value: over the printed (M, alpha) bounds the ribbon dashpot spans
+/// n_H*2*M*alpha in [1.1, 86.8] kg/s; the eigenfrequency-consistent estimate
+/// D = 2 alpha S / w0^2 (M from the eigenfrequency and the derived stiffness,
+/// alpha and f0 at the range midpoints) is about 8.9 kg/s; the hand-typed model
+/// value is 10 kg/s. These agree; only the unmatched midpoint product 2 M alpha
+/// (27.4 kg/s) disagrees. Because the pack lacks a consistent (M, eigenfrequency)
+/// scalar pair, this is a FLAGGED STATED ASSUMPTION (c), never a measurement row:
+/// D = 10 kg/s, which sits on the consistent estimate and inside the bracket.
+/// `g2_*` prints the whole derivation next to this value as the cross-check.
+const STATED_RIBBON_DAMPING_KG_S: f64 = 10.0;
+
+/// Measured horse bow-hair, Pitteroff & Woodhouse 1998 model violin bow, read
+/// from the matdb pack. The hair radius is the pack diameter range's MIDPOINT
+/// (computed here, MagentaBadger 6556 item 2); gamma = 0.5 is a documented
+/// modelling choice (6556 item 3); the damping is the stated assumption above.
 fn violin_hair() -> HairRibbonProperties {
+    let p = bow_hair_pack();
+    // Hair radius = midpoint of the printed diameter range, in code from min/max.
+    let diameter_midpoint_m =
+        0.5 * (p["hair_diameter_printed_range_low"] + p["hair_diameter_printed_range_high"]);
+    let reference_width_m = p["violin_bow_ribbon_width"];
     HairRibbonProperties {
-        youngs_modulus_pa: 7.0e9,
-        hair_radius_m: 0.19e-3 / 2.0,
-        hairs_in_contact: 50.0,
-        free_length_m: 0.65,
-        excitation_fraction: 0.5,
-        distributed_damping_kg_s_m: 1000.0,
-        density_kg_m3: 1100.0,
+        youngs_modulus_pa: p["young_modulus_static"],
+        hair_radius_m: 0.5 * diameter_midpoint_m,
+        hairs_in_contact: p["hairs_in_contact_with_string_at_most"],
+        free_length_m: p["violin_bow_hair_length_frog_to_tip"],
+        excitation_fraction: 0.5, // gamma: a documented modelling choice (6556)
+        // Stated assumption D, carried as the distributed d = D / b_ref so the
+        // lumped tangential damping D = d * b_ref is width-free (frankensim-o7qbp).
+        distributed_damping_kg_s_m: STATED_RIBBON_DAMPING_KG_S / reference_width_m,
+        reference_width_m,
+        density_kg_m3: p["density"],
     }
 }
 
@@ -692,5 +748,388 @@ fn narrow_ribbon_converges_through_the_first_transition_via_active_set() {
             total_rescues > 0,
             "active-set rescue never fired; the GS sweep converged alone (did the o7qbp repro regress?)"
         );
+    });
+}
+
+/// o7qbp item 1-2: when the active-set pivot budget is too small to reach the
+/// unique consistent partition, the step refuses with the NAMED active-set error
+/// (not the original Gauss-Seidel error). The default budget converges.
+#[test]
+fn active_set_refuses_with_a_named_error_when_the_budget_is_too_small() {
+    with_cx(|cx, gate| {
+        let drives = ribbon_drives(5, BOW_SPEED_M_S, BOW_FORCE_N);
+        // Default budget: the narrow converges through the first transition.
+        let mut ok = tuned_base(cx, gate, 20)
+            .unwrap()
+            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .unwrap();
+        ok.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        let zero = vec![0.0; ok.system().mode_count()];
+        for s in 0..150 {
+            ok.step(&zero, &drives)
+                .unwrap_or_else(|e| panic!("default budget refused at step {s}: {e:?}"));
+        }
+        // Budget 1: the rescue cannot resolve the partition, so the step refuses
+        // with the named active-set error.
+        let mut starved = tuned_base(cx, gate, 20)
+            .unwrap()
+            .with_compliant_bow_ribbon(0.0008, 5, violin_hair(), ladder_limits(), gate)
+            .unwrap();
+        starved.force_active_set_budget(1);
+        starved.restore_string_states(0, &helmholtz_start(20)).unwrap();
+        let mut refusal = None;
+        for s in 0..150 {
+            if let Err(e) = starved.step(&zero, &drives) {
+                refusal = Some((s, format!("{e:?}")));
+                break;
+            }
+        }
+        let (s, msg) = refusal.expect("budget-1 narrow must refuse at the first transition");
+        println!("{{\"test\":\"budget1\",\"refused_at\":{s},\"msg\":{msg:?}}}");
+        // The refusal must be the NAMED active-set exhaustion carrying its payload
+        // (pivots against budget, last active set, worst KKT violation), never the
+        // original Gauss-Seidel error.
+        assert!(
+            msg.contains("ActiveSetExhausted")
+                && msg.contains("pivots")
+                && msg.contains("budget")
+                && msg.contains("last_active_set")
+                && msg.contains("worst_port")
+                && msg.contains("worst_condition"),
+            "refusal must be the named ActiveSetExhausted with its payload, got: {msg}"
+        );
+    });
+}
+
+/// o7qbp item 3 (bit-identity): a step the Gauss-Seidel sweep converges never
+/// invokes the active-set rescue, so the fix cannot perturb it. Run the
+/// converging 1-cell point bow twice -- once with the rescue at its default
+/// budget, once with the budget forced to 0 (rescue disabled) -- and require the
+/// two traction traces byte-for-byte identical. The rescue-count is 0 on every
+/// step, proving the active-set path is inert on a converged run; the trace hash
+/// is reported for the record.
+#[test]
+fn active_set_is_inert_on_a_gs_converged_run() {
+    with_cx(|cx, gate| {
+        let trace = |budget: Option<usize>| -> Vec<u64> {
+            let mut bank = tuned_base(cx, gate, 20)
+                .unwrap()
+                .with_compliant_bow_ribbon(0.0008, 1, violin_hair(), ladder_limits(), gate)
+                .unwrap();
+            if let Some(b) = budget {
+                bank.force_active_set_budget(b);
+            }
+            bank.restore_string_states(0, &helmholtz_start(20)).unwrap();
+            let zero = vec![0.0; bank.system().mode_count()];
+            let drives = ribbon_drives(1, BOW_SPEED_M_S, BOW_FORCE_N);
+            let mut bits = Vec::with_capacity(200);
+            for s in 0..200 {
+                let f = bank
+                    .step(&zero, &drives)
+                    .unwrap_or_else(|e| panic!("point bow refused at step {s}: {e:?}"));
+                assert_eq!(
+                    f.active_set_rescues, 0,
+                    "a converged GS step must not invoke the active-set rescue (step {s})"
+                );
+                bits.push(f.ports[0].traction_n.to_bits());
+            }
+            bits
+        };
+        let with_rescue = trace(None); // default budget: rescue available
+        let rescue_off = trace(Some(0)); // budget 0: rescue disabled
+        assert_eq!(
+            with_rescue, rescue_off,
+            "the active-set changed a Gauss-Seidel-converged run; it must be inert there"
+        );
+        let hash = with_rescue
+            .iter()
+            .enumerate()
+            .fold(0u64, |h, (s, &b)| h ^ b.rotate_left((s % 64) as u32));
+        println!("{{\"test\":\"bit_identity\",\"point_bow_traction_hash\":\"{hash:#018x}\"}}");
+    });
+}
+
+// ---- Gate 2 (DONE-WHEN 2): point-bow limit on SMOOTH observables ----
+//
+// MagentaBadger 6545/6556. The quantized port-0 sliding fraction is a FINDING,
+// not the gate: its 1/tail step gives false non-monotone "orders". The gate is
+// the width -> 0 point-bow limit on SMOOTH observables, against the width-free
+// 1-cell compliant point reference:
+//   (i)  tail-mean TOTAL bow traction [N] = sum of the port tractions, the net
+//        tangential force on the string. Port 0 alone is NOT cell-count
+//        invariant: ribbon_drives shares the normal load as load/cells, so a
+//        5-cell port 0 carries 1/5 of a 1-cell port 0. For coincident ports
+//        (w -> 0) the cells each slide at mu(v)*N/cells and sum to mu(v)*N, the
+//        1-cell point's single-port traction, so the TOTAL converges to the
+//        reference and equals port 0 for the 1-cell reference itself.
+//   (ii) the steady-state period of the observer pressure (the body/bridge
+//        signal the frame exposes), by autocorrelation refined to sub-sample.
+// PASS = both within 2% of the reference on the TWO FINEST rungs, compared only
+// within the same motion regime. The measured order is reported, not asserted;
+// monotonicity is not asserted. Sliding fraction (with its 1/tail quantization)
+// and the regime are reported per rung.
+
+const SAMPLE_RATE_HZ: f64 = 48_000.0;
+const SLIP_EPS_M: f64 = 1.0e-12; // |per-step slip| above this is sliding (travel/step ~2e-6 m)
+// One FIXED string resolution for the reference and every rung, so the only
+// quantity that changes down the ladder is the contact width. 20 = 4 * 5 cells
+// is the owner's minimum (n_modes >= 4*n_cells) for the finest 5-cell ribbon.
+const GATE_MODES: usize = 20;
+
+#[derive(Clone, Debug)]
+struct RungObs {
+    width_m: f64,
+    tail_mean_total_traction_n: f64,
+    tail_mean_port0_traction_n: f64,
+    period_s: f64,
+    sliding_fraction_port0: f64,
+    slips_per_period_port0: f64,
+    regime: &'static str,
+    rescues: usize,
+}
+
+/// Dominant period [s] of a tail signal by autocorrelation around the expected
+/// fundamental, refined to sub-sample by a parabolic fit at the peak. The search
+/// window 0.5x..2.5x the expected period admits period-doubling (multiple slip).
+fn dominant_period_s(signal: &[f64], expected_period_samples: f64) -> f64 {
+    let n = signal.len();
+    if n < 4 {
+        return 0.0;
+    }
+    let mean = signal.iter().sum::<f64>() / n as f64;
+    let x: Vec<f64> = signal.iter().map(|v| v - mean).collect();
+    let acf = |lag: usize| -> f64 {
+        let mut s = 0.0;
+        for i in 0..(n - lag) {
+            s += x[i] * x[i + lag];
+        }
+        s
+    };
+    let lo = ((0.5 * expected_period_samples).round() as usize).max(1);
+    let hi = ((2.5 * expected_period_samples).round() as usize).min(n - 2);
+    let mut best_lag = lo;
+    let mut best = f64::NEG_INFINITY;
+    for lag in lo..=hi {
+        let r = acf(lag);
+        if r > best {
+            best = r;
+            best_lag = lag;
+        }
+    }
+    // Parabolic sub-sample refinement at the peak.
+    let (rm, r0, rp) = (acf(best_lag - 1), acf(best_lag), acf(best_lag + 1));
+    let denom = rm - 2.0 * r0 + rp;
+    let delta = if denom.abs() > 0.0 {
+        0.5 * (rm - rp) / denom
+    } else {
+        0.0
+    };
+    (best_lag as f64 + delta) / SAMPLE_RATE_HZ
+}
+
+fn classify_regime(slips_per_period: f64, period_s: f64, expected_period_samples: f64) -> &'static str {
+    let period_ratio = period_s * SAMPLE_RATE_HZ / expected_period_samples; // 1.0 = fundamental
+    if slips_per_period < 0.5 {
+        "stuck_or_aperiodic"
+    } else if (0.7..=1.4).contains(&slips_per_period) && (0.8..=1.25).contains(&period_ratio) {
+        "helmholtz_one_slip"
+    } else if slips_per_period <= 3.5 {
+        "multiple_slip"
+    } else {
+        "raucous_or_aperiodic"
+    }
+}
+
+/// Run one Helmholtz-started rung and measure the smooth observables over the
+/// tail. `n_modes` is FIXED across the reference and every rung so the only
+/// quantity that varies is the contact width (not the string resolution); it
+/// must satisfy the owner rule n_modes >= 4*cells for the finest ribbon.
+fn run_rung(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    hair: HairRibbonProperties,
+    width_m: f64,
+    cells: usize,
+    n_modes: usize,
+    run: usize,
+    tail: usize,
+) -> Result<RungObs, String> {
+    let mut bank = tuned_base(cx, gate, n_modes)?
+        .with_compliant_bow_ribbon(width_m, cells, hair, ladder_limits(), gate)
+        .map_err(|e| format!("with_compliant_bow_ribbon(w={width_m:e}, cells={cells}): {e:?}"))?;
+    bank.restore_string_states(0, &helmholtz_start(n_modes))
+        .map_err(|e| format!("restore: {e:?}"))?;
+    let zero = vec![0.0; bank.system().mode_count()];
+    let drives = ribbon_drives(cells, BOW_SPEED_M_S, BOW_FORCE_N);
+    let tail_start = run - tail;
+    let (mut total_tr, mut port0_tr, mut pressure) = (
+        Vec::with_capacity(tail),
+        Vec::with_capacity(tail),
+        Vec::with_capacity(tail),
+    );
+    let (mut sliding, mut slip_events, mut prev_sliding, mut rescues) = (0usize, 0usize, false, 0usize);
+    for s in 0..run {
+        let f = bank.step(&zero, &drives).map_err(|e| format!("step {s}: {e:?}"))?;
+        rescues += f.active_set_rescues;
+        if s >= tail_start {
+            total_tr.push(f.ports.iter().map(|p| p.traction_n).sum::<f64>());
+            port0_tr.push(f.ports[0].traction_n);
+            pressure.push(f.observer_pressure_pa);
+            let is_sliding = f.ports[0].slip_distance_m.abs() > SLIP_EPS_M;
+            if is_sliding {
+                sliding += 1;
+            }
+            if is_sliding && !prev_sliding {
+                slip_events += 1;
+            }
+            prev_sliding = is_sliding;
+        }
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    let expected_period = SAMPLE_RATE_HZ / PITCH_HZ;
+    let period_s = dominant_period_s(&pressure, expected_period);
+    let n_periods = tail as f64 / expected_period;
+    let slips_per_period = slip_events as f64 / n_periods;
+    let sliding_fraction = sliding as f64 / tail as f64;
+    Ok(RungObs {
+        width_m,
+        tail_mean_total_traction_n: mean(&total_tr),
+        tail_mean_port0_traction_n: mean(&port0_tr),
+        period_s,
+        sliding_fraction_port0: sliding_fraction,
+        slips_per_period_port0: slips_per_period,
+        regime: classify_regime(slips_per_period, period_s, expected_period),
+        rescues,
+    })
+}
+
+/// Print the damping provenance cross-check (MagentaBadger 6556 item 1): the
+/// stated value, the eigenfrequency-consistent 2 M alpha estimate, the full
+/// (M, alpha) bracket, and S at the diameter range ends (6556 item 2). All from
+/// the pack; no gate run. The gate uses `STATED_RIBBON_DAMPING_KG_S`.
+fn print_damping_provenance(hair: &HairRibbonProperties) {
+    let p = bow_hair_pack();
+    let n_h = p["hairs_in_contact_with_string_at_most"];
+    let (al_lo, al_hi) = (
+        p["exponential_decay_rate_printed_range_low"],
+        p["exponential_decay_rate_printed_range_high"],
+    );
+    // M and f0 ranges are stated in the pw98-dynamic observation (not scalar
+    // rows): attached mass 11..62 g, eigenfrequency 10..100 Hz.
+    let (m_lo, m_hi) = (0.011_f64, 0.062_f64);
+    let (f_lo, f_hi) = (10.0_f64, 100.0_f64);
+    let gamma = hair.excitation_fraction;
+    // Lumped tangential stiffness S = n_H pi a^2 E / (l gamma (1-gamma)) [N/m]
+    // (same formula as the private HairRibbonProperties::lumped_tangential_stiffness_n_m).
+    let s_at = |a: f64| {
+        n_h * core::f64::consts::PI * a * a * hair.youngs_modulus_pa
+            / (hair.free_length_m * gamma * (1.0 - gamma))
+    };
+    let s = s_at(hair.hair_radius_m);
+    let (al, m, f0) = (0.5 * (al_lo + al_hi), 0.5 * (m_lo + m_hi), 0.5 * (f_lo + f_hi));
+    let w0 = 2.0 * core::f64::consts::PI * f0;
+    let d_eigen = 2.0 * al * s / (w0 * w0); // M from eigenfrequency, = Kelvin-Voigt eta S / w
+    let d_mid_product = n_h * 2.0 * m * al; // unmatched midpoint product
+    let bracket = [
+        n_h * 2.0 * m_lo * al_lo,
+        n_h * 2.0 * m_lo * al_hi,
+        n_h * 2.0 * m_hi * al_lo,
+        n_h * 2.0 * m_hi * al_hi,
+    ];
+    let a_lo = 0.5 * p["hair_diameter_printed_range_low"];
+    let a_hi = 0.5 * p["hair_diameter_printed_range_high"];
+    println!(
+        "{{\"provenance\":\"ribbon_damping\",\"stated_D_kg_s\":{},\"derived_D_eigen_consistent_kg_s\":{:.3},\"midpoint_product_D_kg_s\":{:.3},\"bracket_kg_s\":[{:.3},{:.3}],\"S_n_m\":{:.1},\"S_at_diameter_lo_n_m\":{:.1},\"S_at_diameter_hi_n_m\":{:.1},\"hair_radius_m\":{:e}}}",
+        STATED_RIBBON_DAMPING_KG_S,
+        d_eigen,
+        d_mid_product,
+        bracket.iter().cloned().fold(f64::INFINITY, f64::min),
+        bracket.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        s,
+        s_at(a_lo),
+        s_at(a_hi),
+        hair.hair_radius_m,
+    );
+}
+
+fn rel(a: f64, b: f64) -> f64 {
+    (a - b).abs() / b.abs().max(f64::MIN_POSITIVE)
+}
+
+/// Gate 2: the finite-width ribbon's SMOOTH observables converge to the
+/// width-free 1-cell compliant point as the width goes to zero; the limit holds
+/// on the two finest rungs (within 2% on total traction AND period).
+#[test]
+fn g2_point_bow_limit_on_smooth_observables() {
+    with_cx(|cx, gate| {
+        let per_period = (SAMPLE_RATE_HZ / PITCH_HZ).round() as usize; // 960
+        let (run, tail) = (4 * per_period, 3 * per_period); // settle 1, measure 3 periods
+        print_damping_provenance(&violin_hair());
+        // Width-free reference: the 1-cell compliant point bow.
+        let reference = run_rung(cx, gate, violin_hair(), 8.0e-4, 1, GATE_MODES, run, tail)
+            .unwrap_or_else(|e| panic!("reference point bow refused: {e}"));
+        println!(
+            "{{\"test\":\"g2_reference_point\",\"total_traction_n\":{},\"port0_traction_n\":{},\"period_s\":{},\"sliding_fraction\":{},\"slips_per_period\":{:.3},\"regime\":{:?}}}",
+            reference.tail_mean_total_traction_n,
+            reference.tail_mean_port0_traction_n,
+            reference.period_s,
+            reference.sliding_fraction_port0,
+            reference.slips_per_period_port0,
+            reference.regime,
+        );
+        // Width ladder (5 cells) toward the point-bow limit; two finest 7e-5, 5e-5.
+        let widths = [8.0e-4_f64, 4.0e-4, 2.0e-4, 1.0e-4, 7.0e-5, 5.0e-5];
+        let quantization_floor = 1.0 / tail as f64;
+        let mut rungs: Vec<RungObs> = Vec::new();
+        for &w in &widths {
+            let r = run_rung(cx, gate, violin_hair(), w, 5, GATE_MODES, run, tail)
+                .unwrap_or_else(|e| panic!("rung w={w:e} refused: {e}"));
+            println!(
+                "{{\"test\":\"g2_rung\",\"w\":{:e},\"cells\":5,\"total_traction_n\":{},\"rel_traction\":{:.6},\"port0_traction_n\":{},\"period_s\":{},\"rel_period\":{:.6},\"sliding_fraction\":{},\"quantization_floor\":{:.6},\"slips_per_period\":{:.3},\"regime\":{:?},\"rescues\":{}}}",
+                w,
+                r.tail_mean_total_traction_n,
+                rel(r.tail_mean_total_traction_n, reference.tail_mean_total_traction_n),
+                r.tail_mean_port0_traction_n,
+                r.period_s,
+                rel(r.period_s, reference.period_s),
+                r.sliding_fraction_port0,
+                quantization_floor,
+                r.slips_per_period_port0,
+                r.regime,
+                r.rescues,
+            );
+            rungs.push(r);
+        }
+        // Measured order per halving on the total traction gap (reported only).
+        let orders: Vec<f64> = (1..rungs.len())
+            .map(|i| {
+                let g0 = rel(rungs[i - 1].tail_mean_total_traction_n, reference.tail_mean_total_traction_n);
+                let g1 = rel(rungs[i].tail_mean_total_traction_n, reference.tail_mean_total_traction_n);
+                let ratio = widths[i - 1] / widths[i];
+                if g1 > 0.0 && ratio > 1.0 { (g0 / g1).ln() / ratio.ln() } else { f64::NAN }
+            })
+            .collect();
+        println!("{{\"test\":\"g2_measured_order_traction\",\"orders\":{orders:?}}}");
+        // PASS: the two finest rungs within 2% of the reference on BOTH smooth
+        // observables, compared within the same regime.
+        for r in &rungs[rungs.len() - 2..] {
+            assert_eq!(
+                r.regime, reference.regime,
+                "rung w={:e} regime {:?} differs from reference {:?}; compare only within a regime",
+                r.width_m, r.regime, reference.regime
+            );
+            let rt = rel(r.tail_mean_total_traction_n, reference.tail_mean_total_traction_n);
+            let rp = rel(r.period_s, reference.period_s);
+            assert!(
+                rt <= 0.02,
+                "rung w={:e}: total traction {} off reference {} by {:.3}% > 2%",
+                r.width_m, r.tail_mean_total_traction_n, reference.tail_mean_total_traction_n, rt * 100.0
+            );
+            assert!(
+                rp <= 0.02,
+                "rung w={:e}: period {} off reference {} by {:.3}% > 2%",
+                r.width_m, r.period_s, reference.period_s, rp * 100.0
+            );
+        }
     });
 }

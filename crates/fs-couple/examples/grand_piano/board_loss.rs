@@ -11,6 +11,9 @@
 //! - `loss-share,share,eta,f_lo_hz,f_hi_hz,strict|extrapolate-frequency,receipt`
 //! - `loss-unknown,share,reason` (the share's loss is omitted: a lower bound)
 //! - `loss-sensitivity,label,from_hz,to_hz,ratio,source` (printed only)
+//! - `loss-proxy,share,eta_lo,eta_hi,f_lo_hz,f_hi_hz,composition-proxy,receipt`
+//!   (printed only): a bracket of a `loss-unknown` share's loss from other
+//!   species, never entering the damping
 //!
 //! Each loss factor is constant (hysteretic) over the frequencies its source
 //! measured, `[f_lo, f_hi]`. A source mode outside that domain refuses by name
@@ -39,6 +42,8 @@ pub const PANEL_SHARES: [&str; 4] = ["panel-l", "panel-r", "panel-lr", "panel-12
 pub const MAX_GROUPS: usize = 16;
 /// Upper bound on printed sensitivity laws.
 pub const MAX_SENSITIVITY: usize = 4;
+/// Upper bound on composition-proxy brackets.
+pub const MAX_PROXIES: usize = 8;
 /// Two modes whose `|H_ab| / |omega_a^2 - omega_b^2|` reaches this join one
 /// cluster for the exact check of the diagonal (ruling 6431).
 pub const CLUSTER_PAIR_RATIO: f64 = 0.03;
@@ -80,12 +85,24 @@ impl RiseLaw {
     }
 }
 
+/// A composition-proxy bracket of one `loss-unknown` share's loss factor,
+/// measured on other species over `domain_hz`: printed beside the lower bound,
+/// never part of the board's damping.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProxyBracket {
+    pub share: String,
+    pub eta: (f64, f64),
+    pub domain_hz: (f64, f64),
+    pub receipt: String,
+}
+
 /// Every loss row of one `damping,material` board.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LossDeclaration {
     shares: Vec<(String, ShareLoss)>,
     groups: Vec<(String, Vec<usize>)>,
     sensitivity: Vec<RiseLaw>,
+    proxies: Vec<ProxyBracket>,
 }
 
 fn number(fields: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -151,6 +168,22 @@ impl LossDeclaration {
                 }
                 self.sensitivity.push(law);
             }
+            "loss-proxy" => {
+                let share = f.get(1).copied().unwrap_or("");
+                let eta = (number(f, 2, "proxy loss factor lower edge")?, number(f, 3, "proxy loss factor upper edge")?);
+                let domain_hz = (number(f, 4, "proxy frequency domain lower edge")?,
+                    number(f, 5, "proxy frequency domain upper edge")?);
+                if f.get(6).copied() != Some("composition-proxy") {
+                    return Err(format!("loss-proxy {share}: the flag must be composition-proxy"));
+                }
+                if !(eta.0 >= 0.0 && eta.0 <= eta.1 && eta.1 < 1.0) || !(domain_hz.0 > 0.0 && domain_hz.0 <= domain_hz.1) {
+                    return Err(format!("loss-proxy {share}: a bracket 0 <= lo <= hi < 1 and a positive frequency domain lo <= hi"));
+                }
+                if !slug(share) || self.proxies.iter().any(|p| p.share == share) || self.proxies.len() >= MAX_PROXIES {
+                    return Err(format!("loss-proxy '{share}' must name one share once, at most {MAX_PROXIES} brackets"));
+                }
+                self.proxies.push(ProxyBracket { share: share.to_string(), eta, domain_hz, receipt: text(f, 7, "loss-proxy")? });
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -166,7 +199,9 @@ impl LossDeclaration {
 
     /// True when the declaration holds any loss row.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.shares.is_empty() && self.groups.is_empty() && self.sensitivity.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.shares.is_empty() && self.groups.is_empty() && self.sensitivity.is_empty() && self.proxies.is_empty()
+    }
 
     /// The shares in projection order: the four panel parts, then each group's
     /// bending and torsion in declared group order.
@@ -205,6 +240,12 @@ impl LossDeclaration {
         if let Some((extra, _)) = self.shares.iter().find(|(n, _)| !names.contains(n)) {
             return Err(format!("loss share '{extra}' names no panel part or stiffener group"));
         }
+        for proxy in &self.proxies {
+            if !matches!(self.shares.iter().find(|(n, _)| *n == proxy.share), Some((_, ShareLoss::Unknown { .. }))) {
+                return Err(format!("loss-proxy '{}' brackets only a loss-unknown share; a claimed or undeclared share refuses",
+                    proxy.share));
+            }
+        }
         Ok(())
     }
 
@@ -241,6 +282,9 @@ pub struct ModeLoss {
     /// Second-order estimate of the relative change the pairs left between
     /// clusters would make to the exact loss factor.
     pub neglected: f64,
+    /// The loss factor if every composition-proxy share took the lower, then
+    /// the upper edge of its bracket (printed only; `None` without brackets).
+    pub proxy_bracket: Option<(f64, f64)>,
 }
 
 impl ModeLoss {
@@ -254,6 +298,7 @@ impl ModeLoss {
 pub struct MaterialLossReceipt {
     pub shares: Vec<(String, ShareLoss)>,
     pub sensitivity: Vec<RiseLaw>,
+    pub proxies: Vec<ProxyBracket>,
     pub modes: Vec<ModeLoss>,
     /// The coupled clusters of the exact check, and the largest pair ratio left
     /// between them.
@@ -270,6 +315,9 @@ pub struct BandSummary {
     pub mean_ratio: f64,
     pub min_ratio: f64,
     pub max_ratio: f64,
+    /// The mean damping ratio with every composition-proxy share at the lower,
+    /// then the upper edge of its bracket.
+    pub proxy_mean_ratio: Option<(f64, f64)>,
 }
 
 impl MaterialLossReceipt {
@@ -278,13 +326,16 @@ impl MaterialLossReceipt {
     #[must_use]
     pub fn band_summary(&self, edges_hz: &[f64]) -> Vec<BandSummary> {
         edges_hz.windows(2).map(|w| {
-            let ratios: Vec<f64> = self.modes.iter().filter(|m| m.frequency_hz >= w[0] && m.frequency_hz < w[1])
-                .map(|m| m.damping_ratio).collect();
+            let band: Vec<&ModeLoss> = self.modes.iter().filter(|m| m.frequency_hz >= w[0] && m.frequency_hz < w[1]).collect();
+            let ratios: Vec<f64> = band.iter().map(|m| m.damping_ratio).collect();
             let n = ratios.len();
+            let proxy: Vec<(f64, f64)> = band.iter().filter_map(|m| m.proxy_bracket).collect();
+            let mean = |edge: fn(&(f64, f64)) -> f64| proxy.iter().map(edge).sum::<f64>() / (2.0 * n as f64);
             BandSummary { band_hz: (w[0], w[1]), modes: n,
                 mean_ratio: if n == 0 { f64::NAN } else { ratios.iter().sum::<f64>() / n as f64 },
                 min_ratio: ratios.iter().copied().fold(f64::NAN, f64::min),
-                max_ratio: ratios.iter().copied().fold(f64::NAN, f64::max) }
+                max_ratio: ratios.iter().copied().fold(f64::NAN, f64::max),
+                proxy_mean_ratio: (n > 0 && proxy.len() == n).then(|| (mean(|b| b.0), mean(|b| b.1))) }
         }).collect()
     }
 
@@ -305,7 +356,7 @@ impl MaterialLossReceipt {
         for (name, _) in &self.shares { let _ = write!(out, "\tf_{name}"); }
         out.push_str("\tunknown_fraction\textrapolated\tmax_coupling\tlower_neighbour\tlower_ratio\tupper_neighbour\tupper_ratio");
         for law in &self.sensitivity { let _ = write!(out, "\tloss_factor_if_{}", law.label); }
-        out.push_str("\texact_loss_factor\tdiagonal_error\tcluster\toverlap\tneglected\n");
+        out.push_str("\texact_loss_factor\tdiagonal_error\tcluster\toverlap\tneglected\tproxy_loss_factor_lo\tproxy_loss_factor_hi\n");
         for (a, m) in self.modes.iter().enumerate() {
             let _ = write!(out, "{a}\t{:.6}\t{:.6e}\t{:.6e}", m.frequency_hz, m.loss_factor, m.damping_ratio);
             for f in &m.fractions { let _ = write!(out, "\t{f:.6e}"); }
@@ -319,8 +370,12 @@ impl MaterialLossReceipt {
             }
             for s in &m.sensitivity { let _ = write!(out, "\t{s:.6e}"); }
             let cluster = m.cluster.map_or_else(|| "-".to_string(), |k| k.to_string());
-            let _ = writeln!(out, "\t{:.6e}\t{:+.3e}\t{cluster}\t{:.3}\t{:.1e}", m.exact_loss_factor, m.diagonal_error(),
+            let _ = write!(out, "\t{:.6e}\t{:+.3e}\t{cluster}\t{:.3}\t{:.1e}", m.exact_loss_factor, m.diagonal_error(),
                 m.overlap, m.neglected);
+            let _ = match m.proxy_bracket {
+                Some((lo, hi)) => writeln!(out, "\t{lo:.6e}\t{hi:.6e}"),
+                None => writeln!(out, "\t-\t-"),
+            };
         }
         out
     }
@@ -393,6 +448,8 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
     let loss = energies.hysteretic(&eta).map_err(|e| format!("board material loss: {e}"))?;
     let exact = energies.cluster_exact(&eta, CLUSTER_PAIR_RATIO).map_err(|e| format!("board material loss check: {e}"))?;
     let unknown: Vec<usize> = (0..names.len()).filter(|&c| matches!(declaration.loss(&names[c]), ShareLoss::Unknown { .. })).collect();
+    let proxied: Vec<(usize, &ProxyBracket)> = declaration.proxies.iter()
+        .map(|p| (names.iter().position(|n| *n == p.share).expect("validated proxy share"), p)).collect();
     let modes = (0..n).map(|a| {
         let hz = omega[a] / std::f64::consts::TAU;
         let fractions: Vec<f64> = (0..names.len()).map(|c| energies.fraction(c, a)).collect();
@@ -402,11 +459,16 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
                 eta[c][a] * scale * fractions[c]
             }).sum()
         }).collect();
+        // Printed only: the declared loss plus each bracketed share at one edge.
+        let proxy_bracket = (!proxied.is_empty()).then(|| {
+            let add = |edge: fn(&ProxyBracket) -> f64| proxied.iter().map(|(c, p)| edge(p) * fractions[*c]).sum::<f64>();
+            (loss.loss_factor[a] + add(|p| p.eta.0), loss.loss_factor[a] + add(|p| p.eta.1))
+        });
         ModeLoss { frequency_hz: hz, loss_factor: loss.loss_factor[a], damping_ratio: loss.loss_factor[a] / 2.0,
             unknown_fraction: unknown.iter().map(|&c| fractions[c]).sum(), fractions,
             extrapolated: extrapolated[a].clone(), max_coupling: loss.max_coupling[a],
             neighbours: loss.neighbours[a], sensitivity, exact_loss_factor: exact.loss_factor[a],
-            cluster: exact.cluster_of[a], overlap: exact.overlap[a], neglected: exact.neglected[a] }
+            cluster: exact.cluster_of[a], overlap: exact.overlap[a], neglected: exact.neglected[a], proxy_bracket }
     }).collect::<Vec<ModeLoss>>();
     let mut caveats = Vec::new();
     for &c in &unknown {
@@ -425,6 +487,14 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
                 domain_hz.1, outside.len()));
         }
     }
+    for (c, p) in &proxied {
+        let most = modes.iter().map(|m| m.fractions[*c]).fold(f64::NEG_INFINITY, f64::max);
+        let outside = modes.iter().filter(|m| m.frequency_hz < p.domain_hz.0 || m.frequency_hz > p.domain_hz.1).count();
+        caveats.push(format!("composition-proxy, printed only: '{}' bracketed by loss factor {:.5}-{:.5} ({}), measured \
+            at {:.0}-{:.0} Hz and taken constant at the {outside} of {} modes outside it (largest f_{} {most:.3e}); the \
+            board's damping keeps it at the lower bound", p.share, p.eta.0, p.eta.1, p.receipt, p.domain_hz.0, p.domain_hz.1,
+            modes.len(), p.share));
+    }
     // Off-diagonal loss: sqrt(eta_c,a eta_c,b) is exact only where a share's loss is the same at both modes.
     let varying = (0..names.len()).filter(|&c| eta[c].iter().any(|v| *v != eta[c][0])).count();
     caveats.push(if varying == 0 {
@@ -436,7 +506,8 @@ pub(super) fn resolve(declaration: &LossDeclaration, parts: &BoardParts<'_>, mod
     });
     // Shares in projection order, matching every mode's fraction columns.
     let shares = names.iter().map(|name| (name.clone(), declaration.loss(name).clone())).collect();
-    let mut receipt = MaterialLossReceipt { shares, sensitivity: declaration.sensitivity.clone(), modes,
+    let mut receipt = MaterialLossReceipt { shares, sensitivity: declaration.sensitivity.clone(),
+        proxies: declaration.proxies.clone(), modes,
         clusters: exact.clusters, max_outside_ratio: exact.max_outside_ratio, caveats };
     let (above, worst, mode) = receipt.diagonal_check();
     let largest = receipt.clusters.iter().map(Vec::len).max().unwrap_or(0);

@@ -3,7 +3,7 @@ use std::io::Cursor;
 use fs_couple::pcm_wav::{encode_pcm16_wav, decimate::Decimator};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::stream::{Pcm16WavStream, ScheduledWavProgress, render_pressure_pcm16};
-use fs_couple::render::ReedBoreVoice;
+use fs_couple::render::{ReedBoreVoice, ReedObserverParts};
 use fs_couple::render::schedule::reed::{ReedPerformance, MAX_REED_PERFORMANCE_BYTES};
 use fs_couple::thin_plate::PlateBank;
 use fs_duct::{Duct, HoleState, Segment, Termination};
@@ -26,7 +26,7 @@ fn schedule() -> GestureSchedule {
     }]).unwrap()
 }
 fn geometry() -> Duct { Duct { segments: vec![Segment::Cylinder { radius: 0.0022, length: 0.5 }] } }
-fn reference(rate: u32, samples: usize, duct: &Duct, temp: f64, mass: f64, stiffness: f64) -> Vec<f64> {
+fn reference(rate: u32, samples: usize, duct: &Duct, temp: f64, mass: f64, stiffness: f64) -> Vec<ReedObserverParts> {
     let air = GasState::try_new_moist_air(temp, 101_325.0, 0.0).unwrap();
     let reed = BeatingReed { rest_opening_m: 0.0004, width_m: 0.013,
         closing_pressure_pa: 6000.0, mass_kg: mass, stiffness_n_m: stiffness,
@@ -40,7 +40,7 @@ fn reference(rate: u32, samples: usize, duct: &Duct, temp: f64, mass: f64, stiff
     for sample in 0..samples as u64 {
         voice.set_blowing_pressure(gesture.sample("blow", sample * 700 / u64::from(rate)).unwrap());
         let mut pressure = [0.0]; voice.step_block(&mut pressure).unwrap();
-        out.push(0.0 + pressure[0]); // same additive identity as the common mixer
+        out.push(voice.last_observer_parts());
     }
     out
 }
@@ -51,11 +51,24 @@ fn render(text: &str, block: usize) -> Vec<f64> {
     out
 }
 fn bits(values: &[f64]) -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() }
+/// The performance's observer law (by default ISO 9613-1 for its legacy
+/// ambient), rebuilt from its receipt and applied to the radiated part of an
+/// unabsorbed reference. The bore pressure travels no distance and passes
+/// unfiltered. Re-derived, never re-pinned (rulings 6283, 6498).
+fn observed(text: &str, reference: Vec<ReedObserverParts>) -> Vec<f64> {
+    let source = ReedPerformance::from_bytes(text.as_bytes(), 37).unwrap();
+    let receipt = source.observer().filter;
+    assert!(matches!(receipt.absorption.law, fs_couple::air_path::GasAbsorptionModel::Iso9613Air { .. }));
+    assert!(source.observer().internal_part_unpropagated);
+    let mut law = fs_couple::air_path::ObserverFilter::for_law(receipt.absorption.law,
+        source.ambient_gas(), None, receipt.range_m, receipt.sample_rate_hz).unwrap();
+    reference.into_iter().map(|parts| parts.internal_pa + law.process(parts.radiated_pa)).collect()
+}
 
 #[test]
 fn canonical_pressure_phrase_matches_solver_and_preserves_release_across_callbacks() {
     assert_eq!(INPUT.split_once("\nschedule\n").unwrap().1.as_bytes(), schedule().to_canonical_bytes());
-    let expected = reference(48_000, 4801, &geometry(), 293.15, 0.0, 0.0);
+    let expected = observed(INPUT, reference(48_000, 4801, &geometry(), 293.15, 0.0, 0.0));
     assert!(expected[3000..].iter().any(|v| v.abs() > 1e-12), "release must not erase bore history");
     for partition in [1, 37, 512] {
         assert_eq!(bits(&render(INPUT, partition)), bits(&expected));
@@ -67,7 +80,7 @@ fn admitted_massive_reed_uses_the_same_retained_structural_dynamics() {
     let input = INPUT.replace("6000 0 0 0.35", "6000 0.00001 500 0.35");
     let source = ReedPerformance::from_bytes(input.as_bytes(), 37).unwrap();
     assert!(source.info().massive_reed);
-    let expected = reference(48_000, 4801, &geometry(), 293.15, 1e-5, 500.0);
+    let expected = observed(&input, reference(48_000, 4801, &geometry(), 293.15, 1e-5, 500.0));
     assert_eq!(bits(&render(&input, 37)), bits(&expected));
     assert_ne!(bits(&expected), bits(&render(INPUT, 37)), "massive mechanics must not become a static aperture");
 }
@@ -85,7 +98,7 @@ fn supplied_segmented_bore_and_moist_air_owner_control_the_actual_trajectory() {
         .replace("ambient 293.15", "ambient 303.15");
     let source = ReedPerformance::from_bytes(input.as_bytes(), 37).unwrap();
     assert_eq!(source.info().segments, 3); assert_eq!(source.info().tone_holes, 1);
-    let expected = reference(48_000, 4801, &duct, 303.15, 0.0, 0.0);
+    let expected = observed(&input, reference(48_000, 4801, &duct, 303.15, 0.0, 0.0));
     assert_eq!(bits(&render(&input, 37)), bits(&expected));
     assert_ne!(bits(&expected), bits(&render(INPUT, 37)));
 }
@@ -114,7 +127,7 @@ fn rate_conversion_cancellation_and_retry_retain_the_finite_physical_window() {
     let input = INPUT.replace("audio 48000 4801", "audio 96000 9602")
         .replace("cylinder 0.0022", "cylinder 0.0011");
     let duct = Duct { segments: vec![Segment::Cylinder { radius: 0.0011, length: 0.5 }] };
-    let pressure = reference(96_000, 9602, &duct, 293.15, 0.0, 0.0);
+    let pressure = observed(&input, reference(96_000, 9602, &duct, 293.15, 0.0, 0.0));
     let mut filter = Decimator::new(2, 1).unwrap();
     let expected: Vec<f64> = pressure.chunks_exact(2).map(|block| {
         let value = filter.preview(block).unwrap()[0]; filter.commit(); value

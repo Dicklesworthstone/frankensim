@@ -190,6 +190,50 @@ fn drier_air_moves_each_mode_as_the_sitka_moisture_curve_predicts() {
     }
 }
 
+// Ruling 6431: the sugar pine's bending loss is bracketed by five Pinus
+// species (Bremaud 2012, composition-proxy). The bracket is printed beside the
+// lower bound per mode and per band and never enters the damping; a bracket on
+// a claimed share refuses.
+#[test]
+fn the_pinus_bracket_is_printed_beside_the_lower_bound_and_never_damps_the_board() {
+    let materials = reference_materials().unwrap();
+    let text = build_with_material_loss(8, true, &materials, OPEN).unwrap().geometry;
+    assert_eq!(text.lines().filter(|l| l.starts_with("loss-proxy,")).count(), 2, "ribs and cut-off bar bending");
+    let bare = text.lines().filter(|l| !l.starts_with("loss-proxy,")).collect::<Vec<_>>().join("\n");
+    let ((board, receipt), (bare_board, bare_receipt)) = (prepared(&text, 600.0), prepared(&bare, 600.0));
+    let ratios = |b: &super::super::board_geometry::PreparedBoard| b.modes.iter().map(|m| m.damping_ratio).collect::<Vec<_>>();
+    assert_eq!(ratios(&board), ratios(&bare_board), "printed only: the damping is the lower bound either way");
+    assert!(bare_receipt.modes.iter().all(|m| m.proxy_bracket.is_none()));
+    // The bracket is the species range of the pack, read here.
+    let pack = load_pack(PINE_LOSS_PROXY).unwrap();
+    let values: Vec<f64> = pack.claims().claims_for("loss_factor_longitudinal").iter().map(|(_, c)| match c.value {
+        PropertyValue::Scalar { value, .. } => value,
+        _ => panic!("scalar"),
+    }).collect();
+    let (lo, hi) = (values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().copied().fold(0.0_f64, f64::max));
+    assert_eq!((values.len(), lo, hi), (5, 0.0066, 0.0132));
+    let (ribs, bar) = (index_of(&receipt, "ribs-bending"), index_of(&receipt, "cutoff-bar-bending"));
+    for (a, m) in receipt.modes.iter().enumerate() {
+        let (low, high) = m.proxy_bracket.expect("every mode prints the bracket");
+        let f = m.fractions[ribs] + m.fractions[bar];
+        assert!((low - (m.loss_factor + lo * f)).abs() <= 1e-12 * low && (high - (m.loss_factor + hi * f)).abs() <= 1e-12 * high,
+            "mode {a}");
+        assert!(m.loss_factor <= low && low <= high, "mode {a}");
+    }
+    assert!(receipt.caveats.iter().any(|c| c.starts_with("composition-proxy, printed only: 'ribs-bending'")
+        && c.contains("not Pinus lambertiana") && c.contains("ribs-torsion stays unknown")), "{:?}", receipt.caveats);
+    for band in receipt.band_summary(&[0.0, 200.0, 400.0, 600.0]) {
+        let (low, high) = band.proxy_mean_ratio.unwrap();
+        assert!(band.mean_ratio <= low && low <= high, "{band:?}");
+        println!("band {:.0}-{:.0} Hz: lower bound {:.5}, Pinus bracket {low:.5}-{high:.5} (x {:.3}-{:.3} the authored {AUTHORED_RATIO})",
+            band.band_hz.0, band.band_hz.1, band.mean_ratio, low / AUTHORED_RATIO, high / AUTHORED_RATIO);
+    }
+    let claimed = text.replacen("loss-proxy,ribs-bending,", "loss-proxy,bridges-bending,", 1);
+    assert!(BoardGeometry::read(&claimed).unwrap_err().contains("brackets only a loss-unknown share"));
+    let unflagged = text.replacen(",composition-proxy,", ",strict,", 1);
+    assert!(BoardGeometry::read(&unflagged).unwrap_err().contains("the flag must be composition-proxy"));
+}
+
 // G1 (DONE-WHEN regression): the shipped resolution and slice. Every source
 // mode of the 2400 Hz slice and every reduced coordinate is printed against
 // the authored 0.015, with the per-band summary and the near-pair coupling the
@@ -207,9 +251,10 @@ fn the_shipped_slice_reports_material_damping_against_the_authored_ratio() {
     assert!(board.physical_damping.is_some());
     println!("{}", receipt.tsv());
     for band in receipt.band_summary(&[0.0, 200.0, 400.0, 800.0, 1600.0, 2400.0]) {
-        println!("band {:.0}-{:.0} Hz: {} source modes, damping ratio mean {:.5} (min {:.5}, max {:.5}) = {:.3} x the authored {AUTHORED_RATIO}",
-            band.band_hz.0, band.band_hz.1, band.modes, band.mean_ratio, band.min_ratio, band.max_ratio,
-            band.mean_ratio / AUTHORED_RATIO);
+        let (low, high) = band.proxy_mean_ratio.unwrap();
+        println!("band {:.0}-{:.0} Hz: {} source modes, damping ratio mean {:.5} (min {:.5}, max {:.5}) = {:.3} x the authored {AUTHORED_RATIO}; \
+            with the Pinus bracket {low:.5}-{high:.5} = {:.3}-{:.3} x", band.band_hz.0, band.band_hz.1, band.modes, band.mean_ratio,
+            band.min_ratio, band.max_ratio, band.mean_ratio / AUTHORED_RATIO, low / AUTHORED_RATIO, high / AUTHORED_RATIO);
     }
     let worst = receipt.modes.iter().enumerate().flat_map(|(a, m)| m.neighbours.iter().flatten().map(move |c| (a, c.mode, c.ratio)))
         .max_by(|x, y| x.2.total_cmp(&y.2)).unwrap();

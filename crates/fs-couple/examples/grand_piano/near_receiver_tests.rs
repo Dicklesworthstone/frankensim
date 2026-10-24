@@ -83,7 +83,11 @@ fn actual_close_stereo_playback_observes_one_reacted_trajectory_without_receiver
         let (baked,samples,_)=super::super::bake(&mut close,feedback).unwrap();
         super::super::bake(&mut far,feedback).unwrap();
         assert!(samples.delays_s.iter().all(|d|*d>0. && *d<0.0001));
-        let audio=exterior_audio::render(&mut close.piano,score(),2400,&baked,2.,crate::wav_output::Format::Pcm16).unwrap();
+        // The struck A4 lies above this fixture's sampled band, so most of the close receiver's
+        // pressure (its 7.04 Pa peak included) is extrapolated, not a physical level. 10 Pa only
+        // encodes it unclipped; the publication gate refuses it.
+        let audio=exterior_audio::render(&mut close.piano,score(),2400,&baked,10.,crate::wav_output::Format::Pcm16).unwrap();
+        assert!(audio.require_in_band().unwrap_err().contains("outside the sampled"),"{:?}",audio.out_of_band_share);
         let mut manual=score();
         for n in 0..2400 {manual.dispatch(n,&mut far.piano).unwrap();far.piano.step().unwrap();}
         assert_eq!(close.piano.bank.q,far.piano.bank.q);assert_eq!(close.piano.bank.v,far.piano.bank.v);

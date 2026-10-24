@@ -58,8 +58,8 @@ position when comparing imported and original reference trajectories.
 ```text
 frankensim-drum-spec-v1
 geometry,0.1703,0.1651,0.1778
-head,batter,0.000254,4000000000,0.38,1390,3000,0.001
-head,resonant,0.0000762,4000000000,0.38,1390,1500,0.001
+head,batter,0.000254,4000000000,0.38,1390,3000,stated-unknown
+head,resonant,0.0000762,4000000000,0.38,1390,1500,stated-unknown
 mesh,5,32
 band_hz,80,500
 ambient,293.15 101325 0.65
@@ -72,10 +72,18 @@ dimensions for a finite-thickness shell clamped at both hoops, with supplied
 material and damping. See [BARREL.md](BARREL.md) for shared pressure work,
 outer-skin radiation, geometry approximation and input limits.
 Each `head` record gives its name, thickness [m], Young modulus [Pa], Poisson
-ratio, density [kg/m^3], installed isotropic tension [N/m], and nonnegative modal
-damping ratio. The drag coefficient is `2 * ratio * angular_frequency`; zero
-means zero declared head drag, not fallback damping. The batter and resonant
-head can have different thicknesses, materials, tensions and losses.
+ratio, density [kg/m^3], installed isotropic tension [N/m], and where its loss
+comes from. The loss field is a token, never a number:
+- `stated-unknown`: no citable film or edge loss exists. The head gets zero
+  modal drag, and the render prints "head <name> film and edge loss: STATED
+  UNKNOWN, entered as 0; its decays are upper bounds".
+- `relaxation`: the head's loss is the `--head-relaxation` material law (see
+  [HEAD_RELAXATION.md](HEAD_RELAXATION.md)). The head has no modal drag, and
+  the file refuses without that option.
+
+An authored damping ratio refuses, because it has no source: a decay fitted to
+a recording would otherwise enter as a material property. The batter and
+resonant head can have different thicknesses, materials, tensions and losses.
 
 `mesh` gives shared radial intervals and azimuthal divisions. `band_hz` gives
 the explicit retained eigenfrequency window. `ambient` gives the air inside and

@@ -6,14 +6,17 @@
 //! image; this is the receipted upgrade.
 //!
 //! Provenance chain (the card carries all three): the blank-mesh digest,
-//! the material resolution identity (E_L = 5.0 GPa from the reed-HEEL
-//! pack `cane-arundo-reedheel-mdpi-ma13204566` — the vamp IS heel-zone
-//! material; density 778.9 kg/m^3 is the BLANK pack's low value, a
-//! DISCLOSED zone mismatch since no heel density is licensable; loss
-//! factor 0.025 = delta/pi from the damping pack's 0.06..0.10 log
-//! decrement, conversion ownership ours), and the reduction options.
-//! The moisture caveat travels: every value is DRY-state; wet cane is
-//! 3.1/0.1 GPa per the same pack — recorded context, not a model.
+//! the material resolution identity, and the reduction options. Every
+//! cane value resolves from its compiled pack (bead pexfp.32): E_L dry and
+//! its stated spread from the reed-HEEL pack
+//! `cane-arundo-reedheel-mdpi-ma13204566` (the vamp IS heel-zone
+//! material); the density is the BLANK pack's printed low value, a
+//! DISCLOSED zone mismatch since no heel density is licensable; the loss
+//! factor is delta/pi at the middle of the damping pack's printed log
+//! decrement range (conversion ownership ours); the Poisson ratio is the
+//! labelled authored fixture `cane-reed-authored-fixture`. The moisture
+//! caveat travels: every value is DRY-state; the same heel pack carries the
+//! water-soaked moduli, recorded context, not a model.
 //!
 //! The LAY is a measured-geometry chart (tip opening + facing length ->
 //! circular-arc radius R = l_f^2 / (2 h_t)); v1 consumes it as the rest
@@ -40,14 +43,65 @@ use fs_solid::reduce::{
     reduce_valve,
 };
 
+#[path = "support/material_packs.rs"]
+mod material_packs;
+use material_packs::{
+    CANE_DAMPING, CANE_REED_BLANK, CANE_REED_FIXTURE, CANE_REED_HEEL, MaterialPack,
+};
+
 const RATE: u32 = 48_000;
 
-/// Cane pack values (data/matdb/seed-v1/cane-*): heel E_L dry, blank
-/// low density (zone mismatch disclosed), eta = delta/pi mid.
-const CANE_E_HEEL_PA: f64 = 5.0e9;
-const CANE_E_SIGMA_PA: f64 = 0.7e9;
-const CANE_RHO_BLANK_LOW: f64 = 778.9;
-const CANE_ETA: f64 = 0.025;
+/// The cane values, each resolved from its pack at its measured dry state.
+struct Cane {
+    /// Heel E_L dry [Pa] and its stated half-width (the pack's 1-sigma band).
+    e_heel: f64,
+    e_sigma: f64,
+    /// The blank's printed low density [kg/m^3] (zone mismatch disclosed).
+    rho: f64,
+    /// delta/pi at the middle of the printed log decrement range.
+    eta: f64,
+    /// Authored-fixture Poisson ratio.
+    nu: f64,
+    /// `id hash` of the heel, blank, damping and fixture packs.
+    provenance: [String; 4],
+}
+
+fn cane() -> Cane {
+    let heel = MaterialPack::seed(CANE_REED_HEEL);
+    let blank = MaterialPack::seed(CANE_REED_BLANK);
+    let damping = MaterialPack::seed(CANE_DAMPING);
+    let fixture = MaterialPack::fixture(CANE_REED_FIXTURE);
+    let decrement = |property| {
+        damping
+            .scalar_as_measured(property, Dims::NONE)
+            .expect("cane log decrement")
+    };
+    let (low, high) = (
+        decrement("logarithmic_decrement_printed_range_low"),
+        decrement("logarithmic_decrement_printed_range_high"),
+    );
+    Cane {
+        e_heel: heel
+            .scalar_as_measured("young_modulus_longitudinal", Pressure::DIMS)
+            .expect("heel E_L dry"),
+        e_sigma: heel
+            .half_width("young_modulus_longitudinal")
+            .expect("heel E_L spread"),
+        rho: blank
+            .scalar_as_measured("density_printed_range_low", fs_qty::Density::DIMS)
+            .expect("blank low density"),
+        eta: 0.5 * (low + high) / core::f64::consts::PI,
+        nu: fixture
+            .scalar_as_measured("poisson_ratio", Dims::NONE)
+            .expect("authored Poisson ratio"),
+        provenance: [
+            heel.provenance(),
+            blank.provenance(),
+            damping.provenance(),
+            fixture.provenance(),
+        ],
+    }
+}
 
 // Preserve this benchmark's former loading assumption explicitly. This is
 // an authored effective face length, NOT the mesh's pressure-load projection.
@@ -81,30 +135,38 @@ impl LayChart {
 }
 
 fn cane_card(e_pa: f64) -> MaterialCard {
+    let cane = cane();
+    let [heel, blank, _, fixture] = &cane.provenance;
     let mut claims = ClaimSet::new();
     for (name, dims, value, source) in [
         (
             "density",
             fs_qty::Density::DIMS,
-            CANE_RHO_BLANK_LOW,
-            "cane-arundo-reedblank-mdpi-ma18122759 density_printed_range_low (DISCLOSED zone \
-             mismatch: blank/cortex-weighted value used for heel-zone reduction; no heel density \
-             is licensable); dry, moisture unstated",
+            cane.rho,
+            format!(
+                "{blank} density_printed_range_low (DISCLOSED zone mismatch: blank/cortex-weighted \
+                 value used for heel-zone reduction; no heel density is licensable); dry, moisture \
+                 unstated"
+            ),
         ),
         (
             "young_modulus",
             Pressure::DIMS,
             e_pa,
-            "cane-arundo-reedheel-mdpi-ma13204566 young_modulus_longitudinal (DRY; wet is \
-             3.1 GPa per the same pack - recorded context); isotropic reduction uses E_L, the \
-             bending-dominant axis; the 10x E_T anisotropy is unrepresented (disclosed)",
+            format!(
+                "{heel} young_modulus_longitudinal (DRY; the same pack carries the water-soaked \
+                 modulus - recorded context); isotropic reduction uses E_L, the bending-dominant \
+                 axis; the 10x E_T anisotropy is unrepresented (disclosed)"
+            ),
         ),
         (
             "poisson_ratio",
             Dims::NONE,
-            0.30,
-            "authored Estimate (no licensable cane Poisson ratio; bending-dominated reduction is \
-             insensitive)",
+            cane.nu,
+            format!(
+                "{fixture} poisson_ratio (authored test fixture; no licensable cane Poisson ratio; \
+                 bending-dominated reduction is insensitive)"
+            ),
         ),
     ] {
         claims
@@ -279,7 +341,7 @@ fn mint_pressure_card(lay: LayChart, e_pa: f64) -> PressureLoadedValve {
                 },
                 window_hz: (100.0, 12_000.0),
                 retained_compliance_floor: 0.4,
-                loss_factor: CANE_ETA,
+                loss_factor: cane().eta,
                 source_id: "music/cane-reed-vamp/20x13mm-taper1.0-0.1/v1",
             },
             &pressure_load,
@@ -392,7 +454,7 @@ fn threshold_pa(card: &ValveCard) -> f64 {
 #[test]
 fn cr_001_the_minted_card_carries_the_provenance_chain() {
     let lay = LayChart::try_new(1.0e-3, 0.017).expect("lay");
-    let loaded = mint_pressure_card(lay, CANE_E_HEEL_PA);
+    let loaded = mint_pressure_card(lay, cane().e_heel);
     let card = loaded.card();
     let projected_area = loaded.effective_areas_m2()[0];
     assert!(projected_area.is_finite() && projected_area > 0.0);
@@ -424,7 +486,7 @@ fn cr_001_the_minted_card_carries_the_provenance_chain() {
     let reed = card
         .beating_reed(card.width_m * RESEARCH_PRESSURE_FACE_LENGTH_M, 2000.0, 0.01)
         .expect("declared pressure face");
-    assert_eq!(reed.damping_ratio, 0.5 * CANE_ETA);
+    assert_eq!(reed.damping_ratio, 0.5 * cane().eta);
     let playing_damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
     assert!(
         (playing_damping - card.modes[0].damping_n_s_m).abs()
@@ -479,8 +541,8 @@ fn cr_002_threshold_and_brightness_follow_cane_and_lay() {
     // hard cane are the pack's own 1-sigma band ends — the sweep is
     // licensed data, not invention.
     let lay = LayChart::try_new(1.0e-3, 0.017).expect("lay");
-    let soft = mint_card(lay, CANE_E_HEEL_PA - CANE_E_SIGMA_PA);
-    let hard = mint_card(lay, CANE_E_HEEL_PA + CANE_E_SIGMA_PA);
+    let soft = mint_card(lay, cane().e_heel - cane().e_sigma);
+    let hard = mint_card(lay, cane().e_heel + cane().e_sigma);
     let p_soft = threshold_pa(&soft);
     let p_hard = threshold_pa(&hard);
     assert!(
@@ -498,7 +560,7 @@ fn cr_002_threshold_and_brightness_follow_cane_and_lay() {
     // - MATCHED ABSOLUTE pressure (same breath, different reed) at
     //   p_ref = 1.6 * p_hard: under the closed-loop moving-aperture
     //   junction (commits 4b2c3a40d..da2da0935c, honoring card damping
-    //   zeta = 0.5 * CANE_ETA = 0.0125 and midpoint opening/swept flow),
+    //   zeta = 0.5 * eta, about 0.0127, and midpoint opening/swept flow),
     //   the softer reed has a lower closing pressure P_c proportional
     //   to E, so at fixed absolute mouth pressure p_ref it operates at
     //   a 1.33x higher fraction of P_c, closes more deeply each cycle,
@@ -521,8 +583,8 @@ fn cr_002_threshold_and_brightness_follow_cane_and_lay() {
     );
     // The lay sweep: a more open facing raises the threshold.
     let open_lay = LayChart::try_new(1.3e-3, 0.019).expect("open lay");
-    let open = mint_card(open_lay, CANE_E_HEEL_PA);
-    let base = mint_card(lay, CANE_E_HEEL_PA);
+    let open = mint_card(open_lay, cane().e_heel);
+    let base = mint_card(lay, cane().e_heel);
     let p_open = threshold_pa(&open);
     let p_base = threshold_pa(&base);
     assert!(
@@ -545,7 +607,7 @@ fn cr_003_refusals_fire_by_name() {
         .insert_claim(PropertyClaim {
             key: PropertyKey::new("density", fs_qty::Density::DIMS),
             value: PropertyValue::Scalar {
-                value: CANE_RHO_BLANK_LOW,
+                value: cane().rho,
                 dims: fs_qty::Density::DIMS,
             },
             validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
@@ -598,7 +660,7 @@ fn cr_003_refusals_fire_by_name() {
             fixed.extend_from_slice(&[3 * n, 3 * n + 1, 3 * n + 2]);
         }
     }
-    let state = resolve_cane(CANE_E_HEEL_PA);
+    let state = resolve_cane(cane().e_heel);
     let refused = with_cx(|cx| {
         reduce_valve(
             &ValveCardRequest {
@@ -615,7 +677,7 @@ fn cr_003_refusals_fire_by_name() {
                 },
                 window_hz: (100.0, 12_000.0),
                 retained_compliance_floor: 0.4,
-                loss_factor: CANE_ETA,
+                loss_factor: cane().eta,
                 source_id: "test/empty-face",
             },
             cx,

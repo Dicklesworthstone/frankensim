@@ -27,6 +27,20 @@ cargo run --release -p fs-couple --bin music_render -- \
   /tmp/reed-baffled-mixture.wav --block 37
 ```
 
+## Observer law
+
+An optional `observer_law none|iso9613|stokes-kirchhoff|relaxation
+iso9613-terrestrial-air` record follows the observation record (and its
+`exterior`, if any). Without one, a legacy (T, p, RH) listener gas gets ISO
+9613-1 and any other gas gets Stokes-Kirchhoff, with its omitted relaxation
+receipted. `music_render wind` writes the receipt as `reed_input.observer`. It
+refuses, before any output exists, a listener gas whose omitted relaxation is
+unbounded (CO2 above ISO's ceiling, heliox, a resolved field cell without a
+record) or above 1.0 dB at the band top, unless the law is declared. That is why
+`reed-baffled-mixture.performance` and the other CO2 examples declare
+`observer_law stokes-kirchhoff`: the law they already used, now accepted
+explicitly.
+
 ## Independent internal and exterior atmospheres
 
 An optional `exterior` record immediately after `baffled_outlet` selects the

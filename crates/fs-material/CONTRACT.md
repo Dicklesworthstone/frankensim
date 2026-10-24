@@ -607,7 +607,11 @@ component, alongside existing thermodynamic/transport receipts. Missing NASA-9
 or transport data refuse. `gas_species::input::read_gas_record` requires an
 already-loaded registry for thermochemical input and returns the full resolved
 state; the legacy two-argument reader preserves its old bits and refuses that
-record without a registry. Phase admission is explicit: frozen gas makes no
+record without a registry. A named `mixture` record keeps its species and
+mole fractions beside its state (`GasRecord::Mixture(state, composition)`;
+a mass record is converted by the species' own molar masses), so a consumer
+that needs the composition reads it and never infers it from the state.
+Phase admission is explicit: frozen gas makes no
 condensation claim; the liquid-water option applies the existing Buck limit
 only inside its stated temperature window. No real-gas or molecular-relaxation
 accuracy is supplied by this adapter. Literal NASA/JANAF disagreements remain
@@ -687,6 +691,12 @@ is that data set: the O2 and N2 vibrations at ISO's theta and rates, with Ar,
 CO2 and H2O declared without reservoirs (ISO's own assumption). Rotation is
 not a reservoir in it, so the rotational bulk loss inside ISO's classical
 constant is left out.
+`RelaxationAbsorption::evaluate_iso9613_rates_held(medium)` evaluates the
+same reservoirs for N2 and O2 in any proportion (with Ar, H2O, and CO2 at or
+below ISO's ceiling) with ISO's relaxation frequencies at the medium's own T, p
+and water fraction HELD: a declared assumption, since the partner rates of any
+other proportion are not sourced. At ISO's own fractions it is ISO's rate
+law. Any other species present refuses by name.
 
 The law also refuses:
 - a present species without data;
@@ -733,7 +743,11 @@ relaxation law's own policy) or with the legacy moist-air state
 (`TerrestrialAir::moist_air`, U.S. Standard Atmosphere 1976 dry air). Any
 other composition is refused by `Iso9613Refusal`, which names the species:
 a foreign species (He, SF6, ...), O2 or N2 off ISO's dry fraction, or CO2
-above 1e-3. Pr is DERIVED, never an
+above 1e-3. `iso9613::iso9613_terms` exposes ISO's own decomposition, its
+classical coefficient and each relaxing species' strength and `f_r`.
+Consumers that need ISO's dispersion (its exact Debye pairs) build it from
+there, not from a second transcription. `iso9613_relative_humidity` inverts
+ISO's humidity-to-water conversion. Pr is DERIVED, never an
 input — the emergent ~0.71 for air is the built-in kinetic-theory
 falsifier, and the Eucken-vs-USSA divergence (measured 0.1%..12% over
 200..600 K, monotone-worsening) is asserted as the relation's honest
@@ -2025,3 +2039,11 @@ parameter work; fixed-storage winding and moving-gap owners retain their stricte
 source-evolution guards. Focused field-storage tests cover pressure/composition
 surfaces, typed external curves, original claim retention and dynamic-role refusal.
 This adds no independent constitutive formula or magnetic heating law.
+
+## Reversible thermal field storage
+
+field_storage::thermal supplies source-bound reversible thermal field response for fixed-geometry linear C(T)=epsilon(T) A/d and L(T)=mu(T) N^2 A/l. The exact original material card, selected claims, typed absolute temperature and fixed external context remain attached to each refreshed native element. The existing continuous source-path owner checks the full requested interval; the shared affine-temperature derivative admission is reused by thermoplastic and field-storage consumers. Globally affine positive coefficient paths (including constant and fixed-context surface slices) supply field Helmholtz energy psi=z^2/(2K), entropy s=psi Kprime/K, internal energy U=psi+T s, and the nonpositive fixed-coordinate heat-capacity contribution -2T psi(Kprime/K)^2. A conservative full-interval bound supports the coupled owner admission of positive total caloric plus field capacity under an enforced coordinate limit. This material law does not advance a circuit or thermal state. Coupled owners must account reversible field-caloric exchange separately from Joule heat and add U, not psi, to total internal energy. Derivative jumps, field/frequency-dependent coefficients, second thermal source axes, hysteresis, phase transitions, moving geometry and changing nonthermal context refuse or require another owner. Synthetic G1 tests check potential derivatives, electric/magnetic signs, native geometry, source retention, surface paths, coefficient swaps and validity/refusal boundaries; they are not experimental material validation.
+
+## Spatial affine magnetic thermal material
+
+`field_storage::thermal::magnetic::ThermalMagneticMaterial` pins a complete original material snapshot, its immutable card and selected claims, an explicit absolute-temperature axis, fixed remaining context, and a positive globally affine permeability path. It shares source-path admission, Helmholtz derivatives and capacity arithmetic with lumped C(T)/L(T). For actual cell volume V and gauge-invariant |B| it returns psi=V B²/(2mu), entropy=psi mu_prime/mu, U=psi+T entropy and fixed-B heat capacity=−2T psi(mu_prime/mu)². The full-range conservative capacity bound requires the caller to enforce its B envelope and add all field contributions to the caloric capacity. This is a linear reversible fixed-geometry rung; kinked/nonaffine paths, hysteresis, saturation, transition physics and experimental validation are not inferred.

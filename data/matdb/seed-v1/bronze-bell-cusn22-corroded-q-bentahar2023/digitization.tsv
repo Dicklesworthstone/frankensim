@@ -1,0 +1,20 @@
+frankensim.figure-extraction.v1
+source_url	https://pmc.ncbi.nlm.nih.gov/articles/PMC10342902/ (figure image https://cdn.ncbi.nlm.nih.gov/pmc/blobs/d63d/10342902/c53a9480491a/materials-16-04763-g010.jpg)
+source_sha256	92f2cfbb2aeaaa25e46bd08481227461ce6a926ae8342ca7112e11bc2c55cba4
+source_pages	Figure 10 (PMC image g010, 796 x 354 px RGB JPEG); panel (b) quality factor, panel (a) resonance frequency, both against drive amplitude in volts
+retained_file	source-figure-10.jpg
+retained_sha256	92f2cfbb2aeaaa25e46bd08481227461ce6a926ae8342ca7112e11bc2c55cba4
+figure	10(b) Q vs drive amplitude, 4th bending resonance, cycles 1-3 (blue, orange, green markers); 10(a) resonance frequency for the validity band
+authority	bounded; extraction bounds only; experimental scatter, clamp loss and the corrosion layer are not separated; no confidence probability
+method	Automated pixel reads by script (scratch tools/fig10b_read.py) on the sips-decoded 24-bit image: gridlines are rows/columns with more than 60 of the plot-area pixels gridline gray (200-240, channels within 10); markers are colour masks in a 25 px window round the 0.1 V column; pass A = mask centroid of the marker body rows (3 or more mask pixels), pass B = midpoint of the body's vertical extent
+calibration	panel (b): gridline rows y 39.5, 80.5, 122.5, 163.5, 205.5 for the printed ticks Q 100, 90, 80, 70, 60 (4.150 px per unit Q); columns x 482, 536.5, 592.5, 648.5, 705, 761.5 for 0, 0.2, ..., 1.0 V, so 0.1 V is x 509.95; panel (a): rows y 62.5, 103, 144.5, 184.5, 224 for 11500 ... 11100 Hz (2.472 Hz per px, least squares), 0.1 V at x 123.1
+read_rule	read_p = marker body centroid (A) or extent midpoint (B) at the 0.1 V column; the series' fit lines (red) and connecting lines are excluded by colour and by the body-row threshold
+bound_rule	For each pass evaluate all eight combinations of read_p +/- read_radius and both ordinate anchors +/- anchor_radius under the affine calibration (anchor rows 39.5 for Q 100 and 205.5 for Q 60). read_radius = half the marker body height + 1 px; anchor_radius = half the 2 px gridline width. Nominal +/- half_width encloses the A/B union including rounding; units are Q. Panel (a) frequencies: cycle 1 11308, cycle 2 11430, cycle 3 11407 Hz, each +/- 13 Hz by the same rule, which set each claim's validity band
+scope	Lowest plotted drive (0.1 V) only; corroded specimens only (no intact Q is printed); total specimen Q including the bolted clamp; drive volts are not strain amplitude
+claim	pass	dpi	abscissa_scale	x0_pixel	x0_value	x1_pixel	x1_value	target_x	read_x	ordinate_p0	ordinate_v0	ordinate_p1	ordinate_v1	read_p	read_radius	anchor_radius	scale_to_property	value_unit	nominal	half_width
+q-cycle1	A	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	43.85	4.0	1.0	1	1	99.00	1.25
+q-cycle1	B	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	43.50	4.0	1.0	1	1	99.00	1.25
+q-cycle2	A	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	58.50	3.0	1.0	1	1	95.42	0.97
+q-cycle2	B	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	58.50	3.0	1.0	1	1	95.42	0.97
+q-cycle3	A	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	33.29	4.0	1.0	1	1	101.49	1.25
+q-cycle3	B	image-px	linear	482	0	761.5	1.0	0.1	509.95	39.5	100	205.5	60	33.50	4.0	1.0	1	1	101.49	1.25

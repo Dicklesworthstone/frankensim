@@ -24,6 +24,40 @@
 
 use super::*;
 
+/// The worst Karush-Kuhn-Tucker violation of a candidate active set: which port,
+/// which friction condition it broke, and by how much. Carried in a refusal so a
+/// reader can see why the active-set rescue could not land a partition.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct KktViolation {
+    pub port: usize,
+    pub condition: &'static str,
+    pub size: f64,
+}
+
+/// Result of the active-set rescue: either a consistent partition, or an
+/// exhaustion carrying the pivots spent, the last active set tried (as a compact
+/// S/+/- string) and the worst KKT violation.
+pub(super) enum Resolution {
+    Solved(Vec<f64>, Vec<ModalFrictionRegime>),
+    Exhausted {
+        pivots: usize,
+        last_set: String,
+        worst: KktViolation,
+    },
+}
+
+/// Compact S (stuck) / + (slide positive) / - (slide negative) encoding of a set.
+fn encode(cells: &[Branch]) -> String {
+    cells
+        .iter()
+        .map(|b| match b {
+            Branch::Stuck => 'S',
+            Branch::SlidePos => '+',
+            Branch::SlideNeg => '-',
+        })
+        .collect()
+}
+
 /// One port's assigned branch in a candidate active set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Branch {
@@ -236,17 +270,22 @@ pub(super) fn solve_active_set(
     dt: f64,
     seed: &[ModalFrictionRegime],
     budget: usize,
-) -> Result<Option<(Vec<f64>, Vec<ModalFrictionRegime>)>, ModalFrictionError> {
+) -> Result<Resolution, ModalFrictionError> {
     let p = f.len();
     // First partition: every port stuck. A stuck port that cannot hold will be
     // flipped to the sliding direction its over-cone traction indicates.
     let _ = seed;
     let mut cells = vec![Branch::Stuck; p];
     let mut seen: Vec<Vec<Branch>> = Vec::new();
-    for _pivot in 0..budget {
+    let mut pivots = 0usize;
+    // The worst KKT violation seen on the most recent partition, carried into an
+    // exhaustion so the refusal can name port, condition and size.
+    let mut worst = KktViolation { port: 0, condition: "none", size: 0.0 };
+    for _ in 0..budget {
+        pivots += 1;
         if seen.contains(&cells) {
             // Revisited a partition: the single-flip walk is cycling; stop.
-            return Ok(None);
+            return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
         }
         seen.push(cells.clone());
         let Some(t) = solve_partition(a, f, normal, law, dt, &cells, 100) else {
@@ -254,62 +293,68 @@ pub(super) fn solve_active_set(
             // port with the largest |slip| that is pinned stuck, else give up.
             let slip = slips(a, f, &vec![0.0; p]);
             let mut flip = None;
-            let mut worst = 0.0;
+            let mut w = 0.0;
             for i in 0..p {
-                if cells[i] == Branch::Stuck && slip[i].abs() > worst {
-                    worst = slip[i].abs();
+                if cells[i] == Branch::Stuck && slip[i].abs() > w {
+                    w = slip[i].abs();
                     flip = Some(i);
                 }
             }
             match flip {
                 Some(i) => {
-                    cells[i] = if slips(a, f, &vec![0.0; p])[i] >= 0.0 {
-                        Branch::SlidePos
-                    } else {
-                        Branch::SlideNeg
-                    };
+                    worst = KktViolation { port: i, condition: "newton-nonconvergence", size: w };
+                    cells[i] = if slip[i] >= 0.0 { Branch::SlidePos } else { Branch::SlideNeg };
                     continue;
                 }
-                None => return Ok(None),
+                None => {
+                    worst = KktViolation { port: 0, condition: "newton-nonconvergence", size: f64::INFINITY };
+                    return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
+                }
             }
         };
         if is_consistent(a, f, normal, law, dt, &cells, &t)? {
             let regimes = cells.iter().map(|&b| regime_of(b)).collect();
-            return Ok(Some((t, regimes)));
+            return Ok(Resolution::Solved(t, regimes));
         }
-        // Flip the single worst KKT violator.
+        // Flip the single worst KKT violator, recording port/condition/size.
         let slip = slips(a, f, &t);
         let mut flip = None;
-        let mut worst = 0.0f64;
+        let mut wsize = 0.0f64;
+        let mut wport = 0usize;
+        let mut wcond = "none";
         for i in 0..p {
-            let (viol, want) = match cells[i] {
+            let (viol, cond, want) = match cells[i] {
                 Branch::Stuck => {
                     let cap = law[i].static_coefficient()? * normal[i];
-                    let excess = t[i].abs() - cap;
-                    let want = if t[i] >= 0.0 { Branch::SlidePos } else { Branch::SlideNeg };
-                    (excess, want)
+                    (
+                        t[i].abs() - cap,
+                        "stuck-exceeds-static-cone",
+                        if t[i] >= 0.0 { Branch::SlidePos } else { Branch::SlideNeg },
+                    )
                 }
                 Branch::SlidePos => {
-                    // Wrong direction or non-dissipative -> should stick.
                     let bad = if slip[i] <= 0.0 || t[i] <= 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
-                    (bad, Branch::Stuck)
+                    (bad, "slide-pos-wrong-direction-or-nondissipative", Branch::Stuck)
                 }
                 Branch::SlideNeg => {
                     let bad = if slip[i] >= 0.0 || t[i] >= 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
-                    (bad, Branch::Stuck)
+                    (bad, "slide-neg-wrong-direction-or-nondissipative", Branch::Stuck)
                 }
             };
-            if viol > worst {
-                worst = viol;
+            if viol > wsize {
+                wsize = viol;
+                wport = i;
+                wcond = cond;
                 flip = Some((i, want));
             }
         }
+        worst = KktViolation { port: wport, condition: wcond, size: wsize };
         match flip {
             Some((i, want)) => cells[i] = want,
-            None => return Ok(None),
+            None => return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst }),
         }
     }
-    Ok(None)
+    Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst })
 }
 
 #[cfg(test)]
@@ -416,10 +461,12 @@ mod tests {
         let l = law();
         let laws: Vec<&FrictionLaw> = (0..5).map(|_| &l).collect();
         let seed = vec![ModalFrictionRegime::Sticking; 5];
-        let got = solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 64)
-            .unwrap()
-            .expect("active-set rescue found no consistent solution");
-        let (t, regimes) = got;
+        let (t, regimes) = match solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 64).unwrap() {
+            Resolution::Solved(t, regimes) => (t, regimes),
+            Resolution::Exhausted { pivots, last_set, worst } => panic!(
+                "active-set rescue found no consistent solution: {pivots} pivots, last set {last_set}, worst {worst:?}"
+            ),
+        };
         assert_eq!(
             regimes,
             vec![
@@ -437,5 +484,31 @@ mod tests {
                 assert!(ti.abs() <= cap * (1.0 + 1e-9), "port {i} stuck traction {ti} exceeds the cone {cap}");
             }
         }
+    }
+
+    #[test]
+    fn active_set_refuses_when_the_pivot_budget_is_spent() {
+        let (a, f) = operating_point();
+        let l = law();
+        let laws: Vec<&FrictionLaw> = (0..5).map(|_| &l).collect();
+        let seed = vec![ModalFrictionRegime::Sticking; 5];
+        // From the all-stuck start the unique partition S+SSS needs more than one
+        // pivot (flip port 1, then re-solve), so budget 1 cannot resolve it and
+        // the rescue refuses with a payload; the real default budget resolves it.
+        match solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 1).unwrap() {
+            Resolution::Exhausted { pivots, last_set, worst } => {
+                assert!(pivots <= 1, "budget 1 must spend at most one pivot, spent {pivots}");
+                assert!(!last_set.is_empty(), "the refusal must carry the last active set");
+                assert!(worst.condition != "none", "the refusal must carry a KKT violation");
+            }
+            Resolution::Solved(..) => panic!("budget 1 must not resolve the partition"),
+        }
+        assert!(
+            matches!(
+                solve_active_set(&a, &f, &NORMAL, &laws, DT, &seed, 64).unwrap(),
+                Resolution::Solved(..)
+            ),
+            "the default budget must resolve the partition"
+        );
     }
 }

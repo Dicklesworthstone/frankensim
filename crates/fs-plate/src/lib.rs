@@ -126,6 +126,15 @@ pub enum PlateError {
         /// Mesh node count.
         node_count: usize,
     },
+    /// An EdgeTie slave node is not on a free edge (an edge of one facet) of
+    /// its component. The slave side is the edge being joined; the master side
+    /// may run along an interior line (a web on a flange, a rib on a skin).
+    InteriorTieNode {
+        /// Slave component index.
+        component: usize,
+        /// Node index in that component's mesh.
+        node: usize,
+    },
     /// A stiffener path references nodes outside the mesh or is too short.
     BadStiffener {
         /// Diagnostic.
@@ -166,6 +175,10 @@ impl core::fmt::Display for PlateError {
             PlateError::BadBoundary { node, node_count } => write!(
                 f,
                 "FS-PLATE-BAD-BOUNDARY: boundary node {node} outside the {node_count}-node mesh"
+            ),
+            PlateError::InteriorTieNode { component, node } => write!(
+                f,
+                "FS-PLATE-INTERIOR-TIE-NODE: slave node {node} of component {component} is not on a free edge"
             ),
             PlateError::BadStiffener { what } => write!(f, "FS-PLATE-BAD-STIFFENER: {what}"),
             PlateError::Modal(e) => write!(f, "FS-PLATE-MODAL: {e}"),

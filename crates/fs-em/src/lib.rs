@@ -14,9 +14,11 @@
 //! Explicit geometry/frame correspondence transfers the computed field into
 //! existing moving-conductor/current/heat/flow owners. That coupling is one-way
 //! in the low-induction regime: their induced currents do not update this field.
-//! There is no nonlinear ferromagnetism, permanent magnet, hysteresis, field
-//! loss, spatial eddy-current/flow induction feedback, magnetization-force or
-//! thermodynamic temperature-work claim.
+//! `planar::eddy` additionally retains stationary planar induction history and
+//! spatial Ohmic heat, including floating conductor current-return constraints.
+//! There is no nonlinear ferromagnetism, permanent magnet, hysteresis, moving
+//! conductor induction feedback, magnetization-force or magnetic parameter-work
+//! claim.
 
 pub mod planar;
 pub mod transfer;

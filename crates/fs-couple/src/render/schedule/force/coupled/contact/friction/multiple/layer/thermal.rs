@@ -1,16 +1,23 @@
 //! Closed retained-film heating on the original modal/contact transaction.
 //!
-//! Only the layer's plastic loss becomes a source to its SAME fs-thermal cell.
+//! Plastic loss and reversible thermoelastic exchange reach the SAME thermal cell.
+//! Explicit series-drive routes can deposit physical dashpot loss into other
+//! original cells; their existing conductive links close the contact feedback.
 //! Conductive links, other sources and boundary losses keep the existing finite
 //! enthalpy owner. At each nonlinear endpoint, the original material claims are
 //! evaluated at that cell's temperature, and the original simultaneous contact
 //! solve starts from accepted elastic/plastic history. No trial advances time.
 //!
-//! This bounded continuation requires temperature-independent elastic modulus
-//! and reference density, unchanged geometry, retained compression and solid
-//! caloric state. Only yield and plastic viscosity can change with temperature;
-//! changing elastic storage needs a thermoelastic law and is refused. The grid
-//! is stationary and callers must justify its uniform cells and conduction.
+//! This bounded continuation admits affine G(T), fixed reference density,
+//! unchanged geometry, retained compression and solid caloric state. Mechanical
+//! free energy is psi=k(T)e^2/2, entropy s=-k'e^2/2 and internal energy psi+T*s.
+//! Source knots are checked across the complete caloric interval; a kink in G
+//! refuses because its entropy jump is absent from this thermal model. The grid
+//! retains reference mass/volume: the stress-free caloric enthalpy changes are
+//! internal-energy changes here, with no evolving pressure-volume work.
+//! Affine G contributes zero fixed-strain heat-capacity correction. Endpoint
+//! thermal stepping can produce numerical entropy; it is not plastic heating.
+//! The grid is stationary; callers must justify its uniform cells and conduction.
 //! Moving footprints, layer advection, expansion, melting and flash-temperature
 //! approximations are not supplied. Endpoint thermal feedback is first order;
 //! solver convergence is not temporal/spatial convergence or a real-rosin claim.
@@ -27,7 +34,7 @@ use fs_solver::{
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 /// An existing finite layer cell, with its original material/caloric owners.
@@ -40,6 +47,22 @@ pub struct LayerThermalCell<'a> {
     pub material: &'a MaterialCard,
     pub caloric: &'a EquilibriumEnthalpyPhaseCurve,
     pub temperature_axis: &'a str,
+}
+
+/// Deposit ONE existing series-drive dashpot's physical loss into an existing
+/// finite cell. No partition, receiving mass, heat capacity or conduction is
+/// inferred. Several drives may feed one declared uniform receiving body, but
+/// each port may be routed only once. Unrouted losses remain in the mechanical
+/// report's external loss account.
+///
+/// The declared spring/dashpot retains its fixed coefficients. This route does
+/// not identify a hair material or infer temperature dependence from k and c;
+/// the caller must justify that constitutive approximation over the receiving
+/// cell's temperature range. Source-backed films still refresh their own laws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeriesDriveHeatDestination {
+    pub port: usize,
+    pub cell: CellId,
 }
 
 /// Independent nonlinear work, cell balance and combined energy admission.
@@ -58,8 +81,10 @@ pub struct LayerThermalSolve {
 
 /// The accepted original pressure/contact observation and finite heat account.
 pub struct LayerThermalFrame<S> {
+    /// Original held-coefficient mechanical work/pressure report. Its shear
+    /// storage is free energy; the terms below complete the thermal account.
     pub mechanics: MultiFrictionFrame,
-    /// Includes the internal transfer of layer plastic heat.
+    /// Includes routed plastic/drive heat and signed reversible layer exchange.
     pub thermal: EnergyAudit,
     pub source: S,
     pub nonlinear: NewtonReport,
@@ -69,7 +94,19 @@ pub struct LayerThermalFrame<S> {
     pub deposited_heat_j: f64,
     /// Original physical plastic loss removed from the combined loss account.
     pub routed_plastic_heat_j: f64,
-    /// Independently evaluated other heat, excluding the internal layer source.
+    /// Physical series-drive dashpot loss deposited into its named cells.
+    /// Already included in the mechanical report, so removed once from the
+    /// combined external loss account. Never includes stored spring energy.
+    pub routed_series_drive_heat_j: f64,
+    /// Signed reversible caloric exchange, never classified as dissipation.
+    pub routed_reversible_heat_j: f64,
+    /// psi(T_new,e_old)-psi(T_old,e_old), in addition to the mechanical report.
+    pub coefficient_free_energy_change_j: f64,
+    /// Change of the mechanical entropy contribution T*s to internal energy.
+    pub mechanical_entropy_energy_change_j: f64,
+    /// Actual change of layer internal energy psi+T*s across both endpoints.
+    pub layer_internal_energy_change_j: f64,
+    /// Independently evaluated other heat, excluding all internal routed sources.
     pub external_heat_j: f64,
     /// Mechanical + caloric storage + unrouted physical loss - external supplies.
     pub total_energy_residual_j: f64,
@@ -164,7 +201,7 @@ impl LayerThermalCell<'_> {
         &self,
         original: &MaterialShearLayer,
         thermal: &DepositionSimulation<'_>,
-    ) -> Result<MaterialShearLayer, LayerThermalError<E>> {
+    ) -> Result<(MaterialShearLayer, f64), LayerThermalError<E>> {
         let invalid = LayerThermalError::Invalid;
         let cell = thermal
             .cells()
@@ -191,9 +228,9 @@ impl LayerThermalCell<'_> {
                 "layer, caloric chart and thermal cell must share one material card",
             ));
         }
-        for name in ["shear_modulus", "density"] {
+        for name in ["density"] {
             let property = source.resolved().property(name).ok_or(invalid(
-                "thermal layer needs its original modulus and density claims",
+                "thermal layer needs its original density claim",
             ))?;
             let claim = self
                 .material
@@ -204,7 +241,7 @@ impl LayerThermalCell<'_> {
                 ))?;
             if claim.value.axes().next().is_some() {
                 return Err(invalid(
-                    "thermal layer continuation requires constant elastic modulus and reference density",
+                    "thermal layer continuation requires constant reference density",
                 ));
             }
         }
@@ -255,7 +292,6 @@ impl LayerThermalCell<'_> {
             source.maximum_elastic_shear_strain(),
         )?;
         if refreshed.temperature_kelvin().to_bits() != phase.temperature_k().to_bits()
-            || refreshed.stiffness_n_m().to_bits() != source.stiffness_n_m().to_bits()
             || refreshed
                 .resolved()
                 .property("density")
@@ -265,15 +301,16 @@ impl LayerThermalCell<'_> {
                 != density.value_si().to_bits()
         {
             return Err(invalid(
-                "thermal layer may update only temperature and dissipative response",
+                "thermal layer must retain its reference density and actual temperature",
             ));
         }
         let mut next = MaterialShearLayer::new(refreshed)?;
-        next.state = next
+        let continuation = next
             .law
-            .continue_state(&original.state)
+            .continue_state_with_work(&original.state)
             .map_err(ModalFrictionError::from)?;
-        Ok(next)
+        next.state = continuation.state;
+        Ok((next, continuation.coefficient_free_energy_change_j))
     }
 }
 
@@ -282,12 +319,13 @@ impl MultiFrictionModalSystem {
     ///
     /// Every layer must have a distinct explicit receiving cell. Its complete
     /// source bundle must additionally contain positive static `density`;
-    /// temperature-dependent modulus/density, material replacement and phase
-    /// change refuse. The selected claims and geometry remain pinned. All
+    /// density changes, non-affine modulus, material replacement and phase
+    /// change refuse. Affine G(T) retains mechanical entropy and coefficient
+    /// work. The selected claims and geometry remain pinned. All
     /// thermal cells, links, source models and heat capacity retain their owners.
     ///
     /// `resolve` supplies only OTHER heat and existing-link conductances at the
-    /// proposed endpoint; it must not include layer plastic loss or advance
+    /// proposed endpoint; it must not include layer plastic/reversible heat or advance
     /// external history. Its payload is returned from the accepted evaluation.
     /// Energy guesses use the original thermal owner's sorted CellId order.
     /// Source/topology events inside the sample refuse; endpoint events remain
@@ -304,6 +342,39 @@ impl MultiFrictionModalSystem {
         &mut self,
         thermal: &mut DepositionSimulation<'t>,
         bindings: &[LayerThermalCell<'_>],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.step_with_contact_thermal_network(thermal, bindings, &[], controls,
+            energy_guess_j, external, drives, gate, resolve)
+    }
+
+    /// Advance the original contact/pressure/thermal transaction, including
+    /// explicit heat destinations for existing series-compliant drives.
+    ///
+    /// Each routed source is the actual accepted c*(delta eta)^2/dt, not total
+    /// contact work or spring-energy release. Original thermal links conduct
+    /// it to other cells, including temperature-dependent material films, in
+    /// the SAME nonlinear endpoint solve. Each trial restarts accepted stretch,
+    /// strain, mechanics and caloric state; rejection publishes none of them.
+    ///
+    /// Every material film must still have its original binding. Empty film
+    /// bindings are admitted for a drive-only thermal route. Unrouted modal,
+    /// dry-contact, obstacle and drive losses keep their existing accounts.
+    /// `resolve` supplies only OTHER heat: it must not add either routed loss.
+    /// Receiving cells already own their physical volume, mass and caloric law.
+    /// This transfers fixed-coefficient drive loss, without inventing material
+    /// temperature laws for those drives. See `SeriesDriveHeatDestination`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_network<'t, S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
         controls: LayerThermalSolve,
         energy_guess_j: &[f64],
         external: &[f64],
@@ -348,12 +419,25 @@ impl MultiFrictionModalSystem {
             ));
         }
         let original_layers = self.shear_layers.clone();
-        if bindings.is_empty() || bindings.len() != original_layers.iter().flatten().count() {
+        if bindings.is_empty() && series_heat.is_empty()
+            || bindings.len() != original_layers.iter().flatten().count() {
             return Err(LayerThermalError::Invalid(
                 "bind every retained layer to one original finite thermal cell",
             ));
         }
+        let mut heated_drives = BTreeSet::new();
+        for route in series_heat {
+            checkpoint()?;
+            if !heated_drives.insert(route.port)
+                || self.series_drives.get(route.port).and_then(Option::as_ref).is_none()
+                || !thermal.cells().contains_key(&route.cell) {
+                return Err(LayerThermalError::Invalid(
+                    "each heat route needs one distinct existing series drive and an existing receiving cell",
+                ));
+            }
+        }
         let (mut ports, mut cells) = (BTreeSet::new(), BTreeSet::new());
+        let mut thermodynamics = Vec::with_capacity(bindings.len());
         for binding in bindings {
             checkpoint()?;
             if !ports.insert(binding.port) || !cells.insert(binding.cell) {
@@ -367,12 +451,20 @@ impl MultiFrictionModalSystem {
                 .ok_or(LayerThermalError::Invalid(
                     "thermal binding requires an existing material layer",
                 ))?;
-            let admitted = binding.at(original, thermal)?;
+            let (admitted, _) = binding.at(original, thermal)?;
             if admitted.source != original.source {
                 return Err(LayerThermalError::Invalid(
                     "initial layer source must match its accepted thermal cell",
                 ));
             }
+            let knots = binding.caloric.knots();
+            let span = (knots.first().expect("admitted caloric chart").temperature_k,
+                knots.last().expect("admitted caloric chart").temperature_k);
+            let slope = original.source.thermal_stiffness_slope_n_m_k(
+                binding.material, binding.temperature_axis, span)?;
+            let initial = original.law.thermodynamics(&original.state, slope)
+                .map_err(ModalFrictionError::from)?;
+            thermodynamics.push((slope, initial));
         }
         self.prepare_step(drives, None, None, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
@@ -390,11 +482,14 @@ impl MultiFrictionModalSystem {
                     trials.set(trials.get() + 1);
                     // Every thermal/Jacobian/contact trial restarts ACCEPTED history.
                     let mut layers = original_layers.clone();
+                    let mut coefficient_changes = Vec::with_capacity(bindings.len());
                     for binding in bindings {
-                        layers[binding.port] = Some(binding.at(
+                        let (layer, coefficient_work) = binding.at(
                             original_layers[binding.port].as_ref().expect("admitted"),
                             endpoint,
-                        )?);
+                        )?;
+                        layers[binding.port] = Some(layer);
+                        coefficient_changes.push(coefficient_work);
                     }
                     let mut system = mechanics.borrow_mut();
                     let original = std::mem::replace(&mut system.shear_layers, layers);
@@ -402,15 +497,45 @@ impl MultiFrictionModalSystem {
                     let candidate_layers = std::mem::replace(&mut system.shear_layers, original);
                     // Accepted source/strain was restored even if mechanics refused.
                     let frame = staged?;
-                    let physical_heat = bindings
-                        .iter()
-                        .map(|binding| {
-                            system.staged_ports[binding.port]
-                                .shear_layer
-                                .expect("staged material layer")
-                                .dissipated_j
-                        })
-                        .collect::<Vec<_>>();
+                    let mut physical_heat = Vec::with_capacity(bindings.len());
+                    let (mut coefficient_work_j, mut entropy_energy_j,
+                        mut internal_change_j, mut reversible_heat_j) = (0.0, 0.0, 0.0, 0.0);
+                    for ((binding, &(slope, initial)), coefficient_work) in bindings.iter()
+                        .zip(&thermodynamics).zip(coefficient_changes) {
+                        checkpoint()?;
+                        let layer = candidate_layers[binding.port].as_ref().expect("admitted");
+                        let staged = layer.staged.as_ref().expect("staged material layer");
+                        let current = layer.law.thermodynamics(&staged.state, slope)
+                            .map_err(ModalFrictionError::from)?;
+                        let old_temperature = original_layers[binding.port].as_ref()
+                            .expect("admitted").source.temperature_kelvin();
+                        let entropy_energy_change = if slope == 0.0 { 0.0 } else {
+                            number(layer.source.temperature_kelvin() * current.entropy_j_k
+                                - old_temperature * initial.entropy_j_k)?
+                        };
+                        // Native mechanics solves with endpoint k. Its work is
+                        // delta(psi at that k)+D. The missing coefficient work
+                        // and delta(T*s) are reversible exchange with caloric H.
+                        let reversible = number(-coefficient_work - entropy_energy_change)?;
+                        coefficient_work_j = number(coefficient_work_j + coefficient_work)?;
+                        entropy_energy_j = number(entropy_energy_j + entropy_energy_change)?;
+                        internal_change_j = number(internal_change_j
+                            + current.internal_energy_j - initial.internal_energy_j)?;
+                        reversible_heat_j = number(reversible_heat_j + reversible)?;
+                        physical_heat.push((staged.dissipated_j,
+                            number(staged.dissipated_j + reversible)?));
+                    }
+                    let mut series_loss = Vec::with_capacity(series_heat.len());
+                    let mut series_heat_j = 0.0;
+                    for route in series_heat {
+                        checkpoint()?;
+                        let heat_j = number(system.staged_ports[route.port].series_drive_dissipation_j)?;
+                        if heat_j < 0.0 {
+                            return Err(LayerThermalError::Invalid("series drive physical heat must be nonnegative"));
+                        }
+                        series_heat_j = number(series_heat_j + heat_j)?;
+                        series_loss.push((route.cell, heat_j));
+                    }
                     drop(system);
                     let StepCoefficients {
                         mut sources_w,
@@ -425,37 +550,29 @@ impl MultiFrictionModalSystem {
                         )?,
                     )?;
                     let (mut deposited_heat_j, mut plastic_heat_j) = (0.0, 0.0);
-                    for (binding, heat_j) in bindings.iter().zip(physical_heat) {
+                    for (binding, (plastic_j, heat_j)) in bindings.iter().zip(physical_heat) {
                         checkpoint()?;
-                        let power = number(heat_j / dt)?;
-                        if heat_j < 0.0 || heat_j != 0.0 && power == 0.0 {
+                        if plastic_j < 0.0 {
                             return Err(LayerThermalError::Invalid(
-                                "layer physical heat cannot vanish in power conversion",
+                                "layer plastic loss must be nonnegative",
                             ));
                         }
-                        plastic_heat_j = number(plastic_heat_j + heat_j)?;
-                        let other = sources_w.entry(binding.cell).or_insert(0.0);
-                        let merged = number(*other + power)?;
-                        let increment = number(merged - *other)?;
-                        if heat_j != 0.0 && increment <= 0.0 {
-                            return Err(LayerThermalError::Invalid(
-                                "layer physical heat vanished when added to another cell source",
-                            ));
-                        }
-                        let delivered = number(dt * increment)?;
-                        if number(delivered - heat_j)?.abs() > controls.total_energy_tolerance_j {
-                            return Err(LayerThermalError::Invalid(
-                                "actual layer source increment does not preserve its physical heat",
-                            ));
-                        }
+                        plastic_heat_j = number(plastic_heat_j + plastic_j)?;
+                        let delivered = deposit_heat(&mut sources_w, binding.cell,
+                            heat_j, dt, controls.total_energy_tolerance_j)?;
                         deposited_heat_j = number(deposited_heat_j + delivered)?;
-                        *other = merged;
                     }
-                    if number(deposited_heat_j - plastic_heat_j)?.abs()
+                    for (cell, heat_j) in series_loss {
+                        checkpoint()?;
+                        let delivered = deposit_heat(&mut sources_w, cell,
+                            heat_j, dt, controls.total_energy_tolerance_j)?;
+                        deposited_heat_j = number(deposited_heat_j + delivered)?;
+                    }
+                    if number(deposited_heat_j - plastic_heat_j - reversible_heat_j - series_heat_j)?.abs()
                         > controls.total_energy_tolerance_j
                     {
                         return Err(LayerThermalError::Invalid(
-                            "layer plastic loss and finite-cell heat do not balance",
+                            "contact plastic loss, reversible exchange, series loss and finite-cell heat do not balance",
                         ));
                     }
                     Ok::<_, LayerThermalError<E>>(StepCoefficients {
@@ -468,6 +585,11 @@ impl MultiFrictionModalSystem {
                             deposited_heat_j,
                             plastic_heat_j,
                             external_heat_j,
+                            reversible_heat_j,
+                            coefficient_work_j,
+                            entropy_energy_j,
+                            internal_change_j,
+                            series_heat_j,
                         ),
                     })
                 },
@@ -506,7 +628,8 @@ impl MultiFrictionModalSystem {
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
         let (
             next,
-            (frame, layers, source, deposited_heat_j, plastic_heat_j, external_heat_j),
+            (frame, layers, source, deposited_heat_j, plastic_heat_j, external_heat_j,
+                reversible_heat_j, coefficient_work_j, entropy_energy_j, internal_change_j, series_heat_j),
             thermal_audit,
         ) = trial.accept(
             controls.cell_energy_tolerance_j,
@@ -516,7 +639,7 @@ impl MultiFrictionModalSystem {
         let total = number(
             frame.energy_residual_j + thermal_audit.stored_energy_change_j
                 - plastic_heat_j
-                - external_heat_j,
+                - series_heat_j - external_heat_j + coefficient_work_j + entropy_energy_j,
         )?;
         if total.abs() > controls.total_energy_tolerance_j {
             return Err(LayerThermalError::Invalid(
@@ -539,8 +662,36 @@ impl MultiFrictionModalSystem {
             maximum_cell_residual_j,
             deposited_heat_j,
             routed_plastic_heat_j: plastic_heat_j,
+            routed_series_drive_heat_j: series_heat_j,
+            routed_reversible_heat_j: reversible_heat_j,
+            coefficient_free_energy_change_j: coefficient_work_j,
+            mechanical_entropy_energy_change_j: entropy_energy_j,
+            layer_internal_energy_change_j: internal_change_j,
             external_heat_j,
             total_energy_residual_j: total,
         })
     }
+}
+
+// One source insertion rule for signed reversible exchange and positive
+// physical losses. It checks the ACTUAL representable increment in each cell,
+// including multiple mechanical sources sharing one finite receiving body.
+fn deposit_heat<E>(sources_w: &mut BTreeMap<CellId, f64>, cell: CellId,
+    heat_j: f64, dt: f64, tolerance_j: f64) -> Result<f64, LayerThermalError<E>> {
+    let power = number(heat_j / dt)?;
+    if heat_j != 0.0 && power == 0.0 {
+        return Err(LayerThermalError::Invalid("contact heat vanished in power conversion"));
+    }
+    let other = sources_w.entry(cell).or_insert(0.0);
+    let merged = number(*other + power)?;
+    let increment = number(merged - *other)?;
+    if heat_j != 0.0 && (increment == 0.0 || (increment > 0.0) != (heat_j > 0.0)) {
+        return Err(LayerThermalError::Invalid("contact heat vanished in the receiving-cell source sum"));
+    }
+    let delivered = number(dt * increment)?;
+    if number(delivered - heat_j)?.abs() > tolerance_j {
+        return Err(LayerThermalError::Invalid("actual contact source increment does not preserve its physical heat"));
+    }
+    *other = merged;
+    Ok(delivered)
 }

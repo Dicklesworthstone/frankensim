@@ -231,7 +231,12 @@ fn walls_and_reaction_preserve_branched_geometry_section_gases_and_all_outlets()
     let branched = source().replace(
         "network 3 2\nduct_node inlet\nduct_node junction\nduct_node reflection -0.9\nduct_section 0 1 0.15 0.006 5e-11\nduct_section 1 2 0.15 0.006 5e-11",
         "network 5 4\nduct_node inlet\nduct_node junction\nduct_node junction\nduct_node reflection -0.9\nduct_node reflection -0.7\nduct_section 0 1 0.08 0.006 5e-11\nduct_section 1 2 0.08 0.006 5e-11\nduct_section 2 3 0.15 0.006 5e-11\nduct_section 2 4 0.05 0.003 5e-11 gas 320 101325 0")
-        .replace("outlets 2 0", "outlets 3 1\noutlet 4 0.2 0");
+        .replace("outlets 2 0", "outlets 3 1\noutlet 4 0.2 0")
+        // The 0.08 m sections at 96 kHz admit at most 5 loss cells: each of the 4*CELLS
+        // quarters must span one transit sample (343 m/s / 96 kHz = 3.6 mm).
+        .replace("loss_section 0 8 300 500\nloss_section 1 8 300 500",
+            "loss_section 0 4 300 500\nloss_section 1 4 300 500");
+    assert_eq!(branched.matches("loss_section 0 4 300 500").count(), 1);
     let material = pack(1000.0, 1e6, None, 100_000.0);
     let p = loaded(&branched, &material, 37);
     assert_eq!(p.radiation_bindings().len(), 2);

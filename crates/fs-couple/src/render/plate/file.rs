@@ -8,12 +8,24 @@
 //! need not include every physical mode; no continuum convergence is implied.
 //! The exterior medium is one shared gas record: its density and sound speed
 //! reach the observer, and a record that does not resolve refuses (never air).
+//!
+//! A section is either bare numbers ending in an explicit `fixture LABEL`
+//! (`section THICK RHO E1 E2 NU12 G12 ANGLE fixture LABEL`), or pack-backed:
+//! `section material isotropic THICK PACK STATE [AXIS=VALUE ...]` or
+//! `section material orthotropic12|orthotropic21 THICK ANGLE PACK STATE
+//! [AXIS=VALUE ...]`, resolved through `crate::material_source` from a
+//! caller-supplied material-card pack compiled at the named STATE. Bare
+//! numbers without a label refuse (bead pexfp.32). `section_provenance` keeps
+//! each section's pack, hash, state and point, or its fixture label.
 
 use std::collections::BTreeSet;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_material::MaterialError;
 use fs_material::gas::GasState;
+use fs_matdb::NormalizedMaterialCardPack;
+use crate::material_source::{MaterialRecord, fixture_label, plate_section};
+use crate::thin_plate::PlateMaterialModel;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -55,6 +67,13 @@ pub enum PlatePerformanceError {
     Reduction(AcousticRealizeError),
     /// The scheduled voice refused.
     Render(RenderError),
+    /// A section's material record, fixture label or caller-supplied pack refused.
+    MaterialSource {
+        /// One-based source line of the `section` record.
+        line: usize,
+        /// Original record, loader or material-owner refusal.
+        source: String,
+    },
 }
 impl core::fmt::Display for PlatePerformanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -64,6 +83,7 @@ impl core::fmt::Display for PlatePerformanceError {
             Self::Geometry(e) => write!(f, "plate geometry/section: {e}"),
             Self::Reduction(e) => write!(f, "plate reduction: {e}"),
             Self::Render(e) => write!(f, "plate render: {e}"),
+            Self::MaterialSource { line, source } => write!(f, "plate input line {line}: material section: {source}"),
         }
     }
 }
@@ -105,6 +125,7 @@ pub struct PlatePerformance {
     info: PlatePerformanceInfo,
     gas_record: GasRecord,
     renderer: ScheduledRenderer,
+    section_provenance: Vec<String>,
 }
 impl PlatePerformance {
     /// Read a bounded flat triangular plate and its physical force history.
@@ -132,7 +153,24 @@ impl PlatePerformance {
         max_block: usize,
         sources: Option<&ThermochemicalSources<'_>>,
     ) -> Result<Self, PlatePerformanceError> {
-        let input = Parsed::read(bytes, max_block, sources)?;
+        Self::from_bytes_with_all_sources(bytes, max_block, sources,
+            |_| Err("a pack-backed material section needs an explicit material-card loader".into()))
+    }
+
+    /// As [`PlatePerformance::from_bytes_with_gas_sources`], with `load_material`
+    /// supplying each material-card pack a `section material` record names (by
+    /// its path relative to the input). Each pack is loaded once.
+    ///
+    /// # Errors
+    /// As [`PlatePerformance::from_bytes`], plus a loader refusal, a card compiled
+    /// at a state other than the record's, or a missing section property, by name.
+    pub fn from_bytes_with_all_sources(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, PlatePerformanceError> {
+        let input = Parsed::read_with_materials(bytes, max_block, sources, &mut load_material)?;
         let bodies = certified_chart_radiators(&input.chart, &input.options)
             .map_err(PlatePerformanceError::Reduction)?;
         let retained_modes = bodies.len();
@@ -152,8 +190,14 @@ impl PlatePerformance {
         let context = RenderContext::new(vec![RenderVoice::CompactPlate(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, input.events, input.max_events)
             .map_err(PlatePerformanceError::Render)?;
-        Ok(Self { info, gas_record: input.gas_record, renderer })
+        Ok(Self { info, gas_record: input.gas_record, renderer, section_provenance: input.section_provenance })
     }
+
+    /// Each section's source, in section order: `pack PATH HASH state STATE at
+    /// AXIS=VALUE,...` for a pack-backed section, `fixture LABEL` for labelled
+    /// bare numbers.
+    #[must_use]
+    pub fn section_provenance(&self) -> &[String] { &self.section_provenance }
 
     /// Retained source and reduction counts for the output consumer.
     #[must_use]
@@ -177,15 +221,25 @@ struct Parsed {
     full_scale_pa: f64,
     initial_force_n: f64,
     sections: usize,
+    section_provenance: Vec<String>,
     events: Vec<ScheduledControl>,
     max_events: usize,
 }
 impl Parsed {
-    #[allow(clippy::too_many_lines)] // fixed-order grammar; all records precede reduction
     fn read(
         bytes: &[u8],
         max_block: usize,
         sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, PlatePerformanceError> {
+        Self::read_with_materials(bytes, max_block, sources,
+            &mut |_| Err("a pack-backed material section needs an explicit material-card loader".into()))
+    }
+    #[allow(clippy::too_many_lines)] // fixed-order grammar; all records precede reduction
+    fn read_with_materials(
+        bytes: &[u8],
+        max_block: usize,
+        sources: Option<&ThermochemicalSources<'_>>,
+        load_material: &mut dyn FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlatePerformanceError> {
         if bytes.len() > MAX_PLATE_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(0, "source exceeds 4 MiB or callback capacity is outside 1..=65536"));
@@ -239,19 +293,50 @@ impl Parsed {
         let sections_count = r.count("sections", MAX_SECTIONS)?;
         if sections_count == 0 { return Err(bad(r.line, "at least one section is required")); }
         let mut sections = Vec::with_capacity(sections_count);
+        let mut section_provenance = Vec::with_capacity(sections_count);
+        let mut packs: Vec<(String, NormalizedMaterialCardPack)> = Vec::new();
         for _ in 0..sections_count {
             let mut row = r.row("section")?;
-            let thickness = row.scalar()?;
-            let density = row.scalar()?;
-            let e1 = row.scalar()?;
-            let e2 = row.scalar()?;
-            let nu12 = row.scalar()?;
-            let g12 = row.scalar()?;
-            let angle = row.scalar()?;
-            row.finish()?;
-            sections.push(PlateSection::orthotropic_plane_stress_at_angle(
-                e1, e2, nu12, g12, thickness, density, angle,
-            ).map_err(PlatePerformanceError::Geometry)?);
+            let line = row.line;
+            let ingress = |e: crate::material_source::MaterialIngressError|
+                PlatePerformanceError::MaterialSource { line, source: e.0 };
+            if row.fields.clone().next() == Some("material") {
+                row.word()?;
+                let model = match row.word()? {
+                    "isotropic" => PlateMaterialModel::Isotropic,
+                    "orthotropic12" => PlateMaterialModel::Orthotropic12,
+                    "orthotropic21" => PlateMaterialModel::Orthotropic21,
+                    _ => return Err(bad(line, "a material section needs isotropic, orthotropic12 or orthotropic21")),
+                };
+                let thickness = row.scalar()?;
+                let angle = if model == PlateMaterialModel::Isotropic { 0.0 } else { row.scalar()? };
+                let record = MaterialRecord::parse(&row.rest()).map_err(ingress)?;
+                if !packs.iter().any(|(path, _)| *path == record.pack) {
+                    if packs.len() >= MAX_SECTIONS { return Err(bad(line, "too many material packs")); }
+                    let pack = load_material(&record.pack)
+                        .map_err(|source| PlatePerformanceError::MaterialSource { line, source })?;
+                    packs.push((record.pack.clone(), pack));
+                }
+                let pack = &packs.iter().find(|(path, _)| *path == record.pack).expect("loaded above").1;
+                let card = record.card(pack).map_err(ingress)?;
+                let point = record.query_point(card).map_err(ingress)?;
+                let (section, _) = plate_section(card, &point, model, thickness, angle).map_err(ingress)?;
+                sections.push(section);
+                section_provenance.push(record.provenance(pack));
+            } else {
+                let thickness = row.scalar()?;
+                let density = row.scalar()?;
+                let e1 = row.scalar()?;
+                let e2 = row.scalar()?;
+                let nu12 = row.scalar()?;
+                let g12 = row.scalar()?;
+                let angle = row.scalar()?;
+                let label = fixture_label(&row.rest()).map_err(ingress)?;
+                sections.push(PlateSection::orthotropic_plane_stress_at_angle(
+                    e1, e2, nu12, g12, thickness, density, angle,
+                ).map_err(PlatePerformanceError::Geometry)?);
+                section_provenance.push(format!("fixture {label}"));
+            }
         }
         let nodes_count = r.count("nodes", MAX_NODES)?;
         if nodes_count < 3 { return Err(bad(r.line, "at least three nodes required")); }
@@ -321,7 +406,7 @@ impl Parsed {
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
         Ok(Self { gas_record, chart, options, config, samples, full_scale_pa, initial_force_n,
-            sections: sections_count, events, max_events })
+            sections: sections_count, section_provenance, events, max_events })
     }
 }
 fn check_force(value: f64, maximum: f64, line: usize) -> Result<(), PlatePerformanceError> {
@@ -373,6 +458,8 @@ impl<'a> Row<'a> {
         if self.fields.next().is_some() { return Err(bad(self.line, "unexpected extra field")); }
         Ok(())
     }
+    /// Every remaining field, consuming the row.
+    fn rest(&mut self) -> Vec<&'a str> { self.fields.by_ref().collect() }
 }
 
 #[cfg(test)]

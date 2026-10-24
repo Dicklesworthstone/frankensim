@@ -25,8 +25,9 @@ output envelope stands in for that loss.
 ```
 
 These are supported invocations, not claims of completed or calibrated renders.
-The supplied drum file MUST have zero damping ratios on both heads, so material
-loss is not counted again as authored modal damping. Both Young moduli must
+Both heads of the supplied drum file MUST declare their loss as `relaxation`,
+so material loss is not counted again as modal drag. A drum file that declares
+`relaxation` refuses without this option. Both Young moduli must
 match their Maxwell equilibrium moduli exactly. No parameter is silently reset.
 Unselected commands preserve the previous model. The `drum-modal` image does
 not have material memory and rejects this option; use `drum` instead.
