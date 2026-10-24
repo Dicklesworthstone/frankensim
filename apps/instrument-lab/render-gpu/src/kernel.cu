@@ -26,6 +26,20 @@
 
 typedef unsigned int u32;
 
+// Same variable-mass edge flux as Csr::mass_flux_correction. The shared
+// Laplacian includes fixed-boundary diagonal terms; those remain unchanged.
+__device__ __forceinline__ double mass_flux_correction(const P& p, int i, ll o,
+                                                       const double* w, const double* wp) {
+  const double xi = w[o + i] - wp[o + i], mi = __ldg(&p.mass[i]);
+  double correction = 0.0;
+  for (int q = 0; q < p.KL; q++) {
+    const int j = __ldg(&p.lapE_col[(ll)q * p.NT + i]);
+    correction += 0.5 * __ldg(&p.lapE_val[(ll)q * p.NT + i]) * (__ldg(&p.mass[j]) - mi)
+                  * ((w[o + j] - wp[o + j]) - xi);
+  }
+  return correction;
+}
+
 #define TPB 256
 #ifndef SPIN_NS
 #define SPIN_NS 32
@@ -175,6 +189,8 @@ __device__ double contact_force(double d_pred, double comp, double force, double
     double v, dv;
     contact_phi(d_pred - comp * x, previous, kk, alpha, mu, k, v, dv);
     double g = x - v;
+    // Keep an exact root before the bracket safeguard can step away from it.
+    if (g == 0.0) return x;
     if (g > 0.0) hi = x; else lo = x;
     double next = x - g / (1.0 + comp * dv);
     if (!((next > lo && next < hi) || (fixed_exit && next == x))) next = 0.5 * (lo + hi);
@@ -473,7 +489,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         }
         p.F[o + i] = f;
         if (__ldg(&p.bs1[b]) > 0.0) {
-          p.TMP[o + i] = -(lw - LWP[o + i]) * __ldg(&p.bih2[b]);
+          const double correction = mass_flux_correction(p, i, o, W, Wp);
+          p.TMP[o + i] = -((lw - LWP[o + i]) + correction / __ldg(&p.mass[i])) * __ldg(&p.bih2[b]);
         }
         const double w = W[o + i], wp = Wp[o + i];
         v[0] = w * lw; v[1] = w; v[2] = w - wp; v[3] = 2.0 * w - wp;
@@ -755,7 +772,11 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const ll o = (ll)s * NT + i;
         const double dv = Wn[o] - Wp[o];
         if (sav) {
-          if (__ldg(&p.bvk[b])) { v[0] = __ldg(&p.ms0[i]) * dv * dv; v[1] = __ldg(&p.mass[i]) * (LW[o] - LWP[o]) * dv; }
+          if (__ldg(&p.bvk[b])) {
+            v[0] = __ldg(&p.ms0[i]) * dv * dv;
+            const double correction = mass_flux_correction(p, i, (ll)s * NT, W, Wp);
+            v[1] = (__ldg(&p.mass[i]) * (LW[o] - LWP[o]) + correction) * dv;
+          }
           v[2] = p.G[o] * dv;
         }
         if (viscous) {

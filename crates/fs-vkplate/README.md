@@ -26,6 +26,12 @@ on a 7 mm grid carries 3356 nodes and resolves the whole audio band.
   The nonlinear force is the exact gradient of the discrete potential.
 - **Loss**: either `s0 + s1 beta^2` per mode, fixed by two (frequency, T60) points,
   or an explicitly selected source-bound plane-stress Kelvin–Voigt bending tensor.
+  The former is a phenomenological law, not measured material viscosity. Its gradient
+  term is `2 s1 div(rho t grad(w_t))`: on a tapered surface, each grid edge uses
+  the mean adjacent mass, giving equal and opposite internal forces and nonnegative
+  dissipation. Multiplying the ordinary Laplacian by each node's mass instead would
+  violate those properties. Uniform-mass surfaces retain their original operator;
+  clock admission includes the mass-normalized damping bound on tapered surfaces.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
   Hunt-Crossley loss, `f = K d^alpha (1 + mu d_dot)`, each solved implicitly as a monotone scalar
   equation, so a hickory tip on bronze is stable at audio rates. A zero-radius tip uses bilinear

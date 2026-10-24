@@ -3,7 +3,7 @@
 //! One explicit finite-difference solver for every vibrating surface of a drum kit.
 //! A body is a thin plate on a square grid (spacing `h`) with
 //!
-//! `rho t w_tt = T Lap(w) - div div (D curv) + vK(w, F) - 2 rho t (s0 w_t - s1 Lap(w_t)) + p + f_contact`
+//! `rho t w_tt = T Lap(w) - div div (D curv) + vK(w, F) - 2 rho t s0 w_t + 2 s1 div(rho t grad(w_t)) + p + f_contact`
 //!
 //! - **membranes** (drum heads): clamped rim, in-plane pretension `T`, optional bending,
 //!   Berger tension modulation (the mean stretch raises the tension: pitch glide);
@@ -208,6 +208,22 @@ impl Csr {
             q += x[i] * acc;
         }
         q
+    }
+
+    /// Correction from M L to the symmetric edge-flux Laplacian L_M,
+    /// evaluated on w-wp. Each edge carries the arithmetic-mean nodal mass:
+    /// (L_M x)_i = m_i (L x)_i + sum_j L_ij (m_j-m_i)(x_j-x_i)/2.
+    /// Thus -L_M is an internal dissipative force even on a tapered plate.
+    /// Dirichlet boundary edges keep their existing m_i weight. Constant mass
+    /// gives exactly zero correction, preserving the uniform-body operator.
+    fn mass_flux_correction(&self, i: usize, w: &[f64], wp: &[f64], mass: &[f64]) -> f64 {
+        let xi = w[i] - wp[i];
+        let mut correction = 0.0;
+        for p in self.ptr[i]..self.ptr[i + 1] {
+            let j = self.col[p];
+            correction += 0.5 * self.val[p] * (mass[j] - mass[i]) * ((w[j] - wp[j]) - xi);
+        }
+        correction
     }
 }
 
@@ -1031,10 +1047,12 @@ impl Body {
             viscous.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
         }
         if self.s1 > 0.0 {
-            // Lap_h (w - wp) = -(L w - L wp) / h^2 from the two stored products
+            // div(m grad velocity), not m Lap(velocity): the latter is not
+            // symmetric when thickness varies and can create mechanical energy.
             let ih2 = 1.0 / (self.h * self.h);
-            for ((t, a), b) in self.tmp.iter_mut().zip(&self.lw).zip(&self.lwp) {
-                *t = -(a - b) * ih2;
+            for i in 0..self.n {
+                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
             }
         }
         let nl = self.berger > 0.0 || self.vk.is_some();
@@ -1193,14 +1211,16 @@ impl Body {
         }
         if self.sav && self.vk.is_some() {
             // energy the loss terms removed over this step (the budget for raising psi next step):
-            // s0: sum m s0 (wn - wp)^2 / (2k); s1: s1/(k h^2) sum m (L(w - wp)) . (wn - wp), if positive
+            // s0: sum m s0 (wn - wp)^2 / (2k); s1 uses the same symmetric
+            // mass-weighted edge flux as predict, paired with centered velocity.
             let ih2 = 1.0 / (self.h * self.h);
             let mut d0 = 0.0;
             let mut d1 = 0.0;
             for i in 0..self.n {
                 let dv = self.wn[i] - self.wp[i];
                 d0 += self.mass[i] * self.s0[i] * dv * dv;
-                d1 += self.mass[i] * (self.lw[i] - self.lwp[i]) * dv;
+                let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                d1 += (self.mass[i] * (self.lw[i] - self.lwp[i]) + correction) * dv;
             }
             self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0) + bending_loss;
         }
@@ -1561,7 +1581,9 @@ pub struct Contact {
     pub peak_force: f64,
     /// Force of the last step [N] (diagnostics).
     pub force: f64,
-    /// The force solve stops at an exact Newton fixed point (see `contact_force`). On for the snare
+    /// The force solve may stop when a nonzero-residual Newton correction rounds
+    /// to the current iterate (see `contact_force`). Exact zero residuals always
+    /// stop, independently of this option. On for the snare
     /// wires: held under load and warm-started, about one solve in five lands on its own root. Off
     /// elsewhere: it is as exact there, but it would change every other piece's output (by rounding
     /// for most; the open hi-hat's rim chatter decorrelates), and that has not been graded.
@@ -1702,7 +1724,8 @@ fn contact_phi(d: f64, previous: f64, kk: f64, alpha: f64, mu: f64, k: f64) -> (
 /// can still exert force with negative predicted or final penetration.
 /// Safeguarded Newton (a
 /// bisection step whenever Newton leaves the bracket), from the last force when it lies in the bracket.
-/// With `fixed_exit`, a Newton step that lands exactly on the iterate stops the solve there: the
+/// An exactly zero residual always stops the solve. With `fixed_exit`, a Newton
+/// step that rounds to the iterate also stops the solve there: the
 /// correction is below half an ulp, so the iterate is the root to rounding. Without it the bracket
 /// update has just put that iterate on the bracket's edge, so the safeguard bisects away from the
 /// root and halves back down to it (30-47 iterations instead of about 3).
@@ -1720,6 +1743,9 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fi
     for _ in 0..60 {
         let (v, dv) = phi(d_pred - comp * x);
         let g = x - v;
+        // An exact root must be accepted before it becomes a bracket endpoint.
+        // Otherwise the strict interior safeguard bisects away from the solution.
+        if g == 0.0 { return x; }
         if g > 0.0 { hi = x; } else { lo = x; }
         let mut next = x - g / (1.0 + comp * dv);
         if !((next > lo && next < hi) || (fixed_exit && next == x)) {
@@ -1734,7 +1760,7 @@ fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fi
     x
 }
 
-/// One iteration of `contact_force`'s loop for a = 1.5, without branches: the same operations in the
+/// One iteration of `contact_force`'s loop for a = 1.5: the same operations in the
 /// same order, so the same iterate, bracket and stop. Returns (next iterate, stop).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -1742,6 +1768,7 @@ fn newton_step_sqrt(x: f64, lo: &mut f64, hi: &mut f64, dp: f64, cm: f64, dn: f6
     let d = dp - cm * x;
     let (v, dv) = contact_phi(d, dn, kk, 1.5, mu, k);
     let g = x - v;
+    if g == 0.0 { return (x, true); }
     let up = g > 0.0;
     *hi = if up { x } else { *hi };
     *lo = if up { *lo } else { x };
@@ -2160,7 +2187,13 @@ impl Instrument {
         let viscous_rate2 = self.viscosity_admission_rate2(self.rate);
         if viscous_rate2 > 0.0 {
             worst.0 += viscous_rate2;
-            worst.1.push_str(" + material bending viscosity");
+            let material_loss = self.bodies.iter()
+                .any(|b| b.viscosity.as_ref().is_some_and(|v| v.rate_bound > 0.0));
+            worst.1.push_str(if material_loss {
+                " + material bending viscosity"
+            } else {
+                " + gradient loss"
+            });
         }
         let radiation_rate2 = 2.0 * self.rate * self.bodies.iter().filter_map(|b| b.head_radiation.as_deref())
             .map(|load| load.rate_bound).fold(0.0_f64, f64::max);
@@ -2182,8 +2215,29 @@ impl Instrument {
     }
 
     fn viscosity_admission_rate2(&self, rate: f64) -> f64 {
-        2.0 * rate * self.bodies.iter().filter_map(|b| b.viscosity.as_ref())
-            .map(|v| v.rate_bound).fold(0.0_f64, f64::max)
+        // Both explicit viscous forces need dt^2 lambda_K + 2 dt lambda_C < 4.
+        // For the variable-mass gradient loss, bound M^-1 L_M by its absolute
+        // row sums. The constant-mass shortcut 8/h^2 is not valid on a taper.
+        let bound = self.bodies.iter().map(|b| {
+            let mut gradient = 0.0_f64;
+            if b.s1 > 0.0 {
+                for i in 0..b.n {
+                    let (mut diagonal, mut off) = (0.0, 0.0);
+                    for p in b.lap.ptr[i]..b.lap.ptr[i + 1] {
+                        let j = b.lap.col[p];
+                        let a = b.lap.val[p];
+                        if i == j { diagonal += b.mass[i] * a; } else {
+                            diagonal += 0.5 * a * (b.mass[i] - b.mass[j]);
+                            off += (0.5 * a * (b.mass[i] + b.mass[j])).abs();
+                        }
+                    }
+                    gradient = gradient.max((diagonal.abs() + off) / b.mass[i]);
+                }
+                gradient *= 2.0 * b.s1 / (b.h * b.h);
+            }
+            gradient + b.viscosity.as_ref().map_or(0.0, |v| v.rate_bound)
+        }).fold(0.0_f64, f64::max);
+        2.0 * rate * bound
     }
 
     /// Source-domain admission at the actual internal integration clock.
@@ -2708,6 +2762,96 @@ pub fn wav_f32(channels: &[Vec<f64>], rate: u32) -> Vec<u8> {
 
 pub mod kit;
 pub mod live;
+
+#[cfg(test)]
+#[test]
+fn exact_contact_root_is_not_bisected_away() {
+    // Hertz contact at d = 1/4: 8 * d^(3/2) = 1 exactly. The predictor
+    // d_pred = 5/4 and unit compliance leave that penetration under force 1.
+    // This covers both scalar and interleaved solvers without a tolerance
+    // relaxation or reliance on the optional rounded-fixed-point policy.
+    for fixed_exit in [false, true] {
+        let (mut lo, mut hi) = (0.0, 16.0);
+        let (force, done) = newton_step_sqrt(
+            1.0, &mut lo, &mut hi, 1.25, 1.0, 0.25, 8.0, 0.0,
+            fixed_exit, 0.1,
+        );
+        assert_eq!((force, done), (1.0, true));
+        assert_eq!((lo, hi), (0.0, 16.0));
+        assert_eq!(contact_force(
+            1.25, 1.0, 1.0, 0.25,
+            Law::Power { k: 8.0, alpha: 1.5, mu: 0.0 }, fixed_exit, 0.1,
+        ), 1.0);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn internal_damping_preserves_momentum_and_dissipates_on_unequal_masses() {
+    // Two free nodes joined by one viscous edge. The continuum flux gives
+    // equal/opposite forces -c(v0-v1), +c(v0-v1), c=2*s1*mean(m)/h^2.
+    // The old M L ordering instead gives [-1,4] here: +2 W and +3 N.
+    for masses in [[1.0, 4.0], [2.0, 2.0]] {
+        for velocity in [[2.0, 1.0], [1.0, 2.0], [3.0, 3.0]] {
+            let mut b = Body::string("viscous edge", 2, 1.0, 1.0, 0.0, f64::INFINITY, 0.0, 0.0);
+            b.mass.copy_from_slice(&masses);
+            b.s0.fill(0.0);
+            b.s1 = 0.5;
+            b.lap = Csr::from_rows(&[
+                BTreeMap::from([(0, 1.0), (1, -1.0)]),
+                BTreeMap::from([(0, -1.0), (1, 1.0)]),
+            ]);
+            let k = 1.0 / 128.0;
+            for i in 0..2 { b.wp[i] = -k * velocity[i]; }
+            b.sync();
+            b.linear_forces();
+            b.predict(k);
+            let force: Vec<_> = (0..2).map(|i| masses[i] * (b.wn[i] + b.wp[i]) / (k*k)).collect();
+            let c = 0.5 * (masses[0] + masses[1]);
+            let expected = -c * (velocity[0] - velocity[1]);
+            assert!((force[0] - expected).abs() < 1e-12);
+            assert!((force[0] + force[1]).abs() < 1e-12, "internal force changed momentum");
+            let power = force[0] * velocity[0] + force[1] * velocity[1];
+            assert!((power + c * (velocity[0] - velocity[1]).powi(2)).abs() < 1e-12);
+            let mut ins = Instrument::new(1.0 / k);
+            ins.add(b);
+            // The nonzero eigenvalue of this two-node viscous operator is
+            // c*(1/m0+1/m1). Admission must enclose it at every trial clock.
+            let exact_rate = c * (1.0 / masses[0] + 1.0 / masses[1]);
+            let momentum = masses[0] * velocity[0] + masses[1] * velocity[1];
+            let exact_relative = (velocity[0] - velocity[1]) * (-exact_rate * 0.25).exp();
+            let mut previous_error = f64::INFINITY;
+            for rate in [128.0, 256.0, 512.0] {
+                assert!(ins.viscosity_admission_rate2(rate) >= 2.0 * rate * exact_rate);
+                // Check the actual time evolution against the analytic viscous
+                // dimer, not another implementation of the sparse stencil.
+                let mut trial = ins.clone();
+                trial.rate = rate;
+                for i in 0..2 { trial.bodies[0].wp[i] = -velocity[i] / rate; }
+                trial.bodies[0].sync();
+                let mut last_energy = 0.5 * (masses[0] * velocity[0].powi(2) + masses[1] * velocity[1].powi(2));
+                let mut relative = 0.0;
+                for _ in 0..(rate / 4.0) as usize {
+                    trial.step(&mut []);
+                    let b = &trial.bodies[0];
+                    let v = [(b.w[0] - b.wp[0]) * rate, (b.w[1] - b.wp[1]) * rate];
+                    assert!((masses[0] * v[0] + masses[1] * v[1] - momentum).abs() < 1e-9);
+                    let energy = 0.5 * (masses[0] * v[0].powi(2) + masses[1] * v[1].powi(2));
+                    assert!(energy <= last_energy + 1e-10, "viscous trajectory gained kinetic energy");
+                    last_energy = energy;
+                    relative = v[0] - v[1];
+                }
+                if velocity[0] != velocity[1] {
+                    let error = (relative - exact_relative).abs();
+                    assert!(error < 0.55 * previous_error, "backward-velocity loss must converge at first order");
+                    previous_error = error;
+                } else {
+                    assert!(relative.abs() < 1e-10, "rigid translation must remain undamped");
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;
