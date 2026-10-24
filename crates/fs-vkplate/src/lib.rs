@@ -1007,9 +1007,11 @@ impl Body {
             let VonKarman { eh, nb, rest_curv, airy, f, q, curv, annulus, z0, .. } = vk;
             let eh = *eh;
             if let Some(annulus) = annulus {
-                annulus.load(w, z0, eh, q);
-                f.copy_from_slice(q);
-                annulus.solve(f);
+                annulus.solve_with(f, |c| {
+                    let qc = annulus.load_row(c, w, z0, eh);
+                    q[c] = qc;
+                    qc
+                });
                 v += h2 / (2.0 * eh) * f.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
                 annulus.gradient(w, z0, f, h2, &mut self.g);
                 return v.max(0.0);

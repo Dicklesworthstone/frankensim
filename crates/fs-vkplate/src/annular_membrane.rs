@@ -196,9 +196,26 @@ impl AnnularMembrane {
         ))
     }
 
+    #[cfg(test)]
     pub(super) fn solve(&self, f: &mut [f64]) {
         let (interior, boundary) = f.split_at_mut(self.nc);
         self.core.solve(interior);
+        self.finish_solve(interior, boundary);
+    }
+
+    /// Build each load row during forward substitution, as the simply
+    /// connected solver does. The Schur correction and summation order stay
+    /// unchanged; independent strain work can overlap the triangular chain.
+    pub(super) fn solve_with(&self, f: &mut [f64], mut rhs: impl FnMut(usize) -> f64) {
+        let (interior, boundary) = f.split_at_mut(self.nc);
+        self.core.solve_with(interior, &mut rhs);
+        for (k, value) in boundary.iter_mut().enumerate() {
+            *value = rhs(self.nc + k);
+        }
+        self.finish_solve(interior, boundary);
+    }
+
+    fn finish_solve(&self, interior: &mut [f64], boundary: &mut [f64]) {
         for (k, cross) in self.cross.iter().enumerate() {
             boundary[k] -= cross
                 .iter()
@@ -214,14 +231,19 @@ impl AnnularMembrane {
         }
     }
 
-    pub(super) fn load(&self, w: &[f64], z: &[f64], eh: f64, q: &mut [f64]) {
-        for (row, qc) in self.terms.iter().zip(q) {
-            *qc = eh
-                * row
-                    .iter()
-                    .map(|t| t.weight * (w[t.a] * w[t.b] + z[t.a] * w[t.b] + w[t.a] * z[t.b]))
-                    .sum::<f64>();
+    #[cfg(test)]
+    fn load(&self, w: &[f64], z: &[f64], eh: f64, q: &mut [f64]) {
+        for (c, qc) in q.iter_mut().enumerate() {
+            *qc = self.load_row(c, w, z, eh);
         }
+    }
+
+    #[inline]
+    pub(super) fn load_row(&self, c: usize, w: &[f64], z: &[f64], eh: f64) -> f64 {
+        eh * self.terms[c]
+            .iter()
+            .map(|t| t.weight * (w[t.a] * w[t.b] + z[t.a] * w[t.b] + w[t.a] * z[t.b]))
+            .sum::<f64>()
     }
 
     pub(super) fn gradient(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
@@ -261,6 +283,92 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn fused_load_solve_preserves_separate_load_and_schur_bits() {
+        for h in [0.08, 0.04, 0.02] {
+            for curved in [false, true] {
+                let body = plate(h, 0.1, curved);
+                let vk = body.vk.as_ref().unwrap();
+                let annulus = vk.annulus.as_ref().unwrap();
+                let mut q = vec![0.0; vk.q.len()];
+                let mut fused_q = q.clone();
+                let mut f = q.clone();
+                let mut fused_f = q.clone();
+                for phase in [0.0, 0.7, 1.9] {
+                    let w: Vec<_> = body
+                        .xy
+                        .iter()
+                        .map(|[x, y]| 0.007 * (19.0 * x + phase).sin() * (13.0 * y - phase).cos())
+                        .collect();
+                    annulus.load(&w, &vk.z0, vk.eh, &mut q);
+                    f.copy_from_slice(&q);
+                    annulus.solve(&mut f);
+                    annulus.solve_with(&mut fused_f, |c| {
+                        fused_q[c] = annulus.load_row(c, &w, &vk.z0, vk.eh);
+                        fused_q[c]
+                    });
+                    for (expected, actual) in q.iter().chain(&f).zip(fused_q.iter().chain(&fused_f))
+                    {
+                        assert_eq!(
+                            expected.to_bits(),
+                            actual.to_bits(),
+                            "h={h} curved={curved} phase={phase}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "paired performance measurement; run explicitly in release mode"]
+    fn paired_annular_load_solve_timings() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let body = plate(0.02, 0.1, true);
+        let vk = body.vk.as_ref().unwrap();
+        let annulus = vk.annulus.as_ref().unwrap();
+        let w: Vec<_> = body
+            .xy
+            .iter()
+            .map(|[x, y]| 0.007 * (19.0 * x + 13.0 * y).sin())
+            .collect();
+        let mut q = vec![0.0; vk.q.len()];
+        let mut f = q.clone();
+        // Warm both paths before 20 alternating pairs. Both do the same
+        // load, core solve and three-boundary-mode correction on this body.
+        for pair in 0..22 {
+            let mut seconds = [0.0; 2];
+            for path in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+                let start = Instant::now();
+                for _ in 0..100 {
+                    let w = black_box(w.as_slice());
+                    if path == 0 {
+                        annulus.load(w, &vk.z0, vk.eh, &mut q);
+                        f.copy_from_slice(&q);
+                        annulus.solve(&mut f);
+                    } else {
+                        annulus.solve_with(&mut f, |c| {
+                            q[c] = annulus.load_row(c, w, &vk.z0, vk.eh);
+                            q[c]
+                        });
+                    }
+                    black_box((&q, &f));
+                }
+                seconds[path] = start.elapsed().as_secs_f64();
+            }
+            if pair >= 2 {
+                println!(
+                    "pair={} nodes={} separate_s={:.9} fused_s={:.9}",
+                    pair - 2,
+                    body.n,
+                    seconds[0],
+                    seconds[1]
+                );
+            }
+        }
     }
 
     #[test]
