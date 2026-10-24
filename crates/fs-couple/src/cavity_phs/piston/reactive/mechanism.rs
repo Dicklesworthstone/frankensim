@@ -134,9 +134,9 @@ pub(super) struct Progress {
 }
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct Sum { pub(super) value: f64, correction: f64 }
+pub(crate) struct Sum { pub(crate) value: f64, correction: f64 }
 impl Sum {
-    pub(super) fn add(&mut self, term: f64) -> Result<(), GasReactionError> {
+    pub(crate) fn add(&mut self, term: f64) -> Result<(), GasReactionError> {
         let adjusted = term - self.correction;
         let next = self.value + adjusted;
         let correction = (next - self.value) - adjusted;
