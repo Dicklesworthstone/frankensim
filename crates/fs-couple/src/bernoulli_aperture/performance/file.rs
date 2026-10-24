@@ -191,7 +191,8 @@ impl PlateValvePerformance {
     /// places gas-derived series/thermal memories along each selected section.
     /// `dg_tube` instead binds gas-derived Bessel memories inside the original DG
     /// exponential and solves its exact mean inlet relation with this same valve.
-    /// That bounded one-port cylinder currently supports inlet observation only.
+    /// Its computed baffled outlet also supports `observation baffled-outlet`,
+    /// using the accepted terminal flow and that load's original exterior gas.
     /// Other graph loads retain explicit impedances, enclosed cavities, compliant walls
     /// and geometry-derived compact baffled radiation.
     /// A selected radiation load replaces, never supplements, that reflection.
@@ -282,6 +283,12 @@ impl PlateValvePerformance {
                 n.represented_sections().iter().map(|s|s.represented_length_m).sum()),
         };
         if !represented.is_finite() {return Err(bad(0,"total represented duct length overflowed"));}
+        let dg_exterior = match &system {
+            CoupledAperture::Dg(model) => model.load().radiation_record()
+                .map(|record| *record.gas_record().state()),
+            _ => None,
+        };
+        let dg_radiation_terminals = usize::from(dg_exterior.is_some());
         let mut renderer=match (parsed.exterior, observation) {
             (Some(exterior), ApertureObservation::NetworkBaffled { .. }) =>
                 AperturePerformance::new_with_exterior_gas(system,observation,parsed.schedule,parsed.config,exterior),
@@ -297,7 +304,7 @@ impl PlateValvePerformance {
             nodes:parsed.nodes,triangles:parsed.triangles,sections:parsed.sections,moving_blades,memory_branches,
             force_ports:renderer.force_ports().len(),force_controls:renderer.pending_force_controls().len(),
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
-            duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
+            duct_nodes,duct_sections,radiation_terminals:radiation_loads.len()+dg_radiation_terminals,
         };
         Ok(Self {
             info,
@@ -305,7 +312,7 @@ impl PlateValvePerformance {
             radiation_loads,
             viscothermal_losses,
             ambient_gas: parsed.air,
-            exterior_gas: parsed.exterior,
+            exterior_gas: dg_exterior.or(parsed.exterior),
             gas_records: parsed.gas_records,
             section_provenance: parsed.section_provenance,
         })
@@ -334,8 +341,9 @@ impl PlateValvePerformance {
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
-    /// Every physical radiation boundary, paired with its source graph node.
-    /// Each is applied once by the network; observing it adds no second load.
+    /// Compact radiation boundaries, paired with their source graph nodes.
+    /// Computed DG radiation retains its original record on the DG load instead.
+    /// Observing either kind adds no second reaction.
     #[must_use]
     pub fn radiation_loads(&self) -> &[(usize, BaffledRadiationLoad)] {&self.radiation_loads}
     /// Original section assignments and the exact retained RL/RC loss sites.

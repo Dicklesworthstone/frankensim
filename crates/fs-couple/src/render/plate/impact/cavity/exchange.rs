@@ -227,7 +227,7 @@ impl PreparedCavityExchange {
         if output.len() != self.y.len() {
             return Err(invalid("cavity pressure output must cover the complete pressure basis"));
         }
-        let mut pressure = [0.0;8];
+        let mut pressure = [0.0;super::MAX_CAVITY_PRESSURE_MODES];
         for (j,(&root,&y)) in self.root_a.iter().zip(&self.y).enumerate() {
             pressure[j] = -root*y;
             if !pressure[j].is_finite() { return Err(invalid("cavity pressure overflow")); }

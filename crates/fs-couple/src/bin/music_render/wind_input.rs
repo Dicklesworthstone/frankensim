@@ -78,6 +78,11 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
 pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<BaffledRadiationLoad>) -> String {
     let load_json=radiation_provenance(radiation);
     let (c,radius,_density,_speed)=match (p.observation(),p.system()) {
+        (ApertureObservation::TubeBaffled(receiver), CoupledAperture::Dg(runtime)) => {
+            return super::duct_metadata::dg_baffled_observation_provenance(
+                runtime.load(), receiver, p.baffled_receiver().expect("admitted DG microphone"),
+            );
+        }
         (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s),
         (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
             let (index,section)=n.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node)).expect("admitted physical outlet section");
@@ -487,14 +492,14 @@ fn load_with_all_sources(
     // Exact versioned source header selects the existing owner; filenames and
     // instrument labels never choose geometry or material constants.
     // The exact DG source reuses the same jet and material input owners. Its
-    // internal pressure follows the existing explicit decimation path below.
+    // selected same-clock pressure follows the explicit decimation path below.
     if bytes.starts_with(b"frankensim-flue-dg-performance-v1\n") {
         use fs_couple::flue_loop::dg::performance::file::FlueDgFilePerformance;
         if policy == ObservationPolicy::Acceptance {
             return Err("DG flue files retain an exploration-only jet card; --acceptance requires resolved qualified source flow".into());
         }
         if flow_tap.is_some() {
-            return Err("DG flue input does not declare exterior aperture flows".into());
+            return Err("DG flue aperture-flow export is not supported by this pressure input".into());
         }
         let p = FlueDgFilePerformance::from_bytes_with_gas_sources(
             bytes, block, &CancelGate::new(), sources).map_err(|e| e.to_string())?;
@@ -510,12 +515,22 @@ fn load_with_all_sources(
         let inlet_gas = super::duct_metadata::gas_state(duct.inlet_gas());
         let outlet_gas = super::duct_metadata::gas_state(duct.outlet_gas());
         let gas_sources = super::thermochemical::provenance(p.gas_records());
+        let radiation = super::duct_metadata::dg_radiation_provenance(load);
+        let (pressure_point, pressure_observation) =
+            if let Some(receiver) = p.renderer().baffled_receiver_config() {
+                ("baffled-outlet", super::duct_metadata::dg_baffled_observation_provenance(
+                    load, receiver,
+                    p.renderer().baffled_receiver().expect("admitted DG microphone"),
+                ))
+            } else {
+                ("mean-inlet", ",\"observation_scope\":\"internal interval-mean inlet pressure; not an exterior microphone\"".into())
+            };
         let wall = duct.spatial_viscothermal_admission().map_or_else(
             || "\"uniform-consistent-mass\"".to_owned(),
             |wall| format!("{{\"model\":\"local-cylinder-positive-quadrature\",\"quadrature_points\":{},\"poles_per_field\":{},\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e}}}",
                 wall.resolution.quadrature_points, wall.resolution.poles_per_field,
                 wall.max_complex_error, wall.max_real_loss_error));
-        let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"mean-inlet\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; internal mean pressure, not an exterior microphone; rigid bore wall; taper uses local-cylinder Webster approximation; no resolved turbulence or measured flute qualification\"{field}{gas_sources}}}",
+        let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; rigid bore wall; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}}}",
             i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
             i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),
             duct.total_length(), duct.inlet_area_m2(), duct.outlet_area_m2(),
@@ -654,7 +669,10 @@ fn load_with_all_sources(
             ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {..}=>"baffled-outlet",
         };
         let receiver_json=format!("{}{}",outlet_provenance(p.renderer(),i.radiation_load),super::duct_metadata::provenance(&p));
+        let computed_dg = matches!(p.renderer().system(), CoupledAperture::Dg(runtime)
+            if runtime.load().radiation_record().is_some());
         let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
+            else if computed_dg { "exterior baffled-outlet pressure from the accepted causal DG terminal flow; computed full-clock-band reaction with separate continuous and sampled GridOnly checks; no measured-instrument qualification" }
             else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
         let requested=match p.renderer().system() {

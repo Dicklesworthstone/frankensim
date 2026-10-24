@@ -227,10 +227,16 @@ impl DuctInput {
         let physics = PlateValveInputError::Physics;
         match self {
             Self::Dg(source) => {
-                if observation != ApertureObservation::Inlet {
-                    return Err(bad(0, "DG currently observes exact mean inlet pressure; terminal and exterior receivers are not bound"));
+                if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeBaffled(_)) {
+                    return Err(bad(0, "DG observation requires inlet or its computed baffled-outlet receiver"));
                 }
-                Ok(PreparedDuct { tube:None, graph:None, dg:Some(source.prepare(air, dt, gate)?),
+                let load = source.prepare(air, dt, gate)?;
+                if matches!(observation, ApertureObservation::TubeBaffled(_))
+                    && load.radiation_record().is_none()
+                {
+                    return Err(bad(0, "DG baffled-outlet observation requires a computed baffled reaction source"));
+                }
+                Ok(PreparedDuct { tube:None, graph:None, dg:Some(load),
                     gases:None, observation, radiation:vec![], losses:vec![] })
             }
             Self::Tube { spec, radiation_band, loss } => {

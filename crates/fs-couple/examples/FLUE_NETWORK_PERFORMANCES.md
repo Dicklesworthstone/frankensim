@@ -352,8 +352,8 @@ the shared `dg_tube` or `dg_bore` declaration and its geometry/gas-field rows,
 `jet_card tonal-interim|json CANONICAL_CARD`,
 `jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`,
 `jet_limits MIN_SPEED MAX_MACH MAX_HISTORY`, `controls MAX_CONTROLS MAX_WORK`,
-and `observation inlet-pressure`, followed by the existing canonical
-`gesture` suffix. Pressure and optional jet-angle tracks retain their existing
+and `observation inlet-pressure` or `observation baffled X Y Z RINGS ANGLES FMAX_HZ`,
+followed by the existing canonical `gesture` suffix. Pressure and optional jet-angle tracks retain their existing
 physical units and interpolation. The actual DG inlet supplies mouth bore area,
 density, viscosity and sound speed; there is no second authored inlet medium.
 
@@ -362,11 +362,58 @@ The bore declaration is shared with plate valves; see
 limits and geometry/gas-field syntax. Static gas/material substitutions rebuild
 the source and causal bore together. They do not mutate an accepted history.
 
-This format explicitly emits **internal step-mean inlet pressure**. It has no
-exterior microphone, terminal radiation model, solid-wall motion or room.
+The default observation emits **internal step-mean inlet pressure**. The explicit
+computed-baffled selection below instead emits exterior pressure from its solved
+terminal flow. Neither selection adds solid-wall motion or a room.
 The retained tonal jet card and authored receptivity remain exploration-only;
 `--acceptance` refuses this source. This connection does not implement the
 resolved compressible jet or zonal interface required by the instrument plan.
 Dense DG dissipation remains an inferred energy deficit where the original
 ledger reports `balance_checked = false`. Numerical spatial/time convergence
 and measured instrument fidelity require separate evidence.
+
+### Computed DG radiation and exterior sound
+
+`flue-dg-baffled.performance` adds a causal radiation reaction and microphone
+to the same jet, windway, bore, material gas and gesture owners. Select `baffled`
+in the shared DG header. After every geometry and gas-station row, provide:
+
+```text
+dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257
+dg_exterior mixture 293.15 101325 mole 2 N2 0.8 CO2 0.2
+```
+
+The fourteen controls use the shared source grammar documented in
+[PLATE_VALVE_PERFORMANCES.md](PLATE_VALVE_PERFORMANCES.md#computed-dg-outlet-radiation-and-exterior-pressure).
+The actual outlet area supplies the circle; the complete exterior gas record
+supplies its radiation medium and retains thermochemical source receipts.
+Bore and exterior static pressure must agree. Temperature and composition may
+differ. A material change rebuilds the physical source and causal load.
+
+At the existing observation position, select:
+
+```text
+observation baffled 0 0 0.2 8 32 2000
+```
+
+These are microphone X/Y/Z in metres, radial/angular quadrature counts and
+maximum declared frequency in Hz. Every accepted outward outlet-flow sample
+enters the original differentiating retarded Rayleigh observer once. It uses
+the retained source's exact opening and exterior, without adding a second
+reaction. Inlet observation remains available with the same reaction active.
+
+This observer runs on the mechanical clock within its original 8–192 kHz rate
+domain. The existing `--decimate` path remains available for explicit 96-to-48
+kHz conversion. Metadata includes actual receiver gas, propagation support,
+uncompensated filter delay and original source fitting/passivity reports.
+
+The example requests a 10% fit budget for integration coverage; its numerical
+admission has not been executed in the authoring environment. Original fitting,
+held-out, causality, storage and passivity failures remain errors. Reaction
+covers mechanical Nyquist independently of the microphone band. The observer
+band must also fit the wall-loss admission and original quadrature limits.
+
+This is one circular opening in an infinite rigid baffle. It does not add
+unflanged-bell diffraction, mouth-to-outlet mutual radiation, body scattering
+or resolved jet turbulence. The declared observer band is not an additional
+output low-pass filter. No measured flute qualification is implied.

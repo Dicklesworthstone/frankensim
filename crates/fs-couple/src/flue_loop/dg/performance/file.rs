@@ -2,8 +2,9 @@
 //!
 //! This grammar uses the same gas records, DG source loader, flue control
 //! compiler, source equations and PressureRenderer as the existing instrument
-//! paths. Observation is declared internal mean-inlet pressure. The jet card
-//! remains an exploration source; it is never a resolved-flow qualification.
+//! paths. Observation is explicitly internal mean-inlet pressure or the
+//! computed outlet's baffled microphone in its original exterior gas. The jet
+//! card remains an exploration source, never a resolved-flow qualification.
 
 use super::{FlueDgConfig, FlueDgPerformance};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
@@ -12,6 +13,7 @@ use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
 };
 use crate::flue_loop::{FlueGeometry, FlueVoice};
+use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
@@ -46,6 +48,23 @@ fn bad(line: usize, what: &'static str) -> FlueDgInputError {
 }
 fn poll(gate: &CancelGate) -> Result<(), FlueDgInputError> {
     if gate.is_requested() { Err(bad(0, "DG flue source construction cancelled")) } else { Ok(()) }
+}
+
+fn read_observation(rows: &mut Rows<'_>) -> Result<Option<CircularOutletReceiver>, FlueDgInputError> {
+    let mut row = rows.row("observation")?;
+    let receiver = match row.fields.next() {
+        Some("inlet-pressure") => None,
+        Some("baffled") => Some(CircularOutletReceiver {
+            position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+            radial_rings: row.number()?,
+            angular_points: row.number()?,
+            maximum_frequency_hz: row.scalar()?,
+        }),
+        _ => return Err(bad(row.line,
+            "observation requires inlet-pressure or baffled X Y Z RINGS ANGLES FMAX_HZ")),
+    };
+    row.end()?;
+    Ok(receiver)
 }
 
 pub struct FlueDgFilePerformance {
@@ -164,9 +183,7 @@ impl FlueDgFilePerformance {
         if max_controls > 262_144 {
             return Err(bad(rows.line, "DG flue control budget exceeds 262144 ticks"));
         }
-        if rows.record("observation")? != "inlet-pressure" {
-            return Err(bad(rows.line, "DG flue currently observes internal mean inlet pressure only"));
-        }
+        let observation = read_observation(&mut rows)?;
         if rows.lines.next().is_some() {
             return Err(bad(rows.line + 1, "unexpected records before gesture section"));
         }
@@ -198,10 +215,16 @@ impl FlueDgFilePerformance {
                 .with_unsteady_windway(length, transverse, convection)
                 .map_err(FlueInputError::Physics)?,
         };
-        let renderer = FlueDgPerformance::new(voice, schedule, FlueDgConfig {
+        let config = FlueDgConfig {
             sample_rate_hz, samples, max_block, max_controls, max_compile_work,
             maximum_abs_pressure_pa,
-        }).map_err(FlueInputError::Performance)?;
+        };
+        let renderer = match observation {
+            Some(receiver) => FlueDgPerformance::with_baffled_outlet(
+                voice, schedule, config, receiver,
+            ),
+            None => FlueDgPerformance::new(voice, schedule, config),
+        }.map_err(FlueInputError::Performance)?;
         poll(gate)?;
         let info = FluePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.flue-dg-performance.v1", bytes),
@@ -219,3 +242,6 @@ impl FlueDgFilePerformance {
     pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
     pub fn into_renderer(self) -> FlueDgPerformance { self.renderer }
 }
+
+#[cfg(test)]
+mod tests;

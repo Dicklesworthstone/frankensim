@@ -8,9 +8,55 @@ use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_plate::shell::pressure::{OrientedShellFacet, ShellFace};
 
 fn with_volume<R>(n: usize, atmosphere: GasState, f: impl FnOnce(&HelmholtzFe<'_>) -> R) -> R {
-    let (complex, positions) = fs_feec::kuhn_cube(n);
-    let positions: Vec<_> = positions.into_iter()
-        .map(|p| [0.4*p[0], 0.3*p[1], 0.2*p[2]]).collect();
+    assert!((1..=2).contains(&n));
+    // A closed icosahedral shell has strictly acute incident-facet angles.
+    // Mild unequal axis scales separate symmetric eigenvalues without changing
+    // its conforming topology or weakening the original director admission.
+    let golden = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    let mut positions: Vec<[f64; 3]> = [
+        [-1.0,golden,0.0], [1.0,golden,0.0], [-1.0,-golden,0.0], [1.0,-golden,0.0],
+        [0.0,-1.0,golden], [0.0,1.0,golden], [0.0,-1.0,-golden], [0.0,1.0,-golden],
+        [golden,0.0,-1.0], [golden,0.0,1.0], [-golden,0.0,-1.0], [-golden,0.0,1.0],
+    ].into_iter().map(|p| [0.1*p[0],0.11*p[1],0.09*p[2]]).collect();
+    let center = positions.len() as u32;
+    positions.push([0.0;3]);
+    let faces = [
+        [0,11,5], [0,5,1], [0,1,7], [0,7,10], [0,10,11],
+        [1,5,9], [5,11,4], [11,10,2], [10,7,6], [7,1,8],
+        [3,9,4], [3,4,2], [3,2,6], [3,6,8], [3,8,9],
+        [4,9,5], [2,4,11], [6,2,10], [8,6,7], [9,8,1],
+    ];
+    let mut tetrahedra: Vec<[u32;4]> = faces.into_iter()
+        .map(|[a,b,c]| [center,a,b,c]).collect();
+    if n == 2 {
+        // Split only cell interiors: adjacent tets retain the exact same face
+        // triangulation and the shell keeps its original 12 boundary vertices.
+        for tet in std::mem::take(&mut tetrahedra) {
+            let centroid: [f64;3] = std::array::from_fn(|axis|
+                tet.iter().map(|&v| positions[v as usize][axis]).sum::<f64>() / 4.0);
+            let interior = positions.len() as u32;
+            positions.push(centroid);
+            for omitted in 0..4 {
+                let mut child = [interior;4];
+                let mut next = 1;
+                for (local, vertex) in tet.into_iter().enumerate() {
+                    if local != omitted { child[next] = vertex; next += 1; }
+                }
+                tetrahedra.push(child);
+            }
+        }
+    }
+    for tet in &mut tetrahedra {
+        let origin = positions[tet[0] as usize];
+        let [a,b,c] = [tet[1],tet[2],tet[3]].map(|v| {
+            let point = positions[v as usize];
+            [point[0]-origin[0],point[1]-origin[1],point[2]-origin[2]]
+        });
+        let signed_volume = a[0]*(b[1]*c[2]-b[2]*c[1])
+            - a[1]*(b[0]*c[2]-b[2]*c[0]) + a[2]*(b[0]*c[1]-b[1]*c[0]);
+        if signed_volume < 0.0 { tet.swap(2,3); }
+    }
+    let complex = fs_rep_mesh::TetComplex::from_tets(positions.len(),tetrahedra);
     let fe = HelmholtzFe::new(&complex, &positions, 1, Medium {
         density_kg_m3: atmosphere.density, sound_speed_m_s: atmosphere.sound_speed,
     }).unwrap();
@@ -19,7 +65,7 @@ fn with_volume<R>(n: usize, atmosphere: GasState, f: impl FnOnce(&HelmholtzFe<'_
 fn resolution() -> ShellCavityOptions {
     ShellCavityOptions {
         maximum_hz: 6000.0, eigensolver: fs_modal::SliceOptions::default(),
-        maximum_pressure_modes: 32, maximum_dofs: 64, maximum_boundary_faces: 64,
+        maximum_pressure_modes: 64, maximum_dofs: 64, maximum_boundary_faces: 64,
         maximum_projection_terms: 10_000_000,
         acoustic_budget: ModalAcousticTimeBudget::audible_reference(),
     }
@@ -47,13 +93,13 @@ fn closed_body(fe: &HelmholtzFe<'_>, rho: f64, gate: &CancelGate) -> SharedMater
         }
     }
     let vectors = nodes.iter().map(|p| {
-        let normal = [p[0]-0.2, p[1]-0.15, p[2]-0.1];
+        let normal = *p;
         let length = normal.iter().map(|v| v*v).sum::<f64>().sqrt();
         normal.map(|v| v/length)
     }).collect();
     let mesh = ShellMesh::new(nodes, triangles).unwrap();
     let directors = NodalDirectors::new(&mesh, vectors, 0.05).unwrap();
-    let moving = mesh.nodes.iter().position(|p| *p == [0.4,0.3,0.2]).unwrap();
+    let moving = mesh.nodes.iter().position(|p| p[0] > 0.0 && p[2] == 0.0).unwrap();
     let constraints = (0..mesh.nodes.len()).map(|node| {
         let mut mask = [true;6]; if node == moving { mask[0] = false; }
         ShellConstraint { node, mask, frame: ConstraintFrame::Global }
@@ -112,7 +158,8 @@ fn spatial_pressure_reacts_on_the_original_material_body_and_string() {
         assert!(cavity.coupling().cavity_modes() > 8);
         assert_eq!(cavity.coupling().total_modes(),
             cavity.coupling().structural_modes()+cavity.coupling().cavity_modes()-1);
-        assert!((cavity.volume_m3()-0.4*0.3*0.2).abs() < 1e-14);
+        let volume = (10.0/3.0)*(3.0+5.0_f64.sqrt())*0.1*0.11*0.09;
+        assert!((cavity.volume_m3()-volume).abs() < 1e-14);
         let expected = loaded.source().material_shell_image().unwrap()
             .cavity_volume_shapes_m2_per_sqrt_kg()[0] / cavity.volume_m3().sqrt();
         assert!((cavity.overlap_rows()[0]-expected).abs() < 1e-10*expected.abs());

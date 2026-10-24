@@ -1,9 +1,11 @@
-//! Scheduled internal mean-inlet pressure from the shared DG jet composition.
+//! Scheduled physical pressure from the shared DG jet composition.
 //!
-//! This keeps the existing flue control compiler, original accepted source
-//! history and common PressureRenderer/PCM interface. It adds no exterior
-//! radiation or source physics. A caller may use the shared decimating observer
-//! explicitly when the mechanical rate exceeds the output rate.
+//! The default observation is the original interval-mean inlet pressure.
+//! An explicit baffled microphone instead consumes every accepted exterior
+//! terminal flow through the original retarded Rayleigh pressure owner, using
+//! the same bound aperture and material gas as the computed reaction source.
+//! This keeps the existing flue control compiler, accepted source histories,
+//! finite pressure ceiling and common PressureRenderer/PCM interface.
 
 use super::super::network::FlueResonator;
 use super::super::network::performance::controls::{
@@ -11,6 +13,7 @@ use super::super::network::performance::controls::{
 };
 use super::super::{FlueError, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::GestureCompileError;
@@ -42,6 +45,11 @@ pub struct FlueDgConfig {
     pub maximum_abs_pressure_pa: f64,
 }
 
+struct BaffledOutletObservation {
+    config: CircularOutletReceiver,
+    receiver: BaffledPressure,
+}
+
 pub struct FlueDgPerformance {
     voice: FlueVoice,
     schedule: GestureSchedule,
@@ -49,17 +57,46 @@ pub struct FlueDgPerformance {
     controls: Vec<ScheduledFlueControl>,
     next: usize,
     launched: Vec<f64>,
+    outlet: Option<BaffledOutletObservation>,
     poisoned: bool,
 }
 
 impl FlueDgPerformance {
     /// Compile original pressure/angle gestures for a cold, source-bound DG
-    /// voice. Only mean inlet pressure is observed; no terminal-flow surrogate
-    /// or acoustic normalization is inferred.
+    /// voice, observing its accepted mean inlet pressure.
     pub fn new(
         voice: FlueVoice,
         schedule: GestureSchedule,
         config: FlueDgConfig,
+    ) -> Result<Self, GestureCompileError> {
+        Self::build(voice, schedule, config, None)
+    }
+
+    /// Observe the actual held outward flow of the computed baffled DG terminal.
+    ///
+    /// The original radiation record supplies the aperture and exterior gas;
+    /// neither is inferred from the inlet or independently re-baked. One accepted
+    /// source sample enters the existing differentiating Rayleigh observer once.
+    /// Both clocks are the declared source rate. Receiver band, quadrature and
+    /// causal-history limits belong to that owner, including its 8..192 kHz
+    /// same-clock range. Numerical filter delay is exposed by baffled_receiver().
+    ///
+    /// This is one circular opening in an infinite rigid baffle, not free-field
+    /// instrument-body/mouth radiation or a new qualification of the jet card.
+    pub fn with_baffled_outlet(
+        voice: FlueVoice,
+        schedule: GestureSchedule,
+        config: FlueDgConfig,
+        receiver: CircularOutletReceiver,
+    ) -> Result<Self, GestureCompileError> {
+        Self::build(voice, schedule, config, Some(receiver))
+    }
+
+    fn build(
+        voice: FlueVoice,
+        schedule: GestureSchedule,
+        config: FlueDgConfig,
+        receiver: Option<CircularOutletReceiver>,
     ) -> Result<Self, GestureCompileError> {
         if config.sample_rate_hz == 0
             || config.samples == 0
@@ -76,6 +113,45 @@ impl FlueDgPerformance {
         }
         voice.validate_blowing_pressure(0.0)
             .map_err(|error| GestureCompileError::Render(source_error(error)))?;
+        let outlet = if let Some(receiver) = receiver {
+            let load = voice.dg().expect("admitted original DG voice").load();
+            let source = load.radiation_record().ok_or_else(|| invalid(
+                "baffled DG observation requires the original computed radiation source",
+            ))?;
+            let [aperture] = source.apertures() else {
+                return Err(invalid("baffled DG observation requires one bound circular outlet"));
+            };
+            let area = core::f64::consts::PI * aperture.radius_m * aperture.radius_m;
+            let actual_area = load.duct().outlet_area_m2();
+            if aperture.center_m != [0.0; 2]
+                || !area.is_finite()
+                || (area - actual_area).abs() > 64.0 * f64::EPSILON * actual_area
+                || source.band_hz()[1].to_bits()
+                    != (0.5 * f64::from(config.sample_rate_hz)).to_bits()
+            {
+                return Err(invalid(
+                    "baffled DG observation must use its original outlet geometry and physical clock",
+                ));
+            }
+            if receiver.maximum_frequency_hz > source.band_hz()[1]
+                || load.duct().viscothermal_band_rad_s().is_some_and(|band|
+                    receiver.maximum_frequency_hz * core::f64::consts::TAU > band[1])
+            {
+                return Err(invalid(
+                    "baffled DG receiver exceeds the source or wall-loss admission band",
+                ));
+            }
+            let pressure = BaffledPressure::circular_outlet_multirate_differentiating(
+                aperture.radius_m,
+                config.sample_rate_hz,
+                config.sample_rate_hz,
+                receiver,
+                source.gas_record().state().into(),
+            ).map_err(|error| GestureCompileError::Render(RenderError::Voice(
+                AcousticRealizeError::Nonlinear(error),
+            )))?;
+            Some(BaffledOutletObservation { config: receiver, receiver: pressure })
+        } else { None };
         let controls = controls::compile(
             &voice,
             &schedule,
@@ -90,13 +166,24 @@ impl FlueDgPerformance {
         launched.try_reserve_exact(config.max_block)
             .map_err(|_| invalid("DG flue callback exceeds available allocation"))?;
         launched.resize(config.max_block, 0.0);
-        Ok(Self { voice, schedule, config, controls, next: 0, launched, poisoned: false })
+        Ok(Self { voice, schedule, config, controls, next: 0, launched, outlet, poisoned: false })
     }
 
     pub const fn voice(&self) -> &FlueVoice { &self.voice }
     pub const fn schedule(&self) -> &GestureSchedule { &self.schedule }
     pub const fn config(&self) -> &FlueDgConfig { &self.config }
     pub fn compiled_controls(&self) -> usize { self.controls.len() }
+
+    /// The original exterior observer, including explicit numerical and travel delays.
+    /// Absent for the compatible internal mean-inlet observation.
+    pub fn baffled_receiver(&self) -> Option<&BaffledPressure> {
+        self.outlet.as_ref().map(|outlet| &outlet.receiver)
+    }
+
+    /// Original receiver position, surface resolution and declared physical band.
+    pub fn baffled_receiver_config(&self) -> Option<CircularOutletReceiver> {
+        self.outlet.as_ref().map(|outlet| outlet.config)
+    }
 
     fn advance_block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
         let end = self.voice.samples_rendered() + output.len() as u64;
@@ -111,17 +198,28 @@ impl FlueDgPerformance {
             let until = self.controls.get(self.next).map_or(end, |control| control.sample.min(end));
             let count = (until - now) as usize;
             let ceiling = self.config.maximum_abs_pressure_pa;
+            let outlet = &mut self.outlet;
             let mut destinations = output[written..written + count].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
                 let FlueResonator::Dg(duct) = line else {
                     return Err(FlueError::Invalid { what: "DG pressure lost its original bore" });
                 };
-                let pressure = duct.last_frame().ok_or(FlueError::Invalid {
-                    what: "DG pressure has no accepted original port frame",
-                })?.inlet_pressure_pa;
+                let pressure = if let Some(observer) = outlet.as_mut() {
+                    let flow = duct.load().last_terminal_frame().ok_or(FlueError::Invalid {
+                        what: "baffled DG pressure has no accepted original terminal flow",
+                    })?.outward_flow_m3_s;
+                    observer.receiver.step_trace(&[flow])
+                        .map_err(|error| FlueError::Physics(
+                            AcousticRealizeError::Nonlinear(error),
+                        ))?
+                } else {
+                    duct.last_frame().ok_or(FlueError::Invalid {
+                        what: "DG pressure has no accepted original port frame",
+                    })?.inlet_pressure_pa
+                };
                 if !pressure.is_finite() || pressure.abs() > ceiling {
                     return Err(FlueError::Invalid {
-                        what: "DG mean inlet pressure exceeds the declared finite ceiling",
+                        what: "DG observed pressure exceeds the declared finite ceiling",
                     });
                 }
                 *destinations.next().expect("one pressure per accepted physical sample") = pressure;

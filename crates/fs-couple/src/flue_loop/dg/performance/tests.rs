@@ -91,3 +91,141 @@ fn g0_unbound_exterior_and_nonphysical_source_declarations_refuse() {
             &CancelGate::new_clock_free()).is_err());
     }
 }
+
+fn baffled_input() -> String {
+    input().replace(
+        "dg_tube 0.05 0.001 open 1 2 8 50 2000 0.01 1e-11 256",
+        concat!(
+            "dg_tube 0.05 0.001 baffled 1 2 8 50 2000 0.01 1e-11 256\n",
+            "dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 ",
+            "2 100 1e-8 64 1048576 257\n",
+            "dg_exterior mixture 293.15 101325 mole 2 N2 0.8 CO2 0.2",
+        ),
+    ).replace(
+        "observation inlet-pressure",
+        "observation baffled 0 0 0.2 8 32 2000",
+    ).replace(
+        "events\t0\n",
+        "events\t1\nevent\t1e-3\t0e0\tpressure-pa\t0e0\n",
+    )
+}
+
+// Reuse the already computed cold load: rebuilding the source voice must not
+// fit a second reaction operator merely to choose another observation/block.
+fn replica_voice(source: &FlueDgFilePerformance) -> FlueVoice {
+    use crate::flue_loop::dg::FlueDgSpec;
+    FlueVoice::from_dg(
+        Some(source.card()), 8.0, 1e-6, source.geometry(),
+        FlueDgSpec {
+            load: source.renderer().voice().dg().unwrap().load().clone(),
+            minimum_jet_speed_m_s: 1.0,
+            maximum_jet_mach: 0.3,
+            max_jet_history_samples: 8192,
+        },
+        source.info().sample_rate_hz, 3, 0, &CancelGate::new_clock_free(),
+    ).unwrap().with_viscous_windway(0.005).unwrap()
+}
+
+#[test]
+fn baffled_pressure_uses_each_accepted_outlet_flow_and_bound_exterior_once() {
+    let source = FlueDgFilePerformance::from_bytes(
+        baffled_input().as_bytes(), 37, &CancelGate::new_clock_free(),
+    ).unwrap();
+    let original = source.renderer();
+    let load = original.voice().dg().unwrap().load();
+    let record = load.radiation_record().unwrap();
+    let receiver = original.baffled_receiver_config().unwrap();
+    assert_ne!(
+        record.gas_record().state().sound_speed.to_bits(),
+        load.duct().inlet_gas().sound_speed.to_bits(),
+    );
+    assert_eq!(record.apertures().len(), 1);
+    assert_eq!(record.apertures()[0].center_m, [0.0; 2]);
+    assert_eq!(record.band_hz()[1], 0.5 * f64::from(source.info().sample_rate_hz));
+    assert!(record.report().maximum_fit_relative_error <= 0.1);
+    assert!(record.report().maximum_held_out_relative_error <= 0.1);
+    let mut expected = BaffledPressure::circular_outlet_multirate_differentiating(
+        record.apertures()[0].radius_m, source.info().sample_rate_hz,
+        source.info().sample_rate_hz, receiver, record.gas_record().state().into(),
+    ).unwrap();
+    let first_arrival = expected.delay_samples.0;
+    assert_eq!(
+        original.baffled_receiver().unwrap().filter_delay_samples(),
+        expected.filter_delay_samples(),
+    );
+    let mut config = *original.config();
+    config.max_block = 512;
+    let mut whole = FlueDgPerformance::with_baffled_outlet(
+        replica_voice(&source), original.schedule().clone(), config, receiver,
+    ).unwrap();
+    let mut internal = FlueDgPerformance::new(
+        replica_voice(&source), original.schedule().clone(), config,
+    ).unwrap();
+    config.max_block = 37;
+    let mut partitioned = FlueDgPerformance::with_baffled_outlet(
+        replica_voice(&source), original.schedule().clone(), config, receiver,
+    ).unwrap();
+    let mut single = source.into_renderer();
+    let mut reference = Vec::with_capacity(512);
+    for _ in 0..512 {
+        let mut pressure = [0.0];
+        single.block(&mut pressure).unwrap();
+        let flow = single.voice().dg().unwrap().load()
+            .last_terminal_frame().unwrap().outward_flow_m3_s;
+        assert_eq!(pressure[0], expected.step_trace(&[flow]).unwrap());
+        reference.push(pressure[0]);
+    }
+    assert!(reference[..first_arrival].iter().all(|p| *p == 0.0));
+    assert!(reference.iter().any(|p| p.abs() > 1e-14));
+    let mut all_at_once = vec![0.0; 512];
+    let mut chunked = vec![0.0; 512];
+    whole.block(&mut all_at_once).unwrap();
+    for block in chunked.chunks_mut(37) { partitioned.block(block).unwrap(); }
+    internal.block(&mut vec![0.0; 512]).unwrap();
+    assert_eq!(reference, all_at_once);
+    assert_eq!(reference, chunked);
+    for other in [&whole, &partitioned, &internal] {
+        assert_eq!(single.voice().dg().unwrap().load().state(),
+            other.voice().dg().unwrap().load().state());
+        assert_eq!(
+            single.voice().dg().unwrap().load().last_terminal_frame()
+                .unwrap().outward_flow_m3_s.to_bits(),
+            other.voice().dg().unwrap().load().last_terminal_frame()
+                .unwrap().outward_flow_m3_s.to_bits(),
+        );
+    }
+}
+
+#[test]
+fn baffled_source_receiver_and_finite_pressure_limits_are_enforced() {
+    let unbound = input().replace(
+        "observation inlet-pressure", "observation baffled 0 0 0.2 8 32 2000",
+    );
+    assert!(FlueDgFilePerformance::from_bytes(
+        unbound.as_bytes(), 37, &CancelGate::new_clock_free(),
+    ).is_err());
+    let source = FlueDgFilePerformance::from_bytes(
+        baffled_input().as_bytes(), 512, &CancelGate::new_clock_free(),
+    ).unwrap();
+    let original = source.renderer();
+    let receiver = original.baffled_receiver_config().unwrap();
+    for refused in [
+        CircularOutletReceiver { position_m: [0.0, 0.0, 0.01], ..receiver },
+        CircularOutletReceiver { radial_rings: 0, ..receiver },
+        CircularOutletReceiver { maximum_frequency_hz: 47000.0, ..receiver },
+    ] {
+        assert!(FlueDgPerformance::with_baffled_outlet(
+            replica_voice(&source), original.schedule().clone(), *original.config(), refused,
+        ).is_err());
+    }
+    assert_eq!(original.samples_rendered(), 0);
+    assert_eq!(original.voice().dg().unwrap().load().state().step_count(), 0);
+
+    let mut config = *original.config();
+    config.maximum_abs_pressure_pa = 1e-20;
+    let mut limited = FlueDgPerformance::with_baffled_outlet(
+        replica_voice(&source), original.schedule().clone(), config, receiver,
+    ).unwrap();
+    assert!(limited.block(&mut vec![0.0; 512]).is_err());
+    assert!(matches!(limited.block(&mut [0.0]), Err(RenderError::Poisoned)));
+}

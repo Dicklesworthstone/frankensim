@@ -183,3 +183,22 @@ fn bordered_dynamic_stiffness_reuses_the_same_springs_and_survives_fixed_wall_po
         }
     }
 }
+
+#[test]
+fn prepared_exchange_observes_every_admitted_pressure_mode_beyond_eight() {
+    let count = 9;
+    let air = basis((0..count).map(|mode| 100.0*mode as f64).collect());
+    let model = CavityCoupling::new_with_mode_budget(
+        &air,1,&vec![0.01;count],&vec![0.0;count],count+1,
+    ).unwrap();
+    let mut admission = budget(); admission.max_right = count;
+    let mut cavity = model.prepare_exchange(48_000,admission).unwrap();
+    let mut velocity = [0.02];
+    cavity.before(&mut velocity).unwrap();
+    let mut pressure = vec![f64::NAN;count];
+    cavity.pressures_into(&mut pressure).unwrap();
+    assert!(pressure.iter().all(|p| p.is_finite() && *p != 0.0));
+    let mut incomplete = [42.0;8];
+    assert!(cavity.pressures_into(&mut incomplete).is_err());
+    assert_eq!(incomplete,[42.0;8]);
+}

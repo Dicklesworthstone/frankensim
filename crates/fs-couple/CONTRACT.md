@@ -5125,3 +5125,45 @@ Numerical Jacobian probes must remain inside the declared material domains.
 Independent three-reservoir regressions cover local heat, source conductivity
 and gas-volume changes reaching displacement, zero-net spatial exchange,
 source continuity, cancellation and transactional refusal.
+
+### Computed DG radiation and source-bound exterior pressure
+
+DgPortLoad::new_with_computed_baffled derives the single circular outlet from
+original DG area and an explicit shared GasRecord. ComputedBaffledInput now
+exposes its existing aperture/gas bake independently of waveguide topology;
+its original BEM samples, rational fit, full mechanical Nyquist admission and
+source/held-out/continuous/sampled reports remain unchanged. The retained
+ComputedBaffledRecord owns source geometry, gas receipts and numerical results,
+not another copy of the accepted physical terminal history.
+
+The shared dg_tube/dg_bore reader admits OUTLET baffled followed, after all
+geometry and gas-station rows, by dg_radiation computed-baffled with the original
+fourteen controls and dg_exterior with a complete gas record. Static pressure
+must match the quiescent bore; mixture and temperature may differ. Cold source
+preparation rebuilds the physical load once. The same source serves moving
+apertures and original jet-driven flues through the shared DG endpoint solve.
+
+FlueDgPerformance::with_baffled_outlet and AperturePerformance's existing
+TubeBaffled selector consume each accepted outward DG terminal flow once in
+the original same-clock differentiating BaffledPressure owner. Their opening
+and exterior come from that computed source; observing adds no second load.
+The default original inlet observation remains available with the same reaction
+active. Geometry, source/wall frequency admissions, receiver limits and clock
+remain checked; a conflicting explicit exterior refuses. A failed pressure
+callback poisons its finite wrapper rather than claiming complete acceptance.
+
+Both authored formats reach the existing pressure renderer and explicit CLI
+decimation. Metadata retains the computed source even for inlet observation.
+An active ensemble microphone uses its actual bound exterior gas, checked
+against the numerical receiver medium and existing common-listener policy.
+Focused tests cover gas/geometry source records, original thermochemical
+receipts, accepted-flow observer equality, physical-state preservation,
+callback partitioning, receiver refusals and pressure-ceiling poisoning.
+
+This is one uniform circular opening in an infinite rigid baffle, without
+mouth mutual loading, unflanged bell diffraction, body scattering or room
+physics. The original flue jet remains an exploration source. Wall-law,
+spatial, rational and nonlinear-time convergence stay separate; sampled
+passivity remains GridOnly. No measured flute, clarinet or oboe qualification
+is asserted. Source tests and illustrative fit declarations require native
+execution before numerical or acoustic accuracy claims.
