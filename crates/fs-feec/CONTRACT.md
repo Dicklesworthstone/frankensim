@@ -1074,3 +1074,18 @@ couplers to verify exact boundary ownership and budget the projection before
 construction. Tests compare linear traces against analytic triangle moments,
 the original uniform boundary load, vertex permutations and volume-oriented
 normals through every admitted pressure order.
+
+
+### Isothermal gas diffusion on the original acoustic FE
+
+`HelmholtzFe::isothermal_diffusion_modes` restricts the original consistent
+stiffness/mass pencil to the exact hierarchical trace constraints of explicitly
+selected wall faces. Other faces retain natural zero heat flux. It returns all
+positive modes through the declared unit-diffusivity eigenvalue ceiling, with
+original inertia counts/residuals and full-coordinate shapes. The material
+caller owns kappa/(rho*cv), source coupling, memory/work budgets and physical
+validation. Duplicate/nonboundary faces, empty thermal spaces, incomplete or
+oversized windows and cancellation refuse. The sparse modal owner is reused;
+no heat stepper, penalty boundary or copied geometry is introduced. The original
+single eigensolver call has its existing cancellation granularity. Box/mixed-wall
+modal and normalization regressions supplement the higher-level acoustic tests.

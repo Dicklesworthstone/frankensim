@@ -33,6 +33,9 @@ use fs_sparse::direct::{DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
 use fs_sparse::{Coo, Csr};
 use std::fmt;
 
+/// Heat-diffusion modes on this same hierarchical volume space.
+pub mod diffusion;
+
 /// Highest element order accepted; `MAX_ORDER + 1` refuses.
 pub const MAX_ORDER: usize = 4;
 /// Most Neumann modes a window may hold; more refuses (the window is never truncated).
@@ -1160,3 +1163,4 @@ mod tests {
         }
     }
 }
+
