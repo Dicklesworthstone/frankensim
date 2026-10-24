@@ -36,3 +36,31 @@ chain rules are included in the gradient.
 
 ## Unsafe boundary
 None. Workspace `unsafe_code = "deny"`.
+
+## Moving finite-area loads
+
+`moving_load::MovingPlateLoad` implements the original `PlateLoad` trait for
+a translating finite footprint and a piecewise-linear physical load history.
+Explicit positive area quadrature is located through `fs-plate`'s shared
+`PlatePatchStencil`; the reference mesh, supports and material matrices stay
+owned by the original spatial model. Three physical load parameters per knot
+(Fz, Mx, My, in that order) participate in the existing trajectory adjoint,
+including the consistent-initial-acceleration chain rule. Knot times, path
+coordinates and quadrature measures are fixed for these derivatives.
+
+Admission bounds the knot/point/mesh scans and checks every knot footprint.
+Each later query also locates the actual footprint, so a path leaving a
+nonconvex mesh refuses without clipping or partially updating the force/VJP
+buffer. The explicitly declared time horizon is closed; extrapolation refuses.
+Loads and observations are stateless under retry, replay and out-of-order time
+queries. Observed power is physical load times material velocity; a translating
+probe over a motionless displaced surface contributes no mechanical power.
+This layer does not integrate energy, solve contact, infer complete dynamic
+support reactions or certify the continuously swept footprint.
+
+The `moving_patch` example shares the original forward/adjoint experiment with
+`moving_plate`. `tests/moving_patch.rs` covers point-quadrature equivalence,
+all knot-load VJPs, physical work, failed-query rollback and an independently
+assembled dense trajectory/gradient reference. These authored regressions
+require native execution for qualification; focused source type checks alone
+do not establish whole-trajectory behavior.

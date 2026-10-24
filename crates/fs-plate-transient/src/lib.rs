@@ -11,3 +11,8 @@ pub use fs_plate::PlateModel;
 
 mod transient;
 pub use transient::*;
+
+pub mod moving_load;
+pub use moving_load::{
+    MovingPlateLoad, MovingPlateLoadBudget, MovingPlateLoadError, PlateLoadKeyframe,
+};
