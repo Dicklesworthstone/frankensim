@@ -209,6 +209,25 @@ pullbacks reuse the original owner. The exact block mass inverse supports the
 shared consistent initialization and its pullback. Source coefficients retain
 their original immutable ownership and are never silently made fit variables.
 
+`with_body_forcing` attaches independently prescribed normal forces to the
+ordered body coordinates through the existing pure time-dependent `PlateLoad`
+protocol. Its output has one force in newtons per body, positive in the body's
+positive coordinate direction. The shared plate load remains in the plate
+prefix. Force-history parameters append after every contact suffix, and
+`body_forcing_parameter_range` exposes their range. These controls contribute
+only through the forcing VJP; their fixed-state residual partials are zero.
+Consistent initialization and checkpointed trajectory pullbacks therefore
+include the original force history without duplicating parameter contributions.
+Source-owned contact coefficients remain fixed even when excitation is fitted.
+
+The original aggregate parameter cap also bounds these controls. Rebinding a
+history replaces its parameter tail without moving contact ranges. Changing
+the provider's parameter count after admission, nonfinite forces or pullbacks,
+and callbacks that leave output entries unwritten are refused. Each physical
+parameter point uses an immutable provider; state-dependent forces belong in
+the coupled residual. Applied body work is external work and must be included
+when interpreting driven-system energy changes.
+
 `PlateImpactSetProbe` reports plate storage and Rayleigh loss once, sums the
 separate body/contact storage and contact dissipation, and preserves ordered
 per-body observations. These are instantaneous physical observations rather
@@ -217,6 +236,8 @@ than an assertion of exact generalized-alpha step energy conservation.
 Run `cargo run -p fs-plate-transient --example material_plate_multi_impact` for
 two material-sourced finite bodies on the same DKT plate. The comparison changes
 only the first body's initial velocity and reports the resulting second-body
-response through shared plate compliance. `tests/plate_multi_impact.rs` covers
-singleton equivalence, shared momentum/coupling, body permutation, local and
-parameter derivatives, original source refusal and aggregate admission.
+response through shared plate compliance. A third scenario applies separate
+smooth force pulses and reports their amplitudes and signed sampled drive work.
+`tests/plate_multi_impact.rs` covers singleton equivalence, shared momentum and
+coupling, body permutation, local and parameter derivatives, force-history
+trajectory pullbacks, original source refusal and aggregate admission.
