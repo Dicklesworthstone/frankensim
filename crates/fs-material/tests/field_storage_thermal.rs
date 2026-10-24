@@ -15,6 +15,42 @@ use fs_qty::{
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 
+#[test]
+fn spatial_magnetic_law_uses_actual_b_volume_and_shared_thermal_derivatives() {
+    use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
+    for slope in [-1e-6,0.0,1e-6] {
+        let source=curve(MAGNETIC_PERMEABILITY_PROPERTY,MAGNETIC_PERMEABILITY_DIMS,
+            vec![(200.0,5e-4-100.0*slope),(500.0,5e-4+200.0*slope)]);
+        let original=ResolvedInductor::resolve(&source,&point(300.0),
+            MaterialPropertySelection::SingleClaimOnly,0.001,0.1,50).unwrap();
+        let law=ThermalMagneticMaterial::new(&source,original.material(),"T",[200.0,500.0]).unwrap();
+        let t=350.0; let volume=0.002; let b=0.3;
+        let at=law.at_temperature(t).unwrap();
+        let actual=at.state(b,volume).unwrap();
+        let mu=5e-4+(t-300.0)*slope;
+        let psi=volume*b*b/(2.0*mu);
+        close(actual.free_energy_j,psi,1e-12);
+        if slope!=0.0 {
+            close(actual.entropy_j_k,psi*slope/mu,1e-12);
+            close(actual.heat_capacity_j_k,-t*volume*b*b*slope*slope/mu.powi(3),1e-12);
+            let lo=law.at_temperature(t-0.01).unwrap().state(b,volume).unwrap();
+            let hi=law.at_temperature(t+0.01).unwrap().state(b,volume).unwrap();
+            close(-(hi.free_energy_j-lo.free_energy_j)/0.02,actual.entropy_j_k,1e-8);
+        } else {assert_eq!(actual.entropy_j_k,0.0); assert_eq!(actual.heat_capacity_j_k,0.0);}
+        close(actual.internal_energy_j,psi+t*actual.entropy_j_k,1e-12);
+        close(at.state(b,3.0*volume).unwrap().free_energy_j,3.0*psi,1e-12);
+        assert_eq!(at.material().card_identity(),source.content_hash());
+        let bound=law.minimum_heat_capacity_j_k(b,volume).unwrap();
+        for k in 0..=30 {
+            let sampled=law.at_temperature(200.0+10.0*k as f64).unwrap().state(b,volume).unwrap();
+            assert!(sampled.heat_capacity_j_k>=bound);
+        }
+        assert!(law.at_temperature(501.0).is_err());
+        assert!(at.state(-b,volume).is_err());
+        assert!(at.state(b,0.0).is_err());
+    }
+}
+
 fn quantity(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
@@ -347,3 +383,4 @@ fn g1_affine_surface_keeps_fixed_pressure_and_rejects_a_second_thermal_owner() {
     let original = capacitor(&second, &context);
     assert!(ThermalFieldStorage::capacitor(&second, &original, "T", [200.0, 500.0]).is_err());
 }
+

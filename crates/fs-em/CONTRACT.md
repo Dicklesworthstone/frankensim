@@ -143,3 +143,9 @@ source refuses changed temperature even if its endpoint values coincide, since
 fixed-L evolution cannot account for magnetic parameter work along that path.
 Data-only material replacements are prepared as a new magnetic/electrical model.
 Changing live geometry or storage requires an explicit coupled work owner.
+
+## Temperature-refreshed spatial induction
+
+`PlanarEddy::step_with_materials_candidate` retains the original mesh, A history, fixed boundary traces, electrical region identities, source choices and clock while assembling source-pinned endpoint permeability. It reuses the original checked CG with endpoint magnetic effort (K_old A_old+K_next A_next)/2; insulating/floating algebraic constraints are checked at the actual endpoint. The accepted candidate owns its rebuilt operator through a shared immutable owner; a field recovered from that candidate borrows the candidate lifetime.
+
+Each triangle reports actual old/new curl A, magnetic free energy, volume and signed parameter work P=V B_old dot B_next (1/mu_next−1/mu_old)/2. The native account is delta psi + Joule heat = impressed-source work + P. Parameter work is not automatically heat: a thermal or external-work owner must close it. Fixed-coefficient steps retain P=0. No constitutive loss is added to resolved sigma E². Fixed geometry and linear isotropic nondispersive mu remain required; moving media, hysteresis and unconditional coupled entropy/passivity are not claimed. Synthetic tests cover analytical one-mode evolution, repeated operator/history continuation, algebraic insulating refresh, unchanged-source refusal, assembly budget and cancellation.

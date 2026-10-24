@@ -9,19 +9,23 @@
 //! stiffness makes the increment solve positive definite. No lumped or fitted
 //! magnetic loss is added. Triangle integrals of sigma*E_z^2 supply actual heat.
 //!
-//! This is a fixed-geometry, linear-mu magnetoquasistatic section, invariant in z.
+//! This is a fixed-geometry, linear isotropic magnetoquasistatic section, invariant in z.
 //! Opposite axial currents close outside the modeled section; their end fields
 //! and end losses are excluded. Fixed A boundary traces and balanced impressed
 //! current profiles drive the represented section. There is no terminal circuit,
 //! displacement current, Hall effect, hysteresis, moving conductor or force law.
 //! Implicit midpoint is second order for held coefficients; thermal endpoint
 //! refresh in a composed solve generally reduces coupled accuracy to first order.
+//! A source-pinned temperature-dependent mu may rebuild the same mesh through
+//! `step_with_materials_candidate`; its signed parameter work is then explicit.
 
 use super::{MagneticError, PlanarField, PlanarMagnetostatics};
 use fs_material::{
     conductor::ResolvedConductorState,
-    field_storage::{FieldStorageError, admit_fixed_magnetic_refresh},
+    field_storage::{FieldStorageError, admit_fixed_magnetic_refresh, admit_magnetic_temperature_refresh},
+    state_point::ResolvedMaterialStatePoint,
 };
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_solver::{
     CheckedCgConfig, CheckedCgError, LinearOp, ResidualClaim, SolveReport, checked_cg,
 };
@@ -29,7 +33,26 @@ use fs_sparse::precond::IdentityPrecond;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
+    ops::Deref,
+    sync::Arc,
 };
+
+// An accepted thermal refresh owns its assembled operator. Initial histories
+// can still borrow their prepared owner; cloning a candidate never copies K.
+#[derive(Clone)]
+enum MagneticOwner<'m> {
+    Borrowed(&'m PlanarMagnetostatics),
+    Owned(Arc<PlanarMagnetostatics>),
+}
+impl Deref for MagneticOwner<'_> {
+    type Target = PlanarMagnetostatics;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(p) => p,
+            Self::Owned(p) => p,
+        }
+    }
+}
 
 /// Complete conductor source and explicit isolated axial-current region.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,7 +103,7 @@ impl std::error::Error for EddyError {}
 /// Accepted original nodal field, complete conductor sources and physical time.
 #[derive(Clone)]
 pub struct PlanarEddy<'m> {
-    problem: &'m PlanarMagnetostatics,
+    problem: MagneticOwner<'m>,
     conductors: Vec<EddyConductor>,
     insulators: Vec<usize>,
     free: Vec<usize>,
@@ -103,13 +126,28 @@ pub struct EddyCellHeat {
     pub heat_j: f64,
 }
 #[derive(Clone, Debug)]
+pub struct EddyMagneticCell {
+    pub triangle: usize,
+    pub volume_m3: f64,
+    /// Curl of the original/accepted P1 potential; independent of gauge offsets.
+    pub flux_density_t: [[f64; 2]; 2],
+    /// Actual endpoint Helmholtz energies V*|B|²/(2*mu).
+    pub free_energy_j: [f64; 2],
+    /// ½ V B_old·B_next (1/mu_next−1/mu_old), signed parameter transfer.
+    pub parameter_work_j: f64,
+}
+#[derive(Clone, Debug)]
 pub struct EddyStep {
     pub cells: Vec<EddyCellHeat>,
+    pub magnetic_cells: Vec<EddyMagneticCell>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     pub heat_j: f64,
     /// Midpoint impressed J_z paired with the actual accepted delta A_z [J].
     pub supplied_work_j: f64,
+    /// Change of magnetic constitutive storage, separate from impressed work.
+    /// Delta psi + Joule heat = impressed work + parameter work.
+    pub parameter_work_j: f64,
     pub energy_residual_j: f64,
     pub region_currents_a: Vec<(u32, f64)>,
     /// Actual accepted increment's recomputed free-coordinate residual.
@@ -640,7 +678,7 @@ impl<'m> PlanarEddy<'m> {
         )?;
         poll(cancelled)?;
         Ok(Self {
-            problem,
+            problem: MagneticOwner::Borrowed(problem),
             conductors,
             insulators: insulating_triangles.to_vec(),
             free: (0..prescribed.len())
@@ -654,8 +692,8 @@ impl<'m> PlanarEddy<'m> {
             time_s,
         })
     }
-    pub fn problem(&self) -> &'m PlanarMagnetostatics {
-        self.problem
+    pub fn problem(&self) -> &PlanarMagnetostatics {
+        &self.problem
     }
     pub fn conductors(&self) -> &[EddyConductor] {
         &self.conductors
@@ -679,7 +717,7 @@ impl<'m> PlanarEddy<'m> {
     pub fn field(
         &self,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<PlanarField<'m>, EddyError> {
+    ) -> Result<PlanarField<'_>, EddyError> {
         Ok(self
             .problem
             .recover(self.potential_wb_m.clone(), None, cancelled)?)
@@ -700,6 +738,51 @@ impl<'m> PlanarEddy<'m> {
         limits: EddyControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
+        self.step_with_owner(target_s, self.problem.clone(), conductors,
+            impressed_jz_a_m2, limits, cancelled)
+    }
+
+    /// Reassemble the SAME mesh at source-pinned endpoint temperatures and
+    /// continue its accepted magnetic history. This is trapezoidal in magnetic
+    /// effort: ½(K_old A_old + K_next A_next) + C_sigma delta A/dt = load_mid.
+    /// Consequently insulating/floating algebraic constraints hold at both
+    /// endpoints without resetting A or inventing an initialization impulse.
+    /// The returned parameter work MUST be closed by a thermal/material owner
+    /// or explicit external supply; it is neither Joule heat nor source work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_candidate(
+        &self,
+        target_s: f64,
+        materials: Vec<ResolvedMaterialStatePoint>,
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        assembly: WeightedAssemblyLimits,
+        limits: EddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
+        poll(cancelled)?;
+        if materials.len() != self.problem.materials.len() {
+            return Err(EddyError::Invalid("complete original magnetic material correspondence required"));
+        }
+        for (before, after) in self.problem.materials.iter().zip(&materials) {
+            poll(cancelled)?;
+            admit_magnetic_temperature_refresh(before, after)?;
+        }
+        let problem = PlanarMagnetostatics::new(self.problem.mesh.clone(), materials,
+            assembly, cancelled)?;
+        self.step_with_owner(target_s, MagneticOwner::Owned(Arc::new(problem)),
+            conductors, impressed_jz_a_m2, limits, cancelled)
+    }
+
+    fn step_with_owner(
+        &self,
+        target_s: f64,
+        next_problem: MagneticOwner<'m>,
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        limits: EddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
         poll(cancelled)?;
         controls(limits)?;
         let dt = target_s - self.time_s;
@@ -713,9 +796,9 @@ impl<'m> PlanarEddy<'m> {
             ));
         }
         let (conductors, conduction) =
-            bind(self.problem, conductors, Some(&self.conductors), cancelled)?;
+            bind(&next_problem, conductors, Some(&self.conductors), cancelled)?;
         let endpoint_load = load(
-            self.problem,
+            &next_problem,
             impressed_jz_a_m2,
             &self.components,
             limits.current_balance_tolerance_a,
@@ -728,22 +811,25 @@ impl<'m> PlanarEddy<'m> {
             .map(|(&a, &b)| f64::midpoint(a, b))
             .collect();
         let loads = load(
-            self.problem,
+            &next_problem,
             &midpoint_current,
             &self.components,
             limits.current_balance_tolerance_a,
             cancelled,
         )?;
         let old_magnetic = magnetic_load(
-            self.problem,
+            &self.problem,
             &self.potential_wb_m,
             &self.components,
             cancelled,
         )?;
+        let refreshed_old_magnetic = magnetic_load(
+            &next_problem, &self.potential_wb_m, &self.components, cancelled,
+        )?;
         let mut rhs = Vec::with_capacity(self.free.len());
         for &v in &self.free {
             poll(cancelled)?;
-            rhs.push(finite(loads[v] - old_magnetic[v])?);
+            rhs.push(finite(loads[v] - f64::midpoint(old_magnetic[v], refreshed_old_magnetic[v]))?);
         }
         let mut potential = self.potential_wb_m.clone();
         let report = if self.free.is_empty() {
@@ -760,7 +846,7 @@ impl<'m> PlanarEddy<'m> {
                 }
             };
             let op = Increment {
-                problem: self.problem,
+                problem: &next_problem,
                 free: &self.free,
                 conduction: &conduction,
                 dt,
@@ -830,16 +916,37 @@ impl<'m> PlanarEddy<'m> {
             }
             Some(report)
         };
-        let new_magnetic = magnetic_load(self.problem, &potential, &self.components, cancelled)?;
+        let new_magnetic = magnetic_load(&next_problem, &potential, &self.components, cancelled)?;
         admit_algebraic(
-            self.problem,
+            &next_problem,
             &new_magnetic,
             &endpoint_load,
             &self.algebraic,
             limits.current_balance_tolerance_a,
             cancelled,
         )?;
-        let field = self.problem.recover(potential.clone(), None, cancelled)?;
+        let field = next_problem.recover(potential.clone(), None, cancelled)?;
+        let old_field = self.field(cancelled)?;
+        let mut magnetic_cells = Vec::with_capacity(next_problem.materials.len());
+        let mut parameter_work_j = 0.0;
+        for triangle in 0..next_problem.materials.len() {
+            poll(cancelled)?;
+            let volume_m3 = next_problem.mesh.face_measure(triangle)
+                .ok_or(EddyError::Invalid("missing magnetic volume"))?;
+            let b0 = old_field.magnetic_flux_density_t()[triangle];
+            let b1 = field.magnetic_flux_density_t()[triangle];
+            let mu0 = self.problem.permeability_h_m[triangle];
+            let mu1 = next_problem.permeability_h_m[triangle];
+            let parameter = finite(0.5 * volume_m3 * (b0[0]*b1[0] + b0[1]*b1[1])
+                * (mu1.recip()-mu0.recip()))?;
+            parameter_work_j = finite(parameter_work_j + parameter)?;
+            magnetic_cells.push(EddyMagneticCell {
+                triangle, volume_m3, flux_density_t: [b0,b1],
+                free_energy_j: [finite(0.5*volume_m3*(b0[0]*b0[0]+b0[1]*b0[1])/mu0)?,
+                    finite(0.5*volume_m3*(b1[0]*b1[0]+b1[1]*b1[1])/mu1)?],
+                parameter_work_j: parameter,
+            });
+        }
         let increments: Vec<_> = potential
             .iter()
             .zip(&self.potential_wb_m)
@@ -906,7 +1013,7 @@ impl<'m> PlanarEddy<'m> {
             ));
         }
         let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;
-        let energy_residual_j = finite(field.energy_j - self.energy_j + heat_j - supplied_work_j)?;
+        let energy_residual_j = finite(field.energy_j - self.energy_j + heat_j - supplied_work_j - parameter_work_j)?;
         if energy_residual_j.abs() > limits.energy_tolerance_j {
             return Err(EddyError::Balance(
                 "magnetic storage, spatial eddy heat and impressed-source work do not close",
@@ -914,16 +1021,19 @@ impl<'m> PlanarEddy<'m> {
         }
         let step = EddyStep {
             cells,
+            magnetic_cells,
             stored_before_j: self.energy_j,
             stored_after_j: field.energy_j,
             heat_j,
             supplied_work_j,
+            parameter_work_j,
             energy_residual_j,
             region_currents_a: conduction.regions.into_iter().zip(net_current).collect(),
             report,
         };
+        let energy_j = field.energy_j;
         let state = Self {
-            problem: self.problem,
+            problem: next_problem,
             conductors,
             insulators: self.insulators.clone(),
             free: self.free.clone(),
@@ -931,10 +1041,11 @@ impl<'m> PlanarEddy<'m> {
             algebraic: self.algebraic.clone(),
             impressed_jz_a_m2: impressed_jz_a_m2.to_vec(),
             potential_wb_m: potential,
-            energy_j: field.energy_j,
+            energy_j,
             time_s: target_s,
         };
         poll(cancelled)?;
         Ok(PlanarEddyCandidate { state, step })
     }
 }
+

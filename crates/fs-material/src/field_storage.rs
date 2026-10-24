@@ -117,6 +117,28 @@ pub fn admit_fixed_magnetic_refresh(
     prepared: &ResolvedMaterialStatePoint,
     refreshed: &ResolvedMaterialStatePoint,
 ) -> Result<(), FieldStorageError> {
+    admit_magnetic_temperature_refresh(prepared, refreshed)?;
+    let mu = linear_magnetic_permeability(refreshed)?;
+    let original_mu = linear_magnetic_permeability(prepared)?;
+    let property = refreshed.property(MAGNETIC_PERMEABILITY_PROPERTY).expect("admitted permeability");
+    if mu.to_bits() != original_mu.to_bits()
+        || prepared.query_point().iter().zip(refreshed.query_point()).any(|((axis, a), (_, b))| {
+            a.to_bits() != b.to_bits() && property.source_axes().iter().any(|(name, _)| name == axis)
+        })
+    {
+        return Err(FieldStorageError::Invalid("heated magnetic region changes prepared storage; new extraction and magnetic parameter work required"));
+    }
+    Ok(())
+}
+
+/// Admit a source-pinned temperature change for an owner that REASSEMBLES its
+/// magnetic operator and explicitly accounts for the resulting parameter work.
+/// This only checks source/context continuity, not a thermodynamic derivative
+/// or energy balance; thermal owners must additionally bind a supported law.
+pub fn admit_magnetic_temperature_refresh(
+    prepared: &ResolvedMaterialStatePoint,
+    refreshed: &ResolvedMaterialStatePoint,
+) -> Result<(), FieldStorageError> {
     use fs_qty::{Temperature, semantic::{QuantityKind, ValueForm}};
     use FieldStorageError::Invalid;
     if prepared.card_identity() != refreshed.card_identity()
@@ -131,7 +153,6 @@ pub fn admit_fixed_magnetic_refresh(
     {
         return Err(Invalid("magnetic refresh must retain the complete original card, requirements, coordinate schema and selected claims"));
     }
-    let mut changed_temperature_axis = None;
     let mut temperatures = 0;
     for ((name, value), (next_name, next_value)) in prepared.query_point().iter().zip(refreshed.query_point()) {
         if name != next_name { return Err(Invalid("magnetic source coordinates changed correspondence")); }
@@ -147,20 +168,11 @@ pub fn admit_fixed_magnetic_refresh(
         }
         if value.to_bits() != next_value.to_bits() {
             if !is_temperature { return Err(Invalid("only the owned magnetic temperature may change during a fixed-geometry step")); }
-            changed_temperature_axis = Some(name.as_str());
         }
     }
     if temperatures > 1 { return Err(Invalid("magnetic temperature coordinate is ambiguous")); }
-    let mu = linear_magnetic_permeability(refreshed)?;
-    let original_mu = linear_magnetic_permeability(prepared)?;
-    let property = refreshed.property(MAGNETIC_PERMEABILITY_PROPERTY).expect("admitted permeability");
-    if mu.to_bits() != original_mu.to_bits()
-        || changed_temperature_axis.is_some_and(|temperature| {
-            property.source_axes().iter().any(|(axis, _)| axis == temperature)
-        })
-    {
-        return Err(Invalid("heated magnetic region changes prepared storage; new extraction and magnetic parameter work required"));
-    }
+    linear_magnetic_permeability(prepared)?;
+    linear_magnetic_permeability(refreshed)?;
     Ok(())
 }
 
@@ -367,3 +379,4 @@ impl ResolvedInductor {
         energy(flux_linkage_wb, self.inductance_h)
     }
 }
+

@@ -30,6 +30,10 @@ use crate::state_point::{
     ResolvedMaterialStatePoint, affine_temperature_slope, pinned_temperature_line,
 };
 
+/// Spatial material field thermodynamics, using the same affine source admission
+/// and potential derivatives as lumped C(T)/L(T).
+pub mod magnetic;
+
 /// A native material storage element. Geometry and source receipts are retained;
 /// this is not another circuit state, graph branch or material evaluator.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +132,91 @@ fn finite(value: f64, what: &'static str) -> Result<f64, FieldStorageError> {
     }
 }
 
+// Shared source-path admission. The model derivative comes from the exact
+// selected source path, never from finite differences of unrelated queries.
+fn affine_path(
+    card: &MaterialCard,
+    material: &ResolvedMaterialStatePoint,
+    property_name: &str,
+    temperature_axis: &str,
+    temperature_range_k: [f64; 2],
+) -> Result<(f64, f64, f64), FieldStorageError> {
+    let invalid = FieldStorageError::Invalid;
+    let [low, high] = temperature_range_k;
+    if !low.is_finite() || !high.is_finite() || low <= 0.0 || low >= high {
+        return Err(invalid("field thermal range must be finite positive increasing kelvin"));
+    }
+    let context = material.query();
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static,
+    ));
+    if context.axis_quantities().get(temperature_axis) != Some(&absolute) {
+        return Err(invalid("field thermal coordinate needs explicit absolute-temperature semantics"));
+    }
+    let reference_k = *context.axes().get(temperature_axis)
+        .ok_or(invalid("field thermal coordinate is missing"))?;
+    if !(low..=high).contains(&reference_k) {
+        return Err(invalid("original field temperature lies outside its thermal range"));
+    }
+    material.at_query_point(card, &context)?;
+    let property = material.property(property_name)
+        .ok_or(invalid("field thermal property is missing or ambiguous"))?;
+    if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
+        return Err(invalid("field law requires one owned temperature and fixed external source coordinates"));
+    }
+    let point = |temperature| context.clone().with(temperature_axis, temperature)
+        .map_err(|_| invalid("field thermal query is unrepresentable"));
+    let claim = card.claims().claim(property.answer().receipt.selected)
+        .ok_or(invalid("field source claim is absent from original card"))?;
+    let knots = pinned_temperature_line(card, &claim.key, temperature_axis,
+        &point(low)?, &point(high)?, property.answer().receipt.selected)?;
+    if knots.first().map(|v| v.0) != Some(low)
+        || knots.last().map(|v| v.0) != Some(high)
+        || knots.iter().any(|(_, value)| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(invalid("positive field source must continuously cover the complete thermal range"));
+    }
+    let slope = affine_temperature_slope(&knots, reference_k, property.value_si()).map_err(invalid)?;
+    let minimum = knots.first().unwrap().1.min(knots.last().unwrap().1);
+    Ok((reference_k, slope, minimum))
+}
+
+fn thermal_state(
+    free_energy_j: f64,
+    temperature_k: f64,
+    ratio: f64,
+) -> Result<FieldThermalState, FieldStorageError> {
+    if ratio == 0.0 || free_energy_j == 0.0 {
+        return Ok(FieldThermalState {
+            free_energy_j, entropy_j_k: 0.0, internal_energy_j: free_energy_j,
+            heat_capacity_j_k: 0.0,
+        });
+    }
+    let entropy_j_k = finite(free_energy_j * ratio, "field entropy is unrepresentable")?;
+    let internal_energy_j = finite(temperature_k.mul_add(entropy_j_k, free_energy_j),
+        "field internal energy is unrepresentable")?;
+    let heat_capacity_j_k = finite((-2.0*temperature_k*entropy_j_k)*ratio,
+        "field heat capacity is unrepresentable")?;
+    if entropy_j_k == 0.0 || heat_capacity_j_k == 0.0 {
+        return Err(FieldStorageError::Invalid("nonzero field thermal contribution underflows"));
+    }
+    Ok(FieldThermalState { free_energy_j, entropy_j_k, internal_energy_j, heat_capacity_j_k })
+}
+
+fn capacity_bound(
+    worst_energy_j: f64,
+    maximum_temperature_k: f64,
+    maximum_ratio: f64,
+) -> Result<f64, FieldStorageError> {
+    if worst_energy_j == 0.0 || maximum_ratio == 0.0 { return Ok(0.0); }
+    let magnitude = finite((2.0*maximum_temperature_k*worst_energy_j*maximum_ratio.abs())
+        *maximum_ratio.abs(), "field capacity bound is unrepresentable")?;
+    if magnitude == 0.0 {
+        return Err(FieldStorageError::Invalid("nonzero field capacity bound underflows"));
+    }
+    finite(-magnitude*(1.0+2048.0*f64::EPSILON), "field capacity bound is unrepresentable")
+}
+
 impl ThermalFieldStorage {
     /// Bind a native capacitor to its original card over a positive temperature
     /// interval. The original absolute-temperature coordinate must be explicitly
@@ -169,46 +258,14 @@ impl ThermalFieldStorage {
         temperature_range_k: [f64; 2],
     ) -> Result<Self, FieldStorageError> {
         let invalid = FieldStorageError::Invalid;
-        let [low, high] = temperature_range_k;
-        if !low.is_finite() || !high.is_finite() || low <= 0.0 || low >= high {
-            return Err(invalid(
-                "field thermal range must be finite positive increasing kelvin",
-            ));
-        }
         let material = original.material();
+        let (reference_k, source_slope, _) = affine_path(card, material,
+            original.property_name(), temperature_axis, temperature_range_k)?;
+        let [low, high] = temperature_range_k;
         let context = material.query();
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
-        if context.axis_quantities().get(temperature_axis) != Some(&absolute) {
-            return Err(invalid(
-                "field thermal coordinate needs explicit absolute-temperature semantics",
-            ));
-        }
-        let reference_k = *context
-            .axes()
-            .get(temperature_axis)
-            .ok_or(invalid("field thermal coordinate is missing"))?;
-        if !(low..=high).contains(&reference_k) {
-            return Err(invalid(
-                "original field temperature lies outside its thermal range",
-            ));
-        }
-        // This checks the full original bundle and immutable card, not just a
-        // numeric coefficient or a material name.
-        // Refresh pins the selected claims and can change selection-policy
-        // receipts even at the same state. The trusted original snapshot stays
-        // intact; this call checks card identity and all original requirements.
-        material.at_query_point(card, &context)?;
         let property = material
             .property(original.property_name())
             .ok_or(invalid("field thermal property is missing or ambiguous"))?;
-        if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
-            return Err(invalid(
-                "field law requires one owned temperature and fixed external source coordinates",
-            ));
-        }
         let point = |temperature| {
             context
                 .clone()
@@ -217,30 +274,6 @@ impl ThermalFieldStorage {
         };
         let lower = point(low)?;
         let upper = point(high)?;
-        let claim = card
-            .claims()
-            .claim(property.answer().receipt.selected)
-            .ok_or(invalid("field source claim is absent from original card"))?;
-        let knots = pinned_temperature_line(
-            card,
-            &claim.key,
-            temperature_axis,
-            &lower,
-            &upper,
-            property.answer().receipt.selected,
-        )?;
-        if knots.first().map(|v| v.0) != Some(low)
-            || knots.last().map(|v| v.0) != Some(high)
-            || knots
-                .iter()
-                .any(|(_, value)| !value.is_finite() || *value <= 0.0)
-        {
-            return Err(invalid(
-                "positive field source must continuously cover the complete thermal range",
-            ));
-        }
-        let source_slope =
-            affine_temperature_slope(&knots, reference_k, property.value_si()).map_err(invalid)?;
         // Geometry is fixed, so the logarithmic derivative of K equals that
         // of its source epsilon or mu; no finite-difference source queries.
         let scale = positive(
@@ -369,17 +402,10 @@ impl ThermalFieldStorage {
         }
         let worst_energy = energy(maximum_absolute_coordinate, self.minimum_coefficient)?;
         let ratio = self.coefficient_slope_per_k / self.minimum_coefficient;
-        let magnitude = finite(
-            (2.0 * self.temperature_range_k[1] * worst_energy * ratio.abs()) * ratio.abs(),
-            "field capacity bound is unrepresentable",
-        )?;
-        if magnitude == 0.0 {
-            return Err(invalid("nonzero field capacity bound underflows"));
+        if ratio == 0.0 || !ratio.is_finite() {
+            return Err(invalid("field capacity derivative ratio is unrepresentable"));
         }
-        finite(
-            -magnitude * (1.0 + 2048.0 * f64::EPSILON),
-            "field capacity bound is unrepresentable",
-        )
+        capacity_bound(worst_energy, self.temperature_range_k[1], ratio)
     }
 }
 
@@ -397,37 +423,16 @@ impl ResolvedThermalFieldStorage {
     /// Actual field Helmholtz, entropy, internal-energy and capacity contributions.
     pub fn state(&self, coordinate: f64) -> Result<FieldThermalState, FieldStorageError> {
         let free_energy_j = energy(coordinate, self.element.coefficient())?;
-        if self.coefficient_slope_per_k == 0.0 || coordinate == 0.0 {
-            return Ok(FieldThermalState {
-                free_energy_j,
-                entropy_j_k: 0.0,
-                internal_energy_j: free_energy_j,
-                heat_capacity_j_k: 0.0,
-            });
-        }
         let ratio = finite(
             self.coefficient_slope_per_k / self.element.coefficient(),
             "field thermal derivative ratio is unrepresentable",
         )?;
-        let entropy_j_k = finite(free_energy_j * ratio, "field entropy is unrepresentable")?;
-        let internal_energy_j = finite(
-            self.temperature_k.mul_add(entropy_j_k, free_energy_j),
-            "field internal energy is unrepresentable",
-        )?;
-        let heat_capacity_j_k = finite(
-            (-2.0 * self.temperature_k * entropy_j_k) * ratio,
-            "field heat capacity is unrepresentable",
-        )?;
-        if ratio == 0.0 || entropy_j_k == 0.0 || heat_capacity_j_k == 0.0 {
+        if self.coefficient_slope_per_k != 0.0 && ratio == 0.0 {
             return Err(FieldStorageError::Invalid(
-                "nonzero field thermal contribution underflows",
+                "nonzero field thermal derivative underflows",
             ));
         }
-        Ok(FieldThermalState {
-            free_energy_j,
-            entropy_j_k,
-            internal_energy_j,
-            heat_capacity_j_k,
-        })
+        thermal_state(free_energy_j, self.temperature_k, ratio)
     }
 }
+

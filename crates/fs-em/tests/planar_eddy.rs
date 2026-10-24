@@ -2,6 +2,8 @@
 //! These are manufactured coefficients, not a measured metal qualification.
 #[path = "winding_ohmic/common.rs"]
 mod material;
+#[path = "planar_eddy/thermal.rs"]
+mod thermal;
 
 use fs_em::planar::{
     PlanarMagnetostatics,
@@ -502,3 +504,4 @@ fn field_and_material_history_survive_source_budget_cancel_and_topology_refusals
     assert_eq!(a.state().potential_wb_m(), b.state().potential_wb_m());
     near(a.step().heat_j, b.step().heat_j);
 }
+
