@@ -5300,10 +5300,19 @@ The `heated_valve_sound` example accepts an explicit finite gas volume, layer
 distance and step count alongside the existing species/NASA9/transport packs.
 The original 48-cell solid receives gas heat on actual exterior triangles,
 with an insulated root and conservative shared-face internal links. The native
-slice requires a constant scalar solid conductivity across its declared fully
-solid 280–400 K interval; its centroid-normal two-point network is a coarse
-transport model, not a continuum-consistent tetrahedral heat discretization.
-The reusable gas-facing material coupling retains temperature-dependent laws.
+slice pins the original conductivity source and resolves it at each cell's
+actual nonlinear endpoint within the declared fully solid 280–400 K interval.
+Internal half-cell links and gas-facing layers consume the same material
+snapshot; constant claims, temperature curves and supported fixed-context
+response surfaces use the original material-network owner. Its centroid-normal
+two-point network remains a coarse transport model, not a continuum-consistent
+tetrahedral heat discretization.
+
+The optional manufactured `--demo-conductivity K_AT_280 K_AT_300 K_AT_400`
+source permits conductivity comparisons with identical initial coefficients.
+A regression follows the changed temperature dependence through spatial heat,
+quasistatic deformation, reduced valve frequency and actual pressure, with
+combined storage closure and deterministic replay checks.
 
 Each accepted temperature field uses the same source stiffness and expansion
 owner as the final equilibrium, prestress, aperture and valve reduction.

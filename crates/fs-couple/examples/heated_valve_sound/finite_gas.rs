@@ -4,6 +4,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use fs_couple::circuit_enthalpy::material::{ConductionLink, PreparedMaterialNetwork};
 use fs_couple::solid_enthalpy::gas::{GasConductionGeometry, SolidGasContact, SolidGasSolve};
 use fs_material::gas_species::input::read_isochoric_parcel;
 use fs_material::state_point::{
@@ -95,6 +96,7 @@ impl Options {
 
 pub(super) struct Transport {
     pub links: Vec<ThermalLink>,
+    pub material_links: Vec<ConductionLink>,
     pub surface_areas_m2: Vec<f64>,
     contacts: Vec<SolidGasContact>,
 }
@@ -109,47 +111,25 @@ fn centroid(mesh: &Mesh, element: usize) -> [f64; 3] {
     })
 }
 
-/// A constant source claim is necessary because the existing internal thermal
-/// links are fixed in this bounded example. Endpoint sampling cannot prove that
-/// an arbitrary temperature curve is constant, so non-scalar claims refuse.
-fn constant_conductivity(card: &MaterialCard) -> Result<f64> {
+/// Initialize the authored reference links; every physical step replaces their
+/// values through the original prepared material network at the trial endpoint.
+fn reference_conductivity(card: &MaterialCard) -> Result<f64> {
     let requirement = ScalarPropertyRequirement::try_new(
         "thermal_conductivity",
         THERMAL_CONDUCTIVITY_DIMS,
-        ScalarAdmissibility::StrictlyPositive,
+        ScalarAdmissibility::NonNegative,
     )?;
-    let lower = resolve_material_state_point(
+    let reference = resolve_material_state_point(
         card,
-        &point(280.0)?,
-        &[requirement.clone()],
-        MaterialPropertySelection::SingleClaimOnly,
-    )?;
-    let upper = resolve_material_state_point(
-        card,
-        &point(400.0)?,
+        &point(300.0)?,
         &[requirement],
         MaterialPropertySelection::SingleClaimOnly,
     )?;
     let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
-    let a = lower
+    Ok(reference
         .property_by_key(&key)
         .ok_or("missing conductivity snapshot")?
-        .answer();
-    let b = upper
-        .property_by_key(&key)
-        .ok_or("missing conductivity snapshot")?
-        .answer();
-    if a.receipt.selected != b.receipt.selected {
-        return Err("one constant conductivity source must span the entire solid interval".into());
-    }
-    let claim = card
-        .claims()
-        .claim(a.receipt.selected)
-        .ok_or("selected conductivity claim missing")?;
-    match (&claim.value, claim.interpolation) {
-        (PropertyValue::Scalar { value, .. }, InterpolationPolicy::ConstantWithinValidity) => Ok(*value),
-        _ => Err("finite-gas valve internal links require an explicit constant scalar conductivity claim".into()),
-    }
+        .value_si())
 }
 
 pub(super) fn transport(
@@ -159,7 +139,7 @@ pub(super) fn transport(
     options: &Options,
     cx: &Cx<'_>,
 ) -> Result<Transport> {
-    let k = constant_conductivity(card)?;
+    let k = reference_conductivity(card)?;
     let mut owners = BTreeMap::<[usize; 3], Vec<usize>>::new();
     for (element, tet) in mesh.tets.iter().enumerate() {
         for local in [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] {
@@ -169,6 +149,7 @@ pub(super) fn transport(
         }
     }
     let mut links = Vec::new();
+    let mut material_links = Vec::new();
     let mut surface_areas_m2 = vec![0.0; mesh.tets.len()];
     for (face, elements) in &owners {
         cx.checkpoint().map_err(|_| "heated valve cancelled")?;
@@ -193,16 +174,19 @@ pub(super) fn transport(
                     .sum::<f64>()
                     .abs()
             };
+            let id = links.len() as u64;
+            let distances = [distance(*first), distance(*second)];
+            material_links.push(ConductionLink {
+                link: id,
+                distance_a_m: distances[0],
+                distance_b_m: distances[1],
+            });
             links.push(ThermalLink {
-                id: links.len() as u64,
+                id,
                 a: CellId(*first as u64),
                 b: CellId(*second as u64),
                 area_m2: area,
-                conductance_w_k: series_conductance_w_k(
-                    area,
-                    [distance(*first), distance(*second)],
-                    [k, k],
-                )?,
+                conductance_w_k: series_conductance_w_k(area, distances, [k, k])?,
             });
         }
     }
@@ -239,6 +223,7 @@ pub(super) fn transport(
     }
     Ok(Transport {
         links,
+        material_links,
         surface_areas_m2,
         contacts,
     })
@@ -293,6 +278,7 @@ pub(super) fn advance<'t>(
     duration_s: f64,
     options: &Options,
     transport: &Transport,
+    material_transport: &PreparedMaterialNetwork<'_, '_>,
     cx: &Cx<'_>,
 ) -> Result<Evolution<'t>> {
     let mut gas = options.gas.clone();
@@ -347,7 +333,7 @@ pub(super) fn advance<'t>(
             0.0,
         ]],
         description: format!(
-            "finite fixed-volume gas; volume_m3={}; gas_mass_kg={}; gas_distance_m={}; steps={}; solid_interval_K=280..400; thermal network: fixed scalar source conductivity, centroid-normal two-point links, insulated clamped root; heating and sound are sequential frozen-state experiments; gas_source={provenance}",
+            "finite fixed-volume gas; volume_m3={}; gas_mass_kg={}; gas_distance_m={}; steps={}; solid_interval_K=280..400; thermal network: source conductivity at each cell's actual endpoint temperature, centroid-normal two-point links, insulated clamped root; heating and sound are sequential frozen-state experiments; gas_source={provenance}",
             gas.volume_m3(),
             gas.mass_kg(),
             options.gas_distance_m,
@@ -358,12 +344,13 @@ pub(super) fn advance<'t>(
     let mut exchange = 0.0;
     for step in 1..=options.steps {
         let target = duration_s * step as f64 / options.steps as f64;
-        let candidate = source.step_with_isochoric_gas(
+        let candidate = source.step_with_isochoric_gas_transport(
             &thermal,
             &gas,
             target,
             0.0,
             &transport.contacts,
+            material_transport,
             controls,
             &vec![0.0; thermal.cells().len() + 1],
             cx,
@@ -495,6 +482,43 @@ mod tests {
     }
 
     #[test]
+    fn temperature_dependent_internal_transport_changes_material_field_and_pressure() {
+        let gas = options(0.0004);
+        // Both cards have exactly the same conductivity at the 300 K initial
+        // state. Only its subsequently sampled temperature dependence changes.
+        let constant = demo(1.0).unwrap();
+        let variable = demo_with_conductivity(1.0, Some([0.1, 0.2, 2.0])).unwrap();
+        assert_eq!(
+            reference_conductivity(&constant).unwrap(),
+            reference_conductivity(&variable).unwrap()
+        );
+        let a = synthesize_with_gas(&constant, 0.0, 10.0, Some(&gas), &CancelGate::new()).unwrap();
+        let b = synthesize_with_gas(&variable, 0.0, 10.0, Some(&gas), &CancelGate::new()).unwrap();
+        assert_eq!(a.cold, b.cold);
+        assert_ne!(a.hot, b.hot);
+        assert_ne!(a.hot_frequency, b.hot_frequency);
+        assert_ne!(a.displacement_m, b.displacement_m);
+        for result in [&a, &b] {
+            let end = result.gas_history.as_ref().unwrap().rows.last().unwrap();
+            assert!(end[2] > end[1]);
+            assert_eq!(end[5], 0.0);
+            assert!((end[6] + end[7]).abs() < 2e-6);
+            assert_eq!(result.cold_mass, result.hot_mass);
+        }
+        assert_ne!(
+            a.gas_history.as_ref().unwrap().rows,
+            b.gas_history.as_ref().unwrap().rows
+        );
+        let replay =
+            synthesize_with_gas(&variable, 0.0, 10.0, Some(&gas), &CancelGate::new()).unwrap();
+        assert_eq!(b.hot, replay.hot);
+        assert_eq!(
+            b.gas_history.unwrap().rows,
+            replay.gas_history.unwrap().rows
+        );
+    }
+
+    #[test]
     fn invalid_native_gas_input_and_cancelled_trajectory_return_no_comparison() {
         let sources = thermochemical::Options::default();
         for words in [
@@ -508,6 +532,8 @@ mod tests {
         }
         let gate = CancelGate::new();
         gate.request();
+        assert!(demo_with_conductivity(1.0, Some([0.1, -0.2, 2.0])).is_err());
+        assert!(demo_with_conductivity(1.0, Some([0.1, 0.2, f64::NAN])).is_err());
         assert!(
             synthesize_with_gas(
                 &demo(1.0).unwrap(),

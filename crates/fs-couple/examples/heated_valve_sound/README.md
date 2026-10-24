@@ -100,14 +100,38 @@ The finite-gas mode explicitly admits a **fully solid 280–400 K interval**,
 including a margin around the 300 K initial state for numerical Jacobian
 probes. Packs must supply their own support across that interval; there is no
 extrapolation. In addition to the mechanical/caloric properties, the bounded
-native example requires one positive scalar `thermal_conductivity` claim with
-`ConstantWithinValidity` interpolation throughout the interval. The manufactured
-demo declares 0.2 W/(m K). A temperature-varying conductivity claim is refused
-because this example's internal links are fixed. The reusable library accepts
-temperature-dependent solid and gas conductivity at its gas-facing patches.
+native example requires a nonnegative scalar-valued `thermal_conductivity`
+source at every actual local temperature and numerical probe. Constant claims,
+temperature curves and supported fixed-context response surfaces use the same
+material resolver. The source is selected once at the original state, then
+refreshed at every trial endpoint. Internal links and gas-facing patches consume
+the **same cell material snapshot**; conductivity is not frozen at 300 K or
+reselected separately at a boundary. An explicit zero coefficient insulates;
+missing or unsupported data refuses the entire candidate.
 
-Interior conductances use the source conductivity, shared triangle area and
-the two centroid-to-face normal distances. This is an explicit coarse two-point
+The manufactured demo defaults to 0.2 W/(m K). To compare a temperature-dependent
+source with exactly the same initial conductivity, repeat the command above
+with a new output prefix and add:
+
+```text
+--demo-conductivity 0.1 0.2 2.0
+```
+
+These three values specify conductivity at 280, 300 and 400 K, with the ordinary
+source pack's linear-inside interpolation. The option requires `--demo` and
+`--finite-gas`; it declares manufactured material data and does not override an
+imported pack. All reference mechanical/caloric coefficients, geometry, gas,
+heating and acoustic excitation remain the same. The calculation propagates
+the changed conductivity through the spatial heat field, deformation, valve
+frequency and actual pressure. `--pack` uses the supplied conductivity law
+directly, with no demonstration override.
+
+Interior conductances use each endpoint cell's actual source conductivity,
+shared triangle area and the two centroid-to-face normal distances. The existing
+prepared material-network owner lowers those two material layers in series
+inside the **same implicit residual** as finite gas heat and local enthalpy
+storage. Different cell temperatures therefore give different half-cell
+coefficients even for a homogeneous specimen. This is an explicit coarse two-point
 thermal network. The tetrahedral mesh is not orthogonal, so the network does
 not claim a consistent continuum heat-equation discretization. It does conserve
 each signed internal transfer. Boundary conductance places the source gas and
@@ -194,3 +218,9 @@ The finite-gas regressions change only reservoir volume and check nonuniform
 solid heating, fixed gas mass through `p/T`, equal-and-opposite endpoint storage,
 different valve frequency and actual pressure, deterministic replay and input
 or cancellation refusal.
+
+An additional material-swap regression changes only the conductivity's
+temperature dependence while retaining its initial value. It checks unchanged
+cold pressure, changed heated deformation/frequency/pressure, conserved combined
+storage and deterministic replay. The library also covers heterogeneous original
+material cards against independently written nonlinear cell/gas energy equations.

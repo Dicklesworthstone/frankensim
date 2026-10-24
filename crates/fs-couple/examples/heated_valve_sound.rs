@@ -17,6 +17,7 @@ use json::json_string;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
+use fs_couple::circuit_enthalpy::material::{MaterialCell, MaterialNetwork};
 use fs_couple::material_assembly::{
     AcousticMaterialBindings, valve::compile_pressure_loaded_reed_assembly,
 };
@@ -420,8 +421,38 @@ fn synthesize_with_gas(
             .reduce_pressure_valve(&reduction, &cx)?;
         let (heated_thermal, heated_valve, heat, gas_result) =
             if let (Some(options), Some(transport)) = (reservoir, transport.as_ref()) {
-                let evolved =
-                    finite_gas::advance(&source, thermal, duration_s, options, transport, &cx)?;
+                let conductivity = PropertyKey::new(
+                    "thermal_conductivity",
+                    fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
+                );
+                let cells: Vec<_> = thermal
+                    .cells()
+                    .values()
+                    .map(|cell| MaterialCell {
+                        cell: cell.id,
+                        material_id: cell.material_id,
+                        curve: caloric.curve(),
+                        point: ThermalMaterialPoint {
+                            material: card,
+                            context: &context,
+                            temperature_axis: "T",
+                            liquid_fraction_axis: None,
+                        },
+                        conductivity: Some((
+                            &conductivity,
+                            MaterialPropertySelection::SingleClaimOnly,
+                        )),
+                    })
+                    .collect();
+                let network = MaterialNetwork {
+                    cells: &cells,
+                    resistors: &[],
+                    links: &transport.material_links,
+                };
+                let prepared = network.prepare(&thermal, || cx.checkpoint().is_err())?;
+                let evolved = finite_gas::advance(
+                    &source, thermal, duration_s, options, transport, &prepared, &cx,
+                )?;
                 let valve = source
                     .resolve(&evolved.thermal, &cx)?
                     .reduce_pressure_valve(&reduction, &cx)?;
@@ -521,8 +552,20 @@ fn synthesize_with_gas(
 }
 
 fn demo(heat_capacity_scale: f64) -> Result<MaterialCard> {
+    demo_with_conductivity(heat_capacity_scale, None)
+}
+
+fn demo_with_conductivity(
+    heat_capacity_scale: f64,
+    conductivity_at_280_300_400_k: Option<[f64; 3]>,
+) -> Result<MaterialCard> {
     if !heat_capacity_scale.is_finite() || heat_capacity_scale <= 0.0 {
         return Err("demo heat-capacity scale must be finite and positive".into());
+    }
+    if conductivity_at_280_300_400_k
+        .is_some_and(|values| values.iter().any(|k| !k.is_finite() || *k < 0.0))
+    {
+        return Err("demo conductivity values must be finite and nonnegative".into());
     }
     let mut claims = ClaimSet::new();
     for (name, dims, a, b) in [
@@ -566,13 +609,25 @@ fn demo(heat_capacity_scale: f64) -> Result<MaterialCard> {
             "thermal_conductivity",
             fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
         ),
-        value: PropertyValue::Scalar {
-            value: 0.2,
-            dims: fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
+        value: match conductivity_at_280_300_400_k {
+            Some(values) => PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: [280.0, 300.0, 400.0].into_iter().zip(values).collect(),
+                dims: fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
+            },
+            None => PropertyValue::Scalar {
+                value: 0.2,
+                dims: fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS,
+            },
         },
         validity: ValidityDomain::unconstrained().with("T", 280.0, 400.0),
         uncertainty: UncertaintyModel::Unstated,
-        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        interpolation: if conductivity_at_280_300_400_k.is_some() {
+            InterpolationPolicy::LinearInside
+        } else {
+            InterpolationPolicy::ConstantWithinValidity
+        },
         observations: vec![],
         provenance: Provenance {
             source: "manufactured heated-valve integration data, not measurements".into(),
@@ -594,16 +649,42 @@ fn demo(heat_capacity_scale: f64) -> Result<MaterialCard> {
 
 fn run(args: &[String]) -> Result<()> {
     let requested_gas = args.iter().any(|word| word.starts_with("--gas-"));
-    let (args, gas_sources) = thermochemical::Options::extract(args)?;
+    let mut remaining = Vec::new();
+    let mut demo_conductivity = None;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word != "--demo-conductivity" {
+            remaining.push(word.clone());
+            continue;
+        }
+        if demo_conductivity.is_some() {
+            return Err("--demo-conductivity may be supplied only once".into());
+        }
+        let mut values = [0.0; 3];
+        for value in &mut values {
+            *value = words
+                .next()
+                .ok_or("--demo-conductivity needs k at 280, 300 and 400 K in W/(m K)")?
+                .parse()?;
+        }
+        demo_conductivity = Some(values);
+    }
+    let (args, gas_sources) = thermochemical::Options::extract(&remaining)?;
     let (args, gas_options) = finite_gas::Options::extract(&args, &gas_sources)?;
     if requested_gas && gas_options.is_none() {
         return Err("gas source declarations require --finite-gas".into());
     }
     if args.len() != 6 {
-        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen]".into());
+        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen] [--demo-conductivity K_AT_280 K_AT_300 K_AT_400]".into());
+    }
+    if demo_conductivity.is_some() && (args[0] != "--demo" || gas_options.is_none()) {
+        return Err("--demo-conductivity requires --demo and --finite-gas".into());
     }
     let card = match args[0].as_str() {
-        "--demo" => demo(args[1].parse()?)?,
+        "--demo" => match demo_conductivity {
+            Some(values) => demo_with_conductivity(args[1].parse()?, Some(values))?,
+            None => demo(args[1].parse()?)?,
+        },
         "--pack" => {
             let mut bytes = Vec::new();
             std::fs::File::open(&args[1])?
