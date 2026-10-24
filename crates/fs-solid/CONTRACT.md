@@ -514,32 +514,47 @@ This is source-data covariance conditional on fixed orientation, not solved-fiel
 uncertainty, a confidence/domain bound, material/frame calibration, propagation
 of uncertain temperature/stiffness/orientation, or experimental validation.
 
-## Thermal eigenstrain evolution in sparse P1 dynamics
+## Thermal material evolution in sparse P1 dynamics
 
 `loads3::transient::thermal::advance_thermal_candidate` refreshes the actual
-source-bound thermal strain and material identity while preserving the original
-Newmark displacement, velocity, acceleration, clock and sparse operators.
-Density and every global Mandel stiffness entry must remain bit-identical;
-mesh connectivity and stationary zero restraints stay fixed. Refreshed source
-counts, identities, geometry, quality and strain limits pass the original
-assembly and response checks. A fully clamped trajectory uses the existing
-zero-free-DOF dynamic assembly and still reports stress and stored energy.
+source-bound thermal strain, material identity and global Mandel stiffness.
+Changed tensors rebuild the native endpoint stiffness using the existing P1
+assembly; unchanged tensors reuse the original sparse operators. Both paths
+preserve the accepted Newmark displacement, velocity, acceleration and clock.
+Reference density, sparse mass, reference inventory, mesh connectivity and
+stationary zero restraints stay fixed. Refreshed source counts, identities,
+geometry, quality and strain limits pass the original assembly and response
+checks. A fully clamped trajectory uses the existing zero-free-DOF dynamic
+assembly and still reports stress and stored energy.
 
-The ordinary Newmark audit retains its unshifted quadratic-energy convention
-and averages old/new thermal nodal forcing. `ThermalTransientStep3` separately
-audits physical kinetic plus shifted elastic energy. Independent element work
-is `-sum V * (sigma_old+sigma_next)/2 : delta(epsilon_free)`, including heating
-of a fully restrained solid with zero displacement work. Both audits reuse the
-declared run tolerances; native endpoint stress recovery uses the refreshed
-source identities. Failed assembly, motion, stress, energy or cancellation
-checks leave the original trajectory unchanged.
+The ordinary Newmark audit retains its unshifted quadratic-energy convention,
+averages old/new thermal nodal forcing, and records signed stiffness parameter
+work `W_K = q_old' * (K_next-K_old) * q_next / 2`.
+`ThermalTransientStep3` separately audits physical kinetic plus shifted elastic
+energy, with `e = epsilon-epsilon_free`. Its independent element work is
+`W_T = -sum V * (sigma_old+sigma_next)/2 : delta(epsilon_free)` and
+`W_C = sum V/2 * e_old : (C_next-C_old) : e_next`. Both terms are needed when a
+fully restrained solid expands and softens with zero displacement work.
+Material parameter work is signed prescribed input; it is not dissipated heat.
+
+Changing stiffness requires zero stiffness-proportional Rayleigh damping;
+fixed reference mass damping remains supported. Changing endpoint Rayleigh
+stiffness damping is not unconditionally dissipative and is refused.
+Unchanged-stiffness trajectories retain their existing damping behavior.
+The native and physical audits use the declared run tolerances and refreshed
+source identities. These are exact discrete endpoint work identities;
+continuum accuracy still requires resolving the prescribed material path and
+checking timestep refinement. Failed assembly, motion, stress, energy or
+cancellation checks leave the original trajectory unchanged.
 
 G1/G3/G4 tests in `tests/transient3.rs` cover an analytical thermally driven
-oscillator with timestep refinement, source-identity refresh, fully clamped
-heating/cooling and signed work, changed-stiffness refusal, late strain refusal
-and cancellation. This is one-way prescribed thermal loading with constant
-constitutive coefficients, not reciprocal caloric feedback, softening, moving
-thermal supports, an adjoint of the new thermal inputs or measured validation.
+oscillator with timestep refinement, source-identity refresh, scalar softening
+and stiffening with retained motion and mass damping, fully clamped thermal
+storage with distinct expansion/stiffness work, changed-density and variable
+stiffness-damping refusal, late strain refusal and cancellation. This is
+one-way prescribed thermal/material loading. Reciprocal caloric feedback,
+changing reference mass, moving thermal supports, an adjoint of the new
+material inputs and measured validation remain outside this path.
 
 ## Prescribed support motion in sparse P1 dynamics
 

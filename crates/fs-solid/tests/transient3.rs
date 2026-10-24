@@ -147,6 +147,8 @@ fn g1_thermal_eigenstrain_ramp_drives_the_same_inertial_motion_and_refreshed_str
                     TetThermalStrainField::Uniform(&strain),&load,1.0/count as f64,frame,0.01,cx).unwrap();
                 assert!(report.physical_balance_error_j.abs() < 1e-13);
                 assert!(report.native.balance_error_j.abs() < 1e-13);
+                assert_eq!(report.native.stiffness_parameter_work_j,0.0);
+                assert_eq!(report.stiffness_material_work_j,0.0);
                 material_work += report.thermal_material_work_j;
                 run = next;
             }
@@ -201,10 +203,96 @@ fn g1_fully_clamped_heating_and_cooling_account_for_elastic_storage_without_moti
 }
 
 #[test]
-fn g4_thermal_refresh_refuses_changed_operators_and_late_strain_without_mutating_history() {
+fn g1_temperature_dependent_stiffness_uses_endpoint_operator_and_signed_material_work() {
+    with_cx(false, |cx| {
+        // One free axial DOF: m=.1, k0=10, k1=6. The independently solved
+        // Newmark scalar reference includes changing eigenstrain and force.
+        let initial_material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
+        let heated_material = TetElasticMaterial::try_new(6.0,36.0,0.0,[75;32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let initial_problem = problem(&initial_material,&fixed);
+        let heated_problem = problem(&heated_material,&fixed);
+        let geometry = geometry(cx);
+        let old_load = geometry.assemble(&[],VolumeLoad3::None,&[(3,0.0002)],cx).unwrap();
+        let next_load = geometry.assemble(&[],VolumeLoad3::None,&[(3,-0.0001)],cx).unwrap();
+        let frame = fs_blake3::ContentHash([74;32]);
+        let old_strain = TetThermalStrainState::try_new(300.0,290.0,[0.0003,0.0,0.0,0.0,0.0,0.0],
+            initial_material.material_state_identity,frame,0.01).unwrap();
+        let next_strain = TetThermalStrainState::try_new(301.0,290.0,[0.0012,0.0,0.0,0.0,0.0,0.0],
+            heated_material.material_state_identity,frame,0.01).unwrap();
+        let mut u = ZERO; u[1][0] = 0.002;
+        let mut v = ZERO; v[1][0] = -0.001;
+        let cfg = TransientConfig3 { mass_damping_per_s:0.4, ..config() };
+        let run = old_load.begin_transient(&initial_problem,Some(TetThermalStrainField::Uniform(&old_strain)),
+            0.0,&u,&v,cfg,cx).unwrap();
+        let saved = run.state().clone();
+        let (heated, report) = run.advance_thermal_candidate(&heated_problem,
+            TetThermalStrainField::Uniform(&next_strain),&next_load,0.02,frame,0.01,cx).unwrap();
+        // Exact rational scalar solution, independently evaluated.
+        let q1 = 0.001958712871287129;
+        let v1 = -0.003128712871287129;
+        assert!((heated.state().displacement[0]-q1).abs() < 1e-14);
+        assert!((heated.state().velocity[0]-v1).abs() < 1e-13);
+        assert!((report.native.stiffness_parameter_work_j+7.834851485148515e-6).abs() < 1e-14);
+        assert!((report.stiffness_material_work_j+2.5796237623762375e-6).abs() < 1e-14);
+        assert!((report.native.damping_loss_j-3.4092539947064014e-9).abs() < 1e-15);
+        assert!(report.native.balance_error_j.abs() < 1e-13);
+        assert!(report.physical_balance_error_j.abs() < 1e-13);
+        let response = heated.recover_response(frame,0.01,cx).unwrap();
+        assert!((response.stress.elements()[0].stress_mandel_pa()[0]-36.0*(q1-0.0012)).abs() < 1e-12);
+        assert_eq!(run.state(),&saved);
+
+        // Continue from K1 and retained q1/v1/a1 while the source stiffens.
+        let final_strain = TetThermalStrainState::try_new(302.0,290.0,[0.0006,0.0,0.0,0.0,0.0,0.0],
+            initial_material.material_state_identity,frame,0.01).unwrap();
+        let (stiffened, second) = heated.advance_thermal_candidate(&initial_problem,
+            TetThermalStrainField::Uniform(&final_strain),&next_load,0.02,frame,0.01,cx).unwrap();
+        let qp = q1+0.02*v1+0.0001*heated.state().acceleration[0];
+        let vp = v1+0.01*heated.state().acceleration[0];
+        let a2 = (-0.0001+10.0*0.0006-10.0*qp-0.04*vp)/(0.1+0.0004+0.001);
+        let q2 = qp+0.0001*a2;
+        assert!((stiffened.state().displacement[0]-q2).abs() < 1e-14);
+        assert!((second.native.stiffness_parameter_work_j-0.5*q1*4.0*q2).abs() < 1e-14);
+        assert!(second.physical_balance_error_j.abs() < 1e-13);
+        assert_eq!(stiffened.state().step,2);
+    });
+}
+
+#[test]
+fn g1_clamped_softening_and_expansion_keep_distinct_physical_work_accounts() {
+    with_cx(false, |cx| {
+        let cold_material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
+        let hot_material = TetElasticMaterial::try_new(6.0,30.0,0.0,[75;32]).unwrap();
+        let fixed: Vec<_> = (0..12).collect();
+        let cold_problem = problem(&cold_material,&fixed);
+        let hot_problem = problem(&hot_material,&fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[],VolumeLoad3::None,&[],cx).unwrap();
+        let frame = fs_blake3::ContentHash([74;32]);
+        let cold_strain = TetThermalStrainState::try_new(310.0,300.0,[0.001,0.0,0.0,0.0,0.0,0.0],
+            cold_material.material_state_identity,frame,0.01).unwrap();
+        let hot_strain = TetThermalStrainState::try_new(320.0,300.0,[0.002,0.0,0.0,0.0,0.0,0.0],
+            hot_material.material_state_identity,frame,0.01).unwrap();
+        let cold = load.begin_transient(&cold_problem,Some(TetThermalStrainField::Uniform(&cold_strain)),
+            0.0,&ZERO,&ZERO,config(),cx).unwrap();
+        let (hot, report) = cold.advance_thermal_candidate(&hot_problem,
+            TetThermalStrainField::Uniform(&hot_strain),&load,0.01,frame,0.01,cx).unwrap();
+        assert_eq!(report.native.thermal_equivalent_work_j,0.0);
+        assert_eq!(report.native.stiffness_parameter_work_j,0.0);
+        assert!((report.kinetic_plus_elastic_before_j-5e-6).abs() < 1e-15);
+        assert!((report.kinetic_plus_elastic_after_j-1e-5).abs() < 1e-15);
+        assert!((report.thermal_material_work_j-1e-5).abs() < 1e-15);
+        assert!((report.stiffness_material_work_j+5e-6).abs() < 1e-15);
+        assert!(report.physical_balance_error_j.abs() < 1e-15);
+        assert_eq!(hot.nodal_motion(cx).unwrap(),[ZERO.to_vec(),ZERO.to_vec(),ZERO.to_vec()]);
+    });
+}
+
+#[test]
+fn g4_thermal_refresh_refuses_changed_mass_and_late_strain_without_mutating_history() {
     with_cx(false, |cx| {
         let material = TetElasticMaterial::try_new(6.0,60.0,0.0,[73;32]).unwrap();
-        let changed = TetElasticMaterial::try_new(6.0,61.0,0.0,[75;32]).unwrap();
+        let changed = TetElasticMaterial::try_new(7.0,60.0,0.0,[75;32]).unwrap();
         let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
         let original = problem(&material,&fixed); let wrong = problem(&changed,&fixed);
         let geometry = geometry(cx);
@@ -216,6 +304,15 @@ fn g4_thermal_refresh_refuses_changed_operators_and_late_strain_without_mutating
             material.material_state_identity,frame,0.1).unwrap();
         assert!(matches!(run.advance_thermal_candidate(&wrong,TetThermalStrainField::Uniform(&strain),
             &load,0.01,frame,0.1,cx),Err(TransientError3::Invalid(_))));
+        let softened = TetElasticMaterial::try_new(6.0,30.0,0.0,[75;32]).unwrap();
+        let softened_problem = problem(&softened,&fixed);
+        let softened_strain = TetThermalStrainState::try_new(310.0,300.0,[0.001,0.0,0.0,0.0,0.0,0.0],
+            softened.material_state_identity,frame,0.1).unwrap();
+        let damped = load.begin_transient(&original,None,0.0,&ZERO,&ZERO,
+            TransientConfig3 { stiffness_damping_s:0.01, ..config() },cx).unwrap();
+        assert!(matches!(damped.advance_thermal_candidate(&softened_problem,
+            TetThermalStrainField::Uniform(&softened_strain),&load,0.01,frame,0.1,cx),
+            Err(TransientError3::Invalid(_))));
         // The native inertial candidate is computed, then physical stress
         // recovery refuses an over-limit elastic strain. Accepted history stays.
         assert!(run.advance_thermal_candidate(&original,TetThermalStrainField::Uniform(&strain),

@@ -7,7 +7,8 @@
 //!
 //! This is a sequential thermal-loading approximation. The default solve is
 //! quasistatic; resolved states also drive the existing inertial Newmark owner
-//! through `advance_transient_candidate` when density/stiffness stay fixed. The thermal
+//! through `advance_transient_candidate` with refreshed stiffness and fixed
+//! reference mass. Expansion and stiffness work are explicit. The thermal
 //! audit covers caloric storage and heat; it does not include elastic energy or
 //! infer reciprocal thermoelastic heat, plastic flow, phase-support laws, or
 //! deformation-dependent thermal conductances. Those require their own closures.
@@ -422,13 +423,14 @@ impl SolidEnthalpyState<'_> {
     /// borrowed by the returned run so refreshed source identities remain alive.
     /// Keep both resolved states and their problems until the candidate is accepted.
     ///
-    /// The native owner admits unchanged density/stiffness, mesh and zero
-    /// supports, preserves motion/history, and audits physical thermal input
-    /// work even in fully clamped elements. This is prescribed one-way thermal
-    /// loading: its signed material work is NOT subtracted from caloric storage.
-    /// Thermal gradients, expansion and their source domains are resolved here;
-    /// softening and reciprocal thermoelastic heat require a different closure.
-    /// Resolve heating events and verify temporal refinement explicitly.
+    /// The native owner retains reference mass, mesh and zero supports while
+    /// rebuilding changed stiffness. Motion/history continues, and expansion
+    /// and stiffness work are audited separately, even in fully clamped elements.
+    /// Changing stiffness admits mass-proportional damping only. This is
+    /// prescribed one-way thermal loading: signed material work is NOT subtracted
+    /// from caloric storage. Reciprocal thermoelastic heat needs its own closure.
+    /// This endpoint adapter does not inspect intervening thermal events; admit
+    /// that path, resolve heating events and verify temporal refinement explicitly.
     pub fn advance_transient_candidate<'g, 'm, 'p, 's>(
         &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
         problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>, cx: &Cx<'_>,

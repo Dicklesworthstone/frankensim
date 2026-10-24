@@ -4760,18 +4760,25 @@ previous state must match the run's exact material and thermal fields and
 clock. Both endpoints retain the same source-pinned reference records, cell
 inventory, axes, frames and strain bounds. The next problem is checked against
 the resolved endpoint before its source identities are borrowed by the native
-candidate. Density/stiffness changes refuse this eigenstrain-only lane rather
-than reuse a stale mass/stiffness operator.
+candidate. Changed source stiffness rebuilds the native operator at fixed
+reference mass; temperature-dependent softening and stiffening continue the
+same displacement, velocity and acceleration history. Density changes and
+changing stiffness with stiffness-proportional damping refuse. Constant mass
+damping remains admissible.
 
-The returned thermal work is the independently integrated native material work,
-including clamped thermal storage, and is kept separate from caloric heat.
+Expansion work and constitutive-stiffness work are independently integrated
+from the native stress/strain endpoints, including fully clamped storage, and
+kept separate from caloric heat. The latter is the signed tensor term
+`sum V/2 * elastic_strain_old : (C_next-C_old) : elastic_strain_next`.
 This is sequential one-way thermal-to-inertial loading; no reciprocal heat
 correction or whole caloric/mechanical energy closure is claimed. Tests in
 `tests/solid_enthalpy.rs` change material expansion, modulus and heat capacity
 as source data, compare actual heated inertial endpoints with a one-DOF
-reference, continue the same motion, and refuse missing source/clock bindings
-or temperature-dependent softening. Existing source and phase-domain admission
-remains mandatory and heating events require resolved time steps.
+reference, continue the same motion through softening and stiffening, and
+refuse missing source/clock bindings or unsupported damping. A nonzero initial
+elastic strain makes omitted stiffness work exceed the energy allowance.
+The endpoint adapter does not observe intervening thermal events: callers
+must admit that path, resolve heating events and check temporal refinement.
 
 ### Finite source gas on uniform thermal feedback
 
