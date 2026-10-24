@@ -392,6 +392,9 @@ __device__ __forceinline__ void solve_contact(const P& p, ll s, int j, const dou
   p.ct_peak[oj] = fmax(p.ct_peak[oj], f);
   p.ct_force[oj] = f;
   p.ct_dnow[oj] = d_pred - comp * f;
+  // Coulomb friction has zero support without a compressive normal force.
+  // This is only an activity witness: never reorder or approximate an active solve.
+  if (f > 0.0 && __ldg(&p.ct_has_friction[j])) atomicExch(p.any_friction, 1);
 }
 
 // Friction r of simulation s: constrained quadratic solve, as in fs-vkplate.
@@ -454,6 +457,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
   const ll nwarps = ((ll)nbk * TPB) >> 5;
   // phase timing on block 0 (cycles from one barrier exit to the next, summed in registers, written at exit)
   long long tprev = clock64(), pt[7] = {0, 0, 0, 0, 0, 0, 0};
+  long long active_friction_steps = 0;
 #define MARK(ph) if (blockIdx.x == 0 && tid == 0) { long long tn = clock64(); pt[ph] += tn - tprev; tprev = tn; }
 
   for (ll it = 0; it < p.steps; it++) {
@@ -468,6 +472,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     double* LWP = (n % 2 == 0) ? p.LW1 : p.LW0;
 
     // ------------------------------------------------------------------ P1
+    // The P1 grid barrier publishes this reset before any contact is solved.
+    if (blockIdx.x == 0 && tid == 0) *(volatile int*)p.any_friction = 0;
     for (ll wi = blockIdx.x; wi < B * NI; wi += nbk) {
       const int s = (int)(wi / NI), item = (int)(wi % NI);
       const int b = __ldg(&p.item_body[item]);
@@ -733,6 +739,16 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     {
       bool wide_before = false;
       for (int bt = 0; bt < p.NCB + p.NFB; bt++) {
+        if (bt == p.NCB) {
+          // Include contacts solved on other blocks before reading the witness.
+          // If every friction call would return immediately, its hundreds of
+          // ordered batch barriers have no work to protect. Otherwise retain
+          // the original batches and every floating-point operation unchanged.
+          gsync(p.bar, nbk);
+          // Volatile bypasses per-SM L1 caching of this cross-block witness.
+          if (!*(volatile int*)p.any_friction) break;
+          if (blockIdx.x == 0 && tid == 0) active_friction_steps++;
+        }
         const bool fr = bt >= p.NCB;
         const int g = fr ? bt - (int)p.NCB : bt;
         const int q0 = fr ? __ldg(&p.fb_ptr[g]) : __ldg(&p.cb_ptr[g]);
@@ -872,5 +888,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     }
     MARK(6)
   }
-  if (blockIdx.x == 0 && tid == 0) for (int ph = 0; ph < 7; ph++) p.prof[ph] += pt[ph];
+  if (blockIdx.x == 0 && tid == 0) {
+    for (int ph = 0; ph < 7; ph++) p.prof[ph] += pt[ph];
+    p.prof[7] += active_friction_steps;
+  }
 }

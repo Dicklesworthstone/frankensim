@@ -49,6 +49,7 @@ params! {
     ct_a0: "int*", ct_b0: "int*", ct_end: "int*", ct_node: "int*", ct_w: "double*", ct_gap: "double*", ct_kk: "double*",
     ct_alpha: "double*", ct_mu: "double*", ct_comp: "double*", ct_fx: "int*", cb_ptr: "int*", cb_idx: "int*",
     ct_active: "int*", ct_force: "double*", ct_dnow: "double*", ct_peak: "double*",
+    ct_has_friction: "int*", any_friction: "int*",
     bc_ptr: "int*", bc_idx: "int*",
     fr_x0: "int*", fr_y0: "int*", fr_end: "int*", fr_node: "int*", fr_w: "double*", fr_contact: "int*", fr_mu: "double*",
     fr_cxx: "double*", fr_cyy: "double*", fr_cxy: "double*", fb_ptr: "int*", fb_idx: "int*", fr_force: "double*",
@@ -312,6 +313,14 @@ pub fn run(
     p.cb_ptr = m.i32(&plan.cb_ptr)?; p.cb_idx = m.i32(&plan.cb_idx)?;
     p.ct_active = m.i32(&cati(&|s| &s.ct_active))?; p.ct_force = m.f64(&cat(&|s| &s.ct_force))?;
     p.ct_dnow = m.f64(&cat(&|s| &s.ct_dnow))?; p.ct_peak = m.f64(&cat(&|s| &s.ct_peak))?;
+    let mut has_friction = vec![0i32; ncon];
+    for (&contact, &mu) in plan.fr_contact.iter().zip(&plan.fr_mu) {
+        let flag = has_friction.get_mut(contact as usize).ok_or("friction contact out of bounds")?;
+        // Match solve_friction's early return exactly, including unordered mu.
+        if mu > 0.0 || mu.is_nan() { *flag = 1; }
+    }
+    p.ct_has_friction = m.i32(&has_friction)?;
+    p.any_friction = m.i32(&[0])?;
     p.bc_ptr = m.i32(&plan.bc_ptr)?; p.bc_idx = m.i32(&plan.bc_idx)?;
     p.fr_x0 = m.i32(&plan.fr_x0)?; p.fr_y0 = m.i32(&plan.fr_y0)?; p.fr_end = m.i32(&plan.fr_end)?; p.fr_node = m.i32(&plan.fr_node)?;
     p.fr_w = m.f64(&plan.fr_w)?; p.fr_contact = m.i32(&plan.fr_contact)?; p.fr_mu = m.f64(&plan.fr_mu)?;
@@ -375,8 +384,9 @@ pub fn run(
     }
     let pr: Vec<i64> = stream.clone_dtoh(&prof).map_err(e)?;
     if std::env::var("RENDER_GPU_PROF").is_ok() {
-        let tot: i64 = pr[..8].iter().sum();
+        let tot: i64 = pr[..7].iter().sum();
         eprintln!("cycles per step by phase (block 0): {:?} total {}", pr.iter().take(7).map(|c| c / total.max(1) as i64).collect::<Vec<_>>(), tot / total.max(1) as i64);
+        eprintln!("friction-active steps: {} of {total}", pr[7]);
     }
     let mut bending_loss_j = stream.clone_dtoh(&m.f64s[viscous_counter_index]).map_err(e)?;
     bending_loss_j.truncate(b * nb);
