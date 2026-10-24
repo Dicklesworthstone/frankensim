@@ -6017,3 +6017,45 @@ closure, all-closed source response, signed kinetic-energy return, material
 and gap substitutions, joint-mouth construction order, aggregate source work,
 late refusal and exact retry. Rust syntax parsing passed; native compilation,
 numerical test execution and acoustic qualification remain pending.
+
+
+## Original cavity gas diffusion in the reciprocal string bank
+
+`with_material_shell_cavity_thermal` projects scalar heat diffusion on the same
+original tetrahedral Helmholtz FE into the existing complete mechanical and
+material-memory propagator. `HelmholtzFe::isothermal_diffusion_modes` restricts
+the original consistent K/M pencil to homogeneous Dirichlet traces on selected
+solid walls; actual compact mouths remain natural zero-diffusive-flux faces.
+The original sparse inertia/slicing owner retains the entire declared positive
+eigenwindow. A source ceiling refuses, never truncates. Its bounded eigensolver
+call retains the original cancellation limitations; assembly/projection polls.
+
+The coherent source gas supplies kappa/(rho*cv), cv=cp/gamma, adiabatic modulus
+rho*c² and isothermal modulus rho*c²/gamma. Complete L2 pressure/temperature
+cross projections form reciprocal compression-memory rows. Positive equilibrium
+compression is factored by the existing Cholesky owner, and one first-order
+Maxwell state per active heat eigenmode enters the existing exact network.
+All modal cross terms and actual neck volume coordinates remain coupled. The
+instantaneous stiffness equals the original adiabatic cavity. Missing thermal
+projection remains explicitly adiabatic, with a declared infinity-norm bound;
+no modal-Q fit, eigenvalue clipping or duplicated compliance is introduced.
+
+Existing source/body/layered history stays a prefix, followed by gas history.
+New gas states start unrelaxed so initial mechanical compression is preserved.
+Cold gas/torque/axial rebuilds retain thermal projections and states. Accepted
+single/multiple-bow pressure and neck observations include that exact memory.
+Coordinate-only physical pressure observations refuse on a memory-bound cavity;
+the separately named adiabatic reference is not a physical pressure readout.
+The original work/energy owner counts thermal availability and dissipative loss
+exactly once, together with material memories and exterior acoustic loading.
+
+This is linear gas conduction to fixed-temperature walls, not complete
+viscothermal boundary-layer physics: no no-slip shear, wall effusivity/finite
+thermal inventory, aperture enthalpy advection, molecular relaxation or measured
+instrument agreement is claimed. The gas/solid state remains frozen. The FE,
+heat-mode window, compression-projector remainder and pressure basis require
+convergence; a coarse FE does not resolve audio-frequency thermal skin depths.
+Focused tests cover analytic star-tet heat rates/projections, coherent gas and
+length substitutions, reciprocal pressure/force/storage/loss, strict budgets,
+original bank history and reconstruction. Native Rust execution remains
+required; syntax and independent matrix identities are not runtime proof.

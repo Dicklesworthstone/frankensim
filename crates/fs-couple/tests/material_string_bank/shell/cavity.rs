@@ -7,6 +7,8 @@ use fs_couple::shear_shell::pressure::ShellPressureSurfaces;
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_plate::shell::pressure::{OrientedShellFacet, ShellFace};
 
+mod thermal;
+
 fn with_volume<R>(n: usize, atmosphere: GasState, f: impl FnOnce(&HelmholtzFe<'_>) -> R) -> R {
     assert!((1..=2).contains(&n));
     // A closed icosahedral shell has strictly acute incident-facet angles.
@@ -271,3 +273,4 @@ fn missing_faces_wrong_normals_stale_gas_and_incomplete_pressure_windows_refuse(
         assert!(cold.with_material_shell_cavity(fe,resolution(),gate).is_err());
     }));
 }
+

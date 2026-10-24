@@ -53,6 +53,8 @@ pub struct CavityCoupling {
     maximum_modes: usize,
     medium: crate::vibroacoustic::AcousticMedium,
     necks: Vec<neck::CompiledNeck>,
+    // A constitutive owner now needs accepted memory to observe pressure.
+    external_compression_memory: bool,
 }
 impl CavityCoupling {
     /// Compile the existing row-major structural-by-acoustic overlap matrix.
@@ -117,7 +119,7 @@ impl CavityCoupling {
         Ok(Self { structural, omegas:cavity.omegas.clone(), damping:damping_per_s.to_vec(),
             springs, dynamic, total, maximum_modes,
             medium: crate::vibroacoustic::AcousticMedium {rho0:cavity.rho0,c0:cavity.c0},
-            necks:Vec::new() })
+            necks:Vec::new(), external_compression_memory:false })
     }
 
     /// Original solid/striker coordinates; these keep their original addresses.
@@ -129,6 +131,18 @@ impl CavityCoupling {
     /// Retained cavity basis size, including uniform compression when supplied.
     #[must_use]
     pub fn cavity_modes(&self) -> usize { self.omegas.len() }
+
+    /// Original adiabatic compression storage in pressure-mode order. Each
+    /// row includes all actual solid, standing-wave and neck coordinates.
+    /// Constitutive reducers may project this storage; they must retain the
+    /// same reciprocal pressure observation and account every memory state.
+    pub fn compression_storage(&self) -> &[VolumeSpring] { &self.springs }
+
+    /// Mark an attached compression-memory owner. Coordinate-only physical
+    /// pressure/neck observations then refuse; that owner must supply its
+    /// complete memory-aware pressure coefficients. This is irreversible on
+    /// this value and changes no storage or integration by itself.
+    pub fn require_compression_memory(&mut self) { self.external_compression_memory = true; }
 
     /// Compose before execution, preserving every original body's initial motion
     /// and every pad's declared conditioning. Standing-wave coordinates start
@@ -222,6 +236,16 @@ impl CavityCoupling {
     /// Reuses caller storage; bad state/dimensions/overflow leave it unchanged.
     /// Kelvin memory can follow the interleaved prefix and is not acoustic data.
     pub fn pressures_into(&self, state: &[f64], output: &mut [f64]) -> Result<(), ImpactError> {
+        if self.external_compression_memory {
+            return Err(invalid("physical cavity pressure requires the attached compression memory"));
+        }
+        self.adiabatic_pressures_into(state,output)
+    }
+
+    /// Adiabatic reference coefficients only. When compression memory is
+    /// attached this is NOT the physical pressure; the constitutive owner must
+    /// add its accepted memory correction before observation or work projection.
+    pub fn adiabatic_pressures_into(&self, state: &[f64], output: &mut [f64]) -> Result<(), ImpactError> {
         if state.len() < 2*self.total || output.len() != self.springs.len()
             || state[..2*self.total].iter().any(|v| !v.is_finite()) {
             return Err(invalid("cavity pressure needs the complete finite accepted state"));
@@ -249,3 +273,4 @@ impl CavityCoupling {
         Ok(pressure)
     }
 }
+

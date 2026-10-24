@@ -181,12 +181,26 @@ impl CavityCoupling {
     /// Observe accepted neck flow and the reciprocal pressure drive. Invalid
     /// states, indices or arithmetic are refused rather than publishing NaNs.
     pub fn neck_observation(&self,state:&[f64],index:usize)->Result<NeckObservation,ImpactError> {
+        let mut pressure = [0.0;super::MAX_CAVITY_PRESSURE_MODES];
+        self.pressures_into(state,&mut pressure[..self.cavity_modes()])?;
+        self.neck_observation_with_pressures(state,index,&pressure[..self.cavity_modes()])
+    }
+
+    /// Observe a neck with complete pressure coefficients supplied by its
+    /// constitutive owner, including accepted thermal/compression memory.
+    /// The owner must use this cavity's exact pressure basis and normalization.
+    pub fn neck_observation_with_pressures(&self,state:&[f64],index:usize,
+        pressure:&[f64])->Result<NeckObservation,ImpactError> {
+        if state.len()<2*self.total_modes() || pressure.len()!=self.cavity_modes()
+            || state[..2*self.total_modes()].iter().chain(pressure).any(|v|!v.is_finite()) {
+            return Err(invalid("neck observation needs complete finite mechanics and physical pressure"));
+        }
         let neck=self.necks.get(index).ok_or_else(||invalid("unknown cavity neck"))?;
-        let driving_pressure_pa=self.pressure_at(state,&neck.averages)?;
+        let driving_pressure_pa=pressure.iter().zip(&neck.averages).map(|(a,b)|a*b).sum::<f64>();
         let q=state[2*neck.coordinate];let p=state[2*neck.coordinate+1];
         let volume=q*neck.volume_weight;let flow=p*neck.volume_weight;
         let drop=neck.resistance*flow;let energy=0.5*p*p;let power=drop*flow;
-        if [volume,flow,drop,energy,power].iter().any(|v|!v.is_finite()) {
+        if [volume,flow,drop,energy,power,driving_pressure_pa].iter().any(|v|!v.is_finite()) {
             return Err(invalid("neck observation overflow"));
         }
         Ok(NeckObservation {coordinate:neck.coordinate,displaced_volume_m3:volume,
@@ -194,3 +208,4 @@ impl CavityCoupling {
             resistive_pressure_drop_pa:drop,kinetic_energy_j:energy,dissipated_power_w:power})
     }
 }
+
