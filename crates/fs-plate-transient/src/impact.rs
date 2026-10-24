@@ -139,9 +139,11 @@ pub struct PlateImpactProbe {
 /// The final component of every q/v/a vector belongs to the indenter. All
 /// contact points use the same patch-average closure with their own original
 /// gaps and weights: this is a declared uniform-pressure interface reduction,
-/// not a resolved distribution of local penetration. The indenter mass, fixed
-/// footprint, and contact-law parameters are held fixed by the adjoint; its
-/// parameter order is exactly the original plate's four parameters plus loads.
+/// not a resolved distribution of local penetration. By default the adjoint
+/// retains the original plate/load parameter order. Authored models can opt
+/// into [`Self::with_contact_calibration`] to append indenter mass and the
+/// original contact owner's stiffness, internal loss and point gaps. The
+/// footprint, exponent and quadrature measures remain fixed.
 pub struct PlateImpact<'a, L: ?Sized> {
     plate: PlateDynamics<'a, L>,
     patch: PlatePatchStencil,
@@ -150,6 +152,7 @@ pub struct PlateImpact<'a, L: ?Sized> {
     closure: Vec<f64>,
     dimension: usize,
     source: Option<SourceBinding>,
+    contact_parameters: usize,
 }
 
 struct SourceBinding {
@@ -257,7 +260,46 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
             closure,
             dimension,
             source: None,
+            contact_parameters: 0,
         })
+    }
+
+    /// Include physical contact controls in the existing discrete adjoint.
+    ///
+    /// The original plate/load prefix stays in place. Its suffix is
+    /// `[indenter_mass_kg, contact_stiffness, internal_loss, gap_0, ...]`,
+    /// using the admitted law's original SI coefficients and point order.
+    /// This changes derivative coordinates only; forward physics is unchanged.
+    /// The mass derivative includes consistent initial acceleration through
+    /// the shared initialization VJP as well as every implicit time step.
+    ///
+    /// Rebuild the authored model at each new parameter point. Stiffness and
+    /// loss stay nonnegative, mass stays positive, and point measures,
+    /// collocation, exponent and footprint stay fixed. At contact switching
+    /// and unloading-cap corners the original owner selects one-sided
+    /// derivatives; these are not derivatives of event times or topology.
+    ///
+    /// Source-bound models refuse this opt-in: changing their constitutive
+    /// coefficients requires re-resolving the original material/interface
+    /// owner, whose derivative is not represented by these authored controls.
+    pub fn with_contact_calibration(mut self) -> Result<Self, PlateImpactError> {
+        if self.source.is_some() {
+            return Err(PlateImpactError::Invalid(
+                "source-bound contact calibration requires material re-resolution",
+            ));
+        }
+        let additional = self.contact.obstacles()[0]
+            .n_points()
+            .checked_add(3)
+            .ok_or(PlateImpactError::Budget("contact parameter count overflow"))?;
+        self.plate
+            .parameter_count()
+            .checked_add(additional)
+            .ok_or(PlateImpactError::Budget(
+                "combined parameter count overflow",
+            ))?;
+        self.contact_parameters = additional;
+        Ok(self)
     }
 
     /// Bind the original sourced point-contact owner without caller overrides
@@ -745,7 +787,7 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateImpact<'_, L> {
 
 impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpact<'_, L> {
     fn parameter_count(&self) -> usize {
-        self.plate.parameter_count()
+        self.plate.parameter_count() + self.contact_parameters
     }
     fn mass_transpose_apply(&self, seed: &[f64], output: &mut [f64]) -> Result<(), String> {
         if !self.io(&[seed], output) {
@@ -847,9 +889,35 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpact<'_, L> {
         self.check(&[q, v, a, seed]).map_err(|e| e.to_string())?;
         self.validate_source_kinematics(q, Some(v))
             .map_err(|e| e.to_string())?;
+        if output.len() != self.parameter_count() {
+            return Err("invalid impact parameter derivative dimension".into());
+        }
         let n = self.plate_dofs();
-        self.plate
-            .residual_parameter_vjp(&q[..n], &v[..n], &a[..n], &seed[..n], output)
+        let prefix = self.plate.parameter_count();
+        self.plate.residual_parameter_vjp(
+            &q[..n],
+            &v[..n],
+            &a[..n],
+            &seed[..n],
+            &mut output[..prefix],
+        )?;
+        if self.contact_parameters != 0 {
+            output[prefix] = seed[n] * a[n];
+            let x = self.pack(q).map_err(|error| error.to_string())?;
+            self.contact.obstacles()[0]
+                .resistance_parameter_vjp_into(
+                    self.dimension,
+                    &x,
+                    v,
+                    seed,
+                    &mut output[prefix + 1..],
+                )
+                .map_err(|error| PlateImpactError::Contact(error).to_string())?;
+        }
+        if !finite(output) {
+            return Err("nonfinite impact parameter derivative".into());
+        }
+        Ok(())
     }
 }
 
@@ -865,8 +933,14 @@ impl<L: PlateLoad + ?Sized> StructuralTrajectoryModel for PlateImpact<'_, L> {
     }
     fn forcing_vjp(&self, time: f64, seed: &[f64], output: &mut [f64]) -> Result<(), String> {
         self.check(&[seed]).map_err(|e| e.to_string())?;
+        if output.len() != self.parameter_count() {
+            return Err("invalid impact forcing derivative dimension".into());
+        }
+        let prefix = self.plate.parameter_count();
         self.plate
-            .forcing_vjp(time, &seed[..self.plate_dofs()], output)
+            .forcing_vjp(time, &seed[..self.plate_dofs()], &mut output[..prefix])?;
+        output[prefix..].fill(0.0);
+        Ok(())
     }
 }
 

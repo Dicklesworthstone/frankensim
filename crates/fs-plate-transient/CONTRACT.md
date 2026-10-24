@@ -84,10 +84,10 @@ The contact-only inner storage is zero, so plate elastic energy is counted once.
 Displacement- and velocity-dependent resistance participates in the shared
 implicit generalized-alpha solve, consistent initial acceleration and discrete
 adjoints. There is no lagged force injection, modal truncation or second time
-integrator. Plate and applied-load parameters retain their original order;
-body mass, contact-law controls, footprint and geometry are fixed in these
-derivatives. Contact switching and unloading-cap corners use the original
-owner's selected one-sided derivatives.
+integrator. By default, plate and applied-load parameters retain their original
+order and body/contact controls are fixed. Authored models can opt into the
+contact-calibration suffix described below. Contact switching and unloading-cap
+corners use the original owner's selected one-sided derivatives.
 
 The probe reports plate/body kinetic energy, plate/contact potential energy,
 closure and relative velocity, penetration, normal force and separate physical
@@ -140,3 +140,37 @@ The example uses the existing material/interface evaluators and retains
 `SyntheticFixture` authority. It does not claim experimental calibration,
 thermal evolution, three-dimensional contact conformity, or independent
 material identity verification for arbitrary preassembled matrices.
+
+## Physical contact calibration
+
+`PlateImpact::with_contact_calibration` enables physical-parameter derivatives
+for an explicitly authored impact law. It appends
+`[indenter_mass_kg, contact_stiffness, internal_loss, gap_0, ...]` after the
+unchanged plate/load prefix. Every gap retains its original point index and SI
+units. The time-independent contact controls contribute to the structural
+residual; the applied-load VJP writes exact zeros to this suffix.
+
+The mass pullback includes the indenter's actual acceleration. Contact
+coefficient and gap pullbacks come from the original `fs-dcontact::Obstacle`
+owner's derivative of the complete positive resisting force, including the
+unloading cap and original point measures. The shared initialization and
+trajectory adjoints therefore include these controls without a second solver
+or a finite-difference production gradient. Forward behavior is unchanged by
+enabling the derivative coordinates.
+
+The caller rebuilds a model at each new admissible parameter point. Exponent,
+collocation, footprint and physical quadrature weights remain fixed. Contact
+switching uses the existing one-sided convention; derivatives do not account
+for changes to contact topology. Source-bound material models refuse this
+opt-in because free contact coefficients would bypass their material/interface
+resolution. This API does not differentiate the material-card resolver or
+establish that all fitted controls are independently identifiable.
+
+Run `cargo run -p fs-plate-transient --example calibrate_plate_impact` for a
+bounded fit of authored contact stiffness to synthetic velocity observations
+on a full DKT plate. It uses the shared sampled trajectory adjoint, chains the
+consistent initial acceleration and parameterized load, and keeps all other
+controls fixed. `tests/impact_calibration.rs` compares the step and sampled
+trajectory gradients to finite differences that rebuild the physical model
+and its initial acceleration. It also checks the unchanged default parameter
+layout, source-bound refusal and reduction of the actual observation loss.
