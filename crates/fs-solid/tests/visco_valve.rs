@@ -1,7 +1,7 @@
 //! Synthetic source laws isolate material-to-valve dynamics, not measured reeds.
 use fs_exec::Cx;
 use fs_material::visco::tensor::{Mandel6, PronyBranch, TensorProny};
-use fs_modal::damping::ModalDampingBudget;
+use fs_modal::ModalDampingBudget;
 use fs_solid::linear3::{
     TetAssemblyBudget,
     visco::{TetViscoField, TetViscoMaterial, ViscoStateBudget},
