@@ -6,6 +6,9 @@
 //! the same bound aperture and material gas as the computed reaction source.
 //! This keeps the existing flue control compiler, accepted source histories,
 //! finite pressure ceiling and common PressureRenderer/PCM interface.
+//! An optional physical rectangular mouth shares that exterior and microphone.
+//! Its compact self reaction can replace the legacy mouth load; it does not
+//! include mutual mouth/outlet loading or resolve the surrounding jet flow.
 
 use super::super::network::FlueResonator;
 use super::super::network::performance::controls::{
@@ -21,6 +24,9 @@ use fs_scenario::gesture::GestureSchedule;
 
 /// Explicit source grammar using the same material-gas and DG input owners.
 pub mod file;
+mod mouth;
+
+pub use crate::flue_loop::network::performance::FlueMouthRadiation;
 
 fn invalid(what: &'static str) -> GestureCompileError {
     GestureCompileError::Render(RenderError::Voice(
@@ -58,6 +64,7 @@ pub struct FlueDgPerformance {
     next: usize,
     launched: Vec<f64>,
     outlet: Option<BaffledOutletObservation>,
+    mouth: Option<mouth::MouthPressure>,
     poisoned: bool,
 }
 
@@ -133,7 +140,8 @@ impl FlueDgPerformance {
         launched.try_reserve_exact(config.max_block)
             .map_err(|_| invalid("DG flue callback exceeds available allocation"))?;
         launched.resize(config.max_block, 0.0);
-        Ok(Self { voice, schedule, config, controls, next: 0, launched, outlet, poisoned: false })
+        Ok(Self { voice, schedule, config, controls, next: 0, launched, outlet,
+            mouth: None, poisoned: false })
     }
 
     pub const fn voice(&self) -> &FlueVoice { &self.voice }
@@ -166,12 +174,13 @@ impl FlueDgPerformance {
             let count = (until - now) as usize;
             let ceiling = self.config.maximum_abs_pressure_pa;
             let outlet = &mut self.outlet;
+            let mouth = &mut self.mouth;
             let mut destinations = output[written..written + count].iter_mut();
             self.voice.step_block_observed(&mut self.launched[..count], |line| {
                 let FlueResonator::Dg(duct) = line else {
                     return Err(FlueError::Invalid { what: "DG pressure lost its original bore" });
                 };
-                let pressure = if let Some(observer) = outlet.as_mut() {
+                let mut pressure = if let Some(observer) = outlet.as_mut() {
                     let flow = duct.load().last_terminal_frame().ok_or(FlueError::Invalid {
                         what: "baffled DG pressure has no accepted original terminal flow",
                     })?.outward_flow_m3_s;
@@ -184,6 +193,12 @@ impl FlueDgPerformance {
                         what: "DG pressure has no accepted original port frame",
                     })?.inlet_pressure_pa
                 };
+                if let Some(mouth) = mouth.as_mut() {
+                    let inward_flow = duct.last_frame().ok_or(FlueError::Invalid {
+                        what: "DG mouth pressure has no accepted original inlet flow",
+                    })?.inlet_flow_m3_s;
+                    pressure += mouth.push(inward_flow)?;
+                }
                 if !pressure.is_finite() || pressure.abs() > ceiling {
                     return Err(FlueError::Invalid {
                         what: "DG observed pressure exceeds the declared finite ceiling",
@@ -229,3 +244,4 @@ impl PressureRenderer for FlueDgPerformance {
 
 #[cfg(test)]
 mod tests;
+

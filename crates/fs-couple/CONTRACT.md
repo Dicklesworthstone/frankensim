@@ -5489,3 +5489,32 @@ Three nonlinear-transport regressions exercise different material cards,
 independent three-reservoir equations and compatible nonuniform displacement,
 subsequent source refresh, conductivity changes reaching gas/motion, and
 wrong-context/chart or failed-trial refusal.
+
+
+## DG flue mouth observation and compact reaction
+
+`FlueDgPerformance::with_mouth_radiation` observes the source's actual flue
+width and cut-up through the existing rectangular Rayleigh owner. Placement
+and surface resolution are explicit; the already computed terminal supplies
+the complete exterior gas and common microphone. Each accepted negative DG
+inlet flow enters that receiver once, then its physical pressure is added to
+the terminal pressure. Each aperture retains its own propagation and numerical
+filter support. Geometry, equal static pressure, quadrature, source band and
+cold attachment remain original-owner admission checks.
+
+Optional `with_mouth_reaction` attaches the existing `RectangularMouthLoad`
+through `FlueVoice::attach_mouth_radiation` before playback, replacing the legacy
+mouth load and feeding its retained passive state into the current jet/DG
+solve. The original source equations, controls, pressure ceiling and callback
+failure behavior remain in effect. The file grammar adds optional
+`mouth_radiation X Y WIDTH_CELLS CUT_UP_CELLS` and
+`mouth_reaction none|compact-baffled` after `observation baffled ...`; a physical
+reaction requires zero legacy `mouth_loss_rel`.
+
+This is a disjoint rectangular mouth and circular terminal in an infinite
+rigid baffle, with independent self reactions. Mutual mouth/terminal loading,
+free-field body scattering and a resolved compressible jet are not provided.
+Focused tests compare the pressure against the original Rayleigh owners fed
+with accepted signed flows, source-state change under mouth reaction, block
+partition equality and physical admission. Native execution and measured flute
+qualification remain pending.

@@ -1,0 +1,124 @@
+//! Original rectangular Rayleigh observation and compact self reaction at the
+//! actual DG flue mouth. The accepted inlet flow supplies its outward sign.
+
+use super::{BaffledPressure, FlueDgPerformance, FlueError, FlueMouthRadiation};
+use super::{GestureCompileError, RenderError, invalid, source_error};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::flue_loop::mouth_radiation::RectangularMouthLoad;
+use crate::pcm_wav::baffled::openings::RectangularOutletReceiver;
+use fs_exec::CancelGate;
+
+pub(super) struct MouthPressure {
+    input: FlueMouthRadiation,
+    receiver: BaffledPressure,
+}
+
+impl MouthPressure {
+    pub(super) fn push(&mut self, inward_flow_m3_s: f64) -> Result<f64, FlueError> {
+        // DG inlet flow is positive into the bore. Both observed openings face
+        // the same exterior, so mouth radiation takes its negative once.
+        self.receiver.step_trace(&[-inward_flow_m3_s])
+            .map_err(|error| FlueError::Physics(AcousticRealizeError::Nonlinear(error)))
+    }
+}
+
+impl FlueDgPerformance {
+    /// Add the solved mouth flow to this performance's exterior microphone.
+    ///
+    /// Width and cut-up come from the actual source, and the complete exterior
+    /// gas comes from its already computed terminal. The original rectangular
+    /// Rayleigh owner retains distance, phase, surface quadrature and numerical
+    /// filter delay; no gain or duplicate pressure source is introduced.
+    ///
+    /// This explicitly describes disjoint openings in one infinite rigid baffle.
+    /// Selecting observation alone retains the existing mouth reaction. Call
+    /// `with_mouth_reaction` to select the same rectangle's compact self load.
+    /// Neither choice resolves a jet, mutual mouth/outlet reaction or free-field
+    /// scattering by an instrument body.
+    pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some() {
+            return Err(invalid("DG mouth observation requires one cold attachment"));
+        }
+        let outlet = self.outlet.as_ref()
+            .ok_or_else(|| invalid("DG mouth observation requires the bound baffled outlet microphone"))?;
+        let source = self.voice.dg().expect("admitted original DG voice").load()
+            .radiation_record().expect("admitted computed DG microphone source");
+        let exterior = source.gas_record().state();
+        if self.voice.gas().pressure.to_bits() != exterior.pressure.to_bits() {
+            return Err(invalid("DG mouth and exterior require equal static pressure"));
+        }
+        let size = [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m];
+        for opening in source.apertures() {
+            let dx = ((opening.center_m[0] - input.center_m[0]).abs() - 0.5 * size[0]).max(0.0);
+            let dy = ((opening.center_m[1] - input.center_m[1]).abs() - 0.5 * size[1]).max(0.0);
+            if !dx.is_finite() || !dy.is_finite() || fs_math::det::hypot(dx, dy) < opening.radius_m {
+                return Err(invalid("DG mouth rectangle and radiating terminal must not overlap"));
+            }
+        }
+        let receiver = BaffledPressure::rectangular_outlet_multirate_differentiating(
+            size, self.config.sample_rate_hz, self.config.sample_rate_hz,
+            RectangularOutletReceiver {
+                center_m: input.center_m,
+                position_m: outlet.config.position_m,
+                cells: input.cells,
+                maximum_frequency_hz: outlet.config.maximum_frequency_hz,
+            }, exterior.into(),
+        ).map_err(|error| GestureCompileError::Render(RenderError::Voice(
+            AcousticRealizeError::Nonlinear(error),
+        )))?;
+        self.mouth = Some(MouthPressure { input, receiver });
+        Ok(self)
+    }
+
+    /// Replace the authored mouth loss and end correction with the existing
+    /// compact self reaction of this exact rectangle and exterior material.
+    ///
+    /// The retained passive load participates in the current jet/DG solve and
+    /// owns its near-field storage and escaped energy. It is independent of the
+    /// computed outlet load; mutual reaction between openings is not included.
+    /// Original compact-band, quadrature, cancellation and cold-source checks
+    /// apply. The flue's legacy `mouth_loss_rel` must be zero.
+    pub fn with_mouth_reaction(mut self, gate: &CancelGate)
+        -> Result<Self, GestureCompileError>
+    {
+        if self.poisoned || self.voice.samples_rendered() != 0 {
+            return Err(invalid("DG mouth reaction requires a cold performance"));
+        }
+        let mouth = self.mouth.as_ref()
+            .ok_or_else(|| invalid("DG mouth reaction requires its actual rectangular receiver"))?;
+        let outlet = self.outlet.as_ref().expect("mouth requires the original outlet observer");
+        let source = self.voice.dg().expect("admitted original DG voice").load()
+            .radiation_record().expect("admitted computed DG microphone source");
+        let model = RectangularMouthLoad::new(
+            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+            mouth.input.cells, *source.gas_record().state(), self.voice.sample_period_s(),
+            outlet.config.maximum_frequency_hz, gate,
+        ).map_err(|error| GestureCompileError::Render(source_error(error)))?;
+        self.voice.attach_mouth_radiation(model)
+            .map_err(|error| GestureCompileError::Render(source_error(error)))?;
+        Ok(self)
+    }
+
+    /// Actual rectangular mouth receiver, including its own propagation support.
+    pub fn mouth_receiver(&self) -> Option<&BaffledPressure> {
+        self.mouth.as_ref().map(|mouth| &mouth.receiver)
+    }
+
+    /// Original placement and surface resolution of the optional mouth.
+    pub fn mouth_radiation(&self) -> Option<FlueMouthRadiation> {
+        self.mouth.as_ref().map(|mouth| mouth.input)
+    }
+
+    /// Complete propagation support of every selected exterior contribution.
+    /// Numerical filter latency remains separately exposed by each receiver.
+    /// Internal mean-inlet observation has no exterior propagation kernel.
+    pub fn propagation_delay_samples(&self) -> Option<(usize, usize)> {
+        let terminal = self.baffled_receiver()?.delay_samples;
+        Some(self.mouth_receiver().map_or(terminal, |mouth| (
+            terminal.0.min(mouth.delay_samples.0),
+            terminal.1.max(mouth.delay_samples.1),
+        )))
+    }
+}

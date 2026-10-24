@@ -2,6 +2,8 @@ use super::*;
 use file::FlueDgFilePerformance;
 use fs_exec::CancelGate;
 
+mod mouth;
+
 fn input() -> String {
     let example = include_str!("../../../../examples/flue-dg.performance");
     let header = example.split_once("\ngesture\n").unwrap().0
@@ -229,3 +231,4 @@ fn baffled_source_receiver_and_finite_pressure_limits_are_enforced() {
     assert!(limited.block(&mut vec![0.0; 512]).is_err());
     assert!(matches!(limited.block(&mut [0.0]), Err(RenderError::Poisoned)));
 }
+

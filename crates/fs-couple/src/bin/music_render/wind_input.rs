@@ -575,10 +575,37 @@ fn load_with_all_sources(
         let radiation = super::duct_metadata::dg_radiation_provenance(load);
         let (pressure_point, pressure_observation) =
             if let Some(receiver) = p.renderer().baffled_receiver_config() {
-                ("baffled-outlet", super::duct_metadata::dg_baffled_observation_provenance(
-                    load, receiver,
-                    p.renderer().baffled_receiver().expect("admitted DG microphone"),
-                ))
+                let terminal = p.renderer().baffled_receiver().expect("admitted DG microphone");
+                if let Some(mouth) = p.renderer().mouth_radiation() {
+                    let source = load.radiation_record().expect("bound DG exterior");
+                    let exterior = super::duct_metadata::gas_state(source.gas_record().state());
+                    let aperture = source.apertures().first().expect("single DG outlet");
+                    let microphone = p.renderer().mouth_receiver().expect("admitted DG mouth");
+                    let support = p.renderer().propagation_delay_samples().expect("exterior kernels");
+                    let mouth_reaction = voice.mouth_radiation_load();
+                    let terminal_json = format!(",\"outlet_receiver\":{{\"radius_m\":{:e},\"radial_rings\":{},\"angular_points\":{},\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e}}}",
+                        aperture.radius_m, receiver.radial_rings, receiver.angular_points,
+                        terminal.delay_samples.0, terminal.delay_samples.1, terminal.filter_delay_samples());
+                    let mouth_json = format!(",\"mouth_receiver\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"negative accepted DG inlet volume flow\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"reaction_added\":{}}}",
+                        mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                        mouth.cells[0], mouth.cells[1], microphone.delay_samples.0,
+                        microphone.delay_samples.1, microphone.filter_delay_samples(), mouth_reaction.is_some());
+                    let reaction_json = mouth_reaction.map_or_else(|| ",\"mouth_reaction\":null".to_owned(), |reaction| {
+                        let spec = reaction.load();
+                        let term = spec.terms()[0];
+                        format!(",\"mouth_reaction\":{{\"model\":\"compact-rectangular-baffled-v1\",\"legacy_load_replaced\":true,\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"rate_per_s\":{:e},\"static_quadrature_relative_error\":{:e},\"max_complex_relative_error\":{:e},\"max_resistance_relative_error\":{:e},\"memory\":\"shared passive midpoint relaxation\",\"mutual_mouth_terminal_reaction\":false}}",
+                            reaction.maximum_frequency_hz(), term.resistance_pa_s_m3, term.rate_per_s,
+                            reaction.static_quadrature_relative_error(), reaction.max_complex_relative_error(),
+                            reaction.max_resistance_relative_error())
+                    });
+                    ("baffled-mouth-and-outlet", format!(",\"observation_scope\":\"signed Rayleigh pressure sum of the actual rectangular mouth and computed circular outlet in one material exterior and infinite rigid baffle; independent self loads, no mutual mouth/outlet reaction, resolved jet, free-field body or room radiation\",\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"exterior_gas\":{exterior},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"delay_compensated\":false{terminal_json}{mouth_json}{reaction_json}",
+                        receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
+                        receiver.maximum_frequency_hz, support.0, support.1))
+                } else {
+                    ("baffled-outlet", super::duct_metadata::dg_baffled_observation_provenance(
+                        load, receiver, terminal,
+                    ))
+                }
             } else {
                 ("mean-inlet", ",\"observation_scope\":\"internal interval-mean inlet pressure; not an exterior microphone\"".into())
             };
@@ -887,3 +914,4 @@ mod tests {
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
     }
 }
+

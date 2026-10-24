@@ -5,8 +5,12 @@
 //! paths. Observation is explicitly internal mean-inlet pressure or the
 //! computed outlet's baffled microphone in its original exterior gas. The jet
 //! card remains an exploration source, never a resolved-flow qualification.
+//! After a baffled observation, optional `mouth_radiation X Y WIDTH_CELLS
+//! CUT_UP_CELLS` adds the actual rectangular mouth to that same microphone.
+//! Optional `mouth_reaction none|compact-baffled` then selects its original
+//! compact self reaction; mutual mouth/outlet loading is not included.
 
-use super::{FlueDgConfig, FlueDgPerformance};
+use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
@@ -65,6 +69,37 @@ fn read_observation(rows: &mut Rows<'_>) -> Result<Option<CircularOutletReceiver
     };
     row.end()?;
     Ok(receiver)
+}
+
+fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
+    -> Result<(Option<FlueMouthRadiation>, bool), FlueDgInputError>
+{
+    let mouth = if rows.next_is("mouth_radiation") {
+        let mut row = rows.row("mouth_radiation")?;
+        let input = FlueMouthRadiation {
+            center_m: [row.scalar()?, row.scalar()?],
+            cells: [row.number()?, row.number()?],
+        };
+        row.end()?;
+        if !exterior {
+            return Err(bad(rows.line, "DG mouth radiation requires observation baffled"));
+        }
+        Some(input)
+    } else { None };
+    let reaction = if rows.next_is("mouth_reaction") {
+        let mut row = rows.row("mouth_reaction")?;
+        let enabled = match row.fields.next() {
+            Some("none") => false,
+            Some("compact-baffled") => true,
+            _ => return Err(bad(row.line, "mouth_reaction requires none or compact-baffled")),
+        };
+        row.end()?;
+        if enabled && mouth.is_none() {
+            return Err(bad(rows.line, "DG mouth reaction requires an explicit mouth_radiation rectangle"));
+        }
+        enabled
+    } else { false };
+    Ok((mouth, reaction))
 }
 
 pub struct FlueDgFilePerformance {
@@ -184,6 +219,7 @@ impl FlueDgFilePerformance {
             return Err(bad(rows.line, "DG flue control budget exceeds 262144 ticks"));
         }
         let observation = read_observation(&mut rows)?;
+        let (mouth_radiation, mouth_reaction) = read_mouth(&mut rows, observation.is_some())?;
         if rows.lines.next().is_some() {
             return Err(bad(rows.line + 1, "unexpected records before gesture section"));
         }
@@ -219,12 +255,20 @@ impl FlueDgFilePerformance {
             sample_rate_hz, samples, max_block, max_controls, max_compile_work,
             maximum_abs_pressure_pa,
         };
-        let renderer = match observation {
+        let mut renderer = match observation {
             Some(receiver) => FlueDgPerformance::with_baffled_outlet(
                 voice, schedule, config, receiver,
             ),
             None => FlueDgPerformance::new(voice, schedule, config),
         }.map_err(FlueInputError::Performance)?;
+        if let Some(mouth) = mouth_radiation {
+            renderer = renderer.with_mouth_radiation(mouth)
+                .map_err(FlueInputError::Performance)?;
+        }
+        if mouth_reaction {
+            renderer = renderer.with_mouth_reaction(gate)
+                .map_err(FlueInputError::Performance)?;
+        }
         poll(gate)?;
         let info = FluePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.flue-dg-performance.v1", bytes),
@@ -245,3 +289,4 @@ impl FlueDgFilePerformance {
 
 #[cfg(test)]
 mod tests;
+
