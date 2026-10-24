@@ -102,6 +102,65 @@ pub fn linear_magnetic_permeability(
     )
 }
 
+/// Admit a temperature refresh without changing prepared linear magnetic storage.
+///
+/// The complete original card, coordinate schema, requirements and selected
+/// claims stay pinned. Only one owned absolute-temperature coordinate may move;
+/// all other physical coordinates remain fixed. A permeability law with actual
+/// temperature dependence refuses any temperature change, even if its endpoint
+/// values happen to coincide: fixed-field storage cannot pay its parameter work.
+/// This is shared by spatial induction and circuit-derived winding histories.
+pub fn admit_fixed_magnetic_refresh(
+    prepared: &ResolvedMaterialStatePoint,
+    refreshed: &ResolvedMaterialStatePoint,
+) -> Result<(), FieldStorageError> {
+    use fs_qty::{Temperature, semantic::{QuantityKind, ValueForm}};
+    use FieldStorageError::Invalid;
+    if prepared.card_identity() != refreshed.card_identity()
+        || prepared.material() != refreshed.material()
+        || prepared.axis_quantities() != refreshed.axis_quantities()
+        || prepared.query_point().len() != refreshed.query_point().len()
+        || prepared.properties().len() != refreshed.properties().len()
+        || prepared.properties().iter().zip(refreshed.properties()).any(|(a, b)| {
+            a.requirement() != b.requirement() || a.source_axes() != b.source_axes()
+                || a.answer().receipt.selected != b.answer().receipt.selected
+        })
+    {
+        return Err(Invalid("magnetic refresh must retain the complete original card, requirements, coordinate schema and selected claims"));
+    }
+    let mut changed_temperature_axis = None;
+    let mut temperatures = 0;
+    for ((name, value), (next_name, next_value)) in prepared.query_point().iter().zip(refreshed.query_point()) {
+        if name != next_name { return Err(Invalid("magnetic source coordinates changed correspondence")); }
+        let quantity = prepared.axis_quantities().get(name).copied();
+        let is_temperature = quantity.and_then(QuantitySpec::semantic_type).is_some_and(|ty| {
+            ty.kind() == QuantityKind::AbsoluteTemperature && ty.form() == ValueForm::Static
+        }) || name == "T" && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS));
+        if is_temperature {
+            temperatures += 1;
+            if !value.is_finite() || *value <= 0.0 || !next_value.is_finite() || *next_value <= 0.0 {
+                return Err(Invalid("magnetic temperature must be positive and finite"));
+            }
+        }
+        if value.to_bits() != next_value.to_bits() {
+            if !is_temperature { return Err(Invalid("only the owned magnetic temperature may change during a fixed-geometry step")); }
+            changed_temperature_axis = Some(name.as_str());
+        }
+    }
+    if temperatures > 1 { return Err(Invalid("magnetic temperature coordinate is ambiguous")); }
+    let mu = linear_magnetic_permeability(refreshed)?;
+    let original_mu = linear_magnetic_permeability(prepared)?;
+    let property = refreshed.property(MAGNETIC_PERMEABILITY_PROPERTY).expect("admitted permeability");
+    if mu.to_bits() != original_mu.to_bits()
+        || changed_temperature_axis.is_some_and(|temperature| {
+            property.source_axes().iter().any(|(axis, _)| axis == temperature)
+        })
+    {
+        return Err(Invalid("heated magnetic region changes prepared storage; new extraction and magnetic parameter work required"));
+    }
+    Ok(())
+}
+
 fn resolve(
     card: &MaterialCard,
     point: &QueryPoint,
