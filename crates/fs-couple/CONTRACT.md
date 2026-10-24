@@ -6073,3 +6073,46 @@ The macro audit independently reconstructs all finite-cell enthalpy change, circ
 This is bounded temporal refinement of the existing first-order sealed-chamber split, not a monolithic implicit chemistry solve or a reacting compressible-flow model. Cell masses, thermal/circuit topology and chamber identities remain fixed; the `state::flow` transport stages are not composed by this API. Source-domain refusal, failed numerical work and cancellation preserve the complete original assembly and its port/history state.
 
 Focused regressions in `tests/material_exchange/subcycling.rs` exercise a data-only emissivity change reaching reaction progress within the interval, real circuit/contact/radiation source histories, independent total physical energy and impulse balances, integrated heat versus held electrical-current/force semantics, nonzero-clock resume, charge-controlled refinement, and late source/work-limit/cancellation rollback. Fixtures are synthetic and establish integration behavior rather than empirical combustion calibration.
+
+## Consistent-inertia solids with original tensor material memory
+
+`tensor_material::TensorMaterialBody::from_mass_matrix` admits the complete
+symmetric positive-definite inertia in the caller's displacement coordinates.
+Momentum is `M v`, velocity is `M^-1 p`, and the kinetic Hamiltonian retains
+the full quadratic block. The existing `fs-la` Cholesky owner supplies the
+inverse; a dimension-scaled floating-point identity-residual check rejects
+unrepresentable inertia, including dependent bases that leave a tiny positive
+pivot. It never regularizes mass or removes coordinates. Existing diagonal
+inertia and plane-stress paths keep their own original arithmetic.
+
+`tensor_material::solid::TensorSolidBody` connects
+`fs-solid::linear3::visco::ProjectedViscoSolid` to this same full-memory
+`TensorMaterialBody` and the existing `fs-phs` exact-ZOH propagator. The
+source tetrahedral basis owns consistent mass, strain maps, supports and
+force/velocity transformations together. Every material point retains its
+equilibrium stiffness, Kelvin matrix and all Maxwell branches. Initial
+constitutive prehistory remains explicit. Held nodal forces are projected by
+the same basis transpose; the reported mean nodal velocity expands the same
+work-conjugate port output used for integrated supplied work.
+
+`TensorMaterialHistory::advance_with_material_heat` independently integrates
+each original point's Kelvin and Maxwell resistance channels along the same
+complete coupled trajectory using `fs-phs::integrated_resistance_loss`.
+`TensorSolidHistory::advance` aggregates those channels to their original
+elements. No work-minus-storage residual is assigned as material heat.
+Both point and element totals must agree with the original total dissipated
+energy within the caller's explicit positive absolute attribution tolerance.
+Failed propagation, heat attribution, nodal expansion or cancellation preserves
+the entire original history, clock and accumulated heat.
+
+Existing material-point/state-coordinate and dense-propagation capacities remain
+in force; oversized requests refuse without dropping modes or memories.
+Geometry, basis and material temperature/composition are fixed. The returned
+element heat is available for a thermal owner but this API does not itself
+advance caloric state. Separate point heat for plane-stress histories is
+explicitly refused; their existing total-loss dynamics remain available.
+There is no claim of nonlinear mechanics, acoustic radiation, spatial/modal
+convergence or empirical material calibration. Five focused G0/G3 regressions
+in `tests/tensor_solid.rs` exercise off-diagonal inertia and analytic force work,
+Tet4/Tet10 shear/mass, Maxwell prehistory, regional loss attribution, constrained
+nonorthogonal work maps, dependent-basis refusal and transactional failure.
