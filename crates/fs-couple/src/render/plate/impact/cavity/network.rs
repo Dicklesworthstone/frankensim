@@ -57,11 +57,36 @@ impl CavityCoupling {
         reference_area_m2: f64, acoustic_budget: ModalAcousticTimeBudget,
         gate: &CancelGate,
     ) -> Result<ModalCavityParts, ImpactError> {
+        self.modal_network_inner(body, sample_rate_hz, reference_area_m2,
+            acoustic_budget, false, gate)
+    }
+
+    /// Lower explicitly radiating compact necks with the SAME mechanical law.
+    /// The complete exterior source map must contain every internal-only neck
+    /// exactly once and no interior standing-wave coordinate. This is cold
+    /// composition: the receiving bank must retain this map and attach its load.
+    /// Until then the declared comparison has zero exterior pressure, exactly
+    /// as the existing impact owner; no exterior end mass or loss is invented.
+    pub fn modal_network_for_exterior_load(
+        &self, body: ModalAcousticTimeModel, sample_rate_hz: u32,
+        reference_area_m2: f64, acoustic_budget: ModalAcousticTimeBudget,
+        source_modes: &[usize], gate: &CancelGate,
+    ) -> Result<ModalCavityParts, ImpactError> {
+        self.admit_exterior_sources(source_modes)?;
+        self.modal_network_inner(body, sample_rate_hz, reference_area_m2,
+            acoustic_budget, true, gate)
+    }
+
+    fn modal_network_inner(
+        &self, body: ModalAcousticTimeModel, sample_rate_hz: u32,
+        reference_area_m2: f64, acoustic_budget: ModalAcousticTimeBudget,
+        exterior: bool, gate: &CancelGate,
+    ) -> Result<ModalCavityParts, ImpactError> {
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         if body.modes().len() != self.structural || sample_rate_hz == 0
             || body.sample_period_s().to_bits() != f64::from(sample_rate_hz).recip().to_bits()
             || !reference_area_m2.is_finite() || reference_area_m2 <= 0.0
-            || self.necks.iter().any(|neck| neck.exterior_load)
+            || (!exterior && self.necks.iter().any(|neck| neck.exterior_load))
         {
             return Err(invalid("modal cavity requires its exact structural basis/clock, positive area scale and complete neck loads"));
         }
@@ -231,6 +256,32 @@ mod tests {
             link.damping_n_s_m*speed*speed
         }).sum();
         close(loss,7.0*0.01*0.01+2000.0*3.0e-6*3.0e-6);
+    }
+
+    #[test]
+    fn exterior_mapping_keeps_internal_standing_waves_out_of_the_load_ports() {
+        let gate = CancelGate::new_clock_free();
+        let budget = ModalAcousticTimeBudget::audible_reference();
+        let neck = CavityNeck {
+            area_m2:1.0e-4,effective_length_m:0.01,resistance_pa_s_m3:2000.0,
+            pressure_shape_averages:vec![1.0,0.2],initial_volume_m3:2.0e-8,
+            initial_flow_m3_s:-3.0e-6,
+        };
+        let reference = cavity(true).with_necks(vec![neck.clone()],&gate).unwrap();
+        let exterior = cavity(true).with_necks_for_exterior_load(vec![neck],&gate).unwrap();
+        assert!(exterior.modal_network(body(),48_000,0.01,budget,&gate).is_err());
+        for map in [&[0,1][..],&[0,1,2,3][..],&[0,1,3,3][..]] {
+            assert!(exterior.modal_network_for_exterior_load(body(),48_000,0.01,budget,map,&gate).is_err());
+        }
+        let actual = exterior.modal_network_for_exterior_load(body(),48_000,0.01,
+            budget,&[0,1,3],&gate).unwrap();
+        let expected = parts(&reference,0.01);
+        assert_eq!(actual.connections,expected.connections);
+        for (a,b) in actual.components.iter().zip(&expected.components) {
+            assert_eq!(a.modes(),b.modes());
+            assert_eq!(a.states(),b.states());
+        }
+        assert_eq!(exterior.neck_radiation_port(0).unwrap().coordinate,3);
     }
 
     #[test]

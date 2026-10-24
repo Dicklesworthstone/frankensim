@@ -18,6 +18,7 @@ pub struct MaterialBodyRadiation {
     gas: GasState,
     basis_identity: ContentHash,
     maximum_poles: usize,
+    source_body_coordinates: Vec<usize>,
     // Present only when the original material-shell producer attached this load.
     shell_bem: Option<bem::ShellBemReport>,
 }
@@ -25,6 +26,10 @@ impl MaterialBodyRadiation {
     pub const fn model(&self) -> &Model { &self.model }
     pub const fn gas(&self) -> &GasState { &self.gas }
     pub const fn basis_identity(&self) -> ContentHash { self.basis_identity }
+    /// Complete source order relative to the original body component: all
+    /// structural modes, then explicitly declared cavity-neck coordinates.
+    /// Interior standing-wave coordinates are never radiation sources.
+    pub fn source_body_coordinates(&self) -> &[usize] { &self.source_body_coordinates }
 
     /// Preparation report of the source-derived closed-shell load actually
     /// attached to this body. Raw and planar loads do not carry this binding.
@@ -42,15 +47,37 @@ impl MaterialStringBankSource {
         &self, system: FrictionModalSystem, gate: &CancelGate,
     ) -> Result<FrictionModalSystem, ReciprocalStringError> {
         let Some(air) = &self.body_radiation else { return Ok(system); };
-        let (identity, modes) = self.body_radiation_basis(&system, gate)?;
+        let (identity, body_modes) = self.body_radiation_basis(&system, gate)?;
+        let coordinates = self.radiation_body_coordinates(body_modes.len())?;
         if air.gas != self.gas || air.basis_identity != identity {
             return Err(invalid("exterior load no longer matches the original material body basis and gas"));
         }
+        if coordinates != air.source_body_coordinates {
+            return Err(invalid("exterior load lost its original complete body/neck source map"));
+        }
+        let start = body_modes[0];
+        let modes: Vec<_> = coordinates.iter().map(|coordinate|start+coordinate).collect();
         let system = system.with_radiation_load(&air.model, &modes, air.maximum_poles, gate)
             .map_err(ReciprocalStringError::Friction)?;
         self.validate_body_memory_frequencies(&system, gate)?;
         self.validate_material_bridge_frequencies(&system, gate)?;
         Ok(system)
+    }
+
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn radiation_body_coordinates(
+        &self, structural_modes: usize,
+    ) -> Result<Vec<usize>, ReciprocalStringError> {
+        if structural_modes == 0 { return Err(invalid("exterior source requires a nonempty original body")); }
+        if let Some(cavity) = &self.spatial_cavity {
+            if cavity.coupling().structural_modes() != structural_modes {
+                return Err(invalid("exterior source lost its original cavity/body basis"));
+            }
+            if cavity.opening_count() != 0 {
+                return cavity.exterior_body_coordinates().map_err(|_|
+                    invalid("exterior source requires every original internal-only cavity neck"));
+            }
+        }
+        Ok((0..structural_modes).collect())
     }
 
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn body_radiation_basis(&self, system: &FrictionModalSystem, gate: &CancelGate)
@@ -96,7 +123,10 @@ impl MaterialStringBankSource {
 
 impl ReciprocalStringBank {
     /// Couple a producer's complete exterior model to ALL actual body velocities
-    /// in original mass-normalized mode order. Air reacts on the body and hence
+    /// followed by every explicitly declared compact cavity-neck velocity in
+    /// source order. Neck columns use their original mass-normalized coordinate;
+    /// a physical mouth trace therefore equals volume_weight / mouth_area.
+    /// Air reacts on the body and hence
     /// the bridges, every string, bow traction and accepted pressure acceleration.
     /// The current material/geometry basis and coherent gas are pinned together;
     /// later cold gas-inertia/torque/axial additions retain the original load.
@@ -112,16 +142,18 @@ impl ReciprocalStringBank {
         if self.source.body_radiation.is_some() || self.system.samples_rendered() != 0 {
             return Err(invalid("body exterior loading requires one original cold source binding"));
         }
-        let (basis_identity, modes) = self.source.body_radiation_basis(&self.system, gate)?;
+        let (basis_identity, body_modes) = self.source.body_radiation_basis(&self.system, gate)?;
+        let source_body_coordinates = self.source.radiation_body_coordinates(body_modes.len())?;
+        let modes: Vec<_> = source_body_coordinates.iter().map(|coordinate|body_modes[0]+coordinate).collect();
         if model.ports != modes.len() {
-            return Err(invalid("body radiation requires every original body mode in its exact order"));
+            return Err(invalid("radiation requires every original body mode and actual mouth in source order"));
         }
         self.system = self.system.with_radiation_load(&model, &modes, maximum_poles, gate)
             .map_err(ReciprocalStringError::Friction)?;
         self.source.validate_body_memory_frequencies(&self.system, gate)?;
         self.source.validate_material_bridge_frequencies(&self.system, gate)?;
         self.source.body_radiation = Some(MaterialBodyRadiation { model, gas: self.source.gas,
-            basis_identity, maximum_poles, shell_bem: None });
+            basis_identity, maximum_poles, source_body_coordinates, shell_bem: None });
         poll(gate)?;
         Ok(self)
     }

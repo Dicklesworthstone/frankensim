@@ -170,6 +170,14 @@ impl CavityCoupling {
     #[must_use]
     pub fn neck_count(&self)->usize {self.necks.len()}
 
+    /// Original fixed-wall angular-frequency guard of this compact neck.
+    /// A broadband exterior producer must cover it as well as the pressure
+    /// basis; this is not a new coupled resonance or a fitted frequency.
+    pub fn neck_fixed_wall_angular_frequency_rad_s(&self,index:usize)->Result<f64,ImpactError> {
+        self.necks.get(index).map(|neck|neck.fixed_wall_omega)
+            .ok_or_else(||invalid("unknown cavity neck"))
+    }
+
     /// Observe accepted neck flow and the reciprocal pressure drive. Invalid
     /// states, indices or arithmetic are refused rather than publishing NaNs.
     pub fn neck_observation(&self,state:&[f64],index:usize)->Result<NeckObservation,ImpactError> {

@@ -7,14 +7,18 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::{
 use std::collections::BTreeMap;
 
 fn soft_material(rho: f64) -> ResolvedMaterialStatePoint {
+    soft_material_scaled(rho, 1.0)
+}
+
+fn soft_material_scaled(rho: f64, stiffness_scale: f64) -> ResolvedMaterialStatePoint {
     let mut entries = vec![
         ("density", Density::DIMS, rho),
-        ("young_modulus_1", Pressure::DIMS, 1.0e6),
-        ("young_modulus_2", Pressure::DIMS, 4.0e5),
+        ("young_modulus_1", Pressure::DIMS, 1.0e6 * stiffness_scale),
+        ("young_modulus_2", Pressure::DIMS, 4.0e5 * stiffness_scale),
         ("poisson_ratio_12", Dims::NONE, 0.25),
-        ("shear_modulus_12", Pressure::DIMS, 1.8e5),
-        ("shear_modulus_13", Pressure::DIMS, 8.0e4),
-        ("shear_modulus_23", Pressure::DIMS, 3.0e4),
+        ("shear_modulus_12", Pressure::DIMS, 1.8e5 * stiffness_scale),
+        ("shear_modulus_13", Pressure::DIMS, 8.0e4 * stiffness_scale),
+        ("shear_modulus_23", Pressure::DIMS, 3.0e4 * stiffness_scale),
     ];
     entries.extend(
         PLANE_STRESS_VISCOSITY_PROPERTIES
@@ -361,3 +365,7 @@ fn open_skin_incomplete_bands_work_limits_and_cancellation_refuse() {
         ));
     });
 }
+
+#[path = "bem/openings.rs"]
+mod openings;
+

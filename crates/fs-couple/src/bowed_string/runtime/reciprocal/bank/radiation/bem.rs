@@ -15,8 +15,12 @@
 //! This is a cold finite-band passive approximation of a BEM calculation, not a
 //! continuum certificate or measured-instrument claim. The existing compact
 //! microphone still observes loaded acceleration; this module does not turn it
-//! into a finite-distance broadband receiver. Open holes need an explicit
-//! interior/exterior boundary coupling and are refused, never silently capped.
+//! into a finite-distance broadband receiver. Explicit compact mouths from the
+//! original cavity own their fluid boundary panels and mass-normalized flow
+//! traces. Undeclared holes are refused, never silently capped.
+//! Independent body/mouth columns can expose the existing collocation owner's
+//! reciprocity error. The passive loading gate remains 1e-12; an inadmissible
+//! source refuses, with no matrix symmetrization or instrument qualification.
 
 use super::super::{ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
@@ -83,6 +87,8 @@ pub struct ShellBemReport {
     pub gas: GasState,
     pub options: ShellBemOptions,
     pub body_modes: usize,
+    /// Actual compact aperture-flow ports after the complete structural basis.
+    pub opening_ports: usize,
     pub surface_panels: usize,
     pub acoustic_poles: usize,
     pub sweep_terms: u64,
@@ -200,6 +206,26 @@ impl ReciprocalStringBank {
                 "shell radiation must cover every original body mode within the shared passive port capacity",
             ));
         }
+        let opening_ports = self.source.spatial_cavity.as_ref().map_or(0, |c|c.opening_count());
+        if modes.len()+opening_ports > crate::render::plate::impact::radiation::MAX_PORTS {
+            return Err(ShellBemError::Invalid("complete body/mouth basis exceeds passive port capacity"));
+        }
+        if let Some(cavity) = self.source.spatial_cavity.as_ref().filter(|c|c.opening_count() != 0) {
+            if cavity.options().maximum_hz > options.maximum_hz {
+                return Err(ShellBemError::Invalid("joint exterior band must cover the complete interior pressure window"));
+            }
+            for index in 0..cavity.opening_count() {
+                let reference = cavity.coupling().neck_fixed_wall_angular_frequency_rad_s(index)
+                    .map_err(|_|ShellBemError::Invalid("missing original compact neck frequency"))?;
+                let extent = cavity.opening_extent_m(index)
+                    .ok_or(ShellBemError::Invalid("missing original mouth extent"))?;
+                if reference/core::f64::consts::TAU > options.maximum_hz
+                    || core::f64::consts::TAU*options.maximum_hz*extent/self.source.gas.sound_speed > 0.3
+                {
+                    return Err(ShellBemError::Invalid("exterior band must cover neck dynamics inside the compact mouth chart"));
+                }
+            }
+        }
         let (surface, fields, work) = self.source.shell_surface_traces(
             modes.len(), options.maximum_surface_panels, options.maximum_sweep_terms,
             options.frequency_samples, gate,
@@ -246,7 +272,7 @@ impl ReciprocalStringBank {
         } else {
             high - low
         };
-        let fitted = fit::fit_resolved(&omega, &impedance, modes.len(), spacing)
+        let fitted = fit::fit_resolved(&omega, &impedance, fields.len(), spacing)
             .map_err(ShellBemError::Fit)?;
         poll(gate)?;
         if fitted.model.poles.len() > options.maximum_poles {
@@ -260,6 +286,7 @@ impl ReciprocalStringBank {
             gas,
             options,
             body_modes: modes.len(),
+            opening_ports,
             surface_panels: panels,
             acoustic_poles: fitted.model.poles.len(),
             sweep_terms: work,
@@ -303,7 +330,7 @@ impl super::super::MaterialStringBankSource {
                 "computed closed-body radiation requires an original material shell basis",
             ));
         }
-        let panels = parts
+        let body_panels = parts
             .iter()
             .try_fold(0usize, |count, (shell, _)| {
                 count.checked_add(
@@ -315,8 +342,22 @@ impl super::super::MaterialStringBankSource {
             .ok_or(ShellBemError::Invalid(
                 "shell exterior panel extent overflow",
             ))?;
+        let cavity = self.spatial_cavity.as_ref();
+        let opening_ports = cavity.map_or(0, |c|c.opening_count());
+        let opening_panels = if let Some(cavity) = cavity {
+            (0..opening_ports).try_fold(0usize,|sum,index| {
+                cavity.opening_triangles(index).and_then(|faces|sum.checked_add(faces.len()))
+            }).ok_or(ShellBemError::Invalid("mouth exterior panel extent overflow"))?
+        } else { 0 };
+        let panels = body_panels.checked_add(opening_panels)
+            .ok_or(ShellBemError::Invalid("complete exterior panel extent overflow"))?;
+        let ports = modes.checked_add(opening_ports)
+            .ok_or(ShellBemError::Invalid("complete exterior port extent overflow"))?;
+        if ports > crate::render::plate::impact::radiation::MAX_PORTS {
+            return Err(ShellBemError::Invalid("complete body/mouth source exceeds passive port capacity"));
+        }
         let p = panels as u64;
-        let n = modes as u64;
+        let n = ports as u64;
         let work = p
             .checked_mul(p)
             .and_then(|p2| p.checked_add(n).and_then(|sum| p2.checked_mul(sum)))
@@ -335,7 +376,7 @@ impl super::super::MaterialStringBankSource {
                 "complete shell exterior exceeds its panel or sweep-work allowance",
             ));
         }
-        let (surface, fields) = surface_trace(&parts, modes, gate)?;
+        let (surface, fields) = surface_trace(&parts, modes, cavity, gate)?;
         Ok((surface, fields, work))
     }
 }
@@ -345,6 +386,7 @@ impl super::super::MaterialStringBankSource {
 fn surface_trace(
     parts: &[(&ResolvedShearShell, &[Vec<f64>])],
     modes: usize,
+    cavity: Option<&super::super::cavity::MaterialShellCavity>,
     gate: &CancelGate,
 ) -> Result<(SpherePanels, Vec<Vec<f64>>), ShellBemError> {
     let mut triangles = Vec::new();
@@ -386,18 +428,43 @@ fn surface_trace(
             node_rows.push(velocities);
         }
     }
+    let body_panels = triangles.len();
+    let opening_ports = cavity.map_or(0, |c|c.opening_count());
+    if let Some(cavity) = cavity {
+        for index in 0..opening_ports {
+            poll(gate)?;
+            triangles.extend_from_slice(cavity.opening_triangles(index)
+                .ok_or(ShellBemError::Invalid("lost original mouth boundary triangles"))?);
+        }
+    }
     let surface = SpherePanels::from_triangles(triangles).map_err(ShellBemError::Geometry)?;
-    let mut fields = vec![Vec::with_capacity(surface.areas().len()); modes];
-    for (normal, velocities) in surface.normals().iter().zip(node_rows) {
+    let mut fields = vec![vec![0.0;surface.areas().len()]; modes+opening_ports];
+    for (panel, (normal, velocities)) in surface.normals().iter().zip(node_rows).enumerate() {
         poll(gate)?;
-        for (field, velocity) in fields.iter_mut().zip(velocities) {
+        for (field, velocity) in fields[..modes].iter_mut().zip(velocities) {
             let value = normal[0] * velocity[0] + normal[1] * velocity[1] + normal[2] * velocity[2];
             if !value.is_finite() {
                 return Err(ShellBemError::Invalid(
                     "nonfinite material shell normal trace",
                 ));
             }
-            field.push(value);
+            field[panel] = value;
+        }
+    }
+    if let Some(cavity) = cavity {
+        let mut first = body_panels;
+        for index in 0..opening_ports {
+            poll(gate)?;
+            let count = cavity.opening_triangles(index)
+                .ok_or(ShellBemError::Invalid("lost original mouth boundary triangles"))?.len();
+            let port = cavity.coupling().neck_radiation_port(index)
+                .map_err(|_|ShellBemError::Invalid("lost original mouth volume-flow port"))?;
+            let value = port.volume_weight_m2_per_sqrt_kg/port.area_m2;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(ShellBemError::Invalid("mouth normal velocity scaling is unrepresentable"));
+            }
+            fields[modes+index][first..first+count].fill(value);
+            first += count;
         }
     }
     Ok((surface, fields))

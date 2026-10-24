@@ -5583,3 +5583,40 @@ no instrument-accuracy or measured-audio qualification is claimed.
 Integrated gas and body source heats are apportioned at constant power with cumulative fractions and a final remainder; exterior pressure and applied force remain constant. The returned `UniformEnthalpyStep` covers the complete interval, including the sum of boundary heat and the original source-bearing reports of every accepted substep. Independent macro checks enforce the original species, isolated chemical energy, finite-body energy, total energy and momentum tolerances. Momentum uses actual endpoint MΔv against separately accumulated midpoint gas-pressure, exterior-pressure, applied-force and support impulses. Chemical formation energy is never credited again as heat. One macro port clock/account replaces tentative substep accounts and retains actual accepted work, gas endpoint entropy, summed heat and the full heat entropy integral Σ(Q/T); heat reversals do not create a fictitious single boundary temperature.
 
 Focused regressions in `cavity_phs::piston::reactive::tests::thermal` cover material-only conductivity swaps changing intrainterval reaction progress, piston compression feeding source-backed rates, independent reversible-isomer convergence under tighter tolerances, whole-interval source/heat/impulse accounting, and bounded-work/late-source/late-cancellation rollback. Synthetic source cards establish numerical and integration behavior; they are not empirical combustion calibration.
+
+
+## Explicit compact mouths on the material shell cavity
+
+`ShellCavityOpening` binds a connected planar disk of original interior FE
+boundary faces, internal neck length and nonnegative internal resistance.
+`with_material_shell_cavity_openings` integrates its actual area and every
+retained pressure-shape average through `HelmholtzFe::boundary_load`, then
+uses the original `CavityCoupling` neck inertia and collective volume springs.
+Each face has exactly one solid or declared fluid owner. Existing solid caps,
+undeclared holes, duplicate/disconnected patches and moving retained rims
+refuse. The maximum patch extent and internal length must remain within the
+original compact acoustic chart across the declared band. No exterior end mass
+is included in internal neck data. The sealed constructor keeps its old path.
+
+A joint exterior source map contains all structural modes followed by actual
+neck coordinates, excluding interior standing-wave inertias. Existing shell
+BEM receives solid panels and explicit fluid panels with normal trace W/area;
+its complete passive Model acts through the original exact mechanical network.
+The existing finite-distance observer instead labels physical aperture volume
+flow Q=W*v_neck and uses the inverse-scaled 1/area trace. Body-mouth and
+mouth-mouth terms, material memory, cold rebuild mappings, signed work and
+accepted physical state remain with their original owners. New readouts expose
+accepted neck pressure, flow and the exterior reaction without another solve.
+
+The unloaded constructor explicitly means zero exterior pressure. The atomic
+`with_material_shell_cavity_and_bem` and the existing later BEM attachment both
+require the unchanged exterior admissions. In particular, dense collocation
+does not guarantee the modal fitter's 1e-12 reciprocity bound for independent
+localized body/mouth columns. Such data refuse; the matrix is never repaired or
+its tolerance relaxed. Source-derived general open-body radiation is therefore
+not qualified by this integration. Native regressions and the manufactured
+joint-BEM example remain pending and may expose this existing numerical limit.
+The direct FE/neck/passive-network tests cover original normalization, pressure
+reaction and work, atmosphere substitution, geometry refusal and retained source
+maps. This is a fixed compact-mouth model, not distributed f-hole flow, interior
+thermoviscous loss, moving aperture rims or measured violin/cello/bass accuracy.
