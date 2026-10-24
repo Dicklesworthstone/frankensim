@@ -5627,3 +5627,5 @@ mod finite_gas;
 
 #[path = "string_specimen/thermoelastic.rs"]
 mod thermoelastic;
+#[path = "string_specimen/substitution.rs"]
+mod substitution;

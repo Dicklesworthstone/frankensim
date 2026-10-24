@@ -976,6 +976,26 @@ are not supplied here. Coefficients are externally scheduled and piecewise const
 The acoustic observer retains the preceding accepted acceleration across updates;
 abrupt coefficient changes can produce a transient, without a crossfade.
 
+`substitute_material` additionally accepts a different source card and line mass
+at exactly the same length, circular radius and pinned sine-mode count. It uses
+the same coefficient/loss/observer rebuild, with an explicit canonical transfer:
+`q_new = sqrt(mu_new / mu_old) q_old` and
+`p_new = sqrt(mu_old / mu_new) p_old`. Physical displacement and transverse
+momentum remain continuous; velocity generally changes. The reported external
+parameter work includes both kinetic and elastic energy changes and must fit the
+caller's budget. Previous acceleration is rescaled into the new mass normalization
+so the pressure observer retains its physical history. Physical forces must be
+projected again after the epoch changes. The compact observer includes endpoint
+acceleration changes but does not reconstruct distributional radiation from the
+instantaneous velocity jump; that needs a time-resolved transition.
+G1 checks an independent forced oscillator,
+canonical momentum and pressure including the even-mode jerk term; G3 checks a
+substitution round trip and identical-source continuation; G4 checks complete
+rollback after geometry/basis, work-budget and cancellation refusals. This is a
+prescribed material intervention, not chemical conversion, melting, mass transport
+or heat deposited in either material. The thermal wrapper retains its stricter
+same-card binding and does not expose this substitution.
+
 Explicit `refine_modes` increases the retained sine basis at fixed geometry without
 advancing time. Existing coordinates and observer acceleration history are retained;
 added modes start at rest with zero previous acceleration. Shared admission enforces

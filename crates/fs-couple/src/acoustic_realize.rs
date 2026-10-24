@@ -2497,9 +2497,12 @@ struct LinearMember {
 /// no atmospheric path filter, common propagation delay or radiation loading is
 /// included. The observer is a diagnostic, not an additional energy debit.
 ///
-/// Rebinding keeps the exact length, linear density and sine-mode count, hence
-/// the same mass-normalized basis. Changing geometry/supports, Prony memory,
-/// nonlinear response or phase requires a different state-transfer owner.
+/// Ordinary rebinding keeps the exact length, linear density and sine-mode
+/// count, hence the same mass-normalized basis. Explicit material substitution
+/// at fixed geometry transfers physical displacement and conjugate momentum to
+/// the new mass normalization and reports the external parameter work. Changing
+/// geometry/supports, Prony memory, nonlinear response or phase requires a
+/// different state-transfer owner.
 /// Material temperature is supplied by the specimen, never copied from air.
 /// The caller owns heat transport and must account for returned parameter work;
 /// this runtime alone does not implement a closed thermomechanical system.
@@ -2534,7 +2537,8 @@ pub struct StringPointMotion {
     pub velocity_m_s: f64,
 }
 
-/// Energy change when replacing stiffness at fixed modal displacement/momentum.
+/// Energy change when replacing a material at fixed physical displacement and
+/// conjugate momentum. Ordinary rebinding also keeps the mass normalization.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringMaterialUpdate {
     /// Shared material/operator/observer epoch after publication.
@@ -2543,7 +2547,9 @@ pub struct StringMaterialUpdate {
     pub energy_before_j: f64,
     /// Modal mechanical energy after the update [J].
     pub energy_after_j: f64,
-    /// Signed work into the retained vibration: `sum((omega_new²-omega_old²) q²/2)`.
+    /// Signed work into the retained vibration. With unchanged mass this is
+    /// `sum((omega_new²-omega_old²) q²/2)`; material substitution also includes
+    /// the change in kinetic energy at fixed physical conjugate momentum.
     /// The thermal or external parameter owner owes the opposite energy transfer.
     /// This excludes the axial prestress reservoir and dissipated heat.
     pub parameter_work_j: f64,
@@ -2696,7 +2702,7 @@ impl LinearMaterialStringRuntime {
         self.accepted_samples
     }
 
-    /// Current states in the unchanged mass-normalized sine basis.
+    /// Current states in the accepted material's mass-normalized sine basis.
     #[must_use]
     pub fn states(&self) -> &[ModalAcousticState] {
         self.member.model.states()
@@ -2995,16 +3001,71 @@ impl LinearMaterialStringRuntime {
         specimen: crate::string_specimen::ResolvedStringSpecimen,
         maximum_abs_parameter_work_j: f64,
     ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
+        self.replace_material_state(cx, specimen, maximum_abs_parameter_work_j, false)
+    }
+
+    /// Substitute a source-bound material without restarting the vibrating string.
+    ///
+    /// Length, circular radius, pinned supports and retained sine modes must be
+    /// unchanged. The new specimen supplies its own density, elasticity,
+    /// prestress and admitted loss law. No material name selects solver code.
+    /// The unchanged sine shapes allow an explicit canonical transfer: with
+    /// `s = sqrt(mu_new / mu_old)`, `q_new = s q_old` and `p_new = p_old / s`.
+    /// Physical displacement and transverse momentum therefore survive; velocity
+    /// generally changes. This is not a velocity-preserving replacement.
+    ///
+    /// The caller imposes an external parameter intervention and owes the signed
+    /// change in kinetic plus elastic energy returned as `parameter_work_j`.
+    /// It is not chemical conversion, melting, mass transport or material heat.
+    /// The axial prestress reservoir remains outside the retained transverse
+    /// vibration. This operation is unavailable on the thermal wrapper, whose
+    /// immutable material/enthalpy binding must not silently change identity.
+    ///
+    /// Force projection, damping and pressure weights rebuild together. Accepted
+    /// physical acceleration history survives its change in normalization, so
+    /// the next observer sample includes the change in endpoint acceleration.
+    /// Distributional radiation from an instantaneous velocity jump is not
+    /// reconstructed; that needs a time-resolved transition. Time does not
+    /// advance and no crossfade is inserted. Reproject held physical forces
+    /// after this operation; old mass-normalized force vectors are stale.
+    ///
+    /// # Errors
+    /// Changed geometry/basis, unsupported loss or material domains, unrepresentable
+    /// transferred state, exceeded parameter-work budget or cancellation refuse
+    /// without publishing any material, motion, observer or clock change.
+    pub fn substitute_material(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        specimen: crate::string_specimen::ResolvedStringSpecimen,
+        maximum_abs_parameter_work_j: f64,
+    ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
+        self.replace_material_state(cx, specimen, maximum_abs_parameter_work_j, true)
+    }
+
+    fn replace_material_state(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        specimen: crate::string_specimen::ResolvedStringSpecimen,
+        maximum_abs_parameter_work_j: f64,
+        substitute: bool,
+    ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
         let epoch = next_string_epoch(self.epoch)?;
         let old = self.specimen.string();
         let new = specimen.string();
         validate_incremental_string(&new)?;
-        if self.specimen.material().card_identity() != specimen.material().card_identity()
-            || old.length_m.to_bits() != new.length_m.to_bits()
+        let same_shapes =
+            old.length_m.to_bits() == new.length_m.to_bits() && old.n_modes == new.n_modes;
+        if substitute {
+            if !same_shapes || self.specimen.radius_m().to_bits() != specimen.radius_m().to_bits() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "material substitution requires the same length, circular radius and pinned sine basis",
+                });
+            }
+        } else if !same_shapes
+            || self.specimen.material().card_identity() != specimen.material().card_identity()
             || old.lin_density_kg_m.to_bits() != new.lin_density_kg_m.to_bits()
-            || old.n_modes != new.n_modes
         {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "incremental material update requires the same card, length, linear density and sine basis; use an explicit state transfer for other changes",
@@ -3024,14 +3085,60 @@ impl LinearMaterialStringRuntime {
             self.sample_rate_hz,
             1.0,
         )?;
+        // Take roots first so a representable normalization need not overflow
+        // in the intermediate density ratio. Both must be strictly positive.
+        let mass_scale = if old.lin_density_kg_m.to_bits() == new.lin_density_kg_m.to_bits() {
+            1.0
+        } else {
+            det::sqrt(new.lin_density_kg_m) / det::sqrt(old.lin_density_kg_m)
+        };
+        if !(mass_scale.is_finite() && mass_scale > 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "material substitution mass normalization is unrepresentable",
+            });
+        }
+        let transferred: Vec<_> = self
+            .states()
+            .iter()
+            .map(|state| ModalAcousticState {
+                displacement_m_sqrt_kg: state.displacement_m_sqrt_kg * mass_scale,
+                velocity_m_sqrt_kg_per_s: state.velocity_m_sqrt_kg_per_s / mass_scale,
+            })
+            .collect();
+        if transferred.iter().zip(self.states()).any(|(next, previous)| {
+            (previous.displacement_m_sqrt_kg != 0.0 && next.displacement_m_sqrt_kg == 0.0)
+                || (previous.velocity_m_sqrt_kg_per_s != 0.0
+                    && next.velocity_m_sqrt_kg_per_s == 0.0)
+        }) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "material substitution underflows nonzero motion",
+            });
+        }
         candidate
             .model
-            .restore_states(self.states())
+            .restore_states(&transferred)
             .map_err(AcousticRealizeError::Modal)?;
-        candidate
+        candidate.observer.previous_acceleration = self
+            .member
             .observer
             .previous_acceleration
-            .clone_from(&self.member.observer.previous_acceleration);
+            .as_ref()
+            .map(|history| history.iter().map(|value| value * mass_scale).collect());
+        if candidate
+            .observer
+            .previous_acceleration
+            .as_ref()
+            .zip(self.member.observer.previous_acceleration.as_ref())
+            .is_some_and(|(history, previous)| {
+                history.iter().zip(previous).any(|(value, before)| {
+                    !value.is_finite() || (*before != 0.0 && *value == 0.0)
+                })
+            })
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "material substitution acceleration history is unrepresentable",
+            });
+        }
         let energy = |model: &ModalAcousticTimeModel| -> f64 {
             model
                 .modes()
@@ -3045,17 +3152,21 @@ impl LinearMaterialStringRuntime {
         };
         let energy_before_j = energy(&self.member.model);
         let energy_after_j = energy(&candidate.model);
-        // Difference the stiffness terms mode by mode; do not subtract large
-        // kinetic energies when the parameter work is small.
+        // Difference kinetic and stiffness terms mode by mode; subtracting
+        // total energies would erase small work against unchanged large terms.
         let parameter_work_j: f64 = self
             .modes()
             .iter()
             .zip(candidate.model.modes())
             .zip(self.states())
-            .map(|((before, after), state)| {
+            .zip(&transferred)
+            .map(|(((before, after), state), transferred)| {
                 let old_wq = before.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
-                let new_wq = after.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
+                let new_wq = after.angular_frequency_rad_s * transferred.displacement_m_sqrt_kg;
+                let old_v = state.velocity_m_sqrt_kg_per_s;
+                let new_v = transferred.velocity_m_sqrt_kg_per_s;
                 0.5 * (new_wq - old_wq) * (new_wq + old_wq)
+                    + 0.5 * (new_v - old_v) * (new_v + old_v)
             })
             .sum();
         if !parameter_work_j.is_finite() || parameter_work_j.abs() > maximum_abs_parameter_work_j {
