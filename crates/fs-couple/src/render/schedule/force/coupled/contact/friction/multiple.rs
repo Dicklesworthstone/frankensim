@@ -66,6 +66,9 @@ pub struct FrictionPortFrame {
     pub drive_work_j: f64,
     /// Nonnegative dissipation [J]: dry sliding work or physical layer plastic loss.
     pub dissipation_j: f64,
+    /// Physical loss in this port's series-drive dashpot [J], separately from
+    /// interface loss. Already included in `friction_dissipation_j`.
+    pub series_drive_dissipation_j: f64,
     /// Actual signed kinetic force residual [N], zero on other branches.
     pub constitutive_residual_n: f64,
     /// Dry contact branch, or explicitly resolved elastic/plastic material shear.
@@ -79,7 +82,8 @@ pub struct FrictionPortFrame {
 impl Default for FrictionPortFrame {
     fn default() -> Self {
         Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
-            dissipation_j: 0.0, constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
+            dissipation_j: 0.0, series_drive_dissipation_j: 0.0,
+            constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
             roots: None, shear_layer: None }
     }
 }
@@ -378,6 +382,7 @@ impl MultiFrictionModalSystem {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
+                series_drive_dissipation_j: 0.0,
                 constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None };
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
             self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
@@ -698,7 +703,8 @@ impl MultiFrictionModalSystem {
             absolute_work = finite(absolute_work+supply.abs())?;
             self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
                 traction_n: self.tractions[i], slip_distance_m: slip,
-                drive_work_j: supply, dissipation_j: dissipation, constitutive_residual_n: residual,
+                drive_work_j: supply, dissipation_j: dissipation,
+                series_drive_dissipation_j: hair_loss, constitutive_residual_n: residual,
                 regime: self.regimes[i], roots: self.port_roots[i], shear_layer };
         }
         let mut pressure = self.core.staged_observer_pressure(gate)?;

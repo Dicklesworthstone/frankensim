@@ -6,7 +6,8 @@ use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedShearLayer;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
 use crate::render::schedule::force::coupled::contact::friction::{FrictionDrive,
-    multiple::layer::thermal::{LayerThermalCell, LayerThermalSolve, LayerThermalFrame, LayerThermalError}};
+    multiple::layer::thermal::{LayerThermalCell, LayerThermalSolve, LayerThermalFrame, LayerThermalError,
+        SeriesDriveHeatDestination}};
 
 impl MultiBowStringBank {
     /// Bind isothermal thin shear layers to selected original bow/contact ports.
@@ -61,6 +62,31 @@ impl MultiBowStringBank {
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
         self.system.step_with_layer_thermal_network(thermal, bindings, controls,
             energy_guess_j, external, drives, gate, resolve)
+    }
+
+    /// Continue original instrument motion, layer thermodynamics and explicitly
+    /// routed series-hair heating on the SAME finite thermal network.
+    /// The heat is the actual drive dashpot loss; stored hair spring energy is
+    /// retained mechanically. Existing conduction can carry that heat into a
+    /// material film, changing its traction and this instrument's pressure.
+    /// Hair drive coefficients remain their declared fixed values: no material
+    /// temperature law or thermal mass is inferred from spring/dashpot data.
+    /// Empty layer bindings permit a series-drive-only thermal continuation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_contact_thermal_network<'t, S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'t>,
+        bindings: &[LayerThermalCell<'_>],
+        series_heat: &[SeriesDriveHeatDestination],
+        controls: LayerThermalSolve,
+        energy_guess_j: &[f64],
+        external: &[f64],
+        drives: &[FrictionDrive],
+        gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
+    ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        self.system.step_with_contact_thermal_network(thermal, bindings, series_heat,
+            controls, energy_guess_j, external, drives, gate, resolve)
     }
 
     /// Complete original layer material and geometry, retained through

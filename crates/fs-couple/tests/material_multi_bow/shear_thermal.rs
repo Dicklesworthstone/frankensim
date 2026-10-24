@@ -714,3 +714,164 @@ fn reversible_shear_cooling_is_not_clipped_or_relabelled_as_plastic_dissipation(
         assert!(f.total_energy_residual_j.abs() <= controls(1).total_energy_tolerance_j);
     });
 }
+
+// A geometry-derived, fixed-coefficient hair drive on the original instrument.
+// The receiving caloric cells below are explicit manufactured lumped bodies;
+// this does not identify a measured thermal law for horsehair or rosin.
+fn compliant_instrument(cx: &Cx<'_>, gate: &CancelGate, distributed_damping: f64)
+    -> (MultiBowStringBank, f64, f64) {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::compliant_ribbon::{
+        CompliantBowRibbon, HairRibbonProperties,
+    };
+    let hair = HairRibbonProperties {
+        youngs_modulus_pa: 7e9, hair_radius_m: 0.095e-3,
+        hairs_in_contact: 50.0, free_length_m: 0.65, excitation_fraction: 0.5,
+        distributed_damping_kg_s_m: distributed_damping,
+        reference_width_m: 0.01, density_kg_m3: 1100.0,
+    };
+    let ribbon = CompliantBowRibbon::new(options().bow, 0.5, 0.01, 1, hair).unwrap();
+    let bank = base(cx, gate, 7800.0)
+        .with_compliant_bow_ribbon(0.01, 1, hair, joint_limits(), gate).unwrap();
+    (bank, ribbon.lumped_tangential_stiffness_n_m(), ribbon.lumped_tangential_damping_kg_s())
+}
+
+#[test]
+fn series_hair_heat_is_its_actual_dashpot_loss_and_preserves_original_motion() {
+    with_cx(|cx, gate| {
+        for damping in [0.0, 1000.0] {
+            let (_, caloric) = coating(false, false);
+            let (mut bank, k, c) = compliant_instrument(cx, gate, damping);
+            let (mut ordinary, _, _) = compliant_instrument(cx, gate, damping);
+            let mut heat = thermal(caloric.curve(), false);
+            let routes = [SeriesDriveHeatDestination { port: 0, cell: FILM }];
+            let forces = vec![0.0; bank.system().mode_count()];
+            let drives = [drive(0.001, 0.1)];
+            let dt = bank.system().sample_period_s();
+            let (mut eta, mut generated) = (0.0, 0.0);
+            for _ in 0..128 {
+                let f = bank.step_with_contact_thermal_network(&mut heat, &[], &routes,
+                    controls(1), &[0.0], &forces, &drives, gate, other).unwrap();
+                let reference = ordinary.step(&forces, &drives).unwrap();
+                assert_eq!(&f.mechanics, reference);
+                assert_eq!(states(&bank), states(&ordinary));
+                let traction = f.mechanics.ports[0].traction_n;
+                let next = eta + (traction-k*eta)/(0.5*k+c/dt);
+                // Independently subtract elastic storage from drive-end work.
+                let work = traction*(next-eta);
+                let stored = 0.5*k*(next*next-eta*eta);
+                let expected = work-stored;
+                assert!((f.routed_series_drive_heat_j-expected).abs()
+                    <= 1e-12*work.abs().max(stored.abs())+1e-18);
+                assert_eq!(f.routed_series_drive_heat_j,
+                    f.mechanics.ports[0].series_drive_dissipation_j);
+                assert_eq!(f.routed_plastic_heat_j, 0.0);
+                assert_eq!(f.routed_reversible_heat_j, 0.0);
+                assert!((f.deposited_heat_j-f.routed_series_drive_heat_j).abs() < 1e-15);
+                assert!(f.total_energy_residual_j.abs() <= controls(1).total_energy_tolerance_j);
+                generated += f.routed_series_drive_heat_j;
+                eta = next;
+            }
+            assert!((total_heat(&heat)-generated).abs() < 1e-11);
+            if damping == 0.0 {
+                assert_eq!(generated, 0.0);
+                assert_eq!(heat.temperature_k(FILM).unwrap(), 300.0);
+            } else {
+                assert!(generated > 0.0 && heat.temperature_k(FILM).unwrap() > 300.0);
+            }
+        }
+    });
+}
+
+#[test]
+fn hair_heat_conducts_to_the_original_material_film_and_changes_instrument_pressure() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating(true, true);
+        let make = || compliant_instrument(cx, gate, 1000.0).0
+            .with_bow_shear_layers(vec![(0, layer(&card))], gate).unwrap();
+        let (mut bank, mut unrouted) = (make(), make());
+        let (mut heat, mut reference_heat) =
+            (thermal(caloric.curve(), true), thermal(caloric.curve(), true));
+        let bound = binding(&card, caloric.curve());
+        let routes = [SeriesDriveHeatDestination { port: 0, cell: CellId(11) }];
+        let original = bank.bow_shear_layer(0).unwrap().clone();
+        let forces = vec![0.0; bank.system().mode_count()];
+        let drives = [drive(0.001, 0.1)];
+        let (mut hair, mut plastic, mut reversible, mut pressure_difference) =
+            (0.0, 0.0, 0.0, 0.0);
+        for _ in 0..256 {
+            let f = bank.step_with_contact_thermal_network(&mut heat, &bound, &routes,
+                controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+            let reference = unrouted.step_with_layer_thermal_network(&mut reference_heat,
+                &bound, controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+            hair += f.routed_series_drive_heat_j;
+            plastic += f.routed_plastic_heat_j;
+            reversible += f.routed_reversible_heat_j;
+            pressure_difference += (f.mechanics.observer_pressure_pa
+                -reference.mechanics.observer_pressure_pa).abs();
+            assert!(f.routed_series_drive_heat_j >= 0.0 && f.routed_plastic_heat_j >= 0.0);
+            assert!((f.deposited_heat_j-f.routed_plastic_heat_j
+                -f.routed_reversible_heat_j-f.routed_series_drive_heat_j).abs() < 1e-15);
+            assert_eq!(reference.routed_series_drive_heat_j, 0.0);
+            assert!(f.total_energy_residual_j.abs() <= controls(3).total_energy_tolerance_j);
+            assert_eq!(bank.bow_shear_layer(0).unwrap().temperature_kelvin(),
+                heat.temperature_k(FILM).unwrap());
+        }
+        assert!(hair > 0.0 && plastic > 0.0);
+        assert!((total_heat(&heat)-hair-plastic-reversible).abs() < 1e-11);
+        assert!(heat.temperature_k(CellId(11)).unwrap() > heat.temperature_k(CellId(12)).unwrap());
+        assert!((heat.temperature_k(FILM).unwrap()-reference_heat.temperature_k(FILM).unwrap()).abs() > 1e-10);
+        assert!(pressure_difference > 1e-14);
+        let current = bank.bow_shear_layer(0).unwrap();
+        for (now, old) in current.resolved().properties().iter()
+            .zip(original.resolved().properties()) {
+            assert_eq!(now.answer().receipt.selected, old.answer().receipt.selected);
+        }
+        assert_eq!(bank.system().samples_rendered(), 256);
+    });
+}
+
+#[test]
+fn drive_heat_route_and_late_source_refusals_preserve_stretch_heat_and_pressure_history() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating(true, true);
+        let make = || compliant_instrument(cx, gate, 1000.0).0
+            .with_bow_shear_layers(vec![(0, layer(&card))], gate).unwrap();
+        let (mut bank, mut reference) = (make(), make());
+        let (mut heat, mut reference_heat) =
+            (thermal(caloric.curve(), true), thermal(caloric.curve(), true));
+        let bound = binding(&card, caloric.curve());
+        let route = SeriesDriveHeatDestination { port: 0, cell: CellId(11) };
+        let forces = vec![0.0; bank.system().mode_count()];
+        let drives = [drive(0.001, 0.1)];
+        bank.step_with_contact_thermal_network(&mut heat, &bound, &[route],
+            controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+        reference.step_with_contact_thermal_network(&mut reference_heat, &bound, &[route],
+            controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+        let saved = (states(&bank), bank.system().last_frame().cloned(), heat.cells().clone(),
+            bank.system().total_energy_j().unwrap(), heat.time_s(), bank.bow_shear_layer(0).cloned());
+        for routes in [vec![route, route],
+            vec![SeriesDriveHeatDestination { port: 1, cell: CellId(11) }],
+            vec![SeriesDriveHeatDestination { port: 0, cell: CellId(999) }]] {
+            assert!(bank.step_with_contact_thermal_network(&mut heat, &bound, &routes,
+                controls(3), &[0.0; 3], &forces, &drives, gate, other).is_err());
+        }
+        assert!(matches!(bank.step_with_contact_thermal_network(&mut heat, &bound, &[route],
+            controls(3), &[0.0; 3], &forces, &drives, gate,
+            |_| -> Result<StepCoefficients<()>, &'static str> { Err("late source refusal") }),
+            Err(LayerThermalError::Source("late source refusal"))));
+        assert_eq!(states(&bank), saved.0);
+        assert_eq!(bank.system().last_frame(), saved.1.as_ref());
+        assert_eq!(heat.cells(), &saved.2);
+        assert_eq!(bank.system().total_energy_j().unwrap(), saved.3);
+        assert_eq!(heat.time_s(), saved.4);
+        assert_eq!(bank.bow_shear_layer(0), saved.5.as_ref());
+        let retry = bank.step_with_contact_thermal_network(&mut heat, &bound, &[route],
+            controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+        let next = reference.step_with_contact_thermal_network(&mut reference_heat, &bound, &[route],
+            controls(3), &[0.0; 3], &forces, &drives, gate, other).unwrap();
+        assert_eq!(retry.mechanics, next.mechanics);
+        assert_eq!(retry.routed_series_drive_heat_j, next.routed_series_drive_heat_j);
+        assert_eq!(states(&bank), states(&reference));
+        assert_eq!(heat.cells(), reference_heat.cells());
+    });
+}
