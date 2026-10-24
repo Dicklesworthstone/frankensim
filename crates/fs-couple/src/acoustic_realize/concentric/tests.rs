@@ -323,3 +323,5 @@ fn source_resistance_drives_layer_current_heat_and_sound_in_the_same_endpoint_so
         assert_ne!(a.3, b.3);
     });
 }
+
+mod finite_gas;

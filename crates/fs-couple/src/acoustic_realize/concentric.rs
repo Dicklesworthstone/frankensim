@@ -15,6 +15,9 @@
 //! and Kelvin-Voigt bending are explicit limits. Helical slip, evolving geometry,
 //! melting, nonlinear stretching and a coupled instrument body are not supplied.
 
+/// Finite source gas, reciprocal surface heat and retained acoustic history.
+pub mod finite_gas;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -29,7 +32,8 @@ use crate::string_specimen::{KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, StringPres
 use fs_exec::Cx;
 use fs_material::conductor::{ConductorError, OhmicDrive};
 use fs_material::gas::GasState;
-use fs_material::phase::{MAX_HEAT_CAPACITY_ENTHALPY_KNOTS, ResolvedHeatCapacityCurve};
+use fs_material::phase::{MAX_HEAT_CAPACITY_ENTHALPY_KNOTS, PhaseStateError, ResolvedHeatCapacityCurve};
+use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::section::ConcentricKelvinVoigtSection;
 use fs_material::section::transport::ElectrothermalSectionResponse;
 use fs_material::section_temperature::thermoelastic::{ConcentricThermoelasticLaw,
@@ -71,6 +75,10 @@ pub enum ConcentricStringError<E = Infallible> {
     Electrical(ConductorError),
     Acoustic(AcousticRealizeError),
     Thermal(DepositionError),
+    Caloric(PhaseStateError),
+    Gas(GasEnergyError),
+    ExchangeOutsideBracket { lower_residual_j: f64, upper_residual_j: f64 },
+    ExchangeNotConverged { iterations: usize, residual_j: f64 },
     Source(E),
     Newton(NewtonError),
     NotConverged(NewtonReport),
@@ -89,6 +97,12 @@ impl<E> From<AcousticRealizeError> for ConcentricStringError<E> {
 impl<E> From<DepositionError> for ConcentricStringError<E> {
     fn from(e: DepositionError) -> Self { Self::Thermal(e) }
 }
+impl<E> From<PhaseStateError> for ConcentricStringError<E> {
+    fn from(e: PhaseStateError) -> Self { Self::Caloric(e) }
+}
+impl<E> From<GasEnergyError> for ConcentricStringError<E> {
+    fn from(e: GasEnergyError) -> Self { Self::Gas(e) }
+}
 impl<E> From<NewtonError> for ConcentricStringError<E> {
     fn from(e: NewtonError) -> Self { Self::Newton(e) }
 }
@@ -100,6 +114,12 @@ impl<E: core::fmt::Display> core::fmt::Display for ConcentricStringError<E> {
             Self::Electrical(e) => write!(f, "concentric thermal electrical transport: {e}"),
             Self::Acoustic(e) => write!(f, "concentric thermal mechanics: {e}"),
             Self::Thermal(e) => write!(f, "concentric thermal network: {e}"),
+            Self::Caloric(e) => write!(f, "concentric caloric source: {e}"),
+            Self::Gas(e) => write!(f, "concentric finite gas: {e}"),
+            Self::ExchangeOutsideBracket { lower_residual_j, upper_residual_j } =>
+                write!(f, "concentric gas exchange is not bracketed: {lower_residual_j}, {upper_residual_j} J"),
+            Self::ExchangeNotConverged { iterations, residual_j } =>
+                write!(f, "concentric gas exchange did not converge in {iterations} iterations: {residual_j} J"),
             Self::Source(e) => write!(f, "concentric thermal source: {e}"),
             Self::Newton(e) => write!(f, "concentric thermal solve: {e:?}"),
             Self::NotConverged(r) => write!(f, "concentric thermal solve did not converge: {r:?}"),
@@ -228,6 +248,29 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
     pub const fn gas(&self) -> &GasState { &self.gas }
     pub fn thermal_bindings(&self) -> &[ConcentricStringThermalCell<'a>] { &self.bindings }
 
+    /// Settle physical point loads before the simulation window, then hold or
+    /// release them through the ordinary force projection. Only an unexcited
+    /// runtime without accepted samples or observer history can be initialized.
+    /// The native modal equilibrium owner supplies the displacement; existing
+    /// motion is never replaced and no loading work is invented inside the run.
+    pub fn initialize_point_load_equilibrium(&mut self, cx: &Cx<'_>, loads: &[StringPointForce])
+        -> Result<(), ConcentricStringError>
+    {
+        checkpoint(cx)?;
+        if self.accepted_samples != 0 || self.member.observer.previous_acceleration.is_some()
+            || self.states().iter().any(|state| state.displacement_m_sqrt_kg != 0.0
+                || state.velocity_m_sqrt_kg_per_s != 0.0)
+        { return Err(invalid("settled loads require an unexcited layered string before stepping")); }
+        let forces = self.project_point_forces(cx, loads)?;
+        let mut member = self.member.clone();
+        member.model.initialize_static_equilibrium(&forces).map_err(AcousticRealizeError::Modal)?;
+        self.admit_capacity(cx, &self.source, member.model.states())?;
+        member.observer.previous_acceleration = Some(vec![0.0; forces.len()]);
+        checkpoint(cx)?;
+        self.member = member;
+        Ok(())
+    }
+
     /// Project held physical point forces using the accepted mass-normalized basis.
     pub fn project_point_forces(&self, cx: &Cx<'_>, loads: &[StringPointForce])
         -> Result<Vec<f64>, ConcentricStringError>
@@ -284,7 +327,7 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<ConcentricStringThermalFrame<S>, ConcentricStringError<E>> {
         self.step_with_resolved_thermal_network(cx, thermal, controls, energy_guess_j, forces,
-            |endpoint, _, _| resolve(endpoint).map_err(ConcentricStringError::Source))
+            |endpoint, _, _, _| resolve(endpoint).map_err(ConcentricStringError::Source))
     }
 
     /// Drive current or voltage through the original layered conductor and
@@ -314,34 +357,9 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         let length_m = self.string.length_m;
         let cells: Vec<_> = self.bindings.iter().map(|binding| binding.cell).collect();
         self.step_with_resolved_thermal_network(cx, thermal, controls, energy_guess_j, forces,
-            |endpoint, source, dt| {
-                checkpoint(cx)?;
-                let electrical = source.section.section().thermal_transport()?
-                    .with_ohmic_transport(length_m)?.evaluate(drive, 0.0)?;
-                let StepCoefficients { mut sources_w, conductances_w_k, payload } =
-                    resolve(endpoint).map_err(ConcentricStringError::Source)?;
-                let check = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
-                let other_external_heat_j = finite(dt*endpoint.external_step_power_w(
-                    &sources_w, &conductances_w_k, check)?)?;
-                let mut layer_joule_heat_j = Vec::with_capacity(cells.len());
-                let joule_heat_j = finite(dt*electrical.joule_power_w)?;
-                for (&cell, layer) in cells.iter().zip(&electrical.layers) {
-                    checkpoint(cx)?;
-                    let heat = finite(dt*layer.joule_power_w)?;
-                    deposit(&mut sources_w, cell, heat, dt, controls.total_energy_tolerance_j)?;
-                    layer_joule_heat_j.push(heat);
-                }
-                let actual_heat_j = finite(dt*endpoint.external_step_power_w(
-                    &sources_w, &conductances_w_k, check)?)?;
-                let split_residual = finite(actual_heat_j-other_external_heat_j-joule_heat_j)?;
-                let roundoff = 32.0*f64::EPSILON*(actual_heat_j.abs()+other_external_heat_j.abs()+joule_heat_j);
-                if split_residual.abs() > controls.total_energy_tolerance_j+roundoff {
-                    return Err(invalid("layer Joule heat does not match actual electrical supply into the thermal network"));
-                }
-                Ok(StepCoefficients { sources_w, conductances_w_k,
-                    payload: ConcentricStringOhmicSource { drive, electrical, joule_heat_j,
-                        layer_joule_heat_j, other_external_heat_j, transport: payload } })
-            })
+            |endpoint, source, dt, _| add_ohmic_heat(cx, endpoint, source, length_m,
+                dt, &cells, drive, controls.total_energy_tolerance_j,
+                resolve(endpoint).map_err(ConcentricStringError::Source)?))
     }
 
     // The electrical adapter receives exactly the source already resolved for
@@ -350,7 +368,7 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
     fn step_with_resolved_thermal_network<'t, S, E>(
         &mut self, cx: &Cx<'_>, thermal: &mut DepositionSimulation<'t>,
         controls: ConcentricStringThermalSolve, energy_guess_j: &[f64], forces: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'t>, &ConcentricThermoelasticState, f64)
+        resolve: impl Fn(&DepositionSimulation<'t>, &ConcentricThermoelasticState, f64, &StringDissipation)
             -> Result<StepCoefficients<S>, ConcentricStringError<E>>,
     ) -> Result<ConcentricStringThermalFrame<S>, ConcentricStringError<E>> {
         checkpoint(cx)?;
@@ -412,7 +430,7 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
                 let after_layers = layer_energies(cx, &source, member.model.states(), self.reference_length_m, string.length_m)?;
                 let mut exchanges = Vec::with_capacity(self.bindings.len());
                 let StepCoefficients { mut sources_w, conductances_w_k, payload } =
-                    resolve(endpoint, &source, dt)?;
+                    resolve(endpoint, &source, dt, &dissipation)?;
                 let external_heat_j = finite(dt*endpoint.external_step_power_w(&sources_w,
                     &conductances_w_k, thermal_checkpoint)?)?;
                 for (i, binding) in self.bindings.iter().enumerate() {
@@ -631,6 +649,41 @@ fn layer_losses<E>(section: &ConcentricKelvinVoigtSection, loss: &StringDissipat
         return Err(invalid("source-derived layer bending losses do not sum to the native solid heat"));
     }
     Ok(values)
+}
+
+// Shared by the prescribed-medium and finite-gas paths. Electrical and
+// mechanical consumers receive one already resolved physical material state.
+#[allow(clippy::too_many_arguments)]
+fn add_ohmic_heat<'t, S, E>(
+    cx: &Cx<'_>, endpoint: &DepositionSimulation<'t>, source: &ConcentricThermoelasticState,
+    length_m: f64, dt: f64, cells: &[CellId], drive: OhmicDrive, tolerance_j: f64,
+    coefficients: StepCoefficients<S>,
+) -> Result<StepCoefficients<ConcentricStringOhmicSource<S>>, ConcentricStringError<E>> {
+    checkpoint(cx)?;
+    let electrical = source.section.section().thermal_transport()?
+        .with_ohmic_transport(length_m)?.evaluate(drive, 0.0)?;
+    let StepCoefficients { mut sources_w, conductances_w_k, payload } = coefficients;
+    let check = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
+    let other_external_heat_j = finite(dt*endpoint.external_step_power_w(
+        &sources_w, &conductances_w_k, check)?)?;
+    let mut layer_joule_heat_j = Vec::with_capacity(cells.len());
+    let joule_heat_j = finite(dt*electrical.joule_power_w)?;
+    for (&cell, layer) in cells.iter().zip(&electrical.layers) {
+        checkpoint(cx)?;
+        let heat = finite(dt*layer.joule_power_w)?;
+        deposit(&mut sources_w, cell, heat, dt, tolerance_j)?;
+        layer_joule_heat_j.push(heat);
+    }
+    let actual_heat_j = finite(dt*endpoint.external_step_power_w(
+        &sources_w, &conductances_w_k, check)?)?;
+    let split_residual = finite(actual_heat_j-other_external_heat_j-joule_heat_j)?;
+    let roundoff = 32.0*f64::EPSILON*(actual_heat_j.abs()+other_external_heat_j.abs()+joule_heat_j);
+    if split_residual.abs() > tolerance_j+roundoff {
+        return Err(invalid("layer Joule heat does not match actual electrical supply into the thermal network"));
+    }
+    Ok(StepCoefficients { sources_w, conductances_w_k,
+        payload: ConcentricStringOhmicSource { drive, electrical, joule_heat_j,
+            layer_joule_heat_j, other_external_heat_j, transport: payload } })
 }
 
 fn deposit<E>(sources: &mut BTreeMap<CellId, f64>, cell: CellId, heat_j: f64, dt: f64,

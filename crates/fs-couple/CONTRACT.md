@@ -5725,8 +5725,9 @@ thermoelastic curvature over every original caloric segment. Slack, source
 exits, excessive strain/temperature increments, changed inventory, cancellation
 and solver/balance failures publish neither thermal nor acoustic history.
 The thermal/mechanical split is first order and needs timestep/modal refinement.
-Gas is the supplied fixed physical state; microphone pressure is the existing
-diagnostic radiation approximation. This does not thermally evolve a complete
+The thermal-only and Ohmic methods above retain their supplied fixed gas state;
+the finite-gas transaction below evolves it explicitly. Microphone pressure is
+the existing diagnostic radiation approximation. This does not thermally evolve a complete
 bow/string/body network, resolve helical winding slip, radial gradients inside
 an annulus, skin effects, changing geometry or phase transitions.
 
@@ -5877,3 +5878,53 @@ Source syntax parsing and an independent 90-case numerical elimination/work
 oracle passed during integration; neither executes the Rust implementation.
 Native tests and example audio remain pending. The declared geometry, source
 fit and material validity gates remain mandatory.
+
+## Finite source gas on continuing bonded layered strings
+
+`acoustic_realize::concentric::finite_gas` couples the existing layered-string
+thermal step to the original `IsochoricGasParcel`. All annuli keep their own
+material cards, caloric cells, temperatures and source-derived electrical
+paths. The gas retains its original species, thermochemistry, transport
+sources, mass and volume. Its initial complete snapshot must agree with the
+string's accepted ambient.
+
+The existing bounded scalar feedback owner solves signed heat exchange with
+the outermost annulus around the existing backward-Euler layer network. Each
+proposal begins from the same accepted histories. The conductance callback
+receives the candidate gas and exposed material states, so source-driven
+conduction or convection can share this transaction. The original parallel
+Ohmic owner optionally supplies current/voltage heating at each trial
+temperature. Solid bending loss and per-layer reversible thermoelastic heat
+remain in their original cells; the actual native aerodynamic loss enters
+the gas once. Interface heat is debited from the exposed solid and credited
+to the gas.
+
+Acceptance independently measures caloric solid storage, mechanical internal
+energy (kinetic plus Helmholtz plus `T*s`) and gas internal energy. The
+external account includes force work, electrical supply and other declared
+solid/gas heat; signed interface heat and drag cancel internally. Damping
+roundoff stays an explicit numerical account. Endpoint gas thermochemistry,
+EOS and transport rebuild drag and pressure observation while preserving
+modal displacement, momentum and observer acceleration history. Final
+publication advances the string, thermal network and gas together;
+source-domain exits, failed balances, work limits and cancellation leave all
+three accepted owners unchanged.
+
+The parcel is a well-mixed fixed-volume thermal inventory with frozen species.
+This first-order partitioned path does not supply chamber acoustics, gas flow,
+pressure-volume work, reactions, evolving geometry or complete bowed-instrument
+body/radiation feedback. The inherited fixed-section, solid-caloric,
+small-strain and source-law limits still apply. The compact pressure observer
+is diagnostic; it is not a second heat source.
+
+The source-bound conduction adapter also checks the actual exposed outer area,
+original conductivity claim and conditions, and the native lumped Biot limit.
+A pre-window point-load initializer uses the original modal equilibrium owner;
+existing motion or pressure history cannot be overwritten by initialization.
+
+Three focused regression definitions independently reconstruct mixture heat
+capacity, layer Ohmic current and complete stored energy; compare composition/
+pressure changes at identical geometry; and check late refusal, cancellation
+and exact retry. Production and regression source passed Rust syntax parsing.
+Native compilation, numerical execution and audio rendering/listening were not
+available in this session; these tests do not establish instrument fidelity.
