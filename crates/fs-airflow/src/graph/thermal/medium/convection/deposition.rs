@@ -1,11 +1,12 @@
-//! Material-driven forced convection on the shared finite-cell enthalpy state.
+//! Material-driven convection on the shared finite-cell enthalpy state.
 //!
 //! The fluid is an explicitly prescribed reservoir, not another finite thermal
-//! store. One original transport snapshot supplies Re, Pr and h for each binding.
+//! store. One original transport snapshot supplies Re or Ra, Pr and h per binding.
 //! The original thermal owner supplies wall temperature and currently exposed
 //! area. Evaluate inside a thermal residual callback, never only at step start.
-//! Fluid property/film conditions, speed and correlation geometry are held fixed
-//! during an interval; this is not a resolved flow or evolving gas energy model.
+//! Fluid property conditions, expansion and geometry are held fixed during an
+//! interval; the actual wall temperature still changes natural-convection Ra.
+//! This is not a resolved flow, film-temperature or evolving gas energy model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use fs_conduction::transient::deposition::{CellId, DepositionError, DepositionSimulation};
@@ -27,6 +28,62 @@ pub struct ConvectiveCell<'a> {
     pub settings: ForcedConvectionSettings,
 }
 
+/// A boundary law evaluated from the same material and current thermal cell.
+/// Each exposed cell has exactly one law; forced and natural coefficients are
+/// not summed into an unsupported mixed-convection correlation.
+#[derive(Clone, Copy, Debug)]
+pub enum CellConvectionLaw {
+    /// Prescribed relative flow through an existing forced-convection card.
+    Forced {
+        correlation: CorrelationId,
+        speed_m_s: f64,
+        settings: ForcedConvectionSettings,
+    },
+    /// Churchill-Chu isothermal vertical plate. Gravity is a nonnegative
+    /// magnitude [m/s²]; volumetric expansion [1/K] is explicitly supplied.
+    /// Negative expansion is admitted by the original vertical-plate owner.
+    /// No liquid expansion is inferred from a gas temperature or material name.
+    VerticalPlate {
+        gravity_m_s2: f64,
+        expansion_per_k: f64,
+    },
+}
+
+/// One material source, reservoir and law on the whole currently exposed cell.
+/// The property state is explicitly frozen. The caller must retain its source
+/// and justify the selected card's property-evaluation temperature convention.
+#[derive(Clone, Copy)]
+pub struct MaterialConvectiveCell<'a> {
+    pub cell: CellId,
+    pub fluid: &'a dyn FluidTransport,
+    pub reference_temperature: Temperature,
+    pub characteristic_length: Length,
+    pub law: CellConvectionLaw,
+}
+
+impl<'a> From<ConvectiveCell<'a>> for MaterialConvectiveCell<'a> {
+    fn from(binding: ConvectiveCell<'a>) -> Self {
+        Self {
+            cell: binding.cell,
+            fluid: binding.fluid,
+            reference_temperature: binding.reference_temperature,
+            characteristic_length: binding.characteristic_length,
+            law: CellConvectionLaw::Forced {
+                correlation: binding.correlation,
+                speed_m_s: binding.speed_m_s,
+                settings: binding.settings,
+            },
+        }
+    }
+}
+
+/// One supported correlation evaluation, without an invented equilibrium limit.
+#[derive(Debug)]
+pub struct CellConvectionEvaluation {
+    pub nusselt: NusseltEvaluation,
+    pub coefficient: Evidence<HeatTransferCoefficient>,
+}
+
 /// Original dimensional/correlation result and the exact thermal destination.
 #[derive(Debug)]
 pub struct CellConvectionSample {
@@ -35,8 +92,9 @@ pub struct CellConvectionSample {
     pub reference_temperature_k: f64,
     pub exposed_area_m2: f64,
     pub transport: FluidTransportState,
-    pub nusselt: NusseltEvaluation,
-    pub coefficient: Evidence<HeatTransferCoefficient>,
+    /// Absent only at exact natural-convection thermal equilibrium: the power
+    /// is zero, but a correlation at unsupported Ra=0 has not been evaluated.
+    pub evaluation: Option<CellConvectionEvaluation>,
     /// Signed external power into the finite body. Cooling is negative.
     pub heat_into_cell_w: f64,
 }
@@ -119,6 +177,37 @@ impl CellConvectionSources {
 /// inferred from the material name. Unsupported zero-flow groups still refuse.
 pub fn evaluate_cell_convection(
     thermal: &DepositionSimulation<'_>, bindings: &[ConvectiveCell<'_>],
+    maximum_cells: usize, cancelled: impl FnMut() -> bool,
+) -> Result<CellConvectionSources, ConvectionSourceError> {
+    evaluate_bound_cells(thermal, bindings.iter().copied().map(MaterialConvectiveCell::from),
+        maximum_cells, cancelled)
+}
+
+/// Evaluate forced and natural boundaries through one thermal ownership loop.
+///
+/// Use this inside the original thermal residual, where `thermal` is the actual
+/// proposed enthalpy endpoint. A natural boundary's Rayleigh number and h then
+/// follow its current wall/reservoir temperature difference. Material properties
+/// and expansion remain frozen at the explicitly borrowed source state.
+/// Exact natural-convection thermal equilibrium returns zero power with no
+/// correlation evaluation, after admitting the original fluid and physical
+/// inputs. Nonzero temperature differences still require an admitted Rayleigh
+/// number; zero gravity/expansion do not invent an out-of-domain coefficient.
+///
+/// Exposed-area/contact accounting, independent source addition, stable ordering,
+/// work limits and transactional refusals are identical to
+/// `evaluate_cell_convection`. A repeated cell across different laws also
+/// refuses: this API does not compose a mixed-convection law on one surface.
+pub fn evaluate_material_cell_convection(
+    thermal: &DepositionSimulation<'_>, bindings: &[MaterialConvectiveCell<'_>],
+    maximum_cells: usize, cancelled: impl FnMut() -> bool,
+) -> Result<CellConvectionSources, ConvectionSourceError> {
+    evaluate_bound_cells(thermal, bindings.iter().copied(), maximum_cells, cancelled)
+}
+
+fn evaluate_bound_cells<'a>(
+    thermal: &DepositionSimulation<'_>,
+    bindings: impl ExactSizeIterator<Item = MaterialConvectiveCell<'a>>,
     maximum_cells: usize, mut cancelled: impl FnMut() -> bool,
 ) -> Result<CellConvectionSources, ConvectionSourceError> {
     check(&mut cancelled)?;
@@ -151,28 +240,54 @@ pub fn evaluate_cell_convection(
         check(&mut cancelled)?;
         let wall = thermal.temperature_k(binding.cell)?;
         let area = thermal.exposed_area_m2(binding.cell)?;
-        let mut settings = binding.settings;
-        if wall > binding.reference_temperature.value() {
-            settings.direction = ThermalDirection::HeatingFluid;
-        } else if wall < binding.reference_temperature.value() {
-            settings.direction = ThermalDirection::CoolingFluid;
-        }
-        let result = evaluate_forced_from_material(binding.correlation, binding.fluid,
-            binding.speed_m_s, binding.characteristic_length, settings)
-            .map_err(ConvectionSourceError::Material)?;
-        let (transport, nusselt, coefficient) = result.into_parts();
+        // Query the original source exactly once. Both group evaluation and
+        // dimensional conversion below consume this same admitted snapshot.
+        let transport = binding.fluid.transport_state()
+            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
+        let result = match binding.law {
+            CellConvectionLaw::Forced { correlation, speed_m_s, mut settings } => {
+                if wall > binding.reference_temperature.value() {
+                    settings.direction = ThermalDirection::HeatingFluid;
+                } else if wall < binding.reference_temperature.value() {
+                    settings.direction = ThermalDirection::CoolingFluid;
+                }
+                evaluate_forced_from_material(correlation, &transport,
+                    speed_m_s, binding.characteristic_length, settings).map(Some)
+            }
+            CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
+                if wall == binding.reference_temperature.value() {
+                    transport.rayleigh(gravity_m_s2, expansion_per_k, 0.0,
+                        binding.characteristic_length.value())
+                        .map_err(MaterialConvectionError::from).map(|_| None)
+                } else {
+                    evaluate_vertical_plate_from_material(&transport, gravity_m_s2,
+                        expansion_per_k, Temperature::new(wall), binding.reference_temperature,
+                        binding.characteristic_length).map(Some)
+                }
+            }
+        }.map_err(ConvectionSourceError::Material)?;
+        let evaluation = result.map(|value| {
+            let (_, nusselt, coefficient) = value.into_parts();
+            CellConvectionEvaluation { nusselt, coefficient }
+        });
         let delta = finite(binding.reference_temperature.value() - wall)?;
-        let conductance = finite(coefficient.value.value() * area)?;
-        let power = finite(conductance * delta)?;
-        if (area > 0.0 && coefficient.value.value() > 0.0 && conductance == 0.0)
-            || (conductance != 0.0 && delta != 0.0 && power == 0.0) {
-            return Err(ConvectionSourceError::Invalid("convective transfer underflowed to zero"));
-        }
+        let power = match &evaluation {
+            None => 0.0,
+            Some(value) => {
+                let conductance = finite(value.coefficient.value.value() * area)?;
+                let power = finite(conductance * delta)?;
+                if (area > 0.0 && conductance == 0.0)
+                    || (conductance != 0.0 && delta != 0.0 && power == 0.0) {
+                    return Err(ConvectionSourceError::Invalid("convective transfer underflowed to zero"));
+                }
+                power
+            }
+        };
         total_w = finite(total_w + power)?;
         sources_w.insert(binding.cell, power);
         samples.push(CellConvectionSample { cell: binding.cell, wall_temperature_k: wall,
             reference_temperature_k: binding.reference_temperature.value(), exposed_area_m2: area,
-            transport, nusselt, coefficient, heat_into_cell_w: power });
+            transport, evaluation, heat_into_cell_w: power });
     }
     check(&mut cancelled)?;
     Ok(CellConvectionSources { sources_w, samples, total_w })

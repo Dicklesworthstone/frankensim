@@ -27,6 +27,27 @@ Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
 quantities, as a Re/Pr handoff to the existing convection rung, and as the
 CHT ladder's correlation-rung transfer.
 
+### Material-driven natural and forced finite-cell convection
+
+`medium::convection::deposition::evaluate_material_cell_convection` binds either
+an existing forced-convection card or the Churchill-Chu vertical-plate card to
+the original finite-cell enthalpy owner. Both laws share one source, exposed-area
+and contact-coverage accounting path. Natural convection reevaluates Ra and h
+at the proposed wall temperature inside the thermal residual; density, Cp,
+viscosity and conductivity come from one admitted material transport snapshot.
+Reservoir properties and explicitly supplied volumetric expansion remain frozen
+for the interval. No liquid expansion or film state is inferred.
+
+Exact thermal equilibrium returns zero power while retaining the material
+snapshot, with no fabricated Ra=0 correlation result. Every nonzero contrast
+retains the original card's domain restrictions. Repeated bindings, authored
+heat-transfer overlap, invalid sources, work limits and cancellation refuse
+transactionally. The existing forced-only entry point delegates to the same
+ownership loop. `tests/material_cell_convection.rs` covers independent natural
+heat-transfer calculations, material substitution, both heat directions,
+negative expansion, nonlinear accepted endpoints, ambient heater startup,
+mixed-law ownership and thermal-energy balance.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `graph::thermal::medium::FrozenFlowMedium::ThermochemicalGas` retains the
