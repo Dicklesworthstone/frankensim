@@ -7,6 +7,7 @@ use fs_couple::shear_shell::pressure::ShellPressureSurfaces;
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_plate::shell::pressure::{OrientedShellFacet, ShellFace};
 
+#[path = "cavity/thermal.rs"]
 mod thermal;
 
 fn with_volume<R>(n: usize, atmosphere: GasState, f: impl FnOnce(&HelmholtzFe<'_>) -> R) -> R {
@@ -273,4 +274,5 @@ fn missing_faces_wrong_normals_stale_gas_and_incomplete_pressure_windows_refuse(
         assert!(cold.with_material_shell_cavity(fe,resolution(),gate).is_err());
     }));
 }
+
 

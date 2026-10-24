@@ -327,7 +327,9 @@ impl input::Spec {
             }
             bank.with_rotational_body_connections(joints, gate)?
         };
-        let bank = if let Some(resolution) = self.cylinder_gas_loading {
+        let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
+            bank // Gas inertia precedes the material/thermal memory prefix.
+        } else if let Some(resolution) = self.cylinder_gas_loading {
             bank.with_cylinder_gas_loading(resolution, gate)?
         } else { bank };
         let bank = if let Some((slope, config)) = self.geometric_stretching {
@@ -337,13 +339,17 @@ impl input::Spec {
             bank.with_longitudinal_waves_and_loss(vec![resolution.clone(); self.strings.len()],
                 self.longitudinal_loss.clone(), *config, gate)?
         } else { bank };
-        let bank = match &profile {
-            Some(body) => body.bind_material_memory(bank, gate)?,
-            None => bank,
-        };
-        let bank = match &self.bending_memory {
-            Some(memory) => memory.bind(bank, gate)?,
-            None => bank,
+        let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
+            bank // The source material prefix was bound before thermal air memory.
+        } else {
+            let bank = match &profile {
+                Some(body) => body.bind_material_memory(bank, gate)?,
+                None => bank,
+            };
+            match &self.bending_memory {
+                Some(memory) => memory.bind(bank, gate)?,
+                None => bank,
+            }
         };
         // The original body basis survives fluid, torsion and material-history
         // binding. Compute its air reaction once, before bows or preload run.
@@ -535,3 +541,4 @@ fn main()->Result<()> {
 #[cfg(test)]
 #[path = "material_strings/tests.rs"]
 mod tests;
+

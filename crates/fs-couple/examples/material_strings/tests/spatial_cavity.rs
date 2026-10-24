@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "spatial_cavity/openings.rs"]
 mod openings;
+#[path = "spatial_cavity/thermal.rs"]
+mod thermal;
 
 const BODY: &str = include_str!("../closed-shell-cavity.body");
 const PERFORMANCE: &str = include_str!("../closed-shell-cavity.material-strings");
@@ -199,4 +201,5 @@ fn strict_volume_and_whole_network_admission_precede_material_reads() {
         assert!(error.to_string().contains("material shell cavity"));
     });
 }
+
 

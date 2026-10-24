@@ -6,7 +6,8 @@
 //! BEM stage supplies their joint exterior reaction before any render escapes.
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::{
-    ShellCavityOpening, ShellCavityOptions, MAX_SHELL_CAVITY_OPENINGS,
+    ShellCavityOpening, ShellCavityOptions, ShellCavityThermalOptions,
+    MAX_SHELL_CAVITY_OPENINGS,
 };
 use fs_couple::render::plate::impact::cavity::MAX_CAVITY_PRESSURE_MODES;
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium, MAX_ORDER};
@@ -21,6 +22,7 @@ pub(super) struct Spec {
     options: ShellCavityOptions,
     pressure_allowance: usize,
     openings: Vec<ShellCavityOpening>,
+    thermal: Option<ShellCavityThermalOptions>,
 }
 
 /// The optional volume follows a complete v3/v4 body. Existing body readers
@@ -132,6 +134,23 @@ impl Spec {
                     internal_resistance_pa_s_m3 });
             }
         }
+        let thermal = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("air-thermal")
+        {
+            let v = r.row("air-thermal", 6)?;
+            if v[0] != "isothermal-walls" {
+                return Err("interior thermal loss requires an explicit isothermal solid-wall boundary".into());
+            }
+            let options = ShellCavityThermalOptions {
+                maximum_decay_rate_per_s: scalar(v[1])?,
+                maximum_thermal_modes: count(v[2], 1, 256)?,
+                maximum_thermal_dofs: count(v[3], 1, 8192)?,
+                maximum_projection_terms: count(v[4], 1, 1_000_000_000)?,
+                maximum_unresolved_fraction: scalar(v[5])?,
+            };
+            options.validate()?;
+            Some(options)
+        } else { None };
         if r.lines.next().is_some() {
             return Err("interior FE must consume every record".into());
         }
@@ -140,12 +159,19 @@ impl Spec {
         if dofs > maximum_dofs {
             return Err("complete pressure FE space exceeds the authored degree-of-freedom allowance".into());
         }
+        if thermal.is_some_and(|options| dofs > options.maximum_thermal_dofs) {
+            return Err("original cavity FE exceeds its thermal degree-of-freedom allowance".into());
+        }
         Ok(Self { positions, complex, order, options,
-            pressure_allowance: maximum_pressure_modes.min(dofs), openings })
+            pressure_allowance: maximum_pressure_modes.min(dofs), openings, thermal })
     }
 
     pub(super) fn pressure_allowance(&self) -> usize { self.pressure_allowance }
     pub(super) fn opening_count(&self) -> usize { self.openings.len() }
+    pub(super) fn has_thermal_loss(&self) -> bool { self.thermal.is_some() }
+    pub(super) fn thermal_memory_states(&self) -> usize {
+        self.thermal.map_or(0, |options| options.maximum_thermal_modes)
+    }
 
     fn physical_positions(&self, spec: &input::Spec) -> Vec<[f64; 3]> {
         self.positions.iter().map(|p|
@@ -155,6 +181,12 @@ impl Spec {
     pub(super) fn preflight(&self, spec: &input::Spec) -> Result<()> {
         if spec.cavity.is_some() {
             return Err("interior FE and a separate lumped cavity would duplicate gas storage".into());
+        }
+        if let Some(thermal) = self.thermal {
+            thermal.validate()?;
+            if spec.prepared_linear.is_some() {
+                return Err("interior thermal diffusion requires the original exact owner with gas memory".into());
+            }
         }
         if self.options.maximum_hz >= 0.45 * f64::from(spec.rate) {
             return Err("interior pressure window exceeds the original acoustic Nyquist guard".into());
@@ -201,11 +233,16 @@ impl Spec {
         // the reciprocal ports before subsequent nonlinear attachments. The
         // authored source cannot return until its mandatory BEM stage binds
         // the complete body/opening exterior load.
-        Ok(if self.openings.is_empty() {
+        Ok(if let Some(thermal) = self.thermal {
+            bank.with_material_shell_cavity_thermal(
+                &fe, self.options, self.openings.clone(), thermal, gate,
+            )?
+        } else if self.openings.is_empty() {
             bank.with_material_shell_cavity(&fe, self.options, gate)?
         } else {
             bank.with_material_shell_cavity_openings(&fe, self.options, self.openings.clone(), gate)?
         })
     }
 }
+
 

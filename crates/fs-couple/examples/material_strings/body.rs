@@ -93,6 +93,9 @@ impl Profile {
         self.interior.as_ref().map_or(0, |air|
             air.pressure_allowance() - 1 + air.opening_count())
     }
+    pub fn has_thermal_cavity(&self) -> bool {
+        self.interior.as_ref().is_some_and(cavity::Spec::has_thermal_loss)
+    }
     /// Load original ordered interface packs before the ordinary bulk loader.
     /// Geometry and complete-network admission precede the first source read.
     pub fn load_interfaces(&mut self, spec: &input::Spec, gate: &CancelGate,
@@ -130,6 +133,22 @@ impl Profile {
             BodyModel::Shell(shell) => shell.compile(spec, sources, catalog, loader, settings, cx, gate),
             BodyModel::Assembly(assembly) => assembly.compile(spec, sources, catalog, loader, settings, cx, gate),
         }?;
+        // Original string/body material histories are the fixed prefix of the
+        // shared memory owner. Cavity thermal diffusion appends to that prefix
+        // before rotational and nonlinear coordinates are attached.
+        let bank = if self.has_thermal_cavity() {
+            // Explicit layered memory retains the final mass-normalized string
+            // basis, so source-gas inertia must precede that selection.
+            let bank = match spec.cylinder_gas_loading {
+                Some(resolution) => bank.with_cylinder_gas_loading(resolution, gate)?,
+                None => bank,
+            };
+            let bank = self.bind_material_memory(bank, gate)?;
+            match &spec.bending_memory {
+                Some(memory) => memory.bind(bank, gate)?,
+                None => bank,
+            }
+        } else { bank };
         match &self.interior {
             Some(interior) => interior.bind(bank, spec, gate),
             None => Ok(bank),
@@ -137,10 +156,11 @@ impl Profile {
     }
     /// Reserve body and string histories together before material-pack I/O.
     pub fn material_memory_states(&self) -> usize {
-        match &self.model {
+        let solid = match &self.model {
             BodyModel::Plate(plate) => plate.loss.max_memory_states(),
             _ => 0,
-        }
+        };
+        solid + self.interior.as_ref().map_or(0, cavity::Spec::thermal_memory_states)
     }
     /// All solid/gas/axial coordinates are now fixed; memory enters the SAME
     /// coupled mechanical owner before conversion to multiple bows and PCM.
@@ -403,4 +423,5 @@ impl<'a> Records<'a> {
 #[cfg(test)]
 #[path="body/tests.rs"]
 mod tests;
+
 

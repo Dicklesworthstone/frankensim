@@ -779,11 +779,70 @@ load and finite-distance shell observer can still be selected through their
 existing performance records; their frequency bands, spatial resolution and
 error budgets need to cover the desired observation.
 
-This interior path represents frozen, homogeneous gas with lossless linear
-acoustics on straight-sided tetrahedra and the original linear shell kinematics.
-Viscothermal interior-wall loss and nonconforming volume/shell interfaces need
-their own physical operators. Missing boundary assignments are refused; no
-fictitious solid closure surface is added.
+Without an explicit thermal declaration, this interior path represents frozen,
+homogeneous gas with lossless linear acoustics on straight-sided tetrahedra and
+the original linear shell kinematics. The thermal extension below adds gas
+heat diffusion. Viscous wall shear and nonconforming volume/shell interfaces
+remain separate physical operators. Missing boundary assignments are refused;
+no fictitious solid closure surface is added.
+
+### Thermal diffusion in the same cavity and mechanical solve
+
+After the last `air-tet`, or after the complete optional `air-openings` block,
+select the original gas heat equation with:
+
+```text
+air-thermal isothermal-walls MAX_DECAY_PER_S MAX_THERMAL_MODES MAX_THERMAL_DOFS MAX_PROJECTION_TERMS MAX_UNRESOLVED_FRACTION
+```
+
+The solid wall temperature perturbation is fixed to zero. Actual opening faces
+have zero diffusive heat flux, so the declaration does not invent a heat
+reservoir across an aperture. The retained gas supplies conductivity, density,
+heat capacity and gamma; these determine the diffusivity `kappa/(rho*cv)`.
+Heat modes come from the original volume FE stiffness and consistent mass
+matrices, with the actual wall trace constrained. Every positive heat mode in
+the declared decay-rate window is retained, subject to the explicit mode and
+work allowances.
+
+Those modes become passive compression-relaxation states in the existing
+string/body/cavity propagator. They change both pressure reaction and decay,
+including the uniform compression mode. The instantaneous compression remains
+the original adiabatic law; the captured thermal field relaxes toward its
+isothermal equilibrium. There is no independent heat timestepper or assigned
+modal damping. Original pressure and neck observers include accepted thermal
+history. A bare coordinate-only pressure readout refuses when it would omit
+that history.
+
+The part of the compression field outside the retained thermal space stays
+adiabatic. `MAX_UNRESOLVED_FRACTION`, strictly between zero and one, bounds the
+infinity norm of the missing normalized compression projector. It measures
+the FE/window representation, not overall instrument accuracy. Refining the
+volume and retaining more heat modes are the way to reduce it; the source
+refuses an unresolved declaration. Each retained heat mode reserves a possible
+first-order state in the complete material-memory budget before pack I/O.
+The `prepared-linear` backend is refused because it has no such states.
+
+`closed-shell-thermal.body` reuses the original manufactured closed-shell
+geometry with one pressure mode and this declaration:
+
+```text
+air-thermal isothermal-walls 1.0 43 256 50000000 0.201
+```
+
+Use it with `closed-shell-cavity.material-strings` and the same run command
+above, selecting the thermal body profile and a new output path. An independent
+exact polynomial FE calculation for the authored 0.4 by 0.4 m body gives 205
+volume DOFs, 43 free heat DOFs and a uniform-compression projector remainder of
+0.20. That explicit coarse remainder is why the fixture declares 0.201. For
+293.15 K dry air the retained decay rates are about 0.0084–0.1804 per second.
+This source demonstrates physical coupling and retained history; its coarse
+mesh does not resolve audio-frequency thermal boundary layers.
+
+The model covers linear gas thermal conduction to fixed-temperature walls.
+Viscous boundary shear, finite wall heat capacity and effusivity, mean flow and
+aperture enthalpy transport are not supplied by this selector. Material-card
+and gas substitutions rebuild their original physical owners; this fixture
+does not establish measured violin, cello or bass fidelity.
 
 ### Explicit compact openings through the original volume and exterior
 
@@ -871,4 +930,5 @@ cargo run --release -p fs-couple --bin material_strings -- \
   "$demo/open-shell-cavity.material-strings" "$demo/open-shell-cavity.wav" \
   --body-profile crates/fs-couple/examples/material_strings/open-shell-cavity.body
 ```
+
 
