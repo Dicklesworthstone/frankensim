@@ -7,13 +7,18 @@ mod gas_source;
 mod common;
 
 use fs_airflow::graph::thermal::medium::convection::{ForcedConvectionSettings,
-    finite_gas::{ForcedGasSurface, network::{self, ConvectiveContact}}};
+    finite_gas::{ForcedGasSurface, natural::NaturalGasSurface,
+        network::{ConvectiveContact, exchange::{self, ExchangeContact, GasHeatLaw}}}};
+#[cfg(test)]
+use fs_airflow::graph::thermal::medium::convection::finite_gas::network;
 use fs_convection::CorrelationId;
 use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_couple::cavity_phs::piston::thermal::{HeatExchangeSolve, source::ThermalMaterialPoint};
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::{Chamber, Contact, NetworkSolve};
 use fs_couple::circuit_enthalpy::material::{CellResistor, ConductionLink, MaterialCell, MaterialNetwork};
 use fs_couple::material_circuit::MaterialCircuit;
+use fs_couple::circuit_enthalpy::contacts::material::ElectricalContactNetwork;
+use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::exchange::MaterialExchangeNetwork;
 use fs_material::conductor::ElectricalPropertyBasis;
 use fs_material::state_point::{MaterialPropertySelection, THERMAL_CONDUCTIVITY_DIMS};
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, parcel::ClosedGasParcel};
@@ -80,24 +85,58 @@ fn storage(thermal: &DepositionSimulation<'_>, circuit: &MaterialCircuit, gas: &
 }
 #[derive(Debug)]
 struct Outcome { cell_k: f64, charge_c: f64, velocity_m_s: f64, sound_m_s: f64, energy_defect_j: f64 }
+fn with_runtime<R>(run: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = fs_exec::CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| run(&fs_exec::Cx::new(&gate, arena,
+        fs_exec::StreamKey { seed: 71, kernel_id: 3, tile: 0, iteration: 0 },
+        fs_exec::Budget::INFINITE, fs_exec::ExecMode::Deterministic)))
+}
+fn heat_law(input: &str) -> Result<GasHeatLaw> {
+    let geometry = contacts(1.0)[0].surface;
+    if input == "natural" || input.starts_with("natural:") {
+        let gravity: f64 = match input.strip_prefix("natural:") {
+            Some(value) => value.parse()?, None => 9.80665,
+        };
+        if !gravity.is_finite() || gravity <= 0.0 {
+            return Err("natural-convection gravity must be positive and finite".into());
+        }
+        Ok(GasHeatLaw::NaturalConvection(NaturalGasSurface {
+            area_m2: geometry.area_m2, characteristic_length: geometry.characteristic_length,
+            gravity_m_s2: gravity,
+        }))
+    } else {
+        let speed: f64 = input.parse()?;
+        if !speed.is_finite() || speed <= 0.0 {
+            return Err("forced-convection speed must be positive and finite".into());
+        }
+        Ok(GasHeatLaw::ForcedConvection(ForcedGasSurface { speed_m_s: speed, ..geometry }))
+    }
+}
+#[cfg(test)]
 fn run(fraction: f64, speed: f64, steps: usize, emit: bool) -> Result<Outcome> {
-    fixture(|binding, mut thermal, mut circuit| {
+    run_with_law(fraction, GasHeatLaw::ForcedConvection(contacts(speed)[0].surface), steps, emit)
+}
+fn run_with_law(fraction: f64, law: GasHeatLaw, steps: usize, emit: bool) -> Result<Outcome> {
+    with_runtime(|cx| fixture(|binding, mut thermal, mut circuit| {
+        let electrical = ElectricalContactNetwork { bulk: binding, contacts: &[], electrical_bases: &BASES };
+        let assembly = MaterialExchangeNetwork { electrical: &electrical, thermal_contacts: &[], radiation: None };
+        let prepared = assembly.prepare(cx, &thermal)?;
         let mut gas = gases(fraction);
         let initial = storage(&thermal, &circuit, &gas);
-        let patches = contacts(speed);
+        let patches = contacts(1.0).map(|patch| ExchangeContact { contact: patch.contact, law });
         let mut outside = 0.0;
         if emit { println!("time_s,cell30_k,cell10_k,charge_c,gas10_k,gas10_pa,wall10_m_s,sound10_m_s,energy_defect_j"); }
         for i in 0..steps {
             let target = (i+1) as f64*DT;
             let drives = chambers(&gas, target-thermal.time_s());
-            let candidate = network::step_candidate(binding, &thermal, target, &circuit, &[], &BASES,
-                &drives, &patches, controls(), &[0.0; 2], || false)?;
+            let candidate = exchange::step_candidate(&prepared, cx, &thermal, target, &circuit, &[],
+                &drives, &[], &patches, controls(), &[0.0; 2])?;
             let (next_thermal, next_circuit, report, _) = candidate.into_parts();
             let mut next_gas = BTreeMap::new();
             for entry in report.source.chambers {
-                let (piston, _, boundary) = entry.boundary.into_parts();
-                outside += boundary.piston.exterior_pressure_work_j;
-                next_gas.insert(entry.id, piston);
+                outside += entry.boundary.piston.exterior_pressure_work_j;
+                next_gas.insert(entry.id, entry.piston);
             }
             thermal = next_thermal; circuit = next_circuit; gas = next_gas;
             if emit {
@@ -111,21 +150,27 @@ fn run(fraction: f64, speed: f64, steps: usize, emit: bool) -> Result<Outcome> {
         Ok(Outcome { cell_k: thermal.temperature_k(CellId(30))?, charge_c: circuit.charges_c()[0],
             velocity_m_s: gas[&10].velocity_m_s(), sound_m_s: gas[&10].gas().state().state().sound_speed,
             energy_defect_j: storage(&thermal, &circuit, &gas)+outside-initial })
-    })
+    }))
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args.len() > 3 {
-        return Err("usage: material_convective_network A_mole_fraction [speed_m_s=1] [steps=24]".into());
+        return Err("usage: material_convective_network A_mole_fraction [speed_m_s|natural[:gravity_m_s2]] [steps=24]".into());
     }
     let fraction: f64 = args[0].parse()?;
-    let speed: f64 = args.get(1).map_or(Ok(1.0), |s| s.parse())?;
+    let law = heat_law(args.get(1).map_or("1", String::as_str))?;
     let steps: usize = args.get(2).map_or(Ok(24), |s| s.parse())?;
-    if !fraction.is_finite() || !(0.01..=0.99).contains(&fraction)
-        || !speed.is_finite() || speed <= 0.0 || !(1..=500).contains(&steps) {
-        return Err("fraction must be 0.01..=0.99, speed positive finite, steps 1..=500".into());
+    if !fraction.is_finite() || !(0.01..=0.99).contains(&fraction) || !(1..=500).contains(&steps) {
+        return Err("fraction must be 0.01..=0.99 and steps 1..=500".into());
     }
-    let out = run(fraction, speed, steps, true)?;
+    match law {
+        GasHeatLaw::ForcedConvection(surface) =>
+            eprintln!("forced convection: relative speed {} m/s", surface.speed_m_s),
+        GasHeatLaw::NaturalConvection(surface) =>
+            eprintln!("natural convection: gravity {} m/s²", surface.gravity_m_s2),
+        GasHeatLaw::Conduction(_) => eprintln!("conductive gas boundary"),
+    }
+    let out = run_with_law(fraction, law, steps, true)?;
     eprintln!("final cell={} K, charge={} C, velocity={} m/s, sound={} m/s, balance={} J",
         out.cell_k, out.charge_c, out.velocity_m_s, out.sound_m_s, out.energy_defect_j);
     Ok(())

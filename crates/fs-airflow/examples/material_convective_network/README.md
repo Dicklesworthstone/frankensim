@@ -1,6 +1,6 @@
 # Material convection through finite electrical, thermal and gas storage
 
-This executable uses `convection::finite_gas::network::step_candidate`. Two
+This executable uses `convection::finite_gas::network::exchange::step_candidate`. Two
 finite source-backed gas chambers exchange heat through three convective
 patches on two material cells. The cells also conduct heat to each other and
 receive Joule heat from the original finite capacitor/resistor network. Gas
@@ -19,11 +19,19 @@ From this directory:
 ```sh
 cargo run --release -- 0.75 1 24 > mixture-a.csv
 cargo run --release -- 0.25 1 24 > mixture-b.csv
+cargo run --release -- 0.75 natural 24 > natural-a.csv
+cargo run --release -- 0.25 natural:3.71 24 > natural-low-gravity.csv
 cargo test
 ```
 
-The arguments are first chamber's A mole fraction, prescribed relative speed
-[m/s], and steps. The second chamber retains 50/50 A/B composition. Geometry,
+The arguments are first chamber's A mole fraction, heat law, and steps. A numeric
+heat-law argument is the existing prescribed relative speed [m/s], defaulting
+to 1. `natural` selects the external isothermal vertical-plate Churchill–Chu
+law at 9.80665 m/s²; `natural:GRAVITY` supplies positive finite gravity in m/s².
+Natural convection uses the actual material gas properties and wall temperature
+at every shared trial, with ideal-mixture expansion 1/T at fixed composition.
+It does not require an invented fan speed. The selected law is printed to stderr;
+the CSV columns remain the same. The second chamber retains 50/50 A/B composition. Geometry,
 material laws and the 0.00005 s clock are otherwise identical. The original
 source-pack and circuit/thermal manufactured fixtures are reused explicitly;
 A/B and the cells are NOT measured real materials. The CSV includes both cell
@@ -40,6 +48,10 @@ cargo test --manifest-path crates/fs-airflow/examples/material_convective_networ
 ```
 
 ## Public adapter
+
+The executable selects `GasHeatLaw::ForcedConvection` or
+`GasHeatLaw::NaturalConvection` as patch data on the same complete
+exchange owner. The existing forced-only adapter remains available:
 
 `ConvectiveContact` binds an original `Contact` (ID, chamber, cell) to a
 `ForcedGasSurface`. `step_candidate` takes the existing `MaterialNetwork`,
@@ -62,13 +74,15 @@ energy check. No state is accepted after a partial solve or late cancellation.
 
 ## Verification and limits
 
-Five authored tests cover explicit original-solver equivalence, exact source
+The authored tests cover explicit original-solver equivalence, exact source
 points, patch-order independence, repeated composition feedback into charge
 and motion, opposite transfers on one cell, aggregate coverage, invalid
 bindings, failure/cancellation and closed-face reduction.
 
-Native Rust compilation and tests remain UNVERIFIED in the authoring
-environment: cargo/rustc were unavailable. Independent Python equations ran
+The natural-convection additions remain uncompiled and unexecuted in this
+session: the native dependency build exceeded available compiler memory, and
+shared storage was exhausted. Syntax and bounded source/API checks passed.
+The earlier independent Python reference equations ran
 128 manufactured updates and their reordered counterparts plus 48 history
 steps. Maximum step energy discrepancy was 2.68e-13 J; reordered results were
 identical. Changing first-chamber A fraction 0.75 -> 0.25 changed the reference
@@ -77,9 +91,15 @@ identical. Changing first-chamber A fraction 0.75 -> 0.25 changed the reference
 independent equation checks, not execution of this Rust binary or experiments.
 
 This retains the original first-order thermal-endpoint/gas-midpoint scheme,
-uniform cells/gases, fixed cell geometry and independent rigid walls. Relative
-speed is prescribed, not a solved fan or boundary layer. Correlations use bulk
-gas properties within their admitted domains. No gas mass transfer, chemistry,
+uniform cells/gases, fixed cell geometry and independent rigid walls. Forced
+convection uses prescribed relative speed. Natural convection assumes a
+quiescent bulk next to an external vertical plate; it does not model enclosed
+cavities, horizontal walls, or forced/mixed convection. A finite thermal gas
+inventory does not establish those geometric/flow assumptions. Both laws use
+bulk gas properties within their admitted domains. Natural-convection trials
+with unequal temperatures outside the existing Rayleigh/Prandtl range refuse;
+exact equilibrium and zero exposed area have zero transfer and no claimed
+correlation evaluation. No gas mass transfer, chemistry,
 radiation, jet thrust, viscous heating or pump-power accounting is added by this
 adapter. Those processes are not implied by a successful energy check. Source
 events require explicit interval boundaries, and temporal/spatial validity

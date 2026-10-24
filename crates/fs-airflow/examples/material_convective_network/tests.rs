@@ -137,3 +137,24 @@ fn failed_late_trial_and_cancellation_publish_no_subset_and_closed_faces_are_exa
         }
     });
 }
+
+#[test]
+fn authored_natural_convection_drives_the_same_electrical_and_gas_trajectory() {
+    let forced = run_with_law(0.75, heat_law("1").unwrap(), 12, false).unwrap();
+    let first = run_with_law(0.75, heat_law("natural").unwrap(), 12, false).unwrap();
+    let second = run_with_law(0.25, heat_law("natural").unwrap(), 12, false).unwrap();
+    let low_gravity = run_with_law(0.75, heat_law("natural:3.71").unwrap(), 12, false).unwrap();
+    for outcome in [&forced, &first, &second, &low_gravity] {
+        assert!(outcome.energy_defect_j.abs() < 2e-5);
+        assert!(outcome.cell_k > 300.0);
+    }
+    assert_ne!(first.cell_k, forced.cell_k);
+    assert_ne!(first.cell_k, second.cell_k);
+    assert_ne!(first.charge_c, second.charge_c);
+    assert_ne!(first.velocity_m_s, second.velocity_m_s);
+    assert_ne!(first.sound_m_s, second.sound_m_s);
+    assert!(first.cell_k > low_gravity.cell_k);
+    for invalid in ["natural:0", "natural:-1", "natural:NaN", "0", "-1"] {
+        assert!(heat_law(invalid).is_err());
+    }
+}
