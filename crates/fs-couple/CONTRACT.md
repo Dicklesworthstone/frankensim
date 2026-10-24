@@ -5167,3 +5167,24 @@ spatial, rational and nonlinear-time convergence stay separate; sampled
 passivity remains GridOnly. No measured flute, clarinet or oboe qualification
 is asserted. Source tests and illustrative fit declarations require native
 execution before numerical or acoustic accuracy claims.
+
+## Native finite-gas heating of a spatial material valve
+
+The `heated_valve_sound` example accepts an explicit finite gas volume, layer
+distance and step count alongside the existing species/NASA9/transport packs.
+The original 48-cell solid receives gas heat on actual exterior triangles,
+with an insulated root and conservative shared-face internal links. The native
+slice requires a constant scalar solid conductivity across its declared fully
+solid 280–400 K interval; its centroid-normal two-point network is a coarse
+transport model, not a continuum-consistent tetrahedral heat discretization.
+The reusable gas-facing material coupling retains temperature-dependent laws.
+
+Each accepted temperature field uses the same source stiffness and expansion
+owner as the final equilibrium, prestress, aperture and valve reduction.
+Initial and final gas snapshots feed the existing common-medium acoustic
+realizer. Pressure CSV and stereo WAV preserve physical pressure scaling; an
+additional thermal CSV reports spatial temperature extrema, gas T/p and
+independently measured solid/gas storage and cumulative heat. Both complete
+frozen-state acoustic experiments precede output creation. The gas volume is
+thermal storage, not a modeled acoustic enclosure; pressure work, live modal
+state transfer and reciprocal thermoelastic heat remain outside this slice.
