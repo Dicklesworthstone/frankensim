@@ -389,7 +389,6 @@ const VIOLIN_STRING_BAND_HZ: f64 = 10_000.0;
 /// tenth of the speaking length from the bridge. There is no cylinder gas loading: its memory (bending modes x planes x
 /// intervals) would exceed the 512-coordinate prepared ceiling.
 fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
-    use std::f64::consts::PI;
     let (nx, ny) = (15, 11);
     let centre = (ny / 2) * nx + nx / 2;
     let feet: String = [centre - 2, centre - 1, centre + 1, centre + 2].iter()
@@ -397,6 +396,15 @@ fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
     let text = clamped_plate_body(nx, ny, "window 1 4000000000", 2_000_000_000)
         .replace(&format!("bridges 1\nbridge {centre} 0 0 1\n"), &format!("bridges 4\n{feet}"));
     let profile = Profile::parse(text.as_bytes()).unwrap();
+    let performance = violin_performance(samples, "body body.fsmatpk 0.4 0.3 0.001 128 1",
+        "cavity neck 0.002 0.0187 0.003 100 1");
+    (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+}
+
+/// The violin-sized rung's performance (see `violin_inputs`: its strings, bow and schedule) around a body and a cavity
+/// record.
+fn violin_performance(samples: u64, body: &str, cavity: &str) -> String {
+    use std::f64::consts::PI;
     let (speaking, span) = (0.328_f64, 0.383_f64);
     let bridge = speaking / span;
     let (density, young, shear) = (7800.0, 200e9, 80e9);
@@ -417,12 +425,76 @@ fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
             section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two 0.6 0.8 1 0\n", radius * 2.0 / 3.0));
     }
     let bow = bridge * 0.9;
-    let performance = format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
-        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\nbody body.fsmatpk 0.4 0.3 0.001 128 1\nstrings 4\n{strings}\
-        prepared-linear 512 4294967296 1000000000000000\ncavity neck 0.002 0.0187 0.003 100 1\n\
+    format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
+        gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2\n{body}\nstrings 4\n{strings}\
+        prepared-linear 512 4294967296 1000000000000000\n{cavity}\n\
         friction stribeck 0.8 0.4 0.1 0\nforces retain 0 0\nschedule\nfrankensim-gesture-schedule-v1\n\
-        control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n");
-    (profile, input::Spec::parse(performance.as_bytes()).unwrap())
+        control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n")
+}
+
+/// il Cannone's strings G, D, A, E meet the bridge at these points (x, y) [m] of its table
+/// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/string-contacts.tsv), in string order.
+const CANNONE_BRIDGES: [(f64, f64); 4] =
+    [(-0.017_34, -0.051_64), (-0.005_57, -0.054_21), (0.006_29, -0.053_29), (0.017_28, -0.048_87)];
+
+/// The performance body record's thickness [m] for il Cannone; every part's own thickness is written as a ratio to it.
+const CANNONE_REFERENCE_THICKNESS_M: f64 = 0.003;
+
+/// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv: 48
+/// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile. Spruce (top, bass bar, soundpost) is
+/// the performance body pack, maple (back, ribs, bridge) the other. The window holds the body modes from 15 Hz (above the
+/// free body's rigid motion) to 2 kHz, the violin packs' declared angular-frequency validity. The table's frame has x
+/// across the body, y vertical and z along the strings, so each string drives its bridge node along x, the bowing
+/// direction.
+fn cannone_profile() -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let converted = super::super::shell::assembly::table::convert(
+        include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv"),
+        &super::super::shell::assembly::table::TableOptions {
+            window: ((two_pi * 15.0).powi(2), (two_pi * 2000.0).powi(2)),
+            projection_work: MAX_SHELL_PROJECTION_WORK,
+            packs: &[("spruce", "@body"), ("maple", "violin-maple-sycamore-sonderegger2013-shell.fsmatpk")],
+            reference_thickness_m: CANNONE_REFERENCE_THICKNESS_M,
+            bridge_component: "bridge",
+            bridges: &CANNONE_BRIDGES,
+            bridge_direction: [1.0, 0.0, 0.0],
+        }).unwrap();
+    (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
+}
+
+/// The whole il Cannone body is admitted: its 48 components and 119 ties are exactly the assembly caps, and one more
+/// component or one more tie refuses. Its four bridges land on bridge nodes within 0.6 mm of the string contacts and push
+/// along x. With the violin-sized strings (synthetic steel, `violin_performance`), the table's own cavity row as a
+/// physical neck and 128 body modes, it passes preflight: every check that runs before pack I/O and the reduction.
+#[test]
+fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
+    let (profile, converted) = cannone_profile();
+    let text = &converted.profile;
+    let records = |name: &str| text.lines().filter(|l| l.split(' ').next() == Some(name)).count();
+    assert_eq!((records("component"), records("edge-tie"), records("bridge")), (48, 119, 4));
+    assert!(text.lines().filter(|l| l.starts_with("bridge bridge ")).all(|l| l.ends_with(" 1 0 0")));
+    assert!(converted.bridge_snaps_m.iter().all(|&d| d < 0.000_6), "bridge snaps {:?} m", converted.bridge_snaps_m);
+    let refusal = |text: &str| Profile::parse(text.as_bytes()).err().expect("one past the cap must refuse").to_string();
+    // One more component: the bridge again, under a new name.
+    let (start, end) = (text.find("component bridge\n").unwrap(), text.find("face-ties").unwrap());
+    let part_end = start + text[start..end].find("end-component\n").unwrap() + "end-component\n".len();
+    let copy = text[start..part_end].replacen("component bridge\n", "component bridge-copy\n", 1);
+    let one_more_component = format!("{}{copy}{}", &text[..part_end], &text[part_end..])
+        .replacen("components 48\n", "components 49\n", 1);
+    assert!(refusal(&one_more_component).contains("count exceeds its explicit range"));
+    // One more tie: the first edge tie again.
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines.iter().position(|l| l.starts_with("edge-tie ")).unwrap();
+    let f: Vec<&str> = lines[first].split(' ').collect();
+    let block = 1 + f[5].parse::<usize>().unwrap() + f[6].parse::<usize>().unwrap();
+    let one_more_tie = [&lines[..first + block], &lines[first..]].concat().join("\n")
+        .replacen("edge-ties 119\n", "edge-ties 120\n", 1);
+    assert!(refusal(&one_more_tie).contains("count exceeds its explicit range"));
+    let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
+    let performance = violin_performance(96, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} \
+        {CANNONE_REFERENCE_THICKNESS_M} 128 1", converted.length_m, converted.width_m),
+        &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"));
+    profile.preflight(&input::Spec::parse(performance.as_bytes()).unwrap()).unwrap();
 }
 
 /// The violin-sized G3 rung (above) for a quarter second: the wall time per audio second with what it was measured on, the
@@ -524,6 +596,7 @@ fn esteso_profile(strings: &[(f64, f64)]) -> (Profile, super::super::shell::asse
             reference_thickness_m: ESTESO_REFERENCE_THICKNESS_M,
             bridge_component: "top",
             bridges: strings,
+            bridge_direction: [0.0, 0.0, 1.0],
         }).unwrap();
     (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
 }

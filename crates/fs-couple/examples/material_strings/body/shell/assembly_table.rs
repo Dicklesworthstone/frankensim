@@ -22,9 +22,12 @@ pub(crate) struct TableOptions<'a> {
     /// The performance body record's thickness [m]: each part's thickness is written as a ratio to it.
     pub reference_thickness_m: f64,
     /// The component that carries the string bridges, and each string's bridge point (x, y) [m] in table coordinates,
-    /// in string order. Each becomes the nearest node of that component, with a +z force direction.
+    /// in string order. Each becomes the nearest node of that component in (x, y).
     pub bridge_component: &'a str,
     pub bridges: &'a [(f64, f64)],
+    /// The force direction of every bridge in table coordinates (normalized here): the guitar's saddle presses along
+    /// the top's normal +z; a violin string drives its bridge across, along the table's x.
+    pub bridge_direction: [f64; 3],
 }
 
 /// A converted table: the v4 profile, the body length and width [m] its x/y fractions refer to, how far each bridge point
@@ -192,13 +195,14 @@ pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<Convert
         for n in &tie.slave_nodes { writeln!(out, "slave-node {n}")?; }
     }
     let carrier = &parts[index(options.bridge_component)?];
+    let d = unit(options.bridge_direction)?;
     writeln!(out, "face-ties 0\nbridges {}", options.bridges.len())?;
     let mut bridge_snaps_m = Vec::with_capacity(options.bridges.len());
     for &(x, y) in options.bridges {
         let distance = |n: &[f64; 6]| ((n[0] - x).powi(2) + (n[1] - y).powi(2)).sqrt();
         let (node, snap) = carrier.nodes.iter().enumerate().map(|(i, n)| (i, distance(n)))
             .min_by(|a, b| a.1.total_cmp(&b.1)).ok_or("bridge component has no node")?;
-        writeln!(out, "bridge {} {node} 0 0 1", options.bridge_component)?;
+        writeln!(out, "bridge {} {node} {} {} {}", options.bridge_component, d[0], d[1], d[2])?;
         bridge_snaps_m.push(snap);
     }
     Ok(ConvertedTable { profile: out, length_m, width_m, bridge_snaps_m, cavity })

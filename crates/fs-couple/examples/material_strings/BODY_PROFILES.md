@@ -652,8 +652,8 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles take the 4 MiB shell limit and admit at most 32 components, 8192 total
-nodes, 16384 total triangles, 64 ties and 128 shared body modes. Per-component v3
+Profiles take the 4 MiB shell limit and admit at most 48 components, 8192 total
+nodes, 16384 total triangles, 119 ties and 128 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select
@@ -675,8 +675,13 @@ their own axes at the part's thickness, a free body, the part flags' exterior
 and cavity facets, full-rotation rigid edge ties on the master's skin or
 midsurface. What the table does not carry is explicit: the window, projection
 work, which wood is `@body`, the reference thickness, and one bridge per string
-at the nearest node of a declared point (the snap distance is reported). The
-table's cavity row supplies the performance's cavity record.
+at the nearest node of a declared point (the snap distance is reported), each
+pushing along one declared direction. The table's cavity row supplies the
+performance's cavity record. The il Cannone violin body
+(`data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv`,
+48 components and 119 ties, which set the two caps above) converts the same way;
+its frame has x across the body, y vertical and z along the strings, so its
+strings push their bridge nodes along x.
 
 ## Authored distributed interior air on the material shell
 

@@ -12,11 +12,13 @@ use fs_plate::shell::junction::{
 #[path = "assembly_table.rs"]
 pub(crate) mod table;
 
-const MAX_COMPONENTS: usize = 32;
+// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv) has
+// 48 components and 119 ties, the largest table on file; both caps are exactly what it needs.
+const MAX_COMPONENTS: usize = 48;
 // Totals across every component of one assembled body: four components at the per-component ceiling.
 const MAX_TOTAL_NODES: usize = 4 * MAX_NODES;
 const MAX_TOTAL_TRIANGLES: usize = 4 * MAX_TRIANGLES;
-const MAX_TIES: usize = 64;
+const MAX_TIES: usize = 119;
 
 #[derive(Clone, Debug)]
 struct Component {
