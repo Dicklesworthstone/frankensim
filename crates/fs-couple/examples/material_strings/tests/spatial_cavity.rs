@@ -2,6 +2,7 @@
 //! mechanical performance. This manufactured closed shell is not an instrument.
 use super::*;
 
+#[path = "spatial_cavity/openings.rs"]
 mod openings;
 
 const BODY: &str = include_str!("../closed-shell-cavity.body");
