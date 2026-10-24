@@ -25,6 +25,12 @@ use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
 use fs_time::galpha::{SecondOrderOperatorWeights, SecondOrderProblem};
 
+/// Simultaneous normal impacts coupled through one original spatial plate.
+pub mod multiple;
+pub use multiple::{
+    PlateImpactSet, PlateImpactSetBudget, PlateImpactSetMassPreconditioner, PlateImpactSetProbe,
+};
+
 /// Admission bounds for the combined spatial model and original contact law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlateImpactBudget {
@@ -131,6 +137,33 @@ pub struct PlateImpactProbe {
     /// Physical indenter velocity [m/s].
     pub indenter_velocity_m_per_s: f64,
     /// Original contact-law quadrature points with positive penetration.
+    pub active_contact_points: usize,
+}
+
+/// One finite body and its original contact, excluding shared plate storage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlateImpactBodyProbe {
+    /// Finite indenter kinetic energy [J].
+    pub indenter_kinetic_energy_j: f64,
+    /// Original contact potential [J], counted once.
+    pub contact_energy_j: f64,
+    /// Indenter displacement minus area-averaged plate displacement [m].
+    pub closure_m: f64,
+    /// Signed relative material velocity from the same interpolation [m/s].
+    pub relative_velocity_m_per_s: f64,
+    /// Maximum positive penetration over the original contact-law points [m].
+    pub maximum_penetration_m: f64,
+    /// Compressive reaction including the original non-attractive loss law [N].
+    pub normal_force_n: f64,
+    /// Instantaneous original contact loss [W], excluding numerical dissipation.
+    pub contact_dissipated_power_w: f64,
+    /// Area-averaged plate displacement, slopes and material velocity.
+    pub patch: PlatePointSample,
+    /// Physical indenter displacement [m].
+    pub indenter_displacement_m: f64,
+    /// Physical indenter velocity [m/s].
+    pub indenter_velocity_m_per_s: f64,
+    /// Original contact-law points with positive penetration.
     pub active_contact_points: usize,
 }
 
@@ -537,18 +570,10 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
         Ok(())
     }
 
-    /// Observe the actual physical state without changing history or solver state.
-    pub fn probe(&self, q: &[f64], v: &[f64]) -> Result<PlateImpactProbe, PlateImpactError> {
+    fn body_probe(&self, q: &[f64], v: &[f64]) -> Result<PlateImpactBodyProbe, PlateImpactError> {
         self.check(&[q, v])?;
         self.validate_source_kinematics(q, Some(v))?;
         let n = self.plate_dofs();
-        let mut work = zeros(n)?;
-        self.plate.mass_apply(&v[..n], &mut work);
-        let plate_kinetic_energy_j = 0.5 * dot(&v[..n], &work);
-        self.plate.internal_force(&q[..n], &mut work);
-        let plate_elastic_energy_j = 0.5 * dot(&q[..n], &work);
-        self.plate.damping_apply(&v[..n], &mut work);
-        let plate_dissipated_power_w = dot(&v[..n], &work);
         let indenter_kinetic_energy_j = 0.5 * v[n] * (self.indenter_mass_kg * v[n]);
         let x = self.pack(q)?;
         let contact = self.contact.probe(&x);
@@ -562,14 +587,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
         }
         let closure_m = dot(&self.closure, q);
         let relative_velocity_m_per_s = dot(&self.closure, v);
-        let total_energy_j = plate_kinetic_energy_j
-            + plate_elastic_energy_j
-            + indenter_kinetic_energy_j
-            + contact.contact_energy;
         if !finite(&[
-            plate_kinetic_energy_j,
-            plate_elastic_energy_j,
-            plate_dissipated_power_w,
             indenter_kinetic_energy_j,
             contact.contact_energy,
             contact.max_penetration,
@@ -577,6 +595,45 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
             loss_power[0],
             closure_m,
             relative_velocity_m_per_s,
+        ]) {
+            return Err(PlateImpactError::Invalid(
+                "nonfinite physical impact observation",
+            ));
+        }
+        Ok(PlateImpactBodyProbe {
+            indenter_kinetic_energy_j,
+            contact_energy_j: contact.contact_energy,
+            closure_m,
+            relative_velocity_m_per_s,
+            maximum_penetration_m: contact.max_penetration,
+            normal_force_n: reaction[n],
+            contact_dissipated_power_w: loss_power[0],
+            patch: self.patch.sample(&q[..n], &v[..n])?,
+            indenter_displacement_m: q[n],
+            indenter_velocity_m_per_s: v[n],
+            active_contact_points: contact.active_points,
+        })
+    }
+
+    /// Observe the actual physical state without changing history or solver state.
+    pub fn probe(&self, q: &[f64], v: &[f64]) -> Result<PlateImpactProbe, PlateImpactError> {
+        let body = self.body_probe(q, v)?;
+        let n = self.plate_dofs();
+        let mut work = zeros(n)?;
+        self.plate.mass_apply(&v[..n], &mut work);
+        let plate_kinetic_energy_j = 0.5 * dot(&v[..n], &work);
+        self.plate.internal_force(&q[..n], &mut work);
+        let plate_elastic_energy_j = 0.5 * dot(&q[..n], &work);
+        self.plate.damping_apply(&v[..n], &mut work);
+        let plate_dissipated_power_w = dot(&v[..n], &work);
+        let total_energy_j = plate_kinetic_energy_j
+            + plate_elastic_energy_j
+            + body.indenter_kinetic_energy_j
+            + body.contact_energy_j;
+        if !finite(&[
+            plate_kinetic_energy_j,
+            plate_elastic_energy_j,
+            plate_dissipated_power_w,
             total_energy_j,
         ]) {
             return Err(PlateImpactError::Invalid(
@@ -586,20 +643,50 @@ impl<'a, L: PlateLoad + ?Sized> PlateImpact<'a, L> {
         Ok(PlateImpactProbe {
             plate_kinetic_energy_j,
             plate_elastic_energy_j,
-            indenter_kinetic_energy_j,
-            contact_energy_j: contact.contact_energy,
-            total_energy_j,
-            closure_m,
-            relative_velocity_m_per_s,
-            maximum_penetration_m: contact.max_penetration,
-            normal_force_n: reaction[n],
-            contact_dissipated_power_w: loss_power[0],
             plate_dissipated_power_w,
-            patch: self.patch.sample(&q[..n], &v[..n])?,
-            indenter_displacement_m: q[n],
-            indenter_velocity_m_per_s: v[n],
-            active_contact_points: contact.active_points,
+            total_energy_j,
+            indenter_kinetic_energy_j: body.indenter_kinetic_energy_j,
+            contact_energy_j: body.contact_energy_j,
+            closure_m: body.closure_m,
+            relative_velocity_m_per_s: body.relative_velocity_m_per_s,
+            maximum_penetration_m: body.maximum_penetration_m,
+            normal_force_n: body.normal_force_n,
+            contact_dissipated_power_w: body.contact_dissipated_power_w,
+            patch: body.patch,
+            indenter_displacement_m: body.indenter_displacement_m,
+            indenter_velocity_m_per_s: body.indenter_velocity_m_per_s,
+            active_contact_points: body.active_contact_points,
         })
+    }
+
+    // Only this body's optional mass/contact suffix; the shared plate gradient
+    // is evaluated once by the enclosing single- or multiple-body adapter.
+    fn contact_parameter_vjp(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        a: &[f64],
+        seed: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), String> {
+        self.check(&[q, v, a, seed]).map_err(|e| e.to_string())?;
+        self.validate_source_kinematics(q, Some(v))
+            .map_err(|e| e.to_string())?;
+        if output.len() != self.contact_parameters {
+            return Err("invalid impact contact parameter derivative dimension".into());
+        }
+        if self.contact_parameters != 0 {
+            let n = self.plate_dofs();
+            output[0] = seed[n] * a[n];
+            let x = self.pack(q).map_err(|error| error.to_string())?;
+            self.contact.obstacles()[0]
+                .resistance_parameter_vjp_into(self.dimension, &x, v, seed, &mut output[1..])
+                .map_err(|error| PlateImpactError::Contact(error).to_string())?;
+        }
+        if !finite(output) {
+            return Err("nonfinite impact contact parameter derivative".into());
+        }
+        Ok(())
     }
 }
 
@@ -901,19 +988,7 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateImpact<'_, L> {
             &seed[..n],
             &mut output[..prefix],
         )?;
-        if self.contact_parameters != 0 {
-            output[prefix] = seed[n] * a[n];
-            let x = self.pack(q).map_err(|error| error.to_string())?;
-            self.contact.obstacles()[0]
-                .resistance_parameter_vjp_into(
-                    self.dimension,
-                    &x,
-                    v,
-                    seed,
-                    &mut output[prefix + 1..],
-                )
-                .map_err(|error| PlateImpactError::Contact(error).to_string())?;
-        }
+        self.contact_parameter_vjp(q, v, a, seed, &mut output[prefix..])?;
         if !finite(output) {
             return Err("nonfinite impact parameter derivative".into());
         }

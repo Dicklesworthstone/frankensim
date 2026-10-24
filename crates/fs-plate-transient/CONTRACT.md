@@ -174,3 +174,49 @@ controls fixed. `tests/impact_calibration.rs` compares the step and sampled
 trajectory gradients to finite differences that rebuild the physical model
 and its initial acceleration. It also checks the unchanged default parameter
 layout, source-bound refusal and reduction of the actual observation loss.
+
+## Simultaneous finite-body contacts
+
+`PlateImpactSet` composes prepared `PlateImpact` bodies on one full spatial
+plate. Its state order is `[plate DOFs, body_0, body_1, ...]`. Build every body
+from a copy of the same immutable `PlateDynamics`: admission checks the actual
+model and load identities, physical plate parameters and cached load parameter
+count. Equal-sized independent plates or different load owners cannot silently
+be treated as one specimen. The set separately caps body count, combined DOFs,
+total original contact quadrature points and all parameter coordinates.
+
+Every original plate mass, stiffness and damping action is evaluated once.
+Each body's original contact owner sees that same trial plate state and its
+own finite-mass coordinate; only its reciprocal contact contribution is
+scattered into the shared plate prefix and corresponding body entry. Contact
+forces at different footprints therefore interact through the actual spatial
+plate during one existing generalized-alpha/Newton solve. No sequential contact
+solver, repeated plate inertia, or independently advanced plate copies are used.
+
+Each body retains its own footprint, original quadrature measures, material
+source, loss law, mass and calibration choice. All source step/state limits
+participate in joint admission, with the refusing body index retained by the
+structural callback. An inadmissible trial or endpoint cannot publish a partial
+set of accepted body states. The original shared time owner provides rollback,
+cancellation and trajectory replay. Body-to-body contact detection, changing
+footprints and tangential/rotational motion remain outside this normal model.
+
+The common plate/load parameter prefix appears once. Enabled authored body
+suffixes follow in constructor order; `contact_parameter_range` exposes their
+exact ranges, including empty ranges for fixed/source-bound bodies. Full state
+transposes preserve the same gather/scatter maps, and contact parameter
+pullbacks reuse the original owner. The exact block mass inverse supports the
+shared consistent initialization and its pullback. Source coefficients retain
+their original immutable ownership and are never silently made fit variables.
+
+`PlateImpactSetProbe` reports plate storage and Rayleigh loss once, sums the
+separate body/contact storage and contact dissipation, and preserves ordered
+per-body observations. These are instantaneous physical observations rather
+than an assertion of exact generalized-alpha step energy conservation.
+
+Run `cargo run -p fs-plate-transient --example material_plate_multi_impact` for
+two material-sourced finite bodies on the same DKT plate. The comparison changes
+only the first body's initial velocity and reports the resulting second-body
+response through shared plate compliance. `tests/plate_multi_impact.rs` covers
+singleton equivalence, shared momentum/coupling, body permutation, local and
+parameter derivatives, original source refusal and aggregate admission.
