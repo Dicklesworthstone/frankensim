@@ -756,7 +756,8 @@ and 0.328 m speaking length; the contacts table puts il Cannone's own G at
 323.1 mm bridge to nut. The G keeps its bending and twist modes to 30 kHz; D, A
 and E keep theirs to 10 kHz, which is 474 coordinates with the body and cavity.
 The bow presses 1 N and moves at 0.2 m/s, a tenth of the speaking length from
-the bridge.
+the bridge. The WAV's full scale is 1 Pa. The peak at the microphone is
+0.34 Pa on this body and 0.37 Pa on h6 at 5 kHz, both in the first 50 ms.
 
 Two inputs of this note are authored, not measured:
 - the bridge joint (200000 N/m, 0.1 N s/m);
