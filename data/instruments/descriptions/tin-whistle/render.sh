@@ -11,12 +11,17 @@
 # Proc. Inst. Acoust. 28(1), 2006, pp. 597-606; fingerings from Timoney et al., DAFx'04 Fig. 2 and the paper's Sec. 3.2). Every geometry number
 # is a dimensions.tsv row. The network is: the window (2.4 mm wall as a riser of equal area to the 8 x 5.3 mm opening) on a junction with a
 # closed pocket behind it (8 mm beyond the flue plus half the window, a cylinder of the bore radius: an upper bound, u-pocket-shape), the bore to
-# hole 6 and on to hole 1 and the open end, each finger hole a chimney section ending open or closed.
+# hole 6 and on to hole 1 and the open end, each finger hole a chimney section ending open or closed. The window's mass is computed, not a
+# constant: each card's row `window wall-cut 16` solves the 3-D potential flow through the 8 mm arc by 5.3 mm cut in the 2.4 mm wall of the
+# 6.1 mm bore, with the pocket behind it and free space outside (fs_bem::wall_window at 16 and 32 axial cells, extrapolated at the re-entrant
+# edges' order 4/3). That mass, 15.71 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law.
 # Player: the air flow the same paper measured for each note of the major scale at its tempered frequency (Table 1: l/min D5 6.2, E5 6.9,
 # F#5 9.0, G5 8.2, A5 10.0, B5 9.55, C#6 11.3, D6 with only hole 6 open 11.9; and the paper's overblown series with every hole closed, Fig. 2 and
 # Table 1: D6 12.0, A6 17.9, D7 23.8, files d6c, a6c, d7c, a test of the overblowing ladder whose answer is a result), turned into mouth pressure by the island's own viscous windway law
 # p = 12 mu L v / h^2 + rho v^2 / 2 with L = 24.55 mm, h = 1.48 mm (exit depth over the whole length: an upper bound, u-flue-taper), flue width 8 mm,
 # v = flow / (8 x 1.48 mm^2), dry air at 20 C. The gesture is 50 ms attack, hold, 10.5 ms release.
+# Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
+# room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
 # Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), mouth loss (0.02), jet displacement gain (90, as in the
 # flue gates), the jet card (the repository interim slot-jet card, chosen BEFORE looking at any render because a windway jet is a slot jet; it is
 # outside its Reynolds band, u-jet-profile). The binary must contain the jet-island phase fix (fs-couple 1718d79fb or later).

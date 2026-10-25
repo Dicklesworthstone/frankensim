@@ -55,6 +55,7 @@ receiver -0.26730 0 1 4 16 2800
 outlets 15 1
 outlet 14 -0.0377000 0
 mouth_radiation -0.2673000 0 4 4
+window wall-cut 16
 controls 4096 100000
 gesture
 frankensim-gesture-schedule-v1

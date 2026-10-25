@@ -59,6 +59,7 @@ outlet 10 -0.0812000 0
 outlet 12 -0.0627000 0
 outlet 14 -0.0377000 0
 mouth_radiation -0.2673000 0 4 4
+window wall-cut 16
 controls 4096 100000
 gesture
 frankensim-gesture-schedule-v1
