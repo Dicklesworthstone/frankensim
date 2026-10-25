@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	dominant-a-section	Dominant A string, wound on a Perlon core (the table's note 3); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Equivalent homogeneous section from Pickering (1985) as committed in violin-strings-whole-pickering-jcas1985, row s12: radius 0.0003405 m (mean relaxed diameter / 2); density = linear density 0.000666 kg/m / (pi r^2); young_modulus = B T L^2 / pi^2 / (pi r^4 / 4) with B 0.000212531808, the least-squares inharmonicity of the printed deviations of partials 2-8 (rms residual 1.51 cents), the printed tension T 56.25 N and the test bed L 0.329 m; shear_modulus = (k L / 4) / (pi r^4 / 2) with the printed string torsional stiffness k 24.85 g cm/rad	The stiffnesses are the whole wound string's, assigned to a cylinder of its own radius; they are not the moduli of any one of its materials. The deviations are printed to whole cents, which bounds the precision of B. Temperature and humidity are not stated by the source. The validity band omega 0 to 2 pi 40 kHz and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.
+observation	dominant-a-twist-loss	the same string	Pickering (1985) printed damping coefficient 10.33 = 100 x the logarithmic decrement of his torsion pendulum (p. 6: 4.12 g, 5.4016 Hz, effective torsional stiffness 30.355 g cm/rad) clamped at the string's centre, swinging at 7.284 Hz: system loss factor 0.032881; the string's own torsional loss factor 0.068988 to 0.073047 (the pendulum's own loss from 0 to 0.003323, the bound that gives the least damped string, s01, all of its system loss); written 0.071018, the midpoint	Measured near 7 Hz and applied as a CONSTANT loss factor at every twist mode's own frequency: kelvin_voigt_shear_viscosity = eta_t G / omega_ref with shear_viscosity_constant_loss_reference_omega = omega_ref = 2 pi 200 rad/s, an encoding frequency only. Wound strings' measured torsional Q is nearly the same on the first few modes (Wollman, Smith & Wolfe 2010, ISMA, Table 1; Woodhouse & Loach 1999, Acustica 85:734-740).
+observation	dominant-a-bending-loss	the same string	No measurement: Pickering (1985) reports no transverse damping	UNKNOWN. kelvin_voigt_bending_viscosity is written as 0, the lower end, so the string's transverse loss is its air drag and its supports only. Measured bending loss factors of other wound strings: 0.047 to 0.13 (D'Addario Kaplan cello strings; Mansour, Woodhouse & Scavone 2016, Acta Acust. 102:1082-1093, Table 1) and 0.002 (a steel violin E; Galluzzo, Woodhouse & Mansour 2017, Acta Acust. 103:1080-1099, Table 1).
+scalar	density	dominant-a-section	density	1828.47962	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	251327.412	rad/s
+scalar	young_modulus	dominant-a-section	young_modulus	1.24188153e+10	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	251327.412	rad/s
+scalar	shear_modulus	dominant-a-section	shear_modulus	9.49280661e+09	Pa	constant
+uncertainty	shear_modulus	unstated	-	-	-	-
+validity	shear_modulus	T	280	320	K
+validity	shear_modulus	omega	0	251327.412	rad/s
+scalar	kelvin_voigt_bending_viscosity	dominant-a-bending-loss	kelvin_voigt_bending_viscosity	0	Pa*s	constant
+uncertainty	kelvin_voigt_bending_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_bending_viscosity	T	280	320	K
+validity	kelvin_voigt_bending_viscosity	omega	0	251327.412	rad/s
+scalar	kelvin_voigt_shear_viscosity	dominant-a-twist-loss	kelvin_voigt_shear_viscosity	536475.821	Pa*s	constant
+uncertainty	kelvin_voigt_shear_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_shear_viscosity	T	280	320	K
+validity	kelvin_voigt_shear_viscosity	omega	0	251327.412	rad/s
+scalar	shear_viscosity_constant_loss_reference_omega	dominant-a-twist-loss	shear_viscosity_constant_loss_reference_omega	1256.63706	rad/s	constant
+uncertainty	shear_viscosity_constant_loss_reference_omega	unstated	-	-	-	-
+validity	shear_viscosity_constant_loss_reference_omega	T	280	320	K
+validity	shear_viscosity_constant_loss_reference_omega	omega	0	251327.412	rad/s

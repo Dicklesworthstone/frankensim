@@ -1,4 +1,5 @@
-//! Synthetic sources test physical wiring; no measured instrument timbre claim.
+//! Synthetic sources test physical wiring, and the measured Dominant string packs test their data path; no measured
+//! instrument timbre claim.
 use fs_couple::bowed_string::runtime::reciprocal::{InteriorStringConnection, ReciprocalStringError};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringMember, MaterialStringSource, ReciprocalStringBank, StringBankOptions, StringBowLocation,
@@ -26,7 +27,7 @@ use fs_couple::thin_plate::{PlateMaterialModel, PlateThicknessConstraint, with_u
     PlateRegionMaterial, PlateChartRadiation, compile_plate_material_chart};
 use fs_evidence::ValidityDomain;
 use fs_exec::{CancelGate, Cx};
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, NormalizedPack, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
@@ -183,6 +184,83 @@ fn constant_loss_torsion_refuses_a_twist_mode_outside_its_spectrum_band() {
         let refused=raw(cx,gate,anchored(g,100.0,reference).with_torsion("G","eta_s",1).unwrap(),options()).err()
             .expect("a 35.8 Hz constant-loss twist mode must refuse");
         assert!(refused.to_string().contains("exceed material support"),"{refused}");
+    });
+}
+
+/// Pickering (1985) as committed: the scalar `<key>_<row>` of his whole-string table.
+fn pickering(key:&str,row:&str)->f64 {
+    let name=format!("{key}_{row}");
+    include_str!("../../../data/matdb/seed-v1/violin-strings-whole-pickering-jcas1985/properties.tsv").lines()
+        .map(|l| l.split('\t').collect::<Vec<_>>()).find(|f| f[0]=="scalar" && f[3]==name)
+        .map(|f| f[4].parse().unwrap()).unwrap()
+}
+/// A material_strings string pack resolved as the example resolves a twisting string with the constant-loss anchor.
+fn string_pack(bytes:&[u8])->ResolvedMaterialStatePoint {
+    let pack=NormalizedPack::from_bytes(bytes).unwrap();
+    let card=MaterialCard::assemble(MaterialStateId{chemistry:format!("source-pack:{}",pack.pack_id()),
+        phase:"declared solid model".into(),process:"frozen source-pack realization".into(),revision:0},
+        pack.claims().clone(),vec![]).unwrap();
+    let requirements=[("density",Density::DIMS),("young_modulus",Pressure::DIMS),(ETA,DynViscosity::DIMS),
+        ("shear_modulus",Pressure::DIMS),("kelvin_voigt_shear_viscosity",DynViscosity::DIMS),
+        (TORSION_REFERENCE,TORSION_REFERENCE_DIMS)]
+        .map(|(name,dims)| ScalarPropertyRequirement::try_new(name,dims,ScalarAdmissibility::Finite).unwrap());
+    resolve_material_state_point(&card,&QueryPoint::new().with("T",293.15).unwrap().with("omega",1000.0).unwrap(),
+        &requirements,MaterialPropertySelection::SingleClaimOnly).unwrap()
+}
+
+// The four Thomastik Dominant violin strings of Pickering (1985) as material_strings ships them
+// (examples/material_strings/gen_dominant_string_packs.py). At his mean radius each pack holds his linear density and
+// his string torsional stiffness on the 329 mm bed (both halves twist), and its Young's modulus is the least-squares
+// inharmonicity of his whole-cent partials. On a violin span every twist mode carries the string's own loss factor at
+// its own frequency: the pendulum-and-string decrement with the pendulum's 30.355 g cm/rad of gravity stiffness taken
+// out, at the midpoint of the bracket the pendulum's unstated own loss leaves (0 up to all of the steel E's loss).
+#[test]
+fn the_dominant_packs_hold_pickerings_strings_and_their_measured_twist_loss() {
+    use core::f64::consts::PI;
+    let packs:[(&str,f64,&[u8]);4]=[
+        ("s01",659.26,include_bytes!("../examples/material_strings/packs/violin-string-dominant-e-pickering1985-section.fsmatpk")),
+        ("s12",440.0,include_bytes!("../examples/material_strings/packs/violin-string-dominant-a-pickering1985-section.fsmatpk")),
+        ("s22",293.66,include_bytes!("../examples/material_strings/packs/violin-string-dominant-d-pickering1985-section.fsmatpk")),
+        ("s32",196.0,include_bytes!("../examples/material_strings/packs/violin-string-dominant-g-pickering1985-section.fsmatpk"))];
+    let (bed,gram_cm,pendulum,speaking,span)=(0.329,9.80665e-5,30.355,0.328,0.383);
+    let system=|row:&str| pickering("damping_coefficient_printed_x100",row)/100.0/PI;
+    let k_e=pickering("torsion_stiffness_printed_g_cm_per_rad","s01");
+    let pendulum_loss=system("s01")*(k_e+pendulum)/pendulum;
+    let spectrum=ConstantLossSpectrum::fit_over(STRING_LOSS_SPECTRUM_BAND_RAD_S);
+    with_cx(|cx,gate| for (row,pitch,bytes) in packs {
+        let m=string_pack(bytes);
+        let v=|name:&str| m.property(name).unwrap().value_si();
+        let r=0.25*(pickering("diameter_max",row)+pickering("diameter_min",row));
+        let (mu,tension,k)=(pickering("linear_density",row),pickering("tension",row),
+            pickering("torsion_stiffness_printed_g_cm_per_rad",row));
+        assert!((v("density")*PI*r*r/mu-1.0).abs()<1e-8,"{row}");
+        assert!((4.0*v("shear_modulus")*(PI*r.powi(4)/2.0)/bed/(k*gram_cm)-1.0).abs()<1e-8,"{row}");
+        let squares=|b:f64| (2..=8).map(|n| {
+            let cents=1200.0*((1.0+b*(n*n) as f64).sqrt()/(1.0+b).sqrt()).log2();
+            (cents-pickering(&format!("partial_{n}_deviation_cents"),row)).powi(2)
+        }).sum::<f64>();
+        let b=PI*PI*v("young_modulus")*(PI*r.powi(4)/4.0)/(tension*bed*bed);
+        assert!(squares(b)<squares(0.99*b) && squares(b)<squares(1.01*b),"{row}: B {b:e}");
+        let eta_hi=system(row)*(k+pendulum)/k;
+        let eta_lo=((system(row)*(k+pendulum)-pendulum_loss*pendulum)/k).max(0.0);
+        let eta_t=v("kelvin_voigt_shear_viscosity")*v(TORSION_REFERENCE)/v("shear_modulus");
+        assert!((eta_t/(0.5*(eta_lo+eta_hi))-1.0).abs()<1e-8,"{row}: {eta_t} in {eta_lo}..{eta_hi}");
+        assert_eq!(v(ETA),0.0,"{row}: the bending loss is stated unknown, written 0");
+        eprintln!("{row}: B {b:.4e} (rms {:.2} cents), twist loss factor {eta_t:.5} ({eta_lo:.5}..{eta_hi:.5})",
+            (squares(b)/7.0).sqrt());
+        // The il Cannone span at the open string's pitch from its speaking length.
+        let string=PrestressedString{length_m:span,tension_n:mu*(2.0*speaking*pitch).powi(2),..template()};
+        let source=MaterialStringSource::Homogeneous(with_uniform_circular_material_state(string,r,&m).unwrap()
+            .with_kelvin_voigt_bending_loss().unwrap()).with_torsion("shear_modulus","kelvin_voigt_shear_viscosity",3).unwrap();
+        let bank=raw(cx,gate,source,options()).unwrap();
+        let modes=bank.system().components()[0].modes();
+        assert_eq!(modes.len(),7);
+        for n in 1..=3 {
+            let omega=n as f64*PI/span*(v("shear_modulus")/v("density")).sqrt();
+            assert!((modes[3+n].angular_frequency_rad_s/omega-1.0).abs()<2e-14,"{row} twist {n}");
+            let loss=2.0*modes[3+n].damping_ratio;
+            assert!((loss/(eta_t*spectrum.shape(omega))-1.0).abs()<1e-12,"{row} twist {n}: {loss}");
+        }
     });
 }
 

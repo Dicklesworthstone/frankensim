@@ -1339,6 +1339,19 @@ viscosity stays Kelvin-Voigt. The body additionally needs `poisson_ratio` [1]. B
 and shear loss must have an explicit valid angular-frequency band; all actual
 retained modes, not only the source query frequency, undergo the existing checks.
 
+`packs/violin-string-dominant-{e,a,d,g}-pickering1985-section.fsmatpk` are the four Thomastik Dominant violin
+strings measured by Pickering (1985). `xtask matdb-pack` builds them from the sources that
+`gen_dominant_string_packs.py` writes into `data/matdb/seed-v1`. Each is an equivalent homogeneous section of the
+string's own mean radius (E 0.1555 mm, A 0.3405 mm, D 0.399 mm, G 0.40275 mm; use that radius in the string record):
+- its density gives the measured linear density;
+- its `young_modulus` gives the least-squares inharmonicity of the printed partials;
+- its `shear_modulus` gives the measured torsional stiffness.
+
+Each pack states its torsional loss factor with the constant-loss anchor: 0.0032 (E), 0.071 (A), 0.036 (D) and
+0.119 (G). It is the pendulum-and-string decrement with the pendulum's own gravity stiffness taken out. The
+bending viscosity is written as 0 because no transverse internal loss is measured; such a string loses
+transverse energy only to its air drag and its supports.
+
 This executable selects homogeneous, bonded or close-wound circular strings, fixed tension or
 fixed-extension supports and fixed rotational ends. Its shared body is the legacy
 simply supported isotropic flat plate or an explicit material plate, shell or
