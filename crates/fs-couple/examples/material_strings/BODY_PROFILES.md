@@ -386,15 +386,15 @@ an unconstrained translational component. The bridge count equals the actual
 string count, including unplayed strings. Source bytes, geometry, packs,
 physical eigenvectors and force maps remain attached to the performer.
 
-The file admits at most 2048 nodes and 4096 triangles per component, 16 regions, eight string
-attachments and 128 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
+The file admits at most 3072 nodes and 6144 triangles per component, 16 regions, eight string
+attachments and 256 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects
 `consistent` or `lumped` inertia. `drilling` supplies positive numerical
 drilling stabilization; `director-min-dot` declares the incident-facet alignment
 floor in `(0,1]`. The spectral window contains squared angular frequencies.
 `projection-work` declares a separate cold shell-projection budget, at most
-549,755,813,888 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
-force and pressure projections, about 2.6e10 for a cap-sized component; a v4 assembly adds the owner's
-conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 4.3e11 in all at the v4 caps).
+2,199,023,255,552 terms (the count is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus
+force and pressure projections, about 1.4e11 for a cap-sized component; a v4 assembly adds the owner's
+conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`, about 2.0e12 in all at the v4 caps).
 It does not enlarge the existing complete-network limits.
 These discretization choices require mesh, mode, stabilization and time-step
 refinement for the intended specimen.
@@ -661,8 +661,8 @@ components; they retain the same physical chord and perpendicular-lever rule
 as v3. The other string controls, material bow interfaces, afterlength, torsion,
 preloads and shared gas continue through the original performer.
 
-Profiles take the 4 MiB shell limit and admit at most 48 components, 8192 total
-nodes, 16384 total triangles, 119 ties and 128 shared body modes. Per-component v3
+Profiles take the 4 MiB shell limit and admit at most 64 components, 12288 total
+nodes, 24576 total triangles, 157 ties and 256 shared body modes. Per-component v3
 mesh limits still apply. Material/interface source bytes and every damping
 channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select
@@ -688,7 +688,8 @@ at the nearest node of a declared point (the snap distance is reported), each
 pushing along one declared direction. The table's cavity row supplies the
 performance's cavity record. The il Cannone violin body
 (`data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv`,
-48 components and 119 ties, which set the two caps above) converts the same way;
+48 components and 119 ties; its 6 mm mesh `shell-assembly-h6.tsv`, 64 components
+and 157 ties, sets the two caps above) converts the same way;
 its frame has x across the body, y vertical and z along the strings, so its
 strings push their bridge nodes along x. That x is also the bow's tangent, so
 the il Cannone rungs give every string `polarizations two 1 0 1 0`: the bow
@@ -702,7 +703,7 @@ With the two violin shell packs, both built by `xtask matdb-pack` from
 `data/matdb/seed-v1` (`packs/violin-spruce-norway-viala2020-shell.fsmatpk` as
 `@body` for the top, bass bar and soundpost,
 `packs/violin-maple-sycamore-sonderegger2013-shell.fsmatpk` for the back, ribs
-and bridge), the window from 15 Hz to the packs' 2 kHz validity holds 30
+and bridge), the window from 15 Hz to 2 kHz holds 30
 assembled modes, 473.5 Hz to 1967.7 Hz. A request for more refuses once the
 window is solved and names the count it holds. Both packs state
 `constant_loss_reference_omega` (2 pi 200 rad/s), so the body modes' Q is
@@ -741,7 +742,13 @@ starts with `#` is a comment. The command prints:
   record.
 
 `cannone-h8.assembly` holds il Cannone's choices. The rungs in
-`body/shell/tests.rs` read the same file.
+`body/shell/tests.rs` read the same file. `cannone-h6.assembly` makes the same
+choices for the 6 mm table `shell-assembly-h6.tsv` beside it, with the
+projection work its 11769 nodes need, except the window: it reaches 5 kHz, the
+narrower pack's validity. The spruce pack declares its source's band (Viala's
+model updating, 100-5000 Hz) and the maple pack Laemmlein's 150 Hz to 10 kHz
+sweep; no source reaches 5-6 kHz. The cavity row and the bridge snaps differ
+slightly from h8's, so `assemble-shell` prints them for the performance.
 
 `cannone-dominant-g3.material-strings` bows il Cannone's G for 2 s at 144 kHz,
 on the four Dominant string packs (README.md). It uses the rung's 0.383 m span

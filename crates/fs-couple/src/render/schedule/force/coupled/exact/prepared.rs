@@ -20,13 +20,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Explicit upper bound on complete mechanical modes in the cold dense path.
 /// Each mode retains displacement, velocity and its independent held input.
-pub const MAX_PREPARED_MODAL_MODES: usize = 512;
+pub const MAX_PREPARED_MODAL_MODES: usize = 1024;
+// Each loss integral exponentiates Van Loan's 2d operator, d = 3 coordinates per mode; at the ceiling it must fit the
+// budgeted exponential.
+const _: () = assert!(6 * MAX_PREPARED_MODAL_MODES <= fs_phs::linear_exact::MAX_PREPARED_EXPONENTIAL_DIM);
 
 /// Additional cold dense resources; original modal/connection/work and
 /// physical/energy admissions remain binding. There is deliberately no default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedModalBudget {
-    /// Maximum TOTAL original mechanical modes, up to 512; none are dropped.
+    /// Maximum TOTAL original mechanical modes, up to 1024; none are dropped.
     pub max_modes: usize,
     /// Conservative peak bytes of additional dense preparation/cache storage.
     /// Includes up to 48 scale levels (kept for the per-link integrals), the component and total connection loss matrices

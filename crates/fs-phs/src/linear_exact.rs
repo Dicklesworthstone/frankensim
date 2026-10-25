@@ -207,7 +207,7 @@ pub fn exponential(a: &[f64], n: usize) -> Result<Vec<f64>, PhsError> {
 /// workspace; the term count reserves 32 Taylor products and 48 squarings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DenseExponentialBudget {
-    /// Matrix dimension ceiling, at most MAX_PREPARED_EXPONENTIAL_DIM (4096).
+    /// Matrix dimension ceiling, at most MAX_PREPARED_EXPONENTIAL_DIM (6144).
     pub max_dimension: usize,
     /// Maximum simultaneous dense matrix bytes, including the supplied input.
     pub max_dense_bytes: usize,
@@ -215,8 +215,9 @@ pub struct DenseExponentialBudget {
     pub max_multiply_terms: u64,
 }
 
-/// Hard capacity of the explicit budgeted cold path; defaults remain 256.
-pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 4096;
+/// Hard capacity of the explicit budgeted cold path; defaults remain 256. 6144 is the 2d x 2d Van Loan operator of a
+/// 3072-dimensional generator (fs-couple's 1024 prepared modes, three coordinates each).
+pub const MAX_PREPARED_EXPONENTIAL_DIM: usize = 6144;
 
 /// The same deterministic Taylor/scaling exponential under an explicit larger
 /// cold work/byte budget. No approximate backend, state removal, stability

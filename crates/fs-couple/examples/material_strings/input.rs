@@ -13,18 +13,22 @@ pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
 pub const MAX_MODES: usize = 128;
-/// Retained body modes a `body` record may request. Flat plate bodies keep [`MAX_PLATE_BODY_MODES`].
-pub const MAX_BODY_MODES: usize = 128;
+/// Retained body modes a `body` record may request: the shell owner's own ceiling, `MAX_SHELL_MODES`. Flat plate
+/// bodies keep [`MAX_PLATE_BODY_MODES`].
+pub const MAX_BODY_MODES: usize = 256;
 pub const MAX_PLATE_BODY_MODES: usize = 16;
 /// Modal coordinates of one complete instrument (strings, twist, body, cavity, gas memory). The shared exact
 /// propagation holds at most 42 of them as one dense block; a larger network needs the explicit
-/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (512). The network
+/// `prepared-linear` record, whose own library ceiling is `MAX_PREPARED_MODAL_MODES` (1024). The network
 /// setup work `modes * (links + 1)^2` still has to fit [`MAX_WORK`].
-pub const MAX_TOTAL_MODES: usize = 512;
+pub const MAX_TOTAL_MODES: usize = 1024;
 const _: () = assert!(MAX_TOTAL_MODES <= fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES);
 pub const MAX_EVENTS: usize = 16_384;
 pub const MAX_CONTROLS: usize = 262_144;
-pub const MAX_WORK: u64 = 16_777_216;
+/// The complete network's setup work `modes * (links + 1)^2` at the ceilings: every mode of the total ceiling with one
+/// link per body mode at the body ceiling. It also bounds plate and relaxation projection terms; each performance's
+/// declared budgets bound the real work, and this ceiling only refuses impossible declarations.
+pub const MAX_WORK: u64 = (MAX_TOTAL_MODES * (MAX_BODY_MODES + 1) * (MAX_BODY_MODES + 1)) as u64;
 
 #[derive(Clone, Debug)]
 pub struct Wire {

@@ -209,6 +209,27 @@ fn explicit_preparation_refusals_and_negative_loss_gate_do_not_invent_accuracy()
     assert_eq!(system.samples_rendered(), 0);
 }
 
+/// At the mode ceiling the admission hands the exponential its Van Loan dimension, 6 x modes, and the budgeted
+/// exponential accepts it; one more mode refuses.
+#[test]
+fn the_prepared_mode_ceiling_admits_its_van_loan_dimension_and_refuses_one_more_mode() {
+    let wide = PreparedModalBudget {
+        max_modes: MAX_PREPARED_MODAL_MODES,
+        max_dense_bytes: usize::MAX,
+        max_multiply_terms: u64::MAX,
+    };
+    let exponential = wide.admit(MAX_PREPARED_MODAL_MODES, 1, 1).unwrap();
+    assert_eq!(exponential.max_dimension, 6 * MAX_PREPARED_MODAL_MODES);
+    let identity = fs_phs::linear_exact::exponential_with_budget(&[0.0], 1, exponential).unwrap();
+    assert_eq!(identity, vec![1.0]);
+    let over = PreparedModalBudget {
+        max_modes: MAX_PREPARED_MODAL_MODES + 1,
+        ..wide
+    };
+    assert!(over.validate().is_err());
+    assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1).is_err());
+}
+
 #[test]
 fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluation_bit_for_bit() {
     let mut system = fixture(48_000, true);

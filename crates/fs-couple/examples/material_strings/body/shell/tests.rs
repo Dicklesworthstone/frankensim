@@ -193,8 +193,9 @@ fn shell_profile_admits_exactly_the_node_ceiling_and_refuses_one_more() {
     assert!(Profile::parse(grid_body(nx, 32, MAX_NODES, 0).as_bytes()).is_ok());
     // One more node is refused when it is only declared and when it is really present.
     assert!(Profile::parse(grid_body(nx, 32, MAX_NODES + 1, 0).as_bytes()).is_err());
-    assert_eq!((MAX_NODES + 1) % 3, 0, "MAX_NODES + 1 must factor as 3 * m for the real over-cap grid");
-    assert!(Profile::parse(grid_body(3, (MAX_NODES + 1) / 3, MAX_NODES + 1, 0).as_bytes()).is_err());
+    // The real over-cap grid is `columns` wide, the smallest factor of MAX_NODES + 1.
+    let columns = (2..MAX_NODES + 1).find(|f| (MAX_NODES + 1) % f == 0).expect("MAX_NODES + 1 must not be prime");
+    assert!(Profile::parse(grid_body(columns, (MAX_NODES + 1) / columns, MAX_NODES + 1, 0).as_bytes()).is_err());
 }
 
 #[test]
@@ -222,6 +223,34 @@ fn shell_profile_admits_exactly_the_mode_ceiling_and_refuses_one_more() {
     assert!(plate.preflight(&spec).is_ok());
     spec.body.modes = input::MAX_PLATE_BODY_MODES + 1;
     assert!(plate.preflight(&spec).is_err());
+}
+
+/// A complete instrument admits exactly `MAX_TOTAL_MODES` modal coordinates (1024, the prepared owner's ceiling) and
+/// refuses one more; at that ceiling it admits exactly `MAX_WORK` setup terms, one link per body mode at the body
+/// ceiling, and refuses one more link. A `prepared-linear` record admits the library ceiling and refuses one more mode.
+#[test]
+fn the_complete_instrument_admits_exactly_the_mode_and_work_ceilings_and_refuses_one_more() {
+    let spec = shell_spec();
+    let dimensions = |links, modes| spec.network_dimensions_with_body_modes(false, links, modes);
+    let (base, base_links, _) = dimensions(0, 0).unwrap();
+    let (at, _, _) = dimensions(0, input::MAX_TOTAL_MODES - base).unwrap();
+    assert_eq!(at, input::MAX_TOTAL_MODES);
+    let over = dimensions(0, input::MAX_TOTAL_MODES - base + 1).unwrap_err();
+    assert!(over.to_string().contains("exceeds 1024 modes"), "{over}");
+    let extra = input::MAX_BODY_MODES - base_links;
+    let (_, links, terms) = dimensions(extra, input::MAX_TOTAL_MODES - base).unwrap();
+    assert_eq!(links, input::MAX_BODY_MODES);
+    assert_eq!(terms as u64, input::MAX_WORK);
+    let over = dimensions(extra + 1, input::MAX_TOTAL_MODES - base).unwrap_err();
+    assert!(over.to_string().contains("setup work budget"), "{over}");
+    let body = "body body.fsmatpk 0.4 0.3 0.001 2 1";
+    let cavity = "cavity neck 0.003 0.01 0.02 100 1";
+    let text = violin_performance(96, body, cavity, CANNONE_DIRECTIONS);
+    let ceiling = fs_couple::render::schedule::force::coupled::MAX_PREPARED_MODAL_MODES;
+    let record = |modes: usize| format!("prepared-linear {modes} ");
+    let with = |modes: usize| text.replacen(&record(512), &record(modes), 1);
+    assert!(input::Spec::parse(with(ceiling).as_bytes()).is_ok());
+    assert!(input::Spec::parse(with(ceiling + 1).as_bytes()).is_err());
 }
 
 #[test]
@@ -439,8 +468,9 @@ fn violin_performance(samples: u64, body: &str, cavity: &str, directions: &str) 
 const CANNONE_DIRECTIONS: &str = "1 0 1 0";
 
 /// The il Cannone body's assembly choices (`cannone-h8.assembly`, the file `material_strings assemble-shell` reads): the
-/// window from 15 Hz to the violin packs' 2 kHz validity, spruce as the performance body pack and maple the other, the
-/// 3 mm reference thickness, and the four string contacts on the bridge, each driving its node along x.
+/// window from 15 Hz to 2 kHz (the packs declare 100 Hz to 5 kHz and 150 Hz to 10 kHz), spruce as the performance body
+/// pack and maple the other, the 3 mm reference thickness, and the four string contacts on the bridge, each driving its
+/// node along x.
 fn cannone_options() -> super::super::shell::assembly::table::OptionsFile {
     super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h8.assembly")).unwrap()
 }
@@ -449,9 +479,27 @@ fn cannone_options() -> super::super::shell::assembly::table::OptionsFile {
 /// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile with `cannone_options`. The table's
 /// frame has x across the body, y vertical and z along the strings.
 fn cannone_profile() -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
-    let converted = cannone_options().convert(
-        include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv"))
-        .unwrap();
+    cannone_profile_with(&cannone_options(), CANNONE_H8)
+}
+
+const CANNONE_H8: &str =
+    include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv");
+
+/// The same body meshed at 6 mm by the same generator (shell-assembly-h6.tsv: 64 parts, 11769 nodes, 17483 triangles,
+/// 157 ties), the largest table on file.
+const CANNONE_H6: &str =
+    include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv");
+
+/// The 6 mm table's assembly choices (`cannone-h6.assembly`): h8's, with the window to 5 kHz (the spruce pack's source
+/// band) and the projection work its 11769 nodes need.
+fn cannone_h6_options() -> super::super::shell::assembly::table::OptionsFile {
+    super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h6.assembly")).unwrap()
+}
+
+fn cannone_profile_with(options: &super::super::shell::assembly::table::OptionsFile, table: &str)
+    -> (Profile, super::super::shell::assembly::table::ConvertedTable)
+{
+    let converted = options.convert(table).unwrap();
     (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
 }
 
@@ -495,25 +543,32 @@ fn the_cannone_dominant_g3_performance_matches_its_body_and_passes_preflight() {
     profile.preflight(&input::Spec::parse(text.as_bytes()).unwrap()).unwrap();
 }
 
-/// The whole il Cannone body is admitted: its 48 components and 119 ties are exactly the assembly caps, and one more
-/// component or one more tie refuses. Its four bridges land on bridge nodes within 0.6 mm of the string contacts and push
-/// along x. With the violin-sized strings (synthetic steel, `violin_performance`), the table's own cavity row as a
-/// physical neck and 128 body modes, it passes preflight: every check that runs before pack I/O and the reduction.
+/// Both il Cannone tables are admitted, and their four bridges land on bridge nodes within 0.6 mm of the string
+/// contacts and push along x. The 6 mm body's 64 components and 157 ties are exactly the assembly caps: one more
+/// component or one more tie refuses. Its rib set (2904 nodes, 5082 triangles) and its 11769 nodes and 17483 triangles
+/// in all fit the node and triangle caps. With the violin-sized strings (synthetic steel, `violin_performance`), each
+/// table's own cavity row as a physical neck and 128 body modes, each passes preflight: every check that runs before
+/// pack I/O and the reduction.
 #[test]
-fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
-    let (profile, converted) = cannone_profile();
-    let text = &converted.profile;
-    let records = |name: &str| text.lines().filter(|l| l.split(' ').next() == Some(name)).count();
-    assert_eq!((records("component"), records("edge-tie"), records("bridge")), (48, 119, 4));
-    assert!(text.lines().filter(|l| l.starts_with("bridge bridge ")).all(|l| l.ends_with(" 1 0 0")));
-    assert!(converted.bridge_snaps_m.iter().all(|&d| d < 0.000_6), "bridge snaps {:?} m", converted.bridge_snaps_m);
+fn the_cannone_violin_body_at_6_mm_fills_the_assembly_caps_and_both_tables_pass_preflight() {
+    let records = |text: &str, name: &str| text.lines().filter(|l| l.split(' ').next() == Some(name)).count();
+    let tables = [(cannone_options(), CANNONE_H8, (48, 119, 4)), (cannone_h6_options(), CANNONE_H6, (64, 157, 4))];
+    for (options, table, counts) in tables {
+        let (profile, converted) = cannone_profile_with(&options, table);
+        let text = &converted.profile;
+        assert_eq!((records(text, "component"), records(text, "edge-tie"), records(text, "bridge")), counts);
+        assert!(text.lines().filter(|l| l.starts_with("bridge bridge ")).all(|l| l.ends_with(" 1 0 0")));
+        assert!(converted.bridge_snaps_m.iter().all(|&d| d < 0.000_6), "bridge snaps {:?} m", converted.bridge_snaps_m);
+        profile.preflight(&cannone_inputs_with(&options, table, 96, 128).1).unwrap();
+    }
+    let text = &cannone_profile_with(&cannone_h6_options(), CANNONE_H6).1.profile;
     let refusal = |text: &str| Profile::parse(text.as_bytes()).err().expect("one past the cap must refuse").to_string();
     // One more component: the bridge again, under a new name.
     let (start, end) = (text.find("component bridge\n").unwrap(), text.find("face-ties").unwrap());
     let part_end = start + text[start..end].find("end-component\n").unwrap() + "end-component\n".len();
     let copy = text[start..part_end].replacen("component bridge\n", "component bridge-copy\n", 1);
     let one_more_component = format!("{}{copy}{}", &text[..part_end], &text[part_end..])
-        .replacen("components 48\n", "components 49\n", 1);
+        .replacen("components 64\n", "components 65\n", 1);
     assert!(refusal(&one_more_component).contains("count exceeds its explicit range"));
     // One more tie: the first edge tie again.
     let lines: Vec<&str> = text.lines().collect();
@@ -521,9 +576,8 @@ fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
     let f: Vec<&str> = lines[first].split(' ').collect();
     let block = 1 + f[5].parse::<usize>().unwrap() + f[6].parse::<usize>().unwrap();
     let one_more_tie = [&lines[..first + block], &lines[first..]].concat().join("\n")
-        .replacen("edge-ties 119\n", "edge-ties 120\n", 1);
+        .replacen("edge-ties 157\n", "edge-ties 158\n", 1);
     assert!(refusal(&one_more_tie).contains("count exceeds its explicit range"));
-    profile.preflight(&cannone_inputs(96, 128).1).unwrap();
 }
 
 /// The violin-sized G3 rung's strings, bow and schedule (`violin_performance`: synthetic steel, NOT violin strings) on the
@@ -531,10 +585,17 @@ fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
 /// one equivalent neck of the two f-holes, both ends flanged). The body, the cavity and the strings' directions
 /// (`CANNONE_DIRECTIONS`) differ from that rung.
 fn cannone_inputs(samples: u64, modes: usize) -> (Profile, input::Spec) {
-    let (profile, converted) = cannone_profile();
+    cannone_inputs_with(&cannone_options(), CANNONE_H8, samples, modes)
+}
+
+/// `cannone_inputs` on one il Cannone table converted with its options.
+fn cannone_inputs_with(options: &super::super::shell::assembly::table::OptionsFile, table: &str, samples: u64,
+    modes: usize) -> (Profile, input::Spec)
+{
+    let (profile, converted) = cannone_profile_with(options, table);
     let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
     let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} {} \
-        {modes} 1", converted.length_m, converted.width_m, cannone_options().reference_thickness_m()),
+        {modes} 1", converted.length_m, converted.width_m, options.reference_thickness_m()),
         &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"), CANNONE_DIRECTIONS);
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
 }
@@ -717,7 +778,8 @@ const GUITAR_STRINGS: [(f64, f64); 6] =
     [(82.41, 0.000_5), (110.0, 0.000_375), (146.83, 0.000_28), (196.0, 0.000_21), (246.94, 0.000_166), (329.63, 0.000_125)];
 
 /// Every guitar string keeps every bending and twist mode of its full span below this frequency [Hz]. It is half the
-/// violin rung's: six strings at 10 kHz would exceed the 512-coordinate prepared ceiling with the 128 body modes.
+/// violin rung's, set when the prepared ceiling was 512 coordinates: six strings at 10 kHz with the 128 body modes
+/// exceeded it.
 const GUITAR_STRING_BAND_HZ: f64 = 5_000.0;
 
 /// The Esteso 1964 guitar body (data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv, 19 parts,

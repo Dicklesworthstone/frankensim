@@ -16,7 +16,7 @@ import sys
 
 REPO, OUT = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
 SEED = REPO + "/data/matdb/seed-v1/"
-OMEGA_MAX = 12566.37
+OMEGA_MIN, OMEGA_MAX = 2.0 * math.pi * 100.0, 2.0 * math.pi * 5000.0  # the source's band: Viala's audio-band model updating, 100-5000 Hz
 OMEGA_REF = 2.0 * math.pi * 200.0
 PACK = "violin-spruce-norway-viala2020-shell"
 
@@ -63,8 +63,9 @@ VISC_ORDER = ["plane_stress_viscosity_11", "plane_stress_viscosity_22", "plane_s
 BASE = [("density", "kg/m^3"), ("young_modulus_1", "Pa"), ("young_modulus_2", "Pa"), ("poisson_ratio_12", "1"), ("shear_modulus_12", "Pa"), ("shear_modulus_13", "Pa"), ("shear_modulus_23", "Pa")]
 
 AXES = ("Axis convention: material axis 1 = L (grain), axis 2 = R (across the growth rings, in the plane of a quartersawn plate), thickness = T, so shear_modulus_12 = G_LR, "
-        "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). The validity band omega 0 to 2 pi 2000 rad/s "
-        "and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.")
+        "shear_modulus_13 = G_LT and shear_modulus_23 = G_RT, poisson_ratio_12 = nu_LR (strain along R per strain along L under stress along L). The validity band omega 2 pi 100 to 2 pi 5000 rad/s "
+        "is the source's band (Viala's audio-band model updating, 100-5000 Hz); T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a "
+        "measured band.")
 OBS = [
     ("viala-shell", "Norway spruce (Picea abies) violin-top tonewood, 10 split quarters from one seller, 9-11 percent moisture",
      "Viala et al. (2020) J. Cult. Herit. 42:108-116 as committed in the pack spruce-norway-viala2020-quarters (audio-band finite element model updating, 100-5000 Hz): density %.0f kg/m3, "
@@ -88,15 +89,15 @@ lines = ["frankensim.matdb-source.v1"]
 for o in OBS:
     lines.append("\t".join(("observation",) + o))
 for k, u in BASE:
-    for row in (("scalar", k, "viala-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "viala-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
 for k in VISC_ORDER:
-    for row in (("scalar", k, "viala-shell-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, "viala-shell-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
 # The angular frequency at which the nine viscosities above were written: a reader applies each loss factor at every
 # mode's own frequency with it (fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA); without it they are Kelvin-Voigt.
 k = "constant_loss_reference_omega"
-for row in (("scalar", k, "viala-shell-loss", k, fmt(OMEGA_REF), "rad/s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", "0", fmt(OMEGA_MAX), "rad/s")):
+for row in (("scalar", k, "viala-shell-loss", k, fmt(OMEGA_REF), "rad/s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
     lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,

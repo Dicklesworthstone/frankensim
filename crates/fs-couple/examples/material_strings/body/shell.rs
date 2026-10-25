@@ -21,19 +21,21 @@ mod pressure;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
-// Per-component ceilings of one shell profile. A violin top resolved at about 10 mm is roughly 600
-// nodes, so these leave room for a top, back or rib set at that resolution.
-pub(super) const MAX_NODES: usize = 2048;
-pub(super) const MAX_TRIANGLES: usize = 4096;
+// Per-component ceilings of one shell profile. The largest component on file is the il Cannone rib set at
+// 6 mm (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv): 2904
+// nodes and 5082 triangles.
+pub(super) const MAX_NODES: usize = 3072;
+pub(super) const MAX_TRIANGLES: usize = 6144;
 pub(super) const MAX_MODES: usize = input::MAX_BODY_MODES;
 const _: () = assert!(MAX_MODES <= fs_couple::shear_shell::MAX_SHELL_MODES);
 // Interface bindings keep their own allowance.
 const MAX_PROJECTION_WORK: usize = 268_435_456;
 // The shell projection work is `triangles * (10^6 + 324 modes^2) + 6 nodes modes` plus force and pressure
-// projections (about 2.6e10 for MAX_TRIANGLES triangles and MAX_MODES modes). An assembly adds the owner's
-// conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`: about 4.3e11 in all at the v4 caps
-// (8192 nodes, 16384 triangles, 128 modes, 8 bridges), 2.3e11 for the 5805-node Esteso guitar. 2^39 on 64-bit hosts.
-pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 39) > usize::MAX as u64 { usize::MAX } else { (1u64 << 39) as usize };
+// projections (about 1.4e11 for MAX_TRIANGLES triangles and MAX_MODES modes). An assembly adds the owner's
+// conservative dense mortar bound `(6 total nodes)^2 (modes + bridges)`: about 2.0e12 in all at the v4 caps
+// (12288 nodes, 24576 triangles, 256 modes, 8 bridges). At 128 modes and four bridges it is 7.7e11 for the
+// 11769-node il Cannone at 6 mm and 2.3e11 for the 5805-node Esteso guitar. 2^41 on 64-bit hosts.
+pub(super) const MAX_SHELL_PROJECTION_WORK: usize = if (1u64 << 41) > usize::MAX as u64 { usize::MAX } else { (1u64 << 41) as usize };
 
 #[derive(Clone, Debug)]
 struct Node {

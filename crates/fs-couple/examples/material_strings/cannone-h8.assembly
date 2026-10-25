@@ -1,7 +1,8 @@
 frankensim-shell-assembly-options-v1
 # The il Cannone violin body, data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv
 # (48 parts, 7042 nodes, 10192 triangles, 119 ties). Body modes from 15 Hz (above the free body's rigid motion) to
-# 2 kHz, the violin shell packs' declared angular-frequency validity.
+# 2 kHz, the window this body's rungs were registered at. The violin shell packs declare 100 Hz to 5 kHz (spruce) and
+# 150 Hz to 10 kHz (maple); cannone-h6.assembly takes the 6 mm body to 5 kHz.
 window-hz 15 2000
 projection-work 549755813888
 # The performance body record's thickness [m]; every part's own thickness is written as a ratio to it.

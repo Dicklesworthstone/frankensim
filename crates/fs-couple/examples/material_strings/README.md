@@ -896,8 +896,8 @@ An optional record after `cylinder-gas-loading` (when present) and before
 prepared-linear MAX_MODES MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
 ```
 
-All three values must be positive. The shared owner accepts at most 512 modes;
-this executable retains its stricter **128 complete-coordinate limit**.
+All three values must be positive. The shared owner accepts at most 1024 modes,
+and so does this executable's complete-coordinate limit.
 `MAX_DENSE_BYTES` bounds additional dense preparation/cache storage, and
 `MAX_MULTIPLY_TERMS` bounds cold scalar multiply-add work. Both are explicit
 refusal budgets, not accuracy parameters or permissions to drop weak modes.
