@@ -117,10 +117,10 @@ cone 0.0174 0.018 0.0024
 cone 0.018 0.0223 0.0198
 cone 0.0223 0.02635 0.0186
 cone 0.02635 0.028 0.008
-compile_limits 100000 4096
+compile_limits 600000 4096
 schedule
 frankensim-gesture-schedule-v1
-control_rate_hz	700
+control_rate_hz	48000
 tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
