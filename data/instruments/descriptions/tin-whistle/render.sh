@@ -5,16 +5,22 @@
 #   SHA12=<sha12 containing these files> BIN_SHA12=<sha12 with a release music_render> \
 #     data/instruments/descriptions/tin-whistle/render.sh
 # Each note is 48 kHz mono, 2.5 s, observed as the summed pressure of every open aperture (open holes, open end and the window) at a physical
-# receiver 1 m above the window.
+# receiver 1 m above the window. Every note is rendered at both ends of the labium edge bracket, into $OUT/prism and $OUT/wedge
+# (ENDS=prism or ENDS=wedge renders one).
 #
 # Geometry: data/instruments/geometry/tinwhistle-clare-d-davies2006 (a Clare D whistle measured by P. O. A. L. Davies, J. Pinho and E. J. English,
 # Proc. Inst. Acoust. 28(1), 2006, pp. 597-606; fingerings from Timoney et al., DAFx'04 Fig. 2 and the paper's Sec. 3.2). Every geometry number
 # is a dimensions.tsv row. The network is: the window (2.4 mm wall as a riser of equal area to the 8 x 5.3 mm opening) on a junction with a
 # closed pocket behind it (8 mm beyond the flue plus half the window, a cylinder of the bore radius: an upper bound, u-pocket-shape), the bore to
 # hole 6 and on to hole 1 and the open end, each finger hole a chimney section ending open or closed. The window's mass is computed, not a
-# constant: each card's row `window wall-cut 16` solves the 3-D potential flow through the 8 mm arc by 5.3 mm cut in the 2.4 mm wall of the
-# 6.1 mm bore, with the pocket behind it and free space outside (fs_bem::wall_window at 16 and 32 axial cells, extrapolated at the re-entrant
-# edges' order 4/3). That mass, 15.71 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law.
+# constant: each card's row `window wall-cut 8 cheeks parallel` solves the 3-D potential flow through the 8 mm wide by 5.3 mm cut in the
+# 2.4 mm wall of the 6.1 mm bore, its side walls parallel and 8 mm apart like the windway's, with the pocket behind it and free space
+# outside (fs_bem::wall_window, a staircase of cut cells at 8, 16 and 32 axial cells, extrapolated at the order the three rungs show).
+# Where the wedge's tip sits inside the wall is not published (u-labium-edge-height): the paper gives its 25 degree angle and 11 mm upper
+# surface only. So the edge height is a stated bracket and both ends are rendered, neither preferred: prism, the card's face straight
+# through the wall (17.84 mm of bore, order 1.20), and wedge, the 25 degree face rising from a tip 0.5 mm above the
+# bore (`ramp 0.0005 25` added to the row: 16.31 mm, order 1.51). That mass replaces the 0.61 a_eq mouth inertance; the
+# jet's source coefficient keeps its own law. The binary must contain the parallel-cheek window (the commit that adds this row).
 # Player: the air flow the same paper measured for each note of the major scale at its tempered frequency (Table 1: l/min D5 6.2, E5 6.9,
 # F#5 9.0, G5 8.2, A5 10.0, B5 9.55, C#6 11.3, D6 with only hole 6 open 11.9; and the paper's overblown series with every hole closed, Fig. 2 and
 # Table 1: D6 12.0, A6 17.9, D7 23.8, files d6c, a6c, d7c, a test of the overblowing ladder whose answer is a result), turned into mouth pressure by the island's own viscous windway law
@@ -33,7 +39,7 @@
 # first control tick of the attack, which the default limit refuses); the pressure release lasts 10.5 ms because a release that ends exactly on a
 # control tick can leave a rounding-sized pressure that the jet domain check refuses.
 #
-# SEED=<n> re-renders with another jet seed into $OUT/seed-<n> (seed-independence check).
+# SEED=<n> re-renders with another jet seed into $OUT/seed-<n>/<end> (seed-independence check).
 set -euo pipefail
 
 SHA12=${SHA12:?set SHA12 to the pushed sha12 whose snapshot holds these files}
@@ -42,21 +48,30 @@ BIN=${BIN:-/data/tmp/wa-inst/bin/$BIN_SHA12/music_render}
 SNAP=${SNAP:-/data/tmp/wa-inst/snap/$SHA12/frankensim}
 OUT=${OUT:-/data/tmp/wa-inst/renders/tin-whistle/$SHA12}
 NOTES=${NOTES:-"d5 e5 fs5 g5 a5 b5 cs6 d6 d6c a6c d7c"}
+ENDS=${ENDS:-"prism wedge"}
 DIR=data/instruments/descriptions/tin-whistle
 
+ROW="window wall-cut 8 cheeks parallel"
 cd "$SNAP"
+seed=()
 if [ -n "${SEED:-}" ]; then
   OUT="$OUT/seed-$SEED"
+  seed=(-e "s/^jet ([^ ]+) ([^ ]+) [0-9]+ ([0-9]+)\$/jet \\1 \\2 $SEED \\3/")
 fi
-mkdir -p "$OUT"
-for note in $NOTES; do
-  src="$DIR/tin-whistle-$note.performance"
-  if [ -n "${SEED:-}" ]; then
-    src="$OUT/tin-whistle-$note.seed.performance"
-    sed -E "s/^jet ([^ ]+) ([^ ]+) [0-9]+ ([0-9]+)\$/jet \\1 \\2 $SEED \\3/" "$DIR/tin-whistle-$note.performance" >"$src"
-  fi
-  nohup nice -n 10 "$BIN" wind "$src" "$OUT/tin-whistle-$note.wav" \
-    >"$OUT/tin-whistle-$note.log" 2>&1 &
+for end in $ENDS; do
+  case "$end" in
+    prism) row="$ROW" ;;
+    wedge) row="$ROW ramp 0.0005 25" ;;
+    *) echo "ENDS takes prism and wedge, not $end" >&2; exit 64 ;;
+  esac
+  mkdir -p "$OUT/$end"
+  for note in $NOTES; do
+    src="$OUT/$end/tin-whistle-$note.performance"
+    sed -E -e "s/^$ROW\$/$row/" ${seed[@]+"${seed[@]}"} "$DIR/tin-whistle-$note.performance" >"$src"
+    grep -qx "$row" "$src" || { echo "$src lacks the row: $row" >&2; exit 65; }
+    nohup nice -n 10 "$BIN" wind "$src" "$OUT/$end/tin-whistle-$note.wav" \
+      >"$OUT/$end/tin-whistle-$note.log" 2>&1 &
+  done
 done
 wait
-ls -l "$OUT"/*.wav
+ls -l "$OUT"/*/*.wav

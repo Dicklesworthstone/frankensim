@@ -11,11 +11,16 @@ use fs_exec::CancelGate;
 const CARD: &str =
     include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d5.performance");
 
-/// The card without any window row, cut to a 1024-sample window whose only
+/// The card without its window row, cut to a 1024-sample window whose only
 /// gesture event is the opening pressure ramp.
 fn legacy() -> String {
+    let rows: Vec<&str> = CARD
+        .lines()
+        .filter(|line| line.starts_with("window "))
+        .collect();
+    assert_eq!(rows.len(), 1, "the D5 card carries one window row");
     let text = CARD
-        .replace("window wall-cut 16\n", "")
+        .replace(&format!("{}\n", rows[0]), "")
         .replace("output 120000 5", "output 1024 1");
     let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(
