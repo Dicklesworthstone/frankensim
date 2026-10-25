@@ -397,13 +397,13 @@ fn violin_inputs(samples: u64) -> (Profile, input::Spec) {
         .replace(&format!("bridges 1\nbridge {centre} 0 0 1\n"), &format!("bridges 4\n{feet}"));
     let profile = Profile::parse(text.as_bytes()).unwrap();
     let performance = violin_performance(samples, "body body.fsmatpk 0.4 0.3 0.001 128 1",
-        "cavity neck 0.002 0.0187 0.003 100 1");
+        "cavity neck 0.002 0.0187 0.003 100 1", "0.6 0.8 1 0");
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
 }
 
 /// The violin-sized rung's performance (see `violin_inputs`: its strings, bow and schedule) around a body and a cavity
-/// record.
-fn violin_performance(samples: u64, body: &str, cavity: &str) -> String {
+/// record, with every string's `polarizations two` directions (BOW_X BOW_Y BRIDGE_X BRIDGE_Y).
+fn violin_performance(samples: u64, body: &str, cavity: &str, directions: &str) -> String {
     use std::f64::consts::PI;
     let (speaking, span) = (0.328_f64, 0.383_f64);
     let bridge = speaking / span;
@@ -422,7 +422,7 @@ fn violin_performance(samples: u64, body: &str, cavity: &str) -> String {
             .count();
         let twist = (VIOLIN_STRING_BAND_HZ * 2.0 * span / (shear / density).sqrt()) as usize;
         strings.push_str(&format!("string wire.fsmatpk {span} {radius} tension {tension} {bending} {twist} {bridge} 3000 0.1\n\
-            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two 0.6 0.8 1 0\n", radius * 2.0 / 3.0));
+            section bonded {} 1\nlayer sleeve.fsmatpk {radius}\npolarizations two {directions}\n", radius * 2.0 / 3.0));
     }
     let bow = bridge * 0.9;
     format!("frankensim-material-strings-v3\naudio 48000 {samples} 0.01 128\nstate 293.15 1000\n\
@@ -436,6 +436,12 @@ fn violin_performance(samples: u64, body: &str, cavity: &str) -> String {
 /// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/string-contacts.tsv), in string order.
 const CANNONE_BRIDGES: [(f64, f64); 4] =
     [(-0.017_34, -0.051_64), (-0.005_57, -0.054_21), (0.006_29, -0.053_29), (0.017_28, -0.048_87)];
+
+/// Every il Cannone string's BOW_X BOW_Y BRIDGE_X BRIDGE_Y. The bridge nodes push along x, across the body, which is also
+/// the bow's tangent, so the bow drives the plane the bridge holds. The bow-normal plane has no bridge (the string record
+/// carries one bridge direction) and nothing drives it. With the violin-sized rung's `0.6 0.8 1 0`, 0.8 of the bow drove
+/// that free plane, and the G string sounded its full 0.383 m span (167 Hz) instead of its 0.328 m speaking length.
+const CANNONE_DIRECTIONS: &str = "1 0 1 0";
 
 /// The performance body record's thickness [m] for il Cannone; every part's own thickness is written as a ratio to it.
 const CANNONE_REFERENCE_THICKNESS_M: f64 = 0.003;
@@ -495,13 +501,14 @@ fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
 
 /// The violin-sized G3 rung's strings, bow and schedule (`violin_performance`: synthetic steel, NOT violin strings) on the
 /// il Cannone body (`cannone_profile`) with `modes` retained body modes and the table's own cavity row (2.061 L through
-/// one equivalent neck of the two f-holes, both ends flanged). Only the body and the cavity differ from that rung.
+/// one equivalent neck of the two f-holes, both ends flanged). The body, the cavity and the strings' directions
+/// (`CANNONE_DIRECTIONS`) differ from that rung.
 fn cannone_inputs(samples: u64, modes: usize) -> (Profile, input::Spec) {
     let (profile, converted) = cannone_profile();
     let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
     let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} \
         {CANNONE_REFERENCE_THICKNESS_M} {modes} 1", converted.length_m, converted.width_m),
-        &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"));
+        &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"), CANNONE_DIRECTIONS);
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
 }
 

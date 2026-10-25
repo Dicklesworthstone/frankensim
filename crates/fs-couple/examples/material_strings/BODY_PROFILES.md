@@ -690,7 +690,13 @@ performance's cavity record. The il Cannone violin body
 (`data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv`,
 48 components and 119 ties, which set the two caps above) converts the same way;
 its frame has x across the body, y vertical and z along the strings, so its
-strings push their bridge nodes along x.
+strings push their bridge nodes along x. That x is also the bow's tangent, so
+the il Cannone rungs give every string `polarizations two 1 0 1 0`: the bow
+drives the plane the bridge holds. The string record carries one bridge
+direction, so the bow-normal plane has no bridge, and nothing drives it. With
+the violin-sized rung's `0.6 0.8 1 0`, 0.8 of the bow drove that free plane, and
+the G string sounded its full 0.383 m span (167 Hz) instead of its 0.328 m
+speaking length.
 
 With the two violin shell packs, both built by `xtask matdb-pack` from
 `data/matdb/seed-v1` (`packs/violin-spruce-norway-viala2020-shell.fsmatpk` as
