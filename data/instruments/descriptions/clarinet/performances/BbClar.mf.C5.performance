@@ -1,7 +1,7 @@
 frankensim-reed-performance-v1
 audio 48000 127200 20
 ambient 300.15 101325 1
-reed 0.0009 0.013 7794 3.8050000000000004e-06 659.0260000000001 0.11397702454754344
+reed 0.0004 0.013 3464 3.8050000000000004e-06 659.0260000000001 0.11397702454754344
 baffled_outlet 0 0 0.5 32 128 4800
 termination flanged
 segments 112
@@ -125,5 +125,5 @@ tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
-event	1.5e-1	2e-2	pressure-pa	4.05e3
+event	1.5e-1	2e-2	pressure-pa	1.8e3
 event	2.45e0	6e-2	pressure-pa	0e0

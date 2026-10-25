@@ -176,9 +176,12 @@ def duct_records(desc, dims, open_holes):
 
 
 def pressure_curve(desc, root):
+    table_rel = need(desc, "player.pressure_table")
+    if table_rel == "-":
+        return None
     group = need(desc, "player.instrument_group")
     level = need(desc, "player.level")
-    path = os.path.join(root, need(desc, "player.pressure_table"))
+    path = os.path.join(root, table_rel)
     sums = {}
     for row in table(path, "frankensim.player-blowing-pressure.v1"):
         if row["instrument"] == group and row["level"] == level:
@@ -188,7 +191,10 @@ def pressure_curve(desc, root):
     return sorted((m, sum(v) / len(v) * CM_H2O_PA) for m, v in sums.items())
 
 
-def pressure_for(curve, note, reach, step):
+def pressure_for(desc, curve, note, reach, step):
+    if curve is None:
+        value = float(need(desc, "reed.operating_blowing_pa"))
+        return round(value / step) * step, "fixed-operating-point"
     lo, hi = curve[0][0], curve[-1][0]
     if note < lo - reach or note > hi + reach:
         refuse(f"{uiowa_name(note)} lies more than {reach} semitones outside the published pressure range")
@@ -222,13 +228,11 @@ def gesture(desc, pressure):
 def reed_record(desc, pressure):
     """The `reed` header values: literal keys, or per-area quantities with a lip-force rule.
 
-    Per-area mode (reed.stiffness_per_area_pa_m present): the closing pressure is the blowing
-    pressure over the published operating ratio p_m / (K_a y_{m,0}), K_a, m_a, and g are held
-    at their published per-area values (Chatziioannou and van Walstijn 2009 Table 1), the
-    equilibrium rest opening is y_m = P_M / K_a (checked against reed.tip_opening_cap_m when
-    present, satisfying the reed owner's face rule k y_m = P_M S_r with k = K_a S_r), the
-    mass is m = m_a S_r, and the damping ratio follows from g / (2 omega_r) with
-    omega_r = sqrt(K_a / m_a) = sqrt(k / m).
+    Per-area mode (reed.stiffness_per_area_pa_m present): at the published operating point
+    p_m = reed.operating_blowing_pa (Chatziioannou and van Walstijn 2009 Table 1), the lip-reduced
+    equilibrium rest opening is held at y_m = h0 = 0.40 mm across all notes with closing pressure
+    P_M = K_a y_m = 3464 Pa, stiffness k = K_a S_r = 659.026 N/m, mass m = m_a S_r = 3.805e-6 kg,
+    and damping ratio zeta = g / (2 omega_r) with omega_r = sqrt(K_a / m_a) = sqrt(k / m).
     """
     height = need(desc, "reed.rest_opening_m")
     width = need(desc, "reed.width_m")
@@ -240,9 +244,14 @@ def reed_record(desc, pressure):
     k_a = float(need(desc, "reed.stiffness_per_area_pa_m"))
     m_a = float(need(desc, "reed.mass_per_area_kg_m2"))
     g = float(need(desc, "reed.damping_rate_1_s"))
-    ratio = float(need(desc, "reed.operating_blowing_pa")) / (k_a * h0)
-    closing = pressure / ratio
-    y_m = closing / k_a
+    p_op = float(need(desc, "reed.operating_blowing_pa"))
+    if abs(pressure - p_op) <= 1e-12:
+        y_m = h0
+        closing = k_a * h0
+    else:
+        ratio = p_op / (k_a * h0)
+        closing = pressure / ratio
+        y_m = closing / k_a
     if "reed.tip_opening_cap_m" in desc and y_m > float(desc["reed.tip_opening_cap_m"]):
         refuse(f"equilibrium reed opening {y_m} m exceeds tip opening cap {desc['reed.tip_opening_cap_m']} m")
     stiffness = k_a * area
@@ -290,7 +299,7 @@ def main(argv):
             continue
         open_holes = set() if row["open_holes"] == "-" else {int(h) for h in row["open_holes"].split(",")}
         note = midi(row["concert"])
-        pressure, rule = pressure_for(curve, note, reach, step)
+        pressure, rule = pressure_for(desc, curve, note, reach, step)
         records = duct_records(desc, dims, open_holes)
         name = f"{prefix}.{level}.{uiowa_name(note)}.performance"
         with open(os.path.join(out_dir, name), "w", encoding="utf-8", newline="\n") as handle:
