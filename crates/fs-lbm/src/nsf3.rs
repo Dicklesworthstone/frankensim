@@ -48,6 +48,8 @@
 //! beyond); no turbulence model. The optional open-axis boundary is a separately
 //! bounded local linear characteristic rung, not a qualified nonreflecting jet interface. Sound-speed dispersion is second order; see the
 //! battery.
+//! Prescribed reservoir ghost states are also available as a separate, mutually
+//! exclusive boundary mode; they do not preserve outgoing acoustic characteristics.
 
 use crate::lattice3::Lattice3;
 use core::fmt;
@@ -56,6 +58,8 @@ use material::NsfCellMaterial;
 
 mod material;
 pub use material::{NsfGasMedium, ThermochemicalNsfGas};
+mod open;
+pub use open::NsfOpenState;
 mod open_boundary;
 pub use open_boundary::{
     NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis, NsfCharacteristicBoundary,
@@ -292,6 +296,8 @@ pub struct EnergyLedger {
     /// Kinetic energy after the step [J].
     pub kinetic_j: f64,
     /// Viscous heating of the step [J] (defined from the budget, see the module note).
+    /// With prescribed reservoir faces this remainder also includes kinetic-energy
+    /// transport and is not an independent viscous-heating measurement.
     pub viscous_heating_j: f64,
     /// Reversible kinetic-to-internal exchange `-integral(p div u)` of the step [J].
     pub pressure_work_j: f64,
@@ -300,6 +306,9 @@ pub struct EnergyLedger {
     /// Net total energy entering the open faces [J], including enthalpy,
     /// conduction and viscous work. Zero without characteristic boundaries.
     pub open_boundary_energy_j: f64,
+    /// Total energy entering prescribed reservoir ghost faces [J].
+    /// Separate from characteristic-face energy; the two modes cannot coexist.
+    pub open_energy_j: f64,
     /// `|change of total energy - wall heat - open energy| / total energy`.
     pub residual_rel: f64,
 }
@@ -488,6 +497,7 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     wall_out: f64,
     open: Option<NsfCharacteristicAxis>,
     open_faces: Option<OpenFaces>,
+    reservoir_faces: [[Option<open::OpenGhost>; 2]; 3],
     open_out: BoundaryFlux,
     last_boundary_exchange: Option<[NsfBoundaryExchange; 2]>,
     steps: usize,
@@ -679,6 +689,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             wall_out: 0.0,
             open: None,
             open_faces: None,
+            reservoir_faces: [[None; 2]; 3],
             open_out: BoundaryFlux::default(),
             last_boundary_exchange: None,
             steps: 0,
@@ -783,6 +794,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ) -> Result<(), NsfError> {
         if axis >= 3 || self.spec.periodic[axis]
             || self.open.as_ref().is_some_and(|open| open.axis == axis)
+            || self.reservoir_faces[axis][usize::from(high)].is_some()
         {
             return Err(NsfError::Input(
                 "an edge wall exists only on a non-periodic axis",
@@ -915,6 +927,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if let Some(face) = self.characteristic_face(faces, i, a, s) {
                     return face.rho * (face.theta - THETA0);
                 }
+                if let Some(b) = self.open_at(i, a, s) {
+                    return 0.5 * (pp[i] + b.rho * (b.theta - THETA0));
+                }
                 return pp[i];
             };
             let xj = self.at(j);
@@ -1036,6 +1051,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if let Some(face) = self.characteristic_face(faces, i, a, s) {
                 return self.open_energy_flux(face, i, a, s, rho, theta, sig).map(|f| f.0);
             }
+            if let Some(b) = self.open_at(i, a, s) {
+                let sg = sig[i];
+                let row = match a {
+                    0 => [sg[0], sg[3], sg[4]],
+                    1 => [sg[3], sg[1], sg[5]],
+                    _ => [sg[4], sg[5], sg[2]],
+                };
+                let stress_work = row[0] * b.u[0] + row[1] * b.u[1] + row[2] * b.u[2];
+                let gb = (b.energy + b.rho * b.theta) * b.u[a] - stress_work;
+                let k = self.spec.gas.face_conductivity(
+                    &self.law,
+                    0.5 * (theta[i] + b.theta),
+                    0.5 * (self.law.pressure_pa(rho[i], theta[i])
+                        + self.law.pressure_pa(b.rho, b.theta)),
+                )?;
+                return Ok(0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]));
+            }
             let heat = match wall_theta {
                 None => 0.0,
                 Some(tw) => {
@@ -1098,6 +1130,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         let (total, internal) = self.open_energy_flux(face, i, a, 1, rho, theta, sig)?;
                         open.total_out[1] += total;
                         open.internal_out[1] += internal;
+                    } else if self.open_at(i, a, 1).is_some() {
+                        open.prescribed_out += wall_flux(i, a, 1)?;
                     } else {
                         out += wall_flux(i, a, 1)?;
                     }
@@ -1107,6 +1141,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         let (total, internal) = self.open_energy_flux(face, i, a, -1, rho, theta, sig)?;
                         open.total_out[0] -= total;
                         open.internal_out[0] -= internal;
+                    } else if self.open_at(i, a, -1).is_some() {
+                        open.prescribed_out -= wall_flux(i, a, -1)?;
                     } else {
                         out -= wall_flux(i, a, -1)?;
                     }
@@ -1144,6 +1180,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                             .at(x, self.spec.dims, side)[q]
                     }
                     None if !self.solid[self.index(y)] => post[self.index(y)][q],
+                    Some((a, side)) if self.reservoir_faces[a][side].is_some() => {
+                        let b = self.reservoir_faces[a][side].expect("guarded reservoir face");
+                        let (rho, mom) = raw_moments::<L>(&post[i]);
+                        let local_u = mom.map(|m| m / rho);
+                        // Post-collision populations carry rho*u + F/2. Extrapolate
+                        // that half-force shift as well as the non-equilibrium part.
+                        let ghost_u = core::array::from_fn(|k| b.u[k] + 0.5 * self.force[i][k] / b.rho);
+                        equilibrium::<L>(b.rho, ghost_u, THETA0)[q]
+                            + post[i][q] - equilibrium::<L>(rho, local_u, THETA0)[q]
+                    }
                     _ => {
                         let mut v = post[i][L::OPP[q]];
                         if let (true, Some((a, side))) = (self.moving_walls, edge) {
@@ -1353,6 +1399,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             + self.open_out.total_out.iter().sum::<f64>());
         let open_internal_in = -0.5 * (open1.internal_out.iter().sum::<f64>()
             + self.open_out.internal_out.iter().sum::<f64>());
+        let prescribed_in = -0.5 * (open1.prescribed_out + self.open_out.prescribed_out);
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
@@ -1360,8 +1407,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let viscous = if self.open.is_some() {
             d_int - wall_in - open_internal_in - pressure_work
         } else {
-            d_int - wall_in - pressure_work
+            let remainder = d_int - wall_in - pressure_work;
+            if prescribed_in == 0.0 { remainder } else { remainder - prescribed_in }
         };
+        let balance = if self.open.is_some() {
+            d_total - wall_in - open_in
+        } else {
+            d_total - wall_in
+        };
+        // Retain closed/characteristic arithmetic, including signed zero.
+        let balance = if prescribed_in == 0.0 { balance } else { balance - prescribed_in };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
@@ -1369,11 +1424,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             pressure_work_j: unit * pressure_work,
             wall_heat_j: unit * wall_in,
             open_boundary_energy_j: unit * open_in,
-            residual_rel: if self.open.is_some() {
-                (d_total - wall_in - open_in).abs() / e_new.abs().max(f64::MIN_POSITIVE)
-            } else {
-                (d_total - wall_in).abs() / e_new.abs().max(f64::MIN_POSITIVE)
-            },
+            open_energy_j: unit * prescribed_in,
+            residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
             boundary_links, self.open_faces.as_ref(), faces1.as_ref(), open1,
@@ -1396,6 +1448,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
         self.cumulative.open_boundary_energy_j += ledger.open_boundary_energy_j;
+        self.cumulative.open_energy_j += ledger.open_energy_j;
         self.cumulative.internal_j = ledger.internal_j;
         self.cumulative.kinetic_j = ledger.kinetic_j;
         Ok(ledger)
@@ -1427,11 +1480,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     },
                     (None, Some(p)) => match self.characteristic_face(faces, i, a, -1) {
                         Some(f) => 0.5 * (u[p][a] + u[i][a]) - f.u[a],
-                        None => 0.5 * (u[p][a] + u[i][a]),
+                        None => self.open_at(i, a, -1).map_or(
+                            0.5 * (u[p][a] + u[i][a]),
+                            |b| 0.5 * (u[p][a] - b.u[a]),
+                        ),
                     },
                     (Some(m), None) => match self.characteristic_face(faces, i, a, 1) {
                         Some(f) => f.u[a] - 0.5 * (u[m][a] + u[i][a]),
-                        None => -0.5 * (u[m][a] + u[i][a]),
+                        None => self.open_at(i, a, 1).map_or(
+                            -0.5 * (u[m][a] + u[i][a]),
+                            |b| 0.5 * (b.u[a] - u[m][a]),
+                        ),
                     },
                     (None, None) => 0.0,
                 };

@@ -883,6 +883,48 @@ the internal-energy budget, excludes that work: in a steady Couette flow the net
 so the ledger carries no heating information there and the physical check is the temperature profile
 (`couette_viscous_heating_profile`).
 
+**Prescribed open faces (pexfp.138).**
+`set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
+Cartesian velocity [m/s] and temperature [K] of a uniform exterior ghost plane.
+The face lies halfway between its ghost centre and the adjacent fluid centre.
+Only one non-periodic axis with periodic transverse domain edges is admitted;
+internal solid masks may describe a nozzle/channel but must not touch the open
+plane. Solid/open junctions, intersecting open/wall domain edges, moving open
+faces and manufactured volume sources are refused. Prescribed reservoir and
+characteristic boundary modes are mutually exclusive in either attachment order.
+`None` restores a stationary wall. Incoming populations use non-equilibrium
+extrapolation (Guo, Zheng & Shi 2002, Chinese Physics 11, 366–374,
+doi:10.1088/1009-1963/11/4/310), including the post-collision half-force shift.
+The same exterior state enters the centred thermal-pressure face force and the
+total-energy face flux (enthalpy, extrapolated stress work, and conduction).
+Caloric energy and face transport use the grid's gas owner, including NASA9
+when supplied. Changing a boundary restarts flux history and adjusts the
+pre-collision half-force moment without changing the fluid's physical velocity
+or energy. Refused updates leave the state and prior boundary intact.
+
+`EnergyLedger::open_energy_j` reports the signed net energy entering prescribed
+faces, separately from `wall_heat_j` and characteristic `open_boundary_energy_j`;
+the conservation residual subtracts all three. With prescribed faces the legacy
+`viscous_heating_j` remainder also contains kinetic energy transport and is
+**not** a physical viscous-heating measurement.
+The `nsf3::open::tests` checks cover uniform throughflow in both directions on
+all three axes (G0, error < 1e-11, sealed-wall negative control), heat input
+and the total-energy balance (G0, relative residual < 1e-12), boundary-update
+refusals and velocity preservation, and worker-count equality (G5).
+The existing thermochemical suite also exercises open throughflow away from the
+caloric reference temperature, arbitrary formation-energy offsets and refusal
+outside source pressure support. A fixed-domain pulse at 64/128/256 cells reports
+the prescribed boundary's reflection; it does not assert a transparency band.
+The native 20 mm-domain, sigma=1 mm Gaussian diagnostic measured amplitude
+ratios 0.68695 / 0.81251 / 0.90254 at dx=0.3125 / 0.15625 / 0.078125 mm
+(-3.26 / -1.80 / -0.89 dB): reflection increases with refinement. This broadband
+packet result is not frequency-resolved R(f) over an instrument's declared band.
+These are boundary-implementation checks, not a spatial convergence ladder,
+characteristic zone-to-DG coupling, < -40 dB reflection qualification, jet
+validation, or instrument/audio evidence. A prescribed exterior state generally
+reflects acoustic waves. The separate characteristic mode has its own contract
+and qualification limits below; it is not replaced by this primitive.
+
 **Manufactured-solution hooks.** `NsfGrid3::new_with_sources(spec, solid, initial, Some(source))` takes a `SourceFn`: for a cell
 index and a lattice time (steps) it returns `(S_rho, S_m, S_E)` in lattice units for `d rho/dt + div(rho u) = S_rho`,
 `d(rho u)/dt + div(rho u u + p I - sigma) = S_m` and `dE/dt + div((E + p) u - sigma . u - kappa grad theta) = S_E`. The momentum

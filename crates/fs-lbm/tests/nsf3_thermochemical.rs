@@ -4,7 +4,9 @@
 mod source;
 
 use fs_lbm::d3q27::D3q27;
-use fs_lbm::nsf3::{NsfError, NsfGasMedium, NsfGrid3, NsfSpec, ThermochemicalNsfGas, WallThermal};
+use fs_lbm::nsf3::{
+    NsfError, NsfGasMedium, NsfGrid3, NsfOpenState, NsfSpec, ThermochemicalNsfGas, WallThermal,
+};
 use fs_material::gas::GasSpec;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 
@@ -50,6 +52,48 @@ fn varying(x: [usize; 3]) -> (f64, [f64; 3], f64) {
         [0.02, 0.0, 0.0],
         300.0 + 0.2 * phase.sin(),
     )
+}
+
+#[test]
+fn g0_open_faces_use_source_caloric_energy_and_pressure_support() {
+    // Uniform flow at a temperature away from the reference detects a ghost
+    // energy reconstructed with frozen cv instead of the source's integral.
+    // Arbitrary formation energy must not leak into the open energy flux.
+    for offset in [-4000.0, 1_000_000.0] {
+        let mut s = spec(gas(offset, 110000.0, 1.0));
+        s.periodic[0] = false;
+        let mut grid =
+            NsfGrid3::<D3q27>::new(s, |_| false, |_| (300.0 / 310.0, [0.02, 0.0, 0.0], 310.0))
+                .unwrap();
+        let exterior = NsfOpenState {
+            density_kg_m3: grid.law().rho_ref_kg_m3 * 300.0 / 310.0,
+            velocity_m_s: [0.02 * grid.law().dx_m / grid.law().dt_s, 0.0, 0.0],
+            temperature_k: 310.0,
+        };
+        for high in [false, true] {
+            grid.set_open_face(0, high, Some(exterior)).unwrap();
+        }
+        let hash = grid.state_hash();
+        let unsupported = NsfOpenState {
+            density_kg_m3: 2.0 * exterior.density_kg_m3,
+            ..exterior
+        };
+        assert!(matches!(
+            grid.set_open_face(0, false, Some(unsupported)),
+            Err(NsfError::Gas(_))
+        ));
+        assert_eq!(grid.state_hash(), hash);
+        for _ in 0..32 {
+            let ledger = grid.step().unwrap();
+            assert!(ledger.residual_rel < 1e-12);
+        }
+        for x in 0..8 {
+            let (rho, u, temperature) = grid.cell([x, 0, 0]);
+            assert!((rho - 300.0 / 310.0).abs() < 1e-10);
+            assert!((u[0] - 0.02).abs() < 1e-10);
+            assert!((temperature - 310.0).abs() < 1e-6);
+        }
+    }
 }
 
 #[test]

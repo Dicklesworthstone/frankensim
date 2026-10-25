@@ -50,7 +50,7 @@ pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel
     )
     .unwrap();
     let species = NormalizedSpeciesPack::new(
-        "synthetic",
+        "manufactured",
         "nsf-v1",
         artifact,
         "CC0-1.0",
@@ -151,7 +151,7 @@ pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel
         ));
     }
     let nasa9 = NormalizedModelPack::new(
-        "synthetic",
+        "manufactured",
         "nsf-v1",
         artifact,
         "CC0-1.0",

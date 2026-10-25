@@ -81,6 +81,7 @@ pub struct NsfBoundaryExchange {
 pub(super) struct BoundaryFlux {
     pub total_out: [f64; 2],
     pub internal_out: [f64; 2],
+    pub prescribed_out: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -138,6 +139,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// as the interior. Frozen composition and the original source support,
     /// temperature, viscosity and Mach refusals all still apply.
     pub fn with_characteristic_axis(mut self, open: NsfCharacteristicAxis) -> Result<Self, NsfError> {
+        if self.reservoir_faces.iter().flatten().any(Option::is_some) {
+            return Err(NsfError::Input("characteristic and prescribed reservoir faces are exclusive"));
+        }
         if self.steps != 0 || self.open.is_some() || self.sources.is_some() {
             return Err(NsfError::Input(
                 "characteristic topology is cold-only and excludes manufactured body sources",
