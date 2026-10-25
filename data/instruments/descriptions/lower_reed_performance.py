@@ -214,6 +214,10 @@ def pressure_for(desc, curve, note, reach, step):
 def gesture(desc, pressure):
     attack = float(need(desc, "gesture.attack_s"))
     start = float(need(desc, "gesture.attack_start_s"))
+    if "tongue.contact_duration_s" in desc:
+        start = round(start - float(need(desc, "tongue.contact_duration_s")), 10)
+        if start < 0:
+            refuse("tongue.contact_duration_s exceeds gesture.attack_start_s")
     release_at = float(need(desc, "gesture.release_start_s"))
     release = float(need(desc, "gesture.release_s"))
     return (
@@ -223,6 +227,22 @@ def gesture(desc, pressure):
         f"event\t{exp(start)}\t{exp(attack)}\tpressure-pa\t{exp(pressure)}\n"
         f"event\t{exp(release_at)}\t{exp(release)}\tpressure-pa\t0e0\n"
     )
+
+
+def tongue_record(desc):
+    if "tongue.contact_area_m2" not in desc:
+        return ""
+    area_t = float(need(desc, "tongue.contact_area_m2"))
+    area_r = float(need(desc, "reed.effective_area_m2"))
+    force_n = float(need(desc, "tongue.contact_force_n"))
+    release_start = float(need(desc, "gesture.attack_start_s"))
+    contact_duration = float(need(desc, "tongue.contact_duration_s"))
+    unload_start = round(release_start - contact_duration, 10)
+    unload_s = float(need(desc, "gesture.attack_s"))
+    release_s = float(need(desc, "tongue.release_s"))
+    if unload_start < 0 or unload_start + unload_s > release_start:
+        refuse("tongue contact window does not enclose the pre-release mouth-pressure ramp")
+    return f"tongue_contact {num(area_t)} {num(area_r)} {num(force_n)} {num(release_start)} {num(release_s)}\n"
 
 
 def reed_record(desc, pressure):
@@ -271,7 +291,7 @@ def performance(desc, records, pressure):
     head = (
         "frankensim-reed-performance-v1\n"
         f"audio {rate} {samples} {need(desc, 'audio.full_scale_pa')}\n"
-        f"ambient {ambient}\nreed {reed}\n{need(desc, 'observer.record')}\n"
+        f"ambient {ambient}\nreed {reed}\n{tongue_record(desc)}{need(desc, 'observer.record')}\n"
         f"termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
     )
     return head + "\n".join(records) + f"\ncompile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
