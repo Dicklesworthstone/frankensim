@@ -4,7 +4,7 @@
 
 use fs_bem::wall_window::{
     WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowOutside, WindowUpstream,
-    wall_window_mass,
+    wall_window_ladder, wall_window_mass,
 };
 
 /// The Clare D tin whistle's window (Davies 2006 rows of the instrument
@@ -263,6 +263,30 @@ fn workers_do_not_change_a_bit() {
     )
     .expect("three workers");
     assert_eq!(one, three);
+}
+
+#[test]
+fn two_rung_ladder_reaches_the_three_rung_limit() {
+    let window = clare_d();
+    let options = WallWindowOptions::rung(&window, 16);
+    // 24 arc cells: N = 115 here and 230 at the doubling, both within 2e-4 of
+    // exact, so both rungs resolve the same arc.
+    assert_eq!(
+        (options.axial_cells, options.arc_cells, options.wall_layers),
+        (16, 24, 16)
+    );
+    let ladder = wall_window_ladder(&window, &options).expect("ladder");
+    let area = core::f64::consts::PI * window.bore_radius * window.bore_radius;
+    let length = ladder.mass_per_density * area;
+    eprintln!(
+        "rungs {:.6} {:.6} mm, extrapolated {:.6} mm",
+        ladder.coarse.bore_length * 1e3,
+        ladder.fine.bore_length * 1e3,
+        length * 1e3
+    );
+    // The ignored clare_d_window_ladder extrapolates 16x24, 32x48 and 64x96
+    // cells to 15.71259 mm.
+    assert!((length / 0.01571259 - 1.0).abs() < 1e-4, "{length}");
 }
 
 #[test]

@@ -823,6 +823,38 @@ impl FlueVoice {
         self.viscous_windway.as_ref()
     }
 
+    /// Replace the legacy `0.61 a_eq` mouth inertance with a computed window
+    /// mass before any accepted sample. `branch_mass_per_density` [1/m] is the
+    /// whole window branch from the graph's junction to the far field (e.g.
+    /// `fs_bem::wall_window`); `riser_mass_per_density` is the part the graph
+    /// already carries as its inlet section. The remainder times the inlet gas
+    /// density becomes the series mouth inertance, so the static mass between
+    /// junction and far field is the computed one. The jet's source
+    /// coefficient and the authored linear loss keep their owners. A compact
+    /// mouth reaction brings its own outer mass and refuses this.
+    ///
+    /// # Errors
+    /// Late attachment, an attached mouth reaction, or a remainder that is
+    /// not finite and positive.
+    pub fn with_window_mass(mut self, branch_mass_per_density: f64, riser_mass_per_density: f64)
+        -> Result<Self, FlueError>
+    {
+        if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some() {
+            return Err(FlueError::Invalid { what: "window mass requires a cold voice without a compact mouth reaction" });
+        }
+        let inertance = self.rho * (branch_mass_per_density - riser_mass_per_density);
+        if !(inertance.is_finite() && inertance > 0.0) {
+            return Err(FlueError::Invalid { what: "window mass must exceed the inlet section's own mass" });
+        }
+        self.inertance = inertance;
+        Ok(self)
+    }
+
+    /// Series mouth inertance [Pa s^2/m^3]: `rho 0.61 a_eq / S_m`, the rest
+    /// of a computed window mass, or zero under a compact mouth reaction.
+    #[must_use]
+    pub const fn mouth_inertance_pa_s2_m3(&self) -> f64 { self.inertance }
+
     /// Attach a material-gas windway with resolved unsteady no-slip momentum.
     ///
     /// The supplied length and transverse mesh determine the evolving velocity

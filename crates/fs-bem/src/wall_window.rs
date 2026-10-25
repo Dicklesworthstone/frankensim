@@ -148,6 +148,103 @@ impl Default for WallWindowOptions {
     }
 }
 
+impl WallWindowOptions {
+    /// One ladder rung for `window` with `axial_cells` along it, and every
+    /// other option at its default.
+    ///
+    /// The arc cells are about square: within two of
+    /// `axial_cells * arc_width / axial_length`, chosen so that this rung and
+    /// its doubling resolve the requested arc most nearly. The wall layers are
+    /// no thicker than an axial cell, and there are at least `axial_cells` of
+    /// them.
+    #[must_use]
+    pub fn rung(window: &WallWindow, axial_cells: usize) -> Self {
+        let theta_w = 0.5 * window.arc_width / window.bore_radius;
+        let square = (axial_cells as f64 * window.arc_width / window.axial_length)
+            .round()
+            .max(2.0) as usize;
+        let miss = |k: usize| {
+            let exact = PI * k as f64 / theta_w;
+            (exact.round() - exact).abs() / exact
+        };
+        let arc_cells = (square.saturating_sub(2).max(2)..=square + 2)
+            .min_by(|&p, &q| {
+                (miss(p) + miss(2 * p))
+                    .total_cmp(&(miss(q) + miss(2 * q)))
+                    .then(p.abs_diff(square).cmp(&q.abs_diff(square)))
+            })
+            .unwrap_or(square);
+        let per_cell = window.wall_thickness * axial_cells as f64 / window.axial_length;
+        Self {
+            axial_cells,
+            arc_cells,
+            wall_layers: (per_cell.ceil() as usize).max(axial_cells),
+            ..Self::default()
+        }
+    }
+}
+
+/// Two rungs of one window and their extrapolation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallWindowLadder {
+    /// The declared rung.
+    pub coarse: WallWindowMass,
+    /// Twice the declared cells in every direction.
+    pub fine: WallWindowMass,
+    /// `C / Q` extrapolated at the edge order 4/3 [1/m].
+    pub mass_per_density: f64,
+}
+
+/// `2^(4/3) - 1`: Richardson's divisor for one doubling at order 4/3.
+const EDGE_RICHARDSON: f64 = 1.519_842_099_789_746_3;
+
+/// Solve `options` and its doubling, and extrapolate the mass at the
+/// re-entrant edges' order 4/3.
+///
+/// # Errors
+/// Those of [`wall_window_mass`] at either rung;
+/// [`WallWindowError::Invalid`] when the two rungs resolve arcs more than
+/// 1e-3 apart; [`WallWindowError::Unphysical`] when the fine rung's mass is
+/// not below the coarse rung's, i.e. the ladder is not yet falling toward
+/// its limit.
+pub fn wall_window_ladder(
+    window: &WallWindow,
+    options: &WallWindowOptions,
+) -> Result<WallWindowLadder> {
+    let coarse = wall_window_mass(window, options)?;
+    let doubled = |n: usize| {
+        n.checked_mul(2).ok_or(WallWindowError::Invalid(
+            "cell counts overflow when doubled",
+        ))
+    };
+    let fine = wall_window_mass(
+        window,
+        &WallWindowOptions {
+            axial_cells: doubled(options.axial_cells)?,
+            arc_cells: doubled(options.arc_cells)?,
+            wall_layers: doubled(options.wall_layers)?,
+            ..*options
+        },
+    )?;
+    if (fine.resolved_arc_width / coarse.resolved_arc_width - 1.0).abs() > 1e-3 {
+        return Err(WallWindowError::Invalid(
+            "the two rungs resolve different arcs; choose arc cells whose theta cells round alike",
+        ));
+    }
+    let drop = coarse.mass_per_density - fine.mass_per_density;
+    if !(drop > 0.0) {
+        return Err(WallWindowError::Unphysical(
+            "the ladder does not fall toward its limit; refine the coarse rung",
+        ));
+    }
+    let mass_per_density = fine.mass_per_density - drop / EDGE_RICHARDSON;
+    Ok(WallWindowLadder {
+        coarse,
+        fine,
+        mass_per_density,
+    })
+}
+
 /// A solved window mass and its discretization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WallWindowMass {

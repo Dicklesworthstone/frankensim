@@ -50,7 +50,9 @@ mod duct;
 mod wall;
 mod material;
 mod boundary;
+mod window;
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
+pub use window::FlueWindowRecord;
 pub use boundary::{FlueBoundaryRecord, boundary_closing_force_path, flue_source_control_paths};
 
 /// Versioned SI source grammar; the suffix is the existing gesture format.
@@ -143,6 +145,7 @@ pub struct FlueFilePerformance {
     radiation_bindings: Vec<BaffledOutletBinding>,
     mimo_radiation_record: Option<MimoRadiationRecord>,
     computed_radiation_record: Option<ComputedBaffledRecord>,
+    window: Option<FlueWindowRecord>,
 }
 impl FlueFilePerformance {
     /// Parse the fixed-order source shown in `examples/flue.performance`.
@@ -183,6 +186,10 @@ impl FlueFilePerformance {
     /// The declared receiver band must satisfy `k*mouth_diagonal <= 0.5`,
     /// `dt*fmax <= 0.1` and the fixed 5% sampled response checks. Reaction and
     /// observation share the supplied mouth cells (at most 1024 in total).
+    /// After the mouth records, optional `window wall-cut AXIAL_CELLS` replaces
+    /// the legacy `0.61 a_eq` mouth inertance with the window's mass computed
+    /// from the card's own channel, pocket and bore (see [`FlueWindowRecord`]);
+    /// `window none` or omission keeps it. It refuses a compact mouth reaction.
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
@@ -498,6 +505,12 @@ impl FlueFilePerformance {
             }
             enabled
         } else { false };
+        let window = match window::read(&mut rows)? {
+            Some(_) if mouth_reaction => return Err(bad(rows.line,
+                "window wall-cut replaces the legacy mouth inertance; a compact mouth reaction brings its own outer mass")),
+            Some(cells) => Some(window::solve(&duct.graph, &geometry, cells, rows.line)?),
+            None => None,
+        };
         let control_source = boundary::read_control_source(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
@@ -573,6 +586,11 @@ impl FlueFilePerformance {
             Some(spec) => voice.with_nolle_jet(spec).map_err(FlueInputError::Physics)?,
             None => voice,
         };
+        let voice = match &window {
+            Some(record) => voice.with_window_mass(record.ladder.mass_per_density,
+                record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
         let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
             .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;
         let (voice, boundary_records) = boundaries.bind(voice, mechanical_samples,
@@ -616,7 +634,7 @@ impl FlueFilePerformance {
             mechanics_rate_hz, sample_rate_hz, samples, full_scale_pa,
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
-            radiation_bindings, mimo_radiation_record, computed_radiation_record })
+            radiation_bindings, mimo_radiation_record, computed_radiation_record, window })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -643,6 +661,8 @@ impl FlueFilePerformance {
     #[must_use] pub const fn computed_radiation_record(&self) -> Option<&ComputedBaffledRecord> {
         self.computed_radiation_record.as_ref()
     }
+    /// The window derived from the card and its computed mass, when selected.
+    #[must_use] pub const fn window(&self) -> Option<&FlueWindowRecord> { self.window.as_ref() }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
 }

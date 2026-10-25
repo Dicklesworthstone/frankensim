@@ -702,6 +702,22 @@ fn load_with_all_sources(
             }
             None => ",\"mouth_reaction\":null".to_string(),
         };
+        let window_json = match p.window() {
+            Some(record) => {
+                let (w, l) = (&record.window, &record.ladder);
+                let pocket = match w.upstream {
+                    fs_bem::wall_window::WindowUpstream::ClosedEnd { distance }
+                    | fs_bem::wall_window::WindowUpstream::Port { distance } => distance,
+                };
+                let bore_area = core::f64::consts::PI * w.bore_radius * w.bore_radius;
+                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v1\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{:e},{:e}],\"extrapolation_order\":\"4/3\",\"bore_length_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"unchanged\"}}",
+                    w.bore_radius, w.wall_thickness, w.arc_width, l.fine.resolved_arc_width, w.axial_length,
+                    pocket, record.cells[0], record.cells[1], record.cells[2], l.coarse.bore_length,
+                    l.fine.bore_length, l.mass_per_density * bore_area, record.riser_mass_per_density,
+                    renderer.voice().mouth_inertance_pa_s2_m3())
+            }
+            None => ",\"window\":null".to_string(),
+        };
         let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
         let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();
         let phase_error: f64 = details.iter().map(|s|s.phase_error_bound_rad).sum();
@@ -739,7 +755,7 @@ fn load_with_all_sources(
         let mouth_scope = if mouth_reaction.is_some() {
             "same-sample compact rectangular mouth reaction and matched exterior observation"
         } else { "optional rectangular mouth is observation only" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,
