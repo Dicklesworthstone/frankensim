@@ -903,3 +903,38 @@ fn rim_friction_sticks_inside_its_cone_and_contracts_backward_slip() {
     }
     assert!(stuck > 0 && slid > 0);
 }
+
+#[test]
+fn g0_head_viscous_layer_increases_modal_damping() {
+    let gas = standard_gas();
+    let table = radiation::RadiationTable::shipped().unwrap();
+    let mut plain = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    let mut layered = kit::drum(&kit::snare_wires_off(), &[]).unwrap();
+    plain.instrument.bodies[0].attach_head_radiation(&table, 0.1703, &gas, None).unwrap();
+    layered.instrument.bodies[0].attach_head_radiation_with_viscous(&table, 0.1703, &gas, None, 140_000.0).unwrap();
+    let plain_damping: f64 = plain.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
+    let layered_damping: f64 = layered.instrument.bodies[0].head_radiation().unwrap().damping.iter().sum();
+    assert!(layered_damping > plain_damping, "viscous layer did not add loss: {layered_damping} <= {plain_damping}");
+    assert!(layered.instrument.bodies[0].head_radiation().unwrap().rate_bound
+        > plain.instrument.bodies[0].head_radiation().unwrap().rate_bound);
+}
+
+#[test]
+fn g0_floor_tom_viscous_layer_refines_its_clock() {
+    let gas = standard_gas();
+    let cards = materials::KitMaterials::from_packs_at_temperature(
+        include_bytes!("../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk"),
+        &[],
+        include_bytes!("../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk"),
+        "T",
+        gas.temperature,
+        0.00730108512,
+        0.005,
+        0.05,
+    ).and_then(materials::KitMaterials::with_stated_unknown_film_loss).unwrap();
+    let piece = kit::drum_with_materials(&kit::tom(14.0), &[], gas, &cards).unwrap();
+    assert!(piece.instrument.rate > kit::OUT_RATE, "viscous layer left the floor tom at 48 kHz");
+    let (lam, who) = piece.instrument.admission_rate2();
+    let ratio = lam / (4.0 * piece.instrument.rate.powi(2));
+    assert!(ratio < 0.95, "floor tom was not admitted: {ratio} ({who})");
+}

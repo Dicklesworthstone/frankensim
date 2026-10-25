@@ -201,8 +201,13 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         // The volume shapes stay on the compact monopole below; the receipt
         // states its error against the baked baffled self-resistance.
         let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance;
-        for (head, label) in [(&mut batter, "batter"), (&mut reso, "resonant")] {
-            for line in head.attach_head_radiation(&table, s.radius, &gas, Some(compact))? {
+        for (head, label, hd, elastic) in [
+            (&mut batter, "batter", s.batter, primary),
+            (&mut reso, "resonant", s.reso, secondary),
+        ] {
+            let coincidence_hz = gas.sound_speed.powi(2) / (2.0 * PI * hd.thickness)
+                * (12.0 * elastic.2 * (1.0 - elastic.1 * elastic.1) / elastic.0).sqrt();
+            for line in head.attach_head_radiation_with_viscous(&table, s.radius, &gas, Some(compact), coincidence_hz)? {
                 notes.push(format!("{label} {line}"));
             }
         }
@@ -272,7 +277,7 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut mic = Mic::new(s.mic);
     mic.floor = s.floor;
     ins.mics.push(mic);
-    let oversample = if materials.and_then(KitMaterials::primary_bending_loss).is_some() {
+    let oversample = if !matches!(batter_loss, FilmLoss::FittedT60) {
         pick_oversample(&mut ins, 0.6)?
     } else { s.oversample };
     ins.validate_bending_loss_clock()?;

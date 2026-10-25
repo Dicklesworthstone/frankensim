@@ -891,6 +891,16 @@ impl Body {
     /// with the baked volume shapes in the receipt.
     pub fn attach_head_radiation(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
         compact_volume_resistance: Option<f64>) -> Result<Vec<String>, String> {
+        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, None)
+    }
+
+    pub fn attach_head_radiation_with_viscous(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
+        compact_volume_resistance: Option<f64>, coincidence_hz: f64) -> Result<Vec<String>, String> {
+        self.attach_head_radiation_impl(table, radius, gas, compact_volume_resistance, Some(coincidence_hz))
+    }
+
+    fn attach_head_radiation_impl(&mut self, table: &radiation::RadiationTable, radius: f64, gas: &GasState,
+        compact_volume_resistance: Option<f64>, coincidence_hz: Option<f64>) -> Result<Vec<String>, String> {
         // Air loading is the same physics whatever the film-loss source: a
         // sourced bending viscosity composes with it (its force is explicit,
         // the air mass implicit). Shallow shells are not clamped films.
@@ -904,7 +914,9 @@ impl Body {
             lap.mul_add(v, tension, &mut out);
             out
         };
-        let load = radiation::ModalAirLoad::new(table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance)?;
+        let viscous = coincidence_hz.map(|fc| (self.mass.iter().sum::<f64>() / self.area, fc));
+        let load = radiation::ModalAirLoad::new_with_losses(
+            table, radius, self.h, &self.xy, &self.mass, &stiffness, gas, compact_volume_resistance, None, viscous)?;
         let receipt = load.receipt.clone();
         self.head_radiation = Some(Box::new(load));
         self.kc = 0.0; // the implicit air mass is prepared with the update coefficients

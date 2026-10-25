@@ -311,6 +311,16 @@ Scope, also printed in the receipt:
 
 The GPU and CUDA planners refuse a head with this load. Render it natively.
 
+### Head viscous layer
+
+Native card-built drums also apply the two-face Stokes boundary-layer loss
+from `air_loss::plate_viscous_layer` to every retained non-volume head shape,
+evaluated at its loaded frequency and its own areal density. Volume and
+dropped shapes carry none, so their decays remain upper bounds. Every admitted
+shape must be below coincidence. This is a gas-owned loss, not a decay-time
+fit; live keeps its existing installed decays.
+
+
 ## Numerics
 
 Leapfrog in time. The nonlinear potential (Berger or von Karman) enters through a scalar
