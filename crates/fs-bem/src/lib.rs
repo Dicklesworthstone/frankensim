@@ -236,6 +236,8 @@ pub mod radiation_policy;
 /// Work-conjugate P1/P0 radiation for reciprocal acoustic feedback.
 pub mod reciprocal_radiation;
 pub mod wake2d;
+/// Potential-flow acoustic mass of a window cut through the wall of a cylindrical bore.
+pub mod wall_window;
 
 pub use panel2d::{
     Airfoil2d, NACA0012_PRESTALL_MAX_ALPHA_RAD, PanelSolution2d, naca4_symmetric,
