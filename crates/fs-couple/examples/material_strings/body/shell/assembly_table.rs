@@ -30,6 +30,85 @@ pub(crate) struct TableOptions<'a> {
     pub bridge_direction: [f64; 3],
 }
 
+/// `TableOptions` as a `frankensim-shell-assembly-options-v1` text, so a table converts from the command line
+/// (`material_strings assemble-shell`, BODY_PROFILES.md). One record per line, `#` starts a comment line:
+/// `window-hz LO HI`, `projection-work N`, `reference-thickness-m T`, `bridge-component NAME` and
+/// `bridge-direction X Y Z` once each; `pack TABLE_PACK PROFILE_PACK` per table pack and `bridge X Y` per string, in
+/// string order.
+pub(crate) struct OptionsFile {
+    window_hz: (f64, f64),
+    projection_work: usize,
+    packs: Vec<(String, String)>,
+    reference_thickness_m: f64,
+    bridge_component: String,
+    bridges: Vec<(f64, f64)>,
+    bridge_direction: [f64; 3],
+}
+
+impl OptionsFile {
+    pub(crate) fn parse(text: &str) -> Result<Self> {
+        let mut lines = text.lines();
+        if lines.next() != Some("frankensim-shell-assembly-options-v1") {
+            return Err("not a frankensim-shell-assembly-options-v1 file".into());
+        }
+        let (mut window_hz, mut projection_work, mut reference_thickness_m) = (None, None, None);
+        let (mut bridge_component, mut bridge_direction) = (None, None);
+        let (mut packs, mut bridges) = (Vec::new(), Vec::new());
+        for line in lines.filter(|l| !l.starts_with('#')) {
+            let f: Vec<&str> = line.split_ascii_whitespace().collect();
+            match f.as_slice() {
+                [] => {}
+                ["window-hz", rest @ ..] if window_hz.is_none() => window_hz = Some(floats::<2>(rest)?),
+                ["projection-work", n] if projection_work.is_none() => projection_work = Some(n.parse::<usize>()?),
+                ["reference-thickness-m", t] if reference_thickness_m.is_none() => reference_thickness_m = Some(t.parse::<f64>()?),
+                ["bridge-component", name] if bridge_component.is_none() => bridge_component = Some(name.to_string()),
+                ["bridge-direction", rest @ ..] if bridge_direction.is_none() => bridge_direction = Some(floats::<3>(rest)?),
+                ["pack", table, profile] if !packs.iter().any(|(t, _): &(String, String)| t == table) =>
+                    packs.push((table.to_string(), profile.to_string())),
+                ["bridge", rest @ ..] => bridges.push(floats::<2>(rest).map(|[x, y]| (x, y))?),
+                _ => return Err(format!("unknown, repeated or malformed shell-assembly option: {line}").into()),
+            }
+        }
+        let missing = |what: &str| format!("shell-assembly options need {what}");
+        let [lo, hi] = window_hz.ok_or_else(|| missing("window-hz"))?;
+        if !(lo > 0.0 && hi > lo && hi.is_finite()) {
+            return Err("shell-assembly option window-hz must be finite with 0 < LO < HI".into());
+        }
+        if bridges.is_empty() {
+            return Err(missing("at least one bridge").into());
+        }
+        Ok(Self {
+            window_hz: (lo, hi),
+            projection_work: projection_work.ok_or_else(|| missing("projection-work"))?,
+            packs,
+            reference_thickness_m: reference_thickness_m.ok_or_else(|| missing("reference-thickness-m"))?,
+            bridge_component: bridge_component.ok_or_else(|| missing("bridge-component"))?,
+            bridges,
+            bridge_direction: bridge_direction.ok_or_else(|| missing("bridge-direction"))?,
+        })
+    }
+
+    /// The performance body record's thickness [m] the part thicknesses are written against.
+    pub(crate) fn reference_thickness_m(&self) -> f64 {
+        self.reference_thickness_m
+    }
+
+    /// `convert` with these options; the window is squared angular frequency, (2 pi f)^2.
+    pub(crate) fn convert(&self, table: &str) -> Result<ConvertedTable> {
+        let two_pi = 2.0 * core::f64::consts::PI;
+        let packs: Vec<(&str, &str)> = self.packs.iter().map(|(t, p)| (t.as_str(), p.as_str())).collect();
+        convert(table, &TableOptions {
+            window: ((two_pi * self.window_hz.0).powi(2), (two_pi * self.window_hz.1).powi(2)),
+            projection_work: self.projection_work,
+            packs: &packs,
+            reference_thickness_m: self.reference_thickness_m,
+            bridge_component: &self.bridge_component,
+            bridges: &self.bridges,
+            bridge_direction: self.bridge_direction,
+        })
+    }
+}
+
 /// A converted table: the v4 profile, the body length and width [m] its x/y fractions refer to, how far each bridge point
 /// was from the node it became [m], and the table's cavity row (volume [m^3], neck radius [m], neck length [m]) for the
 /// performance's cavity record.

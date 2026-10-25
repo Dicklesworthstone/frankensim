@@ -1,0 +1,19 @@
+frankensim-shell-assembly-options-v1
+# The il Cannone violin body, data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv
+# (48 parts, 7042 nodes, 10192 triangles, 119 ties). Body modes from 15 Hz (above the free body's rigid motion) to
+# 2 kHz, the violin shell packs' declared angular-frequency validity.
+window-hz 15 2000
+projection-work 549755813888
+# The performance body record's thickness [m]; every part's own thickness is written as a ratio to it.
+reference-thickness-m 0.003
+# Spruce (top, bass bar, soundpost) is the performance body pack, maple (back, ribs, bridge) the other.
+pack spruce @body
+pack maple violin-maple-sycamore-sonderegger2013-shell.fsmatpk
+# Strings G, D, A, E meet the bridge at these points (x, y) [m] of the table (string-contacts.tsv beside it). The table's
+# frame has x across the body, so each string drives its bridge node along x, the bowing direction.
+bridge-component bridge
+bridge-direction 1 0 0
+bridge -0.01734 -0.05164
+bridge -0.00557 -0.05421
+bridge 0.00629 -0.05329
+bridge 0.01728 -0.04887

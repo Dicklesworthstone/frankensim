@@ -442,9 +442,30 @@ fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
     let mut bytes=Vec::new();File::open(path)?.take(cap as u64+1).read_to_end(&mut bytes)?;
     if bytes.len()>cap {return Err(format!("{} exceeds {cap} bytes",path.display()).into());} Ok(bytes)
 }
+/// `material_strings assemble-shell TABLE OPTIONS NEW_PROFILE`: a `frankensim.shell-assembly.v1` table written as a v4
+/// body profile with the choices of a `frankensim-shell-assembly-options-v1` file (BODY_PROFILES.md). The profile is
+/// admitted before it is written. Printed: the body length and width [m] and reference thickness the performance's body
+/// record takes, how far each bridge point is from its node, and the table's cavity row for the cavity record.
+fn assemble_shell(args:&[std::ffi::OsString])->Result<()> {
+    let [table,options,out]=args else {
+        return Err("usage: material_strings assemble-shell TABLE OPTIONS NEW_PROFILE".into());
+    };
+    let options=body::ShellTableOptions::parse(std::str::from_utf8(&read_bounded(Path::new(options),body::MAX_BYTES)?)?)?;
+    let converted=options.convert(std::str::from_utf8(&read_bounded(Path::new(table),body::MAX_SHELL_BYTES)?)?)?;
+    body::Profile::parse(converted.profile.as_bytes())?;
+    OpenOptions::new().write(true).create_new(true).open(out)?.write_all(converted.profile.as_bytes())?;
+    println!("body-length-m {}\nbody-width-m {}\nreference-thickness-m {}",converted.length_m,converted.width_m,
+        options.reference_thickness_m());
+    for (k,snap) in converted.bridge_snaps_m.iter().enumerate() { println!("bridge-snap-m {k} {snap}"); }
+    if let Some([volume,radius,length])=converted.cavity {
+        println!("cavity-volume-m3 {volume}\ncavity-neck-radius-m {radius}\ncavity-neck-length-m {length}");
+    }
+    Ok(())
+}
 fn main()->Result<()> {
-    let (args, gas_options)=thermochemical::Options::extract_os(
-        &std::env::args_os().collect::<Vec<_>>())?;
+    let raw=std::env::args_os().collect::<Vec<_>>();
+    if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
+    let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
     if args.len()<3 {
         return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }

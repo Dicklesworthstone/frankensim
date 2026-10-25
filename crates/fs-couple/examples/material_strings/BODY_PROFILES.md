@@ -715,6 +715,59 @@ and a 2 s render for listening. On trj the body constructs in 315-350 s and the
 coupled network (245 coordinates, 36 connections) renders at 100-125 s per
 audio second.
 
+### A table from the command line
+
+`material_strings assemble-shell TABLE OPTIONS NEW_PROFILE` writes a table as
+this v4 profile and admits it before it writes it. OPTIONS states the choices
+the table does not carry:
+
+```text
+frankensim-shell-assembly-options-v1
+window-hz LO HI
+projection-work N
+reference-thickness-m T
+pack TABLE_PACK PROFILE_PACK          (one per table pack; @body is the performance body pack)
+bridge-component NAME
+bridge-direction X Y Z
+bridge X Y                            (one per string, in string order, table coordinates [m])
+```
+
+Each record except `pack` and `bridge` appears exactly once, and a line that
+starts with `#` is a comment. The command prints:
+- the body length and width [m] and the reference thickness, for the
+  performance's body record;
+- each bridge's snap distance;
+- the table's cavity row (volume, neck radius, neck length), for the cavity
+  record.
+
+`cannone-h8.assembly` holds il Cannone's choices. The rungs in
+`body/shell/tests.rs` read the same file.
+
+`cannone-dominant-g3.material-strings` bows il Cannone's G for 2 s at 144 kHz,
+on the four Dominant string packs (README.md). It uses the rung's 0.383 m span
+and 0.328 m speaking length; the contacts table puts il Cannone's own G at
+323.1 mm bridge to nut. The G keeps its bending and twist modes to 30 kHz; D, A
+and E keep theirs to 10 kHz, which is 474 coordinates with the body and cavity.
+The bow presses 1 N and moves at 0.2 m/s, a tenth of the speaking length from
+the bridge.
+
+Two inputs of this note are authored, not measured:
+- the bridge joint (200000 N/m, 0.1 N s/m);
+- the Stribeck friction law (0.8, 0.4, 0.1 m/s).
+
+Gather the packs and the performance in one directory, then run from the root:
+
+```bash
+demo=$(mktemp -d)
+m=crates/fs-couple/examples/material_strings
+cp $m/packs/violin-*.fsmatpk $m/cannone-dominant-g3.material-strings "$demo/"
+cargo run --release -p fs-couple --example material_strings -- assemble-shell \
+  data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv \
+  $m/cannone-h8.assembly "$demo/cannone-h8.body"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/cannone-dominant-g3.material-strings" "$demo/g3.wav" --body-profile "$demo/cannone-h8.body"
+```
+
 ## Authored distributed interior air on the material shell
 
 An optional `interior-fe-v1` trailer follows every ordinary record of a v3

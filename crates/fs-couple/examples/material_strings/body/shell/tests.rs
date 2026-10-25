@@ -432,40 +432,67 @@ fn violin_performance(samples: u64, body: &str, cavity: &str, directions: &str) 
         control_rate_hz\t700\ntracks\t1\ntrack\tbow\tbow\t0\ninitial\tbow\t2e-1\t5e-1\t{bow:e}\nevents\t0\n")
 }
 
-/// il Cannone's strings G, D, A, E meet the bridge at these points (x, y) [m] of its table
-/// (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/string-contacts.tsv), in string order.
-const CANNONE_BRIDGES: [(f64, f64); 4] =
-    [(-0.017_34, -0.051_64), (-0.005_57, -0.054_21), (0.006_29, -0.053_29), (0.017_28, -0.048_87)];
-
 /// Every il Cannone string's BOW_X BOW_Y BRIDGE_X BRIDGE_Y. The bridge nodes push along x, across the body, which is also
 /// the bow's tangent, so the bow drives the plane the bridge holds. The bow-normal plane has no bridge (the string record
 /// carries one bridge direction) and nothing drives it. With the violin-sized rung's `0.6 0.8 1 0`, 0.8 of the bow drove
 /// that free plane, and the G string sounded its full 0.383 m span (167 Hz) instead of its 0.328 m speaking length.
 const CANNONE_DIRECTIONS: &str = "1 0 1 0";
 
-/// The performance body record's thickness [m] for il Cannone; every part's own thickness is written as a ratio to it.
-const CANNONE_REFERENCE_THICKNESS_M: f64 = 0.003;
+/// The il Cannone body's assembly choices (`cannone-h8.assembly`, the file `material_strings assemble-shell` reads): the
+/// window from 15 Hz to the violin packs' 2 kHz validity, spruce as the performance body pack and maple the other, the
+/// 3 mm reference thickness, and the four string contacts on the bridge, each driving its node along x.
+fn cannone_options() -> super::super::shell::assembly::table::OptionsFile {
+    super::super::shell::assembly::table::OptionsFile::parse(include_str!("../../cannone-h8.assembly")).unwrap()
+}
 
 /// The il Cannone violin body (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv: 48
-/// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile. Spruce (top, bass bar, soundpost) is
-/// the performance body pack, maple (back, ribs, bridge) the other. The window holds the body modes from 15 Hz (above the
-/// free body's rigid motion) to 2 kHz, the violin packs' declared angular-frequency validity. The table's frame has x
-/// across the body, y vertical and z along the strings, so each string drives its bridge node along x, the bowing
-/// direction.
+/// parts, 7042 nodes, 10192 triangles, 119 ties) written as a v4 assembled profile with `cannone_options`. The table's
+/// frame has x across the body, y vertical and z along the strings.
 fn cannone_profile() -> (Profile, super::super::shell::assembly::table::ConvertedTable) {
-    let two_pi = 2.0 * std::f64::consts::PI;
-    let converted = super::super::shell::assembly::table::convert(
-        include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv"),
-        &super::super::shell::assembly::table::TableOptions {
-            window: ((two_pi * 15.0).powi(2), (two_pi * 2000.0).powi(2)),
-            projection_work: MAX_SHELL_PROJECTION_WORK,
-            packs: &[("spruce", "@body"), ("maple", "violin-maple-sycamore-sonderegger2013-shell.fsmatpk")],
-            reference_thickness_m: CANNONE_REFERENCE_THICKNESS_M,
-            bridge_component: "bridge",
-            bridges: &CANNONE_BRIDGES,
-            bridge_direction: [1.0, 0.0, 0.0],
-        }).unwrap();
+    let converted = cannone_options().convert(
+        include_str!("../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv"))
+        .unwrap();
     (Profile::parse(converted.profile.as_bytes()).unwrap(), converted)
+}
+
+/// A shell-assembly options file states each choice once: a missing, repeated, unknown or malformed record refuses, as do
+/// an inverted window and another version.
+#[test]
+fn shell_assembly_options_refuse_missing_repeated_unknown_and_malformed_records() {
+    use super::super::shell::assembly::table::OptionsFile;
+    let text = include_str!("../../cannone-h8.assembly");
+    assert!(OptionsFile::parse(text).is_ok());
+    let refused = |t: &str| OptionsFile::parse(t).err().expect("must refuse").to_string();
+    assert!(refused(&text.replace("window-hz 15 2000\n", "")).contains("need window-hz"));
+    assert!(refused(&text.replace("bridge-direction 1 0 0\n", "")).contains("need bridge-direction"));
+    assert!(refused(&format!("{text}reference-thickness-m 0.004\n")).contains("repeated"));
+    assert!(refused(&format!("{text}pack maple violin-spruce-norway-viala2020-shell.fsmatpk\n")).contains("repeated"));
+    assert!(refused(&format!("{text}bridge 0.01\n")).contains("needs 2 numbers"));
+    assert!(refused(&format!("{text}bridge-component bridge top\n")).contains("malformed"));
+    assert!(refused(&format!("{text}tie-budget 4\n")).contains("unknown"));
+    assert!(refused(&text.replace("window-hz 15 2000", "window-hz 2000 15")).contains("0 < LO < HI"));
+    assert!(refused(&text.replacen("options-v1", "options-v2", 1)).contains("not a frankensim-shell-assembly-options-v1"));
+}
+
+/// `cannone-dominant-g3.material-strings` is the il Cannone G3 note for the command line: the four Dominant string packs
+/// on the rung's 0.383 m span and 0.328 m speaking length, the G bowed at 1 N and 0.2 m/s one tenth of its speaking length
+/// from the bridge, 2 s at 144 kHz. Its body and cavity records are the ones this body's conversion gives, and it passes
+/// preflight on that profile.
+#[test]
+fn the_cannone_dominant_g3_performance_matches_its_body_and_passes_preflight() {
+    let text = include_str!("../../cannone-dominant-g3.material-strings");
+    let (profile, converted) = cannone_profile();
+    let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
+    let body = format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} {} {CANNONE_BODY_MODES} 1\n",
+        converted.length_m, converted.width_m, cannone_options().reference_thickness_m());
+    assert!(text.contains(&body), "{body}");
+    let cavity = format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1\n");
+    assert!(text.contains(&cavity), "{cavity}");
+    for (k, string) in ["g", "d", "a", "e"].iter().enumerate() {
+        let record = text.lines().filter(|l| l.starts_with("string ")).nth(k).unwrap();
+        assert!(record.starts_with(&format!("string violin-string-dominant-{string}-pickering1985-section.fsmatpk ")));
+    }
+    profile.preflight(&input::Spec::parse(text.as_bytes()).unwrap()).unwrap();
 }
 
 /// The whole il Cannone body is admitted: its 48 components and 119 ties are exactly the assembly caps, and one more
@@ -506,8 +533,8 @@ fn the_cannone_violin_body_fills_the_assembly_caps_and_passes_preflight() {
 fn cannone_inputs(samples: u64, modes: usize) -> (Profile, input::Spec) {
     let (profile, converted) = cannone_profile();
     let [volume, neck_radius, neck_length] = converted.cavity.unwrap();
-    let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} \
-        {CANNONE_REFERENCE_THICKNESS_M} {modes} 1", converted.length_m, converted.width_m),
+    let performance = violin_performance(samples, &format!("body violin-spruce-norway-viala2020-shell.fsmatpk {} {} {} \
+        {modes} 1", converted.length_m, converted.width_m, cannone_options().reference_thickness_m()),
         &format!("cavity physical-neck {volume} {neck_radius} {neck_length} flanged flanged 1"), CANNONE_DIRECTIONS);
     (profile, input::Spec::parse(performance.as_bytes()).unwrap())
 }
