@@ -8,7 +8,10 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{MaterialBowCo
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::MultiBowPerformanceConfig;
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{
     ModalRotationAttachment, StringBodyRotationConnection, StringBridgeLocation,
+    SHEAR_VISCOSITY_REFERENCE_OMEGA as TORSION_REFERENCE, SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS as TORSION_REFERENCE_DIMS,
+    STRING_LOSS_SPECTRUM_BAND_RAD_S,
 };
+use fs_couple::shear_shell::constant_loss::ConstantLossSpectrum;
 use fs_couple::bowed_string::runtime::reciprocal::bank::chart::{
     SharedMaterialPlateChartBody, PlateBridgeFootprints,
 };
@@ -40,11 +43,12 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     pool.scope(|arena| f(&Cx::new(&gate,arena,fs_exec::StreamKey { seed:6,kernel_id:5,tile:0,iteration:0 },
         fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic),&gate))
 }
-fn material(rho:f64,g:f64,eta:f64,hi:f64)->ResolvedMaterialStatePoint {
+fn material(rho:f64,g:f64,eta:f64,hi:f64)->ResolvedMaterialStatePoint { material_with(rho,g,eta,hi,&[]) }
+fn material_with(rho:f64,g:f64,eta:f64,hi:f64,extra:&[(&str,Dims,f64)])->ResolvedMaterialStatePoint {
     let mut claims=ClaimSet::new(); let mut requirements=Vec::new();
     for (name,dims,value) in [("density",Density::DIMS,rho),("young_modulus",Pressure::DIMS,200e9),
         ("poisson_ratio",Dims::NONE,0.3),(ETA,DynViscosity::DIMS,10.0),
-        ("G",Pressure::DIMS,g),("eta_s",DynViscosity::DIMS,eta)] {
+        ("G",Pressure::DIMS,g),("eta_s",DynViscosity::DIMS,eta)].into_iter().chain(extra.iter().copied()) {
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),value:PropertyValue::Scalar{value,dims},
             validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,hi),
             uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
@@ -119,6 +123,66 @@ fn sourced_twist_has_physical_frequency_loss_and_surface_torque_normalization() 
             assert!((phi[3+n]/(radius*angle)-1.0).abs()<2e-14);
         }
         assert!(modes.iter().all(|m|m.pressure_per_modal_velocity==fs_math::c64::C64::ZERO));
+    });
+}
+
+/// A source stating SHEAR_VISCOSITY_REFERENCE_OMEGA [rad/s] beside its shear viscosity.
+fn anchored(g:f64,eta:f64,reference:f64)->MaterialStringSource {
+    MaterialStringSource::Homogeneous(with_uniform_circular_material_state(template(),0.0003,
+        &material_with(7800.0,g,eta,200_000.0,&[(TORSION_REFERENCE,TORSION_REFERENCE_DIMS,reference)])).unwrap()
+        .with_kelvin_voigt_bending_loss().unwrap())
+}
+
+// The receipt for the string band: every weight is positive, and G stays within 2 % of one from 100 Hz to 30 kHz
+// (measured 0.9849..1.0169 in the numpy probe) and within 4.5 % over the whole 50 Hz-40 kHz fit band (0.9624..1.0169).
+#[test]
+fn the_string_loss_spectrum_is_flat_to_thirty_kilohertz() {
+    let spectrum=ConstantLossSpectrum::fit_over(STRING_LOSS_SPECTRUM_BAND_RAD_S);
+    assert!(spectrum.branches().all(|(_,g)|g>0.0),"{spectrum:?}");
+    let extreme=|lo:f64,hi:f64| (0..2001).map(|k| core::f64::consts::TAU*lo*(hi/lo).powf(k as f64/2000.0))
+        .map(|w| spectrum.shape(w)).fold((f64::MAX,f64::MIN),|(a,b),g|(a.min(g),b.max(g)));
+    let inner=extreme(100.0,30_000.0); let band=extreme(50.0,40_000.0);
+    eprintln!("G over 100 Hz-30 kHz {:.4}..{:.4}; over 50 Hz-40 kHz {:.4}..{:.4}",inner.0,inner.1,band.0,band.1);
+    assert!(inner.0>0.98 && inner.1<1.02,"{inner:?}");
+    assert!(band.0>0.955 && band.1<1.045,"{band:?}");
+}
+
+// A shear viscosity written as eta_s = eta_t G / omega_ref with omega_ref stated gives every twist mode the loss
+// factor eta_t G(omega_n) (damping ratio half that); the same number read as Kelvin-Voigt gives eta_t omega_n / omega_ref.
+// Frequencies and normalization do not change.
+#[test]
+fn a_stated_shear_viscosity_reference_gives_every_twist_mode_its_constant_loss_factor() {
+    with_cx(|cx,gate| {
+        let (g,eta_t,reference)=(80e9,0.0585,core::f64::consts::TAU*1000.0);
+        let eta_s=eta_t*g/reference;
+        let spectrum=ConstantLossSpectrum::fit_over(STRING_LOSS_SPECTRUM_BAND_RAD_S);
+        let kelvin_voigt=raw(cx,gate,source(g,eta_s).with_torsion("G","eta_s",3).unwrap(),options()).unwrap();
+        let constant=raw(cx,gate,anchored(g,eta_s,reference).with_torsion("G","eta_s",3).unwrap(),options()).unwrap();
+        let (kv,cl)=(kelvin_voigt.system().components()[0].modes(),constant.system().components()[0].modes());
+        assert_eq!((kv.len(),cl.len()),(7,7));
+        for i in 0..4 { assert_eq!(kv[i],cl[i]); }
+        assert_eq!(kelvin_voigt.system().port().left.shapes,constant.system().port().left.shapes);
+        for n in 1..=3 {
+            let omega=cl[3+n].angular_frequency_rad_s;
+            assert_eq!(omega.to_bits(),kv[3+n].angular_frequency_rad_s.to_bits());
+            let loss=2.0*cl[3+n].damping_ratio;
+            assert!((loss/(eta_t*spectrum.shape(omega))-1.0).abs()<1e-12,"mode {n}: {loss}");
+            assert!((2.0*kv[3+n].damping_ratio/(eta_t*omega/reference)-1.0).abs()<1e-12,"mode {n}");
+        }
+    });
+}
+
+// The law is claimed only inside its spectrum's fit band: a twist mode below 50 Hz refuses under constant loss, while
+// the same string read as Kelvin-Voigt is admitted.
+#[test]
+fn constant_loss_torsion_refuses_a_twist_mode_outside_its_spectrum_band() {
+    with_cx(|cx,gate| {
+        // c_t = sqrt(1e7 / 7800) = 35.8 m/s puts the first twist mode of the 0.5 m span at 35.8 Hz.
+        let (g,reference)=(1e7,core::f64::consts::TAU*1000.0);
+        assert!(raw(cx,gate,source(g,100.0).with_torsion("G","eta_s",1).unwrap(),options()).is_ok());
+        let refused=raw(cx,gate,anchored(g,100.0,reference).with_torsion("G","eta_s",1).unwrap(),options()).err()
+            .expect("a 35.8 Hz constant-loss twist mode must refuse");
+        assert!(refused.to_string().contains("exceed material support"),"{refused}");
     });
 }
 

@@ -35,7 +35,14 @@ impl ConstantLossSpectrum {
     /// The least-squares fit of `G = 1` over [`SPECTRUM_BAND_RAD_S`], by Cholesky on the normal equations.
     #[must_use]
     pub fn fit() -> Self {
-        let (lo, hi) = SPECTRUM_BAND_RAD_S;
+        Self::fit_over(SPECTRUM_BAND_RAD_S)
+    }
+
+    /// The same fit with the branch rates and the fit points spread over `band` [rad/s] instead (for owners whose
+    /// retained modes reach past 10 kHz); `fit()` is `fit_over(SPECTRUM_BAND_RAD_S)`.
+    #[must_use]
+    pub fn fit_over(band: (f64, f64)) -> Self {
+        let (lo, hi) = band;
         let span = det::ln(hi / lo);
         let rates: [f64; BRANCHES] =
             core::array::from_fn(|j| lo * det::exp(span * j as f64 / (BRANCHES - 1) as f64));

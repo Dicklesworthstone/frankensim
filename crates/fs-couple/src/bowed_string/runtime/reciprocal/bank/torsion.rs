@@ -17,10 +17,25 @@
 //! arXiv:physics/0505059, for the importance of surface rather than centre speed.
 
 use super::*;
+use crate::shear_shell::constant_loss::ConstantLossSpectrum;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::torsion::{ConcentricTorsionalSection, ConcentricPronyTorsionalSection};
 use fs_material::section::relaxation::LayerRelaxationProperties;
 use fs_material::state_point::MaterialStatePointError;
+use fs_qty::{Dims, QuantitySpec};
+
+/// Optional layer property: the angular frequency [rad/s] at which a pack wrote its Kelvin-Voigt shear viscosity as
+/// `eta_s = eta_t G / omega_ref` from a measured torsional loss factor `eta_t`. A layer that states it has the constant
+/// loss stiffness `omega_ref eta_s`, and every twist mode gets that layer's `eta_t` at its own frequency, times the
+/// shell's unit constant-loss spectrum ([`crate::shear_shell::constant_loss`]) fitted over
+/// [`STRING_LOSS_SPECTRUM_BAND_RAD_S`]. A layer without it stays Kelvin-Voigt, bit for bit.
+pub const SHEAR_VISCOSITY_REFERENCE_OMEGA: &str = "shear_viscosity_constant_loss_reference_omega";
+/// Dimensions of [`SHEAR_VISCOSITY_REFERENCE_OMEGA`]: an angular frequency, 1/s.
+pub const SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
+/// The span of that spectrum's branch rates and fit [rad/s], 50 Hz to 40 kHz: a bowed string keeps twist modes to
+/// 30 kHz. A constant-loss twist mode outside it refuses.
+pub const STRING_LOSS_SPECTRUM_BAND_RAD_S: (f64, f64) =
+    (core::f64::consts::TAU * 50.0, core::f64::consts::TAU * 40_000.0);
 
 /// Angular displacement/torque participation in the supplied body's SAME basis.
 /// Unlike a translational `ModalAttachment`, entries have units
@@ -395,12 +410,20 @@ impl TorsionalStringSource {
             || !(radius / norm).is_finite() || radius / norm == 0.0 {
             return Err(invalid("torsion frequency and angular normalization must be representable"));
         }
-        let (lo, hi) = self.section.omega_band_rad_s();
+        let constant_loss = self.constant_loss()?;
+        let (lo, hi) = match &constant_loss {
+            None => self.section.omega_band_rad_s(),
+            Some(law) => law.band,
+        };
         for n in 1..=self.mode_count {
             poll(gate)?;
             let k = n as f64 * core::f64::consts::PI / card.length_m;
             let omega = k * speed;
-            let zeta = (self.section.viscous_stiffness_n_m2_s() / inertia) * k * k / (2.0 * omega);
+            let viscous = match &constant_loss {
+                None => self.section.viscous_stiffness_n_m2_s(),
+                Some(law) => law.viscous_stiffness_at(omega),
+            };
+            let zeta = (viscous / inertia) * k * k / (2.0 * omega);
             if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi
                 || !zeta.is_finite() || zeta < 0.0
                 || (self.section.viscous_stiffness_n_m2_s() > 0.0 && zeta == 0.0) {
@@ -410,5 +433,62 @@ impl TorsionalStringSource {
                 pressure_per_modal_velocity: fs_math::c64::C64::ZERO });
         }
         Ok(())
+    }
+
+    /// The per-layer shear loss when any layer states [`SHEAR_VISCOSITY_REFERENCE_OMEGA`], else `None`. Its band is
+    /// the section's material band within the spectrum's fit band and each stated anchor's own validity.
+    fn constant_loss(&self) -> Result<Option<TorsionalConstantLoss>, ReciprocalStringError> {
+        let elastic = self.section.shear().elastic();
+        if elastic.layers().iter().all(|layer| layer.material.property(SHEAR_VISCOSITY_REFERENCE_OMEGA).is_none()) {
+            return Ok(None);
+        }
+        let (lo, hi) = self.section.omega_band_rad_s();
+        let mut band = (lo.max(STRING_LOSS_SPECTRUM_BAND_RAD_S.0), hi.min(STRING_LOSS_SPECTRUM_BAND_RAD_S.1));
+        let mut layers = Vec::with_capacity(elastic.layers().len());
+        for (layer, geometry) in elastic.layers().iter().zip(elastic.layer_integrals()) {
+            // The same per-layer term as the section's sum: eta_s times the polar moment J = 2 I.
+            let eta = layer.material.property(self.section.viscosity_property())
+                .ok_or_else(|| invalid("constant-loss torsion lost a layer's shear viscosity"))?.value_si();
+            let viscous = eta * (2.0 * geometry.second_moment_m4());
+            let reference = match layer.material.property(SHEAR_VISCOSITY_REFERENCE_OMEGA) {
+                None => None,
+                Some(p) => {
+                    let w = p.value_si();
+                    if p.requirement().quantity() != QuantitySpec::dimensional(SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS)
+                        || !w.is_finite() || w <= 0.0 || !p.is_constant_at_fixed_temperature() {
+                        return Err(invalid("a shear-viscosity reference angular frequency is a positive constant in rad/s"));
+                    }
+                    if let Some((a, b)) = p.angular_frequency_band_rad_s()
+                        .map_err(|_| invalid("invalid shear-viscosity reference frequency semantics"))? {
+                        band = (band.0.max(a), band.1.min(b));
+                    }
+                    Some(w)
+                }
+            };
+            layers.push((viscous, reference));
+        }
+        if band.0.is_nan() || band.1.is_nan() || band.0 > band.1 {
+            return Err(invalid("constant-loss torsion has no frequency band inside the loss spectrum's fit band"));
+        }
+        Ok(Some(TorsionalConstantLoss { layers, spectrum: ConstantLossSpectrum::fit_over(STRING_LOSS_SPECTRUM_BAND_RAD_S),
+            band }))
+    }
+}
+
+/// A twist source's shear loss with at least one constant-loss layer.
+struct TorsionalConstantLoss {
+    /// Per layer: `eta_s J` [N m2 s] and the layer's reference angular frequency, `None` for a Kelvin-Voigt layer.
+    layers: Vec<(f64, Option<f64>)>,
+    spectrum: ConstantLossSpectrum,
+    /// Where the law is claimed [rad/s]; a twist mode outside it refuses.
+    band: (f64, f64),
+}
+
+impl TorsionalConstantLoss {
+    /// The viscous stiffness that gives a twist mode at `omega` its loss: a constant-loss layer's `eta_s J` times
+    /// `omega_ref G(omega) / omega` (loss factor `eta_t G(omega)` at every frequency), a Kelvin-Voigt layer's unchanged.
+    fn viscous_stiffness_at(&self, omega: f64) -> f64 {
+        let shape = self.spectrum.shape(omega);
+        self.layers.iter().map(|&(viscous, reference)| reference.map_or(viscous, |w| viscous * w * shape / omega)).sum()
     }
 }

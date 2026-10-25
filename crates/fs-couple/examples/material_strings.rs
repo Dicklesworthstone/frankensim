@@ -30,7 +30,8 @@ use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
     MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
-use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation};
+use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation,
+    SHEAR_VISCOSITY_REFERENCE_OMEGA as TORSION_REFERENCE,SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS as TORSION_REFERENCE_DIMS};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemReport;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::MaterialBowContact;
@@ -124,6 +125,12 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     if twist {
         requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
         requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
+        // A pack that wrote its shear viscosity at a stated reference frequency has constant torsional loss
+        // (fs_couple::bowed_string::runtime::reciprocal::bank::torsion::SHEAR_VISCOSITY_REFERENCE_OMEGA).
+        load_pack(name,catalog,loader)?;
+        if !catalog[name].pack.claims().claims_for(TORSION_REFERENCE).is_empty() {
+            requirements.push(Requirement::try_new(TORSION_REFERENCE,TORSION_REFERENCE_DIMS,Admit::StrictlyPositive)?);
+        }
     }
     if !body && let LongitudinalMaterialLoss::KelvinVoigt { viscosity_property } = &spec.longitudinal_loss {
         requirements.push(Requirement::try_new(viscosity_property.as_str(),DynViscosity::DIMS,Admit::Finite)?);
@@ -138,10 +145,7 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }
-fn resolve_properties(name:&str, catalog:&mut Catalog,
-    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
-    requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
-{
+fn load_pack(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>) -> Result<()> {
     if !catalog.contains_key(name) {
         let pack=loader(name)?;
         let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
@@ -149,6 +153,13 @@ fn resolve_properties(name:&str, catalog:&mut Catalog,
             pack.claims().clone(),vec![])?;
         catalog.insert(name.into(),CatalogEntry { pack,card });
     }
+    Ok(())
+}
+fn resolve_properties(name:&str, catalog:&mut Catalog,
+    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
+    requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
+{
+    load_pack(name,catalog,loader)?;
     // This compact input profile explicitly declares bare SI T and omega axes.
     // Incompatible typed/context axes refuse in the original resolver; they are
     // never removed, guessed, coerced or supplied from an unrelated source.

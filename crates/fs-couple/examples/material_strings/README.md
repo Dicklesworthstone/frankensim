@@ -1331,7 +1331,11 @@ missing loss, out-of-domain mode, or absent shear data becomes a fallback value.
 Every homogeneous string and every bonded layer needs `density` [kg/m3], `young_modulus` [Pa], and
 `kelvin_voigt_bending_viscosity` [Pa s]. Positive `TWIST_MODES` additionally requires
 `shear_modulus` [Pa] and `kelvin_voigt_shear_viscosity` [Pa s]; zero does not query or
-infer those properties. The body additionally needs `poisson_ratio` [1]. Bending
+infer those properties. A pack that also states `shear_viscosity_constant_loss_reference_omega` [rad/s]
+wrote its shear viscosity as `eta_t G / omega_ref` from a measured torsional loss factor `eta_t`. Every twist
+mode then gets `eta_t` at its own frequency (the shell's constant-loss spectrum fitted over 50 Hz-40 kHz; a
+twist mode outside that band refuses) instead of the Kelvin-Voigt `eta_t omega / omega_ref`. The bending
+viscosity stays Kelvin-Voigt. The body additionally needs `poisson_ratio` [1]. Bending
 and shear loss must have an explicit valid angular-frequency band; all actual
 retained modes, not only the source query frequency, undergo the existing checks.
 
