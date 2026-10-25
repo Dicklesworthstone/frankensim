@@ -92,6 +92,7 @@ enum Backend {
 struct Opts {
     backend: Backend,
     airy_f32: bool,
+    airy_refine: bool,
     device: usize,
     all_devices: bool,
     launch_s: f64,
@@ -152,7 +153,7 @@ fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
         pl.nt,
         pl.nc,
         pl.airy.len() as f64 * if o.airy_f32 { 4.0 } else { 8.0 } / 1e6,
-        if o.airy_f32 { "f32" } else { "f64" },
+        if o.airy_refine { "refined f32" } else if o.airy_f32 { "f32" } else { "f64" },
         pl.ct_gap.len(),
         pl.cb_ptr.len().saturating_sub(1),
         pl.fr_mu.len(),
@@ -179,7 +180,7 @@ fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
                     let b = sims.len();
                     let mut raw = vec![vec![Vec::with_capacity(total); nm]; b];
                     let mut last = Instant::now();
-                    let run = cuda::run(pl, sims, total, o.airy_f32, dev, spl, |first, s| {
+                    let run = cuda::run(pl, sims, total, o.airy_f32, o.airy_refine, dev, spl, |first, s| {
                         let steps = s.len() / (b * nm);
                         for i in 0..steps {
                             for sim in 0..b {
@@ -507,7 +508,7 @@ fn check(name: &str, secs: f64, o: &Opts) {
 
 fn main() {
     let mut pos = vec![];
-    let mut o = Opts { backend: Backend::Auto, airy_f32: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false, preset_heads: false, grid_scale: 1.0 };
+    let mut o = Opts { backend: Backend::Auto, airy_f32: false, airy_refine: false, device: 0, all_devices: false, launch_s: 0.25, chunks: 1, preroll: 1.0, exact_friction: false, preset_heads: false, grid_scale: 1.0 };
     let (mut batch, mut chk) = (false, false);
     let mut a = std::env::args().skip(1);
     while let Some(x) = a.next() {
@@ -521,10 +522,11 @@ fn main() {
                 }
             }
             "--airy" => {
-                o.airy_f32 = match a.next().as_deref() {
-                    Some("f64") => false,
-                    Some("f32") => true,
-                    other => die(&format!("--airy {other:?}: f64 or f32")),
+                (o.airy_f32, o.airy_refine) = match a.next().as_deref() {
+                    Some("f64") => (false, false),
+                    Some("f32") => (true, false),
+                    Some("refined") => (true, true),
+                    other => die(&format!("--airy {other:?}: f64, f32 or refined")),
                 }
             }
             "--device" => match a.next().as_deref() {

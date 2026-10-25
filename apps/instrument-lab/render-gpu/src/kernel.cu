@@ -46,6 +46,11 @@ __device__ __forceinline__ double mass_flux_correction(const P& p, int i, ll o,
 #endif
 
 __device__ __forceinline__ void gsync(u32* bar, u32 nb) {
+#if AIRY_REFINE
+  // Every writer must publish its correction before thread 0 announces
+  // this block's arrival. Volatile AF/QF accesses also bypass stale L1 reads.
+  __threadfence();
+#endif
   __syncthreads();
   if (threadIdx.x == 0) {
     volatile u32* gen = bar + 32;
@@ -312,7 +317,7 @@ __device__ __forceinline__ void woodbury(const P& p, int s, int b, double& cg, d
 
 // F = A^-1 q for every plate and simulation: one warp per row, simulations NG at a time (the batch is
 // padded to a multiple of GB in Q, QF and AF), so each pass reads the dense inverse once for NG of them.
-template <int NG>
+template <int NG, bool Add = false>
 __device__ void airy_rows(const P& p, ll gwarp, ll nwarps) {
   const int lane = threadIdx.x & 31;
   const ll B = p.B, NC = p.NC;
@@ -350,7 +355,10 @@ __device__ void airy_rows(const P& p, ll gwarp, ll nwarps) {
       for (int g = 0; g < NG; g++) {
         double x = acc[g];
         for (int off = 16; off; off >>= 1) x = x + __shfl_down_sync(0xffffffffu, x, off);
-        if (lane == 0) p.AF[(s0 + g) * NC + coff + row] = x;
+        if (lane == 0) {
+          const ll index = (s0 + g) * NC + coff + row;
+          if (Add) p.AF[index] += x; else p.AF[index] = x;
+        }
       }
     }
   }
@@ -557,6 +565,36 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
     if (p.NVK > 0) {
       if (B == 1) airy_rows<1>(p, gwarp, nwarps); else airy_rows<GB>(p, gwarp, nwarps);
       gsync(p.bar, nbk);
+#if AIRY_REFINE
+      // A and q remain F64. Only applications of the existing inverse use
+      // F32; correct their error against the original physical operator.
+      // All blocks make the same decision after the global visibility barrier.
+      for (int correction = 0; correction <= 8; correction++) {
+        if (blockIdx.x == 0 && tid == 0) *p.any_refine = 0;
+        gsync(p.bar, nbk);
+        for (ll e = (ll)blockIdx.x * TPB + tid; e < B * NC; e += (ll)nbk * TPB) {
+          const ll row = e % NC, offset = e - row;
+          double residual = p.Q[e], scale = fabs(p.Q[e]);
+          for (int j = p.airy_ptr[row]; j < p.airy_ptr[row + 1]; j++) {
+            const double ax = p.airy_val[j] * p.AF[offset + p.airy_col[j]];
+            residual -= ax;
+            scale += fabs(ax);
+          }
+          p.QF[e] = (float)residual;
+          // Componentwise backward error, including exact zero systems.
+          if (!isfinite(residual) || !isfinite(scale) || fabs(residual) > 1e-12 * scale)
+            atomicExch(p.any_refine, 1);
+        }
+        gsync(p.bar, nbk);
+        if (*(volatile int*)p.any_refine == 0) break;
+        if (correction == 8) {
+          if (blockIdx.x == 0 && tid == 0) *p.airy_failed = 1;
+          return;
+        }
+        if (B == 1) airy_rows<1, true>(p, gwarp, nwarps); else airy_rows<GB, true>(p, gwarp, nwarps);
+        gsync(p.bar, nbk);
+      }
+#endif
     }
     MARK(1)
 
