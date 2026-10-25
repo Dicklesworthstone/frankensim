@@ -1,6 +1,6 @@
 frankensim.specimen-fingerings.v1
 fingering	written	concert	register	open_holes	source_id	note
-f1	F4	F4	first	-	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 5 6 7 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 omitted
-a1	A4	A4	first	7	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 5 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 omitted
-bb1	Bb4	Bb4	first	6	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 . 6 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 omitted
-b1	B4	B4	first	5	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 . 5 6 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 omitted
+f1	F4	F4	first	-	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 5 6 7 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 closed
+a1	A4	A4	first	7,8	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 5 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 open (a fingering closes only the holes it lists)
+bb1	Bb4	Bb4	first	6,8	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 4 . 6 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 open (a fingering closes only the holes it lists)
+b1	B4	B4	first	5,8	bouterse-2010-bressan-alto-fomrhi	Bouterse fingering 0 1 2 3 . 5 6 (hole numbers 0 to 7 as published); open_holes here counts the thumb hole as 1, so it lists Bouterse hole number + 1; hole 7 open (a fingering closes only the holes it lists)

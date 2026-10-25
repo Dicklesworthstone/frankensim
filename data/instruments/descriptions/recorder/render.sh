@@ -13,7 +13,16 @@
 # geometry number is a dimensions.tsv row. The network is: the window (wall thickness at the window, DERIVED from the mean outer diameter of the
 # other four Bressan altos, as a riser of equal area to the 12.0 x 4.6 mm opening) on a junction with the closed bore up to the block line
 # behind it, then the bore as equal-volume cylinders of at most 40 mm with a chimney section at every finger hole (chimney = (outer diameter -
-# local bore) / 2), to the open end of the foot. Hole 7 is omitted: only its diameter is published (u-hole-7-position).
+# local bore) / 2), to the open end of the foot. Hole 7 (5.25 mm, chimney (32.0 - 14.02) / 2 mm) opens 24 mm below the foot's upper end:
+# its position is not published, the dimensions row is DERIVED from the 16.0 mm tenon socket and the 32.0 mm bulb, with the bracket 18 to
+# 30 mm in unknowns.tsv (u-hole-7-position); it is open in a1, b-flat1 and b1 and closed in f1.
+# The window's mass is computed, not a constant: each card's row `window wall-cut 4 cheeks parallel ramp 0.00051 18.6210` solves the 3-D
+# potential flow through the cut in the 6.575 mm wall of the 9.83 mm bore: parallel cheeks 12.0 mm apart, 4.6 mm long, its downstream face
+# the labium ramp, straight up to the edge 0.51 mm above the bore (windway exit 1.06 - step 0.8 + edge thickness 0.25 mm, so the edge
+# inherits u-windway-height, bounds 0 to 1.25 mm) and then rising 6.065 mm over the side walls' 18.0 mm beyond the window (22.6 - 4.6 mm,
+# 18.62 degrees), with the closed bore behind it and free space outside (fs_bem::wall_window, a staircase of cut cells at 4, 8 and 16
+# axial cells, extrapolated at the order the three rungs show: 1.61; rungs 8, 16 and 32 give 52.567 mm at order 1.62, too costly for
+# a render). That mass, 52.56 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law.
 # The windway HEIGHT is not published for this alto. The recipe uses 1.8 mm / 1.7 = 1.06 mm (the opening height of the Berlin Bressan alto e
 # divided by the opening-to-exit area ratio of Bouterse's copy), with the bounds 0.5 to 1.8 mm in unknowns.tsv; the flue width is the window width.
 # The viscous windway law uses that exit height over the 61.5 mm windway length (an upper bound on the resistance of a tapering windway). The jet
@@ -28,8 +37,12 @@
 # b1 (0 1 2 3 . 5 6). The gesture of the held notes is 50 ms attack, hold, 10.5 ms release.
 # Unknown or authored: the windway height and shape, labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), mouth loss (0.02), jet
 # displacement gain (90, as in the flue gates), hole undercutting, hole 7, the thumb-hole venting that gives the second and third registers (not
-# modelled, so only fingerings of the first register are rendered), dry air at 20 C. The binary must contain the jet-island phase fix (fs-couple
-# 1718d79fb or later).
+# modelled, so only fingerings of the first register are rendered), hole 7's position, the labium edge height. The binary must contain the
+# jet-island phase fix (fs-couple 1718d79fb or later) and the computed window (the commit that adds this row).
+# Gas: the woodwind breath law, air saturated with water at 27 C as the mean temperature of the bore (Nederveen 1969 sec. 12, Fletcher and
+# Rossing sec. 8.1, Coltman 1966; the clarinet recipes' gas), because these data were played by mouth. Not in it: the CO2 of the breath
+# (u-breath-co2: 4 % in place of oxygen would flatten every note by about 18 cents) and the temperature gradient along the bore; Bouterse's
+# rooms, 15 to 27 C, bracket the temperature (u-temperature: about 40 cents). Bouterse puts this alto at about a1 = 409 Hz.
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss
 # cell needs four transit samples and under 0.5 rad at its band edge (3 kHz); loss only on bore sections of 17 mm or more; compact baffled radiation
