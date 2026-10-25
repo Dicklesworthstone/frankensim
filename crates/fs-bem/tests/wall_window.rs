@@ -1,10 +1,11 @@
 //! Wall-window acoustic mass: the ladder, the inner end correction against
-//! Dalmont's law, far-boundary and port invariance, an independent
-//! implementation, worker determinism and the refusals.
+//! Dalmont's law, far-boundary and port invariance, independent
+//! implementations of the prism and of the staircase cuts, the bounds that
+//! radial cuts put on parallel cheeks, worker determinism and the refusals.
 
 use fs_bem::wall_window::{
-    WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowOutside, WindowUpstream,
-    wall_window_ladder, wall_window_mass,
+    WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowCheeks, WindowOutside,
+    WindowRamp, WindowUpstream, wall_window_ladder, wall_window_mass,
 };
 
 /// The Clare D tin whistle's window (Davies 2006 rows of the instrument
@@ -16,6 +17,8 @@ fn clare_d() -> WallWindow {
         wall_thickness: 0.0024,
         arc_width: 0.008,
         axial_length: 0.0053,
+        cheeks: WindowCheeks::Radial,
+        ramp: None,
         upstream: WindowUpstream::ClosedEnd { distance: 0.01065 },
         outside: WindowOutside::Free,
     }
@@ -173,6 +176,8 @@ fn inner_end_correction_matches_dalmont_within_shape_tolerance() {
             wall_thickness: t,
             arc_width: side,
             axial_length: side,
+            cheeks: WindowCheeks::Radial,
+            ramp: None,
             upstream: WindowUpstream::Port { distance: 0.04 },
             outside: WindowOutside::Release,
         };
@@ -276,12 +281,14 @@ fn two_rung_ladder_reaches_the_three_rung_limit() {
         (16, 24, 16)
     );
     let ladder = wall_window_ladder(&window, &options).expect("ladder");
+    assert_eq!(ladder.rungs.len(), 2);
+    assert_eq!(ladder.order.to_bits(), (4.0f64 / 3.0).to_bits());
     let area = core::f64::consts::PI * window.bore_radius * window.bore_radius;
     let length = ladder.mass_per_density * area;
     eprintln!(
         "rungs {:.6} {:.6} mm, extrapolated {:.6} mm",
-        ladder.coarse.bore_length * 1e3,
-        ladder.fine.bore_length * 1e3,
+        ladder.rungs[0].bore_length * 1e3,
+        ladder.rungs[1].bore_length * 1e3,
         length * 1e3
     );
     // The ignored clare_d_window_ladder extrapolates 16x24, 32x48 and 64x96
@@ -386,4 +393,401 @@ fn refusals() {
         ),
         Err(WallWindowError::Budget { .. })
     ));
+}
+
+/// The Clare D window with parallel cheeks 8 mm apart: they meet the bore on
+/// the arc `2 a asin(4 mm / a)`.
+fn clare_d_parallel() -> WallWindow {
+    let a = 0.0061;
+    WallWindow {
+        arc_width: 2.0 * a * (0.004f64 / a).asin(),
+        cheeks: WindowCheeks::Parallel,
+        ..clare_d()
+    }
+}
+
+/// The Clare D labium as a 25 degree ramp rising from `edge_height` above
+/// the bore.
+fn wedge(edge_height: f64) -> Option<WindowRamp> {
+    Some(WindowRamp {
+        edge_height,
+        angle: 25f64.to_radians(),
+    })
+}
+
+#[test]
+fn a_ramp_whose_edge_is_the_outer_surface_is_the_prism() {
+    // The staircase path on the cut the prism path solves: its conjugate
+    // gradients must land on the prism's LU solution.
+    for options in [rung(8, 12, 8), rung(16, 24, 16)] {
+        let prism = solve(&clare_d(), &options);
+        let stair = solve(
+            &WallWindow {
+                ramp: wedge(0.0024),
+                ..clare_d()
+            },
+            &options,
+        );
+        eprintln!(
+            "prism {:.12} mm, staircase {:.12} mm after {} iterations",
+            prism.bore_length * 1e3,
+            stair.bore_length * 1e3,
+            stair.iterations
+        );
+        assert_eq!(prism.iterations, 0);
+        assert!(stair.iterations > 0);
+        assert!(
+            (stair.bore_length / prism.bore_length - 1.0).abs() < 1e-10,
+            "staircase {} vs prism {}",
+            stair.bore_length,
+            prism.bore_length
+        );
+    }
+}
+
+#[test]
+fn staircases_match_the_independent_dense_prototype() {
+    // A numpy implementation written first, port at 40 mm and exterior at
+    // 60 mm, solved by its own conjugate gradients to 1e-13: the cut cells,
+    // the face potentials, and an exterior on its own grid that ends every
+    // open part of the outer face on a cell edge. Spreading the outer face
+    // over whole cells instead, it reproduces its direct solve of the cut
+    // cells to ten digits. The release face, which has no exterior, comes
+    // from that direct solve.
+    let ramp = WallWindow {
+        ramp: wedge(0.0005),
+        ..clare_d()
+    };
+    let parallel = clare_d_parallel();
+    let both = WallWindow {
+        ramp: wedge(0.0005),
+        ..clare_d_parallel()
+    };
+    let release = WallWindow {
+        outside: WindowOutside::Release,
+        ..clare_d_parallel()
+    };
+    for (window, options, expected_mm) in [
+        (&ramp, rung(8, 12, 8), 15.1023968854),
+        (&ramp, rung(16, 24, 16), 14.7738166561),
+        (&parallel, rung(8, 13, 8), 18.6302048855),
+        (&parallel, rung(16, 26, 16), 18.1511039750),
+        (&both, rung(8, 13, 8), 17.0859619497),
+        (&both, rung(16, 26, 16), 16.5541238992),
+        (&release, rung(8, 13, 8), 11.7654317712),
+    ] {
+        let options = WallWindowOptions {
+            port_radii: 0.04 / 0.0061,
+            exterior_radii: 0.06 / 0.0061,
+            ..options
+        };
+        let got = solve(window, &options).bore_length * 1e3;
+        assert!(
+            (got - expected_mm).abs() <= 1e-8 * expected_mm,
+            "Rust {got:.10} mm vs prototype {expected_mm:.10} mm"
+        );
+    }
+}
+
+#[test]
+fn a_grid_aligned_ramp_is_the_whole_cell_staircase() {
+    // Edge at half a layer and a slope of two axial cells per layer put the
+    // ramp on cell boundaries at every layer's mid-radius, so no cell is
+    // cut. The numpy staircase of whole cells (open where the cell centre
+    // lies inside the cut), checked against its dense twin, gives this.
+    let (layer, cell) = (0.0024 / 8.0, 0.0053 / 8.0);
+    let window = WallWindow {
+        ramp: Some(WindowRamp {
+            edge_height: 0.5 * layer,
+            angle: (layer / (2.0 * cell)).atan(),
+        }),
+        ..clare_d()
+    };
+    let options = WallWindowOptions {
+        port_radii: 0.04 / 0.0061,
+        exterior_radii: 0.06 / 0.0061,
+        ..rung(8, 12, 8)
+    };
+    let got = solve(&window, &options).bore_length * 1e3;
+    let expected_mm = 14.6543202168;
+    assert!(
+        (got - expected_mm).abs() <= 1e-8 * expected_mm,
+        "Rust {got:.10} mm vs whole-cell staircase {expected_mm:.10} mm"
+    );
+}
+
+#[test]
+fn parallel_cheeks_lie_between_the_radial_cuts_that_bound_them() {
+    // On one grid, a radial cut over the window's arc contains the
+    // parallel-cheeked cut, and one over the whole cells inside the cheeks'
+    // angle at the outer surface, where it is narrowest, is contained in it,
+    // so by Rayleigh's monotonicity their masses bracket it.
+    let window = clare_d_parallel();
+    let options = rung(8, 13, 8);
+    let parallel = solve(&window, &options);
+    let dth = 2.0 * core::f64::consts::PI / parallel.theta_cells as f64;
+    let (a, t) = (window.bore_radius, window.wall_thickness);
+    let half_chord = a * (6.5 * dth).sin();
+    let narrowest = (2.0 * (half_chord / (a + t)).asin() / dth).floor() as usize;
+    let radial = |cells: usize| {
+        solve(
+            &WallWindow {
+                arc_width: cells as f64 * dth * a,
+                ..clare_d()
+            },
+            &WallWindowOptions {
+                arc_cells: cells,
+                ..options
+            },
+        )
+    };
+    let containing = radial(13);
+    let contained = radial(narrowest);
+    eprintln!(
+        "radial over 13 cells {:.6} mm < parallel {:.6} mm < radial over {narrowest} cells {:.6} mm",
+        containing.bore_length * 1e3,
+        parallel.bore_length * 1e3,
+        contained.bore_length * 1e3
+    );
+    assert!(narrowest < 13);
+    assert_eq!(containing.theta_cells, parallel.theta_cells);
+    assert_eq!(contained.theta_cells, parallel.theta_cells);
+    assert!(containing.bore_length < parallel.bore_length);
+    assert!(parallel.bore_length < contained.bore_length);
+}
+
+#[test]
+fn a_staircase_ladder_reports_the_order_it_observes() {
+    let window = WallWindow {
+        ramp: wedge(0.0005),
+        ..clare_d_parallel()
+    };
+    let options = WallWindowOptions {
+        workers: 4,
+        ..WallWindowOptions::rung(&window, 8)
+    };
+    let ladder = wall_window_ladder(&window, &options).expect("staircase ladder");
+    let area = core::f64::consts::PI * window.bore_radius * window.bore_radius;
+    eprintln!(
+        "rungs {:?} mm, observed order {:.3}, extrapolated {:.6} mm",
+        ladder
+            .rungs
+            .iter()
+            .map(|r| r.bore_length * 1e3)
+            .collect::<Vec<_>>(),
+        ladder.order,
+        ladder.mass_per_density * area * 1e3
+    );
+    assert_eq!(ladder.rungs.len(), 3);
+    assert!((0.5..=2.0).contains(&ladder.order));
+    assert!(ladder.mass_per_density < ladder.rungs[2].mass_per_density);
+}
+
+#[test]
+fn staircase_workers_do_not_change_a_bit() {
+    let window = WallWindow {
+        ramp: wedge(0.0005),
+        ..clare_d_parallel()
+    };
+    let one = wall_window_mass(&window, &rung(8, 13, 8)).expect("one worker");
+    let three = wall_window_mass(
+        &window,
+        &WallWindowOptions {
+            workers: 3,
+            ..rung(8, 13, 8)
+        },
+    )
+    .expect("three workers");
+    assert_eq!(one, three);
+}
+
+#[test]
+fn staircase_refusals() {
+    let ok = WallWindow {
+        ramp: wedge(0.0005),
+        ..clare_d_parallel()
+    };
+    let options = rung(4, 7, 4);
+    assert!(wall_window_mass(&ok, &options).is_ok());
+    let invalid = |window: &WallWindow, options: &WallWindowOptions| {
+        matches!(
+            wall_window_mass(window, options),
+            Err(WallWindowError::Invalid(_))
+        )
+    };
+    for ramp in [
+        wedge(-1e-4),
+        wedge(0.0025),
+        wedge(f64::NAN),
+        Some(WindowRamp {
+            edge_height: 0.0005,
+            angle: 0.0,
+        }),
+        Some(WindowRamp {
+            edge_height: 0.0005,
+            angle: 0.5 * core::f64::consts::PI,
+        }),
+    ] {
+        assert!(invalid(&WallWindow { ramp, ..ok }, &options), "{ramp:?}");
+    }
+    assert!(invalid(
+        &WallWindow {
+            arc_width: core::f64::consts::PI * ok.bore_radius,
+            ..ok
+        },
+        &options
+    ));
+    assert!(invalid(
+        &ok,
+        &WallWindowOptions {
+            tolerance: 0.0,
+            ..options
+        }
+    ));
+    assert!(matches!(
+        wall_window_mass(
+            &ok,
+            &WallWindowOptions {
+                max_iterations: 3,
+                ..options
+            }
+        ),
+        Err(WallWindowError::Budget {
+            what: "conjugate-gradient iterations",
+            ..
+        })
+    ));
+    assert!(matches!(
+        wall_window_mass(
+            &ok,
+            &WallWindowOptions {
+                max_unknowns: 10,
+                ..options
+            }
+        ),
+        Err(WallWindowError::Budget {
+            what: "dense face unknowns",
+            ..
+        })
+    ));
+    assert!(matches!(
+        wall_window_mass(
+            &WallWindow {
+                ramp: Some(WindowRamp {
+                    edge_height: 0.0,
+                    angle: 1e-12,
+                }),
+                ..ok
+            },
+            &options
+        ),
+        Err(WallWindowError::Budget {
+            what: "axial cells over the outer face",
+            ..
+        })
+    ));
+    // A ramp so shallow that it runs past the exterior.
+    assert!(invalid(
+        &WallWindow {
+            ramp: Some(WindowRamp {
+                edge_height: 0.0,
+                angle: 1e-3,
+            }),
+            ..ok
+        },
+        &WallWindowOptions {
+            max_line_cells: 1 << 20,
+            ..options
+        }
+    ));
+}
+
+/// The alto recorder's window (Bressan alto d-, Bouterse 2010 rows of the
+/// instrument ledger): bore radius 9.8317 mm and wall 6.575 mm at the window,
+/// parallel cheeks 12 mm apart, window 4.6 mm long, labium edge 0.51 mm above
+/// the bore on a ramp rising 6.065 mm over 18.0 mm, flush closed end.
+fn bressan_alto() -> WallWindow {
+    let a = 0.0098317;
+    WallWindow {
+        bore_radius: a,
+        wall_thickness: 0.006575,
+        arc_width: 2.0 * a * (0.006f64 / a).asin(),
+        axial_length: 0.0046,
+        cheeks: WindowCheeks::Parallel,
+        ramp: Some(WindowRamp {
+            edge_height: 0.00051,
+            angle: (0.006065f64 / 0.018).atan(),
+        }),
+        upstream: WindowUpstream::ClosedEnd { distance: 0.0023 },
+        outside: WindowOutside::Free,
+    }
+}
+
+/// The alto recorder's window with its labium edge at another height: the ramp
+/// still meets the outer surface 18.0 mm beyond the window, as measured.
+fn recorder_edge(edge_height: f64) -> WallWindow {
+    let window = bressan_alto();
+    WallWindow {
+        ramp: Some(WindowRamp {
+            edge_height,
+            angle: ((window.wall_thickness - edge_height) / 0.018).atan(),
+        }),
+        ..window
+    }
+}
+
+#[test]
+#[ignore = "staircase ladders of the whistle and recorder windows to their finest rungs: a few minutes"]
+fn staircase_ladders_by_rung() {
+    let cases = [
+        ("whistle parallel cheeks", clare_d_parallel(), 8, 4),
+        (
+            "whistle parallel cheeks, 0.5 mm wedge",
+            WallWindow {
+                ramp: wedge(0.0005),
+                ..clare_d_parallel()
+            },
+            8,
+            4,
+        ),
+        ("recorder", bressan_alto(), 4, 4),
+        // The ends of the edge height's bracket (u-windway-height).
+        ("recorder, edge at the bore", recorder_edge(0.0), 4, 4),
+        ("recorder, edge 1.25 mm", recorder_edge(0.00125), 4, 4),
+    ];
+    for (name, window, coarse, count) in cases {
+        let base = WallWindowOptions::rung(&window, coarse);
+        let mut lengths = Vec::new();
+        for k in 0..count {
+            let options = WallWindowOptions {
+                axial_cells: base.axial_cells << k,
+                arc_cells: base.arc_cells << k,
+                wall_layers: base.wall_layers << k,
+                workers: 8,
+                max_unknowns: 8192,
+                ..base
+            };
+            let mass = solve(&window, &options);
+            lengths.push(mass.bore_length);
+            eprintln!(
+                "{name}: rung {}/{}/{}: {:.6} mm, {} unknowns, {} iterations, outer {:.4} mm long",
+                options.axial_cells,
+                options.arc_cells,
+                options.wall_layers,
+                mass.bore_length * 1e3,
+                mass.unknowns,
+                mass.iterations,
+                mass.outer_axial_length * 1e3
+            );
+            if let [.., l0, l1, l2] = lengths[..] {
+                let (d1, d2) = (l0 - l1, l1 - l2);
+                eprintln!(
+                    "{name}: order {:.3}, extrapolated {:.6} mm",
+                    (d1 / d2).log2(),
+                    (l2 - d2 / (d1 / d2 - 1.0)) * 1e3
+                );
+            }
+        }
+        assert!(lengths.windows(2).all(|pair| pair[1] < pair[0]), "{name}");
+    }
 }
