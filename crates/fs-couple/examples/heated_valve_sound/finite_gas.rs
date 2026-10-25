@@ -266,21 +266,28 @@ impl History {
     }
 }
 
-pub(super) struct Evolution<'t> {
+pub(super) struct Evolution<'m, 't> {
     pub thermal: DepositionSimulation<'t>,
     pub gas: IsochoricGasParcel,
     pub history: History,
+    pub states: Vec<fs_couple::solid_enthalpy::SolidEnthalpyState<'m>>,
 }
 
-pub(super) fn advance<'t>(
-    source: &SolidEnthalpy<'_>,
+pub(super) fn advance<'m, 't>(
+    source: &SolidEnthalpy<'m>,
     mut thermal: DepositionSimulation<'t>,
     duration_s: f64,
     options: &Options,
     transport: &Transport,
     material_transport: &PreparedMaterialNetwork<'_, '_>,
+    retain_states: bool,
     cx: &Cx<'_>,
-) -> Result<Evolution<'t>> {
+) -> Result<Evolution<'m, 't>> {
+    let mut states = if retain_states {
+        vec![source.resolve(&thermal, cx)?]
+    } else {
+        Vec::new()
+    };
     let mut gas = options.gas.clone();
     let initial_solid: BTreeMap<_, _> = thermal
         .cells()
@@ -355,7 +362,7 @@ pub(super) fn advance<'t>(
             &vec![0.0; thermal.cells().len() + 1],
             cx,
         )?;
-        let (next_thermal, next_gas, _, report) = candidate.into_parts();
+        let (next_thermal, next_gas, state, report) = candidate.into_parts();
         external += report.external_thermal_heat_j;
         exchange += report.solid_to_gas_heat_j;
         let solid = next_thermal
@@ -391,11 +398,15 @@ pub(super) fn advance<'t>(
         ]);
         thermal = next_thermal;
         gas = next_gas;
+        if retain_states {
+            states.push(state);
+        }
     }
     Ok(Evolution {
         thermal,
         gas,
         history,
+        states,
     })
 }
 
@@ -516,6 +527,148 @@ mod tests {
             b.gas_history.unwrap().rows,
             replay.gas_history.unwrap().rows
         );
+    }
+
+    #[test]
+    fn retained_inertial_motion_follows_the_same_heat_clock_and_source_stiffness() {
+        let card = demo(1.0).unwrap();
+        let gas = options(0.0004);
+        let controls = inertial::Options {
+            maximum_step_s: 0.0003,
+            mass_damping_per_s: 20.0,
+        };
+        // A finite heating pulse excites inertia; the manufactured Young's
+        // modulus and expansion both change with the actual spatial field.
+        let result = synthesize_with_options(
+            &card,
+            5000.0,
+            0.002,
+            Some(&gas),
+            Some(controls),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        let history = result.inertial_history.as_ref().unwrap();
+        let heat = result.gas_history.as_ref().unwrap();
+        assert_eq!(history.frames.len(), gas.steps + 1);
+        assert_eq!(history.frames.len(), heat.rows.len());
+        assert!(
+            history.frames[0]
+                .motion
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|v| *v == 0.0)
+        );
+        let mesh = mesh();
+        for (index, (frame, row)) in history.frames.iter().zip(&heat.rows).enumerate() {
+            assert_eq!(frame.time_s.to_bits(), row[0].to_bits());
+            assert_eq!(frame.step, index);
+            assert!(frame.kinetic_j >= 0.0 && frame.elastic_j >= 0.0);
+            assert_eq!(frame.work_j[0], 0.0);
+            assert!(frame.work_j[3] >= 0.0);
+            assert!(frame.residual_j.abs() < 2e-9);
+            for &dof in &mesh.fixed {
+                for field in &frame.motion {
+                    assert_eq!(field[dof / 3][dof % 3], 0.0);
+                }
+            }
+        }
+        // Independently check the average-acceleration kinematic identities
+        // across each retained endpoint; resetting to equilibria violates them.
+        for pair in history.frames.windows(2) {
+            let h = pair[1].time_s - pair[0].time_s;
+            for node in 0..mesh.nodes.len() {
+                for axis in 0..3 {
+                    let [old_u, old_v, old_a] =
+                        core::array::from_fn(|i| pair[0].motion[i][node][axis]);
+                    let [new_u, new_v, new_a] =
+                        core::array::from_fn(|i| pair[1].motion[i][node][axis]);
+                    assert!((new_u - old_u - 0.5 * h * (old_v + new_v)).abs() < 1e-12);
+                    assert!((new_v - old_v - 0.5 * h * (old_a + new_a)).abs() < 1e-10);
+                }
+            }
+        }
+        let end = history.frames.last().unwrap();
+        assert!(end.kinetic_j > 0.0);
+        assert!(end.work_j[1] > 0.0);
+        assert!(end.work_j[2].abs() > 1e-14);
+        assert!(end.work_j[3] > 0.0);
+        let displacement = end.motion[0]
+            .iter()
+            .map(|u| u[0].hypot(u[1]).hypot(u[2]))
+            .fold(0.0, f64::max);
+        assert_ne!(displacement, result.displacement_m);
+        let replay = synthesize_with_options(
+            &card,
+            5000.0,
+            0.002,
+            Some(&gas),
+            Some(controls),
+            &CancelGate::new(),
+        )
+        .unwrap();
+        assert_eq!(history.frames, replay.inertial_history.unwrap().frames);
+        assert_eq!(heat.rows, replay.gas_history.unwrap().rows);
+        assert_eq!(result.hot, replay.hot);
+    }
+
+    #[test]
+    fn inertial_controls_refuse_unadmitted_clocks_and_cancelled_runs() {
+        let card = demo(1.0).unwrap();
+        let gas = options(0.0004);
+        let controls = inertial::Options {
+            maximum_step_s: 0.0001,
+            mass_damping_per_s: 0.0,
+        };
+        assert!(
+            synthesize_with_options(
+                &card,
+                5000.0,
+                0.002,
+                Some(&gas),
+                Some(controls),
+                &CancelGate::new()
+            )
+            .is_err()
+        );
+        assert!(
+            synthesize_with_options(
+                &card,
+                5000.0,
+                0.0001,
+                None,
+                Some(controls),
+                &CancelGate::new()
+            )
+            .is_err()
+        );
+        let gate = CancelGate::new();
+        gate.request();
+        assert!(
+            synthesize_with_options(&card, 5000.0, 0.0001, Some(&gas), Some(controls), &gate)
+                .is_err()
+        );
+        for words in [
+            vec!["--inertial-history", "0", "0"],
+            vec!["--inertial-history", "0.001", "-1"],
+            vec!["--inertial-history", "NaN", "0"],
+            vec![
+                "--inertial-history",
+                "0.001",
+                "0",
+                "--inertial-history",
+                "0.001",
+                "0",
+            ],
+        ] {
+            assert!(
+                inertial::Options::extract(
+                    &words.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

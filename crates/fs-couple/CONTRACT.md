@@ -6130,3 +6130,21 @@ convergence or empirical material calibration. Five focused G0/G3 regressions
 in `tests/tensor_solid.rs` exercise off-diagonal inertia and analytic force work,
 Tet4/Tet10 shear/mass, Maxwell prehistory, regional loss attribution, constrained
 nonorthogonal work maps, dependent-basis refusal and transactional failure.
+
+## Retained inertial motion during native finite-gas heating
+
+`heated_valve_sound --inertial-history MAX_STEP_S MASS_DAMPING_PER_S` retains
+each accepted finite-gas/source state and advances one original sparse Newmark
+trajectory from stress-free rest on those exact times. Nodal displacement,
+velocity and acceleration persist while source stiffness and expansion refresh
+at fixed reference mass, mesh and supports. `PREFIX.motion.csv` records actual
+nodal motion and global kinetic/shifted elastic energy, signed external,
+expansion and stiffness work, damping and cumulative mechanical residual.
+
+The explicit step ceiling is an admission limit, not a temporal-error
+certificate. This is prescribed one-way thermal loading: parameter work and
+damping are not silently exchanged with caloric storage. Pressure CSV/WAV retain
+the existing frozen-state acoustic experiments. All mechanical admission and
+sound calculations precede output creation. Focused native tests check the
+retained Newmark kinematic identities, shared heat/motion clock, actual inertia,
+source-stiffness work, energy balance, replay and refused/cancelled inputs.

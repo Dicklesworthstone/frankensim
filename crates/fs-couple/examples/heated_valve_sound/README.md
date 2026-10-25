@@ -157,6 +157,57 @@ it is not a closed acoustic chamber geometry or a pressure load on the solid.
 Gas mass/composition/volume and reference solid mass stay fixed. Moving surfaces,
 gas flow and pressure-volume work need their own closures.
 
+## Retained inertial motion during heating
+
+The finite-gas mode can also advance the solid's actual displacement, velocity
+and acceleration as the spatial temperature field changes. Add:
+
+```text
+--inertial-history MAX_STEP_S MASS_DAMPING_PER_S
+```
+
+`MAX_STEP_S` is a finite positive ceiling on every thermal/mechanical interval,
+in seconds. `MASS_DAMPING_PER_S` is an explicitly authored nonnegative
+mass-proportional damping coefficient, in inverse seconds. The option requires
+`--finite-gas`. Choose `HEAT_SECONDS / STEPS <= MAX_STEP_S`; a larger interval
+refuses and asks for more finite-gas steps or a shorter heating duration. The
+ceiling is an admission control, not a temporal-error certificate: resolve the
+fastest inertial behavior of interest and check timestep refinement.
+
+For example, a short manufactured heating pulse can use `POWER_W=5000`,
+`HEAT_SECONDS=0.002`, eight finite-gas steps, and:
+
+```text
+--inertial-history 0.0003 20
+```
+
+The original thermal solve first retains each accepted source state. The
+existing sparse Newmark owner then advances one trajectory from stress-free
+rest on those **same physical endpoint times**, using each cell's refreshed
+stiffness and thermal strain. Displacement, velocity and acceleration continue
+through the whole trajectory; they are not reset to successive equilibria.
+The reference mesh, solid mass and homogeneous clamped supports stay fixed.
+Stiffness-proportional damping is zero because the changing-stiffness owner
+admits mass damping only. The acoustic loss factor is not copied into this
+mechanical history.
+
+The additional `OUTPUT_PREFIX.motion.csv` contains a row for every node at
+every accepted thermal time, including the initial state. Columns report
+reference coordinates; displacement in metres; velocity in metres/second;
+acceleration in metres/second²; kinetic and shifted elastic energy; cumulative
+external, thermal-expansion and stiffness work; damping loss; and the cumulative
+mechanical balance residual, all energies in joules. Global energy accounts are
+repeated on each node row and must not be summed over nodes.
+
+This is **prescribed one-way thermal loading**. Signed expansion/stiffness work
+is accounted by the native mechanical owner, but is not debited from caloric
+storage. Mechanical damping is not silently credited as heat. Reciprocal
+thermoelastic heat needs an admitted closure. The existing pressure CSV and WAV
+remain the two frozen-state acoustic experiments; this option does not claim
+that a live vibrating modal state has been transferred into those recordings.
+All thermal and mechanical admission and sound calculations finish before any
+output file is created, and all output paths must be new.
+
 ## Physical calculation
 
 The declared specimen is a 10 × 12 × 4 mm slab, with 27 reference nodes and
@@ -224,3 +275,8 @@ temperature dependence while retaining its initial value. It checks unchanged
 cold pressure, changed heated deformation/frequency/pressure, conserved combined
 storage and deterministic replay. The library also covers heterogeneous original
 material cards against independently written nonlinear cell/gas energy equations.
+
+The inertial regressions exercise a finite heating pulse with changing source
+stiffness, retained Newmark kinematics, identical thermal/mechanical clocks,
+zero supports, explicit work and energy balance, actual inertial displacement,
+deterministic replay, and timestep/control/cancellation refusal.

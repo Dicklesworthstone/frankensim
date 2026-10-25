@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 
 #[path = "heated_valve_sound/finite_gas.rs"]
 mod finite_gas;
+#[path = "heated_valve_sound/inertial.rs"]
+mod inertial;
 #[allow(dead_code)]
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
@@ -205,6 +207,7 @@ struct Comparison {
     cold_identity: ContentHash,
     hot_identity: ContentHash,
     gas_history: Option<finite_gas::History>,
+    inertial_history: Option<inertial::History>,
 }
 
 fn synthesize(
@@ -223,6 +226,17 @@ fn synthesize_with_gas(
     reservoir: Option<&finite_gas::Options>,
     gate: &CancelGate,
 ) -> Result<Comparison> {
+    synthesize_with_options(card, power_w, duration_s, reservoir, None, gate)
+}
+
+fn synthesize_with_options(
+    card: &MaterialCard,
+    power_w: f64,
+    duration_s: f64,
+    reservoir: Option<&finite_gas::Options>,
+    inertial: Option<inertial::Options>,
+    gate: &CancelGate,
+) -> Result<Comparison> {
     if !power_w.is_finite()
         || power_w < 0.0
         || !duration_s.is_finite()
@@ -232,6 +246,10 @@ fn synthesize_with_gas(
         return Err(
             "finite nonnegative heat power and duration in (0,3600] seconds required".into(),
         );
+    }
+    if let Some(options) = inertial {
+        let gas = reservoir.ok_or("--inertial-history requires --finite-gas")?;
+        options.admit_interval(duration_s / gas.steps as f64)?;
     }
     ArenaPool::new(ArenaConfig::default()).scope(|arena| -> Result<_> {
         let cx = Cx::new(
@@ -419,7 +437,7 @@ fn synthesize_with_gas(
         let cold = source
             .resolve(&thermal, &cx)?
             .reduce_pressure_valve(&reduction, &cx)?;
-        let (heated_thermal, heated_valve, heat, gas_result) =
+        let (heated_thermal, heated_valve, heat, gas_result, inertial_history) =
             if let (Some(options), Some(transport)) = (reservoir, transport.as_ref()) {
                 let conductivity = PropertyKey::new(
                     "thermal_conductivity",
@@ -451,8 +469,20 @@ fn synthesize_with_gas(
                 };
                 let prepared = network.prepare(&thermal, || cx.checkpoint().is_err())?;
                 let evolved = finite_gas::advance(
-                    &source, thermal, duration_s, options, transport, &prepared, &cx,
+                    &source,
+                    thermal,
+                    duration_s,
+                    options,
+                    transport,
+                    &prepared,
+                    inertial.is_some(),
+                    &cx,
                 )?;
+                let motion = inertial
+                    .map(|controls| {
+                        inertial::evolve(&source, &mesh, &evolved.states, controls, &cx)
+                    })
+                    .transpose()?;
                 let valve = source
                     .resolve(&evolved.thermal, &cx)?
                     .reduce_pressure_valve(&reduction, &cx)?;
@@ -462,6 +492,7 @@ fn synthesize_with_gas(
                     valve,
                     heat,
                     Some((evolved.gas, evolved.history)),
+                    motion,
                 )
             } else {
                 let heated = source
@@ -475,6 +506,7 @@ fn synthesize_with_gas(
                         audit.stored_energy_change_j,
                         audit.residual_j,
                     ],
+                    None,
                     None,
                 )
             };
@@ -547,6 +579,7 @@ fn synthesize_with_gas(
             cold_identity: cold.valve().identity(),
             hot_identity: hot.valve().identity(),
             gas_history: gas_result.map(|(_, history)| history),
+            inertial_history,
         })
     })
 }
@@ -648,6 +681,7 @@ fn demo_with_conductivity(
 }
 
 fn run(args: &[String]) -> Result<()> {
+    let (args, inertial_options) = inertial::Options::extract(args)?;
     let requested_gas = args.iter().any(|word| word.starts_with("--gas-"));
     let mut remaining = Vec::new();
     let mut demo_conductivity = None;
@@ -675,10 +709,13 @@ fn run(args: &[String]) -> Result<()> {
         return Err("gas source declarations require --finite-gas".into());
     }
     if args.len() != 6 {
-        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen] [--demo-conductivity K_AT_280 K_AT_300 K_AT_400]".into());
+        return Err("usage: heated_valve_sound --demo CP_SCALE POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX | --pack MATERIAL.pack POWER_W HEAT_SECONDS FULL_SCALE_PA OUTPUT_PREFIX [--finite-gas VOLUME_M3 GAS_DISTANCE_M STEPS --gas-record FILE --gas-component SPECIES.pack NASA9.pack TRANSPORT.pack --gas-water none --gas-phase frozen] [--demo-conductivity K_AT_280 K_AT_300 K_AT_400] [--inertial-history MAX_STEP_S MASS_DAMPING_PER_S]".into());
     }
     if demo_conductivity.is_some() && (args[0] != "--demo" || gas_options.is_none()) {
         return Err("--demo-conductivity requires --demo and --finite-gas".into());
+    }
+    if inertial_options.is_some() && gas_options.is_none() {
+        return Err("--inertial-history requires --finite-gas".into());
     }
     let card = match args[0].as_str() {
         "--demo" => match demo_conductivity {
@@ -704,11 +741,12 @@ fn run(args: &[String]) -> Result<()> {
         return Err("positive finite PCM full scale in pascals required".into());
     }
     let result = match &gas_options {
-        Some(options) => synthesize_with_gas(
+        Some(options) => synthesize_with_options(
             &card,
             args[2].parse()?,
             args[3].parse()?,
             Some(options),
+            inertial_options,
             &CancelGate::new(),
         )?,
         None => synthesize(
@@ -728,9 +766,11 @@ fn run(args: &[String]) -> Result<()> {
     let csv_path = format!("{}.csv", args[5]);
     let wav_path = format!("{}.wav", args[5]);
     let heat_path = format!("{}.thermal.csv", args[5]);
+    let motion_path = format!("{}.motion.csv", args[5]);
     if std::path::Path::new(&csv_path).exists()
         || std::path::Path::new(&wav_path).exists()
         || (result.gas_history.is_some() && std::path::Path::new(&heat_path).exists())
+        || (result.inertial_history.is_some() && std::path::Path::new(&motion_path).exists())
     {
         return Err("all output CSV and WAV paths must be new".into());
     }
@@ -753,6 +793,9 @@ fn run(args: &[String]) -> Result<()> {
         .write_all(&wav)?;
     if let Some(history) = &result.gas_history {
         history.write(&heat_path)?;
+    }
+    if let Some(history) = &result.inertial_history {
+        history.write(&motion_path)?;
     }
     eprintln!(
         "material_card={}; cold_valve={}; heated_valve={}",
