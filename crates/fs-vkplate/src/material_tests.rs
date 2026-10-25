@@ -720,10 +720,9 @@ fn g0_source_viscosity_participates_in_the_real_kit_clock_admission() {
         standard_gas(),
         &viscous_binding(&too_stiff, 0.0),
     );
-    assert!(
-        matches!(result, Err(error) if error.contains("material bending viscosity")
-        && error.contains("8x oversampling"))
-    );
+    let error = result.err().expect("excessive viscosity must refuse every supported clock");
+    assert!(error.contains("material bending viscosity"), "{error}");
+    assert!(error.contains("32x oversampling"), "{error}");
 }
 
 #[test]
