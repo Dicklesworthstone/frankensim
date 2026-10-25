@@ -856,9 +856,34 @@ fn tone_hole_shunt_with_wall(
     state: &GasState, hole_radius: f64, chimney_height: f64, hole_state: HoleState,
     omega: f64, loss: LossModel, bore_radius: f64, wall: WallModel<'_>,
 ) -> Result<C64, DuctError> {
+    tone_hole_shunt_with_wall_vortex(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+        0.0,
+        wall,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tone_hole_shunt_with_wall_vortex(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
+    open_vortex_resistance: f64,
+    wall: WallModel<'_>,
+) -> Result<C64, DuctError> {
     let sigma = hole_sigma(hole_state);
     if sigma > 0.0 && sigma < 1.0 {
-        let z_o = tone_hole_shunt_with_wall(
+        let z_o = tone_hole_shunt_with_wall_vortex(
             state,
             hole_radius,
             chimney_height,
@@ -866,9 +891,10 @@ fn tone_hole_shunt_with_wall(
             omega,
             loss,
             bore_radius,
+            open_vortex_resistance,
             wall,
         )?;
-        let z_c = tone_hole_shunt_with_wall(
+        let z_c = tone_hole_shunt_with_wall_vortex(
             state,
             hole_radius,
             chimney_height,
@@ -876,6 +902,7 @@ fn tone_hole_shunt_with_wall(
             omega,
             loss,
             bore_radius,
+            0.0,
             wall,
         )?;
         return Ok((z_o.recip().scale(sigma) + z_c.recip().scale(1.0 - sigma)).recip());
@@ -892,7 +919,7 @@ fn tone_hole_shunt_with_wall(
         );
     }
     let inner = side_hole_inner_length(hole_radius, bore_radius);
-    chimney_line_impedance_with_wall(
+    let z_open = chimney_line_impedance_with_wall(
         state,
         hole_radius,
         chimney_height + inner,
@@ -900,7 +927,8 @@ fn tone_hole_shunt_with_wall(
         loss,
         Termination::FlangedOpen,
         wall,
-    )
+    )?;
+    Ok(z_open + C64::from_re(open_vortex_resistance))
 }
 
 /// Input impedance of a one-segment chimney. WideTube is
@@ -984,6 +1012,133 @@ fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
     ]
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OpenHoleSite {
+    pub axial_position_m: f64,
+    pub acoustic_position_m: f64,
+    pub effective_radius_m: f64,
+    pub bore_radius_m: f64,
+    pub chimney_height_m: f64,
+}
+
+pub(crate) fn collect_open_hole_sites(duct: &Duct) -> (Vec<OpenHoleSite>, f64, f64) {
+    let mut sites = Vec::new();
+    let mut x = 0.0;
+    let mut x_ac = 0.0;
+    let mut last_r = duct.segments.first().map_or(0.0075, Segment::inlet_radius);
+    for s in &duct.segments {
+        if let Segment::ToneHole {
+            hole_radius,
+            chimney_height,
+            bore_radius,
+            state: hs,
+        } = *s
+        {
+            let sigma = hole_sigma(hs);
+            if sigma > 0.0 {
+                sites.push(OpenHoleSite {
+                    axial_position_m: x,
+                    acoustic_position_m: x_ac,
+                    effective_radius_m: hole_radius * det::sqrt(sigma),
+                    bore_radius_m: bore_radius,
+                    chimney_height_m: chimney_height,
+                });
+            }
+            // Benade (1960) closed-hole shunt compliance acoustic length contribution:
+            x_ac += 0.5
+                * (1.0 - sigma)
+                * chimney_height
+                * (hole_radius * hole_radius)
+                / (bore_radius * bore_radius);
+        } else {
+            let len = s.axial_length();
+            x += len;
+            x_ac += len;
+            last_r = s.outlet_radius();
+        }
+    }
+    (sites, x_ac, last_r)
+}
+
+/// Describing-function orifice separation resistance for an open side hole
+/// (Dalmont, Nederveen, Dubos, Ollivier, Meserette & te Sligte 2002,
+/// Acta Acustica united with Acustica 88:567-575, Sec. 4.1, Eq. 18-19, p. 572),
+/// evaluated at the hole's characteristic cutoff wavenumber `k_h = pi / (3 * l_h)`
+/// (`l_h = t_h * (a / b)^2`) and section fundamental frequency `omega_0 = pi * c / (3 * d_eff)`
+/// of the closed bore section `d_eff = d_next + l_load` downstream of the hole so the
+/// shunt resistance `R_v` is frequency-independent (causal `R_v * delta(t)`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_hole_vortex_resistance(
+    state: &GasState,
+    loss: LossModel,
+    hole_radius: f64,
+    bore_radius: f64,
+    chimney_height: f64,
+    sites: &[OpenHoleSite],
+    hole_index: usize,
+    total_acoustic_len_m: f64,
+    outlet_radius_m: f64,
+) -> f64 {
+    if loss != LossModel::Bessel || hole_index >= sites.len() {
+        return 0.0;
+    }
+    const P_AC_PEAK_PA: f64 = 1633.0;
+    const C_VC: f64 = 0.61;
+    let rho = state.density;
+    let c = state.sound_speed;
+    let area_h = core::f64::consts::PI * hole_radius * hole_radius;
+    let area_b = core::f64::consts::PI * bore_radius * bore_radius;
+    let zc_bore = rho * c / area_b;
+    let xi_ac = sites[hole_index].acoustic_position_m;
+    let (d_next, l_load) = if hole_index + 1 < sites.len() {
+        let x_next_ac = sites[hole_index + 1].acoustic_position_m;
+        let d = (x_next_ac - xi_ac).max(0.0);
+        let mut inv_l_par = 0.0;
+        for site_j in &sites[hole_index + 1..] {
+            let b_j = site_j.effective_radius_m;
+            let a_j = site_j.bore_radius_m;
+            let t_j = site_j.chimney_height_m
+                + side_hole_inner_length(b_j, a_j)
+                + 0.8216 * b_j;
+            let l_eq_j = (site_j.acoustic_position_m - x_next_ac).max(0.0)
+                + t_j * (bore_radius * bore_radius) / (b_j * b_j);
+            if l_eq_j > 0.0 {
+                inv_l_par += 1.0 / l_eq_j;
+            }
+        }
+        let l_par = if inv_l_par > 0.0 { 1.0 / inv_l_par } else { 0.0 };
+        (d, l_par)
+    } else {
+        let d = (total_acoustic_len_m - xi_ac).max(0.0);
+        (d, 0.8216 * outlet_radius_m)
+    };
+    let d_eff = d_next + l_load;
+    if d_eff <= 0.0 || !d_eff.is_finite() {
+        return 0.0;
+    }
+    let omega0 = core::f64::consts::PI * c / (3.0 * d_eff);
+    let z_down_abs = det::sqrt(3.0) * zc_bore;
+    let t_h = chimney_height
+        + side_hole_inner_length(hole_radius, bore_radius)
+        + 0.8216 * hole_radius;
+    let l_h = t_h * (bore_radius * bore_radius) / (hole_radius * hole_radius);
+    if l_h <= 0.0 || !l_h.is_finite() {
+        return 0.0;
+    }
+    let x_h = (core::f64::consts::PI * c / (3.0 * l_h)) * rho * t_h / area_h;
+    let denom = det::hypot(x_h * z_down_abs, zc_bore * (z_down_abs + x_h));
+    if denom <= 0.0 || !denom.is_finite() {
+        return 0.0;
+    }
+    let u_h = P_AC_PEAK_PA * z_down_abs / denom;
+    let v_ac = u_h / area_h;
+    let v_eff = (v_ac - omega0 * hole_radius).max(0.0);
+    if v_eff <= 0.0 {
+        return 0.0;
+    }
+    (4.0 / (3.0 * core::f64::consts::PI * C_VC * C_VC)) * (rho * v_eff / area_h)
+}
+
 /// Compact T-junction: series `Z_s/2`, shunt `Z_h`, series `Z_s/2`.
 ///
 /// `Z_s = −i ω ρ t_s / S` under `e^{-iωt}` with Nederveen
@@ -1001,17 +1156,68 @@ fn tone_hole_t_junction(
     extra_series_m: f64,
     wall: Option<&WallPin>,
 ) -> Result<[C64; 4], DuctError> {
-    tone_hole_t_junction_with_wall(state, hole_radius, chimney_height, hole_state,
-        omega, loss, bore_radius, extra_series_m, WallModel::from_pin(wall))
+    tone_hole_t_junction_with_wall(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+        extra_series_m,
+        WallModel::from_pin(wall),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn tone_hole_t_junction_with_wall(
-    state: &GasState, hole_radius: f64, chimney_height: f64, hole_state: HoleState,
-    omega: f64, loss: LossModel, bore_radius: f64, extra_series_m: f64, wall: WallModel<'_>,
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
+    extra_series_m: f64,
+    wall: WallModel<'_>,
 ) -> Result<[C64; 4], DuctError> {
-    let zh = tone_hole_shunt_with_wall(
-        state, hole_radius, chimney_height, hole_state, omega, loss, bore_radius, wall,
+    tone_hole_t_junction_with_wall_vortex(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+        extra_series_m,
+        0.0,
+        wall,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tone_hole_t_junction_with_wall_vortex(
+    state: &GasState,
+    hole_radius: f64,
+    chimney_height: f64,
+    hole_state: HoleState,
+    omega: f64,
+    loss: LossModel,
+    bore_radius: f64,
+    extra_series_m: f64,
+    open_vortex_resistance: f64,
+    wall: WallModel<'_>,
+) -> Result<[C64; 4], DuctError> {
+    let zh = tone_hole_shunt_with_wall_vortex(
+        state,
+        hole_radius,
+        chimney_height,
+        hole_state,
+        omega,
+        loss,
+        bore_radius,
+        open_vortex_resistance,
+        wall,
     )?;
     let shunt = [C64::ONE, C64::ZERO, zh.recip(), C64::ONE];
     let sigma = hole_sigma(hole_state);
@@ -1446,24 +1652,7 @@ fn input_impedance_legacy(
     }
     // Open-hole sites for Nederveen mutual series (near-field
     // beyond the plane-wave cells already in the chain).
-    let mut hole_sites: Vec<(f64, f64, f64)> = Vec::new();
-    let mut acc = 0.0;
-    for segment in &duct.segments {
-        if let Segment::ToneHole {
-            hole_radius,
-            bore_radius,
-            state: hole_state,
-            ..
-        } = *segment
-        {
-            let sigma = hole_sigma(hole_state);
-            if sigma > 0.0 {
-                hole_sites.push((acc, hole_radius * sigma.sqrt(), bore_radius));
-            }
-        } else {
-            acc += segment.axial_length();
-        }
-    }
+    let (hole_sites, total_acoustic_len_m, outlet_radius_m) = collect_open_hole_sites(duct);
     // Chain matrix input -> outlet.
     let mut m = [C64::ONE, C64::ZERO, C64::ZERO, C64::ONE];
     let mut min_rv = f64::INFINITY;
@@ -1492,14 +1681,36 @@ fn input_impedance_legacy(
                 min_rv = min_rv.min(rv);
             }
             let mut extra = 0.0;
+            let mut r_vortex = 0.0;
             if hole_sigma(hole_state) > 0.0 {
-                let (xi, bi, ai) = hole_sites[hole_i];
-                for &(xj, bj, _) in &hole_sites {
-                    extra += side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
+                let site = hole_sites[hole_i];
+                let (xi, bi, ai) = (
+                    site.axial_position_m,
+                    site.effective_radius_m,
+                    site.bore_radius_m,
+                );
+                for site_j in &hole_sites {
+                    extra += side_hole_mutual_length(
+                        bi,
+                        site_j.effective_radius_m,
+                        ai,
+                        (site_j.axial_position_m - xi).abs(),
+                    );
                 }
+                r_vortex = open_hole_vortex_resistance(
+                    state,
+                    loss,
+                    hole_radius,
+                    bore_radius,
+                    chimney_height,
+                    &hole_sites,
+                    hole_i,
+                    total_acoustic_len_m,
+                    outlet_radius_m,
+                );
                 hole_i += 1;
             }
-            tone_hole_t_junction(
+            tone_hole_t_junction_with_wall_vortex(
                 state,
                 hole_radius,
                 chimney_height,
@@ -1508,7 +1719,8 @@ fn input_impedance_legacy(
                 loss,
                 bore_radius,
                 extra,
-                wall,
+                r_vortex,
+                WallModel::from_pin(wall),
             )?
         } else if let Segment::Cone {
             inlet_radius,
@@ -3615,6 +3827,84 @@ mod tone_hole_tests {
         assert!(
             (z_w.impedance - z_r.impedance).abs() > 0.0,
             "a walled bore with a long hole must not reprint the rigid chain"
+        );
+    }
+
+    #[test]
+    fn dalmont_2002_register_hole_separation_resistance_damps_clarion_leak() {
+        let state = air20();
+        let a = 7.45e-3;
+        let b_reg = 1.46e-3;
+        let h_reg = 11.7e-3;
+        let b_fng = 3.5e-3;
+        let h_fng = 7.0e-3;
+        let sites = [
+            OpenHoleSite {
+                axial_position_m: 0.134,
+                acoustic_position_m: 0.134,
+                effective_radius_m: b_reg,
+                bore_radius_m: a,
+                chimney_height_m: h_reg,
+            },
+            OpenHoleSite {
+                axial_position_m: 0.289,
+                acoustic_position_m: 0.289,
+                effective_radius_m: b_fng,
+                bore_radius_m: a,
+                chimney_height_m: h_fng,
+            },
+            OpenHoleSite {
+                axial_position_m: 0.312,
+                acoustic_position_m: 0.312,
+                effective_radius_m: b_fng,
+                bore_radius_m: a,
+                chimney_height_m: h_fng,
+            },
+        ];
+        let rv_reg = open_hole_vortex_resistance(
+            &state,
+            LossModel::Bessel,
+            b_reg,
+            a,
+            h_reg,
+            &sites,
+            0,
+            0.66,
+            0.03,
+        );
+        let rv_fng = open_hole_vortex_resistance(
+            &state,
+            LossModel::Bessel,
+            b_fng,
+            a,
+            h_fng,
+            &sites,
+            1,
+            0.66,
+            0.03,
+        );
+        let rv_lossless = open_hole_vortex_resistance(
+            &state,
+            LossModel::Lossless,
+            b_reg,
+            a,
+            h_reg,
+            &sites,
+            0,
+            0.66,
+            0.03,
+        );
+        assert!(
+            (10.0e6..20.0e6).contains(&rv_reg),
+            "sharp-edged register hole must exhibit Dalmont (2002) Eq. 18-19 separation resistance (got {rv_reg})"
+        );
+        assert_eq!(
+            rv_fng, 0.0,
+            "rounded tone holes (ri/2b > 0.14) must have zero steady separation resistance"
+        );
+        assert_eq!(
+            rv_lossless, 0.0,
+            "LossModel::Lossless must disable separation resistance"
         );
     }
 }

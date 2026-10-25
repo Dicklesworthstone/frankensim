@@ -868,24 +868,7 @@ pub(crate) fn duct_chain_with_wall_and_holes(
     let mut blocks = Vec::new();
     let mut open_holes = Vec::new();
     let mut min_shear = f64::INFINITY;
-    let mut sites = Vec::new();
-    let mut x = 0.0;
-    for s in &duct.segments {
-        if let Segment::ToneHole {
-            hole_radius,
-            bore_radius,
-            state: hs,
-            ..
-        } = *s
-        {
-            let sigma = crate::hole_sigma(hs);
-            if sigma > 0.0 {
-                sites.push((x, hole_radius * sigma.sqrt(), bore_radius));
-            }
-        } else {
-            x += s.axial_length();
-        }
-    }
+    let (sites, total_acoustic_len_m, outlet_radius_m) = crate::collect_open_hole_sites(duct);
     let mut hole_index = 0;
     for (index, s) in duct.segments.iter().enumerate() {
         poll(&mut cancelled, index)?;
@@ -927,21 +910,45 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                 let block_index = blocks.len();
                 let m = if compact_corrections {
                     let mut extra = 0.0;
+                    let mut r_vortex = 0.0;
                     if sigma > 0.0 {
-                        let (xi, bi, ai) = sites[hole_index];
-                        for &(xj, bj, _) in &sites {
-                            extra += fs_phs::side_hole_mutual_length(bi, bj, ai, (xj - xi).abs());
+                        let site = sites[hole_index];
+                        let (xi, bi, ai) = (
+                            site.axial_position_m,
+                            site.effective_radius_m,
+                            site.bore_radius_m,
+                        );
+                        for site_j in &sites {
+                            extra += fs_phs::side_hole_mutual_length(
+                                bi,
+                                site_j.effective_radius_m,
+                                ai,
+                                (site_j.axial_position_m - xi).abs(),
+                            );
                         }
-                        let (open_resp, chimney_length_m) = crate::chimney_open_response_with_wall(
+                        let (mut open_resp, chimney_length_m) =
+                            crate::chimney_open_response_with_wall(
+                                state,
+                                hole_radius,
+                                chimney_height,
+                                bore_radius,
+                                omega,
+                                loss,
+                                true,
+                                wall,
+                            )?;
+                        r_vortex = crate::open_hole_vortex_resistance(
                             state,
-                            hole_radius,
-                            chimney_height,
-                            bore_radius,
-                            omega,
                             loss,
-                            true,
-                            wall,
-                        )?;
+                            hole_radius,
+                            bore_radius,
+                            chimney_height,
+                            &sites,
+                            hole_index,
+                            total_acoustic_len_m,
+                            outlet_radius_m,
+                        );
+                        open_resp.impedance = open_resp.impedance + C64::from_re(r_vortex);
                         let ts =
                             fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma
                                 + extra;
@@ -963,7 +970,7 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                         });
                         hole_index += 1;
                     }
-                    crate::tone_hole_t_junction_with_wall(
+                    crate::tone_hole_t_junction_with_wall_vortex(
                         state,
                         hole_radius,
                         chimney_height,
@@ -972,11 +979,13 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                         loss,
                         bore_radius,
                         extra,
+                        r_vortex,
                         wall,
                     )?
                 } else {
                     if sigma > 0.0 {
-                        let (xi, bi, _) = sites[hole_index];
+                        let site = sites[hole_index];
+                        let (xi, bi) = (site.axial_position_m, site.effective_radius_m);
                         let (open_resp, chimney_length_m) = crate::chimney_open_response_with_wall(
                             state,
                             hole_radius,
