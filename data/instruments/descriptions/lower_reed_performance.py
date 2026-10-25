@@ -284,15 +284,22 @@ def performance(desc, records, pressure):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
     reed = reed_record(desc, pressure)
-    ambient = " ".join(
-        need(desc, key)
-        for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
-    )
+    if "ambient.composition" in desc:
+        ambient = (
+            f"mixture {need(desc, 'ambient.temperature_k')} {need(desc, 'ambient.pressure_pa')} "
+            f"{need(desc, 'ambient.composition')}"
+        )
+    else:
+        ambient = " ".join(
+            need(desc, key)
+            for key in ("ambient.temperature_k", "ambient.pressure_pa", "ambient.relative_humidity")
+        )
+    observer_law = f"observer_law {need(desc, 'observer.law')}\n" if "observer.law" in desc else ""
     head = (
         "frankensim-reed-performance-v1\n"
         f"audio {rate} {samples} {need(desc, 'audio.full_scale_pa')}\n"
         f"ambient {ambient}\nreed {reed}\n{tongue_record(desc)}{need(desc, 'observer.record')}\n"
-        f"termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
+        f"{observer_law}termination {need(desc, 'observer.termination')}\nsegments {len(records)}\n"
     )
     return head + "\n".join(records) + f"\ncompile_limits {need(desc, 'compile_limits')}\nschedule\n" + gesture(desc, pressure)
 
