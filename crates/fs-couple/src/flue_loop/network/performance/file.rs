@@ -176,7 +176,9 @@ impl FlueFilePerformance {
     /// to the same physical receiver.
     /// Optional `mouth_radiation X_M Y_M WIDTH_CELLS CUT_UP_CELLS` after the
     /// outlet records also observes the solved outward source-mouth flow. Its
-    /// rectangular size is the actual flue width by cut-up; all apertures share
+    /// rectangular size defaults to flue width by cut-up. Preceding optional
+    /// `mouth_aperture rectangle WIDTH_M LENGTH_M` declares an independent
+    /// acoustic opening without changing jet geometry. All apertures share
     /// the declared exterior and rigid baffle. No extra source load is inferred.
     /// Immediately following it, optional `mouth_reaction compact-baffled`
     /// replaces the old mouth end correction and linear loss with the same
@@ -485,13 +487,17 @@ impl FlueFilePerformance {
             return Err(bad(rows.line, "fractional phase band must cover the receiver's declared band"));
         }
         let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
+        let aperture_size_m = read_mouth_aperture(&mut rows)?;
         let mouth_radiation = if rows.next_is("mouth_radiation") {
             let mut row = rows.row("mouth_radiation")?;
-            let input = FlueMouthRadiation { center_m: [row.scalar()?, row.scalar()?],
+            let input = FlueMouthRadiation { center_m: [row.scalar()?, row.scalar()?], aperture_size_m,
                 cells: [row.number()?, row.number()?] };
             row.end()?;
             Some(input)
         } else { None };
+        if aperture_size_m.is_some() && mouth_radiation.is_none() {
+            return Err(bad(rows.line, "mouth_aperture requires mouth_radiation"));
+        }
         let mouth_reaction = if rows.next_is("mouth_reaction") {
             let mut row = rows.row("mouth_reaction")?;
             let enabled = match row.fields.next() {
@@ -665,6 +671,23 @@ impl FlueFilePerformance {
     #[must_use] pub const fn window(&self) -> Option<&FlueWindowRecord> { self.window.as_ref() }
     /// Move the original physical pressure producer into streaming/PCM output.
     #[must_use] pub fn into_renderer(self) -> FlueOutletPerformance { self.renderer }
+}
+
+/// Network acoustic aperture record; no change to the flue source.
+pub(in crate::flue_loop) fn read_mouth_aperture(rows: &mut Rows<'_>)
+    -> Result<Option<[f64; 2]>, FlueInputError>
+{
+    if !rows.next_is("mouth_aperture") { return Ok(None); }
+    let mut row = rows.row("mouth_aperture")?;
+    if row.fields.next() != Some("rectangle") {
+        return Err(bad(row.line, "mouth_aperture requires rectangle WIDTH_M LENGTH_M"));
+    }
+    let size = [row.scalar()?, row.scalar()?];
+    if size.iter().any(|x| *x <= 0.0) {
+        return Err(bad(row.line, "mouth aperture dimensions must be positive finite"));
+    }
+    row.end()?;
+    Ok(Some(size))
 }
 
 enum WindwayInput {

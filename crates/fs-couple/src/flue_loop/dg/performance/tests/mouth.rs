@@ -126,7 +126,7 @@ fn joint_mouth_reaction_reaches_the_source_and_one_shared_physical_microphone() 
     let source = FlueDgFilePerformance::from_bytes(text.as_bytes(), 512, &gate).unwrap();
     let original = source.renderer();
     let receiver = original.baffled_receiver_config().unwrap();
-    let mouth = FlueMouthRadiation { center_m: [-0.003, 0.0], cells: [8, 8] };
+    let mouth = FlueMouthRadiation { center_m: [-0.003, 0.0], cells: [8, 8], aperture_size_m: None };
     let base = || FlueDgPerformance::with_baffled_outlet(
         replica_voice(&source), original.schedule().clone(), *original.config(), receiver,
     ).unwrap().with_mouth_radiation(mouth).unwrap();

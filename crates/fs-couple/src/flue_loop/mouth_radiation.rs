@@ -332,6 +332,7 @@ impl FlueVoice {
     pub(super) fn attach_mouth_radiation(
         &mut self,
         model: RectangularMouthLoad,
+        aperture_size_m: [f64; 2],
     ) -> Result<(), FlueError> {
         if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some()
             || self.dg().is_some_and(|duct| duct.load().radiation_record()
@@ -344,12 +345,14 @@ impl FlueVoice {
                 "physical mouth radiation replaces the legacy loss; declare mouth_loss_rel zero",
             ));
         }
-        if model.size_m != [self.geometry.flue_width_m, self.geometry.cut_up_m]
+        // The acoustic aperture is bound by the performer that owns its
+        // receiver. A lip jet can be narrower than this opening.
+        if model.size_m != aperture_size_m
             || model.time_step_s.to_bits() != self.dt.to_bits()
             || model.exterior.pressure.to_bits() != self.gas.pressure.to_bits()
         {
             return Err(invalid(
-                "mouth radiation must share actual geometry, clock and static pressure",
+                "mouth radiation must share declared aperture, clock and static pressure",
             ));
         }
         let load = MouthRadiation::new(model, self.zc)?;

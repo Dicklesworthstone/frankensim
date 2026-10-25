@@ -83,6 +83,7 @@ fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
         let mut row = rows.row("mouth_radiation")?;
         let input = FlueMouthRadiation {
             center_m: [row.scalar()?, row.scalar()?],
+            aperture_size_m: None,
             cells: [row.number()?, row.number()?],
         };
         row.end()?;

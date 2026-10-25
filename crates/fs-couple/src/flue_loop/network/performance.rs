@@ -81,15 +81,28 @@ pub struct FlueRadiationInput {
 }
 
 /// Optional physical mouth in the common stationary z=0 baffle.
-/// Its width and height are the source's flue width and cut-up, not independent
-/// acoustic dimensions. Positive outward flow is the negative of flow into the
+/// An explicit aperture can differ from the jet's width and cut-up. Positive
+/// outward flow is the negative of flow into the
 /// bore; this is an observation of the solved source, not another jet model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlueMouthRadiation {
     /// Rectangle center [m] relative to the primary outlet at the origin.
     pub center_m: [f64; 2],
-    /// Midpoint surface cells along actual flue width and cut-up.
+    /// Independent acoustic rectangle width and length [m]. Omission uses
+    /// the source's flue width and cut-up, appropriate to a rectangular window.
+    /// This changes observation and selected reaction, never jet geometry.
+    /// Only the network route supports this field; the DG route refuses `Some`.
+    pub aperture_size_m: Option<[f64; 2]>,
+    /// Midpoint surface cells along the acoustic rectangle's two dimensions.
     pub cells: [usize; 2],
+}
+
+impl FlueMouthRadiation {
+    /// Resolve the acoustic aperture independently of the source jet.
+    #[must_use]
+    pub fn size_m(&self, geometry: &crate::flue_loop::FlueGeometry) -> [f64; 2] {
+        self.aperture_size_m.unwrap_or([geometry.flue_width_m, geometry.cut_up_m])
+    }
 }
 
 struct MouthPressure {
@@ -305,7 +318,10 @@ impl FlueOutletPerformance {
             return Err(invalid("mouth observation requires a fresh performance and exactly one source mouth"));
         }
         let network = self.voice.network().expect("admitted physical flue graph");
-        let size = [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m];
+        let size = input.size_m(&self.voice.geometry);
+        if size.iter().any(|x| !x.is_finite() || *x <= 0.0) {
+            return Err(invalid("mouth aperture dimensions must be positive finite"));
+        }
         let exterior = self.receiver.exterior_gas();
         if self.voice.gas().pressure.to_bits() != exterior.pressure.to_bits() {
             return Err(invalid("mouth and receiver static pressure differ; mean interface flow is not modeled"));
@@ -362,11 +378,11 @@ impl FlueOutletPerformance {
         let mouth = self.mouth.as_ref()
             .ok_or_else(|| invalid("mouth reaction requires the actual rectangular mouth receiver"))?;
         let load = crate::flue_loop::mouth_radiation::RectangularMouthLoad::new(
-            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m], mouth.input.cells,
+            mouth.input.size_m(&self.voice.geometry), mouth.input.cells,
             *self.receiver.exterior_gas(), self.voice.sample_period_s(),
             self.config.receiver.maximum_frequency_hz, gate)
             .map_err(|e| GestureCompileError::Render(source_error(e)))?;
-        self.voice.attach_mouth_radiation(load)
+        self.voice.attach_mouth_radiation(load, mouth.input.size_m(&self.voice.geometry))
             .map_err(|e| GestureCompileError::Render(source_error(e)))?;
         Ok(self)
     }

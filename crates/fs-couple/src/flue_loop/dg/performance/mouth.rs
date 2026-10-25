@@ -38,6 +38,9 @@ impl FlueDgPerformance {
     pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
         -> Result<Self, GestureCompileError>
     {
+        if input.aperture_size_m.is_some() {
+            return Err(invalid("independent mouth aperture is supported only by the flue network"));
+        }
         if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some() {
             return Err(invalid("DG mouth observation requires one cold attachment"));
         }
@@ -101,7 +104,8 @@ impl FlueDgPerformance {
             mouth.input.cells, *source.gas_record().state(), self.voice.sample_period_s(),
             outlet.config.maximum_frequency_hz, gate,
         ).map_err(|error| GestureCompileError::Render(source_error(error)))?;
-        self.voice.attach_mouth_radiation(model)
+        self.voice.attach_mouth_radiation(model,
+            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m])
             .map_err(|error| GestureCompileError::Render(source_error(error)))?;
         Ok(self)
     }

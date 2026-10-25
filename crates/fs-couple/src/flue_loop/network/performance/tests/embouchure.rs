@@ -154,7 +154,7 @@ fn mouth_and_terminal_pressure_superpose_from_signed_physical_flows_without_chan
     let g = gas();
     let spec = source(g, -0.9);
     let cfg = config(1);
-    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4] };
+    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4], aperture_size_m: None };
     let mut original = voice(spec.clone());
     original.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
     let size = [original.geometry.flue_width_m, original.geometry.cut_up_m];
@@ -202,7 +202,7 @@ fn mouth_and_terminal_pressure_superpose_from_signed_physical_flows_without_chan
 #[test]
 fn mouth_observation_shares_the_exterior_gas_and_rejects_duplicate_geometry() {
     let cfg = config(1);
-    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4] };
+    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [4, 4], aperture_size_m: None };
     let build = |exterior| FlueOutletPerformance::with_radiation(voice(source(gas(), -0.9)),
         schedule(300.0), cfg, FlueRadiationInput { exterior, additional_outlets: vec![] })
         .unwrap().with_mouth_radiation(input).unwrap();
@@ -222,4 +222,40 @@ fn mouth_observation_shares_the_exterior_gas_and_rejects_duplicate_geometry() {
         assert!(p.with_mouth_radiation(refused).is_err());
     }
     assert!(build(gas()).with_mouth_radiation(input).is_err());
+}
+
+#[test]
+fn independent_aperture_changes_observation_and_reaction_without_redefining_the_jet() {
+    let gate = CancelGate::new_clock_free();
+    let input = FlueMouthRadiation { center_m: [-0.3, 0.0], cells: [8, 8],
+        aperture_size_m: Some([0.010, 0.012]) };
+    let make = |mouth| FlueOutletPerformance::new(voice(source(gas(), -0.9)),
+        schedule(300.0), config(1)).unwrap().with_mouth_radiation(mouth).unwrap();
+    let mut explicit = make(input);
+    let mut legacy = make(FlueMouthRadiation { aperture_size_m: None, ..input });
+    let jet = explicit.voice.geometry;
+    assert_ne!(input.size_m(&jet), [jet.flue_width_m, jet.cut_up_m]);
+    let mut a = [0.0; 513];
+    let mut b = [0.0; 513];
+    explicit.block(&mut a).unwrap();
+    legacy.block(&mut b).unwrap();
+    assert_ne!(a, b, "the independent aperture must reach microphone pressure");
+    assert_eq!(explicit.voice.mouth_flow_m3_s(), legacy.voice.mouth_flow_m3_s());
+    assert_eq!(explicit.voice.network().unwrap().stored_energy_j(),
+        legacy.voice.network().unwrap().stored_energy_j());
+    assert_eq!(explicit.voice.geometry, jet);
+
+    let mut cold = voice(source(gas(), -0.9));
+    cold.geometry.mouth_loss_rel = 0.0;
+    cold.resistance = 0.0;
+    let reacted = FlueOutletPerformance::new(cold, schedule(300.0), config(1)).unwrap()
+        .with_mouth_radiation(input).unwrap().with_mouth_reaction(&gate).unwrap();
+    assert_eq!(reacted.voice.mouth_radiation_load().unwrap().size_m(), [0.010, 0.012]);
+    assert_eq!(reacted.voice.geometry.flue_width_m, jet.flue_width_m);
+    assert_eq!(reacted.voice.geometry.cut_up_m, jet.cut_up_m);
+    for size in [[0.0, 0.012], [-0.01, 0.012], [f64::NAN, 0.012]] {
+        assert!(FlueOutletPerformance::new(voice(source(gas(), -0.9)),
+            schedule(300.0), config(1)).unwrap()
+            .with_mouth_radiation(FlueMouthRadiation { aperture_size_m: Some(size), ..input }).is_err());
+    }
 }

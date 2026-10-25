@@ -2492,7 +2492,14 @@ None.
 
   `FlueOutletPerformance::with_mouth_reaction` selects compact self reaction of
   the actual rectangular mouth in the same exterior gas and area basis as its
-  pressure receiver. The exact rectangular static Rayleigh integral and compact
+  pressure receiver. Optional `mouth_aperture rectangle WIDTH_M LENGTH_M`
+  before `mouth_radiation` supplies acoustic dimensions independently of the
+  jet's width and cut-up; omission retains the original rectangular window.
+  Network observation and compact reaction share this declared aperture.
+  Independent aperture dimensions are not yet supported by the DG route.
+  This choice does not alter the aerodynamic jet geometry,
+  source coefficient or independently selected separation law. The exact
+  rectangular static Rayleigh integral and compact
   monopole resistance determine one positive-real `R*s/(s+p)` branch in the
   existing `fs-vfit` midpoint owner. Current-flow pressure and retained history
   enter the original same-sample jet/mouth/duct solve. Original windway, jet

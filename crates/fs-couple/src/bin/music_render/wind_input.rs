@@ -687,7 +687,7 @@ fn load_with_all_sources(
         let mouth_reaction = renderer.voice().mouth_radiation_load();
         let mouth_radiation_json = match renderer.mouth_radiation() {
             Some(mouth) => format!(",\"mouth_radiation\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"signed outward inlet volume flow\",\"reaction_added\":{}}}",
-                mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                mouth.center_m[0], mouth.center_m[1], mouth.size_m(&geometry)[0], mouth.size_m(&geometry)[1],
                 mouth.cells[0], mouth.cells[1], mouth_reaction.is_some()),
             None => ",\"mouth_radiation\":null".to_string(),
         };

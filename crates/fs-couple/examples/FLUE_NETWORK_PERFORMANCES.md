@@ -63,6 +63,22 @@ claim to solve breath advection, thermal exchange, gas mixing or condensation.
 
 ## Distributed loss and exterior openings
 
+Before `mouth_radiation`, optional `mouth_aperture rectangle WIDTH_M LENGTH_M`
+sets independent acoustic aperture dimensions. Both the receiver and a selected
+mouth reaction use this rectangle; the jet's width, height, cut-up, source
+coefficient and convection remain unchanged. Omission uses flue width times
+cut-up, as before. A supplied aperture requires `mouth_radiation`; nonpositive
+or nonfinite dimensions refuse. This row is supported by the network route only;
+the DG extension remains separate. Render metadata reports the resolved dimensions.
+
+The flute cards use 10 by 12 mm from Boehm's mouth-hole dimensions in
+`data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871/dimensions.tsv`.
+This is a rectangular approximation to the published rounded hole, with unknown
+corner radius and lip coverage. The roughly 90 mm² PF-661 measurement belongs
+to another specimen; the rectangle's 120 mm² area is not that measurement.
+These rows correct the former use of the much smaller jet span as the radiating
+hole. They do not enable mouth reaction or change the authored linear loss.
+
 A network uses `viscothermal none`, or explicitly addresses its original
 physical sections:
 
