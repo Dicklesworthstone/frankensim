@@ -1635,3 +1635,22 @@ regressions in `fs-couple/tests/tensor_solid.rs` cover Tet4/Tet10 shear and
 consistent mass, nodal virtual work, nonorthogonal constrained bases, original
 Maxwell prehistory and regional material-loss swaps. They use synthetic material
 fixtures and do not establish empirical calibration.
+
+## Continuing thermal-valve motion across source updates
+
+`reduce::thermal::motion::ThermalValveModalMotion` owns the actual thermal
+reduction and the existing `fs-modal` time-domain state. The reducer retains
+its original mass-normalized mode shapes and exact pressure-load projections.
+Pressure steps use the original exact ZOH owner; applied work is conjugate to
+swept volume, and nodal observations reconstruct equilibrium plus vibration.
+
+Candidate source updates preserve the exact sample clock and use the shared
+mass-inner-product transfer on the same reference mesh, frame, supports and
+consistent mass. New equilibrium, stiffness, mode count/order and supplied
+pressure observations are admitted with explicit state-loss and signed
+incremental-storage budgets. Updates and pressure steps publish only complete
+candidates. Discarded state is not damping or heat; bore feedback, radiation
+reaction and reciprocal thermoelastic heat are not inferred. Three focused
+one-tetrahedron tests use independent consistent mass, stiffness, thermal
+equilibrium and oscillator references to check motion/work, source-update
+continuity, changed pressure response and refused/cancelled candidates.

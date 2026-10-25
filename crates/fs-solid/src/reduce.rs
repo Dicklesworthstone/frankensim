@@ -268,6 +268,8 @@ pub struct ValveCard {
 pub struct PressureLoadedValve {
     card: ValveCard,
     effective_areas_m2: Vec<f64>,
+    source_modes: Vec<fs_modal::ModePair>,
+    mass_normalized_pressure_load: Vec<f64>,
     pressure_compliance: PressureCompliance,
     identity: ContentHash,
 }
@@ -283,6 +285,21 @@ impl PressureLoadedValve {
     #[must_use]
     pub fn effective_areas_m2(&self) -> &[f64] {
         &self.effective_areas_m2
+    }
+
+    /// Original mass-normalized shapes in card order and in the source
+    /// assembly's reduced free-DOF ordering. Sorted mode indices do not identify
+    /// the same physical displacement field when the source changes.
+    #[must_use]
+    pub fn source_modes(&self) -> &[fs_modal::ModePair] {
+        &self.source_modes
+    }
+
+    /// Exact `phi^T load_per_pa` [m² / sqrt(kg)] on each source mode.
+    /// The transpose maps modal velocity to work-conjugate swept volume flow.
+    #[must_use]
+    pub fn mass_normalized_pressure_load(&self) -> &[f64] {
+        &self.mass_normalized_pressure_load
     }
 
     /// Identity of the structural card, nodal pressure load and projections.
@@ -477,6 +494,8 @@ fn pressure_loaded_from_reduction(
     Ok(PressureLoadedValve {
         card,
         effective_areas_m2,
+        source_modes: reduced.source_modes,
+        mass_normalized_pressure_load: reduced.mass_normalized_pressure_load,
         pressure_compliance,
         identity: hash.finalize(),
     })
@@ -522,6 +541,8 @@ struct PreparedValve<'a> {
 struct ReducedValve {
     card: ValveCard,
     effective_areas_m2: Vec<f64>,
+    source_modes: Vec<fs_modal::ModePair>,
+    mass_normalized_pressure_load: Vec<f64>,
     pressure_compliance: Option<PressureCompliance>,
     material_loss: Option<visco::Approximation>,
 }
@@ -707,6 +728,8 @@ fn reduce_valve_impl<M>(
     //    build used it and retained 1e-11 of the compliance).
     let mut modes = Vec::new();
     let mut effective_areas_m2 = Vec::new();
+    let mut source_modes = Vec::new();
+    let mut mass_normalized_pressure_load = Vec::new();
     let mut retained = 0.0f64;
     for (mode_index, pair) in report.modes.iter().enumerate() {
         let gamma: f64 = pair.phi.iter().zip(&r).map(|(a, b)| a * b).sum();
@@ -733,14 +756,17 @@ fn reduce_valve_impl<M>(
             request.loss_factor * (stiffness_n_m * mass_kg).sqrt()
         };
         if let Some(load) = pressure_load {
-            let area = pressure_area(&pair.phi, &assembly.free_dofs, load, u_face);
+            let modal_load = pressure_area(&pair.phi, &assembly.free_dofs, load, 1.0);
+            let area = modal_load / u_face;
             if !area.is_finite() {
                 return Err(ReduceError::Invalid {
                     what: "projected pressure area is not finite",
                 });
             }
             effective_areas_m2.push(area);
+            mass_normalized_pressure_load.push(modal_load);
         }
+        source_modes.push(pair.clone());
         modes.push(ReducedMode {
             frequency_hz: pair.lambda.sqrt() / tau,
             mass_kg,
@@ -838,6 +864,8 @@ fn reduce_valve_impl<M>(
     Ok(ReducedValve {
         card,
         effective_areas_m2,
+        source_modes,
+        mass_normalized_pressure_load,
         pressure_compliance,
         material_loss,
     })

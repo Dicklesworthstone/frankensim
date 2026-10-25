@@ -5,6 +5,9 @@
 //! resulting tangent for BOTH its modal solve and static pressure compliance.
 //! Only aperture observation uses the accepted displaced geometry.
 
+/// Retained pressure-driven motion and source-mesh modal state transfer.
+pub mod motion;
+
 use super::{
     PreparedValve, PressureLoadedValve, ReduceError, SingleModeValveAdmission,
     ValveCardRequest, ValveElementOrder, material_field, validate_element_topology,
@@ -85,6 +88,7 @@ pub struct ThermalPressureLoadedValve {
     valve: PressureLoadedValve,
     equilibrium: ThermalValveEquilibrium,
     observation_nodes_m: Vec<[f64; 3]>,
+    mesh_frame: ContentHash,
     identity: ContentHash,
 }
 
@@ -106,6 +110,12 @@ impl ThermalPressureLoadedValve {
     #[must_use]
     pub fn observation_nodes_m(&self) -> &[[f64; 3]] {
         &self.observation_nodes_m
+    }
+
+    /// Coordinate frame of the retained source mesh and tensor fields.
+    #[must_use]
+    pub const fn mesh_frame(&self) -> ContentHash {
+        self.mesh_frame
     }
 
     /// Binds the valve, equilibrium, displacement limit and observed geometry.
@@ -274,6 +284,7 @@ pub fn reduce_pressure_loaded_valve(
         valve,
         equilibrium,
         observation_nodes_m,
+        mesh_frame: controls.mesh_frame,
         identity: identity.finalize(),
     })
 }

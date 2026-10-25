@@ -333,3 +333,23 @@ agreement gate).
   the fs-sparse casebook); callers nudge endpoints.
 - Performance: the 100k-DoF casebook records wall time and memory evidence
   for its fixture; no throughput claim beyond it.
+
+## Physical transfer between changing modal bases
+
+`transfer::transfer_modal_state` projects displacement and canonical momentum
+using the actual source shapes and one fixed SPD reference mass matrix.
+Equilibrium offsets are included before projection. Mode order, eigenvector
+sign and rotations within a degenerate subspace do not identify state.
+The proposal reports original incremental modal storage, full target-pencil
+storage, retained storage and independent displacement/kinetic/elastic
+projection residuals. Explicit orthogonality, eigen-residual, energy, work,
+state-loss and allocation limits gate publication; inputs are never mutated.
+
+Parameter work is the signed change of represented incremental storage before
+projection. It is not the complete prestressed body's thermodynamic energy.
+Discarded state is neither heat nor physical damping. This stable,
+positive-frequency slice requires the same mass/coordinate space and exactly
+symmetric numeric operators; changed mesh/support/mass, rigid modes and
+constitutive memory require their own transfer. Five focused tests cover
+nonidentity mass, mode signs/order, degenerate rotation, equilibrium shifts,
+independent energy accounts, explicit truncation and refused/cancelled inputs.

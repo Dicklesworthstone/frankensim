@@ -45,6 +45,9 @@ use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, Sy
 /// Exact zero-order-hold realization of mass-normalized damped modes (moved from fs-couple, M1.1-W1a).
 pub mod time;
 
+/// Physical displacement/momentum transfer between source modal bases.
+pub mod transfer;
+
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
 
