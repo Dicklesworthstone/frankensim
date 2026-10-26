@@ -1382,6 +1382,26 @@ and its spacing. The command prints one line per mode and the list of modes
 outside that rule, which would have to be fed back. These are estimates on the
 declared skin, not a convergence certificate, and they do not change the render.
 
+The transfer and the receipt are the expensive part (hours on a 3000-panel skin).
+They depend only on the transfer declaration and the body-mode frequencies. The
+declaration's hash binds the skin operator (panels, every source trace, gas,
+clearance and rule), the receiver, the clock, the band and the FFT ladder.
+`--observer-store DIR` (with `--body-profile`, and only for a performance with
+`one_way_observer`) keeps them in an existing directory, in one file per setup
+key. The first render bakes and writes the entry, and every later render with
+the same key loads it. So notes that differ only in strings, bow, stops or
+length share one entry.
+- The entry holds the kernels, the ladder, the impedance rows and the plain-CBIE
+  limit as exact f64 bits, and a hash over all of them.
+- A loaded setup renders the computed one bit for bit.
+- A damaged, truncated or foreign entry refuses. Nothing is recomputed behind
+  it, and an existing entry is never replaced.
+- The key cannot see a change to the boundary solver or the bake that keeps
+  their hash domains, so each file name also carries the hash of the executable
+  that wrote it: a rebuilt binary bakes afresh.
+- The command prints `setup_key`, `setup_loaded` and the entry's path.
+- Fill a store with one render before starting others on the same key.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly

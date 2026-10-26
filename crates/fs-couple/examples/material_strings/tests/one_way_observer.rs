@@ -224,3 +224,110 @@ fn one_way_source_refuses_loaded_listeners_unmatched_skins_and_bad_records_befor
         }
     });
 }
+
+#[test]
+fn a_kept_setup_renders_the_computed_one_bit_for_bit_and_a_damaged_entry_refuses() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("fs-one-way-setups-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    scoped(|cx, gate| {
+        let kept = |text: &str| {
+            let mut body = profile(&own_skin());
+            body.keep_observer_setups(&dir).unwrap();
+            input::Spec::parse(text.as_bytes())
+                .unwrap()
+                .compile_with_body(cx, gate, Some(body), |name| {
+                    Ok(if name == "closed-shell.fsmatpk" {
+                        shell_pack(name)
+                    } else {
+                        pack(name, 7800.0, 200_000.0, None)
+                    })
+                })
+        };
+        let render = |ready: &mut Ready| {
+            (0..ready.spec.samples)
+                .map(|_| {
+                    let mut output = [0.0];
+                    ready.performance.block(&mut output).unwrap();
+                    output[0].to_bits()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut plain = skinned(&source(""), cx, gate);
+        let mut computed = kept(&source("")).unwrap();
+        let mut loaded = kept(&source("")).unwrap();
+        let reports = [&plain, &computed, &loaded]
+            .map(|ready| ready.performance.one_way_shell_observer().unwrap().clone());
+        assert_eq!(
+            reports.each_ref().map(|r| r.setup_loaded),
+            [false, false, true]
+        );
+        let kernels = reports.each_ref().map(|r| {
+            r.transfer()
+                .kernels
+                .iter()
+                .map(|k| {
+                    let taps: Vec<u64> = k.taps.iter().map(|t| t.to_bits()).collect();
+                    (k.input, k.output, k.integer_delay_samples, taps)
+                })
+                .collect::<Vec<_>>()
+        });
+        for (report, bits) in reports.iter().zip(&kernels).skip(1) {
+            assert_eq!(report.setup_key, reports[0].setup_key);
+            assert_eq!(report.modes, reports[0].modes);
+            assert_eq!(*bits, kernels[0]);
+        }
+        let entry = computed
+            .body_profile
+            .as_ref()
+            .unwrap()
+            .observer_store_entry(&reports[0].setup_key)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "one setup, one entry"
+        );
+        let expected = render(&mut plain);
+        assert!(expected.iter().any(|&p| f64::from_bits(p).abs() > 1e-14));
+        assert_eq!(
+            render(&mut computed),
+            expected,
+            "keeping a setup changes no sample"
+        );
+        assert_eq!(
+            render(&mut loaded),
+            expected,
+            "a loaded setup renders the computed one bit for bit"
+        );
+        // Another receiver is another setup, under its own key.
+        let moved = kept(&source("").replace("front 0.2 0.2 1.0", "front 0.2 0.3 1.0")).unwrap();
+        let other = moved.performance.one_way_shell_observer().unwrap();
+        assert!(!other.setup_loaded && other.setup_key != reports[0].setup_key);
+        let second = moved
+            .body_profile
+            .as_ref()
+            .unwrap()
+            .observer_store_entry(&other.setup_key)
+            .unwrap();
+        // One flipped byte refuses, and nothing is recomputed behind it.
+        let mut bytes = std::fs::read(&entry).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        std::fs::write(&entry, &bytes).unwrap();
+        assert!(kept(&source("")).is_err(), "a damaged kept setup");
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            bytes,
+            "a damaged entry is left as it is"
+        );
+        for path in [&entry, &second] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(&dir).unwrap();
+    });
+}

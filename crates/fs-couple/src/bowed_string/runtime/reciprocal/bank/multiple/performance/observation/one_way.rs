@@ -21,6 +21,10 @@
 //! rule on the geometry-routed owner at each mode's own frequency (plain CBIE
 //! below the bound, where Burton--Miller overstates low-ka resistance); they
 //! are estimates on that skin, not a convergence certificate.
+//!
+//! The transfer and the receipt depend only on the transfer declaration and the
+//! body-mode frequencies, so a [`OneWaySetupStore`] may keep them between
+//! renders of one body; see `one_way_store.rs`.
 
 use super::super::MultiBowPerformance;
 use super::{BoundReport, BoundShellObserver, ShellObserverError, invalid, poll};
@@ -31,11 +35,16 @@ use fs_bem::observation_transfers::{
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_bem::radiation_policy::GeometryPolicy;
+use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_plate::shell::ShellMesh;
 use fs_vfit::observation::MAX_OBSERVATION_ENTRIES;
+
+#[path = "one_way_store.rs"]
+mod setup_store;
+pub use setup_store::{MAX_ONE_WAY_SETUP_BYTES, OneWaySetupStore};
 
 /// Complete dense boundary work this owner admits, over every bake and bound
 /// frequency: panels^2 * (panels + sources + 1) per frequency.
@@ -141,6 +150,10 @@ pub struct OneWayShellObserverReport {
     pub boundary_terms: u64,
     pub replay_terms: u64,
     pub modes: Vec<OneWayModeBound>,
+    /// The store key of this setup: the transfer declaration and every body-mode frequency.
+    pub setup_key: ContentHash,
+    /// The transfer and the receipt were loaded from a store, not computed.
+    pub setup_loaded: bool,
     transfer: ObservationTransferBake,
 }
 impl OneWayShellObserverReport {
@@ -563,14 +576,18 @@ impl MultiBowPerformance {
     /// shell through `skin`, without feeding any air reaction back. The accepted
     /// mechanics may be prepared-linear. A performance with a computed air load
     /// keeps that load's own observer; a spatial cavity keeps its own mouths.
+    /// With a `store`, the transfer and the receipt come from the entry kept
+    /// under this setup's key, or are computed and then kept there.
     ///
     /// # Errors
     /// Declaration, skin binding, boundary-work, realization-gate and receipt
-    /// refusals; a bank that has accepted any sample.
+    /// refusals; a bank that has accepted any sample; a damaged kept entry and
+    /// the store's own failures.
     pub fn with_one_way_shell_observer(
         mut self,
         options: OneWayShellObserverOptions,
         skin: &ShellAcousticSkin,
+        store: Option<&dyn OneWaySetupStore>,
         gate: &CancelGate,
     ) -> Result<Self, ShellObserverError> {
         poll(gate)?;
@@ -710,17 +727,38 @@ impl MultiBowPerformance {
         let producer = owner.operator_hash();
         let declaration = options.declaration(rate, sources, owner.geometric_delays_s(), producer);
         declaration.admit_work()?;
-        let transfer = helmholtz::with_dense_workers(options.workers, || {
-            owner.bake(&declaration, || gate.is_requested())
-        })?;
-        let observer = transfer.observer()?;
-        poll(gate)?;
-        // The receipt: each mode's impedance row at its own frequency, on the same skin and rule.
         let omega: Vec<f64> = body
             .modes()
             .iter()
             .map(|m| m.angular_frequency_rad_s)
             .collect();
+        let setup_key = setup_store::setup_key(&declaration, &omega);
+        let kept = match store {
+            Some(store) => store.load(&setup_key).map_err(ShellObserverError::Store)?,
+            None => None,
+        };
+        let setup_loaded = kept.is_some();
+        let (transfer, impedance, plain_cbie_limit_rad_per_m) = if let Some(entry) = kept {
+            setup_store::KeptSetup::decode(&entry, &setup_key, mode_count)?.into_parts(&declaration)
+        } else {
+            let transfer = helmholtz::with_dense_workers(options.workers, || {
+                owner.bake(&declaration, || gate.is_requested())
+            })?;
+            poll(gate)?;
+            // The receipt: each mode's impedance row at its own frequency, on the same skin and rule.
+            let (impedance, limit) = impedance_rows(
+                &traces.surface,
+                &traces.modes,
+                &omega,
+                medium,
+                options.panel_rule,
+                options.workers,
+                gate,
+            )?;
+            (transfer, impedance, limit)
+        };
+        let observer = transfer.observer()?;
+        poll(gate)?;
         let matrix = damping.matrix_per_s();
         let wood_zeta: Vec<f64> = body
             .modes()
@@ -735,17 +773,19 @@ impl MultiBowPerformance {
                 m.damping_ratio + viscous / (2.0 * m.angular_frequency_rad_s)
             })
             .collect();
-        let (impedance, plain_cbie_limit_rad_per_m) = impedance_rows(
-            &traces.surface,
-            &traces.modes,
-            &omega,
-            medium,
-            options.panel_rule,
-            options.workers,
-            gate,
-        )?;
         let modes = mode_bounds(&omega, &wood_zeta, &impedance, options.rule)?;
         poll(gate)?;
+        if let (Some(store), false) = (store, setup_loaded) {
+            let entry = setup_store::encode(
+                &setup_key,
+                &transfer,
+                &impedance,
+                plain_cbie_limit_rad_per_m,
+            );
+            store
+                .keep(&setup_key, &entry)
+                .map_err(ShellObserverError::Store)?;
+        }
         let report = OneWayShellObserverReport {
             gas,
             body_modes: mode_count,
@@ -756,6 +796,8 @@ impl MultiBowPerformance {
             boundary_terms,
             replay_terms,
             modes,
+            setup_key,
+            setup_loaded,
             transfer,
             options,
         };

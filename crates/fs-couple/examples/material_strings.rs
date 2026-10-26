@@ -428,7 +428,8 @@ impl input::Spec {
         if let Some(observer)=&self.one_way_observer {
             let skin=profile.as_ref().and_then(|body|body.acoustic_skin(&self))
                 .ok_or("one_way_observer requires a body profile that declares its closed acoustic skin")?;
-            performance=performance.with_one_way_shell_observer(observer.clone(),&skin,gate)?;
+            let store=profile.as_ref().and_then(|body|body.observer_store());
+            performance=performance.with_one_way_shell_observer(observer.clone(),&skin,store,gate)?;
         }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
@@ -470,18 +471,32 @@ fn assemble_shell(args:&[std::ffi::OsString])->Result<()> {
     }
     Ok(())
 }
+/// Take `--observer-store DIR` out of the option pairs; the rest are profile options.
+fn observer_store_option(args:&[std::ffi::OsString])->Result<(Option<&Path>,Vec<std::ffi::OsString>)> {
+    let (mut store,mut rest)=(None,Vec::new());
+    for pair in args.chunks(2) {
+        if pair[0]!="--observer-store" { rest.extend_from_slice(pair); continue; }
+        if store.is_some() { return Err("--observer-store cannot be repeated".into()); }
+        store=Some(Path::new(pair.get(1).ok_or("--observer-store needs a directory")?));
+    }
+    Ok((store,rest))
+}
 fn main()->Result<()> {
     let raw=std::env::args_os().collect::<Vec<_>>();
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
     }
-    let (body_path,stop_path)=stops::profile_paths(&args[3..])?;
+    let (store_dir,options)=observer_store_option(&args[3..])?;
+    let (body_path,stop_path)=stops::profile_paths(&options)?;
     let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_SHELL_BYTES)?)).transpose()?;
+    if let Some(dir)=store_dir {
+        profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
+    }
     let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
     let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
     let gas_sources=gas_options.load()?;
@@ -550,11 +565,12 @@ fn main()->Result<()> {
     }
     if let Some(report)=ready.performance.one_way_shell_observer() {
         let transfer=report.transfer();
-        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; skin finite-distance pressure replaces compact pressure; no air reaction enters the mechanics; homogeneous exterior without molecular absorption",
+        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; no air reaction enters the mechanics; homogeneous exterior without molecular absorption",
             report.options.receiver,report.body_modes,report.apertures,report.surface_panels,
             report.largest_anchor_distance_m,report.plain_cbie_limit_rad_per_m,transfer.pass_band_upper_hz,
             transfer.taper_stop_hz,transfer.geometric_delays_s,transfer.filter_latency_samples,
-            report.boundary_terms,report.replay_terms,report.options.rule);
+            report.boundary_terms,report.replay_terms,report.options.rule,report.setup_key.to_hex(),
+            report.setup_loaded,ready.body_profile.as_ref().and_then(|body|body.observer_store_entry(&report.setup_key)));
         for (mode,bound) in report.modes.iter().enumerate() {
             eprintln!("one_way_mode={mode}; f_Hz={}; wood_zeta={}; radiation_zeta={}; added_mass_shift={}; half_power_bandwidth_Hz={}; nearest_spacing_Hz={}; largest_mixing={}; mixing_mode={:?}; one_way={}",
                 bound.frequency_hz,bound.wood_zeta,bound.radiation_zeta,bound.added_mass_shift,

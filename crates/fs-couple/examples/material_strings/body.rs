@@ -7,7 +7,9 @@ use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use fs_couple::thin_plate::{compile_plate_material_chart, PlateChartRadiation, PlateRegionMaterial};
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as VISCOSITY;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
-use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::ShellAcousticSkin;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
+    OneWaySetupStore, ShellAcousticSkin,
+};
 
 pub const MAX_BYTES: usize = 65_536;
 /// Shell (v3) and assembled (v4) profiles carry node and triangle rows, so they take a larger byte
@@ -36,6 +38,7 @@ pub struct Profile {
     model: BodyModel,
     interior: Option<cavity::Spec>,
     skin: Option<skin::Spec>,
+    observer_store: Option<skin::SetupDir>,
 }
 #[derive(Clone, Debug)]
 enum BodyModel {
@@ -70,11 +73,26 @@ impl Profile {
         if skin.is_some() && matches!(model, BodyModel::Plate(_)) {
             return Err("an acoustic skin requires a curved shell or assembled shell body profile".into());
         }
-        Ok(Self { bytes: bytes.to_vec(), model, interior, skin })
+        Ok(Self { bytes: bytes.to_vec(), model, interior, skin, observer_store: None })
     }
     /// The declared closed acoustic skin in the performance body's frame, if any.
     pub fn acoustic_skin(&self, spec: &input::Spec) -> Option<ShellAcousticSkin> {
         self.skin.as_ref().map(|skin| skin.resolve(spec))
+    }
+    /// Keep the skin's one-way observer setups in the existing directory `dir` (`--observer-store`).
+    pub fn keep_observer_setups(&mut self, dir: &std::path::Path) -> Result<()> {
+        if self.skin.is_none() {
+            return Err("--observer-store requires a body profile that declares its closed acoustic skin".into());
+        }
+        self.observer_store = Some(skin::SetupDir::open(dir)?);
+        Ok(())
+    }
+    pub fn observer_store(&self) -> Option<&dyn OneWaySetupStore> {
+        self.observer_store.as_ref().map(|store| store as &dyn OneWaySetupStore)
+    }
+    /// Where the setup under `key` is kept, with `--observer-store`.
+    pub fn observer_store_entry(&self, key: &fs_blake3::ContentHash) -> Option<std::path::PathBuf> {
+        self.observer_store.as_ref().map(|store| store.entry(key))
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         match &self.model {
@@ -90,6 +108,9 @@ impl Profile {
             None if spec.one_way_observer.is_some() => return Err(
                 "one_way_observer requires a body profile that declares its closed acoustic skin".into()),
             None => {}
+        }
+        if self.observer_store.is_some() && spec.one_way_observer.is_none() {
+            return Err("--observer-store keeps one_way_observer setups, and this performance has none".into());
         }
         spec.network_dimensions_with_body_modes(true, self.additional_body_connections(),
             self.additional_body_modes())?;

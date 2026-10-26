@@ -48,6 +48,8 @@ pub enum ShellObserverError {
     Invalid(&'static str),
     Shell(ShellBemError),
     Transfer(TransferError),
+    /// A one-way setup store's own read or write failure.
+    Store(String),
     Cancelled,
 }
 impl core::fmt::Display for ShellObserverError {

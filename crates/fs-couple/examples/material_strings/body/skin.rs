@@ -5,13 +5,84 @@
 //! declared shares of the lumped cavity's neck flow. Nothing here is inferred:
 //! the generator that writes the profile states how the skin was made.
 use super::*;
+use fs_blake3::ContentHash;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
-    ShellAcousticSkin, SkinAnchor, SkinAperture,
+    MAX_ONE_WAY_SETUP_BYTES, OneWaySetupStore, ShellAcousticSkin, SkinAnchor, SkinAperture,
 };
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read as _, Write as _};
+use std::path::{Path, PathBuf};
 
 const MAX_VERTICES: usize = fs_bem::helmholtz::MAX_DENSE_PANELS;
 const MAX_ANCHORS: usize = 8;
 const MAX_APERTURES: usize = 8;
+
+/// `--observer-store DIR`: this executable's one-way observer setups, kept in an
+/// existing directory. Each entry's name holds its setup key and the start of
+/// the executable's own hash, because the key cannot see a solver change that
+/// keeps its hash domains, so a rebuilt binary bakes afresh. An entry is
+/// written once and never replaced.
+#[derive(Clone, Debug)]
+pub(super) struct SetupDir {
+    dir: PathBuf,
+    build: String,
+}
+
+impl SetupDir {
+    pub(super) fn open(dir: &Path) -> Result<Self> {
+        if !dir.is_dir() {
+            return Err("--observer-store needs an existing directory".into());
+        }
+        let executable = std::fs::read(std::env::current_exe()?)?;
+        let build = fs_blake3::hash_domain(
+            "frankensim:material-strings:observer-store-build:v1",
+            &executable,
+        );
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            build: build.to_hex()[..32].into(),
+        })
+    }
+
+    pub(super) fn entry(&self, key: &ContentHash) -> PathBuf {
+        self.dir
+            .join(format!("{}-{}.one-way-setup", key.to_hex(), self.build))
+    }
+}
+
+impl OneWaySetupStore for SetupDir {
+    fn load(&self, key: &ContentHash) -> std::result::Result<Option<Vec<u8>>, String> {
+        let path = self.entry(key);
+        let failed = |e: std::io::Error| format!("{}: {e}", path.display());
+        match File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(MAX_ONE_WAY_SETUP_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(failed)?;
+                Ok(Some(bytes))
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    fn keep(&self, key: &ContentHash, entry: &[u8]) -> std::result::Result<(), String> {
+        let path = self.entry(key);
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| {
+                file.write_all(entry)?;
+                file.sync_all()
+            });
+        match written {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+            other => other.map_err(|e| format!("{}: {e}", path.display())),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Spec {

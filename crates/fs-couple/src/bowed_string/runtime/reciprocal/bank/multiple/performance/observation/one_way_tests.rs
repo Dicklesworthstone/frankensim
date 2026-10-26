@@ -1,4 +1,6 @@
 use super::*;
+use fs_bem::observation_transfers::LadderRung;
+use fs_vfit::observation::FirKernel;
 
 fn options() -> OneWayShellObserverOptions {
     OneWayShellObserverOptions {
@@ -305,4 +307,120 @@ fn the_rule_keeps_a_lightly_radiating_mode_one_way_and_names_the_others() {
         mode_bounds(&[omega[0], omega[0], omega[2]], &wood, &z, rule).is_err(),
         "an exact degeneracy mixes without bound"
     );
+}
+
+/// A small computed setup: two kernels (one with a negative zero and a
+/// subnormal tap), two rungs and a 2 x 2 impedance, with its declaration.
+fn computed() -> (
+    TransferDeclaration,
+    ContentHash,
+    ObservationTransferBake,
+    Vec<Vec<C64>>,
+) {
+    let declaration = options().declaration(
+        144_000,
+        (0..2)
+            .map(|m| SourceId::StructuralMode(format!("one-way-shell-mode:{m}")))
+            .collect(),
+        vec![1e-3, 1e-3],
+        ContentHash([7; 32]),
+    );
+    let key = setup_store::setup_key(&declaration, &[100.0, 200.0]);
+    let rung = |n_fft, dtft_relative_change| LadderRung {
+        n_fft,
+        tail_energy_fraction: 1e-12,
+        wrap_energy_fraction: 2e-13,
+        dtft_relative_change,
+    };
+    let transfer = ObservationTransferBake {
+        declaration_hash: declaration.declaration_hash(),
+        sources: declaration.sources.clone(),
+        receivers: declaration.receivers.clone(),
+        fs_hz: declaration.fs_hz,
+        geometric_delays_s: declaration.geometric_delays_s.clone(),
+        filter_latency_samples: declaration.filter_latency_samples,
+        pass_band_upper_hz: declaration.pass_band_upper_hz,
+        taper_stop_hz: declaration.taper_stop_hz,
+        producer_uncertainty: declaration.producer_uncertainty,
+        kernels: vec![
+            FirKernel {
+                input: 0,
+                output: 0,
+                integer_delay_samples: 3,
+                taps: vec![0.5, -0.0, f64::MIN_POSITIVE / 4.0],
+            },
+            FirKernel {
+                input: 1,
+                output: 3,
+                integer_delay_samples: 0,
+                taps: vec![-1.25e-7],
+            },
+        ],
+        ladder: vec![rung(512, None), rung(1024, Some(3e-6))],
+    };
+    let impedance = vec![
+        vec![C64::new(1e-3, -2.5), C64::new(-0.0, 4e-9)],
+        vec![C64::new(4e-9, 1e300), C64::new(7.0, -0.125)],
+    ];
+    (declaration, key, transfer, impedance)
+}
+
+#[test]
+fn a_kept_setup_returns_its_exact_bits_and_refuses_damage_another_key_or_another_mode_count() {
+    let (declaration, key, transfer, impedance) = computed();
+    let entry = setup_store::encode(&key, &transfer, &impedance, 46.75);
+    let decode = |entry: &[u8], key: &ContentHash, modes| {
+        setup_store::KeptSetup::decode(entry, key, modes).map(|s| s.into_parts(&declaration))
+    };
+    let (back, rows, limit) = decode(&entry, &key, 2).unwrap();
+    let bits = |b: &ObservationTransferBake| {
+        b.kernels
+            .iter()
+            .map(|k| {
+                let taps: Vec<u64> = k.taps.iter().map(|t| t.to_bits()).collect();
+                (k.input, k.output, k.integer_delay_samples, taps)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&back), bits(&transfer));
+    assert_eq!(back.ladder, transfer.ladder);
+    let z = |rows: &[Vec<C64>]| {
+        rows.iter()
+            .flatten()
+            .map(|z| (z.re.to_bits(), z.im.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(z(&rows), z(&impedance));
+    assert_eq!(limit.to_bits(), 46.75_f64.to_bits());
+    assert_eq!(back.declaration_hash, transfer.declaration_hash);
+    assert_eq!(
+        (&back.sources, &back.receivers, &back.geometric_delays_s),
+        (
+            &transfer.sources,
+            &transfer.receivers,
+            &transfer.geometric_delays_s
+        )
+    );
+    let other = setup_store::setup_key(&declaration, &[100.0, 200.000_000_000_1]);
+    assert_ne!(other, key, "every mode frequency's bits are in the key");
+    assert!(decode(&entry, &other, 2).is_err(), "another setup's key");
+    assert!(decode(&entry, &key, 3).is_err(), "another mode count");
+    for cut in [0, 1, entry.len() / 2, entry.len() - 1] {
+        assert!(decode(&entry[..cut], &key, 2).is_err(), "cut at {cut}");
+    }
+    let mut longer = entry.clone();
+    longer.push(0);
+    assert!(decode(&longer, &key, 2).is_err(), "a trailing byte");
+    for i in 0..entry.len() {
+        for bit in [0x01, 0x80] {
+            let mut damaged = entry.clone();
+            damaged[i] ^= bit;
+            assert!(decode(&damaged, &key, 2).is_err(), "byte {i} bit {bit:#x}");
+        }
+    }
+    // A complete entry with a correct hash still refuses numbers no bake produces.
+    let mut nonfinite = transfer.clone();
+    nonfinite.kernels[1].taps[0] = f64::NAN;
+    let entry = setup_store::encode(&key, &nonfinite, &impedance, 46.75);
+    assert!(decode(&entry, &key, 2).is_err(), "a NaN tap");
 }
