@@ -700,6 +700,50 @@ impl<'a> BemObservation<'a> {
         owner.panel_rule = panel_rule;
         Ok(owner)
     }
+    /// Bind ONE ruled Burton--Miller boundary operator at every frequency. A
+    /// transfer bake needs one discrete operator across its band: the routed
+    /// owner switches from triangle CBIE to Burton--Miller at the geometric
+    /// bound, and the two discretizations differ there by their own errors, a
+    /// step in every transfer that no DFT ladder converges. The panel rule must
+    /// integrate triangles. Otherwise as [`Self::new_routed`]: the same closed
+    /// outward admission, zero structural traces stay columns, receiver rows
+    /// keep their centroid Green rows, and CQ is refused.
+    pub fn new_ruled_burton_miller(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[SourceId],
+        traces: &[Vec<f64>],
+        receivers: &[ReceiverSpec],
+        minimum_clearance_m: f64,
+        panel_rule: helmholtz::PanelRule,
+    ) -> Result<Self, TransferError> {
+        if matches!(
+            panel_rule,
+            helmholtz::PanelRule::Centroid
+                | helmholtz::PanelRule::TriangleNear { max_pairs: 0 }
+                | helmholtz::PanelRule::Triangle { max_pairs: 0 }
+        ) {
+            return Err(TransferError::Invalid(
+                "ruled Burton-Miller observation needs a nonempty triangle rule",
+            ));
+        }
+        GeometryPolicy::new(surface)?;
+        let mut owner = Self::new_admitted(
+            surface,
+            medium,
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            true,
+        )?;
+        owner.panel_rule = panel_rule;
+        Ok(owner)
+    }
+    /// Only [`Self::new_ruled_burton_miller`] binds a triangle rule without a policy.
+    fn ruled_burton_miller(&self) -> bool {
+        self.policy.is_none() && !matches!(self.panel_rule, helmholtz::PanelRule::Centroid)
+    }
     /// Bake this bound BEM owner. A cross-wired source, receiver, geometric
     /// delay or operator hash is refused before any frequency solve.
     pub fn bake(
@@ -733,6 +777,8 @@ impl<'a> BemObservation<'a> {
     pub fn operator_hash(&self) -> ContentHash {
         let mut h = DomainHasher::new(if self.policy.is_some() {
             "fs-bem:observation-boundary:routed:v1"
+        } else if self.ruled_burton_miller() {
+            "fs-bem:observation-boundary:ruled-burton-miller:v1"
         } else {
             "fs-bem:observation-boundary:v1"
         });
@@ -756,7 +802,7 @@ impl<'a> BemObservation<'a> {
                 h.update(&value.to_bits().to_le_bytes());
             }
         }
-        if self.policy.is_some() {
+        if self.policy.is_some() || self.ruled_burton_miller() {
             let (tag, pairs) = match self.panel_rule {
                 helmholtz::PanelRule::Centroid => (0_u64, 0),
                 helmholtz::PanelRule::TriangleNear { max_pairs } => (1, max_pairs),
@@ -821,6 +867,11 @@ impl<'a> BemObservation<'a> {
         if self.policy.is_some() {
             return Err(HelmholtzError::BadParameter {
                 what: "geometry-routed observation has no matching Laplace boundary operator",
+            });
+        }
+        if self.ruled_burton_miller() {
+            return Err(HelmholtzError::BadParameter {
+                what: "ruled Burton-Miller observation has no matching Laplace boundary operator",
             });
         }
         let mut out = Vec::new();

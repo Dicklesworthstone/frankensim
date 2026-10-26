@@ -818,3 +818,130 @@ fn routed_observation_matches_both_loading_formulations_and_keeps_legacy_cq_sepa
     assert_eq!(legacy.frequency_sample(w).unwrap(), expected);
     assert!(legacy.laplace_sample(C64::new(1.0, 2.0), &[0.0]).is_ok());
 }
+
+#[test]
+fn ruled_burton_miller_observation_is_one_operator_across_the_routed_switch() {
+    use fs_bem::helmholtz::{Formulation, PanelRule};
+    use fs_bem::radiation_policy::GeometryPolicy;
+    let surface = SpherePanels::icosphere(0.1, 1).unwrap();
+    let n = surface.areas().len();
+    let source = vec![
+        SourceId::StructuralMode("signed dipole".into()),
+        SourceId::StructuralMode("tangential mode with zero normal trace".into()),
+    ];
+    let traces = vec![
+        surface
+            .normals()
+            .iter()
+            .map(|normal| normal[2])
+            .collect::<Vec<_>>(),
+        vec![0.0; n],
+    ];
+    let receiver = vec![ReceiverSpec {
+        id: "finite receiver".into(),
+        position_m: [0.3, -0.2, 0.7],
+    }];
+    let rule = PanelRule::Triangle { max_pairs: n * n };
+    let ruled = BemObservation::new_ruled_burton_miller(
+        &surface,
+        medium(),
+        &source,
+        &traces,
+        &receiver,
+        0.001,
+        rule,
+    )
+    .unwrap();
+    let routed =
+        BemObservation::new_routed(&surface, medium(), &source, &traces, &receiver, 0.001, rule)
+            .unwrap();
+    let limit = GeometryPolicy::new(&surface).unwrap().plain_cbie_limit();
+    // Below the bound, where the routed owner is plain CBIE, this one is ruled Burton-Miller.
+    let omega = 0.5 * limit * C;
+    let fields: Vec<Vec<_>> = traces
+        .iter()
+        .map(|row| row.iter().copied().map(C64::from_re).collect())
+        .collect();
+    let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
+    let solved = helmholtz::solve_radiation_batch_with_rule(
+        &surface,
+        omega / C,
+        medium(),
+        &refs,
+        Formulation::BurtonMiller,
+        rule,
+    )
+    .unwrap();
+    let mut direct = Vec::new();
+    for solution in &solved {
+        for field in
+            laplace::observe_frequency(&surface, solution, &[receiver[0].position_m], 0.001)
+                .unwrap()
+        {
+            direct.push(field.pressure_pa);
+            direct.extend(field.gradient_pa_per_m);
+        }
+    }
+    let actual = ruled.frequency_sample(omega).unwrap();
+    assert_eq!(actual, direct);
+    assert!(actual[4..].iter().all(|z| z.abs() == 0.0));
+    // Across the bound the routed pressure steps by the two discretizations' difference; this one does not.
+    let jump = |owner: &BemObservation<'_>| {
+        let below = owner.frequency_sample(limit * (1.0 - 1e-9) * C).unwrap();
+        let above = owner.frequency_sample(limit * (1.0 + 1e-9) * C).unwrap();
+        (below[0] - above[0]).abs() / above[0].abs()
+    };
+    let (ruled_jump, routed_jump) = (jump(&ruled), jump(&routed));
+    assert!(ruled_jump < 1e-6, "ruled {ruled_jump}");
+    assert!(
+        routed_jump > 1e3 * ruled_jump.max(1e-9),
+        "routed {routed_jump}"
+    );
+    assert!(ruled.laplace_sample(C64::new(1.0, 2.0), &[0.0]).is_err());
+    let one = |rule| {
+        BemObservation::new_ruled_burton_miller(
+            &surface,
+            medium(),
+            &source[..1],
+            &traces[..1],
+            &receiver,
+            0.001,
+            rule,
+        )
+    };
+    let legacy = BemObservation::new(
+        &surface,
+        medium(),
+        &source[..1],
+        &traces[..1],
+        &receiver,
+        0.001,
+    )
+    .unwrap();
+    let routed = BemObservation::new_routed(
+        &surface,
+        medium(),
+        &source[..1],
+        &traces[..1],
+        &receiver,
+        0.001,
+        rule,
+    )
+    .unwrap();
+    let hash = one(rule).unwrap().operator_hash();
+    assert_ne!(hash, legacy.operator_hash());
+    assert_ne!(hash, routed.operator_hash());
+    assert_ne!(
+        hash,
+        one(PanelRule::TriangleNear { max_pairs: n * n })
+            .unwrap()
+            .operator_hash()
+    );
+    for empty in [
+        PanelRule::Centroid,
+        PanelRule::Triangle { max_pairs: 0 },
+        PanelRule::TriangleNear { max_pairs: 0 },
+    ] {
+        assert!(one(empty).is_err());
+    }
+}
