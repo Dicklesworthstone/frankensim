@@ -1371,7 +1371,7 @@ Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
 raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 16 rotational
 bridges, 64 force ports, 128 complete-network modes including fluid memory,
 16 plate modes; 16,384 events per input family; 262,144 compiled controls per
-family; 16,777,216 source/projection work units per compiler; at most 192 kHz,
+family; 16,777,216 source/projection work units per compiler; at most 384 kHz,
 600 seconds or 28,800,000 samples. Existing numerical owners retain their stricter
 limits. The example additionally caps total mechanical storage at 100 J,
 connection forces at 1000 N, bow traction at 100 N, slip at 10 m/s and observer

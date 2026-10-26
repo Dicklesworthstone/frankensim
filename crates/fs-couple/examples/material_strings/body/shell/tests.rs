@@ -543,6 +543,139 @@ fn the_cannone_dominant_g3_performance_matches_its_body_and_passes_preflight() {
     profile.preflight(&input::Spec::parse(text.as_bytes()).unwrap()).unwrap();
 }
 
+/// The crown joints of `cannone-dominant-g3-crown-{compliant,stiff}.material-strings`, written by
+/// `gen_crown_interface_packs.py`. Each Dominant string's lateral stick on the il Cannone bridge crown comes from Hertz
+/// crossed cylinders and Mindlin's no-slip tangential stiffness k_t = 8 G* a (Johnson 1985, eqs. 4.53 and 7.42).
+///
+/// Both ends of the envelope of its STATED UNKNOWNs are covered:
+/// - the maple orthotropy: G_RT with E_L, or G_LR with E_R;
+/// - the crown edge radius: 0.1 mm, or half the CT bridge-top thickness;
+/// - the unnamed wrap metal.
+///
+/// The test checks five things:
+/// - each note is the committed note with only every string's scalar joint replaced, and the stiff end's audio clock
+///   raised to 384 kHz over the same duration;
+/// - re-derived here from the committed seeds, the CT tables and the note's own tensions, every resolved joint agrees to
+///   2e-8 in stiffness and damping;
+/// - every joint states the maple pack's constant-loss anchor, so its loss factor is share x eta at every frequency;
+/// - every string's compliant end is the softer and the less lossy;
+/// - the joints claim 0 to 2 pi 200 kHz (MagentaBadger 7268 (a)), and a declared state above that refuses.
+#[test]
+fn the_cannone_crown_joints_resolve_to_their_contact_mechanics_at_both_envelope_ends() {
+    let scalar = |text: &str, name: &str| -> f64 {
+        let f = text.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|f| f[0] == "scalar" && f[3] == name).unwrap_or_else(|| panic!("no scalar {name}"));
+        f[4].parse::<f64>().unwrap() * match f[5] { "MPa" => 1e6, "GPa" => 1e9, _ => 1.0 }
+    };
+    let maple = include_str!(
+        "../../../../../../data/matdb/seed-v1/violin-maple-sycamore-sonderegger2013-shell/properties.tsv");
+    let aluminium = include_str!("../../../../../../data/matdb/seed-v1/aluminum-2024-t3-sheet-mil-hdbk-5j/properties.tsv");
+    let silver = include_str!("../../../../../../data/matdb/seed-v1/silver-pure-smith-fickett-nist1995/properties.tsv");
+    let silver_shear = include_str!("../../../../../../data/matdb/seed-v1/silver-pure-wrap-nist1995/properties.tsv");
+    let wire = include_str!("../../../../../../data/matdb/seed-v1/music-wire-spring-moduli-fuchs-1968/properties.tsv");
+    let contacts = include_str!(
+        "../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/string-contacts.tsv");
+    let dimensions = include_str!(
+        "../../../../../../data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/dimensions.tsv");
+    let base = include_str!("../../cannone-dominant-g3.material-strings");
+    let notes = [("compliant", include_str!("../../cannone-dominant-g3-crown-compliant.material-strings")),
+        ("stiff", include_str!("../../cannone-dominant-g3-crown-stiff.material-strings"))];
+    let packs: [(&str, &[u8]); 4] = [
+        ("violin-cannone-crown-dominant-e-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-e-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-a-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-a-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-d-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-d-interface.fsintpk")),
+        ("violin-cannone-crown-dominant-g-interface.fsintpk",
+            include_bytes!("../../packs/violin-cannone-crown-dominant-g-interface.fsintpk")),
+    ];
+    let loader = |name: &str| -> Result<NormalizedInterfacePack> {
+        let (_, bytes) = packs.iter().find(|(n, _)| *n == name).ok_or("unknown crown pack")?;
+        Ok(NormalizedInterfacePack::from_bytes(bytes)?)
+    };
+
+    // The contact, re-derived from the same committed sources (gen_crown_interface_packs.py's derivation).
+    let nu_maple = scalar(maple, "poisson_ratio_12");
+    let crown = [(scalar(maple, "young_modulus_1"), scalar(maple, "shear_modulus_23")),
+        (scalar(maple, "young_modulus_2"), scalar(maple, "shear_modulus_12"))];
+    let tau = [("plane_stress_viscosity_66", "shear_modulus_12"), ("transverse_shear_viscosity_13", "shear_modulus_13"),
+        ("transverse_shear_viscosity_23", "shear_modulus_23")]
+        .map(|(v, g)| scalar(maple, v) / scalar(maple, g)).into_iter().fold(0.0_f64, f64::max);
+    let crown_thickness = dimensions.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|f| f.len() > 4 && f[0] == "bridge" && f[2] == "thickness-z-min-above-y-minus-52" && f[4] == "m")
+        .map(|f| f[3].parse::<f64>().unwrap()).unwrap();
+    let edge_radius = [1.0e-4, 0.5 * crown_thickness];
+    let al = (scalar(aluminium, "young_modulus"), scalar(aluminium, "poisson_ratio"), scalar(aluminium, "shear_modulus"));
+    let ag = (scalar(silver, "young_modulus"), scalar(silver, "poisson_ratio"), scalar(silver_shear, "shear_modulus"));
+    let (e_w, g_w) = (scalar(wire, "young_modulus"), scalar(wire, "shear_modulus"));
+    let steel = (e_w, e_w / (2.0 * g_w) - 1.0, g_w);
+    let joint = |string: &str, end: usize, radius: f64, tension: f64| -> (f64, f64) {
+        let f: Vec<&str> = contacts.lines().map(|l| l.split('\t').collect::<Vec<_>>())
+            .find(|f| f.len() == 7 && f[0] == string && f[1] == "bridge").unwrap();
+        let theta = (-f[5].parse::<f64>().unwrap()).atan() + f[6].parse::<f64>().unwrap().atan();
+        let load = 2.0 * tension * (theta / 2.0).sin();
+        let (e_s, nu_s, g_s) = [al, if string == "e" { steel } else { ag }][end];
+        let (e_b, g_b) = crown[end];
+        let e_star = 1.0 / ((1.0 - nu_s * nu_s) / e_s + (1.0 - nu_maple * nu_maple) / e_b);
+        let (maple_shear, metal_shear) = ((2.0 - nu_maple) / g_b, (2.0 - nu_s) / g_s);
+        let a = (3.0 * load * (radius * edge_radius[end]).sqrt() / (4.0 * e_star)).cbrt();
+        let k = 8.0 * a / (maple_shear + metal_shear);
+        (k, maple_shear / (maple_shear + metal_shear) * tau * k)
+    };
+
+    let mut resolved = Vec::new();
+    for (end, (label, text)) in notes.iter().enumerate() {
+        let (changed, original) = (text.lines().collect::<Vec<_>>(), base.lines().collect::<Vec<_>>());
+        assert_eq!(changed.len(), original.len());
+        for (c, o) in changed.iter().zip(&original) {
+            if end == 1 && o.starts_with("audio ") {
+                // The stiff end renders at 384 kHz over the same duration (MagentaBadger 7268 (b)).
+                let (c, o): (Vec<&str>, Vec<&str>) = (c.split(' ').collect(), o.split(' ').collect());
+                let seconds = |f: &[&str]| f[2].parse::<f64>().unwrap() / f[1].parse::<f64>().unwrap();
+                assert_eq!((c[1], &c[3..], seconds(&c)), ("384000", &o[3..], seconds(&o)));
+                continue;
+            }
+            if !o.starts_with("string ") {
+                assert_eq!(c, o);
+                continue;
+            }
+            let (c, o): (Vec<&str>, Vec<&str>) = (c.split(' ').collect(), o.split(' ').collect());
+            assert_eq!((&c[..9], &o[9..]), (&o[..9], &["200000", "0.1"][..]), "{label}");
+            assert_eq!((c.len(), c[9]), (14, "interface"));
+            assert_eq!(c[12], format!("crown_lateral_stiffness_per_area_{label}"));
+            assert_eq!(c[13], format!("crown_lateral_viscosity_per_area_{label}"));
+        }
+        let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let claimed = core::f64::consts::TAU * 200e3;
+        assert!(spec.bridge_interfaces.load(spec.temperature, 1.000_001 * claimed, &gate, loader).is_err(),
+            "a solid state above the joints' 2 pi 200 kHz must refuse");
+        spec.bridge_interfaces.load(spec.temperature, spec.omega, &gate, loader).unwrap();
+        let bindings = spec.bridge_interfaces.bindings();
+        assert_eq!(bindings.len(), 4);
+        for binding in bindings {
+            let row: Vec<&str> = changed.iter().filter(|l| l.starts_with("string ")).nth(binding.string).unwrap()
+                .split(' ').collect();
+            let string = &row[1]["violin-string-dominant-".len()..][..1];
+            assert_eq!(row[10], format!("violin-cannone-crown-dominant-{string}-interface.fsintpk"));
+            let (k, d) = joint(string, end, row[3].parse().unwrap(), row[5].parse().unwrap());
+            // The source per area and the row's area are each printed to 9 significant digits.
+            let law = &binding.interface;
+            assert_eq!(law.constant_loss_reference_omega_rad_s(), Some(scalar(maple, "constant_loss_reference_omega")));
+            let (lo, hi) = law.omega_band_rad_s();
+            assert!(lo == 0.0 && (hi / claimed - 1.0).abs() < 1e-8, "{label} {string}: band {lo}..{hi}");
+            assert!((law.stiffness_n_m() / k - 1.0).abs() < 2e-8, "{label} {string}: {} vs {k}", law.stiffness_n_m());
+            assert!((law.damping_n_s_m() / d - 1.0).abs() < 2e-8, "{label} {string}: {} vs {d}", law.damping_n_s_m());
+            resolved.push((end, binding.string, law.stiffness_n_m(), law.damping_n_s_m()));
+        }
+    }
+    for &(_, string, k, d) in resolved.iter().filter(|r| r.0 == 0) {
+        let &(_, _, k_stiff, d_stiff) = resolved.iter().find(|r| r.0 == 1 && r.1 == string).unwrap();
+        assert!(k < k_stiff && d < d_stiff, "string {string}: compliant {k} {d}, stiff {k_stiff} {d_stiff}");
+    }
+}
+
 /// Both il Cannone tables are admitted, and their four bridges land on bridge nodes within 0.6 mm of the string
 /// contacts and push along x. The 6 mm body's 64 components and 157 ties are exactly the assembly caps: one more
 /// component or one more tie refuses. Its rib set (2904 nodes, 5082 triangles) and its 11769 nodes and 17483 triangles

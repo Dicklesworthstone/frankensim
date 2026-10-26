@@ -763,18 +763,71 @@ Two inputs of this note are authored, not measured:
 - the bridge joint (200000 N/m, 0.1 N s/m);
 - the Stribeck friction law (0.8, 0.4, 0.1 m/s).
 
+`cannone-dominant-g3-crown-compliant.material-strings` and
+`cannone-dominant-g3-crown-stiff.material-strings` replace the authored joint.
+They are the same note, but every string's joint comes from its interface pack
+`packs/violin-cannone-crown-dominant-{e,a,d,g}-interface.fsintpk`.
+
+`gen_crown_interface_packs.py` writes both notes and the four sources from
+committed data only:
+- the maple shell pack;
+- the wrap-metal packs;
+- the CT break angles and bridge-top thickness;
+- this note's string radii and tensions.
+
+Each joint is the string's lateral stick on the maple crown: Hertz crossed
+cylinders and Mindlin's no-slip tangential stiffness, k_t = 8 G* a. The joint
+loss is the maple's shear retardation time times its share of the compliance.
+That dashpot is written at the maple pack's constant-loss anchor (2 pi 200
+rad/s), and each source states the anchor as `constant_loss_reference_omega`.
+The prepared network then gives every coupled mode the joint's loss factor
+(share x eta_LR, about 0.016) times the joint's share of that mode's strain
+energy, at the mode's own frequency, instead of the Kelvin-Voigt reading that
+grows with frequency. The note needs the prepared owner, which it declares.
+
+The stiff end's coupled stiffness bound exceeds the network's 0.9 pi f_s guard
+at 144 kHz, so its note renders at 384 kHz over the same 2 s, with 2.67 times
+as many steps.
+
+Every claim covers 0 to 2 pi 200 kHz: the contact is quasi-static there, and the
+network asks the law at the cavity neck's free coordinate and at its coupled
+stiffness bound. The loss outside the maple's measured 150 Hz-10 kHz is a STATED
+UNKNOWN; there it is the five-branch constant-loss shape, extrapolated.
+
+Three inputs are STATED UNKNOWN. Each is taken at both ends of its range:
+- the maple's orthotropy;
+- the crown edge radius, from 0.1 mm to half the CT's 1.8 mm bridge top;
+- the wrap metal Pickering does not name: aluminium to silver, and aluminium to
+  steel for the E.
+
+| string | compliant k_t, D | stiff k_t, D |
+|---|---|---|
+| G | 1.08e5 N/m, 1.37 N s/m | 1.30e6 N/m, 15.9 N s/m |
+| E | 1.05e5 N/m, 1.33 N s/m | 1.30e6 N/m, 16.4 N s/m |
+
+The D and A strings lie in between.
+
+The elastic contact's mean pressure (170 MPa to 2.2 GPa) is beyond what end-grain
+maple bears, so a played crown beds into a conforming groove. That only enlarges
+the contact: the compliant end is a lower bound, and the stiff end can be
+exceeded. The winding's turn-by-turn contact is not resolved.
+
 Gather the packs and the performance in one directory, then run from the root:
 
 ```bash
 demo=$(mktemp -d)
 m=crates/fs-couple/examples/material_strings
-cp $m/packs/violin-*.fsmatpk $m/cannone-dominant-g3.material-strings "$demo/"
+cp $m/packs/violin-*.fsmatpk $m/packs/violin-cannone-crown-*.fsintpk $m/cannone-dominant-g3*.material-strings "$demo/"
 cargo run --release -p fs-couple --example material_strings -- assemble-shell \
   data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv \
   $m/cannone-h8.assembly "$demo/cannone-h8.body"
 cargo run --release -p fs-couple --example material_strings -- \
   "$demo/cannone-dominant-g3.material-strings" "$demo/g3.wav" --body-profile "$demo/cannone-h8.body"
 ```
+
+For a crown end, run the last command on
+`cannone-dominant-g3-crown-compliant.material-strings` or
+`cannone-dominant-g3-crown-stiff.material-strings`, with a new output.
 
 ## Authored distributed interior air on the material shell
 

@@ -167,7 +167,7 @@ impl Spec {
         let mut row = r.row("audio")?;
         let rate: u32 = row.parse()?; let samples: u64 = row.parse()?;
         let full_scale = row.positive()?; let block = row.count(65_536)?; row.end()?;
-        if rate == 0 || rate > 192_000 || samples == 0 || samples > 28_800_000
+        if rate == 0 || rate > 384_000 || samples == 0 || samples > 28_800_000
             || samples > u64::from(rate)*600 || block == 0 {
             return Err("audio requires a bounded positive clock, horizon and callback".into());
         }
