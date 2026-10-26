@@ -206,3 +206,94 @@ fn arbitrary_endpoint_separates_signed_radiation_from_convection_without_a_solve
         }
     });
 }
+
+#[test]
+fn radiation_only_endpoint_accounts_for_signed_heat_without_a_convection_port() {
+    let mesh = regular_tet();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("exterior", |_| true, ThermalBc::adiabatic()).unwrap().finish().unwrap();
+    let original = boundary.clone();
+    let curve = phase_curve(true);
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem { mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None };
+    with_cx(|cx| {
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh,
+            &[ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: RHO }],
+            &[0], budget()).unwrap();
+        for ambient in [270.0_f64, 350.0, 400.0] {
+            let patches = [patch(ambient, 500.0)];
+            let got = engine.evaluate_endpoint(cx, problem, None, &[2000.0; 4], &[2000.0; 4],
+                0.25, config(), Some(&patches)).unwrap();
+            let heat = 3.0_f64.sqrt() * EPSILON * STEFAN_BOLTZMANN_W_M2_K4
+                * (350.0_f64.powi(4) - ambient.powi(4));
+            assert!((got.radiation_out_w - heat).abs() < 1e-9);
+            assert!((got.energy_residual_j - 0.25 * heat).abs() < 1e-9);
+            assert!((got.residual_norm_j - 0.125 * heat.abs()).abs() < 1e-9);
+            assert_eq!(got.convective_out_w, 0.0);
+            assert!(got.convective_robin_fluxes.is_empty());
+            assert_eq!(got.stored_energy_change_j, 0.0);
+        }
+    });
+    assert_eq!(boundary, original);
+    assert!(!boundary.has_robin());
+}
+
+#[test]
+fn radiation_only_primal_can_be_rechecked_and_perturbed_without_advancing_history() {
+    let mesh = regular_tet();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("exterior", |_| true, ThermalBc::adiabatic()).unwrap().finish().unwrap();
+    let curve = phase_curve(false);
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let patches = [patch(400.0, 500.0)];
+    let problem = ConductionProblem { mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None };
+    let old = [1000.0; 4];
+    with_cx(|cx| {
+        let engine = EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, RHO, budget()).unwrap();
+        let solved = engine.advance_with_ambient_radiation(cx, problem, None, &old, 0.1,
+            config(), &patches, radiation_config()).unwrap();
+        let got = engine.evaluate_endpoint(cx, problem, None, &old,
+            &solved.conduction.specific_enthalpy_j_kg, 0.1, config(), Some(&patches)).unwrap();
+        assert!(got.residual_norm_j <= solved.physical_residual_tolerance_j);
+        assert!(got.energy_residual_j.abs() <= config().energy_tolerance_j);
+        assert!(got.radiation_out_w < 0.0 && got.stored_energy_change_j > 0.0);
+        assert!(got.convective_robin_fluxes.is_empty());
+        let perturbed: Vec<_> = solved.conduction.specific_enthalpy_j_kg.iter().map(|h| h + 1.0).collect();
+        let bad = engine.evaluate_endpoint(cx, problem, None, &old, &perturbed, 0.1,
+            config(), Some(&patches)).unwrap();
+        assert!(bad.residual_norm_j > 1e-3);
+        assert!(bad.energy_residual_j.abs() > 1e-3);
+    });
+    assert_eq!(old, [1000.0; 4]);
+}
+
+#[test]
+fn radiation_only_and_separate_air_faces_keep_independent_heat_accounts() {
+    let mesh = regular_tet();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region("exterior", |f| f.centroid[2] == 0.0, ThermalBc::adiabatic()).unwrap()
+        .remainder("air", ThermalBc::robin(HTC, 300.0).unwrap()).unwrap().finish().unwrap();
+    let curve = phase_curve(true);
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem { mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None };
+    with_cx(|cx| {
+        let engine = EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, RHO, budget()).unwrap();
+        let patches = [patch(400.0, 500.0)];
+        let got = engine.evaluate_endpoint(cx, problem, None, &[2000.0; 4], &[2000.0; 4],
+            0.25, config(), Some(&patches)).unwrap();
+        let convection = 3.0 * 3.0_f64.sqrt() / 4.0 * HTC * 50.0;
+        let radiation = 3.0_f64.sqrt() / 4.0 * EPSILON * STEFAN_BOLTZMANN_W_M2_K4
+            * (350.0_f64.powi(4) - 400.0_f64.powi(4));
+        assert!((got.convective_out_w - convection).abs() < 1e-10);
+        assert!((got.radiation_out_w - radiation).abs() < 1e-9);
+        assert!((got.energy_residual_j - 0.25 * (convection + radiation)).abs() < 1e-9);
+        assert_eq!(got.convective_robin_fluxes.len(), 1);
+        assert_eq!(got.convective_robin_fluxes[0].region, "air");
+    });
+}

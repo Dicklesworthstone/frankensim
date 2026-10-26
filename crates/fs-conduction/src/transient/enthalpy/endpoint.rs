@@ -143,15 +143,35 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 finite(value)?;
             }
         }
+        // A radiation-only patch starts from a named zero-flux boundary, so it
+        // has NO original convection row. Obtain its area/mean from the actual
+        // radiative secant boundary using the same trace integrator as the
+        // primal. Never return that radiation row as a coolant/air heat port.
+        // Existing convection-only/mixed-Robin calls retain their exact path.
+        let needs_radiative_traces = patches.is_some_and(|patches| patches.iter().any(|patch|
+            !convective_robin_fluxes.iter().any(|row| row.region == patch.region())));
+        let radiative_traces = if needs_radiative_traces {
+            let boundary = combined_boundary.as_ref().ok_or(EnthalpyError::InvalidInput(
+                "radiation endpoint lost its physical boundary",
+            ))?;
+            let (_, traces) = energy_balance(
+                self.mesh, boundary, problem.source, &system, &dofs, &temperature,
+            );
+            poll(cx, n)?;
+            traces
+        } else {
+            Vec::new()
+        };
         let mut radiation_out_w = 0.0;
         if let Some(patches) = patches {
             for (index, patch) in patches.iter().enumerate() {
                 poll(cx, index)?;
                 let flux = convective_robin_fluxes
                     .iter()
+                    .chain(&radiative_traces)
                     .find(|row| row.region == patch.region())
                     .ok_or(EnthalpyError::InvalidInput(
-                        "evaluated radiation patch has no convection trace",
+                        "evaluated radiation patch has no physical trace",
                     ))?;
                 radiation_out_w = finite(
                     radiation_out_w
