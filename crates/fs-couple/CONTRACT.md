@@ -6216,3 +6216,39 @@ with the independent sealed-tube oscillator while checking total energy.
 A further source-state regression changes only a relaxation-time claim and
 checks actual DG pressure, retained branch energy and material loss; the
 unused Kelvin property is not counted again. Native execution is pending.
+
+## Nonlinear induction coupled to finite material enthalpy
+
+`MagneticThermalNetwork::step_nonlinear_eddy_candidate` advances the original
+`PlanarNonlinearEddy` field and `DepositionSimulation` on one accepted time
+interval. Each thermal Newton trial starts from the same accepted magnetic
+potential, resolves the same material card's conductivity at the trial endpoint
+temperature, and solves the source-defined reversible H(B) induction problem.
+The original conductor-region projection supplies exact triangle-integrated
+sigma*E^2 losses to the existing thermal cells; the shared material network
+supplies conduction, authored sources, boundaries and finite caloric storage.
+The coupled candidate publishes both histories together. Cancellation, missing
+routes, source mismatch or nonlinear failure leaves both inputs unchanged.
+
+Only physical Joule heat enters material enthalpy. The field step's nonnegative
+backward-Euler magnetic convexity loss remains separately visible as
+`report.electrical.numerical_dissipation_j`. The shared driver audit checks
+magnetic storage change + thermal storage change + numerical dissipation
+against impressed-current work and other external heat. Numerical loss is not
+an empirical core-loss model and is never deposited as heating.
+
+Source identity, property basis, requirements, nonthermal coordinates, fixed
+geometry, original triangle volumes and complete conductor/thermal routing are
+re-admitted at every trial. The complete H(B) source path must remain unchanged;
+a temperature-dependent H(B,T) source refuses thermal feedback even if selected
+endpoint values happen to agree. This path does not supply magnetic entropy,
+thermal parameter work, hysteresis, remanence, moving conductors or terminal
+circuit feedback. Caloric charts are fixed and fully solid in this bounded
+coupling; unsupported phase changes refuse through the existing material owner.
+
+`tests/nonlinear_eddy_enthalpy.rs` specifies an independent scalar-bisection
+oracle for source-only changes to saturation and temperature-dependent
+resistivity, continuation from the accepted field, physical heat versus
+numerical loss, complete energy balance, and transactional failure. Full native
+integration execution is required in a build environment that can compile the
+pinned constellation; the production-leaf checks alone do not establish it.

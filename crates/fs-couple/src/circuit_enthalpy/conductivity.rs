@@ -58,6 +58,7 @@ impl ThermalDriver for MaterialConductivityCandidate {
             resistors: &electrical.resistors,
             contacts: &electrical.contacts,
             heat_j: electrical.heat_j,
+            numerical_dissipation_j: 0.0,
             stored_change_j: electrical.stored_after_j - electrical.stored_before_j,
             supplied_j: electrical.native.supplied,
         }
