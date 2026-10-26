@@ -31,6 +31,15 @@ pub fn point(t: f64, p: f64) -> QueryPoint {
 /// cp/R = 3 + 0.001 T; a7 is an arbitrary formation-energy offset [K].
 /// Both transport properties vary with pressure; k_scale changes data only.
 pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel {
+    model_with_temperature_limit(a7, pressure_max, k_scale, 700.0)
+}
+
+pub fn model_with_temperature_limit(
+    a7: f64,
+    pressure_max: f64,
+    k_scale: f64,
+    temperature_max: f64,
+) -> ThermochemicalGasModel {
     let artifact = hash("synthetic gas");
     let provenance = Provenance {
         source: "authored synthetic NSF fixture; not measured".into(),
@@ -105,7 +114,7 @@ pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel
         parameters,
         state_schema_version: 0,
         initial_state: InitialStatePolicy::ZeroInternalState,
-        validity: ValidityDomain::unconstrained().with("T", 200.0, 700.0),
+        validity: ValidityDomain::unconstrained().with("T", 200.0, temperature_max),
         sources: vec![artifact],
         provenance: provenance.clone(),
     };
@@ -132,7 +141,7 @@ pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel
         .collect::<Vec<_>>();
     for (side, value) in [
         (ValidityBoundSide::Lower, 200.0),
-        (ValidityBoundSide::Upper, 700.0),
+        (ValidityBoundSide::Upper, temperature_max),
     ] {
         normalized.push(ModelNormalizationReceipt::new(
             ModelNormalizationTarget::ValidityBound {
@@ -191,7 +200,7 @@ pub fn model(a7: f64, pressure_max: f64, k_scale: f64) -> ThermochemicalGasModel
                         "temperature",
                         typed(QuantityKind::AbsoluteTemperature),
                         200.0,
-                        700.0,
+                        temperature_max,
                     )
                     .with_quantity(
                         "pressure",

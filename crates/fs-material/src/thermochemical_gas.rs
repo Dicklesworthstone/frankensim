@@ -80,10 +80,13 @@ fn coordinates(point: &QueryPoint) -> Result<(Temperature, Pressure), MaterialEr
     };
     let t = coordinate("temperature", QuantityKind::AbsoluteTemperature)?;
     let p = coordinate("pressure", QuantityKind::Pressure)?;
-    // Preserve the shared GasState admission envelope. This is NOT a proof of
-    // phase stability or ideal-gas accuracy; narrower source domains still apply.
-    if !(50.0..=2000.0).contains(&t) || !positive(p) || p > 1.0e7 {
-        return Err(invalid("thermochemical gas requires T in [50,2000] K and p in (0,1e7] Pa"));
+    // NASA-9 regions and every pure-transport claim own the supported domain.
+    // The legacy calorically-perfect air fit's envelope is not this model's.
+    // Source support still does not prove ideal-gas accuracy or phase stability.
+    if !positive(t) || !positive(p) {
+        return Err(invalid(
+            "thermochemical gas requires finite positive absolute temperature and pressure",
+        ));
     }
     Ok((Temperature::new(t), Pressure::new(p)))
 }

@@ -145,6 +145,63 @@ fn nasa9_energy_heating_updates_temperature_pressure_gamma_and_transport_togethe
 }
 
 #[test]
+fn hot_source_data_reaches_the_same_native_flow_heat_and_acoustic_state() {
+    use fs_material::fluid_transport::FluidTransport;
+
+    let temperature = 2400.0;
+    let controls = GasEnergySolve {
+        minimum_temperature_k: 2200.0,
+        maximum_temperature_k: 2700.0,
+        ..controls()
+    };
+    let gas = ThermochemicalNsfGas::new(
+        source::model_with_temperature_limit(-4000.0, 250000.0, 1.0, 3000.0),
+        source::point(temperature, 100000.0),
+        controls,
+    )
+    .unwrap();
+    let reference = gas.model().evaluate(gas.context()).unwrap();
+    let r = reference.state().specific_gas_constant;
+    let mut spec = spec(gas);
+    spec.temperature_k = temperature;
+    spec.temperature_window_k = [
+        controls.minimum_temperature_k,
+        controls.maximum_temperature_k,
+    ];
+    let heat_per_mass = 10000.0;
+    let source_e = heat_per_mass / (3.0 * r * temperature);
+    let mut grid = NsfGrid3::<D3q27>::new_with_sources(
+        spec,
+        |_| false,
+        |_| (1.0, [0.0; 3], temperature),
+        Some(Box::new(move |_, _| (0.0, [0.0; 3], source_e))),
+    )
+    .unwrap();
+    let before = grid.total_energy_j();
+    let mass = 32.0 * grid.law().rho_ref_kg_m3 * grid.law().dx_m.powi(3);
+    for _ in 0..4 {
+        let balance = grid.step().unwrap();
+        assert!(balance.residual_rel < 1e-12);
+    }
+    let resolved = grid.thermochemical_state([0, 0, 0]).unwrap().unwrap();
+    let hot = resolved.state();
+    hot.validate_coherence().unwrap();
+    assert_eq!(
+        hot.transport_state().unwrap(),
+        resolved.transport_state().unwrap()
+    );
+    assert!(hot.temperature > temperature);
+    assert!(hot.sound_speed > reference.state().sound_speed);
+    assert!(hot.gamma < reference.state().gamma);
+    assert!(hot.dynamic_viscosity > reference.state().dynamic_viscosity);
+    let specific_heat = r
+        * (2.0 * (hot.temperature - temperature)
+            + 0.0005 * (hot.temperature.powi(2) - temperature.powi(2)));
+    assert!((specific_heat - 4.0 * heat_per_mass).abs() < 1e-4);
+    assert!((grid.total_energy_j() - before - mass * specific_heat).abs() < 1e-10 * before.abs());
+}
+
+#[test]
 fn formation_energy_offset_cannot_drive_flow_or_heat_when_density_changes() {
     let mut a =
         NsfGrid3::<D3q27>::new(spec(gas(-4000.0, 250000.0, 1.0)), |_| false, varying).unwrap();

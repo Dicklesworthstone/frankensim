@@ -85,7 +85,7 @@ fn failure_cancellation_and_work_exhaustion_are_atomic() {
     assert!(matches!(parcel.add_heat(100.0, controls(), || { polls += 1; polls == 4 }), Err(GasEnergyError::Cancelled)));
     assert_eq!(parcel, saved);
     // Target is inside the thermodynamic bracket but pressure crosses the
-    // shared gas admission limit. No tentative state may become observable.
+    // pure-transport source pressure limit. No tentative state may become observable.
     let mut dense = IsochoricGasParcel::new(model(vec![0.75, 0.25], 0.001), point(300.0, 8e6), 0.01).unwrap();
     let saved_dense = dense.clone();
     let q = dense.mass_kg() * (specific_u(600.0, 0.75, 0.001) - specific_u(300.0, 0.75, 0.001));
@@ -106,6 +106,90 @@ fn zero_heat_is_bitwise_unchanged_and_bad_controls_are_not_ignored() {
         assert!(parcel.add_heat(0.0, invalid, || false).is_err());
         assert_eq!(parcel, saved);
     }
+}
+
+#[test]
+fn source_supported_heating_and_compression_cross_legacy_air_temperature_limits() {
+    use super::super::tests::model_in_domains;
+    use super::entropy::GasEntropySolve;
+    use super::parcel::ClosedGasParcel;
+
+    let model = model_in_domains(
+        vec![0.75, 0.25],
+        0.001,
+        [200.0, 6000.0],
+        [200.0, 5000.0],
+        [1000.0, 1.0e7],
+    );
+    let mut parcel = ClosedGasParcel::new(model, point(1800.0, 100000.0), 0.01).unwrap();
+    let mass = parcel.mass_kg();
+    let energy = GasEnergySolve {
+        minimum_temperature_k: 200.0,
+        maximum_temperature_k: 4900.0,
+        energy_tolerance_j_kg: 1e-6,
+        maximum_iterations: 128,
+    };
+    let entropy = GasEntropySolve {
+        minimum_temperature_k: 200.0,
+        maximum_temperature_k: 4900.0,
+        entropy_tolerance_j_kg_k: 1e-8,
+        maximum_iterations: 128,
+    };
+    let heat = mass * (specific_u(3200.0, 0.75, 0.001) - specific_u(1800.0, 0.75, 0.001));
+    let report = parcel.add_heat(heat, energy, || false).unwrap();
+    close(parcel.state().state().temperature, 3200.0);
+    close(parcel.state().state().pressure, 100000.0 * 3200.0 / 1800.0);
+    close(report.stored_energy_change_j, heat);
+    parcel.state().state().validate_coherence().unwrap();
+    assert_eq!(
+        parcel.state().state().transport_state().unwrap(),
+        parcel.state().transport_state().unwrap()
+    );
+
+    let heated = parcel.state().clone();
+    let work = parcel
+        .set_volume_isentropic(0.005, entropy, || false)
+        .unwrap();
+    let compressed = parcel.state().state();
+    assert!(compressed.temperature > 3200.0);
+    assert!(compressed.sound_speed > heated.state().sound_speed);
+    close(compressed.density, 2.0 * heated.state().density);
+    assert!(work.work_by_gas_j < 0.0);
+    assert!(work.entropy_change_j_k.abs() <= mass * entropy.entropy_tolerance_j_kg_k);
+    // Independent integral of cv(T)/T - R_specific d(ln rho) for cp/R = a+bT.
+    let specific_r = R / (0.75 * 0.028 + 0.25 * 0.004);
+    let a = 0.75 * 3.5 + 0.25 * 2.5;
+    let b = 0.75 * 0.001;
+    let ds = specific_r
+        * ((a - 1.0) * (compressed.temperature / 3200.0).ln()
+            + b * (compressed.temperature - 3200.0)
+            - 2.0f64.ln());
+    assert!(ds.abs() < 1e-8);
+    compressed.validate_coherence().unwrap();
+
+    // Returning to the original volume restores the entire thermal/acoustic state.
+    parcel
+        .set_volume_isentropic(0.01, entropy, || false)
+        .unwrap();
+    close(parcel.state().state().temperature, 3200.0);
+    close(
+        parcel.state().state().sound_speed,
+        heated.state().sound_speed,
+    );
+    close(parcel.mass_kg(), mass);
+    // Thermodynamic support alone cannot authorize unsupported transport.
+    let saved = parcel.clone();
+    let invalid_heat =
+        mass * (specific_u(5500.0, 0.75, 0.001) - parcel.state().specific_internal_energy_j_kg());
+    let wider = GasEnergySolve {
+        maximum_temperature_k: 5900.0,
+        ..energy
+    };
+    assert!(matches!(
+        parcel.add_heat(invalid_heat, wider, || false),
+        Err(GasEnergyError::Material(_))
+    ));
+    assert_eq!(parcel, saved);
 }
 
 #[test]
