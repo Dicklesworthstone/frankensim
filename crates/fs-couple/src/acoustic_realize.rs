@@ -5958,6 +5958,7 @@ mod string_observer_tests {
             relaxation_bending: None,
             polarization_detune: 0.0,
             moving_end: false,
+            tension_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let mut member = linear_string_member(&string, None, None, &gas, 1.0, 8_000, 1.0).unwrap();
@@ -5995,6 +5996,7 @@ mod string_observer_tests {
             relaxation_bending: None,
             polarization_detune: 0.0,
             moving_end: false,
+            tension_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let mut member = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0).unwrap();
@@ -6167,6 +6169,7 @@ mod string_observer_tests {
                 relaxation_bending: None,
                 polarization_detune: 0.0,
                 moving_end: true,
+                tension_loss_factor: None,
             };
             let render = |string: &PrestressedString| {
                 realize_dirac_join(
@@ -6632,7 +6635,7 @@ mod arbitrary_gas_realization_tests {
                 axial_stiffness_n: 0.0, width_m: 0.001, n_modes: 6,
                 damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
                 kelvin_voigt_bending: None, relaxation_bending: None,
-                polarization_detune: 0.0, moving_end: false,
+                polarization_detune: 0.0, moving_end: false, tension_loss_factor: None,
             }),
             duct: None,
             pluck: Some(Pluck { station_frac: 0.25, height_m: 1.0e-4 }),

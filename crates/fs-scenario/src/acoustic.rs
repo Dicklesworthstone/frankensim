@@ -70,6 +70,9 @@ pub struct PrestressedString {
     /// Dirac-joins the waveguide to any plate/cavity. False is
     /// fixed-fixed sines with a one-way bridge force.
     pub moving_end: bool,
+    /// Fractional loss factor `eta_F` of the tension (the string's own
+    /// construction, not its bending law). `None` is no tension loss term.
+    pub tension_loss_factor: Option<f64>,
 }
 
 /// Uniform Kelvin–Voigt bending: moment `M = EI curvature + eta I curvature_dot`.

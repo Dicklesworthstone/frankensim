@@ -139,7 +139,8 @@ fn template() -> PrestressedString {
     PrestressedString { length_m: LENGTH, tension_n: 1.0, lin_density_kg_m: 1.0,
         axial_stiffness_n: 0.0, width_m: 0.001, n_modes: 2, damping_ratio: 0.0,
         rayleigh: None, bending_stiffness_n_m2: 0.0, kelvin_voigt_bending: None,
-        relaxation_bending: None, polarization_detune: 0.0, moving_end: false }
+        relaxation_bending: None, polarization_detune: 0.0, moving_end: false,
+        tension_loss_factor: None }
 }
 fn controls() -> ConcentricStringThermalSolve {
     ConcentricStringThermalSolve { maximum_cells: 2, maximum_thermal_trials: 256,

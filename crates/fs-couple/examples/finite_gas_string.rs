@@ -113,6 +113,7 @@ fn string_template(spec: &input::Spec) -> PrestressedString {
         relaxation_bending: None,
         polarization_detune: 0.0,
         moving_end: false,
+        tension_loss_factor: None,
     }
 }
 

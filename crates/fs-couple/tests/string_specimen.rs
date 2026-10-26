@@ -421,6 +421,7 @@ fn template() -> PrestressedString {
         }),
         polarization_detune: 0.0,
         moving_end: false,
+        tension_loss_factor: None,
     }
 }
 

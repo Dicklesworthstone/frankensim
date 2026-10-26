@@ -134,6 +134,7 @@ fn source(rho: f64) -> MaterialStringSource {
         relaxation_bending: None,
         polarization_detune: 0.0,
         moving_end: false,
+        tension_loss_factor: None,
     };
     MaterialStringSource::Homogeneous(
         with_uniform_circular_material_state(string, 0.0003, &material(rho))
@@ -538,6 +539,7 @@ fn tuned_source(n_modes: usize) -> MaterialStringSource {
         relaxation_bending: None,
         polarization_detune: 0.0,
         moving_end: false,
+        tension_loss_factor: None,
     };
     MaterialStringSource::Homogeneous(
         with_uniform_circular_material_state(string, 0.0003, &material(7800.0))
