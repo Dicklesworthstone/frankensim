@@ -96,7 +96,8 @@ mod energy;
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
 mod flow;
-mod krylov;
+pub(crate) use flow::scale_rows;
+pub(crate) mod krylov;
 pub mod material_coupling;
 mod natural;
 mod radiation;

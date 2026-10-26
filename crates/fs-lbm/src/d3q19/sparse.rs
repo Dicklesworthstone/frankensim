@@ -257,6 +257,7 @@ impl Reduce for FirstRefusal {
 /// neighbors' post-collision state) — followed by one failure-atomic
 /// publication swap, so every pass writes each output exactly once from
 /// read-only inputs.
+#[derive(Clone)]
 pub struct SparseGrid3 {
     ntx: usize,
     nty: usize,

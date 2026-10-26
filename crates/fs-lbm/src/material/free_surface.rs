@@ -21,6 +21,8 @@ mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
 /// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
 pub mod transfer;
+/// Conservative moving-liquid enthalpy and source-temperature viscosity.
+pub mod enthalpy;
 
 /// One frozen source state and its physical-to-lattice conversion.
 ///

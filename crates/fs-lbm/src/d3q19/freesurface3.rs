@@ -44,6 +44,8 @@ use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
+pub(crate) mod transport;
+use transport::{MassLocation3, MassTransport3};
 
 /// D3Q19 lattice speed of sound squared.
 const CS2_3: f64 = 1.0 / 3.0;
@@ -159,6 +161,8 @@ pub enum FreeSurfaceError3 {
         /// Failed admission condition.
         reason: &'static str,
     },
+    /// A bounded companion transport could not retain the native mass routes.
+    Transport(&'static str),
     /// Cancellation was observed before physical state publication.
     Cancelled,
 }
@@ -181,6 +185,9 @@ impl core::fmt::Display for FreeSurfaceError3 {
             ),
             FreeSurfaceError3::InvalidInitialState { coordinates, reason } => {
                 write!(f, "free-surface initial state at {coordinates:?} refused: {reason}")
+            }
+            FreeSurfaceError3::Transport(reason) => {
+                write!(f, "free-surface companion transport refused: {reason}")
             }
             FreeSurfaceError3::Cancelled => {
                 f.write_str("free-surface step cancelled before publication")
@@ -230,6 +237,7 @@ pub struct FreeSurfaceSample3 {
 }
 
 /// 3-D free surface over a sparse active-tile D3Q19 grid.
+#[derive(Clone)]
 pub struct FreeSurface3 {
     grid: SparseGrid3,
     tiles: BTreeMap<u64, FsTile>,
@@ -858,6 +866,15 @@ impl FreeSurface3 {
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
+        self.step_inner(gate, None, None)
+    }
+
+    fn step_inner(
+        &mut self,
+        gate: &CancelGate,
+        mut transport: Option<&mut MassTransport3>,
+        local_tau: Option<&BTreeMap<(u64, usize), f64>>,
+    ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         let ledger_before = self.ledger_mass();
         self.refresh_fill(gate)?;
@@ -876,7 +893,15 @@ impl FreeSurface3 {
                 *out = match self.tiles[&key].cells[lane] {
                     Cell3::Gas => populations,
                     Cell3::Fluid | Cell3::Interface => {
-                        super::collide_cell3(populations, model, force).map_err(|source| {
+                        let cell_model = match local_tau {
+                            None => model,
+                            Some(values) => super::CollisionModel3::Bgk {
+                                tau: *values.get(&(key, lane)).ok_or(FreeSurfaceError3::Transport(
+                                    "missing source viscosity at a wet cell",
+                                ))?,
+                            },
+                        };
+                        super::collide_cell3(populations, cell_model, force).map_err(|source| {
                             FreeSurfaceError3::Collision {
                                 tile_key: key,
                                 lane,
@@ -912,26 +937,36 @@ impl FreeSurface3 {
                 if flag == Cell3::Gas {
                     continue;
                 }
-                // Mass exchange (interface only; fluid Σf tracks itself).
-                if flag == Cell3::Interface {
+                // The optional companion records these SAME pair exchanges.
+                // Fluid Σf tracks its mass through streaming, not another update.
+                if flag == Cell3::Interface || transport.is_some() {
                     let mut dm = 0.0f64;
                     for q in 1..Q3 {
                         if let Neighbor::Active(nb_key, nb_lane, nb_cell) =
                             self.neighbor_state(key, lane, q)
                         {
-                            let w = match nb_cell {
-                                Cell3::Fluid => 1.0,
-                                Cell3::Interface => {
+                            let w = match (flag, nb_cell) {
+                                (_, Cell3::Gas) => 0.0,
+                                (Cell3::Interface, Cell3::Interface) => {
                                     f64::midpoint(fills[&key][lane], fills[&nb_key][nb_lane])
                                 }
-                                Cell3::Gas => 0.0,
+                                _ => 1.0,
                             };
                             if w > 0.0 {
-                                dm += w * (post[&nb_key][nb_lane][OPP3[q]] - post[&key][lane][q]);
+                                let incoming = w * (post[&nb_key][nb_lane][OPP3[q]] - post[&key][lane][q]);
+                                dm += incoming;
+                                if (key, lane) < (nb_key, nb_lane)
+                                    && let Some(trace) = transport.as_deref_mut()
+                                {
+                                    trace.exchange(
+                                        MassLocation3::Cell(nb_key, nb_lane),
+                                        MassLocation3::Cell(key, lane), incoming,
+                                    )?;
+                                }
                             }
                         }
                     }
-                    mass_delta.push((key, lane, dm));
+                    if flag == Cell3::Interface { mass_delta.push((key, lane, dm)); }
                 }
                 // Pull-stream with gas reconstruction (2-D port).
                 let populations = self.grid.populations(slot, lane);
@@ -990,7 +1025,7 @@ impl FreeSurface3 {
             self.tiles.get_mut(&key).expect("active").mass[lane] += dm;
         }
 
-        self.apply_conversions()?;
+        self.apply_conversions(transport)?;
 
         let ledger_after = self.ledger_mass();
         let violation = ((ledger_after - ledger_before) / ledger_before.max(1e-12)).abs();
@@ -1002,7 +1037,9 @@ impl FreeSurface3 {
 
     /// Conversion cascade with conservative redistribution (2-D port),
     /// activating inactive in-domain tiles when fluid advances into them.
-    fn apply_conversions(&mut self) -> Result<(), FreeSurfaceError3> {
+    fn apply_conversions(
+        &mut self, mut transport: Option<&mut MassTransport3>,
+    ) -> Result<(), FreeSurfaceError3> {
         let mut excess_pool = std::mem::take(&mut self.carry);
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
         let mut to_fluid: Vec<(u64, usize)> = Vec::new();
@@ -1030,6 +1067,10 @@ impl FreeSurface3 {
             let rho: f64 = self.grid.populations(slot, lane).iter().sum();
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
+                if let Some(trace) = transport.as_deref_mut() {
+                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry,
+                        tile.mass[lane] - rho)?;
+                }
                 excess_pool += tile.mass[lane] - rho;
                 tile.cells[lane] = Cell3::Fluid;
                 tile.mass[lane] = rho;
@@ -1102,6 +1143,10 @@ impl FreeSurface3 {
             }
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
+                if let Some(trace) = transport.as_deref_mut() {
+                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry,
+                        tile.mass[lane])?;
+                }
                 excess_pool += tile.mass[lane];
                 tile.cells[lane] = Cell3::Gas;
                 tile.mass[lane] = 0.0;
@@ -1136,9 +1181,12 @@ impl FreeSurface3 {
         } else {
             #[allow(clippy::cast_precision_loss)]
             let share = excess_pool / interface_count as f64;
-            for tile in self.tiles.values_mut() {
+            for (&key, tile) in &mut self.tiles {
                 for lane in 0..TILE_CELLS {
                     if tile.cells[lane] == Cell3::Interface {
+                        if let Some(trace) = transport.as_deref_mut() {
+                            trace.exchange(MassLocation3::Carry, MassLocation3::Cell(key, lane), share)?;
+                        }
                         tile.mass[lane] += share;
                     }
                 }

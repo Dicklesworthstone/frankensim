@@ -62,6 +62,40 @@ chart remain the model limits; this does not implement moving melt or induction.
 `tests/joule_enthalpy_material.rs` exercises source-driven phase/current/heat
 changes on a latent plateau, equivalent electrical source bases and rollback.
 
+### Moving-liquid enthalpy on native free-surface mass routes
+
+`material::free_surface::enthalpy::MaterialFreeSurfaceEnthalpy3` binds the
+original `FreeSurface3` state, material card, pinned `LiquidTemperatureLaw`
+and `EquilibriumEnthalpyPhaseCurve`. Native collision emits its actual pair
+mass exchanges; the original interface conversion cascade emits its exact
+carry/redistribution transfers. The companion transports extensive `mass*h`
+over those same routes with implicit donor upwinding and the existing sparse
+BiCGStab/ILU owner. It does not reconstruct a separate flux from velocities.
+Positive old storage must anchor every participating route component; both
+local mass closure and the final extensive-enthalpy defect are checked. The
+conversion carry retains its own enthalpy. No regularization, balancing heat
+or density repair is added.
+
+Declared cell heat acts at the beginning of the step. The original caloric
+chart supplies T, and every wet cell's pinned material query supplies viscosity
+to its original native collision. All endpoint states are queried again before
+publication. A private flow candidate makes source-support, negative-storage,
+solver, budget and cancellation refusals atomic for populations, classifications,
+carry, heat and material history. Zero-mass interface ghosts store no energy;
+new unconnected ghosts receive a mass-weighted one-ring extension only for their
+collision coefficients. Their enthalpy is never a heat reservoir.
+
+This bounded rung requires one pure liquid, unchanged physical density,
+stationary walls and explicitly neglected capillarity. Negative accepted native
+interface/carry mass refuses. Phase conversion, volume change, conduction,
+viscous heating, pressure work and surface-energy evolution remain separate
+missing closures. `h` is enthalpy and is never described as internal or total
+energy. Implicit transport and native global conversion redistribution introduce
+numerical mixing; no physical thermal-diffusion or mechanical-energy claim is
+made. The focused `material_free_surface_enthalpy` tests exercise actual
+interface conversion, material-only viscosity changes, heat conservation and
+atomic physical/source-domain refusals.
+
 ## Public types and semantics
 
 - D2Q9 constants: `Q` (9), `CS2` (`1/3`), `MACH_LIMIT` (`0.3`).
