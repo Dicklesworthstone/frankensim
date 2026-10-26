@@ -388,8 +388,10 @@ GPU.
   Every term is therefore a lower bound.
 
 Still declared, not sourced, and printed with every coil: strand count,
-spacing, length, tension, preload and the contact law (`kit::Wires`). The last
-three were adopted in a kit retuning graded against the recording (96ccf8f1b).
+spacing, length, tension, preload and the contact law (`kit::Wires`). The
+presets' tension, preload and contact law were adopted in a kit retuning
+graded against the recording (96ccf8f1b); the card route's are 88cccbb78's
+declared estimates (ruling 7486, `kit::card_drum`).
 The ends
 are pinned with no strand-end or cord damping, so the lowest coil modes keep
 their long material decay. On the 14x6 snare this leaves 63-125 Hz louder than
@@ -614,9 +616,32 @@ A fresh level table and real-time qualification remain outstanding; this package
 
 The kit's sizes follow the Salamander Drumkit (Alexander Holm, CC BY-SA 3.0): 18x18 kick,
 14x6 snare, 12x7 rack tom, 14x14 floor tom, 14-inch hi-hat, Paiste 18-inch crash and 20-inch ride,
-recorded with overhead microphones. Head tensions are the drummer's tuning, set so each
-fundamental lands on the recording's; loss points come from the recordings' band decay times.
-`apps/instrument-lab/tools/kitgrade.py` compares every piece band by band.
+recorded with overhead microphones. `apps/instrument-lab/tools/kitgrade.py` compares every piece
+band by band.
+
+The presets (and so live, the browser and GPU) still carry the values a 2026-10-14 retuning
+adopted because they graded closer to those recordings (96ccf8f1b): head tensions, strike points,
+the stick's Hunt-Crossley loss, the wires' tension, preload and contact, the kick's felt crown,
+pillow and microphone, the ride's shell and the hi-hat's rim loss, waviness and stick tip. Their
+notes say so (`kit::FITTED_DRUM_RECEIPT`, `FITTED_CYMBAL_INTERFACE`, the ride's provenance). The
+offline examples' card route keeps none of them (ruling 7486):
+- **Tensions** are a drummer's tuning: both heads keep 88cccbb78's ratio and are scaled so the card
+  drum's own lowest mode, read from a 0.1 m/s stroke 0.3-1.0 s after onset, sits at the late pitch
+  of the Salamander strokes. That pitch is the lowest spectral peak within 20 dB of the strongest,
+  30-400 Hz, where two dynamics agree: kick 40.6 Hz, snare 134.4 Hz, rack tom 133.9 Hz, floor
+  tom 60.4 Hz. The batter tensions that put the card drums there are 375.5 (kick), 1072 (snare),
+  1264 (rack tom) and 478 N/m (floor tom). The early pitch of a hard stroke is up to 15 Hz sharper
+  (the stretch); kitgrade's "fundamental", the strongest component in the first 250 ms, reads that.
+- **Everything else** is 88cccbb78's declared estimate: strike points; stick loss 0.2 s/m; wire
+  tension 2.0 N, preload 0.25 N/m and contact k 2e7 N/m^1.5 with loss 2.0 s/m; the kick's 0.12 kg
+  beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3
+  (no pillow is modelled);
+  the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims with loss 3.0 s/m
+  and a 5 mm stick tip. 88cccbb78 set that rim loss to stand in for rim friction, which is now its
+  own term (`RIM_FRICTION`), so the two overlap.
+
+88cccbb78's own loss points came from the recordings' band decay times. The card drums no longer
+use head T60s; the cymbals' and hi-hat's T60 pairs still do.
 
 ## Estimates (not measurements)
 
@@ -648,11 +673,16 @@ Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced ca
   `drum_cards::FILM_LOSS_SOURCE_NOTE`, and the edge loss's stated unknown;
 - the stick's moving volume is `kit::STICK_TIP_KG` over the 800 kg/m³ at which that Z5A
   contact-effective mass was integrated, so the card's density sets the mass (7.30 g);
-- the tip radius (5 mm) and Hunt-Crossley loss (0.05 s/m) are the presets' declared values;
-- the kick keeps its preset felt beater (`kit::kick_with_materials`) and says so, and its notes say
-  that no pillow is modelled (`kit::KICK_PILLOW_RECEIPT`): only the preset's muffle dashpot, an
+- the tip radius (5 mm) and Hunt-Crossley loss (0.2 s/m) are declared values;
+- tensions, strike points, wires and the kick's beater and muffle dashpot are `kit::card_drum`'s
+  (above);
+- the kick keeps its spec's felt beater (`kit::kick_with_materials`) and says so, and its notes say
+  that no pillow is modelled (`kit::KICK_PILLOW_RECEIPT`): only the declared muffle dashpot, an
   estimate, stands in for it.
 
-`--preset-heads` (anywhere on the command line) renders the recording-fitted preset heads instead,
-and adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to
-the notes. The cymbals and the hi-hat are unchanged.
+Their cymbals and hi-hat take `kit::DECLARED_CYMBAL_INTERFACE` (and the hi-hat
+`DECLARED_HIHAT_RIM_LAW`), and their ride is `kit::card_ride()`.
+
+`--preset-heads` (anywhere on the command line) renders the recording-fitted presets instead, and
+adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to the
+drums' notes.

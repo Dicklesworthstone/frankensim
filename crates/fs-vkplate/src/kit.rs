@@ -67,6 +67,7 @@ impl Wires {
 /// Carried by every drum whose snare wires are the fitted strings.
 pub const FITTED_WIRES_RECEIPT: &str = "snare wires: fitted to a recording (96ccf8f1b), not physics: plain strings with a declared mass per length and one T60, no coil bending and no material or air loss law";
 
+#[derive(Clone, Copy)]
 pub struct DrumSpec {
     pub name: &'static str,
     pub radius: f64,
@@ -85,11 +86,30 @@ pub struct DrumSpec {
     pub mic: [f64; 3],
     /// Floor height relative to the batter head (None: free field).
     pub floor: Option<f64>,
+    /// Where the tensions, strike point, stick and (kick) beater, pillow and microphone come
+    /// from. It joins the notes of every drum built from the spec.
+    pub provenance: &'static str,
 }
+
+/// The presets' provenance (ruling 7486). Their head tensions, strike points and stick loss, and
+/// the kick's felt crown, pillow and microphone, were adopted in 96ccf8f1b because they graded
+/// closer to the Salamander overheads. `card_drum` replaces them.
+pub const FITTED_DRUM_RECEIPT: &str = "drum: fitted to a recording (96ccf8f1b), not physics: head tensions, strike point and stick Hunt-Crossley loss 0.05 s/m; the kick's felt crown, pillow and microphone";
+
+/// The presets' stick Hunt-Crossley loss [s/m], adopted by grade in 96ccf8f1b (it was 0.2).
+const FITTED_STICK_LOSS_S_M: f64 = 0.05;
+
+/// The stick's Hunt-Crossley loss [s/m] on the card route: 88cccbb78's declared estimate. No
+/// source gives the loss of a hickory tip on PET film or bronze; the 3-6 ms contact Wagner (2006)
+/// measured is a falsifier, not an input.
+pub const DECLARED_STICK_LOSS_S_M: f64 = 0.2;
+
+/// The presets' hickory tip (E Pa, nu): a handbook value, not the hickory card.
+const PRESET_HICKORY: (f64, f64) = (12.0e9, 0.3);
 
 pub(crate) fn hertz_stick(tip_radius: f64, e_target: f64, nu_target: f64) -> Law {
     // hickory tip on the target: K = 4/3 E* sqrt(R)
-    hertz_pair(tip_radius, (12.0e9, 0.3), (e_target, nu_target), 0.05)
+    hertz_pair(tip_radius, PRESET_HICKORY, (e_target, nu_target), FITTED_STICK_LOSS_S_M)
 }
 
 /// The existing two-elastic-half-space contact, shared by presets and sources.
@@ -163,8 +183,9 @@ pub fn drum_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, mat
     build_drum(s, hits, gas, Some(materials), false)
 }
 
-/// The kick's receipt on the card route: its beater stays the preset.
-pub const KICK_BEATER_PRESET_RECEIPT: &str = "kick beater: PRESET (declared estimate, not a material card)";
+/// The kick's receipt on the card route: its beater is the spec's (the card drum's is 88cccbb78's
+/// declared felt; see its provenance).
+pub const KICK_BEATER_PRESET_RECEIPT: &str = "kick beater: the spec's felt beater (declared estimate, not a material card)";
 
 /// `drum_with_materials` for the kick: heads from the cards, while the drum
 /// keeps its declared `s.striker`, a felt beater that no material card
@@ -203,7 +224,7 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut ins = instrument(rate, gas, materials)?;
     let primary = materials.map_or(MYLAR, |m| elastic_values(m.primary()));
     let secondary = materials.map_or(MYLAR, |m| elastic_values(m.secondary()));
-    let mut notes = vec![];
+    let mut notes = vec![s.provenance.to_string()];
     match materials.and_then(KitMaterials::film_loss_note) {
         Some(film) => notes.extend([film, crate::materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT.into()]),
         None if matches!(batter_loss, FilmLoss::NoSurfaceLoss) => notes.push(crate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT.into()),
@@ -363,6 +384,7 @@ pub fn snare() -> DrumSpec {
         port: None,
         mic: [0.35, 0.25, 0.9], // an overhead about 1 m away, 25 degrees off the drum's axis
         floor: Some(-0.65),
+        provenance: FITTED_DRUM_RECEIPT,
     }
 }
 
@@ -390,6 +412,7 @@ pub fn kick() -> DrumSpec {
         port: None,
         mic: [0.35, 0.25, 0.9],
         floor: Some(-0.65),
+        provenance: FITTED_DRUM_RECEIPT,
     }
 }
 
@@ -424,6 +447,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         port: None,
         mic: [0.35, 0.25, 0.9],
         floor: Some(if size_in <= 12.5 { -0.75 } else { -0.55 }),
+        provenance: FITTED_DRUM_RECEIPT,
     }
 }
 
@@ -432,6 +456,83 @@ pub fn retune(mut s: DrumSpec, factor: f64) -> DrumSpec {
     s.batter.tension *= factor;
     s.reso.tension *= factor;
     s
+}
+
+/// One card drum's tuning and playing position (ruling 7486).
+struct CardDrum {
+    name: &'static str,
+    /// Batter and resonant tension [N/m]: the batter tuned so the card drum's own lowest mode sits
+    /// at the late pitch of the Salamander strokes (rule 1, below), the resonant head at
+    /// 88cccbb78's ratio to it.
+    tensions: (f64, f64),
+    /// 88cccbb78's declared playing position [m] (rule 2).
+    strike_xy: (f64, f64),
+    provenance: &'static str,
+}
+
+// Rule 1 of ruling 7486: a drummer tunes the heads, so the tension may put the drum's own computed
+// lowest mode at the pitch measured on the reference stroke. The pitch is the lowest spectral peak
+// within 20 dB of the strongest, 30-400 Hz (Hann, 2^19 points), in the small-amplitude tail of the
+// Salamander overhead strokes the kit is compared with, where two dynamics agree (mail 7506):
+// kick 40.6 Hz (kick_OH_F_1, _P_3, 0.3-0.6 s), snare 134.4 Hz (snare2OFF_OH_F_1, _P_2,
+// 0.6-1.0 s), rack tom 133.9 Hz (hiTom_OH_F_4, _P_3, 1.0-1.6 s), floor tom 60.4 Hz
+// (loTom_OH_FF_5, _MP_3, 1.0-1.6 s). The card drum's mode is read the same way from a 0.1 m/s
+// stroke (the Berger stretch negligible), 0.3-1.0 s after onset; both heads keep 88cccbb78's
+// ratio. Found by scaling both preset heads together (f proportional to the square root of the
+// tension) until that mode was within 0.3 Hz of the target, rounding the batter to four figures
+// and setting the resonant head at 88cccbb78's ratio to it; the snare, 0.37 Hz high at that ratio,
+// took one more step. These drums' own modes: snare 134.40, rack tom 133.85, floor tom 60.42
+// and kick 40.56 Hz (trj, 2026-10-26). The early pitch of a hard stroke is up to 15 Hz sharper
+// (the stretch); nothing grades balance or decay.
+const CARD_DRUMS: [CardDrum; 4] = [
+    CardDrum {
+        name: "snare 14x6",
+        tensions: (1072.0, 1072.0 * 2080.0 / 1330.0),
+        strike_xy: (0.06, 0.02),
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 134.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, late tail); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact law (k 2e7 N/m^1.5, loss 2.0 s/m) are declared estimates (88cccbb78)",
+    },
+    CardDrum {
+        name: "kick 18x18",
+        tensions: (375.5, 375.5 * 253.0 / 358.0),
+        strike_xy: (0.0, 0.02),
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 40.6 Hz (Salamander kick_OH_F_1/_P_3, late tail); strike point (0, 20) mm, a declared playing-position estimate (88cccbb78); beater 0.12 kg with a 3 cm felt face (k 1e8 N/m^2.5, mu 0.3 s/m) and the muffle dashpot 25 N s/m^3 standing in for the pillow are declared estimates (88cccbb78); the microphone is the declared overhead position",
+    },
+    CardDrum {
+        name: "rack tom 12x7",
+        tensions: (1264.0, 1264.0 * 950.0 / 1270.0),
+        strike_xy: (0.35 * 0.146, 0.0),
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 133.9 Hz (Salamander hiTom_OH_F_4/_P_3, late tail); strike point 0.35 R, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
+    },
+    CardDrum {
+        name: "floor tom 14x14",
+        tensions: (478.0, 478.0 * 175.0 / 330.0),
+        strike_xy: (0.35 * 0.1703, 0.0),
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 60.4 Hz (Salamander loTom_OH_FF_5/_MP_3, late tail); strike point 0.35 R, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
+    },
+];
+
+/// The card route's drum (ruling 7486): `preset` with every value 96ccf8f1b adopted by grade
+/// replaced. The tensions are tuned to the recording's pitch (rule 1); the strike point, the
+/// wires' tension, preload and contact loss, and the kick's beater and muffle are 88cccbb78's
+/// declared estimates (rules 2 and 3). Geometry, heads, grids and the microphone are kept. The
+/// stick's loss is `DECLARED_STICK_LOSS_S_M`, which the card route passes to the hickory card.
+/// The wires-off snare is the snare without wires. Refuses a spec it has no card values for.
+pub fn card_drum(preset: &DrumSpec) -> Result<DrumSpec, String> {
+    let card_name = if preset.name == "snare 14x6, wires off" { "snare 14x6" } else { preset.name };
+    let card = CARD_DRUMS.iter().find(|c| c.name == card_name)
+        .ok_or_else(|| format!("card_drum: no card values for {:?}", preset.name))?;
+    let mut s = DrumSpec { strike_xy: card.strike_xy, provenance: card.provenance, ..*preset };
+    s.batter.tension = card.tensions.0;
+    s.reso.tension = card.tensions.1;
+    s.wires = preset.wires.map(|w| Wires { tension: 2.0, preload_per_m: 0.25, contact: Law::Power { k: 2.0e7, alpha: 1.5, mu: 2.0 }, ..w });
+    if card_name == "kick 18x18" {
+        // a felt beater face of 3 cm radius, power-law felt stiffening with compression (about
+        // 5 mm of felt compression at 180 N), and the muffle dashpot against the lower part of the
+        // heads, standing in for the pillow (not modelled; KICK_PILLOW_RECEIPT)
+        s.striker = (0.12, Law::Power { k: 1.0e8, alpha: 2.5, mu: 0.3 }, 0.03);
+        s.muffle = preset.muffle.map(|(x, y, r, _)| (x, y, r, 25.0));
+    }
+    Ok(s)
 }
 
 pub struct CymbalSpec {
@@ -444,7 +545,49 @@ pub struct CymbalSpec {
     pub bell_rise: f64,
     pub grid: f64,
     pub t60: [(f64, f64); 2],
+    /// Where the shell's dimensions or loss points come from, when a receipt is owed; it joins the
+    /// notes of every cymbal built from the spec.
+    pub provenance: Option<&'static str>,
 }
+
+/// The stick and rim constants a cymbal or hi-hat is played with (ruling 7486).
+#[derive(Clone, Copy, Debug)]
+pub struct CymbalInterface {
+    /// The stick's Hunt-Crossley loss on bronze without a stick card [s/m].
+    pub stick_loss_s_m: f64,
+    /// The hi-hat stick's tip radius without a stick card [m].
+    pub hat_stick_tip_m: f64,
+    /// Two-lobe waviness of the hi-hat rims: the rim gap grows by `w (1 - cos 2 theta)` [m].
+    pub hat_rim_waviness_m: f64,
+    /// Joins a cymbal's notes when no stick card is bound.
+    pub cymbal_receipt: &'static str,
+    /// Joins every hi-hat's notes.
+    pub hat_receipt: &'static str,
+}
+
+/// The presets' interface, each value adopted in 96ccf8f1b because it graded closer to the
+/// Salamander overheads (88cccbb78 had a 0.2 s/m stick loss, a 5 mm tip and flat rims). Its rim
+/// law is HIHAT_RIM_LAW.
+pub const FITTED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
+    stick_loss_s_m: FITTED_STICK_LOSS_S_M,
+    hat_stick_tip_m: HIHAT_STICK_TIP_RADIUS_M,
+    hat_rim_waviness_m: 7.5e-5,
+    cymbal_receipt: "cymbal stick: fitted to a recording (96ccf8f1b), not physics: Hunt-Crossley loss 0.05 s/m",
+    hat_receipt: "hi-hat: fitted to a recording (96ccf8f1b), not physics: rim loss 0.08 s/m (HIHAT_RIM_LAW), a two-lobe rim waviness of up to 0.15 mm, a 4 mm stick tip and, without a stick card, stick loss 0.05 s/m",
+};
+
+/// The card route's interface: 88cccbb78's declared estimates. Its rim law is
+/// DECLARED_HIHAT_RIM_LAW. No source gives a hi-hat's rim waviness, so the rims are flat.
+pub const DECLARED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
+    stick_loss_s_m: DECLARED_STICK_LOSS_S_M,
+    hat_stick_tip_m: 0.005,
+    hat_rim_waviness_m: 0.0,
+    cymbal_receipt: "cymbal stick (ruling 7486): Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
+    hat_receipt: "hi-hat (ruling 7486): flat rims, rim loss 3.0 s/m, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); 88cccbb78 set the rim loss to stand in for rim friction, which is now its own term, so the two overlap",
+};
+
+/// 88cccbb78's declared hi-hat rim law, reference cell as HIHAT_RIM_LAW.
+pub const DECLARED_HIHAT_RIM_LAW: Law = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
 
 /// Grid points (spacing h) with r in [r0, r1]. A grid too coarse to put four of them in the
 /// annulus (a real-time grid) widens r1 to the first ring that does; the caller then spreads the
@@ -530,15 +673,23 @@ fn cymbal_shell(name: &str, c: &CymbalSpec, felt: bool, elastic: (f64, f64, f64)
 }
 
 pub fn splash() -> CymbalSpec {
-    CymbalSpec { name: "splash 8", radius: 0.1016, bow_thickness: 0.68e-3, bell_thickness: 1.5e-3, bell_radius: 0.039, bow_rise: 0.008, bell_rise: 0.014, grid: 4.5e-3, t60: [(500.0, 6.8), (10000.0, 3.1)] }
+    CymbalSpec { name: "splash 8", radius: 0.1016, bow_thickness: 0.68e-3, bell_thickness: 1.5e-3, bell_radius: 0.039, bow_rise: 0.008, bell_rise: 0.014, grid: 4.5e-3, t60: [(500.0, 6.8), (10000.0, 3.1)], provenance: None }
 }
 
 pub fn crash() -> CymbalSpec {
-    CymbalSpec { name: "crash 18", radius: 0.2286, bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, bell_radius: 0.075, bow_rise: 0.025, bell_rise: 0.015, grid: 6.0e-3, t60: [(500.0, 10.0), (10000.0, 2.0)] }
+    CymbalSpec { name: "crash 18", radius: 0.2286, bow_thickness: 0.95e-3, bell_thickness: 1.6e-3, bell_radius: 0.075, bow_rise: 0.025, bell_rise: 0.015, grid: 6.0e-3, t60: [(500.0, 10.0), (10000.0, 2.0)], provenance: None }
 }
 
 pub fn ride() -> CymbalSpec {
-    CymbalSpec { name: "ride 20", radius: 0.254, bow_thickness: 1.65e-3, bell_thickness: 2.25e-3, bell_radius: 0.085, bow_rise: 0.022, bell_rise: 0.020, grid: 6.2e-3, t60: [(500.0, 14.0), (10000.0, 3.2)] }
+    CymbalSpec { name: "ride 20", radius: 0.254, bow_thickness: 1.65e-3, bell_thickness: 2.25e-3, bell_radius: 0.085, bow_rise: 0.022, bell_rise: 0.020, grid: 6.2e-3, t60: [(500.0, 14.0), (10000.0, 3.2)],
+                 provenance: Some("ride: fitted to a recording (96ccf8f1b), not physics: bow 1.65 mm, bell 2.25 mm, 10 kHz T60 3.2 s") }
+}
+
+/// The card route's ride (ruling 7486): the preset with 88cccbb78's declared shell, bow 1.60 mm
+/// and bell 2.20 mm, and its 10 kHz loss point, 3.0 s. The grid (6.2 mm) is numerics and stays.
+pub fn card_ride() -> CymbalSpec {
+    CymbalSpec { bow_thickness: 1.6e-3, bell_thickness: 2.2e-3, t60: [(500.0, 14.0), (10000.0, 3.0)],
+                 provenance: Some("ride (ruling 7486): bow 1.60 mm, bell 2.20 mm and the 10 kHz T60 3.0 s, declared estimates (88cccbb78)"), ..ride() }
 }
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
@@ -594,17 +745,22 @@ pub fn cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)]) -> Result<Piece, St
 
 /// The same plate and contact mechanics with material-resolved propagation.
 pub fn cymbal_with_gas(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState) -> Result<Piece, String> {
-    build_cymbal(c, hits, gas, None)
+    build_cymbal(c, hits, gas, None, &FITTED_CYMBAL_INTERFACE)
+}
+
+/// The same with the stick's loss from `iface` (the card route passes DECLARED_CYMBAL_INTERFACE).
+pub fn cymbal_with_interface(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], iface: &CymbalInterface) -> Result<Piece, String> {
+    build_cymbal(c, hits, standard_gas(), None, iface)
 }
 
 /// Source-bound shell stiffness/mass and spherical-striker mass/contact.
 /// With materials supplied, hit tuple radii remain strike positions; the
 /// material binding's tip radius declares the common physical impactor.
 pub fn cymbal_with_materials(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_cymbal(c, hits, gas, Some(materials))
+    build_cymbal(c, hits, gas, Some(materials), &FITTED_CYMBAL_INTERFACE)
 }
 
-fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
+fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface) -> Result<Piece, String> {
     let mut ins = instrument(OUT_RATE, gas, materials)?;
     let elastic = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
     let mut body = cymbal_body(c.name, c, elastic, materials.and_then(KitMaterials::primary_bending_loss))?;
@@ -613,10 +769,14 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
     let ci = ins.add(body);
     let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
     let mut notes = vec![format!("{}: {n} nodes at {:.1} mm", c.name, c.grid * 1e3)];
+    notes.extend(c.provenance.map(String::from));
+    if materials.is_none() {
+        notes.push(iface.cymbal_receipt.into());
+    }
     for (k, &(t, v, rf, tip)) in hits.iter().enumerate() {
         let fp = ins.bodies[ci].footprint(rf * c.radius, 0.0, 0.0);
         // the stick comes down onto the upper surface: plate on side a
-        let law = materials.map_or_else(|| hertz_stick(tip, elastic.0, elastic.1), KitMaterials::impact_law);
+        let law = materials.map_or_else(|| hertz_pair(tip, PRESET_HICKORY, (elastic.0, elastic.1), iface.stick_loss_s_m), KitMaterials::impact_law);
         let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ci, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
         con.active = false;
         ins.contacts.push(con);
@@ -638,7 +798,7 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
 }
 
 pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
-    let top = CymbalSpec { name: "hi-hat top 14", radius: 0.1778, bow_thickness: 0.85e-3, bell_thickness: 1.4e-3, bell_radius: 0.055, bow_rise: 0.015, bell_rise: 0.01, grid: 5.5e-3, t60: [(500.0, 8.0), (10000.0, 1.5)] };
+    let top = CymbalSpec { name: "hi-hat top 14", radius: 0.1778, bow_thickness: 0.85e-3, bell_thickness: 1.4e-3, bell_radius: 0.055, bow_rise: 0.015, bell_rise: 0.01, grid: 5.5e-3, t60: [(500.0, 8.0), (10000.0, 1.5)], provenance: None };
     let bottom = CymbalSpec { name: "hi-hat bottom 14", bow_thickness: 1.1e-3, ..top };
     (top, bottom)
 }
@@ -685,17 +845,24 @@ pub fn hihat_grid_mu(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from
 
 /// Opposed plates, their shared contacts and microphones in the same gas state.
 pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None)
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None, &FITTED_CYMBAL_INTERFACE)
+}
+
+/// The kit's own hi-hat (contact annulus from 0.8 R, offline grid, RIM_FRICTION) with the rim law
+/// `rim` and the stick and rim waviness of `iface`. The card route passes DECLARED_HIHAT_RIM_LAW
+/// and DECLARED_CYMBAL_INTERFACE.
+pub fn hihat_with_interface(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, iface: &CymbalInterface) -> Result<Piece, String> {
+    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, RIM_FRICTION, standard_gas(), None, iface)
 }
 
 /// Material-resolved opposed shells and impactor. Selected material bending
 /// loss replaces surface T60; rim contact, rim friction and support remain
 /// explicitly separate input data.
 pub fn hihat_grid_mu_with_materials(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials))
+    build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, Some(materials), &FITTED_CYMBAL_INTERFACE)
 }
 
-fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: Option<&KitMaterials>) -> Result<Piece, String> {
+fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64, scale: f64, friction: f64, gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface) -> Result<Piece, String> {
     if !gap.is_finite() || gap < 0.0 {
         return Err(format!("hi-hat: rim opening must be finite and nonnegative, got {gap} m"));
     }
@@ -748,8 +915,8 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     ins.links.extend(Link::affine_mount(bi,&ins.bodies[bi],&nodes,None,
         [9.0e7*felt_area,2.7e3*felt_area],
         [0.5*angular_k,0.0,0.5*angular_k],[0.0;3])?);
-    // rim contact between the shells: matching nodes in the outer 20 % of the radius, with slight
-    // 2-lobe rim waviness (~0.15 mm) so the pedal rests on high spots while adjacent rim arcs sizzle
+    // rim contact between the shells: matching nodes in the outer 20 % of the radius, with the
+    // interface's 2-lobe rim waviness (the presets' ~0.15 mm rests the pedal on high spots)
     let mut pairs = 0;
     for k in 0..ins.bodies[ti].n {
         let p = ins.bodies[ti].xy[k];
@@ -762,7 +929,7 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
             let (tb, tt) = (bow_thickness(&bs, r), bow_thickness(&ts, r));
             let top_z = ins.bodies[ti].origin[2] + ins.bodies[ti].rest_z[k];
             let bottom_z = ins.bodies[bi].origin[2] + ins.bodies[bi].rest_z[kb];
-            let local_gap = top_z - bottom_z - 0.5 * (tt + tb) + 7.5e-5 * (1.0 - cos2);
+            let local_gap = top_z - bottom_z - 0.5 * (tt + tb) + iface.hat_rim_waviness_m * (1.0 - cos2);
             ins.contacts.push(Contact::new(vec![(bi, kb, 1.0)], vec![(ti, k, 1.0)], local_gap, rim));
             if friction > 0.0 {
                 // the faces the contact presses together rub as the shells bend (see Friction)
@@ -781,8 +948,8 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
     for &(t, v) in hits {
         let fp = ins.bodies[ti].footprint(0.85 * ts.radius, 0.0, 0.0);
-        let tip = HIHAT_STICK_TIP_RADIUS_M;
-        let law = materials.map_or_else(|| hertz_stick(tip, primary.0, primary.1), KitMaterials::impact_law);
+        let tip = iface.hat_stick_tip_m;
+        let law = materials.map_or_else(|| hertz_pair(tip, PRESET_HICKORY, (primary.0, primary.1), iface.stick_loss_s_m), KitMaterials::impact_law);
         let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ti, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
         con.active = false;
         ins.contacts.push(con);
@@ -792,7 +959,8 @@ fn build_hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f64,
     mic.unbaffled = Some(ts.radius);
     ins.mics.push(mic);
     let os = pick_oversample(&mut ins, 0.6)?;
-    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), rim opening {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0)];
+    let notes = vec![format!("hi-hat: {} + {} nodes, {pairs} rim contact pairs (friction {friction}), rim opening {:.2} mm, pedal {pedal_n} N, internal {} kHz", ins.bodies[ti].n, ins.bodies[bi].n, gap * 1e3, OUT_RATE * os as f64 / 1000.0),
+                     iface.hat_receipt.into()];
     Ok(Piece { instrument: ins, oversample: os, settle, notes })
 }
 

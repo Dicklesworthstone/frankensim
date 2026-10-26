@@ -1,10 +1,13 @@
-//! The drums' default build in the offline examples (.370): heads and stick
+//! The kit's default build in the offline examples (.370): heads and stick
 //! from sourced material cards, no recording-fitted head T60, a head film loss
-//! from the film card's derived loss-tangent curve (ruling 7468), and snare
-//! wires that are coils of sourced steel (ruling 7373).
+//! from the film card's derived loss-tangent curve (ruling 7468), snare wires
+//! that are coils of sourced steel (ruling 7373), and in place of every value
+//! adopted because it graded closer to a recording (96ccf8f1b), the
+//! recording's pitch for the tensions and 88cccbb78's declared estimates for
+//! the rest (ruling 7486).
 
 use fs_matdb::QueryPoint;
-use fs_vkplate::kit::{self, DrumSpec, Piece};
+use fs_vkplate::kit::{self, CymbalSpec, DrumSpec, Piece};
 use fs_vkplate::materials::{KitMaterials, temperature_frequency_point};
 
 /// The PET head-film card and the hickory stick card, both compiled from
@@ -42,35 +45,42 @@ pub const FILM_LOSS_SOURCE_NOTE: &str = "head film loss source: DERIVED on the P
 /// density sets the stick's moving mass without rescaling its geometry.
 const Z5A_DENSITY_ESTIMATE_KG_M3: f64 = 800.0;
 
-/// The presets' declared stick tip (kit::hertz_stick): radius and
-/// Hunt-Crossley loss. Neither is a card property.
+/// The stick tip's radius (as the presets' kit::hertz_stick) and its
+/// Hunt-Crossley loss, 88cccbb78's declared estimate (ruling 7486). Neither is
+/// a card property.
 const TIP_RADIUS_M: f64 = 0.005;
-const TIP_LOSS_S_M: f64 = 0.05;
+const TIP_LOSS_S_M: f64 = kit::DECLARED_STICK_LOSS_S_M;
 
 pub const PRESET_HEADS_FLAG: &str = "--preset-heads";
 pub const PRESET_HEADS_RECEIPT: &str =
     "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss";
 
-/// Builds a drum. By default its heads come from the film card and its stick
-/// from the hickory card, at the standard gas's temperature. The heads' film
-/// loss is the film card's loss-tangent curve, read at each head mode's own
-/// frequency; its receipt, FILM_LOSS_SOURCE_NOTE and the edge loss's stated
-/// unknown join the notes. The kick keeps its preset felt beater and says so
-/// (ruling 6433 (b)), and says that no pillow is modelled. A drum with snare
-/// wires binds the wire steel cards, so its strands are coils. With
-/// `preset_heads` the drum is the recording-fitted preset, and
+/// Builds a drum from a preset spec, with both head tensions scaled by `tune`
+/// (a drummer's tuning turn; 1 is the drum's own tuning). By default the drum
+/// is `kit::card_drum(spec)`, whose tensions, strike point, wires and kick
+/// beater replace the values fitted to a recording (ruling 7486); its heads
+/// come from the film card and its stick from the hickory card, at the
+/// standard gas's temperature. The heads' film loss is the film card's
+/// loss-tangent curve, read at each head mode's own frequency; its receipt,
+/// FILM_LOSS_SOURCE_NOTE and the edge loss's stated unknown join the notes.
+/// The kick keeps the spec's felt beater, card_drum's declared estimate, and
+/// says so (ruling 6433 (b)); its notes also say that no pillow is modelled.
+/// A drum with snare wires binds the wire steel cards, so its strands are
+/// coils. With `preset_heads` the drum is the recording-fitted preset, and
 /// PRESET_HEADS_RECEIPT joins its notes.
 pub fn drum(
     spec: &DrumSpec,
+    tune: f64,
     hits: &[(f64, f64)],
     kick: bool,
     preset_heads: bool,
 ) -> Result<Piece, String> {
     if preset_heads {
-        let mut piece = kit::drum(spec, hits)?;
+        let mut piece = kit::drum(&kit::retune(*spec, tune), hits)?;
         piece.notes.push(PRESET_HEADS_RECEIPT.into());
         return Ok(piece);
     }
+    let spec = &kit::retune(kit::card_drum(spec)?, tune);
     let gas = fs_vkplate::standard_gas();
     let cards = KitMaterials::from_packs_at_temperature(
         HEAD_FILM,
@@ -108,4 +118,45 @@ pub fn drum(
     }?;
     piece.notes.push(FILM_LOSS_SOURCE_NOTE.into());
     Ok(piece)
+}
+
+/// The ride the examples play: by default `kit::card_ride()`, 88cccbb78's
+/// declared shell (ruling 7486); with `preset` the recording-fitted preset.
+pub fn ride(preset: bool) -> CymbalSpec {
+    if preset {
+        kit::ride()
+    } else {
+        kit::card_ride()
+    }
+}
+
+/// A cymbal struck with 88cccbb78's declared stick loss
+/// (kit::DECLARED_CYMBAL_INTERFACE), or with `preset` the presets' fitted one.
+pub fn cymbal(
+    spec: &CymbalSpec,
+    hits: &[(f64, f64, f64, f64)],
+    preset: bool,
+) -> Result<Piece, String> {
+    if preset {
+        kit::cymbal(spec, hits)
+    } else {
+        kit::cymbal_with_interface(spec, hits, &kit::DECLARED_CYMBAL_INTERFACE)
+    }
+}
+
+/// The hi-hat with 88cccbb78's declared rim law, flat rims and 5 mm stick tip
+/// (kit::DECLARED_HIHAT_RIM_LAW, DECLARED_CYMBAL_INTERFACE), or with `preset`
+/// the presets' fitted ones.
+pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], preset: bool) -> Result<Piece, String> {
+    if preset {
+        kit::hihat(gap, pedal_n, hits)
+    } else {
+        kit::hihat_with_interface(
+            gap,
+            pedal_n,
+            hits,
+            kit::DECLARED_HIHAT_RIM_LAW,
+            &kit::DECLARED_CYMBAL_INTERFACE,
+        )
+    }
 }

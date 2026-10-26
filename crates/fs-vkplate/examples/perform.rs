@@ -1,8 +1,9 @@
 //! Play one kit piece through a list of strokes: `perform PIECE HITS.csv OUT.wav SECONDS [--preset-heads]`.
 //! HITS.csv holds `time_s,speed_m_s` lines (a header line is allowed); every stroke goes through
 //! the same simulation, so each one lands on whatever the piece is still doing from the last.
-//! The drums' heads and stick come from sourced material cards (see `drum_cards`);
-//! `--preset-heads` renders the recording-fitted preset heads instead, and says so.
+//! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
+//! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
+//! instead, and says so.
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
@@ -29,15 +30,15 @@ fn main() {
     let secs: f64 = a[4].parse().expect("seconds");
     let cym = |r: f64, tip: f64| hits.iter().map(|&(t, v)| (t, v, r, tip)).collect::<Vec<_>>();
     let piece: Result<Piece, String> = match a[1].as_str() {
-        "kick" => drum_cards::drum(&kit::kick(), &hits, true, preset_heads),
-        "snare" => drum_cards::drum(&kit::snare(), &hits, false, preset_heads),
-        "snare-off" => drum_cards::drum(&kit::snare_wires_off(), &hits, false, preset_heads),
-        "tom-12" => drum_cards::drum(&kit::tom(12.0), &hits, false, preset_heads),
-        "tom-14" => drum_cards::drum(&kit::tom(14.0), &hits, false, preset_heads),
-        "hihat-closed" => kit::hihat(0.0, 80.0, &hits),
-        "hihat-open" => kit::hihat(0.002, 0.0, &hits),
-        "crash" => kit::cymbal(&kit::crash(), &cym(0.95, 0.008)),
-        "ride" => kit::cymbal(&kit::ride(), &cym(0.6, 0.004)),
+        "kick" => drum_cards::drum(&kit::kick(), 1.0, &hits, true, preset_heads),
+        "snare" => drum_cards::drum(&kit::snare(), 1.0, &hits, false, preset_heads),
+        "snare-off" => drum_cards::drum(&kit::snare_wires_off(), 1.0, &hits, false, preset_heads),
+        "tom-12" => drum_cards::drum(&kit::tom(12.0), 1.0, &hits, false, preset_heads),
+        "tom-14" => drum_cards::drum(&kit::tom(14.0), 1.0, &hits, false, preset_heads),
+        "hihat-closed" => drum_cards::hihat(0.0, 80.0, &hits, preset_heads),
+        "hihat-open" => drum_cards::hihat(0.002, 0.0, &hits, preset_heads),
+        "crash" => drum_cards::cymbal(&kit::crash(), &cym(0.95, 0.008), preset_heads),
+        "ride" => drum_cards::cymbal(&drum_cards::ride(preset_heads), &cym(0.6, 0.004), preset_heads),
         other => {
             eprintln!("unknown piece {other}");
             std::process::exit(2);

@@ -3,8 +3,9 @@
 //! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]
 //! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | ride
 //!
-//! The drums' heads and stick come from sourced material cards (see `drum_cards`);
-//! `--preset-heads` renders the recording-fitted preset heads instead, and says so.
+//! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
+//! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
+//! instead, and says so.
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
@@ -22,22 +23,23 @@ fn main() {
     let v = |d: f64| speed.unwrap_or(d);
     // FS_KIT_TUNE scales a drum's head tensions (tuning experiments)
     let tune: f64 = std::env::var("FS_KIT_TUNE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let d = |s: kit::DrumSpec| kit::retune(s, tune);
-    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&d(s), &[(0.005, v)], kick, preset_heads);
+    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&s, tune, &[(0.005, v)], kick, preset_heads);
     // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
+    let cymbal = |s: kit::CymbalSpec, hit: (f64, f64, f64, f64)| drum_cards::cymbal(&cy(s), &[hit], preset_heads);
+    let hihat = |gap: f64, pedal_n: f64, v: f64| drum_cards::hihat(gap, pedal_n, &[(0.005, v)], preset_heads);
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
         "kick" => (drum(kit::kick(), true, v(3.0)), 1.2),
         "snare" => (drum(kit::snare(), false, v(4.5)), 1.2),
         "snare-off" => (drum(kit::snare_wires_off(), false, v(4.5)), 1.2),
         "tom-12" => (drum(kit::tom(12.0), false, v(3.5)), 2.0),
         "tom-14" => (drum(kit::tom(14.0), false, v(3.5)), 2.5),
-        "hihat-closed" => (kit::hihat(0.0, 80.0, &[(0.005, v(2.5))]), 0.8),
-        "hihat-open" => (kit::hihat(0.002, 0.0, &[(0.005, v(2.5))]), 2.5),
-        "splash" => (kit::cymbal(&cy(kit::splash()), &[(0.005, v(2.0), 0.78, 0.005)]), 2.6),
-        "crash" => (kit::cymbal(&cy(kit::crash()), &[(0.005, v(6.0), 0.95, 0.008)]), 5.0),
-        "ride" => (kit::cymbal(&cy(kit::ride()), &[(0.005, v(2.5), 0.6, 0.004)]), 4.0),
+        "hihat-closed" => (hihat(0.0, 80.0, v(2.5)), 0.8),
+        "hihat-open" => (hihat(0.002, 0.0, v(2.5)), 2.5),
+        "splash" => (cymbal(kit::splash(), (0.005, v(2.0), 0.78, 0.005)), 2.6),
+        "crash" => (cymbal(kit::crash(), (0.005, v(6.0), 0.95, 0.008)), 5.0),
+        "ride" => (cymbal(drum_cards::ride(preset_heads), (0.005, v(2.5), 0.6, 0.004)), 4.0),
         other => {
             eprintln!("unknown piece {other}");
             std::process::exit(2);

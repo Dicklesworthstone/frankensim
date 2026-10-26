@@ -1312,6 +1312,91 @@ fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
     }
 }
 
+#[test]
+fn g2_card_drums_keep_no_value_graded_against_a_recording_and_presets_say_theirs_were() {
+    // Ruling 7486: 88cccbb78's head ratios, strike points, wires and kick beater; the presets (so
+    // live and GPU) keep 96ccf8f1b's and carry FITTED_DRUM_RECEIPT.
+    let ratio = |s: &kit::DrumSpec| s.reso.tension / s.batter.tension;
+    let declared = [
+        (kit::snare(), 2080.0 / 1330.0, (0.06, 0.02)),
+        (kit::snare_wires_off(), 2080.0 / 1330.0, (0.06, 0.02)),
+        (kit::kick(), 253.0 / 358.0, (0.0, 0.02)),
+        (kit::tom(12.0), 950.0 / 1270.0, (0.35 * 0.146, 0.0)),
+        (kit::tom(14.0), 175.0 / 330.0, (0.35 * 0.1703, 0.0)),
+    ];
+    for (preset, head_ratio, strike_xy) in declared {
+        assert_eq!(preset.provenance, kit::FITTED_DRUM_RECEIPT);
+        let card = kit::card_drum(&preset).unwrap();
+        assert!(card.provenance.starts_with("drum (card route, ruling 7486): tensions tuned to the recording's pitch"), "{}", preset.name);
+        near(ratio(&card), head_ratio);
+        assert_eq!(card.strike_xy, strike_xy, "{}", preset.name);
+        assert_eq!((card.radius, card.depth, card.grid, card.mic, card.floor), (preset.radius, preset.depth, preset.grid, preset.mic, preset.floor));
+        assert_eq!(card.wires.is_some(), preset.wires.is_some());
+        if let Some(w) = card.wires {
+            let Law::Power { k, alpha, mu } = w.contact;
+            assert_eq!((w.tension, w.preload_per_m, k, alpha, mu), (2.0, 0.25, 2.0e7, 1.5, 2.0));
+        }
+        if preset.name == "kick 18x18" {
+            let (m, Law::Power { k, alpha, mu }, foot) = card.striker;
+            assert_eq!((m, k, alpha, mu, foot), (0.12, 1.0e8, 2.5, 0.3, 0.03));
+            assert_eq!(card.muffle.map(|m| m.3), Some(25.0));
+        }
+    }
+    assert!(kit::card_drum(&kit::DrumSpec { name: "tom 16", ..kit::tom(14.0) }).is_err());
+
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let mut spec = kit::tom(12.0);
+    spec.grid *= 4.0;
+    let preset = kit::drum(&spec, &[]).unwrap();
+    assert!(preset.notes.iter().any(|n| n == kit::FITTED_DRUM_RECEIPT));
+    let card = kit::card_drum(&spec).unwrap();
+    let piece = kit::drum_with_materials(&card, &[], standard_gas(), &binding(&film, &film, &stick)).unwrap();
+    assert!(piece.notes.iter().any(|n| n == card.provenance));
+    assert!(!piece.notes.iter().any(|n| n == kit::FITTED_DRUM_RECEIPT));
+}
+
+#[test]
+fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_was_fitted() {
+    let coarse = |c: kit::CymbalSpec| kit::CymbalSpec { grid: c.grid * 3.0, ..c };
+    let stick_mu = |p: &kit::Piece| {
+        let c = p.instrument.contacts.iter().find(|c| c.b.iter().any(|&(b, _, _)| p.instrument.bodies[b].name == "stick")).unwrap();
+        let Law::Power { mu, .. } = c.law;
+        mu
+    };
+    let hit = [(0.0, 1.0, 0.6, 0.004)];
+    let fitted = kit::cymbal(&coarse(kit::ride()), &hit).unwrap();
+    assert!(fitted.notes.iter().any(|n| n == kit::FITTED_CYMBAL_INTERFACE.cymbal_receipt));
+    assert!(fitted.notes.iter().any(|n| n.starts_with("ride: fitted to a recording (96ccf8f1b)")));
+    assert_eq!(stick_mu(&fitted), 0.05);
+    let ride = kit::card_ride();
+    assert_eq!((ride.bow_thickness, ride.bell_thickness, ride.t60[1], ride.grid), (1.6e-3, 2.2e-3, (10000.0, 3.0), kit::ride().grid));
+    let card = kit::cymbal_with_interface(&coarse(ride), &hit, &kit::DECLARED_CYMBAL_INTERFACE).unwrap();
+    assert!(card.notes.iter().any(|n| n == kit::DECLARED_CYMBAL_INTERFACE.cymbal_receipt));
+    assert!(!card.notes.iter().any(|n| n.contains("fitted to a recording")));
+    assert_eq!(stick_mu(&card), kit::DECLARED_STICK_LOSS_S_M);
+
+    // The hi-hat's rim gaps: the presets' two-lobe waviness, the card route's flat rims.
+    let rim_gaps = |p: &kit::Piece| p.instrument.contacts.iter()
+        .filter(|c| !c.b.iter().any(|&(b, _, _)| p.instrument.bodies[b].name == "stick"))
+        .map(|c| c.gap).collect::<Vec<_>>();
+    let spread = |g: &[f64]| g.iter().cloned().fold(f64::MIN, f64::max) - g.iter().cloned().fold(f64::MAX, f64::min);
+    let fitted = kit::hihat(0.002, 0.0, &[(0.0, 1.0)]).unwrap();
+    assert!(fitted.notes.iter().any(|n| n == kit::FITTED_CYMBAL_INTERFACE.hat_receipt));
+    assert_eq!(stick_mu(&fitted), 0.05);
+    let card = kit::hihat_with_interface(0.002, 0.0, &[(0.0, 1.0)], kit::DECLARED_HIHAT_RIM_LAW, &kit::DECLARED_CYMBAL_INTERFACE).unwrap();
+    assert!(card.notes.iter().any(|n| n == kit::DECLARED_CYMBAL_INTERFACE.hat_receipt));
+    assert_eq!(stick_mu(&card), kit::DECLARED_STICK_LOSS_S_M);
+    let (fitted_gaps, card_gaps) = (rim_gaps(&fitted), rim_gaps(&card));
+    assert!(!card_gaps.is_empty() && card_gaps.len() == fitted_gaps.len());
+    // the shells' rest shapes vary the gap a little either way; the waviness adds up to 0.15 mm
+    assert!(spread(&fitted_gaps) > spread(&card_gaps) + 1.0e-4, "{} {}", spread(&fitted_gaps), spread(&card_gaps));
+    for c in card.instrument.contacts.iter().filter(|c| !c.b.iter().any(|&(b, _, _)| card.instrument.bodies[b].name == "stick")) {
+        let Law::Power { mu, .. } = c.law;
+        assert_eq!(mu, 3.0);
+    }
+}
+
 /// The value between `before` and the next `after` in a receipt line.
 fn receipt_number(line: &str, before: &str, after: &str) -> f64 {
     let rest = &line[line.find(before).unwrap_or_else(|| panic!("{before:?} in {line}")) + before.len()..];
