@@ -48,6 +48,7 @@ use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use fs_couple::pcm_wav::baffled::{BaffledPressure, RayleighMedium, SurfaceSample};
+use fs_couple::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use fs_material::{Uniaxial, WoolFelt};
 use fs_math::{c64::C64, det};
 use std::f64::consts::{PI, TAU};
@@ -97,6 +98,10 @@ pub struct Config {
     pub static_attachment: bool,
     /// Rayleigh half-space receiver position [m] in the board frame.
     pub microphone_m: [f64; 3],
+    /// Optional source-gas absorption/dispersion on every original surface
+    /// path. None retains the lossless reference observer; prepared browser
+    /// atmospheres select the shared classical transport law explicitly.
+    pub atmospheric_propagation: Option<GasPropagation>,
     /// Fixed pressure full scale of the float output [Pa].
     pub full_scale_pa: f64,
     /// A sounding, undamped key returns to the static image below this
@@ -205,6 +210,7 @@ impl Config {
             duplex: true,
             static_attachment: true,
             microphone_m: [0.675, 1.0, 1.0],
+            atmospheric_propagation: None,
             full_scale_pa: 10.0,
             retire_ringing_j: 1.0e-10,
             retire_damped_j: 1.0e-8,
@@ -1488,6 +1494,8 @@ pub struct LivePiano {
     cfg: Config,
     /// Exact admitted gas shared by source-material string drag and the receiver.
     acoustic_gas: fs_material::gas::GasState,
+    /// Exact gas and original per-distance material-filter receipts.
+    atmospheric_propagation: Option<std::sync::Arc<GasPropagationReport>>,
     /// Full immutable source packs and the section integrals actually installed.
     string_materials: Option<std::sync::Arc<crate::preparation::materials::StringMaterials>>,
     /// Retained-mode cylinder resistance divided by the ORIGINAL solid line mass.
@@ -1595,6 +1603,7 @@ impl Clone for LivePiano {
         Self {
             cfg: self.cfg.clone(),
             acoustic_gas: self.acoustic_gas,
+            atmospheric_propagation: self.atmospheric_propagation.clone(),
             string_materials: self.string_materials.clone(),
             string_gas_drag_rates: self.string_gas_drag_rates.clone(),
             r: self.r,
@@ -1712,9 +1721,10 @@ impl LivePiano {
 
     /// Build the identical mechanical piano with an explicitly supplied gas.
     ///
-    /// The gas affects only the shared Rayleigh half-space receiver in this
-    /// reduced engine: source density sets pressure gain and sound speed sets
-    /// propagation delay. String/board/hammer mechanics remain unchanged.
+    /// The gas supplies the shared Rayleigh half-space receiver's pressure gain
+    /// and travel delay. `Config::atmospheric_propagation` also binds its transport
+    /// and any explicitly supplied molecular law to every geometric path.
+    /// Effective-scale string/board/hammer mechanics remain unchanged.
     /// This is the data-only ingress for source-resolved or mixed gases; no
     /// chemistry name or dry-air preset is inferred on this path.
     pub fn new_with_gas(
@@ -2057,8 +2067,15 @@ impl LivePiano {
                 mode_shape: (0..r).map(|j| (0..r).map(|i| p.mode_shape[i] * phi_s[i * r + j]).sum()).collect(),
             })
             .collect();
-        let mut mic = BaffledPressure::new_multirate_differentiating(&surface, r, rate, rate, cfg.microphone_m,
-            RayleighMedium { density: gas.density, sound_speed: gas.sound_speed })?;
+        let (mut mic, atmospheric_propagation) = match &cfg.atmospheric_propagation {
+            Some(propagation) => {
+                let (mic, report) = BaffledPressure::new_multirate_gas_differentiating(
+                    &surface, r, rate, rate, cfg.microphone_m, &gas, propagation, &mut || false)?;
+                (mic, Some(std::sync::Arc::new(report)))
+            }
+            None => (BaffledPressure::new_multirate_differentiating(&surface, r, rate, rate,
+                cfg.microphone_m, RayleighMedium::from(&gas))?, None),
+        };
         // The same bandlimited derivative on the summed pressure instead of all r board
         // coordinates (frankensim-mhrzg): ~3,000 fewer multiply-adds per sample at r32.
         mic.differentiate_pressure()?;
@@ -2067,6 +2084,7 @@ impl LivePiano {
         let n_courses = courses.len();
         let mut piano = Self {
             acoustic_gas: gas,
+            atmospheric_propagation,
             string_materials,
             string_gas_drag_rates,
             r,
@@ -2163,7 +2181,16 @@ impl LivePiano {
     /// eigensolve, after it has changed the set, as a real failure there would.
     #[doc(hidden)]
     pub fn fail_next_rebuild(&mut self) { self.rebuild_failure_armed = true; }
-    pub fn microphone_delay_samples(&self) -> (usize, f64) { (self.mic.delay_samples.0, self.mic.filter_delay_samples()) }
+    pub fn microphone_delay_samples(&self) -> (usize, f64) {
+        // A material response has its own FIR support, distinct from travel.
+        // Report physical arrival and common numerical latency separately so
+        // the filter's dispersion/padding is never counted twice by the host.
+        let travel = self.atmospheric_propagation.as_ref().map_or(self.mic.delay_samples.0, |report| {
+            report.filters.iter().map(|filter| filter.range_m / report.gas.sound_speed
+                * f64::from(self.cfg.sample_rate)).fold(f64::INFINITY, f64::min).floor() as usize
+        });
+        (travel, self.mic.filter_delay_samples())
+    }
     pub fn microphone_multiplies(&self) -> usize { self.mic.multiply_adds_per_sample() }
     pub fn total_strings(&self) -> usize { self.segs.iter().filter(|s| !s.duplex).count() }
     pub fn table_modes(&self) -> usize { self.q.len() }
@@ -3765,6 +3792,12 @@ impl LivePiano {
     #[must_use]
     pub const fn acoustic_gas(&self) -> fs_material::gas::GasState {
         self.acoustic_gas
+    }
+
+    /// Per-path propagation laws and original filter/delay receipts used by
+    /// the actual pressure convolution; absent on the lossless reference path.
+    pub fn atmospheric_propagation(&self) -> Option<&GasPropagationReport> {
+        self.atmospheric_propagation.as_deref()
     }
 
     /// Gas-only velocity-loss rates [1/s] of the first speaking unison member,

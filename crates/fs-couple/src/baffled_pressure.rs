@@ -27,6 +27,13 @@ use fs_math::det;
 #[path = "baffled_pressure_bandlimited.rs"]
 mod bandlimited;
 
+#[path = "baffled_pressure_path.rs"]
+mod path;
+
+/// Material-derived absorption/dispersion on every original surface path.
+#[path = "baffled_pressure_gas.rs"]
+pub mod gas;
+
 /// Multiple physical openings through the same retarded-time pressure owner.
 #[path = "baffled_pressure_openings.rs"]
 pub mod openings;
@@ -145,6 +152,8 @@ pub struct BaffledPressure {
     pressure_derivative: Option<antialias::Decimator>,
     /// Fixed delay introduced only by the optional bandlimited kernel.
     interpolation_delay: usize,
+    /// Common causal padding of independently prepared material paths.
+    material_path_delay: usize,
     head: usize,
     modes: usize,
     rate: f64,
@@ -165,7 +174,8 @@ impl Clone for BaffledPressure {
             previous_velocity:self.previous_velocity.clone(),acceleration:self.acceleration.clone(),
             decimator:self.decimator.clone(),differentiate_velocity:self.differentiate_velocity,
             pressure_derivative:self.pressure_derivative.clone(),
-            interpolation_delay:self.interpolation_delay,head:self.head,modes:self.modes,rate:self.rate,
+            interpolation_delay:self.interpolation_delay,material_path_delay:self.material_path_delay,
+            head:self.head,modes:self.modes,rate:self.rate,
             position_m:self.position_m,delay_samples:self.delay_samples };
         if transposed {copy.tap_history=copy.history.as_ptr() as usize;}
         copy
@@ -298,6 +308,7 @@ impl BaffledPressure {
         self.decimator.delay_output_frames()
             + self.pressure_derivative.as_ref().map_or(0.0, antialias::Decimator::delay_output_frames)
             + self.interpolation_delay as f64
+            + self.material_path_delay as f64
     }
     /// Cold, before stepping: a differentiating receiver at one mechanics frame per output
     /// frame takes the bandlimited derivative of the summed pressure instead of every input's
@@ -352,6 +363,7 @@ impl BaffledPressure {
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,pressure_derivative:None,interpolation_delay:0,
+            material_path_delay:0,
             position_m,delay_samples:(first,last) };
         receiver.prepare_taps();
         Ok(receiver)

@@ -6,7 +6,8 @@
 //! B = EI pi^2/(T L^2), the first partials' frequencies, and each partial's
 //! amplitude decay rate from the reference bank's string loss (material
 //! bending loss, thermoelastic where declared) plus the gas drag of the same
-//! atmosphere. Then the key is struck at 2 m/s and rendered for two seconds at
+//! atmosphere. Each Rayleigh path also carries that gas's classical viscothermal
+//! propagation; molecular relaxation is not inferred. Then the key is struck at 2 m/s and rendered for two seconds at
 //! 48 kHz: peak pressure, RMS over 0.5-1.0 s and 1.5-2.0 s, and the energy
 //! ledger. The render consumes these same coefficients; nothing is tuned.
 //!
@@ -35,11 +36,16 @@ fn main() {
     let report = materials.strength_report(&desc.courses).expect("strength report");
     let gas = fs_material::gas::GasState::try_new(&fs_material::gas::GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)
         .expect("gas");
-    let cfg = Config::live(48_000);
+    let mut cfg = Config::live(48_000);
+    cfg.atmospheric_propagation = Some(fs_couple::pcm_wav::baffled::gas::GasPropagation::classical(
+        fs_couple::pcm_wav::baffled::gas::GasPropagationLimits::surface_reference()));
     // The live kernel's own bank arguments (kernel.rs build): band 0.45 x rate.
     let bank = Bank::new_with_string_damping(&desc.courses, &desc.board, 48_000, 0.45 * 48_000.0,
         cfg.max_partials, true, None, false).expect("bank");
     let (losses, _) = bank_string_losses(&bank);
+    // Cold physical path preparation belongs to the unchanged instrument;
+    // every independent strike starts from an exact copy of that resting state.
+    let template = PianoAudio::new_with_materials(&desc, cfg, 1, gas, materials.clone()).expect("engine");
     println!("{{\"material\":{},\n\"keys\":[", materials.json());
     for (n, &key) in keys.iter().enumerate() {
         let index = desc.courses.iter().position(|c| c.midi == key).expect("key in scale");
@@ -47,7 +53,7 @@ fn main() {
         let stress = report.keys[index];
         let b = c.flexural_rigidity_nm2 * (std::f64::consts::PI / c.length_m).powi(2) / c.tension_n;
         let string = bank.strings.iter().find(|s| s.course == index).expect("speaking string");
-        let mut audio = PianoAudio::new_with_materials(&desc, cfg.clone(), 1, gas, materials.clone()).expect("engine");
+        let mut audio = template.clone();
         let gas_rates = audio.piano().string_gas_drag_rates_per_s(key).map(<[f64]>::to_vec).unwrap_or_default();
         let partials = string.modes.clone().take(8).enumerate().map(|(i, m)| {
             let rate = losses[m].mass_rate + losses[m].strain_rate + gas_rates.get(i).copied().unwrap_or(0.0);

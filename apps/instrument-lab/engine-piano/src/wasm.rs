@@ -126,6 +126,11 @@ fn prepared_engine(sample_rate: u32, board: &[u8], board_coordinates: usize,
         if scale_csv.is_empty() { None } else { Some(scale_csv) }, policy, materials.as_deref())
         .map_err(|e| JsError::new(&e))?;
     let mut cfg = config(sample_rate, course_mode_budget, max_dynamic_modes, full_scale_pa);
+    // This exact atmosphere also supplies each surface-to-microphone path's
+    // viscothermal propagation. Molecular coefficients are never guessed from
+    // an arbitrary species name; the receipt explicitly names that omission.
+    cfg.atmospheric_propagation = Some(fs_couple::pcm_wav::baffled::gas::GasPropagation::classical(
+        fs_couple::pcm_wav::baffled::gas::GasPropagationLimits::surface_reference()));
     // Published per-key string losses describe the original Model D strings.
     // Imported sections supply their own physical loss; an authored CSV keeps
     // the original reference reader's authored law. Tension-only tuning of the

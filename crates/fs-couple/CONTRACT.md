@@ -2062,6 +2062,35 @@ clarinet is one filling of those objects.
   `xtask/tests/observer_relaxation_amount.rs` gates the amount on a rendered
   plucked string at 100 m. The humidity change is gated against ISO 9613-1,
   and the oxygen change against the law with declared rates.
+  The shared `pcm_wav::baffled::BaffledPressure::new_multirate_gas_differentiating`
+  composes these same `ObserverFilter` laws on every original surface-to-receiver
+  path before signed modal summation. Only bit-equal computed distances share a
+  prepared filter; there is no common-distance filter on the summed pressure.
+  Each path retains its `rho*dA/(2*pi*r)` gain, source filter receipt and residual
+  delay `r/c - filter.low_frequency_delay_s`. A negative residual receives the
+  smallest common whole-sample causal padding across ALL paths; that added
+  numerical latency is reported separately and preserves relative path timing.
+  The existing 65-tap sinc contributes its original 32-sample interpolation
+  latency. The source response's own delay is counted once, including dispersion
+  and its numerical padding; FIR support is not physical travel time.
+  Explicit distinct-path, retained-response and convolution/projection budgets
+  bound cold preparation, with cancellation between bounded designs and surface
+  tiles. The actual pressure loop and clone retain the original receiver owner.
+  The reference cold budgets are 16,384 distinct paths, 4,000,000 source-filter
+  taps and 500,000,000 convolution/projection terms. These are admission limits,
+  not a measured real-time guarantee. The receiver exposes its actual multiply
+  count per sample; the live-piano clock reports that count and the physical and
+  numerical delays separately. Larger responses, including some reduced-pressure
+  or higher-rate configurations, can exceed the declared limits and refuse;
+  the caller may select larger explicit cold budgets in the native API.
+  The law is explicit: classical transport does not infer molecular relaxation,
+  ISO requires its state-bound terrestrial-air admission, and a supplied
+  molecular state must belong to the same gas. Prepared live-piano atmospheres
+  now use this path with the generic classical law; native configurations can
+  supply another admitted law or retain the lossless comparison receiver.
+  This remains fixed-gas, infinite-baffle, one-way observation, with original
+  source-law, filter-tail, temporal and spatial approximation limits.
+
   Streaming renderers apply the same laws through `air_path::ObserverFilter`,
   a causal FIR built once per law, range and clock. The reed performance
   (`render::schedule::reed`) applies it to both observers, the legacy

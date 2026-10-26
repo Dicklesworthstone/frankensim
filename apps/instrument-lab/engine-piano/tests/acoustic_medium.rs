@@ -17,6 +17,55 @@ fn source_packet(molar_mass: f64) -> (Vec<u8>, Vec<u32>) {
 
 const SOURCE_GAS: &str = "thermochemical 300 100000 mole 1 piano-test-gas 1";
 
+/// The original source gas supplies EACH Rayleigh path's transport, at both
+/// actual mechanics clocks. No string material or source excitation changes.
+#[test]
+fn source_pressure_changes_path_absorption_beyond_density_gain_at_both_clocks() {
+    use fs_live_piano::{PianoAudio, preparation::resolve_atmosphere_sources};
+    use fs_couple::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits};
+    let (bytes, lengths) = source_packet(0.028);
+    let records = [SOURCE_GAS.to_owned(), SOURCE_GAS.replace("100000", "1000")].map(|text|
+        resolve_atmosphere_sources(&text, &bytes, &lengths, "", "frozen").unwrap());
+    let gases = records.each_ref().map(|record| *record.state());
+    assert_eq!(gases[0].sound_speed, gases[1].sound_speed);
+    assert_eq!(gases[0].dynamic_viscosity, gases[1].dynamic_viscosity);
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|course| course.midi == 69);
+    // A small explicit surface quadrature keeps this an integration regression;
+    // it makes no soundboard quadrature-convergence or measured-audio claim.
+    desc.surface.sort_by(|a, b| b.mode_shape[0].abs().total_cmp(&a.mode_shape[0].abs()));
+    desc.surface.truncate(2);
+    let mut cfg = Config::live(48_000);
+    cfg.max_partials = 8;
+    cfg.silent_bank_hz = 0.0;
+    cfg.duplex = false;
+    cfg.atmospheric_propagation = Some(GasPropagation::classical(
+        GasPropagationLimits::surface_reference()));
+    for substeps in [1, 2] {
+        let mut a = PianoAudio::new_with_gas(&desc, cfg.clone(), substeps, gases[0]).unwrap();
+        let mut b = PianoAudio::new_with_gas(&desc, cfg.clone(), substeps, gases[1]).unwrap();
+        for (engine, gas) in [(&a, gases[0]), (&b, gases[1])] {
+            let report = engine.piano().atmospheric_propagation().unwrap();
+            assert_eq!(report.gas, gas);
+            assert_eq!(report.surface_filter_indices.len(), desc.surface.len());
+            assert!(report.filters.iter().all(|filter| filter.sample_rate_hz == 48_000 * substeps as u32));
+            assert!(fs_live_piano::describe_audio(engine).contains("stokes-kirchhoff-classical-only"));
+        }
+        a.note_on(69, 0.25).unwrap(); b.note_on(69, 0.25).unwrap();
+        let (mut peak, mut difference) = (0.0_f64, 0.0_f64);
+        for _ in 0..4096 {
+            let x = a.step_pressure().unwrap() / gases[0].density;
+            let y = b.step_pressure().unwrap() / gases[1].density;
+            assert!(x.is_finite() && y.is_finite());
+            peak = peak.max(x.abs()); difference = difference.max((x - y).abs());
+            assert_eq!(a.piano().bridge_velocity(69), b.piano().bridge_velocity(69));
+        }
+        assert!(peak > 1e-10 && difference > 1e-5 * peak,
+            "transport must affect actual pressure beyond its common density scaling");
+        assert_eq!(format!("{:?}", a.close_ledger()), format!("{:?}", b.close_ledger()));
+    }
+}
+
 /// G3: source bytes, without a named-species branch, reach actual material
 /// string drag, bridge motion and observer pressure at both output clocks.
 #[test]

@@ -59,6 +59,21 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
     let freqs = piano.board_frequencies_hz();
     let provenance: String = piano.board_provenance().chars()
         .map(|ch| if ch == '"' || ch == '\\' { '\'' } else if ch.is_control() { ' ' } else { ch }).collect();
+    let propagation = piano.atmospheric_propagation().map_or_else(|| "null".into(), |report| {
+        use fs_couple::air_path::GasAbsorptionModel;
+        let law = match report.law {
+            GasAbsorptionModel::StokesKirchhoff => "stokes-kirchhoff-classical-only",
+            GasAbsorptionModel::Iso9613Air { .. } => "iso9613-terrestrial-air",
+            GasAbsorptionModel::MolecularRelaxation => "source-molecular-relaxation",
+            GasAbsorptionModel::Lossless => "declared-lossless",
+        };
+        let range = report.filters.iter().fold([f64::INFINITY, 0.0_f64], |[lo, hi], filter|
+            [lo.min(filter.range_m), hi.max(filter.range_m)]);
+        format!(concat!("{{\"law\":\"{}\",\"surfacePaths\":{},\"distinctPaths\":{},",
+            "\"rangeM\":[{},{}],\"additionalLatencySamples\":{},\"kernelTerms\":{}}}"),
+            law, report.surface_filter_indices.len(), report.filters.len(), range[0], range[1],
+            report.additional_latency_samples, report.kernel_terms)
+    });
     format!(
         concat!(
             "{{\"model\":\"reduced real-time piano (not the offline reference)\",",
@@ -74,7 +89,7 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             "\"fullScalePa\":{},\"midiMaxVelocityMS\":{},\"stations\":{},",
             "\"silentBankHz\":{},\"silentBankModes\":{},",
             "\"retireRingingJ\":{:e},\"retireDampedJ\":{:e},\"stringDamping\":\"{}\",\"hammerLaw\":\"{}\",",
-            "\"stringGasLoading\":\"{}\",\"stringMaterials\":{}}}"
+            "\"stringGasLoading\":\"{}\",\"stringMaterials\":{},\"atmosphericPropagation\":{}}}"
         ),
         output_rate, c.sample_rate, substeps, piano.courses().len(), piano.total_strings(), piano.table_modes(),
         piano.board_modes(), piano.board_exact_low_modes(), freqs.first().copied().unwrap_or(0.0), freqs.last().copied().unwrap_or(0.0),
@@ -100,5 +115,6 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
         if piano.string_materials().is_some() { "sampled-cylinder-retained-modes" }
             else { "unresolved-effective-scale" },
         piano.string_materials().map_or_else(|| "null".into(), |materials| materials.json()),
+        propagation,
     )
 }

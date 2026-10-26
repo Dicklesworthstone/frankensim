@@ -4,38 +4,8 @@
 //! This changes the delay approximation, never the source geometry or SI gain.
 use super::{BaffledPressure, RayleighMedium, SurfaceSample, MAX_HISTORY};
 use fs_math::det;
-use std::f64::consts::{PI, TAU};
-
-const HALF: usize = 32;
-const TAPS: usize = 2 * HALF + 1;
-
-fn window() -> [f64; TAPS] {
-    let mut w = [0.0; TAPS];
-    for (i, value) in w.iter_mut().enumerate().take(TAPS - 1).skip(1) {
-        let phase = TAU * i as f64 / (TAPS - 1) as f64;
-        *value = 0.42 - 0.5 * det::cos(phase) + 0.08 * det::cos(2.0 * phase);
-    }
-    w
-}
-
-fn taps(fraction: f64, window: &[f64; TAPS]) -> [f64; TAPS] {
-    let mut h = [0.0; TAPS];
-    if fraction == 0.0 {
-        h[HALF] = 1.0;
-        return h;
-    }
-    // sin(pi*(integer-f)) alternates sign. One sine per physical patch, not
-    // 65; evaluate near the nearest integer to avoid cancellation near f=1.
-    let sine = det::sin(PI * fraction.min(1.0 - fraction));
-    for (i, value) in h.iter_mut().enumerate().take(TAPS - 1).skip(1) {
-        let offset = i as i32 - HALF as i32;
-        let numerator = if offset % 2 == 0 { -sine } else { sine };
-        *value = window[i] * numerator / (PI * (f64::from(offset) - fraction));
-    }
-    let sum: f64 = h.iter().sum();
-    for value in &mut h { *value /= sum; }
-    h
-}
+use std::f64::consts::TAU;
+use super::path::{HALF, TAPS, taps, window};
 
 impl BaffledPressure {
     /// Rayleigh pressure with a 65-tap Blackman-windowed sinc fractional delay.
