@@ -1764,6 +1764,59 @@ impl Link {
     }
 }
 
+#[cfg(test)]
+mod link_clock_tests {
+    use super::*;
+
+    #[test]
+    fn assembled_signed_links_retain_the_analytical_relative_mode() {
+        let mut ins = Instrument::new(48_000.0);
+        ins.add(Body::point("a", 1.0));
+        ins.add(Body::point("b", 1.0));
+        // Together these are one positive spring/dashpot, like signed terms
+        // in an affine mount. Separately taking magnitudes gives a false bound.
+        ins.links.push(Link { a: (0, 0), b: Some((1, 0)), k: 10.0, c: 3.0 });
+        ins.links.push(Link { a: (0, 0), b: Some((1, 0)), k: -7.0, c: -2.0 });
+        for rate in [48_000.0, 96_000.0] {
+            assert_eq!(ins.link_admission_rate2(rate), 6.0 + 4.0 * rate);
+        }
+        assert_eq!(ins.admission_rate2().0, 192_006.0);
+    }
+
+    #[test]
+    fn link_clock_matches_real_explicit_dashpot_instability() {
+        let run = |rate| {
+            let mut ins = Instrument::new(rate);
+            ins.add(Body::point("a", 1.0));
+            ins.add(Body::point("b", 1.0));
+            ins.links.push(Link { a: (0, 0), b: Some((1, 0)), k: 0.0, c: 96_000.0 });
+            ins.bodies[0].w[0] = 1e-6;
+            ins.bodies[1].w[0] = -1e-6;
+            let ratio = ins.stability().0;
+            let mut peak = 0.0_f64;
+            for _ in 0..32 {
+                ins.step(&mut []);
+                peak = peak.max(ins.bodies[0].w[0].abs());
+            }
+            (ratio, peak)
+        };
+        let (bad_ratio, bad_peak) = run(48_000.0);
+        let (good_ratio, good_peak) = run(192_000.0);
+        assert!((bad_ratio - 2.0).abs() < 1e-14);
+        assert!((good_ratio - 0.5).abs() < 1e-14);
+        assert!(bad_peak > 1.0, "the omitted dashpot really destabilizes the step");
+        assert!(good_peak <= 1e-6, "the admitted clock must keep the actual trajectory bounded");
+    }
+
+    #[test]
+    fn invalid_link_coefficients_cannot_disappear_from_the_bound() {
+        let mut ins = Instrument::new(48_000.0);
+        ins.add(Body::point("a", 1.0));
+        ins.links.push(Link { a: (0, 0), b: None, k: f64::NAN, c: 0.0 });
+        assert!(ins.admission_rate2().0.is_infinite());
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Law {
     /// f = K d^alpha (1 + mu d_dot): Hertz with Hunt-Crossley loss.
@@ -2404,7 +2457,47 @@ impl Instrument {
             worst.0 += radiation_rate2;
             worst.1.push_str(" + head radiation");
         }
+        let link_rate2 = self.link_admission_rate2(self.rate);
+        if link_rate2 > 0.0 {
+            worst.0 += link_rate2;
+            worst.1.push_str(" + spring/dashpot links");
+        }
         worst
+    }
+
+    /// Bound the explicit links' K + 2 rate C in mass-symmetric coordinates.
+    /// The backward-velocity dashpots in `step` enter the leapfrog stability
+    /// condition at the candidate clock, not the clock at construction.
+    fn link_admission_rate2(&self, rate: f64) -> f64 {
+        type Node = (usize, usize);
+        let mut rows = BTreeMap::<Node, BTreeMap<Node, f64>>::new();
+        for link in &self.links {
+            let q = link.k + 2.0 * rate * link.c;
+            if !q.is_finite() { return f64::INFINITY; }
+            *rows.entry(link.a).or_default().entry(link.a).or_default() += q;
+            if let Some(b) = link.b {
+                *rows.entry(b).or_default().entry(b).or_default() += q;
+                *rows.entry(link.a).or_default().entry(b).or_default() -= q;
+                *rows.entry(b).or_default().entry(link.a).or_default() -= q;
+            }
+        }
+        // Affine mounts are PSD only after assembling their signed pair
+        // terms. Taking absolute values before assembly destroys cancellation
+        // between those terms and invents extra stiffness/damping.
+        let mut bound = 0.0_f64;
+        for (&(a, i), row) in &rows {
+            let ma = self.bodies[a].mass[i];
+            if !ma.is_finite() || ma <= 0.0 { return f64::INFINITY; }
+            let mut sum = 0.0;
+            for (&(b, j), &q) in row {
+                let mb = self.bodies[b].mass[j];
+                if !q.is_finite() || !mb.is_finite() || mb <= 0.0 { return f64::INFINITY; }
+                sum += if (a, i) == (b, j) { q.abs() / ma }
+                    else { q.abs() / ma.sqrt() / mb.sqrt() };
+            }
+            bound = bound.max(sum);
+        }
+        bound
     }
 
     /// Factor every head-radiation air-mass system at this instrument's own
@@ -2495,7 +2588,8 @@ impl Instrument {
     }
 
     /// (k^2 lambda_K + 2 k lambda_C) / 4 including rest curvature and explicit
-    /// gas/material damping; excludes contact and large-deflection changes.
+    /// gas/material damping and spring/dashpot links; excludes contact and
+    /// large-deflection changes.
     pub fn stability(&mut self) -> (f64, String) {
         let k = self.k();
         let (lam, who) = self.admission_rate2();

@@ -694,7 +694,8 @@ pub fn card_ride() -> CymbalSpec {
 
 fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String> {
     let (lam, who) = ins.admission_rate2();
-    let structural = (lam - ins.gas_admission_rate2(ins.rate) - ins.viscosity_admission_rate2(ins.rate)).max(0.0);
+    let structural = (lam - ins.gas_admission_rate2(ins.rate)
+        - ins.viscosity_admission_rate2(ins.rate) - ins.link_admission_rate2(ins.rate)).max(0.0);
     // Finer spatial meshes need smaller time steps (plate bending scales as
     // h^-4). Extend the bounded clock search, retaining the same CFL margin
     // and every previously admitted rate; never coarsen the physical grid.
@@ -704,7 +705,8 @@ fn pick_oversample(ins: &mut Instrument, max_ratio: f64) -> Result<usize, String
         let k = 1.0 / rate;
         // Explicit radiation's contribution is 2 D / dt, so it must use
         // this candidate's clock rather than the instrument's original rate.
-        let candidate = structural + ins.gas_admission_rate2(rate) + ins.viscosity_admission_rate2(rate);
+        let candidate = structural + ins.gas_admission_rate2(rate)
+            + ins.viscosity_admission_rate2(rate) + ins.link_admission_rate2(rate);
         if k * k * candidate / 4.0 <= max_ratio {
             ins.rate = rate;
             ins.validate_bending_loss_clock()?;
@@ -736,6 +738,31 @@ fn g0_clock_refinement_preserves_the_cfl_margin_and_bounded_refusal() {
             assert_eq!(ins.rate, OUT_RATE);
         }
     }
+}
+
+#[test]
+fn g0_link_clock_covers_stiff_springs_and_retimes_dashpots() {
+    // Relative motion of two unit masses has stiffness 2K and damping 2C.
+    // K dt^2 + 2 C dt < 2 is the analytical leapfrog condition; the kit
+    // retains its stricter 0.6 margin, independent of the row-bound code.
+    for (spring, damping, expected) in [(1e12, 0.0, 24), (0.0, 2.0 * OUT_RATE, 4)] {
+        let mut ins = Instrument::new(OUT_RATE);
+        ins.add(Body::point("a", 1.0));
+        ins.add(Body::point("b", 1.0));
+        ins.links.push(Link { a: (0, 0), b: Some((1, 0)), k: spring, c: damping });
+        assert_eq!(pick_oversample(&mut ins, 0.6).unwrap(), expected);
+        let ratio = spring / (2.0 * ins.rate.powi(2)) + damping / ins.rate;
+        assert!(ratio <= 0.6);
+    }
+}
+
+#[test]
+fn g0_link_clock_refuses_beyond_existing_limit() {
+    let mut ins = Instrument::new(OUT_RATE);
+    ins.add(Body::point("a", 1.0));
+    ins.links.push(Link { a: (0, 0), b: None, k: 1e15, c: 0.0 });
+    assert!(pick_oversample(&mut ins, 0.6).unwrap_err().contains("32x oversampling"));
+    assert_eq!(ins.rate, OUT_RATE);
 }
 
 /// A suspended cymbal struck once per hit: (time s, speed m/s, radius fraction, stick tip radius m).
