@@ -410,6 +410,17 @@ pub fn collide_cell3(
     collide_cell3_with_projection(populations, model, force, false)
 }
 
+// Raw Guo source projection, before its weight and collision prefactor. The
+// free-surface force-frame transform uses this SAME polynomial, so changing a
+// source does not change physical momentum or the force-corrected stress.
+pub(crate) fn guo_projection3(e: [f64; 3], velocity: [f64; 3], eu: f64, force: [f64; 3]) -> f64 {
+    let cs2 = 1.0 / 3.0;
+    let cs4 = cs2 * cs2;
+    (0..3)
+        .map(|axis| ((e[axis] - velocity[axis]) / cs2 + eu * e[axis] / cs4) * force[axis])
+        .sum()
+}
+
 #[cfg(test)]
 fn collide_axial_z_cell3(
     populations: [f64; Q3],
@@ -458,8 +469,6 @@ fn collide_cell3_with_projection(
     match model {
         CollisionModel3::Bgk { tau } => {
             let coefficient = 1.0 - 0.5 / tau;
-            let cs2 = 1.0 / 3.0;
-            let cs4 = cs2 * cs2;
             let mut post = [0.0; Q3];
             for direction in 0..Q3 {
                 let e = [
@@ -481,11 +490,7 @@ fn collide_cell3_with_projection(
                         * (3.0 * (e[2] - velocity[2]) + 9.0 * eu * e[2])
                         * force[2]
                 } else {
-                    let projection = (0..3)
-                        .map(|axis| {
-                            ((e[axis] - velocity[axis]) / cs2 + eu * e[axis] / cs4) * force[axis]
-                        })
-                        .sum::<f64>();
+                    let projection = guo_projection3(e, velocity, eu, force);
                     coefficient * W3[direction] * projection
                 };
                 let value = populations[direction]

@@ -125,3 +125,42 @@ separate physical owners. The focused `material_free_surface_enthalpy` integrati
 target adds an independent two-cell nonlinear-conductivity balance, a
 conductivity-only card swap affecting actual native momentum, external-source
 accounting and atomic failure/retry regressions under `enthalpy-coupling`.
+
+## Source-density buoyancy in a moving liquid
+
+`MaterialFreeSurface3::with_boussinesq_enthalpy` connects the same pinned liquid
+density law to the original sparse free-surface momentum solver. The existing
+`BoussinesqMaterial` owner bounds source density and heat-capacity departures.
+The original VOF reference mass/volume and caloric h chart remain fixed; actual
+source `mu(T)/rho0` supplies native relaxation and `k(T)` supplies conduction.
+The unprojected material samples and their receipts remain observable. No
+ideal-gas expansion coefficient is inferred for a liquid.
+
+The supplied gravity must equal the existing domain gravity. Its reference
+load `rho0*g` stays present at the free surface, with `(rho(T)-rho0)*g` added as
+a spatial perturbation. Native collision, pressure-boundary reconstruction,
+new-interface initialization and velocity sampling carry that actual force.
+The existing uniform-force boundary approximation is translated through the
+perturbation source frame, including both anti-bounce-back populations, so its
+zero-density-departure limit is continuous and the exact limit retains the
+original path. Newly created interface populations use the same full Guo
+half-source transform as force rebinding, including its second moment.
+
+Attachment preserves physical velocity and force-corrected stress even for
+an evolved flow; raw populations change only to express the new force frame.
+Each step holds the post-thermal source force through native momentum. The
+accepted advected h then refreshes source support and rebinds the endpoint
+force frame without adding an extra half-force impulse. The same-force fast
+path preserves population bits. Thermal/conduction, native force, VOF routes,
+conversion counters and all enthalpy/source history are accepted together.
+
+This is a first-order held-force thermal/flow split with a bounded Boussinesq
+momentum approximation. It does not supply a thermodynamic volume source,
+phase conversion, capillary energy, pressure work, gravitational total-energy
+closure or physical viscous heating. Existing native low-Mach and boundary
+accuracy limitations remain. `material_free_surface_enthalpy` adds six focused
+regressions: exact reference-density behavior; independent held-force impulse
+through changed heat; source-only density replacement with and without gravity;
+a partial-fill density-refinement limit under gravity; transactional source,
+cancellation and late-flow failures; and common conduction/buoyancy temperature.
+Compilation and source review are not execution or experimental validation.

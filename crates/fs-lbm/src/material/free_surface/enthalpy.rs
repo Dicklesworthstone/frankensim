@@ -9,7 +9,8 @@
 //! This is the single-liquid, constant-density, stationary-wall rung. Capillary
 //! energy, phase mobility, viscous heat and pressure work are not supplied.
 //! Optional `conduction` reuses the shared thermal timeline on explicit wetted
-//! face geometry. In particular, h is enthalpy, not internal or total energy. The
+//! face geometry. Optional `buoyancy` admits bounded source-density departures
+//! while retaining reference mass and volume. In particular, h is enthalpy, not internal or total energy. The
 //! incompressible lattice pressure is not a thermodynamic EOS. A negative native
 //! accepted interface/carry mass refuses rather than becoming thermal storage.
 //! A source-domain, numerical-budget or cancellation refusal publishes nothing.
@@ -30,6 +31,10 @@ use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
 mod transport;
+
+/// Source-density buoyancy with explicitly bounded reference-mass storage.
+pub mod buoyancy;
+use buoyancy::{BoussinesqLiquid, resolve_liquid};
 
 /// Source-conductivity exchange on the existing thermal timeline before flow.
 #[cfg(feature = "enthalpy-coupling")]
@@ -174,6 +179,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     controls: FreeSurfaceEnthalpyControls,
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
+    buoyancy: Option<BoussinesqLiquid>,
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -192,6 +198,18 @@ impl<'s> MaterialFreeSurface3<'s> {
         caloric: &'m EquilibriumEnthalpyPhaseCurve,
         controls: FreeSurfaceEnthalpyControls,
         initial_h: impl Fn([usize; 3]) -> f64,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        self.with_enthalpy_model(law, caloric, controls, initial_h, None, gate)
+    }
+
+    fn with_enthalpy_model<'m>(
+        self,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
@@ -249,6 +267,9 @@ impl<'s> MaterialFreeSurface3<'s> {
                 ));
             }
         }
+        let buoyancy = buoyancy
+            .map(|config| BoussinesqLiquid::try_new(&self, law, config))
+            .transpose()?;
         let masses = self.lattice.mass_snapshot();
         admit_masses(&masses, controls.max_cells)?;
         self.ledger_mass_kg()?;
@@ -271,8 +292,13 @@ impl<'s> MaterialFreeSurface3<'s> {
             controls,
             h,
             states: BTreeMap::new(),
+            buoyancy,
         };
-        candidate.states = candidate.resolve_states(&candidate.h, &masses, gate)?.0;
+        let (states, _, forces) = candidate.resolve_states(&candidate.h, &masses, gate)?;
+        if let Some(forces) = forces {
+            candidate.flow.lattice.rebind_force_field(forces, gate)?;
+        }
+        candidate.states = states;
         Ok(candidate)
     }
 }
@@ -376,21 +402,29 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
-        let (_, tau) = self.resolve_states(&heated, &masses, gate)?;
+        let (_, tau, forces) = self.resolve_states(&heated, &masses, gate)?;
         // Native activation/conversion and the companion solve operate on one
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
         let mut lattice = self.flow.lattice.clone();
-        let trace = lattice.step_with_mass_transport(gate, &tau, self.controls.max_mass_routes)?;
+        let trace =
+            lattice.step_with_mass_transport(gate, &tau, forces, self.controls.max_mass_routes)?;
         admit_masses(&trace.after, self.controls.max_cells)?;
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));
         extend_empty_ghosts(&trace.after, &mut h, &heated)?;
-        let (states, _) = self.resolve_states(&h, &trace.after, gate)?;
-        let after = total(&trace.after, &h, mass_unit)?;
+        let (states, _, endpoint_forces) = self.resolve_states(&h, &trace.after, gate)?;
+        if let Some(forces) = endpoint_forces {
+            // This changes the Guo population frame without adding an impulse.
+            // The accepted force now belongs to the accepted advected h state.
+            lattice.rebind_force_field(forces, gate)?;
+        }
+        let endpoint_masses = lattice.mass_snapshot();
+        admit_masses(&endpoint_masses, self.controls.max_cells)?;
+        let after = total(&endpoint_masses, &h, mass_unit)?;
         let defect = after - before - external;
         let scale = absolute_total(&masses, &self.h, mass_unit)?
-            + absolute_total(&trace.after, &h, mass_unit)?
+            + absolute_total(&endpoint_masses, &h, mass_unit)?
             + absolute_heat;
         if !defect.is_finite()
             || !scale.is_finite()
@@ -401,7 +435,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             ));
         }
         let mass_before_kg = trace.before.values().sum::<f64>() * mass_unit;
-        let mass_after_kg = trace.after.values().sum::<f64>() * mass_unit;
+        let mass_after_kg = endpoint_masses.values().sum::<f64>() * mass_unit;
         if !mass_before_kg.is_finite() || !mass_after_kg.is_finite() {
             return Err(Error::Invalid("physical liquid mass overflows"));
         }
@@ -437,11 +471,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         (
             BTreeMap<MassLocation3, ResolvedLiquidState>,
             BTreeMap<(u64, usize), f64>,
+            Option<BTreeMap<(u64, usize), [f64; 3]>>,
         ),
         Error,
     > {
         let mut states = BTreeMap::new();
         let mut tau = BTreeMap::new();
+        let mut forces = self.buoyancy.map(|_| BTreeMap::new());
         let rho = self.flow.scaling.material().density_kg_m3();
         for (&location, &mass) in masses {
             poll(gate)?;
@@ -451,34 +487,23 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let specific = *h
                 .get(&location)
                 .ok_or(Error::Invalid("wet mass has no enthalpy history"))?;
-            let phase = self.caloric.state_at_specific_enthalpy(specific)?;
-            if phase.phase() != SolidLiquidPhase::Liquid
-                || phase.bulk_density_kg_m3().to_bits() != rho.to_bits()
-            {
-                return Err(Error::Invalid(
-                    "free-surface heat needs pure liquid at the original fixed density",
-                ));
-            }
-            let state = self
-                .law
-                .at_temperature(Temperature::new(phase.temperature_k()))?;
-            if state.density_kg_m3().to_bits() != rho.to_bits() {
-                return Err(Error::Invalid(
-                    "temperature-dependent density needs a conservative volume-change owner",
-                ));
-            }
+            let (state, transport) =
+                resolve_liquid(self.law, self.caloric, specific, rho, self.buoyancy)?;
             let (plan, _) = plan_momentum_scaling(
-                state.kinematic_viscosity_m2_s(),
+                transport.kinematic_viscosity_m2_s(),
                 self.flow.scaling.cell_size_m(),
                 self.flow.scaling.timestep_s(),
                 self.flow.scaling.flow.u_lattice * self.flow.scaling.velocity_scale,
             )?;
             if let MassLocation3::Cell(key, lane) = location {
                 tau.insert((key, lane), plan.tau);
+                if let (Some(binding), Some(forces)) = (self.buoyancy, &mut forces) {
+                    forces.insert((key, lane), binding.force(&self.flow, &state)?);
+                }
             }
             states.insert(location, state);
         }
-        Ok((states, tau))
+        Ok((states, tau, forces))
     }
 }
 

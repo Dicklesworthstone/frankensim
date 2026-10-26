@@ -44,6 +44,7 @@ use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
+mod forcing;
 pub(crate) mod transport;
 use transport::{MassLocation3, MassTransport3};
 
@@ -183,8 +184,14 @@ impl core::fmt::Display for FreeSurfaceError3 {
             FreeSurfaceError3::InvalidContactAngle => f.write_str(
                 "contact angle must lie in (0, pi) radians with a representable wall slope",
             ),
-            FreeSurfaceError3::InvalidInitialState { coordinates, reason } => {
-                write!(f, "free-surface initial state at {coordinates:?} refused: {reason}")
+            FreeSurfaceError3::InvalidInitialState {
+                coordinates,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "free-surface initial state at {coordinates:?} refused: {reason}"
+                )
             }
             FreeSurfaceError3::Transport(reason) => {
                 write!(f, "free-surface companion transport refused: {reason}")
@@ -232,7 +239,7 @@ pub struct FreeSurfaceSample3 {
     pub fill_fraction: f64,
     /// Sum of the wet cell's populations (reference density one).
     pub density: f64,
-    /// Lattice velocity including half the constant Guo force density.
+    /// Lattice velocity including half the actual retained Guo force density.
     pub velocity: [f64; 3],
 }
 
@@ -257,6 +264,9 @@ pub struct FreeSurface3 {
     worst_step_violation: f64,
     /// Smoothed fill field, refreshed at the top of each step.
     fill_smooth: BTreeMap<u64, [f64; TILE_CELLS]>,
+    /// Actual force frame of each wet population, when it differs from the
+    /// uniform reference gravity. This history travels with population state.
+    local_force: Option<BTreeMap<(u64, usize), [f64; 3]>>,
 }
 
 impl core::fmt::Debug for FreeSurface3 {
@@ -293,15 +303,21 @@ impl FreeSurface3 {
     #[must_use]
     pub fn sample_at(&self, x: usize, y: usize, z: usize) -> Option<FreeSurfaceSample3> {
         let (slot, lane) = self.grid.resolve_source(
-            i64::try_from(x).ok()?, i64::try_from(y).ok()?, i64::try_from(z).ok()?,
+            i64::try_from(x).ok()?,
+            i64::try_from(y).ok()?,
+            i64::try_from(z).ok()?,
         )?;
         let key = self.grid.active_keys()[slot];
         let cell = self.tiles.get(&key)?.cells[lane];
-        if cell == Cell3::Gas { return None; }
+        if cell == Cell3::Gas {
+            return None;
+        }
         let (density, raw_velocity) = self.grid.cell_macros(slot, lane);
-        let (_, force) = self.grid.collision();
+        let force = self.force_at_lane(key, lane);
         Some(FreeSurfaceSample3 {
-            cell, fill_fraction: self.fill(key, lane), density,
+            cell,
+            fill_fraction: self.fill(key, lane),
+            density,
             velocity: core::array::from_fn(|axis| raw_velocity[axis] + 0.5 * force[axis] / density),
         })
     }
@@ -446,6 +462,7 @@ impl FreeSurface3 {
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,
             fill_smooth: BTreeMap::new(),
+            local_force: None,
         };
 
         // Interface insertion: any fluid cell with a gas neighbor.
@@ -725,12 +742,12 @@ impl FreeSurface3 {
     /// `phi_at` port): `from` is the querying cell.
     fn phi_or_ghost(&self, gx: i64, gy: i64, gz: i64, from: (u64, usize)) -> f64 {
         match self.grid.resolve_source(gx, gy, gz) {
-            None => self.planar_angle_ghost([gx, gy, gz]).unwrap_or_else(|| {
-                match self.contact {
+            None => self
+                .planar_angle_ghost([gx, gy, gz])
+                .unwrap_or_else(|| match self.contact {
                     ContactModel3::Neutral => self.fill(from.0, from.1),
                     ContactModel3::Wetting => 1.0,
-                }
-            }),
+                }),
             Some((slot, lane)) => {
                 let key = self.grid.active_keys()[slot];
                 self.fill_smooth[&key][lane]
@@ -752,7 +769,11 @@ impl FreeSurface3 {
         let axis = contact.wall.axis();
         let dims = self.grid.tile_dims();
         let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
-        let edge = if contact.wall.upper() { extents[axis] as i64 - 1 } else { 0 };
+        let edge = if contact.wall.upper() {
+            extents[axis] as i64 - 1
+        } else {
+            0
+        };
         let distance = if contact.wall.upper() {
             position[axis] - edge
         } else {
@@ -878,7 +899,7 @@ impl FreeSurface3 {
         check_cancel(gate)?;
         let ledger_before = self.ledger_mass();
         self.refresh_fill(gate)?;
-        let (model, force) = self.grid.collision();
+        let (model, _) = self.grid.collision();
 
         // Collide wet lanes into a post map (canonical order). Gas lanes
         // keep their raw populations (never read back, kept defined).
@@ -896,18 +917,19 @@ impl FreeSurface3 {
                         let cell_model = match local_tau {
                             None => model,
                             Some(values) => super::CollisionModel3::Bgk {
-                                tau: *values.get(&(key, lane)).ok_or(FreeSurfaceError3::Transport(
-                                    "missing source viscosity at a wet cell",
-                                ))?,
+                                tau: *values.get(&(key, lane)).ok_or(
+                                    FreeSurfaceError3::Transport(
+                                        "missing source viscosity at a wet cell",
+                                    ),
+                                )?,
                             },
                         };
-                        super::collide_cell3(populations, cell_model, force).map_err(|source| {
-                            FreeSurfaceError3::Collision {
+                        super::collide_cell3(populations, cell_model, self.force_at_lane(key, lane))
+                            .map_err(|source| FreeSurfaceError3::Collision {
                                 tile_key: key,
                                 lane,
                                 source,
-                            }
-                        })?
+                            })?
                     }
                 };
             }
@@ -953,25 +975,29 @@ impl FreeSurface3 {
                                 _ => 1.0,
                             };
                             if w > 0.0 {
-                                let incoming = w * (post[&nb_key][nb_lane][OPP3[q]] - post[&key][lane][q]);
+                                let incoming =
+                                    w * (post[&nb_key][nb_lane][OPP3[q]] - post[&key][lane][q]);
                                 dm += incoming;
                                 if (key, lane) < (nb_key, nb_lane)
                                     && let Some(trace) = transport.as_deref_mut()
                                 {
                                     trace.exchange(
                                         MassLocation3::Cell(nb_key, nb_lane),
-                                        MassLocation3::Cell(key, lane), incoming,
+                                        MassLocation3::Cell(key, lane),
+                                        incoming,
                                     )?;
                                 }
                             }
                         }
                     }
-                    if flag == Cell3::Interface { mass_delta.push((key, lane, dm)); }
+                    if flag == Cell3::Interface {
+                        mass_delta.push((key, lane, dm));
+                    }
                 }
                 // Pull-stream with gas reconstruction (2-D port).
                 let populations = self.grid.populations(slot, lane);
                 let rho_pre: f64 = populations.iter().sum();
-                let u_pre = [
+                let mut u_pre = [
                     populations
                         .iter()
                         .enumerate()
@@ -991,6 +1017,16 @@ impl FreeSurface3 {
                         .sum::<f64>()
                         / rho_pre,
                 ];
+                let local_force = self.force_at_lane(key, lane);
+                let base_force = self.grid.collision().1;
+                let perturbation = core::array::from_fn(|d| local_force[d] - base_force[d]);
+                let physical_velocity =
+                    core::array::from_fn(|d| u_pre[d] + 0.5 * local_force[d] / rho_pre);
+                if self.local_force.is_some() {
+                    for axis in 0..3 {
+                        u_pre[axis] += 0.5 * perturbation[axis] / rho_pre;
+                    }
+                }
                 let mut new_f = [0.0f64; Q3];
                 for (q, out) in new_f.iter_mut().enumerate() {
                     // Pull source lies opposite the direction of travel.
@@ -1006,7 +1042,22 @@ impl FreeSurface3 {
                                 Cell3::Gas => {
                                     let rho_ref = self.reference_density(key, lane);
                                     let eq = equilibrium3(rho_ref, u_pre);
-                                    eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]]
+                                    let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
+                                    if self.local_force.is_some() {
+                                        value
+                                            - 0.5
+                                                * (forcing::source(
+                                                    q,
+                                                    physical_velocity,
+                                                    perturbation,
+                                                ) + forcing::source(
+                                                    OPP3[q],
+                                                    physical_velocity,
+                                                    perturbation,
+                                                ))
+                                    } else {
+                                        value
+                                    }
                                 }
                                 Cell3::Fluid | Cell3::Interface => post[&src_key][src_lane][q],
                             }
@@ -1038,7 +1089,8 @@ impl FreeSurface3 {
     /// Conversion cascade with conservative redistribution (2-D port),
     /// activating inactive in-domain tiles when fluid advances into them.
     fn apply_conversions(
-        &mut self, mut transport: Option<&mut MassTransport3>,
+        &mut self,
+        mut transport: Option<&mut MassTransport3>,
     ) -> Result<(), FreeSurfaceError3> {
         let mut excess_pool = std::mem::take(&mut self.carry);
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
@@ -1068,8 +1120,11 @@ impl FreeSurface3 {
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
                 if let Some(trace) = transport.as_deref_mut() {
-                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry,
-                        tile.mass[lane] - rho)?;
+                    trace.exchange(
+                        MassLocation3::Cell(key, lane),
+                        MassLocation3::Carry,
+                        tile.mass[lane] - rho,
+                    )?;
                 }
                 excess_pool += tile.mass[lane] - rho;
                 tile.cells[lane] = Cell3::Fluid;
@@ -1094,6 +1149,7 @@ impl FreeSurface3 {
                 // Initialize from the average of wet neighbors (2-D port).
                 let mut rho_avg = 0.0;
                 let mut u_avg = [0.0f64; 3];
+                let mut force_avg = [0.0f64; 3];
                 let mut cnt = 0.0;
                 for q2 in 1..Q3 {
                     if let Neighbor::Active(nn_key, nn_lane, nn_cell) =
@@ -1109,6 +1165,14 @@ impl FreeSurface3 {
                             u_avg[1] += fq * f64::from(E3[q3].1) / r;
                             u_avg[2] += fq * f64::from(E3[q3].2) / r;
                         }
+                        if self.local_force.is_some() {
+                            let force = self.force_at_lane(nn_key, nn_lane);
+                            let base = self.grid.collision().1;
+                            for axis in 0..3 {
+                                u_avg[axis] += 0.5 * (force[axis] - base[axis]) / r;
+                                force_avg[axis] += force[axis];
+                            }
+                        }
                         cnt += 1.0;
                     }
                 }
@@ -1118,9 +1182,25 @@ impl FreeSurface3 {
                 } else {
                     rho_avg = 1.0;
                 }
+                let base_force = self.grid.collision().1;
+                let mut initial = equilibrium3(rho_avg, u_avg);
+                if let Some(forces) = &mut self.local_force {
+                    if cnt > 0.0 {
+                        for axis in 0..3 {
+                            force_avg[axis] /= cnt;
+                        }
+                    } else {
+                        return Err(FreeSurfaceError3::Transport(
+                            "new forced interface needs a wet source neighbor",
+                        ));
+                    }
+                    let physical_velocity =
+                        core::array::from_fn(|d| u_avg[d] + 0.5 * base_force[d] / rho_avg);
+                    initial = forcing::reframe(initial, physical_velocity, base_force, force_avg)?;
+                    forces.insert((nb_key, nb_lane), force_avg);
+                }
                 let nb_slot = self.grid.slot_of(nb_key).expect("active");
-                self.grid
-                    .set_populations(nb_slot, nb_lane, equilibrium3(rho_avg, u_avg));
+                self.grid.set_populations(nb_slot, nb_lane, initial);
                 let nb_tile = self.tiles.get_mut(&nb_key).expect("active");
                 nb_tile.cells[nb_lane] = Cell3::Interface;
                 nb_tile.mass[nb_lane] = 0.0;
@@ -1144,14 +1224,20 @@ impl FreeSurface3 {
             {
                 let tile = self.tiles.get_mut(&key).expect("active");
                 if let Some(trace) = transport.as_deref_mut() {
-                    trace.exchange(MassLocation3::Cell(key, lane), MassLocation3::Carry,
-                        tile.mass[lane])?;
+                    trace.exchange(
+                        MassLocation3::Cell(key, lane),
+                        MassLocation3::Carry,
+                        tile.mass[lane],
+                    )?;
                 }
                 excess_pool += tile.mass[lane];
                 tile.cells[lane] = Cell3::Gas;
                 tile.mass[lane] = 0.0;
             }
             self.conversions.to_gas += 1;
+            if let Some(forces) = &mut self.local_force {
+                forces.remove(&(key, lane));
+            }
             for q in 1..Q3 {
                 if let Neighbor::Active(nb_key, nb_lane, Cell3::Fluid) =
                     self.neighbor_state(key, lane, q)
@@ -1185,7 +1271,11 @@ impl FreeSurface3 {
                 for lane in 0..TILE_CELLS {
                     if tile.cells[lane] == Cell3::Interface {
                         if let Some(trace) = transport.as_deref_mut() {
-                            trace.exchange(MassLocation3::Carry, MassLocation3::Cell(key, lane), share)?;
+                            trace.exchange(
+                                MassLocation3::Carry,
+                                MassLocation3::Cell(key, lane),
+                                share,
+                            )?;
                         }
                         tile.mass[lane] += share;
                     }
@@ -1289,7 +1379,6 @@ enum Neighbor {
     Active(u64, usize, Cell3),
 }
 
-
 #[cfg(test)]
 mod capillary_boundary_tests {
     use super::*;
@@ -1297,14 +1386,28 @@ mod capillary_boundary_tests {
     #[test]
     fn g1_planar_wall_ghost_has_the_prescribed_angle_and_zero_planar_curvature() {
         for wall in [
-            PlanarWall3::XMin, PlanarWall3::XMax,
-            PlanarWall3::YMin, PlanarWall3::YMax,
-            PlanarWall3::ZMin, PlanarWall3::ZMax,
+            PlanarWall3::XMin,
+            PlanarWall3::XMax,
+            PlanarWall3::YMin,
+            PlanarWall3::YMax,
+            PlanarWall3::ZMin,
+            PlanarWall3::ZMax,
         ] {
-            for angle in [core::f64::consts::PI / 3.0, 2.0 * core::f64::consts::PI / 3.0] {
+            for angle in [
+                core::f64::consts::PI / 3.0,
+                2.0 * core::f64::consts::PI / 3.0,
+            ] {
                 let mut surface = FreeSurface3::new(
-                    8, 8, 8, 0.8, [0.0; 3], 0.001, ContactModel3::Neutral, |_, _, _| true,
-                ).unwrap();
+                    8,
+                    8,
+                    8,
+                    0.8,
+                    [0.0; 3],
+                    0.001,
+                    ContactModel3::Neutral,
+                    |_, _, _| true,
+                )
+                .unwrap();
                 surface.set_planar_contact_angle(wall, angle).unwrap();
                 let axis = wall.axis();
                 let tangent = (axis + 1) % 3;
@@ -1331,16 +1434,18 @@ mod capillary_boundary_tests {
                     let mut minus = p;
                     plus[component] += 1;
                     minus[component] -= 1;
-                    gradient[component] = (
-                        surface.phi_or_ghost(plus[0], plus[1], plus[2], (key, lane))
-                        - surface.phi_or_ghost(minus[0], minus[1], minus[2], (key, lane))
-                    ) / 2.0;
+                    gradient[component] =
+                        (surface.phi_or_ghost(plus[0], plus[1], plus[2], (key, lane))
+                            - surface.phi_or_ghost(minus[0], minus[1], minus[2], (key, lane)))
+                            / 2.0;
                 }
                 let magnitude = gradient.iter().map(|x| x * x).sum::<f64>().sqrt();
                 let inward_sign = if wall.upper() { -1.0 } else { 1.0 };
                 let normal_dot_wall = -gradient[axis] * inward_sign / magnitude;
-                assert!((normal_dot_wall - angle.cos()).abs() < 2e-12,
-                    "{wall:?}, angle {angle}: normal dot wall {normal_dot_wall}");
+                assert!(
+                    (normal_dot_wall - angle.cos()).abs() < 2e-12,
+                    "{wall:?}, angle {angle}: normal dot wall {normal_dot_wall}"
+                );
                 assert!(surface.curvature(key, lane).abs() < 2e-12);
             }
         }
@@ -1352,9 +1457,16 @@ mod capillary_boundary_tests {
             let cells = 4 * radius;
             let center = (2 * radius) as f64;
             let mut surface = FreeSurface3::new(
-                cells, cells, cells, 0.8, [0.0; 3], 0.001,
-                ContactModel3::Neutral, |_, _, _| true,
-            ).unwrap();
+                cells,
+                cells,
+                cells,
+                0.8,
+                [0.0; 3],
+                0.001,
+                ContactModel3::Neutral,
+                |_, _, _| true,
+            )
+            .unwrap();
             for &key in surface.grid.active_keys() {
                 let values = core::array::from_fn(|lane| {
                     let (x, y, z) = FreeSurface3::global_of(key, lane);
@@ -1364,9 +1476,14 @@ mod capillary_boundary_tests {
                 });
                 surface.fill_smooth.insert(key, values);
             }
-            let (slot, lane) = surface.grid.resolve_source(
-                (3 * radius) as i64, (2 * radius) as i64, (2 * radius) as i64,
-            ).unwrap();
+            let (slot, lane) = surface
+                .grid
+                .resolve_source(
+                    (3 * radius) as i64,
+                    (2 * radius) as i64,
+                    (2 * radius) as i64,
+                )
+                .unwrap();
             let key = surface.grid.active_keys()[slot];
             let curvature = surface.curvature(key, lane);
             let density = surface.reference_density(key, lane);
@@ -1376,7 +1493,9 @@ mod capillary_boundary_tests {
         let coarse = relative_error(4);
         let fine = relative_error(8);
         assert!(coarse < 0.06);
-        assert!(fine < 0.016 && fine < coarse / 3.0,
-            "sphere curvature errors coarse={coarse}, fine={fine}");
+        assert!(
+            fine < 0.016 && fine < coarse / 3.0,
+            "sphere curvature errors coarse={coarse}, fine={fine}"
+        );
     }
 }

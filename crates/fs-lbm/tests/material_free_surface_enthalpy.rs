@@ -25,6 +25,9 @@ use fs_qty::{Dims, QuantitySpec, Temperature};
 #[path = "material_free_surface_enthalpy/conduction.rs"]
 mod conduction;
 
+#[path = "material_free_surface_enthalpy/buoyancy.rs"]
+mod buoyancy;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [

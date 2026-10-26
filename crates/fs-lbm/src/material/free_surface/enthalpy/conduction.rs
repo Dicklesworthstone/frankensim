@@ -71,6 +71,7 @@ struct Conduction<'a, 'm> {
     law: &'a LiquidTemperatureLaw<'m>,
     caloric: &'a EquilibriumEnthalpyPhaseCurve,
     density: f64,
+    buoyancy: Option<BoussinesqLiquid>,
     faces: &'a [FreeSurfaceConductionFace],
     endpoints: Vec<[CellId; 2]>,
     powers: BTreeMap<CellId, f64>,
@@ -87,24 +88,13 @@ impl Conduction<'_, '_> {
         let mut states = BTreeMap::new();
         for (&id, cell) in thermal.cells() {
             check()?;
-            let phase = self
-                .caloric
-                .state_at_specific_enthalpy(cell.specific_h_j_kg)?;
-            if phase.phase() != SolidLiquidPhase::Liquid
-                || phase.bulk_density_kg_m3().to_bits() != self.density.to_bits()
-            {
-                return Err(Error::Invalid(
-                    "conduction requires the original pure-liquid density",
-                ));
-            }
-            let state = self
-                .law
-                .at_temperature(Temperature::new(phase.temperature_k()))?;
-            if state.density_kg_m3().to_bits() != self.density.to_bits() {
-                return Err(Error::Invalid(
-                    "liquid conduction cannot hide thermal volume change",
-                ));
-            }
+            let (state, _) = resolve_liquid(
+                self.law,
+                self.caloric,
+                cell.specific_h_j_kg,
+                self.density,
+                self.buoyancy,
+            )?;
             states.insert(id, state);
         }
         let mut samples = Vec::with_capacity(self.faces.len());
@@ -361,6 +351,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             law: self.law,
             caloric: self.caloric,
             density: rho,
+            buoyancy: self.buoyancy,
             faces,
             endpoints,
             powers,

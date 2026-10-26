@@ -116,8 +116,12 @@ impl FreeSurface3 {
         &mut self,
         gate: &CancelGate,
         tau: &BTreeMap<(u64, usize), f64>,
+        forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
         max_routes: usize,
     ) -> Result<MassTransport3, FreeSurfaceError3> {
+        if let Some(forces) = forces {
+            self.rebind_force_field(forces, gate)?;
+        }
         let mut trace = MassTransport3::new(self.mass_snapshot(), max_routes);
         self.step_inner(gate, Some(&mut trace), Some(tau))?;
         trace.after = self.mass_snapshot();
