@@ -258,7 +258,11 @@ impl input::Spec {
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
             .ok_or("complete material memory extent overflow")?;
-        let internal_states = self.body_radiation.map_or(0, |r| 2*r.maximum_poles())
+        // A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to the prepared
+        // byte and work budget (the library's own split); only the exact owner holds them in its state.
+        let acoustic_states = if self.prepared_linear.is_some() { 0 }
+            else { self.body_radiation.map_or(0, |r| 2*r.maximum_poles()) };
+        let internal_states = acoustic_states
             .checked_add(memory).ok_or("complete constitutive/acoustic state extent overflow")?;
         if internal_states != 0 {
             let core = settings.network.max_modes.checked_mul(2).ok_or("material setup dimension overflow")?;

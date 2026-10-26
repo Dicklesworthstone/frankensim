@@ -470,6 +470,33 @@ fn the_skin_s_own_two_way_load_reacts_on_the_mechanics_its_observer_hears() {
     });
 }
 
+// A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to its own byte and work
+// budget as the library splits them; the exact owner holds them in its state. So the shared pole ceiling, declared
+// under `prepared-linear`, reaches material I/O, and the same cap on the exact owner still refuses before it.
+#[test]
+fn a_prepared_skin_load_charges_its_poles_to_the_prepared_budget_not_the_exact_state() {
+    let wide = SKIN_LOAD.replace(" 36 2 1e-9", " 16384 2 1e-9");
+    scoped(|cx, gate| {
+        for (owner, reaches_io) in [
+            (
+                format!("prepared-linear 512 4294967296 1000000000000000\n{wide}"),
+                true,
+            ),
+            (wide.clone(), false),
+        ] {
+            let mut reads = 0;
+            let result = input::Spec::parse(source(&owner).as_bytes())
+                .unwrap()
+                .compile_with_body(cx, gate, Some(profile(&own_skin())), |_| {
+                    reads += 1;
+                    Err("the first material read ends this check".into())
+                });
+            assert!(result.is_err());
+            assert_eq!(reads > 0, reaches_io, "{owner}");
+        }
+    });
+}
+
 #[test]
 fn a_skin_load_refuses_a_compact_mouth_a_missing_skin_and_bad_records_before_material_io() {
     assert!(

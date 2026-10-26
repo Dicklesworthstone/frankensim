@@ -1275,7 +1275,9 @@ profile's declared `acoustic-skin-v1` (below) instead of the shell's own facets:
 
 The `rayleigh` and `bem` routes require the ordinary exact owner;
 `prepared-linear` is refused for them. The `skin` route also runs on
-`prepared-linear`, whose air bank carries the load. Without the `shell_observer` selection below, the receiver remains the
+`prepared-linear`, whose air bank carries the load. Its poles count against the prepared owner's byte and work
+budget (the `prepared-linear` record), not the exact owner's state and setup ceiling, so `MAX_POLES` may reach
+the shared pole ceiling (16384). Without the `shell_observer` selection below, the receiver remains the
 existing compact, zero-retardation pressure observation of the **loaded**
 acceleration. The Rayleigh example retains one body mode to keep the complete
 passive acoustic image small; it is an integration fixture, not a claim of
