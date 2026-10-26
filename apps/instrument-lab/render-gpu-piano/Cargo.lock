@@ -730,6 +730,7 @@ dependencies = [
  "fs-scenario",
  "fs-solid",
  "fs-solver",
+ "fs-sparse",
  "fs-thermal",
  "fs-thermochem",
  "fs-tribo",
@@ -772,6 +773,7 @@ name = "fs-em"
 version = "0.0.1"
 dependencies = [
  "fs-feec",
+ "fs-ga",
  "fs-la",
  "fs-material",
  "fs-phs",
@@ -1228,6 +1230,9 @@ dependencies = [
 [[package]]
 name = "fs-thermal"
 version = "0.0.1"
+dependencies = [
+ "fs-la",
+]
 
 [[package]]
 name = "fs-thermochem"
