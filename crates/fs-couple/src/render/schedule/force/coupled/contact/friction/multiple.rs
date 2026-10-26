@@ -123,6 +123,9 @@ pub struct MultiFrictionFrame {
     /// Times the active-set rescue resolved a step the Gauss-Seidel sweep could
     /// not converge (frankensim-o7qbp). Zero on every step the sweep converges.
     pub active_set_rescues: usize,
+    /// One when a stop's actual endpoint missed its unchanged tolerance and the
+    /// step was solved again with headroom; zero on every step that passed first.
+    pub obstacle_resolves: usize,
     /// Jointly accepted nonlinear storage and reaction convergence, when bound.
     /// Refused trials leave this report and every port report unchanged.
     pub nonlinear: Option<super::nonlinear::NonlinearFrictionDiagnostics>,
@@ -171,6 +174,8 @@ pub struct MultiFrictionModalSystem {
     // Pivot budget for the active-set rescue (frankensim-o7qbp). Set at
     // construction; a test may lower it to plant a budget-exhaustion negative.
     active_set_budget: usize,
+    // Accepted steps solved again after a stop's actual-endpoint miss.
+    obstacle_resolves: usize,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -233,8 +238,11 @@ impl MultiFrictionModalSystem {
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
             accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
-            shear_layers: vec![None; p], active_set_budget: 4 * p + 16 })
+            shear_layers: vec![None; p], active_set_budget: 4 * p + 16, obstacle_resolves: 0 })
     }
+    /// Accepted steps whose stop missed at its actual endpoint and was solved
+    /// again with headroom, then passed the unchanged tolerance.
+    #[must_use] pub fn obstacle_resolves(&self) -> usize { self.obstacle_resolves }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
     /// Original constitutive parameters, retained through the joint friction solve.
@@ -446,6 +454,7 @@ impl MultiFrictionModalSystem {
         }
         for layer in self.shear_layers.iter_mut().flatten() { layer.publish(); }
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
+        self.obstacle_resolves += accepted.obstacle_resolves;
         // Reuse the accepted port allocation through repeated constitutive
         // trials. No fallible work follows mechanical publication.
         std::mem::swap(&mut accepted.ports, &mut self.frame.ports);
@@ -567,7 +576,32 @@ impl MultiFrictionModalSystem {
     // Original simultaneous friction/obstacle solve with held modal forces.
     // Only candidates and scratch change. Nonlinear storage can repeat this
     // solve until every bow and the shared constitutive reaction agree.
+    //
+    // Each stop is checked again at its ACTUAL endpoint after staging, which is
+    // rounded along a different path than its prediction. A prediction accepted
+    // at the edge of the tolerance can then miss by parts per million. Only then
+    // is the same step solved again from the accepted state with headroom and
+    // checked with the UNCHANGED tolerance; it refuses if it misses again. A
+    // step that passes the first time is unchanged.
     fn stage_multiple(&mut self, external: &[f64], drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
+        -> Result<MultiFrictionFrame, ModalFrictionError>
+    {
+        let first = self.stage_multiple_once(external, drives, obstacle_offsets, gate);
+        let Some(obstacles) = self.obstacles.as_mut() else { return first; };
+        if !obstacles.take_endpoint_miss() { return first; }
+        obstacles.set_headroom(true);
+        let second = self.stage_multiple_once(external, drives, obstacle_offsets, gate);
+        if let Some(obstacles) = &mut self.obstacles {
+            obstacles.set_headroom(false);
+            obstacles.take_endpoint_miss();
+        }
+        let mut frame = second?;
+        frame.obstacle_resolves = 1;
+        Ok(frame)
+    }
+
+    fn stage_multiple_once(&mut self, external: &[f64], drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<MultiFrictionFrame, ModalFrictionError>
     {
@@ -745,7 +779,7 @@ impl MultiFrictionModalSystem {
             friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy, energy_residual_j: residual,
             obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
             obstacle_work_j: obstacle_work, energy_tolerance_j: tolerance, sweeps,
-            active_set_rescues: rescues,
+            active_set_rescues: rescues, obstacle_resolves: 0,
             nonlinear: None, ports: Vec::new(),
         })
     }

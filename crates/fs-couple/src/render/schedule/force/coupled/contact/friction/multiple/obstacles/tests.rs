@@ -275,3 +275,86 @@ fn refused_preload_keeps_state_sources_and_clock_and_can_be_retried() {
         assert_eq!(joint.samples_rendered(), 1);
     }
 }
+
+#[test]
+fn an_actual_endpoint_pushed_past_a_prediction_inside_the_tolerance_is_a_named_miss() {
+    let gate = CancelGate::new_clock_free();
+    let mut joint = multi(friction(network(1000.0)))
+        .with_obstacles(vec![(obstacle(1.0, -1e-4), normal_limits())], limits(), &gate).unwrap();
+    let dt = joint.sample_period_s();
+    let set = joint.obstacles.as_mut().unwrap();
+    set.prepare(&[0.0], &[0.0], None, None).unwrap();
+    // At rest the undamped alpha = 1 stop carries 0.2 N, rising 2000 N/m with closure.
+    let (expected, _) = law_force(&set.points[0].law, set.points[0].old, 0.0, dt).unwrap();
+    assert!((expected-0.2).abs() < 1e-15);
+    let reaction = expected + 0.9*force_tolerance(expected, expected, normal_limits()).unwrap();
+    let tolerance = force_tolerance(reaction, expected, normal_limits()).unwrap();
+    assert!((reaction-expected).abs() < tolerance);
+    // Seed the prediction: this reaction lands the predicted endpoint at rest.
+    set.points[0].free = set.nn[0]*reaction;
+    set.reactions[0] = reaction;
+    // Inside the tolerance, it is accepted as it stands, but not by a solve with headroom.
+    set.check_prediction(&[0.0], dt, None).unwrap();
+    set.set_headroom(true);
+    assert!(set.check_prediction(&[0.0], dt, None).is_err());
+    set.set_headroom(false);
+    // The staged endpoint 0.4 tol/k less closed, on whichever side the law relieves.
+    // The step's law is the secant of the stop's potential, k/2 per unit of endpoint
+    // here, so the reaction sits 0.2 of the tolerance further from it: past it.
+    let law = |x: f64| law_force(&set.points[0].law, set.points[0].old, x, dt).unwrap().0;
+    let step = 0.4*tolerance/2000.0;
+    let pushed = if law(step) < expected { step } else { -step };
+    let relieved = law(pushed);
+    assert!((reaction-relieved).abs() > force_tolerance(reaction, relieved, normal_limits()).unwrap());
+    let shape = set.points[0].column[0];
+    let mut staged = vec![model(100.0, 0.0)];
+    staged[0].restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: pushed/shape,
+        velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
+    // The unchanged final check refuses, and names the miss once.
+    assert!(matches!(set.stage(&staged, dt, None), Err(ModalCouplingError::ContactSolve { .. })));
+    assert!(set.take_endpoint_miss());
+    assert!(!set.take_endpoint_miss());
+    // At the predicted endpoint the same reaction passes, and nothing is named.
+    staged[0].restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: 0.0,
+        velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
+    set.stage(&staged, dt, None).unwrap();
+    assert!(!set.take_endpoint_miss());
+}
+
+// Two opposed stops pinch the bowed coordinate with a finger-like preload (k times
+// 1e-5 m interference) and the violin stops' internal loss, at a declared relative
+// tolerance near the arithmetic floor, where predictions accepted at the edge often
+// miss at the actual endpoint.
+fn pinched(stiffness: f64, relative: f64) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let stop = ModalContactConfig { max_iterations: 96, maximum_force_n: 50.0, maximum_penetration_m: 1e-4,
+        force_absolute_tolerance_n: 1e-18, force_relative_tolerance: relative };
+    let contacts = [1.0, -1.0].map(|sign| {
+        let mut contact = obstacle(sign, -1e-5);
+        contact.law = Obstacle::new(vec![-1.0], 1, 1, vec![-1e-5], vec![1.0], stiffness, 1.0,
+            "synthetic finger-like stop pair, not a finger measurement".into()).unwrap()
+            .with_internal_loss(0.19).unwrap();
+        (contact, stop)
+    }).to_vec();
+    multi(friction(coupled_network())).with_obstacles(contacts, limits(), &gate).unwrap()
+}
+
+#[test]
+fn a_stop_that_misses_at_its_actual_endpoint_is_solved_again_and_accepted() {
+    let mut joint = pinched(5e5, 1e-13);
+    let mut resolved = 0;
+    for _ in 0..2000 {
+        let frame = joint.step(&[0.0, 0.0], &[FrictionDrive { speed_m_s: 0.05, normal_force_n: 0.2 }])
+            .unwrap().clone();
+        assert!(frame.obstacle_resolves <= 1);
+        resolved += frame.obstacle_resolves;
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        for normal in joint.last_obstacle_frames().unwrap() {
+            assert!(normal.constitutive_residual_n.abs() <= normal.force_tolerance_n);
+        }
+    }
+    // Each re-solved step is one whose first solve, the arithmetic before the
+    // headroom re-solve, refused at the actual endpoint.
+    assert!(resolved > 0);
+    assert_eq!(joint.obstacle_resolves(), resolved);
+}

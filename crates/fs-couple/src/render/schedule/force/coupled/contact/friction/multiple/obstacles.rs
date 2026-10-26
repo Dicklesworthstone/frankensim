@@ -136,13 +136,15 @@ impl NormalPoint {
         limit("friction obstacle penetration", penetration, self.config.maximum_penetration_m)?;
         Ok(penetration)
     }
-    fn check(&self, reaction: f64, x: f64, dt: f64) -> Result<(f64, f64, f64), ModalCouplingError> {
+    // `share` of the declared tolerance bounds the residual: all of it at the
+    // actual endpoint, half of it on a prediction solved with headroom.
+    fn check(&self, reaction: f64, x: f64, dt: f64, share: f64) -> Result<(f64, f64, f64), ModalCouplingError> {
         let (expected, elastic) = law_force(&self.law, self.old, x, dt)?;
         let tolerance = force_tolerance(reaction, expected, self.config)?;
         let residual = finite(reaction-expected)?;
-        if residual.abs() > tolerance {
+        if residual.abs() > share*tolerance {
             return Err(ModalCouplingError::ContactSolve { residual_n: residual,
-                tolerance_n: tolerance, iterations: self.iterations });
+                tolerance_n: share*tolerance, iterations: self.iterations });
         }
         // Exactly the original nonadhesive constitutive loss, not a new damper
         // or a residual disguised as physical dissipation.
@@ -162,6 +164,11 @@ pub(super) struct ObstacleSet {
     motion: Option<motion::MotionState>,
     geometry: Option<geometry::GeometryState>,
     absolute_work_j: f64,
+    // The prediction and the propagated endpoint are rounded along different
+    // paths. A step whose actual endpoint missed is solved once more with
+    // headroom: tighter roots and a prediction within half the tolerance.
+    headroom: bool,
+    endpoint_missed: bool,
 }
 impl ObstacleSet {
     // Only the joint friction owner reads these current trial reactions. An
@@ -169,6 +176,9 @@ impl ObstacleSet {
     pub(super) fn normal_reaction(&self, index: usize) -> Option<f64> {
         self.reactions.get(index).copied()
     }
+    // Whether the last stage refused at an actual endpoint; reading clears it.
+    pub(super) fn take_endpoint_miss(&mut self) -> bool { std::mem::take(&mut self.endpoint_missed) }
+    pub(super) fn set_headroom(&mut self, headroom: bool) { self.headroom = headroom; }
     fn new(system: &MultiFrictionModalSystem, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
@@ -207,7 +217,7 @@ impl ObstacleSet {
         }
         Ok(Self { points, limits, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
             staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q],
-            motion: None, geometry: None, absolute_work_j: 0.0 })
+            motion: None, geometry: None, absolute_work_j: 0.0, headroom: false, endpoint_missed: false })
     }
     pub(super) fn energy(&self, models: &[ModalAcousticTimeModel]) -> Result<f64, ModalCouplingError> {
         let mut total = 0.0;
@@ -277,7 +287,14 @@ impl ObstacleSet {
             let mut free = finite(self.points[i].free+dot(&self.nt[i*p..(i+1)*p], friction)?)?;
             for j in 0..q { if j != i { free = finite(free-self.nn[i*q+j]*self.reactions[j])?; } }
             let point = &mut self.points[i];
-            let (reaction, iterations) = solve_contact(&point.law, point.old, free, self.nn[i*q+i], dt, point.config, gate)?;
+            let mut config = point.config;
+            if self.headroom {
+                // As in the plain multi-contact owner: a tighter coordinate root
+                // leaves room, and acceptance keeps the ORIGINAL caps.
+                if config.force_absolute_tolerance_n*0.125 > 0.0 { config.force_absolute_tolerance_n *= 0.125; }
+                if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
+            }
+            let (reaction, iterations) = solve_contact(&point.law, point.old, free, self.nn[i*q+i], dt, config, gate)?;
             self.reactions[i] = reaction; point.iterations += iterations;
         }
         Ok(())
@@ -293,7 +310,7 @@ impl ObstacleSet {
             poll(gate)?;
             let x = finite(finite(point.free+dot(&self.nt[i*p..(i+1)*p], friction)?)?
                 - dot(&self.nn[i*q..(i+1)*q], &self.reactions)?)?;
-            point.check(self.reactions[i], x, dt)?;
+            point.check(self.reactions[i], x, dt, if self.headroom { 0.5 } else { 1.0 })?;
         }
         Ok(())
     }
@@ -328,7 +345,13 @@ impl ObstacleSet {
             let actuator_work_j = if attachment_work_j == 0.0 { translation_work_j }
                 else { finite(translation_work_j+attachment_work_j)? };
             let penetration_m = point.penetration(x)?;
-            let (dissipation_j, constitutive_residual_n, force_tolerance_n) = point.check(self.reactions[i], x, dt)?;
+            let (dissipation_j, constitutive_residual_n, force_tolerance_n) = match point.check(self.reactions[i], x, dt, 1.0) {
+                Ok(checked) => checked,
+                Err(error) => {
+                    self.endpoint_missed = matches!(error, ModalCouplingError::ContactSolve { .. });
+                    return Err(error);
+                },
+            };
             let stored_energy_j = point.energy(x)?;
             energy = finite(energy+stored_energy_j)?; loss = finite(loss+dissipation_j)?;
             work = finite(work+actuator_work_j)?;

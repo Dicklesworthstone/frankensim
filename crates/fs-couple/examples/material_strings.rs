@@ -606,6 +606,8 @@ fn main()->Result<()> {
     let (_,summary)=ready.write(output,&gate).map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,
         summary.clipped_samples,summary.full_scale_pa);
+    // Steps whose stop missed its tolerance at the actual endpoint and passed it after a headroom re-solve.
+    eprintln!("obstacle_resolves={}",ready.performance.bank().system().obstacle_resolves());
     Ok(())
 }
 
