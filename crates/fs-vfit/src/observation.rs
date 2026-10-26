@@ -139,15 +139,22 @@ impl ObservationFir {
         }
         let mut output = vec![0.0; self.outputs];
         for kernel in &self.kernels {
+            let history = &self.history[kernel.input];
+            // Lag l reads slot (cursor - l) mod length, so walk down the ring
+            // instead of dividing per tap; every product and sum is unchanged.
+            let delay = kernel.integer_delay_samples;
+            let mut slot = (self.cursor + self.length - delay) % self.length;
+            let mut sum = output[kernel.output];
             for (i, &tap) in kernel.taps.iter().enumerate() {
-                let lag = i + kernel.integer_delay_samples;
-                let value = if lag == 0 {
+                let value = if i + delay == 0 {
                     input[kernel.input]
                 } else {
-                    self.history[kernel.input][(self.cursor + self.length - lag) % self.length]
+                    history[slot]
                 };
-                output[kernel.output] += tap * value;
+                sum += tap * value;
+                slot = if slot == 0 { self.length - 1 } else { slot - 1 };
             }
+            output[kernel.output] = sum;
         }
         if output.iter().any(|x| !x.is_finite()) {
             return Err(FirError::Invalid("output overflow"));
@@ -195,6 +202,55 @@ mod tests {
             };
             assert_eq!(a.step(&x).unwrap(), vec![expected]);
             assert_eq!(b.step(&x).unwrap(), vec![expected]);
+        }
+    }
+    #[test]
+    fn ring_walk_replays_the_modular_lag_reference_bitwise() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        // Zero and long delays, duplicate pairs and every output, over many ring turns.
+        let shapes = [
+            (0, 1, 0, 5),
+            (1, 0, 3, 17),
+            (2, 2, 0, 1),
+            (0, 2, 41, 9),
+            (1, 1, 1, 64),
+            (0, 1, 2, 3),
+        ];
+        let kernels: Vec<FirKernel> = shapes
+            .iter()
+            .map(|&(input, output, integer_delay_samples, taps)| FirKernel {
+                input,
+                output,
+                integer_delay_samples,
+                taps: (0..taps).map(|_| next()).collect(),
+            })
+            .collect();
+        let mut fir = ObservationFir::new(3, 3, kernels.clone()).unwrap();
+        let length = fir.length;
+        let mut past: Vec<Vec<f64>> = Vec::new();
+        for _ in 0..7 * length {
+            let x: Vec<f64> = (0..3).map(|_| next()).collect();
+            past.push(x.clone());
+            let mut expected = vec![0.0; 3];
+            for k in &kernels {
+                for (i, &tap) in k.taps.iter().enumerate() {
+                    let lag = i + k.integer_delay_samples;
+                    let value = past
+                        .len()
+                        .checked_sub(lag + 1)
+                        .map_or(0.0, |n| past[n][k.input]);
+                    expected[k.output] += tap * value;
+                }
+            }
+            let actual = fir.step(&x).unwrap();
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&actual), bits(&expected));
         }
     }
     #[test]
