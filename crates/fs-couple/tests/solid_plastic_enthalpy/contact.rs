@@ -1,4 +1,6 @@
 //! Closed pressure/thermal/constitutive feedback on an actual native tetrahedron.
+#[path = "contact/dynamics.rs"]
+mod dynamics;
 use super::*;
 use fs_conduction::interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RDIMS,

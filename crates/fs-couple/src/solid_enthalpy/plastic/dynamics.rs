@@ -23,6 +23,11 @@
 use super::*;
 pub use fs_solid::plastic3::dynamics::InertialEnergy;
 
+/// Solved-pressure thermal supports on the same retained inertial trajectory.
+pub mod contact;
+/// Circuit heating and pressure-dependent interfaces with retained inertia.
+pub mod electrical;
+
 pub(super) struct Motion {
     pub velocity_mps: Vec<[f64; 3]>,
     pub energy: InertialEnergy,
@@ -37,10 +42,10 @@ pub struct ThermoplasticDynamics<'a> {
 
 /// Both original physical accounts for the same converged endpoint.
 #[derive(Clone, Debug)]
-pub struct ThermoplasticDynamicsReport {
+pub struct ThermoplasticDynamicsReport<R = ThermoplasticReport> {
     /// Original thermal, constitutive, external-work and complete combined gates.
-    /// Its numerical_loss_j contains constitutive loss only.
-    pub material: ThermoplasticReport,
+    /// Material reports keep constitutive numerical loss separate from inertia.
+    pub material: R,
     /// Consistent reference-mass kinetic work and separate inertial BE loss.
     pub inertia: InertialEnergy,
 }

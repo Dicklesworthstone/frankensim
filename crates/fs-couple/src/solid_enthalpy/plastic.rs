@@ -306,19 +306,6 @@ impl<'a> ThermoplasticSolid<'a> {
         Ok(enthalpies)
     }
 
-    fn mechanics<E>(
-        &self,
-        enthalpies: &[f64],
-        prescribed_m: &[(usize, f64)],
-        nodal_forces_n: &[(usize, f64)],
-        settings: IncrementSettings,
-        config: ThermoplasticConfig,
-        cx: &Cx<'_>,
-    ) -> Result<MechanicalProposal, ThermoplasticError<E>> {
-        self.mechanics_with_motion(enthalpies, prescribed_m, nodal_forces_n,
-            settings, config, None, cx)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn mechanics_with_motion<E>(
         &self,

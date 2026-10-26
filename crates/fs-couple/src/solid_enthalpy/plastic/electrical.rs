@@ -363,6 +363,23 @@ impl<'m> ThermoplasticSolid<'m> {
         guess_j: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ElectricalSolidCandidate<'m, 't>, ElectricalSolidError> {
+        self.advance_electrical_with_motion_candidate(thermal, circuit, prepared,
+            support_contacts, electrical_supports, ports, target_s, prescribed_m,
+            nodal_forces_n, settings, controls, guess_j, None, cx)
+            .map(|(candidate, _)| candidate)
+    }
+
+    // All electrical, thermal and support-source admission stays shared with
+    // the quasistatic path. Only the native mechanical residual gains inertia.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_electrical_with_motion_candidate<'t>(
+        &self, thermal: &DepositionSimulation<'t>, circuit: &MaterialCircuit,
+        prepared: &PreparedHeatNetwork<'_, '_>, support_contacts: &[ThermalSupportContact<'_>],
+        electrical_supports: &[ElectricalSupportContact], ports: &[f64], target_s: f64,
+        prescribed_m: &[(usize, f64)], nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings, controls: ElectricalSolidSolve, guess_j: &[f64],
+        velocity_mps: Option<&[[f64; 3]]>, cx: &Cx<'_>,
+    ) -> Result<(ElectricalSolidCandidate<'m, 't>, Option<dynamics::Motion>), ElectricalSolidError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
         let dt = target_s - self.time_s;
@@ -459,8 +476,9 @@ impl<'m> ThermoplasticSolid<'m> {
                     prepared.resolve(cx, endpoint).map_err(ElectricalSolidSourceError::Heat)?;
                 let h = self.enthalpies::<Infallible>(endpoint, false, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
-                let mechanical = self.mechanics::<Infallible>(&h, prescribed_m,
-                    nodal_forces_n, settings, mechanics, cx)
+                let mechanical = self.mechanics_with_motion::<Infallible>(&h, prescribed_m,
+                    nodal_forces_n, settings, mechanics,
+                    velocity_mps.map(|velocity| (velocity, dt)), cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
                 let mut support_samples = Vec::with_capacity(support_contacts.len());
                 for (binding, &(element, normal)) in support_contacts.iter().zip(&support_routes) {
@@ -530,6 +548,8 @@ impl<'m> ThermoplasticSolid<'m> {
         let combined_residual_j = r.electrical.stored_after_j - r.electrical.stored_before_j
             + mechanical.stored_change_j + mechanical.thermoelastic_storage_change_j
             + r.thermal.stored_energy_change_j + mechanical.numerical_loss_j
+            + mechanical.motion.as_ref().map_or(0.0, |motion|
+                motion.energy.kinetic_change_j + motion.energy.numerical_loss_j)
             - r.electrical.native.supplied - mechanical.external_work_j
             - trial.external_heat_j - r.thermal.incoming_energy_j;
         let source_residual_j = r.thermal.external_heat_j - trial.external_heat_j
@@ -562,7 +582,7 @@ impl<'m> ThermoplasticSolid<'m> {
             thermal_residual_j, combined_residual_j,
         };
         checkpoint().map_err(|_| ElectricalSolidError::Cancelled)?;
-        Ok(ElectricalSolidCandidate { thermal, solid, circuit, report })
+        Ok((ElectricalSolidCandidate { thermal, solid, circuit, report }, mechanical.motion))
     }
 
     // The heat network already binds exact fixed conditions. Reuse the original

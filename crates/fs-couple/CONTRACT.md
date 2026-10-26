@@ -4358,6 +4358,41 @@ approximation, not resolved transient jet turning, moving lips, coverage,
 time-varying mouth area/cut-up, or a material-state evolution law. The
 separation closure does not resolve vortex memory or turbulence.
 
+### Retained material inertia in contact and electrical feedback
+
+`solid_enthalpy::plastic::dynamics::ThermoplasticDynamics` now composes with the
+original pressure-dependent thermal supports, finite circuits and electrical
+support contacts. Its `advance_with_thermal_contacts` and series-conduction
+variant use the same contact Newton residual as the quasistatic solid. Its
+`advance_electrical_candidate`, support variant and pressure-contact variant use
+the same original circuit/enthalpy residual. Existing quasistatic entry points
+retain their signatures and omit inertia.
+
+Every thermal trial calls the original native small-strain mechanical owner
+with the same accepted displacement, velocity, J2 history and source-bound
+reference mass. Endpoint stress supplies support compression; that pressure and
+the actual two-sided temperatures resolve the original pinned interface laws.
+Source resistivity determines current, native current supplies Joule heat, and
+plastic plus reversible material heat reaches the original caloric cells once.
+Bulk conductivity and contact resistance retain their original series owner.
+
+The complete coupled balance includes kinetic change and separately reported
+backward-Euler inertial loss, alongside original constitutive numerical loss.
+Neither numerical loss becomes physical heat. Dynamic candidates retain velocity
+and its native kinetic account; their `into_parts` returns thermal and dynamic
+owners together, plus the original circuit where present. Continuation must use
+all returned histories. Refusal, cancellation and source exit publish none.
+
+Reference geometry, mass, electrical topology and transport areas remain fixed.
+Support contacts retain their original complete, prescribed, compressive face
+model; this adds no opening, impact, friction, evolving contact area, motional EMF,
+Lorentz force or finite-strain mechanics. Loads are endpoint values and time
+accuracy is first order. Focused regressions add independent consistent-mass
+displacement/contact-pressure and two-cell heat oracles, source-only resistivity
+changes, circuit and motion continuation, physical versus numerical loss,
+pressure-dependent current and atomic source refusal. Native execution remains
+pending in the resource-constrained build environment.
+
 ### Sourced thermal expansion in the native thermoplastic solid
 
 `ThermoplasticSolid` accepts optional source-integrated isotropic expansion

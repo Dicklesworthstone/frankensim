@@ -1,4 +1,6 @@
 //! G1/G3: native support compression closes the electrical/thermal/plastic loop.
+#[path = "pressure/dynamics.rs"]
+mod dynamics;
 use super::*;
 use fs_material::electrical_interface::{
     ELECTRICAL_CONTACT_RESISTANCE_DIMS as R_DIMS, ELECTRICAL_CONTACT_RESISTANCE_PROPERTY as R_NAME,
