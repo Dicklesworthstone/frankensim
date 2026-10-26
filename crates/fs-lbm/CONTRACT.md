@@ -936,12 +936,28 @@ error of that size after the first step and a density error that did not shrink 
 residual per step is `theta0 laplacian(S) / 4`, which is second order globally under acoustic scaling. A grid without sources
 is bitwise unchanged. The hooks exist for the qualification (`mms_full_nsf_order`) and are not an instrument source API.
 
-**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating and wall-heat terms of a step in joules
-and `residual_rel = |change of total energy - wall heat| / total energy`. `pressure_work_j = -integral(p div u) dV dt` is the
-reversible exchange (trapezoid in time, fourth-order divergence); `viscous_heating_j` is DEFINED as
-`internal change - wall heat - pressure work`, so it equals the kinetic energy loss net of pressure work term by term to
-round-off. THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is the continuum dissipation) is the
-Taylor-Green kinetic-energy decay rate in the battery.
+**Ledger.** `EnergyLedger` reports internal, kinetic, pressure-work, viscous-heating, wall-heat, boundary-energy and
+volume-source terms in joules. `source_energy_j` is the exact trapezoid of the same `S_E` samples applied to fluid cells;
+solid cells and callback reevaluation cannot add an audit-only supply. Negative supplies remove energy. The total-energy
+residual subtracts wall, boundary and volume supplies independently; no internal-exchange remainder is a balancing credit.
+Cumulative source energy is published only with an accepted step and uses the medium's fixed sensible-energy chart.
+
+`pressure_work_j = -integral(p div u) dV dt` is the reversible exchange (trapezoid in time, fourth-order divergence).
+For source-free and heat-only steps, `viscous_heating_j` is DEFINED as
+`internal change - wall heat - pressure work - source energy`, with the existing boundary terms where applicable.
+With no source, it equals the kinetic-energy loss net of pressure work term by term to round-off.
+THAT IDENTITY IS BOOKKEEPING. The physical content (the heating is continuum dissipation) is the Taylor-Green decay rate.
+
+Manufactured mass/momentum sources also alter kinetic storage, and this owner has no separately qualified local
+source-work split for its streamed mass source. Such steps report the signed residual in
+`unresolved_internal_exchange_j` and zero in `viscous_heating_j`; the unresolved term includes both dissipation and
+unseparated source mechanics and must not be deposited as heat. Uniform acceleration can give a negative unresolved
+term while the exact supplied energy becomes kinetic energy. This does not weaken the independent total-energy audit.
+Source-free arithmetic, dynamics and bit-semantics version are unchanged.
+
+Focused regressions in `tests/nsf3_thermochemical.rs` cover affine signed heating/cooling in both gas branches,
+solid-cell exclusion, one/three-worker replay, uniform source-driven acceleration, mass/energy supply, and existing
+source-domain rollback. They are authored behavioral checks, not a native execution or empirical qualification claim.
 
 **Conformance (`tests/nsf3_battery.rs`).** `equilibrium_recovers_conserved_moments` (G0: mass, momentum, the second moment
 and every third moment the lattice can represent, 1e-13), `refusals_cap_and_cap_plus_one` (G0, including the viscosity envelope, the anonymous ratio and the Mach-bound refusal; the

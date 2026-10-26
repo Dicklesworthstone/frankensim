@@ -38,9 +38,13 @@
 //!
 //! LEDGER SPLIT. `pressure_work_j = -integral(p div u) dV dt` is the reversible kinetic-to-internal exchange
 //! (trapezoid of the two time levels, fourth-order central divergence). `viscous_heating_j` is DEFINED as
-//! `internal change - wall heat - pressure work`; total-energy conservation then makes it equal the kinetic
-//! energy loss net of pressure work TERM BY TERM to round-off. That identity is bookkeeping, not evidence; the
-//! physical content (the heating equals the continuum dissipation) is tested on a Taylor-Green vortex.
+//! `internal change - wall heat - pressure work - source energy` for heat-only volume sources.
+//! With no volume source, total-energy conservation makes it equal the kinetic energy loss net of pressure
+//! work TERM BY TERM to round-off. Manufactured mass/momentum sources also do mechanical work; without a
+//! separately qualified source-work split, that signed remainder is reported as
+//! `unresolved_internal_exchange_j`, never as viscous heating. The exact total source supply is still
+//! independently audited. These identities are bookkeeping, not evidence; the physical content of
+//! viscous heating is tested on a Taylor-Green vortex.
 //!
 //! WHAT THIS IS NOT: not Boussinesq (`thermal.rs` and `d3q19/coupled.rs` are); not a thermal-LBM with an energy
 //! population; the thermal pressure enters as a force, so the lattice resolves the sound speed `sqrt(gamma
@@ -297,8 +301,15 @@ pub struct EnergyLedger {
     pub kinetic_j: f64,
     /// Viscous heating of the step [J] (defined from the budget, see the module note).
     /// With prescribed reservoir faces this remainder also includes kinetic-energy
-    /// transport and is not an independent viscous-heating measurement.
+    /// transport and is not an independent viscous-heating measurement. Zero for
+    /// a step with manufactured mass/momentum sources; see the unresolved account.
     pub viscous_heating_j: f64,
+    /// Signed internal-energy remainder for manufactured mass/momentum sources [J].
+    /// Includes physical/numerical dissipation and the unseparated mechanical
+    /// action of those sources after their total energy supply is removed.
+    /// It can be negative. It is neither heat nor a total-energy balancing credit.
+    /// Zero for source-free and heat-only steps.
+    pub unresolved_internal_exchange_j: f64,
     /// Reversible kinetic-to-internal exchange `-integral(p div u)` of the step [J].
     pub pressure_work_j: f64,
     /// Heat entering through the walls during the step [J].
@@ -309,7 +320,12 @@ pub struct EnergyLedger {
     /// Total energy entering prescribed reservoir ghost faces [J].
     /// Separate from characteristic-face energy; the two modes cannot coexist.
     pub open_energy_j: f64,
-    /// `|change of total energy - wall heat - open energy| / total energy`.
+    /// Total energy supplied by the volume source during this step [J].
+    /// The exact trapezoid used by the energy update, in the medium's fixed
+    /// sensible chart. Heat-only sources supply heat; arbitrary manufactured
+    /// mass/momentum sources need not. Negative values remove energy.
+    pub source_energy_j: f64,
+    /// `|change of total energy - wall heat - open energy - source energy| / total energy`.
     pub residual_rel: f64,
 }
 
@@ -1400,6 +1416,20 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let open_internal_in = -0.5 * (open1.internal_out.iter().sum::<f64>()
             + self.open_out.internal_out.iter().sum::<f64>());
         let prescribed_in = -0.5 * (open1.prescribed_out + self.open_out.prescribed_out);
+        // Use the exact source quadrature from the native energy update and
+        // the already-sampled fields; never query a callback again for the audit.
+        let mut source_in = 0.0;
+        let mut source_carries_mechanics = false;
+        if have_sources {
+            for i in 0..n {
+                if !self.solid[i] {
+                    source_in += 0.5 * (src_next[i].2 + self.src_now[i].2);
+                    source_carries_mechanics |= mass_half[i].0 != 0.0
+                        || self.src_now[i].1.iter().any(|&value| value != 0.0)
+                        || src_next[i].1.iter().any(|&value| value != 0.0);
+                }
+            }
+        }
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
@@ -1410,6 +1440,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let remainder = d_int - wall_in - pressure_work;
             if prescribed_in == 0.0 { remainder } else { remainder - prescribed_in }
         };
+        let remainder = if source_in == 0.0 { viscous } else { viscous - source_in };
+        let (viscous, unresolved) = if source_carries_mechanics {
+            (0.0, remainder)
+        } else {
+            (remainder, 0.0)
+        };
         let balance = if self.open.is_some() {
             d_total - wall_in - open_in
         } else {
@@ -1417,14 +1453,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         // Retain closed/characteristic arithmetic, including signed zero.
         let balance = if prescribed_in == 0.0 { balance } else { balance - prescribed_in };
+        let balance = if source_in == 0.0 { balance } else { balance - source_in };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
             kinetic_j: unit * ke1,
             viscous_heating_j: unit * viscous,
+            unresolved_internal_exchange_j: unit * unresolved,
             pressure_work_j: unit * pressure_work,
             wall_heat_j: unit * wall_in,
             open_boundary_energy_j: unit * open_in,
             open_energy_j: unit * prescribed_in,
+            source_energy_j: unit * source_in,
             residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
@@ -1445,6 +1484,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_boundary_exchange = boundary_exchange;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
+        self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
+        self.cumulative.source_energy_j += ledger.source_energy_j;
         self.cumulative.pressure_work_j += ledger.pressure_work_j;
         self.cumulative.wall_heat_j += ledger.wall_heat_j;
         self.cumulative.open_boundary_energy_j += ledger.open_boundary_energy_j;
