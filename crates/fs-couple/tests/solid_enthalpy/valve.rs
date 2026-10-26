@@ -5,6 +5,9 @@ use fs_scenario::reed_source::BeatingReedSource;
 use fs_solid::reduce::thermal::ThermalValveEquilibrium;
 use fs_solid::reduce::{OrificeSpec, SingleModeValveAdmission};
 
+#[path = "valve/motion.rs"]
+mod motion;
+
 const CUBE: [[f64; 3]; 8] = [
     [0., 0., 0.],
     [0., 0., 1.],

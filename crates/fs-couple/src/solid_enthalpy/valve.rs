@@ -5,9 +5,12 @@
 //! returned valve can enter `material_assembly::valve` without copying or
 //! overriding its material-derived mass, opening, stiffness or pressure port.
 //!
-//! Acoustic observations are frozen-state experiments. Updating a live modal
-//! trajectory, accounting for reversible thermoelastic heat, and moving the
-//! pressure footprint require separate admitted models.
+//! `motion` carries this finite thermal state into the existing continuing
+//! modal trajectory. Reversible thermoelastic heat and moving the pressure
+//! footprint still require separate admitted models.
+
+/// Finite spatial heating and continuing native modal motion on one clock.
+pub mod motion;
 
 use fs_exec::Cx;
 use fs_solid::linear3::{TetMaterialField, TetStaticSolveConfig};

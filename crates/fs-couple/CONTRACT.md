@@ -6413,3 +6413,33 @@ parsed but not natively executed. Native exact-production matrix tests cover
 independent heterogeneous sealed-pocket dynamics, physical energy/force for
 noncommuting mass roots, and refusal/cancellation; they do not certify the
 complete material-query/DG exponential path.
+
+## Finite spatial enthalpy drives continuing reduced solid motion
+
+`solid_enthalpy::valve::motion::HeatedValveMotion` binds one finite thermal
+inventory, pinned solid source/reduction and existing `ThermalValveModalMotion`.
+Each interval advances the native held-pressure motion at the accepted source,
+advances the original spatial thermal owner over the same physical duration,
+rebuilds compatible thermal equilibrium and tangent modes, and uses the existing
+mass-inner-product transfer for the same displacement and conjugate momentum.
+The changed equilibrium contributes its actual displacement offset. Mode order,
+sign or count never substitutes for physical state identity. The new observer is
+formed on the actual endpoint basis and evaluated after transfer.
+
+All candidates remain private until source admission at every thermal substep
+and event, equilibrium/reduction, native modal limits, projection/work limits,
+endpoint observation and cancellation succeed. Heat, motion, basis, observation
+and sample count publish together. The absolute thermal clock is the stored
+initial origin plus the native modal elapsed clock; incompatible intervals
+refuse. The original caloric heat audit, pressure-step work/loss and signed
+incremental modal parameter work/discarded-state accounts remain separate.
+Projection loss and coefficient-change energy are never physical heating.
+
+This is a first-order prescribed-thermal split on fixed reference mass, mesh,
+supports and pressure footprint. It does not close reciprocal thermoelastic
+heat, dissipative heat return, bore pressure feedback or radiation reaction;
+the supplied narrow-band pressure transfer is an observation. G1/G3/G4 tests in
+`tests/solid_enthalpy/valve/motion.rs` compare an independent heated one-DOF
+oscillator, a heat-capacity-only material swap in actual motion, and late
+observer/transfer/cancellation refusals followed by deterministic retry. Full
+native runtime execution remains required for numerical qualification.
