@@ -1268,6 +1268,21 @@ fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared()
     assert!(piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
     assert!(piece.notes.iter().any(|n| n == COIL_ENDS_NOTE));
     assert!(!piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
+    // The wire's contact (ruling 7520 L12 (a)): elliptical Hertz of a turn's surface on the film,
+    // the wire's radius across it and the helix's radius of curvature plus that along it (steel
+    // nu 0.3 assumed), grid / pitch turns per node at one approach; the spec's loss kept.
+    let (rm, lead) = (dm / 2.0, p / (2.0 * PI));
+    let turn = crate::hertz::EllipticHertz::isotropic((212e9, 0.3), (4e9, 0.38), d / 2.0, (rm * rm + lead * lead) / rm + d / 2.0).unwrap();
+    let Law::Power { mu: declared_loss, .. } = spec.wires.unwrap().contact;
+    let on_wires = |c: &&Contact| c.b.iter().any(|&(b, _, _)| piece.instrument.bodies[b].name.starts_with("wire "));
+    let contacts: Vec<&Contact> = piece.instrument.contacts.iter().filter(on_wires).collect();
+    assert!(!contacts.is_empty());
+    for c in contacts {
+        let Law::Power { k, alpha, mu } = c.law;
+        near(k, turn.k() * (spec.grid / p));
+        assert_eq!((alpha, mu), (1.5, declared_loss));
+    }
+    assert!(piece.notes.iter().any(|n| n.starts_with("snare wire contact: computed from the cards (Hertz, elliptical, helix)")));
 
     // A wire card without the thermal and loss data refuses; absent loss is not a lossless wire.
     let refused = binding(&film, &film, &stick)
@@ -1309,6 +1324,14 @@ fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
         }
         assert!(piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
         assert!(!piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
+        // the spec's contact law, not a computed one
+        let on_wires = |c: &&Contact| c.b.iter().any(|&(b, _, _)| piece.instrument.bodies[b].name.starts_with("wire "));
+        let Law::Power { k: k0, alpha: a0, mu: m0 } = spec.wires.unwrap().contact;
+        assert!(piece.instrument.contacts.iter().filter(on_wires).all(|c| {
+            let Law::Power { k, alpha, mu } = c.law;
+            (k, alpha, mu) == (k0, a0, m0)
+        }));
+        assert!(!piece.notes.iter().any(|n| n.starts_with("snare wire contact:")));
     }
 }
 
@@ -1395,6 +1418,14 @@ fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_w
         let Law::Power { mu, .. } = c.law;
         assert_eq!(mu, 3.0);
     }
+    // Rim friction (ruling 7520 G1): the presets' graded RIM_FRICTION, the card route's measured
+    // tin bronze on itself; both receipts say which.
+    let rubs = |p: &kit::Piece| p.instrument.frictions.iter().map(|f| f.mu).collect::<Vec<_>>();
+    assert_eq!((kit::RIM_FRICTION, kit::BRONZE_RIM_FRICTION), (0.5, 0.6));
+    assert!(rubs(&fitted).len() == fitted_gaps.len() && rubs(&fitted).iter().all(|&m| m == kit::RIM_FRICTION));
+    assert!(rubs(&card).len() == card_gaps.len() && rubs(&card).iter().all(|&m| m == kit::BRONZE_RIM_FRICTION));
+    assert!(kit::FITTED_CYMBAL_INTERFACE.hat_receipt.contains("rim friction RIM_FRICTION 0.5, picked by grade"));
+    assert!(kit::DECLARED_CYMBAL_INTERFACE.hat_receipt.contains("rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520)"));
 }
 
 /// The value between `before` and the next `after` in a receipt line.

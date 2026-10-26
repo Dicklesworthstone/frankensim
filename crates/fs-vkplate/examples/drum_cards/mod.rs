@@ -160,3 +160,23 @@ pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], preset: bool) -> Resul
         )
     }
 }
+
+/// The open hat's rim opening on the card route: 88cccbb78's declared 8 mm (ruling 7520 G2).
+pub const OPEN_HAT_OPENING_M: f64 = 0.008;
+pub const OPEN_HAT_OPENING_NOTE: &str = "open hi-hat: rim opening 8 mm, the declared opening (88cccbb78); the recording's pedal position is unknown";
+/// The presets' open-hat opening, picked by grade (bb1e5abf3).
+pub const PRESET_OPEN_HAT_OPENING_M: f64 = 0.002;
+pub const PRESET_OPEN_HAT_OPENING_NOTE: &str = "open hi-hat: rim opening 2 mm, PRESET, picked by grade (bb1e5abf3); not a declared or measured opening";
+
+/// The open hi-hat, no pedal force: `hihat` at the declared opening, or with `preset` at the
+/// presets' graded one. Its notes say which.
+pub fn open_hihat(hits: &[(f64, f64)], preset: bool) -> Result<Piece, String> {
+    let (gap, note) = if preset {
+        (PRESET_OPEN_HAT_OPENING_M, PRESET_OPEN_HAT_OPENING_NOTE)
+    } else {
+        (OPEN_HAT_OPENING_M, OPEN_HAT_OPENING_NOTE)
+    };
+    let mut piece = hihat(gap, 0.0, hits, preset)?;
+    piece.notes.push(note.into());
+    Ok(piece)
+}

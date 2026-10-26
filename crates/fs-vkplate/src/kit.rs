@@ -52,6 +52,8 @@ pub struct Wires {
     pub tension: f64,
     pub preload_per_m: f64,
     pub t60: f64,
+    /// The wire-head contact law; a coil of a bound steel keeps only its loss and computes the
+    /// stiffness (`coil::turn_contact`).
     pub contact: Law,
     pub coil: CoilGeometry,
 }
@@ -285,15 +287,21 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut settle = 0.0;
     if let Some(wr) = s.wires {
         let (mass_per_m, tension, preload_per_m, len) = (wr.mass_per_m, wr.tension, wr.preload_per_m, wr.length);
-        let coil = match materials.and_then(KitMaterials::snare_wire) {
-            Some(steel) => {
+        // a coil of a bound steel presses the film with its computed Hertz law (the declared loss
+        // kept); fitted strings keep the spec's law
+        let (coil, contact) = match materials.and_then(|m| m.snare_wire().map(|steel| (m, steel))) {
+            Some((m, steel)) => {
                 let c = CoilWire::new(&wr.coil, steel, &gas)?;
                 notes.extend(c.notes(tension)?);
-                Some(c)
+                let Law::Power { mu, .. } = wr.contact;
+                let film = (m.secondary().young_modulus_pa(), m.secondary().poisson_ratio());
+                let (law, note) = crate::coil::turn_contact(&wr.coil, steel, film, s.reso.thickness, s.grid, preload_per_m, mu)?;
+                notes.push(note);
+                (Some(c), law)
             }
             None => {
                 notes.push(FITTED_WIRES_RECEIPT.into());
-                None
+                (None, wr.contact)
             }
         };
         let h = s.grid;
@@ -322,7 +330,7 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
             for k in 0..n {
                 let x = x0 + k as f64 * h;
                 if let Some(hn) = ins.bodies[ri].node_at(x, y) {
-                    let mut c = Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, wr.contact);
+                    let mut c = Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, contact);
                     c.fixed_point_exit = true;
                     ins.contacts.push(c);
                 }
@@ -489,7 +497,7 @@ const CARD_DRUMS: [CardDrum; 4] = [
         name: "snare 14x6",
         tensions: (1072.0, 1072.0 * 2080.0 / 1330.0),
         strike_xy: (0.06, 0.02),
-        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 134.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, late tail); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact law (k 2e7 N/m^1.5, loss 2.0 s/m) are declared estimates (88cccbb78)",
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 134.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, late tail); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m are declared estimates (88cccbb78); the wires' contact stiffness is computed from the cards (Hertz, elliptical, helix; ruling 7520)",
     },
     CardDrum {
         name: "kick 18x18",
@@ -516,6 +524,8 @@ const CARD_DRUMS: [CardDrum; 4] = [
 /// wires' tension, preload and contact loss, and the kick's beater and muffle are 88cccbb78's
 /// declared estimates (rules 2 and 3). Geometry, heads, grids and the microphone are kept. The
 /// stick's loss is `DECLARED_STICK_LOSS_S_M`, which the card route passes to the hickory card.
+/// The wires' contact stiffness is computed from the steel and film cards once the steel is
+/// bound (`coil::turn_contact`); 88cccbb78's 2e7 N/m^1.5 here only reaches strings without one.
 /// The wires-off snare is the snare without wires. Refuses a spec it has no card values for.
 pub fn card_drum(preset: &DrumSpec) -> Result<DrumSpec, String> {
     let card_name = if preset.name == "snare 14x6, wires off" { "snare 14x6" } else { preset.name };
@@ -559,6 +569,8 @@ pub struct CymbalInterface {
     pub hat_stick_tip_m: f64,
     /// Two-lobe waviness of the hi-hat rims: the rim gap grows by `w (1 - cos 2 theta)` [m].
     pub hat_rim_waviness_m: f64,
+    /// Dry friction coefficient between the hi-hat's rims (`hihat_with_interface`).
+    pub hat_rim_friction: f64,
     /// Joins a cymbal's notes when no stick card is bound.
     pub cymbal_receipt: &'static str,
     /// Joins every hi-hat's notes.
@@ -572,19 +584,30 @@ pub const FITTED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
     stick_loss_s_m: FITTED_STICK_LOSS_S_M,
     hat_stick_tip_m: HIHAT_STICK_TIP_RADIUS_M,
     hat_rim_waviness_m: 7.5e-5,
+    hat_rim_friction: RIM_FRICTION,
     cymbal_receipt: "cymbal stick: fitted to a recording (96ccf8f1b), not physics: Hunt-Crossley loss 0.05 s/m",
-    hat_receipt: "hi-hat: fitted to a recording (96ccf8f1b), not physics: rim loss 0.08 s/m (HIHAT_RIM_LAW), a two-lobe rim waviness of up to 0.15 mm, a 4 mm stick tip and, without a stick card, stick loss 0.05 s/m",
+    hat_receipt: "hi-hat: fitted to a recording (96ccf8f1b), not physics: rim loss 0.08 s/m (HIHAT_RIM_LAW), a two-lobe rim waviness of up to 0.15 mm, a 4 mm stick tip and, without a stick card, stick loss 0.05 s/m; rim friction RIM_FRICTION 0.5, picked by grade (963d1e278)",
 };
 
-/// The card route's interface: 88cccbb78's declared estimates. Its rim law is
-/// DECLARED_HIHAT_RIM_LAW. No source gives a hi-hat's rim waviness, so the rims are flat.
+/// The card route's interface: 88cccbb78's declared estimates, and the measured BRONZE_RIM_FRICTION.
+/// Its rim law is DECLARED_HIHAT_RIM_LAW. No source gives a hi-hat's rim waviness, so the rims
+/// are flat.
 pub const DECLARED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
     stick_loss_s_m: DECLARED_STICK_LOSS_S_M,
     hat_stick_tip_m: 0.005,
     hat_rim_waviness_m: 0.0,
+    hat_rim_friction: BRONZE_RIM_FRICTION,
     cymbal_receipt: "cymbal stick (ruling 7486): Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
-    hat_receipt: "hi-hat (ruling 7486): flat rims, rim loss 3.0 s/m, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); 88cccbb78 set the rim loss to stand in for rim friction, which is now its own term, so the two overlap",
+    hat_receipt: "hi-hat (ruling 7486): flat rims, rim loss 3.0 s/m, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); 88cccbb78 set the rim loss to stand in for rim friction, which is now its own term, so the two overlap; rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520): dry in air, a polished hemispherical pin at 2.5 N and 0.05 m/s (NASA TN D-6912, 1972, fig. 2), not B20 rims; primary values span 0.2-0.6 across contact geometry (Morin 1834: 0.20, a loaded bronze sled on bronze)",
 };
+
+/// Dry kinetic friction of tin bronze on itself, for the card route's hi-hat rims (ruling 7520
+/// G1): Cu-10 at.% Sn (17 wt% Sn; B20 is 20 wt%) sliding on itself in air, 0.6, read from the
+/// bar of Buckley 1972 (NASA TN D-6912, fig. 2: a 0.48 cm hemispherical rider on a disk of the
+/// same alloy, polished, 250 g, 300 cm/min, 25 C, averaged over an hour of adhesive wear). The
+/// other primary measurement, Morin 1834 (Tableau LXXVII), is 0.20 for an unnamed bronze sled on
+/// a bronze bed at about 1.2 m/s; neither is a lathed B20 rim at a hi-hat's load and slip.
+pub const BRONZE_RIM_FRICTION: f64 = 0.6;
 
 /// 88cccbb78's declared hi-hat rim law, reference cell as HIHAT_RIM_LAW.
 pub const DECLARED_HIHAT_RIM_LAW: Law = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
@@ -856,7 +879,9 @@ pub fn hihat_with(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, from: f
 /// span about 0.3-1; with 0.3 and 0.5 the closed hat's octave-band decay grades inside the real-vs-real
 /// ruler (0.40 and 0.32 octaves from the Salamander stroke, two real strokes 0.47; without friction 0.95),
 /// and 0.5 was the closer of the two. Those grades predate opposing geometry and
-/// finite washer rocking; they do not qualify the current preset.
+/// finite washer rocking; they do not qualify the current preset. Picked by grade: the presets
+/// (and so live, the browser and GPU) keep it and say so; the card route takes
+/// BRONZE_RIM_FRICTION (ruling 7520 G1).
 pub const RIM_FRICTION: f64 = 0.5;
 
 /// The same with grid spacing multiplied by `scale`.
@@ -875,11 +900,11 @@ pub fn hihat_grid_mu_with_gas(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: 
     build_hihat(gap, pedal_n, hits, rim, from, scale, friction, gas, None, &FITTED_CYMBAL_INTERFACE)
 }
 
-/// The kit's own hi-hat (contact annulus from 0.8 R, offline grid, RIM_FRICTION) with the rim law
-/// `rim` and the stick and rim waviness of `iface`. The card route passes DECLARED_HIHAT_RIM_LAW
+/// The kit's own hi-hat (contact annulus from 0.8 R, offline grid) with the rim law `rim` and the
+/// stick, rim waviness and rim friction of `iface`. The card route passes DECLARED_HIHAT_RIM_LAW
 /// and DECLARED_CYMBAL_INTERFACE.
 pub fn hihat_with_interface(gap: f64, pedal_n: f64, hits: &[(f64, f64)], rim: Law, iface: &CymbalInterface) -> Result<Piece, String> {
-    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, RIM_FRICTION, standard_gas(), None, iface)
+    build_hihat(gap, pedal_n, hits, rim, 0.8, 1.0, iface.hat_rim_friction, standard_gas(), None, iface)
 }
 
 /// Material-resolved opposed shells and impactor. Selected material bending

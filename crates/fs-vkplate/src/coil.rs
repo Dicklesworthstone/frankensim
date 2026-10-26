@@ -30,8 +30,12 @@
 //!   wire exceeds that, so this term is a lower bound. The gas's added mass, about 1.5e-4 of the
 //!   steel's, is not applied.
 //!
+//! Contact with the head ([`turn_contact`]): each turn presses the film as an elliptical Hertz
+//! contact of the wire's surface, curved along the helix, its stiffness computed from the two
+//! cards. It holds while the contact is small against the film: up to about 0.1 N per turn.
+//!
 //! Not sourced, and stated in every coil's notes: the strand count, spacing, length, tension,
-//! preload and contact law (see `kit::Wires`). The ends are pinned with no strand-end or cord
+//! preload and contact loss (see `kit::Wires`). The ends are pinned with no strand-end or cord
 //! damping, so the lowest coil modes keep their long material decay.
 
 use crate::GasState;
@@ -87,6 +91,94 @@ impl CoilGeometry {
     pub fn helix_angle_rad(&self) -> f64 {
         (self.pitch_m / (PI * self.mean_diameter_m())).atan()
     }
+    /// The principal radii of the wire's surface where a turn rests on a flat, outermost from
+    /// the coil's axis [m]: across the wire its own radius d/2; along it the helix's radius of
+    /// curvature plus d/2. A helix of radius R = D/2 and lead p/(2 pi) curves at
+    /// (R^2 + (p/(2 pi))^2) / R, which for a close coil is R.
+    #[must_use]
+    pub fn turn_surface_radii_m(&self) -> (f64, f64) {
+        let (r, lead, a) = (
+            0.5 * self.mean_diameter_m(),
+            self.pitch_m / (2.0 * PI),
+            0.5 * self.wire_diameter_m,
+        );
+        (a, (r * r + lead * lead) / r + a)
+    }
+}
+
+/// The steel's Poisson ratio in the wire's Hertz contact: ASSUMED, neither steel card states one.
+/// The film's compliance is about 40 times the steel's, so it moves K by under 0.1 %.
+pub const STEEL_POISSON_RATIO_ASSUMED: f64 = 0.3;
+
+/// The wire's Hertz contact on a head film (ruling 7520 L12 (a)): the elliptical contact
+/// (`crate::hertz`) of a turn's surface (`CoilGeometry::turn_surface_radii_m`) on the flat
+/// film, steel E from the wire card with `STEEL_POISSON_RATIO_ASSUMED` and the film card's E and
+/// nu, both half-spaces. For `CANOPUS_VINTAGE` (d 0.5 mm, D 0.85 mm, p 3.4 mm: a 51.9 degree
+/// helix) the surface's radii are d/2 = 0.25 mm across the wire and, along it,
+/// (R^2 + (p/(2 pi))^2)/R + d/2 = 1.114 + 0.25 = 1.364 mm, so on the 4.903 GPa PET film K is
+/// 1.91e8 N/m^1.5 per turn; the wire's radius alone, a point contact, bounds it below at 1.18e8.
+/// A wire node of length `node_m` carries `node_m / pitch` turns at one approach, so its
+/// stiffness is that many turns'. The film is a half-space only while the contact ellipse is
+/// small against its thickness: at the 0.85 mN preload per turn the semi-axes are 2.2 x 6.8 um
+/// on 76.2 um of film, in range; near 0.1 N per turn they are 11 x 33 um, and above that load
+/// the law is outside its range. Returns the node's law with Hunt-Crossley loss `loss_s_m` and
+/// a receipt that states the ellipse at the preload `preload_n_m` [N/m] and at 0.1 N against
+/// the film's thickness `film_m`.
+pub fn turn_contact(
+    geometry: &CoilGeometry,
+    steel: &CoilSteel,
+    film: (f64, f64),
+    film_m: f64,
+    node_m: f64,
+    preload_n_m: f64,
+    loss_s_m: f64,
+) -> Result<(crate::Law, String), String> {
+    let steel_e = steel.young_modulus_pa();
+    let wire = (steel_e, STEEL_POISSON_RATIO_ASSUMED);
+    let (across, along) = geometry.turn_surface_radii_m();
+    let turn = crate::hertz::EllipticHertz::isotropic(wire, film, across, along)?;
+    let point = crate::hertz::EllipticHertz::isotropic(wire, film, across, across)?;
+    let turns = node_m / geometry.pitch_m;
+    let k = turn.k() * turns;
+    if !(k.is_finite() && k > 0.0 && film_m > 0.0 && preload_n_m >= 0.0 && loss_s_m >= 0.0) {
+        return Err(format!(
+            "snare wire contact: unrepresentable K {k} N/m^1.5, film {film_m} m, preload {preload_n_m} N/m or loss {loss_s_m} s/m"
+        ));
+    }
+    let e_star = 1.0 / ((1.0 - wire.1 * wire.1) / wire.0 + (1.0 - film.1 * film.1) / film.0);
+    let preload = preload_n_m * geometry.pitch_m;
+    let (pa, pb) = turn.semi_axes_m(preload);
+    let (ha, hb) = turn.semi_axes_m(0.1);
+    let note = format!(
+        "snare wire contact: computed from the cards (Hertz, elliptical, helix): each turn's surface (radius {:.3} mm across the wire, {:.3} mm along its {:.1} deg helix) on the resonant film; steel E {:.4e} Pa (wire card; nu {STEEL_POISSON_RATIO_ASSUMED} assumed), film E {:.4e} Pa, nu {} (film card), E* {:.4e} Pa; K {:.4e} N/m^1.5 per turn (b/a {:.2}; the wire's radius alone, a point contact, gives {:.4e}), {:.3} turns per {:.1} mm node, {:.4e} per node; a half-space while the ellipse is small against the {:.0} um film: semi-axes {:.1} x {:.1} um at the {:.2} mN preload per turn, in range, and {:.0} x {:.0} um at 0.1 N per turn, above which the law is outside its range; Hunt-Crossley loss {loss_s_m} s/m declared",
+        across * 1e3,
+        along * 1e3,
+        geometry.helix_angle_rad().to_degrees(),
+        steel_e,
+        film.0,
+        film.1,
+        e_star,
+        turn.k(),
+        turn.aspect(),
+        point.k(),
+        turns,
+        node_m * 1e3,
+        k,
+        film_m * 1e6,
+        pa * 1e6,
+        pb * 1e6,
+        preload * 1e3,
+        ha * 1e6,
+        hb * 1e6,
+    );
+    Ok((
+        crate::Law::Power {
+            k,
+            alpha: 1.5,
+            mu: loss_s_m,
+        },
+        note,
+    ))
 }
 
 /// The coil's steel: one resolved state of the wire card (density, E, the three thermal
@@ -178,6 +270,13 @@ impl CoilSteel {
     #[must_use]
     pub const fn shear(&self) -> &ResolvedMaterialStatePoint {
         &self.shear
+    }
+    /// The wire card's Young's modulus [Pa].
+    #[must_use]
+    pub fn young_modulus_pa(&self) -> f64 {
+        self.steel
+            .property(YOUNG_MODULUS_PROPERTY)
+            .map_or(f64::NAN, |p| p.value_si())
     }
     fn shear_modulus_pa(&self) -> f64 {
         self.shear
@@ -378,4 +477,4 @@ impl CoilWire {
 }
 
 /// Every coil states what is still declared and what is absent.
-pub const COIL_ENDS_NOTE: &str = "snare wires, declared not sourced: strand count, spacing, length, tension, preload and contact law (kit::Wires, authored 88cccbb78, retuned toward a recording 96ccf8f1b); ends pinned with no strand-end or cord damping, so the lowest coil modes ring long and 63-125 Hz is too loud";
+pub const COIL_ENDS_NOTE: &str = "snare wires, declared not sourced: strand count, spacing, length, tension, preload and contact loss (kit::Wires; the card route keeps 88cccbb78's, ruling 7486); ends pinned with no strand-end or cord damping, so the lowest coil modes ring long and 63-125 Hz is too loud";

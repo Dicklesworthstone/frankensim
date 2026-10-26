@@ -387,11 +387,25 @@ GPU.
 
   Every term is therefore a lower bound.
 
+Contact with the head (`coil::turn_contact`, ruling 7520): each turn presses
+the resonant film as an elliptical Hertz contact (`hertz::EllipticHertz`) of
+the wire's surface, whose radii are the wire's 0.25 mm across it and, along
+it, the helix's radius of curvature plus the wire's: (R^2 + (p/2 pi)^2)/R +
+d/2 = 1.364 mm at the 51.9 degree helix. Steel E from the wire card (nu 0.3
+assumed) on the film card's E and nu gives K 1.91e8 N/m^1.5 per turn on the
+4.903 GPa PET; the wire's radius alone, a point contact, gives 1.18e8. A
+3.5 mm node carries 1.03 turns at one approach. The film is a half-space
+only while the ellipse is small against its 76 um: the semi-axes are 2.2 x
+6.8 um at the 0.85 mN preload per turn, in range, and 11 x 33 um at 0.1 N per
+turn. Above about 0.1 N per turn the law is outside its range. The contact's
+loss, 2.0 s/m, is declared.
+
 Still declared, not sourced, and printed with every coil: strand count,
-spacing, length, tension, preload and the contact law (`kit::Wires`). The
+spacing, length, tension, preload and the contact loss (`kit::Wires`). The
 presets' tension, preload and contact law were adopted in a kit retuning
 graded against the recording (96ccf8f1b); the card route's are 88cccbb78's
-declared estimates (ruling 7486, `kit::card_drum`).
+declared estimates (ruling 7486, `kit::card_drum`), but for the computed
+contact stiffness.
 The ends
 are pinned with no strand-end or cord damping, so the lowest coil modes keep
 their long material decay. On the 14x6 snare this leaves 63-125 Hz louder than
@@ -463,7 +477,8 @@ The offline and live constructors share `kit::HIHAT_RIM_LAW`: reference-cell
 `K` with cell area. This remains a declared contact estimate, not a measured law
 for these cymbals or an overall acoustic qualification.
 
-The rims also rub (`Friction`, dry friction coefficient 0.5). Bending moves a plate's faces sideways by
+The rims also rub (`Friction`; dry friction coefficient 0.5 in the presets, `RIM_FRICTION`, picked by
+grade; 0.6 on the card route, `BRONZE_RIM_FRICTION`, below). Bending moves a plate's faces sideways by
 half its thickness times its slope, so where the rims touch, the bottom shell's upper face and the top
 shell's lower face slip by (t_b/2) grad w_b + (t_t/2) grad w_t, slopes from the grid's finite
 differences. Each step, after the contacts, every rim contact's friction is the force that would stop
@@ -636,13 +651,23 @@ offline examples' card route keeps none of them (ruling 7486):
   tom 60.4 Hz. The batter tensions that put the card drums there are 375.5 (kick), 1072 (snare),
   1264 (rack tom) and 478 N/m (floor tom). The early pitch of a hard stroke is up to 15 Hz sharper
   (the stretch); kitgrade's "fundamental", the strongest component in the first 250 ms, reads that.
+- **The wires' contact stiffness** is computed from the steel and film cards (ruling 7520, above).
+- **The hi-hat's rim friction**, 0.6, is measured: Cu-10 at.% Sn (17 wt% Sn; B20 is 20 wt%) sliding
+  on itself, dry in air (Buckley 1972, NASA TN D-6912, fig. 2: a polished 0.48 cm hemispherical
+  rider, 250 g, 300 cm/min, 25 C, averaged over an hour; read to +/- 0.02). The other primary
+  value, Morin 1834 (Tableau LXXVII), is 0.20 for an unnamed bronze sled on a bronze bed at about
+  1.2 m/s, so primary values span 0.2-0.6 across contact geometry. Neither is a lathed B20 rim at
+  a hi-hat's load and slip (ruling 7520, ledger
+  `nasa-buckley-1972-cusn-self-friction`).
 - **Everything else** is 88cccbb78's declared estimate: strike points; stick loss 0.2 s/m; wire
-  tension 2.0 N, preload 0.25 N/m and contact k 2e7 N/m^1.5 with loss 2.0 s/m; the kick's 0.12 kg
+  tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m; the kick's 0.12 kg
   beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3
   (no pillow is modelled);
   the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims with loss 3.0 s/m
-  and a 5 mm stick tip. 88cccbb78 set that rim loss to stand in for rim friction, which is now its
-  own term (`RIM_FRICTION`), so the two overlap.
+  and a 5 mm stick tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the
+  recording's pedal position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
+  88cccbb78 set that rim loss to stand in for rim friction, which is now its own term
+  (`BRONZE_RIM_FRICTION` on this route), so the two overlap.
 
 88cccbb78's own loss points came from the recordings' band decay times. The card drums no longer
 use head T60s; the cymbals' and hi-hat's T60 pairs still do.

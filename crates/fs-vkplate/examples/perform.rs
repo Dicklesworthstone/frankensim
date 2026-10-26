@@ -36,7 +36,7 @@ fn main() {
         "tom-12" => drum_cards::drum(&kit::tom(12.0), 1.0, &hits, false, preset_heads),
         "tom-14" => drum_cards::drum(&kit::tom(14.0), 1.0, &hits, false, preset_heads),
         "hihat-closed" => drum_cards::hihat(0.0, 80.0, &hits, preset_heads),
-        "hihat-open" => drum_cards::hihat(0.002, 0.0, &hits, preset_heads),
+        "hihat-open" => drum_cards::open_hihat(&hits, preset_heads),
         "crash" => drum_cards::cymbal(&kit::crash(), &cym(0.95, 0.008), preset_heads),
         "ride" => drum_cards::cymbal(&drum_cards::ride(preset_heads), &cym(0.6, 0.004), preset_heads),
         other => {

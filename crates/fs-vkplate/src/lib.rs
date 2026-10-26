@@ -53,6 +53,9 @@ pub mod air_loss;
 /// Coiled steel snare wires from a declared geometry, two material cards and the gas.
 pub mod coil;
 
+/// Elliptical Hertz contact of two elastic bodies.
+pub mod hertz;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
