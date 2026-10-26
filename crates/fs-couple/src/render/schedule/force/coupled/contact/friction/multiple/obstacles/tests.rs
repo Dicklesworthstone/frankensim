@@ -12,6 +12,9 @@ mod motion;
 #[path = "geometry_tests.rs"]
 mod geometry;
 
+#[path = "residual_tests.rs"]
+mod residual;
+
 fn config(pressure: f64) -> ModalCouplingConfig {
     ModalCouplingConfig { max_modes: 8, max_connections: 8, max_setup_terms: 4096,
         nyquist_guard_fraction: 0.9, maximum_total_energy_j: 10.0,

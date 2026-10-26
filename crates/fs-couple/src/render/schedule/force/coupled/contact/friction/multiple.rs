@@ -114,6 +114,12 @@ pub struct MultiFrictionFrame {
     /// Work supplied by prescribed support translation and attachment motion [J]. This is
     /// separate from bow/surface work and is not counted as contact loss.
     pub obstacle_work_j: f64,
+    /// Static storage of modes the network omits, under the obstacles' reactions,
+    /// R G R / 2 [J]. Zero unless an obstacle residual compliance is bound.
+    pub obstacle_residual_energy_j: f64,
+    /// Declared NUMERICAL loss of that quasi-static residual under step-held
+    /// reactions, dR G dR / 2 >= 0 [J]; not a physical dissipation.
+    pub obstacle_residual_loss_j: f64,
     /// Change of ALL storage + all losses - external and surface work [J].
     pub energy_residual_j: f64,
     /// Original network's energy allowance, scaled by absolute surface work.
@@ -260,6 +266,8 @@ impl MultiFrictionModalSystem {
     }
     /// External modal-force dimension.
     #[must_use] pub fn mode_count(&self) -> usize { self.core.mode_count() }
+    /// The shared linear network's admitted stiffness bound [rad/s]; contacts are not in it.
+    #[must_use] pub const fn linear_frequency_upper_bound_rad_s(&self) -> f64 { self.core.linear_frequency_upper_bound_rad_s() }
     /// Original shared mechanical period [s].
     #[must_use] pub fn sample_period_s(&self) -> f64 { self.core.sample_period_s() }
     /// Preserved original accepted sample clock.
@@ -404,6 +412,9 @@ impl MultiFrictionModalSystem {
         if self.core.has_nonlinear_potentials() && (self.series_drives.iter().any(Option::is_some)
             || self.shear_layers.iter().any(Option::is_some)) {
             return Err(invalid("series compliant drives and shear layers are not jointly staged with bound nonlinear storage").into());
+        }
+        if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
+            return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());
         }
         let accepted = if self.core.has_nonlinear_potentials() {
             self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
@@ -698,6 +709,11 @@ impl MultiFrictionModalSystem {
             Some(obstacles) => obstacles.stage(&self.core.network.candidates, self.core.network.dt, gate)?,
             None => (0.0, 0.0, 0.0, 0.0),
         };
+        let residual_bound = self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual);
+        let (residual_energy, residual_loss) = match &self.obstacles {
+            Some(obstacles) if residual_bound => obstacles.staged_residual_j()?,
+            _ => (0.0, 0.0),
+        };
         let (mut loss, mut work, mut absolute_work) = (0.0, 0.0, 0.0);
         for i in 0..p {
             poll(gate)?;
@@ -749,7 +765,8 @@ impl MultiFrictionModalSystem {
         let network_energy = finite(self.core.network.staged_frame.total_energy_j())?;
         let hair_energy: f64 = (0..p).filter_map(|i|
             self.series_drives[i].map(|drive| drive.spring_energy_j(self.staged_stretch[i]))).sum();
-        let after = if self.obstacles.is_some() { finite(network_energy+obstacle_energy+hair_energy)? }
+        let after = if residual_bound { finite(network_energy+obstacle_energy+residual_energy+hair_energy)? }
+            else if self.obstacles.is_some() { finite(network_energy+obstacle_energy+hair_energy)? }
             else { finite(network_energy+hair_energy)? };
         let shear_layer_energy = finite(self.shear_layers.iter().flatten()
             .map(layer::MaterialShearLayer::staged_energy_j).sum())?;
@@ -758,7 +775,9 @@ impl MultiFrictionModalSystem {
         let staged = &self.core.network.staged_frame;
         let network_loss = finite(staged.total_dissipation_j())?;
         let external_work = dot(external, &self.core.network.free_delta)?;
-        let residual = if self.obstacles.is_some() {
+        let residual = if residual_bound {
+            finite((after-before)+network_loss+loss+obstacle_loss+residual_loss-external_work-work-obstacle_work)?
+        } else if self.obstacles.is_some() {
             finite((after-before)+network_loss+loss+obstacle_loss-external_work-work-obstacle_work)?
         } else { finite((after-before)+network_loss+loss-external_work-work)? };
         let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss)
@@ -778,7 +797,8 @@ impl MultiFrictionModalSystem {
             drive_work_j: work, network_dissipation_j: network_loss,
             friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy, energy_residual_j: residual,
             obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
-            obstacle_work_j: obstacle_work, energy_tolerance_j: tolerance, sweeps,
+            obstacle_work_j: obstacle_work, obstacle_residual_energy_j: residual_energy,
+            obstacle_residual_loss_j: residual_loss, energy_tolerance_j: tolerance, sweeps,
             active_set_rescues: rescues, obstacle_resolves: 0,
             nonlinear: None, ports: Vec::new(),
         })

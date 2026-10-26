@@ -7,6 +7,7 @@
 use super::*;
 use super::performance::force::{StringForceCoupling, StringForcePort};
 use crate::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
+use crate::bowed_string::runtime::reciprocal::bank::residual::{ResidualStop, directions, residual_bridges, stop_residual};
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
@@ -56,6 +57,13 @@ pub struct MaterialStringStop {
     pub limits: ModalContactConfig,
 }
 fn error(what: &'static str) -> RenderError { RenderError::Control { what } }
+fn source_error(error: ReciprocalStringError) -> RenderError {
+    match error {
+        ReciprocalStringError::Material(e) => RenderError::Voice(e),
+        ReciprocalStringError::Network(e) => RenderError::Coupled(e),
+        ReciprocalStringError::Friction(e) => RenderError::Friction(e),
+    }
+}
 
 impl MultiBowStringBankSource {
     /// Original physical stop descriptions, retained through scheduling/output.
@@ -99,12 +107,60 @@ impl MultiBowStringBank {
             || stops.len()+self.system.port_count() > 64 {
             return Err(error("string stops require one bounded binding before the first physical sample"));
         }
-        let geometry = self.stop_geometry(&stops, None, limits.max_setup_terms, gate)?;
+        let mut geometry = self.stop_geometry(&stops, None, limits.max_setup_terms, gate)?;
+        let residual = if self.source.bank().residual_flexibility() {
+            Some(self.residual_stop_geometry(&stops, &mut geometry, gate)?)
+        } else { None };
         let contacts = stops.iter().zip(geometry).map(|(stop, geometry)|
             (ModalContact { left: geometry.left, right: geometry.right, law: stop.law.clone() }, stop.limits)).collect();
         self.system = self.system.with_obstacles(contacts, limits, gate).map_err(RenderError::Friction)?;
+        if let Some(compliance) = residual {
+            self.system = self.system.with_obstacle_residual_compliance(compliance, gate).map_err(RenderError::Friction)?;
+        }
         self.source.stops = stops;
         Ok(self)
+    }
+
+    // With residual flexibility (pexfp.299): each fixed stop's closure gains its
+    // bridge's cross term, minus k_eff G_sb times the bridge link's string and
+    // body columns, and the stops share the condensed omitted-mode compliance
+    // (bank/residual.rs). Receiver stops are not wired. Returns that compliance.
+    fn residual_stop_geometry(&self, stops: &[MaterialStringStop], geometry: &mut [ObstacleGeometry],
+        gate: &CancelGate) -> Result<Vec<f64>, RenderError>
+    {
+        let strings = self.source.bank().strings();
+        let string_count = self.cards.len();
+        let mut ports = Vec::with_capacity(stops.len());
+        for stop in stops {
+            if stop.body.is_some() {
+                return Err(error("a receiver stop is not wired with residual flexibility"));
+            }
+            let member = strings.get(stop.location.string).ok_or_else(|| error("stop names an unknown string"))?;
+            let unsigned = match stop.side {
+                StringStopSide::Along(direction) => direction.components(),
+                _ => directions(&member.source).0,
+            };
+            let sign = stop.side.sign();
+            ports.push(ResidualStop { string: stop.location.string, station_fraction: stop.location.station_fraction,
+                direction: [sign*unsigned[0], sign*unsigned[1]] });
+        }
+        let bridges = residual_bridges(strings, &self.cards).map_err(source_error)?;
+        let (cross, compliance) = stop_residual(&bridges, &ports).map_err(source_error)?;
+        for ((stop, geometry), factor) in stops.iter().zip(geometry.iter_mut()).zip(cross) {
+            if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
+            let index = stop.location.string;
+            let connection = &strings[index].connections[0];
+            let bridge = strings[index].source.bridge_shape(&self.cards[index], connection.station_fraction)
+                .map_err(source_error)?;
+            if bridge.len() != geometry.left.shapes.len() {
+                return Err(error("stop and bridge maps differ from the string's actual basis"));
+            }
+            for (left, b) in geometry.left.shapes.iter_mut().zip(&bridge) { *left -= factor*b; }
+            // Closure is left minus right, so the body part +factor*B enters as right = -factor*B.
+            geometry.right = ModalAttachment { component: string_count + connection.body.component,
+                shapes: connection.body.shapes.iter().map(|b| -factor*b).collect() };
+        }
+        Ok(compliance)
     }
 
     // One source projection for initial and moving stops. Material/gas-loaded

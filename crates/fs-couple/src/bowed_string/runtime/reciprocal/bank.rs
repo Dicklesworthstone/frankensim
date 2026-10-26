@@ -144,8 +144,13 @@ pub struct MaterialStringBankSource {
     material_cavity: Option<super::plate::MaterialBodyCavity>,
     body_radiation: Option<radiation::MaterialBodyRadiation>,
     spatial_cavity: Option<cavity::MaterialShellCavity>,
+    residual_flexibility: bool,
 }
 impl MaterialStringBankSource {
+    /// Whether bridges and stops carry the omitted bending modes' static
+    /// compliance (`ReciprocalStringBank::with_residual_flexibility`).
+    #[must_use]
+    pub const fn residual_flexibility(&self) -> bool { self.residual_flexibility }
     /// Original string order, material/loss receipts and physical connections.
     #[must_use]
     pub fn strings(&self) -> &[MaterialStringMember] { &self.strings }
@@ -279,11 +284,11 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, &[], law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, &[], false, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None };
+        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None, residual_flexibility: false };
         let system = source.restore_material_memory(system, &cards, None, gate)?;
         Ok(Self { source, cards, system })
     }
@@ -305,6 +310,58 @@ impl ReciprocalStringBank {
             .map_err(ReciprocalStringError::Friction)?;
         self.source.prepared_linear = Some(budget);
         poll(gate)?;
+        Ok(self)
+    }
+
+    /// Put the omitted bending modes' static compliance in series with every
+    /// string's bridge, and later with its stops (`residual`; pexfp.299).
+    ///
+    /// Each string's single spring/dashpot bridge connection is rebuilt as the
+    /// retained modes see it: k/(1 + k G_bb), with the dashpot to first order.
+    /// G_bb is the exact static Green's function of that string's own tension
+    /// and EI minus its retained modes' static sum. The source keeps k and c;
+    /// later fluid, torsion and cavity rebuilds keep the condensation. Stops
+    /// bound later carry the cross terms. The bow port has no residual yet.
+    ///
+    /// # Errors
+    /// After motion, playback or bound nonlinear storage; repeated; beside
+    /// rotational bridges, material bridge interfaces or a string with other
+    /// than one bridge connection; or the original assembly's own refusals.
+    pub fn with_residual_flexibility(mut self, gate: &CancelGate) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        if self.system.has_nonlinear_potentials() || self.source.residual_flexibility
+            || !self.source.material_bridge_interfaces.is_empty() {
+            return Err(invalid("residual flexibility binds once, before nonlinear storage and without material bridge interfaces"));
+        }
+        if self.system.samples_rendered() != 0
+            || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
+                .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
+            return Err(invalid("residual flexibility binds before string motion or playback"));
+        }
+        // The rotational rebuild's own recipe: same cards, bodies, links and memory.
+        let body_end = self.source.fluid_loading.as_ref().map_or(
+            self.system.components().len(), |fluid| self.cards.len() + fluid.body_components,
+        );
+        let bodies = self.system.components()[self.cards.len()..body_end].to_vec();
+        let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
+        let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
+            &bridges, &self.source.body_connections, &self.source.rotational_body_connections,
+            self.source.fluid_loading.as_ref(), self.source.prepared_linear,
+            &self.source.constant_loss_bridges(), true, self.system.port().law.clone(),
+            &self.source.options, gate)?;
+        if let Some(weights) = self.system.acceleration_pressure_weights() {
+            system = system.with_acceleration_pressure(weights.to_vec())
+                .map_err(ReciprocalStringError::Friction)?;
+        }
+        if let Some(binding) = self.system.interface() {
+            system = system.with_interface(binding.clone()).map_err(ReciprocalStringError::Friction)?;
+        }
+        system = self.source.restore_material_memory(system, &self.cards,
+            Some(self.system.material_memory().to_vec()), gate)?;
+        self.source.validate_material_bridge_frequencies(&system, gate)?;
+        poll(gate)?;
+        self.system = system;
+        self.source.residual_flexibility = true;
         Ok(self)
     }
 
@@ -446,7 +503,7 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
-    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, &[], law, options, gate)
+    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, &[], false, law, options, gate)
 }
 
 // Keep the original one-string API in the same assembler. Its absent source
@@ -460,7 +517,7 @@ fn assemble_sources(
     body_connections: &[ModalConnection],
     rotational_body_connections: &[torsion::StringBodyRotationConnection],
     fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: Option<PreparedModalBudget>,
-    constant_loss: &[ConstantLossConnection], law: FrictionLaw,
+    constant_loss: &[ConstantLossConnection], residual: bool, law: FrictionLaw,
     options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
     poll(gate)?;
@@ -468,6 +525,11 @@ fn assemble_sources(
         || sources.is_some_and(|s| s.len() != cards.len())
         || options.bow.string >= cards.len() || !interior(options.bow.station_fraction) {
         return Err(invalid("reciprocal assembly requires aligned strings, bodies and an interior bow"));
+    }
+    if residual && (sources.is_none() || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
+        || connections.iter().any(|c| c.len() != 1)) {
+        // Only a single spring/dashpot bridge per string condenses here.
+        return Err(invalid("residual flexibility condenses one plain bridge connection per material string"));
     }
     let mut components = Vec::with_capacity(cards.len() + bodies.len());
     let mut links = Vec::new();
@@ -490,11 +552,20 @@ fn assemble_sources(
                 Some(source) => source.bridge_shape(card, connection.station_fraction)?,
                 None => shape(card, connection.station_fraction),
             };
+            // The omitted modes are in series with the bridge: the retained
+            // modes see it softened (residual.rs). The source keeps k and c.
+            let (stiffness_n_m, damping_n_s_m) = match source {
+                Some(source) if residual => {
+                    let condensed = self::residual::condense_bridge(source, card, connection)?;
+                    (condensed.stiffness_n_m, condensed.damping_n_s_m)
+                },
+                _ => (connection.stiffness_n_m, connection.damping_n_s_m),
+            };
             links.push(ModalConnection {
                 left: ModalAttachment { component: index, shapes: bridge_shape },
                 right: ModalAttachment { component: cards.len() + connection.body.component,
                     shapes: connection.body.shapes.clone() },
-                stiffness_n_m: connection.stiffness_n_m, damping_n_s_m: connection.damping_n_s_m,
+                stiffness_n_m, damping_n_s_m,
                 rest_extension_m: connection.rest_extension_m,
             });
         }
@@ -584,3 +655,6 @@ pub mod nonlinear;
 
 /// Source-bound bending memory in the same string/body/contact operator.
 pub mod relaxation;
+
+/// The omitted bending modes' static compliance at bridges and stops.
+pub mod residual;

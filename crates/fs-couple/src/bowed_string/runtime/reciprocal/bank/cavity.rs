@@ -282,7 +282,7 @@ impl ReciprocalStringBank {
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings),
             image.components, &bridge_rows, &links, &self.source.rotational_body_connections,
             fluid.as_ref(), self.source.prepared_linear, &self.source.constant_loss_bridges(),
-            self.system.port().law.clone(), &self.source.options, gate).map_err(ShellCavityError::Bank)?;
+            self.source.residual_flexibility, self.system.port().law.clone(), &self.source.options, gate).map_err(ShellCavityError::Bank)?;
         if let Some(original) = self.system.acceleration_pressure_weights() {
             let insert = self.system.components()[..string_count+1].iter()
                 .map(|component| component.modes().len()).sum::<usize>();

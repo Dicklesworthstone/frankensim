@@ -56,6 +56,12 @@ pub struct FrictionObstacleFrame {
     pub attachment_work_j: f64,
     /// Total prescribed geometry work: attachment_work - R delta_offset [J].
     pub actuator_work_j: f64,
+    /// This contact's share of the omitted modes' static storage, R_i (G R)_i / 2 [J].
+    /// Zero unless a residual compliance is bound.
+    pub residual_energy_j: f64,
+    /// This contact's share of the declared numerical loss, dR_i (G dR)_i / 2 [J], where dR is
+    /// the change of the held reactions over the step. Zero unless a residual compliance is bound.
+    pub residual_loss_j: f64,
 }
 
 impl MultiFrictionModalSystem {
@@ -97,9 +103,91 @@ impl MultiFrictionModalSystem {
         Ok(self)
     }
 
+    /// Bind the static compliance of modes the network does NOT retain, among the
+    /// bound obstacles, once and before the first sample (pexfp.299).
+    ///
+    /// `compliance` is row-major q x q [m/N], symmetric and positive semidefinite:
+    /// entry (i, j) is obstacle i's closure under a unit reaction of obstacle j
+    /// through the omitted modes. Each closure then reads x = N^T q - G R. The
+    /// omitted modes respond quasi-statically to each step's held reactions, so
+    /// the joint solve adds G to the dynamic compliance and the ledger stores
+    /// R G R / 2. Over a step whose reactions change by dR, dR G dR / 2 >= 0
+    /// leaves the mechanics: that is reported as declared NUMERICAL loss, apart
+    /// from every contact's constitutive loss. The bound producer owns G.
+    ///
+    /// Two obstacles whose rows of the complete joint compliance are exactly
+    /// opposed (a pinching pair at one station) act through one net force. A
+    /// coordinate sweep between them converges at rate (kA/(1+kA))^2 per sweep,
+    /// which G makes slow, so the pair is solved together on its net force.
+    ///
+    /// Translating or moving supports, released static preload and bound
+    /// nonlinear storage refuse: their residual is not wired.
+    pub fn with_obstacle_residual_compliance(mut self, compliance: Vec<f64>, gate: &CancelGate)
+        -> Result<Self, ModalFrictionError>
+    {
+        poll(Some(gate))?;
+        if self.samples_rendered() != 0 || self.core.has_nonlinear_potentials() {
+            return Err(invalid("obstacle residual compliance binds once, before playback and without nonlinear storage").into());
+        }
+        let set = self.obstacles.as_mut()
+            .ok_or_else(|| invalid("obstacle residual compliance requires bound obstacles"))?;
+        if set.residual.is_some() || set.motion.is_some() || set.geometry.is_some() {
+            return Err(invalid("obstacle residual compliance binds once, on fixed supports").into());
+        }
+        let q = set.points.len();
+        if compliance.len() != q*q || compliance.iter().any(|g| !g.is_finite()) {
+            return Err(invalid("obstacle residual compliance needs one finite entry per obstacle pair").into());
+        }
+        let mut largest = 0.0_f64;
+        for i in 0..q {
+            if compliance[i*q+i] < 0.0 {
+                return Err(invalid("obstacle residual compliance must be positive semidefinite").into());
+            }
+            largest = largest.max(compliance[i*q+i]);
+            for j in 0..i {
+                if compliance[i*q+j].to_bits() != compliance[j*q+i].to_bits() {
+                    return Err(invalid("obstacle residual compliance must be exactly symmetric").into());
+                }
+            }
+        }
+        let (eigenvalues, _) = fs_la::eigen::jacobi_eigh(&compliance, q);
+        if eigenvalues.iter().any(|&l| !(l >= -1e-12*largest)) {
+            return Err(invalid("obstacle residual compliance must be positive semidefinite").into());
+        }
+        for (a, g) in set.nn.iter_mut().zip(&compliance) { *a = finite(*a+g)?; }
+        let mut paired = vec![false; q];
+        let mut blocks = Vec::with_capacity(q);
+        for i in 0..q {
+            if paired[i] { continue; }
+            let partner = (i+1..q).find(|&j| !paired[j] && opposed(&set.nn, q, i, j));
+            paired[i] = true;
+            match partner {
+                Some(j) => { paired[j] = true; blocks.push(Block::Pair(i, j)); },
+                None => blocks.push(Block::Single(i)),
+            }
+        }
+        set.residual = Some(Residual { compliance, blocks });
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
     /// Number of independent normal obstacles, not the prescribed bow loads.
     #[must_use]
     pub fn obstacle_count(&self) -> usize { self.obstacles.as_ref().map_or(0, |o| o.points.len()) }
+
+    /// Bound residual compliance among the obstacles, row-major [m/N], if any.
+    #[must_use]
+    pub fn obstacle_residual_compliance(&self) -> Option<&[f64]> {
+        self.obstacles.as_ref()?.residual.as_ref().map(|r| r.compliance.as_slice())
+    }
+
+    /// Obstacle pairs solved together on their net force, in input indices.
+    #[must_use]
+    pub fn obstacle_pairs(&self) -> Vec<(usize, usize)> {
+        self.obstacles.as_ref().and_then(|o| o.residual.as_ref()).map_or_else(Vec::new, |r|
+            r.blocks.iter().filter_map(|b| match *b { Block::Pair(i, j) => Some((i, j)), Block::Single(_) => None })
+                .collect())
+    }
 
     /// Original geometry, law and its optional source receipt, in input order.
     #[must_use]
@@ -169,8 +257,77 @@ pub(super) struct ObstacleSet {
     // headroom: tighter roots and a prediction within half the tolerance.
     headroom: bool,
     endpoint_missed: bool,
+    residual: Option<Residual>,
 }
+
+// Omitted-mode static compliance among the contacts, already added to nn.
+struct Residual {
+    compliance: Vec<f64>,
+    blocks: Vec<Block>,
+}
+#[derive(Clone, Copy)]
+enum Block { Single(usize), Pair(usize, usize) }
+
+// Exactly opposed 2x2 block of the complete joint compliance A: x_i = f_i - a(R_i - R_j)
+// and x_j = f_j + a(R_i - R_j). Bitwise, so a pair is never formed from rounding.
+fn opposed(a: &[f64], q: usize, i: usize, j: usize) -> bool {
+    let d = a[i*q+i];
+    d > 0.0 && a[j*q+j].to_bits() == d.to_bits()
+        && a[i*q+j].to_bits() == (-d).to_bits() && a[j*q+i].to_bits() == (-d).to_bits()
+}
+
 impl ObstacleSet {
+    pub(super) const fn has_residual(&self) -> bool { self.residual.is_some() }
+    // Closure lag of contact i through the omitted modes under reactions `r`: (G r)_i.
+    fn lag(&self, i: usize, reactions: &[f64]) -> Result<f64, ModalCouplingError> {
+        match &self.residual {
+            Some(residual) => { let q = self.points.len(); dot(&residual.compliance[i*q..(i+1)*q], reactions) },
+            None => Ok(0.0),
+        }
+    }
+    fn accepted_reactions(&self) -> Vec<f64> { self.accepted.iter().map(|f| f.normal_force_n).collect() }
+    // Both contacts of an exactly opposed pair on their net force D = R_i - R_j.
+    // h(D) = D - L_i(f_i - a D) + L_j(f_j + a D) rises with slope at least one, so
+    // [min(0, -h(0)), max(0, -h(0))] brackets the root, as in the scalar owner.
+    // Accepts once both laws hold at the closures their OWN reactions imply.
+    fn solve_pair(&self, i: usize, j: usize, f_i: f64, f_j: f64, dt: f64, gate: Option<&CancelGate>)
+        -> Result<(f64, f64, usize), ModalCouplingError>
+    {
+        let q = self.points.len();
+        let a = self.nn[i*q+i];
+        let (pi, pj) = (&self.points[i], &self.points[j]);
+        let share = if self.headroom { 0.125 } else { 0.5 };
+        let reactions = |d: f64| -> Result<(f64, f64), ModalCouplingError> {
+            poll(gate)?;
+            let (ri, _) = law_force(&pi.law, pi.old, finite(f_i-a*d)?, dt)?;
+            let (rj, _) = law_force(&pj.law, pj.old, finite(f_j+a*d)?, dt)?;
+            Ok((ri, rj))
+        };
+        let settled = |ri: f64, rj: f64| -> Result<bool, ModalCouplingError> {
+            let net = finite(ri-rj)?;
+            let (ei, _) = law_force(&pi.law, pi.old, finite(f_i-a*net)?, dt)?;
+            let (ej, _) = law_force(&pj.law, pj.old, finite(f_j+a*net)?, dt)?;
+            Ok((ri-ei).abs() <= share*force_tolerance(ri, ei, pi.config)?
+                && (rj-ej).abs() <= share*force_tolerance(rj, ej, pj.config)?)
+        };
+        let (r0i, r0j) = reactions(0.0)?;
+        let h0 = finite(r0j-r0i)?;
+        if settled(r0i, r0j)? { return Ok((r0i, r0j, 0)); }
+        let (mut lo, mut hi) = if h0 < 0.0 { (0.0, -h0) } else { (-h0, 0.0) };
+        let iterations = pi.config.max_iterations.max(pj.config.max_iterations);
+        let (mut ri, mut rj) = (r0i, r0j);
+        for iteration in 1..=iterations {
+            let mid = f64::midpoint(lo, hi);
+            (ri, rj) = reactions(mid)?;
+            if settled(ri, rj)? { return Ok((ri, rj, iteration)); }
+            if mid == lo || mid == hi { break; }
+            if finite(mid-(ri-rj))? < 0.0 { lo = mid; } else { hi = mid; }
+        }
+        let net = finite(ri-rj)?;
+        let (expected, _) = law_force(&pi.law, pi.old, finite(f_i-a*net)?, dt)?;
+        Err(ModalCouplingError::ContactSolve { residual_n: finite(ri-expected)?,
+            tolerance_n: share*force_tolerance(ri, expected, pi.config)?, iterations })
+    }
     // Only the joint friction owner reads these current trial reactions. An
     // accepted public report is deliberately not used as a one-sample delay.
     pub(super) fn normal_reaction(&self, index: usize) -> Option<f64> {
@@ -217,13 +374,21 @@ impl ObstacleSet {
         }
         Ok(Self { points, limits, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
             staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q],
-            motion: None, geometry: None, absolute_work_j: 0.0, headroom: false, endpoint_missed: false })
+            motion: None, geometry: None, absolute_work_j: 0.0, headroom: false, endpoint_missed: false,
+            residual: None })
     }
     pub(super) fn energy(&self, models: &[ModalAcousticTimeModel]) -> Result<f64, ModalCouplingError> {
         let mut total = 0.0;
+        let accepted = if self.residual.is_some() { self.accepted_reactions() } else { Vec::new() };
         for (i, point) in self.points.iter().enumerate() {
             let mut x = extension(models, &point.column, 0.0)?;
             if let Some(motion) = &self.motion { x = finite(x-motion.accepted[i])?; }
+            if self.residual.is_some() {
+                // The omitted modes still hold the accepted reactions' static deflection.
+                let lag = self.lag(i, &accepted)?;
+                x = finite(x-lag)?;
+                total = finite(total+0.5*accepted[i]*lag)?;
+            }
             total = finite(total+point.energy(x)?)?;
         }
         Ok(total)
@@ -236,6 +401,10 @@ impl ObstacleSet {
         external: &[f64], max_sweeps: usize, gate: &CancelGate,
     ) -> Result<f64, ModalCouplingError> {
         poll(Some(gate))?;
+        if self.residual.is_some() {
+            // The equilibrium owner condenses the retained network only.
+            return Err(invalid("released static preload does not include the obstacles' residual compliance"));
+        }
         let contacts: Vec<_> = self.points.iter()
             .map(|point| (point.contact.clone(), point.config)).collect();
         let config = super::super::super::multiple::MultiContactConfig {
@@ -251,6 +420,14 @@ impl ObstacleSet {
     pub(super) fn prepare(&mut self, old_q: &[f64], free_delta: &[f64], offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>
     {
+        // Closure lag through omitted modes, held from the accepted reactions.
+        let lags = match &self.residual {
+            Some(_) => {
+                let accepted = self.accepted_reactions();
+                (0..self.points.len()).map(|i| self.lag(i, &accepted)).collect::<Result<Vec<_>, _>>()?
+            },
+            None => Vec::new(),
+        };
         self.reactions.fill(0.0);
         if let Some(motion) = &mut self.motion {
             motion.candidate.copy_from_slice(offsets.unwrap_or(&motion.accepted));
@@ -258,6 +435,14 @@ impl ObstacleSet {
         for (i, point) in self.points.iter_mut().enumerate() {
             poll(gate)?;
             point.old = dot(&point.column, old_q)?;
+            if !lags.is_empty() {
+                // The free endpoint holds no reaction yet, so no lag; the solve adds G R.
+                point.free = finite(point.old+dot(&point.column, free_delta)?)?;
+                point.old = finite(point.old-lags[i])?;
+                point.law = OpeningContactStep::new(&point.contact.law, -point.old).map_err(ModalCouplingError::ContactLaw)?;
+                point.iterations = 0;
+                continue;
+            }
             if let Some(geometry) = &mut self.geometry {
                 if geometry.moving[i] {
                     point.free = finite(dot(&geometry.end_columns[i], old_q)?
@@ -282,6 +467,39 @@ impl ObstacleSet {
         -> Result<(), ModalCouplingError>
     {
         let q = self.points.len(); let p = self.friction_ports;
+        if let Some(residual) = &self.residual {
+            for &block in &residual.blocks {
+                poll(gate)?;
+                let (i, j) = match block { Block::Pair(i, j) => (i, j), Block::Single(i) => (i, i) };
+                // Free closure under friction and every contact OUTSIDE this block.
+                let mut frees = [0.0; 2];
+                for (slot, k) in [i, j].into_iter().enumerate() {
+                    let mut free = finite(self.points[k].free+dot(&self.nt[k*p..(k+1)*p], friction)?)?;
+                    for m in 0..q { if m != i && m != j { free = finite(free-self.nn[k*q+m]*self.reactions[m])?; } }
+                    frees[slot] = free;
+                }
+                if i == j {
+                    let point = &mut self.points[i];
+                    let mut config = point.config;
+                    if self.headroom {
+                        if config.force_absolute_tolerance_n*0.125 > 0.0 { config.force_absolute_tolerance_n *= 0.125; }
+                        if config.force_relative_tolerance*0.125 > 0.0 { config.force_relative_tolerance *= 0.125; }
+                    }
+                    let (reaction, iterations) = solve_contact(&point.law, point.old, frees[0], self.nn[i*q+i], dt, config, gate)?;
+                    self.reactions[i] = reaction; point.iterations += iterations;
+                } else {
+                    let (ri, rj, iterations) = self.solve_pair(i, j, frees[0], frees[1], dt, gate)?;
+                    for (k, r) in [(i, ri), (j, rj)] {
+                        let limit = self.points[k].config.maximum_force_n;
+                        if r > limit {
+                            return Err(ModalCouplingError::Budget { what: "contact normal force", value: r, limit });
+                        }
+                        self.reactions[k] = r; self.points[k].iterations += iterations;
+                    }
+                }
+            }
+            return Ok(());
+        }
         for i in 0..q {
             poll(gate)?;
             let mut free = finite(self.points[i].free+dot(&self.nt[i*p..(i+1)*p], friction)?)?;
@@ -328,8 +546,18 @@ impl ObstacleSet {
     {
         let (mut energy, mut loss) = (0.0, 0.0);
         let (mut work, mut absolute_work) = (0.0, 0.0);
+        // Change of the held reactions over this step, for the declared numerical loss.
+        let change = match &self.residual {
+            Some(_) => self.reactions.iter().zip(&self.accepted).map(|(r, f)| finite(r-f.normal_force_n))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
         for (i, point) in self.points.iter().enumerate() {
             poll(gate)?;
+            let (residual_energy_j, residual_loss_j, lag) = if self.residual.is_some() {
+                let lag = self.lag(i, &self.reactions)?;
+                (finite(0.5*self.reactions[i]*lag)?, finite(0.5*change[i]*self.lag(i, &change)?)?, lag)
+            } else { (0.0, 0.0, 0.0) };
             let (mut x, attachment_work_j) = if let Some(geometry) = &self.geometry {
                 if geometry.moving[i] {
                     let transport = finite(0.5 * finite(geometry.start_transport[i]
@@ -337,6 +565,7 @@ impl ObstacleSet {
                     (extension(models, &geometry.end_columns[i], 0.0)?, finite(self.reactions[i]*transport)?)
                 } else { (extension(models, &point.column, 0.0)?, 0.0) }
             } else { (extension(models, &point.column, 0.0)?, 0.0) };
+            if self.residual.is_some() { x = finite(x-lag)?; }
             let (support_offset_m, translation_work_j) = if let Some(motion) = &self.motion {
                 x = finite(x-motion.candidate[i])?;
                 let distance = finite(motion.candidate[i]-motion.accepted[i])?;
@@ -358,10 +587,18 @@ impl ObstacleSet {
             absolute_work = finite(absolute_work+translation_work_j.abs()+attachment_work_j.abs())?;
             self.staged[i] = FrictionObstacleFrame { normal_force_n: self.reactions[i], stored_energy_j,
                 dissipation_j, penetration_m, constitutive_residual_n, force_tolerance_n,
-                support_offset_m, attachment_work_j, actuator_work_j };
+                support_offset_m, attachment_work_j, actuator_work_j, residual_energy_j, residual_loss_j };
         }
         self.absolute_work_j = absolute_work;
         Ok((energy, loss, work, absolute_work))
+    }
+    // Omitted-mode storage and declared numerical loss of the staged step [J].
+    pub(super) fn staged_residual_j(&self) -> Result<(f64, f64), ModalCouplingError> {
+        let mut sums = (0.0, 0.0);
+        for frame in &self.staged {
+            sums = (finite(sums.0+frame.residual_energy_j)?, finite(sums.1+frame.residual_loss_j)?);
+        }
+        Ok(sums)
     }
     pub(super) fn publish(&mut self) {
         self.accepted.copy_from_slice(&self.staged);

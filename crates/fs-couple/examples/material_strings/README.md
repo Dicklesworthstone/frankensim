@@ -1012,11 +1012,46 @@ constructor. Generic callers needing an initially larger network can explicitly
 use `CoupledModalSystem::new_prepared` or `new_with_columns_prepared` with their
 own complete models and budgets.
 
+## Omitted bending modes at the supports
+
+An optional record after `prepared-linear` (or where it would be), before
+`geometric-stretching` and `cavity`:
+
+```text
+residual-flexibility exact-static-green
+```
+
+A point support seen through a string's N retained sines cannot form its kink.
+The retained basis alone is therefore a Rayleigh-Ritz upper bound, and open and
+stopped notes come out sharp by an error that falls as 1/N. The modes past N
+still yield, almost statically, under a support force. With this record every
+string's bridge spring and every fixed stop is seen through that compliance:
+the exact static Green's function of the same tension, EI and pinned span,
+minus the retained modes' static sum. Nothing is fitted; no tension, length or
+pitch changes.
+
+- The bridge spring condenses exactly to k/(1 + k G_bb). Its dashpot condenses
+  to first order, c/(1 + k G_bb)^2.
+- A fixed stop's closure gains the bridge cross term. The stops share the
+  condensed compliance G_ss' - k_eff G_sb G_s'b as one matrix. The stop owner
+  stores f G f / 2 and books its step-held response's numerical loss
+  dR G dR / 2, reported per step as `obstacle_residual_energy_j` and
+  `obstacle_residual_loss_j`. A pinching pair at one station is solved
+  together on its net force.
+- The receipt prints each condensed bridge, the stops' compliance and pairs.
+  Every run prints `linear_frequency_upper_bound_rad_s`, the coupled stiffness
+  bound the Nyquist guard checks.
+- Refused: a released static preload with stops (use `forces retain`), receiver
+  stops, moving or migrating stops, bound nonlinear storage, material bridge
+  interfaces, rotational and constant-loss bridges, and a string with other than
+  one bridge connection.
+- The bow port carries no residual yet. That is the next step.
+
 ## Nonlinear stretching with the same bow, body and gas memory
 
-An optional record after `prepared-linear` (or the cylinder-loading record when
-preparation is omitted), before `cavity`, selects source-derived geometric
-stretching:
+An optional record after `prepared-linear` and `residual-flexibility` (or the
+cylinder-loading record when both are omitted), before `cavity`, selects
+source-derived geometric stretching:
 
 ```text
 geometric-stretching 0.2 64 100000 1e-11 1e-10

@@ -60,6 +60,9 @@ impl MultiFrictionModalSystem {
         if obstacles.motion.is_some() {
             return Err(invalid("normal motion cannot replace an existing binding").into());
         }
+        if obstacles.has_residual() {
+            return Err(invalid("normal motion does not carry the obstacles' residual compliance").into());
+        }
         let count = obstacles.points.len();
         obstacles.motion = Some(MotionState {
             accepted: vec![0.0; count], candidate: vec![0.0; count], limits,

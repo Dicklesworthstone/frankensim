@@ -172,6 +172,9 @@ pub struct Spec {
     pub rotational_bridges: Vec<RotationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
+    /// `residual-flexibility exact-static-green`: the omitted bending modes' static compliance in series with
+    /// every bridge and fixed stop (pexfp.299). Absent means the retained modes alone.
+    pub residual_flexibility: bool,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
@@ -389,6 +392,15 @@ impl Spec {
             budget.validate()?;
             Some(budget)
         } else { None };
+        let residual_flexibility = r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("residual-flexibility");
+        if residual_flexibility {
+            let mut row = r.row("residual-flexibility")?;
+            if row.word()? != "exact-static-green" {
+                return Err("residual-flexibility names its one source: exact-static-green".into());
+            }
+            row.end()?;
+        }
         let geometric_stretching = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("geometric-stretching") {
             let mut row = r.row("geometric-stretching")?;
@@ -814,8 +826,8 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
-            longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
+            rotational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
+            longitudinal_waves, longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
             shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, bow_ribbon, bow_fibers,
             forces, schedule };
         spec.validate_shell_observer()?;

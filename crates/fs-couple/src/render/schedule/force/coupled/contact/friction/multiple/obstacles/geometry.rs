@@ -68,6 +68,10 @@ impl MultiFrictionModalSystem {
         if set.geometry.is_some() {
             return Err(invalid("attachment motion cannot replace an existing binding").into());
         }
+        if set.has_residual() {
+            // Moving stations change the omitted modes' compliance every step.
+            return Err(invalid("attachment motion does not carry the obstacles' residual compliance").into());
+        }
         let q = set.points.len(); let n = self.core.network.mode_count();
         let s = q+self.points.len(); let k = self.core.network.columns.len();
         let dense = n.checked_mul(n).and_then(|v| v.checked_mul(9))

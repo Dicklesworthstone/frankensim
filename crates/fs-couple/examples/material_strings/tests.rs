@@ -156,6 +156,9 @@ mod tension_loss;
 #[path = "tests/bow_trace.rs"]
 mod bow_trace;
 
+#[path = "tests/residual.rs"]
+mod residual;
+
 #[path = "tests/polarized.rs"]
 mod polarized;
 

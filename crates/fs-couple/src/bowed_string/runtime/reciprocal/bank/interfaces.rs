@@ -234,6 +234,10 @@ impl ReciprocalStringBank {
                 "material bridges require one nonempty bounded set of source bindings",
             ));
         }
+        if self.source.residual_flexibility {
+            // Its links are already softened; an interface law would re-anchor them.
+            return Err(invalid("material bridge interfaces are not wired with residual flexibility"));
+        }
         let mut seen = vec![false; self.source.strings.len()];
         for binding in &bindings {
             poll(gate)?;

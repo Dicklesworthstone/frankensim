@@ -28,7 +28,7 @@ mod json;
 use json::json_string;
 use std::{collections::BTreeMap, error::Error, fs::{File,OpenOptions}, io::{Read,Seek,Write}, path::Path};
 use fs_couple::bowed_string::runtime::reciprocal::bank::{
-    MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation};
+    MaterialStringSource,ReciprocalStringBank,StringBankOptions,StringBowLocation,residual};
 use fs_couple::bowed_string::runtime::reciprocal::bank::plate::{SharedMaterialPlateBody,SharedPlateBridge};
 use fs_couple::bowed_string::runtime::reciprocal::bank::torsion::{StringBodyRotationConnection,StringBridgeLocation,
     SHEAR_VISCOSITY_REFERENCE_OMEGA as TORSION_REFERENCE,SHEAR_VISCOSITY_REFERENCE_OMEGA_DIMS as TORSION_REFERENCE_DIMS};
@@ -335,6 +335,8 @@ impl input::Spec {
                 bank.with_prepared_linear_propagation(budget, gate)?,
             _ => bank,
         };
+        // Omitted bending modes in series with every bridge, before any stop binds (pexfp.299).
+        let bank = if self.residual_flexibility { bank.with_residual_flexibility(gate)? } else { bank };
         let bank = if self.rotational_bridges.is_empty() { bank } else {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {
@@ -659,6 +661,19 @@ fn main()->Result<()> {
     if let Some(budget)=ready.performance.bank().source().bank().prepared_linear_budget() {
         eprintln!("prepared_linear={budget:?}");
     }
+    if ready.spec.residual_flexibility {
+        let bank=ready.performance.bank();
+        for (index,(member,card)) in bank.source().bank().strings().iter().zip(bank.cards()).enumerate() {
+            for connection in &member.connections {
+                let condensed=residual::condense_bridge(&member.source,card,connection)?;
+                eprintln!("residual_bridge string={index}; station={}; G_m_N={:e}; k_eff_N_m={:e}; c_eff_N_s_m={:e}",
+                    connection.station_fraction,condensed.residual_m_n,condensed.stiffness_n_m,condensed.damping_n_s_m);
+            }
+        }
+        eprintln!("residual_stop_compliance_m_N={:?}; opposed_stop_pairs={:?}",
+            bank.system().obstacle_residual_compliance(),bank.system().obstacle_pairs());
+    }
+    eprintln!("linear_frequency_upper_bound_rad_s={:e}",ready.performance.bank().system().linear_frequency_upper_bound_rad_s());
     if let Some(loading)=ready.performance.bank().source().bank().cylinder_gas_loading() {
         let additional = ready.body_profile.as_ref()
             .map_or(0, body::Profile::additional_body_connections);
