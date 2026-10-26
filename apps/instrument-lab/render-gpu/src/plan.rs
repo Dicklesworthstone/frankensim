@@ -273,25 +273,72 @@ fn i32s(v: usize) -> i32 {
     i32::try_from(v).expect("index fits i32")
 }
 
-/// Node-disjoint batches of items in list order: an item joins the open batch unless it shares a node
-/// with it. Items sharing a node keep their list order, so solving each batch in parallel gives what
-/// solving them one at a time gives.
+/// Dependency levels of node-disjoint items. Every shared-node pair retains its list order;
+/// independent items may move to an earlier level. Since they read and write disjoint nodes,
+/// their operations commute without changing any item's floating-point evaluation order.
 fn disjoint_batches(items: &[Vec<usize>]) -> (Vec<i32>, Vec<i32>) {
-    let mut ptr = vec![0];
-    let mut idx = vec![];
-    let mut used: BTreeSet<usize> = BTreeSet::new();
+    let mut next_level = std::collections::BTreeMap::<usize, usize>::new();
+    let mut levels = Vec::<Vec<i32>>::new();
     for (j, nodes) in items.iter().enumerate() {
-        if nodes.iter().any(|n| used.contains(n)) {
-            ptr.push(i32s(idx.len()));
-            used.clear();
+        let level = nodes.iter().filter_map(|n| next_level.get(n)).copied().max().unwrap_or(0);
+        levels.resize_with(levels.len().max(level + 1), Vec::new);
+        levels[level].push(i32s(j));
+        for &node in nodes {
+            next_level.insert(node, level + 1);
         }
-        used.extend(nodes.iter().copied());
-        idx.push(i32s(j));
     }
-    if !idx.is_empty() {
+    let mut ptr = vec![0];
+    let mut idx = Vec::with_capacity(items.len());
+    for level in levels {
+        idx.extend(level);
         ptr.push(i32s(idx.len()));
     }
     (ptr, idx)
+}
+
+#[cfg(test)]
+mod ordered_batch_tests {
+    use super::*;
+
+    #[test]
+    fn independent_work_can_cross_an_unrelated_dependency() {
+        assert_eq!(disjoint_batches(&[vec![0], vec![0], vec![1], vec![1]]),
+            (vec![0, 2, 4], vec![0, 2, 1, 3]));
+        assert_eq!(disjoint_batches(&[]), (vec![0], vec![]));
+        assert_eq!(disjoint_batches(&[vec![], vec![]]), (vec![0, 2], vec![0, 1]));
+    }
+
+    #[test]
+    fn every_shared_node_keeps_its_original_order() {
+        // Exhaust every length-four stream of the subsets of three nodes, including empty items.
+        // The oracle checks dependencies directly, independently of the level construction.
+        for mut bits in 0..4096 {
+            let mut items = Vec::new();
+            for _ in 0..4 {
+                let mask = bits & 7;
+                bits >>= 3;
+                items.push((0..3).filter(|n| mask & (1 << n) != 0).collect::<Vec<_>>());
+            }
+            let (ptr, idx) = disjoint_batches(&items);
+            let mut levels = vec![None; items.len()];
+            for (level, span) in ptr.windows(2).enumerate() {
+                let mut used = BTreeSet::new();
+                for &j in &idx[span[0] as usize..span[1] as usize] {
+                    let j = j as usize;
+                    assert!(levels[j].replace(level).is_none());
+                    for &node in &items[j] { assert!(used.insert(node)); }
+                }
+            }
+            assert!(levels.iter().all(Option::is_some));
+            for i in 0..items.len() {
+                for j in i + 1..items.len() {
+                    if items[i].iter().any(|n| items[j].contains(n)) {
+                        assert!(levels[i] < levels[j]);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Node-disjoint groups by greedy colouring in list order: each item takes the lowest colour no earlier
@@ -323,8 +370,8 @@ fn coloured_batches(items: &[Vec<usize>]) -> (Vec<i32>, Vec<i32>) {
 impl Plan {
     /// Flatten `img`; the dense Airy inverses come from `ins`'s own factors (the same instrument).
     /// `item`: nodes per work item (at most TPB; smaller spreads a small instrument over more blocks).
-    /// `exact_friction`: frictions in the CPU's list order (one group per run of node-disjoint frictions:
-    /// 603 groups on a closed hi-hat) instead of a coloured sweep (6 groups); for checks against the CPU.
+    /// `exact_friction`: retain the CPU's order on all shared nodes (dependency levels)
+    /// instead of a coloured sweep; for checks against the CPU.
     pub fn new(img: &InstrumentImage, ins: &Instrument, threads: usize, item: usize, exact_friction: bool) -> Result<Plan, String> {
         let item = item.clamp(32, TPB);
         if img.step_index != 0 {
