@@ -2,6 +2,8 @@
 //! finite enthalpy share the same endpoint. Synthetic data are not metal data.
 #[path = "../../fs-em/tests/nonlinear_winding_circuit/common.rs"]
 mod field;
+#[path = "nonlinear_winding_enthalpy/graph_material.rs"]
+mod graph_material;
 
 use fs_couple::{
     circuit_enthalpy::{

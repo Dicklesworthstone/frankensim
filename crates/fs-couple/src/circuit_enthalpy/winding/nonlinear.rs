@@ -11,17 +11,19 @@ use super::{
     DriverAccount, Error, ThermalDriver, WindingThermalError, WindingThermalNetwork,
     WindingThermalSample, cell_driver_candidate, check, invalid, material, same_material,
 };
-use crate::circuit_enthalpy::material::MaterialNetwork;
+use crate::circuit_enthalpy::material::{CellResistor, MaterialNetwork};
 use fs_em::{
     planar::eddy::EddyConductor,
     winding::{
         nonlinear::{
             NonlinearWindingCandidate, NonlinearWindingCircuit, NonlinearWindingControls,
-            NonlinearWindingError, NonlinearWindingStep,
+            NonlinearWindingError, NonlinearWindingStep, resistors::GraphResistorMaterial,
         },
         ohmic::WindingConductor,
     },
 };
+use fs_material::conductor::ElectricalPropertyBasis;
+use fs_phs::circuit::Branch;
 use fs_thermal::enthalpy::DepositionSimulation;
 use std::{cell::RefCell, collections::BTreeMap};
 
@@ -108,6 +110,75 @@ impl WindingThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<NonlinearWindingEnthalpyCandidate<'t, 'm>, Error> {
+        if !circuit.graph_resistor_materials().is_empty() {
+            return Err(invalid(
+                "source-bound graph resistors require their complete thermal material bindings",
+            ));
+        }
+        self.step_nonlinear_bound(
+            thermal,
+            target_s,
+            circuit,
+            external_inputs,
+            None,
+            controls,
+            winding_controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// The same finite circuit/field/enthalpy residual with every ordinary graph
+    /// resistor resolved from its OWN whole-cell material and endpoint state.
+    /// The accepted native R and any retained source snapshot must match the
+    /// initial thermal state. Original claim choices are pinned throughout the
+    /// interval; conductivity and resistivity inputs share the existing owner.
+    ///
+    /// Bindings must match the existing graph heat destinations exactly. These
+    /// separate bulk-resistor bodies cannot also be volumes covered by magnetic
+    /// triangles. Their source, geometry, phase and material-conduction links
+    /// are admitted by PreparedMaterialNetwork; no second heat or R(T) law is
+    /// introduced. Source-domain and late thermal refusals preserve all histories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_nonlinear_material_candidate<'t, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &NonlinearWindingCircuit<'m>,
+        external_inputs: &[f64],
+        resistors: &[CellResistor],
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        controls: CircuitEnthalpySolve,
+        winding_controls: NonlinearWindingControls,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NonlinearWindingEnthalpyCandidate<'t, 'm>, Error> {
+        self.step_nonlinear_bound(
+            thermal,
+            target_s,
+            circuit,
+            external_inputs,
+            Some((resistors, electrical_bases)),
+            controls,
+            winding_controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_nonlinear_bound<'t, 'm>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &NonlinearWindingCircuit<'m>,
+        external_inputs: &[f64],
+        graph_material: Option<(&[CellResistor], &[(usize, ElectricalPropertyBasis)])>,
+        controls: CircuitEnthalpySolve,
+        winding_controls: NonlinearWindingControls,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NonlinearWindingEnthalpyCandidate<'t, 'm>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
@@ -125,11 +196,15 @@ impl WindingThermalNetwork<'_> {
         }
         let network = MaterialNetwork {
             cells: self.cells,
-            resistors: &[],
+            resistors: graph_material.map_or(&[], |(resistors, _)| resistors),
             links: self.links,
         };
         let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .prepare_with_bases(
+                thermal,
+                graph_material.map_or(&[], |(_, bases)| bases),
+                || (*cancel.borrow_mut())(),
+            )
             .map_err(material)?;
         let mut conductors = BTreeMap::new();
         let mut core_regions = BTreeMap::new();
@@ -164,10 +239,55 @@ impl WindingThermalNetwork<'_> {
             circuit.graph(),
             &cancel,
         )?;
+        if graph_material.is_some()
+            && (network.resistors.len() != routes.graph.len()
+                || network.resistors.iter().any(|source| {
+                    routes.graph.get(&source.destination.branch) != Some(&source.destination.cell)
+                        || routes
+                            .magnetic
+                            .magnetic
+                            .values()
+                            .any(|cell| *cell == Some(source.destination.cell))
+                }))
+        {
+            return Err(invalid(
+                "sourced graph resistors need exact existing heat routes and distinct whole-cell volumes",
+            ));
+        }
         let layout = self.magnetic_layout();
         let accepted = prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
             .map_err(material)?;
+        if graph_material.is_some() {
+            for source in &accepted.resistors {
+                check(&cancel)?;
+                let Some((_, _, Branch::Resistor { ohms })) =
+                    circuit.graph().branches.get(source.branch)
+                else {
+                    return Err(invalid("material graph source names a non-resistor branch"));
+                };
+                if ohms.to_bits() != source.conductor.resistance_ohm().to_bits() {
+                    return Err(invalid(
+                        "accepted graph resistance does not match its actual thermal source",
+                    ));
+                }
+                if !circuit.graph_resistor_materials().is_empty()
+                    && !circuit.graph_resistor_materials().iter().any(|old| {
+                        old.branch == source.branch
+                            && old.conductor.source_basis() == source.conductor.source_basis()
+                            && old.conductor.length_m().to_bits()
+                                == source.conductor.length_m().to_bits()
+                            && old.conductor.area_m2().to_bits()
+                                == source.conductor.area_m2().to_bits()
+                            && same_material(old.conductor.material(), source.conductor.material())
+                    })
+                {
+                    return Err(invalid(
+                        "graph resistor changed its accepted material source or geometry",
+                    ));
+                }
+            }
+        }
         let (initial, _) = layout.nonlinear_materials_at(
             thermal,
             circuit.field().problem(),
@@ -225,7 +345,24 @@ impl WindingThermalNetwork<'_> {
                         });
                     }
                 }
-                let proposal = circuit
+                let driven = if graph_material.is_some() {
+                    circuit
+                        .with_graph_resistors(
+                            coefficients
+                                .resistors
+                                .iter()
+                                .map(|source| GraphResistorMaterial {
+                                    branch: source.branch,
+                                    conductor: source.conductor.clone(),
+                                })
+                                .collect(),
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map_err(electrical)?
+                } else {
+                    circuit.clone()
+                };
+                let proposal = driven
                     .step_to_candidate(
                         target_s,
                         core,

@@ -6354,6 +6354,38 @@ work and numerical loss. They also exercise incomplete routes, trial budgets,
 late cancellation, clock mismatch and deterministic retry. The integration
 tests are added and parsed; full native execution is not yet claimed.
 
+### Ordinary resistor material feedback in nonlinear field circuits
+
+`WindingThermalNetwork::step_nonlinear_material_candidate` extends that SAME
+residual to source-bound ordinary graph resistors. Complete `CellResistor`
+bindings and explicit conductivity/resistivity bases use the original
+`PreparedMaterialNetwork`; its card, caloric instance, phase, geometry and
+source-selection checks remain authoritative. Accepted native resistance and
+any retained source/geometry snapshot must match the actual starting thermal
+state. Each trial refreshes the original selected sources at its proposed
+endpoint, then invokes the native resistance-only circuit reassembly before
+solving the existing nonlinear circuit/field equations. The accepted circuit
+and report retain the resulting source bundles across continuation steps.
+
+Every whole-cell resistor binding must match its existing graph heat route and
+occupy a separate body from the cells covered by magnetic triangles. This
+avoids representing the same physical conductor volume with both bulk graph
+loss and winding/core loss. Existing material-conduction links couple those
+separate thermal bodies. Native graph-local Joule heat is deposited once through
+the original routing; source resolution adds no second heat input. Resistance
+changes store no parameter energy, and field backward-Euler loss remains
+numerical dissipation. The legacy numeric-resistor entry refuses omission of
+already attached material bindings, rather than freezing them while heating.
+
+Focused manufactured regressions discharge a finite capacitor into the original
+nonlinear field and two distinct thermal bodies. An independent scalar current
+solve and exact two-body thermal equations check temperature-dependent bulk
+resistance, heat transfer, charge drain, field energy and physical/numerical
+loss separation. Changing only the resistor's source curve changes both actual
+current and body temperatures. Source-domain, missing-binding, work-budget and
+late-cancellation refusals preserve all accepted histories. These are discrete
+coupling checks, not measured resistor or magnetic-device validation.
+
 ## Source gas fields and source walls in the native DG operator
 
 `LocalMaterialWall::bind_dg` composes its original elastic, Kelvin or

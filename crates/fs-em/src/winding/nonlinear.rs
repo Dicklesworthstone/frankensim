@@ -17,6 +17,10 @@
 //! The allocating native DAE must admit the held private-current trials; ideal
 //! current-only constraint topologies can refuse this bounded partitioned lane.
 
+/// Source-driven ordinary graph resistance on this same native circuit owner.
+pub mod resistors;
+use resistors::GraphResistorMaterial;
+
 use super::ohmic::{
     OhmicWindingError, WindingCellHeat, WindingConductor, WindingGraphResistorHeat,
 };
@@ -160,6 +164,7 @@ struct Layout {
 #[derive(Clone)]
 pub struct NonlinearWindingCircuit<'m> {
     layout: Rc<Layout>,
+    graph_materials: Vec<GraphResistorMaterial>,
     field: PlanarNonlinearEddy<'m>,
     conductors: Vec<WindingConductor>,
     conductor_windings: Vec<usize>,
@@ -178,6 +183,9 @@ pub struct NonlinearWindingStep {
     /// Spatial stranded heat at the backward-Euler endpoint current.
     pub cells: Vec<WindingCellHeat>,
     pub graph_resistors: Vec<WindingGraphResistorHeat>,
+    /// Complete source bindings used for ordinary graph loss, in branch order.
+    /// Empty for the original explicitly authored numeric-resistor path.
+    pub graph_materials: Vec<GraphResistorMaterial>,
     pub currents_a: Vec<f64>,
     /// Native step-average voltage, in original first-to-second orientation.
     pub terminal_voltage_v: Vec<f64>,
@@ -497,6 +505,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         poll(cancelled)?;
         Ok(Self {
             layout,
+            graph_materials: Vec::new(),
             field,
             conductors,
             conductor_windings,
@@ -785,6 +794,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             field: field_step,
             cells,
             graph_resistors,
+            graph_materials: self.graph_materials.clone(),
             currents_a: solver.x.clone(),
             terminal_voltage_v: trial.voltage,
             flux_linkages_wb: [self.flux_linkages_wb.clone(), trial.linkage.clone()],
@@ -800,6 +810,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
         };
         let circuit = Self {
             layout: self.layout.clone(),
+            graph_materials: self.graph_materials.clone(),
             field,
             conductors,
             conductor_windings,

@@ -484,8 +484,22 @@ This first-order coupling admits at most 16 windings within the existing
 32-node/64-branch/32-port/128-state allocating circuit bounds. The native graph
 must admit its held private-current trials; ideal current-only constraint
 topologies can refuse this partitioned lane. Geometry, magnetic law and native
-graph coefficients stay fixed. No hysteresis, magnetic thermal parameter work,
+graph coefficients stay fixed during each native trial. No hysteresis, magnetic thermal parameter work,
 moving-conductor or experimental material-qualification claim is introduced.
+
+`NonlinearWindingCircuit::with_graph_resistors` binds every ordinary graph
+resistor to a complete `GraphResistorMaterial`. It reassembles only the original
+native resistor coefficients from the common `ResolvedConductor` owner. Original
+branch endpoints, transformers, private winding ports, state-coordinate maps,
+charges, fluxes, field history and winding linkage stay intact. Exact native
+storage equality is admitted before returning an independent candidate at the
+same clock. A static scalar Ohmic source and complete unique original-resistor
+coverage are required; winding branches cannot be replaced through this API.
+The full source bundles and geometry remain with the accepted circuit and its
+step report beside the original graph-local heat records. Explicit resistance
+reconfiguration stores no parameter energy. Thermal consumers must admit the
+accepted sources and refresh them at their actual endpoint through the shared
+material/enthalpy owner; this API supplies no temperature or contact law.
 Synthetic `nonlinear_winding_circuit` regressions exercise independent nonlinear
 RL and coupled-winding/capacitor equations, source-only H(B)/resistivity swaps,
 core/strand loss separation, temperature refresh and transactional failure.
