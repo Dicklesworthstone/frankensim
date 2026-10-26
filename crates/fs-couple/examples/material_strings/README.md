@@ -1319,6 +1319,69 @@ computed transfer; they do not certify mesh convergence, material accuracy,
 room acoustics or agreement with a measured instrument. Sound holes still need
 an explicit coupled interior/exterior opening model.
 
+## Finite-distance pressure through a declared skin, one way
+
+The optional `one_way_observer` record stands where `shell_observer` would and
+precedes `cavity`. It sends the accepted body modal velocities, and a lumped
+cavity's neck volume flow, through the same shared causal BEM observation
+transfer to one receiver, but feeds **no** air reaction back. The mechanics may
+therefore be the exact or the `prepared-linear` owner. It refuses alongside
+`body-radiation` or `shell_observer`.
+
+```text
+one_way_observer ID X Y Z CLEARANCE_M PASS_HZ STOP_HZ LATENCY N_FFT FFT... TAIL_TOL DTFT_TOL MAX_FREQ_ENTRIES MAX_REPLAY_TERMS RULE [MAX_PAIRS] MAX_SKIN_PANELS MAX_ANCHOR_M MAX_BOUNDARY_TERMS WORKERS LOSS_FRACTION SHIFT_FRACTION
+```
+
+The receiver, band, latency, FFT ladder, tolerances and replay allowance mean
+what they mean for `shell_observer`. `RULE` is the panel quadrature,
+`triangle-near MAX_PAIRS` or `triangle MAX_PAIRS`. The transfer is baked on one
+ruled Burton-Miller operator at every frequency: the geometry-routed owner's
+switch from plain CBIE at the skin's box bound is a step in every transfer, and
+a bake across it fails its DFT ladder. The mode receipt keeps the routed owner,
+plain CBIE below the bound, at each mode's own frequency.
+`MAX_BOUNDARY_TERMS` bounds the complete dense work, panels^2 (panels + sources
++ 1) per frequency, over every bin through the taper plus one solve per mode.
+`WORKERS` threads the dense assembly, the LU and the per-field solves; no bit
+depends on the count. Every bin below the stop must also keep six panels per
+wavelength on the skin's largest panel.
+
+The skin is data in the v3 or v4 body profile, after the body and before any
+`interior-fe-v1` volume:
+
+```text
+acoustic-skin-v1
+skin-vertices N
+skin-vertex X Y Z K                           (x/y fractions of the body length and width, z in metres, as shell nodes)
+skin-anchor W COMPONENT TRIANGLE B0 B1 B2     (K rows: a weighted point in one part's triangle)
+skin-triangles M
+skin-triangle A B C                           (closed and outward)
+skin-apertures P
+skin-aperture ID FLOW_SHARE T
+skin-cap TRIANGLE                             (T rows)
+```
+
+Each vertex moves as the weighted sum of its anchored points on the parts, and
+the observer checks every anchored point against the vertex, within
+`MAX_ANCHOR_M`, before any boundary work. A panel's normal velocity per mode is
+the mean of its vertices'. Aperture caps carry `FLOW_SHARE` of the lumped
+cavity's outward neck flow, uniform over the cap, and no structural motion. A
+performance with a lumped cavity needs apertures, and one without needs none.
+The skin may be the shell's own surface (the integration test anchors the
+closed shell's triangles at their own nodes) or a separate surface of the same
+body; the generator that writes it states how it was made.
+
+Because nothing is fed back, the report states for every retained mode, at its
+own frequency and on the same skin and route, what this owner leaves out:
+- the radiation damping ratio and the added-mass frequency shift;
+- the mode's wood damping, half-power bandwidth and spacing to the nearest mode;
+- the largest first-order air mixing into another mode.
+
+A mode stays one-way when its radiation damping is at most `LOSS_FRACTION` of
+its wood damping and its shift at most `SHIFT_FRACTION` of both its bandwidth
+and its spacing. The command prints one line per mode and the list of modes
+outside that rule, which would have to be fed back. These are estimates on the
+declared skin, not a convergence certificate, and they do not change the render.
+
 ## Material profile and physical limits
 
 The input profile queries **bare SI axes `T` and `omega`**, at the explicitly

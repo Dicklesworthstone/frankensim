@@ -204,6 +204,9 @@ impl input::Spec {
         self.validate_shell_observer()?;
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
+        if self.one_way_observer.is_some() && profile.is_none() {
+            return Err("one_way_observer requires a body profile that declares its closed acoustic skin".into());
+        }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
@@ -422,6 +425,11 @@ impl input::Spec {
             performance=performance.with_material_shell_observer_with_quadrature(
                 observer.clone(),self.shell_receiver_quadrature,gate)?;
         }
+        if let Some(observer)=&self.one_way_observer {
+            let skin=profile.as_ref().and_then(|body|body.acoustic_skin(&self))
+                .ok_or("one_way_observer requires a body profile that declares its closed acoustic skin")?;
+            performance=performance.with_one_way_shell_observer(observer.clone(),&skin,gate)?;
+        }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
     }
@@ -539,6 +547,21 @@ fn main()->Result<()> {
             report.body_modes,report.surface_panels,transfer.pass_band_upper_hz,transfer.taper_stop_hz,
             transfer.geometric_delays_s,transfer.filter_latency_samples,
             report.sweep_terms,report.replay_terms);
+    }
+    if let Some(report)=ready.performance.one_way_shell_observer() {
+        let transfer=report.transfer();
+        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; skin finite-distance pressure replaces compact pressure; no air reaction enters the mechanics; homogeneous exterior without molecular absorption",
+            report.options.receiver,report.body_modes,report.apertures,report.surface_panels,
+            report.largest_anchor_distance_m,report.plain_cbie_limit_rad_per_m,transfer.pass_band_upper_hz,
+            transfer.taper_stop_hz,transfer.geometric_delays_s,transfer.filter_latency_samples,
+            report.boundary_terms,report.replay_terms,report.options.rule);
+        for (mode,bound) in report.modes.iter().enumerate() {
+            eprintln!("one_way_mode={mode}; f_Hz={}; wood_zeta={}; radiation_zeta={}; added_mass_shift={}; half_power_bandwidth_Hz={}; nearest_spacing_Hz={}; largest_mixing={}; mixing_mode={:?}; one_way={}",
+                bound.frequency_hz,bound.wood_zeta,bound.radiation_zeta,bound.added_mass_shift,
+                bound.half_power_bandwidth_hz,bound.nearest_spacing_hz,bound.largest_mixing,
+                bound.largest_mixing_mode,bound.one_way);
+        }
+        eprintln!("one_way_fed_back_modes={:?}",report.fed_back_modes());
     }
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }

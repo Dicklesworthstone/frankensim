@@ -3,7 +3,7 @@ use super::*;
 
 const OBSERVED: &str = include_str!("../closed-shell-observed.material-strings");
 
-fn shell_pack(name: &str) -> NormalizedPack {
+pub(super) fn shell_pack(name: &str) -> NormalizedPack {
     let provenance = Provenance {
         source: "synthetic closed-shell observer integration".into(),
         license: "CC0-1.0".into(),

@@ -134,8 +134,14 @@ impl ShellObserverReport {
     pub const fn transfer(&self) -> &ObservationTransferBake { &self.transfer }
 }
 
+/// The receipt of whichever receiver is bound.
+enum BoundReport {
+    Loaded(ShellObserverReport),
+    OneWay(Box<one_way::OneWayShellObserverReport>),
+}
+
 pub(super) struct BoundShellObserver {
-    report: ShellObserverReport,
+    report: BoundReport,
     observer: ObservationFir,
     // (original component, original coordinate, physical source scale).
     // Body columns use generalized velocity; mouths use actual volume flow.
@@ -307,7 +313,7 @@ impl MultiBowPerformance {
             surface_panels, quadrature, sweep_terms, replay_terms, transfer,
         };
         self.shell_observer = Some(BoundShellObserver {
-            report, observer, coordinates, velocity: vec![0.0; source_count],
+            report: BoundReport::Loaded(report), observer, coordinates, velocity: vec![0.0; source_count],
             maximum_abs_pressure_pa: source.options().network.maximum_abs_pressure_pa,
             samples: 0,
         });
@@ -316,9 +322,15 @@ impl MultiBowPerformance {
 
     /// Original bound receiver declaration and completed finite-band realization.
     pub fn material_shell_observer(&self) -> Option<&ShellObserverReport> {
-        self.shell_observer.as_ref().map(|observer| &observer.report)
+        match self.shell_observer.as_ref().map(|observer| &observer.report) {
+            Some(BoundReport::Loaded(report)) => Some(report),
+            _ => None,
+        }
     }
 }
+
+/// The same receiver through a declared closed skin, with no air load fed back.
+pub mod one_way;
 
 #[cfg(test)]
 mod tests {

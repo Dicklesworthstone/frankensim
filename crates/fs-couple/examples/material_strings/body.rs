@@ -7,6 +7,7 @@ use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use fs_couple::thin_plate::{compile_plate_material_chart, PlateChartRadiation, PlateRegionMaterial};
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as VISCOSITY;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::ShellAcousticSkin;
 
 pub const MAX_BYTES: usize = 65_536;
 /// Shell (v3) and assembled (v4) profiles carry node and triangle rows, so they take a larger byte
@@ -21,6 +22,8 @@ mod shell;
 mod relaxation;
 #[path = "body/cavity.rs"]
 mod cavity;
+#[path = "body/skin.rs"]
+mod skin;
 use relaxation::PlateLoss;
 /// The choices `material_strings assemble-shell` reads for a shell-assembly table.
 pub(crate) use shell::assembly::table::OptionsFile as ShellTableOptions;
@@ -32,6 +35,7 @@ pub struct Profile {
     pub bytes: Vec<u8>,
     model: BodyModel,
     interior: Option<cavity::Spec>,
+    skin: Option<skin::Spec>,
 }
 #[derive(Clone, Debug)]
 enum BodyModel {
@@ -49,6 +53,7 @@ impl Profile {
         if bytes.len() > MAX_SHELL_BYTES { return Err("body profile exceeds 4 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let (body_text, interior) = cavity::split(text)?;
+        let (body_text, skin) = skin::split(body_text)?;
         let body_bytes = body_text.as_bytes();
         let version = text.lines().next().and_then(|s| s.split_ascii_whitespace().next())
             .ok_or("missing body profile version")?;
@@ -62,7 +67,14 @@ impl Profile {
         if interior.is_some() && matches!(model, BodyModel::Plate(_)) {
             return Err("interior FE requires a curved shell or assembled shell body profile".into());
         }
-        Ok(Self { bytes: bytes.to_vec(), model, interior })
+        if skin.is_some() && matches!(model, BodyModel::Plate(_)) {
+            return Err("an acoustic skin requires a curved shell or assembled shell body profile".into());
+        }
+        Ok(Self { bytes: bytes.to_vec(), model, interior, skin })
+    }
+    /// The declared closed acoustic skin in the performance body's frame, if any.
+    pub fn acoustic_skin(&self, spec: &input::Spec) -> Option<ShellAcousticSkin> {
+        self.skin.as_ref().map(|skin| skin.resolve(spec))
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         match &self.model {
@@ -73,6 +85,12 @@ impl Profile {
             BodyModel::Assembly(assembly) => assembly.preflight(spec),
         }?;
         if let Some(interior) = &self.interior { interior.preflight(spec)?; }
+        match &self.skin {
+            Some(skin) => skin.preflight(spec)?,
+            None if spec.one_way_observer.is_some() => return Err(
+                "one_way_observer requires a body profile that declares its closed acoustic skin".into()),
+            None => {}
+        }
         spec.network_dimensions_with_body_modes(true, self.additional_body_connections(),
             self.additional_body_modes())?;
         Ok(())

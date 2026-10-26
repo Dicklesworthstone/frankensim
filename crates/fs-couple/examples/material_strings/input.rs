@@ -8,6 +8,8 @@ use fs_scenario::acoustic::BendingRelaxationProperties;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::ShellObserverOptions;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
+    OneWayRule, OneWayShellObserverOptions};
 
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
@@ -138,6 +140,8 @@ pub struct Spec {
     pub shell_bem_angular_refinement: u32,
     pub shell_observer: Option<ShellObserverOptions>,
     pub shell_receiver_quadrature: fs_bem::near_field::Options,
+    /// One-way receiver through the body profile's closed acoustic skin; nothing is fed back.
+    pub one_way_observer: Option<OneWayShellObserverOptions>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
@@ -496,6 +500,47 @@ impl Spec {
             };
             row.end()?;options.validate()?;options
         } else {fs_bem::near_field::Options::default()};
+        let one_way_observer = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("one_way_observer") {
+            let mut row = r.row("one_way_observer")?;
+            let receiver = fs_bem::observation_transfers::ReceiverSpec {
+                id: row.word()?.to_string(),
+                position_m: [row.scalar()?, row.scalar()?, row.scalar()?],
+            };
+            let minimum_clearance_m = row.positive()?;
+            let pass_band_upper_hz = row.positive()?;
+            let taper_stop_hz = row.positive()?;
+            let filter_latency_samples =
+                row.count(fs_bem::observation_transfers::MAX_OBSERVATION_FFT / 4)?;
+            let count = row.count(fs_bem::observation_transfers::MAX_OBSERVATION_RUNGS)?;
+            let mut fft_lengths = Vec::with_capacity(count);
+            for _ in 0..count {
+                fft_lengths.push(row.count(fs_bem::observation_transfers::MAX_OBSERVATION_FFT)?);
+            }
+            let tail_energy_tolerance = row.positive()?;
+            let dtft_relative_tolerance = row.positive()?;
+            let maximum_frequency_entries =
+                row.count(fs_vfit::observation::MAX_OBSERVATION_ENTRIES)?;
+            let maximum_replay_terms = row.parse()?;
+            let panel_rule = match row.word()? {
+                "triangle-near" => fs_bem::helmholtz::PanelRule::TriangleNear { max_pairs: row.parse()? },
+                "triangle" => fs_bem::helmholtz::PanelRule::Triangle { max_pairs: row.parse()? },
+                _ => return Err("one_way_observer panel rule must be triangle-near MAX_PAIRS or triangle MAX_PAIRS".into()),
+            };
+            let maximum_skin_panels = row.count(fs_bem::helmholtz::MAX_DENSE_PANELS)?;
+            let maximum_anchor_distance_m = row.positive()?;
+            let maximum_boundary_terms = row.parse()?;
+            let workers = row.count(256)?;
+            let rule = OneWayRule { maximum_loss_fraction: row.scalar()?, maximum_shift_fraction: row.scalar()? };
+            row.end()?;
+            Some(OneWayShellObserverOptions {
+                receiver, minimum_clearance_m, pass_band_upper_hz, taper_stop_hz,
+                filter_latency_samples, fft_lengths, tail_energy_tolerance,
+                dtft_relative_tolerance, maximum_frequency_entries, maximum_replay_terms,
+                panel_rule, maximum_skin_panels, maximum_anchor_distance_m,
+                maximum_boundary_terms, workers, rule,
+            })
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -702,7 +747,8 @@ impl Spec {
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, cylinder_gas_loading, prepared_linear, geometric_stretching, longitudinal_waves,
             longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
-            shell_observer, shell_receiver_quadrature, cavity, friction, bow_ribbon, bow_fibers, forces, schedule };
+            shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, bow_ribbon, bow_fibers,
+            forces, schedule };
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
@@ -730,6 +776,12 @@ impl Spec {
             if self.cavity.is_some() || observer.taper_stop_hz > load.maximum_hz
                 || first_positive_hz < load.minimum_hz {
                 return Err("shell_observer requires no cavity and its positive-frequency band covered by the original BEM load".into());
+            }
+        }
+        if let Some(observer) = &self.one_way_observer {
+            observer.validate(self.rate)?;
+            if self.body_radiation.is_some() || self.shell_observer.is_some() {
+                return Err("one_way_observer feeds nothing back, so it takes neither a computed air load nor its shell_observer".into());
             }
         }
         Ok(())
