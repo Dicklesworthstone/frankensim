@@ -21,6 +21,11 @@ pub struct MembraneTerm {
 #[derive(Clone)]
 pub(super) struct AnnularMembrane {
     pub terms: Vec<Vec<MembraneTerm>>,
+    // The same geometric-strain product contributes to several Airy rows.
+    // Keep their original term order, but evaluate each product once per step.
+    strain_pairs: Vec<(usize, usize)>,
+    strains: Vec<f64>,
+    load_terms: Vec<Vec<(usize, f64)>>,
     core: Band,
     cross: [Vec<f64>; 3],
     lift: [Vec<f64>; 3],
@@ -189,7 +194,7 @@ impl AnnularMembrane {
             }
         }
         let schur = Band::factor(&border)?;
-        let terms = load
+        let terms: Vec<Vec<MembraneTerm>> = load
             .into_iter()
             .map(|row| {
                 row.into_iter()
@@ -198,9 +203,25 @@ impl AnnularMembrane {
                     .collect()
             })
             .collect();
+        let mut indices = BTreeMap::new();
+        let mut strain_pairs = Vec::new();
+        let load_terms = terms.iter().map(|row| {
+            row.iter().map(|term| {
+                let index = *indices.entry((term.a, term.b)).or_insert_with(|| {
+                    let index = strain_pairs.len();
+                    strain_pairs.push((term.a, term.b));
+                    index
+                });
+                (index, term.weight)
+            }).collect()
+        }).collect();
+        let strains = vec![0.0; strain_pairs.len()];
         Ok((
             Self {
                 terms,
+                strain_pairs,
+                strains,
+                load_terms,
                 core,
                 cross,
                 lift,
@@ -254,6 +275,23 @@ impl AnnularMembrane {
         }
     }
 
+    /// Refresh unconditionally: both displacement and rest geometry are public
+    /// body state. No timestep/identity shortcut may reuse an older product.
+    pub(super) fn prepare_load(&mut self, w: &[f64], z: &[f64]) {
+        for (&(a, b), strain) in self.strain_pairs.iter().zip(&mut self.strains) {
+            *strain = w[a] * w[b] + z[a] * w[b] + w[a] * z[b];
+        }
+    }
+
+    #[inline]
+    pub(super) fn prepared_load_row(&self, c: usize, eh: f64) -> f64 {
+        eh * self.load_terms[c]
+            .iter()
+            .map(|&(index, weight)| weight * self.strains[index])
+            .sum::<f64>()
+    }
+
+    #[cfg(test)]
     #[inline]
     pub(super) fn load_row(&self, c: usize, w: &[f64], z: &[f64], eh: f64) -> f64 {
         eh * self.terms[c]
@@ -347,6 +385,9 @@ mod tests {
                 let mut fused_q = q.clone();
                 let mut f = q.clone();
                 let mut fused_f = q.clone();
+                let mut prepared = annulus.clone();
+                let mut prepared_q = q.clone();
+                let mut prepared_f = q.clone();
                 for phase in [0.0, 0.7, 1.9] {
                     let w: Vec<_> = body
                         .xy
@@ -360,6 +401,15 @@ mod tests {
                         fused_q[c] = annulus.load_row(c, &w, &vk.z0, vk.eh);
                         fused_q[c]
                     });
+                    prepared.prepare_load(&w, &vk.z0);
+                    prepared.solve_with(&mut prepared_f, |c| {
+                        prepared_q[c] = prepared.prepared_load_row(c, vk.eh);
+                        prepared_q[c]
+                    });
+                    for (expected, actual) in q.iter().chain(&f).zip(prepared_q.iter().chain(&prepared_f)) {
+                        assert_eq!(expected.to_bits(), actual.to_bits(),
+                            "prepared h={h} curved={curved} phase={phase}");
+                    }
                     for (expected, actual) in q.iter().chain(&f).zip(fused_q.iter().chain(&fused_f))
                     {
                         assert_eq!(
@@ -369,6 +419,25 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_load_refreshes_changed_rest_shape_and_displacement() {
+        let body = plate(0.04, 0.1, true);
+        let vk = body.vk.as_ref().unwrap();
+        let original = vk.annulus.as_ref().unwrap();
+        let mut prepared = original.clone();
+        assert!(prepared.strains.len() < original.terms.iter().map(Vec::len).sum::<usize>());
+        for (amplitude, rest_scale) in [(0.007, 1.0), (-0.003, 0.0), (0.0, -2.0), (1e-150, 1e-150), (0.007, 1.0)] {
+            let w: Vec<_> = body.xy.iter().map(|[x, y]| amplitude * (19.0*x + 13.0*y).sin()).collect();
+            let z: Vec<_> = vk.z0.iter().map(|z| rest_scale*z).collect();
+            prepared.prepare_load(&w, &z);
+            for c in 0..original.terms.len() {
+                assert_eq!(original.load_row(c, &w, &z, vk.eh).to_bits(),
+                    prepared.prepared_load_row(c, vk.eh).to_bits(),
+                    "row={c} amplitude={amplitude} rest_scale={rest_scale}");
             }
         }
     }

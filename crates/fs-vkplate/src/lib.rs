@@ -1137,8 +1137,9 @@ impl Body {
             let VonKarman { eh, nb, rest_curv, airy, f, q, curv, annulus, z0, .. } = vk;
             let eh = *eh;
             if let Some(annulus) = annulus {
+                annulus.prepare_load(w, z0);
                 annulus.solve_with(f, |c| {
-                    let qc = annulus.load_row(c, w, z0, eh);
+                    let qc = annulus.prepared_load_row(c, eh);
                     q[c] = qc;
                     qc
                 });
