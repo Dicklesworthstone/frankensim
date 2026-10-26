@@ -6170,13 +6170,20 @@ retained Newmark kinematic identities, shared heat/motion clock, actual inertia,
 source-stiffness work, energy balance, replay and refused/cancelled inputs.
 
 `LocalMaterialWall::bind_dg` carries the same source-resolved thin-cylinder
-mass, elasticity and optional Kelvin-Voigt viscosity into the native DG duct
-time operator. `MaterialWallDg` retains the original material receipts, geometry
+mass, elasticity, Kelvin-Voigt viscosity or complete generalized-Maxwell
+relaxation into the native DG duct time operator. `MaterialWallDg` retains the
+original material receipts, geometry
 reduction and declared frequency applicability beside that operator. Material
 data changes affect pressure, reciprocal wall motion and stored energy through
-the existing gas/port/time owners. Maxwell walls explicitly refuse rather than
-discarding memory. The source band remains an applicability statement, not a
+the existing gas/port/time owners. Every positive Maxwell source arm retains
+its radial reaction pressure, elastic storage and nonnegative loss in that
+same operator. The exact exponential advances all memories together, so the
+network midpoint clock restrictions do not apply to this route. The source
+band remains an applicability statement, not a
 filter or broadband certificate; uniform gas/cylinder, small displacement and
 frozen source state are the bounded model. The source-data regression changes
 only Young modulus and compares actual time-domain pressure and wall motion
 with the independent sealed-tube oscillator while checking total energy.
+A further source-state regression changes only a relaxation-time claim and
+checks actual DG pressure, retained branch energy and material loss; the
+unused Kelvin property is not counted again. Native execution is pending.

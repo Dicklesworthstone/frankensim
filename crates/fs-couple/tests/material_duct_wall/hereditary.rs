@@ -160,3 +160,67 @@ fn material_memory_changes_actual_microphone_pressure_and_survives_callbacks() {
     assert_ne!(signals[0],signals[1]);
     assert!(voice(0.001,RATE).is_err()); // Source construction enforces its actual material-memory clock.
 }
+
+/// G3: changing only a sourced relaxation time changes the native DG pressure
+/// and material memory. The equilibrium mass/stiffness and geometry stay fixed.
+#[test]
+fn sourced_relaxation_reaches_native_dg_motion_pressure_and_loss() {
+    use fs_couple::bernoulli_aperture::wall::material::LocalMaterialWall;
+    use fs_duct::dg::{DgBoundary, DgDuct, DgMesh};
+    let radius = 0.006;
+    let geometry = fs_duct::Duct { segments: vec![fs_duct::Segment::Cylinder {
+        radius, length: 0.3,
+    }] };
+    let mut histories = Vec::new();
+    let mut base_pin = None;
+    for tau in [0.0005, 0.002] {
+        let mut values = properties(1000.0, 1e6, 2.0).to_vec();
+        values.push(("wall_arm_modulus", Pressure::DIMS, 8e5));
+        values.push(("wall_arm_time", Dims([0, 0, 1, 0, 0, 0]), tau));
+        let source = state(&values, None, None);
+        let spectrum = WallRelaxation::from_state_point(
+            &source,
+            &[("wall_arm_modulus".into(), "wall_arm_time".into())],
+            BAND, 1.0, 0.8,
+        ).unwrap();
+        assert_eq!(spectrum.source_identity(), Some(source.identity()));
+        let wall = LocalMaterialWall::new(
+            source.clone(), 0.0002, AxialConstraint::StressFree,
+            WallMaterialLoss::Maxwell(spectrum), BAND,
+        ).unwrap();
+        let dg = DgDuct::new(
+            &geometry, &gas(), DgMesh { elements: 2, order: 2 },
+            DgBoundary::Closed, DgBoundary::Closed,
+        ).unwrap();
+        let bound = wall.bind_dg(dg).unwrap();
+        assert_eq!(bound.wall().material().identity(), source.identity());
+        let dg = bound.duct();
+        let pin = dg.compliant_wall().unwrap();
+        assert_eq!(pin.resistance, 0.0); // The unused KV property is not added.
+        if let Some(previous) = base_pin { assert_eq!(pin, previous); }
+        base_pin = Some(pin);
+        assert_eq!(dg.total_dofs(), 5 * dg.field_dofs());
+        let propagator = dg.propagator(1e-5, 1e-13).unwrap();
+        let mut current = dg.project_initial_state(|_| 1.0, |_| 0.0);
+        let initial = current.stored_energy_j();
+        let mut previous = initial;
+        let mut trace = Vec::new();
+        let mut maximum_memory = 0.0_f64;
+        for _ in 0..100 {
+            propagator.step(&mut current, &[]).unwrap();
+            propagator.sync_nodal(&mut current).unwrap();
+            let motion = dg.compliant_wall_state(&current).unwrap();
+            assert_eq!(motion.relaxation_pressure_pa.len(), 1);
+            close(motion.stored_energy_j, current.wall_stored_energy_j());
+            close(motion.dissipated_power_w, dg.wall_dissipated_power_w(&current).unwrap());
+            assert!(current.stored_energy_j() <= previous + 1e-12 * initial);
+            previous = current.stored_energy_j();
+            maximum_memory = maximum_memory.max(motion.relaxation_stored_energy_j);
+            trace.push(current.pressure()[0]);
+        }
+        assert!(maximum_memory > 0.0);
+        assert!(current.stored_energy_j() < initial);
+        histories.push(trace);
+    }
+    assert_ne!(histories[0], histories[1]);
+}

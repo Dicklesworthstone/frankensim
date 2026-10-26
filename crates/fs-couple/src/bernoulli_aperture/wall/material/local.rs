@@ -95,21 +95,24 @@ impl LocalMaterialWall {
     /// Previously attached gas viscothermal memory remains a separate loss.
     ///
     /// Elastic and Kelvin-Voigt coefficients follow base_patch without a fit.
-    /// A Maxwell law refuses rather than dropping its hereditary arms. The
-    /// existing uniform-cylinder/gas and thin-wall restrictions apply. This is
+    /// Maxwell walls retain every positive source arm in the SAME DG operator;
+    /// the native exact exponential advances their history together with gas
+    /// and wall motion. Midpoint-network clock limits do not apply to that
+    /// propagator. The existing uniform-cylinder/gas and thin-wall restrictions
+    /// apply. This is
     /// cold compilation, not transfer of an already vibrating wall.
     /// The retained band is the SAME model applicability statement as the
     /// graph-wall owner, not a filter or broadband input certificate. The
     /// caller must resolve and qualify its excited frequency range separately.
     pub fn bind_dg(self, duct: fs_duct::dg::DgDuct) -> Result<MaterialWallDg, AcousticRealizeError> {
-        if matches!(self.loss, WallMaterialLoss::Maxwell(_)) {
-            return Err(invalid("DG material wall requires elastic or Kelvin-Voigt data; Maxwell memory is not supplied"));
-        }
         let radius = duct.uniform_circular_radius_m()
             .ok_or_else(|| invalid("DG material wall requires an explicit uniform circular geometry"))?;
         let patch = self.base_patch(radius, duct.total_length())?;
-        let duct = duct.with_compliant_wall(patch.wall)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let duct = match &self.loss {
+            WallMaterialLoss::Maxwell(source) =>
+                duct.with_compliant_wall_relaxation(patch.wall, source.material()),
+            _ => duct.with_compliant_wall(patch.wall),
+        }.map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         Ok(MaterialWallDg { wall: self, duct })
     }
 

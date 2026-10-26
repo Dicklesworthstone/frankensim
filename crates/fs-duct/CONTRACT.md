@@ -1059,10 +1059,29 @@ All boundary/side ports see wall reaction through their original pressure
 columns. A matched end remains the gas characteristic resistance, not an
 assertion of reflectionless termination for an elastic tube. Source bandwidth,
 small-displacement applicability and refinement remain caller responsibilities.
-Axial shell waves, Maxwell memory, thermal evolution and external wall radiation
-are not supplied. The dense ledger still labels dissipation inferred from its
+Axial shell waves, thermal evolution and external wall radiation are not
+supplied. The dense ledger still labels dissipation inferred from its
 deficit; the independent instantaneous loss is not an integrated heat proof.
 
 G0/G1 regressions compare actual pressure, wall displacement and velocity to
 the independent sealed-tube oscillator, check conservative port work and total
 storage, and reconstruct the combined gas/material dissipation from x^T L x.
+
+`with_compliant_wall_relaxation` consumes the original `GeneralizedMaxwell`
+spectrum using the same equilibrium thin-wall reduction, K_j=(K_inf/E_inf)E_j.
+Each positive arm adds radial reaction pressure z_j with z_j'=K_j v-z_j/tau_j,
+work-conjugate reaction -z_j, storage integral P z_j^2/(2K_j), and loss integral
+P z_j^2/(K_j tau_j). Every arm advances together with gas and radial motion in
+the existing exact-ZOH exponential; no midpoint or separately lagged material
+step is introduced. Exact zero arms add no state and preserve the original
+operator identity. Positive coefficients that cannot be represented and total
+states beyond the original dense cap refuse. New memories start relaxed.
+
+`compliant_wall_state` reports each arm's physical radial pressure and its
+spring energy; complete wall storage and loss include all arms exactly once.
+Original source provenance and frequency applicability belong to the material
+adapter. Frozen geometry/state and uniform-gas restrictions remain in force.
+An independent decaying sealed-gas eigenmotion exercises pressure, wall motion,
+branch pressure, complete energy and physical loss. Further regressions cover
+unchanged original gas/port blocks, combined passivity, zero-arm equivalence,
+foreign states and invalid spectra. These new tests await native execution.

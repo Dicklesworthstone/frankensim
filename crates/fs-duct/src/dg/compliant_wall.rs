@@ -18,6 +18,14 @@ pub(super) struct CompliantWall {
     start: usize,
     displacement_scale: f64,
     velocity_scale: f64,
+    relaxation: Vec<WallRelaxationBranch>,
+}
+
+#[derive(Debug, Clone)]
+struct WallRelaxationBranch {
+    start: usize,
+    rate_per_s: f64,
+    pressure_scale: f64,
 }
 
 /// Physical wall fields on the original DG nodes, read without advancing time.
@@ -27,9 +35,15 @@ pub struct DgCompliantWallState {
     pub displacement_m: Vec<f64>,
     /// Outward radial velocity [m/s].
     pub velocity_m_s: Vec<f64>,
-    /// Integral of P (sigma v² + K w²)/2 [J], excluding gas storage.
+    /// Each retained Maxwell arm's radial reaction pressure [Pa] at DG nodes.
+    /// Positive pressure opposes outward wall motion. Exact zero arms are absent.
+    pub relaxation_pressure_pa: Vec<Vec<f64>>,
+    /// Complete wall energy [J]: inertia, equilibrium spring and Maxwell springs.
+    /// Gas storage is excluded; relaxation_stored_energy_j is already included.
     pub stored_energy_j: f64,
-    /// Integral of P r v² [W], excluding viscothermal and terminal losses.
+    /// Energy [J] in the retained Maxwell springs alone.
+    pub relaxation_stored_energy_j: f64,
+    /// Kelvin and Maxwell dissipation [W], excluding gas and terminal losses.
     pub dissipated_power_w: f64,
 }
 
@@ -140,6 +154,7 @@ impl DgDuct {
             start: original,
             displacement_scale,
             velocity_scale,
+            relaxation: Vec::new(),
         });
         self.memory_dofs += 2 * m;
         self.l_tilde = operator;
@@ -155,7 +170,127 @@ impl DgDuct {
         Ok(self)
     }
 
-    /// The original physical wall coefficients, if attached.
+    /// Attach the existing generalized-Maxwell material spectrum to the same
+    /// radial wall and gas operator. The base pin contains equilibrium stiffness
+    /// K_inf; each source modulus E_j gives K_j = (K_inf/E_inf) E_j. No fitted
+    /// damping or independently stepped constitutive history is introduced.
+    ///
+    /// Each radial reaction pressure obeys z_j' = K_j v - z_j/tau_j and acts
+    /// as -z_j on the wall. Its energy is integral P z_j^2/(2 K_j), and its
+    /// loss is integral P z_j^2/(K_j tau_j). Energy-normalized coupling to
+    /// wall velocity is skew; only -1/tau_j dissipates. All states advance in
+    /// the original exact-ZOH exponential, so midpoint-specific clock limits
+    /// do not apply. Input bandwidth and dense exponential accuracy still do.
+    ///
+    /// The source's exact zero arms are omitted; an empty/zero spectrum is
+    /// bit-identical to with_compliant_wall. New memories start relaxed.
+    ///
+    /// # Errors
+    /// Invalid source spectrum, unrepresentable positive coefficients, or the
+    /// original wall/geometry/DOF refusals. No positive arm may be dropped.
+    pub fn with_compliant_wall_relaxation(
+        self,
+        pin: WallPin,
+        material: &fs_material::visco::GeneralizedMaxwell,
+    ) -> Result<Self, DuctError> {
+        if material.terms.len() > MAX_DG_PROPAGATOR_DOFS {
+            return Err(invalid(
+                "DG wall source spectrum exceeds the bounded state capacity",
+            ));
+        }
+        let material =
+            fs_material::visco::GeneralizedMaxwell::new(material.e_inf, material.terms.clone())
+                .map_err(|_| invalid("DG wall requires a passive generalized-Maxwell spectrum"))?;
+        let count = material
+            .terms
+            .iter()
+            .filter(|(modulus, _)| *modulus > 0.0)
+            .count();
+        let mut duct = self.with_compliant_wall(pin)?;
+        if count == 0 {
+            return Ok(duct);
+        }
+        let m = duct.field_dofs;
+        let original = duct.total_dofs();
+        let extra = count
+            .checked_mul(m)
+            .ok_or_else(|| invalid("DG wall memory DOF overflow"))?;
+        let total = original
+            .checked_add(extra)
+            .filter(|n| *n <= MAX_DG_PROPAGATOR_DOFS)
+            .ok_or_else(|| {
+                invalid("DG acoustic plus Maxwell wall state exceeds the dense DOF cap")
+            })?;
+        let wall = duct
+            .compliant_wall
+            .as_ref()
+            .expect("wall was attached above");
+        let velocity_start = wall.start + m;
+        let radius = duct.uniform_radius_m.expect("wall requires a cylinder");
+        let bulk = duct.gas.density * duct.gas.sound_speed * duct.gas.sound_speed;
+        let beta = 2.0 * bulk / radius;
+        let factor = pin.stiffness_per_area / material.e_inf;
+        let mut branches = Vec::with_capacity(count);
+        let mut couplings = Vec::with_capacity(count);
+        for (modulus, tau) in material.terms {
+            if modulus == 0.0 {
+                continue;
+            }
+            let stiffness = factor * modulus;
+            let coupling = det::sqrt(stiffness / pin.surface_density);
+            let rate_per_s = 1.0 / tau;
+            let pressure_scale = det::sqrt(stiffness / beta);
+            if [stiffness, coupling, rate_per_s, pressure_scale]
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            {
+                return Err(invalid(
+                    "DG Maxwell wall reduction lost a positive coefficient",
+                ));
+            }
+            branches.push(WallRelaxationBranch {
+                start: original + branches.len() * m,
+                rate_per_s,
+                pressure_scale,
+            });
+            couplings.push(coupling);
+        }
+        let mut operator = vec![0.0; total * total];
+        for i in 0..original {
+            operator[i * total..i * total + original]
+                .copy_from_slice(&duct.l_tilde[i * original..(i + 1) * original]);
+        }
+        for (branch, coupling) in branches.iter().zip(couplings) {
+            for i in 0..m {
+                let velocity = velocity_start + i;
+                let memory = branch.start + i;
+                operator[velocity * total + memory] = -coupling;
+                operator[memory * total + velocity] = coupling;
+                operator[memory * total + memory] = -branch.rate_per_s;
+            }
+        }
+        for (_, port) in &mut duct.ports {
+            port.resize(total, 0.0);
+        }
+        duct.compliant_wall
+            .as_mut()
+            .expect("wall was attached above")
+            .relaxation = branches;
+        duct.memory_dofs += extra;
+        duct.l_tilde = operator;
+        duct.operator_identity = hash_operator(
+            duct.mesh,
+            duct.inlet,
+            duct.outlet,
+            &duct.elements,
+            &duct.l_tilde,
+            &duct.ports,
+        );
+        Ok(duct)
+    }
+
+    /// The original equilibrium/inertial/Kelvin coefficients, if attached.
+    /// Maxwell branch storage and pressure are returned by compliant_wall_state.
     #[must_use]
     pub fn compliant_wall(&self) -> Option<WallPin> {
         self.compliant_wall.as_ref().map(|wall| wall.pin)
@@ -196,15 +331,38 @@ impl DgDuct {
                 velocity_m_s[base + i] *= wall.velocity_scale;
             }
         }
+        let mut relaxation_pressure_pa = Vec::with_capacity(wall.relaxation.len());
+        let mut relaxation_stored_energy_j = 0.0;
+        for branch in &wall.relaxation {
+            let mut pressure = vec![0.0; m];
+            for (e, element) in self.elements.iter().enumerate() {
+                let base = e * local;
+                for i in 0..local {
+                    for j in 0..local {
+                        pressure[base + i] += element.mp_inv_sqrt[i * local + j]
+                            * state.tilde[branch.start + base + j];
+                    }
+                    pressure[base + i] *= branch.pressure_scale;
+                }
+            }
+            relaxation_stored_energy_j += 0.5
+                * state.tilde[branch.start..branch.start + m]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>();
+            relaxation_pressure_pa.push(pressure);
+        }
         let stored_energy_j = 0.5
             * state.tilde[wall.start..wall.start + 2 * m]
                 .iter()
                 .map(|value| value * value)
-                .sum::<f64>();
+                .sum::<f64>()
+            + relaxation_stored_energy_j;
         let dissipated_power_w = self.compliant_wall_loss(state);
         if displacement_m
             .iter()
             .chain(&velocity_m_s)
+            .chain(relaxation_pressure_pa.iter().flatten())
             .any(|value| !value.is_finite())
             || !stored_energy_j.is_finite()
             || !dissipated_power_w.is_finite()
@@ -214,18 +372,28 @@ impl DgDuct {
         Ok(DgCompliantWallState {
             displacement_m,
             velocity_m_s,
+            relaxation_pressure_pa,
             stored_energy_j,
+            relaxation_stored_energy_j,
             dissipated_power_w,
         })
     }
 
     pub(super) fn compliant_wall_loss(&self, state: &DgState) -> f64 {
         self.compliant_wall.as_ref().map_or(0.0, |wall| {
-            wall.pin.resistance / wall.pin.surface_density
+            let mut loss = wall.pin.resistance / wall.pin.surface_density
                 * state.tilde[wall.start + self.field_dofs..wall.start + 2 * self.field_dofs]
                     .iter()
                     .map(|value| value * value)
-                    .sum::<f64>()
+                    .sum::<f64>();
+            for branch in &wall.relaxation {
+                loss += branch.rate_per_s
+                    * state.tilde[branch.start..branch.start + self.field_dofs]
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>();
+            }
+            loss
         })
     }
 }

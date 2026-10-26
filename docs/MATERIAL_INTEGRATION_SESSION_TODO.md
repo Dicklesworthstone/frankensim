@@ -43,18 +43,18 @@ MR04, `frankensim-material-reality-ui2if.1.4`.
 
 Related plan work: MR33, `frankensim-material-reality-ui2if.5.3`.
 
-- [ ] Add existing Maxwell branches to the native DG wall operator.
-- [ ] Preserve reciprocal pressure/wall coupling and every existing gas-memory block.
-- [ ] Include branch storage in wall observations and total native energy.
-- [ ] Include branch relaxation loss exactly once in dissipated power.
-- [ ] Keep ports, operator identity, and the existing DOF cap consistent.
-- [ ] Wire `LocalMaterialWall::bind_dg` to its retained Maxwell material spectrum.
-- [ ] Retain the source frequency band and current cylinder/gas admission limits.
-- [ ] Add an independent sealed-gas relaxing-mode regression.
-- [ ] Add zero-branch equivalence and combined-loss/port/state regressions.
-- [ ] Add a source-only relaxation-time change through the material adapter.
-- [ ] Review state indexing, branch units, source admission, and energy signs.
-- [ ] Commit the implementation, focused tests, and bounded contract changes.
+- [x] Add existing Maxwell branches to the native DG wall operator.
+- [x] Preserve reciprocal pressure/wall coupling and every existing gas-memory block.
+- [x] Include branch storage in wall observations and total native energy.
+- [x] Include branch relaxation loss exactly once in dissipated power.
+- [x] Keep ports, operator identity, and the existing DOF cap consistent.
+- [x] Wire `LocalMaterialWall::bind_dg` to its retained Maxwell material spectrum.
+- [x] Retain the source frequency band and current cylinder/gas admission limits.
+- [x] Add an independent sealed-gas relaxing-mode regression.
+- [x] Add zero-branch equivalence and combined-loss/port/state regressions.
+- [x] Add a source-only relaxation-time change through the material adapter.
+- [x] Review state indexing, branch units, source admission, and energy signs.
+- [x] Commit the implementation, focused tests, and bounded contract changes.
 - [ ] Run the focused native duct and coupling tests when execution is available.
 
 ## 4. External heating in the native compressible-flow energy account
