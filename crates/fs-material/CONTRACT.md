@@ -1880,7 +1880,33 @@ gas, wetting or purity default, runtime material-state transfer, or evolving
 surface-energy account. Scalar constants and supported temperature coefficients
 do not authorize frequency- or rate-dependent Newtonian flow.
 
-`gas_field::steady::SteadyAxialGas::solve` generates the existing `AxialGasField` from explicit source packs, common pressure, axial volumes, prescribed positive mass flow, gas injections, and wall temperatures/conductances. The existing fs-thermal `Advected` observer owns both donor-cell enthalpy and its stationary acyclic species extension; the original thermal timeline owns wall heat, combined CFL and energy updates. `GasEnthalpyLaw` derives h(T), T(h,p), and a conservative thermal slope bound from the existing NASA-9 source and safeguarded energy root. Caloric laws may differ by stationary composition only after exact full species/fraction and common enthalpy-reference checks. Inlet enthalpy belongs to its own source mixture. Fixed initial EOS cell masses serve only as pseudo-time relaxation weights; only a converged common-pressure EOS field is published. The final power gate includes absolute caloric closure-flux errors so loose inverse tolerances cannot hide an incorrect supplied inlet energy. Reported balances, work, flow and low-Mach admission are retained. Downstream faces carry first-order mixed-cell states; primitive field interpolation and acoustic sampling require independent spatial refinement. The scope excludes transient variable-density breath flow, inferred heat-transfer coefficients, pressure drop, diffusion, reaction and condensation; phase/source/domain failures refuse without publishing a field. This addition does not close the complete M0.1-W3 qualification.
+`gas_field::steady::SteadyAxialGas::solve` lowers its source packs, axial volumes,
+supplies and walls through `to_network` into the shared
+`network::SteadyGasNetwork`. That owner also admits branched and inlet-fed
+recirculating graphs, with at most 64 cells and 256 interior/boundary connections.
+The existing fs-thermal `Advected` observer owns both donor-cell enthalpy and
+stationary species transport; the original thermal timeline owns wall heat,
+combined CFL and energy updates. Cyclic species balance uses the existing
+fs-la prepared LU with bounded work and a numerical conditioning allowance;
+unanchored closed loops refuse instead of inventing a composition or leakage.
+`GasEnthalpyLaw` derives h(T), T(h,p), and a conservative thermal slope bound from
+the original NASA-9 source. Caloric laws may differ by stationary composition
+only after exact full species/fraction and common enthalpy-reference checks.
+Every inlet carries its own source-mixture enthalpy. Initial EOS cell masses
+are pseudo-time relaxation weights, not a physical variable-density history.
+Only converged, phase-admitted common-pressure states are published, retaining
+their thermochemical and material transport sources for existing flow, thermal
+and acoustic consumers. Each final power gate bounds every donor/outlet caloric
+closure flux separately so inverse errors cannot conceal an inlet energy error.
+The axial adapter additionally checks its reconstructed inlet face, then emits
+the same `AxialGasField` used by existing ducts and reeds. Balances, work, flow
+and bulk-cell low-Mach admission survive this lowering. Downstream faces carry
+first-order mixed-cell states; field interpolation and acoustic sampling still
+need independent spatial refinement. The scope excludes pressure-drop and
+branch-throat velocity prediction, transient variable-density flow, inferred
+wall conductances, diffusion, reaction and condensation. Source, phase, work,
+convergence and publication failures return no partial solution. This does not
+close the complete M0.1-W3 qualification.
 
 ### Equilibrium substrate wetting on the liquid surface owner
 
