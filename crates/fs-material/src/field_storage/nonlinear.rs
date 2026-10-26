@@ -18,6 +18,8 @@ use crate::state_point::{
 use fs_matdb::{ClaimSelection, MaterialCard, PropertyLineSlice, QueryPoint};
 use fs_qty::QuantitySpec;
 
+mod convexity;
+
 /// Magnitude H [A/m] of an explicitly reversible, isotropic, zero-remanence law.
 /// A major hysteresis loop, coercivity or secant permeability is not this key.
 pub const REVERSIBLE_FIELD_STRENGTH_PROPERTY: &str = "reversible_magnetic_field_strength";
@@ -31,6 +33,132 @@ pub struct ReversibleMagneticMaterial {
     path: PropertyLineSlice,
     energy_at_knots_j_m3: Vec<f64>,
     slopes_a_m_t: Vec<f64>,
+}
+
+impl ReversibleMagneticMaterial {
+    /// Admit an electrical/material refresh without changing this magnetic law.
+    /// The same card, selected H(B) source and coordinate schema remain pinned.
+    /// Only the owned absolute-temperature coordinate may change, and an H(B)
+    /// source that depends on that temperature refuses even coincident endpoints.
+    /// Additional electrical properties in the refreshed bundle are retained by
+    /// the caller. The complete original field range must still be supported.
+    pub fn admit_fixed_material_refresh(
+        &self,
+        refreshed: &ResolvedMaterialStatePoint,
+    ) -> Result<(), FieldStorageError> {
+        let invalid = FieldStorageError::Invalid;
+        let original = self
+            .material
+            .property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
+            .expect("prepared reversible field source");
+        let property = refreshed
+            .property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
+            .ok_or(invalid(
+                "refreshed conductor must retain the reversible magnetic source",
+            ))?;
+        if self.material.card_identity() != refreshed.card_identity()
+            || self.material.material() != refreshed.material()
+            || original.requirement() != property.requirement()
+            || original.source_axes() != property.source_axes()
+            || original.answer().receipt.selected != property.answer().receipt.selected
+        {
+            return Err(invalid(
+                "nonlinear magnetic refresh changed the original card or source",
+            ));
+        }
+        // Rebuild just the original H(B) bundle so common field continuity
+        // admission does not discard or miscompare extra conductor properties.
+        let query = refreshed.query();
+        let checked = self.material.at_query_point(&self.card, &query)?;
+        super::admit_source_temperature_refresh(&self.material, &checked)?;
+        if property.value_si().to_bits()
+            != checked
+                .property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
+                .expect("rechecked reversible source")
+                .value_si()
+                .to_bits()
+            || self
+                .material
+                .query_point()
+                .iter()
+                .zip(checked.query_point())
+                .any(|((axis, a), (_, b))| {
+                    a.to_bits() != b.to_bits()
+                        && original.source_axes().iter().any(|(name, _)| name == axis)
+                })
+        {
+            return Err(invalid(
+                "temperature-dependent H(B) requires magnetic parameter work and entropy",
+            ));
+        }
+        let upper = query
+            .clone()
+            .with(&self.path.axis, self.maximum_flux_density_t())
+            .map_err(|_| invalid("refreshed magnetic field range is unrepresentable"))?;
+        let selected = original.answer().receipt.selected;
+        let claim = self
+            .card
+            .claims()
+            .claim(selected)
+            .expect("prepared source claim");
+        let path = self
+            .card
+            .claims()
+            .query_line_typed(
+                &claim.key,
+                &self.path.axis,
+                &query,
+                &upper,
+                ClaimSelection::Pinned(selected),
+            )
+            .map_err(|source| MaterialStatePointError::Support {
+                property: REVERSIBLE_FIELD_STRENGTH_PROPERTY.to_owned(),
+                source: Box::new(source),
+            })?;
+        if path.knots.len() != self.path.knots.len()
+            || path
+                .knots
+                .iter()
+                .zip(&self.path.knots)
+                .any(|((b, h), (old_b, old_h))| {
+                    b.to_bits() != old_b.to_bits()
+                        || h.evidence.value.value.to_bits() != old_h.evidence.value.value.to_bits()
+                        || h.receipt.selected != selected
+                })
+        {
+            return Err(invalid(
+                "refreshed magnetic range changes the prepared constitutive law",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Nonnegative backward-Euler magnetic loss density [J/m3],
+    /// H(after).(after-before) - (psi(after)-psi(before)).
+    /// This is numerical dissipation, NEVER constitutive Joule heat.
+    /// Integrating original positive slopes and angular convexity avoids
+    /// cancellation when a small step changes a large stored field energy.
+    pub fn bregman_density_j_m3(
+        &self,
+        before_flux_density_t: [f64; 2],
+        after_flux_density_t: [f64; 2],
+    ) -> Result<f64, FieldStorageError> {
+        self.evaluate(before_flux_density_t[0].hypot(before_flux_density_t[1]))?;
+        let after = self.evaluate(after_flux_density_t[0].hypot(after_flux_density_t[1]))?;
+        convexity::bregman_density(
+            before_flux_density_t,
+            after_flux_density_t,
+            after.field_strength_a_m,
+            self.path
+                .knots
+                .windows(2)
+                .zip(&self.slopes_a_m_t)
+                .map(|(pair, &slope)| (pair[0].0, pair[1].0, slope)),
+        )
+        .ok_or(FieldStorageError::Invalid(
+            "magnetic numerical dissipation is unrepresentable",
+        ))
+    }
 }
 
 /// Response of the SAME source law at one admitted flux-density magnitude.

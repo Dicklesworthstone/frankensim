@@ -19,13 +19,21 @@
 //! A source-pinned temperature-dependent mu may rebuild the same mesh through
 //! `step_with_materials_candidate`; its signed parameter work is then explicit.
 
+mod conduction;
+/// Source-defined reversible H(B) induction on the same conduction/heat owners.
+pub mod nonlinear;
+use conduction::{Conduction, ConductionCell, ConductionError};
+
 use super::{MagneticError, PlanarField, PlanarMagnetostatics};
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     conductor::ResolvedConductorState,
-    field_storage::{FieldStorageError, admit_fixed_magnetic_refresh, admit_magnetic_temperature_refresh},
+    field_storage::{
+        FieldStorageError, admit_fixed_magnetic_refresh, admit_magnetic_temperature_refresh,
+    },
     state_point::ResolvedMaterialStatePoint,
 };
-use fs_feec::weighted::WeightedAssemblyLimits;
+use fs_rep_mesh::TriComplex2;
 use fs_solver::{
     CheckedCgConfig, CheckedCgError, LinearOp, ResidualClaim, SolveReport, checked_cg,
 };
@@ -91,6 +99,15 @@ impl From<MagneticError> for EddyError {
 impl From<FieldStorageError> for EddyError {
     fn from(e: FieldStorageError) -> Self {
         Self::Material(e)
+    }
+}
+impl From<ConductionError> for EddyError {
+    fn from(error: ConductionError) -> Self {
+        match error {
+            ConductionError::Cancelled => Self::Cancelled,
+            ConductionError::Invalid(message) => Self::Invalid(message),
+            ConductionError::Balance(message) => Self::Balance(message),
+        }
     }
 }
 impl core::fmt::Display for EddyError {
@@ -199,56 +216,31 @@ fn controls(c: EddyControls) -> Result<(), EddyError> {
     Ok(())
 }
 
-struct ConductionCell {
-    vertices: [usize; 3],
-    group: usize,
-    sigma_volume: f64,
+// Only the magnetic material admission differs between constitutive owners.
+// Topology, gauge constraints, source loads and Ohmic projection stay shared.
+trait EddySection {
+    fn mesh(&self) -> &TriComplex2;
+    fn thickness_m(&self) -> f64;
+    fn admit_conductor(
+        &self,
+        triangle: usize,
+        material: &ResolvedMaterialStatePoint,
+    ) -> Result<(), EddyError>;
 }
-struct Conduction {
-    cells: Vec<ConductionCell>,
-    regions: Vec<u32>,
-    weights: Vec<f64>,
-    anchors: Vec<usize>,
-}
-impl Conduction {
-    // Subtract a regional coordinate BEFORE summation; constant gauge values
-    // cannot manufacture axial field through cancellation of large offsets.
-    fn means(&self, x: &[f64], check: &dyn Fn() -> bool) -> Option<Vec<f64>> {
-        let mut means = vec![0.0; self.regions.len()];
-        for cell in &self.cells {
-            if check() {
-                return None;
-            }
-            let anchor = x[self.anchors[cell.group]];
-            means[cell.group] += cell.sigma_volume
-                * cell
-                    .vertices
-                    .iter()
-                    .map(|&v| (x[v] - anchor) / 3.0)
-                    .sum::<f64>();
-        }
-        for (v, &weight) in means.iter_mut().zip(&self.weights) {
-            *v /= weight;
-        }
-        Some(means)
+impl EddySection for PlanarMagnetostatics {
+    fn mesh(&self) -> &TriComplex2 {
+        &self.mesh
     }
-    fn apply(&self, x: &[f64], y: &mut [f64], check: &dyn Fn() -> bool) -> bool {
-        y.fill(0.0);
-        let Some(means) = self.means(x, check) else {
-            return false;
-        };
-        for cell in &self.cells {
-            if check() {
-                return false;
-            }
-            let anchor = x[self.anchors[cell.group]];
-            let d = cell.vertices.map(|v| (x[v] - anchor) - means[cell.group]);
-            let sum = d.iter().sum::<f64>();
-            for i in 0..3 {
-                y[cell.vertices[i]] += cell.sigma_volume / 12.0 * (d[i] + sum);
-            }
-        }
-        true
+    fn thickness_m(&self) -> f64 {
+        self.thickness_m
+    }
+    fn admit_conductor(
+        &self,
+        triangle: usize,
+        material: &ResolvedMaterialStatePoint,
+    ) -> Result<(), EddyError> {
+        admit_fixed_magnetic_refresh(&self.materials[triangle], material)?;
+        Ok(())
     }
 }
 
@@ -291,12 +283,12 @@ impl LinearOp for Increment<'_> {
 }
 
 fn bind(
-    problem: &PlanarMagnetostatics,
+    problem: &impl EddySection,
     mut sources: Vec<EddyConductor>,
     previous: Option<&[EddyConductor]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<EddyConductor>, Conduction), EddyError> {
-    if sources.len() > problem.mesh.faces().len() {
+    if sources.len() > problem.mesh().faces().len() {
         return Err(EddyError::Invalid("too many conductor triangles"));
     }
     sources.sort_by_key(|s| s.triangle);
@@ -317,7 +309,7 @@ fn bind(
     };
     for (i, source) in sources.iter().enumerate() {
         poll(cancelled)?;
-        if source.triangle >= problem.mesh.faces().len()
+        if source.triangle >= problem.mesh().faces().len()
             || i > 0 && sources[i - 1].triangle == source.triangle
         {
             return Err(EddyError::Invalid(
@@ -328,15 +320,29 @@ fn bind(
             p[i].triangle != source.triangle
                 || p[i].region != source.region
                 || p[i].conductor.source_basis() != source.conductor.source_basis()
+                || {
+                    let before = p[i].conductor.material();
+                    let after = source.conductor.material();
+                    before.card_identity() != after.card_identity()
+                        || before.material() != after.material()
+                        || before.axis_quantities() != after.axis_quantities()
+                        || before.properties().len() != after.properties().len()
+                        || before
+                            .properties()
+                            .iter()
+                            .zip(after.properties())
+                            .any(|(a, b)| {
+                                a.requirement() != b.requirement()
+                                    || a.source_axes() != b.source_axes()
+                                    || a.answer().receipt.selected != b.answer().receipt.selected
+                            })
+                }
         }) {
             return Err(EddyError::Invalid(
                 "conductor region, triangle or independent source basis changed",
             ));
         }
-        admit_fixed_magnetic_refresh(
-            &problem.materials[source.triangle],
-            source.conductor.material(),
-        )?;
+        problem.admit_conductor(source.triangle, source.conductor.material())?;
         if !source
             .conductor
             .source_property()
@@ -348,7 +354,7 @@ fn bind(
         }
         let sigma = source.conductor.resistivity_ohm_m().recip();
         let volume = problem
-            .mesh
+            .mesh()
             .face_measure(source.triangle)
             .ok_or(EddyError::Invalid("missing conductor volume"))?;
         let weight = sigma * volume;
@@ -358,7 +364,7 @@ fn bind(
             ));
         }
         let group = groups[&source.region];
-        let vertices = problem.mesh.faces()[source.triangle].map(|v| v as usize);
+        let vertices = problem.mesh().faces()[source.triangle].map(|v| v as usize);
         conduction.weights[group] = finite(conduction.weights[group] + weight)?;
         if conduction.anchors[group] == usize::MAX {
             conduction.anchors[group] = vertices[0];
@@ -367,6 +373,8 @@ fn bind(
             vertices,
             group,
             sigma_volume: weight,
+            conductivity_s_m: sigma,
+            volume_m3: volume,
         });
     }
     Ok((sources, conduction))
@@ -375,12 +383,12 @@ fn bind(
 // Electrical contact across a whole edge cannot be silently insulated by a
 // region label. A point touch does not create positive-area electrical contact.
 fn regions(
-    problem: &PlanarMagnetostatics,
+    problem: &impl EddySection,
     conductors: &[EddyConductor],
     insulators: &[usize],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<usize>, EddyError> {
-    let count = problem.mesh.faces().len();
+    let count = problem.mesh().faces().len();
     if conductors.len() + insulators.len() != count {
         return Err(EddyError::Invalid(
             "every triangle must explicitly be conducting or insulating",
@@ -403,14 +411,14 @@ fn regions(
     }
     let mut edges = BTreeMap::<(u32, u32), Vec<usize>>::new();
     let mut neighbors = vec![Vec::new(); conductors.len()];
-    let mut parent: Vec<_> = (0..problem.mesh.vertices().len()).collect();
+    let mut parent: Vec<_> = (0..problem.mesh().vertices().len()).collect();
     fn root(parent: &[usize], mut i: usize) -> usize {
         while parent[i] != i {
             i = parent[i];
         }
         i
     }
-    for (cell, face) in problem.mesh.faces().iter().enumerate() {
+    for (cell, face) in problem.mesh().faces().iter().enumerate() {
         poll(cancelled)?;
         for k in 0..3 {
             let a = face[k];
@@ -462,7 +470,7 @@ fn regions(
         }
     }
     Ok(problem
-        .mesh
+        .mesh()
         .faces()
         .iter()
         .map(|f| root(&parent, f[0] as usize))
@@ -473,7 +481,7 @@ fn regions(
 // conducting nodal component that does not touch the fixed boundary. These
 // are algebraic coordinates, not magnetic time-history degrees of freedom.
 fn algebraic_blocks(
-    problem: &PlanarMagnetostatics,
+    problem: &impl EddySection,
     conductors: &[EddyConductor],
     prescribed: &[Option<f64>],
     cancelled: &mut impl FnMut() -> bool,
@@ -489,7 +497,7 @@ fn algebraic_blocks(
     }
     for c in conductors {
         poll(cancelled)?;
-        let face = problem.mesh.faces()[c.triangle].map(|v| v as usize);
+        let face = problem.mesh().faces()[c.triangle].map(|v| v as usize);
         for &v in &face {
             active[v] = true;
         }
@@ -518,7 +526,7 @@ fn algebraic_blocks(
 }
 
 fn load(
-    problem: &PlanarMagnetostatics,
+    problem: &impl EddySection,
     current: &[f64],
     components: &[usize],
     tolerance_a: f64,
@@ -529,16 +537,16 @@ fn load(
             "complete finite impressed current required",
         ));
     }
-    let mut result = vec![0.0; problem.mesh.vertices().len()];
+    let mut result = vec![0.0; problem.mesh().vertices().len()];
     let mut balances = BTreeMap::<usize, f64>::new();
-    for (cell, face) in problem.mesh.faces().iter().enumerate() {
+    for (cell, face) in problem.mesh().faces().iter().enumerate() {
         poll(cancelled)?;
         let volume = problem
-            .mesh
+            .mesh()
             .face_measure(cell)
             .ok_or(EddyError::Invalid("missing mesh volume"))?;
         let sum = balances.entry(components[cell]).or_default();
-        *sum = finite(*sum + current[cell] * (volume / problem.thickness_m))?;
+        *sum = finite(*sum + current[cell] * (volume / problem.thickness_m()))?;
         for &v in face {
             result[v as usize] = finite(result[v as usize] + current[cell] * volume / 3.0)?;
         }
@@ -576,7 +584,7 @@ fn magnetic_load(
 }
 
 fn admit_algebraic(
-    problem: &PlanarMagnetostatics,
+    problem: &impl EddySection,
     magnetic: &[f64],
     load: &[f64],
     blocks: &[Vec<usize>],
@@ -587,7 +595,7 @@ fn admit_algebraic(
         let mut residual = 0.0;
         for &v in block {
             poll(cancelled)?;
-            residual = finite(residual + (magnetic[v] - load[v]) / problem.thickness_m)?;
+            residual = finite(residual + (magnetic[v] - load[v]) / problem.thickness_m())?;
         }
         if residual.abs() > tolerance_a {
             return Err(EddyError::Invalid(
@@ -596,6 +604,43 @@ fn admit_algebraic(
         }
     }
     Ok(())
+}
+
+struct EddyHeat {
+    cells: Vec<EddyCellHeat>,
+    heat_j: f64,
+    region_currents_a: Vec<(u32, f64)>,
+}
+fn heat_cells(
+    conduction: &Conduction,
+    conductors: &[EddyConductor],
+    increments: &[f64],
+    dt: f64,
+    thickness_m: f64,
+    current_tolerance_a: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<EddyHeat, EddyError> {
+    let cancel = RefCell::new(&mut *cancelled);
+    let heat = conduction.heat(increments, dt, thickness_m, current_tolerance_a, &|| {
+        (*cancel.borrow_mut())()
+    })?;
+    let cells = conductors
+        .iter()
+        .zip(heat.cells)
+        .map(|(source, cell)| EddyCellHeat {
+            source: source.clone(),
+            electric_field_v_m: cell.electric_field_v_m,
+            current_density_a_m2: cell.current_density_a_m2,
+            volume_m3: cell.volume_m3,
+            power_w: cell.power_w,
+            heat_j: cell.heat_j,
+        })
+        .collect();
+    Ok(EddyHeat {
+        cells,
+        heat_j: heat.heat_j,
+        region_currents_a: heat.region_currents_a,
+    })
 }
 
 impl<'m> PlanarEddy<'m> {
@@ -743,8 +788,14 @@ impl<'m> PlanarEddy<'m> {
         limits: EddyControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
-        self.step_with_owner(target_s, self.problem.clone(), conductors,
-            impressed_jz_a_m2, limits, cancelled)
+        self.step_with_owner(
+            target_s,
+            self.problem.clone(),
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            cancelled,
+        )
     }
 
     /// Reassemble the SAME mesh at source-pinned endpoint temperatures and
@@ -767,16 +818,24 @@ impl<'m> PlanarEddy<'m> {
     ) -> Result<PlanarEddyCandidate<'m>, EddyError> {
         poll(cancelled)?;
         if materials.len() != self.problem.materials.len() {
-            return Err(EddyError::Invalid("complete original magnetic material correspondence required"));
+            return Err(EddyError::Invalid(
+                "complete original magnetic material correspondence required",
+            ));
         }
         for (before, after) in self.problem.materials.iter().zip(&materials) {
             poll(cancelled)?;
             admit_magnetic_temperature_refresh(before, after)?;
         }
-        let problem = PlanarMagnetostatics::new(self.problem.mesh.clone(), materials,
-            assembly, cancelled)?;
-        self.step_with_owner(target_s, MagneticOwner::Owned(Arc::new(problem)),
-            conductors, impressed_jz_a_m2, limits, cancelled)
+        let problem =
+            PlanarMagnetostatics::new(self.problem.mesh.clone(), materials, assembly, cancelled)?;
+        self.step_with_owner(
+            target_s,
+            MagneticOwner::Owned(Arc::new(problem)),
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            cancelled,
+        )
     }
 
     fn step_with_owner(
@@ -800,10 +859,14 @@ impl<'m> PlanarEddy<'m> {
                 "positive representable interval and complete finite impressed current required",
             ));
         }
-        let (conductors, conduction) =
-            bind(&next_problem, conductors, Some(&self.conductors), cancelled)?;
+        let (conductors, conduction) = bind(
+            &*next_problem,
+            conductors,
+            Some(&self.conductors),
+            cancelled,
+        )?;
         let endpoint_load = load(
-            &next_problem,
+            &*next_problem,
             impressed_jz_a_m2,
             &self.components,
             limits.current_balance_tolerance_a,
@@ -816,7 +879,7 @@ impl<'m> PlanarEddy<'m> {
             .map(|(&a, &b)| f64::midpoint(a, b))
             .collect();
         let loads = load(
-            &next_problem,
+            &*next_problem,
             &midpoint_current,
             &self.components,
             limits.current_balance_tolerance_a,
@@ -829,12 +892,17 @@ impl<'m> PlanarEddy<'m> {
             cancelled,
         )?;
         let refreshed_old_magnetic = magnetic_load(
-            &next_problem, &self.potential_wb_m, &self.components, cancelled,
+            &next_problem,
+            &self.potential_wb_m,
+            &self.components,
+            cancelled,
         )?;
         let mut rhs = Vec::with_capacity(self.free.len());
         for &v in &self.free {
             poll(cancelled)?;
-            rhs.push(finite(loads[v] - f64::midpoint(old_magnetic[v], refreshed_old_magnetic[v]))?);
+            rhs.push(finite(
+                loads[v] - f64::midpoint(old_magnetic[v], refreshed_old_magnetic[v]),
+            )?);
         }
         let mut potential = self.potential_wb_m.clone();
         let report = if self.free.is_empty() {
@@ -923,7 +991,7 @@ impl<'m> PlanarEddy<'m> {
         };
         let new_magnetic = magnetic_load(&next_problem, &potential, &self.components, cancelled)?;
         admit_algebraic(
-            &next_problem,
+            &*next_problem,
             &new_magnetic,
             &endpoint_load,
             &self.algebraic,
@@ -936,19 +1004,26 @@ impl<'m> PlanarEddy<'m> {
         let mut parameter_work_j = 0.0;
         for triangle in 0..next_problem.materials.len() {
             poll(cancelled)?;
-            let volume_m3 = next_problem.mesh.face_measure(triangle)
+            let volume_m3 = next_problem
+                .mesh
+                .face_measure(triangle)
                 .ok_or(EddyError::Invalid("missing magnetic volume"))?;
             let b0 = old_field.magnetic_flux_density_t()[triangle];
             let b1 = field.magnetic_flux_density_t()[triangle];
             let mu0 = self.problem.permeability_h_m[triangle];
             let mu1 = next_problem.permeability_h_m[triangle];
-            let parameter = finite(0.5 * volume_m3 * (b0[0]*b1[0] + b0[1]*b1[1])
-                * (mu1.recip()-mu0.recip()))?;
+            let parameter = finite(
+                0.5 * volume_m3 * (b0[0] * b1[0] + b0[1] * b1[1]) * (mu1.recip() - mu0.recip()),
+            )?;
             parameter_work_j = finite(parameter_work_j + parameter)?;
             magnetic_cells.push(EddyMagneticCell {
-                triangle, volume_m3, flux_density_t: [b0,b1],
-                free_energy_j: [finite(0.5*volume_m3*(b0[0]*b0[0]+b0[1]*b0[1])/mu0)?,
-                    finite(0.5*volume_m3*(b1[0]*b1[0]+b1[1]*b1[1])/mu1)?],
+                triangle,
+                volume_m3,
+                flux_density_t: [b0, b1],
+                free_energy_j: [
+                    finite(0.5 * volume_m3 * (b0[0] * b0[0] + b0[1] * b0[1]) / mu0)?,
+                    finite(0.5 * volume_m3 * (b1[0] * b1[0] + b1[1] * b1[1]) / mu1)?,
+                ],
                 parameter_work_j: parameter,
             });
         }
@@ -957,68 +1032,22 @@ impl<'m> PlanarEddy<'m> {
             .zip(&self.potential_wb_m)
             .map(|(a, b)| a - b)
             .collect();
-        let means = {
-            let cancel = RefCell::new(&mut *cancelled);
-            conduction
-                .means(&increments, &|| (*cancel.borrow_mut())())
-                .ok_or(EddyError::Cancelled)?
-        };
-        let mut cells = Vec::with_capacity(conductors.len());
-        let mut net_current = vec![0.0; conduction.regions.len()];
-        let mut heat_j = 0.0;
-        for (source, cell) in conductors.iter().zip(&conduction.cells) {
-            poll(cancelled)?;
-            let anchor = increments[conduction.anchors[cell.group]];
-            let electric_field_v_m = cell
-                .vertices
-                .map(|v| -((increments[v] - anchor) - means[cell.group]) / dt);
-            let sigma = source.conductor.resistivity_ohm_m().recip();
-            let current_density_a_m2 = electric_field_v_m.map(|e| sigma * e);
-            let volume_m3 = self
-                .problem
-                .mesh
-                .face_measure(source.triangle)
-                .ok_or(EddyError::Invalid("missing conductor volume"))?;
-            let e_sum = electric_field_v_m.iter().sum::<f64>();
-            let power_w = finite(
-                cell.sigma_volume / 12.0
-                    * (e_sum * e_sum + electric_field_v_m.iter().map(|e| e * e).sum::<f64>()),
-            )?;
-            let heat = finite(power_w * dt)?;
-            if current_density_a_m2.iter().any(|v| !v.is_finite())
-                || power_w < 0.0
-                || electric_field_v_m != [0.0; 3] && power_w == 0.0
-                || power_w != 0.0 && heat == 0.0
-            {
-                return Err(EddyError::Balance(
-                    "represented eddy heat is not finite and nonnegative",
-                ));
-            }
-            net_current[cell.group] = finite(
-                net_current[cell.group]
-                    + current_density_a_m2.iter().sum::<f64>() / 3.0 * volume_m3
-                        / self.problem.thickness_m,
-            )?;
-            heat_j = finite(heat_j + heat)?;
-            cells.push(EddyCellHeat {
-                source: source.clone(),
-                electric_field_v_m,
-                current_density_a_m2,
-                volume_m3,
-                power_w,
-                heat_j: heat,
-            });
-        }
-        if net_current
-            .iter()
-            .any(|i| i.abs() > limits.current_balance_tolerance_a)
-        {
-            return Err(EddyError::Balance(
-                "floating conductor has unresolved net axial current",
-            ));
-        }
+        let EddyHeat {
+            cells,
+            heat_j,
+            region_currents_a,
+        } = heat_cells(
+            &conduction,
+            &conductors,
+            &increments,
+            dt,
+            self.problem.thickness_m,
+            limits.current_balance_tolerance_a,
+            cancelled,
+        )?;
         let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;
-        let energy_residual_j = finite(field.energy_j - self.energy_j + heat_j - supplied_work_j - parameter_work_j)?;
+        let energy_residual_j =
+            finite(field.energy_j - self.energy_j + heat_j - supplied_work_j - parameter_work_j)?;
         if energy_residual_j.abs() > limits.energy_tolerance_j {
             return Err(EddyError::Balance(
                 "magnetic storage, spatial eddy heat and impressed-source work do not close",
@@ -1033,7 +1062,7 @@ impl<'m> PlanarEddy<'m> {
             supplied_work_j,
             parameter_work_j,
             energy_residual_j,
-            region_currents_a: conduction.regions.into_iter().zip(net_current).collect(),
+            region_currents_a,
             report,
         };
         let energy_j = field.energy_j;
@@ -1053,4 +1082,3 @@ impl<'m> PlanarEddy<'m> {
         Ok(PlanarEddyCandidate { state, step })
     }
 }
-

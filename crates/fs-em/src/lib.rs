@@ -32,6 +32,9 @@
 //! with source-integrated energy and the same Hodge, gauge and transfer owners.
 //! Its nonlinear fields can drive existing imposed-field flow consumers; they
 //! do not acquire the linear winding/induction superposition assumptions.
+//! `planar::eddy::nonlinear` evolves those same H(B) fields with the original
+//! floating-conductor projection and spatial Joule heating. Its backward-Euler
+//! numerical dissipation is explicit and is never relabeled as material heat.
 //! [`force`] transfers a static field's closed exterior Maxwell-stress integral
 //! to the existing mechanical wrench owner, including admitted enclosed recoil
 //! magnets. Its contour remains in an induced-linear exterior medium; it does

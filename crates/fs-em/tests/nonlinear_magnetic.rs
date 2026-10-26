@@ -168,6 +168,88 @@ fn exact_source_energy_and_tangent_include_every_saturation_segment() {
 }
 
 #[test]
+fn frozen_nonlinear_refresh_checks_source_identity_context_and_complete_support() {
+    let source = curve(&[(0.0, 0.0), (1.0, 1.0), (4.0, 13.0)]);
+    let law = law(&source);
+    let hot = law
+        .material()
+        .at_query_point(&source, &point(400.0))
+        .unwrap();
+    law.admit_fixed_material_refresh(&hot).unwrap();
+    let changed_field = law
+        .material()
+        .at_query_point(&source, &point(300.0).with("B", 0.25).unwrap())
+        .unwrap();
+    assert!(law.admit_fixed_material_refresh(&changed_field).is_err());
+    assert!(
+        law.material()
+            .at_query_point(&source, &point(501.0))
+            .is_err()
+    );
+    let other_source = curve(&[(0.0, 0.0), (4.0, 4.0)]);
+    let other = ReversibleMagneticMaterial::resolve(
+        &other_source,
+        &point(300.0),
+        "B",
+        4.0,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert!(law.admit_fixed_material_refresh(other.material()).is_err());
+    near(
+        law.bregman_density_j_m3([0.5, 0.0], [2.0, 0.0]).unwrap(),
+        4.125,
+    );
+    near(
+        law.bregman_density_j_m3([2.0, 0.0], [0.5, 0.0]).unwrap(),
+        2.625,
+    );
+    assert!(law.bregman_density_j_m3([4.1, 0.0], [0.0; 2]).is_err());
+    assert!(law.bregman_density_j_m3([0.0; 2], [f64::NAN, 0.0]).is_err());
+}
+
+#[test]
+fn temperature_dependent_magnetic_source_cannot_hide_work_in_equal_endpoint_values() {
+    let source = card(
+        PropertyValue::Surface2D {
+            axes: ["B".into(), "T".into()],
+            axis_dims: [FLUX_DENSITY_DIMS, Temperature::DIMS],
+            samples: vec![
+                ([0.0, 200.0], 0.0),
+                ([4.0, 200.0], 4.0),
+                ([0.0, 350.0], 0.0),
+                ([4.0, 350.0], 8.0),
+                ([0.0, 500.0], 0.0),
+                ([4.0, 500.0], 4.0),
+            ],
+            triangles: vec![[0, 1, 3], [0, 3, 2], [2, 3, 5], [2, 5, 4]],
+            dims: FIELD_STRENGTH_DIMS,
+        },
+        InterpolationPolicy::LinearInside,
+    );
+    let law = ReversibleMagneticMaterial::resolve(
+        &source,
+        &point(200.0),
+        "B",
+        4.0,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let hot = law
+        .material()
+        .at_query_point(&source, &point(500.0))
+        .unwrap();
+    assert_eq!(
+        hot.property(REVERSIBLE_FIELD_STRENGTH_PROPERTY)
+            .unwrap()
+            .value_si(),
+        0.0
+    );
+    assert!(law.admit_fixed_material_refresh(&hot).is_err());
+    law.admit_fixed_material_refresh(law.material()).unwrap();
+}
+
+#[test]
 fn changing_only_the_source_curve_changes_the_solved_field_and_energy() {
     let straight = law(&curve(&[(0.0, 0.0), (4.0, 4.0)]));
     let saturated = law(&curve(&[(0.0, 0.0), (1.0, 1.0), (4.0, 13.0)]));

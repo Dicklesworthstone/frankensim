@@ -22,8 +22,9 @@ use fs_material::{
 };
 use fs_qty::Dims;
 use fs_rep_mesh::{Metric2, TriComplex2};
-use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg};
+use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, LinearOp, checked_cg};
 use fs_sparse::{Csr, precond::IdentityPrecond};
+use std::cell::{Cell, RefCell};
 
 /// An explicit per-triangle physical law, retaining its original source owner.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +35,13 @@ pub enum IsotropicMagneticMaterial {
     Reversible(ReversibleMagneticMaterial),
 }
 impl IsotropicMagneticMaterial {
+    /// Immutable source snapshot of this physical law (H(B) is anchored at B=0).
+    pub fn material(&self) -> &ResolvedMaterialStatePoint {
+        match self {
+            Self::Linear(material) => material,
+            Self::Reversible(law) => law.material(),
+        }
+    }
     fn response(&self, b: f64) -> Result<ReversibleMagneticResponse, MagneticError> {
         match self {
             Self::Reversible(law) => law.evaluate(b).map_err(MagneticError::Material),
@@ -139,6 +147,51 @@ struct Evaluation {
     objective: f64,
 }
 
+// A positive quadratic contribution supplied by another physical owner, e.g.
+// the SAME conductor projection C_sigma/dt in a backward-Euler induction step.
+// It contributes residual, tangent and objective together; the magnetic source
+// law, FEEC assembly, Newton iteration and checked CG are not duplicated.
+pub(crate) trait PositiveQuadratic {
+    fn reference(&self) -> &[f64];
+    fn apply(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), MagneticError>;
+}
+struct Tangent<'a> {
+    magnetic: CsrOp,
+    quadratic: Option<&'a dyn PositiveQuadratic>,
+    free: &'a [usize],
+    full_len: usize,
+    cancelled: &'a dyn Fn() -> bool,
+    failure: &'a RefCell<Option<MagneticError>>,
+}
+impl LinearOp for Tangent<'_> {
+    fn n(&self) -> usize {
+        self.free.len()
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        self.magnetic.apply(x, y);
+        if let Some(quadratic) = self.quadratic {
+            let mut full = vec![0.0; self.full_len];
+            let mut applied = vec![0.0; self.full_len];
+            for (&v, &value) in self.free.iter().zip(x) {
+                full[v] = value;
+            }
+            if let Err(error) = quadratic.apply(&full, &mut applied, self.cancelled) {
+                *self.failure.borrow_mut() = Some(error);
+                y.fill(f64::NAN);
+                return;
+            }
+            for (value, &v) in y.iter_mut().zip(self.free) {
+                *value += applied[v];
+            }
+        }
+    }
+}
+
 fn weighted_error(error: WeightedError) -> MagneticError {
     match error {
         WeightedError::Cancelled => MagneticError::Cancelled,
@@ -216,12 +269,16 @@ impl PlanarNonlinearMagnetostatics {
     pub fn materials(&self) -> &[IsotropicMagneticMaterial] {
         &self.materials
     }
+    pub(crate) fn thickness_m(&self) -> f64 {
+        self.thickness_m
+    }
 
     fn evaluate(
         &self,
         potential: &[f64],
         rhs: &[f64],
         gauge: f64,
+        quadratic: Option<&dyn PositiveQuadratic>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Evaluation, NonlinearMagneticError> {
         let count = self.materials.len();
@@ -299,7 +356,58 @@ impl PlanarNonlinearMagnetostatics {
         for (&load, &value) in rhs.iter().zip(potential) {
             result.objective = finite((-load).mul_add(value - gauge, result.objective))?;
         }
+        if let Some(quadratic) = quadratic {
+            let increment = potential
+                .iter()
+                .zip(quadratic.reference())
+                .map(|(value, reference)| finite(value - reference))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut applied = vec![0.0; potential.len()];
+            let cancel = RefCell::new(&mut *cancelled);
+            quadratic.apply(&increment, &mut applied, &|| (*cancel.borrow_mut())())?;
+            for (v, (&delta, &effort)) in increment.iter().zip(&applied).enumerate() {
+                result.residual[v] = finite(result.residual[v] + effort)?;
+                result.objective = finite((0.5 * delta).mul_add(effort, result.objective))?;
+            }
+        }
         Ok(result)
+    }
+
+    pub(crate) fn magnetic_load(
+        &self,
+        potential: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, NonlinearMagneticError> {
+        Ok(self
+            .evaluate(potential, &vec![0.0; potential.len()], 0.0, None, cancelled)?
+            .residual)
+    }
+
+    pub(crate) fn recover(
+        &self,
+        potential: Vec<f64>,
+        report: NonlinearMagneticReport,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarNonlinearField<'_>, NonlinearMagneticError> {
+        let evaluation = self.evaluate(
+            &potential,
+            &vec![0.0; potential.len()],
+            0.0,
+            None,
+            cancelled,
+        )?;
+        poll(cancelled)?;
+        Ok(PlanarNonlinearField {
+            problem: self,
+            potential_wb_m: potential,
+            magnetic_flux_density_t: evaluation.b,
+            magnetic_field_a_m: evaluation.h,
+            cell_energy_j: evaluation.energies,
+            cell_coenergy_j: evaluation.coenergies,
+            energy_j: evaluation.energy,
+            coenergy_j: evaluation.coenergy,
+            report,
+        })
     }
 
     /// Solve the physical nonlinear residual with source-derived Newton tangents.
@@ -319,11 +427,53 @@ impl PlanarNonlinearMagnetostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarNonlinearField<'_>, NonlinearMagneticError> {
         poll(cancelled)?;
-        let n = self.mesh.vertices().len();
         if current_density_a_m2.len() != self.mesh.faces().len()
             || current_density_a_m2.iter().any(|v| !v.is_finite())
+        {
+            return Err(
+                MagneticError::Invalid("complete finite impressed current required").into(),
+            );
+        }
+        let mut rhs = vec![0.0; self.mesh.vertices().len()];
+        for (triangle, face) in self.mesh.faces().iter().enumerate() {
+            poll(cancelled)?;
+            let volume = self
+                .mesh
+                .face_measure(triangle)
+                .ok_or(MagneticError::Invalid("missing triangle measure"))?;
+            let load = finite(current_density_a_m2[triangle] * (volume / 3.0))?;
+            for &v in face {
+                rhs[v as usize] = finite(rhs[v as usize] + load)?;
+            }
+        }
+        self.solve_loaded(
+            &rhs,
+            boundary_potential_wb_m,
+            initial_potential_wb_m,
+            None,
+            controls,
+            cancelled,
+        )
+    }
+
+    pub(crate) fn solve_loaded(
+        &self,
+        rhs: &[f64],
+        boundary_potential_wb_m: &[(usize, f64)],
+        initial_potential_wb_m: &[f64],
+        quadratic: Option<&dyn PositiveQuadratic>,
+        controls: NonlinearMagneticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarNonlinearField<'_>, NonlinearMagneticError> {
+        poll(cancelled)?;
+        let n = self.mesh.vertices().len();
+        if rhs.len() != n
+            || rhs.iter().any(|v| !v.is_finite())
             || initial_potential_wb_m.len() != n
             || initial_potential_wb_m.iter().any(|v| !v.is_finite())
+            || quadratic.is_some_and(|q| {
+                q.reference().len() != n || q.reference().iter().any(|v| !v.is_finite())
+            })
             || !controls.absolute_residual_tolerance_a_m.is_finite()
             || controls.absolute_residual_tolerance_a_m <= 0.0
             || !controls.relative_residual_tolerance.is_finite()
@@ -358,20 +508,8 @@ impl PlanarNonlinearMagnetostatics {
         for (i, &v) in free.iter().enumerate() {
             index[v] = i;
         }
-        let mut rhs = vec![0.0; n];
-        for (triangle, face) in self.mesh.faces().iter().enumerate() {
-            poll(cancelled)?;
-            let volume = self
-                .mesh
-                .face_measure(triangle)
-                .ok_or(MagneticError::Invalid("missing triangle measure"))?;
-            let load = finite(current_density_a_m2[triangle] * (volume / 3.0))?;
-            for &v in face {
-                rhs[v as usize] = finite(rhs[v as usize] + load)?;
-            }
-        }
         let mut potential = initial_potential_wb_m.to_vec();
-        let mut evaluation = self.evaluate(&potential, &rhs, gauge, cancelled)?;
+        let mut evaluation = self.evaluate(&potential, rhs, gauge, quadratic, cancelled)?;
         let initial_norm = norm(free.iter().map(|&v| evaluation.residual[v]));
         let reference_norm = initial_norm.max(norm(free.iter().map(|&v| rhs[v])));
         let target = controls.absolute_residual_tolerance_a_m.max(finite(
@@ -429,17 +567,47 @@ impl PlanarNonlinearMagnetostatics {
             }
             let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
             let direction_rhs: Vec<_> = free.iter().map(|&v| -evaluation.residual[v]).collect();
-            let direction = checked_cg(
-                &CsrOp::symmetric(matrix),
-                &IdentityPrecond,
-                &direction_rhs,
-                controls.linear,
-                |_| poll(cancelled),
-            )
-            .map_err(|error| match error {
-                CheckedCgError::InvalidInput(why) => MagneticError::Invalid(why),
-                CheckedCgError::Interrupted(error) => error,
-            })?;
+            let direction = {
+                let cancel = RefCell::new(&mut *cancelled);
+                let interrupted = Cell::new(false);
+                let check = || {
+                    if interrupted.get() || (*cancel.borrow_mut())() {
+                        interrupted.set(true);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                let failure = RefCell::new(None);
+                let tangent = Tangent {
+                    magnetic: CsrOp::symmetric(matrix),
+                    quadratic,
+                    free: &free,
+                    full_len: n,
+                    cancelled: &check,
+                    failure: &failure,
+                };
+                let result = checked_cg(
+                    &tangent,
+                    &IdentityPrecond,
+                    &direction_rhs,
+                    controls.linear,
+                    |_| {
+                        if check() {
+                            Err(MagneticError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                if let Some(error) = failure.into_inner() {
+                    return Err(error.into());
+                }
+                result.map_err(|error| match error {
+                    CheckedCgError::InvalidInput(why) => MagneticError::Invalid(why),
+                    CheckedCgError::Interrupted(error) => error,
+                })?
+            };
             if !direction.report.converged_euclidean() {
                 return Err(MagneticError::Nonconvergence(direction.report).into());
             }
@@ -462,7 +630,7 @@ impl PlanarNonlinearMagnetostatics {
                 for (&v, &delta) in free.iter().zip(&direction.x) {
                     trial[v] = finite(alpha.mul_add(delta, potential[v]))?;
                 }
-                match self.evaluate(&trial, &rhs, gauge, cancelled) {
+                match self.evaluate(&trial, rhs, gauge, quadratic, cancelled) {
                     Ok(next) => {
                         let residual = norm(free.iter().map(|&v| next.residual[v]));
                         if residual <= target
@@ -500,9 +668,9 @@ pub struct PlanarNonlinearField<'a> {
     coenergy_j: f64,
     report: NonlinearMagneticReport,
 }
-impl PlanarNonlinearField<'_> {
+impl<'a> PlanarNonlinearField<'a> {
     /// Exact immutable geometry and source owner that produced this field.
-    pub fn problem(&self) -> &PlanarNonlinearMagnetostatics {
+    pub fn problem(&self) -> &'a PlanarNonlinearMagnetostatics {
         self.problem
     }
     /// Nodal A_z [Wb/m], preserving original vertex order.

@@ -326,3 +326,47 @@ thermal work are not inferred. `tests/electrostatic.rs` covers analytic layered
 dielectrics, volume-charge/electrode Gauss balance, voltage-offset and energy
 identities, native RC response, source-state refresh, and explicit refusals using
 synthetic claims rather than measured material qualification.
+
+## Nonlinear reversible induction and spatial Ohmic heat
+
+`planar::eddy::nonlinear::PlanarNonlinearEddy` retains the actual source-bound
+P1 field, electrical regions, fixed boundary trace and physical clock. Its
+backward-Euler endpoint equation is `F_H(A_next) + C_sigma delta A/dt = load(J_next)`.
+The same material H(B) response, FEEC tangent, bounded Newton/Armijo search and
+checked CG used by the nonlinear static owner solve this positive variational
+problem. The induction term contributes its quadratic objective, residual and
+tangent together. No second magnetic solver or inferred permeability is used.
+
+Linear midpoint and nonlinear backward-Euler histories share conductor source
+admission, connected-region topology, isolated-current projection, complete
+electrical roles, balanced impressed-current loads and algebraic constraints.
+They also share the exact consistent-P1 `sigma E_z^2` integration. Every output
+`EddyCellHeat` retains its original source, triangle, nodal E/J, volume, power
+and heat. A conductivity refresh pins the complete original card, requirements,
+coordinate schema, source selection and electrical basis. Nonlinear conductors
+also retain the H(B) claim. A temperature change is admitted only when the full
+original H(B) range is still supported and its constitutive law is unchanged;
+temperature-dependent magnetization requires a different parameter-work owner.
+
+The source-integrated endpoint energies satisfy
+`delta psi + Joule heat + numerical dissipation = endpoint impressed work`.
+The separately reported numerical term is the nonnegative magnetic Bregman
+loss `V*(H_next dot (B_next-B_old) - (psi_next-psi_old))`. It uses the original
+positive source slopes and angular convexity to avoid cancellation; the linear
+limit is `V*|B_next-B_old|^2/(2*mu)`. This is time-discretization loss and MUST NOT
+heat receiving material. Only the existing spatial Joule account is deposited.
+Per-cell and total numerical losses, actual source work and the full nonlinear
+residual remain visible. Failure of source support, nonlinear budget, current
+balance, energy accounting or cancellation returns no candidate replacement.
+
+This is a first-order stationary, isotropic, reversible magnetoquasistatic
+section with fixed magnetic law and fixed geometry. It does not add hysteresis,
+remanence evolution, conductor motion, terminal-circuit feedback or magnetic
+thermal parameter work. A recovered transient field uses the existing explicit
+position/frame transfer without re-solving static equilibrium. Synthetic
+`nonlinear_eddy` tests cover independent P1 decay, material-data substitution,
+Joule/numerical separation, time refinement, conductivity refresh, balanced
+excitation through conducting/insulating cells, source refusal and rollback.
+The std-only production conduction leaf also has direct analytical projection,
+power, floating-current and gauge/reversal tests; those leaf results do not
+establish execution of the complete material/mesh/Newton integration.

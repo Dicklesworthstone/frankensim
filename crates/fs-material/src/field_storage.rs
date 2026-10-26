@@ -157,6 +157,18 @@ pub fn admit_magnetic_temperature_refresh(
     prepared: &ResolvedMaterialStatePoint,
     refreshed: &ResolvedMaterialStatePoint,
 ) -> Result<(), FieldStorageError> {
+    admit_source_temperature_refresh(prepared, refreshed)?;
+    linear_magnetic_permeability(prepared)?;
+    linear_magnetic_permeability(refreshed)?;
+    Ok(())
+}
+
+// One source/context continuity rule for linear and nonlinear field owners.
+// Constitutive admission and parameter work remain each caller's responsibility.
+pub(super) fn admit_source_temperature_refresh(
+    prepared: &ResolvedMaterialStatePoint,
+    refreshed: &ResolvedMaterialStatePoint,
+) -> Result<(), FieldStorageError> {
     use fs_qty::{Temperature, semantic::{QuantityKind, ValueForm}};
     use FieldStorageError::Invalid;
     if prepared.card_identity() != refreshed.card_identity()
@@ -189,8 +201,6 @@ pub fn admit_magnetic_temperature_refresh(
         }
     }
     if temperatures > 1 { return Err(Invalid("magnetic temperature coordinate is ambiguous")); }
-    linear_magnetic_permeability(prepared)?;
-    linear_magnetic_permeability(refreshed)?;
     Ok(())
 }
 
