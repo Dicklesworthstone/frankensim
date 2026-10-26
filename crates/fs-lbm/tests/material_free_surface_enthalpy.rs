@@ -21,6 +21,10 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "material_free_surface_enthalpy/conduction.rs"]
+mod conduction;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [

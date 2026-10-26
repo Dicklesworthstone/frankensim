@@ -89,3 +89,39 @@ spread, outlet energy, subsequent viscosity-driven flow and the actual CFL
 substeps; a graded-cell series-resistance/mass balance; and atomic refusal for
 partial coverage, parallel/competing ownership and stale source epochs. These
 remain numerical coupling fixtures, not experimentally qualified material laws.
+
+## Conducting liquid with a moving free surface
+
+`MaterialFreeSurfaceEnthalpy3::step_with_conduction`, enabled by the existing
+`fs-lbm/enthalpy-coupling` feature, now connects source `k(T)` to the native
+free-surface momentum and extensive-enthalpy transport. The original
+`step`/`step_with_heat` path remains available. This entry first advances the
+actual positive VOF cell masses and the original same-card caloric chart on
+`fs_thermal::enthalpy::DepositionSimulation`. The existing thermal owner applies
+opposite face heat, chooses its explicit CFL substeps and audits storage. Each
+substep re-evaluates the original pinned liquid claims at its actual temperature.
+The accepted thermal field then supplies local viscosity to the original native
+collision and mass-carried enthalpy step. Both stages cover one flow interval.
+
+Each `FreeSurfaceConductionFace` supplies two adjacent occupied cells, their
+actual wetted contact area and both liquid-centroid distances to that face.
+Conductance uses the shared series-resistance law and both source conductivities.
+The area must fit the Cartesian face; duplicate faces, nonpositive distances
+and endpoints without positive native liquid mass refuse. Undeclared faces are
+explicitly insulated. No averaged fill fraction invents a wetted contact, gas
+heat transfer or ambient surface. Supply updated physical geometry on each call.
+
+The report distinguishes the last applied source samples from the thermal
+endpoint before VOF advection. Internal conduction is absent from external heat;
+explicit `FreeSurfaceCellHeat` inputs are delivered uniformly over this interval
+and counted once. The combined audit retains the original pre-thermal enthalpy.
+No heat, flow, conversion, source history or transport state commits unless both
+stages and their endpoint sources pass, including work and cancellation checks.
+
+This first-order thermal/flow split needs time refinement for nonlinear feedback.
+It retains constant density, one admitted liquid phase and neglected capillarity;
+phase-volume change, surface energy, pressure work and viscous heating remain
+separate physical owners. The focused `material_free_surface_enthalpy` integration
+target adds an independent two-cell nonlinear-conductivity balance, a
+conductivity-only card swap affecting actual native momentum, external-source
+accounting and atomic failure/retry regressions under `enthalpy-coupling`.

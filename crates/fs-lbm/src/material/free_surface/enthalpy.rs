@@ -7,8 +7,9 @@
 //! owner solves that transport; no velocity-derived second mass flux exists.
 //!
 //! This is the single-liquid, constant-density, stationary-wall rung. Capillary
-//! energy, phase mobility, viscous heat, pressure work and conduction are not
-//! supplied. In particular, h is enthalpy, not internal or total energy. The
+//! energy, phase mobility, viscous heat and pressure work are not supplied.
+//! Optional `conduction` reuses the shared thermal timeline on explicit wetted
+//! face geometry. In particular, h is enthalpy, not internal or total energy. The
 //! incompressible lattice pressure is not a thermodynamic EOS. A negative native
 //! accepted interface/carry mass refuses rather than becoming thermal storage.
 //! A source-domain, numerical-budget or cancellation refusal publishes nothing.
@@ -29,6 +30,10 @@ use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
 mod transport;
+
+/// Source-conductivity exchange on the existing thermal timeline before flow.
+#[cfg(feature = "enthalpy-coupling")]
+pub mod conduction;
 
 /// Explicit bounds for the sparse companion transport.
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +102,9 @@ pub enum FreeSurfaceEnthalpyError {
     Phase(PhaseStateError),
     /// The existing sparse transport solver refused.
     Solve(crate::conjugate::ChtError),
+    /// The existing conservative thermal timeline refused conduction.
+    #[cfg(feature = "enthalpy-coupling")]
+    Thermal(fs_conduction::enthalpy::DepositionError),
     /// Missing physical closure, invalid input or exhausted explicit budget.
     Invalid(&'static str),
 }
@@ -108,6 +116,8 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::Material(e) => write!(f, "free-surface enthalpy source: {e}"),
             Self::Phase(e) => write!(f, "free-surface enthalpy chart: {e}"),
             Self::Solve(e) => write!(f, "free-surface enthalpy solve: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::Thermal(e) => write!(f, "free-surface conduction: {e}"),
             Self::Invalid(e) => write!(f, "free-surface enthalpy: {e}"),
         }
     }
@@ -136,6 +146,16 @@ impl From<PhaseStateError> for FreeSurfaceEnthalpyError {
 impl From<crate::conjugate::ChtError> for FreeSurfaceEnthalpyError {
     fn from(e: crate::conjugate::ChtError) -> Self {
         Self::Solve(e)
+    }
+}
+#[cfg(feature = "enthalpy-coupling")]
+impl From<fs_conduction::enthalpy::DepositionError> for FreeSurfaceEnthalpyError {
+    fn from(e: fs_conduction::enthalpy::DepositionError) -> Self {
+        if e == fs_conduction::enthalpy::DepositionError::Cancelled {
+            FreeSurfaceError3::Cancelled.into()
+        } else {
+            Self::Thermal(e)
+        }
     }
 }
 
@@ -310,7 +330,6 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
-        let before = total(&masses, &self.h, mass_unit)?;
         let mut heated = self.h.clone();
         let mut supplied = BTreeSet::new();
         let mut external = 0.0;
@@ -335,6 +354,28 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if !external.is_finite() {
             return Err(Error::Invalid("total supplied heat overflows"));
         }
+        self.advance_prepared_enthalpy(
+            heated,
+            external,
+            heat.iter().map(|q| q.energy_j.abs()).sum(),
+            gate,
+        )
+    }
+
+    // Both external heating and source-conductivity exchange feed the exact
+    // same native collision/advection/acceptance owner. No thermal stage can
+    // publish before this complete mass and energy candidate succeeds.
+    fn advance_prepared_enthalpy(
+        &mut self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        absolute_heat: f64,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        poll(gate)?;
+        let masses = self.flow.lattice.mass_snapshot();
+        let mass_unit = self.flow.scaling.mass_unit_kg();
+        let before = total(&masses, &self.h, mass_unit)?;
         let (_, tau) = self.resolve_states(&heated, &masses, gate)?;
         // Native activation/conversion and the companion solve operate on one
         // private candidate. No accepted populations, carry or source state move
@@ -350,7 +391,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let defect = after - before - external;
         let scale = absolute_total(&masses, &self.h, mass_unit)?
             + absolute_total(&trace.after, &h, mass_unit)?
-            + heat.iter().map(|q| q.energy_j.abs()).sum::<f64>();
+            + absolute_heat;
         if !defect.is_finite()
             || !scale.is_finite()
             || defect.abs() > self.controls.relative_tolerance * scale
