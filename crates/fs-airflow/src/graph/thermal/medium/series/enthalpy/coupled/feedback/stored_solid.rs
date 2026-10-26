@@ -10,6 +10,8 @@
 //! volume may vary. This is not moving-material transport, pipe residence time,
 //! phase-dependent mechanics, or a complete mechanical-energy certificate.
 
+/// Source-dependent solid interfaces in the same coolant/storage transaction.
+pub mod contact;
 /// Implicit ambient radiation with separately owned external and coolant heat.
 pub mod radiation;
 mod storage;

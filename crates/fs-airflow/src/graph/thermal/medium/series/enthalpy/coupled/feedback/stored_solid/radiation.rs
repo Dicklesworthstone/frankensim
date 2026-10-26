@@ -119,17 +119,7 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
                         performed: enthalpy_solves, maximum: controls.max_total_enthalpy_solves,
                     });
                 }
-                // Refuse undeclared heat ownership before any spatial solve.
-                for (name, condition) in mapped.boundary.region_names().iter()
-                    .zip(mapped.boundary.conditions())
-                {
-                    if matches!(condition, fs_conduction::ThermalBc::Robin { .. })
-                        && !coolant_names.contains(&name.as_str())
-                        && !patch_names.contains(name.as_str())
-                    {
-                        return Err(StoredCoolingError::Invalid("non-coolant Robin heat requires an explicit radiation patch"));
-                    }
-                }
+                admit_heat_ownership(mapped.boundary, &coolant_names, &patch_names)?;
                 let radiation = AmbientRadiationConfig {
                     max_iterations: controls.radiation.max_iterations.min(remaining),
                     ..controls.radiation
@@ -147,16 +137,44 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
     }
 }
 
-fn add_work(total: usize, increment: usize) -> Result<usize, StoredCoolingError> {
+pub(super) fn add_work(total: usize, increment: usize) -> Result<usize, StoredCoolingError> {
     total.checked_add(increment).ok_or(StoredCoolingError::Invalid("radiative thermal work count overflow"))
+}
+
+// Shared by the fixed-contact and source-dependent-contact response owners.
+// A new constitutive response must not invent another destination for heat.
+pub(super) fn admit_heat_ownership(
+    boundary: &ThermalBoundary, coolant_names: &[&str], patch_names: &BTreeSet<&str>,
+) -> Result<(), StoredCoolingError> {
+    for (name, condition) in boundary.region_names().iter().zip(boundary.conditions()) {
+        if matches!(condition, fs_conduction::ThermalBc::Robin { .. })
+            && !coolant_names.contains(&name.as_str())
+            && !patch_names.contains(name.as_str())
+        {
+            return Err(StoredCoolingError::Invalid("non-coolant Robin heat requires an explicit radiation patch"));
+        }
+    }
+    Ok(())
 }
 
 fn partition(
     thermal: EnthalpyRadiationStepSolution, coolant_names: &[&str], patch_names: &BTreeSet<&str>,
 ) -> Result<RadiatingStoredSolidResponse, StoredCoolingError> {
+    let (coolant_robin_fluxes, coolant_out_w, external_convection_out_w) = partition_convection(
+        &thermal.convective_robin_fluxes, coolant_names, patch_names,
+        thermal.radiation.nonlinear_radiation_out_w,
+    )?;
+    Ok(RadiatingStoredSolidResponse { thermal, coolant_robin_fluxes,
+        coolant_out_w, external_convection_out_w })
+}
+
+pub(super) fn partition_convection(
+    fluxes: &[RobinFlux], coolant_names: &[&str], patch_names: &BTreeSet<&str>,
+    radiation_out_w: f64,
+) -> Result<(Vec<RobinFlux>, f64, f64), StoredCoolingError> {
     let mut seen = BTreeSet::new();
     let mut external = 0.0;
-    for flux in &thermal.convective_robin_fluxes {
+    for flux in fluxes {
         if !seen.insert(flux.region.as_str()) || !flux.heat_rate_w.is_finite() {
             return Err(StoredCoolingError::Invalid("duplicate or nonfinite radiative convection record"));
         }
@@ -168,15 +186,14 @@ fn partition(
         }
     }
     let coolant_robin_fluxes: Vec<_> = coolant_names.iter().map(|name| {
-        thermal.convective_robin_fluxes.iter().find(|f| f.region == *name).cloned()
+        fluxes.iter().find(|f| f.region == *name).cloned()
             .ok_or(StoredCoolingError::Invalid("radiative response lost a coolant trace"))
     }).collect::<Result<_, _>>()?;
     let coolant_out_w = coolant_robin_fluxes.iter().map(|f| f.heat_rate_w).sum::<f64>();
     if !external.is_finite() || !coolant_out_w.is_finite()
-        || !(external + thermal.radiation.nonlinear_radiation_out_w).is_finite()
+        || !(external + radiation_out_w).is_finite()
     {
         return Err(StoredCoolingError::Invalid("radiative heat partition is unrepresentable"));
     }
-    Ok(RadiatingStoredSolidResponse { thermal, coolant_robin_fluxes,
-        coolant_out_w, external_convection_out_w: external })
+    Ok((coolant_robin_fluxes, coolant_out_w, external))
 }
