@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	woodwind-exhaled-breath-27c-saturated	Human exhaled breath inside a mouth-played woodwind bore at mean bore temperature 27 C (300.15 K), standard atmospheric pressure 101325 Pa, and water-vapor saturation (RH = 1.0)	Saturated ideal-gas mixture of N2, O2, Ar, CO2 and H2O from the published woodwind breath composition	Coltman (1966 J. Acoust. Soc. Am. 40(1):99-107 p. 101), Nederveen (1969/1998 Acoustical Aspects of Woodwind Instruments sec. 12 p. 28) and Fletcher and Rossing (1998 The Physics of Musical Instruments 2nd ed. sec. 8.1 p. 191) specify that human exhaled breath in a played woodwind bore has mean bore temperature 27 C (300.15 K), is saturated with water vapor (RH = 1.0, p_sat(300.15 K) = 3567 Pa, wet mole fraction x_H2O = 0.0351), and contains 4.5 percent dry CO2 (stated range 2.5 to 4.5 percent CO2 across the breath cycle) with corresponding O2 depletion to 16.5 percent dry (against 20.95 percent in atmospheric dry air; dry N2 = 78.08 percent, dry Ar = 0.93 percent). Combining the dry fractions with x_H2O = 0.0351 at 300.15 K and 101325 Pa gives the five wet mole fractions: N2 0.7534, O2 0.1591, Ar 0.0090, CO2 0.0434, H2O 0.0351 (exact unit sum 1.0000). Evaluated through the shared named-species gas mixture owner, this state has density 1.1782 kg/m3 and sound speed 345.359 m/s (-18.8 cents relative to CO2-free moist air at 27 C and RH = 1.0 where c = 349.264 m/s). Axial temperature gradients from the mouthpiece or embouchure to the bell are not included in this uniform mean-bore state.
+scalar	temperature	woodwind-exhaled-breath-27c-saturated	temperature	300.15	K	constant
+uncertainty	temperature	unstated	-	-	-	-
+validity	temperature	temperature	288.15	310.15	K
+validity	temperature	pressure	80000	110000	Pa
+validity	temperature	relative_humidity	1	1	1
+scalar	pressure	woodwind-exhaled-breath-27c-saturated	pressure	101325	Pa	constant
+uncertainty	pressure	unstated	-	-	-	-
+validity	pressure	temperature	288.15	310.15	K
+validity	pressure	pressure	80000	110000	Pa
+validity	pressure	relative_humidity	1	1	1
+scalar	relative-humidity	woodwind-exhaled-breath-27c-saturated	relative_humidity	1	1	constant
+uncertainty	relative-humidity	unstated	-	-	-	-
+validity	relative-humidity	temperature	288.15	310.15	K
+validity	relative-humidity	pressure	80000	110000	Pa
+validity	relative-humidity	relative_humidity	1	1	1
+scalar	dry-co2	woodwind-exhaled-breath-27c-saturated	dry_mole_fraction_co2	0.045	1	constant
+uncertainty	dry-co2	bounded	0.025	0.045	1	published breath-cycle CO2 bracket 2.5 to 4.5 percent dry (Coltman 1966; Nederveen 1969 sec. 12)
+validity	dry-co2	temperature	288.15	310.15	K
+validity	dry-co2	pressure	80000	110000	Pa
+validity	dry-co2	relative_humidity	1	1	1
+scalar	dry-o2	woodwind-exhaled-breath-27c-saturated	dry_mole_fraction_o2	0.165	1	constant
+uncertainty	dry-o2	bounded	0.165	0.185	1	published breath-cycle O2 bracket paired with 2.5 to 4.5 percent dry CO2
+validity	dry-o2	temperature	288.15	310.15	K
+validity	dry-o2	pressure	80000	110000	Pa
+validity	dry-o2	relative_humidity	1	1	1
+scalar	mole-n2	woodwind-exhaled-breath-27c-saturated	mole_fraction_n2	0.7534	1	constant
+uncertainty	mole-n2	unstated	-	-	-	-
+validity	mole-n2	temperature	300.15	300.15	K
+validity	mole-n2	pressure	101325	101325	Pa
+validity	mole-n2	relative_humidity	1	1	1
+scalar	mole-o2	woodwind-exhaled-breath-27c-saturated	mole_fraction_o2	0.1591	1	constant
+uncertainty	mole-o2	unstated	-	-	-	-
+validity	mole-o2	temperature	300.15	300.15	K
+validity	mole-o2	pressure	101325	101325	Pa
+validity	mole-o2	relative_humidity	1	1	1
+scalar	mole-ar	woodwind-exhaled-breath-27c-saturated	mole_fraction_ar	0.0090	1	constant
+uncertainty	mole-ar	unstated	-	-	-	-
+validity	mole-ar	temperature	300.15	300.15	K
+validity	mole-ar	pressure	101325	101325	Pa
+validity	mole-ar	relative_humidity	1	1	1
+scalar	mole-co2	woodwind-exhaled-breath-27c-saturated	mole_fraction_co2	0.0434	1	constant
+uncertainty	mole-co2	unstated	-	-	-	-
+validity	mole-co2	temperature	300.15	300.15	K
+validity	mole-co2	pressure	101325	101325	Pa
+validity	mole-co2	relative_humidity	1	1	1
+scalar	mole-h2o	woodwind-exhaled-breath-27c-saturated	mole_fraction_h2o	0.0351	1	constant
+uncertainty	mole-h2o	unstated	-	-	-	-
+validity	mole-h2o	temperature	300.15	300.15	K
+validity	mole-h2o	pressure	101325	101325	Pa
+validity	mole-h2o	relative_humidity	1	1	1

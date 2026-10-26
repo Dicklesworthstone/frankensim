@@ -284,7 +284,13 @@ def performance(desc, records, pressure):
     rate = int(need(desc, "audio.rate_hz"))
     samples = round(float(need(desc, "audio.duration_s")) * rate)
     reed = reed_record(desc, pressure)
-    if "ambient.composition" in desc:
+    if "ambient.gas_pack" in desc:
+        pack_id = need(desc, "ambient.gas_pack")
+        manifest = os.path.join("data", "matdb", "seed-v1", pack_id, "manifest.tsv")
+        if not os.path.isfile(manifest):
+            refuse(f"missing gas pack manifest {manifest}")
+        ambient = f"pack {pack_id}"
+    elif "ambient.composition" in desc:
         ambient = (
             f"mixture {need(desc, 'ambient.temperature_k')} {need(desc, 'ambient.pressure_pa')} "
             f"{need(desc, 'ambient.composition')}"

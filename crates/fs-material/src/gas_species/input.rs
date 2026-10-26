@@ -313,8 +313,91 @@ fn scalar(fields: &mut SplitAsciiWhitespace<'_>) -> Result<f64, GasInputError> {
 /// mole fractions.
 type ReadGas = (GasState, Option<Vec<(GasSpecies, f64)>>);
 
+const BREATH_WOODWIND_MANIFEST_TSV: &str = include_str!(
+    "../../../../data/matdb/seed-v1/breath-woodwind-exhaled-coltman1966-nederveen1969/manifest.tsv"
+);
+const BREATH_WOODWIND_PROPERTIES_TSV: &str = include_str!(
+    "../../../../data/matdb/seed-v1/breath-woodwind-exhaled-coltman1966-nederveen1969/properties.tsv"
+);
+
+fn resolve_seed_gas_pack(
+    pack_id: &str,
+    inherited_pressure_pa: Option<f64>,
+) -> Result<ReadGas, GasInputError> {
+    let manifest_id = BREATH_WOODWIND_MANIFEST_TSV
+        .lines()
+        .find_map(|line| line.strip_prefix("pack_id\t"))
+        .ok_or(GasInputError::Input("missing pack_id in seed gas manifest"))?;
+    if pack_id != manifest_id {
+        return Err(GasInputError::Input("unknown gas pack id"));
+    }
+    let mut temperature = None;
+    let mut pressure = None;
+    let mut n2 = None;
+    let mut o2 = None;
+    let mut ar = None;
+    let mut co2 = None;
+    let mut h2o = None;
+    for line in BREATH_WOODWIND_PROPERTIES_TSV.lines() {
+        let mut cols = line.split('\t');
+        if cols.next() != Some("scalar") {
+            continue;
+        }
+        let _claim = cols.next();
+        let _obs = cols.next();
+        let Some(prop) = cols.next() else { continue };
+        let Some(val_str) = cols.next() else { continue };
+        let val: f64 = val_str
+            .parse()
+            .map_err(|_| GasInputError::Input("invalid scalar in gas pack properties"))?;
+        match prop {
+            "temperature" => temperature = Some(val),
+            "pressure" => pressure = Some(val),
+            "mole_fraction_n2" => n2 = Some(val),
+            "mole_fraction_o2" => o2 = Some(val),
+            "mole_fraction_ar" => ar = Some(val),
+            "mole_fraction_co2" => co2 = Some(val),
+            "mole_fraction_h2o" => h2o = Some(val),
+            _ => {}
+        }
+    }
+    let temperature = temperature.ok_or(GasInputError::Input("gas pack missing temperature"))?;
+    let pack_pressure = pressure.ok_or(GasInputError::Input("gas pack missing pressure"))?;
+    let pressure = inherited_pressure_pa.unwrap_or(pack_pressure);
+    let species = [
+        GasSpecies::Nitrogen,
+        GasSpecies::Oxygen,
+        GasSpecies::Argon,
+        GasSpecies::CarbonDioxide,
+        GasSpecies::WaterVapor,
+    ];
+    let fractions = vec![
+        n2.ok_or(GasInputError::Input("gas pack missing mole_fraction_n2"))?,
+        o2.ok_or(GasInputError::Input("gas pack missing mole_fraction_o2"))?,
+        ar.ok_or(GasInputError::Input("gas pack missing mole_fraction_ar"))?,
+        co2.ok_or(GasInputError::Input("gas pack missing mole_fraction_co2"))?,
+        h2o.ok_or(GasInputError::Input("gas pack missing mole_fraction_h2o"))?,
+    ];
+    let composition = Composition::new(CompositionBasis::MoleFraction, fractions.clone()).map_err(
+        |error| {
+            GasInputError::Material(MaterialError::Parameters {
+                what: format!("gas pack composition: {error}"),
+            })
+        },
+    )?;
+    let gas = resolve_gas_mixture(&species, &composition, temperature, pressure)
+        .map_err(GasInputError::Material)?;
+    Ok((gas, Some(species.into_iter().zip(fractions).collect())))
+}
+
 fn read(fields: &mut SplitAsciiWhitespace<'_>, inherited: Option<f64>) -> Result<ReadGas, GasInputError> {
-    if fields.clone().next() != Some("mixture") {
+    let first = fields.clone().next();
+    if first == Some("pack") {
+        word(fields)?;
+        let pack_id = word(fields)?;
+        return resolve_seed_gas_pack(pack_id, inherited);
+    }
+    if first != Some("mixture") {
         let temperature = scalar(fields)?;
         let pressure = match inherited { Some(p) => p, None => scalar(fields)? };
         let humidity = scalar(fields)?;
@@ -411,6 +494,24 @@ mod tests {
         assert_eq!(state.pressure, 50000.0);
         // Connected acoustic consumers separately refuse this pressure jump.
         assert!(complete("300 0", Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn seed_breath_woodwind_pack_resolves_identically_to_explicit_mixture() {
+        let mut pack_fields =
+            "pack breath-woodwind-exhaled-coltman1966-nederveen1969".split_ascii_whitespace();
+        let mut mix_fields = "mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351"
+            .split_ascii_whitespace();
+        let pack_rec = read_gas_record(&mut pack_fields, None, None).unwrap();
+        let mix_rec = read_gas_record(&mut mix_fields, None, None).unwrap();
+        assert_eq!(pack_rec, mix_rec);
+        let bad = "pack unknown-breath-pack";
+        let mut bad_fields = bad.split_ascii_whitespace();
+        assert!(read_gas_state(&mut bad_fields, None).is_err());
+        assert_eq!(
+            bad_fields.collect::<Vec<_>>(),
+            bad.split_ascii_whitespace().collect::<Vec<_>>()
+        );
     }
 
     #[test]
