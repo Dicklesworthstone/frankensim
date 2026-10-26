@@ -358,3 +358,27 @@ fn a_stop_that_misses_at_its_actual_endpoint_is_solved_again_and_accepted() {
     assert!(resolved > 0);
     assert_eq!(joint.obstacle_resolves(), resolved);
 }
+
+#[test]
+fn a_declined_rescue_names_the_sweep_failure_it_could_not_converge() {
+    // One joint sweep cannot settle a static bow against a preloaded stop: the
+    // bow's traction moves the stop's closure after its reaction was solved. An
+    // obstacle is present, so the active-set rescue declines; the refusal must
+    // carry that unconverged contact solve, not only the decline.
+    let gate = CancelGate::new_clock_free();
+    let mut joint = friction(network(1000.0))
+        .with_additional_ports(vec![], MultiFrictionConfig { max_ports: 8, max_sweeps: 1, max_setup_terms: 100000 }, &gate)
+        .unwrap().with_obstacles(vec![(obstacle(1.0, -1e-4), normal_limits())], limits(), &gate).unwrap();
+    let before = states(&joint);
+    let error = match joint.step(&[0.0], &[FrictionDrive { speed_m_s: 0.0, normal_force_n: 1.0 }]) {
+        Ok(_) => panic!("one sweep settled a bow against a preloaded stop"),
+        Err(error) => error,
+    };
+    match &error {
+        ModalFrictionError::ActiveSetDeclined { cause } => assert!(
+            matches!(**cause, ModalFrictionError::Network(ModalCouplingError::ContactSolve { .. })), "cause: {cause}"),
+        other => panic!("expected a declined rescue, got {other}"),
+    }
+    assert!(error.to_string().contains("; the joint sweep's last failure: friction network: "), "{error}");
+    assert_eq!(states(&joint), before, "a refused step publishes no motion");
+}

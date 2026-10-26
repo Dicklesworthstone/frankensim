@@ -112,7 +112,10 @@ pub enum ModalFrictionError {
     },
     /// The active-set rescue was not attempted because an obstacle or shear layer
     /// is present on a port; the joint solve refused on its original terms.
-    ActiveSetDeclined,
+    ActiveSetDeclined {
+        /// The joint sweep's own failure at its last sweep: what did not converge.
+        cause: Box<ModalFrictionError>,
+    },
 }
 impl From<ModalCouplingError> for ModalFrictionError {
     fn from(value: ModalCouplingError) -> Self { Self::Network(value) }
@@ -130,8 +133,9 @@ impl core::fmt::Display for ModalFrictionError {
             Self::ActiveSetExhausted { pivots, budget, last_active_set, worst_port, worst_condition, worst_size } => write!(f,
                 "active-set rescue exhausted: {pivots}/{budget} pivots, last active set {last_active_set}, \
                  worst KKT violation at port {worst_port} ({worst_condition}) size {worst_size:e}"),
-            Self::ActiveSetDeclined => write!(f,
-                "active-set rescue not attempted: an obstacle or shear layer is present on a port"),
+            Self::ActiveSetDeclined { cause } => write!(f,
+                "active-set rescue not attempted: an obstacle or shear layer is present on a port; \
+                 the joint sweep's last failure: {cause}"),
         }
     }
 }
