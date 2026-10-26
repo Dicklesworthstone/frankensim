@@ -199,21 +199,26 @@ Data-only material replacements are prepared as a new magnetic/electrical model.
 `OhmicWindingCircuit::rebind_material_candidate` transfers accepted history to
 that model at the same clock. It retains the exact mesh/metric, original
 homogeneous magnetic boundary, signed current profiles, end-inductance model,
-branch correspondence and all nonmagnetic graph data. Every differential flux
-linkage and capacitor charge is preserved bit-for-bit; the native consistency
-solver re-equilibrates algebraic voltages/currents. Incompatible ideal constraints
-refuse instead of creating an unaccounted flux or charge impulse.
-This replacement requires both bases to have no fixed-remanence bias. A biased
-native state stores incremental linkage; conserving total linkage would require
-`delta_lambda_new=delta_lambda_old+lambda0_old-lambda0_new` and material work from
-the changed constant field reference W0. This owner does not supply that work.
+branch correspondence and all nonmagnetic graph data. Every capacitor charge is
+preserved bit-for-bit. Total physical linkage is conserved by translating native
+incremental linkage as `delta_lambda_new=delta_lambda_old+(lambda0_old-lambda0_new)`;
+identical bias retains native linkage bit-for-bit without adding and subtracting
+the larger permanent flux. The native consistency solver re-equilibrates
+algebraic voltages/currents. Incompatible ideal constraints refuse instead of
+creating an unaccounted flux or charge impulse. Both actual endpoint fields must
+satisfy their source recoil envelopes before a replacement is returned.
 
 Replacement adopts the new full mutual-inductance block and spatial conductor
 sources, including a different admitted resistivity/conductivity source basis.
-The signed external work is `lambda^T (L_after^-1-L_before^-1) lambda / 2`,
-independently compared with the native field/capacitor storage change and checked
-against the caller's absolute work bound. The report retains before/after current,
-resistance and source-state identities. No time, source-port work or Joule heat is
+The signed external work is the change in `W0 + delta_lambda^T L^-1 delta_lambda / 2`
+at fixed total linkage. Its incremental part is independently compared with the
+native field/capacitor storage change before adding the bias reference, so large
+W0 cannot mask electrical-accounting errors. The full signed work is checked
+against the caller's absolute work bound. The report retains before/after bias
+and total field/capacitor energy, current, resistance and source-state identities.
+This is work in the declared ZeroFlux/FixedRemanence field potential; it does not
+predict material formation energy, an intermediate replacement trajectory,
+hysteresis or irreversible demagnetization. No time, source-port work or Joule heat is
 advanced. Subsequent original midpoint steps and field sampling use the new
 material basis; resistance-only replacements have zero instantaneous storage work.
 Source, geometry, ideal-constraint, work and late-cancellation refusals publish

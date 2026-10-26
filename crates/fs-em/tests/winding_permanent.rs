@@ -709,56 +709,236 @@ fn affine_bias_storage_is_charged_to_the_existing_capacity_and_has_explicit_admi
 }
 
 #[test]
-fn material_replacement_requires_unbiased_old_and_new_flux_coordinates() {
+fn live_magnet_replacement_conserves_total_flux_charge_and_external_work_then_heats() {
     for (old_br, new_br) in [
         (None, None),
         (Some(0.8), None),
         (None, Some(0.8)),
         (Some(0.8), Some(0.9)),
+        (Some(0.8), Some(0.8)),
     ] {
         let old_problem = problem(old_br, 1e6);
         let new_problem = problem(new_br, 1e6);
+        let mut graph = graph();
+        graph.node_count = 4;
+        // An independent charged capacitor proves the change preserves every
+        // electrical store, not just the affected winding coordinate.
+        graph.branches.extend([
+            (3, 0, Branch::Capacitor { farads: 0.5 }),
+            (3, 0, Branch::Resistor { ohms: 4.0 }),
+        ]);
         let old = basis(&old_problem, vec![profile(PROFILE)], vec![0.04])
-            .into_circuit(graph(), vec![1], &mut || false)
+            .into_circuit(graph.clone(), vec![1], &mut || false)
             .unwrap();
         let new = basis(&new_problem, vec![profile(PROFILE)], vec![0.04])
-            .into_circuit(graph(), vec![1], &mut || false)
+            .into_circuit(graph, vec![1], &mut || false)
             .unwrap();
         let ohmic = OhmicWindingCircuit::new(
             &old,
             conductors(&old, &[2, 3]),
-            0.0,
+            0.2,
             &[0.01],
-            &[],
+            &[0.2],
             &[0.0],
             &mut || false,
         )
         .unwrap();
         let original = ohmic.state().to_vec();
-        let candidate = ohmic.rebind_material_candidate(
+        let controls = WindingMaterialRebindControls {
+            maximum_absolute_work_j: 2.0,
+            energy_tolerance_j: 1e-9,
+        };
+        let (replacement, report) = ohmic
+            .rebind_material_candidate(
+                &new,
+                conductors(&new, &[2, 3]),
+                &[0.0],
+                controls,
+                &mut || false,
+            )
+            .unwrap();
+        let l = 0.04 + active_inductance(PROFILE);
+        let bias = |br: Option<f64>| {
+            PROFILE * HEIGHT * DEPTH * WIDTH * WIDTH * br.unwrap_or(0.0) * 1e-6
+                / (6.0 * (2e-6 + 1e-6))
+        };
+        let bias_energy = |br: Option<f64>| {
+            0.5 * WIDTH * HEIGHT * DEPTH * br.unwrap_or(0.0).powi(2) / (2e-6 + 1e-6)
+        };
+        let expected_current = 0.01 + (bias(old_br) - bias(new_br)) / l;
+        let expected_work = bias_energy(new_br) - bias_energy(old_br)
+            + 0.5 * l * (expected_current.powi(2) - 0.01_f64.powi(2));
+        near(replacement.currents_a().unwrap()[0], expected_current);
+        near(report.supplied_work_j, expected_work);
+        near(
+            report.stored_energy_j[1] - report.stored_energy_j[0],
+            expected_work,
+        );
+        near(report.bias_energy_j[0], bias_energy(old_br));
+        near(report.bias_energy_j[1], bias_energy(new_br));
+        assert!(report.energy_residual_j.abs() < controls.energy_tolerance_j);
+        near(
+            new.total_flux_linkages_wb(replacement.state()).unwrap()[0],
+            old.total_flux_linkages_wb(ohmic.state()).unwrap()[0],
+        );
+        assert_eq!(replacement.time_s(), 0.2);
+        let q = old.dae().charge_index[0];
+        assert_eq!(replacement.state()[q].to_bits(), ohmic.state()[q].to_bits());
+        if old_br == new_br {
+            assert_eq!(report.supplied_work_j, 0.0);
+            let f = old.flux_coordinates()[0];
+            assert_eq!(replacement.state()[f].to_bits(), ohmic.state()[f].to_bits());
+        } else {
+            assert!(matches!(
+                ohmic.rebind_material_candidate(
+                    &new,
+                    conductors(&new, &[2, 3]),
+                    &[0.0],
+                    WindingMaterialRebindControls {
+                        maximum_absolute_work_j: 0.0,
+                        ..controls
+                    },
+                    &mut || false,
+                ),
+                Err(OhmicWindingError::Invalid(
+                    "material replacement exceeds its external work allowance"
+                ))
+            ));
+        }
+        let (reversed, reverse) = replacement
+            .rebind_material_candidate(
+                &old,
+                ohmic.conductors().to_vec(),
+                &[0.0],
+                controls,
+                &mut || false,
+            )
+            .unwrap();
+        near(reverse.supplied_work_j, -expected_work);
+        near(reversed.currents_a().unwrap()[0], 0.01);
+
+        let dt = 0.001;
+        let next = replacement
+            .step_to_candidate(
+                0.2 + dt,
+                replacement.conductors().to_vec(),
+                &[0.0],
+                heat_controls(),
+                &mut || false,
+            )
+            .unwrap();
+        let r = 2.0 + replacement.resistance_ohm()[0];
+        let next_current = expected_current * (l - 0.5 * dt * r) / (l + 0.5 * dt * r);
+        near(next.circuit().currents_a().unwrap()[0], next_current);
+        let current_midpoint = f64::midpoint(expected_current, next_current);
+        near(
+            next.step().cells.iter().map(|cell| cell.heat_j).sum(),
+            dt * replacement.resistance_ohm()[0] * current_midpoint.powi(2),
+        );
+        near(
+            next.step().stored_after_j + report.bias_energy_j[1] + next.step().heat_j,
+            report.stored_energy_j[0] + report.supplied_work_j + next.step().native.supplied,
+        );
+        assert_eq!(ohmic.state(), original);
+        assert_eq!(ohmic.time_s(), 0.2);
+    }
+}
+
+#[test]
+fn magnet_replacement_rejects_an_out_of_domain_recoil_endpoint_without_changing_history() {
+    let old_problem = problem(Some(0.8), 1e6);
+    let new_problem = problem(Some(0.9), 0.5);
+    let old = basis(&old_problem, vec![profile(PROFILE)], vec![0.04])
+        .into_circuit(graph(), vec![1], &mut || false)
+        .unwrap();
+    let new = basis(&new_problem, vec![profile(PROFILE)], vec![0.04])
+        .into_circuit(graph(), vec![1], &mut || false)
+        .unwrap();
+    let ohmic = OhmicWindingCircuit::new(
+        &old,
+        conductors(&old, &[2, 3]),
+        0.0,
+        &[0.1],
+        &[],
+        &[0.0],
+        &mut || false,
+    )
+    .unwrap();
+    let original = ohmic.state().to_vec();
+    assert!(matches!(
+        ohmic.rebind_material_candidate(
             &new,
             conductors(&new, &[2, 3]),
             &[0.0],
             WindingMaterialRebindControls {
-                maximum_absolute_work_j: 0.0,
+                maximum_absolute_work_j: 2.0,
                 energy_tolerance_j: 1e-9,
             },
             &mut || false,
-        );
-        if old_br.is_some() || new_br.is_some() {
-            assert!(matches!(
-                candidate,
-                Err(OhmicWindingError::Invalid(
-                    "fixed-remanence material replacement requires total-flux offset and bias-storage work ownership"
-                ))
-            ));
-        } else {
-            let (replacement, report) = candidate.unwrap();
-            assert_eq!(report.supplied_work_j, 0.0);
-            near(replacement.currents_a().unwrap()[0], 0.01);
-            assert_eq!(replacement.time_s(), 0.0);
-        }
-        assert_eq!(ohmic.state(), original);
-        assert_eq!(ohmic.time_s(), 0.0);
-    }
+        ),
+        Err(OhmicWindingError::Winding(WindingError::Magnetic(
+            MagneticError::Material(_)
+        )))
+    ));
+    assert_eq!(ohmic.state(), original);
+    assert_eq!(ohmic.time_s(), 0.0);
+}
+
+#[test]
+fn unchanged_bias_retains_tiny_current_and_late_cancelled_replacement_is_atomic() {
+    let problem = problem(Some(0.8), 1e6);
+    let circuit = basis(&problem, vec![profile(PROFILE)], vec![0.04])
+        .into_circuit(graph(), vec![1], &mut || false)
+        .unwrap();
+    let original = OhmicWindingCircuit::new(
+        &circuit,
+        conductors(&circuit, &[2, 3]),
+        0.0,
+        &[1e-20],
+        &[],
+        &[0.0],
+        &mut || false,
+    )
+    .unwrap();
+    let controls = WindingMaterialRebindControls {
+        maximum_absolute_work_j: 0.0,
+        energy_tolerance_j: 1e-9,
+    };
+    let mut polls = 0;
+    let (same, report) = original
+        .rebind_material_candidate(
+            &circuit,
+            original.conductors().to_vec(),
+            &[0.0],
+            controls,
+            &mut || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let index = circuit.flux_coordinates()[0];
+    assert_eq!(
+        same.state()[index].to_bits(),
+        original.state()[index].to_bits()
+    );
+    assert_eq!(report.currents_a[0], report.currents_a[1]);
+    assert_eq!(report.supplied_work_j, 0.0);
+    let before = original.state().to_vec();
+    let mut count = 0;
+    assert!(matches!(
+        original.rebind_material_candidate(
+            &circuit,
+            original.conductors().to_vec(),
+            &[0.0],
+            controls,
+            &mut || {
+                count += 1;
+                count == polls
+            },
+        ),
+        Err(OhmicWindingError::Cancelled)
+    ));
+    assert_eq!(original.state(), before);
+    assert_eq!(original.time_s(), 0.0);
 }
