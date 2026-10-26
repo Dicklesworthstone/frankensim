@@ -8,6 +8,8 @@
 
 /// Retained planar induction and material eddy-current heat on this same mesh.
 pub mod eddy;
+/// Reversible nonlinear H(B) on the same mesh, Hodge and checked solver owners.
+pub mod nonlinear;
 /// Source-backed, bounded reversible permanent magnets on the same field owner.
 pub mod permanent;
 
@@ -378,9 +380,16 @@ impl PlanarMagnetostatics {
         boundary_potential_wb_m: &[(usize, f64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<Option<f64>>, MagneticError> {
-        let n = self.mesh.vertices().len();
-        let trace = self
-            .mesh
+        Self::admit_mesh_boundary(&self.mesh, boundary_potential_wb_m, cancelled)
+    }
+
+    pub(crate) fn admit_mesh_boundary(
+        mesh: &TriComplex2,
+        boundary_potential_wb_m: &[(usize, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<Option<f64>>, MagneticError> {
+        let n = mesh.vertices().len();
+        let trace = mesh
             .boundary_trace()
             .map_err(|_| MagneticError::Invalid("mesh boundary trace is invalid"))?;
         let mut on_boundary = vec![false; n];
@@ -421,7 +430,7 @@ impl PlanarMagnetostatics {
                 "prescribed potentials must cover exterior edges, not isolated points",
             ));
         }
-        self.admit_gauges(&prescribed, cancelled)?;
+        Self::admit_mesh_gauges(mesh, &prescribed, cancelled)?;
         Ok(prescribed)
     }
 
@@ -544,14 +553,14 @@ impl PlanarMagnetostatics {
         })
     }
 
-    fn admit_gauges(
-        &self,
+    fn admit_mesh_gauges(
+        mesh: &TriComplex2,
         prescribed: &[Option<f64>],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MagneticError> {
         let n = prescribed.len();
         let mut neighbors = vec![Vec::new(); n];
-        for &[a, b] in self.mesh.edges() {
+        for &[a, b] in mesh.edges() {
             poll(cancelled)?;
             neighbors[a as usize].push(b as usize);
             neighbors[b as usize].push(a as usize);
