@@ -36,15 +36,20 @@ impl CoupledModalSystem {
     /// The producer owns geometry, gas, basis and fit validity. This method
     /// proves composition, not acoustic fidelity of an authored pole model.
     /// Complete acoustic/material states share the ordinary exact capacity and
-    /// setup limits. The larger mechanical-only prepared backend refuses.
+    /// setup limits, up to 256 poles. A prepared owner keeps the poles as its
+    /// air bank beside the transition (`exact::prepared::air`), up to the shared
+    /// model's own pole limit, within the prepared byte and work budget.
     /// A completely zero coupling preserves the original system exactly.
     pub fn with_radiation_load(mut self, model: &Model, source_modes: &[usize],
         maximum_poles: usize, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
         poll(Some(gate))?;
         model.validate().map_err(|_| invalid("invalid complete passive acoustic model"))?;
+        let ceiling = if self.prepared_budget.is_some() {
+            crate::render::plate::impact::radiation::MAX_POLES
+        } else { 256 };
         if self.samples_rendered() != 0 || self.radiation.is_some()
-            || maximum_poles > 256 || model.poles.len() > maximum_poles
+            || maximum_poles > ceiling || model.poles.len() > maximum_poles
             || source_modes.len() != model.ports
             || source_modes.iter().enumerate().any(|(i, &k)|
                 k >= self.mode_count() || source_modes[..i].contains(&k)) {
@@ -68,9 +73,6 @@ impl CoupledModalSystem {
         let column_max = column_sums.into_iter().fold(0.0_f64, f64::max);
         let coupling_bound = finite(det::sqrt(row_max)*det::sqrt(column_max))?;
         if coupling_bound == 0.0 { return Ok(self); }
-        if self.prepared_budget.is_some() {
-            return Err(invalid("prepared mechanical propagation cannot retain acoustic memory"));
-        }
         if row_max.max(column_max)*self.dt > 0.25 {
             return Err(invalid("acoustic coupling exceeds the declared mechanical clock resolution"));
         }
@@ -81,9 +83,14 @@ impl CoupledModalSystem {
         if bound > core::f64::consts::PI/self.dt*self.config.nyquist_guard_fraction {
             return Err(invalid("complete acoustic/mechanical frequency bound exceeds Nyquist admission"));
         }
-        self.admit_augmented_setup(self.relaxation_branches.len(), 2*model.poles.len())?;
-        let exact = exact::ExactNetwork::new_with_extensions(&self.models, &self.columns,
-            &self.connections, self.mode_count(), &self.relaxation_branches, Some(&binding), gate)?;
+        let exact = if let Some(budget) = self.prepared_budget {
+            exact::ExactNetwork::new_prepared(&self.models, &self.columns, &self.connections,
+                self.mode_count(), self.dt, budget, Some(&binding), gate)?
+        } else {
+            self.admit_augmented_setup(self.relaxation_branches.len(), 2*model.poles.len())?;
+            exact::ExactNetwork::new_with_extensions(&self.models, &self.columns,
+                &self.connections, self.mode_count(), &self.relaxation_branches, Some(&binding), gate)?
+        };
         poll(Some(gate))?;
         self.radiation_state = vec![0.0; 2*model.poles.len()];
         self.candidate_radiation_state = self.radiation_state.clone();

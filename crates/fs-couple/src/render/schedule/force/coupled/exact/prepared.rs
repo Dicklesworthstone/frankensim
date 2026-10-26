@@ -50,7 +50,8 @@ pub struct PreparedModalBudget {
     pub max_multiply_terms: u64,
 }
 
-/// One exact step before any energy accounting: the held input, the propagated end state and its finite increments.
+/// One exact step before any energy accounting: the held input (with the air's held port force, if any), the propagated
+/// end state and its finite increments.
 struct Propagation {
     x: Vec<f64>,
     u: Vec<f64>,
@@ -58,6 +59,8 @@ struct Propagation {
     endpoint: Vec<f64>,
     y: Vec<f64>,
     supplied: f64,
+    /// The air's held force on each source port.
+    air_force: Option<Vec<f64>>,
 }
 
 /// The two loss quadratics z^T W z of ONE state/input vector (the component Gramian and the total connection Gramian),
@@ -122,6 +125,8 @@ pub(super) struct PreparedNetwork {
     ledger: Arc<LedgerData>,
     sweep: Mutex<Option<LossSweep>>,
     sweeps: AtomicU64,
+    /// Two-way exterior air beside the transition (`air`); None for the mechanics alone.
+    air: Option<air::PreparedAir>,
 }
 
 const MATRIX_TOL: f64 = 1e-11;
@@ -137,7 +142,8 @@ impl PreparedModalBudget {
         Ok(())
     }
 
-    fn admit(self, count: usize, losses: usize, links: usize, anchored: usize)
+    /// `air` is (ports, poles) of a two-way air bank, admitted with its own entries and setup work.
+    fn admit(self, count: usize, losses: usize, links: usize, anchored: usize, air: Option<(usize, usize)>)
         -> Result<DenseExponentialBudget, ModalCouplingError>
     {
         self.validate()?;
@@ -152,8 +158,14 @@ impl PreparedModalBudget {
         // A constant-loss link adds one coupled eigensolve of the n x n stiffness (its copy, the eigenvectors and the
         // solver's own two squares) and one damping column.
         let eigensolve_entries = if anchored == 0 { 0 } else { 4 * count * count + anchored * count };
+        let (air_entries, air_terms) = match air {
+            None => (Some(0), Some(0)),
+            Some((ports, poles)) => (air::PreparedAir::dense_entries(count, ports, poles),
+                air::PreparedAir::setup_terms(ports, poles)),
+        };
         let bytes = extent.checked_mul(matrices)
             .and_then(|n| n.checked_add(eigensolve_entries))
+            .and_then(|n| n.checked_add(air_entries?))
             .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
             .and_then(|n| n.checked_add(links.checked_mul(core::mem::size_of::<Option<Vec<f64>>>())?))
             .ok_or_else(|| invalid("prepared dense byte overflow"))?;
@@ -172,6 +184,7 @@ impl PreparedModalBudget {
         let terms = cube.checked_mul(products)
             .and_then(|n| n.checked_add((links as u64).checked_mul((count as u64).checked_pow(2)?)?.checked_mul(8)?))
             .and_then(|n| n.checked_add(eigensolve_terms?))
+            .and_then(|n| n.checked_add(air_terms?))
             .ok_or_else(|| invalid("prepared complete work overflow"))?;
         if bytes > self.max_dense_bytes {
             return Err(invalid("prepared exact dense bytes exceed max_dense_bytes"));
@@ -195,6 +208,7 @@ impl PreparedNetwork {
         count: usize,
         dt: f64,
         budget: PreparedModalBudget,
+        radiation: Option<&radiation::Binding>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
@@ -203,6 +217,7 @@ impl PreparedNetwork {
             || models.iter().map(|m| m.modes().len()).sum::<usize>() != count {
             return Err(invalid("prepared complete mechanical layout/clock"));
         }
+        let air_extent = radiation.map(|binding| (binding.model.ports, binding.model.poles.len()));
         let has_component_loss = models.iter().flat_map(|m| m.modes())
             .any(|m| m.damping_ratio != 0.0 && m.angular_frequency_rad_s != 0.0);
         // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
@@ -210,7 +225,7 @@ impl PreparedNetwork {
         let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
         let anchored = links.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count();
         let losses = usize::from(has_component_loss) + usize::from(dissipative > 0) + dissipative;
-        let exp_budget = budget.admit(count, losses, links.len(), anchored)?;
+        let exp_budget = budget.admit(count, losses, links.len(), anchored, air_extent)?;
         let d = 3 * count;
         let mut stiffness = vec![0.0; count * count];
         let mut damping = vec![0.0; count * count];
@@ -258,28 +273,7 @@ impl PreparedNetwork {
                 generator[(2 * i + 1) * d + 2 * j + 1] = -damping[i * count + j];
             }
         }
-        let norm = matrix_norm(&generator, d)?;
-        let mut h = dt;
-        let mut scales = 0;
-        while norm * h > 0.5 {
-            if scales == MAX_SCALES {
-                return Err(invalid("prepared exact scaling exceeds 48 doublings"));
-            }
-            h *= 0.5;
-            scales += 1;
-        }
-        let scaled: Vec<_> = generator.iter().map(|v| v * h).collect();
-        let mut levels = Vec::with_capacity(scales + 1);
-        levels.push(exponential_with_budget(&scaled, d, exp_budget).map_err(ModalCouplingError::Propagation)?);
-        for i in 0..scales {
-            levels.push(product(&levels[i], &levels[i], d, gate)?);
-        }
-        // Compare the complete transition against one finer independent series
-        // evaluation. Extra squaring roundoff is admitted, not silently trusted.
-        let finer: Vec<_> = scaled.iter().map(|v| v * 0.5).collect();
-        let mut check = exponential_with_budget(&finer, d, exp_budget).map_err(ModalCouplingError::Propagation)?;
-        for _ in 0..=scales { check = product(&check, &check, d, gate)?; }
-        matrix_agrees(levels.last().unwrap(), &check, d, "prepared transition refinement residual")?;
+        let (levels, h) = scaled_levels(&generator, d, dt, exp_budget, gate)?;
 
         let mut component_loss = None;
         if has_component_loss {
@@ -308,6 +302,8 @@ impl PreparedNetwork {
             None => None,
         };
         let transition = levels.last().unwrap().clone();
+        let air = radiation.map(|binding| air::PreparedAir::new(binding, count, dt, &weights, &transition, gate))
+            .transpose()?;
         let integral = connection_resistance.map(|_| LinkIntegral { generator, levels, h, budget: exp_budget });
         let ledger = Arc::new(LedgerData {
             count, dt, weights: weights.clone(), columns: columns.to_vec(),
@@ -316,7 +312,7 @@ impl PreparedNetwork {
             integral, gramians: OnceLock::new(), evaluations: AtomicU64::new(0),
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total, ledger,
-            sweep: Mutex::new(None), sweeps: AtomicU64::new(0) };
+            sweep: Mutex::new(None), sweeps: AtomicU64::new(0), air };
         result.validate_energy_identity(gate)?;
         poll(Some(gate))?;
         Ok(result)
@@ -326,6 +322,7 @@ impl PreparedNetwork {
         state_vector(self.count, &self.weights, self.dt, x, u, dt)
     }
 
+    /// Mechanical storage of the first 2 count entries of `x`.
     pub(super) fn hamiltonian(&self, x: &[f64]) -> f64 {
         let n = self.count;
         let mut energy = 0.0;
@@ -338,16 +335,40 @@ impl PreparedNetwork {
         energy
     }
 
-    fn propagate(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+    /// Mechanical and acoustic storage of a complete state: the mechanics, then the air's (q, p) pairs.
+    pub(super) fn total_hamiltonian(&self, x: &[f64]) -> Result<f64, ModalCouplingError> {
+        let mechanical = self.hamiltonian(x);
+        match &self.air {
+            None => Ok(mechanical),
+            Some(air) => finite(mechanical + air.energy(x.get(2 * self.count..).unwrap_or_default())?),
+        }
+    }
+
+    /// The acoustic state entries a complete state carries after its mechanics.
+    pub(super) fn air_state_len(&self) -> usize { self.air.as_ref().map_or(0, air::PreparedAir::state_len) }
+
+    fn propagate(&self, models: &[ModalAcousticTimeModel], radiation: &[f64], external: &[f64], dt: f64)
         -> Result<Propagation, ModalCouplingError>
     {
-        if external.len() != self.count {
+        if external.len() != self.count || radiation.len() != self.air_state_len() {
             return Err(invalid("prepared external force layout"));
         }
         let x = flatten(models);
-        let u: Vec<_> = external.iter().zip(&self.rest_force)
+        let mut u: Vec<_> = external.iter().zip(&self.rest_force)
             .map(|(f, r)| finite(f + r)).collect::<Result<_, _>>()?;
-        let z = self.state_input(&x, &u, dt)?;
+        let mut z = self.state_input(&x, &u, dt)?;
+        // The air's held force solves the step's interconnection against this held input (see `air`).
+        let air_force = match &self.air {
+            None => None,
+            Some(air) => {
+                let force = air.exchange_force(&air.port_increments(&z, &x, &self.weights)?, &air.free_increments(radiation)?)?;
+                for (&mode, f) in air.sources().iter().zip(&force) {
+                    u[mode] = finite(u[mode] + f)?;
+                }
+                z = self.state_input(&x, &u, dt)?;
+                Some(force)
+            }
+        };
         let end = apply(&self.transition, &z)?;
         let mut endpoint = vec![0.0; 2 * self.count];
         let mut y = vec![0.0; self.count];
@@ -359,22 +380,26 @@ impl PreparedNetwork {
             y[i] = finite(dq / dt)?;
             supplied = finite(supplied + u[i] * dq)?;
         }
-        Ok(Propagation { x, u, z, endpoint, y, supplied })
+        Ok(Propagation { x, u, z, endpoint, y, supplied, air_force })
     }
 
     /// The end state of the free (contact-free) step, without the loss Gramians and the trajectory energy-residual check.
-    /// Every finiteness check of the propagation still runs. Returns (end state, start state).
-    pub(super) fn predict_free(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+    /// Every finiteness check of the propagation still runs. With air the end state is the air-loaded one. Returns
+    /// (mechanical end state, mechanical start state).
+    pub(super) fn predict_free(&self, models: &[ModalAcousticTimeModel], radiation: &[f64], external: &[f64], dt: f64)
         -> Result<(Vec<f64>, Vec<f64>), ModalCouplingError>
     {
-        let step = self.propagate(models, external, dt)?;
+        let step = self.propagate(models, radiation, external, dt)?;
         Ok((step.endpoint, step.x))
     }
 
-    pub(super) fn advance(&self, models: &[ModalAcousticTimeModel], external: &[f64], dt: f64)
+    /// One exact step. With air the record's state and the returned start state carry the air's (q, p) pairs after the
+    /// mechanics, the returned held input includes the air's held port force, and the record's storage change, loss and
+    /// supplied work are those of mechanics and air together (the interconnection is internal).
+    pub(super) fn advance(&self, models: &[ModalAcousticTimeModel], radiation: &[f64], external: &[f64], dt: f64)
         -> Result<(StepRecord, Vec<f64>, Vec<f64>), ModalCouplingError>
     {
-        let Propagation { x, u, z, endpoint, y, supplied } = self.propagate(models, external, dt)?;
+        let Propagation { x, u, z, endpoint, y, supplied, air_force } = self.propagate(models, radiation, external, dt)?;
         let (component, connection) = self.loss_sums(&z)?;
         let dissipated = finite(component + connection)?;
         let before = finite(self.hamiltonian(&x))?;
@@ -385,17 +410,49 @@ impl PreparedNetwork {
         if residual.abs() > MATRIX_TOL * scale {
             return Err(invalid("prepared exact trajectory energy residual"));
         }
+        let (Some(air), Some(air_force)) = (&self.air, air_force) else {
+            return Ok((StepRecord {
+                x: endpoint, y, delta_h, dissipated, supplied,
+                newton_iters: 0, solver_residual: residual.abs(),
+                solver_certificate: None,
+            }, x, u));
+        };
+        let dq_ports = air.port_increments(&z, &x, &self.weights)?;
+        let step = air.advance(radiation, &dq_ports)?;
+        // The held force the air's own step implies must be the one the mechanics were held at, and the work each side
+        // received must cancel.
+        let exchange = air_force.iter().zip(&dq_ports).try_fold(0.0, |s, (f, dq)| finite(s + f * dq))?;
+        let force_scale = air_force.iter().chain(&step.force).fold(0.0_f64, |m, f| m.max(f.abs())).max(f64::MIN_POSITIVE);
+        let force_defect = air_force.iter().zip(&step.force).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        let energy_scale = scale.max(exchange.abs()).max(step.work.abs()).max(step.loss);
+        if force_defect > 1e-9 * force_scale || (exchange + step.work).abs() > MATRIX_TOL * energy_scale {
+            return Err(invalid("prepared air exchange residual"));
+        }
+        let mut record_x = endpoint;
+        record_x.extend_from_slice(&step.state);
+        let mut start = x;
+        start.extend_from_slice(radiation);
+        let supplied = finite(supplied - exchange)?;
+        let delta_h = finite(delta_h + step.delta_h)?;
+        let dissipated = finite(dissipated + step.loss)?;
+        let residual = finite(delta_h + dissipated - supplied)?;
         Ok((StepRecord {
-            x: endpoint, y, delta_h, dissipated, supplied,
+            x: record_x, y, delta_h, dissipated, supplied,
             newton_iters: 0, solver_residual: residual.abs(),
             solver_certificate: None,
-        }, x, u))
+        }, start, u))
     }
 
+    /// Every mode's end displacement per unit held force along `column`: the air-loaded response when the network has
+    /// air, at rest.
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         let z = self.state_input(&vec![0.0; 2 * self.count], column, dt)?;
         let end = apply(&self.transition, &z)?;
-        (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect()
+        let mut response = (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect::<Result<Vec<_>, _>>()?;
+        if let Some(air) = &self.air {
+            air.load_response(&mut response)?;
+        }
+        Ok(response)
     }
 
     /// The two loss quadratics for `z`: the component Gramian and the pre-summed connection Gramian. Two dense forms per
@@ -440,34 +497,51 @@ impl PreparedNetwork {
     #[cfg(test)]
     pub(super) fn ledger_evaluations(&self) -> u64 { self.ledger.evaluations.load(Ordering::Relaxed) }
 
+    /// (component, connection, radiated) losses of the step from the complete start state `x` under the held input `u`,
+    /// both as `advance` returned them.
     pub(super) fn losses(&self, x: &[f64], u: &[f64], dt: f64, total: f64)
-        -> Result<(f64, f64), ModalCouplingError>
+        -> Result<(f64, f64, f64), ModalCouplingError>
     {
-        let result = self.loss_sums(&self.state_input(x, u, dt)?)?;
-        let sum = finite(result.0 + result.1)?;
+        let mechanical = x.get(..2 * self.count).ok_or_else(|| invalid("prepared complete state layout"))?;
+        let z = self.state_input(mechanical, u, dt)?;
+        let (component, connection) = self.loss_sums(&z)?;
+        // The radiated loss of the same step: the transition's own port rows on the same z give the bits `advance` drove
+        // the air with.
+        let radiated = match &self.air {
+            None => 0.0,
+            Some(air) => air.loss(&x[2 * self.count..], &air.port_increments(&z, mechanical, &self.weights)?)?,
+        };
+        let sum = finite(component + connection + radiated)?;
         if !total.is_finite() || (sum - total).abs() > MATRIX_TOL * sum.abs().max(total.abs()).max(f64::MIN_POSITIVE) {
             return Err(invalid("prepared independent loss channels disagree with total"));
         }
-        Ok(result)
+        Ok((component, connection, radiated))
     }
 
-    /// The per-port work of an accepted step, evaluated now: the entry of every caller that is not deferred.
+    /// The per-port work of an accepted step, evaluated now: the entry of every caller that is not deferred. Only the
+    /// mechanical part of a complete state takes part.
     pub(super) fn connection_work(
         &self, x: &[f64], u: &[f64], endpoint: &[f64], dt: f64,
         columns: &[Vec<f64>], links: &[ConnectionLaw], connection_loss: f64,
         gate: Option<&CancelGate>,
     ) -> Result<Vec<PortTransfer>, ModalCouplingError> {
         let springs: Vec<_> = links.iter().map(|l| (l.stiffness_n_m, l.rest_extension_m)).collect();
+        let n = 2 * self.count;
+        let (Some(x), Some(endpoint)) = (x.get(..n), endpoint.get(..n)) else {
+            return Err(invalid("prepared connection observation layout"));
+        };
         self.ledger.work(x, u, endpoint, dt, connection_loss, columns, &springs, gate)
     }
 
     /// The same ledger as a deferred observation: nothing is evaluated until an observer asks for the window's transfers, and
-    /// the sweep over every link's Gramian then runs once. The step's inputs are copied; the Gramians are shared.
+    /// the sweep over every link's Gramian then runs once. The step's mechanical inputs are copied; the Gramians are shared.
     pub(super) fn pending_ledger(&self, x: &[f64], u: &[f64], endpoint: &[f64], connection_loss: f64)
         -> Arc<dyn DeferredTransfers>
     {
+        let n = (2 * self.count).min(x.len()).min(endpoint.len());
         Arc::new(PendingLedger {
-            data: Arc::clone(&self.ledger), x: x.to_vec(), u: u.to_vec(), endpoint: endpoint.to_vec(), connection_loss,
+            data: Arc::clone(&self.ledger), x: x[..n].to_vec(), u: u.to_vec(), endpoint: endpoint[..n].to_vec(),
+            connection_loss,
         })
     }
 
@@ -704,6 +778,36 @@ fn sandwich(f: &[f64], w: &[f64], n: usize, gate: &CancelGate) -> Result<Vec<f64
     product(&transpose, &wf, n, gate)
 }
 
+/// The transition of `generator` over `dt` by scaling and squaring: every scale level (the last is the transition) and the
+/// short interval h.
+fn scaled_levels(generator: &[f64], d: usize, dt: f64, budget: DenseExponentialBudget, gate: &CancelGate)
+    -> Result<(Vec<Vec<f64>>, f64), ModalCouplingError>
+{
+    let norm = matrix_norm(generator, d)?;
+    let mut h = dt;
+    let mut scales = 0;
+    while norm * h > 0.5 {
+        if scales == MAX_SCALES {
+            return Err(invalid("prepared exact scaling exceeds 48 doublings"));
+        }
+        h *= 0.5;
+        scales += 1;
+    }
+    let scaled: Vec<_> = generator.iter().map(|v| v * h).collect();
+    let mut levels = Vec::with_capacity(scales + 1);
+    levels.push(exponential_with_budget(&scaled, d, budget).map_err(ModalCouplingError::Propagation)?);
+    for i in 0..scales {
+        levels.push(product(&levels[i], &levels[i], d, gate)?);
+    }
+    // Compare the complete transition against one finer independent series
+    // evaluation. Extra squaring roundoff is admitted, not silently trusted.
+    let finer: Vec<_> = scaled.iter().map(|v| v * 0.5).collect();
+    let mut check = exponential_with_budget(&finer, d, budget).map_err(ModalCouplingError::Propagation)?;
+    for _ in 0..=scales { check = product(&check, &check, d, gate)?; }
+    matrix_agrees(levels.last().unwrap(), &check, d, "prepared transition refinement residual")?;
+    Ok((levels, h))
+}
+
 fn gramian(
     generator: &[f64], resistance: &[f64], levels: &[Vec<f64>], h: f64,
     d: usize, budget: DenseExponentialBudget, gate: &CancelGate,
@@ -814,7 +918,11 @@ fn checked_loss(sum: f64, magnitude: f64) -> Result<f64, ModalCouplingError> {
     Ok(sum.max(0.0))
 }
 
+pub(super) mod air;
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod constant_loss_tests;
+#[cfg(test)]
+mod air_tests;

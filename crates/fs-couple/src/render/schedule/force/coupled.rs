@@ -397,7 +397,7 @@ impl CoupledModalSystem {
         if linear_frequency_upper_bound_rad_s > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
         let exact = if let Some(budget) = prepared {
             Some(exact::ExactNetwork::new_prepared(
-                &models, &columns, &connections, count, dt, budget, gate,
+                &models, &columns, &connections, count, dt, budget, None, gate,
             )?)
         } else if connections
             .iter()
@@ -462,6 +462,7 @@ impl CoupledModalSystem {
     /// Existing initial conditions, port ledgers and all source coordinates stay
     /// owned by this system. Use before adding components that need the larger
     /// explicit capacity; this method cannot rescue a constructor already refused.
+    /// A bound radiation load moves with it, as the prepared owner's air bank.
     pub fn with_prepared_linear_propagation(
         mut self, budget: PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
@@ -469,12 +470,12 @@ impl CoupledModalSystem {
         if self.samples_rendered() != 0 || self.prepared_budget.is_some() {
             return Err(invalid("prepared exact propagation requires one cold budget binding"));
         }
-        if !self.relaxation_branches.is_empty() || self.radiation.is_some() {
-            return Err(invalid("prepared mechanical propagation cannot discard material or acoustic memory"));
+        if !self.relaxation_branches.is_empty() {
+            return Err(invalid("prepared mechanical propagation cannot discard material memory"));
         }
         self.exact = Some(exact::ExactNetwork::new_prepared(
             &self.models, &self.columns, &self.connections, self.mode_count(),
-            self.dt, budget, gate,
+            self.dt, budget, self.radiation.as_ref(), gate,
         )?);
         self.prepared_budget = Some(budget);
         poll(Some(gate))?;
@@ -498,12 +499,13 @@ impl CoupledModalSystem {
             || self.connections.iter().any(|link| link.constant_loss_reference_omega_rad_s.is_some()) {
             return Err(invalid("constant-loss connections require one nonempty cold binding"));
         }
-        if !self.relaxation_branches.is_empty() || self.radiation.is_some() {
-            return Err(invalid("prepared mechanical propagation cannot discard material or acoustic memory"));
+        if !self.relaxation_branches.is_empty() {
+            return Err(invalid("prepared mechanical propagation cannot discard material memory"));
         }
         anchor_constant_loss(&mut self.connections, constant_loss)?;
         self.exact = Some(exact::ExactNetwork::new_prepared(
-            &self.models, &self.columns, &self.connections, self.mode_count(), self.dt, budget, gate,
+            &self.models, &self.columns, &self.connections, self.mode_count(), self.dt, budget,
+            self.radiation.as_ref(), gate,
         )?);
         poll(Some(gate))?;
         Ok(self)

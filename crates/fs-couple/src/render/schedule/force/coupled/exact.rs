@@ -27,6 +27,8 @@ pub(super) struct ExactNetwork {
 // inter-mode coupling. An arm's internal strain belongs to exactly one island.
 // This changes no retained coordinate, physical limit or dense-block capacity.
 impl ExactNetwork {
+    /// The prepared owner; `radiation` adds its two-way air as a pole bank beside the transition (`prepared::air`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new_prepared(
         models: &[ModalAcousticTimeModel],
         columns: &[Vec<f64>],
@@ -34,12 +36,14 @@ impl ExactNetwork {
         count: usize,
         dt: f64,
         budget: PreparedModalBudget,
+        radiation: Option<&radiation::Binding>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let prepared = prepared::PreparedNetwork::new(
-            models, columns, links, count, dt, budget, gate,
+            models, columns, links, count, dt, budget, radiation, gate,
         )?;
-        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count, memory_count: 0, radiation_count: 0 })
+        let radiation_count = prepared.air_state_len();
+        Ok(Self { blocks: Vec::new(), prepared: Some(prepared), count, memory_count: 0, radiation_count })
     }
 
     pub(super) fn new(
@@ -194,14 +198,14 @@ impl ExactNetwork {
         state
     }
 
-    fn hamiltonian(&self, x: &[f64]) -> f64 {
+    fn hamiltonian(&self, x: &[f64]) -> Result<f64, ModalCouplingError> {
         if let Some(prepared) = &self.prepared {
-            return prepared.hamiltonian(x);
+            return prepared.total_hamiltonian(x);
         }
-        self.blocks
+        Ok(self.blocks
             .iter()
             .map(|(indices, b)| b.system.hamiltonian(&self.local_state(indices, b, x)))
-            .sum()
+            .sum())
     }
 
     pub(super) fn advance(
@@ -220,7 +224,7 @@ impl ExactNetwork {
             ));
         }
         if let Some(prepared) = &self.prepared {
-            return prepared.advance(models, external, dt);
+            return prepared.advance(models, radiation, external, dt);
         }
         let mut x = flatten(models);
         x.extend_from_slice(memory);
@@ -275,10 +279,11 @@ impl ExactNetwork {
         -> Result<(Vec<f64>, Vec<f64>), ModalCouplingError>
     {
         if let (Some(prepared), false) = (&self.prepared, verify) {
-            if !memory.is_empty() || !radiation.is_empty() || external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
+            if !memory.is_empty() || radiation.len() != self.radiation_count || radiation.iter().any(|z| !z.is_finite())
+                || external.len() != self.count || external.iter().any(|v| !v.is_finite()) {
                 return Err(invalid("external forces must match every original modal coordinate"));
             }
-            return prepared.predict_free(models, external, dt);
+            return prepared.predict_free(models, radiation, external, dt);
         }
         let (record, x, _) = self.advance(models, memory, radiation, external, dt)?;
         Ok((record.x, x))
@@ -322,7 +327,7 @@ impl ExactNetwork {
         total: f64,
     ) -> Result<(f64, f64, f64, f64), ModalCouplingError> {
         if let Some(prepared) = &self.prepared {
-            return prepared.losses(x, u, dt, total).map(|(a, b)| (a, b, 0.0, 0.0));
+            return prepared.losses(x, u, dt, total).map(|(a, b, radiated)| (a, b, 0.0, radiated));
         }
         let (mut component, mut connection, mut material, mut radiation) = (0.0, 0.0, 0.0, 0.0);
         for (indices, block) in &self.blocks {
@@ -736,7 +741,7 @@ pub(super) fn stage(
             &network.radiation_state, external, network.dt)?;
         poll(gate)?;
         let (comp_loss, conn_loss, material_loss, radiation_loss) = exact.losses(&x, &u, network.dt, rec.dissipated)?;
-        let h_x = exact.hamiltonian(&x);
+        let h_x = exact.hamiltonian(&x)?;
         (rec.x, x, u, comp_loss, conn_loss, material_loss, radiation_loss, h_x)
     } else {
         if external.len() != network.mode_count() || external.iter().any(|v| !v.is_finite()) {
