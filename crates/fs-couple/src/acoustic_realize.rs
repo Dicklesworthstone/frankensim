@@ -22,8 +22,8 @@ use crate::reed_bore::{
     blowing_envelope, reed_pressure_face, reed_structural, reed_swept_flow,
 };
 use crate::thin_plate::{
-    PlateBank, PlateChartRadiation, VkBody, certified_chart_radiators, certified_radiators,
-    vk_plate_phs,
+    PlateBank, PlateChartRadiation, ResolvedPlateChart, VkBody, certified_chart_radiators,
+    certified_material_chart_radiators, certified_radiators, vk_plate_phs,
 };
 use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
@@ -459,13 +459,52 @@ pub fn realize_assembly_with_plate_chart_and_options(
             what: "chart assembly requires the uniform plate description to be absent",
         });
     }
-    realize_assembly_inner(assembly, Some((chart, radiation)), options)
+    realize_assembly_inner(
+        assembly,
+        Some((AssemblyPlateChart::Authored(chart), radiation)),
+        options,
+    )
+}
+
+/// Realize a source-bound regional plate without erasing its selected loss law.
+///
+/// Elastic modes, force ports and any material bending loss are reduced once
+/// by the existing material-chart owner. The resulting bodies join the same
+/// string/duct/cavity coupling, gas loading and pressure observer as a bare
+/// chart. Source-band admission and the prohibition on double-counted damping
+/// survive this boundary. The retained regional loss is the existing diagonal
+/// weak-loss image; this does not introduce full nonproportional modal damping.
+///
+/// # Errors
+/// Conflicting plate descriptions, material-loss/source-domain refusals and
+/// ordinary chart, medium, numerical or runtime refusals.
+pub fn realize_assembly_with_material_plate_chart_and_options(
+    assembly: &AcousticAssembly,
+    specimen: &ResolvedPlateChart,
+    radiation: &PlateChartRadiation,
+    options: &RealizeOptions,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    if assembly.plate.is_some() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "chart assembly requires the uniform plate description to be absent",
+        });
+    }
+    realize_assembly_inner(
+        assembly,
+        Some((AssemblyPlateChart::Material(specimen), radiation)),
+        options,
+    )
+}
+
+enum AssemblyPlateChart<'a> {
+    Authored(&'a fs_plate::PlateChart),
+    Material(&'a ResolvedPlateChart),
 }
 
 #[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
-    chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
+    chart: Option<(AssemblyPlateChart<'_>, &PlateChartRadiation)>,
     realize_options: &RealizeOptions,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
@@ -538,9 +577,12 @@ fn realize_assembly_inner(
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
     if let Some((chart, options)) = chart {
-        bodies
-            .linear
-            .extend(certified_chart_radiators(chart, options)?);
+        bodies.linear.extend(match chart {
+            AssemblyPlateChart::Authored(chart) => certified_chart_radiators(chart, options)?,
+            AssemblyPlateChart::Material(specimen) => {
+                certified_material_chart_radiators(specimen, options)?
+            }
+        });
     }
     bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz)?;
     let dirac_base = assembly.string.as_ref().is_some_and(|s| s.moving_end);

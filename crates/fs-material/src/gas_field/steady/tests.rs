@@ -1,7 +1,7 @@
 //! Declared analytic species/geometry, not measurements of a named instrument.
 use super::*;
 use crate::thermochemical_gas::tests::{model, point};
-use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
+use fs_thermochem::{Composition, CompositionBasis, SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
 const LENGTH: f64 = 0.57;
 const RADIUS: f64 = 0.0073;

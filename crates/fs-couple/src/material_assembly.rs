@@ -14,6 +14,7 @@ pub mod valve;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::gas::GasState;
+use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES;
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
     ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
@@ -27,8 +28,8 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure, Time};
 use fs_scenario::{AcousticAssembly, PrestressedString};
 
 use crate::acoustic_realize::{
-    AcousticRealizeError, RealizeOptions, RealizedAssembly, realize_assembly_with_options,
-    realize_assembly_with_plate_chart_and_options,
+    AcousticRealizeError, RealizeOptions, RealizedAssembly,
+    realize_assembly_with_material_plate_chart_and_options, realize_assembly_with_options,
 };
 use crate::string_specimen::{
     EQUILIBRIUM_YOUNG_MODULUS_PROPERTY, KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
@@ -99,6 +100,22 @@ pub struct PlateRegionSource<'a> {
     pub material_angle_rad: f64,
 }
 
+/// Loss selection for all regions of a source-bound plate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegionalPlateLoss {
+    /// Keep the independently authored `PlateChartRadiation::damping_ratio`.
+    /// No loss property is inferred from the elastic material or its name.
+    #[default]
+    Authored,
+    /// Resolve Kelvin-Voigt bending from every region's same material state.
+    /// Isotropic regions need `kelvin_voigt_bending_viscosity`; orthotropic
+    /// regions need all six reduced `plane_stress_viscosity_*` coefficients.
+    /// The existing weak-loss modal image retains each mode's curvature-energy
+    /// weighting and source band, but not off-diagonal modal damping. Authored
+    /// damping must be zero to avoid counting the same loss twice.
+    KelvinVoigt,
+}
+
 /// Uniform rectangular or regional chart material prescription.
 #[derive(Clone, Debug)]
 pub enum PlateMaterialBinding<'a> {
@@ -119,6 +136,8 @@ pub enum PlateMaterialBinding<'a> {
         boundary_nodes: Vec<usize>,
         /// Complete disjoint material partition, without a fallback region.
         regions: Vec<PlateRegionSource<'a>>,
+        /// Explicit material-loss choice, retained through acoustic realization.
+        loss: RegionalPlateLoss,
         /// Existing modal, mechanical and force-footprint controls.
         radiation: PlateChartRadiation,
     },
@@ -198,8 +217,11 @@ impl CompiledMaterialAssembly {
     ) -> Result<RealizedAssembly, AcousticRealizeError> {
         match &self.plate {
             Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
-                realize_assembly_with_plate_chart_and_options(
-                    &self.assembly, chart.chart(), radiation, options,
+                realize_assembly_with_material_plate_chart_and_options(
+                    &self.assembly,
+                    chart,
+                    radiation,
+                    options,
                 )
             }
             _ => realize_assembly_with_options(&self.assembly, options),
@@ -410,12 +432,20 @@ fn compile_plate(
             mesh,
             boundary_nodes,
             regions,
+            loss,
             radiation,
         } => {
             if assembly.plate.is_some() {
                 return Err(missing(
                     "plate",
                     "regional material binding requires the uniform plate to be absent",
+                ));
+            }
+            let bending_viscosity = *loss == RegionalPlateLoss::KelvinVoigt;
+            if bending_viscosity && radiation.damping_ratio != 0.0 {
+                return Err(missing(
+                    "plate",
+                    "source-bound regional bending loss requires zero authored damping",
                 ));
             }
             let inputs = regions
@@ -426,7 +456,7 @@ fn compile_plate(
                         material: resolve_plate(
                             &region.source,
                             region.model,
-                            false,
+                            bending_viscosity,
                             &format!("plate/{}", region.region.name),
                         )?,
                         model: region.model,
@@ -437,6 +467,13 @@ fn compile_plate(
                 .collect::<Result<Vec<_>, MaterialAssemblyError>>()?;
             let chart = compile_plate_material_chart(mesh.clone(), boundary_nodes.clone(), inputs)
                 .map_err(|source| physical("plate", source))?;
+            let chart = if bending_viscosity {
+                chart
+                    .with_kelvin_voigt_bending_loss()
+                    .map_err(|source| physical("plate", source))?
+            } else {
+                chart
+            };
             Ok(CompiledMaterialPlate::Regional {
                 chart,
                 radiation: radiation.clone(),
@@ -534,11 +571,19 @@ fn resolve_plate(
         ]),
     }
     if bending_viscosity {
-        fields.push((
-            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
-            DynViscosity::DIMS,
-            ScalarAdmissibility::NonNegative,
-        ));
+        if model == PlateMaterialModel::Isotropic {
+            fields.push((
+                KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+                DynViscosity::DIMS,
+                ScalarAdmissibility::NonNegative,
+            ));
+        } else {
+            // Couplings may be signed. The shared plane-stress owner admits
+            // the complete tensor, including explicit zero coefficients.
+            fields.extend(
+                PLANE_STRESS_VISCOSITY_PROPERTIES.map(|key| (key, DynViscosity::DIMS, Finite)),
+            );
+        }
     }
     let requirements = fields
         .into_iter()

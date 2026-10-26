@@ -12,19 +12,18 @@
 //! coefficients, turbulence, diffusion, reaction or condensation. No transient
 //! density/mass history or finite-Mach acoustic accuracy is claimed.
 
+/// Shared source-bound steady transport on branched and recirculating graphs.
+pub mod network;
+
 use super::{AxialGasField, PrimitiveGasState, resolve_primitive, typed};
 use crate::{MaterialError, gas_species::input::ThermochemicalPhase};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::{GasEnergyError, GasEnergySolve}};
-use crate::thermochemical_gas::energy::enthalpy::GasEnthalpyLaw;
 use fs_matdb::QueryPoint;
 use fs_qty::semantic::QuantityKind;
-use fs_thermal::enthalpy::{
-    Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
-    DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
-};
-use fs_thermal::enthalpy::advection::{Advected, MassBoundary, MassFlow};
-use fs_thermal::enthalpy::advection::species::{InletSpecies, StationarySpecies};
-use fs_thermochem::{Composition, CompositionBasis};
+use fs_thermal::enthalpy::{CellGeometry, CellId, DepositionError};
+use fs_thermal::enthalpy::advection::MassFlow;
+use fs_thermal::enthalpy::advection::species::StationarySpecies;
+use network::{GasNetworkCell, GasOutlet, SteadyGasNetwork};
 
 /// Bound the thermal/spatial cold path independently of audio sample count.
 pub const MAX_STEADY_GAS_CELLS: usize = 64;
@@ -49,10 +48,10 @@ pub struct AxialGasCell {
     pub initial_temperature_k: f64,
 }
 
-/// An additional gas supply mixed into one axial control volume.
+/// An explicit gas supply mixed into one control volume.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasInjection {
-    /// Zero-based receiving cell. Downstream through-flow increases by this rate.
+    /// Zero-based receiving cell. An axial path increases its downstream flow.
     pub cell: usize,
     /// Positive supplied mass rate [kg/s].
     pub mass_flow_kg_s: f64,
@@ -186,29 +185,15 @@ fn point_at(context: &QueryPoint, t: f64) -> Result<QueryPoint, SteadyGasError> 
 }
 
 impl SteadyAxialGas {
-    /// Solve conservative stationary composition first, then relax the coupled
-    /// species-specific enthalpy/wall balance with the original thermal owner.
-    /// Only a converged, source-admitted, fixed-pressure field is returned.
-    ///
-    /// The grid axis is first-order donor-cell transport: each downstream face
-    /// takes its cell's mixed state. The field interpolates primitive values
-    /// between those face samples. Refine this grid independently of the duct
-    /// sampler and thermal pseudo-time step; a residual tolerance is not a
-    /// spatial-accuracy certificate.
-    pub fn solve(
-        &self, controls: SteadyGasSolve, mut cancelled: impl FnMut() -> bool,
-    ) -> Result<SteadyGasSolution, SteadyGasError> {
-        poll(&mut cancelled)?;
+    /// Lower axial geometry, supplies and wall data into the same reusable gas
+    /// network used by branched/recirculating systems. This validates geometry
+    /// and flow bookkeeping; source and steady-state admission occurs in solve.
+    pub fn to_network(&self) -> Result<SteadyGasNetwork, SteadyGasError> {
         if self.cells.is_empty() || self.cells.len() > MAX_STEADY_GAS_CELLS
             || self.injections.len() > MAX_STEADY_GAS_INJECTIONS
             || !positive(self.inlet_mass_flow_kg_s) || !positive(self.static_pressure_pa)
-            || !positive(controls.maximum_dt_s) || !positive(controls.steady_power_tolerance_w)
-            || !controls.energy_tolerance_j.is_finite() || controls.energy_tolerance_j < 0.0
-            || controls.maximum_relaxations == 0 || controls.maximum_relaxations > 1_000_000
-            || controls.maximum_substeps == 0 || controls.maximum_substeps > 1_000_000
-            || !positive(controls.maximum_mean_mach) || controls.maximum_mean_mach > 0.1
         {
-            return Err(bad("bounded cells/injections/work, positive flow/pressure/tolerances and a low-Mach ceiling required"));
+            return Err(bad("bounded cells/injections and positive inlet flow/pressure required"));
         }
         if self.source_conditions.axes().contains_key("temperature")
             || self.source_conditions.axes().contains_key("pressure")
@@ -231,200 +216,94 @@ impl SteadyAxialGas {
         {
             return Err(bad("gas injection needs an active axial cell and positive mass rate"));
         }
-        let pressure_point = self.source_conditions.clone()
-            .with_quantity("pressure", typed(QuantityKind::Pressure), self.static_pressure_pa)
-            .map_err(|_| bad("invalid common pressure coordinate"))?;
         let count = self.cells.len();
-        let inlet_count = self.injections.len() + 1;
-        let mut inlet_data = vec![(0, self.inlet_mass_flow_kg_s, &self.inlet)];
-        inlet_data.extend(self.injections.iter()
-            .map(|inlet| (inlet.cell, inlet.mass_flow_kg_s, &inlet.state)));
-        let mut inlet_laws = Vec::with_capacity(inlet_count);
-        let mut boundaries = Vec::with_capacity(inlet_count + 1);
-        let mut inlet_species = Vec::with_capacity(inlet_count);
+        let mut inlets = vec![GasInjection { cell: 0,
+            mass_flow_kg_s: self.inlet_mass_flow_kg_s, state: self.inlet.clone() }];
+        inlets.extend(self.injections.iter().cloned());
         let mut incoming_mass = vec![0.0; count];
-        let mut upstream_enthalpy_rate = 0.0;
-        for (index, &(cell, kg_s, primitive)) in inlet_data.iter().enumerate() {
-            poll(&mut cancelled)?;
-            // Source/phase admission precedes any mixing or energy conversion.
-            resolve_primitive(&self.source, &pressure_point, self.phase, primitive)?;
-            let law = GasEnthalpyLaw::from_mole(&self.source, primitive.composition.clone(),
-                point_at(&pressure_point, primitive.temperature_k)?, controls.caloric)?;
-            let h = law.enthalpy_at_temperature(primitive.temperature_k)?;
-            let id = index as u64;
-            boundaries.push(MassBoundary::Inlet { id, cell: CellId(cell as u64), kg_s,
-                material_id: MaterialId((count + index) as u64), specific_h_j_kg: h });
-            inlet_species.push(InletSpecies { boundary_id: id,
-                mass_fractions: law.advected_composition().expect("gas composition").mass_fractions.to_vec() });
-            incoming_mass[cell] += kg_s;
-            if cell == 0 { upstream_enthalpy_rate += kg_s * h; }
-            inlet_laws.push(law);
+        for inlet in &inlets {
+            incoming_mass[inlet.cell] += inlet.mass_flow_kg_s;
         }
         let mut flows = Vec::with_capacity(count - 1);
-        let mut mass_flow = Vec::with_capacity(count);
         let mut rate = 0.0;
         for (index, &incoming) in incoming_mass.iter().enumerate() {
             rate += incoming;
             if !positive(rate) { return Err(bad("axial mass flow is not representable")); }
-            mass_flow.push(rate);
             if index + 1 < count {
-                flows.push(MassFlow { id: (inlet_count + index) as u64,
+                flows.push(MassFlow { id: index as u64,
                     a: CellId(index as u64), b: CellId((index + 1) as u64), kg_s: rate });
             }
         }
-        if !upstream_enthalpy_rate.is_finite() {
-            return Err(bad("upstream enthalpy rate is not representable"));
-        }
-        boundaries.push(MassBoundary::Outlet { id: (inlet_count + count) as u64,
-            cell: CellId((count - 1) as u64), kg_s: rate });
-        let species = self.source.thermodynamics().components().iter()
-            .map(|component| component.species().to_string()).collect();
-        let observer = Advected::new((), flows, MAX_STEADY_GAS_CELLS)?
-            .with_boundaries(boundaries, MAX_STEADY_GAS_CELLS + MAX_STEADY_GAS_INJECTIONS + 2)?
-            .with_stationary_species(species, inlet_species, count, 128)?;
-        let stationary = observer.stationary_species().expect("just admitted").clone();
-        let mut laws = Vec::with_capacity(count + inlet_count);
-        for index in 0..count {
-            poll(&mut cancelled)?;
-            let fractions = &stationary.cells()[&CellId(index as u64)];
-            // Preserve the authored mole coefficients on uniform composition runs.
-            let same = inlet_laws.iter().find(|law|
-                law.advected_composition().expect("gas law").mass_fractions == fractions.as_slice());
-            let law = if let Some(law) = same { law.clone() } else {
-                GasEnthalpyLaw::new(&self.source,
-                    Composition::new(CompositionBasis::MassFraction, fractions.clone())
-                        .map_err(|_| bad("stationary composition refused"))?,
-                    point_at(&pressure_point, self.cells[index].initial_temperature_k)?, controls.caloric)?
-            };
-            laws.push(law);
-        }
-        laws.extend(inlet_laws);
-        let mut schedule = Vec::with_capacity(count);
+        let mut cells = Vec::with_capacity(count);
         previous = 0.0;
-        for (index, cell) in self.cells.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let gas = laws[index].model().evaluate(&point_at(&pressure_point, cell.initial_temperature_k)?)?;
-            let mass_kg = gas.state().density * cell.volume_m3;
-            if !positive(mass_kg) { return Err(bad("initial EOS relaxation mass is not representable")); }
-            schedule.push(TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
-                id: CellId(index as u64), segment_id: index as u64, body_id: 0,
-                material_id: MaterialId(index as u64), mass_kg,
-                specific_h_j_kg: laws[index].enthalpy_at_temperature(cell.initial_temperature_k)?,
+        for cell in &self.cells {
+            cells.push(GasNetworkCell {
                 geometry: CellGeometry { start_m: [previous, 0.0, 0.0], end_m: [cell.end_m, 0.0, 0.0],
                     volume_m3: cell.volume_m3, surface_area_m2: cell.wall_area_m2 },
-                boundary: Boundary { ambient_k: cell.wall_temperature_k, htc_w_m2_k: 0.0,
-                    reservoir: Some(Reservoir { area_m2: cell.wall_area_m2,
-                        conductance_w_k: cell.wall_conductance_w_k,
-                        temperature_k: cell.wall_temperature_k }), source_w: 0.0 },
-            }) });
+                flow_area_m2: cell.volume_m3 / (cell.end_m - previous),
+                wall_conductance_w_k: cell.wall_conductance_w_k,
+                wall_temperature_k: cell.wall_temperature_k,
+                initial_temperature_k: cell.initial_temperature_k,
+            });
             previous = cell.end_m;
         }
-        let references: Vec<_> = laws.iter().enumerate()
-            .map(|(index, law)| (MaterialId(index as u64), law as &dyn ThermalLaw)).collect();
-        let budget = DepositionBudget { max_cells: laws.len(), max_links: count,
-            max_events: count, max_substeps: controls.maximum_substeps };
-        let step = StepConfig { max_dt_s: controls.maximum_dt_s,
-            energy_tolerance_j: controls.energy_tolerance_j };
-        let (mut thermal, _) = DepositionSimulation::new(schedule, &references, budget)?
-            .advance_to(0.0, step, || poll(&mut cancelled))?;
-        let mut observer = observer;
-        let mut substeps = 0usize;
-        let mut maximum_energy_residual_j: f64 = 0.0;
-        let mut balance = thermal.power_balance_observed(&observer, || poll(&mut cancelled))?;
-        let mut maximum_power = balance.net_power_w.values().fold(0.0f64, |a, b| a.max(b.abs()));
-        let mut relaxations = 0usize;
-        while maximum_power > controls.steady_power_tolerance_w {
-            if relaxations >= controls.maximum_relaxations || substeps >= controls.maximum_substeps {
-                return Err(SteadyGasError::NotConverged { substeps, maximum_power_residual_w: maximum_power });
-            }
-            let target = thermal.time_s() + controls.maximum_dt_s;
-            if !target.is_finite() || target <= thermal.time_s() {
-                return Err(bad("pseudo-time increment is not representable"));
-            }
-            let (candidate, prepared, audit) = thermal.advance_observed_limited(
-                &observer, target, step, controls.maximum_substeps - substeps,
-                || poll(&mut cancelled))?;
-            substeps += audit.substeps;
-            maximum_energy_residual_j = maximum_energy_residual_j.max(audit.residual_j.abs());
-            thermal = candidate;
-            observer = prepared;
-            relaxations += 1;
-            balance = thermal.power_balance_observed(&observer, || poll(&mut cancelled))?;
-            maximum_power = balance.net_power_w.values().fold(0.0f64, |a, b| a.max(b.abs()));
-        }
+        Ok(SteadyGasNetwork { source: self.source.clone(),
+            source_conditions: self.source_conditions.clone(), static_pressure_pa: self.static_pressure_pa,
+            phase: self.phase, cells, flows, inlets,
+            outlets: vec![GasOutlet { cell: count - 1, mass_flow_kg_s: rate }] })
+    }
+
+    /// Solve through the shared gas network and publish a source-bound axial
+    /// field for existing ducts, reeds and radiation. Each downstream face takes
+    /// its cell's well-mixed state; spatial refinement remains independent of
+    /// thermal convergence and of the consumer's duct discretization.
+    pub fn solve(
+        &self, controls: SteadyGasSolve, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SteadyGasSolution, SteadyGasError> {
+        poll(&mut cancelled)?;
+        let network = self.to_network()?;
+        let mut solution = network.solve(controls, &mut cancelled)?;
         // The upstream boundary is an enthalpy-balanced mixture of all supplies
         // entering cell zero, before any of its wall heat is exchanged.
-        let upstream_h = upstream_enthalpy_rate / incoming_mass[0];
-        let upstream = laws[0].resolve_enthalpy(upstream_h, &mut cancelled)?;
+        let upstream_h = solution.inlet_enthalpy_w[0] / solution.inlet_mass_kg_s[0];
+        let upstream = solution.laws[0].resolve_enthalpy(upstream_h, &mut cancelled)?;
         let mut stations = vec![0.0];
         let mut states = vec![PrimitiveGasState {
             temperature_k: upstream.state().state().temperature,
-            composition: laws[0].mole_composition().clone(),
+            composition: solution.laws[0].mole_composition().clone(),
         }];
-        let mut residuals = Vec::with_capacity(count);
-        let mut maximum_power_residual_bound_w: f64 = 0.0;
-        let mut incoming_closure_power_w = incoming_mass[0] * upstream.residual_j_kg();
-        if !incoming_closure_power_w.is_finite() {
-            return Err(bad("upstream caloric flux correction is not representable"));
+        // The network checks the exact supplied enthalpies. The axial field
+        // additionally publishes their reconstructed mixture at its x=0 face.
+        let correction = solution.inlet_mass_kg_s[0] * upstream.residual_j_kg();
+        solution.cell_power_residuals_w[0] += correction;
+        solution.cell_power_residual_bounds_w[0] += correction.abs();
+        let bound = solution.cell_power_residual_bounds_w[0];
+        if !bound.is_finite() || bound > controls.steady_power_tolerance_w {
+            return Err(SteadyGasError::PublishedBalance { cell: 0, residual_bound_w: bound });
         }
-        let mut maximum_mean_mach: f64 = 0.0;
-        previous = 0.0;
+        let gas = upstream.state().state();
+        let sonic_mass_rate = gas.density * network.cells[0].flow_area_m2 * gas.sound_speed;
+        if !positive(sonic_mass_rate) { return Err(bad("inlet sonic mass rate is not representable")); }
+        let mach = solution.inlet_mass_kg_s[0] / sonic_mass_rate;
+        if !positive(mach) || mach > controls.maximum_mean_mach {
+            return Err(SteadyGasError::MeanFlow { cell: 0, mach, limit: controls.maximum_mean_mach });
+        }
+        solution.maximum_mean_mach = solution.maximum_mean_mach.max(mach);
         for (index, cell) in self.cells.iter().enumerate() {
             poll(&mut cancelled)?;
-            let h = thermal.cells()[&CellId(index as u64)].specific_h_j_kg;
-            let resolved = laws[index].resolve_enthalpy(h, &mut cancelled)?;
-            let gas = resolved.state().state();
-            // A loose J/kg inverse tolerance must never bypass the independent
-            // W steady tolerance. Bound each actual closure flux separately:
-            // equal inlet/outlet errors must not hide loss of supplied enthalpy.
-            let outgoing_closure_power_w = mass_flow[index] * resolved.residual_j_kg();
-            let owner_residual_w = balance.net_power_w[&CellId(index as u64)];
-            let residual_bound_w = owner_residual_w.abs()
-                + incoming_closure_power_w.abs() + outgoing_closure_power_w.abs();
-            if !residual_bound_w.is_finite() {
-                return Err(bad("published caloric power balance is not representable"));
-            }
-            if residual_bound_w > controls.steady_power_tolerance_w {
-                return Err(SteadyGasError::PublishedBalance { cell: index, residual_bound_w });
-            }
-            maximum_power_residual_bound_w = maximum_power_residual_bound_w.max(residual_bound_w);
-            let area = cell.volume_m3 / (cell.end_m - previous);
-            let sonic_mass_rate = gas.density * area * gas.sound_speed;
-            if !positive(area) || !positive(sonic_mass_rate) {
-                return Err(bad("mean-flow area or sonic mass rate is not representable"));
-            }
-            let mach = mass_flow[index] / sonic_mass_rate;
-            if !positive(mach) || mach > controls.maximum_mean_mach {
-                return Err(SteadyGasError::MeanFlow { cell: index, mach, limit: controls.maximum_mean_mach });
-            }
-            maximum_mean_mach = maximum_mean_mach.max(mach);
-            if index == 0 {
-                let gas = upstream.state().state();
-                let sonic_mass_rate = gas.density * area * gas.sound_speed;
-                if !positive(sonic_mass_rate) {
-                    return Err(bad("inlet sonic mass rate is not representable"));
-                }
-                let mach = incoming_mass[0] / sonic_mass_rate;
-                if !positive(mach) || mach > controls.maximum_mean_mach {
-                    return Err(SteadyGasError::MeanFlow { cell: index, mach, limit: controls.maximum_mean_mach });
-                }
-                maximum_mean_mach = maximum_mean_mach.max(mach);
-            }
             stations.push(cell.end_m);
-            states.push(PrimitiveGasState { temperature_k: gas.temperature,
-                composition: laws[index].mole_composition().clone() });
-            residuals.push(owner_residual_w + incoming_closure_power_w - outgoing_closure_power_w);
-            incoming_closure_power_w = outgoing_closure_power_w;
-            previous = cell.end_m;
+            states.push(PrimitiveGasState { temperature_k: solution.states()[index].state().temperature,
+                composition: solution.laws[index].mole_composition().clone() });
         }
         poll(&mut cancelled)?;
         let field = AxialGasField::new(stations, self.static_pressure_pa, states,
             self.source.clone(), self.source_conditions.clone(), self.phase)?;
         poll(&mut cancelled)?;
-        Ok(SteadyGasSolution { field, species: stationary, mass_flow_kg_s: mass_flow,
-            cell_power_residuals_w: residuals, maximum_power_residual_bound_w,
-            maximum_energy_residual_j, substeps,
-            relaxation_time_s: thermal.time_s(), maximum_mean_mach })
+        let maximum_power_residual_bound_w = solution.maximum_power_residual_bound_w();
+        Ok(SteadyGasSolution { field, species: solution.species, mass_flow_kg_s: solution.mass_flow_kg_s,
+            cell_power_residuals_w: solution.cell_power_residuals_w, maximum_power_residual_bound_w,
+            maximum_energy_residual_j: solution.maximum_energy_residual_j, substeps: solution.substeps,
+            relaxation_time_s: solution.relaxation_time_s, maximum_mean_mach: solution.maximum_mean_mach })
     }
 }
 
