@@ -188,6 +188,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         controls: FreeSurfaceConductionControls,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_conduction(faces, heat, controls, &[], gate)
+    }
+
+    pub(super) fn advance_with_conduction(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         if controls.maximum_faces > self.controls.max_mass_routes
             || faces.len() > controls.maximum_faces
@@ -312,6 +323,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
+        let mut external_heat = 0.0;
         for source in heat {
             poll(gate)?;
             let id = cell_id(source.coordinates)?;
@@ -326,7 +338,23 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 ));
             }
             absolute_heat += source.energy_j.abs();
+            external_heat += source.energy_j;
         }
+        let mut viscous_heat = 0.0;
+        for source in viscous {
+            poll(gate)?;
+            let id = cell_id(source.coordinates)?;
+            if source.heat_j != 0.0 {
+                let power = source.heat_j / duration;
+                let combined = powers.entry(id).or_insert(0.0);
+                *combined += power;
+                if !power.is_finite() || power == 0.0 || !combined.is_finite() {
+                    return Err(Error::Invalid("liquid molecular heat power overflows"));
+                }
+            }
+            viscous_heat += source.heat_j;
+        }
+        absolute_heat += viscous_heat;
         if !absolute_heat.is_finite() {
             return Err(Error::Invalid("conduction heat magnitude overflows"));
         }
@@ -365,8 +393,18 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             poll(gate)?;
             heated.insert(location, thermal.cells()[&id].specific_h_j_kg);
         }
-        let flow =
-            self.advance_prepared_enthalpy(heated, audit.external_heat_j, absolute_heat, gate)?;
+        let external = if viscous.is_empty() {
+            audit.external_heat_j
+        } else {
+            let defect = audit.external_heat_j - external_heat - viscous_heat;
+            if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
+                return Err(Error::Invalid("authored and molecular liquid heat do not close"));
+            }
+            external_heat
+        };
+        let flow = self.advance_prepared_enthalpy(
+            heated, external, viscous_heat, absolute_heat, gate,
+        )?;
         Ok(FreeSurfaceConductionReport {
             thermal: audit,
             flow,

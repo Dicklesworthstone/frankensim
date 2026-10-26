@@ -34,6 +34,7 @@ pub use boundary::{
 pub use coupled::{
     PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3, shear_rate3, update_tau3,
 };
+pub(crate) use coupled::force_corrected_shear_rate3;
 pub use simd::{
     D3q19BgkSimdTier, D3q19StreamSimdTier, d3q19_bgk_simd_tier, d3q19_stream_simd_tier,
 };

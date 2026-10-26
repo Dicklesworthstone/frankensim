@@ -67,7 +67,69 @@ impl MassTransport3 {
     }
 }
 
+#[cfg(test)]
+mod viscous_tests {
+    use super::*;
+    use crate::d3q19::{W3, force_corrected_shear_rate3};
+
+    #[test]
+    fn g1_pure_shear_power_is_invariant_under_guo_force_reframing() {
+        let rho = 1.0;
+        let tau = 0.8;
+        let rate = 0.003;
+        let velocity = [0.02, -0.01, 0.005];
+        let mut physical = equilibrium3(rho, velocity);
+        // Pure xy shear has Pi_xy = -rho*tau*gamma/3. The D3Q19 fourth
+        // moment sum(w*ex^2*ey^2)=1/9 supplies this independent field.
+        for q in 0..Q3 {
+            physical[q] -= 3.0 * rho * tau * rate * W3[q]
+                * f64::from(E3[q].0) * f64::from(E3[q].1);
+        }
+        let expected = force_corrected_shear_rate3(&physical, rho, velocity, [0.0; 3], tau);
+        assert!((expected - rate).abs() < 1e-14);
+        let first = [0.0003, -0.0004, 0.0002];
+        let second = [-0.0008, 0.0001, 0.0005];
+        let f = super::super::forcing::reframe(physical, velocity, [0.0; 3], first).unwrap();
+        let g = super::super::forcing::reframe(f, velocity, first, second).unwrap();
+        for (populations, force) in [(f, first), (g, second)] {
+            let measured = force_corrected_shear_rate3(&populations, rho, velocity, force, tau);
+            assert!((measured - expected).abs() < 1e-14);
+        }
+    }
+}
+
 impl FreeSurface3 {
+    /// Accepted molecular strain rate in lattice inverse-time units. Carry
+    /// has no resolved velocity/stress and must never be thermalized as a cell.
+    pub(crate) fn transport_shear_rate(
+        &self,
+        location: MassLocation3,
+        tau: f64,
+    ) -> Result<f64, FreeSurfaceError3> {
+        let MassLocation3::Cell(key, lane) = location else {
+            return Err(FreeSurfaceError3::Transport("carry has no resolved stress"));
+        };
+        if !tau.is_finite() || tau <= 0.5 {
+            return Err(FreeSurfaceError3::Transport("invalid stress relaxation"));
+        }
+        let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
+            "stress requires an active liquid cell",
+        ))?;
+        let (rho, raw) = self.grid.cell_macros(slot, lane);
+        if !rho.is_finite() || rho <= 0.0 {
+            return Err(FreeSurfaceError3::Transport("invalid stress density"));
+        }
+        let force = self.force_at_lane(key, lane);
+        let u = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
+        let rate = crate::d3q19::force_corrected_shear_rate3(
+            &self.grid.populations(slot, lane), rho, u, force, tau,
+        );
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(FreeSurfaceError3::Transport("unrepresentable liquid strain rate"));
+        }
+        Ok(rate)
+    }
+
     pub(crate) fn mass_snapshot(&self) -> BTreeMap<MassLocation3, f64> {
         let mut masses = BTreeMap::new();
         for (&key, tile) in &self.tiles {

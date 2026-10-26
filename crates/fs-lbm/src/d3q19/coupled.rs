@@ -29,7 +29,7 @@
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
 use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
-use super::{CollisionModel3, E3, OPP3, Q3, collide_cell3, equilibrium3};
+use super::{CollisionModel3, E3, OPP3, Q3, W3, collide_cell3, equilibrium3};
 use crate::rheology::{Rheology, RheologyStats, TAU_CAP, TAU_FLOOR};
 
 /// Flow-lattice sound speed squared (D3Q19).
@@ -247,6 +247,30 @@ pub fn shear_rate3(f: &[f64; Q3], feq: &[f64; Q3], rho: f64, tau: f64) -> f64 {
     let (sxy, sxz, syz) = (c * sxy, c * sxz, c * syz);
     let ss = sxx * sxx + syy * syy + szz * szz + 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
     (2.0 * ss).sqrt()
+}
+
+/// Molecular strain rate in the physical Guo frame, shared by fixed-domain
+/// and moving-liquid thermal consumers. The half-source correction restores
+/// `(u F^T + F u^T)/2` before extracting the non-equilibrium stress. `u` is
+/// already force-corrected; `force` is the force density in this population
+/// epoch, without the collision prefactor `1 - 1/(2 tau)`.
+pub(crate) fn force_corrected_shear_rate3(
+    f: &[f64; Q3],
+    rho: f64,
+    u: [f64; 3],
+    force: [f64; 3],
+    tau: f64,
+) -> f64 {
+    let mut corrected = *f;
+    for q in 0..Q3 {
+        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+        let eu: f64 = e.iter().zip(u).map(|(e, u)| e * u).sum();
+        let raw: f64 = (0..3)
+            .map(|d| (3.0 * (e[d] - u[d]) + 9.0 * eu * e[d]) * force[d])
+            .sum();
+        corrected[q] += 0.5 * W3[q] * raw;
+    }
+    shear_rate3(&corrected, &equilibrium3(rho, u), rho, tau)
 }
 
 /// Update every fluid cell's τ from its local shear rate under `law` —

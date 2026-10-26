@@ -7,7 +7,8 @@
 //! owner solves that transport; no velocity-derived second mass flux exists.
 //!
 //! This is the single-liquid, constant-density, stationary-wall rung. Capillary
-//! energy, phase mobility, viscous heat and pressure work are not supplied.
+//! energy, phase mobility and pressure work are not supplied. Optional `viscous`
+//! converts the molecular stress power into heat on the same VOF mass routes.
 //! Optional `conduction` reuses the shared thermal timeline on explicit wetted
 //! face geometry. Optional `buoyancy` admits bounded source-density departures
 //! while retaining reference mass and volume. In particular, h is enthalpy, not internal or total energy. The
@@ -35,6 +36,9 @@ mod transport;
 /// Source-density buoyancy with explicitly bounded reference-mass storage.
 pub mod buoyancy;
 use buoyancy::{BoussinesqLiquid, resolve_liquid};
+
+/// Molecular stress power deposited into the moving liquid's finite enthalpy.
+pub mod viscous;
 
 /// Source-conductivity exchange on the existing thermal timeline before flow.
 #[cfg(feature = "enthalpy-coupling")]
@@ -86,7 +90,11 @@ pub struct FreeSurfaceEnthalpyReport {
     pub enthalpy_after_j: f64,
     /// Exactly the sum of the caller's admitted cell heat [J].
     pub external_heat_j: f64,
-    /// `H_after - H_before - external_heat` [J]. No balancing heat is added.
+    /// Constitutive molecular stress work converted into heat [J]. Zero for
+    /// steps that do not explicitly select the viscous-heating entry point.
+    pub viscous_heat_j: f64,
+    /// `H_after - H_before - external_heat - viscous_heat` [J]. No balancing
+    /// heat or numerical kinetic-energy residual is added.
     pub balance_defect_j: f64,
     /// True residual returned by the existing sparse solver.
     pub relative_transport_residual: f64,
@@ -350,6 +358,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         heat: &[FreeSurfaceCellHeat],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
+        self.advance_prepared_enthalpy(heated, external, 0.0, absolute_heat, gate)
+    }
+
+    fn prepare_heat(
+        &self,
+        heat: &[FreeSurfaceCellHeat],
+        gate: &CancelGate,
+    ) -> Result<(BTreeMap<MassLocation3, f64>, f64, f64), Error> {
         poll(gate)?;
         if heat.len() > self.controls.max_cells {
             return Err(Error::Invalid("cell-heat budget exhausted"));
@@ -380,12 +397,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if !external.is_finite() {
             return Err(Error::Invalid("total supplied heat overflows"));
         }
-        self.advance_prepared_enthalpy(
-            heated,
-            external,
-            heat.iter().map(|q| q.energy_j.abs()).sum(),
-            gate,
-        )
+        Ok((heated, external, heat.iter().map(|q| q.energy_j.abs()).sum()))
     }
 
     // Both external heating and source-conductivity exchange feed the exact
@@ -395,6 +407,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         &mut self,
         heated: BTreeMap<MassLocation3, f64>,
         external: f64,
+        viscous: f64,
         absolute_heat: f64,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
@@ -422,7 +435,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let endpoint_masses = lattice.mass_snapshot();
         admit_masses(&endpoint_masses, self.controls.max_cells)?;
         let after = total(&endpoint_masses, &h, mass_unit)?;
-        let defect = after - before - external;
+        let defect = after - before - external - viscous;
         let scale = absolute_total(&masses, &self.h, mass_unit)?
             + absolute_total(&endpoint_masses, &h, mass_unit)?
             + absolute_heat;
@@ -445,6 +458,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             enthalpy_before_j: before,
             enthalpy_after_j: after,
             external_heat_j: external,
+            viscous_heat_j: viscous,
             balance_defect_j: defect,
             relative_transport_residual: outcome.relative_residual,
             transport_iterations: outcome.iterations,

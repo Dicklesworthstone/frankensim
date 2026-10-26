@@ -119,9 +119,9 @@ No heat, flow, conversion, source history or transport state commits unless both
 stages and their endpoint sources pass, including work and cancellation checks.
 
 This first-order thermal/flow split needs time refinement for nonlinear feedback.
-It retains constant density, one admitted liquid phase and neglected capillarity;
-phase-volume change, surface energy, pressure work and viscous heating remain
-separate physical owners. The focused `material_free_surface_enthalpy` integration
+It retains constant density, one admitted liquid phase and neglected capillarity.
+Phase-volume change, surface energy and pressure work remain separate physical
+owners. The optional viscous-heating composition below supplies molecular heat. The focused `material_free_surface_enthalpy` integration
 target adds an independent two-cell nonlinear-conductivity balance, a
 conductivity-only card swap affecting actual native momentum, external-source
 accounting and atomic failure/retry regressions under `enthalpy-coupling`.
@@ -164,3 +164,39 @@ through changed heat; source-only density replacement with and without gravity;
 a partial-fill density-refinement limit under gravity; transactional source,
 cancellation and late-flow failures; and common conduction/buoyancy temperature.
 Compilation and source review are not execution or experimental validation.
+
+## Molecular viscous work heats the moving liquid
+
+`MaterialFreeSurfaceEnthalpy3::step_with_viscous_heating` converts the
+accepted molecular stress power into finite liquid enthalpy before the same
+native momentum and VOF transport step. `step_with_conduction_and_viscous_heating`
+also carries that power through the existing thermal substeps, alongside
+source-dependent conductivity and authored heat. Each entry advances flow
+once and composes with the existing source-density buoyancy binding.
+
+The fixed-domain thermal-flow and free-surface consumers share the native
+D3Q19 force-corrected non-equilibrium strain estimator. The physical rate is
+`sqrt(2 D:D)`, and the original liquid source supplies dynamic viscosity.
+Applied molecular power is `mu * rate^2`; each located cell receives that
+power times its reference liquid volume and the physical timestep. Reference
+volume is its actual VOF carrier mass divided by retained reference density.
+Zero-mass interface ghosts and numerical conversion carry have no resolved
+cell stress and receive no invented viscous heat. Reframing the Guo force
+must preserve this physical stress, including when buoyancy changes.
+
+`FreeSurfaceEnthalpyReport` keeps `external_heat_j` and
+`viscous_heat_j` separate. Its enclosing balance subtracts both from the
+extensive enthalpy change. The conduction subsystem's native thermal audit
+sees their sum crossing its boundary; internal conduction is still internal.
+Returned per-cell samples expose the original material query, strain rate,
+reference volume, power and heat actually used.
+
+This is an explicit first-order source split: stress and molecular viscosity
+are sampled at the accepted initial state, heat is applied, then the original
+owner refreshes collision viscosity and optional buoyancy before flow.
+Strong feedback requires timestep refinement. No kinetic-energy discrepancy,
+numerical damping, bulk-viscosity loss, pressure work or surface energy is
+converted into heat. The existing single-liquid, stationary-wall,
+reference-density and neglected-capillarity limits remain. This closes the
+constitutive heat source and extensive enthalpy account; it does not claim
+exact discrete conservation of combined kinetic and thermal energy.

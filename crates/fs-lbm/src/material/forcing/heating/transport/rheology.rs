@@ -153,14 +153,13 @@ impl StressSlab<2, 5> for ThermalLbm {
 impl StressSlab<3, 7> for ThermalLbm3 {
     fn shear_numerator(&self, cell: usize) -> f64 {
         let (rho, u) = self.grid.moments3(cell);
-        let corrected = force_corrected(
-            self.grid.f[cell],
-            crate::d3q19::E3.map(|e| [f64::from(e.0), f64::from(e.1), f64::from(e.2)]),
-            crate::d3q19::W3,
+        crate::d3q19::force_corrected_shear_rate3(
+            &self.grid.f[cell],
+            rho,
             u,
             self.grid.fext[cell],
-        );
-        crate::d3q19::shear_rate3(&corrected, &crate::d3q19::equilibrium3(rho, u), rho, 1.0)
+            1.0,
+        )
     }
 }
 
