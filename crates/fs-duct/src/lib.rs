@@ -466,6 +466,16 @@ pub struct OpenHoleFlow {
     pub chimney_length_m: f64,
     /// Outward volume velocity at the flanged chimney mouth over inlet volume velocity.
     pub u_hole_over_u_in: C64,
+    /// Volume velocity entering the open chimney shunt over inlet volume velocity.
+    pub u_chimney_in_over_u_in: C64,
+    /// Describing-function reference vortex resistance `R_v0` [Pa*s/m^3] when active.
+    pub vortex_resistance_pa_s_m3: f64,
+    /// Dalmont (2002) Eq. 18 Strouhal threshold flow `U_crit = S_h * omega_0 * b` [m^3/s].
+    pub vortex_critical_flow_m3_s: f64,
+    /// Orifice quadratic coefficient `K = rho / (2 C_vc^2 S_h^2)` [Pa*s^2/m^6].
+    pub vortex_quadratic_coeff_pa_s2_m6: f64,
+    /// Local wave reflection `S_22(omega)` at the orifice port referenced to `R_v0`.
+    pub shunt_port_reflection: C64,
 }
 
 /// Viscothermal wavenumber and characteristic impedance for a tube of
@@ -1079,8 +1089,34 @@ pub(crate) fn open_hole_vortex_resistance(
     total_acoustic_len_m: f64,
     outlet_radius_m: f64,
 ) -> f64 {
+    open_hole_vortex_spec(
+        state,
+        loss,
+        hole_radius,
+        bore_radius,
+        chimney_height,
+        sites,
+        hole_index,
+        total_acoustic_len_m,
+        outlet_radius_m,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_hole_vortex_spec(
+    state: &GasState,
+    loss: LossModel,
+    hole_radius: f64,
+    bore_radius: f64,
+    chimney_height: f64,
+    sites: &[OpenHoleSite],
+    hole_index: usize,
+    total_acoustic_len_m: f64,
+    outlet_radius_m: f64,
+) -> (f64, f64, f64) {
     if loss != LossModel::Bessel || hole_index >= sites.len() {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
     const P_AC_PEAK_PA: f64 = 1633.0;
     const C_VC: f64 = 0.61;
@@ -1114,8 +1150,10 @@ pub(crate) fn open_hole_vortex_resistance(
     };
     let d_eff = d_next + l_load;
     if d_eff <= 0.0 || !d_eff.is_finite() {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
+    let is_register_vent =
+        hole_index == 0 && hole_radius * hole_radius < 0.05 * bore_radius * bore_radius;
     let omega0 = core::f64::consts::PI * c / (3.0 * d_eff);
     let z_down_abs = det::sqrt(3.0) * zc_bore;
     let t_h = chimney_height
@@ -1123,20 +1161,32 @@ pub(crate) fn open_hole_vortex_resistance(
         + 0.8216 * hole_radius;
     let l_h = t_h * (bore_radius * bore_radius) / (hole_radius * hole_radius);
     if l_h <= 0.0 || !l_h.is_finite() {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
-    let x_h = (core::f64::consts::PI * c / (3.0 * l_h)) * rho * t_h / area_h;
+    let omega_reactance = if is_register_vent && 3.0 * d_eff < l_h {
+        omega0
+    } else {
+        core::f64::consts::PI * c / (3.0 * l_h)
+    };
+    let x_h = omega_reactance * rho * t_h / area_h;
     let denom = det::hypot(x_h * z_down_abs, zc_bore * (z_down_abs + x_h));
     if denom <= 0.0 || !denom.is_finite() {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
     let u_h = P_AC_PEAK_PA * z_down_abs / denom;
     let v_ac = u_h / area_h;
-    let v_eff = (v_ac - omega0 * hole_radius).max(0.0);
+    let v_crit = omega0 * hole_radius;
+    let v_eff = (v_ac - v_crit).max(0.0);
     if v_eff <= 0.0 {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
-    (4.0 / (3.0 * core::f64::consts::PI * C_VC * C_VC)) * (rho * v_eff / area_h)
+    let r_v = (4.0 / (3.0 * core::f64::consts::PI * C_VC * C_VC)) * (rho * v_eff / area_h);
+    if !is_register_vent {
+        return (r_v, 0.0, 0.0);
+    }
+    let k_quad = rho / (2.0 * C_VC * C_VC * area_h * area_h);
+    let u_thresh = v_crit * area_h + r_v / k_quad;
+    (r_v, u_thresh, k_quad)
 }
 
 /// Compact T-junction: series `Z_s/2`, shunt `Z_h`, series `Z_s/2`.
@@ -4528,3 +4578,72 @@ impl FingeringTable {
         Ok(Duct { segments })
     }
 }
+
+#[cfg(test)]
+mod register_vortex_tests {
+    use super::*;
+
+    #[test]
+    fn open_hole_vortex_spec_computes_self_consistent_register_vent_and_tonehole_resistance() {
+        let state = GasState::try_new_moist_air(293.15, 101_325.0, 0.5).unwrap();
+        let duct = Duct {
+            segments: vec![
+                Segment::Cylinder {
+                    radius: 0.00745,
+                    length: 0.10,
+                },
+                Segment::ToneHole {
+                    hole_radius: 0.00135,
+                    chimney_height: 0.0127,
+                    bore_radius: 0.00745,
+                    state: HoleState::Open,
+                },
+                Segment::Cylinder {
+                    radius: 0.00745,
+                    length: 0.03,
+                },
+                Segment::ToneHole {
+                    hole_radius: 0.00235,
+                    chimney_height: 0.0069,
+                    bore_radius: 0.00745,
+                    state: HoleState::Open,
+                },
+                Segment::Cylinder {
+                    radius: 0.00745,
+                    length: 0.35,
+                },
+            ],
+        };
+        let (sites, total_len, outlet_r) = collect_open_hole_sites(&duct);
+        assert_eq!(sites.len(), 2);
+        let (reg_rv, reg_uthresh, reg_kquad) = open_hole_vortex_spec(
+            &state,
+            LossModel::Bessel,
+            0.00135,
+            0.00745,
+            0.0127,
+            &sites,
+            0,
+            total_len,
+            outlet_r,
+        );
+        let (tone_rv, tone_uthresh, tone_kquad) = open_hole_vortex_spec(
+            &state,
+            LossModel::Bessel,
+            0.00235,
+            0.00745,
+            0.0069,
+            &sites,
+            1,
+            total_len,
+            outlet_r,
+        );
+        assert!(reg_rv > 1.0e6);
+        assert!(reg_kquad > 1.0e10);
+        assert!(reg_uthresh > reg_rv / reg_kquad);
+        assert!(tone_rv > 0.0);
+        assert_eq!(tone_uthresh, 0.0);
+        assert_eq!(tone_kquad, 0.0);
+    }
+}
+

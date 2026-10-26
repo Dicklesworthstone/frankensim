@@ -129,14 +129,14 @@ impl ObservationInput {
         // other ReedBoreVoice. Its proxy is discarded only at the observation
         // boundary; no geometry, mechanics or pressure controls are rewritten.
         let [x, y, z] = receiver.position_m;
-        let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
+        let mut voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
             PlateBank::default(), x.hypot(y).hypot(z), rate, |_| {
                 regional.characteristic_line_realized(termination, rate, samples, None, None)
                     .map_err(map_drive)
             }).map_err(ReedPerformanceError::Model)?;
         let grid = voice.line.history().len();
-        let (mut pressure, mut holes) = regional
-            .baffled_outlet_and_open_holes_delayed_at(
+        let (mut pressure, mut holes, shunt) = regional
+            .baffled_outlet_and_open_holes_and_shunt_delayed_at(
                 rate,
                 grid,
                 receiver,
@@ -152,6 +152,12 @@ impl ObservationInput {
         for hole in &mut holes {
             hole.step(voice.p_plus_prev)
                 .map_err(ReedPerformanceError::Outlet)?;
+        }
+        if let Some(mut shunt) = shunt {
+            shunt
+                .prime(voice.p_plus_prev)
+                .map_err(|error| ReedPerformanceError::Outlet(OutletError::Transfer(error)))?;
+            voice.set_register_shunt(shunt);
         }
         Ok((
             voice,

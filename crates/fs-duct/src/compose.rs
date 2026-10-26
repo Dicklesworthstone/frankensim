@@ -798,6 +798,9 @@ pub(crate) struct PreparedOpenHole {
     pub half_series_impedance: C64,
     pub open_chimney_impedance: C64,
     pub chimney_u_mouth_over_u_in: C64,
+    pub vortex_resistance_pa_s_m3: f64,
+    pub vortex_critical_flow_m3_s: f64,
+    pub vortex_quadratic_coeff_pa_s2_m6: f64,
 }
 fn push_block(blocks: &mut Vec<TwoPort>, limit: usize, block: TwoPort) -> Result<(), DuctError> {
     if blocks.len() >= limit {
@@ -937,17 +940,19 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                                 true,
                                 wall,
                             )?;
-                        r_vortex = crate::open_hole_vortex_resistance(
-                            state,
-                            loss,
-                            hole_radius,
-                            bore_radius,
-                            chimney_height,
-                            &sites,
-                            hole_index,
-                            total_acoustic_len_m,
-                            outlet_radius_m,
-                        );
+                        let (vortex_r, vortex_u_crit, vortex_k_quad) =
+                            crate::open_hole_vortex_spec(
+                                state,
+                                loss,
+                                hole_radius,
+                                bore_radius,
+                                chimney_height,
+                                &sites,
+                                hole_index,
+                                total_acoustic_len_m,
+                                outlet_radius_m,
+                            );
+                        r_vortex = vortex_r;
                         open_resp.impedance = open_resp.impedance + C64::from_re(r_vortex);
                         let ts =
                             fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma
@@ -967,6 +972,9 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                             half_series_impedance: half,
                             open_chimney_impedance: open_resp.impedance,
                             chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
+                            vortex_resistance_pa_s_m3: vortex_r,
+                            vortex_critical_flow_m3_s: vortex_u_crit,
+                            vortex_quadratic_coeff_pa_s2_m6: vortex_k_quad,
                         });
                         hole_index += 1;
                     }
@@ -1005,6 +1013,9 @@ pub(crate) fn duct_chain_with_wall_and_holes(
                             half_series_impedance: C64::ZERO,
                             open_chimney_impedance: open_resp.impedance,
                             chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
+                            vortex_resistance_pa_s_m3: 0.0,
+                            vortex_critical_flow_m3_s: 0.0,
+                            vortex_quadratic_coeff_pa_s2_m6: 0.0,
                         });
                         hole_index += 1;
                     }
@@ -1133,8 +1144,18 @@ fn open_hole_flows(
     bound(condition, options.maximum_condition)?;
     let mut prefix = Product::new();
     let mut next_block = 0usize;
+    let mut left_block = 0usize;
+    let mut r_left = C64::ZERO;
     let mut flows = Vec::with_capacity(open_holes.len());
     for hole in open_holes {
+        while left_block < hole.block_index {
+            let s = chain.blocks[left_block].scattering;
+            let (d, c) = feedback(s[0], r_left);
+            condition = condition.max(c);
+            bound(condition, options.maximum_condition)?;
+            r_left = s[3] + s[1] * r_left * (s[2] / d);
+            left_block += 1;
+        }
         while next_block <= hole.block_index {
             prefix.multiply(t_step[next_block])?;
             next_block += 1;
@@ -1152,14 +1173,36 @@ fn open_hole_flows(
             .scale(hole.sigma * reference)
             / hole.open_chimney_impedance;
         let u_hole_over_u_in = u_chimney_in_over_u_in * hole.chimney_u_mouth_over_u_in;
-        if !finite(u_hole_over_u_in) {
+        if !finite(u_hole_over_u_in) || !finite(u_chimney_in_over_u_in) {
             return Err(DuctError::Singular);
         }
+        let shunt_port_reflection = if hole.vortex_resistance_pa_s_m3 > 0.0 {
+            let z_left = (C64::ONE + r_left).scale(reference) / (C64::ONE - r_left)
+                + hole.half_series_impedance;
+            let z_right = (C64::ONE + r_right).scale(reference) / (C64::ONE - r_right)
+                + hole.half_series_impedance;
+            let z_bore_mid = ((z_left * z_right) / (z_left + z_right)).scale(hole.sigma);
+            let r2 = C64::from_re(hole.vortex_resistance_pa_s_m3);
+            let z_port2_minus_r2 = (hole.open_chimney_impedance - r2.scale(2.0)) + z_bore_mid;
+            let z_port2_plus_r2 = hole.open_chimney_impedance + z_bore_mid;
+            let s22 = z_port2_minus_r2 / z_port2_plus_r2;
+            if !finite(s22) {
+                return Err(DuctError::Singular);
+            }
+            s22
+        } else {
+            C64::ZERO
+        };
         flows.push(OpenHoleFlow {
             axial_position_m: hole.axial_position_m,
             effective_radius_m: hole.effective_radius_m,
             chimney_length_m: hole.chimney_length_m,
             u_hole_over_u_in,
+            u_chimney_in_over_u_in,
+            vortex_resistance_pa_s_m3: hole.vortex_resistance_pa_s_m3,
+            vortex_critical_flow_m3_s: hole.vortex_critical_flow_m3_s,
+            vortex_quadratic_coeff_pa_s2_m6: hole.vortex_quadratic_coeff_pa_s2_m6,
+            shunt_port_reflection,
         });
     }
     Ok(flows)

@@ -270,6 +270,7 @@ pub struct ReedObserverParts {
 pub struct ReedBoreVoice {
     line: fs_vfit::discretize::DelayedFilter,
     line_realization: crate::driving_point::LineRealization,
+    register_shunt: Option<crate::driving_point::regional::outlet::RegisterHoleShuntLine>,
     plates: PlateBank,
     reed: BeatingReed,
     lay: Option<Obstacle>,
@@ -595,6 +596,7 @@ impl ReedBoreVoice {
         Ok(Self {
             line,
             line_realization,
+            register_shunt: None,
             plates,
             reed,
             lay,
@@ -641,6 +643,13 @@ impl ReedBoreVoice {
     /// stay byte-identical to the pre-render-API code).
     pub const fn plate_bank_mut(&mut self) -> &mut PlateBank {
         &mut self.plates
+    }
+
+    pub(crate) fn set_register_shunt(
+        &mut self,
+        shunt: crate::driving_point::regional::outlet::RegisterHoleShuntLine,
+    ) {
+        self.register_shunt = Some(shunt);
     }
 
     /// Select the shared viscous channel law from physical streamwise length
@@ -806,8 +815,16 @@ impl ReedBoreVoice {
         for slot in out.iter_mut() {
             let t = self.sample_index as f64 * self.dt;
             let p_m = blowing_envelope(self.reed, t);
-            let boundary = self.line.boundary_response().map_err(|_|
+            let mut boundary = self.line.boundary_response().map_err(|_|
                 AcousticRealizeError::Reed { what: "characteristic boundary left the finite set" })?;
+            let shunt_incoming = self
+                .register_shunt
+                .as_ref()
+                .map_or(
+                    0.0,
+                    crate::driving_point::regional::outlet::RegisterHoleShuntLine::s12_history,
+                );
+            boundary.history += shunt_incoming;
             let u_body = self.plates.volume_velocity();
             let p_plus = if self.reed.mass_kg > 0.0 {
                 let (pp, y, v) = self.step_massive_scattering(boundary, p_m, u_body)?;
@@ -870,7 +887,13 @@ impl ReedBoreVoice {
                 .push(p_plus)
                 .map_err(|_| AcousticRealizeError::Reed {
                     what: "characteristic line left the finite set",
+                })?
+                + shunt_incoming;
+            if let Some(shunt) = &mut self.register_shunt {
+                shunt.step(p_plus).map_err(|_| AcousticRealizeError::Reed {
+                    what: "register-hole orifice shunt left the finite set",
                 })?;
+            }
             let p_bore = p_plus + p_minus_now;
             let plate_pa = self.plates.drive_and_radiate(
                 p_bore * self.area_bore,
