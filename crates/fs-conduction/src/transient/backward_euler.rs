@@ -167,6 +167,9 @@ impl<'m> BackwardEuler<'m> {
             capacity_temperature_spans: Some(spans) })
     }
 
+    // The theta owner uses this exact prepared P1 storage and source admission.
+    pub(super) fn capacitance(&self) -> &Csr { &self.capacity }
+
     /// Retained density/Cp source bundles. Empty for explicitly declared storage.
     #[must_use]
     pub fn material_capacities(&self) -> &[MaterialHeatCapacity] { &self.material_capacities }

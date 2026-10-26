@@ -1,6 +1,6 @@
-//! Transient conduction by the method of lines: a declared volumetric heat
-//! capacity, the row-sum-lumped P1 capacitance, and theta-method stepping over
-//! the crate's existing steady operator.
+//! Transient conduction by the method of lines: declared or material-derived
+//! heat capacity, the shared row-sum-lumped P1 capacitance, and theta-method
+//! stepping over the crate's existing steady operator.
 //!
 //! Bead `frankensim-extreal-program-f85xj.5.11`, the first item staged by
 //! `f85xj.5.9`. The steady solve answers "where does it settle"; this answers
@@ -67,17 +67,17 @@ pub mod enthalpy;
 pub mod deposition;
 
 mod capacity;
-pub use capacity::MaterialHeatCapacity;
+pub use capacity::{HeatCapacity, MaterialHeatCapacity};
 
-use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
 };
-use crate::bc::ThermalBoundary;
+use crate::bc::{ThermalBoundary, ThermalBoundaryBuilder};
 use crate::field::ScalarField;
 use crate::material::{ConductivityModel, ElementMaterials};
 use crate::mesh::ConductionMesh;
 use crate::solve::{LinearConfig, spd_preconditioner};
+use crate::{ConductionError, ConductionProblem};
 use fs_exec::Cx;
 use fs_solver::krylov::CgState;
 use fs_solver::{CsrOp, norm2};
@@ -94,7 +94,7 @@ pub const MIN_THETA: f64 = 0.5;
 ///
 /// This is explicitly declared storage. [`MaterialHeatCapacity`] resolves
 /// density and specific heat from one card and preserves source domains and
-/// receipts through the backward-Euler/history owners.
+/// receipts through the theta, backward-Euler and history owners.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VolumetricHeatCapacity {
     value_j_per_m3_k: f64,
@@ -346,17 +346,20 @@ pub fn march(
     initial: &[f64],
     steps: usize,
 ) -> Result<TransientSolution, ConductionError> {
-    march_inner(cx, problem, None, config, initial, steps)
+    march_with_capacity(
+        cx,
+        problem.spatial(None),
+        HeatCapacity::Uniform(problem.capacity),
+        config,
+        initial,
+        steps,
+    )
 }
 
 /// [`march`] with a checked per-element constitutive assignment.
 ///
-/// Every assigned model must be temperature-independent. `ρ_e` is not
-/// a material identity; the named model of each tet is.
-///
-/// # Errors
-/// Assignment validation, a `k(T)` model on any element, and every
-/// refusal [`march`] can produce.
+/// Every assigned model must be temperature-independent. For heterogeneous
+/// heat storage as well as conductivity, use [`march_with_capacity`].
 pub fn march_with_element_materials(
     cx: &Cx<'_>,
     problem: TransientProblem<'_>,
@@ -365,39 +368,121 @@ pub fn march_with_element_materials(
     initial: &[f64],
     steps: usize,
 ) -> Result<TransientSolution, ConductionError> {
-    materials.validate_for(problem.mesh)?;
-    for e in 0..problem.mesh.element_count() {
-        if materials.model_for(e)?.is_temperature_dependent() {
-            return Err(ConductionError::Config {
-                parameter: "conductivity",
-                what: "transient marching received a temperature-dependent conductivity; supply a constant one, because freezing k(T) across a step is a different scheme with its own error behaviour and is not adopted silently".to_string(),
-            });
-        }
-    }
-    march_inner(cx, problem, Some(materials), config, initial, steps)
+    march_with_capacity(
+        cx,
+        problem.spatial(Some(materials)),
+        HeatCapacity::Uniform(problem.capacity),
+        config,
+        initial,
+        steps,
+    )
 }
 
-fn march_inner(
+impl<'m> TransientProblem<'m> {
+    fn spatial<'s>(self, element_materials: Option<&'s ElementMaterials>) -> ConductionProblem<'s>
+    where
+        'm: 's,
+    {
+        ConductionProblem {
+            mesh: self.mesh,
+            boundary: self.boundary,
+            material: self.material,
+            source: self.source,
+            element_materials,
+        }
+    }
+}
+
+/// Advance the existing theta scheme with declared or source-bound storage.
+///
+/// The same capacity preparation used by backward Euler and boundary histories
+/// maps material IDs to the original tetrahedra and retains density/Cp sources.
+/// Both storage and conductivity support are checked at every incident vertex,
+/// including initial, prescribed and accepted temperatures. A refusal returns
+/// no partial trajectory. No nonlinear caloric law is frozen into this lane.
+///
+/// Use `MaterialHeatCapacity::isotropic_conductivity` for a same-card pairing;
+/// independently authored conductivity models remain explicitly independent.
+pub fn march_with_capacity(
     cx: &Cx<'_>,
-    problem: TransientProblem<'_>,
-    element_materials: Option<&ElementMaterials>,
+    problem: ConductionProblem<'_>,
+    capacity: HeatCapacity<'_>,
     config: &TransientConfig,
     initial: &[f64],
     steps: usize,
 ) -> Result<TransientSolution, ConductionError> {
-    let TransientProblem {
+    let storage = capacity.prepare(cx, problem.mesh, problem.element_materials)?;
+    march_inner(cx, problem, &storage, config, initial, steps)
+}
+
+fn admit_linear_models(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<(), ConductionError> {
+    if let Some(materials) = problem.element_materials {
+        materials.validate_for(problem.mesh)?;
+    }
+    for element in 0..problem.mesh.element_count() {
+        if element % 512 == 0 {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "transient-materials",
+                at: element,
+            })?;
+        }
+        let model = match problem.element_materials {
+            Some(materials) => materials.model_for(element)?,
+            None => problem.material,
+        };
+        if model.is_temperature_dependent() {
+            return Err(ConductionError::Config {
+                parameter: "conductivity",
+                what: "the theta scheme and its state-independent adjoint require constant conductivity; use the nonlinear enthalpy or backward-Euler owner for k(T)".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_material_temperature(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    storage: &backward_euler::BackwardEuler<'_>,
+    temperature: &[f64],
+) -> Result<(), ConductionError> {
+    storage.validate_capacity_temperature(cx, temperature)?;
+    for (element, tet) in problem.mesh.complex().tets.iter().enumerate() {
+        if element % 512 == 0 {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "transient-material-domain",
+                at: element,
+            })?;
+        }
+        let model = match problem.element_materials {
+            Some(materials) => materials.model_for(element)?,
+            None => problem.material,
+        };
+        for &vertex in tet {
+            model
+                .temperature_span()
+                .check(temperature[vertex as usize])?;
+        }
+    }
+    Ok(())
+}
+
+fn march_inner(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    storage: &backward_euler::BackwardEuler<'_>,
+    config: &TransientConfig,
+    initial: &[f64],
+    steps: usize,
+) -> Result<TransientSolution, ConductionError> {
+    admit_linear_models(cx, problem)?;
+    let ConductionProblem {
         mesh,
         boundary,
         material,
         source,
-        capacity,
+        element_materials,
     } = problem;
-    if element_materials.is_none() && material.is_temperature_dependent() {
-        return Err(ConductionError::Config {
-            parameter: "conductivity",
-            what: "transient marching received a temperature-dependent conductivity; supply a constant one, because freezing k(T) across a step is a different scheme with its own error behaviour and is not adopted silently".to_string(),
-        });
-    }
     let n = mesh.vertex_count();
     if initial.len() != n {
         return Err(ConductionError::FieldLength {
@@ -409,9 +494,10 @@ fn march_inner(
     for &value in initial {
         crate::require_finite("initial temperature", value)?;
     }
+    validate_material_temperature(cx, problem, storage, initial)?;
 
     let dofs = DofMap::new(boundary, n)?;
-    let capacitance = assemble_capacitance(cx, mesh, capacity)?;
+    let capacitance = storage.capacitance();
 
     // K and b are temperature independent here, so one assembly serves every
     // step. That is exactly why k(T) is refused rather than re-assembled.
@@ -428,7 +514,7 @@ fn march_inner(
     let theta = config.theta;
 
     // A = C/dt + theta*K, assembled once.
-    let lhs = axpy_csr(&capacitance, inverse_dt, stiffness, theta);
+    let lhs = axpy_csr(capacitance, inverse_dt, stiffness, theta);
     let (a_ff, lift) = reduce_matrix_and_lift(&lhs, &dofs);
     let precond = spd_preconditioner(&a_ff);
 
@@ -437,6 +523,7 @@ fn march_inner(
         let _ = index;
         temperature[vertex] = dofs.prescribed()[vertex];
     }
+    validate_material_temperature(cx, problem, storage, &temperature)?;
 
     let mut recorded = Vec::with_capacity(steps);
     let mut scratch_c = vec![0.0f64; n];
@@ -487,6 +574,7 @@ fn march_inner(
         for (slot, &vertex) in dofs.free().iter().enumerate() {
             temperature[vertex] = cg.x[slot];
         }
+        validate_material_temperature(cx, problem, storage, &temperature)?;
         recorded.push(TransientStep {
             time_s: config.dt_s * ((step + 1) as f64),
             krylov_iterations: report.iters,
@@ -589,6 +677,10 @@ impl FinalStateFunctional {
 /// is admitted — building the machinery now would add a mechanism that does
 /// nothing and imply a generality the solver does not have.
 ///
+/// This legacy gradient-only entry point assembles at zero kelvin. For a
+/// finite-domain material, use [`march_with_capacity_and_source_scale_gradient`]
+/// so the assembly reference and every forward state are physically admitted.
+///
 /// # Errors
 /// Every refusal [`march`] can produce, plus
 /// [`ConductionError::LinearSolveFailed`] on a non-converging adjoint solve.
@@ -599,18 +691,13 @@ pub fn source_scale_gradient(
     functional: &FinalStateFunctional,
     steps: usize,
 ) -> Result<f64, ConductionError> {
-    source_scale_gradient_inner(cx, problem, None, config, functional, steps)
+    source_scale_gradient_with_storage(cx, problem, None, config, functional, steps)
 }
 
 /// [`source_scale_gradient`] with a checked per-element constitutive assignment.
 ///
-/// Every assigned model must be temperature-independent, for the same
-/// reason as [`march_with_element_materials`]: the adjoint march is
-/// state-independent only when `K` is.
-///
-/// # Errors
-/// Assignment validation, a `k(T)` model on any element, and every
-/// refusal [`source_scale_gradient`] can produce.
+/// Only the volumetric source is scaled: Robin references, prescribed
+/// temperatures and Neumann fluxes retain their physical values.
 pub fn source_scale_gradient_with_element_materials(
     cx: &Cx<'_>,
     problem: TransientProblem<'_>,
@@ -619,39 +706,83 @@ pub fn source_scale_gradient_with_element_materials(
     functional: &FinalStateFunctional,
     steps: usize,
 ) -> Result<f64, ConductionError> {
-    materials.validate_for(problem.mesh)?;
-    for e in 0..problem.mesh.element_count() {
-        if materials.model_for(e)?.is_temperature_dependent() {
-            return Err(ConductionError::Config {
-                parameter: "conductivity",
-                what: "the transient adjoint received a temperature-dependent conductivity; the state-independent-operator argument that removes checkpointing does not hold for k(T)".to_string(),
-            });
-        }
-    }
-    source_scale_gradient_inner(cx, problem, Some(materials), config, functional, steps)
+    source_scale_gradient_with_storage(cx, problem, Some(materials), config, functional, steps)
 }
 
-fn source_scale_gradient_inner(
+fn source_scale_gradient_with_storage(
     cx: &Cx<'_>,
     problem: TransientProblem<'_>,
-    element_materials: Option<&ElementMaterials>,
+    materials: Option<&ElementMaterials>,
     config: &TransientConfig,
     functional: &FinalStateFunctional,
     steps: usize,
 ) -> Result<f64, ConductionError> {
-    let TransientProblem {
+    let storage = HeatCapacity::Uniform(problem.capacity).prepare(cx, problem.mesh, materials)?;
+    let reference = vec![0.0; problem.mesh.vertex_count()];
+    source_scale_gradient_inner(
+        cx,
+        problem.spatial(materials),
+        storage.capacitance(),
+        config,
+        functional,
+        steps,
+        &reference,
+    )
+}
+
+/// Advance and differentiate one material-bound theta trajectory.
+///
+/// The adjoint uses the exact SAME prepared capacity and spatial operator as
+/// the forward solve. Its reference is an accepted physical temperature, so a
+/// finite source domain is never queried at an artificial zero kelvin.
+/// Computing the forward trajectory first also enforces every capacity and
+/// conductivity source interval; an unsupported trajectory has no gradient.
+///
+/// The returned scalar is d(w*T_final)/ds for a uniform multiplier `s` on the
+/// volumetric source alone. All boundary loads remain fixed. The derivative is
+/// local to this admitted constant-property regime, not across a phase change,
+/// source-selection change or boundary of source support.
+#[allow(clippy::too_many_arguments)]
+pub fn march_with_capacity_and_source_scale_gradient(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    capacity: HeatCapacity<'_>,
+    config: &TransientConfig,
+    initial: &[f64],
+    functional: &FinalStateFunctional,
+    steps: usize,
+) -> Result<(TransientSolution, f64), ConductionError> {
+    let storage = capacity.prepare(cx, problem.mesh, problem.element_materials)?;
+    let solution = march_inner(cx, problem, &storage, config, initial, steps)?;
+    let gradient = source_scale_gradient_inner(
+        cx,
+        problem,
+        storage.capacitance(),
+        config,
+        functional,
+        steps,
+        &solution.temperature,
+    )?;
+    Ok((solution, gradient))
+}
+
+fn source_scale_gradient_inner(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    capacitance: &Csr,
+    config: &TransientConfig,
+    functional: &FinalStateFunctional,
+    steps: usize,
+    reference: &[f64],
+) -> Result<f64, ConductionError> {
+    admit_linear_models(cx, problem)?;
+    let ConductionProblem {
         mesh,
         boundary,
         material,
         source,
-        capacity,
+        element_materials,
     } = problem;
-    if element_materials.is_none() && material.is_temperature_dependent() {
-        return Err(ConductionError::Config {
-            parameter: "conductivity",
-            what: "the transient adjoint received a temperature-dependent conductivity; the state-independent-operator argument that removes checkpointing does not hold for k(T)".to_string(),
-        });
-    }
     let n = mesh.vertex_count();
     if functional.weights.len() != n {
         return Err(ConductionError::FieldLength {
@@ -662,29 +793,45 @@ fn source_scale_gradient_inner(
     }
 
     let dofs = DofMap::new(boundary, n)?;
-    let capacitance = assemble_capacitance(cx, mesh, capacity)?;
-    let reference = vec![0.0f64; n];
     let system = match element_materials {
         Some(assigned) => assemble_operator_with_element_materials(
-            cx, mesh, boundary, material, source, &reference, assigned,
+            cx, mesh, boundary, material, source, reference, assigned,
         )?,
-        None => assemble_operator(cx, mesh, boundary, material, source, &reference)?,
+        None => assemble_operator(cx, mesh, boundary, material, source, reference)?,
     };
 
     let inverse_dt = 1.0 / config.dt_s;
     let theta = config.theta;
-    let lhs = axpy_csr(&capacitance, inverse_dt, &system.operator, theta);
+    let lhs = axpy_csr(capacitance, inverse_dt, &system.operator, theta);
     let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
-    let rhs_matrix = axpy_csr(&capacitance, inverse_dt, &system.operator, -(1.0 - theta));
+    let rhs_matrix = axpy_csr(capacitance, inverse_dt, &system.operator, -(1.0 - theta));
     let (b_ff, _) = reduce_matrix_and_lift(&rhs_matrix, &dofs);
     let precond = spd_preconditioner(&a_ff);
 
-    // db/ds over free dofs. The Dirichlet lift does not depend on the source
-    // scale, so it contributes nothing to this derivative.
-    let mut load_sensitivity = Vec::with_capacity(dofs.n());
-    for &vertex in dofs.free() {
-        load_sensitivity.push(system.load[vertex]);
-    }
+    // db/ds over free dofs. Only the volumetric source is scaled; fixed
+    // Dirichlet, Robin and Neumann loads contribute no derivative. Reuse the
+    // original P1 source rule with an adiabatic boundary rather than subtracting
+    // potentially large environmental loads from the complete assembled load.
+    let source_boundary = ThermalBoundaryBuilder::new(mesh)
+        .adiabatic_remainder()
+        .finish()?;
+    let source_system = match element_materials {
+        Some(assigned) => assemble_operator_with_element_materials(
+            cx,
+            mesh,
+            &source_boundary,
+            material,
+            source,
+            reference,
+            assigned,
+        )?,
+        None => assemble_operator(cx, mesh, &source_boundary, material, source, reference)?,
+    };
+    let load_sensitivity = dofs
+        .free()
+        .iter()
+        .map(|&vertex| source_system.load[vertex])
+        .collect::<Vec<_>>();
 
     let mut lambda = Vec::with_capacity(dofs.n());
     for &vertex in dofs.free() {
@@ -717,6 +864,10 @@ fn source_scale_gradient_inner(
             bits: gradient.to_bits(),
         });
     }
+    cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+        stage: "transient-adjoint-publish",
+        at: steps,
+    })?;
     Ok(gradient)
 }
 

@@ -113,6 +113,332 @@ fn controls() -> StepConfig {
 }
 
 #[test]
+fn g1_theta_material_swap_changes_diffusion_heating_and_the_exact_source_adjoint() {
+    use fs_conduction::transient::{
+        FinalStateFunctional, HeatCapacity, TransientConfig,
+        march_with_capacity_and_source_scale_gradient,
+    };
+    let mesh = mesh(false);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let functional = FinalStateFunctional::probe(4, 1).unwrap();
+    let heat = ScalarField::Uniform(30.0);
+    for material in [card(3.0, 5.0, 2.0, false), card(5.0, 6.0, 1.5, false)] {
+        let storage = capacity(&material, 360.0);
+        let k = storage
+            .isotropic_conductivity(&material, SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        let value = storage.value_j_per_m3_k();
+        let conductivity = k.tensor_at(300.0).unwrap()[0][0];
+        for theta in [0.5, 1.0] {
+            let config = TransientConfig::new(theta, 0.2, controls().linear).unwrap();
+            with_cx(|cx| {
+                let (solved, gradient) = march_with_capacity_and_source_scale_gradient(
+                    cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &k,
+                        source: &heat,
+                        element_materials: None,
+                    },
+                    HeatCapacity::MaterialUniform(&storage),
+                    &config,
+                    &[300.0, 310.0, 290.0, 300.0],
+                    &functional,
+                    3,
+                )
+                .unwrap();
+                // Independent P1 eigenmode plus uniform caloric balance.
+                let z = 4.0 * conductivity * 0.2 / value;
+                let ratio = (1.0 - (1.0 - theta) * z) / (1.0 + theta * z);
+                let amplitude = 10.0 * ratio.powi(3);
+                let rise = 30.0 * 0.6 / value;
+                assert!((solved.temperature[0] - 300.0 - rise).abs() < 1e-8);
+                assert!((solved.temperature[1] - 300.0 - rise - amplitude).abs() < 1e-8);
+                assert!((solved.temperature[2] - 300.0 - rise + amplitude).abs() < 1e-8);
+                assert!((gradient - rise).abs() < 1e-9);
+            });
+        }
+    }
+}
+
+#[test]
+fn g1_theta_heterogeneous_capacity_and_adjoint_use_the_same_material_ids() {
+    use fs_conduction::transient::{
+        FinalStateFunctional, HeatCapacity, TransientConfig,
+        march_with_capacity_and_source_scale_gradient,
+    };
+    let mesh = mesh(true);
+    let a = card(2.0, 10.0, 2.0, false);
+    let b = card(3.0, 20.0, 4.0, false);
+    let ca = capacity(&a, 360.0);
+    let cb = capacity(&b, 360.0);
+    let ka = ca
+        .isotropic_conductivity(&a, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    let kb = cb
+        .isotropic_conductivity(&b, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(7), ka.clone()), (MaterialId(2), kb)]).unwrap(),
+        vec![MaterialId(7), MaterialId(2)],
+    )
+    .unwrap();
+    let rows = [(MaterialId(2), cb), (MaterialId(7), ca)];
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let heat = ScalarField::Uniform(30.0);
+    let config = TransientConfig::crank_nicolson(0.2, controls().linear).unwrap();
+    let functional =
+        FinalStateFunctional::new(vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0]).unwrap();
+    with_cx(|cx| {
+        let (solved, gradient) = march_with_capacity_and_source_scale_gradient(
+            cx,
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &ka,
+                source: &heat,
+                element_materials: Some(&assigned),
+            },
+            HeatCapacity::MaterialById(&rows),
+            &config,
+            &[300.0; 8],
+            &functional,
+            3,
+        )
+        .unwrap();
+        for (temperatures, rise) in solved.temperature.chunks_exact(4).zip([0.9, 0.3]) {
+            assert!(
+                temperatures
+                    .iter()
+                    .all(|&t| (t - 300.0 - rise).abs() < 1e-8)
+            );
+        }
+        assert!((gradient - 1.5).abs() < 1e-9);
+    });
+}
+
+#[test]
+fn g1_source_adjoint_does_not_scale_robin_or_neumann_boundary_heat() {
+    use fs_conduction::transient::{
+        FinalStateFunctional, HeatCapacity, TransientConfig, TransientProblem,
+        VolumetricHeatCapacity, march_with_capacity, march_with_capacity_and_source_scale_gradient,
+        source_scale_gradient,
+    };
+    let mesh = mesh(false);
+    let material = card(2.0, 10.0, 2.0, false);
+    let storage = capacity(&material, 360.0);
+    let k = storage
+        .isotropic_conductivity(&material, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    let declared_k = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let functional = FinalStateFunctional::probe(4, 1).unwrap();
+    let config = TransientConfig::crank_nicolson(0.1, controls().linear).unwrap();
+    for bc in [
+        ThermalBc::robin(2.0, 320.0).unwrap(),
+        ThermalBc::neumann(0.5).unwrap(),
+    ] {
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region("environment", |_| true, bc)
+            .unwrap()
+            .finish()
+            .unwrap();
+        with_cx(|cx| {
+            let zero = ScalarField::Uniform(0.0);
+            let problem = ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &k,
+                source: &zero,
+                element_materials: None,
+            };
+            let (_, zero_gradient) = march_with_capacity_and_source_scale_gradient(
+                cx,
+                problem,
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &[300.0; 4],
+                &functional,
+                3,
+            )
+            .unwrap();
+            assert_eq!(zero_gradient, 0.0);
+            // The correction also reaches the original declared-capacity API.
+            assert_eq!(
+                source_scale_gradient(
+                    cx,
+                    TransientProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &declared_k,
+                        source: &zero,
+                        capacity: VolumetricHeatCapacity::declared(20.0).unwrap(),
+                    },
+                    &config,
+                    &functional,
+                    3,
+                )
+                .unwrap(),
+                0.0
+            );
+            let heat = ScalarField::Uniform(30.0);
+            let (_, gradient) = march_with_capacity_and_source_scale_gradient(
+                cx,
+                ConductionProblem {
+                    source: &heat,
+                    ..problem
+                },
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &[300.0; 4],
+                &functional,
+                3,
+            )
+            .unwrap();
+            let objective = |scale| {
+                let source = ScalarField::Uniform(30.0 * scale);
+                let solved = march_with_capacity(
+                    cx,
+                    ConductionProblem {
+                        source: &source,
+                        ..problem
+                    },
+                    HeatCapacity::MaterialUniform(&storage),
+                    &config,
+                    &[300.0; 4],
+                    3,
+                )
+                .unwrap();
+                functional.evaluate(&solved.temperature)
+            };
+            let difference = (objective(1.01) - objective(0.99)) / 0.02;
+            assert!((gradient - difference).abs() < 1e-7);
+            assert!(gradient > 0.0);
+        });
+    }
+}
+
+#[test]
+fn g4_theta_checks_every_source_endpoint_before_returning_a_field_or_gradient() {
+    use fs_conduction::transient::{
+        FinalStateFunctional, HeatCapacity, TransientConfig, march_with_capacity,
+        march_with_capacity_and_source_scale_gradient,
+    };
+    let mesh = mesh(false);
+    let material = card(2.0, 10.0, 2.0, false);
+    let storage = capacity(&material, 300.5);
+    let wide = capacity(&material, 360.0);
+    let k = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let narrow_k = ConductivityModel::isotropic(
+        fs_conduction::ConductivityTable::declared_curve(vec![(280.0, 2.0), (300.2, 2.0)]).unwrap(),
+    );
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let heat = ScalarField::Uniform(30.0);
+    let initial = [300.0; 4];
+    let functional = FinalStateFunctional::probe(4, 0).unwrap();
+    let config = TransientConfig::crank_nicolson(0.25, controls().linear).unwrap();
+    with_cx(|cx| {
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &k,
+            source: &heat,
+            element_materials: None,
+        };
+        assert!(
+            march_with_capacity(
+                cx,
+                problem,
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &initial,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            march_with_capacity_and_source_scale_gradient(
+                cx,
+                problem,
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &initial,
+                &functional,
+                2,
+            ),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        assert!(matches!(
+            march_with_capacity(
+                cx,
+                ConductionProblem {
+                    material: &narrow_k,
+                    ..problem
+                },
+                HeatCapacity::MaterialUniform(&wide),
+                &config,
+                &initial,
+                1,
+            ),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        let prescribed = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "hot",
+                |face| face.centroid[0] == 0.0,
+                ThermalBc::dirichlet(301.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        assert!(matches!(
+            march_with_capacity(
+                cx,
+                ConductionProblem {
+                    boundary: &prescribed,
+                    ..problem
+                },
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &initial,
+                0,
+            ),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        assert_eq!(initial, [300.0; 4]);
+    });
+    with_cancelled_cx(|cx| {
+        assert!(matches!(
+            march_with_capacity(
+                cx,
+                ConductionProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &k,
+                    source: &heat,
+                    element_materials: None,
+                },
+                HeatCapacity::MaterialUniform(&storage),
+                &config,
+                &initial,
+                1,
+            ),
+            Err(ConductionError::Cancelled { .. })
+        ));
+    });
+}
+
+#[test]
 fn g1_one_card_swap_changes_storage_and_actual_diffusion_rate() {
     let mesh = mesh(false);
     let original = card(3.0, 5.0, 2.0, false);

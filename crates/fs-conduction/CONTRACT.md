@@ -80,6 +80,31 @@ expansion, latent heat or a material-error bound. G1/G3/G4 regressions in
 diffusion rate under a one-card swap, heterogeneous caloric heating, selected
 source retention, and transactional refusals.
 
+The original theta/Crank–Nicolson owner now uses the SAME prepared storage
+through `march_with_capacity`. `transient::HeatCapacity` is the shared
+declaration; `ThermalHistoryCapacity` remains a re-export of that exact type.
+Uniform, per-element, material-ID and card-derived assignments therefore use
+one preparation and source-domain policy. The theta path validates every
+incident conductivity and capacity interval before and after prescribed
+boundary lifting and at every accepted endpoint. Borrowed material source
+objects retain the original receipts; a returned temperature field does not
+itself own a new material card.
+
+`march_with_capacity_and_source_scale_gradient` computes the existing exact
+linear discrete adjoint using that same prepared capacity and an accepted
+physical temperature for conductivity assembly. It does not query a
+finite-domain material at an invented zero kelvin. The legacy gradient-only
+API retains its historical zero-valued assembly reference; use the combined
+entry point when source support requires an actual admitted trajectory.
+Only the volumetric source is differentiated: Robin reference heat, Neumann
+flux and Dirichlet values stay fixed. The source-only load is assembled by the
+original P1 rule with an adiabatic boundary, avoiding both a second integration
+rule and cancellation against large environmental loads. The material tests
+include independent theta eigenmode/heating/gradient identities, heterogeneous
+storage, Robin/Neumann boundary invariance, finite differences and endpoint
+refusals. No phase-transition, nonlinear-material or support-boundary derivative
+is claimed.
+
 `incandescent` also exposes a deliberately lumped steady balance for a
 declared filament operating point: `V²/R = εσA(T⁴ - T_ambient⁴)`. It composes
 the crate-owned Stefan-Boltzmann constant with explicit electrical and geometry

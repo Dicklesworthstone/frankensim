@@ -25,18 +25,18 @@ Beads. After execution access recovered, its live export was read through `br`.
 Related plan work: MR19, `frankensim-material-reality-ui2if.3.1`;
 MR04, `frankensim-material-reality-ui2if.1.4`.
 
-- [ ] Generalize the existing capacity assignment for both thermal history and theta marching.
-- [ ] Reuse the existing material-card density/Cp resolution and lumped capacity matrix.
-- [ ] Accept uniform, per-element, and material-ID capacity without an implicit fallback.
-- [ ] Carry material source domains through initial, prescribed, and accepted temperatures.
-- [ ] Use the same prepared capacity in forward and exact source-scale adjoint paths.
-- [ ] Assemble the sourced adjoint at an admitted physical temperature.
-- [ ] Differentiate the volume source without scaling fixed Robin/Neumann loads.
-- [ ] Add an independent material-dependent diffusion/mode and gradient regression.
-- [ ] Add heterogeneous heating and source-support refusal regressions.
-- [ ] Add fixed-boundary, zero-volume-source derivative regressions.
-- [ ] Review public exports, source admission, units, and cancellation boundaries.
-- [ ] Commit the implementation, focused tests, and bounded contract changes.
+- [x] Generalize the existing capacity assignment for both thermal history and theta marching.
+- [x] Reuse the existing material-card density/Cp resolution and lumped capacity matrix.
+- [x] Accept uniform, per-element, and material-ID capacity without an implicit fallback.
+- [x] Carry material source domains through initial, prescribed, and accepted temperatures.
+- [x] Use the same prepared capacity in forward and exact source-scale adjoint paths.
+- [x] Assemble the sourced adjoint at an admitted physical temperature.
+- [x] Differentiate the volume source without scaling fixed Robin/Neumann loads.
+- [x] Add an independent material-dependent diffusion/mode and gradient regression.
+- [x] Add heterogeneous heating and source-support refusal regressions.
+- [x] Add fixed-boundary, zero-volume-source derivative regressions.
+- [x] Review public exports, source admission, units, and cancellation boundaries.
+- [x] Commit the implementation, focused tests, and bounded contract changes.
 - [ ] Run the focused native conduction tests when execution is available.
 
 ## 3. Source-derived Maxwell relaxation in native duct dynamics
@@ -85,7 +85,8 @@ MR07, `frankensim-material-reality-ui2if.1.7`.
 - [ ] Close only tasks whose complete acceptance has actually been met.
 - [ ] Preserve existing assignees and closed antecedents.
 - [ ] Run `br sync --flush-only` after real task updates.
-- [ ] Run applicable rustfmt and focused native Rust verification.
+- [x] Run available rustfmt syntax checks and focused whitespace checks.
+- [ ] Run the pinned-toolchain native Rust tests after dependency/disk blockers are resolved.
 
 Execution was initially unavailable. The recovered environment provides an
 existing nightly-2026-08-31 formatter, used as an explicitly different-toolchain
