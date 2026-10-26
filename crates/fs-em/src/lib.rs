@@ -39,6 +39,9 @@
 //! to the existing mechanical wrench owner, including admitted enclosed recoil
 //! magnets. Its contour remains in an induced-linear exterior medium; it does
 //! not evolve geometry or magnetic work.
+//! The dielectric field uses the same contour integral for electric force and
+//! torque. Native circuit electrode potentials can reconstruct its original
+//! spatial field and mechanical load without another field solve.
 
 /// Spatial source-bound dielectric fields and geometry-derived capacitance.
 pub mod electrostatic;

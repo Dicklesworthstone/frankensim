@@ -1,5 +1,7 @@
 //! Synthetic source-data regressions, not experimentally qualified dielectrics.
 mod common;
+#[path = "electrostatic/force.rs"]
+mod force;
 #[path = "electrostatic/network.rs"]
 mod network;
 use common::{config, layered, limits};

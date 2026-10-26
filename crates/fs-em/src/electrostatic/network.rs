@@ -20,7 +20,7 @@ pub struct CapacitanceMatrixControls {
     /// Exactly one native unit-voltage solve is needed per terminal.
     pub maximum_field_solves: usize,
     /// Total retained scalar field/charge samples across all unit solutions,
-    /// counted as terminals*(2*vertices + 5*triangles). Matrix entries must fit
+    /// counted as terminals*(2*vertices + 6*triangles). Matrix entries must fit
     /// this bound too. This bounds the repeated solves and dense Gram work.
     pub maximum_field_values: usize,
     /// Absolute [F] charge/energy coefficient, reciprocity and gauge allowance.
@@ -98,7 +98,7 @@ impl PlanarElectrostatics {
                 self.mesh
                     .faces()
                     .len()
-                    .checked_mul(5)
+                    .checked_mul(6)
                     .and_then(|m| n.checked_add(m))
             })
             .ok_or_else(|| invalid("capacitance basis extent overflow"))?;
@@ -251,6 +251,69 @@ impl<'m> PlanarCapacitanceMatrix<'m> {
         Ok(reduced)
     }
 
+    fn voltage_differences(&self, voltage_v: &[f64]) -> Result<Vec<f64>, ElectrostaticError> {
+        if voltage_v.len() != self.terminals.len() || voltage_v.iter().any(|v| !v.is_finite()) {
+            return Err(invalid(
+                "one finite voltage per original electrode required",
+            ));
+        }
+        voltage_v.iter().map(|v| finite(v - voltage_v[0])).collect()
+    }
+
+    /// Recover an actual spatial electric field from the original unit-voltage
+    /// solutions, including native weak charge reactions and energy admission.
+    /// This performs no new linear solve. Nodal potentials are reported relative
+    /// to the FIRST electrode; a common voltage never enters field arithmetic.
+    ///
+    /// Supply instantaneous terminal voltages from the native circuit in this
+    /// owner's original electrode order. The returned field can drive the same
+    /// `ElectricField::maxwell_wrench` mechanical connection as a direct solve.
+    /// Actual-voltage charge and energy tolerances are independent of the unit
+    /// basis extraction: scaling an approximate basis cannot bypass acceptance.
+    /// The field retains the frozen material, geometry and zero volume sources;
+    /// motion or changing dielectric state still needs a coupled work owner.
+    pub fn field_at_voltages(
+        &self,
+        voltage_v: &[f64],
+        charge_tolerance_c: f64,
+        energy_tolerance_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ElectricField<'m>, ElectrostaticError> {
+        poll(cancelled)?;
+        if !positive(charge_tolerance_c) || !positive(energy_tolerance_j) {
+            return Err(invalid(
+                "positive actual-field charge and energy tolerances required",
+            ));
+        }
+        let differences = self.voltage_differences(voltage_v)?;
+        let vertices = self.problem.mesh.vertices().len();
+        let mut voltage = vec![0.0; vertices];
+        for (v, potential) in voltage.iter_mut().enumerate() {
+            poll(cancelled)?;
+            for (field, &scale) in self.basis.iter().zip(&differences) {
+                *potential = finite(scale.mul_add(field.voltage_v()[v], *potential))?;
+            }
+        }
+        let mut prescribed = vec![None; vertices];
+        for (terminal, &potential) in self.terminals.iter().zip(&differences) {
+            poll(cancelled)?;
+            for &v in terminal {
+                prescribed[v] = Some(potential);
+            }
+        }
+        self.problem.recover_field(
+            voltage,
+            &vec![0.0; self.problem.mesh.faces().len()],
+            &vec![0.0; vertices],
+            &prescribed,
+            0.0,
+            charge_tolerance_c,
+            energy_tolerance_j,
+            None,
+            cancelled,
+        )
+    }
+
     /// Superpose actual unit fields and return their charge and physical energy.
     /// Voltage differences are formed before products; an arbitrary common
     /// voltage cannot manufacture electric field or stored energy.
@@ -261,15 +324,7 @@ impl<'m> PlanarCapacitanceMatrix<'m> {
     ) -> Result<CapacitanceResponse, ElectrostaticError> {
         poll(cancelled)?;
         let count = self.terminals.len();
-        if voltage_v.len() != count || voltage_v.iter().any(|v| !v.is_finite()) {
-            return Err(invalid(
-                "one finite voltage per original electrode required",
-            ));
-        }
-        let differences: Vec<_> = voltage_v
-            .iter()
-            .map(|v| finite(v - voltage_v[0]))
-            .collect::<Result<_, _>>()?;
+        let differences = self.voltage_differences(voltage_v)?;
         let mut terminal_charge_c = Vec::with_capacity(count);
         for row in 0..count {
             let (mut charge, mut correction) = (0.0, 0.0);

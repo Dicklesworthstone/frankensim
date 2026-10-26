@@ -410,7 +410,7 @@ fn a_topological_neighbour_folded_inside_the_contour_is_not_an_exterior_sample()
     assert!(matches!(
         field.maxwell_wrench(&[0], &frame(), [0.0; 3], force_limits(), &mut || false),
         Err(MagneticError::Invalid(
-            "magnetic contour neighbour is folded onto its enclosed side"
+            "Maxwell contour neighbour is folded onto its enclosed side"
         ))
     ));
 }

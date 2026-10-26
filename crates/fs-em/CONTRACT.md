@@ -103,8 +103,8 @@ counterclockwise complexes. Force and torque use the caller's `PlanarFrame`;
 the torque origin is explicit in that same frame. The returned `fs_ga::Wrench`
 is the canonical native articulated-dynamics input, not another force type or
 mechanical integrator. End-face contributions cancel in the invariant planar
-model. End fringing, electric stress and distributed magnetostriction remain
-unsupported. The fictitious integration contour is not a physical body
+model. End fringing and distributed magnetostriction remain unsupported; the
+electric owner below uses the same geometric integration. The fictitious contour is not a physical body
 surface, so its traction must not be used as an inferred local solid load.
 
 This is an instantaneous static connection. Motion requires updated geometry
@@ -359,14 +359,50 @@ without clipping, even though the original field matrix can remain useful.
 The native circuit owner supplies subsequent KCL/KVL, charge dynamics, source
 work and resistor losses. The extracted network is the dielectric store itself,
 not an additional parallel energy account. Geometry and dielectric state remain
-fixed; parameter work, dielectric loss, leakage and mechanical force remain
-outside this reduction. A balance gate is not a spatial-error certificate.
+fixed; parameter work, dielectric loss and leakage remain outside this
+reduction. The static field-force connection below is not a motion/work closure.
+A balance gate is not a spatial-error certificate.
 Focused synthetic tests compare a three-electrode mesh with independent P1
 coefficients and direct field charge/energy, verify gauge and terminal ordering,
 propagate a regional dielectric-data substitution through actual native coupled
 RC dynamics, and refuse a positive-mutual coarse discretization without altering
 its field matrix. Full native integration execution is still required in an
 environment able to compile the pinned dependency graph.
+
+## Electric field, circuit and native mechanical load
+
+`PlanarCapacitanceMatrix::field_at_voltages` reconstructs an actual
+`ElectricField` from its retained unit-electrode potentials. This invokes the
+same native gradient, weak reaction and physical-energy recovery as a direct
+solve, with independent actual-voltage charge and energy tolerances. It does
+not perform another Krylov solve. Returned potentials use the first electrode
+as their explicit zero reference; a common offset cannot create a field.
+Circuit consumers supply their instantaneous endpoint voltages in the original
+terminal ordering, preserving the exact dielectric mesh and source snapshots.
+
+`ElectricField::maxwell_wrench` integrates `D tensor E - (D.E) I/2` through the
+same contour, outward normals, extrusion thickness, frame/moment transform and
+compensated reduction used by magnetic forces. It returns the existing
+`fs_ga::Wrench` accepted by native articulated dynamics. Both incident cells of
+every contour edge must have the same complete dielectric snapshot, zero
+original volume-charge source, and no prescribed electrode vertex on the edge.
+The field retains per-cell charge sources even when their global sum vanishes.
+Material interfaces, mesh boundaries, folded neighbours and invalid budgets
+refuse before any load can be published. Enclosed material contrast and free
+charge are supported through their actual computed field.
+
+The assumed homogeneous exterior has no electrostriction or mechanical fluid
+pressure response. The result is a net instantaneous load on the enclosed body,
+not a distributed traction on the artificial contour. Motion still requires
+updated geometry and a source/field/mechanical work closure; no frozen-field
+actuator or overlapping free-charge force may be counted as that closure.
+Synthetic G1/G3/G4 tests compare against an independent volume-charge force,
+check material-only changes through native acceleration, reconstruct the force
+after a native multi-electrode RC discharge, and exercise gauge/frame,
+source-domain, budget and cancellation behavior. These are discrete numerical
+connections, not measured dielectric-device qualification. Force-density and
+exterior-medium conventions follow the energy discussion in MIT 6.013,
+chapter 11: https://web.mit.edu/6.013_book/www/chapter11/11.9.html.
 
 ## Nonlinear reversible induction and spatial Ohmic heat
 

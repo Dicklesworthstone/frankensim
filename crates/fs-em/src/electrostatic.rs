@@ -9,6 +9,7 @@
 //! error bounds. No conduction, dielectric loss, dispersion, breakdown, moving
 //! geometry, or live temperature/parameter-work claim is made.
 
+mod force;
 /// Multiple source-resolved electrodes and passive native circuit reduction.
 pub mod network;
 
@@ -266,6 +267,36 @@ impl PlanarElectrostatics {
             }
             Some(result.report)
         };
+        self.recover_field(
+            voltage,
+            free_charge_density_c_m3,
+            &rhs,
+            &prescribed,
+            volume_charge_c,
+            controls.charge_tolerance_c,
+            controls.energy_tolerance_j,
+            report,
+            cancelled,
+        )
+    }
+
+    // Native solves and admitted electrode-basis superpositions use this same
+    // gradient, source-reaction and physical-energy recovery. No second field
+    // representation or looser force-only residual is introduced.
+    #[allow(clippy::too_many_arguments)]
+    fn recover_field(
+        &self,
+        voltage: Vec<f64>,
+        free_charge_density_c_m3: &[f64],
+        rhs: &[f64],
+        prescribed: &[Option<f64>],
+        volume_charge_c: f64,
+        charge_tolerance_c: f64,
+        energy_tolerance_j: f64,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ElectricField<'_>, ElectrostaticError> {
+        let n = self.mesh.vertices().len();
         let mut electric_field_v_m = Vec::with_capacity(self.materials.len());
         let mut displacement_c_m2 = Vec::with_capacity(self.materials.len());
         let mut cell_energy_j = Vec::with_capacity(self.materials.len());
@@ -327,9 +358,9 @@ impl PlanarElectrostatics {
         }
         let charge_balance_residual_c = finite(volume_charge_c + boundary_charge_c)?;
         let energy_balance_residual_j = finite(energy_j - 0.5 * source_pairing_j)?;
-        if charge_balance_residual_c.abs() > controls.charge_tolerance_c
-            || maximum_free_charge_residual_c > controls.charge_tolerance_c
-            || energy_balance_residual_j.abs() > controls.energy_tolerance_j
+        if charge_balance_residual_c.abs() > charge_tolerance_c
+            || maximum_free_charge_residual_c > charge_tolerance_c
+            || energy_balance_residual_j.abs() > energy_tolerance_j
         {
             return Err(ElectrostaticError::Balance {
                 charge_residual_c: charge_balance_residual_c,
@@ -340,6 +371,7 @@ impl PlanarElectrostatics {
         poll(cancelled)?;
         Ok(ElectricField {
             problem: self,
+            free_charge_density_c_m3: free_charge_density_c_m3.to_vec(),
             voltage_v: voltage,
             electric_field_v_m,
             displacement_c_m2,
@@ -470,6 +502,7 @@ impl PlanarElectrostatics {
 /// Accepted electrostatic field tied to its exact geometry and material states.
 pub struct ElectricField<'a> {
     problem: &'a PlanarElectrostatics,
+    free_charge_density_c_m3: Vec<f64>,
     voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 2]>,
     displacement_c_m2: Vec<[f64; 2]>,
@@ -489,6 +522,11 @@ impl ElectricField<'_> {
     }
     pub fn voltage_v(&self) -> &[f64] {
         &self.voltage_v
+    }
+    /// Original prescribed volume-charge source per cell [C/m3], retained even
+    /// when positive and negative charges cancel in the total inventory.
+    pub fn free_charge_density_c_m3(&self) -> &[f64] {
+        &self.free_charge_density_c_m3
     }
     /// Cell E=-grad(V) [V/m], in the original planar frame.
     pub fn electric_field_v_m(&self) -> &[[f64; 2]] {
