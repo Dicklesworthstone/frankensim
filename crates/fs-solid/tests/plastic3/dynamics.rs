@@ -108,6 +108,70 @@ fn g1_inertia_translated_continuation_never_discards_velocity_at_the_force_gate(
 }
 
 #[test]
+fn g1_inertia_stiff_rigid_body_cannot_stop_without_force() {
+    with_cx(|cx| {
+        // This exact small, stiff specimen passed the old stiffness*travel
+        // gate at u_next=0: ||M*v_old/dt||/(maxdiag(K)*dt*v_old) < 1e-10.
+        let nodes = NODES.map(|node| node.map(|x| x * 0.01));
+        let law =
+            J2Plasticity::new(IsotropicElastic::new(1.2e9, 0.2, 0.05).unwrap(), 3e6, 1e8).unwrap();
+        let mut native = problem(&law, &[], &[]);
+        native.nodes_m = &nodes;
+        let velocity = [[0.1, 0.0, 0.0]; 4];
+        match native.advance_backward_euler(
+            &[0.0; 12],
+            &velocity,
+            &[law.initial_state()],
+            &[1000.0],
+            1.0,
+            cx,
+        ) {
+            Ok(step) => {
+                for (v, u) in step.velocity_mps.iter().zip(&step.solution.displacement_m) {
+                    for c in 0..3 {
+                        close(v[c], velocity[0][c], 1e-8);
+                        close(u[c], velocity[0][c], 1e-8);
+                    }
+                }
+            }
+            // The real sparse solve may refuse this severe stiffness/mass
+            // conditioning; it must not replace unresolved motion with rest.
+            Err(
+                fs_solid::plastic3::SmallStrainTetError::NewtonStalled { .. }
+                | fs_solid::plastic3::SmallStrainTetError::LinearSolveFailed { .. },
+            ) => {}
+            other => panic!("unexpected stiff rigid-body result: {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn g1_inertia_unrelated_support_force_does_not_hide_free_momentum() {
+    with_cx(|cx| {
+        let law = j2();
+        let fixed: Vec<_> = (0..12).filter(|d| d % 3 != 0).map(|d| (d, 0.0)).collect();
+        // A y-support cancels this load without doing work. All x motion is
+        // free and carries no applied force; its momentum must be retained.
+        let forces = [(1, 1e20)];
+        let velocity = [[0.1, 0.0, 0.0]; 4];
+        let step = problem(&law, &fixed, &forces)
+            .advance_backward_euler(
+                &[0.0; 12],
+                &velocity,
+                &[law.initial_state()],
+                &[6.0],
+                0.01,
+                cx,
+            )
+            .unwrap();
+        for (v, u) in step.velocity_mps.iter().zip(&step.solution.displacement_m) {
+            close(v[0], 0.1, 1e-10);
+            close(u[0], 0.001, 1e-12);
+        }
+    });
+}
+
+#[test]
 fn g1_inertia_uses_consistent_mass_and_shared_elastic_tangent() {
     with_cx(|cx| {
         let law = j2();

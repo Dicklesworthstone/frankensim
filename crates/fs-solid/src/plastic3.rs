@@ -615,6 +615,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             let mut fallbacks = 0usize;
             let mut converged = false;
             let mut f_int = self.internal(&elements, &states, &u, cx)?;
+            let mut elastic_free_norm = if inertia.is_some() {
+                free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]))
+            } else { 0.0 };
             if let Some(inertia) = inertia { inertia.add_force(&u, &mut f_int, cx)?; }
             for _ in 0..self.settings.max_newton_iterations {
                 checkpoint(cx)?;
@@ -625,16 +628,16 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     .map(|&(dof, value)| (dof, value - u[dof]))
                     .collect();
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
-                let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                let reach = if let Some(inertia) = inertia {
-                    inertia.increment_scale(&u, cx)?
+                let scale = if let Some(inertia) = inertia {
+                    let external_free_norm = free.iter()
+                        .fold(0.0_f64, |n, &d| n.hypot(f_ext[d]));
+                    inertia.force_scale(&u, &free, elastic_free_norm, external_free_norm, cx)?
                 } else {
-                    u.iter().map(|v| v.abs()).fold(0.0, f64::max)
+                    let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
+                    let reach = u.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                    norm(&f_int).max(norm(&f_ext)).max(stiffness * reach)
+                        .max(f64::MIN_POSITIVE)
                 };
-                let scale = norm(&f_int)
-                    .max(norm(&f_ext))
-                    .max(stiffness * reach)
-                    .max(f64::MIN_POSITIVE);
                 let relative = norm(&residual) / scale;
                 history.push(relative);
                 if !pending_any && relative <= self.settings.relative_tolerance {
@@ -671,19 +674,23 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
                     let mut f_trial = self.internal(&elements, &states, &trial, cx)?;
+                    let trial_elastic_free_norm = if inertia.is_some() {
+                        free.iter().fold(0.0_f64, |n, &d| n.hypot(f_trial[d]))
+                    } else { 0.0 };
                     if let Some(inertia) = inertia { inertia.add_force(&trial, &mut f_trial, cx)?; }
                     let after: Vec<f64> = free.iter().map(|&d| f_trial[d] - f_ext[d]).collect();
                     if pending_any || norm(&after) < before || alpha < 1e-3 {
-                        accepted = Some((trial, f_trial));
+                        accepted = Some((trial, f_trial, trial_elastic_free_norm));
                         break;
                     }
                     alpha *= 0.5;
                 }
-                let Some((trial, f_trial)) = accepted else {
+                let Some((trial, f_trial, trial_elastic_free_norm)) = accepted else {
                     return Err(SmallStrainTetError::NewtonStalled { increment, history });
                 };
                 u = trial;
                 f_int = f_trial;
+                elastic_free_norm = trial_elastic_free_norm;
             }
             if !converged {
                 return Err(SmallStrainTetError::NewtonStalled { increment, history });

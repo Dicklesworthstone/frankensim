@@ -132,25 +132,35 @@ impl<'a> Inertia<'a> {
         })
     }
 
-    // An accumulated rigid translation must not inflate the force tolerance.
-    // Only this interval's displacement and velocity predictor set its reach.
-    // Underresolved absolute coordinates may fail Newton; no roundoff floor
-    // silently accepts a lost velocity or invents an impulse.
-    pub(super) fn increment_scale(
+    // Normalize only physical forces on free rows. Elastic stiffness times
+    // rigid travel is unrelated to momentum balance and can accept v_next=0.
+    // The positive mass action retains a reference under momentum cancellation;
+    // unrelated prescribed-support forces cannot inflate the stopping gate.
+    pub(super) fn force_scale(
         &self,
         u: &[f64],
+        free: &[usize],
+        elastic_free_norm: f64,
+        external_free_norm: f64,
         cx: &Cx<'_>,
     ) -> Result<f64, SmallStrainTetError> {
-        let mut reach = 0.0_f64;
+        let mut acceleration_scale = Vec::with_capacity(u.len());
         for (i, ((u, old_u), old_v)) in u.iter().zip(self.old_u).zip(self.old_v).enumerate() {
             if i % 256 == 0 {
                 checkpoint(cx)?;
             }
-            reach = reach
-                .max(finite(u - old_u)?.abs())
-                .max(finite(old_v / self.inverse_dt)?.abs());
+            acceleration_scale.push(finite(
+                (finite(u - old_u)?.abs() * self.inverse_dt + old_v.abs()) * self.inverse_dt,
+            )?);
         }
-        Ok(reach)
+        // Every entry of the original P1 consistent mass is nonnegative,
+        // so its existing action is exactly |M| times this positive vector.
+        let force = self.action(&acceleration_scale, cx)?;
+        let inertial_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(force[d]));
+        Ok(finite(inertial_norm)?
+            .max(finite(elastic_free_norm)?)
+            .max(finite(external_free_norm)?)
+            .max(f64::MIN_POSITIVE))
     }
 
     fn action(&self, x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, SmallStrainTetError> {
