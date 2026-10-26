@@ -205,16 +205,21 @@ impl AnnularMembrane {
             .collect();
         let mut indices = BTreeMap::new();
         let mut strain_pairs = Vec::new();
-        let load_terms = terms.iter().map(|row| {
-            row.iter().map(|term| {
-                let index = *indices.entry((term.a, term.b)).or_insert_with(|| {
-                    let index = strain_pairs.len();
-                    strain_pairs.push((term.a, term.b));
-                    index
-                });
-                (index, term.weight)
-            }).collect()
-        }).collect();
+        let load_terms = terms
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|term| {
+                        let index = *indices.entry((term.a, term.b)).or_insert_with(|| {
+                            let index = strain_pairs.len();
+                            strain_pairs.push((term.a, term.b));
+                            index
+                        });
+                        (index, term.weight)
+                    })
+                    .collect()
+            })
+            .collect();
         let strains = vec![0.0; strain_pairs.len()];
         Ok((
             Self {
@@ -406,9 +411,14 @@ mod tests {
                         prepared_q[c] = prepared.prepared_load_row(c, vk.eh);
                         prepared_q[c]
                     });
-                    for (expected, actual) in q.iter().chain(&f).zip(prepared_q.iter().chain(&prepared_f)) {
-                        assert_eq!(expected.to_bits(), actual.to_bits(),
-                            "prepared h={h} curved={curved} phase={phase}");
+                    for (expected, actual) in
+                        q.iter().chain(&f).zip(prepared_q.iter().chain(&prepared_f))
+                    {
+                        assert_eq!(
+                            expected.to_bits(),
+                            actual.to_bits(),
+                            "prepared h={h} curved={curved} phase={phase}"
+                        );
                     }
                     for (expected, actual) in q.iter().chain(&f).zip(fused_q.iter().chain(&fused_f))
                     {
@@ -430,14 +440,26 @@ mod tests {
         let original = vk.annulus.as_ref().unwrap();
         let mut prepared = original.clone();
         assert!(prepared.strains.len() < original.terms.iter().map(Vec::len).sum::<usize>());
-        for (amplitude, rest_scale) in [(0.007, 1.0), (-0.003, 0.0), (0.0, -2.0), (1e-150, 1e-150), (0.007, 1.0)] {
-            let w: Vec<_> = body.xy.iter().map(|[x, y]| amplitude * (19.0*x + 13.0*y).sin()).collect();
-            let z: Vec<_> = vk.z0.iter().map(|z| rest_scale*z).collect();
+        for (amplitude, rest_scale) in [
+            (0.007, 1.0),
+            (-0.003, 0.0),
+            (0.0, -2.0),
+            (1e-150, 1e-150),
+            (0.007, 1.0),
+        ] {
+            let w: Vec<_> = body
+                .xy
+                .iter()
+                .map(|[x, y]| amplitude * (19.0 * x + 13.0 * y).sin())
+                .collect();
+            let z: Vec<_> = vk.z0.iter().map(|z| rest_scale * z).collect();
             prepared.prepare_load(&w, &z);
             for c in 0..original.terms.len() {
-                assert_eq!(original.load_row(c, &w, &z, vk.eh).to_bits(),
+                assert_eq!(
+                    original.load_row(c, &w, &z, vk.eh).to_bits(),
                     prepared.prepared_load_row(c, vk.eh).to_bits(),
-                    "row={c} amplitude={amplitude} rest_scale={rest_scale}");
+                    "row={c} amplitude={amplitude} rest_scale={rest_scale}"
+                );
             }
         }
     }
