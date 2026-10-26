@@ -395,8 +395,9 @@ pub struct FlueGeometry {
     /// Labium offset from the jet centerline [m] (positive = the labium
     /// sits on the pipe side of the undeflected jet).
     pub labium_offset_m: f64,
-    /// Jet angle towards the pipe side [rad]; tilts the effective
-    /// offset by `W tan(angle)`.
+    /// Jet angle towards the pipe side [rad]. The undeflected jet then
+    /// reaches the labium `W tan(angle)` further to the pipe side, which
+    /// lowers the effective offset by that much.
     pub jet_angle_rad: f64,
     /// Pipe bore area at the mouth [m^2] (the wind line's `zc` basis).
     pub bore_area_m2: f64,
@@ -412,10 +413,11 @@ impl FlueGeometry {
     pub fn mouth_area_m2(&self) -> f64 {
         self.flue_width_m * self.cut_up_m
     }
-    /// Effective labium offset after the jet-angle tilt.
+    /// Effective labium offset after the jet-angle tilt: the labium's
+    /// pipe-side distance from the tilted jet's centreline at the labium.
     #[must_use]
     pub fn effective_offset_m(&self) -> f64 {
-        self.labium_offset_m + self.cut_up_m * self.jet_angle_rad.tan()
+        self.labium_offset_m - self.cut_up_m * self.jet_angle_rad.tan()
     }
     /// Mouth end correction `0.61 * equivalent radius` (unflanged
     /// opening law; the mouth inertance basis).
@@ -1490,6 +1492,18 @@ mod convection_tests {
     }
     fn gas(pressure: f64) -> GasState {
         GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure).unwrap()
+    }
+
+    #[test]
+    fn a_jet_tilted_towards_the_pipe_lowers_the_effective_offset() {
+        // Q_j grows with eta - y0, eta towards the pipe. A tilt towards the
+        // pipe moves the undeflected jet W tan(angle) that way at the labium.
+        let angle = 0.1_f64;
+        let tilted = FlueGeometry { cut_up_m: 0.004, jet_angle_rad: angle, ..geometry() };
+        assert_eq!(tilted.effective_offset_m(), -(0.004 * angle.tan()));
+        let offset = FlueGeometry { labium_offset_m: 2e-4, ..tilted };
+        assert_eq!(offset.effective_offset_m(), 2e-4 - 0.004 * angle.tan());
+        assert!(offset.effective_offset_m() < offset.labium_offset_m);
     }
     fn voice(gas: GasState, geometry: FlueGeometry, gain: f64) -> FlueVoice {
         let source = network::FlueNetworkSpec {
