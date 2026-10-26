@@ -503,3 +503,35 @@ material/enthalpy owner; this API supplies no temperature or contact law.
 Synthetic `nonlinear_winding_circuit` regressions exercise independent nonlinear
 RL and coupled-winding/capacitor equations, source-only H(B)/resistivity swaps,
 core/strand loss separation, temperature refresh and transactional failure.
+
+## Accepted induction and nonlinear circuit fields drive mechanical loads
+
+`PlanarEddy::maxwell_wrench` and `PlanarNonlinearEddy::maxwell_wrench` recover
+the actual accepted B/H from their retained potential and share one source
+admission with the original geometric Maxwell-stress integral. They do not
+re-equilibrate the field. Every contour edge needs the same complete linear
+material snapshot on both sides, zero original impressed current, and no
+resolved eddy conductor. Enclosed source-defined nonlinear magnetic material,
+stranded current and eddy currents remain admissible. The history supplies the
+source support that a detached recovered static field intentionally lacks.
+Mesh work bounds apply before field recovery. Original edge orientation,
+extrusion, exterior sampling, compensated reduction, mechanical frame and
+moment origin remain owned by the common contour implementation.
+
+`NonlinearWindingCircuit::field()` exposes this same accepted induction state,
+so source saturation/resistivity and actual voltage-driven current determine
+its native mechanical wrench. The result can feed the existing articulated
+body dynamics without a fitted force coefficient or material-name branch.
+This is an instantaneous net magnetoquasistatic load on a fixed planar section,
+not a local nodal traction map or a moving-field work closure. No energy is
+debited by this observation, and an overlapping Lorentz body load must not be
+added. Nonlinear/conducting exterior stress, displacement-current electric
+stress, end fields, striction and exterior-medium pressure response remain
+outside this admission.
+
+G1/G3/G4 tests in `tests/magnetic_force/induction.rs` cover the linear history
+limit and independent volume-Lorentz refinement, source-only saturation and
+voltage changes through the native winding circuit and body acceleration,
+retained decaying-eddy force versus an incorrect static reset, source/contour
+refusals and late cancellation. Full native integration execution remains
+required; source parsing and metadata compilation are not physical validation.

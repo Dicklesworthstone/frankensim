@@ -1,4 +1,4 @@
-//! Static electromagnetic force and torque from computed exterior fields.
+//! Electromagnetic force and torque from computed exterior fields.
 //!
 //! Integrate T.n with T = B tensor H - (B.H) I/2 over a CLOSED contour in
 //! one homogeneous, current-free linear exterior medium. The integration
@@ -17,6 +17,7 @@
 use fs_ga::Wrench;
 
 pub(crate) mod contour;
+mod induction;
 use contour::ContourError;
 
 use crate::{

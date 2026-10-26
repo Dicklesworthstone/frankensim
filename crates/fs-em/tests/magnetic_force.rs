@@ -2,6 +2,9 @@
 //! Synthetic source laws verify the numerical connection, not device accuracy.
 mod common;
 
+#[path = "magnetic_force/induction.rs"]
+mod induction;
+
 use common::{config, limits, material, near};
 use fs_em::{
     force::MaxwellForceLimits,
