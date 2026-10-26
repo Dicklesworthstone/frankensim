@@ -52,11 +52,13 @@ impl MaterialStringBankSource {
         if air.gas != self.gas || air.basis_identity != identity {
             return Err(invalid("exterior load no longer matches the original material body basis and gas"));
         }
-        if coordinates != air.source_body_coordinates {
+        if coordinates != air.source_body_coordinates
+            && !self.skin_prefix_coordinates(air, body_modes.len())
+        {
             return Err(invalid("exterior load lost its original complete body/neck source map"));
         }
         let start = body_modes[0];
-        let modes: Vec<_> = coordinates.iter().map(|coordinate|start+coordinate).collect();
+        let modes: Vec<_> = air.source_body_coordinates.iter().map(|coordinate|start+coordinate).collect();
         let system = system.with_radiation_load(&air.model, &modes, air.maximum_poles, gate)
             .map_err(ReciprocalStringError::Friction)?;
         self.validate_body_memory_frequencies(&system, gate)?;
@@ -77,7 +79,29 @@ impl MaterialStringBankSource {
                     invalid("exterior source requires every original internal-only cavity neck"));
             }
         }
+        // An exterior-owned lumped mouth radiates through the one neck coordinate,
+        // the first of the component after the body.
+        if self.material_cavity.as_ref().is_some_and(|c|
+            c.cavity.loss() == crate::cavity_modal::CavityNeckLoss::ExteriorMouth)
+        {
+            return Ok((0..=structural_modes).collect());
+        }
         Ok((0..structural_modes).collect())
+    }
+
+    /// A skin load's coordinates: an ascending prefix of the structural modes,
+    /// then the exterior-owned neck when there is one. Nothing else is admitted.
+    fn skin_prefix_coordinates(&self, air: &MaterialBodyRadiation, structural_modes: usize) -> bool {
+        if !air.shell_bem.as_ref().is_some_and(|report| report.skin_identity.is_some()) {
+            return false;
+        }
+        let neck = self.material_cavity.as_ref().is_some_and(|c|
+            c.cavity.loss() == crate::cavity_modal::CavityNeckLoss::ExteriorMouth);
+        let stored = &air.source_body_coordinates;
+        let loaded = stored.len() - usize::from(neck);
+        (1..=structural_modes).contains(&loaded)
+            && stored[..loaded].iter().copied().eq(0..loaded)
+            && (!neck || stored[loaded] == structural_modes)
     }
 
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn body_radiation_basis(&self, system: &FrictionModalSystem, gate: &CancelGate)
@@ -135,15 +159,27 @@ impl ReciprocalStringBank {
     /// independently of the interior cavity. This raw composition API cannot
     /// certify an authored model as geometry-derived. It adds no microphone
     /// filter: the existing compact observation retains its original scope.
-    pub fn with_body_radiation_load(mut self, model: Model, maximum_poles: usize,
+    pub fn with_body_radiation_load(self, model: Model, maximum_poles: usize,
         gate: &CancelGate) -> Result<Self, ReciprocalStringError>
     {
+        self.attach_body_radiation(model, maximum_poles, None, gate)
+    }
+
+    /// The shared attachment. `coordinates` is a skin load's admitted prefix
+    /// map; `None` is the complete body/neck map.
+    pub(in crate::bowed_string::runtime::reciprocal::bank) fn attach_body_radiation(
+        mut self, model: Model, maximum_poles: usize, coordinates: Option<Vec<usize>>,
+        gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         if self.source.body_radiation.is_some() || self.system.samples_rendered() != 0 {
             return Err(invalid("body exterior loading requires one original cold source binding"));
         }
         let (basis_identity, body_modes) = self.source.body_radiation_basis(&self.system, gate)?;
-        let source_body_coordinates = self.source.radiation_body_coordinates(body_modes.len())?;
+        let source_body_coordinates = match coordinates {
+            Some(coordinates) => coordinates,
+            None => self.source.radiation_body_coordinates(body_modes.len())?,
+        };
         let modes: Vec<_> = source_body_coordinates.iter().map(|coordinate|body_modes[0]+coordinate).collect();
         if model.ports != modes.len() {
             return Err(invalid("radiation requires every original body mode and actual mouth in source order"));

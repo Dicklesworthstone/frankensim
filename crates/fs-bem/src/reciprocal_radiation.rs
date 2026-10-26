@@ -42,17 +42,28 @@ pub use ports::VelocityPortSolution;
 mod receivers;
 pub use receivers::{ReceiverGeometry,PreparedReceivers};
 
+/// Largest admitted P1 vertex plus P0 panel count. It also bounds each
+/// frequency's dense system, 16 n^2 bytes beside the retained cache:
+/// 1.07 GB at this ceiling.
+pub const MAX_RECIPROCAL_UNKNOWNS:usize=8192;
+/// The panel count whose closed genus-0 surface has MAX_RECIPROCAL_UNKNOWNS
+/// unknowns (3F/2 + 2).
+pub const MAX_RECIPROCAL_PANELS:usize=5460;
+/// Largest angular refinement of the plane-wave identity for Im G. Each level
+/// doubles the admitted k*diameter and quadruples the direction count.
+pub const MAX_ANGULAR_REFINEMENT:u32=3;
+
 /// Explicit cold storage/work ceilings; no mechanical modes are truncated.
 #[derive(Debug,Clone,Copy)]
 pub struct Budget {
-    /// P1 vertices plus P0 panels, at most 4096.
+    /// P1 vertices plus P0 panels, at most [`MAX_RECIPROCAL_UNKNOWNS`].
     pub maximum_unknowns:usize,
     /// Retained geometry/static moments, not allocator overhead or per-solve LU.
     pub maximum_cache_bytes:usize,
     /// Conservative scalar-work units for ONE frequency including its batch.
     /// Not measured flops, wall time, or a cumulative sweep budget.
     pub maximum_work:u64,
-    /// 0..=2: subdivides the 8-point polar rule and periodic azimuthal rule.
+    /// 0..=[`MAX_ANGULAR_REFINEMENT`]: subdivides the 8-point polar rule and periodic azimuthal rule.
     /// Antipodal partners share weights exactly. Refine independently of mesh.
     pub angular_refinement:u32,
 }
@@ -93,8 +104,8 @@ impl<'s> Prepared<'s> {
         mut cancelled:impl FnMut()->bool)->Result<Self,HelmholtzError> {
         poll(&mut cancelled)?;
         let nf=surface.areas().len();
-        if !(4..=2730).contains(&nf) || !(1..=4096).contains(&budget.maximum_unknowns)
-            || budget.angular_refinement>2 || budget.maximum_work==0
+        if !(4..=MAX_RECIPROCAL_PANELS).contains(&nf) || !(1..=MAX_RECIPROCAL_UNKNOWNS).contains(&budget.maximum_unknowns)
+            || budget.angular_refinement>MAX_ANGULAR_REFINEMENT || budget.maximum_work==0
             || !highest_k.is_finite() || highest_k<=0.0 {
             return Err(bad("invalid reciprocal geometry/frequency/work envelope"));
         }

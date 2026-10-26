@@ -278,3 +278,39 @@ fn bessel_neck_resistance_spans_poiseuille_and_the_wide_tube_limit() {
         previous = relative;
     }
 }
+
+/// A mouth whose exterior load is computed elsewhere gives up exactly its outer
+/// end: the neck mass drops by that end's correction, the compliance is the
+/// same, and the damper is the same Bessel neck loss at the same isolated
+/// frequency without the compact radiation resistance.
+#[test]
+fn an_exterior_mouth_gives_up_exactly_its_outer_end_and_keeps_the_bessel_loss() {
+    let g = gas(101_325.0);
+    for outer_end in [NeckEnd::Flanged, NeckEnd::Unflanged] {
+        let geo = HelmholtzCavity { outer_end, ..geometry() };
+        let compact = HelmholtzModalCavity::new(geo, g, CavityNeckLoss::RadiationAtResonance)
+            .unwrap();
+        let exterior = HelmholtzModalCavity::new(geo, g, CavityNeckLoss::ExteriorMouth).unwrap();
+        let ends = neck_ends(&geo);
+        let inner = fs_phs::neck_end_correction(geo.neck_radius_m, ends.inner).unwrap();
+        let outer = fs_phs::neck_end_correction(geo.neck_radius_m, ends.outer).unwrap();
+        let length = geo.neck_length_m;
+        let ratio = exterior.neck_mass_kg() / compact.neck_mass_kg();
+        let expected = (length + inner) / (length + inner + outer);
+        assert!((ratio - expected).abs() <= 4.0 * f64::EPSILON, "{ratio} vs {expected}");
+        assert_eq!(exterior.compression_stiffness_n_m().to_bits(),
+            compact.compression_stiffness_n_m().to_bits());
+        let omega = fs_phs::helmholtz_natural_frequency(geo.volume_m3, geo.neck_radius_m,
+            length, g.density, g.sound_speed, ends).unwrap();
+        let neck = neck_viscothermal_resistance(&g, geo.neck_radius_m, length, omega).unwrap();
+        let area_squared = exterior.neck_area_m2() * exterior.neck_area_m2();
+        assert_eq!(exterior.neck_resistance_n_s_m().to_bits(), (area_squared * neck).to_bits());
+        let (radiation, _) = fs_phs::compact_radiation_impedance(g.density, g.sound_speed,
+            geo.neck_radius_m, omega, ends.outer).unwrap();
+        let removed = compact.neck_resistance_n_s_m() - exterior.neck_resistance_n_s_m();
+        assert!(radiation > 0.0
+            && (removed - area_squared * radiation).abs() <= 1e-12 * compact.neck_resistance_n_s_m());
+        let shift = exterior.isolated_omega_rad_s() / compact.isolated_omega_rad_s();
+        assert!((shift * shift * expected - 1.0).abs() <= 1e-14, "{shift}");
+    }
+}

@@ -37,6 +37,14 @@ pub enum CavityNeckLoss {
     /// the frozen value from acceptance. End corrections stay the Helmholtz
     /// owner's, counted once.
     RadiationAtResonance,
+    /// The outer end opens onto a computed exterior load on the actual mouth
+    /// (a port on the body's exterior skin), which owns that end's mass and
+    /// radiation resistance. The neck keeps its length, its inner end
+    /// correction and the same Bessel neck loss as
+    /// [`CavityNeckLoss::RadiationAtResonance`], frozen at the same isolated
+    /// frequency of the declared ends. The declared outer end enters only
+    /// that frequency. Without the exterior load the neck has no outer mass.
+    ExteriorMouth,
 }
 
 /// fs-phs terminations of a declared cavity neck (DEF-09).
@@ -134,6 +142,15 @@ impl HelmholtzModalCavity {
                     geometry.neck_length_m, omega)?;
                 fs_phs::helmholtz_resonator_radiating(geometry.volume_m3, geometry.neck_radius_m,
                     geometry.neck_length_m, gas.density, gas.sound_speed, ends, neck)
+            }
+            CavityNeckLoss::ExteriorMouth => {
+                let omega = fs_phs::helmholtz_natural_frequency(geometry.volume_m3,
+                    geometry.neck_radius_m, geometry.neck_length_m, gas.density,
+                    gas.sound_speed, ends).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+                let neck = neck_viscothermal_resistance(&gas, geometry.neck_radius_m,
+                    geometry.neck_length_m, omega)?;
+                fs_phs::helmholtz_resonator_exterior_mouth(geometry.volume_m3, geometry.neck_radius_m,
+                    geometry.neck_length_m, gas.density, gas.sound_speed, ends.inner, neck)
             }
         }.map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let q = source.effort(&[1.0, 0.0]);

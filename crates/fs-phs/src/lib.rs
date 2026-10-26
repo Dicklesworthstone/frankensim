@@ -2472,6 +2472,43 @@ pub fn helmholtz_resonator_radiating(
     mass_spring_damper(m_ac, stiffness, r_rad + neck_resistance)
 }
 
+/// [`helmholtz_resonator`] whose outer end opens onto an exterior load that
+/// the caller computes on the actual mouth, such as a boundary-element port
+/// on the exterior skin. Only the inner end's correction enters
+/// `L_eff = L + δ_in`: the outer end's mass and radiation resistance belong
+/// to that exterior owner and are counted there, once. The damper is the
+/// caller's neck viscothermal resistance alone.
+///
+/// # Errors
+/// Admission errors on non-physical geometry or gas; a negative or
+/// non-finite neck resistance.
+pub fn helmholtz_resonator_exterior_mouth(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    inner: MouthFlange,
+    neck_resistance: f64,
+) -> Result<PortHamiltonian, PhsError> {
+    if !(neck_resistance >= 0.0 && neck_resistance.is_finite()) {
+        return Err(PhsError::NotPsd {
+            what: "neck viscothermal resistance must be finite and non-negative",
+        });
+    }
+    let (m_ac, stiffness, _) = helmholtz_parts_with(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        0.0,
+        inner,
+        None,
+    )?;
+    mass_spring_damper(m_ac, stiffness, neck_resistance)
+}
+
 /// Series connection of two impedance-causal 1-ports: same `u`,
 /// `y = y_a + y_b`.
 ///
@@ -2638,6 +2675,30 @@ fn helmholtz_parts(
     resistance: f64,
     ends: NeckEnds,
 ) -> Result<(f64, f64, f64), PhsError> {
+    helmholtz_parts_with(
+        volume,
+        neck_radius,
+        neck_length,
+        density,
+        sound_speed,
+        resistance,
+        ends.inner,
+        Some(ends.outer),
+    )
+}
+
+/// `outer: None` leaves the outer end's correction to an exterior owner.
+#[allow(clippy::too_many_arguments)]
+fn helmholtz_parts_with(
+    volume: f64,
+    neck_radius: f64,
+    neck_length: f64,
+    density: f64,
+    sound_speed: f64,
+    resistance: f64,
+    inner: MouthFlange,
+    outer: Option<MouthFlange>,
+) -> Result<(f64, f64, f64), PhsError> {
     if !(volume > 0.0
         && neck_radius > 0.0
         && neck_length >= 0.0
@@ -2656,9 +2717,11 @@ fn helmholtz_parts(
         });
     }
     let area = core::f64::consts::PI * neck_radius * neck_radius;
-    let l_eff = neck_length
-        + neck_end_correction(neck_radius, ends.inner)?
-        + neck_end_correction(neck_radius, ends.outer)?;
+    // Left to right, as before: (L + δ_in) + δ_out.
+    let mut l_eff = neck_length + neck_end_correction(neck_radius, inner)?;
+    if let Some(outer) = outer {
+        l_eff += neck_end_correction(neck_radius, outer)?;
+    }
     let m_ac = density * l_eff / area;
     let c_ac = volume / (density * sound_speed * sound_speed);
     Ok((m_ac, 1.0 / c_ac, resistance))

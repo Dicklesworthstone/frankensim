@@ -185,11 +185,31 @@ impl Spec {
 
     /// Source admission before material I/O; the observer repeats every check on the built parts.
     pub(super) fn preflight(&self, spec: &input::Spec) -> Result<()> {
-        let Some(observer) = &spec.one_way_observer else {
-            return Ok(());
+        let load = match spec.body_radiation {
+            Some(input::BodyRadiation::Skin(load)) => Some(load),
+            _ => None,
         };
-        if self.triangles.len() > observer.maximum_skin_panels {
-            return Err("acoustic skin exceeds the one_way_observer's declared panels".into());
+        if load.is_some_and(|load| self.triangles.len() > load.options.maximum_surface_panels) {
+            return Err(
+                "acoustic skin exceeds the body-radiation skin load's declared panels".into(),
+            );
+        }
+        if let Some(observer) = &spec.one_way_observer {
+            if self.triangles.len() > observer.maximum_skin_panels {
+                return Err("acoustic skin exceeds the one_way_observer's declared panels".into());
+            }
+        } else if load.is_none() {
+            return Ok(());
+        }
+        let compact =
+            |c: &fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity| {
+                c.cavity.loss() != fs_couple::cavity_modal::CavityNeckLoss::ExteriorMouth
+            };
+        if load.is_some() && spec.cavity.as_ref().is_some_and(compact) {
+            return Err(
+                "a compact outer neck end already carries the mouth's exterior load; declare the cavity exterior-neck"
+                    .into(),
+            );
         }
         if spec.cavity.is_some() == self.apertures.is_empty() {
             return Err(

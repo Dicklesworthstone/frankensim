@@ -16,11 +16,17 @@
 use super::super::{ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
 use crate::shear_shell::ResolvedShearShell;
+use crate::cavity_modal::CavityNeckLoss;
+use super::super::multiple::performance::observation::{
+    ShellObserverError, one_way::{ShellAcousticSkin, skin_identity, skin_traces},
+};
 use fs_bem::helmholtz::{HelmholtzError, Medium};
 use fs_bem::modal_loading::{
     ModalLoadingError, ReciprocalLoadingDiagnostics, modal_radiation_loading_reciprocal,
 };
-use fs_bem::reciprocal_radiation::Budget as ReciprocalBudget;
+use fs_bem::reciprocal_radiation::{
+    Budget as ReciprocalBudget, MAX_ANGULAR_REFINEMENT, MAX_RECIPROCAL_PANELS, MAX_RECIPROCAL_UNKNOWNS,
+};
 #[cfg(test)]
 use fs_bem::{helmholtz::{IterativeOptions,PanelRule},modal_loading::{
     LoadingRoute,ModalLoadingBake,SurfaceModeTraces,modal_radiation_loading_routed,
@@ -56,15 +62,15 @@ impl ShellBemOptions {
     pub(in crate::bowed_string::runtime::reciprocal::bank) fn reciprocal_budget(
         &self, frequencies:usize, angular_refinement:u32,
     ) -> Result<ReciprocalBudget,ShellBemError> {
-        if frequencies==0 || angular_refinement>2 {
-            return Err(ShellBemError::Invalid("reciprocal source requires a nonempty grid and angular refinement 0..2"));
+        if frequencies==0 || angular_refinement>MAX_ANGULAR_REFINEMENT {
+            return Err(ShellBemError::Invalid("reciprocal source requires a nonempty grid and an admitted angular refinement"));
         }
         let panels=self.maximum_surface_panels;
         let cache=panels.checked_mul(panels).and_then(|n|n.checked_mul(128))
             .and_then(|n|panels.checked_mul(4096).and_then(|m|n.checked_add(m)))
             .ok_or(ShellBemError::Invalid("reciprocal cache allowance overflow"))?;
         Ok(ReciprocalBudget {
-            maximum_unknowns:panels.saturating_mul(2).min(4096),
+            maximum_unknowns:panels.saturating_mul(2).min(MAX_RECIPROCAL_UNKNOWNS),
             maximum_cache_bytes:cache,
             maximum_work:self.maximum_sweep_terms/(frequencies as u64),
             angular_refinement,
@@ -79,9 +85,9 @@ impl ShellBemOptions {
             || self.maximum_hz <= self.minimum_hz
             || !(33..=257).contains(&self.frequency_samples)
             || self.frequency_samples % 2 == 0
-            || !(4..=2048).contains(&self.maximum_surface_panels)
-            || !(1..=100_000_000_000).contains(&self.maximum_sweep_terms)
-            || !(1..=256).contains(&self.maximum_poles)
+            || !(4..=MAX_RECIPROCAL_PANELS).contains(&self.maximum_surface_panels)
+            || !(1..=100_000_000_000_000).contains(&self.maximum_sweep_terms)
+            || !(1..=crate::render::plate::impact::radiation::MAX_POLES).contains(&self.maximum_poles)
             || rate == 0
             || 8.0 * core::f64::consts::TAU * self.maximum_hz
                 >= 0.9 * core::f64::consts::PI * f64::from(rate)
@@ -125,6 +131,11 @@ pub struct ShellBemReport {
     /// Independently gated resistance error; weak loss cannot hide in inertia.
     pub resistance_peak_error: f64,
     pub resistance_rms_error: f64,
+    /// The declared acoustic skin the load was computed on; none on the shell path.
+    pub skin_identity: Option<ContentHash>,
+    /// Body modes above the loaded band, after the `body_modes` it loads. They
+    /// carry no exterior load; the shell path loads every mode, so zero there.
+    pub one_way_body_modes: usize,
 }
 
 #[derive(Debug)]
@@ -214,12 +225,15 @@ impl ReciprocalStringBank {
     ) -> Result<(Model,ShellBemReport),ShellBemError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
-        if self.system.samples_rendered() != 0
-            || self.source.prepared_linear.is_some()
-            || self.source.body_radiation.is_some()
-        {
+        // A prepared-linear bank carries the load as its air bank beside the transition.
+        if self.system.samples_rendered() != 0 || self.source.body_radiation.is_some() {
             return Err(ShellBemError::Invalid(
-                "computed shell radiation requires an unstarted exact bank without a prior exterior load",
+                "computed shell radiation requires an unstarted bank without a prior exterior load",
+            ));
+        }
+        if self.source.material_cavity.as_ref().is_some_and(|c| c.cavity.loss() == CavityNeckLoss::ExteriorMouth) {
+            return Err(ShellBemError::Invalid(
+                "an exterior-owned mouth radiates through the caps of a declared skin",
             ));
         }
         let (basis_identity, _) = self
@@ -269,6 +283,19 @@ impl ReciprocalStringBank {
             modes.len(), options.maximum_surface_panels, options.maximum_sweep_terms,
             options.frequency_samples, gate,
         )?;
+        self.fit_exterior_load(options, angular_refinement, basis_identity, modes.len(),
+            opening_ports, &surface, &fields, gate)
+    }
+
+    /// The shared Galerkin loading, passive fit and report of one complete
+    /// exterior source on `surface`: `body_modes` structural traces first,
+    /// then `opening_ports` mouth traces, in the order of the bank's ports.
+    #[allow(clippy::too_many_arguments)]
+    fn fit_exterior_load(
+        &self, options:ShellBemOptions, angular_refinement:u32, basis_identity:ContentHash,
+        body_modes:usize, opening_ports:usize, surface:&SpherePanels, fields:&[Vec<f64>],
+        gate:&CancelGate,
+    ) -> Result<(Model,ShellBemReport),ShellBemError> {
         let panels = surface.areas().len();
         let gas = self.source.gas;
         gas.validate_coherence()
@@ -286,7 +313,7 @@ impl ReciprocalStringBank {
         omega[options.frequency_samples - 1] = high;
         let entries=fields.len().checked_mul(fields.len()).and_then(|n|n.checked_mul(omega.len()))
             .ok_or(ShellBemError::Invalid("complete reciprocal matrix extent overflow"))?;
-        let source=modal_radiation_loading_reciprocal(&surface,&fields,&omega,medium,
+        let source=modal_radiation_loading_reciprocal(surface,fields,&omega,medium,
             options.reciprocal_budget(omega.len(),angular_refinement)?,basis_identity,entries,
             ||gate.is_requested()).map_err(|error|match error {
                 ModalLoadingError::Helmholtz(HelmholtzError::Cancelled)=>ShellBemError::Cancelled,
@@ -328,7 +355,7 @@ impl ReciprocalStringBank {
             loading_identity: loading.declaration_hash(),
             gas,
             options,
-            body_modes: modes.len(),
+            body_modes,
             opening_ports,
             surface_panels: panels,
             reciprocal,
@@ -341,8 +368,155 @@ impl ReciprocalStringBank {
             rms_error: fitted.rms_error,
             resistance_peak_error: fitted.resistance_peak_error,
             resistance_rms_error: fitted.resistance_rms_error,
+            skin_identity: None,
+            one_way_body_modes: 0,
         };
         Ok((fitted.model, report))
+    }
+
+    /// The same Galerkin air load on a declared closed acoustic skin of this
+    /// body, the skin its one-way observer reads, attached to the original
+    /// mechanics as by [`Self::with_material_shell_bem`].
+    pub fn with_material_skin_bem(
+        self, options:ShellBemOptions, skin:&ShellAcousticSkin, maximum_anchor_distance_m:f64,
+        angular_refinement:u32, gate:&CancelGate,
+    ) -> Result<(Self,ShellBemReport),ShellBemError> {
+        let (model, report) = self.prepare_material_skin_bem(
+            options, skin, maximum_anchor_distance_m, angular_refinement, gate)?;
+        // Body coordinates relative to the body's first mode: the loaded prefix,
+        // then the neck, the first coordinate of the component after the body.
+        let structural = report.body_modes + report.one_way_body_modes;
+        let mut coordinates: Vec<_> = (0..report.body_modes).collect();
+        if report.opening_ports == 1 {
+            coordinates.push(structural);
+        }
+        let mut bank = self
+            .attach_body_radiation(model, options.maximum_poles, Some(coordinates), gate)
+            .map_err(ShellBemError::Bank)?;
+        let binding = bank.source.body_radiation.as_mut().ok_or(
+            ShellBemError::Invalid("computed skin load lost its source binding"),
+        )?;
+        binding.shell_bem = Some(report.clone());
+        poll(gate)?;
+        Ok((bank, report))
+    }
+
+    /// Cold preparation on `skin` without changing any mechanical state.
+    /// Every skin vertex follows its anchored points on the original parts,
+    /// as in the observer. A lumped cavity's mouths are the skin's aperture
+    /// caps, carrying its neck volume flow in the declared shares: one port on
+    /// the one neck coordinate. Its outer end must be exterior-owned
+    /// ([`CavityNeckLoss::ExteriorMouth`]); a compact outer end already holds
+    /// that exterior mass and resistance, and refuses here.
+    pub fn prepare_material_skin_bem(
+        &self, options:ShellBemOptions, skin:&ShellAcousticSkin, maximum_anchor_distance_m:f64,
+        angular_refinement:u32, gate:&CancelGate,
+    ) -> Result<(Model,ShellBemReport),ShellBemError> {
+        poll(gate)?;
+        options.validate(self.source.options.sample_rate_hz)?;
+        if self.system.samples_rendered() != 0 || self.source.body_radiation.is_some() {
+            return Err(ShellBemError::Invalid(
+                "computed skin radiation requires an unstarted bank without a prior exterior load",
+            ));
+        }
+        if self.source.spatial_cavity.is_some() {
+            return Err(ShellBemError::Invalid(
+                "a spatial cavity's mouths are ports of the shell path, not skin apertures",
+            ));
+        }
+        let (basis_identity, _) = self.source.body_radiation_basis(&self.system, gate)
+            .map_err(ShellBemError::Bank)?;
+        let body = self.source.strings.len();
+        let modes = self.system.components().get(body)
+            .ok_or(ShellBemError::Invalid("missing original material body component"))?
+            .modes();
+        // The load covers the ascending prefix of body modes inside the band. The
+        // owner's uniqueness chart caps the band; modes above it stay one-way.
+        let hz = |m: &crate::modal_acoustic_time::ModalAcousticMode| {
+            m.angular_frequency_rad_s / core::f64::consts::TAU
+        };
+        let loaded = modes.iter().take_while(|m| hz(m) <= options.maximum_hz).count();
+        if loaded == 0
+            || loaded > crate::render::plate::impact::radiation::MAX_PORTS
+            || modes[..loaded].iter().any(|m| hz(m) < options.minimum_hz)
+            || modes[loaded..].iter().any(|m| hz(m) <= options.maximum_hz)
+        {
+            return Err(ShellBemError::Invalid(
+                "skin radiation loads an ascending prefix of the body modes from the band's lower edge",
+            ));
+        }
+        let mut parts = Vec::new();
+        if let Some(image) = &self.source.material_shell_image {
+            parts.push((image.source().mesh(), image.physical_modes()));
+        } else if let Some(image) = &self.source.material_shell_assembly_image {
+            for (part, rows) in image.source().components.iter().zip(image.physical_modes()) {
+                parts.push((part.specimen.mesh(), rows.as_slice()));
+            }
+        } else {
+            return Err(ShellBemError::Invalid(
+                "computed skin radiation requires an original material shell basis",
+            ));
+        }
+        let traces = skin_traces(&parts, modes.len(), skin, options.maximum_surface_panels,
+            maximum_anchor_distance_m, gate).map_err(|error| match error {
+                ShellObserverError::Cancelled => ShellBemError::Cancelled,
+                ShellObserverError::Invalid(what) => ShellBemError::Invalid(what),
+                _ => ShellBemError::Invalid("acoustic skin traces refused"),
+            })?;
+        let mut fields = traces.modes;
+        fields.truncate(loaded);
+        match (self.source.material_cavity.as_ref(), skin.apertures.is_empty()) {
+            (None, true) => {}
+            (Some(cavity), false) if cavity.cavity.loss() == CavityNeckLoss::ExteriorMouth => {
+                let neck = self.system.components().get(body + 1)
+                    .ok_or(ShellBemError::Invalid("skin load lost the cavity neck component"))?;
+                if neck.modes().len() != 1 {
+                    return Err(ShellBemError::Invalid("skin load needs the one physical neck coordinate"));
+                }
+                // The band must reach the neck's own resonance with its declared compact ends.
+                let geometry = cavity.cavity.geometry();
+                let gas = cavity.cavity.gas();
+                let neck_hz = fs_phs::helmholtz_natural_frequency(geometry.volume_m3,
+                    geometry.neck_radius_m, geometry.neck_length_m, gas.density, gas.sound_speed,
+                    crate::cavity_modal::neck_ends(geometry))
+                    .map_err(|_| ShellBemError::Invalid("missing original compact neck frequency"))?
+                    / core::f64::consts::TAU;
+                if options.minimum_hz > neck_hz {
+                    return Err(ShellBemError::Invalid("exterior band must reach the cavity neck resonance"));
+                }
+                let shape = cavity.cavity.neck_volume_shape_m2_per_sqrt_kg();
+                let mut field = vec![0.0; traces.surface.areas().len()];
+                for (aperture, trace) in skin.apertures.iter().zip(&traces.apertures) {
+                    for (value, cap) in field.iter_mut().zip(trace) {
+                        *value += aperture.flow_share * shape * cap;
+                    }
+                }
+                fields.push(field);
+            }
+            (Some(_), false) => return Err(ShellBemError::Invalid(
+                "a compact outer neck end already carries the mouth's exterior load; declare it exterior-owned",
+            )),
+            (Some(_), true) => return Err(ShellBemError::Invalid(
+                "a lumped cavity radiates through declared skin apertures",
+            )),
+            (None, false) => return Err(ShellBemError::Invalid(
+                "skin apertures need a lumped cavity neck",
+            )),
+        }
+        if fields.len() > crate::render::plate::impact::radiation::MAX_PORTS {
+            return Err(ShellBemError::Invalid("complete body/mouth skin source exceeds passive port capacity"));
+        }
+        let opening_ports = fields.len() - loaded;
+        let work = sweep_work(traces.surface.areas().len(), fields.len(), options.frequency_samples)
+            .ok_or(ShellBemError::Invalid("complete BEM sweep extent overflow"))?;
+        if work > options.maximum_sweep_terms {
+            return Err(ShellBemError::Invalid("complete skin exterior exceeds its sweep-work allowance"));
+        }
+        let (model, mut report) = self.fit_exterior_load(options, angular_refinement,
+            basis_identity, loaded, opening_ports, &traces.surface, &fields, gate)?;
+        report.skin_identity = Some(skin_identity(skin));
+        report.one_way_body_modes = modes.len() - loaded;
+        Ok((model, report))
     }
 }
 
@@ -358,7 +532,7 @@ impl super::super::MaterialStringBankSource {
         gate: &CancelGate,
     ) -> Result<(SpherePanels, Vec<Vec<f64>>, u64), ShellBemError> {
         if modes == 0 || modes > crate::render::plate::impact::radiation::MAX_PORTS
-            || frequency_samples == 0 || !(4..=2048).contains(&maximum_surface_panels)
+            || frequency_samples == 0 || !(4..=MAX_RECIPROCAL_PANELS).contains(&maximum_surface_panels)
         {
             return Err(ShellBemError::Invalid("invalid complete shell trace/work dimensions"));
         }
@@ -400,17 +574,7 @@ impl super::super::MaterialStringBankSource {
         if ports > crate::render::plate::impact::radiation::MAX_PORTS {
             return Err(ShellBemError::Invalid("complete body/mouth source exceeds passive port capacity"));
         }
-        let p = panels as u64;
-        let n = ports as u64;
-        let work = p
-            .checked_mul(p)
-            .and_then(|p2| p.checked_add(n).and_then(|sum| p2.checked_mul(sum)))
-            .and_then(|v| {
-                n.checked_mul(n)
-                    .and_then(|n2| p.checked_mul(n2))
-                    .and_then(|w| v.checked_add(w))
-            })
-            .and_then(|v| v.checked_mul(frequency_samples as u64))
+        let work = sweep_work(panels, ports, frequency_samples)
             .ok_or(ShellBemError::Invalid("complete BEM sweep extent overflow"))?;
         if panels < 4
             || panels > maximum_surface_panels
@@ -423,6 +587,20 @@ impl super::super::MaterialStringBankSource {
         let (surface, fields) = surface_trace(&parts, modes, cavity, gate)?;
         Ok((surface, fields, work))
     }
+}
+
+// Dense sweep extent of one exterior source: p^2 (p + n) + p n^2 per frequency.
+fn sweep_work(panels: usize, ports: usize, frequency_samples: usize) -> Option<u64> {
+    let p = panels as u64;
+    let n = ports as u64;
+    p.checked_mul(p)
+        .and_then(|p2| p.checked_add(n).and_then(|sum| p2.checked_mul(sum)))
+        .and_then(|v| {
+            n.checked_mul(n)
+                .and_then(|n2| p.checked_mul(n2))
+                .and_then(|w| v.checked_add(w))
+        })
+        .and_then(|v| v.checked_mul(frequency_samples as u64))
 }
 
 // BEM velocity and pressure use the SAME constant-panel normal trace. Rotations
