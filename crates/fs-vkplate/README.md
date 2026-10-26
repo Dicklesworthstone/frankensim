@@ -182,8 +182,9 @@ some of them refuses. The drum's notes print both ends of this bracket. They
 also print the contact's own limit: the head side of the Hertz pair is the film
 as an elastic half-space, which a tensioned head film is not, and that error may
 exceed the tip bracket.
-Supports, snare-wire material/contact and hi-hat rim/friction laws remain separately
-declared presets. The striker's Hunt-Crossley loss is an independent input, not
+Supports, snare-wire contact and hi-hat rim/friction laws remain separately
+declared presets; the snare wires' steel is sourced on the card route (see
+Snare wires). The striker's Hunt-Crossley loss is an independent input, not
 inferred from elastic modulus. The head radiation-resistance estimate retains
 its tension-only membrane-frequency approximation, using the new density; full
 bending elasticity reaches the computed structural motion and Rayleigh pressure.
@@ -319,6 +320,62 @@ evaluated at its loaded frequency and its own areal density. Volume and
 dropped shapes carry none, so their decays remain upper bounds. Every admitted
 shape must be below coincidence. This is a gas-owned loss, not a decay-time
 fit; live keeps its existing installed decays.
+
+### Snare wires
+
+On the card route (`examples/drum_cards`, the offline examples' default) each
+snare strand is a coil of sourced steel (`src/coil.rs`, ruling 7373). The
+binding is `KitMaterials::with_snare_wire`. A drum without it keeps the fitted
+strings and carries `kit::FITTED_WIRES_RECEIPT`: "fitted to a recording
+(96ccf8f1b), not physics". That covers the presets, live, the browser and the
+GPU.
+
+- **Geometry:** Canopus Vintage Snare Wire, the maker's replica of the 1960s
+  Slingerland wire. Its Japanese page gives 線径0.5mm、線外径1.35mm、ピッチ3.4mm:
+  wire diameter 0.5 mm, coil outer diameter 1.35 mm, pitch 3.4 mm. The mean
+  diameter is therefore 0.85 mm, and the helix angle is atan(p / (pi D)) =
+  51.9 degrees.
+- **Steel:**
+  - `packs/steel-music-wire-string-heptonstall-ligo-p1400229.fsmatpk` is
+    Heptonstall, Waller and Robertson, LIGO P1400229. It gives density
+    7800 kg/m³, E 212 GPa, the three thermal coefficients, and the 1.4e-4
+    bending loss tangent left after the thermoelastic peak is fitted out
+    (8-3000 Hz). It is the engine-piano fixture: material state
+    `steel solid music-wire-untreated 0`, at T = 293.15 K.
+  - `packs/music-wire-spring-moduli-fuchs-1968.fsmatpk` is Fuchs (1968),
+    Table 2. It gives the shear modulus, 79.29 GPa, compiled with material
+    state `steel solid music-wire-cold-wound 0`. It is read on its untyped
+    `temperature` axis at 293 K, the only temperature it holds.
+- **Stiffness and mass:** over a turn, a bending moment loads the wire in
+  bending and in torsion, so
+  `B = 2 sin a / (cos^2 a / GJ + (1 + sin^2 a) / EI)` = 4.81e-4 N m². Wire
+  torsion holds 24 % of that compliance. The mass per length is the wire's
+  over sin a, 1.95e-3 kg/m; the fitted string had 4e-3. `Body::coil` adds
+  `B / h^3 lap^2` to the strand's tension chain, with pinned ends. The
+  bending operator therefore shares the chain's sine modes.
+- **Loss** is applied exactly per mode at the mode's own discrete frequency,
+  as `C = M sum 2 sigma_j phi_j phi_j^T` on the backward velocity. Its
+  dissipation is counted in `Body::modal_loss_dissipated_j`. sigma is the sum
+  of two parts:
+  - **Material:** fs-material's exact thermoelastic series for the round wire,
+    plus the card's excess loss tangent inside its band only. Both act on the
+    wire-bending share of the mode's bending energy. Wire torsion loss is
+    unmeasured and omitted.
+  - **Gas:** the exact linear drag of the gas on the wire, across it
+    (`air_loss::oscillating_cylinder`) and along it
+    (`air_loss::sliding_cylinder`), turn-averaged. Linear Stokes flow
+    understates the drag once the wire's amplitude nears its 0.25 mm radius,
+    which a rattling wire exceeds.
+
+  Every term is therefore a lower bound.
+
+Still declared, not sourced, and printed with every coil: strand count,
+spacing, length, tension, preload and the contact law (`kit::Wires`). The last
+three were adopted in a kit retuning graded against the recording (96ccf8f1b).
+The ends
+are pinned with no strand-end or cord damping, so the lowest coil modes keep
+their long material decay. On the 14x6 snare this leaves 63-125 Hz louder than
+the recording.
 
 
 ## Numerics
@@ -547,7 +604,7 @@ fundamental lands on the recording's; loss points come from the recordings' band
 
 Film and bronze properties are handbook values; head tensions are tuned; the stick's effective
 tip mass (6-7 g), its Hertz constant (hickory on the target), the felt beater law (a 32 g crown in
-point contact), strike points, snare-wire mass, tension and preload, felt washer stiffness and
+point contact), strike points, snare-wire count, spacing, length, tension and preload (and, for the fitted strings, mass and T60), felt washer stiffness and
 loss, and the hi-hat rim contact law, rest gap and waviness are declared estimates in
 `src/kit.rs`. The lumped cavity has no cavity modes; there is no shell, hoop or rim
 vibration, no in-plane (membrane) slip between hi-hat plates (only the bending slip rubs), and each piece is simulated alone (a kit

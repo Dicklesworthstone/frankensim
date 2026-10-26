@@ -4,6 +4,7 @@
 //! sizes, film and bronze from handbook values), not measurements of a particular specimen.
 
 use crate::*;
+use crate::coil::{CANOPUS_VINTAGE, CoilGeometry, CoilWire};
 use crate::materials::KitMaterials;
 use fs_material::state_point::IsotropicElasticStatePoint;
 
@@ -38,6 +39,10 @@ pub struct Head {
 }
 
 /// Snare wires: coiled steel strands under the resonant head, pressed up into it by the strainer.
+/// Strand count, spacing, length, tension, preload and contact are declared, not sourced. Without
+/// a sourced wire (`KitMaterials::with_snare_wire`) each strand is a plain string of the fitted
+/// `mass_per_m` and `t60` (FITTED_WIRES_RECEIPT); with one it is the coil `coil` of that steel
+/// (`crate::coil`), and `mass_per_m` and `t60` are unused.
 #[derive(Clone, Copy, Debug)]
 pub struct Wires {
     pub strands: i32,
@@ -48,15 +53,19 @@ pub struct Wires {
     pub preload_per_m: f64,
     pub t60: f64,
     pub contact: Law,
+    pub coil: CoilGeometry,
 }
 
 impl Wires {
     pub fn estimated() -> Wires {
         // a loosely set strainer: slack strands slap the head instead of tracking it (measured: the most buzz)
         Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 0.8, preload_per_m: 0.22, t60: 0.35,
-                contact: Law::Power { k: 3.0e7, alpha: 1.5, mu: 0.35 } }
+                contact: Law::Power { k: 3.0e7, alpha: 1.5, mu: 0.35 }, coil: CANOPUS_VINTAGE }
     }
 }
+
+/// Carried by every drum whose snare wires are the fitted strings.
+pub const FITTED_WIRES_RECEIPT: &str = "snare wires: fitted to a recording (96ccf8f1b), not physics: plain strings with a declared mass per length and one T60, no coil bending and no material or air loss law";
 
 pub struct DrumSpec {
     pub name: &'static str,
@@ -228,6 +237,17 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut settle = 0.0;
     if let Some(wr) = s.wires {
         let (mass_per_m, tension, preload_per_m, len) = (wr.mass_per_m, wr.tension, wr.preload_per_m, wr.length);
+        let coil = match materials.and_then(KitMaterials::snare_wire) {
+            Some(steel) => {
+                let c = CoilWire::new(&wr.coil, steel, &gas)?;
+                notes.extend(c.notes(tension)?);
+                Some(c)
+            }
+            None => {
+                notes.push(FITTED_WIRES_RECEIPT.into());
+                None
+            }
+        };
         let h = s.grid;
         let n = (len / h).round() as usize;
         let x0 = -(n as f64 - 1.0) * h / 2.0;
@@ -241,7 +261,11 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
             }
             rows.push(row);
             let y = row as f64 * h;
-            let mut wb = Body::string(&format!("wire {row}"), n, h, mass_per_m, tension, wr.t60, x0, y);
+            let name = format!("wire {row}");
+            let mut wb = match &coil {
+                Some(c) => Body::coil(&name, n, h, c.mass_per_m(), tension, c.bending_n_m2(), &|omega, share| c.decay_rate(omega, share), x0, y)?,
+                None => Body::string(&name, n, h, mass_per_m, tension, wr.t60, x0, y),
+            };
             wb.origin = [0.0, 0.0, -s.depth];
             for k in 0..n {
                 wb.bias[k] = -preload_per_m * h; // toward the head (outward is +, the head is above)

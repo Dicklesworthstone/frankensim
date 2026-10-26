@@ -50,6 +50,9 @@ pub mod radiation;
 /// viscous layer on a plate's faces.
 pub mod air_loss;
 
+/// Coiled steel snare wires from a declared geometry, two material cards and the gas.
+pub mod coil;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -457,6 +460,7 @@ pub struct Body {
     lap: Csr,
     stiff: Csr,
     viscosity: Option<ViscousBending>,
+    modal: Option<ModalLoss>,
     tension: f64,
     berger: f64,
     vk: Option<VonKarman>,
@@ -507,6 +511,17 @@ struct ViscousBending {
     rate_bound: f64,
     dissipated_j: f64,
     last_j: f64,
+}
+
+/// A per-mode loss on a body whose modes are known in closed form (a coil's sine modes):
+/// C = sum_j 2 sigma_j M phi_j phi_j' M, applied explicitly to the backward velocity like
+/// `ViscousBending`, so its admission is the same dt^2 lambda_K + 2 dt lambda_C < 4 with
+/// lambda_C = 2 max sigma_j exactly.
+#[derive(Clone)]
+struct ModalLoss {
+    c: Csr,
+    rate_bound: f64,
+    dissipated_j: f64,
 }
 
 fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
@@ -847,7 +862,7 @@ impl Body {
             *m_ = m_.max(1e-12);
         }
         Ok(Body {
-            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, tension: s.tension, berger, vk,
+            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
         })
@@ -866,18 +881,81 @@ impl Body {
         let xy = (0..n).map(|k| [x0 + k as f64 * h, y]).collect();
         Body {
             name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
-            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None,
+            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None, modal: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
         }
     }
 
+    /// A coiled snare wire: the `string` chain plus the coil's own bending stiffness `bending`
+    /// [N m^2], with both ends pinned beyond the last node (w = 0 there, curvature free). The
+    /// bending operator B/h^3 lap^2 then shares the chain's sine modes phi_j, with
+    /// beta_j^2 = 4/h^2 sin^2(pi j / (2 (n + 1))) and omega_j^2 = (T beta_j^2 + B beta_j^4)/mu,
+    /// so the loss is exact per mode: `sigma(omega_j, share_j)` [1/s] at each mode's own discrete
+    /// frequency, where share_j = B beta_j^2/(T + B beta_j^2) is the bending part of its potential
+    /// energy. No s0 or s1 is used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn coil(name: &str, n: usize, h: f64, mass_per_m: f64, tension: f64, bending: f64,
+        sigma: &dyn Fn(f64, f64) -> Result<f64, String>, x0: f64, y: f64) -> Result<Body, String> {
+        if n < 2 || !(h > 0.0 && mass_per_m > 0.0 && tension >= 0.0 && bending > 0.0) {
+            return Err(format!("{name}: a coil needs n >= 2 and positive spacing, mass and bending (tension >= 0)"));
+        }
+        let mut b = Body::string(name, n, h, mass_per_m, tension, f64::INFINITY, x0, y);
+        b.s0 = vec![0.0; n];
+        // stiff = (B/h^3) lap lap, lap the chain's (2, -1) stencil with zero ghosts
+        let lrows: Vec<BTreeMap<usize, f64>> = (0..n).map(|a| {
+            let mut r = BTreeMap::new();
+            r.insert(a, 2.0);
+            if a > 0 { r.insert(a - 1, -1.0); }
+            if a + 1 < n { r.insert(a + 1, -1.0); }
+            r
+        }).collect();
+        let mut krows = vec![BTreeMap::new(); n];
+        for (a, row) in lrows.iter().enumerate() {
+            for (&mid, &x) in row {
+                for (&c, &z) in &lrows[mid] {
+                    add(&mut krows, a, c, bending / h.powi(3) * x * z);
+                }
+            }
+        }
+        b.stiff = Csr::from_rows(&krows);
+        let m = mass_per_m * h;
+        let np1 = (n + 1) as f64;
+        let mut two_sigma = Vec::with_capacity(n);
+        for j in 1..=n {
+            let beta2 = 4.0 / (h * h) * (PI * j as f64 / (2.0 * np1)).sin().powi(2);
+            let omega = ((tension * beta2 + bending * beta2 * beta2) / mass_per_m).sqrt();
+            let share = bending * beta2 / (tension + bending * beta2);
+            let s = sigma(omega, share)?;
+            if !(s >= 0.0 && s.is_finite()) {
+                return Err(format!("{name}: mode {j} at {:.1} Hz has loss {s} 1/s", omega / (2.0 * PI)));
+            }
+            two_sigma.push(2.0 * s);
+        }
+        let phi = |j: usize, i: usize| (2.0 / np1).sqrt() * (PI * (j * (i + 1)) as f64 / np1).sin();
+        let mut crows = vec![BTreeMap::new(); n];
+        for (r, row) in crows.iter_mut().enumerate() {
+            for c in 0..n {
+                let v: f64 = (1..=n).map(|j| two_sigma[j - 1] * phi(j, r) * phi(j, c)).sum();
+                row.insert(c, m * v);
+            }
+        }
+        let rate_bound = two_sigma.iter().cloned().fold(0.0_f64, f64::max);
+        b.modal = Some(ModalLoss { c: Csr::from_rows(&crows), rate_bound, dissipated_j: 0.0 });
+        Ok(b)
+    }
+
+    /// Energy the coil's per-mode loss removed at centred velocity [J].
+    pub fn modal_loss_dissipated_j(&self) -> f64 {
+        self.modal.as_ref().map_or(0.0, |m| m.dissipated_j)
+    }
+
     /// A lumped rigid mass (stick, beater, hi-hat rod).
     pub fn point(name: &str, mass: f64) -> Body {
         Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
-            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None,
+            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None, modal: None,
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
@@ -1139,6 +1217,11 @@ impl Body {
             // dt² lambda_K + 2 dt lambda_C < 4; see discrete_energy below.
             viscous.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
         }
+        if let Some(modal) = &self.modal {
+            // the same backward velocity and admission as the viscous law
+            for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
+            modal.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
+        }
         if self.s1 > 0.0 {
             // div(m grad velocity), not m Lap(velocity): the latter is not
             // symmetric when thickness varies and can create mechanical energy.
@@ -1296,6 +1379,13 @@ impl Body {
             bending_loss = dot(&viscous.scratch, &viscous.scratch) / (4.0 * k);
             viscous.last_j = bending_loss;
             viscous.dissipated_j += bending_loss;
+        }
+        if let Some(modal) = &mut self.modal {
+            for i in 0..self.n { self.tmp[i] = self.wn[i] - self.wp[i]; }
+            // dt v_center' C v_center, v_center = (wn - wp)/(2 dt); C is positive semidefinite
+            let loss = modal.c.quad(&self.tmp) / (4.0 * k);
+            modal.dissipated_j += loss;
+            bending_loss += loss;
         }
         if let Some(load) = self.head_radiation.as_deref_mut() {
             let radiated = load.radiated(&self.wn, k);
@@ -1499,7 +1589,8 @@ impl Body {
         self.stiff.mul_add(&self.w, 1.0, &mut kw);
         self.lap.mul_add(&self.w, self.tension, &mut kw);
         let kinetic = self.mass.iter().zip(&velocity).map(|(m, v)| 0.5*m*v*v).sum::<f64>();
-        let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0);
+        let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0)
+            + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0);
         // Head radiation: the shapes' air kinetic energy, less the same
         // backward-velocity damping correction as the viscous law.
         let air = self.head_radiation.as_deref().map_or(0.0, |load| {
@@ -2284,6 +2375,8 @@ impl Instrument {
                 .any(|b| b.viscosity.as_ref().is_some_and(|v| v.rate_bound > 0.0));
             worst.1.push_str(if material_loss {
                 " + material bending viscosity"
+            } else if self.bodies.iter().any(|b| b.modal.is_some()) {
+                " + coil modal loss"
             } else {
                 " + gradient loss"
             });
@@ -2329,6 +2422,7 @@ impl Instrument {
                 gradient *= 2.0 * b.s1 / (b.h * b.h);
             }
             gradient + b.viscosity.as_ref().map_or(0.0, |v| v.rate_bound)
+                + b.modal.as_ref().map_or(0.0, |m| m.rate_bound)
         }).fold(0.0_f64, f64::max);
         2.0 * rate * bound
     }
@@ -2955,3 +3049,63 @@ fn internal_damping_preserves_momentum_and_dissipates_on_unequal_masses() {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn coil_mode_rings_at_its_discrete_frequency_and_decays_at_its_own_loss() {
+    // G1 manufactured: a free pinned coil started in one sine mode stays in it, rings at the
+    // leapfrog image of omega_j^2 = (T beta^2 + B beta^4)/mu, decays at the sigma it was given
+    // for that mode, and its staggered energy falls by exactly the counted modal loss.
+    let (n, h, mu, t, bend) = (31usize, 3.5e-3, 2.0e-3, 0.8, 4.8e-4);
+    let law = |omega: f64, share: f64| Ok::<f64, String>(2.0 + 3.0e-4 * omega * share);
+    let rate = 400_000.0;
+    let k = 1.0 / rate;
+    for j in [1usize, 6, 23] {
+        let mut b = Body::coil("coil", n, h, mu, t, bend, &law, 0.0, 0.0).unwrap();
+        let np1 = (n + 1) as f64;
+        let phi: Vec<f64> = (0..n).map(|i| (2.0 / np1).sqrt() * (PI * (j * (i + 1)) as f64 / np1).sin()).collect();
+        let beta2 = 4.0 / (h * h) * (PI * j as f64 / (2.0 * np1)).sin().powi(2);
+        let omega = ((t * beta2 + bend * beta2 * beta2) / mu).sqrt();
+        let sigma = law(omega, bend * beta2 / (t + bend * beta2)).unwrap();
+        let amp = 1e-4;
+        for i in 0..n { b.w[i] = amp * phi[i]; b.wp[i] = amp * phi[i]; }
+        b.sync();
+        let mut ins = Instrument::new(rate);
+        ins.add(b);
+        assert!(ins.stability().0 < 0.5);
+        let e0 = ins.bodies[0].discrete_energy(k);
+        let steps = (0.05 * rate) as usize;
+        let (mut q, mut leak) = (Vec::with_capacity(steps), 0.0_f64);
+        for _ in 0..steps {
+            ins.step(&mut []);
+            let w = &ins.bodies[0].w;
+            let qj: f64 = w.iter().zip(&phi).map(|(a, p)| a * p).sum();
+            let rest: f64 = w.iter().zip(&phi).map(|(a, p)| (a - qj * p).powi(2)).sum::<f64>().sqrt();
+            leak = leak.max(rest);
+            q.push(qj);
+        }
+        assert!(leak < 1e-9 * amp, "mode {j} leaked {leak:e} into other modes");
+        // frequency from upward zero crossings, against the leapfrog image of omega
+        let ups: Vec<f64> = (1..steps).filter(|&s| q[s - 1] < 0.0 && q[s] >= 0.0)
+            .map(|s| (s - 1) as f64 + q[s - 1] / (q[s - 1] - q[s])).collect();
+        let f = (ups.len() - 1) as f64 / ((ups[ups.len() - 1] - ups[0]) * k);
+        let leapfrog = 2.0 / k * (omega * k / 2.0).asin() / (2.0 * PI);
+        assert!((f / leapfrog - 1.0).abs() < 2e-3, "mode {j}: {f} Hz vs {leapfrog} Hz");
+        // decay from the per-cycle peaks of |q|
+        let mut peaks = vec![];
+        for s in 1..steps - 1 {
+            if q[s].abs() >= q[s - 1].abs() && q[s].abs() > q[s + 1].abs() && q[s].abs() > 0.0 {
+                peaks.push((s as f64 * k, q[s].abs().ln()));
+            }
+        }
+        let m = peaks.len() as f64;
+        let (st, sy) = peaks.iter().fold((0.0, 0.0), |(a, b), p| (a + p.0, b + p.1));
+        let (mt, my) = (st / m, sy / m);
+        let slope = peaks.iter().map(|p| (p.0 - mt) * (p.1 - my)).sum::<f64>()
+            / peaks.iter().map(|p| (p.0 - mt).powi(2)).sum::<f64>();
+        assert!((-slope / sigma - 1.0).abs() < 0.02, "mode {j}: decay {} vs sigma {sigma}", -slope);
+        let e1 = ins.bodies[0].discrete_energy(k);
+        let lost = ins.bodies[0].modal_loss_dissipated_j();
+        assert!(((e0 - e1) - lost).abs() < 1e-9 * e0, "mode {j}: energy fell {} J, counted {lost} J", e0 - e1);
+    }
+}

@@ -1188,3 +1188,126 @@ fn g1_a_thicker_film_lengthens_the_radiation_decay_inside_its_predicted_band() {
         "T60 thin {thin:.3} s, thick {thick:.3} s: ratio {ratio:.4} outside the predicted [1.73, 2.28]"
     );
 }
+
+/// The snare wires' cards as the card route ships them (crate README), each at its own state.
+fn snare_wire_binding(m: KitMaterials) -> Result<KitMaterials, String> {
+    let steel = include_bytes!("../packs/steel-music-wire-string-heptonstall-ligo-p1400229.fsmatpk");
+    let shear = include_bytes!("../packs/music-wire-spring-moduli-fuchs-1968.fsmatpk");
+    let shear_point = fs_matdb::QueryPoint::new().with("temperature", 293.0).unwrap();
+    m.with_snare_wire(
+        steel,
+        &crate::materials::temperature_frequency_point("T", 293.15, "frequency", 1000.0).unwrap(),
+        shear,
+        &shear_point,
+    )
+}
+
+#[test]
+fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared() {
+    use crate::coil::{CANOPUS_VINTAGE, COIL_ENDS_NOTE, CoilWire};
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let cards = snare_wire_binding(binding(&film, &film, &stick)).unwrap();
+    let steel = cards.snare_wire().unwrap();
+    // Independent arithmetic from the card values (Heptonstall rho 7800 kg/m^3, E 212 GPa;
+    // Fuchs G 79.29 GPa) and the maker's wire 0.5 mm, outer 1.35 mm (mean 0.85), pitch 3.4 mm.
+    let (d, dm, p) = (0.5e-3_f64, 0.85e-3_f64, 3.4e-3_f64);
+    let alpha = (p / (PI * dm)).atan();
+    let (sin, cos2) = (alpha.sin(), alpha.cos().powi(2));
+    let i = PI * d.powi(4) / 64.0;
+    let (bend, twist) = ((1.0 + sin * sin) / (212e9 * i), cos2 / (79.29e9 * 2.0 * i));
+    let wire = CoilWire::new(&CANOPUS_VINTAGE, steel, &standard_gas()).unwrap();
+    near(wire.bending_n_m2(), 2.0 * sin / (bend + twist));
+    near(wire.mass_per_m(), 7800.0 * PI * d * d / 4.0 / sin);
+    near(wire.wire_bending_share(), bend / (bend + twist));
+    // Material loss: fs-material's exact thermoelastic series of the same state, plus the card's
+    // 1.4e-4 excess only inside its 8-3000 Hz band, on the wire-bending share of the mode's
+    // bending energy; a pure-tension mode has none.
+    let section = fs_material::section::ConcentricElasticSection::try_new(
+        0.0,
+        vec![fs_material::section::ConcentricMaterialLayer {
+            outer_radius_m: d / 2.0,
+            material: steel.steel().clone(),
+        }],
+    )
+    .unwrap()
+    .with_thermoelastic_bending()
+    .unwrap();
+    let (inside, outside) = (2.0 * PI * 1000.0, 2.0 * PI * 5000.0);
+    let s_w = wire.wire_bending_share();
+    near(
+        wire.material_rate(inside, 0.4),
+        0.5 * inside * 0.4 * s_w * (section.loss_tangent(inside) + 1.4e-4),
+    );
+    near(
+        wire.material_rate(outside, 0.4),
+        0.5 * outside * 0.4 * s_w * section.loss_tangent(outside),
+    );
+    assert_eq!(wire.material_rate(inside, 0.0), 0.0);
+    let gas = wire.gas_rate(inside).unwrap();
+    assert!(gas > 0.0);
+    near(wire.decay_rate(inside, 0.4).unwrap(), wire.material_rate(inside, 0.4) + gas);
+
+    let mut spec = kit::snare();
+    spec.grid *= 6.0;
+    let piece = kit::drum_with_materials(&spec, &[], standard_gas(), &cards).unwrap();
+    let wires: Vec<&Body> = piece
+        .instrument
+        .bodies
+        .iter()
+        .filter(|b| b.name.starts_with("wire "))
+        .collect();
+    assert!(!wires.is_empty());
+    for w in &wires {
+        assert!(w.modal.is_some(), "{} is not a coil", w.name);
+        assert!(w.s0.iter().all(|&s| s == 0.0));
+        for &m in &w.mass {
+            near(m, wire.mass_per_m() * w.h);
+        }
+    }
+    assert!(piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
+    assert!(piece.notes.iter().any(|n| n == COIL_ENDS_NOTE));
+    assert!(!piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
+
+    // A wire card without the thermal and loss data refuses; absent loss is not a lossless wire.
+    let refused = binding(&film, &film, &stick)
+        .with_snare_wire(
+            &film.to_bytes(),
+            &crate::materials::temperature_frequency_point("T", 293.15, "frequency", 1000.0)
+                .unwrap(),
+            include_bytes!("../packs/music-wire-spring-moduli-fuchs-1968.fsmatpk"),
+            &fs_matdb::QueryPoint::new().with("temperature", 293.0).unwrap(),
+        )
+        .err()
+        .unwrap();
+    assert!(refused.starts_with("snare wire steel:"), "{refused}");
+}
+
+#[test]
+fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let mut spec = kit::snare();
+    spec.grid *= 6.0;
+    // the preset (and so live and GPU), and a card drum bound without the wire cards
+    for piece in [
+        kit::drum(&spec, &[]).unwrap(),
+        kit::drum_with_materials(&spec, &[], standard_gas(), &binding(&film, &film, &stick))
+            .unwrap(),
+    ] {
+        let wires: Vec<&Body> = piece
+            .instrument
+            .bodies
+            .iter()
+            .filter(|b| b.name.starts_with("wire "))
+            .collect();
+        assert!(!wires.is_empty());
+        for w in &wires {
+            assert!(w.modal.is_none());
+            assert!(w.s0.iter().all(|&s| s == 6.907755 / 0.35));
+            assert!(w.mass.iter().all(|&m| m == 0.004 * w.h));
+        }
+        assert!(piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
+        assert!(!piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
+    }
+}

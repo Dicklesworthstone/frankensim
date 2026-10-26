@@ -10,6 +10,13 @@
 //!   unit length is -(pi a^2 rho k) dU/dt - (omega pi a^2 rho k') U.
 //!   Validity: linear unsteady Stokes flow, so Keulegan-Carpenter A/a << 1. The
 //!   caller reports the KC it reaches; this function has no amplitude input.
+//! - [`sliding_cylinder`]: the same cylinder oscillating along its own axis. The
+//!   gas obeys i omega u = nu Lap(u) around it, so u = U K0(q r) / K0(q a) with
+//!   q = (1 + i) / delta, and the wall shear mu du/dr gives the force per unit
+//!   length -2 pi mu alpha K1(alpha) / K0(alpha) U, alpha = q a (Stokes' second
+//!   problem on a cylinder; Landau & Lifshitz, Fluid Mechanics, §24, gives its
+//!   plane limit). For a >> delta it tends to -2 pi a mu (1 + i) U / delta, half
+//!   of the normal law's resistance at the same delta. Same validity as above.
 //! - [`plate_viscous_layer`]: the viscous (Stokes) layer on the faces of a plate
 //!   vibrating in a subsonic bending wave. Above a free bending wave
 //!   w ~ exp(i (k_b x - omega t)) the potential near field phi ~ exp(i k_b x - gamma z),
@@ -176,6 +183,21 @@ pub fn oscillating_cylinder(
         added_mass_kg_per_m: displaced * k,
         resistance_n_s_per_m2: omega_rad_s * displaced * k_prime,
     })
+}
+
+/// Drag resistance [N s/m^2] (force per unit length per unit speed) on a
+/// cylinder of radius `radius_m` sliding along its axis at `omega_rad_s` in `gas`.
+pub fn sliding_cylinder(radius_m: f64, omega_rad_s: f64, gas: &GasState) -> Result<f64, String> {
+    let (rho, mu) = gas_density_viscosity(gas)?;
+    if !(radius_m.is_finite() && radius_m > 0.0 && omega_rad_s.is_finite() && omega_rad_s > 0.0) {
+        return Err(format!(
+            "sliding-cylinder drag needs a positive radius and angular frequency, got a {radius_m} m, omega {omega_rad_s} rad/s"
+        ));
+    }
+    let r = radius_m / (2.0 * mu / (rho * omega_rad_s)).sqrt();
+    let alpha = Complex::new(r, r);
+    let (k0, k1) = scaled_bessel_k01(alpha)?;
+    Ok(2.0 * PI * mu * (alpha * k1 / k0).re)
 }
 
 /// The viscous-layer loss of a plate face pair in a subsonic bending wave.

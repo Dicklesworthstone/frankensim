@@ -1,9 +1,11 @@
 //! Source-bound material substitution for the existing plate/contact solver.
 //!
 //! Geometry, installed tension, supports, rim friction and snare-wire laws
-//! remain independent declarations. Source-bound bending viscosity explicitly
-//! replaces T60 loss when selected. Drum heads built from imported cards need
-//! that, or a declared stated-unknown film loss; they never fall back to the
+//! remain independent declarations; a sourced snare-wire steel
+//! (`with_snare_wire`) makes the wires coils of that steel. Source-bound
+//! bending viscosity explicitly replaces T60 loss when selected. Drum heads
+//! built from imported cards need that, or a declared stated-unknown film
+//! loss; they never fall back to the
 //! preset T60. A material swap never retunes pitch,
 //! rescales geometry to preserve mass, or claims a new measured decay time.
 
@@ -111,6 +113,8 @@ pub struct KitMaterials {
     /// Held film loss tangent of each head's card and the temperature it was
     /// read at [K] (`with_held_film_loss`).
     held_film: Option<([f64; 2], f64)>,
+    /// Snare-wire steel and its shear modulus (`with_snare_wire`).
+    snare_wire: Option<crate::coil::CoilSteel>,
 }
 
 /// The film rows a held film loss reads: one loss tangent along and one
@@ -161,6 +165,7 @@ impl KitMaterials {
             in_plane_moduli: [None, None],
             tip_anisotropy: None,
             held_film: None,
+            snare_wire: None,
         };
         // Refuse a nonrepresentable contact before building any operators.
         let crate::Law::Power { k, .. } = result.impact_law();
@@ -241,16 +246,7 @@ impl KitMaterials {
         {
             return Err("bending viscosity requires a distinct source frequency axis and positive finite frequency [Hz]".into());
         }
-        let point = temperature_point(axis, temperature_k)?
-            .with_quantity(
-                frequency_axis,
-                QuantitySpec::semantic(SemanticType::new(
-                    QuantityKind::Frequency(FrequencyConvention::Cyclic),
-                    ValueForm::Static,
-                )),
-                frequency_hz,
-            )
-            .map_err(|e| e.to_string())?;
+        let point = temperature_frequency_point(axis, temperature_k, frequency_axis, frequency_hz)?;
         let materials = Self::from_card_packs(
             primary,
             secondary,
@@ -367,6 +363,42 @@ impl KitMaterials {
         self.film_loss_stated_unknown = true;
         self.held_film = Some((tangents, reading_temperature_k));
         Ok(self)
+    }
+
+    /// Bind the snare wires' steel: the wire card (density, E, expansion, heat
+    /// capacity, conductivity and its excess bending loss tangent) at
+    /// `steel_point` and the shear card's modulus at `shear_point`, each at
+    /// its own card's coordinates (`crate::coil::CoilSteel::resolve`). A drum
+    /// with wires then builds each strand as a coil of its declared geometry.
+    pub fn with_snare_wire(
+        mut self,
+        steel: &[u8],
+        steel_point: &QueryPoint,
+        shear: &[u8],
+        shear_point: &QueryPoint,
+    ) -> Result<Self, String> {
+        if steel.len().saturating_add(shear.len()) > MAX_MATERIAL_PACK_BYTES {
+            return Err("snare wire packs exceed the aggregate 16 MiB import budget".into());
+        }
+        let load = |bytes: &[u8]| {
+            NormalizedMaterialCardPack::from_bytes(bytes)
+                .map(Arc::new)
+                .map_err(|e| e.to_string())
+        };
+        let (steel, shear) = (load(steel)?, load(shear)?);
+        self.snare_wire = Some(crate::coil::CoilSteel::resolve(
+            &steel,
+            steel_point,
+            &shear,
+            shear_point,
+        )?);
+        self.packs.extend([steel, shear]);
+        Ok(self)
+    }
+
+    /// The bound snare-wire steel, if any.
+    pub const fn snare_wire(&self) -> Option<&crate::coil::CoilSteel> {
+        self.snare_wire.as_ref()
     }
 
     /// The held film loss tangent of the batter (0) or resonant (1) head.
@@ -719,7 +751,29 @@ impl KitMaterials {
     }
 }
 
-fn temperature_point(axis: &str, temperature_k: f64) -> Result<QueryPoint, String> {
+/// `temperature_point` plus one typed cyclic-frequency [Hz] axis: a source
+/// coordinate (a claim valid over a band answers anywhere inside it), not a
+/// frequency at which to freeze a dispersive curve.
+pub fn temperature_frequency_point(
+    axis: &str,
+    temperature_k: f64,
+    frequency_axis: &str,
+    frequency_hz: f64,
+) -> Result<QueryPoint, String> {
+    temperature_point(axis, temperature_k)?
+        .with_quantity(
+            frequency_axis,
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Frequency(FrequencyConvention::Cyclic),
+                ValueForm::Static,
+            )),
+            frequency_hz,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// A query point on one typed absolute-temperature axis.
+pub fn temperature_point(axis: &str, temperature_k: f64) -> Result<QueryPoint, String> {
     if axis.trim().is_empty() || axis.len() > 128 {
         return Err(
             "material temperature axis must name a source coordinate (at most 128 bytes)".into(),

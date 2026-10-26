@@ -3,7 +3,9 @@
 //! viscous layer's closed form and refusals.
 
 use crate::GasState;
-use crate::air_loss::{Complex, oscillating_cylinder, plate_viscous_layer, scaled_bessel_k01};
+use crate::air_loss::{
+    Complex, oscillating_cylinder, plate_viscous_layer, scaled_bessel_k01, sliding_cylinder,
+};
 use std::f64::consts::{FRAC_PI_4, PI};
 
 const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
@@ -196,6 +198,57 @@ fn stuart_drag_per_length_scales_with_the_gas() {
     assert!((base.resistance_n_s_per_m2 / asymptote - 1.0).abs() <= 2e-3);
     // The added mass tends to the displaced gas, pi a^2 rho.
     assert!((base.added_mass_kg_per_m / (PI * a * a * gas.density) - 1.0).abs() <= 3e-3);
+}
+
+#[test]
+fn sliding_cylinder_meets_its_asymptotes_and_half_the_normal_drag() {
+    // R = 2 pi mu Re(z K1(z) / K0(z)), z = (1 + i) a / delta. Large z (A&S 9.7.2):
+    // z K1/K0 = z + 1/2 - 1/(8 z) + O(z^-2), so Re = r + 1/2 - 1/(16 r). Small z
+    // (A&S 9.6.13, the K0 ~ -ln(z/2) - gamma and K1 ~ 1/z of the test above):
+    // Re = -l / (l^2 + (pi/4)^2), l = ln(r / sqrt 2) + gamma.
+    let gas = humid_air();
+    let omega = 2.0 * PI * 1000.0;
+    let mu = gas.dynamic_viscosity;
+    for (r, expected, tol) in [
+        (
+            0.001,
+            -(0.001_f64.ln() - std::f64::consts::LN_2 / 2.0 + EULER_GAMMA),
+            0.01,
+        ),
+        (
+            0.01,
+            -(0.01_f64.ln() - std::f64::consts::LN_2 / 2.0 + EULER_GAMMA),
+            0.01,
+        ),
+        (3.0, 3.5 - 1.0 / 48.0, 2e-3),
+        (10.0, 10.5 - 1.0 / 160.0, 1e-4),
+        (100.0, 100.5 - 1.0 / 1600.0, 1e-6),
+    ] {
+        let re = if r < 1.0 {
+            expected / (expected * expected + FRAC_PI_4 * FRAC_PI_4)
+        } else {
+            expected
+        };
+        let resistance =
+            sliding_cylinder(radius_for(r, omega, &gas), omega, &gas).expect("sliding drag");
+        let got = resistance / (2.0 * PI * mu);
+        println!(
+            "{{\"test\":\"sliding_limits\",\"a_over_delta\":{r},\"re\":{got:.9},\"limit\":{re:.9}}}"
+        );
+        assert!(
+            (got / re - 1.0).abs() <= tol,
+            "a/delta {r}: Re(z K1/K0) {got} against {re}"
+        );
+    }
+    // Far above the layer the normal (Stuart) resistance is twice the sliding one.
+    let a = radius_for(100.0, omega, &gas);
+    let normal = oscillating_cylinder(a, omega, &gas)
+        .expect("drag")
+        .resistance_n_s_per_m2;
+    let ratio = normal / sliding_cylinder(a, omega, &gas).expect("sliding drag");
+    assert!((ratio - 2.0).abs() <= 0.02, "normal over sliding {ratio}");
+    assert!(sliding_cylinder(0.0, omega, &gas).is_err());
+    assert!(sliding_cylinder(1e-3, f64::NAN, &gas).is_err());
 }
 
 #[test]
