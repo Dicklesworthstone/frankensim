@@ -2788,6 +2788,9 @@ version = "0.0.1"
 [[package]]
 name = "fs-thermal"
 version = "0.0.1"
+dependencies = [
+ "fs-la",
+]
 
 [[package]]
 name = "fs-thermochem"

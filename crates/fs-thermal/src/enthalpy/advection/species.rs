@@ -1,7 +1,9 @@
 //! Stationary species balances on the existing prescribed upwind graph.
 //!
-//! Only acyclic, mass-balanced graphs with explicit inlet compositions are
-//! admitted. Species have no reaction, diffusion, condensation or storage rate.
+//! Mass-balanced graphs need explicit inlet compositions. Acyclic sections use
+//! direct mixing; inlet-fed recirculation uses the existing bounded dense solver.
+//! Closed components with no inlet have no uniquely determined composition and
+//! refuse. Species have no reaction, diffusion, condensation or storage rate.
 //! The enthalpy observer uses these SAME directions and mass rates. This
 //! stationary extension does not turn fixed thermal cells into a variable-
 //! density transient flow solver.
@@ -10,6 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Advected, MassBoundary, MassFlow, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation};
+
+#[path = "species/recirculation.rs"]
+mod recirculation;
+
+/// Maximum unresolved cells in the dense recirculation solve, including any
+/// downstream cells held back by a cycle. Acyclic graphs keep their 4096-cell cap.
+pub const MAX_RECIRCULATION_CELLS: usize = 128;
+/// Largest admitted mass-fraction error estimate from the scaled residual and
+/// inverse-norm/roundoff check. This numerical allowance is not material data
+/// uncertainty or a formal interval certificate.
+pub const RECIRCULATION_FRACTION_TOLERANCE: f64 = 1e-10;
 
 /// Frozen caloric-law composition in one explicit species/reference convention.
 /// A common reference identifies the energy datum, not identical h(T) curves.
@@ -200,7 +213,9 @@ impl StationarySpecies {
             cells.insert(cell, fractions);
         }
         if cells.len() != rates.len() {
-            return Err(invalid("stationary species currently require an acyclic flow graph"));
+            maximum_residual_kg_s = maximum_residual_kg_s.max(recirculation::complete(
+                &rates, &edges, &incoming_species, uniform_inputs, &mut cells, count,
+            )?);
         }
         Ok(Self { species, cells, inlets, maximum_residual_kg_s })
     }
@@ -250,6 +265,9 @@ impl StationarySpecies {
 
 impl<O> Advected<O> {
     /// Solve stationary species on this observer's existing mass-flow graph.
+    /// Inlet-fed cycles use at most [`MAX_RECIRCULATION_CELLS`] unresolved cells;
+    /// unreachable or ill-conditioned recirculation refuses without regularizing
+    /// the flow or inventing a composition. The acyclic path is unchanged.
     /// Allows different immutable cell caloric laws only after their exact
     /// compositions and shared energy reference are checked on every advance.
     /// Inlet enthalpy remains the INLET law's enthalpy; it is never interpreted
