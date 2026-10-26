@@ -327,6 +327,47 @@ dielectrics, volume-charge/electrode Gauss balance, voltage-offset and energy
 identities, native RC response, source-state refresh, and explicit refusals using
 synthetic claims rather than measured material qualification.
 
+## Multiple dielectric electrodes and native circuit storage
+
+`PlanarElectrostatics::capacitance_matrix` extends the same source-resolved
+field owner to a complete ordered set of disjoint electrode traces. The scalar
+and multiple-electrode APIs share trace admission; every terminal covers whole
+exterior edges, and unassigned exterior edges retain the natural insulated
+boundary. Exactly one original checked field solve is performed per terminal,
+with explicit terminal, total-solve and retained-field capacity bounds.
+Every unit field retains the original mesh, material states and charge reactions.
+
+The full Maxwell matrix is the symmetric electric-energy Gram matrix in farads.
+Its coefficients must independently agree with every terminal charge reaction,
+reciprocity and the common-voltage nullspace within the caller's coefficient
+tolerance. No reference terminal is silently removed. An explicitly grounded
+submatrix preserves the remaining original terminal order. A floating electrode
+is not eliminated by deleting its row: it still needs its physical charge
+constraint in the receiving model.
+
+`response` forms voltage differences before superposition and integrates the
+resulting original cell fields for stored energy. `circuit_at_voltages` retains
+the source matrix and returns native Kirchhoff capacitor branches with
+`C_pair=-C_ij`, together with consistent signed initial branch charges.
+Its explicit one-to-one electrode/node map and i-before-j orientation determine
+the exact native capacitor charge ordering. Actual terminal charge and network
+storage must match the field at the supplied voltages within independent C/J
+tolerances. Every terminal needs a capacitive connection. Zero mutual entries
+produce no branch; positive off-diagonal entries refuse passive circuit lowering
+without clipping, even though the original field matrix can remain useful.
+
+The native circuit owner supplies subsequent KCL/KVL, charge dynamics, source
+work and resistor losses. The extracted network is the dielectric store itself,
+not an additional parallel energy account. Geometry and dielectric state remain
+fixed; parameter work, dielectric loss, leakage and mechanical force remain
+outside this reduction. A balance gate is not a spatial-error certificate.
+Focused synthetic tests compare a three-electrode mesh with independent P1
+coefficients and direct field charge/energy, verify gauge and terminal ordering,
+propagate a regional dielectric-data substitution through actual native coupled
+RC dynamics, and refuse a positive-mutual coarse discretization without altering
+its field matrix. Full native integration execution is still required in an
+environment able to compile the pinned dependency graph.
+
 ## Nonlinear reversible induction and spatial Ohmic heat
 
 `planar::eddy::nonlinear::PlanarNonlinearEddy` retains the actual source-bound

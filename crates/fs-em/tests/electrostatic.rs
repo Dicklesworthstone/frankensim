@@ -1,5 +1,7 @@
 //! Synthetic source-data regressions, not experimentally qualified dielectrics.
 mod common;
+#[path = "electrostatic/network.rs"]
+mod network;
 use common::{config, layered, limits};
 use fs_em::electrostatic::{ElectrostaticControls, ElectrostaticError, PlanarElectrostatics};
 use fs_evidence::ValidityDomain;

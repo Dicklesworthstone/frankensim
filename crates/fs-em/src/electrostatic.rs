@@ -9,6 +9,9 @@
 //! error bounds. No conduction, dielectric loss, dispersion, breakdown, moving
 //! geometry, or live temperature/parameter-work claim is made.
 
+/// Multiple source-resolved electrodes and passive native circuit reduction.
+pub mod network;
+
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
     weighted::{WeightedAssemblyLimits, WeightedError},
@@ -365,47 +368,12 @@ impl PlanarElectrostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarCapacitance<'_>, ElectrostaticError> {
         poll(cancelled)?;
-        let n = self.mesh.vertices().len();
-        let trace = self
-            .mesh
-            .boundary_trace()
-            .map_err(|_| ElectrostaticError::Invalid("invalid electrode boundary trace"))?;
-        let mut boundary = Vec::new();
-        let mut assigned = vec![false; n];
         let excitation_v = 1.0;
-        for (terminal, value) in [(positive_terminal, excitation_v), (negative_terminal, 0.0)] {
-            if terminal.is_empty() || terminal.len() > n {
-                return Err(ElectrostaticError::Invalid(
-                    "two nonempty bounded terminals required",
-                ));
-            }
-            let mut selected = vec![false; n];
-            for &vertex in terminal {
-                poll(cancelled)?;
-                if vertex >= n || assigned[vertex] {
-                    return Err(ElectrostaticError::Invalid(
-                        "invalid, overlapping or repeated terminal vertex",
-                    ));
-                }
-                assigned[vertex] = true;
-                selected[vertex] = true;
-                boundary.push((vertex, value));
-            }
-            let mut supported = vec![false; n];
-            for edge in &trace.edges {
-                poll(cancelled)?;
-                let [a, b] = edge.oriented_vertices.map(|v| v as usize);
-                if selected[a] && selected[b] {
-                    supported[a] = true;
-                    supported[b] = true;
-                }
-            }
-            if terminal.iter().any(|&v| !supported[v]) {
-                return Err(ElectrostaticError::Invalid(
-                    "each terminal must cover exterior edges, not isolated points",
-                ));
-            }
-        }
+        let boundary = self.terminal_boundary(
+            &[positive_terminal, negative_terminal],
+            &[excitation_v, 0.0],
+            cancelled,
+        )?;
         let field = self.solve(
             &vec![0.0; self.materials.len()],
             &boundary,
@@ -436,6 +404,66 @@ impl PlanarElectrostatics {
             field,
             capacitance_f,
         })
+    }
+
+    // The scalar and multi-electrode reductions admit exactly the same traces.
+    fn terminal_boundary(
+        &self,
+        terminals: &[&[usize]],
+        voltages_v: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<(usize, f64)>, ElectrostaticError> {
+        let n = self.mesh.vertices().len();
+        if terminals.len() < 2
+            || terminals.len() > n
+            || voltages_v.len() != terminals.len()
+            || voltages_v.iter().any(|v| !v.is_finite())
+        {
+            return Err(ElectrostaticError::Invalid(
+                "complete finite electrode voltages and at least two terminals required",
+            ));
+        }
+        let trace = self
+            .mesh
+            .boundary_trace()
+            .map_err(|_| ElectrostaticError::Invalid("invalid electrode boundary trace"))?;
+        let mut boundary = Vec::new();
+        let mut assigned = vec![false; n];
+        for (&terminal, &value) in terminals.iter().zip(voltages_v) {
+            if terminal.is_empty() || terminal.len() > n {
+                return Err(ElectrostaticError::Invalid(
+                    "nonempty bounded terminal traces required",
+                ));
+            }
+            let mut selected = vec![false; n];
+            for &vertex in terminal {
+                poll(cancelled)?;
+                if vertex >= n || assigned[vertex] {
+                    return Err(ElectrostaticError::Invalid(
+                        "invalid, overlapping or repeated terminal vertex",
+                    ));
+                }
+                assigned[vertex] = true;
+                selected[vertex] = true;
+                boundary.push((vertex, value));
+            }
+            let mut supported = vec![false; n];
+            for edge in &trace.edges {
+                poll(cancelled)?;
+                let [a, b] = edge.oriented_vertices.map(|v| v as usize);
+                if selected[a] && selected[b] {
+                    supported[a] = true;
+                    supported[b] = true;
+                }
+            }
+            if terminal.iter().any(|&v| !supported[v]) {
+                return Err(ElectrostaticError::Invalid(
+                    "each terminal must cover exterior edges, not isolated points",
+                ));
+            }
+        }
+        poll(cancelled)?;
+        Ok(boundary)
     }
 }
 
