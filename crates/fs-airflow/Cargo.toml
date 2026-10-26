@@ -36,6 +36,8 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+# Reuse the native graph's cell identities and signed mass-flow connections.
+fs-thermal = { path = "../fs-thermal" }
 # Exercise convection on the original coupled electrical/thermal/gas network.
 fs-phs = { path = "../fs-phs" }
 # Test-only authority for the declared base-to-fin bondline cards in the

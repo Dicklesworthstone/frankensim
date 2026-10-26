@@ -77,6 +77,24 @@ input. `tests/steady_material_gas.rs` checks independent heat/pressure balances,
 temperature-dependent transport, species injection, pressure changes,
 final-state hydraulic admission and transactional failure/cancellation.
 
+`solve_material_gas_network` uses that same material-convection fixed point for
+the native branched and inlet-fed recirculating `SteadyGasNetwork`. There is one
+feedback implementation for the axial and graph APIs; each keeps its original
+thermal result type. Each cell's full accepted source state supplies its heat
+transfer, hydraulic response and acoustic medium. Composition and temperature
+changes therefore update the wall law inside the steady balance, rather than
+leaving an independently authored coefficient frozen. Correlation evidence and
+material receipts remain bound to the returned local states.
+
+Cells must represent the declared bulk-flow sections and correlations; junction
+or nozzle geometry is not inferred. Per-cell hydraulic losses are observations
+of prescribed flows, not a graph pressure solution. Their sum is a conservative
+common-pressure admission bound; only an axial series path identifies that sum
+with its end-to-end drop. No pump or flow-feasibility claim is added. The new
+network regressions independently reconstruct cell and external enthalpy
+balances, check recirculating species, exercise material/pressure substitutions,
+and compare the original axial API with the same graph and wall laws.
+
 `medium::convection::finite_gas::ForcedGasSurface::isochoric_body_candidate`
 connects the same material/correlation evaluator to the generic finite-gas,
 uniform-body thermal callback in `fs-couple`. Each coupled trial resolves h from

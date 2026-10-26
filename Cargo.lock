@@ -967,6 +967,7 @@ dependencies = [
  "fs-rep-mesh",
  "fs-solver",
  "fs-sparse",
+ "fs-thermal",
 ]
 
 [[package]]
