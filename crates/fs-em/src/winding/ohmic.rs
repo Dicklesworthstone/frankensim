@@ -102,7 +102,8 @@ pub struct OhmicWindingCircuit<'c, 'm> {
     time_s: f64,
 }
 
-/// Spatial electrical/heat quantities at the SAME native circuit midpoint.
+/// Spatial electrical/heat quantities at the owning scheme's common current:
+/// native midpoint for linear windings, endpoint for nonlinear BE windings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindingCellHeat {
     /// Original complete source, with actual resolved physical query and receipts.
@@ -182,19 +183,50 @@ fn admit_electrical_law(property: &ResolvedScalarProperty) -> Result<(), OhmicWi
 
 fn bind(
     magnetic: &WindingCircuit<'_>,
-    mut sources: Vec<WindingConductor>,
+    sources: Vec<WindingConductor>,
     previous: Option<&[WindingConductor]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<WindingConductor>, Vec<usize>, Vec<f64>), OhmicWindingError> {
     use OhmicWindingError::Invalid;
     let basis = magnetic.basis();
     let problem = basis.problem();
-    let cells = problem.mesh().faces().len();
-    if sources.len() > cells || magnetic.graph().branches.iter().any(|&(a, b, _)| a == b) {
+    if magnetic.graph().branches.iter().any(|&(a, b, _)| a == b) {
         return Err(Invalid("invalid winding conductor capacity or self-loop circuit branch"));
     }
+    bind_sources(problem.mesh(), basis.profiles_per_m2(), sources, previous, |source| {
+        if problem.recoil_materials()[source.triangle].is_some() {
+            if &problem.materials()[source.triangle] != source.conductor.material() {
+                return Err(Invalid("conducting recoil material requires its exact original fixed-state source bundle"));
+            }
+        } else {
+            admit_fixed_magnetic_refresh(&problem.materials()[source.triangle], source.conductor.material())
+                .map_err(|e| match e {
+                    FieldStorageError::Invalid(why) => OhmicWindingError::Invalid(why),
+                    other => OhmicWindingError::Magnetic(other),
+                })?;
+        }
+        Ok(())
+    }, cancelled)
+}
+
+// Shared by constant-inductance and nonlinear-field circuits. Only magnetic
+// source admission differs; spatial ownership, source continuity and rho*J^2
+// resistance are computed once here.
+pub(super) fn bind_sources(
+    mesh: &fs_rep_mesh::TriComplex2,
+    profiles: &[Vec<f64>],
+    mut sources: Vec<WindingConductor>,
+    previous: Option<&[WindingConductor]>,
+    mut admit_material: impl FnMut(&WindingConductor) -> Result<(), OhmicWindingError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<WindingConductor>, Vec<usize>, Vec<f64>), OhmicWindingError> {
+    use OhmicWindingError::Invalid;
+    let cells = mesh.faces().len();
+    if sources.len() > cells || profiles.iter().any(|p| p.len() != cells) {
+        return Err(Invalid("invalid winding conductor or profile capacity"));
+    }
     let mut owners = vec![None; cells];
-    for (winding, profile) in basis.profiles_per_m2().iter().enumerate() {
+    for (winding, profile) in profiles.iter().enumerate() {
         for (triangle, &current) in profile.iter().enumerate() {
             poll(cancelled)?;
             if current != 0.0 && owners[triangle].replace(winding).is_some() {
@@ -210,7 +242,7 @@ fn bind(
         return Err(Invalid("winding source correspondence changed"));
     }
     let mut windings = Vec::with_capacity(sources.len());
-    let mut resistance = vec![0.0; basis.winding_count()];
+    let mut resistance = vec![0.0; profiles.len()];
     for (index, source) in sources.iter().enumerate() {
         poll(cancelled)?;
         if source.triangle >= cells || index > 0 && sources[index - 1].triangle == source.triangle {
@@ -218,28 +250,25 @@ fn bind(
         }
         let winding = owners[source.triangle].ok_or(Invalid("conductor binding names an inactive triangle"))?;
         if previous.is_some_and(|p| p[index].triangle != source.triangle
-            || p[index].conductor.source_basis() != source.conductor.source_basis())
+            || p[index].conductor.source_basis() != source.conductor.source_basis()
+            || {
+                let before = p[index].conductor.material();
+                let after = source.conductor.material();
+                before.card_identity() != after.card_identity()
+                    || before.material() != after.material()
+                    || before.axis_quantities() != after.axis_quantities()
+                    || before.properties().len() != after.properties().len()
+                    || before.properties().iter().zip(after.properties()).any(|(a,b)|
+                        a.requirement() != b.requirement() || a.source_axes() != b.source_axes()
+                            || a.answer().receipt.selected != b.answer().receipt.selected)
+            })
         {
             return Err(Invalid("winding electrical source basis or triangle correspondence changed"));
         }
-        if problem.recoil_materials()[source.triangle].is_some() {
-            // The generic fixed-mu refresh cannot establish fixed Br, recoil
-            // slope or source limits. A conducting magnet must reuse the exact
-            // original complete bundle, including its electrical claim. No
-            // generic permeability claim is needed or substituted for recoil.
-            if &problem.materials()[source.triangle] != source.conductor.material() {
-                return Err(Invalid("conducting recoil material requires its exact original fixed-state source bundle"));
-            }
-        } else {
-            admit_fixed_magnetic_refresh(&problem.materials()[source.triangle], source.conductor.material())
-                .map_err(|e| match e {
-                    FieldStorageError::Invalid(why) => OhmicWindingError::Invalid(why),
-                    other => OhmicWindingError::Magnetic(other),
-                })?;
-        }
+        admit_material(source)?;
         admit_electrical_law(source.conductor.source_property())?;
-        let j = basis.profiles_per_m2()[winding][source.triangle];
-        let volume = problem.mesh().face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
+        let j = profiles[winding][source.triangle];
+        let volume = mesh.face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
         let contribution = source.conductor.resistivity_ohm_m() * j * j * volume;
         if !positive(volume) || !positive(contribution) {
             return Err(Invalid("spatial winding resistance is not representable and positive"));
@@ -358,49 +387,15 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
         { return Err(Balance("nonfinite or negative native storage/loss")); }
         let midpoint: Vec<_> = x0.iter().zip(&native.x).map(|(&a, &b)| f64::midpoint(a, b)).collect();
         let midpoint_currents_a = self.magnetic.currents_a(&midpoint)?;
-        let mut cells = Vec::with_capacity(conductors.len());
-        let mut winding_power = vec![0.0; resistance_ohm.len()];
-        let mut heat_j = 0.0;
-        for (source, &winding) in conductors.iter().zip(&conductor_windings) {
-            poll(cancelled)?;
-            let volume_m3 = self.magnetic.basis().problem().mesh().face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
-            let current_density_a_m2 = self.magnetic.basis().profiles_per_m2()[winding][source.triangle] * midpoint_currents_a[winding];
-            let electric_field_v_m = source.conductor.resistivity_ohm_m() * current_density_a_m2;
-            let power_w = electric_field_v_m * current_density_a_m2 * volume_m3;
-            let cell_heat = power_w * dt;
-            if [current_density_a_m2, electric_field_v_m, power_w, cell_heat].iter().any(|v| !v.is_finite())
-                || power_w < 0.0 || current_density_a_m2 != 0.0 && power_w == 0.0
-                || power_w != 0.0 && cell_heat == 0.0
-            { return Err(Balance("spatial Ohmic power/heat is unrepresentable")); }
-            winding_power[winding] += power_w;
-            heat_j += cell_heat;
-            cells.push(WindingCellHeat { source: source.clone(), winding, volume_m3,
-                current_density_a_m2, electric_field_v_m, power_w, heat_j: cell_heat });
-        }
-        for winding in 0..resistance_ohm.len() {
-            let i = midpoint_currents_a[winding];
-            let terminal_power = i * resistance_ohm[winding] * i;
-            if !terminal_power.is_finite() || !winding_power[winding].is_finite()
-                || (terminal_power - winding_power[winding]).abs() > controls.power_tolerance_w
-            { return Err(Balance("integrated material heat disagrees with intrinsic winding series work")); }
-        }
-        let voltage = |node: usize| if node == 0 { 0.0 } else { midpoint[dae.node_potential_index[node - 1]] };
-        let mut graph_resistors = Vec::new();
-        for (branch, &(a, b, law)) in self.magnetic.graph().branches.iter().enumerate() {
-            poll(cancelled)?;
-            if let Branch::Resistor { ohms } = law {
-                let voltage_v = voltage(a) - voltage(b);
-                let current_a = voltage_v / ohms;
-                let power_w = voltage_v * current_a;
-                let q = power_w * dt;
-                if [voltage_v, current_a, power_w, q].iter().any(|v| !v.is_finite())
-                    || power_w < 0.0 || voltage_v != 0.0 && power_w == 0.0 || power_w != 0.0 && q == 0.0
-                    || (current_a * ohms * current_a - power_w).abs() > controls.power_tolerance_w
-                { return Err(Balance("original graph resistor work/heat is unrepresentable")); }
-                heat_j += q;
-                graph_resistors.push(WindingGraphResistorHeat { branch, voltage_v, current_a, power_w, heat_j: q });
-            }
-        }
+        let (cells, winding_heat) = spatial_heat(
+            self.magnetic.basis().problem().mesh(), self.magnetic.basis().profiles_per_m2(),
+            &conductors, &conductor_windings, &resistance_ohm, &midpoint_currents_a,
+            dt, controls.power_tolerance_w, cancelled,
+        )?;
+        let (graph_resistors, graph_heat) = graph_heat(
+            self.magnetic.graph(), &dae, &midpoint, dt, controls.power_tolerance_w, cancelled,
+        )?;
+        let heat_j = winding_heat + graph_heat;
         let energy_residual_j = stored_after_j - stored_before_j + heat_j - native.supplied;
         if !heat_j.is_finite() || !energy_residual_j.is_finite()
             || (heat_j - native.dissipated).abs() > controls.energy_tolerance_j
@@ -414,4 +409,78 @@ impl<'c, 'm> OhmicWindingCircuit<'c, 'm> {
         poll(cancelled)?;
         Ok(OhmicWindingCandidate { circuit, step })
     }
+}
+
+// Both winding models use the same spatial work/heat owner, with the current
+// selected by their declared time scheme (midpoint or backward Euler).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spatial_heat(
+    mesh: &fs_rep_mesh::TriComplex2,
+    profiles: &[Vec<f64>],
+    conductors: &[WindingConductor],
+    conductor_windings: &[usize],
+    resistance_ohm: &[f64],
+    currents_a: &[f64],
+    dt: f64,
+    power_tolerance_w: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<WindingCellHeat>, f64), OhmicWindingError> {
+    use OhmicWindingError::{Invalid, Balance};
+        let mut cells = Vec::with_capacity(conductors.len());
+        let mut winding_power = vec![0.0; resistance_ohm.len()];
+        let mut heat_j = 0.0;
+        for (source, &winding) in conductors.iter().zip(conductor_windings) {
+            poll(cancelled)?;
+            let volume_m3 = mesh.face_measure(source.triangle).ok_or(Invalid("winding triangle has no physical mesh volume"))?;
+            let current_density_a_m2 = profiles[winding][source.triangle] * currents_a[winding];
+            let electric_field_v_m = source.conductor.resistivity_ohm_m() * current_density_a_m2;
+            let power_w = electric_field_v_m * current_density_a_m2 * volume_m3;
+            let cell_heat = power_w * dt;
+            if [current_density_a_m2, electric_field_v_m, power_w, cell_heat].iter().any(|v| !v.is_finite())
+                || power_w < 0.0 || current_density_a_m2 != 0.0 && power_w == 0.0
+                || power_w != 0.0 && cell_heat == 0.0
+            { return Err(Balance("spatial Ohmic power/heat is unrepresentable")); }
+            winding_power[winding] += power_w;
+            heat_j += cell_heat;
+            cells.push(WindingCellHeat { source: source.clone(), winding, volume_m3,
+                current_density_a_m2, electric_field_v_m, power_w, heat_j: cell_heat });
+        }
+        for winding in 0..resistance_ohm.len() {
+            let i = currents_a[winding];
+            let terminal_power = i * resistance_ohm[winding] * i;
+            if !terminal_power.is_finite() || !winding_power[winding].is_finite()
+                || (terminal_power - winding_power[winding]).abs() > power_tolerance_w
+            { return Err(Balance("integrated material heat disagrees with intrinsic winding series work")); }
+        }
+    Ok((cells, heat_j))
+}
+
+pub(super) fn graph_heat(
+    graph: &fs_phs::circuit::CircuitGraph,
+    dae: &CircuitDae,
+    midpoint: &[f64],
+    dt: f64,
+    power_tolerance_w: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<WindingGraphResistorHeat>, f64), OhmicWindingError> {
+    use OhmicWindingError::Balance;
+    let mut heat_j = 0.0;
+        let voltage = |node: usize| if node == 0 { 0.0 } else { midpoint[dae.node_potential_index[node - 1]] };
+        let mut graph_resistors = Vec::new();
+        for (branch, &(a, b, law)) in graph.branches.iter().enumerate() {
+            poll(cancelled)?;
+            if let Branch::Resistor { ohms } = law {
+                let voltage_v = voltage(a) - voltage(b);
+                let current_a = voltage_v / ohms;
+                let power_w = voltage_v * current_a;
+                let q = power_w * dt;
+                if [voltage_v, current_a, power_w, q].iter().any(|v| !v.is_finite())
+                    || power_w < 0.0 || voltage_v != 0.0 && power_w == 0.0 || power_w != 0.0 && q == 0.0
+                    || (current_a * ohms * current_a - power_w).abs() > power_tolerance_w
+                { return Err(Balance("original graph resistor work/heat is unrepresentable")); }
+                heat_j += q;
+                graph_resistors.push(WindingGraphResistorHeat { branch, voltage_v, current_a, power_w, heat_j: q });
+            }
+        }
+    Ok((graph_resistors, heat_j))
 }

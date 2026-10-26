@@ -19,6 +19,8 @@
 //! from the same spatial material/profile data and retains explicit graph losses.
 
 pub mod circuit;
+/// Circuit-driven reversible nonlinear fields with spatial conductor losses.
+pub mod nonlinear;
 /// Spatial material-derived winding resistance and native-circuit Joule heat.
 pub mod ohmic;
 
@@ -255,48 +257,10 @@ impl<'a> PlanarWindingBasis<'a> {
                 "winding count, storage, end model or tolerances are invalid",
             ));
         }
-        let components = component_labels(problem, cancelled)?;
-        let component_count = components.iter().copied().max().unwrap_or(0) + 1;
-        let mut net_turns_by_component = Vec::with_capacity(count);
-        for profile in &profiles_per_m2 {
-            poll(cancelled)?;
-            if profile.len() != cells || profile.iter().any(|v| !v.is_finite()) {
-                return Err(WindingError::Invalid(
-                    "one finite current density per triangle is required",
-                ));
-            }
-            let mut net = vec![0.0; component_count];
-            let mut positive = vec![0.0; component_count];
-            let mut negative = vec![0.0; component_count];
-            for (cell, &density) in profile.iter().enumerate() {
-                poll(cancelled)?;
-                let component = components[problem.mesh().faces()[cell][0] as usize];
-                let turns =
-                    finite(density * (problem.mesh().face_measure(cell).unwrap() / thickness_m))?;
-                net[component] = finite(net[component] + turns)?;
-                if turns > 0.0 {
-                    positive[component] = finite(positive[component] + turns)?;
-                }
-                if turns < 0.0 {
-                    negative[component] = finite(negative[component] - turns)?;
-                }
-            }
-            if positive.iter().all(|&v| v == 0.0) {
-                return Err(WindingError::Invalid(
-                    "winding needs nonzero outgoing and return current",
-                ));
-            }
-            for component in 0..component_count {
-                if (positive[component] > 0.0) != (negative[component] > 0.0)
-                    || net[component].abs() > config.current_balance_tolerance_turns
-                {
-                    return Err(WindingError::Invalid(
-                        "unit current must close separately on every connected mesh component",
-                    ));
-                }
-            }
-            net_turns_by_component.push(net);
-        }
+        let net_turns_by_component = admit_profiles(
+            problem.mesh(), &profiles_per_m2, thickness_m,
+            config.current_balance_tolerance_turns, cancelled,
+        )?;
         let boundary: Vec<_> = prescribed_vertices.iter().map(|&v| (v, 0.0)).collect();
         let bias_field = if has_bias {
             Some(problem.solve(&vec![0.0; cells], &boundary, linear, cancelled)?)
@@ -675,7 +639,18 @@ fn pairing(
     profile: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, WindingError> {
-    if potential.len() != problem.mesh().vertices().len()
+    pairing_on_mesh(problem.mesh(), potential, profile, cancelled)
+}
+
+fn pairing_on_mesh(
+    mesh: &fs_rep_mesh::TriComplex2,
+    potential: &[f64],
+    profile: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, WindingError> {
+    if potential.len() != mesh.vertices().len()
+        || profile.len() != mesh.faces().len()
+        || profile.iter().any(|v| !v.is_finite())
         || potential.iter().any(|v| !v.is_finite())
     {
         return Err(WindingError::Invalid(
@@ -683,11 +658,11 @@ fn pairing(
         ));
     }
     let mut flux = 0.0;
-    for (cell, face) in problem.mesh().faces().iter().enumerate() {
+    for (cell, face) in mesh.faces().iter().enumerate() {
         poll(cancelled)?;
         // P1 exact cell average; divide before summing to limit intermediate scale.
         let mean = finite(face.iter().map(|&v| potential[v as usize] / 3.0).sum())?;
-        let load = finite(profile[cell] * problem.mesh().face_measure(cell).unwrap())?;
+        let load = finite(profile[cell] * mesh.face_measure(cell).unwrap())?;
         flux = finite(load.mul_add(mean, flux))?;
     }
     Ok(flux)
@@ -739,13 +714,54 @@ fn inverse(
     Ok((inverse, residual))
 }
 
+fn admit_profiles(
+    mesh: &fs_rep_mesh::TriComplex2,
+    profiles: &[Vec<f64>],
+    thickness_m: f64,
+    current_balance_tolerance_turns: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<Vec<f64>>, WindingError> {
+    let components = component_labels(mesh, cancelled)?;
+    let component_count = components.iter().copied().max().unwrap_or(0) + 1;
+    let mut result = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        poll(cancelled)?;
+        if profile.len() != mesh.faces().len() || profile.iter().any(|v| !v.is_finite()) {
+            return Err(WindingError::Invalid("one finite current density per triangle is required"));
+        }
+        let mut net = vec![0.0; component_count];
+        let mut positive = vec![0.0; component_count];
+        let mut negative = vec![0.0; component_count];
+        for (cell, &density) in profile.iter().enumerate() {
+            poll(cancelled)?;
+            let component = components[mesh.faces()[cell][0] as usize];
+            let turns = finite(density * (mesh.face_measure(cell).unwrap() / thickness_m))?;
+            net[component] = finite(net[component] + turns)?;
+            if turns > 0.0 { positive[component] = finite(positive[component] + turns)?; }
+            if turns < 0.0 { negative[component] = finite(negative[component] - turns)?; }
+        }
+        if positive.iter().all(|&v| v == 0.0) {
+            return Err(WindingError::Invalid("winding needs nonzero outgoing and return current"));
+        }
+        for component in 0..component_count {
+            if (positive[component] > 0.0) != (negative[component] > 0.0)
+                || net[component].abs() > current_balance_tolerance_turns
+            {
+                return Err(WindingError::Invalid("unit current must close separately on every connected mesh component"));
+            }
+        }
+        result.push(net);
+    }
+    Ok(result)
+}
+
 fn component_labels(
-    problem: &PlanarMagnetostatics,
+    mesh: &fs_rep_mesh::TriComplex2,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<usize>, WindingError> {
-    let n = problem.mesh().vertices().len();
+    let n = mesh.vertices().len();
     let mut neighbors = vec![Vec::new(); n];
-    for &[a, b] in problem.mesh().edges() {
+    for &[a, b] in mesh.edges() {
         poll(cancelled)?;
         neighbors[a as usize].push(b as usize);
         neighbors[b as usize].push(a as usize);

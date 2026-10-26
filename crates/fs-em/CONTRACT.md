@@ -411,3 +411,45 @@ excitation through conducting/insulating cells, source refusal and rollback.
 The std-only production conduction leaf also has direct analytical projection,
 power, floating-current and gauge/reversal tests; those leaf results do not
 establish execution of the complete material/mesh/Newton integration.
+
+## Circuit-driven nonlinear material windings
+
+`winding::nonlinear::NonlinearWindingCircuit` couples actual stranded terminal
+currents to `PlanarNonlinearEddy` and the original `fs-phs` Kirchhoff descriptor.
+The authored signed `J_z/I` profiles reuse the original winding component
+balance and exact P1 linkage pairing. A bound original inductor branch becomes
+a private native current-source port with input `-I` and output `V_a-V_b`.
+Its placeholder inductance contributes no storage. Unbound inductors,
+capacitors, transformers, graph resistors and external ports retain their
+original circuit owners and coordinate ordering.
+
+The existing bounded Newton--Krylov and fallible directional-difference owners
+solve `V = delta(lambda)/dt + R_winding*I`, with endpoint winding currents and
+`lambda = integral(A_z*J_unit dV) + L_end*I`. Every trial restarts both accepted
+histories. Declared nonnegative end/leakage self-inductances are optional;
+unrepresented end geometry, resistance and mutual coupling are not invented.
+Disjoint stranded triangles use the same source/resistance and spatial Joule
+owners as linear windings. They cannot also own resolved eddy conductivity.
+Complete material/card/claim/basis continuity is retained across conductivity
+temperature refresh, and the original full H(B) law remains frozen.
+
+The private port work `-dt*I*V` cancels the field/winding terminal work.
+`NonlinearWindingStep.supplied_work_j` contains only original external source
+work; its native descriptor receipt still visibly includes private ports.
+The combined audit checks field, native circuit and end-inductance storage;
+spatial core and stranded Joule heat; explicit graph heat; and separately
+reported magnetic/end-inductance backward-Euler loss. Numerical loss is never
+physical heating. Terminal voltage residual, source/linkage work pairing and
+each heat decomposition must pass physical allowances before publication.
+The candidate publishes the circuit and field together, preserving original
+histories on source, budget, native constraint, nonlinear or cancellation refusal.
+
+This first-order coupling admits at most 16 windings within the existing
+32-node/64-branch/32-port/128-state allocating circuit bounds. The native graph
+must admit its held private-current trials; ideal current-only constraint
+topologies can refuse this partitioned lane. Geometry, magnetic law and native
+graph coefficients stay fixed. No hysteresis, magnetic thermal parameter work,
+moving-conductor or experimental material-qualification claim is introduced.
+Synthetic `nonlinear_winding_circuit` regressions exercise independent nonlinear
+RL and coupled-winding/capacitor equations, source-only H(B)/resistivity swaps,
+core/strand loss separation, temperature refresh and transactional failure.
