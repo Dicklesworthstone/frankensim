@@ -516,6 +516,20 @@ fn compare_raw(c: &[Vec<f64>], g: &[Vec<f64>], total: usize, rate: f64, skip: us
     Ok(())
 }
 
+/// Independent trajectories from one constructed initial state. Constructing the
+/// same mesh twice repeats factorization and the shell stability estimate;
+/// cloning preserves their results without sharing mutable simulation state.
+fn comparison_pieces(name: &str, hits: &[(f64, f64)], preset_heads: bool, grid_scale: f64) -> Result<(Piece, Piece), String> {
+    let cpu = piece(name, hits, preset_heads, grid_scale)?;
+    let gpu = Piece {
+        instrument: cpu.instrument.clone(),
+        oversample: cpu.oversample,
+        settle: cpu.settle,
+        notes: cpu.notes.clone(),
+    };
+    Ok((cpu, gpu))
+}
+
 fn check(name: &str, secs: f64, o: &Opts) {
     if !secs.is_finite() || secs <= 0.0 {
         die("--check SECONDS must be finite and positive");
@@ -523,8 +537,10 @@ fn check(name: &str, secs: f64, o: &Opts) {
     // the CPU's own friction order, so any difference is the arithmetic's
     let o = &Opts { exact_friction: true, ..*o };
     let hits = [(0.002, 3.0), (secs * 0.5, 2.0)];
-    let mut cpu = piece(name, &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e));
-    let mut gpu = vec![piece(name, &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e))];
+    let started = Instant::now();
+    let (mut cpu, gpu) = comparison_pieces(name, &hits, o.preset_heads, o.grid_scale).unwrap_or_else(|e| die(&e));
+    eprintln!("comparison initial state: {:.2} s (one construction, two independent trajectories)", started.elapsed().as_secs_f64());
+    let mut gpu = vec![gpu];
     let rate = cpu.instrument.rate;
     let total = ((secs + cpu.settle) * rate).round() as usize;
     if !use_gpu(o) {
@@ -542,7 +558,35 @@ fn check(name: &str, secs: f64, o: &Opts) {
 
 #[cfg(test)]
 mod trajectory_check_tests {
-    use super::compare_raw;
+    use super::{compare_raw, comparison_pieces, cpu_raw, piece};
+
+    #[test]
+    fn copied_initial_state_matches_independent_build_without_sharing_trajectory() {
+        for name in ["hihat-open", "crash"] {
+            let hits = [(0.002, 3.0), (0.006, 2.0)];
+            let (mut original, mut copied) = comparison_pieces(name, &hits, false, 6.0).unwrap();
+            let mut fresh = piece(name, &hits, false, 6.0).unwrap();
+            assert_eq!(original.oversample, copied.oversample);
+            assert_eq!(original.settle.to_bits(), copied.settle.to_bits());
+            assert_eq!(original.notes, copied.notes);
+            assert_eq!(original.instrument.rate.to_bits(), copied.instrument.rate.to_bits());
+            let total = (0.012 * original.instrument.rate).round() as usize;
+            let expected = cpu_raw(&mut original, total);
+            assert_eq!(copied.instrument.step_index, 0);
+            assert!(expected.iter().flatten().any(|&v| v != 0.0));
+            for actual in [cpu_raw(&mut fresh, total), cpu_raw(&mut copied, total)] {
+                assert_eq!(actual.len(), expected.len());
+                for (a, e) in actual.iter().zip(&expected) {
+                    assert_eq!(a.len(), e.len());
+                    for (&a, &e) in a.iter().zip(e) {
+                        assert!(a.is_finite() && e.is_finite());
+                        assert_eq!(a.to_bits(), e.to_bits(), "{name}");
+                    }
+                }
+            }
+            assert_eq!(copied.instrument.step_index, original.instrument.step_index);
+        }
+    }
 
     #[test]
     fn full_matching_trajectory_passes_and_partial_last_window_is_checked() {

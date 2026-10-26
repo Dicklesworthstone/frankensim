@@ -108,6 +108,7 @@ A hi-hat adds a stick contact per stroke, so chunks are padded to the same strok
 The command now exits nonzero if any window exceeds the existing `1e-3` relative-RMS threshold.
 Missing microphones/samples, nonfinite trajectories, and an entirely silent CPU reference also refuse qualification.
 A successful process exit therefore requires a complete numerical comparison; it does not certify acoustic quality or real-time throughput.
+The comparison constructs the instrument once, then copies its complete initial state into two independent trajectories. This avoids repeating mesh factorization and the builders' stability checks. Construction time is reported separately from CPU stepping and GPU setup/stepping; use the complete process duration when assessing job latency.
 
 | piece | largest window difference | octave bands |
 |---|---|---|
