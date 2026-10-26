@@ -18,7 +18,7 @@ Beads. After execution access recovered, its live export was read through `br`.
 - [x] Choose actual missing solver connections rather than duplicate those owners.
 - [x] Keep independent thermal, acoustic, and flow edits in disjoint file sets.
 - [x] Begin publishing coherent implementations directly to main with expected-head leases.
-- [ ] Verify the final main revision and the complete set of changed paths.
+- [x] Verify all three code commits are on main and their changed paths are scoped.
 
 ## 2. Material heat storage in theta integration and its adjoint
 
@@ -71,7 +71,7 @@ MR07, `frankensim-material-reality-ui2if.1.7`.
 - [x] Preserve arithmetic and observations for the source-free path.
 - [x] Retain atomic state/account rollback on material-support refusal.
 - [x] Add constant heating, cooling, and time-varying source regressions.
-- [x] Add uniform mechanical-forcing and source-free equivalence regressions.
+- [x] Add uniform mechanical-forcing regressions and review source-free branch equivalence.
 - [x] Review source units, endpoint quadrature, field literals, and cumulative semantics.
 - [x] Commit the implementation, focused tests, and bounded contract changes.
 - [ ] Run the focused native NSF tests when execution is available.
@@ -81,10 +81,10 @@ MR07, `frankensim-material-reality-ui2if.1.7`.
 - [x] Locate the canonical `.beads/issues.jsonl` and its current Git blob.
 - [x] Try supported GitHub file, line-range, raw-file, and blob reads.
 - [x] Read the current Beads and create precise in-progress child tasks through `br`.
-- [ ] Record the exact committed scope and verification limitations on those Beads.
-- [ ] Close only tasks whose complete acceptance has actually been met.
-- [ ] Preserve existing assignees and closed antecedents.
-- [ ] Run `br sync --flush-only` after real task updates.
+- [x] Record the exact committed scope and verification limitations through `br update --append-notes`.
+- [x] Keep all three tasks in progress because native regression acceptance is still pending.
+- [x] Preserve existing assignees and parent task states; isolate the three new records for publication.
+- [x] Run `br --no-db sync --flush-only` after real task updates (success).
 - [x] Run available rustfmt syntax checks and focused whitespace checks.
 - [ ] Run the pinned-toolchain native Rust tests after dependency/disk blockers are resolved.
 
@@ -95,14 +95,54 @@ constellation preflight reports all seven required sibling checkouts missing;
 shared-disk exhaustion prevents a responsible full bootstrap. No native Rust
 test is reported as executed.
 
-The 40,991,716-byte Beads export could not be fetched through the GitHub file
-connector, but the recovered checkout and actual `br 0.7.6 --no-db` now work.
-The existing broad parents retain their prerequisite state. Three scoped child
-tasks were created in progress:
+### Committed implementations
+
+- Flow source-energy accounting: `215a11c0fc4576b3668f990375f3a2d9340957bc`.
+- Native sourced Maxwell walls: `7161a318a6056e2ff99409415ff293d83bac6d7b`.
+- Shared theta capacity and adjoint: `7fb1ca17948951e325b6a856d3f581a34f6fe02c`.
+
+### Tracker state and publication blocker
+
+The recovered checkout and actual `br 0.7.6 --no-db` created these scoped tasks
+and appended their exact implementation commits, test scope and pending
+verification. All remain `in_progress`; broad parents were not closed:
 
 - Theta capacity/adjoint: `frankensim-material-reality-ui2if.3.1.2`.
 - Native Maxwell wall: `frankensim-material-reality-ui2if.5.3.1`.
 - NSF source energy: `frankensim-material-reality-ui2if.1.6.1`.
 
-Their exact commit notes, final native-verification state, and exported tracker
-publication are still being completed. No broader task is claimed closed.
+The native tracker contains the updates, and `br --no-db sync --flush-only`
+completed successfully. Remote publication is still blocked: the canonical
+export is approximately 41 MB, while the GitHub connector rejects request
+bodies above 16 MiB. The native Git dry run also refused because no usable
+password/credential was available. No remote tracker update is claimed.
+
+`docs/MATERIAL_INTEGRATION_BEADS.patch` preserves the three exact `br`-authored
+records, including their notes, as an unapplied publication patch. Its baseline
+is Beads blob `03501e63c9c7a51581e3c27b66270510b11c1fa9`; applying only these
+additions produces blob `ac58a8b7b8c667f80a687224b7858cebc499889e`. Existing
+records are preserved byte for byte. A Git apply dry run against the exact
+baseline index passed; the canonical working tracker was not modified by that check. Incidental normalization of old close
+timestamps/comment ordering by the local `br` import is excluded from the patch.
+
+- [x] Preserve the exact task updates in a small committed patch.
+- [ ] Apply/publish the tracker additions from an authenticated native Git host,
+  after checking the current canonical export for concurrent changes.
+- [ ] Execute the focused native regression commands below with the pinned
+  toolchain and constellation checkouts.
+- [ ] Close the scoped Beads only after their regression acceptance passes.
+
+### Focused native checks still pending
+
+```sh
+cargo test -p fs-conduction --test material_heat_capacity --test transient --test thermal_history_capacity
+cargo test -p fs-duct --lib
+cargo test -p fs-couple --test material_duct_wall
+cargo test -p fs-lbm --test nsf3_thermochemical
+```
+
+The existing equations were reviewed, including independent scalar/matrix
+checks of thermal mode/heating derivatives and acoustic passivity. These do
+not substitute for compiling and executing the Rust regressions. No phase
+transition, nonlinear caloric sensitivity, broadband material qualification,
+or full-project material universality is claimed by these bounded changes.
