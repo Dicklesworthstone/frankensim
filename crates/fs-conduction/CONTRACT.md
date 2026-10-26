@@ -57,6 +57,29 @@ move. This is a useful reduced R1 foundation, not completion of umbrella #1.
 
 ## Purpose and layer
 
+`transient::MaterialHeatCapacity` resolves constant density and specific heat
+from one immutable material card at an explicit reference state, then pins both
+selected sources at the endpoints of a declared positive temperature interval.
+Only validity-wide scalar static laws are admitted: temperature-varying
+density/Cp is not silently frozen. Those laws belong to the existing
+reference-mass enthalpy path. The `isotropic_conductivity` pairing method uses
+the same card, external conditions and interval with the original conductivity
+table owner; an unrelated card refuses. Legacy hand-composed conductivity
+models remain independent because they carry claim receipts rather than card
+identity.
+
+`BackwardEuler::uniform_material` and `material_assigned`, and the history
+runner's `MaterialUniform`/`MaterialById` capacity variants, retain these source
+bundles while using the original lumped P1 capacity matrix. Every initial,
+trial and returned temperature lies in every incident capacity source's domain,
+including prescribed nodes and coupled endpoint evaluation. Out-of-domain
+steps publish no new history. Frozen reference geometry and constant scalar
+density imply fixed mass; this is a single-phase temperature formulation, not
+expansion, latent heat or a material-error bound. G1/G3/G4 regressions in
+`tests/material_heat_capacity.rs` check an independently derived tetrahedron
+diffusion rate under a one-card swap, heterogeneous caloric heating, selected
+source retention, and transactional refusals.
+
 `incandescent` also exposes a deliberately lumped steady balance for a
 declared filament operating point: `V²/R = εσA(T⁴ - T_ambient⁴)`. It composes
 the crate-owned Stefan-Boltzmann constant with explicit electrical and geometry

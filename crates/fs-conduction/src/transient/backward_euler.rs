@@ -32,7 +32,9 @@ use crate::assemble::{AssembledSystem, assemble_operator_scaled_with_interfaces,
 use crate::solve::{energy_balance, spd_preconditioner};
 use crate::{ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, LinearConfig,
     RobinFlux, ThermalInterfaces};
-use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, VolumetricHeatCapacity};
+use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, MaterialHeatCapacity,
+    VolumetricHeatCapacity};
+use crate::material::TemperatureSpan;
 
 /// Work and absolute discrete energy-closure budgets for one solid step.
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +89,10 @@ pub struct StepSolution {
 pub struct BackwardEuler<'m> {
     mesh: &'m ConductionMesh,
     capacity: Csr,
+    material_capacities: Vec<MaterialHeatCapacity>,
+    // Intersection of every incident material's interval. A shared vertex must
+    // be supported by all of its cells, not just their mean temperature.
+    capacity_temperature_spans: Option<Vec<TemperatureSpan>>,
 }
 
 impl<'m> BackwardEuler<'m> {
@@ -97,7 +103,7 @@ impl<'m> BackwardEuler<'m> {
         poll(cx, 0)?;
         let capacity = assemble_capacitance(cx, mesh, capacity)?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity })
+        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
 
     /// Prepare one declared volumetric heat capacity per tetrahedron, in mesh order.
@@ -111,7 +117,73 @@ impl<'m> BackwardEuler<'m> {
         }
         let capacity = assemble_capacitance_from(cx, mesh, |e| capacities[e].value_j_per_m3_k())?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity })
+        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
+    }
+
+    /// Bind source-derived constant heat storage uniformly without discarding
+    /// the material card, selected density/Cp claims or temperature domain.
+    pub fn uniform_material(cx: &Cx<'_>, mesh: &'m ConductionMesh, source: &MaterialHeatCapacity)
+        -> Result<Self, ConductionError>
+    {
+        poll(cx, 0)?;
+        Self::material_assigned(cx, mesh, std::slice::from_ref(source), &vec![0; mesh.element_count()])
+    }
+
+    /// Assign retained material capacities by source index to the original
+    /// tetrahedra. Every source must be used, every tet must be assigned, and
+    /// shared vertices must have a nonempty common source-temperature interval.
+    /// Both history and every returned endpoint obey those intervals, including
+    /// prescribed nodes and nonlinear/radiative/coupled endpoint evaluations.
+    pub fn material_assigned(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh, sources: &[MaterialHeatCapacity],
+        of_element: &[usize],
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        if sources.is_empty() || of_element.len() != mesh.element_count() {
+            return Err(invalid("nonempty material capacities and one assignment per tetrahedron required"));
+        }
+        let mut spans = vec![TemperatureSpan::Unbounded; mesh.vertex_count()];
+        let mut used = vec![false; sources.len()];
+        for (element, (&index, tet)) in of_element.iter().zip(&mesh.complex().tets).enumerate() {
+            if element % 512 == 0 { poll(cx, element)?; }
+            let source = sources.get(index)
+                .ok_or_else(|| invalid("heat-capacity source index is outside the source table"))?;
+            used[index] = true;
+            for &vertex in tet {
+                let span = spans[vertex as usize].intersect(source.temperature_span());
+                if matches!(span, TemperatureSpan::Sampled { low, high } if low > high) {
+                    return Err(invalid("incident heat-capacity sources have disjoint temperature support"));
+                }
+                spans[vertex as usize] = span;
+            }
+        }
+        if used.contains(&false) {
+            return Err(invalid("heat-capacity source table contains an unused material"));
+        }
+        let capacity = assemble_capacitance_from(cx, mesh,
+            |element| sources[of_element[element]].value_j_per_m3_k())?;
+        poll(cx, 0)?;
+        Ok(Self { mesh, capacity, material_capacities: sources.to_vec(),
+            capacity_temperature_spans: Some(spans) })
+    }
+
+    /// Retained density/Cp source bundles. Empty for explicitly declared storage.
+    #[must_use]
+    pub fn material_capacities(&self) -> &[MaterialHeatCapacity] { &self.material_capacities }
+
+    pub(crate) fn validate_capacity_temperature(&self, cx: &Cx<'_>, temperature: &[f64])
+        -> Result<(), ConductionError>
+    {
+        if let Some(spans) = &self.capacity_temperature_spans {
+            if temperature.len() != spans.len() {
+                return Err(invalid("capacity temperature field has the wrong vertex count"));
+            }
+            for (vertex, (&span, &value)) in spans.iter().zip(temperature).enumerate() {
+                if vertex % 512 == 0 { poll(cx, vertex)?; }
+                span.check(value)?;
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate one constant-conductivity endpoint from immutable history.
@@ -246,6 +318,7 @@ impl<'m> BackwardEuler<'m> {
             return Err(ConductionError::FieldLength { field: "previous temperature", expected: n, found: old.len() });
         }
         for (i, &t) in old.iter().enumerate() { if i % 512 == 0 { poll(cx, i)?; } finite(t)?; }
+        self.validate_capacity_temperature(cx, old)?;
         if let Some(materials) = problem.element_materials { materials.validate_for(self.mesh)?; }
         DofMap::new(problem.boundary, n)
     }
@@ -256,6 +329,7 @@ impl<'m> BackwardEuler<'m> {
         dofs: &DofMap, system: &AssembledSystem, temperature: Vec<f64>,
         relative_residual: f64, krylov_iterations: usize) -> Result<StepSolution, ConductionError>
     {
+        self.validate_capacity_temperature(cx, &temperature)?;
         // Account using the rounded temperature field that the caller actually
         // receives, not an unpublished high-accuracy correction vector.
         let delta: Vec<f64> = temperature.iter().zip(old).map(|(a,b)| a-b).collect();
