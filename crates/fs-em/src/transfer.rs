@@ -7,7 +7,8 @@
 //! supplied directly to the existing moving-conductor or magnetothermal LBM
 //! owner in the SAME global frame as its velocity and cell-centre positions.
 
-use crate::planar::{MagneticError, PlanarField, gradients, poll};
+use crate::planar::{MagneticError, PlanarField, gradients, nonlinear::PlanarNonlinearField, poll};
+use fs_rep_mesh::TriComplex2;
 
 /// Right-handed orthonormal placement of a planar problem in a 3-D SI frame.
 /// Global position = origin + x*e_x + y*e_y + z*(e_x cross e_y).
@@ -86,69 +87,116 @@ impl PlanarField<'_> {
         max_samples: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<[f64; 3]>, MagneticError> {
+        sample_field_cells(
+            self.problem().mesh(),
+            self.magnetic_flux_density_t(),
+            self.thickness_m(),
+            frame,
+            samples,
+            position_tolerance_m,
+            max_samples,
+            cancelled,
+        )
+    }
+}
+
+impl PlanarNonlinearField<'_> {
+    /// Transfer the solved nonlinear B through the SAME checked triangle/frame
+    /// mapping as linear fields. No secant-linear re-solve or material averaging
+    /// occurs, so source-driven saturation reaches existing flow/force consumers.
+    pub fn sample_cells(
+        &self,
+        frame: &PlanarFrame,
+        samples: &[CellSample],
+        position_tolerance_m: f64,
+        max_samples: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 3]>, MagneticError> {
+        sample_field_cells(
+            self.problem().mesh(),
+            self.magnetic_flux_density_t(),
+            self.thickness_m(),
+            frame,
+            samples,
+            position_tolerance_m,
+            max_samples,
+            cancelled,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_field_cells(
+    mesh: &TriComplex2,
+    magnetic_flux_density_t: &[[f64; 2]],
+    thickness_m: f64,
+    frame: &PlanarFrame,
+    samples: &[CellSample],
+    position_tolerance_m: f64,
+    max_samples: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<[f64; 3]>, MagneticError> {
+    poll(cancelled)?;
+    if samples.len() > max_samples
+        || !position_tolerance_m.is_finite()
+        || position_tolerance_m < 0.0
+    {
+        return Err(MagneticError::Invalid(
+            "field sample budget or position tolerance is invalid",
+        ));
+    }
+    let mut result = Vec::with_capacity(samples.len());
+    for sample in samples {
         poll(cancelled)?;
-        if samples.len() > max_samples
-            || !position_tolerance_m.is_finite()
-            || position_tolerance_m < 0.0
-        {
+        let face = mesh
+            .faces()
+            .get(sample.triangle)
+            .ok_or(MagneticError::Invalid(
+                "sample triangle is outside the source mesh",
+            ))?;
+        if !sample.position_m.iter().all(|v| v.is_finite()) {
             return Err(MagneticError::Invalid(
-                "field sample budget or position tolerance is invalid",
+                "field sample position must be finite",
             ));
         }
-        let mesh = self.problem().mesh();
-        let mut result = Vec::with_capacity(samples.len());
-        for sample in samples {
-            poll(cancelled)?;
-            let face = mesh
-                .faces()
-                .get(sample.triangle)
-                .ok_or(MagneticError::Invalid(
-                    "sample triangle is outside the source mesh",
-                ))?;
-            if !sample.position_m.iter().all(|v| v.is_finite()) {
-                return Err(MagneticError::Invalid(
-                    "field sample position must be finite",
-                ));
-            }
-            let delta = [0, 1, 2].map(|a| sample.position_m[a] - frame.origin_m[a]);
-            let local = frame.axes.map(|axis| dot(delta, axis));
-            if !local.iter().all(|v| v.is_finite())
-                || local[2] < -position_tolerance_m
-                || local[2] > self.thickness_m() + position_tolerance_m
+        let delta = [0, 1, 2].map(|a| sample.position_m[a] - frame.origin_m[a]);
+        let local = frame.axes.map(|axis| dot(delta, axis));
+        if !local.iter().all(|v| v.is_finite())
+            || local[2] < -position_tolerance_m
+            || local[2] > thickness_m + position_tolerance_m
+        {
+            return Err(MagneticError::Invalid(
+                "sample is outside the planar extrusion",
+            ));
+        }
+        let points = face.map(|v| mesh.vertices()[v as usize]);
+        let shape = gradients(points)?;
+        let offset = [local[0] - points[0][0], local[1] - points[0][1]];
+        for (i, gradient) in shape.iter().enumerate() {
+            let barycentric = gradient[0].mul_add(offset[0], gradient[1] * offset[1])
+                + if i == 0 { 1.0 } else { 0.0 };
+            let margin = position_tolerance_m * (gradient[0].abs() + gradient[1].abs());
+            if !barycentric.is_finite()
+                || !margin.is_finite()
+                || barycentric < -margin
+                || barycentric > 1.0 + margin
             {
                 return Err(MagneticError::Invalid(
-                    "sample is outside the planar extrusion",
+                    "consumer position is outside its named triangle",
                 ));
             }
-            let points = face.map(|v| mesh.vertices()[v as usize]);
-            let shape = gradients(points)?;
-            let offset = [local[0] - points[0][0], local[1] - points[0][1]];
-            for (i, gradient) in shape.iter().enumerate() {
-                let barycentric = gradient[0].mul_add(offset[0], gradient[1] * offset[1])
-                    + if i == 0 { 1.0 } else { 0.0 };
-                let margin = position_tolerance_m * (gradient[0].abs() + gradient[1].abs());
-                if !barycentric.is_finite()
-                    || !margin.is_finite()
-                    || barycentric < -margin
-                    || barycentric > 1.0 + margin
-                {
-                    return Err(MagneticError::Invalid(
-                        "consumer position is outside its named triangle",
-                    ));
-                }
-            }
-            let b = self.magnetic_flux_density_t()[sample.triangle];
-            let global = [0, 1, 2].map(|a| b[0].mul_add(frame.axes[0][a], b[1] * frame.axes[1][a]));
-            if !global.iter().all(|v| v.is_finite()) {
-                return Err(MagneticError::Invalid(
-                    "transferred magnetic field is not representable",
-                ));
-            }
-            result.push(global);
         }
-        poll(cancelled)?;
-        Ok(result)
+        let b = magnetic_flux_density_t[sample.triangle];
+        let global = [0, 1, 2].map(|a| b[0].mul_add(frame.axes[0][a], b[1] * frame.axes[1][a]));
+        if !global.iter().all(|v| v.is_finite()) {
+            return Err(MagneticError::Invalid(
+                "transferred magnetic field is not representable",
+            ));
+        }
+        result.push(global);
     }
+    poll(cancelled)?;
+    Ok(result)
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))

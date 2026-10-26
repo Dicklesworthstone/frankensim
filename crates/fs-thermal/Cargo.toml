@@ -11,6 +11,7 @@ description = "Shared conservative enthalpy timelines, material birth and therma
 layer = "L3"
 
 [dependencies]
+fs-la = { path = "../fs-la" }
 
 [lints]
 workspace = true

@@ -641,6 +641,24 @@ test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
 
+Source-backed gas temperature and pressure support comes from the selected
+NASA-9 regions and every pure-transport claim, not from the legacy USSA/Sutherland
+air constructor's 50..2000 K and 100 bar bounds. `GasState::validate_coherence`
+checks positive finite coordinates and the common EOS/caloric/transport/acoustic
+identities; it does not assert source coverage. Energy and entropy inversion
+accept positive finite temperature brackets and retain their original source
+checks, residual tolerances, cancellation and atomic updates. Consequently
+source-supported hot gases can heat, compress and supply the same density,
+viscosity, conductivity and sound speed to existing consumers without changing
+their physics code. Legacy `GasSpec` constructors keep their original limits.
+G1/G3 manufactured tests cover heating through 2000 K, variable-cp reversible
+compression, data-only composition changes and unchanged state after leaving
+transport support. The NASA-9 family covers species-specific high-temperature
+regions (NASA/TP-2002-211556, <https://ntrs.nasa.gov/citations/20020085330>);
+the active source bounds still govern each calculation. This does not admit
+condensed phases, real-gas behavior, equilibrium chemistry or plasma physics,
+and source support alone is not an experimental-accuracy claim.
+
 `gas_species::input::read_isochoric_parcel` retains the same parsed
 thermochemical model, typed conditions and canonical source associations in
 the existing `IsochoricGasParcel` owner. Its mass is rho*V from the declared
@@ -2102,3 +2120,30 @@ analytic coefficients, not experimental wood validation.
 `field_storage::permanent::ResolvedRecoilMaterial` binds the reversible isotropic law `B = mu_recoil H + Br n` at one complete fixed material state. Required source properties are `recoil_magnetic_permeability` [H/m], `remanent_flux_density` [T], signed `recoil_minimum_parallel_field_strength` and `recoil_maximum_parallel_field_strength` [A/m], and `recoil_maximum_transverse_field_strength` [A/m]. The parallel interval must contain zero; all values retain their original units, selected claims, card identity, query coordinates and receipts. Generic permeability, coercivity and energy-product-derived model coefficients cannot substitute for recoil data. All coefficients and limits must be static at the selected external conditions; field/frequency dependence cannot be frozen into this linear law.
 
 `at_query_point` refreshes the complete source-pinned bundle, including Br, slope and operating limits. It creates a new fixed-state snapshot; it does not supply live thermal parameter work or irreversible demagnetization. Specimen orientation belongs to the field owner. Computed parallel/transverse H and signed margins are checked against every source limit; those margins are model-admission estimates, not certified bounds on the numerical field. Remanence-only catalog entries remain insufficient input.
+
+## Source-backed reversible nonlinear magnetics
+
+`field_storage::nonlinear::ReversibleMagneticMaterial` consumes the explicit
+`reversible_magnetic_field_strength` source property [A/m] along a named,
+dimensioned flux-density coordinate [T]. The original matdb line query pins
+one source across the whole interval from zero to the declared maximum,
+including fixed-context slices of two-axis source surfaces. Every breakpoint
+retains its canonical answer and receipt. Field-dependent secant permeability,
+coercivity and material names are not alternative ingress paths.
+
+Admission requires H(0)=0 and finite strictly positive segment slopes. Other
+source axes and applicability bounds must be fixed external thermodynamic
+conditions. Discrete-only spans, gaps, source switching, nonmonotone response
+and extrapolation refuse. Runtime H uses the canonical pinned query. The same
+piecewise-affine path supplies H/B, dH/dB, exact segment-integrated energy
+`psi(B)=integral_0^B H(b) db` and coenergy `B H-psi`. The tangent at zero uses
+the first segment; an interior knot uses its right derivative. These are
+floating-point model evaluations, not uncertainty propagation or enclosures.
+
+The law is reversible, isotropic and without remanence. A hysteresis loop or
+initial magnetization branch does not establish that physical model. Static
+temperature/material substitution creates a new law; it does not supply
+magnetic heat, parameter work, hysteresis or irreversible demagnetization.
+G1/G3 regressions in `fs-em/tests/nonlinear_magnetic.rs` exercise analytical
+energy/tangents, material-only solved saturation, mixed-material oblique fields,
+the linear limit, source-domain refusals and cancellation.

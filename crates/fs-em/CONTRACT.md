@@ -199,21 +199,26 @@ Data-only material replacements are prepared as a new magnetic/electrical model.
 `OhmicWindingCircuit::rebind_material_candidate` transfers accepted history to
 that model at the same clock. It retains the exact mesh/metric, original
 homogeneous magnetic boundary, signed current profiles, end-inductance model,
-branch correspondence and all nonmagnetic graph data. Every differential flux
-linkage and capacitor charge is preserved bit-for-bit; the native consistency
-solver re-equilibrates algebraic voltages/currents. Incompatible ideal constraints
-refuse instead of creating an unaccounted flux or charge impulse.
-This replacement requires both bases to have no fixed-remanence bias. A biased
-native state stores incremental linkage; conserving total linkage would require
-`delta_lambda_new=delta_lambda_old+lambda0_old-lambda0_new` and material work from
-the changed constant field reference W0. This owner does not supply that work.
+branch correspondence and all nonmagnetic graph data. Every capacitor charge is
+preserved bit-for-bit. Total physical linkage is conserved by translating native
+incremental linkage as `delta_lambda_new=delta_lambda_old+(lambda0_old-lambda0_new)`;
+identical bias retains native linkage bit-for-bit without adding and subtracting
+the larger permanent flux. The native consistency solver re-equilibrates
+algebraic voltages/currents. Incompatible ideal constraints refuse instead of
+creating an unaccounted flux or charge impulse. Both actual endpoint fields must
+satisfy their source recoil envelopes before a replacement is returned.
 
 Replacement adopts the new full mutual-inductance block and spatial conductor
 sources, including a different admitted resistivity/conductivity source basis.
-The signed external work is `lambda^T (L_after^-1-L_before^-1) lambda / 2`,
-independently compared with the native field/capacitor storage change and checked
-against the caller's absolute work bound. The report retains before/after current,
-resistance and source-state identities. No time, source-port work or Joule heat is
+The signed external work is the change in `W0 + delta_lambda^T L^-1 delta_lambda / 2`
+at fixed total linkage. Its incremental part is independently compared with the
+native field/capacitor storage change before adding the bias reference, so large
+W0 cannot mask electrical-accounting errors. The full signed work is checked
+against the caller's absolute work bound. The report retains before/after bias
+and total field/capacitor energy, current, resistance and source-state identities.
+This is work in the declared ZeroFlux/FixedRemanence field potential; it does not
+predict material formation energy, an intermediate replacement trajectory,
+hysteresis or irreversible demagnetization. No time, source-port work or Joule heat is
 advanced. Subsequent original midpoint steps and field sampling use the new
 material basis; resistance-only replacements have zero instantaneous storage work.
 Source, geometry, ideal-constraint, work and late-cancellation refusals publish
@@ -249,3 +254,37 @@ Total linkage is `lambda=lambda0+L*i`. Native `CircuitDae` coordinates remain `d
 `field_for_currents` reconstructs `A0+sum(i_w*A_unit,w)` and uses original physical recovery to admit every recoil cell. It also superposes the original static current snapshots, allowing this actual field to use the existing instantaneous Maxwell-force owner; arbitrary induction recovery still lacks that provenance. Sampling, checked circuit initialization/`step_audited`, and Ohmic candidate endpoints share the recoil admission. Incremental responses are explicitly marked and carry no actual magnet operating-point claim. Envelope exits/cancellation return no accepted replacement. Endpoint checks do not bound the continuous trajectory between steps. The raw DAE exposes incremental coordinates and carries no material-domain policy itself; fixed-remanence callers use the checked wrapper.
 
 An active conducting recoil triangle must reuse its exact original complete material bundle, including its electrical claim. This admits unchanged recoil/conductivity sources without generic permeability and refuses temperature, remanence, slope, limit or source refresh that would leave stale fixed bias. Ordinary induced-material electrical refresh retains its previous policy. Geometry, material conditions and remanence stay fixed; no motional EMF, hysteresis or thermal parameter work is supplied. Manufactured-card `winding_permanent` regressions cover affine linkage/storage and layered inductance oracles, native RL/Ohmic work, mutual branch mapping, data swaps, source-envelope refusal and fixed conducting-magnet source binding.
+
+## Material-driven reversible nonlinear planar fields
+
+`planar::nonlinear::PlanarNonlinearMagnetostatics` admits a linear or reversible
+H(|B|) source per original triangle. It shares mesh/metric, exterior-edge and
+component-gauge admission, shape gradients, weighted Whitney Hodge, incidence,
+sparse assembly and checked CG with the existing planar owner. It assembles
+the actual weak residual `integral H(curl A).curl(v)-J v`, and the symmetric
+tangent with radial eigenvalue dH/dB and transverse eigenvalue H/B. The tensor
+is rotated into the gradient frame before the existing degree-1 Hodge assembly.
+
+The complete initial field must satisfy prescribed potentials and source
+envelopes. Newton uses explicit iteration/linear/backtracking limits and an
+energy-decreasing Armijo search; trial fields outside the original H(B) range
+are rejected, never extrapolated. Acceptance recomputes the free-coordinate
+nonlinear Euclidean residual [A m], independent of Krylov convergence. The
+reported target is the maximum of the absolute allowance and the relative
+allowance times max(initial residual, impressed-current load). Exhaustion or
+cancellation returns no partial field. Material, geometry and source owners
+are immutable throughout; traversal and tie-breaking use fixed storage order.
+
+Returned B/H, per-triangle energy/coenergy, total storage and actual work counts
+remain tied to the prepared owner. Nonlinear energy integrates the source H(B),
+not B.H/2. `sample_cells` reuses the original explicit triangle/frame transfer,
+so nonlinear material changes reach existing imposed-field flow consumers.
+This is a finite-domain fixed-geometry P1 estimate, not a discretization error
+certificate, nonlinear winding inductance, hysteresis, eddy-current trajectory,
+force/coenergy motion derivative, thermal parameter-work or remanence model.
+The same reference conventions are described in the
+[FEMM manual](https://www.femm.info/doku/lib/exe/fetch.php?media=upload%3Afiles%3Amanual.pdf),
+magnetic energy/coenergy discussion. Synthetic tests do not validate a catalog
+material. Focused G1/G3/G4 tests cover exact discrete saturation, source-only
+substitutions, oblique mixed-material interface continuity, energy derivatives,
+the linear limit, source envelopes, bounded nonconvergence and cancellation.

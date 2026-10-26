@@ -67,6 +67,10 @@
 //! states share the same dense exponential and energy coordinates; no midpoint
 //! relaxation or duplicated inviscid storage is introduced. Total energy then
 //! includes wall memory, and the dense ledger still reports inferred loss.
+//!
+//! [`DgDuct::with_compliant_wall`] adds the displacement and velocity of a
+//! locally reacting cylindrical wall to that SAME operator. Its pressure work
+//! is reciprocal and its elastic/kinetic storage is part of the native state.
 
 use crate::profile::gas_field::GasFieldDuctError;
 use crate::{Duct, DuctError, Segment};
@@ -78,6 +82,8 @@ use fs_math::det;
 
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
+mod compliant_wall;
+pub use compliant_wall::DgCompliantWallState;
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
@@ -511,6 +517,7 @@ pub struct DgDuct {
     geometry: Duct,
     uniform_radius_m: Option<f64>,
     viscothermal: Option<viscothermal::ViscothermalMemory>,
+    compliant_wall: Option<compliant_wall::CompliantWall>,
     memory_dofs: usize,
     inlet: DgBoundary,
     outlet: DgBoundary,
@@ -998,6 +1005,7 @@ impl DgDuct {
             geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
             viscothermal: None,
+            compliant_wall: None,
             memory_dofs: 0,
             inlet,
             outlet,

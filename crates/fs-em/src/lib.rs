@@ -26,8 +26,12 @@
 //! spatial Ohmic heat, including floating conductor current-return constraints.
 //! The stationary induction-history owner still refuses permanent-magnet bias
 //! until its source/storage trajectory accounts for it explicitly. There is
-//! no nonlinear ferromagnetism, hysteresis, irreversible demagnetization, moving
+//! no hysteresis, irreversible demagnetization, moving
 //! conductor induction feedback or distributed magnetostriction claim.
+//! `planar::nonlinear` supplies a separate fixed-state reversible H(B) solve,
+//! with source-integrated energy and the same Hodge, gauge and transfer owners.
+//! Its nonlinear fields can drive existing imposed-field flow consumers; they
+//! do not acquire the linear winding/induction superposition assumptions.
 //! [`force`] transfers a static field's closed exterior Maxwell-stress integral
 //! to the existing mechanical wrench owner, including admitted enclosed recoil
 //! magnets. Its contour remains in an induced-linear exterior medium; it does

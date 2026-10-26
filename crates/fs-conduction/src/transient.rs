@@ -66,6 +66,9 @@ pub mod enthalpy;
 /// Conservative, schedule-driven material birth on a sparse thermal cell network.
 pub mod deposition;
 
+mod capacity;
+pub use capacity::MaterialHeatCapacity;
+
 use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
@@ -89,10 +92,9 @@ pub const MIN_THETA: f64 = 0.5;
 
 /// Declared volumetric heat capacity `rho · c_p`, J/(m³·K).
 ///
-/// Declared rather than looked up, for now: a card-backed capacity with the
-/// receipt discipline `ConductivityModel` already has is the natural next
-/// step, and this type is shaped so that becoming card-backed does not change
-/// its callers.
+/// This is explicitly declared storage. [`MaterialHeatCapacity`] resolves
+/// density and specific heat from one card and preserves source domains and
+/// receipts through the backward-Euler/history owners.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VolumetricHeatCapacity {
     value_j_per_m3_k: f64,

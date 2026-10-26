@@ -16,6 +16,8 @@
 
 /// Source-bound reversible permanent-magnet recoil at a fixed material state.
 pub mod permanent;
+/// Source-resolved reversible nonlinear isotropic magnetic storage.
+pub mod nonlinear;
 /// Source-bound reversible thermal field energy and entropy at fixed geometry.
 pub mod thermal;
 

@@ -20,11 +20,20 @@ pub struct WindingMaterialRebindControls {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindingMaterialRebind {
     pub time_s: f64,
+    /// Native magnetic/capacitor storage PLUS the declared zero-current field
+    /// reference W0. Ordinary circuit steps report incremental storage instead.
     pub stored_energy_j: [f64; 2],
-    /// W = lambda^T (L_after^-1 - L_before^-1) lambda / 2.
+    /// Original zero-current field references [J], in the source model's
+    /// ZeroFlux or FixedRemanence convention. Not material formation energies.
+    pub bias_energy_j: [f64; 2],
+    /// W = W0_after - W0_before + delta_lambda_after^T L_after^-1
+    /// delta_lambda_after / 2 - delta_lambda_before^T L_before^-1
+    /// delta_lambda_before / 2, at conserved TOTAL physical linkage.
     /// Positive work is supplied to the circuit by the replacement owner;
     /// negative work must be received by that owner, never discarded as heat.
     pub supplied_work_j: f64,
+    /// Independently checked incremental-storage/work defect [J]. Evaluating
+    /// this before adding W0 avoids masking electrical work by a large bias.
     pub energy_residual_j: f64,
     /// Winding order, including mutual inductance and declared end storage.
     pub currents_a: [Vec<f64>; 2],
@@ -104,18 +113,22 @@ impl OhmicWindingCircuit<'_, '_> {
     /// match. New material cards, selected electrical basis and state are data.
     ///
     /// The original native consistency solver recomputes only algebraic values;
-    /// every flux linkage and capacitor charge is preserved bit-for-bit. If the
+    /// every capacitor charge is preserved bit-for-bit. Total physical flux
+    /// linkage is conserved: a changed permanent-flux offset translates native
+    /// delta_lambda by lambda0_before - lambda0_after. Unchanged offsets retain
+    /// incremental linkage bit-for-bit. If the
     /// new currents cannot obey the original ideal constraints at those values,
     /// replacement refuses rather than inventing a source impulse. No step or
     /// heat is generated. Later evolution consumes the new actual field basis
     /// and conductor resistance through the original midpoint/heat owner.
     ///
-    /// The explicit work is the magnetic Hamiltonian change at fixed lambda,
-    /// including full mutual coupling. This is an external material-change
-    /// operation, not continuous heating, motion or magnetic hysteresis.
-    /// Either basis having fixed remanence refuses: its native coordinate is
-    /// delta_lambda, so conserving total flux would require the old/new bias
-    /// offset and work from the changed constant storage reference W0.
+    /// The explicit work is the magnetic Hamiltonian change at fixed TOTAL
+    /// lambda, including full mutual coupling and the changed zero-current
+    /// field reference W0. Actual endpoint fields must remain in their source
+    /// recoil envelopes. This is an externally supplied material-change
+    /// operation, not continuous heating, motion, hysteresis or a prediction
+    /// of material formation energy. No path through intermediate magnet states
+    /// or irreversible demagnetization is inferred.
     pub fn rebind_material_candidate<'c, 'm>(
         &self,
         magnetic: &'c WindingCircuit<'m>,
@@ -125,11 +138,6 @@ impl OhmicWindingCircuit<'_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(OhmicWindingCircuit<'c, 'm>, WindingMaterialRebind), OhmicWindingError> {
         poll(cancelled)?;
-        if self.magnetic.basis().bias_field().is_some() || magnetic.basis().bias_field().is_some() {
-            return Err(OhmicWindingError::Invalid(
-                "fixed-remanence material replacement requires total-flux offset and bias-storage work ownership",
-            ));
-        }
         if !controls.maximum_absolute_work_j.is_finite()
             || controls.maximum_absolute_work_j < 0.0
             || !positive(controls.energy_tolerance_j)
@@ -161,10 +169,31 @@ impl OhmicWindingCircuit<'_, '_> {
         }
         let mut seed = vec![0.0; self.state.len()];
         seed[..nd].copy_from_slice(&self.state[..nd]);
+        let offsets: Vec<_> = self
+            .magnetic
+            .basis()
+            .bias_flux_linkages_wb()
+            .iter()
+            .zip(magnetic.basis().bias_flux_linkages_wb())
+            .map(|(before, after)| before - after)
+            .collect();
+        for (&coordinate, &offset) in magnetic.flux_coordinates().iter().zip(&offsets) {
+            poll(cancelled)?;
+            // Subtract offsets first: identical bias must not erase a small
+            // live current by adding then subtracting a much larger lambda0.
+            if offset != 0.0 {
+                seed[coordinate] += offset;
+            }
+        }
+        if seed.iter().chain(&offsets).any(|v| !v.is_finite()) {
+            return Err(OhmicWindingError::Invalid(
+                "total-flux coordinate transfer is unrepresentable",
+            ));
+        }
         let state = dae.consistent_initial_state(&seed, ports)?;
         if state[..nd]
             .iter()
-            .zip(&self.state[..nd])
+            .zip(&seed[..nd])
             .any(|(a, b)| a.to_bits() != b.to_bits())
             || state.iter().any(|v| !v.is_finite())
         {
@@ -172,24 +201,42 @@ impl OhmicWindingCircuit<'_, '_> {
                 "material replacement changed conserved flux or charge",
             ));
         }
-        let stored_energy_j = [
+        self.magnetic.admit_state(&self.state, cancelled)?;
+        magnetic.admit_state(&state, cancelled)?;
+        let incremental_energy_j = [
             old_dae.system.hamiltonian(&self.state),
             dae.system.hamiltonian(&state),
+        ];
+        let bias_energy_j = [
+            self.magnetic.basis().bias_energy_j(),
+            magnetic.basis().bias_energy_j(),
+        ];
+        let stored_energy_j = [
+            incremental_energy_j[0] + bias_energy_j[0],
+            incremental_energy_j[1] + bias_energy_j[1],
         ];
         let before = self.magnetic.basis().inverse_inductance_per_h();
         let after = magnetic.basis().inverse_inductance_per_h();
         let n = magnetic.basis().winding_count();
-        let mut supplied_work_j = 0.0;
+        let mut incremental_work_j = 0.0;
         for (i, &row) in magnetic.flux_coordinates().iter().enumerate() {
             poll(cancelled)?;
             for (j, &col) in magnetic.flux_coordinates().iter().enumerate() {
-                supplied_work_j += (0.5 * self.state[row])
+                incremental_work_j += (0.5 * self.state[row])
                     * (after[i * n + j] - before[i * n + j])
                     * self.state[col];
+                incremental_work_j +=
+                    (self.state[row] + 0.5 * offsets[i]) * after[i * n + j] * offsets[j];
             }
         }
-        let energy_residual_j = stored_energy_j[1] - stored_energy_j[0] - supplied_work_j;
+        let supplied_work_j = incremental_work_j + (bias_energy_j[1] - bias_energy_j[0]);
+        let energy_residual_j =
+            incremental_energy_j[1] - incremental_energy_j[0] - incremental_work_j;
         if stored_energy_j.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || incremental_energy_j
+                .iter()
+                .any(|v| !v.is_finite() || *v < 0.0)
+            || !incremental_work_j.is_finite()
             || !supplied_work_j.is_finite()
             || !energy_residual_j.is_finite()
             || energy_residual_j.abs() > controls.energy_tolerance_j
@@ -228,6 +275,7 @@ impl OhmicWindingCircuit<'_, '_> {
         let report = WindingMaterialRebind {
             time_s: self.time_s,
             stored_energy_j,
+            bias_energy_j,
             supplied_work_j,
             energy_residual_j,
             currents_a,

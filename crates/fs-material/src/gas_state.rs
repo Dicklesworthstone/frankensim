@@ -25,13 +25,16 @@ impl GasState {
     /// cannot be independently edited. Re-evaluate the owning material model
     /// when temperature, pressure, composition or source data changes.
     ///
-    /// This retains the existing GasState temperature/pressure envelope but
-    /// admits any explicit water mole fraction in [0, 1]. Humid-air correlation
-    /// limits belong to that correlation, not to generic gas mechanics. This
-    /// numerical check grants no source authority or phase-stability claim.
+    /// Temperature and pressure must be finite and positive. Applicability
+    /// belongs to the producing model: the legacy Sutherland/USSA constructor
+    /// retains its own envelope, while NASA-9 and source transport use their
+    /// declared domains. A shared numerical view must not impose an air-fit
+    /// temperature ceiling on a different gas law. Water mole fraction is in
+    /// [0, 1]; humid-air correlation limits likewise belong to that correlation.
+    /// This check grants no source authority or phase-stability claim.
     ///
     /// # Errors
-    /// Refuses nonphysical, out-of-envelope, inconsistent or unrepresentable
+    /// Refuses nonphysical, inconsistent or unrepresentable
     /// states. No coefficients are silently repaired or replaced by air data.
     pub fn validate_coherence(&self) -> Result<(), MaterialError> {
         self.coherent_transport().map(|_| ())
@@ -55,15 +58,13 @@ impl GasState {
         ]
         .into_iter()
         .all(positive)
-            || !(50.0..=2000.0).contains(&self.temperature)
-            || self.pressure > 1.0e7
             || self.gamma <= 1.0
             || self.gamma > 5.0 / 3.0 + 1.0e-9
             || !self.water_mole_fraction.is_finite()
             || !(0.0..=1.0).contains(&self.water_mole_fraction)
         {
             return Err(MaterialError::Parameters {
-                what: "gas snapshot is nonphysical or outside the GasState envelope".into(),
+                what: "gas snapshot contains nonphysical ideal-gas coefficients".into(),
             });
         }
         let transport = FluidTransportState::try_new(
