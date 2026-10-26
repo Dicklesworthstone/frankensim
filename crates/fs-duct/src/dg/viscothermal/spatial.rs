@@ -88,6 +88,9 @@ impl DgDuct {
         mut self,
         resolution: DgWallResolution,
     ) -> Result<Self, GasFieldDuctError> {
+        if self.compliant_wall.is_some() {
+            return Err(invalid("attach DG viscothermal memory before compliant wall mechanics").into());
+        }
         if self.viscothermal.is_some() {
             return Err(invalid("DG viscothermal memory is already attached").into());
         }
@@ -299,6 +302,7 @@ impl DgDuct {
 
     /// Instantaneous nonnegative wall power loss [W] from physical drag and
     /// relaxation squares, independent of the stored-energy deficit.
+    /// Includes an attached compliant wall's material viscosity once.
     /// Matched-boundary absorption is excluded; this is not an integrated
     /// finite-wall heat transfer or temperature-feedback model.
     ///
@@ -313,7 +317,7 @@ impl DgDuct {
                 "DG wall loss needs a finite state of this exact operator",
             ));
         }
-        let mut power = 0.0;
+        let mut power = self.compliant_wall_loss(state);
         match &self.viscothermal {
             Some(ViscothermalMemory::Spatial(wall)) => {
                 for channel in &wall.channels {
@@ -359,7 +363,7 @@ impl DgDuct {
 }
 
 impl DgState {
-    /// Retained viscous/thermal wall energy [J], excluding acoustic p/q.
+    /// Retained viscothermal and compliant-wall energy [J], excluding gas p/q.
     #[must_use]
     pub fn wall_stored_energy_j(&self) -> f64 {
         0.5 * self.tilde[2 * self.p.len()..]

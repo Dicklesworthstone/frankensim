@@ -59,6 +59,11 @@ impl DgDuct {
         band_hz: [f64; 2],
         maximum_relative_error: f64,
     ) -> Result<Self, DuctError> {
+        if self.compliant_wall.is_some() {
+            return Err(DuctError::BadParameter {
+                what: "attach DG viscothermal memory before compliant wall mechanics",
+            });
+        }
         if self.viscothermal.is_some() {
             return Err(DuctError::BadParameter {
                 what: "DG viscothermal memory is already attached",

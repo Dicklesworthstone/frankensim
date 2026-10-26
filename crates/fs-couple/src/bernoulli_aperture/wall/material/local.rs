@@ -30,6 +30,20 @@ pub struct LocalMaterialWall {
     axial_factor: f64,
 }
 
+/// The same source-bound wall and its native time-domain acoustic owner.
+/// Original source receipts and applicability remain attached to the operator.
+#[derive(Clone, Debug)]
+pub struct MaterialWallDg {
+    wall: LocalMaterialWall,
+    duct: fs_duct::dg::DgDuct,
+}
+impl MaterialWallDg {
+    /// Original source, thickness, constraint and declared applicability band.
+    #[must_use] pub const fn wall(&self) -> &LocalMaterialWall { &self.wall }
+    /// Original DG owner, including reciprocal wall mechanics and all gas memory.
+    #[must_use] pub const fn duct(&self) -> &fs_duct::dg::DgDuct { &self.duct }
+}
+
 impl LocalMaterialWall {
     /// Resolve the same original claims used by graph-based material walls.
     ///
@@ -74,6 +88,30 @@ impl LocalMaterialWall {
     #[must_use] pub const fn axial_constraint(&self) -> AxialConstraint { self.axial }
     #[must_use] pub const fn loss(&self) -> &WallMaterialLoss { &self.loss }
     #[must_use] pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
+
+    /// Bind this exact material reduction to the native DG time-domain duct.
+    /// The full lateral wall responds to gas pressure; its velocity feeds back
+    /// into continuity, and its mass/elastic energy is retained in DgState.
+    /// Previously attached gas viscothermal memory remains a separate loss.
+    ///
+    /// Elastic and Kelvin-Voigt coefficients follow base_patch without a fit.
+    /// A Maxwell law refuses rather than dropping its hereditary arms. The
+    /// existing uniform-cylinder/gas and thin-wall restrictions apply. This is
+    /// cold compilation, not transfer of an already vibrating wall.
+    /// The retained band is the SAME model applicability statement as the
+    /// graph-wall owner, not a filter or broadband input certificate. The
+    /// caller must resolve and qualify its excited frequency range separately.
+    pub fn bind_dg(self, duct: fs_duct::dg::DgDuct) -> Result<MaterialWallDg, AcousticRealizeError> {
+        if matches!(self.loss, WallMaterialLoss::Maxwell(_)) {
+            return Err(invalid("DG material wall requires elastic or Kelvin-Voigt data; Maxwell memory is not supplied"));
+        }
+        let radius = duct.uniform_circular_radius_m()
+            .ok_or_else(|| invalid("DG material wall requires an explicit uniform circular geometry"))?;
+        let patch = self.base_patch(radius, duct.total_length())?;
+        let duct = duct.with_compliant_wall(patch.wall)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        Ok(MaterialWallDg { wall: self, duct })
+    }
 
     /// Base mass/equilibrium/viscosity image for an actual cylindrical strip.
     /// Hereditary arms remain in `loss()`; this is not its complete impedance.

@@ -1040,3 +1040,29 @@ Focused regressions cover pressure/work conjugacy, integrated discrete
 continuity, source identity and local material fields, wall attachment order,
 and equal-pressure/opposite-work composition with a second original DG duct.
 Native execution and instrument qualification remain pending.
+
+## Reciprocal compliant walls in the DG time domain
+
+`DgDuct::with_compliant_wall` appends the original `WallPin` radial displacement
+and velocity to the same energy-normalized DG operator and dense exponential.
+For circumference P, area A and gas bulk modulus B, continuity receives -P v
+while the wall receives pressure through sigma v_t = p - K w - r v.
+The reciprocal terms cancel in the complete energy rate; wall storage is
+integral P(sigma v^2 + K w^2)/2 and its independent loss is integral P r v^2.
+`compliant_wall_state` reads physical motion and storage; the existing
+`wall_dissipated_power_w` includes both material and gas-wall loss once.
+
+This cold attachment requires uniform gas and identical circular segments.
+Viscothermal memory must be attached first and is retained unchanged. New
+states start with the wall at rest; old states refuse by operator identity.
+All boundary/side ports see wall reaction through their original pressure
+columns. A matched end remains the gas characteristic resistance, not an
+assertion of reflectionless termination for an elastic tube. Source bandwidth,
+small-displacement applicability and refinement remain caller responsibilities.
+Axial shell waves, Maxwell memory, thermal evolution and external wall radiation
+are not supplied. The dense ledger still labels dissipation inferred from its
+deficit; the independent instantaneous loss is not an integrated heat proof.
+
+G0/G1 regressions compare actual pressure, wall displacement and velocity to
+the independent sealed-tube oscillator, check conservative port work and total
+storage, and reconstruct the combined gas/material dissipation from x^T L x.
