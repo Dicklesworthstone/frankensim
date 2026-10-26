@@ -37,13 +37,19 @@
 # crescendos (recorder-<fingering>-crescendo) are blown with NO pressure chosen: a linear ramp from 3 Pa to 600 Pa at 100 Pa/s (their ramps
 # ran at up to 500 Pa/s), the protocol of that paper. The fingerings are Bouterse's f1 (0 1 2 3 4 5 6 7), a1 (0 1 2 3 4 5), b-flat1 (0 1 2 3 4 . 6),
 # b1 (0 1 2 3 . 5 6). The gesture of the held notes is 50 ms attack, hold, 10.5 ms release.
-# Unknown or authored: the windway height and shape, labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), mouth loss (0.02), jet
+# Labium offset +0.1455 mm on the pipe side, DERIVED: the edge underside sits step - h/2 = 0.8 - 0.53 = 0.27 mm on the bore side of the jet
+# centreline, and the jet splits at the middle of the 0.25 mm edge face, where the dividing streamline of a jet meeting a flat face ends; the
+# face ends bracket it (+0.02 to +0.27 mm) and the windway-height bounds move it from -0.225 to +0.425 mm. Jet angle zero: the 0.3 mm rise of
+# the windway roof moves the jet 0.01 to 0.02 mm at the edge, inside that bracket.
+# Unknown or authored: the windway height and shape, onset ramp (50 ms), mouth loss (0.02), jet
 # displacement gain (90, as in the flue gates), hole undercutting, hole 7, the thumb-hole venting that gives the second and third registers (not
 # modelled, so only fingerings of the first register are rendered), hole 7's position, the labium edge height. The binary must contain the
 # jet-island phase fix (fs-couple 1718d79fb or later), the computed window (the commit that adds this row) and the one-sample channel line
 # (fs-couple 988c2eafd or later).
 # Gas: the woodwind breath law, exhaled breath saturated with water at 27 C as the mean temperature of the bore, with its published 4.5 % CO2
-# and 16.5 % O2 (dry): the row `gas mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351` (Coltman 1966 p. 101,
+# and 16.5 % O2 (dry): the shared woodwind pack, row `gas pack breath-woodwind-exhaled-coltman1966-nederveen1969` (ledger
+# coltman-nederveen-fletcher-woodwind-breath; it renders bit-identical to the explicit mixture this recipe carried before, 300.15 K,
+# 101325 Pa, mole fractions N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351) (Coltman 1966 p. 101,
 # Nederveen 1969 sec. 12 p. 28, Fletcher and Rossing sec. 8.1 p. 191; the clarinet recipes' mixture, pexfp.234), because these data were
 # played by mouth. Its sound speed is 345.36 m/s; against saturated air the CO2 and the oxygen depletion lower every passive mode by 19.1 to
 # 19.3 cents (u-breath-co2). The window and holes radiate into the same gas (exterior same). Not in it: the temperature gradient along the

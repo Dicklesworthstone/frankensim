@@ -22,8 +22,11 @@
 # 2008, pp.740-749. Mean mouth pressure 300 Pa (D4) to 600 Pa (A5), jet length W 8 mm to 4.5 mm
 # (Sec. 5.1); lip-hole area ~6e-6 to ~3.5e-6 m2 (Fig. 4) and height ~0.9 mm (Fig. 6) are read off
 # the plots; values between the two published endpoints are linear in log2(f). Never read from a
-# recording. Labium offset, jet angle, onset ramp (50 ms), mouth loss (0.02), the jet displacement
-# gain (90) are UNKNOWN or authored: see unknowns.tsv and status.json. The jet card is an inline X-Est
+# recording. Labium offset +0.29 mm on the pipe side: one player's measured reference jet (Onogi,
+# Yokoyama and Iida, Acta Acustica 5 (2021) 11, Table 1: y/h = 0.24 +- 0.25 at h = 1.2 mm), so the
+# bracket is -0.01 to +0.59 mm; jet angle 0, because the measured 39 degrees are inside that offset.
+# Onset ramp (50 ms), mouth loss (0.02), the jet displacement gain (90) are UNKNOWN or authored: see
+# unknowns.tsv and status.json. The jet card is an inline X-Est
 # lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
 # omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la
 # Cuadra 2008 Sec. 7), and the convection ratio is 0.4 (Auvray 2012; Terrien 2014; de la Cuadra: 0.3 to 0.5).

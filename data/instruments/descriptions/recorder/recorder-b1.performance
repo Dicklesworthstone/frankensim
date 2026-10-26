@@ -1,7 +1,7 @@
 frankensim-flue-performance-v1
 clock 288000 48000
 output 120000 5 1000000
-gas mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351
+gas pack breath-woodwind-exhaled-coltman1966-nederveen1969
 exterior same
 network 25 24
 duct_node inlet
@@ -54,7 +54,7 @@ duct_section 20 22 0.0287667 0.0066784 1e-10
 duct_section 22 23 0.0287667 0.0062393 1e-10
 duct_section 23 24 0.0287667 0.0062090 1e-10
 radiation compact-baffled
-flue 0.01200 0.001059 0.00460 0 0 0.02
+flue 0.01200 0.001059 0.00460 0.0001455 0 0.02
 windway slit 0.06150
 jet_card tonal-interim
 jet 90 1e-6 3 0
