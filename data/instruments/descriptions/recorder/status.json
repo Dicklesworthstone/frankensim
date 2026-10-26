@@ -7,13 +7,13 @@
   "physics_present": [
     "fs-couple flue_loop: a jet driven by a blowing pressure through the viscous windway law with the published windway length, the published window length as the jet length and the window width as the flue width, acting on a connected duct network (one jet drives the whole graph)",
     "the published bore of the head, middle joint and foot as equal-volume cylinders, the thumb hole and six finger holes as chimney sections on ideal junctions (chimney height from the published outer diameter and the local bore), open or closed per the published fingerings, and the bore closed by the block behind the window",
-    "the window as a computed acoustic mass: the 3-D potential flow through the published 12.0 x 4.6 mm cut with parallel cheeks and the labium ramp, solved on three refinements and extrapolated at the order they show, in place of a textbook end correction",
+    "the window as a computed acoustic mass: the 3-D potential flow through the published 12.0 x 4.6 mm cut with parallel cheeks and the labium ramp, solved on three refinements and extrapolated at the order they show, in place of a textbook end correction; the network keeps the window's channel only as a one-sample inlet line, so no 1-D line rings across a channel whose cross modes start at 13.5 kHz",
     "hole 7 on the foot at a derived position (24 mm below the socket rim, bracket 18 to 30 mm), open in a1, b-flat1 and b1 as the published fingerings open it",
-    "breath as the gas in the bore: air saturated with water at 27 C, the woodwind breath law",
+    "breath as the gas in the bore: exhaled breath saturated with water at 27 C with its published 4.5 % CO2 and 16.5 % O2 (dry), the woodwind breath law and the clarinet recipes' mixture; it lowers every passive mode 19.1 to 19.3 cents below saturated air",
     "fractional-delay propagation and gas-derived viscothermal loss on the long bore sections",
     "radiation reaction and observation from the apertures themselves, so the sound is radiated pressure at a physical receiver rather than internal pressure: a compact baffled-piston load on every open hole and the open end, plus the window",
     "deterministic oscillation: every held note sounds the same pitch and level for another jet seed, so it is a limit cycle and not a filtered seed",
-    "the start of every crescendo: each fingering begins in the first register of its pipe, at the lowest pressures, at two mechanics clocks. In that first-register span the crescendos sound f1 +22, a1 +7, b-flat1 +19 and b1 -6 cents of equal temperament on a1 = 409 Hz (median of 100 ms windows while the pressure rises), where the passive first modes are -24, -30, +12 and +11 cents"
+    "the start of every crescendo: each fingering begins in the first register of its pipe, at the lowest pressures. In that first-register span (the 100 ms windows within 100 cents of the first mode in the first 1.5 s, below 153 Pa) the crescendos sound f1 -6, a1 -1, b-flat1 +6 and b1 +12 cents of equal temperament on a1 = 409 Hz (median of those windows while the pressure rises), where the passive first modes are -43, -49, -7 and -8 cents"
   ],
   "physics_missing": [
     "any reference: no licensed recording of a recorder exists in the library yet (bead pexfp.219), so these renders are listened to, not graded, and no claim of resemblance is made",
@@ -24,7 +24,7 @@
     "pitch: hole 7's position is derived, not measured (bracket 18 to 30 mm); the finger holes have no undercutting and no hole inertance corrections; the labium edge height is inherited from the unknown windway height (an edge at the bore or 1.25 mm above it moves every note by about +10 or -9 cents, passive); the measured bore is the tabulated maximum of a shrunken, slightly oval boxwood joint",
     "the jet: the card is the repository's interim slot-jet card of a lattice rig, outside its Reynolds band; the displacement gain is the demonstrator value, not a measured amplification",
     "a spectrum and attack like a real recorder: the held notes are not first-register notes, and no breath noise, chiff or edge-tone noise is modelled",
-    "the gas beyond the breath law: no CO2 (4 % would flatten every note by about 18 cents), no temperature gradient along the bore, and the published pitch was measured in rooms at 15 to 27 C (about 40 cents between them)",
+    "the gas beyond the breath law: the CO2 fraction is the published one for exhaled breath, not measured in a played recorder; no temperature gradient along the bore, and the published pitch was measured in rooms at 15 to 27 C (about 40 cents between them)",
     "native verification beyond one fingering at two mechanics clocks and two jet seeds on a few files"
   ],
   "blocked": null,

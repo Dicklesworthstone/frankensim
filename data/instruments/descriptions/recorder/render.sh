@@ -22,7 +22,9 @@
 # inherits u-windway-height, bounds 0 to 1.25 mm) and then rising 6.065 mm over the side walls' 18.0 mm beyond the window (22.6 - 4.6 mm,
 # 18.62 degrees), with the closed bore behind it and free space outside (fs_bem::wall_window, a staircase of cut cells at 4, 8 and 16
 # axial cells, extrapolated at the order the three rungs show: 1.61; rungs 8, 16 and 32 give 52.567 mm at order 1.62, too costly for
-# a render). That mass, 52.56 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law.
+# a render). That mass, 52.56 mm of bore, replaces the 0.61 a_eq mouth inertance; the jet's source coefficient keeps its own law. The network
+# keeps the 6.575 mm channel only as a one-sample inlet line (1.20 mm at 288 kHz), the computed mass carrying the rest: the channel's full
+# length as a 1-D line rang against the window mass at 18 to 21 kHz, above the channel's first cross mode (13.5 kHz across 12.9 mm).
 # The windway HEIGHT is not published for this alto. The recipe uses 1.8 mm / 1.7 = 1.06 mm (the opening height of the Berlin Bressan alto e
 # divided by the opening-to-exit area ratio of Bouterse's copy), with the bounds 0.5 to 1.8 mm in unknowns.tsv; the flue width is the window width.
 # The viscous windway law uses that exit height over the 61.5 mm windway length (an upper bound on the resistance of a tapering windway). The jet
@@ -38,11 +40,14 @@
 # Unknown or authored: the windway height and shape, labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), mouth loss (0.02), jet
 # displacement gain (90, as in the flue gates), hole undercutting, hole 7, the thumb-hole venting that gives the second and third registers (not
 # modelled, so only fingerings of the first register are rendered), hole 7's position, the labium edge height. The binary must contain the
-# jet-island phase fix (fs-couple 1718d79fb or later) and the computed window (the commit that adds this row).
-# Gas: the woodwind breath law, air saturated with water at 27 C as the mean temperature of the bore (Nederveen 1969 sec. 12, Fletcher and
-# Rossing sec. 8.1, Coltman 1966; the clarinet recipes' gas), because these data were played by mouth. Not in it: the CO2 of the breath
-# (u-breath-co2: 4 % in place of oxygen would flatten every note by about 18 cents) and the temperature gradient along the bore; Bouterse's
-# rooms, 15 to 27 C, bracket the temperature (u-temperature: about 40 cents). Bouterse puts this alto at about a1 = 409 Hz.
+# jet-island phase fix (fs-couple 1718d79fb or later), the computed window (the commit that adds this row) and the one-sample channel line
+# (fs-couple 988c2eafd or later).
+# Gas: the woodwind breath law, exhaled breath saturated with water at 27 C as the mean temperature of the bore, with its published 4.5 % CO2
+# and 16.5 % O2 (dry): the row `gas mixture 300.15 101325 mole 5 N2 0.7534 O2 0.1591 Ar 0.0090 CO2 0.0434 H2O 0.0351` (Coltman 1966 p. 101,
+# Nederveen 1969 sec. 12 p. 28, Fletcher and Rossing sec. 8.1 p. 191; the clarinet recipes' mixture, pexfp.234), because these data were
+# played by mouth. Its sound speed is 345.36 m/s; against saturated air the CO2 and the oxygen depletion lower every passive mode by 19.1 to
+# 19.3 cents (u-breath-co2). The window and holes radiate into the same gas (exterior same). Not in it: the temperature gradient along the
+# bore; Bouterse's rooms, 15 to 27 C, bracket the temperature (u-temperature: about 40 cents). Bouterse puts this alto at about a1 = 409 Hz.
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss
 # cell needs four transit samples and under 0.5 rad at its band edge (3 kHz); loss only on bore sections of 17 mm or more; compact baffled radiation
