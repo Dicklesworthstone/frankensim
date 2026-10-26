@@ -211,7 +211,7 @@ impl input::Spec {
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
-            if self.prepared_linear.is_some() {
+            if self.prepared_linear.is_some() && !matches!(radiation, input::BodyRadiation::Skin(_)) {
                 return Err("computed body radiation requires the exact owner with acoustic storage".into());
             }
             match radiation {
@@ -224,6 +224,11 @@ impl input::Spec {
                 input::BodyRadiation::ShellBem(_) => {
                     if !profile.as_ref().is_some_and(body::Profile::has_shell_material_basis) {
                         return Err("computed BEM radiation requires a curved shell or assembled shell body profile".into());
+                    }
+                },
+                input::BodyRadiation::Skin(_) => {
+                    if !profile.as_ref().is_some_and(|body| body.has_shell_material_basis() && body.has_acoustic_skin()) {
+                        return Err("a computed skin load requires a shell body profile that declares its closed acoustic skin".into());
                     }
                 },
             }
@@ -253,7 +258,11 @@ impl input::Spec {
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0,body::Profile::material_memory_states)))
             .ok_or("complete material memory extent overflow")?;
-        let internal_states = self.body_radiation.map_or(0, |r| 2*r.maximum_poles())
+        // A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to the prepared
+        // byte and work budget (the library's own split); only the exact owner holds them in its state.
+        let acoustic_states = if self.prepared_linear.is_some() { 0 }
+            else { self.body_radiation.map_or(0, |r| 2*r.maximum_poles()) };
+        let internal_states = acoustic_states
             .checked_add(memory).ok_or("complete constitutive/acoustic state extent overflow")?;
         if internal_states != 0 {
             let core = settings.network.max_modes.checked_mul(2).ok_or("material setup dimension overflow")?;
@@ -376,6 +385,13 @@ impl input::Spec {
             Some(input::BodyRadiation::ShellBem(options)) => {
                 let (bank, report) = bank.with_material_shell_bem_with_angular_refinement(
                     options,self.shell_bem_angular_refinement,gate)?;
+                (bank, Some(BodyRadiationReport::ShellBem(report)))
+            },
+            Some(input::BodyRadiation::Skin(load)) => {
+                let skin = profile.as_ref().and_then(|body| body.acoustic_skin(&self))
+                    .ok_or("a computed skin load requires a body profile that declares its closed acoustic skin")?;
+                let (bank, report) = bank.with_material_skin_bem(load.options, &skin,
+                    load.maximum_anchor_distance_m, load.angular_refinement, gate)?;
                 (bank, Some(BodyRadiationReport::ShellBem(report)))
             },
             None => (bank, None),
@@ -556,6 +572,22 @@ fn main()->Result<()> {
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
+    // A skin load's first-order receipt at each loaded coordinate's own frequency,
+    // in the one-way receipt's terms: zeta = Re Z/(2 w), shift = Im Z/(2 w).
+    if let Some(binding)=ready.performance.bank().source().bank().body_radiation()
+        .filter(|binding|binding.material_shell_bem().is_some_and(|r|r.skin_identity.is_some())) {
+        let components=ready.performance.bank().system().components();
+        let body=ready.spec.strings.len();
+        let structural=components[body].modes().len();
+        let ports=binding.model().ports;
+        for (port,&coordinate) in binding.source_body_coordinates().iter().enumerate() {
+            let w=if coordinate<structural { components[body].modes()[coordinate].angular_frequency_rad_s }
+                else { components[body+1].modes()[coordinate-structural].angular_frequency_rad_s };
+            let z=binding.model().impedance(w)?[port*ports+port];
+            eprintln!("two_way_load_port={port}; coordinate={coordinate}; f_Hz={}; radiation_zeta={}; added_mass_shift={}",
+                w/core::f64::consts::TAU,z.re/(2.0*w),0.5*z.im/w);
+        }
+    }
     if let Some(report)=ready.performance.material_shell_observer() {
         let transfer=report.transfer();
         eprintln!("shell_observer={:?}; basis={}; loading={}; body_modes={}; surface_panels={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; sweep_terms={}; replay_terms={}; closed-shell finite-distance pressure replaces compact pressure; homogeneous exterior without molecular absorption; declared latency and finite window retained",
@@ -566,8 +598,13 @@ fn main()->Result<()> {
     }
     if let Some(report)=ready.performance.one_way_shell_observer() {
         let transfer=report.transfer();
-        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; no air reaction enters the mechanics; homogeneous exterior without molecular absorption",
+        let feedback=match report.two_way_load {
+            Some(_) => "the skin's own computed air load reacts on the two-way body modes and the mouth; the rest stay one-way",
+            None => "no air reaction enters the mechanics",
+        };
+        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; two_way_load={:?}; two_way_modes={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; {feedback}; homogeneous exterior without molecular absorption",
             report.options.receiver,report.body_modes,report.apertures,report.surface_panels,
+            report.two_way_load.map(|key|key.to_hex()),report.two_way_modes,
             report.largest_anchor_distance_m,report.plain_cbie_limit_rad_per_m,transfer.pass_band_upper_hz,
             transfer.taper_stop_hz,transfer.geometric_delays_s,transfer.filter_latency_samples,
             report.boundary_terms,report.replay_terms,report.options.rule,report.setup_key.to_hex(),

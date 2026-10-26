@@ -219,6 +219,47 @@ impl PreparedAir {
         Ok(())
     }
 
+    /// Each port's first-order rounding bound on the difference of its two held forces, `exchange_force`'s and
+    /// `advance`'s. Both are formed from increments that are differences of end and start coordinates: a port's row sum
+    /// over z less its start displacement, a pole's end less its start. The rounding of a difference is relative to its
+    /// operands, not to the difference, so a mode resting on a preload resolves its first increments only to the last
+    /// bits of its displacement, far above the force they imply: a violin body mode resting on the strings' preload at
+    /// x = -1.117e-7 moves 5.37e-20 in its first step at 48 kHz, and the two forces of that step differ by 1.8e-17 N,
+    /// ulp(x) through G / dt^2, on a force of 1.5e-13 N. The operands reach a port's force through
+    /// |l| |D| |l| / dt^2 (ports) and |l| / dt (poles). gamma_n = n u / (1 - n u) is taken over the longest chain of
+    /// roundings an increment passes: the held input's sum and the displacement's weight (2), the row sum over z (d),
+    /// its division and the start's subtraction (2), the pole drive (ports + 1), the pole's row, division and
+    /// subtraction (5) and the force's sum over the poles (poles + 1). Each of the two evaluations carries it once.
+    pub(super) fn force_rounding(&self, z: &[f64], x: &[f64], weights: &[f64], air: &[f64], dq_ports: &[f64])
+        -> Result<Vec<f64>, ModalCouplingError>
+    {
+        let ports = self.sources.len();
+        let d = z.len();
+        if air.len() != self.state_len() || air.iter().any(|v| !v.is_finite()) || dq_ports.len() != ports {
+            return Err(invalid("prepared air state layout"));
+        }
+        let displacement: Vec<f64> = self.sources.iter().zip(self.port_rows.chunks_exact(d)).map(|(&mode, row)| {
+            let terms = row.iter().zip(z).fold(0.0, |s, (a, b)| s + (a * b).abs());
+            finite(terms / weights[mode] + x[2 * mode].abs())
+        }).collect::<Result<_, _>>()?;
+        let drives = self.drives(dq_ports)?;
+        let dt2 = self.dt * self.dt;
+        let mut operands = vec![0.0; ports];
+        for ((pole, s), (&w, row)) in self.poles.iter().zip(air.chunks_exact(2)).zip(drives.iter().zip(self.coupling.chunks_exact(ports))) {
+            let through = row.iter().zip(&displacement).fold(0.0, |acc, (l, m)| acc + (l * m).abs());
+            let terms = pole.rows[0].iter().zip([pole.omega * s[0], s[1], w]).fold(0.0, |acc, (a, b)| acc + (a * b).abs());
+            let pole_side = (terms / pole.omega + s[0].abs()) / self.dt;
+            let port_side = (pole.rows[0][2] / pole.omega).abs() * through / dt2;
+            for (value, l) in operands.iter_mut().zip(row) {
+                *value = finite(*value + l.abs() * (port_side + pole_side))?;
+            }
+        }
+        let unit = 0.5 * f64::EPSILON;
+        let n = (d + ports + self.poles.len() + 11) as f64;
+        let gamma = n * unit / (1.0 - n * unit);
+        operands.into_iter().map(|value| finite(2.0 * gamma * value)).collect()
+    }
+
     /// The pole drives L dq_ports / dt of accepted port increments.
     fn drives(&self, dq_ports: &[f64]) -> Result<Vec<f64>, ModalCouplingError> {
         if dq_ports.len() != self.sources.len() {

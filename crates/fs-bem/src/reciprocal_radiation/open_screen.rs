@@ -158,7 +158,8 @@ pub struct OpenOptions {
     pub maximum_edge_level: u32,
     /// 4 or 8 Gauss points per Duffy coordinate.
     pub triangle_order: usize,
-    /// 0..=2, the existing antipodal angular rule.
+    /// 0..=2, the existing antipodal angular rule. It bounds the band:
+    /// `PreparedScreen::new` refuses k * diameter above ANGULAR_REACH * 2^r.
     pub angular_refinement: u32,
     pub maximum_unknowns: usize,
     pub maximum_cache_bytes: usize,
@@ -167,6 +168,43 @@ pub struct OpenOptions {
     /// factor. Results are bitwise identical at every count. One worker keeps
     /// the serial loops and their per-pair poll points; more poll per block.
     pub workers: usize,
+}
+
+/// The k * diameter that `geometry::directions(r)` resolves, per 2^r. The
+/// real-frequency Im N is a Gram form of plane waves exp(ik s.(x-y)) on that
+/// rule, and no two points of the screen are farther apart than its vertex
+/// diameter, so `PreparedScreen::new` refuses a band above ANGULAR_REACH * 2^r.
+/// Up to that chart the rule's worst error on sin(kR)/(kR) is 6.5e-4, 2.8e-3,
+/// 2.9e-2 and 2.1e-2 at r = 0, 1, 2 and 3.
+///
+/// The check at r = 2: a rigid translating free disc over the baffled piston,
+/// in dB on axis / 19.8 degrees off axis, on the tests' edge-graded unit
+/// discs disc(nr, nt), prepared at kD 35:
+///
+/// ```text
+/// mesh     kD 25            kD 30            kD 35
+/// 16x128   +0.159 / +1.102  +0.253 / +0.242  +1.062 / +1.152
+/// 20x160   +0.163 / +1.111  +0.267 / +0.260  +1.083 / +1.137
+/// 24x160   +0.164 / +1.115  +0.273 / +0.268  +1.092 / +1.130
+/// 28x144   +0.164 / +1.115  +0.276 / +0.271  +1.096 / +1.127
+/// ```
+///
+/// The 1.1 dB is converged to 0.04 dB and is there at kD 25, well inside the
+/// chart: it is the free disc's edge diffraction, not the rule, and the test
+/// admits 1.5 dB. Unguarded, kD 45 solved 24 to 29 dB high at a backward
+/// residual near 1e-15, so past the chart nothing else refuses.
+pub const ANGULAR_REACH: f64 = 9.0;
+
+/// The largest distance between two vertices. It bounds every pair of
+/// points on the triangles.
+fn vertex_diameter(vertices: &[Point]) -> f64 {
+    let mut widest = 0.0_f64;
+    for (i, &a) in vertices.iter().enumerate() {
+        for &b in &vertices[i + 1..] {
+            widest = widest.max(norm(sub(a, b)));
+        }
+    }
+    widest
 }
 
 /// Facet rows per worker in one parallel block; a block's pair values are
@@ -281,6 +319,12 @@ impl<'a> PreparedScreen<'a> {
             return Err(HelmholtzError::TooCoarse {
                 panels_per_wavelength: ppw,
             });
+        }
+        // The band the requested angular rule resolves, read from the options
+        // the assembly will use, not from the refinement cap.
+        let reach = ANGULAR_REACH * f64::from(1_u32 << options.angular_refinement);
+        if highest_k * vertex_diameter(&surface.vertices) > reach {
+            return Err(bad("open screen band exceeds its angular-resolution chart"));
         }
         let count = n
             .checked_mul(n)

@@ -373,3 +373,5 @@ fn open_skin_incomplete_bands_work_limits_and_cancellation_refuse() {
 #[path = "bem/openings.rs"]
 mod openings;
 
+#[path = "bem/skin.rs"]
+mod skin;

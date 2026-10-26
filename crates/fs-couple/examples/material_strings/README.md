@@ -488,6 +488,19 @@ The two declared ends also supply their existing inertial end corrections,
 counted once. Changing gas composition, temperature, pressure, or source-backed
 thermal/transport data therefore changes the physical cavity load carried by
 the same string/body mechanics. It does not require a new damping coefficient.
+
+`cavity exterior-neck` takes the same fields and hands the outer end to a
+computed exterior load:
+- **What the neck keeps:** its mass to the inner end only, L + δ_in, and the
+  same compressibility.
+  - Its Bessel viscothermal resistance is frozen at the isolated frequency of
+    the two declared ends.
+- **What the neck drops:** the compact outer end correction and the compact
+  radiation resistance. The outer end's mass and radiation come from the
+  `body-radiation skin` load, through the skin's aperture caps (below).
+- Without that load the neck has no outer mass. So `exterior-neck` refuses
+  without `body-radiation skin`, and a compact `neck` or `physical-neck`
+  refuses beside it, because its outer end would be counted twice.
 The selection works with the uniform plate, regional plate, curved shell and
 assembled material-body profiles; their original signed volume maps remain
 the common pressure coupling.
@@ -1152,6 +1165,7 @@ Helmholtz boundary-element solver:
 body-radiation rayleigh SIDES MIN_HZ MAX_HZ FREQUENCIES MAX_CELLS MAX_SWEEP_TERMS MAX_POLES
 body-radiation bem MIN_HZ MAX_HZ FREQUENCIES MAX_PANELS MAX_SWEEP_TERMS MAX_POLES
 shell_angular_refinement LEVEL
+body-radiation skin MIN_HZ MAX_HZ FREQUENCIES MAX_PANELS MAX_SWEEP_TERMS MAX_POLES LEVEL MAX_ANCHOR_M
 ```
 
 `rayleigh-pluck.material-strings` and `orthotropic.body` provide a small runnable
@@ -1235,10 +1249,35 @@ by exact coordinates for the acoustic topology; no gaps are filled or holes
 silently capped. This does not certify vertex-manifold quality, absence of
 self-intersection or geometric/acoustic convergence. In particular, a violin with f-holes still
 needs an explicit coupled interior/exterior opening model; merely selecting
-`bem` does not create one.
+`bem` does not create one. The `skin` route below is one.
 
-Both computed routes require the ordinary exact owner; `prepared-linear` is
-refused. Without the `shell_observer` selection below, the receiver remains the
+The `skin` route computes the same symmetric P1/P0 Galerkin load on the body
+profile's declared `acoustic-skin-v1` (below) instead of the shell's own facets:
+- **Skin motion:** the skin moves as its anchored points on the parts, checked
+  within `MAX_ANCHOR_M`.
+- **Angular level:** `LEVEL` is the owner's angular level, 0 to 3.
+- **Mouth port:** with `cavity exterior-neck`, the aperture caps carry the
+  declared shares of the one neck volume flow. That flow is one more port, on
+  the neck's own coordinate.
+- **Coincident skin:** a skin that is the shell's own surface, each vertex
+  anchored at its node, gives the `bem` load bit for bit.
+- **Band:** the owner's slab chart (k times the smallest box width below π)
+  caps the band.
+  - The load covers the ascending prefix of body modes from `MIN_HZ` to
+    `MAX_HZ`. The modes above it carry no exterior load.
+  - The report states how many modes are loaded (`body_modes`) and how many
+    are left one-way (`one_way_body_modes`). It refuses if a loaded mode lies
+    below `MIN_HZ`.
+  - With a mouth, `MIN_HZ` must not exceed the neck's resonance with its
+    declared ends.
+- **Observer:** a `one_way_observer` on the same skin hears this loaded
+  mechanics, and its report names the load (`two_way_load`, `two_way_modes`).
+
+The `rayleigh` and `bem` routes require the ordinary exact owner;
+`prepared-linear` is refused for them. The `skin` route also runs on
+`prepared-linear`, whose air bank carries the load. Its poles count against the prepared owner's byte and work
+budget (the `prepared-linear` record), not the exact owner's state and setup ceiling, so `MAX_POLES` may reach
+the shared pole ceiling (16384). Without the `shell_observer` selection below, the receiver remains the
 existing compact, zero-retardation pressure observation of the **loaded**
 acceleration. The Rayleigh example retains one body mode to keep the complete
 passive acoustic image small; it is an integration fixture, not a claim of
@@ -1326,7 +1365,8 @@ precedes `cavity`. It sends the accepted body modal velocities, and a lumped
 cavity's neck volume flow, through the same shared causal BEM observation
 transfer to one receiver, but feeds **no** air reaction back. The mechanics may
 therefore be the exact or the `prepared-linear` owner. It refuses alongside
-`body-radiation` or `shell_observer`.
+`shell_observer` or a `rayleigh` or `bem` air load. Beside `body-radiation skin`
+it hears the mechanics that the same skin's load reacts on.
 
 ```text
 one_way_observer ID X Y Z CLEARANCE_M PASS_HZ STOP_HZ LATENCY N_FFT FFT... TAIL_TOL DTFT_TOL MAX_FREQ_ENTRIES MAX_REPLAY_TERMS RULE [MAX_PAIRS] MAX_SKIN_PANELS MAX_ANCHOR_M MAX_BOUNDARY_TERMS WORKERS LOSS_FRACTION SHIFT_FRACTION

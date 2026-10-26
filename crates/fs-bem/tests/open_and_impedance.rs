@@ -96,6 +96,16 @@ fn disc(radial: usize, azimuth: usize) -> OpenPanels {
 fn relative(a: C64, b: C64) -> f64 {
     (a - b).abs() / b.abs()
 }
+/// J1 from its power series, which needs no cancellation guard below x = 10.
+fn bessel_j1(x: f64) -> f64 {
+    let mut term = x / 2.0;
+    let mut sum = term;
+    for m in 1..40 {
+        term *= -(x * x / 4.0) / (m * (m + 1)) as f64;
+        sum += term;
+    }
+    sum
+}
 fn mean(surface: &SpherePanels, p: &[C64]) -> C64 {
     p.iter()
         .zip(surface.areas())
@@ -300,6 +310,69 @@ fn open_disc_radiation_and_scattering() {
         !ladder_gate("open-disc-falsifier", analytic, 0.01, &biased_masses, mass),
         "a 2e-3 density bias passed the limit gate: {biased_masses:?}"
     );
+}
+
+/// The angular chart (ANGULAR_REACH) against the rigid-disc control. kD 45 is
+/// refused before any assembly, and so is kD 35 at r = 1: the chart reads the
+/// requested refinement. Unguarded, kD 45 solved 24 to 29 dB high at a 1e-15
+/// backward residual. At r = 2 a translating unit disc is admitted at kD 35
+/// and radiates within 1.5 dB of the baffled piston on axis and 19.8 degrees
+/// off it. The free disc is not the baffled piston: its edge diffraction
+/// moves the ratio by about 1.1 dB even well inside the chart (kD 25 off axis
+/// 1.12 dB, kD 35 on axis 1.10 dB), converged over the 16x128, 20x160, 24x160
+/// and 28x144 discs to 0.04 dB, so 1.5 dB admits that physics and nothing
+/// like the unresolved band.
+#[test]
+fn open_screen_refuses_a_band_its_angular_rule_does_not_resolve() {
+    let medium = Medium::air();
+    let surface = disc(16, 128);
+    let prepare = |k: f64, angular_refinement: u32| {
+        let options = OpenOptions {
+            angular_refinement,
+            ..ladder_options(0)
+        };
+        PreparedScreen::new(&surface, k, options, || false)
+    };
+    for (k, refinement) in [(22.5, 2), (17.5, 1)] {
+        assert!(
+            matches!(
+                prepare(k, refinement),
+                Err(HelmholtzError::BadParameter {
+                    what: "open screen band exceeds its angular-resolution chart"
+                })
+            ),
+            "kD {} at r = {refinement} was admitted",
+            2.0 * k
+        );
+    }
+    let start = Instant::now();
+    let prepared = prepare(17.5, 2).expect("kD 35 at r = 2 is inside the chart");
+    let v = vec![C64::ONE; surface.vertices().len()];
+    let rigid = SurfaceBc {
+        drive_velocity: &v,
+        admittance: Admittance::Rigid,
+    };
+    let solved = prepared.solve(17.5, medium, rigid, || false).unwrap();
+    let omega_rho = 17.5 * medium.sound_speed * medium.density;
+    let off_axis = [0.3, 0.2, 1.0].map(|c: f64| c / 1.13_f64.sqrt());
+    for (name, direction) in [("axis", [0.0, 0.0, 1.0]), ("off-axis", off_axis)] {
+        // the baffled piston of unit radius: r|p| = (omega rho a^2 / 2)|2 J1(u)/u|
+        let u = 17.5 * direction[0].hypot(direction[1]);
+        let pattern = if u == 0.0 {
+            1.0
+        } else {
+            2.0 * bessel_j1(u) / u
+        };
+        let baffled = 0.5 * omega_rho * pattern.abs();
+        let free = solved.far_field(direction).unwrap().abs();
+        let db = 20.0 * (free / baffled).log10();
+        println!(
+            "{{\"case\":\"open-angular-chart\",\"kD\":35,\"direction\":\"{name}\",\"free_over_baffled_db\":{db:.3},\"backward_residual\":{:.1e},\"seconds\":{:.1}}}",
+            solved.backward_residual,
+            start.elapsed().as_secs_f64()
+        );
+        assert!(db.abs() < 1.5, "kD 35 {name}: free/baffled {db:.2} dB");
+    }
 }
 
 #[test]

@@ -79,6 +79,45 @@ pub struct ShellAcousticSkin {
     pub apertures: Vec<SkinAperture>,
 }
 
+/// Content identity of a declared skin: vertices, anchors, triangles and
+/// apertures, bit for bit. A two-way load records it so that the observer can
+/// confirm it reads the same geometry.
+pub fn skin_identity(skin: &ShellAcousticSkin) -> ContentHash {
+    let mut h = fs_blake3::DomainHasher::new("fs-couple:shell-acoustic-skin:v1");
+    h.update(&(skin.vertices.len() as u64).to_le_bytes());
+    for (vertex, anchors) in skin.vertices.iter().zip(&skin.anchors) {
+        for x in vertex {
+            h.update(&x.to_bits().to_le_bytes());
+        }
+        h.update(&(anchors.len() as u64).to_le_bytes());
+        for a in anchors {
+            h.update(&a.weight.to_bits().to_le_bytes());
+            h.update(&(a.component as u64).to_le_bytes());
+            h.update(&(a.triangle as u64).to_le_bytes());
+            for x in a.barycentric {
+                h.update(&x.to_bits().to_le_bytes());
+            }
+        }
+    }
+    h.update(&(skin.triangles.len() as u64).to_le_bytes());
+    for t in &skin.triangles {
+        for v in t {
+            h.update(&(*v as u64).to_le_bytes());
+        }
+    }
+    h.update(&(skin.apertures.len() as u64).to_le_bytes());
+    for a in &skin.apertures {
+        h.update(&(a.id.len() as u64).to_le_bytes());
+        h.update(a.id.as_bytes());
+        h.update(&(a.triangles.len() as u64).to_le_bytes());
+        for t in &a.triangles {
+            h.update(&(*t as u64).to_le_bytes());
+        }
+        h.update(&a.flow_share.to_bits().to_le_bytes());
+    }
+    h.finalize()
+}
+
 /// When a mode may stay one-way: the radiation damping it leaves out is at most
 /// `maximum_loss_fraction` of its wood damping, and its added-mass frequency
 /// shift is at most `maximum_shift_fraction` of both its wood half-power
@@ -154,6 +193,12 @@ pub struct OneWayShellObserverReport {
     pub setup_key: ContentHash,
     /// The transfer and the receipt were loaded from a store, not computed.
     pub setup_loaded: bool,
+    /// The bound two-way load on this same skin, if any: its loading identity.
+    /// Each receipt row then states what a one-way run of that mode would leave
+    /// out; the load feeds it back.
+    pub two_way_load: Option<ContentHash>,
+    /// The ascending prefix of body modes that load feeds back; zero without it.
+    pub two_way_modes: usize,
     transfer: ObservationTransferBake,
 }
 impl OneWayShellObserverReport {
@@ -249,7 +294,7 @@ impl OneWayShellObserverOptions {
 }
 
 /// The skin's panels and its per-mode and per-aperture normal traces.
-pub(super) struct SkinTraces {
+pub(in crate::bowed_string::runtime::reciprocal::bank) struct SkinTraces {
     pub surface: SpherePanels,
     /// Mode-major structural traces [m/s per unit modal velocity].
     pub modes: Vec<Vec<f64>>,
@@ -260,7 +305,7 @@ pub(super) struct SkinTraces {
 
 /// Bind the skin to the original parts and compute every normal trace.
 /// `parts` are the original midsurfaces with their mode-major six-DOF rows.
-pub(super) fn skin_traces(
+pub(in crate::bowed_string::runtime::reciprocal::bank) fn skin_traces(
     parts: &[(&ShellMesh, &[Vec<f64>])],
     modes: usize,
     skin: &ShellAcousticSkin,
@@ -603,11 +648,20 @@ impl MultiBowPerformance {
         let source = self.bank.source.bank();
         let rate = source.options().sample_rate_hz;
         options.validate(rate)?;
-        if source.body_radiation().is_some() {
-            return Err(invalid(
-                "a computed air load is observed by its own loaded shell observer",
-            ));
-        }
+        // The skin maps skin velocity to the receiver whether or not the air
+        // reacts, so a two-way load on this same skin keeps this observer.
+        let (two_way_load, two_way_modes) = match source.body_radiation() {
+            None => (None, 0),
+            Some(binding) => {
+                let loading = binding
+                    .material_shell_bem()
+                    .filter(|r| r.skin_identity == Some(skin_identity(skin)))
+                    .ok_or_else(|| {
+                        invalid("a computed air load is observed on its own skin or by its own loaded shell observer")
+                    })?;
+                (Some(loading.loading_identity), loading.body_modes)
+            }
+        };
         if source.spatial_cavity().is_some() {
             return Err(invalid(
                 "one-way skin observation has no spatial cavity mouth binding",
@@ -643,6 +697,14 @@ impl MultiBowPerformance {
             ));
         }
         let cavity = source.material_cavity();
+        if cavity
+            .is_some_and(|c| c.cavity.loss() == crate::cavity_modal::CavityNeckLoss::ExteriorMouth)
+            && two_way_load.is_none()
+        {
+            return Err(invalid(
+                "an exterior-owned mouth has no outer mass without its two-way skin load",
+            ));
+        }
         if cavity.is_some() != !skin.apertures.is_empty() {
             return Err(invalid(
                 "a lumped cavity radiates through declared skin apertures, and only then",
@@ -798,6 +860,8 @@ impl MultiBowPerformance {
             modes,
             setup_key,
             setup_loaded,
+            two_way_load,
+            two_way_modes,
             transfer,
             options,
         };

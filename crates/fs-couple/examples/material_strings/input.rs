@@ -106,12 +106,23 @@ pub struct Body {
 pub enum BodyRadiation {
     Rayleigh(PlateRayleighOptions),
     ShellBem(ShellBemOptions),
+    /// The same Galerkin load on the body profile's declared acoustic skin.
+    Skin(SkinRadiation),
+}
+/// The two-way load on the declared skin: the body modes inside the band, then
+/// an exterior-owned neck through the skin's aperture caps.
+#[derive(Clone, Copy, Debug)]
+pub struct SkinRadiation {
+    pub options: ShellBemOptions,
+    pub angular_refinement: u32,
+    pub maximum_anchor_distance_m: f64,
 }
 impl BodyRadiation {
     pub fn validate(self, rate: u32) -> Result<()> {
         match self {
             Self::Rayleigh(options) => options.validate(rate)?,
             Self::ShellBem(options) => options.validate(rate)?,
+            Self::Skin(load) => load.options.validate(rate)?,
         }
         Ok(())
     }
@@ -119,6 +130,7 @@ impl BodyRadiation {
         match self {
             Self::Rayleigh(options) => options.maximum_poles,
             Self::ShellBem(options) => options.maximum_poles,
+            Self::Skin(load) => load.options.maximum_poles,
         }
     }
 }
@@ -442,11 +454,23 @@ impl Spec {
                     frequency_samples: row.count(257)?, maximum_surface_panels: row.count(2048)?,
                     maximum_sweep_terms: row.parse()?, maximum_poles: row.count(256)?,
                 }),
-                _ => return Err("body-radiation requires rayleigh or bem geometry-derived loading".into()),
+                "skin" => BodyRadiation::Skin(SkinRadiation {
+                    options: ShellBemOptions {
+                        minimum_hz: row.positive()?, maximum_hz: row.positive()?,
+                        frequency_samples: row.count(257)?,
+                        maximum_surface_panels: row.count(fs_bem::reciprocal_radiation::MAX_RECIPROCAL_PANELS)?,
+                        maximum_sweep_terms: row.parse()?,
+                        maximum_poles: row.count(fs_couple::render::plate::impact::radiation::MAX_POLES)?,
+                    },
+                    angular_refinement: row.count(fs_bem::reciprocal_radiation::MAX_ANGULAR_REFINEMENT as usize)? as u32,
+                    maximum_anchor_distance_m: row.positive()?,
+                }),
+                _ => return Err("body-radiation requires rayleigh, bem or skin geometry-derived loading".into()),
             };
             row.end()?;
             options.validate(rate)?;
-            if prepared_linear.is_some() {
+            // The prepared owner carries the skin load in its air bank.
+            if prepared_linear.is_some() && !matches!(options, BodyRadiation::Skin(_)) {
                 return Err("body radiation requires the exact owner; prepared-linear has no acoustic storage".into());
             }
             Some(options)
@@ -554,7 +578,7 @@ impl Spec {
                 Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
                     CavityNeckLoss::Resistance(resistance))?, modal_budget: modal_budget(), listener_m })
             },
-            "physical-neck" => {
+            kind @ ("physical-neck" | "exterior-neck") => {
                 let volume_m3 = row.positive()?;
                 let neck_radius_m = row.positive()?;
                 let neck_length_m = row.positive()?;
@@ -574,10 +598,20 @@ impl Spec {
                 // One coherent gas supplies inertia, compression, Bessel neck
                 // loss and the declared exterior end's radiation resistance.
                 // The original owner counts each end correction exactly once.
-                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
-                    CavityNeckLoss::RadiationAtResonance)?, modal_budget: modal_budget(), listener_m })
+                // An exterior-owned outer end gives its mass and radiation to the
+                // skin's computed load on the aperture caps, and has none without it.
+                let loss = if kind == "exterior-neck" {
+                    if !matches!(body_radiation, Some(BodyRadiation::Skin(_))) {
+                        return Err("exterior-neck has no outer mass without the body-radiation skin load on its apertures".into());
+                    }
+                    CavityNeckLoss::ExteriorMouth
+                } else {
+                    CavityNeckLoss::RadiationAtResonance
+                };
+                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas, loss)?,
+                    modal_budget: modal_budget(), listener_m })
             },
-            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck V R L INNER_END OUTER_END LISTENER_M".into()),
+            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M".into()),
         };
         row.end()?;
         let mut row = r.row("friction")?;
@@ -780,8 +814,10 @@ impl Spec {
         }
         if let Some(observer) = &self.one_way_observer {
             observer.validate(self.rate)?;
-            if self.body_radiation.is_some() || self.shell_observer.is_some() {
-                return Err("one_way_observer feeds nothing back, so it takes neither a computed air load nor its shell_observer".into());
+            // The skin's own two-way load is observed through the same skin.
+            if matches!(self.body_radiation, Some(BodyRadiation::Rayleigh(_) | BodyRadiation::ShellBem(_)))
+                || self.shell_observer.is_some() {
+                return Err("one_way_observer takes only its own skin's computed load, neither another air load nor a shell_observer".into());
             }
         }
         Ok(())

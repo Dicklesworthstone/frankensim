@@ -75,6 +75,7 @@ impl Profile {
         }
         Ok(Self { bytes: bytes.to_vec(), model, interior, skin, observer_store: None })
     }
+    pub fn has_acoustic_skin(&self) -> bool { self.skin.is_some() }
     /// The declared closed acoustic skin in the performance body's frame, if any.
     pub fn acoustic_skin(&self, spec: &input::Spec) -> Option<ShellAcousticSkin> {
         self.skin.as_ref().map(|skin| skin.resolve(spec))
@@ -107,6 +108,8 @@ impl Profile {
             Some(skin) => skin.preflight(spec)?,
             None if spec.one_way_observer.is_some() => return Err(
                 "one_way_observer requires a body profile that declares its closed acoustic skin".into()),
+            None if matches!(spec.body_radiation, Some(input::BodyRadiation::Skin(_))) => return Err(
+                "a computed skin load requires a body profile that declares its closed acoustic skin".into()),
             None => {}
         }
         if self.observer_store.is_some() && spec.one_way_observer.is_none() {
