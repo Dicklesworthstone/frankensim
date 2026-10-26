@@ -34,7 +34,6 @@ params! {
     bh: "double*", bih2: "double*", bs1: "double*", bten: "double*", bber: "double*", bairm: "double*", barea: "double*", beh: "double*",
     bvk: "int*", bcoff: "int*", bnc: "int*", bitem0: "int*", bitem1: "int*", bcitem0: "int*", bcitem1: "int*", bcav: "int*", brad: "int*",
     cnb: "int*", crest: "double*", vk_body: "int*", airy_off: "ll*", airy64: "double*", airy32: "float*",
-    airy_ptr: "int*", airy_col: "int*", airy_val: "double*", any_refine: "int*", airy_failed: "int*",
     bweak: "int*", q_ptr: "int*", q_a: "int*", q_b: "int*", q_weight: "double*",
     wg_ptr: "int*", wg_core: "int*", wg_other: "int*", wg_weight: "double*",
     item_body: "int*", item_start: "int*", item_len: "int*", citem_body: "int*", citem_start: "int*", citem_len: "int*",
@@ -71,13 +70,10 @@ fn gb(airy_f32: bool) -> usize {
     if airy_f32 { 16 } else { 4 }
 }
 
-fn source(airy_f32: bool, airy_refine: bool) -> String {
+fn source(airy_f32: bool) -> String {
     let mut s = String::from("typedef long long ll;\nstruct P {\n");
     for (name, ty) in PARAMS_C {
-        // Refinement repeatedly overwrites these arrays inside one launch.
-        // Bypass per-SM cached reads across its grid barriers.
-        let qualifier = if airy_refine && matches!(*name, "QF" | "AF") { "volatile " } else { "" };
-        s += &format!("  {qualifier}{ty} {name};\n");
+        s += &format!("  {ty} {name};\n");
     }
     s += "};\n";
     s += &format!(
@@ -86,7 +82,6 @@ fn source(airy_f32: bool, airy_refine: bool) -> String {
         std::env::var("RENDER_GPU_SPIN_NS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
     );
     s += &format!("#define BENDING_ROOT_ROWS_PER_NODE {}\n", fs_vkplate::BENDING_ROOT_ROWS_PER_NODE);
-    s += &format!("#define AIRY_REFINE {}\n", airy_refine as i32);
     s += include_str!("kernel.cu");
     s
 }
@@ -138,10 +133,10 @@ fn nvrtc_cubin(src: &str, opts: &[String]) -> Result<Vec<u8>, String> {
 /// copy ~/.cache/fs-render-gpu over.
 pub fn precompile(arch: &str) -> Result<(), String> {
     let arch: &'static str = Box::leak(arch.to_string().into_boxed_str());
-    for (f32_airy, refine) in [(false, false), (true, false), (true, true)] {
+    for f32_airy in [false, true] {
         let t = std::time::Instant::now();
-        compile(&source(f32_airy, refine), arch)?;
-        eprintln!("{arch} airy {}: {:.1} s", if refine { "refined" } else if f32_airy { "f32" } else { "f64" }, t.elapsed().as_secs_f64());
+        compile(&source(f32_airy), arch)?;
+        eprintln!("{arch} airy {}: {:.1} s", if f32_airy { "f32" } else { "f64" }, t.elapsed().as_secs_f64());
     }
     Ok(())
 }
@@ -231,7 +226,6 @@ pub fn run(
     sims: &[SimState],
     total: usize,
     airy_f32: bool,
-    airy_refine: bool,
     device: usize,
     steps_per_launch: usize,
     mut on_block: impl FnMut(usize, &[f64]),
@@ -245,8 +239,7 @@ pub fn run(
     let sms = ctx.attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).map_err(e)? as u32;
     let t0 = std::time::Instant::now();
     let arch: &'static str = Box::leak(format!("sm_{major}{minor}").into_boxed_str());
-    if airy_refine && !airy_f32 { return Err("Airy refinement requires the F32 solve".into()); }
-    let module = ctx.load_module(compile(&source(airy_f32, airy_refine), arch)?).map_err(e)?;
+    let module = ctx.load_module(compile(&source(airy_f32), arch)?).map_err(e)?;
     let func = module.load_function("vk_step").map_err(e)?;
     let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
     let mut m = Mem { stream: stream.clone(), f64s: vec![], f32s: vec![], i32s: vec![], i64s: vec![], u32s: vec![] };
@@ -282,14 +275,6 @@ pub fn run(
     p.bitem0 = m.i32(&plan.bitem0)?; p.bitem1 = m.i32(&plan.bitem1)?; p.bcitem0 = m.i32(&plan.bcitem0)?;
     p.bcitem1 = m.i32(&plan.bcitem1)?; p.bcav = m.i32(&plan.bcav)?; p.brad = m.i32(&plan.brad)?;
     p.cnb = m.i32(&plan.cnb)?; p.crest = m.f64(&plan.crest)?; p.vk_body = m.i32(&plan.vk_body)?; p.airy_off = m.i64(&plan.airy_off)?;
-    if airy_refine {
-        p.airy_ptr = m.i32(&plan.airy_ptr)?;
-        p.airy_col = m.i32(&plan.airy_col)?;
-        p.airy_val = m.f64(&plan.airy_val)?;
-        p.any_refine = m.i32(&[0])?;
-    }
-    let airy_failed = stream.alloc_zeros::<i32>(1).map_err(e)?;
-    p.airy_failed = m.ptr(&airy_failed);
     p.bweak = m.i32(&plan.bweak)?; p.q_ptr = m.i32(&plan.q_ptr)?;
     p.q_a = m.i32(&plan.q_a)?; p.q_b = m.i32(&plan.q_b)?; p.q_weight = m.f64(&plan.q_weight)?;
     p.wg_ptr = m.i32(&plan.wg_ptr)?; p.wg_core = m.i32(&plan.wg_core)?;
@@ -401,9 +386,6 @@ pub fn run(
         }
         stream.memcpy_dtoh(&out, &mut host).map_err(e)?;
         stream.synchronize().map_err(e)?;
-        if airy_refine && stream.clone_dtoh(&airy_failed).map_err(e)?[0] != 0 {
-            return Err("Airy refinement failed its F64 residual check after eight corrections; no audio accepted".into());
-        }
         on_block(done, &host[..steps * b * plan.nm]);
         done += steps;
     }

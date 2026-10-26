@@ -69,30 +69,6 @@ mod rest_curvature_tests {
                 "a batch must not silently use the first member's physics");
         }
     }
-
-    #[test]
-    fn packed_airy_residual_inverts_both_native_operators() {
-        let mut ins = fs_vkplate::kit::hihat_scaled(0.002, 0.0, &[], 6.0).unwrap().instrument;
-        let image = ins.image();
-        let plan = Plan::new(&image, &ins, 2, 256, true).unwrap();
-        let rhs: Vec<f64> = (0..plan.nc).map(|i| ((i + 1) as f64 * 0.731).sin()).collect();
-        let mut solved = rhs.clone();
-        let mut plates = 0;
-        for (bi, body) in ins.bodies.iter().enumerate() {
-            if plan.bnc[bi] == 0 { continue; }
-            let offset = plan.bcoff[bi] as usize;
-            let n = plan.bnc[bi] as usize;
-            assert!(body.airy_solve(&mut solved[offset..offset + n]));
-            plates += 1;
-        }
-        assert_eq!(plates, 2);
-        assert_eq!(plan.airy_ptr.len(), plan.nc + 1);
-        for row in 0..plan.nc {
-            let got: f64 = (plan.airy_ptr[row] as usize..plan.airy_ptr[row + 1] as usize)
-                .map(|j| plan.airy_val[j] * solved[plan.airy_col[j] as usize]).sum();
-            assert!((got - rhs[row]).abs() < 1e-9, "row {row}: {got} vs {}", rhs[row]);
-        }
-    }
 }
 
 pub const TPB: usize = 256;
@@ -187,10 +163,6 @@ pub struct Plan {
     pub vk_body: Vec<i32>,
     pub airy_off: Vec<i64>,
     pub airy: Vec<f64>,
-    // Original operator for F64 residuals, in concatenated Airy row numbering.
-    pub airy_ptr: Vec<i32>,
-    pub airy_col: Vec<i32>,
-    pub airy_val: Vec<f64>,
     // work items
     pub item_body: Vec<i32>,
     pub item_start: Vec<i32>,
@@ -570,7 +542,6 @@ impl Plan {
         }
         p.bstiff = img.bodies.iter().map(|b| (!b.stiff.col.is_empty()) as i32).collect();
         // dense Airy inverses (row r of A^-1: column r by symmetry of A, taken as the solve of e_r)
-        p.airy_ptr.push(0);
         for (bi, b) in img.bodies.iter().enumerate() {
             if b.vk.is_none() {
                 continue;
@@ -580,15 +551,6 @@ impl Plan {
             let base = p.airy.len();
             p.airy.resize(base + nc * nc, 0.0);
             let body = &ins.bodies[bi];
-            let (matrix, _, _) = body.airy_system().ok_or("missing original Airy operator")?;
-            if matrix.n != nc { return Err("Airy operator dimension mismatch".into()); }
-            for row in 0..nc {
-                for e in matrix.ptr[row]..matrix.ptr[row + 1] {
-                    p.airy_col.push(p.bcoff[bi] + i32s(matrix.col[e]));
-                    p.airy_val.push(matrix.val[e]);
-                }
-                p.airy_ptr.push(i32s(p.airy_col.len()));
-            }
             let rows: Vec<&mut [f64]> = p.airy[base..].chunks_mut(nc).collect();
             let per = nc.div_ceil(threads.max(1));
             std::thread::scope(|sc| {
