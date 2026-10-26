@@ -1,4 +1,6 @@
 //! Exercise the actual per-material FEM through the original coolant transaction.
+#[path = "heterogeneous/contact.rs"]
+mod contact;
 use super::*;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::stored_solid::{
     HeterogeneousStoredCoolingState, StoredMaterialCoolingState,
