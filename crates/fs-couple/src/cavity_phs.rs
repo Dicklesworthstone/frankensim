@@ -5,6 +5,9 @@
 //! the plate's flow port). A bottle and a vented enclosure are the
 //! same objects. There is no guitar type.
 
+/// Finite source gas and the pressure modes of a material-derived elastic wall.
+pub mod modal;
+
 /// Nonlinear closed-gas cavity coupled to an inertial moving wall.
 pub mod piston;
 

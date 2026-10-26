@@ -6443,3 +6443,40 @@ the supplied narrow-band pressure transfer is an observation. G1/G3/G4 tests in
 oscillator, a heat-capacity-only material swap in actual motion, and late
 observer/transfer/cancellation refusals followed by deterministic retry. Full
 native runtime execution remains required for numerical qualification.
+
+## Finite source gas drives an elastic pressure boundary
+
+`cavity_phs::modal::GasValveMotion` joins the original source-bearing
+`ClosedGasParcel` to `ThermalValveModalMotion`. The source mesh, consistent
+mass, prestressed tangent modes and pressure footprint remain authoritative.
+The initial physical gas volume anchors an affine volume chart in the actual
+retained modal coordinates; volume is not reconstructed from a separate
+effective mass or piston area.
+
+One native sample solves finite gas heat and pressure work together with the
+original exact held-pressure modal transition. The existing Newton-Krylov
+solver sees a dimensionless volume residual and an analytic Jacobian built
+from the native held-force map and gas midpoint pressure derivative. Every
+trial starts from the same accepted histories. The original mixture's caloric,
+EOS and transport laws are resolved at the gas stages; no nominal air constants
+or fixed gamma are substituted.
+
+Publication requires independent physical-volume, pressure-transfer and
+enclosing energy bounds. Exterior pressure work uses the actual wall sweep.
+The enclosing balance is gas internal-energy change plus modal-energy change
+plus native modal damping loss plus exterior work minus supplied gas heat.
+Structural loss is not credited as gas heat. Source refusal, failed nonlinear
+iteration, work limits, cancellation and underresolved gas-loaded stiffness
+leave both participants and the sample clock unchanged. The original modal
+Nyquist guard and existing midpoint resolved-band limit apply to a conservative
+bound that includes the gas rank-one stiffness, at the old, midpoint and final
+gas states.
+
+This is a closed, spatially uniform, frozen-composition gas and a fixed
+structural material/geometry epoch. Its pressure/volume feedback requires
+time refinement; exact structural ZOH does not make the full nonlinear
+interconnection exact. There is no new wall heat transfer, reciprocal
+thermoelastic heating, reactive/nozzle flow, finite-deformation geometry or
+automatic exterior radiation-transfer refresh. Changing the structural source
+requires its native state transfer and explicit geometry/parameter work before
+binding a new volume chart.

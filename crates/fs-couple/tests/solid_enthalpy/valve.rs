@@ -8,6 +8,9 @@ use fs_solid::reduce::{OrificeSpec, SingleModeValveAdmission};
 #[path = "valve/motion.rs"]
 mod motion;
 
+#[path = "valve/gas_motion.rs"]
+mod gas_motion;
+
 const CUBE: [[f64; 3]; 8] = [
     [0., 0., 0.],
     [0., 0., 1.],
