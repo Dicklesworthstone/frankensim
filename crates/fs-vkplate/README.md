@@ -132,9 +132,10 @@ energy-conserving replacement of a ringing specimen.
 
 Loss and contact scope remains explicit. Drum heads built from imported cards
 never keep the preset's T60 decay points, which were fitted to recordings. They
-need a selected material bending-loss law, or the declaration
+need a selected material bending-loss law, the head cards' film loss curve
+(`KitMaterials::with_film_loss_curve`, below), or the declaration
 `KitMaterials::with_stated_unknown_film_loss`, which enters head film and edge
-loss as 0. Without either, `drum_with_materials` and every live drum refuse with
+loss as 0. Without one, `drum_with_materials` and every live drum refuse with
 `materials::FILM_LOSS_REFUSAL`. A declared drum carries
 `materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT` in its notes and in `info_json`
 (`filmLossStatedUnknown`): it omits the measured high-mode excess loss, so T60s
@@ -143,18 +144,35 @@ the browser, these are the `filmLoss: 'stated-unknown'` material option and
 `KitPiece.withMaterialsStatedUnknownFilmLoss`. Cymbals and hi-hats without a
 selected bending law still use their installed T60 decay points.
 
+`KitMaterials::with_film_loss_curve(temperature_axis, frequency_axis, T)` reads each
+head card's `loss_tangent_tensile` (`materials::FILM_LOSS_TANGENT`), a curve over a
+typed cyclic-frequency axis, through the canonical resolver. Each retained `m >= 1`
+head mode takes the tan delta at its own loaded frequency times its bending share,
+the part of its stiffness energy in the body's bending operator rather than the
+tension (`Body::attach_head_radiation_with_film`), through the head radiation's
+modal damping. A mode outside the card's band takes none, and its receipt says so;
+the volume shapes and the dropped shapes take none either. The drum's notes carry
+the film receipt and `materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge,
+hoop, shell or mount loss law exists, and `info_json` has `filmLossCurve`. Only
+the native card route uses it; live and browser drums keep the stated unknown.
+
 `packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk` is a sourced head-film
 card, compiled with `xtask matdb-pack` from
 `data/matdb/seed-v1/head-film-pet-mylar-dupont-matsuzawa1959`. It holds density
 1390 kg/m³, Young's modulus 4.90 GPa (the mean of the datasheet's machine and
 transverse directions) and Poisson ratio 0.38 for biaxially oriented PET, admitted
 from 293.15 to 296.15 K, with material state
-`polyethylene-terephthalate solid biaxially-oriented-film 0`. It makes no
-audio-band loss claim, because no citable audio-band loss of this film was found. It carries one
-composition-proxy reading for reference: Kunugi et al. (1992) measured uniaxially
-drawn PET at 110 Hz and 25 C, giving a loss tangent of 0.022 along the draw and 0.029 across it
-(read off a figure). The kit does not consume it. Using it above 110 Hz would be an
-extrapolation that the card does not support.
+`polyethylene-terephthalate solid biaxially-oriented-film 0`. Its audio-band loss is a DERIVED
+curve, `loss_tangent_tensile` at 293.15 K from 20 Hz to 20 kHz. It comes from Hitachi High-Tech's
+DMA application brief No. 9: a 10 µm biaxially oriented PET film annealed at 130 C, not head gauge,
+swept in tension at 0.5-10 Hz. The 1 Hz tan delta trace is read off the brief's plot at 1/3-octave
+centres; it reads 0.0443 against the annotated 0.045 beta peak. The trace is then shifted to 20 C by
+the beta relaxation's Arrhenius law, `1/T_eq = 1/293.15 K + (R / 76 kJ/mol) ln(f / 1 Hz)`, with the
+brief's activation energy and no vertical shift. That gives 0.0183 at 100 Hz, 0.0254 at 1 kHz,
+0.0298 at 3.15 kHz and 0.0343 at 10 kHz. These lie 1 to 3.3 decades beyond the brief's 10 Hz, so
+the estimate is about ±30 %. The card also carries one composition-proxy reading for reference:
+Kunugi et al. (1992) measured uniaxially drawn PET at 110 Hz and 25 C, giving a loss tangent of
+0.022 along the draw and 0.029 across it (read off a figure). The kit does not consume it.
 
 `packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk` is a sourced stick card,
 compiled from `data/matdb/seed-v1/stick-hickory-shagbark-fpl-gtr282` with
@@ -263,8 +281,8 @@ viscosity, or implement a hereditary viscoelastic model.
 
 ### Head radiation
 
-A drum built from imported head cards, with a sourced bending loss or a declared
-stated-unknown film loss, takes its heads' exterior loss and air mass from
+A drum built from imported head cards, with a sourced bending loss, a film loss
+curve or a declared stated-unknown film loss, takes its heads' exterior loss and air mass from
 `data/head-radiation-planar-baffled.tsv`, not from a fitted decay. The table holds `zhat_rs(ka) = Z_rs / (rho c a^2)`: the exterior
 loading of clamped-membrane shapes `J_m(j_mn r/a) cos(m theta)` (with
 `j_mn <= 20`) on a disk in an infinite rigid baffle. `fs_bem::modal_loading`
@@ -625,11 +643,15 @@ Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced ca
 (`examples/drum_cards/mod.rs`):
 - the heads come from the PET film card and the stick from the hickory card, at the standard gas's
   293.15 K;
-- the film loss is a stated unknown, with its receipt in the notes;
+- the film loss is the film card's derived loss-tangent curve, read at each head mode's own frequency
+  (`with_film_loss_curve`); the notes carry its receipt, the source note
+  `drum_cards::FILM_LOSS_SOURCE_NOTE`, and the edge loss's stated unknown;
 - the stick's moving volume is `kit::STICK_TIP_KG` over the 800 kg/m³ at which that Z5A
   contact-effective mass was integrated, so the card's density sets the mass (7.30 g);
 - the tip radius (5 mm) and Hunt-Crossley loss (0.05 s/m) are the presets' declared values;
-- the kick keeps its preset felt beater (`kit::kick_with_materials`) and says so.
+- the kick keeps its preset felt beater (`kit::kick_with_materials`) and says so, and its notes say
+  that no pillow is modelled (`kit::KICK_PILLOW_RECEIPT`): only the preset's muffle dashpot, an
+  estimate, stands in for it.
 
 `--preset-heads` (anywhere on the command line) renders the recording-fitted preset heads instead,
 and adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to

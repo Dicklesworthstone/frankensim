@@ -116,7 +116,9 @@ fn instrument(rate: f64, gas: GasState, materials: Option<&KitMaterials>) -> Res
 enum FilmLoss<'a> {
     FittedT60,
     Sourced(&'a PlaneStressViscosity, f64),
-    StatedUnknown,
+    /// No surface loss on the plate: the film loss is a stated unknown, or
+    /// the cards' film loss curve, which enters through the head radiation.
+    NoSurfaceLoss,
 }
 
 fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, f64, f64)>, elastic: (f64, f64, f64), loss: FilmLoss) -> Result<Body, String> {
@@ -131,7 +133,7 @@ fn head_body(name: &str, r: f64, grid: f64, hd: Head, muffle: Option<(f64, f64, 
     match loss {
         FilmLoss::FittedT60 => Body::plate(name, &spec),
         FilmLoss::Sourced(law, angle) => Body::plate_with_viscosity(name, &spec, law, angle),
-        FilmLoss::StatedUnknown => Body::plate_without_surface_loss(name, &spec),
+        FilmLoss::NoSurfaceLoss => Body::plate_without_surface_loss(name, &spec),
     }
 }
 
@@ -151,8 +153,9 @@ pub fn drum_with_gas(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState) -> Result
 
 /// Fixed geometry and installed tension, with both head materials and a
 /// spherical striker resolved from source data. The head loss is the selected
-/// material bending loss, or a declared stated unknown entered as zero (its
-/// receipt joins the notes); with neither the build refuses with
+/// material bending loss, the head cards' film loss curve (its receipt and the
+/// edge loss's stated unknown join the notes), or a declared stated unknown
+/// entered as zero (its receipt joins the notes); with none the build refuses with
 /// `materials::FILM_LOSS_REFUSAL` instead of keeping the preset's fitted T60.
 /// Support/wire laws stay as declared in `s`. The supplied impactor replaces
 /// `s.striker` completely.
@@ -168,7 +171,23 @@ pub const KICK_BEATER_PRESET_RECEIPT: &str = "kick beater: PRESET (declared esti
 /// describes yet. KICK_BEATER_PRESET_RECEIPT replaces the card striker's tip
 /// note, and the card striker is unused.
 pub fn kick_with_materials(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_drum(s, hits, gas, Some(materials), true)
+    let mut piece = build_drum(s, hits, gas, Some(materials), true)?;
+    piece.notes.push(kick_pillow_note(s));
+    Ok(piece)
+}
+
+/// How the kick's receipt on the card route begins: the preset names a pillow,
+/// and nothing in the render models one.
+pub const KICK_PILLOW_RECEIPT: &str = "kick: pillow not modelled";
+
+/// KICK_PILLOW_RECEIPT with what stands in for the pillow: the spec's declared
+/// muffle dashpot, if any, which is an estimate and not a pillow model.
+pub fn kick_pillow_note(s: &DrumSpec) -> String {
+    let stand_in = s.muffle.map_or_else(
+        || "no muffle dashpot is declared".to_string(),
+        |(_, _, radius, c)| format!("only the preset's declared muffle dashpot ({c} N s/m^3 over a {:.0} mm radius on each head, an estimate) stands in for it", radius * 1e3),
+    );
+    format!("{KICK_PILLOW_RECEIPT}; {stand_in}; a porous absorber in the heads' near field, from a measured flow resistivity, is a separate unit")
 }
 
 fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>, preset_striker: bool) -> Result<Piece, String> {
@@ -176,7 +195,7 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         None => (FilmLoss::FittedT60, FilmLoss::FittedT60),
         Some(m) => match (m.primary_bending_loss(), m.secondary_bending_loss()) {
             (Some((a, angle_a)), Some((b, angle_b))) => (FilmLoss::Sourced(a, angle_a), FilmLoss::Sourced(b, angle_b)),
-            _ if m.film_loss_is_stated_unknown() => (FilmLoss::StatedUnknown, FilmLoss::StatedUnknown),
+            _ if m.film_loss_is_stated_unknown() || m.has_film_loss_curve() => (FilmLoss::NoSurfaceLoss, FilmLoss::NoSurfaceLoss),
             _ => return Err(crate::materials::FILM_LOSS_REFUSAL.into()),
         },
     };
@@ -185,8 +204,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let primary = materials.map_or(MYLAR, |m| elastic_values(m.primary()));
     let secondary = materials.map_or(MYLAR, |m| elastic_values(m.secondary()));
     let mut notes = vec![];
-    if let FilmLoss::StatedUnknown = batter_loss {
-        notes.push(crate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT.into());
+    match materials.and_then(KitMaterials::film_loss_note) {
+        Some(film) => notes.extend([film, crate::materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT.into()]),
+        None if matches!(batter_loss, FilmLoss::NoSurfaceLoss) => notes.push(crate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT.into()),
+        None => {}
     }
     if let Some(m) = materials {
         notes.extend(m.head_reduction_notes());
@@ -210,13 +231,19 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         // The volume shapes stay on the compact monopole below; the receipt
         // states its error against the baked baffled self-resistance.
         let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance;
-        for (head, label, hd, elastic) in [
-            (&mut batter, "batter", s.batter, primary),
-            (&mut reso, "resonant", s.reso, secondary),
+        let film = materials.filter(|m| m.has_film_loss_curve());
+        for (index, head, label, hd, elastic) in [
+            (0, &mut batter, "batter", s.batter, primary),
+            (1, &mut reso, "resonant", s.reso, secondary),
         ] {
             let coincidence_hz = gas.sound_speed.powi(2) / (2.0 * PI * hd.thickness)
                 * (12.0 * elastic.2 * (1.0 - elastic.1 * elastic.1) / elastic.0).sqrt();
-            for line in head.attach_head_radiation_with_viscous(&table, s.radius, &gas, Some(compact), coincidence_hz)? {
+            let lines = match film {
+                Some(m) => head.attach_head_radiation_with_film(&table, s.radius, &gas, Some(compact), coincidence_hz,
+                    &|hz| m.film_tan_delta(index, hz))?,
+                None => head.attach_head_radiation_with_viscous(&table, s.radius, &gas, Some(compact), coincidence_hz)?,
+            };
+            for line in lines {
                 notes.push(format!("{label} {line}"));
             }
         }

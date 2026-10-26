@@ -542,7 +542,7 @@ pub struct ModalAirLoad {
     /// `trace(B U' M^-1 U)`, an upper bound on the damping's largest
     /// `M^-1 C` eigenvalue for the explicit-step admission.
     pub(crate) rate_bound: f64,
-    /// With a held film loss, `damping` is radiation plus film and this is the
+    /// With a film loss, `damping` is radiation plus film and this is the
     /// film part alone, so `radiated` can say how much of a step was film.
     film_damping: Option<Vec<f64>>,
     film_step_j: f64,
@@ -595,7 +595,10 @@ struct Retained {
     /// `phi' K_bend phi / phi' K phi`: the share of the mode's stiffness
     /// energy held in bending, from the body's own operators.
     bending_share: f64,
-    /// Held film loss as a modal damping coefficient,
+    /// The film's loss tangent at the loaded frequency; `None` without a
+    /// film loss, or outside the film source's band.
+    film_tan_delta: Option<f64>,
+    /// Film loss as a modal damping coefficient,
     /// `tan delta * phi' K_bend phi / omega` at the loaded frequency.
     film_resistance: f64,
     /// Stokes face-layer resistance at the loaded frequency.
@@ -782,6 +785,11 @@ fn ritz_macs(
         .collect()
 }
 
+/// A head film's loss tangent at a mode's loaded frequency [Hz]: `Ok(None)`
+/// outside the source's band (that mode then carries no film loss, and the
+/// receipt names it), an error when the source cannot answer.
+pub type FilmTanDelta<'a> = &'a dyn Fn(f64) -> Result<Option<f64>, String>;
+
 impl ModalAirLoad {
 
     /// Build the load of a clamped full circular head of `radius` whose nodes
@@ -814,7 +822,8 @@ impl ModalAirLoad {
         )
     }
 
-    /// As `new`, with an optional held film loss `(tan delta, K_bend)`.
+    /// As `new`, with an optional film loss `(tan delta, K_bend)` whose loss
+    /// tangent is held at one value for every mode.
     ///
     /// Each retained mode gets the hysteretic loss of its bending energy,
     /// `c = tan delta * phi' K_bend phi / omega` at its own loaded frequency
@@ -824,6 +833,7 @@ impl ModalAirLoad {
     /// table lacks or the grid cannot resolve carry no film loss; the receipt
     /// names the covered band. `K_bend` is the body's bending operator alone,
     /// without the tension: tension energy is pre-stress work, not strain.
+    /// `new_with_losses` takes the loss tangent at each mode's frequency.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_film(
         table: &RadiationTable,
@@ -836,9 +846,14 @@ impl ModalAirLoad {
         compact_volume_resistance: Option<f64>,
         film: Option<(f64, &dyn Fn(&[f64]) -> Vec<f64>)>,
     ) -> Result<ModalAirLoad, String> {
+        let held = |_: f64| Ok(film.map(|(tan_delta, _)| tan_delta));
+        let film = film.map(|(_, bending)| (&held as FilmTanDelta, bending));
         Self::new_with_losses(table, radius, h, xy, mass, stiffness, gas, compact_volume_resistance, film, None)
     }
 
+    /// The general constructor: an optional film loss whose loss tangent is
+    /// read at each retained mode's own loaded frequency, and an optional
+    /// Stokes face layer `(areal density, coincidence frequency)`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_losses(
         table: &RadiationTable,
@@ -849,20 +864,13 @@ impl ModalAirLoad {
         stiffness: &dyn Fn(&[f64]) -> Vec<f64>,
         gas: &GasState,
         compact_volume_resistance: Option<f64>,
-        film: Option<(f64, &dyn Fn(&[f64]) -> Vec<f64>)>,
+        film: Option<(FilmTanDelta, &dyn Fn(&[f64]) -> Vec<f64>)>,
         viscous: Option<(f64, f64)>,
     ) -> Result<ModalAirLoad, String> {
         if let Some((areal_density, coincidence_hz)) = viscous
             && !(areal_density.is_finite() && areal_density > 0.0 && coincidence_hz.is_finite() && coincidence_hz > 0.0)
         {
             return Err("head viscous layer needs positive areal density and coincidence frequency".into());
-        }
-        if let Some((tan_delta, _)) = film
-            && !(tan_delta.is_finite() && tan_delta > 0.0 && tan_delta < 1.0)
-        {
-            return Err(format!(
-                "head film loss: tan delta {tan_delta} must be finite and in (0, 1)"
-            ));
         }
         if !(radius > 0.0 && h > 0.0 && radius.is_finite() && h.is_finite())
             || xy.len() != mass.len()
@@ -1005,7 +1013,7 @@ impl ModalAirLoad {
                     }
                     None => (0.0, Some(scale * z.resistance_bound)),
                 };
-                let (bending_share, film_resistance) = match film {
+                let (bending_share, film_tan_delta, film_resistance) = match film {
                     Some((tan_delta, bending)) => {
                         let bend: f64 = phi.iter().zip(&bending(&phi)).map(|(a, b)| a * b).sum();
                         if !(bend >= 0.0 && bend <= stiff * (1.0 + 1e-9)) {
@@ -1013,9 +1021,18 @@ impl ModalAirLoad {
                                 "head film loss: mode {label} has bending energy {bend:e} outside [0, {stiff:e}]"
                             ));
                         }
-                        (bend / stiff, tan_delta * bend / omega)
+                        let hz = omega / (2.0 * std::f64::consts::PI);
+                        match tan_delta(hz).map_err(|e| format!("head film loss: mode {label} at {hz:.1} Hz: {e}"))? {
+                            Some(t) if t.is_finite() && t > 0.0 && t < 1.0 => (bend / stiff, Some(t), t * bend / omega),
+                            Some(t) => {
+                                return Err(format!(
+                                    "head film loss: mode {label} tan delta {t} must be finite and in (0, 1)"
+                                ));
+                            }
+                            None => (bend / stiff, None, 0.0),
+                        }
                     }
-                    None => (0.0, 0.0),
+                    None => (0.0, None, 0.0),
                 };
                 let viscous_resistance = match viscous {
                     Some((areal_density, coincidence_hz)) => {
@@ -1043,6 +1060,7 @@ impl ModalAirLoad {
                     iterations,
                     mac: 1.0,
                     bending_share,
+                    film_tan_delta,
                     film_resistance,
                     viscous_resistance,
                 });
@@ -1197,14 +1215,18 @@ impl ModalAirLoad {
             } else {
                 ""
             };
-            let film_note = match film {
-                Some((tan_delta, _)) => format!(
-                    "; film: bending share {:.3e}, eta {:.3e}, film T60 {:.4} s",
+            let film_note = match (film, r.film_tan_delta) {
+                (Some(_), Some(tan_delta)) => format!(
+                    "; film: tan delta {tan_delta:.4}, bending share {:.3e}, eta {:.3e}, film T60 {:.4} s",
                     r.bending_share,
                     tan_delta * r.bending_share,
                     t60(r.film_resistance)
                 ),
-                None => String::new(),
+                (Some(_), None) => format!(
+                    "; film: NONE, the loaded frequency is outside the film source's band (bending share {:.3e}), so its T60 is an upper bound",
+                    r.bending_share
+                ),
+                (None, _) => String::new(),
             };
             receipt.push(format!(
                 "({},{}) {}: in vacuo {:.1} Hz, loaded {:.1} Hz (ka {:.4}, {} iterations), air mass {:.3e} kg on {:.3e} kg, {loss}; MAC {:.4}{caveat}; ka interpolation <= {:.1e}; dropped in-family coupling <= {:.1e} of its resistance, {:.1e} of its air mass{film_note}",
@@ -1239,16 +1261,40 @@ impl ModalAirLoad {
             dropped.len()
         );
         receipt.push(summary);
-        if let Some((tan_delta, _)) = film {
+        if film.is_some() {
             let hz = |r: &Retained| r.omega / (2.0 * std::f64::consts::PI);
-            let (low, high) = retained
+            let span = |values: &mut dyn Iterator<Item = f64>| {
+                values.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
+            };
+            let covered: Vec<&Retained> = retained.iter().filter(|r| r.film_tan_delta.is_some()).collect();
+            let (low, high) = span(&mut covered.iter().map(|r| hz(r)));
+            let (t_low, t_high) = span(&mut covered.iter().filter_map(|r| r.film_tan_delta));
+            let tangent = if t_low == t_high {
+                format!("tan delta {t_low}")
+            } else {
+                format!("tan delta {t_low:.4} to {t_high:.4}")
+            };
+            let outside: Vec<String> = retained
                 .iter()
-                .fold((f64::INFINITY, 0.0_f64), |(lo, hi), r| {
-                    (lo.min(hz(r)), hi.max(hz(r)))
-                });
-            receipt.push(format!(
-                "head film loss: tan delta {tan_delta} held per mode on the {n} retained m >= 1 shapes, loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share at each mode's own frequency); the volume (m = 0) shapes and every dropped or refused shape carry NO film loss, so their decays stay upper bounds"
-            ));
+                .filter(|r| r.film_tan_delta.is_none())
+                .map(|r| {
+                    let shape = &table.modes[r.shape];
+                    format!("({},{}) {} at {:.1} Hz", shape.m, shape.n, if r.sine { "sin" } else { "cos" }, hz(r))
+                })
+                .collect();
+            let outside = if outside.is_empty() {
+                String::new()
+            } else {
+                format!("; {} retained shapes lie outside the film source's band and carry NO film loss: {}", outside.len(), outside.join(", "))
+            };
+            receipt.push(if covered.is_empty() {
+                format!("head film loss: NONE applied, no retained shape lies inside the film source's band{outside}")
+            } else {
+                format!(
+                    "head film loss: {tangent} at each mode's own loaded frequency on {} of the {n} retained m >= 1 shapes, loaded {low:.1} to {high:.1} Hz (eta = tan delta x bending share){outside}; the volume (m = 0) shapes and every dropped or refused shape carry NO film loss, so their decays stay upper bounds",
+                    covered.len()
+                )
+            });
         }
         if viscous.is_some() {
             let (low, high) = retained.iter().map(|r| r.viscous_resistance / (r.mass * r.omega))
@@ -1325,7 +1371,7 @@ impl ModalAirLoad {
     }
 
     /// Energy the modal damping removes over one step at centred velocity
-    /// `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`. With a held film
+    /// `(wn - wp) / 2k`: `(U'(wn - wp))' B (U'(wn - wp)) / 4k`. With a film
     /// loss this is radiation plus film; `film_step_j` is the film part.
     pub(crate) fn radiated(&mut self, wn: &[f64], k: f64) -> f64 {
         let n = self.cols.len();
@@ -1346,7 +1392,7 @@ impl ModalAirLoad {
         self.film_step_j
     }
 
-    /// Energy the held film loss has removed so far [J].
+    /// Energy the film loss has removed so far [J].
     pub fn film_dissipated_j(&self) -> f64 {
         self.film_dissipated_j
     }

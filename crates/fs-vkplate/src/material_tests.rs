@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::materials::{
-    FILM_LOSS_REFUSAL, FILM_LOSS_STATED_UNKNOWN_RECEIPT, HERTZ_HALF_SPACE_CAVEAT, KitMaterials,
-    TIP_ANISOTROPY, axial_indentation_modulus,
+    EDGE_LOSS_STATED_UNKNOWN_RECEIPT, FILM_LOSS_REFUSAL, FILM_LOSS_STATED_UNKNOWN_RECEIPT,
+    HERTZ_HALF_SPACE_CAVEAT, KitMaterials, TIP_ANISOTROPY, axial_indentation_modulus,
 };
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
@@ -905,7 +905,7 @@ fn g1_the_sourced_head_film_card_supplies_density_and_modulus_and_claims_no_loss
         1000.0,
         [0.0; 2],
     );
-    assert!(loss.is_err(), "the card makes no loss claim");
+    assert!(loss.is_err(), "the card makes no bending-viscosity claim");
     let mut spec = kit::tom(12.0);
     spec.grid *= 6.0;
     assert_eq!(
@@ -1310,4 +1310,91 @@ fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
         assert!(piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
         assert!(!piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
     }
+}
+
+/// The value between `before` and the next `after` in a receipt line.
+fn receipt_number(line: &str, before: &str, after: &str) -> f64 {
+    let rest = &line[line.find(before).unwrap_or_else(|| panic!("{before:?} in {line}")) + before.len()..];
+    rest[..rest.find(after).unwrap()].parse().unwrap()
+}
+
+#[test]
+fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequency() {
+    let cards = || {
+        KitMaterials::from_packs_at_temperature(
+            HEAD_FILM, &[], HICKORY, "T", 293.15, 9e-6, 0.005, 0.05,
+        )
+    };
+    let film = cards()
+        .and_then(|m| m.with_film_loss_curve("T", "frequency", 293.15))
+        .unwrap();
+    // The card's knots, linear between them, and nothing outside 20 Hz to 20 kHz.
+    for head in 0..2 {
+        for (hz, knot) in [(20.0, 0.0158), (1000.0, 0.0254), (20000.0, 0.0372)] {
+            near(film.film_tan_delta(head, hz).unwrap().unwrap(), knot);
+        }
+        near(film.film_tan_delta(head, 1125.0).unwrap().unwrap(), 0.5 * (0.0254 + 0.0266));
+        for hz in [19.9, 20000.5] {
+            assert_eq!(film.film_tan_delta(head, hz), Ok(None), "{hz} Hz");
+        }
+    }
+    assert!(film.film_tan_delta(0, f64::NAN).is_err());
+    // The curve is derived at 20 C only; a film loss is one declaration.
+    assert!(cards().and_then(|m| m.with_film_loss_curve("T", "frequency", 296.15)).is_err());
+    assert!(film.clone().with_stated_unknown_film_loss().is_err());
+    let declared = cards().and_then(KitMaterials::with_stated_unknown_film_loss).unwrap();
+    assert!(declared.clone().with_film_loss_curve("T", "frequency", 293.15).is_err());
+    let plain = pack("declared film", 1390.0, 4e9, Some(0.38)).to_bytes();
+    let refused = KitMaterials::from_packs_at_temperature(&plain, &[], HICKORY, "T", 293.15, 9e-6, 0.005, 0.05)
+        .and_then(|m| m.with_film_loss_curve("T", "frequency", 293.15))
+        .err()
+        .unwrap();
+    assert!(refused.contains("exactly one loss_tangent_tensile claim, not 0"), "{refused}");
+    assert!(film.info_json().contains("\"filmLossCurve\":{\"property\":\"loss_tangent_tensile\",\"temperatureK\":293.15,\"bandHz\":[[20,20000],[20,20000]]"));
+
+    let mut spec = kit::tom(12.0);
+    spec.grid *= 4.0;
+    let hits = [(0.002, 3.5)];
+    let piece = kit::drum_with_materials(&spec, &hits, standard_gas(), &film).unwrap();
+    let notes = &piece.notes;
+    assert!(notes.contains(&film.film_loss_note().unwrap()));
+    assert!(notes.iter().any(|n| n == EDGE_LOSS_STATED_UNKNOWN_RECEIPT));
+    assert!(!notes.iter().any(|n| n == FILM_LOSS_STATED_UNKNOWN_RECEIPT));
+    assert_eq!(piece.instrument.bodies[0].loss(), (0.0, 0.0));
+    // Each retained mode's tan delta is the card's at that mode's loaded
+    // frequency [Hz], and its eta is that times its bending share.
+    let mut modes = 0;
+    for line in notes.iter().filter(|n| n.starts_with("batter (") && n.contains("; film: tan delta")) {
+        let hz = receipt_number(line, "loaded ", " Hz");
+        let tan_delta = receipt_number(line, "film: tan delta ", ",");
+        let share = receipt_number(line, "bending share ", ",");
+        let eta = receipt_number(line, "eta ", ",");
+        let card = film.film_tan_delta(0, hz).unwrap().unwrap();
+        assert!((tan_delta - card).abs() <= 5.1e-5, "{line}: card {card}");
+        assert!((eta - tan_delta * share).abs() <= 4e-3 * eta, "{line}");
+        modes += 1;
+    }
+    assert!(modes >= 4, "{modes} batter modes carry a film loss");
+    assert!(notes.iter().any(|n| n.starts_with("batter head film loss: tan delta 0.0") && n.contains("at each mode's own loaded frequency")));
+    // The film's damping is in the stepped operator: it removes energy, part
+    // of what the head radiation's modal damping removes.
+    let mut ins = piece.instrument;
+    let mut out = vec![0.0; ins.mics.len()];
+    for _ in 0..(0.03 / ins.k()) as usize {
+        ins.step(&mut out);
+    }
+    let load = ins.bodies[0].head_radiation().unwrap();
+    assert!(load.film_dissipated_j() > 0.0);
+    assert!(load.film_dissipated_j() < ins.bodies[0].head_radiated_j());
+    let mut stated = kit::drum_with_materials(&spec, &hits, standard_gas(), &declared).unwrap().instrument;
+    for _ in 0..(0.03 / stated.k()) as usize {
+        stated.step(&mut out);
+    }
+    assert_eq!(stated.bodies[0].head_radiation().unwrap().film_dissipated_j(), 0.0);
+
+    // The card kick says that no pillow is modelled.
+    let mut kick = kit::kick();
+    kick.grid *= 6.0;
+    let kick = kit::kick_with_materials(&kick, &[], standard_gas(), &film).unwrap();
+    assert!(kick.notes.iter().any(|n| n.starts_with(kit::KICK_PILLOW_RECEIPT) && n.contains("muffle dashpot (22 N s/m^3 over a 70 mm radius")));
 }

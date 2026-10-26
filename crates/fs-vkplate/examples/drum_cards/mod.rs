@@ -1,6 +1,7 @@
 //! The drums' default build in the offline examples (.370): heads and stick
-//! from sourced material cards, no recording-fitted head T60, and snare wires
-//! that are coils of sourced steel (ruling 7373).
+//! from sourced material cards, no recording-fitted head T60, a head film loss
+//! from the film card's derived loss-tangent curve (ruling 7468), and snare
+//! wires that are coils of sourced steel (ruling 7373).
 
 use fs_matdb::QueryPoint;
 use fs_vkplate::kit::{self, DrumSpec, Piece};
@@ -28,6 +29,13 @@ const WIRE_STEEL_FREQUENCY: (&str, f64) = ("frequency", 1000.0);
 /// one temperature it is valid at (the kit's gas is at 293.15 K).
 const WIRE_SHEAR_STATE: (&str, f64) = ("temperature", 293.0);
 
+/// The film card's loss-tangent curve lies on its typed `frequency` axis.
+const FILM_FREQUENCY_AXIS: &str = "frequency";
+
+/// What the film card's curve is, for the drums' notes (the card's
+/// hitachi-dma9 observation states it in full).
+pub const FILM_LOSS_SOURCE_NOTE: &str = "head film loss source: DERIVED on the PET film card from Hitachi High-Tech DMA brief No. 9 (a 10 um annealed biaxially oriented film, not head gauge): its 1 Hz tan delta trace, shifted to 20 C by the beta relaxation's Arrhenius law (Ea 76 kJ/mol), 20 Hz to 20 kHz, about +/- 30 %";
+
 /// The density at which kit::STICK_TIP_KG, the Z5A profile's contact-effective
 /// mass, was integrated (crates/fs-couple/examples/percussion). The mass over
 /// this density is the profile's own effective volume, so the hickory card's
@@ -44,12 +52,14 @@ pub const PRESET_HEADS_RECEIPT: &str =
     "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss";
 
 /// Builds a drum. By default its heads come from the film card and its stick
-/// from the hickory card, at the standard gas's temperature. The film card
-/// claims no loss, so the film loss is a declared stated unknown, whose
-/// receipt joins the notes. The kick keeps its preset felt beater and says so
-/// (ruling 6433 (b)). A drum with snare wires binds the wire steel cards, so
-/// its strands are coils. With `preset_heads` the drum is the recording-fitted
-/// preset, and PRESET_HEADS_RECEIPT joins its notes.
+/// from the hickory card, at the standard gas's temperature. The heads' film
+/// loss is the film card's loss-tangent curve, read at each head mode's own
+/// frequency; its receipt, FILM_LOSS_SOURCE_NOTE and the edge loss's stated
+/// unknown join the notes. The kick keeps its preset felt beater and says so
+/// (ruling 6433 (b)), and says that no pillow is modelled. A drum with snare
+/// wires binds the wire steel cards, so its strands are coils. With
+/// `preset_heads` the drum is the recording-fitted preset, and
+/// PRESET_HEADS_RECEIPT joins its notes.
 pub fn drum(
     spec: &DrumSpec,
     hits: &[(f64, f64)],
@@ -72,7 +82,7 @@ pub fn drum(
         TIP_RADIUS_M,
         TIP_LOSS_S_M,
     )
-    .and_then(KitMaterials::with_stated_unknown_film_loss)?;
+    .and_then(|m| m.with_film_loss_curve("T", FILM_FREQUENCY_AXIS, gas.temperature))?;
     let cards = if spec.wires.is_some() {
         let shear = QueryPoint::new()
             .with(WIRE_SHEAR_STATE.0, WIRE_SHEAR_STATE.1)
@@ -91,9 +101,11 @@ pub fn drum(
     } else {
         cards
     };
-    if kick {
+    let mut piece = if kick {
         kit::kick_with_materials(spec, hits, gas, &cards)
     } else {
         kit::drum_with_materials(spec, hits, gas, &cards)
-    }
+    }?;
+    piece.notes.push(FILM_LOSS_SOURCE_NOTE.into());
+    Ok(piece)
 }
