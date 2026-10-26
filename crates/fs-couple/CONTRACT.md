@@ -1769,6 +1769,19 @@ clarinet is one filling of those objects.
   viscosity is requested in that same atomic bundle, including exact claim pins.
   The resulting state rebuilds the fixed-mass/thickness specimen and both loss
   mechanisms. Stale numerical coefficients and citations are replaced together.
+  Regional bindings explicitly select `RegionalPlateLoss::Authored` or
+  `KelvinVoigt`. The latter resolves every region's loss with its elastic state:
+  isotropic regions require uniaxial bending viscosity, while orthotropic regions
+  require all six reduced plane-stress viscosity coefficients, including signed
+  or explicitly zero couplings. The original tensor owner handles rotation and
+  admissibility. `realize_assembly_with_material_plate_chart_and_options` keeps
+  the resolved chart through the common acoustic dispatcher, so its existing
+  modal curvature-energy loss projection and frequency-domain refusals cannot
+  disappear at a bare-chart conversion. Authored damping must be zero alongside
+  sourced loss. This retains the existing diagonal weak-loss image, not full
+  nonproportional damping. G1/G3 compare uniform eta/E against its analytic modal
+  decay, substitute one region's loss source, and observe changed coupled
+  pressure and free decay without changing elastic frequencies or the gas state.
   An orthotropic material selection with this isotropic thermal law refuses.
   Specimen temperature must be an explicit positive absolute T coordinate; the
   surrounding gas does not supply it implicitly. Compilation is
