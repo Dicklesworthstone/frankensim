@@ -314,11 +314,115 @@ impl AnnularMembrane {
             }
         }
     }
+
+    /// Exact derivative J of the weak strain load q/(E t) at w=0.
+    /// The quadratic displacement term vanishes; the two rest-shape cross
+    /// terms remain. Assemble afresh for the supplied geometry, never reuse
+    /// a matrix across a rest-shape change.
+    pub(super) fn rest_jacobian(&self, z: &[f64]) -> Csr {
+        let rows: Vec<_> = self
+            .terms
+            .iter()
+            .map(|terms| {
+                let mut row = BTreeMap::<usize, f64>::new();
+                for t in terms {
+                    *row.entry(t.a).or_default() += t.weight * z[t.b];
+                    *row.entry(t.b).or_default() += t.weight * z[t.a];
+                }
+                row
+            })
+            .collect();
+        Csr::from_rows(&rows)
+    }
+
+    /// Hessian of V = h²/(2 E t) q' A^-1 q at rest:
+    /// B x = h² E t J' A^-1 J x. No finite displacement or fitted stiffness.
+    pub(super) fn rest_hessian_apply(
+        &self,
+        j: &Csr,
+        x: &[f64],
+        eh: f64,
+        h2: f64,
+        airy: &mut [f64],
+        out: &mut [f64],
+    ) {
+        airy.fill(0.0);
+        j.mul_add(x, eh, airy);
+        self.solve(airy);
+        out.fill(0.0);
+        for (c, &fc) in airy.iter().enumerate() {
+            for k in j.ptr[c]..j.ptr[c + 1] {
+                out[j.col[k]] += h2 * j.val[k] * fc;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{Body, Edge, Nonlinear, PlateSpec};
+
+    #[test]
+    fn rest_tangent_matches_energy_derivative_and_is_reciprocal() {
+        for curved in [false, true] {
+            for h in [0.08, 0.04] {
+                let mut b = plate(h, 0.1, curved);
+                let x: Vec<_> =
+                    b.xy.iter()
+                        .map(|[x, y]| (11.0 * x + 7.0 * y).sin())
+                        .collect();
+                let y: Vec<_> =
+                    b.xy.iter()
+                        .map(|[x, y]| (5.0 * x - 13.0 * y).cos())
+                        .collect();
+                let vk = b.vk.as_ref().unwrap();
+                let a = vk.annulus.as_ref().unwrap();
+                let j = a.rest_jacobian(&vk.z0);
+                let mut airy = vec![0.0; vk.f.len()];
+                let mut bx = vec![0.0; b.n];
+                let mut by = bx.clone();
+                a.rest_hessian_apply(&j, &x, vk.eh, h * h, &mut airy, &mut bx);
+                a.rest_hessian_apply(&j, &y, vk.eh, h * h, &mut airy, &mut by);
+                let inner = |v: &[f64], w: &[f64]| v.iter().zip(w).map(|(a, b)| a * b).sum::<f64>();
+                let norm = |v: &[f64]| inner(v, v).sqrt();
+                assert!(inner(&x, &bx) >= -1e-12 * norm(&x) * norm(&bx));
+                assert!(
+                    (inner(&x, &by) - inner(&y, &bx)).abs()
+                        <= 2e-10 * (norm(&x) * norm(&by) + norm(&y) * norm(&bx))
+                );
+                if !curved {
+                    assert!(bx.iter().chain(&by).all(|&v| v == 0.0));
+                }
+                // Independent central difference of the actual nonlinear
+                // gradient, not of the Jacobian being tested.
+                let eps = 1e-7;
+                for sign in [1.0, -1.0] {
+                    for (w, x) in b.w.iter_mut().zip(&x) {
+                        *w = sign * eps * x;
+                    }
+                    b.nonlinear_gradient();
+                    for (value, g) in by.iter_mut().zip(&b.g) {
+                        if sign > 0.0 {
+                            *value = *g / (2.0 * eps);
+                        } else {
+                            *value -= *g / (2.0 * eps);
+                        }
+                    }
+                }
+                let error = bx
+                    .iter()
+                    .zip(&by)
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                assert!(
+                    error <= 2e-7 * norm(&bx).max(1.0),
+                    "curved={curved} h={h}: error={error:e} norm={:e}",
+                    norm(&bx)
+                );
+            }
+        }
+    }
 
     fn plate(h: f64, hole: f64, curved: bool) -> Body {
         Body::plate(

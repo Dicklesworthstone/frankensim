@@ -1489,6 +1489,12 @@ impl Body {
         let mut v: Vec<f64> = (0..n).map(|i| ((i * 7919) % 101) as f64 / 101.0 - 0.5).collect();
         let mut lam = 0.0;
         let eps = 1e-9;
+        // Annular strain is quadratic in displacement. Its rest derivative
+        // gives the exact tangent with one constant sparse Jacobian, rather
+        // than rebuilding the full nonlinear strain at every power iterate.
+        // This changes setup only; rendering still evaluates the full energy.
+        let mut tangent = self.vk.as_ref().and_then(|vk| vk.annulus.as_ref()
+            .map(|a| (a.rest_jacobian(&vk.z0), vec![0.0; vk.f.len()])));
         for _ in 0..400 {
             let vn = v.iter().map(|a| a * a).sum::<f64>().sqrt();
             for i in 0..n {
@@ -1497,13 +1503,21 @@ impl Body {
             let bias = std::mem::replace(&mut self.bias, vec![0.0; n]);
             self.linear_forces();
             self.bias = bias;
-            // B x ~ grad V(eps x) / eps
-            let xs = self.w.clone();
-            for i in 0..n {
-                self.w[i] = eps * xs[i];
-            }
-            self.nonlinear_gradient();
-            let y: Vec<f64> = (0..n).map(|i| (-self.f[i] + self.g[i] / eps) / self.mass[i].sqrt()).collect();
+            let gradient_divisor = if let Some((j, airy)) = tangent.as_mut() {
+                let vk = self.vk.as_ref().unwrap();
+                vk.annulus.as_ref().unwrap().rest_hessian_apply(j, &self.w,
+                    vk.eh, self.h * self.h, airy, &mut self.g);
+                1.0
+            } else {
+                // Simply-connected/other bodies retain their existing path.
+                let xs = self.w.clone();
+                for i in 0..n {
+                    self.w[i] = eps * xs[i];
+                }
+                self.nonlinear_gradient();
+                eps
+            };
+            let y: Vec<f64> = (0..n).map(|i| (-self.f[i] + self.g[i] / gradient_divisor) / self.mass[i].sqrt()).collect();
             let norm = y.iter().map(|a| a * a).sum::<f64>().sqrt();
             lam = norm;
             if norm == 0.0 {

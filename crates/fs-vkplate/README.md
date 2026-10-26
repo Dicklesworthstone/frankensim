@@ -410,8 +410,12 @@ curvature stiffness in `V`, so that drift scales the shell's stiffness (on a liv
 between 0.5 and 1.5 within 2 s and the 8-16 kHz bands grew back after a second). Each step pulls `psi`
 back to `sqrt(2V)` at the half step: lowering it only removes energy, and raising it spends at most
 the energy the loss terms removed in the step before, so the discrete energy still never grows.
-Power iteration estimates the larger of the linear and full rest-shell tangent stiffnesses. The
-internal rate is the smallest supported multiple of 48 kHz using at most 60 % of that estimate
+Power iteration estimates the larger of the linear and full rest-shell tangent stiffnesses.
+For annuli, the rest tangent is the exact energy Hessian `h² E t Jᵀ A⁻¹ J`, where `J` is the
+derivative of the weak strain load at rest. Its sparse Jacobian is assembled once per estimate;
+this avoids repeated nonlinear evaluation at a tiny test displacement during instrument setup.
+Rendering still uses the full nonlinear energy. The internal rate is the smallest supported
+multiple of 48 kHz using at most 60 % of that estimate
 (1, 2, 3, 4, 6, 8, 12, 16, 24 or 32 times); an insufficient maximum rate refuses the build.
 Finer meshes can therefore use smaller steps without relaxing the stability margin;
 this is not a contact or large-deflection convergence bound. Output uses a windowed-sinc filter.
