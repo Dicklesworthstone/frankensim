@@ -1085,3 +1085,36 @@ An independent decaying sealed-gas eigenmotion exercises pressure, wall motion,
 branch pressure, complete energy and physical loss. Further regressions cover
 unchanged original gas/port blocks, combined passivity, zero-arm equivalence,
 foreign states and invalid spectra. These new tests await native execution.
+
+## Nonuniform material gas coupled to the same compliant DG wall
+
+The original prescribed `AxialGasField` now composes with elastic, Kelvin and
+source-Maxwell walls on identical circular segments. The existing pointwise
+material evaluations still own each acoustic pressure mass
+`Mp = integral A/(rho c^2) phi phi^T dx`. Wall inertia and stiffness instead use
+the exact geometric polynomial Gram matrix `G = integral phi phi^T dx`.
+For circumference P and surface density sigma, the shared energy operator uses
+`C = sqrt(P/sigma) Mp^(-1/2) G^(1/2)`: pressure receives `-C` and wall velocity
+receives `+C^T`. These matrices need not commute. No inlet, nodal or averaged
+bulk modulus is substituted for the field. Physical wall velocity is recovered
+by `G^(-1/2)/sqrt(P sigma)`; displacement and every original Maxwell reaction
+use the corresponding spring-energy maps. Gas and material memories remain
+separate, and all evolve in the original exact DG exponential.
+
+The uniform gas and uniform-field routes retain their original operator and
+identity. Existing gas diffusion, boundary/side pressure ports, Maxwell terms,
+energy coordinates and dense state caps remain authoritative. The controlled
+wall constructors support bounded cold cancellation; no interrupted candidate
+is returned. Frozen gas/material state, uniform cylindrical geometry, local
+thin-wall applicability and caller-resolved source bandwidth still apply.
+This does not supply evolving gas composition, tapered shell dynamics or a
+separately integrated heat receipt; the existing dense-ledger limitations remain.
+
+Three exact-production coordinate tests passed natively: independent two-region
+sealed-pocket oscillators, noncommuting mass roots with physical force/storage,
+and uniform limits plus invalid/cancelled preparation. Five full DG/source-pack
+regressions cover pointwise weak continuity, Maxwell force/storage/loss, retained
+gas memory and port work, original uniform identity and caps, actual composition
+and solid-source changes in propagated pressure/wall motion, and source refusals.
+Those full crate tests await native execution; leaf evidence does not certify
+the complete material-query/DG exponential integration.

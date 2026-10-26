@@ -6353,3 +6353,31 @@ physical heat contribution, and distinguish external work from private port
 work and numerical loss. They also exercise incomplete routes, trial budgets,
 late cancellation, clock mismatch and deterministic retry. The integration
 tests are added and parsed; full native execution is not yet claimed.
+
+## Source gas fields and source walls in the native DG operator
+
+`LocalMaterialWall::bind_dg` composes its original elastic, Kelvin or
+source-Maxwell material with a prescribed nonuniform `AxialGasField` on
+identical circular segments. The DG owner uses the already assembled pointwise
+gas pressure masses and independent exact geometric wall masses. Gas
+composition affects the actual pressure/flow operator and reciprocal wall
+motion; the source solid still owns inertia, equilibrium stiffness and every
+positive relaxation arm. Original gas/source receipts, pressure ports, stored
+energy, dissipation and state-size limits are retained.
+
+`bind_dg_controlled` supports cancellation before candidate publication and
+reports the existing typed cancellation error. Original source/domain and
+thin-wall refusals remain authoritative. This is cold assembly of a frozen gas
+field and frozen wall, with the same uniform-cylinder and material-band limits;
+it does not transfer an already vibrating material or solve gas
+advection/thermal evolution.
+
+Source-pack regressions change only downstream composition while keeping inlet
+gas, geometry and wall source fixed, then check propagated pressure, wall motion,
+Maxwell storage/loss and total passive energy. A separate source-solid
+substitution uses the same gas field. Missing transport, out-of-domain
+temperature and cancellation refuse. These full integration tests are added and
+parsed but not natively executed. Native exact-production matrix tests cover
+independent heterogeneous sealed-pocket dynamics, physical energy/force for
+noncommuting mass roots, and refusal/cancellation; they do not certify the
+complete material-query/DG exponential path.

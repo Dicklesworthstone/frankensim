@@ -3,14 +3,19 @@
 //! With circumference P, area A and gas bulk modulus B, the equations are
 //! (A/B) p_t + q_x = -P v, sigma v_t = p-K w-r v, and w_t=v.
 //! Uniform coefficients make all three mass matrices proportional to the same
-//! exact polynomial Gram matrix. In energy coordinates the pressure/velocity
-//! coupling is g=sqrt(P B/(A sigma)); the wall oscillator frequency is
-//! sqrt(K/sigma). Both couplings are skew. Only -(r/sigma) v_tilde dissipates.
+//! exact polynomial Gram matrix. The original uniform-gas coupling remains
+//! g=sqrt(P B/(A sigma)). For a spatial gas, the existing pointwise acoustic
+//! mass and the geometric wall mass give reciprocal matrix coupling instead.
+//! The wall oscillator frequency is sqrt(K/sigma). Both couplings are skew.
+//! Only Kelvin resistance and the retained Maxwell rates dissipate.
 //! This is the same local WallPin law as the frequency-domain duct, including
 //! radial inertia, rather than a retuned wave speed or a separate time step.
 
 use super::*;
 use fs_phs::WallPin;
+
+mod coordinates;
+use coordinates::{CoordinateError, WallCoordinates};
 
 #[derive(Debug, Clone)]
 pub(super) struct CompliantWall {
@@ -18,6 +23,9 @@ pub(super) struct CompliantWall {
     start: usize,
     displacement_scale: f64,
     velocity_scale: f64,
+    // Nonuniform gas cannot supply wall inertia through its pressure mass.
+    // These geometric maps recover physical velocity from wall energy coordinates.
+    physical_velocity_maps: Option<Vec<Vec<f64>>>,
     relaxation: Vec<WallRelaxationBranch>,
 }
 
@@ -51,6 +59,29 @@ fn invalid(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
 }
 
+fn check_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), DuctError> {
+    if cancelled() {
+        Err(DuctError::Cancelled { completed_steps: 0 })
+    } else {
+        Ok(())
+    }
+}
+
+fn coordinate_error(error: CoordinateError) -> DuctError {
+    match error {
+        CoordinateError::Cancelled => DuctError::Cancelled { completed_steps: 0 },
+        CoordinateError::Invalid => invalid("DG spatial gas/wall coordinates are unrepresentable"),
+    }
+}
+
+impl CompliantWall {
+    fn physical_map<'a>(&'a self, element: &'a DgElement, index: usize) -> &'a [f64] {
+        self.physical_velocity_maps
+            .as_ref()
+            .map_or(&element.mp_inv_sqrt, |maps| &maps[index])
+    }
+}
+
 impl DgDuct {
     /// Exact common radius from the original cylindrical geometry, if present.
     /// A sampled taper or profile is never inferred to be a uniform cylinder.
@@ -65,7 +96,8 @@ impl DgDuct {
     /// Every pressure port sees the wall reaction and includes wall storage.
     ///
     /// The wall covers the full lateral surface of identical circular segments
-    /// in a uniform gas. Its coefficients are the existing WallPin law; a
+    /// with either a uniform gas or the original prescribed material gas field.
+    /// Its coefficients are the existing WallPin law; a
     /// material adapter must derive them from geometry and actual source data.
     /// This is a frozen linear local membrane, without axial shell waves,
     /// prestress, external wall radiation or an independently moving mesh.
@@ -79,44 +111,66 @@ impl DgDuct {
     /// remain the caller's responsibility, as for the constant WallPin owner.
     ///
     /// # Errors
-    /// Invalid coefficients, duplicate attachment, nonuniform gas or radius,
+    /// Invalid coefficients, duplicate attachment, nonuniform radius,
     /// or total state beyond the existing dense-propagator cap.
-    pub fn with_compliant_wall(mut self, pin: WallPin) -> Result<Self, DuctError> {
+    pub fn with_compliant_wall(self, pin: WallPin) -> Result<Self, DuctError> {
+        self.with_compliant_wall_controlled(pin, &mut || false)
+    }
+
+    /// Cancellable cold preparation of the same reciprocal wall operator.
+    /// Cancellation publishes no candidate and reports zero completed steps.
+    /// The source gas mass is reused without averaging or new property queries.
+    pub fn with_compliant_wall_controlled(
+        mut self,
+        pin: WallPin,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, DuctError> {
+        check_cancelled(cancelled)?;
         if self.compliant_wall.is_some() {
             return Err(invalid("DG compliant wall is already attached"));
         }
         let radius = self
             .uniform_radius_m
             .ok_or_else(|| invalid("DG compliant wall requires identical circular cylinders"))?;
-        if self
+        let spatial_gas = self
             .gas_field
             .as_ref()
-            .is_some_and(|field| field.uniform_state().is_none())
-        {
-            return Err(invalid("DG compliant wall requires uniform material gas"));
-        }
+            .is_some_and(|field| field.uniform_state().is_none());
         fs_phs::wall_specific_impedance(&pin, 1.0).map_err(|_| {
             invalid("DG compliant wall requires passive finite mass, stiffness and resistance")
         })?;
-        let bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
-        // P/A=2/r. No geometric averaging or nodal mass lumping is used.
-        let pressure_per_displacement = 2.0 * bulk / radius;
-        let coupling = det::sqrt(pressure_per_displacement / pin.surface_density);
         let omega = det::sqrt(pin.stiffness_per_area / pin.surface_density);
         let decay = pin.resistance / pin.surface_density;
-        let displacement_scale =
-            1.0 / det::sqrt(pressure_per_displacement * pin.stiffness_per_area);
-        let velocity_scale = 1.0 / det::sqrt(pressure_per_displacement * pin.surface_density);
-        if [
-            bulk,
-            pressure_per_displacement,
-            coupling,
-            omega,
-            displacement_scale,
-            velocity_scale,
-        ]
-        .iter()
-        .any(|v| !v.is_finite() || *v <= 0.0)
+        let (coupling, displacement_scale, velocity_scale) = if spatial_gas {
+            // The map itself includes 1/sqrt(P*sigma); displacement uses the
+            // same geometric Gram root with its independent equilibrium spring.
+            (
+                None,
+                det::sqrt(pin.surface_density / pin.stiffness_per_area),
+                1.0,
+            )
+        } else {
+            // Preserve the original uniform-gas route and its operation order.
+            let bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
+            let beta = 2.0 * bulk / radius;
+            let coupling = det::sqrt(beta / pin.surface_density);
+            if [bulk, beta, coupling]
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0)
+            {
+                return Err(invalid(
+                    "DG compliant wall coefficients are unrepresentable",
+                ));
+            }
+            (
+                Some(coupling),
+                1.0 / det::sqrt(beta * pin.stiffness_per_area),
+                1.0 / det::sqrt(beta * pin.surface_density),
+            )
+        };
+        if [omega, displacement_scale, velocity_scale]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
             || !decay.is_finite()
             || (pin.resistance > 0.0 && decay == 0.0)
         {
@@ -134,18 +188,70 @@ impl DgDuct {
             })?;
         let mut operator = vec![0.0; total * total];
         for i in 0..original {
+            check_cancelled(cancelled)?;
             operator[i * total..i * total + original]
                 .copy_from_slice(&self.l_tilde[i * original..(i + 1) * original]);
         }
+        let physical_velocity_maps = if spatial_gas {
+            let local = self.mesh.order + 1;
+            // Products of degree-p basis functions have degree 2p: p+1
+            // Gauss nodes integrate the geometric Gram matrix exactly.
+            let (points, weights) = gauss_legendre_rule(local);
+            let mut gram = vec![0.0; local * local];
+            for (point, weight) in points.into_iter().zip(weights) {
+                check_cancelled(cancelled)?;
+                let basis = self.lgl.eval_basis(point);
+                for i in 0..local {
+                    for j in 0..local {
+                        gram[i * local + j] += weight * basis[i] * basis[j];
+                    }
+                }
+            }
+            let (root, inverse) = spd_sqrt_and_inv_sqrt(&gram, local)?;
+            let mut maps = Vec::with_capacity(self.elements.len());
+            for (e, element) in self.elements.iter().enumerate() {
+                check_cancelled(cancelled)?;
+                let length_scale = det::sqrt(0.5 * element.length);
+                let gram_sqrt: Vec<_> = root.iter().map(|v| v * length_scale).collect();
+                let gram_inv_sqrt: Vec<_> = inverse.iter().map(|v| v / length_scale).collect();
+                let coordinates = WallCoordinates::new(
+                    local,
+                    &element.mp_inv_sqrt,
+                    &gram_sqrt,
+                    &gram_inv_sqrt,
+                    core::f64::consts::TAU * radius,
+                    pin.surface_density,
+                    cancelled,
+                )
+                .map_err(coordinate_error)?;
+                coordinates
+                    .stamp(
+                        &mut operator,
+                        total,
+                        e * local,
+                        original + m + e * local,
+                        cancelled,
+                    )
+                    .map_err(coordinate_error)?;
+                maps.push(coordinates.velocity_map);
+            }
+            Some(maps)
+        } else {
+            None
+        };
         for i in 0..m {
+            check_cancelled(cancelled)?;
             let displacement = original + i;
             let velocity = original + m + i;
-            operator[i * total + velocity] = -coupling;
-            operator[velocity * total + i] = coupling;
+            if let Some(coupling) = coupling {
+                operator[i * total + velocity] = -coupling;
+                operator[velocity * total + i] = coupling;
+            }
             operator[displacement * total + velocity] = omega;
             operator[velocity * total + displacement] = -omega;
             operator[velocity * total + velocity] = -decay;
         }
+        check_cancelled(cancelled)?;
         for (_, port) in &mut self.ports {
             port.resize(total, 0.0);
         }
@@ -154,6 +260,7 @@ impl DgDuct {
             start: original,
             displacement_scale,
             velocity_scale,
+            physical_velocity_maps,
             relaxation: Vec::new(),
         });
         self.memory_dofs += 2 * m;
@@ -167,6 +274,7 @@ impl DgDuct {
             &self.l_tilde,
             &self.ports,
         );
+        check_cancelled(cancelled)?;
         Ok(self)
     }
 
@@ -193,6 +301,18 @@ impl DgDuct {
         pin: WallPin,
         material: &fs_material::visco::GeneralizedMaxwell,
     ) -> Result<Self, DuctError> {
+        self.with_compliant_wall_relaxation_controlled(pin, material, &mut || false)
+    }
+
+    /// Cancellable preparation retaining every positive Maxwell source arm.
+    /// An interrupted candidate is discarded before an operator is returned.
+    pub fn with_compliant_wall_relaxation_controlled(
+        self,
+        pin: WallPin,
+        material: &fs_material::visco::GeneralizedMaxwell,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, DuctError> {
+        check_cancelled(cancelled)?;
         if material.terms.len() > MAX_DG_PROPAGATOR_DOFS {
             return Err(invalid(
                 "DG wall source spectrum exceeds the bounded state capacity",
@@ -206,7 +326,7 @@ impl DgDuct {
             .iter()
             .filter(|(modulus, _)| *modulus > 0.0)
             .count();
-        let mut duct = self.with_compliant_wall(pin)?;
+        let mut duct = self.with_compliant_wall_controlled(pin, cancelled)?;
         if count == 0 {
             return Ok(duct);
         }
@@ -226,20 +346,29 @@ impl DgDuct {
             .as_ref()
             .expect("wall was attached above");
         let velocity_start = wall.start + m;
-        let radius = duct.uniform_radius_m.expect("wall requires a cylinder");
-        let bulk = duct.gas.density * duct.gas.sound_speed * duct.gas.sound_speed;
-        let beta = 2.0 * bulk / radius;
+        let spatial_gas = wall.physical_velocity_maps.is_some();
+        let beta = if spatial_gas {
+            None
+        } else {
+            let radius = duct.uniform_radius_m.expect("wall requires a cylinder");
+            let bulk = duct.gas.density * duct.gas.sound_speed * duct.gas.sound_speed;
+            Some(2.0 * bulk / radius)
+        };
         let factor = pin.stiffness_per_area / material.e_inf;
         let mut branches = Vec::with_capacity(count);
         let mut couplings = Vec::with_capacity(count);
         for (modulus, tau) in material.terms {
+            check_cancelled(cancelled)?;
             if modulus == 0.0 {
                 continue;
             }
             let stiffness = factor * modulus;
             let coupling = det::sqrt(stiffness / pin.surface_density);
             let rate_per_s = 1.0 / tau;
-            let pressure_scale = det::sqrt(stiffness / beta);
+            let pressure_scale = match beta {
+                Some(beta) => det::sqrt(stiffness / beta),
+                None => det::sqrt(stiffness * pin.surface_density),
+            };
             if [stiffness, coupling, rate_per_s, pressure_scale]
                 .iter()
                 .any(|value| !value.is_finite() || *value <= 0.0)
@@ -257,11 +386,13 @@ impl DgDuct {
         }
         let mut operator = vec![0.0; total * total];
         for i in 0..original {
+            check_cancelled(cancelled)?;
             operator[i * total..i * total + original]
                 .copy_from_slice(&duct.l_tilde[i * original..(i + 1) * original]);
         }
         for (branch, coupling) in branches.iter().zip(couplings) {
             for i in 0..m {
+                check_cancelled(cancelled)?;
                 let velocity = velocity_start + i;
                 let memory = branch.start + i;
                 operator[velocity * total + memory] = -coupling;
@@ -269,6 +400,7 @@ impl DgDuct {
                 operator[memory * total + memory] = -branch.rate_per_s;
             }
         }
+        check_cancelled(cancelled)?;
         for (_, port) in &mut duct.ports {
             port.resize(total, 0.0);
         }
@@ -286,6 +418,7 @@ impl DgDuct {
             &duct.l_tilde,
             &duct.ports,
         );
+        check_cancelled(cancelled)?;
         Ok(duct)
     }
 
@@ -321,11 +454,13 @@ impl DgDuct {
         let mut velocity_m_s = vec![0.0; m];
         for (e, element) in self.elements.iter().enumerate() {
             let base = e * local;
+            let map = wall.physical_map(element, e);
             for i in 0..local {
                 for j in 0..local {
-                    let map = element.mp_inv_sqrt[i * local + j];
-                    displacement_m[base + i] += map * state.tilde[wall.start + base + j];
-                    velocity_m_s[base + i] += map * state.tilde[wall.start + m + base + j];
+                    displacement_m[base + i] +=
+                        map[i * local + j] * state.tilde[wall.start + base + j];
+                    velocity_m_s[base + i] +=
+                        map[i * local + j] * state.tilde[wall.start + m + base + j];
                 }
                 displacement_m[base + i] *= wall.displacement_scale;
                 velocity_m_s[base + i] *= wall.velocity_scale;
@@ -337,10 +472,11 @@ impl DgDuct {
             let mut pressure = vec![0.0; m];
             for (e, element) in self.elements.iter().enumerate() {
                 let base = e * local;
+                let map = wall.physical_map(element, e);
                 for i in 0..local {
                     for j in 0..local {
-                        pressure[base + i] += element.mp_inv_sqrt[i * local + j]
-                            * state.tilde[branch.start + base + j];
+                        pressure[base + i] +=
+                            map[i * local + j] * state.tilde[branch.start + base + j];
                     }
                     pressure[base + i] *= branch.pressure_scale;
                 }

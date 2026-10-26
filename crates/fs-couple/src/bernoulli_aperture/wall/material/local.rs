@@ -1,11 +1,13 @@
 //! One source-bound thin-membrane law for discrete and continuous ducts.
 //! Geometry reduction is shared with the existing graph wall. Frequency-domain
 //! memory uses GeneralizedMaxwell::modulus; no fitted loss factor is introduced.
-use super::{AxialConstraint, WallMaterialLoss, WallPatch, property, invalid,
-    YOUNG_VISCOSITY_PROPERTY};
+use super::{
+    AxialConstraint, WallMaterialLoss, WallPatch, YOUNG_VISCOSITY_PROPERTY, invalid, property,
+};
 use crate::acoustic_realize::AcousticRealizeError;
-use fs_material::state_point::{ResolvedMaterialStatePoint, DENSITY_PROPERTY,
-    YOUNG_MODULUS_PROPERTY, POISSON_RATIO_PROPERTY};
+use fs_material::state_point::{
+    DENSITY_PROPERTY, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
+};
 use fs_math::c64::C64;
 use fs_phs::{WallPin, wall_specific_impedance};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
@@ -39,9 +41,15 @@ pub struct MaterialWallDg {
 }
 impl MaterialWallDg {
     /// Original source, thickness, constraint and declared applicability band.
-    #[must_use] pub const fn wall(&self) -> &LocalMaterialWall { &self.wall }
+    #[must_use]
+    pub const fn wall(&self) -> &LocalMaterialWall {
+        &self.wall
+    }
     /// Original DG owner, including reciprocal wall mechanics and all gas memory.
-    #[must_use] pub const fn duct(&self) -> &fs_duct::dg::DgDuct { &self.duct }
+    #[must_use]
+    pub const fn duct(&self) -> &fs_duct::dg::DgDuct {
+        &self.duct
+    }
 }
 
 impl LocalMaterialWall {
@@ -50,13 +58,22 @@ impl LocalMaterialWall {
     /// # Errors
     /// Missing/wrong-quantity/out-of-band material data, unsupported material
     /// dependence, nonpositive geometry or invalid isotropic coefficients.
-    pub fn new(material: ResolvedMaterialStatePoint, thickness_m: f64,
-        axial: AxialConstraint, loss: WallMaterialLoss, band_hz: [f64; 2])
-        -> Result<Self, AcousticRealizeError> {
-        if !thickness_m.is_finite() || thickness_m <= 0.0
+    pub fn new(
+        material: ResolvedMaterialStatePoint,
+        thickness_m: f64,
+        axial: AxialConstraint,
+        loss: WallMaterialLoss,
+        band_hz: [f64; 2],
+    ) -> Result<Self, AcousticRealizeError> {
+        if !thickness_m.is_finite()
+            || thickness_m <= 0.0
             || !band_hz.iter().all(|f| f.is_finite() && *f > 0.0)
-            || band_hz[0] >= band_hz[1] || !(core::f64::consts::TAU * band_hz[1]).is_finite() {
-            return Err(invalid("local material wall requires positive thickness and an ordered positive frequency band"));
+            || band_hz[0] >= band_hz[1]
+            || !(core::f64::consts::TAU * band_hz[1]).is_finite()
+        {
+            return Err(invalid(
+                "local material wall requires positive thickness and an ordered positive frequency band",
+            ));
         }
         let density = property(&material, DENSITY_PROPERTY, Density::DIMS, band_hz)?;
         let young = property(&material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS, band_hz)?;
@@ -66,10 +83,16 @@ impl LocalMaterialWall {
         }
         let viscosity = match &loss {
             WallMaterialLoss::Elastic | WallMaterialLoss::Maxwell(_) => 0.0,
-            WallMaterialLoss::KelvinVoigt =>
-                property(&material, YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, band_hz)?,
+            WallMaterialLoss::KelvinVoigt => property(
+                &material,
+                YOUNG_VISCOSITY_PROPERTY,
+                DynViscosity::DIMS,
+                band_hz,
+            )?,
         };
-        if viscosity < 0.0 { return Err(invalid("wall Young viscosity must be nonnegative")); }
+        if viscosity < 0.0 {
+            return Err(invalid("wall Young viscosity must be nonnegative"));
+        }
         if let WallMaterialLoss::Maxwell(spectrum) = &loss {
             spectrum.validate_source(&material)?;
             spectrum.validate_material(young, band_hz)?;
@@ -78,16 +101,40 @@ impl LocalMaterialWall {
             AxialConstraint::StressFree => 1.0,
             AxialConstraint::StrainFixed => 1.0 / (1.0 - nu * nu),
         };
-        Ok(Self { material, thickness_m, axial, loss, band_hz, density, young,
-            viscosity, axial_factor })
+        Ok(Self {
+            material,
+            thickness_m,
+            axial,
+            loss,
+            band_hz,
+            density,
+            young,
+            viscosity,
+            axial_factor,
+        })
     }
 
     /// Original material identity, queries and property receipts.
-    #[must_use] pub const fn material(&self) -> &ResolvedMaterialStatePoint { &self.material }
-    #[must_use] pub const fn thickness_m(&self) -> f64 { self.thickness_m }
-    #[must_use] pub const fn axial_constraint(&self) -> AxialConstraint { self.axial }
-    #[must_use] pub const fn loss(&self) -> &WallMaterialLoss { &self.loss }
-    #[must_use] pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
+    #[must_use]
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
+    #[must_use]
+    pub const fn thickness_m(&self) -> f64 {
+        self.thickness_m
+    }
+    #[must_use]
+    pub const fn axial_constraint(&self) -> AxialConstraint {
+        self.axial
+    }
+    #[must_use]
+    pub const fn loss(&self) -> &WallMaterialLoss {
+        &self.loss
+    }
+    #[must_use]
+    pub const fn band_hz(&self) -> [f64; 2] {
+        self.band_hz
+    }
 
     /// Bind this exact material reduction to the native DG time-domain duct.
     /// The full lateral wall responds to gas pressure; its velocity feeds back
@@ -98,21 +145,46 @@ impl LocalMaterialWall {
     /// Maxwell walls retain every positive source arm in the SAME DG operator;
     /// the native exact exponential advances their history together with gas
     /// and wall motion. Midpoint-network clock limits do not apply to that
-    /// propagator. The existing uniform-cylinder/gas and thin-wall restrictions
-    /// apply. This is
+    /// propagator. The original pointwise gas-field masses also couple to this
+    /// wall; its inertia and spring mass use the geometric Gram matrix, never
+    /// an averaged gas. Uniform-cylinder and thin-wall restrictions apply. This is
     /// cold compilation, not transfer of an already vibrating wall.
     /// The retained band is the SAME model applicability statement as the
     /// graph-wall owner, not a filter or broadband input certificate. The
     /// caller must resolve and qualify its excited frequency range separately.
-    pub fn bind_dg(self, duct: fs_duct::dg::DgDuct) -> Result<MaterialWallDg, AcousticRealizeError> {
-        let radius = duct.uniform_circular_radius_m()
-            .ok_or_else(|| invalid("DG material wall requires an explicit uniform circular geometry"))?;
+    pub fn bind_dg(
+        self,
+        duct: fs_duct::dg::DgDuct,
+    ) -> Result<MaterialWallDg, AcousticRealizeError> {
+        self.bind_dg_controlled(duct, &mut || false)
+    }
+
+    /// Cancellable cold binding. Original gas/wall source refusals remain
+    /// authoritative; interruption publishes no partially coupled operator.
+    pub fn bind_dg_controlled(
+        self,
+        duct: fs_duct::dg::DgDuct,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MaterialWallDg, AcousticRealizeError> {
+        if cancelled() {
+            return Err(AcousticRealizeError::Cancelled);
+        }
+        let radius = duct.uniform_circular_radius_m().ok_or_else(|| {
+            invalid("DG material wall requires an explicit uniform circular geometry")
+        })?;
         let patch = self.base_patch(radius, duct.total_length())?;
         let duct = match &self.loss {
-            WallMaterialLoss::Maxwell(source) =>
-                duct.with_compliant_wall_relaxation(patch.wall, source.material()),
-            _ => duct.with_compliant_wall(patch.wall),
-        }.map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            WallMaterialLoss::Maxwell(source) => duct.with_compliant_wall_relaxation_controlled(
+                patch.wall,
+                source.material(),
+                cancelled,
+            ),
+            _ => duct.with_compliant_wall_controlled(patch.wall, cancelled),
+        }
+        .map_err(|e| match e {
+            fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
+            error => AcousticRealizeError::Nonlinear(error.to_string()),
+        })?;
         Ok(MaterialWallDg { wall: self, duct })
     }
 
@@ -120,21 +192,37 @@ impl LocalMaterialWall {
     /// Hereditary arms remain in `loss()`; this is not its complete impedance.
     pub fn base_patch(&self, radius: f64, length: f64) -> Result<WallPatch, AcousticRealizeError> {
         let h = self.thickness_m;
-        if ![radius, length, h].iter().all(|x| x.is_finite() && *x > 0.0) || h / radius > 0.05 {
-            return Err(invalid("local membrane wall requires positive geometry and thickness/radius <= 0.05"));
+        if ![radius, length, h]
+            .iter()
+            .all(|x| x.is_finite() && *x > 0.0)
+            || h / radius > 0.05
+        {
+            return Err(invalid(
+                "local membrane wall requires positive geometry and thickness/radius <= 0.05",
+            ));
         }
         let factor = (h / radius) / radius * self.axial_factor;
-        let patch = WallPatch { area_m2: core::f64::consts::TAU * radius * length,
-            wall: WallPin { surface_density: self.density * h,
-                stiffness_per_area: self.young * factor, resistance: self.viscosity * factor } };
+        let patch = WallPatch {
+            area_m2: core::f64::consts::TAU * radius * length,
+            wall: WallPin {
+                surface_density: self.density * h,
+                stiffness_per_area: self.young * factor,
+                resistance: self.viscosity * factor,
+            },
+        };
         patch.impedance()?;
         if self.viscosity > 0.0 && patch.wall.resistance == 0.0 {
-            return Err(invalid("wall material reduction lost its nonzero viscosity"));
+            return Err(invalid(
+                "wall material reduction lost its nonzero viscosity",
+            ));
         }
         Ok(patch)
     }
 
-    pub(super) fn load(&self, patch: WallPatch) -> Result<RelaxationImpedanceSpec, AcousticRealizeError> {
+    pub(super) fn load(
+        &self,
+        patch: WallPatch,
+    ) -> Result<RelaxationImpedanceSpec, AcousticRealizeError> {
         match &self.loss {
             WallMaterialLoss::Maxwell(spectrum) => spectrum.load(patch, self.young, self.band_hz),
             _ => RelaxationImpedanceSpec::new(patch.impedance()?, &[])
@@ -145,11 +233,14 @@ impl LocalMaterialWall {
     /// Complete surface impedance [Pa s/m] under exp(-i omega t).
     /// Storage and loss moduli come from the same source law as the graph's
     /// hereditary states, evaluated at the requested physical frequency.
-    pub fn specific_impedance(&self, radius: f64, omega: f64)
-        -> Result<C64, AcousticRealizeError> {
-        if !omega.is_finite() || omega < core::f64::consts::TAU * self.band_hz[0]
-            || omega > core::f64::consts::TAU * self.band_hz[1] {
-            return Err(invalid("material wall frequency lies outside its declared source band"));
+    pub fn specific_impedance(&self, radius: f64, omega: f64) -> Result<C64, AcousticRealizeError> {
+        if !omega.is_finite()
+            || omega < core::f64::consts::TAU * self.band_hz[0]
+            || omega > core::f64::consts::TAU * self.band_hz[1]
+        {
+            return Err(invalid(
+                "material wall frequency lies outside its declared source band",
+            ));
         }
         let patch = self.base_patch(radius, 1.0)?;
         let mut pin = patch.wall;

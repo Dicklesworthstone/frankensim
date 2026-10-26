@@ -1,6 +1,8 @@
 use super::*;
 use fs_material::gas::{GasSpec, GasState};
 
+mod spatial;
+
 const RADIUS: f64 = 0.01;
 const LENGTH: f64 = 0.3;
 
