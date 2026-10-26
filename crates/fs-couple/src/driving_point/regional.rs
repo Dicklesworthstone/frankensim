@@ -248,6 +248,8 @@ impl RegionalDuct {
             )?;
             for hole in &mut holes {
                 hole.u_hole_over_u_in = hole.u_hole_over_u_in * upstream.u_mouth_over_u_in;
+                hole.u_chimney_in_over_u_in =
+                    hole.u_chimney_in_over_u_in * upstream.u_mouth_over_u_in;
             }
             if !upstream_holes.is_empty() {
                 for hole in &mut upstream_holes {

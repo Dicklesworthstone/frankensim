@@ -129,3 +129,77 @@ fn a_second_stage_overflow_poison_cannot_resume_with_inconsistent_histories() {
     assert!(observer.step(0.0).is_err());
     assert_eq!(observer.acceleration.history(), history);
 }
+
+#[test]
+fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_quadratically() {
+    let air = gas(false);
+    let register_duct = RegionalDuct::new(
+        &Duct {
+            segments: vec![
+                Segment::Cylinder { radius: 0.00745, length: 0.15 },
+                Segment::ToneHole {
+                    hole_radius: 0.00135,
+                    chimney_height: 0.0127,
+                    bore_radius: 0.00745,
+                    state: fs_duct::HoleState::Open,
+                },
+                Segment::Cylinder { radius: 0.00745, length: 0.11 },
+            ],
+        },
+        &[air, air, air],
+    )
+    .unwrap();
+    let (_, _, shunt) = register_duct
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at(
+            48000,
+            1024,
+            location(),
+            WallModel::Rigid,
+            air.sound_speed,
+        )
+        .unwrap();
+    let mut shunt = shunt.expect("1.35 mm register hole should build a WDF orifice shunt line");
+    let mut shunt_double = shunt.clone();
+    assert_eq!(shunt.step(0.0).unwrap(), 0.0);
+
+    let mut energy_single = 0.0;
+    let mut energy_double = 0.0;
+    for n in 0..512 {
+        let p_in = 4500.0 * (2.0 * std::f64::consts::PI * 900.0 * n as f64 / 48000.0).sin();
+        let u1 = shunt.step(p_in).unwrap();
+        let u2 = shunt_double.step(2.0 * p_in).unwrap();
+        assert!(u1.is_finite() && u2.is_finite());
+        let r1 = shunt.s12_history();
+        let r2 = shunt_double.s12_history();
+        energy_single += r1 * r1;
+        energy_double += r2 * r2;
+    }
+    assert!(energy_double > 0.0 && energy_double > 4.0 * energy_single, "energy_single={energy_single}, energy_double={energy_double}");
+
+    let tonehole_duct = RegionalDuct::new(
+        &Duct {
+            segments: vec![
+                Segment::Cylinder { radius: 0.00745, length: 0.10 },
+                Segment::ToneHole {
+                    hole_radius: 0.00235,
+                    chimney_height: 0.0069,
+                    bore_radius: 0.00745,
+                    state: fs_duct::HoleState::Open,
+                },
+                Segment::Cylinder { radius: 0.00745, length: 0.20 },
+            ],
+        },
+        &[air, air, air],
+    )
+    .unwrap();
+    let (_, _, no_shunt) = tonehole_duct
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at(
+            48000,
+            1024,
+            location(),
+            WallModel::Rigid,
+            air.sound_speed,
+        )
+        .unwrap();
+    assert!(no_shunt.is_none(), "2.35 mm normal tone hole must not activate the register-hole shunt");
+}

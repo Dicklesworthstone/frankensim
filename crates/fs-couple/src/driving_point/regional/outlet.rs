@@ -108,6 +108,97 @@ impl OutletPressure {
     }
 }
 
+/// Time-domain WDF 2-port nonlinear orifice shunt at the register hole,
+/// referenced to its describing-function vortex resistance `R_2 = R_v0`.
+///
+/// When `Delta p_v(t) = R_2 U_h(t)`, the reflected orifice wave `a_2(t) = 0`
+/// and the 1-port inlet reflectance `S_11` is exact. Away from that operating
+/// point, the orifice solves `Delta p_v(U_h) = K |U_eff| U_eff` with
+/// `U_eff = sign(U_h) max(|U_h| - U_crit, 0)` (Dalmont et al. 2002 *JASA*
+/// 112(5):2292-2305 Eq. 18) and sends `a_2(t) = (Delta p_v(t) - R_2 U_h(t)) / 2`
+/// back through `s12` and `s22`.
+#[derive(Clone, Debug)]
+pub struct RegisterHoleShuntLine {
+    s12: fs_vfit::scattering::FirScatteringPort,
+    s21: fs_vfit::scattering::FirScatteringPort,
+    s22: fs_vfit::scattering::FirScatteringPort,
+    r2_pa_s_m3: f64,
+    u_crit_m3_s: f64,
+    k_quad_pa_s2_m6: f64,
+}
+
+impl RegisterHoleShuntLine {
+    /// Incoming wave at Port 1 (the reed) from prior accepted orifice reflections `a_2`.
+    #[must_use]
+    pub fn s12_history(&self) -> f64 {
+        self.s12.response().history
+    }
+
+    /// Prime sample `-1` with the initial outgoing reed wave `p_plus_prev` and `a_2 = 0`.
+    ///
+    /// # Errors
+    /// Nonfinite input or discrete filter failure.
+    pub fn prime(&mut self, p_plus_prev: f64) -> Result<(), DrivingPointError> {
+        self.s21
+            .push(p_plus_prev)
+            .map_err(|_| invalid("register-hole s21 priming failed"))?;
+        self.s22
+            .push(0.0)
+            .map_err(|_| invalid("register-hole s22 priming failed"))?;
+        self.s12
+            .push(0.0)
+            .map_err(|_| invalid("register-hole s12 priming failed"))?;
+        Ok(())
+    }
+
+    /// Solve the memoryless register-hole orifice at the current sample and
+    /// advance `s21`, `s22`, and `s12` with the accepted `p_plus` and `a_2`.
+    ///
+    /// # Errors
+    /// Nonfinite state or quadratic-orifice solver failure.
+    pub fn step(&mut self, p_plus: f64) -> Result<f64, DrivingPointError> {
+        let s22_resp = self.s22.response();
+        let r2_refl = s22_resp.direct;
+        let h2 = self.s21.response().history + s22_resp.history;
+        if !r2_refl.is_finite() || r2_refl <= -1.0 || r2_refl >= 1.0 || !h2.is_finite() {
+            return Err(invalid(
+                "register-hole shunt port left the finite passive domain",
+            ));
+        }
+        let u_0 = h2 / self.r2_pa_s_m3;
+        let u_excess = u_0.abs() - self.u_crit_m3_s;
+        let (u_h, a2) = if u_excess <= 0.0 {
+            (u_0, 0.0)
+        } else {
+            let one_minus_r = 1.0 - r2_refl;
+            let z_eff = 2.0 * self.r2_pa_s_m3 / one_minus_r;
+            let disc = (self.k_quad_pa_s2_m6 / z_eff) * u_excess;
+            if !disc.is_finite() || disc < 0.0 {
+                return Err(invalid(
+                    "register-hole orifice quadratic discriminant is not finite",
+                ));
+            }
+            let u_eff = u_excess / (0.5 + det::sqrt(0.25 + disc));
+            let u_h = u_0.signum() * (self.u_crit_m3_s + u_eff);
+            let a2 = (h2 - self.r2_pa_s_m3 * u_h) / one_minus_r;
+            if !a2.is_finite() {
+                return Err(invalid("register-hole reflected wave is not finite"));
+            }
+            (u_h, a2)
+        };
+        self.s21
+            .push(p_plus)
+            .map_err(|_| invalid("register-hole s21 step failed"))?;
+        self.s22
+            .push(a2)
+            .map_err(|_| invalid("register-hole s22 step failed"))?;
+        self.s12
+            .push(a2)
+            .map_err(|_| invalid("register-hole s12 step failed"))?;
+        Ok(u_h)
+    }
+}
+
 impl RegionalDuct {
     /// Observe the actual flanged outlet in its bound homogeneous exterior gas.
     ///
@@ -183,6 +274,27 @@ impl RegionalDuct {
         wall: WallModel<'_>,
         delay_speed_m_s: f64,
     ) -> Result<(OutletPressure, Vec<OutletPressure>), OutletError> {
+        self.baffled_outlet_and_open_holes_and_shunt_delayed_at(
+            sample_rate_hz,
+            fft_samples,
+            receiver,
+            wall,
+            delay_speed_m_s,
+        )
+        .map(|(bell, holes, _)| (bell, holes))
+    }
+
+    /// [`Self::baffled_outlet_and_open_holes_delayed_at`] plus an optional
+    /// time-domain WDF 2-port nonlinear orifice shunt line when the first open
+    /// hole has an active describing-function vortex resistance (`R_v0 > 0`).
+    pub fn baffled_outlet_and_open_holes_and_shunt_delayed_at(
+        &self,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        receiver: CircularOutletReceiver,
+        wall: WallModel<'_>,
+        delay_speed_m_s: f64,
+    ) -> Result<(OutletPressure, Vec<OutletPressure>, Option<RegisterHoleShuntLine>), OutletError> {
         let sites = self.open_hole_sites();
         if sites.is_empty() {
             let bell = self.baffled_outlet_delayed_at(
@@ -192,7 +304,7 @@ impl RegionalDuct {
                 wall,
                 delay_speed_m_s,
             )?;
-            return Ok((bell, Vec::new()));
+            return Ok((bell, Vec::new(), None));
         }
         let terminal = self.regions.last().expect("admitted nonempty regional duct");
         let radius_m = terminal
@@ -225,21 +337,24 @@ impl RegionalDuct {
             hole_mics.push((mic, hole_receiver));
         }
         let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
-        let ((bell_kernel, bell_delay), hole_kernels) = acceleration_kernels_with_holes(
-            sample_rate_hz,
-            fft_samples,
-            self.one_way_time_s(),
-            &hole_times,
-            self.inlet_impedance(),
-            |omega| {
-                self.response_with_wall_and_holes(
-                    omega,
-                    LossModel::Bessel,
-                    Termination::FlangedOpen,
-                    wall,
-                )
-            },
-        )?;
+        let first_bore_time_s = sites[0].bore_one_way_time_s;
+        let ((bell_kernel, bell_delay), hole_kernels, shunt_line) =
+            acceleration_kernels_with_holes(
+                sample_rate_hz,
+                fft_samples,
+                self.one_way_time_s(),
+                &hole_times,
+                first_bore_time_s,
+                self.inlet_impedance(),
+                |omega| {
+                    self.response_with_wall_and_holes(
+                        omega,
+                        LossModel::Bessel,
+                        Termination::FlangedOpen,
+                        wall,
+                    )
+                },
+            )?;
         let dt = 1.0 / f64::from(sample_rate_hz);
         let bell_acc = DelayedFilter::from_impulse_response(dt, bell_kernel)
             .map_err(DrivingPointError::Discrete)?;
@@ -281,7 +396,7 @@ impl RegionalDuct {
                 },
             });
         }
-        Ok((bell, holes))
+        Ok((bell, holes, shunt_line))
     }
 
     fn total_axial_length_m(&self) -> f64 {
@@ -318,6 +433,7 @@ impl RegionalDuct {
                         sites.push(OpenHoleSite {
                             axial_position_m: axial_x,
                             effective_radius_m: hole_radius * sigma.sqrt(),
+                            bore_one_way_time_s: axial_time_s,
                             one_way_time_s: axial_time_s
                                 + (chimney_height + inner) / region.gas.sound_speed,
                         });
@@ -336,6 +452,7 @@ impl RegionalDuct {
 struct OpenHoleSite {
     axial_position_m: f64,
     effective_radius_m: f64,
+    bore_one_way_time_s: f64,
     one_way_time_s: f64,
 }
 
@@ -391,15 +508,24 @@ fn acceleration_kernels_with_holes(
     n: usize,
     bell_time_s: f64,
     hole_times_s: &[f64],
+    first_bore_time_s: f64,
     zc: f64,
     mut response: impl FnMut(f64) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError>,
-) -> Result<((Vec<f64>, usize), Vec<(Vec<f64>, usize)>), DrivingPointError> {
+) -> Result<
+    (
+        (Vec<f64>, usize),
+        Vec<(Vec<f64>, usize)>,
+        Option<RegisterHoleShuntLine>,
+    ),
+    DrivingPointError,
+> {
     if sample_rate_hz == 0
         || !(256..=MAX_OUTLET_FFT_SAMPLES).contains(&n)
         || !n.is_power_of_two()
         || !zc.is_finite()
         || zc <= 0.0
         || !bell_time_s.is_finite()
+        || !first_bore_time_s.is_finite()
         || bell_time_s <= 0.0
     {
         return Err(invalid(
@@ -425,6 +551,7 @@ fn acceleration_kernels_with_holes(
     let fft = Fft::new(n);
     let mut bell_spectrum = vec![FftC64::new(0.0, 0.0); n];
     let mut hole_spectra = vec![vec![FftC64::new(0.0, 0.0); n]; hole_times_s.len()];
+    let mut shunt_spec: Option<(f64, f64, f64, Vec<C64>, Vec<C64>)> = None;
     let store_bin = |spectrum: &mut [FftC64], k: usize, theta: f64, delay: usize, acc: C64| -> Result<(), DrivingPointError> {
         let phase = theta * delay as f64;
         let residual =
@@ -458,6 +585,30 @@ fn acceleration_kernels_with_holes(
                 C64::new(hole.u_hole_over_u_in.re, hole.u_hole_over_u_in.im) * two_over_denom;
             store_bin(spectrum, k, theta, delay, hole_flow * derivative)?;
         }
+        if let Some(hole0) = hole_flows.first()
+            && hole0.vortex_resistance_pa_s_m3 > 0.0
+            && hole0.vortex_quadratic_coeff_pa_s2_m6 > 0.0
+        {
+            let (r2_ref, u_crit_ref, k_quad_ref, s12_pos, s22_pos) =
+                shunt_spec.get_or_insert_with(|| {
+                    (
+                        hole0.vortex_resistance_pa_s_m3,
+                        hole0.vortex_critical_flow_m3_s,
+                        hole0.vortex_quadratic_coeff_pa_s2_m6,
+                        vec![C64::ZERO; n / 2 + 1],
+                        vec![C64::ZERO; n / 2 + 1],
+                    )
+                });
+            let k_ref = ((700.0 * n as f64 / rate).round() as usize).clamp(1, n / 2);
+            if k == k_ref {
+                *r2_ref = hole0.vortex_resistance_pa_s_m3;
+                *u_crit_ref = hole0.vortex_critical_flow_m3_s;
+                *k_quad_ref = hole0.vortex_quadratic_coeff_pa_s2_m6;
+            }
+            let one_minus_s11 = two_over_denom.scale(zc);
+            s12_pos[k] = hole0.u_chimney_in_over_u_in * one_minus_s11;
+            s22_pos[k] = hole0.shunt_port_reflection;
+        }
     }
     let mut scratch = vec![FftC64::new(0.0, 0.0); n];
     fft.inverse(&mut bell_spectrum, &mut scratch);
@@ -470,7 +621,54 @@ fn acceleration_kernels_with_holes(
         kernel.extend(spectrum.iter().map(|value| value.re));
         hole_kernels.push((kernel, delay));
     }
-    Ok(((bell_kernel, bell_delay), hole_kernels))
+    let shunt_line = if let Some((r2, u_crit, k_quad, mut s12_pos, mut s22_pos)) = shunt_spec {
+        if let Ok((r0, holes0)) = response(1.0e-3)
+            && let Some(h0) = holes0.first()
+        {
+            let denom0 = C64::new(r0.impedance.re + zc, r0.impedance.im);
+            let one_minus_s11_0 = denom0.recip().scale(2.0 * zc);
+            let s12_0 = (h0.u_chimney_in_over_u_in * one_minus_s11_0).re;
+            if s12_0.is_finite() {
+                s12_pos[0] = C64::new(s12_0, 0.0);
+            }
+            if h0.shunt_port_reflection.re.is_finite() {
+                s22_pos[0] = C64::new(h0.shunt_port_reflection.re.clamp(-1.0, 1.0), 0.0);
+            }
+        }
+        let mut s12_ir = crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+            &s12_pos, n, 0.0, false,
+        );
+        let reg_delay = ((first_bore_time_s * rate).floor().max(1.0) as usize).min(s12_ir.len());
+        for slot in &mut s12_ir[..reg_delay] {
+            *slot = 0.0;
+        }
+        let scale_21 = r2 / zc;
+        let s21_ir: Vec<f64> = s12_ir.iter().map(|&h| h * scale_21).collect();
+        let s22_ir = crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+            &s22_pos, n, 0.0, true,
+        );
+        let dt = 1.0 / rate;
+        let s12 = fs_vfit::scattering::FirScatteringPort::new(dt, s12_ir)
+            .map_err(|_| invalid("register-hole s12 scattering port failed"))?;
+        let s21 = fs_vfit::scattering::FirScatteringPort::new(dt, s21_ir)
+            .map_err(|_| invalid("register-hole s21 scattering port failed"))?;
+        let s22 = fs_vfit::scattering::FirScatteringPort::new(dt, s22_ir)
+            .map_err(|_| invalid("register-hole s22 scattering port failed"))?;
+        if !k_quad.is_finite() || k_quad < 0.0 {
+            return Err(invalid("register-hole quadratic loss coefficient is invalid"));
+        }
+        Some(RegisterHoleShuntLine {
+            s12,
+            s21,
+            s22,
+            r2_pa_s_m3: r2,
+            u_crit_m3_s: u_crit,
+            k_quad_pa_s2_m6: k_quad,
+        })
+    } else {
+        None
+    };
+    Ok(((bell_kernel, bell_delay), hole_kernels, shunt_line))
 }
 
 // Identify the existing linear Rayleigh operator using a unit volume-flow step.
