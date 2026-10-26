@@ -288,3 +288,41 @@ magnetic energy/coenergy discussion. Synthetic tests do not validate a catalog
 material. Focused G1/G3/G4 tests cover exact discrete saturation, source-only
 substitutions, oblique mixed-material interface continuity, energy derivatives,
 the linear limit, source envelopes, bounded nonconvergence and cancellation.
+
+## Spatial dielectric electrostatics and field-derived circuit capacitance
+
+`electrostatic::PlanarElectrostatics` retains one complete material state per
+original triangle. Its absolute SI permittivity is admitted by the same
+`linear_electric_permittivity` law used by the uniform `ResolvedCapacitor`.
+The existing weighted Whitney Hodge, incidence, sparse assembly and checked CG
+owners solve `-div(epsilon grad(V)) = rho_free`; no magnetic material or fictitious
+conductivity substitutes for a dielectric. Fixed external temperature, pressure
+and composition remain attached to their original source queries. Frequency,
+field, strain and stress-dependent or applicability-bounded laws require an
+appropriate constitutive model and refuse here.
+
+Exterior voltage traces cover complete mesh edges and anchor every connected
+component. Other exterior edges carry zero normal displacement. Recovery reports
+cell `E=-grad(V)`, `D=epsilon E` and `integral E.D/2`, without smoothing material
+interfaces. Prescribed-node weak reactions `K*V-f` are electrode free charges;
+their sum must cancel the prescribed volume charge. Free-node residuals and
+`U - (V.volume_load + V.electrode_charge)/2` have independent caller-supplied
+absolute charge/energy gates in addition to the checked linear residual.
+These finite-element balance checks do not certify spatial approximation error.
+
+`capacitance` solves two disjoint complete terminal traces at one and zero volts
+with no volume charge. The source-bound unit-voltage field gives `C=2U`, checked
+against its independently summed positive-terminal charge. Its `circuit_branch`
+feeds the existing Kirchhoff/pHS capacitor with that geometry-derived value;
+the original field object retains all source and geometry identities. Changing
+only dielectric data or a supported fixed temperature changes both the spatial
+field and native circuit storage/decay. Live coefficient changes still require
+parameter-work accounting, and are not implemented by overwriting a branch.
+
+The model is fixed-geometry planar, isotropic, linear, nondispersive and lossless.
+Fringing within the specified domain is solved; missing exterior/end geometry,
+leakage/conduction, dielectric loss, breakdown, electrostriction and evolving
+thermal work are not inferred. `tests/electrostatic.rs` covers analytic layered
+dielectrics, volume-charge/electrode Gauss balance, voltage-offset and energy
+identities, native RC response, source-state refresh, and explicit refusals using
+synthetic claims rather than measured material qualification.

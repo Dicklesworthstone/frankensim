@@ -93,6 +93,20 @@ fn coefficient(
     )
 }
 
+/// Absolute scalar permittivity for a linear isotropic lossless field owner.
+/// Uses the same source/model admission as the uniform circuit capacitor.
+/// Fixed external conditions remain attached to the original material bundle;
+/// frequency, field, strain and stress dependence or bounds require other laws.
+pub fn linear_electric_permittivity(
+    material: &ResolvedMaterialStatePoint,
+) -> Result<f64, FieldStorageError> {
+    coefficient(
+        material,
+        ELECTRIC_PERMITTIVITY_PROPERTY,
+        ELECTRIC_PERMITTIVITY_DIMS,
+    )
+}
+
 /// Absolute scalar permeability for a linear isotropic lossless field owner.
 /// Shares the exact source/model admission used by the circuit inductance:
 /// temperature and typed pressure/composition/moisture/concentration may be
@@ -230,11 +244,7 @@ impl ResolvedCapacitor {
     ) -> Result<Self, FieldStorageError> {
         positive(area_m2, "capacitor area must be finite and positive")?;
         positive(gap_m, "capacitor gap must be finite and positive")?;
-        let epsilon = coefficient(
-            &material,
-            ELECTRIC_PERMITTIVITY_PROPERTY,
-            ELECTRIC_PERMITTIVITY_DIMS,
-        )?;
+        let epsilon = linear_electric_permittivity(&material)?;
         let capacitance_f = positive(
             epsilon * (area_m2 / gap_m),
             "capacitance must be representable and positive",

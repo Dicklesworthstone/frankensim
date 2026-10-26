@@ -37,6 +37,8 @@
 //! magnets. Its contour remains in an induced-linear exterior medium; it does
 //! not evolve geometry or magnetic work.
 
+/// Spatial source-bound dielectric fields and geometry-derived capacitance.
+pub mod electrostatic;
 pub mod force;
 pub mod planar;
 pub mod transfer;
