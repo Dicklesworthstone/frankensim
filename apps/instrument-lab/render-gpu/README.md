@@ -105,6 +105,9 @@ A hi-hat adds a stick contact per stroke, so chunks are padded to the same strok
 ### Agreement with the CPU
 
 `--check`, 2 ms windows, compared with the signal RMS. The CPU friction order and f64 Airy storage are used throughout.
+The command now exits nonzero if any window exceeds the existing `1e-3` relative-RMS threshold.
+Missing microphones/samples, nonfinite trajectories, and an entirely silent CPU reference also refuse qualification.
+A successful process exit therefore requires a complete numerical comparison; it does not certify acoustic quality or real-time throughput.
 
 | piece | largest window difference | octave bands |
 |---|---|---|

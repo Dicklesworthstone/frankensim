@@ -460,7 +460,66 @@ fn octaves(x: &[f64], rate: f64) -> Vec<(f64, f64)> {
     out
 }
 
+/// Validate the complete trajectories before accepting the existing 2-ms,
+/// 1e-3 relative-RMS comparison. Zip alone would hide a missing GPU tail,
+/// and a comparison with NaN never satisfies `d > threshold`.
+fn compare_raw(c: &[Vec<f64>], g: &[Vec<f64>], total: usize, rate: f64, skip: usize) -> Result<(), String> {
+    if !rate.is_finite() || rate <= 0.0 || total == 0 || skip >= total {
+        return Err("--check needs a finite positive rate and a nonempty post-settle trajectory".into());
+    }
+    if c.is_empty() || c.len() != g.len() {
+        return Err("--check CPU/GPU microphone counts differ or are empty".into());
+    }
+    for (m, (cpu, gpu)) in c.iter().zip(g).enumerate() {
+        if cpu.len() != total || gpu.len() != total {
+            return Err(format!("--check mic {m}: expected {total} samples, got CPU {} and GPU {}", cpu.len(), gpu.len()));
+        }
+        if cpu.iter().chain(gpu).any(|x| !x.is_finite()) {
+            return Err(format!("--check mic {m}: nonfinite trajectory"));
+        }
+    }
+    let win = ((0.002 * rate) as usize).max(1);
+    let mut failed = false;
+    let mut audible = false;
+    for m in 0..c.len() {
+        let rms = (c[m].iter().map(|x| x * x).sum::<f64>() / c[m].len() as f64).sqrt();
+        if !rms.is_finite() {
+            return Err(format!("--check mic {m}: nonfinite reference energy"));
+        }
+        audible |= rms > 0.0;
+        println!("mic {m}: rms {rms:.3e} Pa; relative difference |gpu - cpu| / rms over time:");
+        let mut first_big = None;
+        let mut line = String::new();
+        for (wi, (a, b)) in c[m].chunks(win).zip(g[m].chunks(win)).enumerate() {
+            let d = (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64).sqrt() / rms.max(1e-300);
+            if !d.is_finite() {
+                return Err(format!("--check mic {m}: nonfinite difference in window {wi}"));
+            }
+            if wi < 8 || wi % (c[m].len() / win / 12).max(1) == 0 {
+                line += &format!(" {:.0}ms:{d:.1e}", wi as f64 * 2.0);
+            }
+            if first_big.is_none() && d > 1e-3 {
+                first_big = Some(wi as f64 * 2.0);
+            }
+        }
+        println!("  {line}");
+        match first_big {
+            Some(ms) => { println!("  first 2-ms window above 1e-3: {ms:.0} ms"); failed = true; }
+            None => println!("  never above 1e-3"),
+        }
+        let (oc, og) = (octaves(&c[m][skip..], rate), octaves(&g[m][skip..], rate));
+        let row: Vec<String> = oc.iter().zip(&og).map(|(a, b)| format!("{:.0}:{:+.2}", a.0, b.1 - a.1)).collect();
+        println!("  octave bands, GPU - CPU dB: {}", row.join(" "));
+    }
+    if failed { return Err("CPU/CUDA comparison exceeded the 1e-3 relative-RMS threshold".into()); }
+    if !audible { return Err("--check reference is entirely silent; parity is unqualified".into()); }
+    Ok(())
+}
+
 fn check(name: &str, secs: f64, o: &Opts) {
+    if !secs.is_finite() || secs <= 0.0 {
+        die("--check SECONDS must be finite and positive");
+    }
     // the CPU's own friction order, so any difference is the arithmetic's
     let o = &Opts { exact_friction: true, ..*o };
     let hits = [(0.002, 3.0), (secs * 0.5, 2.0)];
@@ -478,30 +537,41 @@ fn check(name: &str, secs: f64, o: &Opts) {
     let c = cpu_raw(&mut cpu, total);
     let wc = tc.elapsed().as_secs_f64();
     println!("{name}: {total} steps at {rate:.0} Hz; CPU {wc:.2} s, GPU {wg:.2} s (incl. setup) -> {:.1}x", wc / wg);
-    for m in 0..c.len() {
-        let rms = (c[m].iter().map(|x| x * x).sum::<f64>() / c[m].len() as f64).sqrt();
-        println!("mic {m}: rms {rms:.3e} Pa; relative difference |gpu - cpu| / rms over time:");
-        let win = (0.002 * rate) as usize;
-        let mut first_big = None;
-        let mut line = String::new();
-        for (wi, (a, b)) in c[m].chunks(win).zip(g[m].chunks(win)).enumerate() {
-            let d = (a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64).sqrt() / rms.max(1e-300);
-            if wi < 8 || wi % (c[m].len() / win / 12).max(1) == 0 {
-                line += &format!(" {:.0}ms:{d:.1e}", wi as f64 * 2.0);
-            }
-            if first_big.is_none() && d > 1e-3 {
-                first_big = Some(wi as f64 * 2.0);
-            }
+    compare_raw(&c, &g, total, rate, (cpu.settle * rate) as usize).unwrap_or_else(|e| die(&e));
+}
+
+#[cfg(test)]
+mod trajectory_check_tests {
+    use super::compare_raw;
+
+    #[test]
+    fn full_matching_trajectory_passes_and_partial_last_window_is_checked() {
+        let cpu = vec![vec![1.0; 193]]; // 96 samples/window, including a final singleton.
+        assert!(compare_raw(&cpu, &cpu, 193, 48000.0, 0).is_ok());
+        let mut gpu = cpu.clone();
+        gpu[0][192] += 0.002;
+        assert!(compare_raw(&cpu, &gpu, 193, 48000.0, 0).unwrap_err().contains("threshold"));
+        gpu[0][192] = 1.0005;
+        assert!(compare_raw(&cpu, &gpu, 193, 48000.0, 0).is_ok());
+    }
+
+    #[test]
+    fn missing_samples_mics_nonfinite_and_silent_evidence_refuse() {
+        let cpu = vec![vec![1.0; 193]];
+        let short = vec![vec![1.0; 192]];
+        assert!(compare_raw(&cpu, &short, 193, 48000.0, 0).is_err());
+        assert!(compare_raw(&short, &cpu, 193, 48000.0, 0).is_err());
+        assert!(compare_raw(&cpu, &[], 193, 48000.0, 0).is_err());
+        assert!(compare_raw(&[], &[], 193, 48000.0, 0).is_err());
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bad = cpu.clone(); bad[0][192] = invalid;
+            assert!(compare_raw(&cpu, &bad, 193, 48000.0, 0).is_err());
+            assert!(compare_raw(&bad, &cpu, 193, 48000.0, 0).is_err());
         }
-        println!("  {line}");
-        match first_big {
-            Some(ms) => println!("  first 2-ms window above 1e-3: {ms:.0} ms"),
-            None => println!("  never above 1e-3"),
-        }
-        let skip = (cpu.settle * rate) as usize;
-        let (oc, og) = (octaves(&c[m][skip..], rate), octaves(&g[m][skip..], rate));
-        let row: Vec<String> = oc.iter().zip(&og).map(|(a, b)| format!("{:.0}:{:+.2}", a.0, b.1 - a.1)).collect();
-        println!("  octave bands, GPU - CPU dB: {}", row.join(" "));
+        let silent = vec![vec![0.0; 193]];
+        assert!(compare_raw(&silent, &silent, 193, 48000.0, 0).is_err());
+        assert!(compare_raw(&cpu, &cpu, 193, f64::NAN, 0).is_err());
+        assert!(compare_raw(&cpu, &cpu, 193, 48000.0, 193).is_err());
     }
 }
 
