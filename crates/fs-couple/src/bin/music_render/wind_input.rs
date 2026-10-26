@@ -716,10 +716,10 @@ fn load_with_all_sources(
                 let rungs = l.rungs.iter().map(|r| format!("{:e}", r.bore_length)).collect::<Vec<_>>().join(",");
                 let iterations = l.rungs.iter().map(|r| r.iterations.to_string()).collect::<Vec<_>>().join(",");
                 let order_source = if w.is_prism() { "re-entrant edges" } else { "observed over three rungs" };
-                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"unchanged\"}}",
+                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"unchanged\"}}",
                     w.bore_radius, w.wall_thickness, w.arc_width, fine.resolved_arc_width, w.axial_length,
                     fine.outer_axial_length, pocket, record.cells[0], record.cells[1], record.cells[2], l.order,
-                    l.mass_per_density * bore_area, record.riser_mass_per_density,
+                    l.mass_per_density * bore_area, record.channel_line_m, record.riser_mass_per_density,
                     renderer.voice().mouth_inertance_pa_s2_m3())
             }
             None => ",\"window\":null".to_string(),

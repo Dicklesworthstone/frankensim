@@ -30,12 +30,18 @@
 //! A radial prism's mass is the order-4/3 extrapolation of AXIAL_CELLS and
 //! twice that; any other cut is a staircase, extrapolated from AXIAL_CELLS,
 //! twice and four times that at the order the three show. Free space lies
-//! around the outer cylinder. The graph keeps its inlet section, and the mouth
+//! around the outer cylinder. The computed mass holds the channel, so the
+//! graph keeps the inlet section only as the inlet line it needs: one transit
+//! sample of its gas at the mechanics clock, the shortest the fractional image
+//! admits. A line as long as the channel rings against the window mass, yet a
+//! channel as wide as the window carries plane waves only below its first
+//! cross mode, `c / 2W` (13.5 kHz across the recorder's window); the
+//! recorder's 6.575 mm wall rang so at 18 to 21 kHz. The mouth
 //! inertance becomes the rest of the branch mass, so the static mass from
 //! junction to far field is the computed one. The jet's source coefficient and
 //! `mouth_loss_rel` are unchanged. A compact mouth reaction refuses this row.
-//! Not represented: a windway block or flat baffle around the window, a
-//! tapered pocket, viscous edge loss.
+//! Not represented: the channel air's compressibility, a windway block or flat
+//! baffle around the window, a tapered pocket, viscous edge loss.
 
 use super::{FlueInputError, Rows, bad};
 use crate::acoustic_realize::AcousticRealizeError;
@@ -45,6 +51,7 @@ use fs_bem::wall_window::{
     WallWindow, WallWindowLadder, WallWindowOptions, WindowCheeks, WindowOutside, WindowRamp,
     WindowUpstream, wall_window_ladder,
 };
+use fs_material::gas::GasState;
 
 /// Largest relative difference between pocket and bore radii that the
 /// window solve takes as one bore (see the module notes).
@@ -68,7 +75,10 @@ pub struct FlueWindowRecord {
     pub cells: [usize; 3],
     /// The rungs and the extrapolated mass per density.
     pub ladder: WallWindowLadder,
-    /// The inlet section's own `L / S` [1/m], which the graph keeps.
+    /// The inlet line the graph keeps in place of the channel [m]: one
+    /// transit sample at the mechanics clock.
+    pub channel_line_m: f64,
+    /// That line's own `L / S` [1/m].
     pub riser_mass_per_density: f64,
 }
 
@@ -129,9 +139,12 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
     Ok(shape)
 }
 
-/// Derive the window from the graph and the flue row, and solve its mass.
+/// Derive the window from the graph and the flue row, solve its mass, and
+/// shorten the graph's inlet section to one transit sample.
 pub(super) fn solve(
-    graph: &TubeNetworkSpec,
+    graph: &mut TubeNetworkSpec,
+    gases: &[GasState],
+    mechanics_rate_hz: u32,
     geometry: &FlueGeometry,
     shape: WindowRow,
     line: usize,
@@ -229,15 +242,23 @@ pub(super) fn solve(
         workers,
         ..WallWindowOptions::rung(&window, shape.axial_cells)
     };
+    // The same product the fractional image forms, so the line is exactly one
+    // sample. A channel shorter than that never had a line.
+    let channel_line_m = gases[riser_index].sound_speed * (1.0 / f64::from(mechanics_rate_hz));
+    if !(channel_line_m.is_finite() && channel_line_m > 0.0 && riser.length_m >= channel_line_m) {
+        return refuse("window wall-cut: the channel must span at least one transit sample");
+    }
     let ladder = wall_window_ladder(&window, &options).map_err(|error| {
         FlueInputError::Physics(FlueError::Physics(AcousticRealizeError::Nonlinear(
             format!("window wall-cut: {error}"),
         )))
     })?;
+    graph.sections[riser_index].length_m = channel_line_m;
     Ok(FlueWindowRecord {
         window,
         cells: [options.axial_cells, options.arc_cells, options.wall_layers],
         ladder,
-        riser_mass_per_density: riser.length_m / riser_area,
+        channel_line_m,
+        riser_mass_per_density: channel_line_m / riser_area,
     })
 }

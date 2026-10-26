@@ -190,7 +190,8 @@ impl FlueFilePerformance {
     /// observation share the supplied mouth cells (at most 1024 in total).
     /// After the mouth records, optional `window wall-cut AXIAL_CELLS` replaces
     /// the legacy `0.61 a_eq` mouth inertance with the window's mass computed
-    /// from the card's own channel, pocket and bore (see [`FlueWindowRecord`]);
+    /// from the card's own channel, pocket and bore (see [`FlueWindowRecord`]),
+    /// and keeps the channel in the graph only as a one-sample inlet line;
     /// `window none` or omission keeps it. It refuses a compact mouth reaction.
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
@@ -514,7 +515,8 @@ impl FlueFilePerformance {
         let window = match window::read(&mut rows)? {
             Some(_) if mouth_reaction => return Err(bad(rows.line,
                 "window wall-cut replaces the legacy mouth inertance; a compact mouth reaction brings its own outer mass")),
-            Some(cells) => Some(window::solve(&duct.graph, &geometry, cells, rows.line)?),
+            Some(cells) => Some(window::solve(&mut duct.graph, &duct.gases, mechanics_rate_hz,
+                &geometry, cells, rows.line)?),
             None => None,
         };
         let control_source = boundary::read_control_source(&mut rows)?;

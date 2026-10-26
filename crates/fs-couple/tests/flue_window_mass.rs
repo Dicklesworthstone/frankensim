@@ -87,10 +87,33 @@ fn wall_cut_window_replaces_only_the_legacy_mouth_inertance() {
         ]
     );
     assert_eq!(length.to_bits(), 1.571237399621776e-2f64.to_bits());
+    // The graph keeps the channel only as a one-sample inlet line; the card's
+    // 2.4 mm channel stays the window's wall (asserted above).
+    let c = new.renderer().voice().gas().sound_speed;
+    assert_eq!(
+        record.channel_line_m.to_bits(),
+        (c * (1.0 / 288_000.0)).to_bits()
+    );
     let riser_area = core::f64::consts::PI * 0.0036737 * 0.0036737;
     assert_eq!(
         record.riser_mass_per_density.to_bits(),
-        (0.0024 / riser_area).to_bits()
+        (record.channel_line_m / riser_area).to_bits()
+    );
+    let inlet = |file: &FlueFilePerformance| {
+        file.renderer()
+            .voice()
+            .network()
+            .expect("physical graph")
+            .source()
+            .graph
+            .sections[0]
+            .length_m
+    };
+    assert_eq!(inlet(&new).to_bits(), record.channel_line_m.to_bits());
+    assert_eq!(
+        inlet(&old),
+        0.0024,
+        "without the row the channel stays a line"
     );
 
     let rho = new.renderer().voice().gas().density;
@@ -134,6 +157,12 @@ fn inconsistent_windows_refuse_before_output() {
     // window's area.
     assert!(refused(&with_window(
         &base.replace("flue 0.00800", "flue 0.00700"),
+        "window wall-cut 16"
+    )));
+    // A channel shorter than one transit sample (1.19 mm at 288 kHz) has no
+    // line to keep.
+    assert!(refused(&with_window(
+        &base.replace("duct_section 0 1 0.0024000", "duct_section 0 1 0.0011000"),
         "window wall-cut 16"
     )));
     // A stepped pocket is not represented.
