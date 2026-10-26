@@ -65,6 +65,20 @@ fn solve(window: &WallWindow, options: &WallWindowOptions) -> WallWindowMass {
         mass.flux,
         mass.outer_flux
     );
+    let outer_r = window.bore_radius + window.wall_thickness;
+    let cell_flux: f64 = mass.outer_cells.iter().map(|c| c.flux).sum();
+    let cell_area: f64 = mass
+        .outer_cells
+        .iter()
+        .map(|c| outer_r * c.arc * c.length)
+        .sum();
+    assert!(
+        (cell_flux / mass.outer_flux - 1.0).abs() < 1e-12
+            && (cell_area / mass.outer_area - 1.0).abs() < 1e-12,
+        "outer cells carry {cell_flux} over {cell_area} m^2, the face {} over {} m^2",
+        mass.outer_flux,
+        mass.outer_area
+    );
     mass
 }
 
@@ -418,16 +432,50 @@ fn wedge(edge_height: f64) -> Option<WindowRamp> {
 #[test]
 fn a_ramp_whose_edge_is_the_outer_surface_is_the_prism() {
     // The staircase path on the cut the prism path solves: its conjugate
-    // gradients must land on the prism's LU solution.
-    for options in [rung(8, 12, 8), rung(16, 24, 16)] {
-        let prism = solve(&clare_d(), &options);
+    // gradients must land on the prism's LU solution, and its outer face's
+    // cell fluxes (from the exterior's face map, or a release face's ground
+    // links) on the prism's (from its diagonal channel maps).
+    let release = WallWindow {
+        outside: WindowOutside::Release,
+        ..clare_d()
+    };
+    for (window, options) in [
+        (clare_d(), rung(8, 12, 8)),
+        (clare_d(), rung(16, 24, 16)),
+        (release, rung(8, 12, 8)),
+    ] {
+        let prism = solve(&window, &options);
         let stair = solve(
             &WallWindow {
                 ramp: wedge(0.0024),
-                ..clare_d()
+                ..window
             },
             &options,
         );
+        let largest = prism
+            .outer_cells
+            .iter()
+            .map(|c| c.flux.abs())
+            .fold(0.0, f64::max);
+        assert_eq!(prism.outer_cells.len(), stair.outer_cells.len());
+        for (p, s) in prism.outer_cells.iter().zip(&stair.outer_cells) {
+            assert!(
+                (p.theta, p.arc, p.axial, p.length) == (s.theta, s.arc, s.axial, s.length)
+                    && (p.flux - s.flux).abs() < 1e-9 * largest,
+                "prism cell {p:?} vs staircase {s:?}"
+            );
+        }
+        // Against free space the flux crowds towards the outer face's
+        // re-entrant edges, where the velocity is singular.
+        let least = prism
+            .outer_cells
+            .iter()
+            .map(|c| c.flux)
+            .fold(f64::INFINITY, f64::min);
+        eprintln!("outer cell flux: largest / least {:.4}", largest / least);
+        if window.outside == WindowOutside::Free {
+            assert!(largest > 1.5 * least, "edge {largest} vs centre {least}");
+        }
         eprintln!(
             "prism {:.12} mm, staircase {:.12} mm after {} iterations",
             prism.bore_length * 1e3,

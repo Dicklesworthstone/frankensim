@@ -1,7 +1,8 @@
 //! `window wall-cut` on the Clare D whistle's D5 card: the window derived from
 //! the card's own channel, pocket and bore, its computed mass replacing the
 //! legacy `0.61 a_eq` inertance, parallel cheeks and a labium ramp from the
-//! row, the pocket radius tolerance, and the refusals.
+//! row, the pocket radius tolerance, the refusals, and the window's radiation
+//! from the head's outer cylinder in place of the authored loss.
 
 use fs_bem::wall_window::{WallWindowOptions, WindowCheeks, WindowRamp, wall_window_ladder};
 use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FlueInputError};
@@ -11,16 +12,25 @@ use fs_exec::CancelGate;
 const CARD: &str =
     include_str!("../../../data/instruments/descriptions/tin-whistle/tin-whistle-d5.performance");
 
-/// The card without its window row, cut to a 1024-sample window whose only
-/// gesture event is the opening pressure ramp.
+/// The card's flue row: the window's radiation replaces the authored loss.
+const FLUE: &str = "flue 0.00800 0.00148 0.00530 0 0 0\n";
+
+/// The card without its window radiation and window rows (lossless mouth),
+/// cut to a 1024-sample window whose only gesture event is the opening
+/// pressure ramp.
 fn legacy() -> String {
     let rows: Vec<&str> = CARD
         .lines()
         .filter(|line| line.starts_with("window "))
         .collect();
     assert_eq!(rows.len(), 1, "the D5 card carries one window row");
+    let radiating = format!("mouth_reaction window-cylinder\n{}\n", rows[0]);
+    assert!(
+        CARD.contains(&radiating) && CARD.contains(FLUE),
+        "the D5 window no longer radiates through its row; update this test"
+    );
     let text = CARD
-        .replace(&format!("{}\n", rows[0]), "")
+        .replace(&radiating, "")
         .replace("output 120000 5", "output 1024 1");
     let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(
@@ -175,17 +185,68 @@ fn inconsistent_windows_refuse_before_output() {
     )));
     // A compact mouth reaction brings its own outer mass.
     assert!(refused(&with_window(
-        &base
-            .replace(
-                "flue 0.00800 0.00148 0.00530 0 0 0.02",
-                "flue 0.00800 0.00148 0.00530 0 0 0"
-            )
-            .replace(
-                "\ncontrols 4096",
-                "\nmouth_reaction compact-baffled\ncontrols 4096"
-            ),
+        &base.replace(
+            "\ncontrols 4096",
+            "\nmouth_reaction compact-baffled\ncontrols 4096"
+        ),
         "window wall-cut 16"
     )));
+}
+
+#[test]
+fn window_cylinder_radiates_the_solved_outer_face_in_place_of_the_authored_loss() {
+    let lossless = legacy();
+    let reaction = |text: &str, kind: &str| {
+        with_window(text, &format!("mouth_reaction {kind}\nwindow wall-cut 8 cheeks parallel"))
+    };
+    // The card's own rows.
+    let file = parse(&reaction(&lossless, "window-cylinder")).unwrap();
+    let record = file.window().expect("window record");
+    let voice = file.renderer().voice();
+    let load = voice.window_radiation_load().expect("window radiation");
+    let face = &record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells;
+    assert_eq!(load.cells(), face.len());
+    assert_eq!(load.outer_radius_m(), 0.0061 + 0.0024);
+    assert!(load.band_error() <= 0.05);
+    let rho = voice.gas().density;
+    assert_eq!(
+        voice.mouth_inertance_pa_s2_m3().to_bits(),
+        (rho * (record.ladder.mass_per_density - record.riser_mass_per_density)
+            - load.load().static_inertance_pa_s2_m3())
+        .to_bits(),
+        "the radiation's static mass comes out of the computed window mass"
+    );
+    let exact = load.exact_resistance(face, 1000.0).unwrap();
+    assert!((load.realized_resistance(1000.0, false) / exact - 1.0).abs() <= 0.05);
+    let bracket = parse(&reaction(&lossless, "window-cylinder-piston")).unwrap();
+    let piston = bracket.renderer().voice().window_radiation_load().expect("bracket");
+    assert_eq!(piston.cells(), 1);
+    for (name, l) in [("outer face", load), ("cut-up piston", piston)] {
+        eprintln!(
+            "{name}: {} cells, {} R-L-C cells, M0 {:.3} Pa s^2/m^3 ({:.4} rho/sqrt(S), tail share {:.4}), realized {:.3}; band {:.4}, discrete {:.4}, tail {:.4} to {:.0} Hz; kA {:?}",
+            l.cells(),
+            l.load().cells().len(),
+            l.static_mass_pa_s2_m3(),
+            l.static_mass_pa_s2_m3() * l.open_area_m2().sqrt() / rho,
+            l.static_mass_tail_share(),
+            l.load().static_inertance_pa_s2_m3(),
+            l.band_error(),
+            l.discrete_band_error(),
+            l.tail_error(),
+            l.tail_top_hz(),
+            l.ka_band()
+        );
+    }
+    let authored = lossless.replace(FLUE, "flue 0.00800 0.00148 0.00530 0 0 0.02\n");
+    assert!(
+        parse(&reaction(&authored, "window-cylinder")).is_err(),
+        "an authored loss must be declared zero"
+    );
+    assert!(
+        parse(&with_window(&lossless, "mouth_reaction window-cylinder")).is_err(),
+        "the radiation needs the window row"
+    );
+    render(file);
 }
 
 #[test]

@@ -54,7 +54,7 @@ duct_section 20 22 0.0287667 0.0066784 1e-10
 duct_section 22 23 0.0287667 0.0062393 1e-10
 duct_section 23 24 0.0287667 0.0062090 1e-10
 radiation compact-baffled
-flue 0.01200 0.001059 0.00460 0.0001455 0 0.02
+flue 0.01200 0.001059 0.00460 0.0001455 0 0
 windway slit 0.06150
 jet_card tonal-interim
 jet 90 1e-6 3 0
@@ -78,6 +78,7 @@ loss_section 23 5 200 3000
 receiver -0.44820 0 1 4 16 2800
 outlets 24 0
 mouth_radiation -0.4482000 0 4 4
+mouth_reaction window-cylinder
 window wall-cut 4 cheeks parallel ramp 0.00051 18.6210
 controls 8192 100000
 gesture

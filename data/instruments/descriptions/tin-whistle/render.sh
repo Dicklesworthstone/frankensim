@@ -21,6 +21,16 @@
 # through the wall (17.84 mm of bore, order 1.20), and wedge, the 25 degree face rising from a tip 0.5 mm above the
 # bore (`ramp 0.0005 25` added to the row: 16.31 mm, order 1.51). That mass replaces the 0.61 a_eq mouth inertance; the
 # jet's source coefficient keeps its own law. The binary must contain the parallel-cheek window (the commit that adds this row).
+# The window radiates; its loss is not authored. Each card's row `mouth_reaction window-cylinder` takes the flux that the same solve puts
+# through the cut's outer face (8.5 mm from the axis, on the head's rigid outer cylinder, the solve's own exterior) and loads the mouth with
+# that face's radiation: resistance from the cylindrical-harmonic series of Junger and Feit (propagating axial wavenumbers only), static mass
+# from it by Kramers-Kronig, realized as a passive chain of parallel R-L-C cells fitted from 20 Hz to 24 kHz (prism: 12 cells; error 1.4 % in
+# that band, 3.6 % after the 288 kHz clock's warp, 4.8 % up to its 144 kHz Nyquist; wedge: 11 cells, 1.7 %, 3.3 % and 5.6 %; kA 0.003 to 3.7
+# on both). The radiation's static mass (prism 65.9, wedge 55.4 Pa s^2/m^3) comes out of the computed window mass, so the outer mass is not
+# counted twice. It replaces mouth_loss_rel 0.02: the flue
+# row's last field is 0. The uniform cut-up piston on the same cylinder (`mouth_reaction window-cylinder-piston`, static mass 70.3) is the
+# shape bracket, reported with the landing renders, not rendered here. The binary must contain the window radiation (the commit that adds
+# `mouth_reaction window-cylinder`).
 # Player: the air flow the same paper measured for each note of the major scale at its tempered frequency (Table 1: l/min D5 6.2, E5 6.9,
 # F#5 9.0, G5 8.2, A5 10.0, B5 9.55, C#6 11.3, D6 with only hole 6 open 11.9; and the paper's overblown series with every hole closed, Fig. 2 and
 # Table 1: D6 12.0, A6 17.9, D7 23.8, files d6c, a6c, d7c, a test of the overblowing ladder whose answer is a result), turned into mouth pressure by the island's own viscous windway law
@@ -28,7 +38,7 @@
 # v = flow / (8 x 1.48 mm^2), dry air at 20 C. The gesture is 50 ms attack, hold, 10.5 ms release.
 # Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
 # room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
-# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), mouth loss (0.02), jet displacement gain (90, as in the
+# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), jet displacement gain (90, as in the
 # flue gates), the jet card (the repository interim slot-jet card, chosen BEFORE looking at any render because a windway jet is a slot jet; it is
 # outside its Reynolds band, u-jet-profile). The binary must contain the jet-island phase fix (fs-couple 1718d79fb or later).
 #

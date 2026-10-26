@@ -702,6 +702,22 @@ fn load_with_all_sources(
             }
             None => ",\"mouth_reaction\":null".to_string(),
         };
+        let window_radiation = renderer.voice().window_radiation_load();
+        let window_radiation_json = match window_radiation {
+            Some(load) => {
+                let cells = load.load().cells().iter().map(|c| format!("[{:e},{:e},{:e}]",
+                    c.resistance_pa_s_m3, c.inertance_pa_s2_m3, c.compliance_m3_pa)).collect::<Vec<_>>().join(",");
+                let [band_lo, band_hi] = fs_couple::flue_loop::window_radiation::WINDOW_RADIATION_BAND_HZ;
+                format!(",\"window_radiation\":{{\"model\":\"window-on-rigid-outer-cylinder-v1\",\"flux\":\"{}\",\"legacy_load_replaced\":\"mouth_loss_rel\",\"outer_radius_m\":{:e},\"opening_cells\":{},\"open_area_m2\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"band_hz\":[{band_lo:e},{band_hi:e}],\"ka_band\":[{:e},{:e}],\"static_mass_kramers_kronig_pa_s2_m3\":{:e},\"static_mass_realized_pa_s2_m3\":{:e},\"static_mass_tail_share\":{:e},\"high_frequency_resistance_pa_s_m3\":{:e},\"band_error\":{:e},\"discrete_band_error\":{:e},\"tail_error\":{:e},\"tail_top_hz\":{:e},\"cells_r_l_c\":[{cells}],\"memory\":\"fs-vfit parallel-cell midpoint chain\"}}",
+                    load.flux().label(), load.outer_radius_m(), load.cells(), load.open_area_m2(),
+                    load.exterior().density, load.exterior().sound_speed, load.ka_band()[0], load.ka_band()[1],
+                    load.static_mass_pa_s2_m3(), load.load().static_inertance_pa_s2_m3(),
+                    load.static_mass_tail_share(), load.high_frequency_resistance_pa_s_m3(),
+                    load.band_error(), load.discrete_band_error(), load.tail_error(), load.tail_top_hz())
+            }
+            None => ",\"window_radiation\":null".to_string(),
+        };
+        let window_loss = if window_radiation.is_some() { "replaced by window_radiation" } else { "unchanged" };
         let window_json = match p.window() {
             Some(record) => {
                 let (w, l) = (&record.window, &record.ladder);
@@ -716,7 +732,7 @@ fn load_with_all_sources(
                 let rungs = l.rungs.iter().map(|r| format!("{:e}", r.bore_length)).collect::<Vec<_>>().join(",");
                 let iterations = l.rungs.iter().map(|r| r.iterations.to_string()).collect::<Vec<_>>().join(",");
                 let order_source = if w.is_prism() { "re-entrant edges" } else { "observed over three rungs" };
-                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"unchanged\"}}",
+                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"{window_loss}\"}}",
                     w.bore_radius, w.wall_thickness, w.arc_width, fine.resolved_arc_width, w.axial_length,
                     fine.outer_axial_length, pocket, record.cells[0], record.cells[1], record.cells[2], l.order,
                     l.mass_per_density * bore_area, record.channel_line_m, record.riser_mass_per_density,
@@ -743,7 +759,7 @@ fn load_with_all_sources(
         };
         let mutual = p.mimo_radiation_record().is_some() || p.computed_radiation_record().is_some();
         let terminal_reaction = !p.radiation_bindings().is_empty() || mutual;
-        let reaction = terminal_reaction || mouth_reaction.is_some();
+        let reaction = terminal_reaction || mouth_reaction.is_some() || window_radiation.is_some();
         let radiation_json = p.radiation_bindings().iter().map(|binding| format!(
             "{{\"node\":{},\"original_reflection\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e}{}}}",
             binding.opening().node,binding.previous_reflection(),binding.load().density_kg_m3(),
@@ -760,8 +776,10 @@ fn load_with_all_sources(
             else { "broadband unbaffled or mutual radiation" };
         let mouth_scope = if mouth_reaction.is_some() {
             "same-sample compact rectangular mouth reaction and matched exterior observation"
+        } else if window_radiation.is_some() {
+            "same-sample window radiation from the head's rigid outer cylinder; optional rectangular mouth is observation only"
         } else { "optional rectangular mouth is observation only" };
-        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
+        let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{window_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
             i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
             geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
             geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

@@ -688,8 +688,11 @@ pub fn lower_to_prony(
 }
 
 /// Lawson–Hanson non-negative least squares (dense, deterministic): solve
-/// `min ‖A x − b‖` s.t. `x ≥ 0`. Sizes here are tiny (≤ 64 unknowns).
-pub(crate) fn nnls(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+/// `min ‖A x − b‖` s.t. `x ≥ 0`, `A` row-major `rows x cols`. Sizes here are
+/// tiny (≤ 64 unknowns). A column enters while its gradient exceeds 1e-12,
+/// an absolute threshold, so callers scale `A`'s columns to unit norm.
+#[must_use]
+pub fn nnls(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut passive = vec![false; cols];
     let mut x = vec![0.0f64; cols];
     for _outer in 0..(2 * cols + 4) {

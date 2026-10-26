@@ -1,8 +1,9 @@
 //! Independent circuit, scattering and work checks, not material identification.
 use fs_math::c64::C64;
 use fs_vfit::impedance::{ImpedanceState, SeriesImpedanceSpec};
-use fs_vfit::relaxation::{ComplianceRelaxationTerm as RcTerm, RelaxationImpedance,
-    RelaxationImpedanceSpec, RelaxationTerm, MAX_RELAXATION_BRANCHES};
+use fs_vfit::relaxation::{ComplianceRelaxationTerm as RcTerm, ParallelCell, ParallelCellLoad,
+    ParallelCellSpec, RelaxationImpedance, RelaxationImpedanceSpec, RelaxationTerm, MAX_PARALLEL_CELLS,
+    MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, NetworkSegment, WaveguideNetwork};
 const DT: f64 = 0.02;
 fn base() -> SeriesImpedanceSpec {
@@ -150,4 +151,108 @@ fn existing_series_and_shunt_networks_publish_rc_memory_with_wave_energy() {
         }
         assert!(heard);
     }
+}
+
+// One RL cell (C = 0) and resonances at 7.1 and 71 rad/s, below the 157 rad/s Nyquist of DT.
+fn cells() -> [ParallelCell; 3] {
+    [ParallelCell { resistance_pa_s_m3: 0.6, inertance_pa_s2_m3: 0.3, compliance_m3_pa: 0.0 },
+     ParallelCell { resistance_pa_s_m3: 0.9, inertance_pa_s2_m3: 0.05, compliance_m3_pa: 0.4 },
+     ParallelCell { resistance_pa_s_m3: 2.5, inertance_pa_s2_m3: 0.01, compliance_m3_pa: 0.02 }]
+}
+fn chain() -> ParallelCellLoad { ParallelCellLoad::new(ParallelCellSpec::new(&cells()).unwrap(), DT).unwrap() }
+
+#[test]
+fn parallel_cells_close_their_own_recurrence_storage_and_loss_on_the_driven_flow() {
+    let mut m=chain(); let mut released=false;
+    for n in 0..2000 {
+        let old_i=m.inductor_flows_m3_s().to_vec(); let old_v=m.pressures_pa().to_vec();
+        let before=m.stored_energy_j();
+        let u=if n<300 {f64::from(n%11)-5.0} else {0.0};
+        let (direct,history)=m.affine_pressure();
+        let f=m.step(u).unwrap();
+        close(f.pressure_pa,direct*u+history);
+        let (mut pressure,mut energy,mut loss)=(0.0,0.0,0.0);
+        for (k,t) in cells().iter().enumerate() {
+            let (i,v)=(f.inductor_flows_m3_s()[k],f.pressures_pa()[k]);
+            let mid=if t.compliance_m3_pa>0.0 {0.5*(v+old_v[k])} else {v};
+            // L i' = v and C v' = U - v/R - i, both at the step midpoint.
+            close(t.inertance_pa_s2_m3*(i-old_i[k])/DT,mid);
+            close(t.compliance_m3_pa*(v-old_v[k])/DT,u-mid/t.resistance_pa_s_m3-0.5*(i+old_i[k]));
+            pressure+=mid;
+            energy+=0.5*t.inertance_pa_s2_m3*i*i+0.5*t.compliance_m3_pa*v*v;
+            loss+=mid*mid/t.resistance_pa_s_m3*DT;
+        }
+        close(pressure,f.pressure_pa); close(energy,f.stored_energy_j); close(loss,f.dissipated_energy_j);
+        let scale=(before+energy+loss+f.supplied_work_j.abs()).max(f64::MIN_POSITIVE);
+        assert!(f.balance_residual_j().abs()<2e-12*scale);
+        // A prescribed zero flow takes no work, so the cells return stored
+        // energy to the driver only while it drives; afterwards they decay.
+        released |= f.supplied_work_j<0.0;
+        if n>=300 { assert!(energy<=before+2e-12*scale); }
+    }
+    assert!(released && m.stored_energy_j()<1e-12);
+}
+
+#[test]
+fn a_cell_without_compliance_is_the_existing_high_pass_term_on_the_same_flow() {
+    let zero=SeriesImpedanceSpec{resistance_pa_s_m3:0.0,inertance_pa_s2_m3:0.0,compliance_m3_pa:None};
+    let term=rl()[0];
+    let mut wave=RelaxationImpedance::new(RelaxationImpedanceSpec::new(zero,&[term]).unwrap(),1.0,DT).unwrap();
+    let cell=ParallelCell{resistance_pa_s_m3:term.resistance_pa_s_m3,
+        inertance_pa_s2_m3:term.resistance_pa_s_m3/term.rate_per_s,compliance_m3_pa:0.0};
+    let mut flow=ParallelCellLoad::new(ParallelCellSpec::new(&[cell]).unwrap(),DT).unwrap();
+    for n in 0..1500 {
+        let f=wave.step(if n<200 {f64::from(n%7)-3.0} else {0.0}).unwrap();
+        let g=flow.step(f.port.flow_m3_s).unwrap();
+        close(g.pressure_pa,f.port.pressure_pa);
+        close(g.inductor_flows_m3_s()[0],f.branch_flows_m3_s()[0]);
+        close(g.stored_energy_j,f.port.stored_energy_j); close(g.dissipated_energy_j,f.port.dissipated_energy_j);
+    }
+}
+
+#[test]
+fn parallel_cells_answer_a_driven_flow_with_their_warped_impedance() {
+    let spec=ParallelCellSpec::new(&cells()).unwrap();
+    for bin in [3,13,53,151,401] {
+        let theta=core::f64::consts::TAU*f64::from(bin)/2048.0;
+        let mut m=ParallelCellLoad::new(spec,DT).unwrap(); let mut measured=C64::ZERO;
+        for n in 0..12288 {
+            // The step-mean flow of a sampled cosine is its sample-pair average.
+            let mean=0.5*((theta*f64::from(n)).cos()+(theta*f64::from(n+1)).cos());
+            let p=m.step(mean).unwrap().pressure_pa;
+            if n>=10240 {
+                let phase=theta*(f64::from(n)+0.5);
+                measured=measured+C64::new(phase.cos(),-phase.sin()).scale(p/1024.0);
+            }
+        }
+        let s=C64::new(0.0,2.0/DT*(theta*0.5).tan());
+        // Midpoint pressure over midpoint flow is Z at the warped s; the drive's
+        // midpoint phasor at the half-sample phase has amplitude cos(theta/2).
+        let expected=spec.impedance(s).scale((theta*0.5).cos());
+        assert!((measured-expected).abs()<1e-10*expected.abs().max(1.0), "{bin}: {measured:?} {expected:?}");
+    }
+}
+
+#[test]
+fn parallel_cells_refuse_bad_data_budgets_and_keep_history_on_refusal() {
+    assert!(ParallelCellSpec::new(&[]).is_err());
+    assert!(ParallelCellSpec::new(&[cells()[1];MAX_PARALLEL_CELLS]).is_ok());
+    assert!(ParallelCellSpec::new(&[cells()[1];MAX_PARALLEL_CELLS+1]).is_err());
+    for bad in [0.0,-1.0,f64::NAN,f64::INFINITY] {
+        assert!(ParallelCellSpec::new(&[ParallelCell{resistance_pa_s_m3:bad,..cells()[1]}]).is_err());
+        assert!(ParallelCellSpec::new(&[ParallelCell{inertance_pa_s2_m3:bad,..cells()[1]}]).is_err());
+    }
+    for bad in [-1.0,f64::NAN,f64::INFINITY] {
+        assert!(ParallelCellSpec::new(&[ParallelCell{compliance_m3_pa:bad,..cells()[1]}]).is_err());
+    }
+    let tiny=ParallelCellSpec::new(&[ParallelCell{inertance_pa_s2_m3:1e-320,..cells()[1]}]).unwrap();
+    assert!(ParallelCellLoad::new(tiny,DT).is_err());
+    assert!(ParallelCellLoad::new(ParallelCellSpec::new(&cells()).unwrap(),0.0).is_err());
+    let mut m=chain(); m.step(3.0).unwrap();
+    let (i,v,e)=(m.inductor_flows_m3_s().to_vec(),m.pressures_pa().to_vec(),m.stored_energy_j());
+    let expected=m.preview_step(2.0).unwrap();
+    for invalid in [f64::NAN,f64::INFINITY] { assert!(m.step(invalid).is_err()); }
+    assert_eq!((m.inductor_flows_m3_s().to_vec(),m.pressures_pa().to_vec(),m.stored_energy_j()),(i,v,e));
+    assert_eq!(m.step(2.0).unwrap(),expected);
+    close(ParallelCellSpec::new(&cells()).unwrap().static_inertance_pa_s2_m3(),0.36);
 }

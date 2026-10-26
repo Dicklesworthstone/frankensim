@@ -335,6 +335,7 @@ impl FlueVoice {
         aperture_size_m: [f64; 2],
     ) -> Result<(), FlueError> {
         if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some()
+            || self.window_radiation.is_some()
             || self.dg().is_some_and(|duct| duct.load().radiation_record()
                 .is_some_and(|record| record.driven_mouth().is_some()))
         {

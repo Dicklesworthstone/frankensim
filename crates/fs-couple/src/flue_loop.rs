@@ -98,6 +98,9 @@ pub mod mouth_loss;
 /// Rectangular exterior-gas reaction sharing the physical mouth receiver.
 pub mod mouth_radiation;
 
+/// A wall window's radiation load on the head's outer cylinder.
+pub mod window_radiation;
+
 /// Refinable unsteady no-slip source channel and spatial jet feedback transport.
 pub mod windway;
 
@@ -547,6 +550,9 @@ pub struct FlueVoice {
     gas: GasState,
     mouth_contraction: Option<crate::bernoulli_aperture::contraction::ContractionLoss>,
     mouth_radiation: Option<mouth_radiation::MouthRadiation>,
+    window_radiation: Option<window_radiation::WindowRadiation>,
+    // The series inertance is the rest of a computed window mass.
+    window_mass: bool,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     unsteady_windway: Option<windway::UnsteadyWindway>,
     rho: f64,
@@ -674,6 +680,8 @@ impl FlueVoice {
             gas: *gas,
             mouth_contraction: None,
             mouth_radiation: None,
+            window_radiation: None,
+            window_mass: false,
             viscous_windway: None,
             unsteady_windway: None,
             rho,
@@ -833,7 +841,9 @@ impl FlueVoice {
     /// density becomes the series mouth inertance, so the static mass between
     /// junction and far field is the computed one. The jet's source
     /// coefficient and the authored linear loss keep their owners. A compact
-    /// mouth reaction brings its own outer mass and refuses this.
+    /// mouth reaction brings its own outer mass and refuses this; the
+    /// window's radiation load ([`FlueVoice::with_window_radiation`]) follows
+    /// it and takes its static mass out of this one.
     ///
     /// # Errors
     /// Late attachment, an attached mouth reaction, or a remainder that is
@@ -841,19 +851,22 @@ impl FlueVoice {
     pub fn with_window_mass(mut self, branch_mass_per_density: f64, riser_mass_per_density: f64)
         -> Result<Self, FlueError>
     {
-        if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some() {
-            return Err(FlueError::Invalid { what: "window mass requires a cold voice without a compact mouth reaction" });
+        if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some()
+            || self.window_radiation.is_some() {
+            return Err(FlueError::Invalid { what: "window mass requires a cold voice without a mouth reaction" });
         }
         let inertance = self.rho * (branch_mass_per_density - riser_mass_per_density);
         if !(inertance.is_finite() && inertance > 0.0) {
             return Err(FlueError::Invalid { what: "window mass must exceed the inlet section's own mass" });
         }
         self.inertance = inertance;
+        self.window_mass = true;
         Ok(self)
     }
 
     /// Series mouth inertance [Pa s^2/m^3]: `rho 0.61 a_eq / S_m`, the rest
-    /// of a computed window mass, or zero under a compact mouth reaction.
+    /// of a computed window mass (less a window radiation load's static
+    /// mass), or zero under a compact mouth reaction.
     #[must_use]
     pub const fn mouth_inertance_pa_s2_m3(&self) -> f64 { self.inertance }
 
@@ -1003,6 +1016,11 @@ impl FlueVoice {
     {
         let (radiation_direct, radiation_history) = self.mouth_radiation.as_ref()
             .map_or((0.0, 0.0), mouth_radiation::MouthRadiation::affine_pressure);
+        // At most one of the two is attached; an absent one adds exact zeros.
+        let (window_direct, window_history) = self.window_radiation.as_ref()
+            .map_or((0.0, 0.0), window_radiation::WindowRadiation::affine_pressure);
+        let (radiation_direct, radiation_history) =
+            (radiation_direct + window_direct, radiation_history + window_history);
         let (l, r, zc, dt) = (self.inertance, self.resistance + radiation_direct, self.zc, self.dt);
         let area = self.geometry.mouth_area_m2();
         let jet = |q: f64| self.jet_trial(delayed.past_m_s+delayed.current_weight*q/area, seed, c);
@@ -1264,6 +1282,8 @@ impl FlueVoice {
             }
             let radiation_candidate = self.mouth_radiation.as_ref()
                 .map(|load| load.candidate(q)).transpose()?;
+            let window_candidate = self.window_radiation.as_ref()
+                .map(|load| load.candidate(q)).transpose()?;
             // Validate the entire source field with the solved current mouth
             // velocity before either the wave or source history can publish.
             let windway_candidate = windway_trial
@@ -1301,6 +1321,11 @@ impl FlueVoice {
                 radiation += frame.port.dissipated_energy_j;
                 stored_delta += frame.port.storage_change_j;
                 self.mouth_radiation = Some(next);
+            }
+            if let Some((next, frame)) = window_candidate {
+                radiation += frame.dissipated_energy_j;
+                stored_delta += frame.storage_change_j;
+                self.window_radiation = Some(next);
             }
             self.q_prev = q;
             // Mouth transverse velocity into the history ring.
@@ -1506,6 +1531,9 @@ mod convection_tests {
         assert!(offset.effective_offset_m() < offset.labium_offset_m);
     }
     fn voice(gas: GasState, geometry: FlueGeometry, gain: f64) -> FlueVoice {
+        voice_at(gas, geometry, gain, 48_000)
+    }
+    fn voice_at(gas: GasState, geometry: FlueGeometry, gain: f64, rate: u32) -> FlueVoice {
         let source = network::FlueNetworkSpec {
             graph: TubeNetworkSpec {
                 nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.7 }],
@@ -1517,7 +1545,7 @@ mod convection_tests {
             maximum_jet_mach: 0.3, max_jet_history_samples: 4096,
         };
         FlueVoice::from_network(Some(&fs_aeroac::jetcard::mint_tonal_interim_card().unwrap()),
-            gain, 1e-6, geometry, source, 48_000, 3, 0, &CancelGate::new_clock_free()).unwrap()
+            gain, 1e-6, geometry, source, rate, 3, 0, &CancelGate::new_clock_free()).unwrap()
     }
     fn contraction() -> ContractionSpec {
         ContractionSpec { area_ratio: 0.8, maximum_contracted_mach: 0.3,
@@ -1530,6 +1558,35 @@ mod convection_tests {
             assert!(d.ledger_defect_j.abs() <= 2e-12*scale+1e-30, "{d:?}");
             assert!(d.separation_loss_j >= 0.0);
         }
+    }
+
+    #[test]
+    fn a_window_radiation_load_takes_its_mass_from_the_window_and_closes_the_ledger() {
+        use fs_bem::wall_window::OuterFaceCell;
+        use window_radiation::{WindowFlux, WindowRadiationLoad};
+        let gas = gas(101_325.0);
+        let lossless = FlueGeometry { mouth_loss_rel: 0.0, ..geometry() };
+        // A 10 mm by 4 mm piston on an 8.5 mm outer cylinder: a numerical
+        // fixture, M0 near 0.39 rho / sqrt(S), about 62 rho per metre.
+        let cells = [OuterFaceCell { theta: 0.0, arc: 0.010 / 0.0085, axial: 0.0, length: 0.004, flux: 1.0 }];
+        let load = WindowRadiationLoad::new(0.0085, &cells, WindowFlux::CutUpPiston, gas,
+            1.0 / 96_000.0, &CancelGate::new_clock_free()).unwrap();
+        let window = 300.0;
+        assert!(voice_at(gas, lossless, 0.01, 96_000).with_window_radiation(load).is_err(),
+            "the radiation load needs the computed window mass first");
+        assert!(voice_at(gas, geometry(), 0.01, 96_000).with_window_mass(window, 0.0).unwrap()
+            .with_window_radiation(load).is_err(), "it replaces the authored loss");
+        assert!(voice(gas, lossless, 0.01).with_window_mass(window, 0.0).unwrap()
+            .with_window_radiation(load).is_err(), "it shares the voice's clock");
+        let v = voice_at(gas, lossless, 0.01, 96_000).with_window_mass(window, 0.0).unwrap();
+        let before = v.mouth_inertance_pa_s2_m3();
+        let mut v = v.with_window_radiation(load).unwrap();
+        assert_eq!(v.mouth_inertance_pa_s2_m3(), before - load.load().static_inertance_pa_s2_m3());
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        v.step_block(&mut [0.0; 512]).unwrap();
+        assert!(v.diagnostics()[0].radiation_loss_j > 0.0);
+        assert_work(&v);
+        assert!(v.with_window_radiation(load).is_err(), "attachment is cold and single");
     }
 
     #[test]

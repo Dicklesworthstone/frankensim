@@ -380,6 +380,11 @@ pub struct WallWindowMass {
     /// Flux out of the window's outer face per unit potential [m]. It equals
     /// `flux` to rounding.
     pub outer_flux: f64,
+    /// The outer face's open cells on the outer surface, both sides of the
+    /// mid-plane, and the flux through each: how `outer_flux` spreads over
+    /// the opening. Their fluxes sum to `outer_flux` and their areas to
+    /// `outer_area`.
+    pub outer_cells: Vec<OuterFaceCell>,
     /// `theta` cells around the bore, `N`.
     pub theta_cells: usize,
     /// Bore grid cells, (radial, axial).
@@ -393,6 +398,23 @@ pub struct WallWindowMass {
     pub residual: f64,
     /// Conjugate-gradient iterations; zero for a prism.
     pub iterations: usize,
+}
+
+/// The open part of one cell of the window's outer face, on the outer
+/// surface `r = a + t`, and the flux through it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OuterFaceCell {
+    /// Angle of the open part's centre from the window's mid-plane [rad].
+    pub theta: f64,
+    /// Angle the open part spans [rad].
+    pub arc: f64,
+    /// Axial position of the open part's centre from the window centre,
+    /// downstream positive [m].
+    pub axial: f64,
+    /// Axial length of the open part [m].
+    pub length: f64,
+    /// Flux out through the open part per unit potential [m].
+    pub flux: f64,
 }
 
 /// Why a window mass was refused.
@@ -782,10 +804,14 @@ pub fn wall_window_mass(
             let v: f64 = row.iter().zip(&phi).map(|(m, x)| m * x).sum::<f64>() - rhs[r];
             misfit += v * v;
         }
-        let top = if free { phi[face] } else { 0.0 };
+        let top = |i: usize| if free { phi[face + i] } else { 0.0 };
+        let outer_modes: Vec<f64> = (0..face)
+            .map(|i| -cross[i] * phi[i] + out_top[i] * top(i))
+            .collect();
         Solved {
-            flux: rhs[0] * (into_bottom[0] * phi[0] + cross[0] * top),
-            outer_flux: rhs[0] * (-cross[0] * phi[0] + out_top[0] * top),
+            flux: rhs[0] * (into_bottom[0] * phi[0] + cross[0] * top(0)),
+            outer_flux: rhs[0] * outer_modes[0],
+            outer_cells: faces[0].half_cells(&outer_modes),
             unknowns: size,
             residual: det::sqrt(misfit) / rhs[0],
             iterations: 0,
@@ -817,10 +843,43 @@ pub fn wall_window_mass(
     let Solved {
         flux,
         outer_flux,
+        outer_cells: half_fluxes,
         unknowns,
         residual,
         iterations,
     } = solved;
+    // Each half cell's open part, from its open fractions: an arc cell is
+    // open from its edge nearer the mid-plane (the odd arc's mid-plane cell
+    // about its centre), an axial cell from its upstream edge.
+    let (outer_arc_cells, outer_axial) = match layers.last() {
+        Some(top) => (outer.clone(), top.axial.clone()),
+        None => (vec![1.0; nwth.div_ceil(2)], vec![1.0; nwx]),
+    };
+    let odd = nwth % 2 == 1;
+    let mut outer_cells = Vec::with_capacity(2 * half_fluxes.len());
+    for (i, &fi) in outer_arc_cells.iter().enumerate() {
+        let theta = if odd && i == 0 {
+            0.0
+        } else {
+            (if odd { i as f64 - 0.5 } else { i as f64 } + 0.5 * fi) * dth
+        };
+        for (j, &fj) in outer_axial.iter().enumerate() {
+            let cell = OuterFaceCell {
+                theta,
+                arc: fi * dth,
+                axial: -half + (j as f64 + 0.5 * fj) * dxw,
+                length: fj * dxw,
+                flux: half_fluxes[i * outer_axial.len() + j],
+            };
+            outer_cells.push(cell);
+            if !(odd && i == 0) {
+                outer_cells.push(OuterFaceCell {
+                    theta: -theta,
+                    ..cell
+                });
+            }
+        }
+    }
     let bore_area = PI * a * a;
     let extrapolated = if through {
         1.0 - flux / (bore_area * (1.0 / port + 1.0 / upstream))
@@ -845,6 +904,7 @@ pub fn wall_window_mass(
         outer_axial_length,
         flux,
         outer_flux,
+        outer_cells,
         theta_cells: n_theta,
         bore_cells: (bore.nr, bore.nx),
         exterior_cells: exterior.as_ref().map_or((0, 0), |e| (e.nr, e.nx)),
@@ -858,6 +918,9 @@ pub fn wall_window_mass(
 struct Solved {
     flux: f64,
     outer_flux: f64,
+    /// Flux out of each of the outer face's half cells, outward from the
+    /// mid-plane by axial cells.
+    outer_cells: Vec<f64>,
     unknowns: usize,
     residual: f64,
     iterations: usize,
@@ -887,6 +950,26 @@ impl FaceBasis {
     /// Unknowns of the face in its even basis.
     fn size(&self) -> usize {
         self.even * self.axial_cells
+    }
+
+    /// The cell values, on the half cells outward from the mid-plane by
+    /// axial cells, of the face vector whose even coefficients are `modes`.
+    fn half_cells(&self, modes: &[f64]) -> Vec<f64> {
+        let (n, nx) = (self.arc_cells, self.axial_cells);
+        let half = n.div_ceil(2);
+        let mut cells = vec![0.0; half * nx];
+        for pe in 0..self.even {
+            for q in 0..nx {
+                let axial = &self.axial_dct[q * nx..(q + 1) * nx];
+                for i in 0..half {
+                    let z = modes[pe * nx + q] * self.arc_dct[2 * pe * n + n / 2 + i];
+                    for (c, &p) in cells[i * nx..(i + 1) * nx].iter_mut().zip(axial) {
+                        *c += z * p;
+                    }
+                }
+            }
+        }
+        cells
     }
 
     /// The even arc DCT coefficients of `cos(m theta)` sampled at the arc
@@ -1662,16 +1745,31 @@ fn staircase_channel(
     for (d, w) in drop.iter_mut().zip(bore.to_modes(&u)) {
         *d -= w;
     }
-    let outer_flux = match faces.get(1) {
+    let (outer_flux, outer_cells) = match faces.get(1) {
         Some((top, load, ..)) => {
             let outer_cells = outer_face.arc_cells * outer_face.axial_cells;
-            det::sqrt(outer_cells as f64) * load.apply(&top.to_modes(&u))[0]
+            let modes = load.apply(&top.to_modes(&u));
+            (
+                det::sqrt(outer_cells as f64) * modes[0],
+                outer_face.half_cells(&modes),
+            )
         }
-        None => channel.ground.iter().map(|&(c, g)| g * u[c]).sum(),
+        None => {
+            // A ground link carries its half cell and its mirror image.
+            let nx = outer_face.axial_cells;
+            let cells = channel.ground.iter().enumerate().map(|(k, &(c, g))| {
+                g * u[c] / multiplicity(outer_face.arc_cells, k / nx)
+            });
+            (
+                channel.ground.iter().map(|&(c, g)| g * u[c]).sum(),
+                cells.collect(),
+            )
+        }
     };
     Ok(Solved {
         flux: det::sqrt(bore_cells as f64) * bore_load.apply(&drop)[0],
         outer_flux,
+        outer_cells,
         unknowns: n,
         residual: det::sqrt(misfit) / norm,
         iterations,

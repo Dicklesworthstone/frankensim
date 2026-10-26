@@ -31,6 +31,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
+use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::openings::duct::{
@@ -193,6 +194,12 @@ impl FlueFilePerformance {
     /// from the card's own channel, pocket and bore (see [`FlueWindowRecord`]),
     /// and keeps the channel in the graph only as a one-sample inlet line;
     /// `window none` or omission keeps it. It refuses a compact mouth reaction.
+    /// `mouth_reaction window-cylinder` instead radiates that window's solved
+    /// outer face from the head's outer cylinder in the declared exterior
+    /// (see [`crate::flue_loop::window_radiation`]), replacing the authored
+    /// linear loss: it needs `window wall-cut` and `mouth_loss_rel` zero.
+    /// `mouth_reaction window-cylinder-piston` radiates one uniform piston over
+    /// that face's angle and the window's cut-up instead, as a bracket.
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
@@ -499,19 +506,22 @@ impl FlueFilePerformance {
         if aperture_size_m.is_some() && mouth_radiation.is_none() {
             return Err(bad(rows.line, "mouth_aperture requires mouth_radiation"));
         }
-        let mouth_reaction = if rows.next_is("mouth_reaction") {
+        let (mouth_reaction, window_reaction) = if rows.next_is("mouth_reaction") {
             let mut row = rows.row("mouth_reaction")?;
-            let enabled = match row.fields.next() {
-                Some("none") => false,
-                Some("compact-baffled") => true,
-                _ => return Err(bad(rows.line, "mouth_reaction requires none or compact-baffled")),
+            let selected = match row.fields.next() {
+                Some("none") => (false, None),
+                Some("compact-baffled") => (true, None),
+                Some("window-cylinder") => (false, Some(WindowFlux::WallWindow)),
+                Some("window-cylinder-piston") => (false, Some(WindowFlux::CutUpPiston)),
+                _ => return Err(bad(rows.line,
+                    "mouth_reaction requires none, compact-baffled, window-cylinder or window-cylinder-piston")),
             };
             row.end()?;
-            if enabled && mouth_radiation.is_none() {
+            if selected.0 && mouth_radiation.is_none() {
                 return Err(bad(rows.line, "mouth reaction requires an explicit mouth_radiation rectangle"));
             }
-            enabled
-        } else { false };
+            selected
+        } else { (false, None) };
         let window = match window::read(&mut rows)? {
             Some(_) if mouth_reaction => return Err(bad(rows.line,
                 "window wall-cut replaces the legacy mouth inertance; a compact mouth reaction brings its own outer mass")),
@@ -519,6 +529,10 @@ impl FlueFilePerformance {
                 &geometry, cells, rows.line)?),
             None => None,
         };
+        if window_reaction.is_some() && window.is_none() {
+            return Err(bad(rows.line,
+                "mouth_reaction window-cylinder radiates the window's outer face; declare window wall-cut"));
+        }
         let control_source = boundary::read_control_source(&mut rows)?;
         let mut row = rows.row("controls")?;
         let max_controls: usize = row.number()?;
@@ -598,6 +612,22 @@ impl FlueFilePerformance {
             Some(record) => voice.with_window_mass(record.ladder.mass_per_density,
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
             None => voice,
+        };
+        let voice = match (window_reaction, &window) {
+            (Some(flux), Some(record)) => {
+                // The finest rung's outer face carries the flux distribution.
+                let face = &record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells;
+                let piston = [cut_up_piston(face, record.window.axial_length)];
+                let cells = match flux {
+                    WindowFlux::WallWindow => face.as_slice(),
+                    WindowFlux::CutUpPiston => &piston[..],
+                };
+                let load = WindowRadiationLoad::new(
+                    record.window.bore_radius + record.window.wall_thickness, cells, flux,
+                    exterior, voice.sample_period_s(), gate).map_err(FlueInputError::Physics)?;
+                voice.with_window_radiation(load).map_err(FlueInputError::Physics)?
+            }
+            _ => voice,
         };
         let mechanical_samples = samples.checked_mul(u64::from(mechanics_rate_hz / sample_rate_hz))
             .ok_or_else(|| bad(0, "moving boundary step window overflows"))?;

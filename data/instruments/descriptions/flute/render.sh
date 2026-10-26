@@ -26,7 +26,11 @@
 # Yokoyama and Iida, Acta Acustica 5 (2021) 11, Table 1: y/h = 0.24 +- 0.25 at h = 1.2 mm), so the
 # bracket is -0.01 to +0.59 mm; jet angle 0, because the measured 39 degrees are inside that offset.
 # Onset ramp (50 ms), mouth loss (0.02), the jet displacement gain (90) are UNKNOWN or authored: see
-# unknowns.tsv and status.json. The jet card is an inline X-Est
+# unknowns.tsv and status.json. The window loss stays authored here (as on the pan pipes, for the same
+# reason) while the recorder and the whistle radiate theirs from the window's solved outer face
+# (`mouth_reaction window-cylinder`): this embouchure's exterior is set by a lip plate, the lip covering
+# part of the hole and the player's face, and none of the three is in its geometry (bead frankensim-5kfrn).
+# The jet card is an inline X-Est
 # lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
 # omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la
 # Cuadra 2008 Sec. 7), and the convection ratio is 0.4 (Auvray 2012; Terrien 2014; de la Cuadra: 0.3 to 0.5).
